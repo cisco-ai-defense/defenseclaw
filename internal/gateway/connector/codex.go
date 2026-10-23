@@ -2933,7 +2933,9 @@ func restoreOwnedCodexConfigFromTOML(
 		return atomicTransformResult{}, fmt.Errorf("snapshot restored codex config shape: %w", err)
 	}
 	if bytes.Equal(originalShape, restoredShape) {
-		return atomicTransformResult{Data: append([]byte(nil), raw...)}, nil
+		// Nothing of DefenseClaw's was in the file: keep its bytes and mode
+		// (GAP-0650).
+		return atomicTransformResult{Data: append([]byte(nil), raw...), Keep: true}, nil
 	}
 	if len(cfg) == 0 {
 		return atomicTransformResult{Remove: true}, nil

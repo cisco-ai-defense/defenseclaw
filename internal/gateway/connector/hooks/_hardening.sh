@@ -191,7 +191,8 @@ defenseclaw_harden_env() {
   fi
   if [ -z "${DEFENSECLAW_HOOK_HOME:-}" ]; then
     DEFENSECLAW_HOOK_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/hook-tmp.$$"
-    mkdir -p "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
+    # Never the DefenseClaw folder itself: a purge removed it (GAP-0654).
+    mkdir "$DEFENSECLAW_HOOK_HOME" 2>/dev/null || true
   fi
   export HOME="$DEFENSECLAW_HOOK_HOME"
   trap '_defenseclaw_hook_cleanup' EXIT
@@ -1156,7 +1157,9 @@ defenseclaw_log_hook_failure() {
       "$(defenseclaw_json_escape "$category")" "$(defenseclaw_json_escape "$reason")" >&2 || true
   fi
   local log_dir="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/logs"
-  mkdir -p "$log_dir" 2>/dev/null || return 0
+  # Only logs: a log line never creates the DefenseClaw folder a purge
+  # removed (GAP-0654).
+  [ -d "$log_dir" ] || mkdir "$log_dir" 2>/dev/null || return 0
   chmod 700 "$log_dir" 2>/dev/null || true
   local log_file="${log_dir}/hook-failures.jsonl"
   local ts
@@ -1592,6 +1595,15 @@ defenseclaw_should_fail_closed_on_unreachable() {
     open) ;;
     *) return 0 ;;
   esac
+  # An install or upgrade of this account's DefenseClaw (.install.lock) stops
+  # its gateway and starts it again when it is done. That window is not an
+  # outage, so a per-user hook does not let the call through unchecked
+  # (GAP-0649). Managed and socket hooks keep the administrator's mode.
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) ;;
+    *) [ -n "${DEFENSECLAW_HOOK_SOCKET:-}" ] ||
+      [ ! -e "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/.install.lock" ] || return 0 ;;
+  esac
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
     *) return 1 ;;
@@ -1760,9 +1772,9 @@ defenseclaw_unreachable_notice_json() {
   next="$(defenseclaw_unreachable_next_step)"
   [ -n "$next" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-  if [ -e "${data}/.install.lock" ]; then
-    text='DefenseClaw is not checking this session: DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done. If it does not come back, run `defenseclaw-gateway start`. `defenseclaw-gateway status` shows its state.'
-  elif [ -e "${data}/gateway.stopped" ]; then
+  # During an install (.install.lock) a per-user hook fails closed
+  # (defenseclaw_should_fail_closed_on_unreachable), so no notice names it.
+  if [ -e "${data}/gateway.stopped" ]; then
     text='DefenseClaw is not checking this session: the gateway was stopped with `defenseclaw-gateway stop`. Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state.'
   elif [ -n "${_DC_GATEWAY_RESTART_WAITED:-}" ] && ! defenseclaw_own_config_invalid; then
     text='DefenseClaw is not checking this session: this account'"'"'s gateway is restarting or not running (no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state.'
@@ -1796,7 +1808,7 @@ defenseclaw_unreachable_next_step() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 0
   local data="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
   if [ -e "${data}/.install.lock" ]; then
-    printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run `defenseclaw-gateway start` if it does not come back (`defenseclaw-gateway status` shows its state)'
+    printf '%s' 'DefenseClaw is being installed or upgraded for this account and its gateway starts again when that is done; try again in a moment, or run the installer again if it has stopped (`defenseclaw-gateway status` shows its state)'
   elif [ -e "${data}/gateway.stopped" ]; then
     printf '%s' 'the gateway was stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection (`defenseclaw-gateway status` shows its state)'
   elif defenseclaw_own_gateway_stopped && defenseclaw_own_config_invalid; then

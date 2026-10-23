@@ -30,9 +30,9 @@ var pluginGatewayDownCases = []pluginGatewayDownCase{
 	{name: "gateway stopped by the user", failMode: "closed", marker: "gateway.stopped",
 		want: []string{"stopped with `defenseclaw-gateway stop`", "`defenseclaw-gateway start`"}},
 	{name: "install in progress, closed", failMode: "closed", marker: ".install.lock",
-		want: []string{"being installed or upgraded", "`defenseclaw-gateway start`"}},
+		want: []string{"being installed or upgraded", "run the installer again", "`defenseclaw-gateway status`"}},
 	{name: "install in progress, open", failMode: "open", marker: ".install.lock",
-		want: []string{"being installed or upgraded", "`defenseclaw-gateway start`"}},
+		want: []string{"being installed or upgraded", "run the installer again", "`defenseclaw-gateway status`"}},
 	{name: "gateway answers 503", failMode: "closed", status: http.StatusServiceUnavailable,
 		want: []string{"gateway answered HTTP 503", "`defenseclaw-gateway status`"}},
 }

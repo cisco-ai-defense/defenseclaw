@@ -1920,6 +1920,21 @@ def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
     return resolved, "", "gateway config"
 
 
+def _unreadable_gateway_dotenv(cfg) -> str:
+    """Return the gateway ``.env`` path when it exists but this account cannot read it."""
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return ""
+    path = os.path.join(data_dir, ".env")
+    try:
+        read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
+    except PermissionError:
+        return path
+    except OSError:
+        return ""
+    return ""
+
+
 def _missing_gateway_token_detail(cfg) -> str:
     """Return an actionable missing-token message without false fix promises."""
     custom_env = _custom_gateway_token_env(cfg)
@@ -1927,6 +1942,14 @@ def _missing_gateway_token_detail(cfg) -> str:
         return (
             f"custom token provider {custom_env!r} is empty — populate it or "
             "explicitly change gateway.token_env; auto-fix preserves custom providers"
+        )
+    # The token is in a .env this account cannot read: a new token would
+    # replace the file and its other secrets (GAP-0662).
+    unreadable = _unreadable_gateway_dotenv(cfg)
+    if unreadable:
+        return (
+            f"this account cannot read {unreadable}, which holds the gateway token — "
+            "restore this account's read access to it; doctor --fix does not replace it"
         )
     return "no gateway token is configured — run `defenseclaw doctor --fix` to generate and persist one"
 
@@ -16629,6 +16652,8 @@ def _fix_gateway_token(
     current, _current_env, _current_source = _daemon_effective_gateway_token(cfg)
     if current and not rotate_required:
         return ("skip", f"{env_var} already set")
+    if _unreadable_gateway_dotenv(cfg):
+        return ("fail", _missing_gateway_token_detail(cfg))
 
     configured_env = (getattr(cfg.gateway, "token_env", "") or "").strip()
     if configured_env and not any(

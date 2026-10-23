@@ -18,6 +18,7 @@ package hookexec
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -148,12 +149,14 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 	// profile's inherited access control, and the next event's hook found a
 	// folder and no longer said it was missing (GAP-0154, rel-1-0-4
 	// GAP-0593). A managed account with no such folder writes no row.
+	// Mkdir creates only logs, so a purge that removes the folder while the
+	// call runs is not undone either (GAP-0654).
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		return
 	}
 	failMode = loggedFailMode(opts, sp, failMode)
 	logDir := filepath.Join(home, "logs")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
+	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return
 	}
 	entry := struct {

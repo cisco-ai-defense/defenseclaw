@@ -32,11 +32,48 @@ trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_managed_fa
 # environment is not read, so status and doctor report what runs (GAP-0315).
 # Strict availability closes it.
 case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="closed" ;; esac
+# copilot_per_user_install_block answers with Copilot's native deny while
+# DefenseClaw is being installed or upgraded for this account, whatever the
+# fail mode, even before helpers, the token or the gateway are available
+# (GAP-0649); otherwise it returns 1.
+copilot_per_user_install_block() {
+  local home="${DEFENSECLAW_HOME:-${HOME:-${USERPROFILE:-}}/.defenseclaw}"
+  local installing=0
+  if [ ! -d "$home" ] || [ ! -x "$home" ] ||
+     [ -e "${home}/.install.lock" ] || [ -L "${home}/.install.lock" ]; then
+    installing=1
+  fi
+  # A caller can override DEFENSECLAW_HOME. The registered hook's own data
+  # directory is authoritative once its path has been resolved.
+  if [ -n "${HOOK_DIR:-}" ]; then
+    local hook_home="${HOOK_DIR}/.."
+    if [ ! -d "$hook_home" ] || [ ! -x "$hook_home" ] ||
+       [ -e "${hook_home}/.install.lock" ] || [ -L "${hook_home}/.install.lock" ]; then
+      installing=1
+    fi
+  fi
+  if [ "$installing" = "1" ]; then
+    if declare -F defenseclaw_harden_env >/dev/null 2>&1; then
+      defenseclaw_log_hook_failure copilot copilot-hook "${1:-install or upgrade in progress}" "${2:-transport}" closed fail_closed
+    fi
+    echo "defenseclaw: blocking Copilot call while DefenseClaw is being installed or upgraded" >&2
+    local message='DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped.'
+    case "$_DC_COPILOT_EVENT" in
+      preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$message" ;;
+      permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$message" ;;
+      sessionEnd|agentStop|subagentStop) ;;
+      *) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$message" "$message" ;;
+    esac
+    exit 0
+  fi
+  return 1
+}
 # Copilot CLI lets a call run when its hook fails. In fail mode closed every
 # failure DefenseClaw sees prints Copilot's native deny with the reason ($1)
 # instead; Copilot's other events cannot block. Fail mode open lets the call
 # run.
 copilot_hook_failure() {
+  copilot_per_user_install_block "$@" || true
   ! declare -F defenseclaw_close_during_install >/dev/null 2>&1 || defenseclaw_close_during_install
   [ "$FAIL_MODE" != "open" ] || exit 0
   local text="DefenseClaw blocked this tool call (fail mode closed). Run \`defenseclaw doctor\` to see why."
@@ -92,6 +129,8 @@ export DEFENSECLAW_HOME
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "hook home unavailable" transport || true
+{{end}}
   # A registered closed hook cannot treat missing local state as retirement.
   [ ! -e "${DEFENSECLAW_HOME}/.install.lock" ] && [ ! -L "${DEFENSECLAW_HOME}/.install.lock" ] || FAIL_MODE="closed"
   if [ "$FAIL_MODE" != "open" ]; then
@@ -186,7 +225,8 @@ case "$COPILOT_HOOK_EVENT" in
     ;;
 esac
 
-{{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
+{{if and (not .Managed) (not .Sandbox)}}copilot_per_user_install_block "install or upgrade in progress" transport || true
+{{end}}{{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
@@ -240,7 +280,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "$1" transport || true
+{{end}}{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
 {{if .Managed}}  {{$failure}}
@@ -250,7 +291,8 @@ fail_unreachable() {
 {{end}}}
 
 fail_response() {
-{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "$1" response || true
+{{end}}{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   echo "defenseclaw: copilot hook error: $1" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "the DefenseClaw gateway returned an answer DefenseClaw could not use. Run \`defenseclaw doctor\` to see why."{{end}}

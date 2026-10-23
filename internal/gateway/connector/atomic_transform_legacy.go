@@ -80,7 +80,7 @@ func atomicTransformFileLegacyPrepared(
 		if writePerm == 0 {
 			writePerm = perm
 		}
-		semanticNoop := !result.Force && ((!snapshot.exists && result.Remove) ||
+		semanticNoop := result.Keep || !result.Force && ((!snapshot.exists && result.Remove) ||
 			(snapshot.exists && !result.Remove && bytes.Equal(snapshot.data, result.Data) &&
 				atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm)))
 		if !semanticNoop {

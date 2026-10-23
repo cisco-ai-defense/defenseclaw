@@ -139,8 +139,11 @@ def _render_bridge_publication(
         "amp": "amp-plugin.ts",
         "opencode": "opencode-plugin.js",
     }[connector]
-    if managed and connector == "opencode":
-        template_name = "opencode-plugin-managed.js"
+    if managed:
+        template_name = {
+            "amp": "amp-plugin-managed.ts",
+            "opencode": "opencode-plugin-managed.js",
+        }[connector]
     template = (_bridge_host_templates(repository_root) / template_name).read_text(
         encoding="utf-8"
     )
@@ -575,7 +578,7 @@ def test_bridge_rendered_with_the_listener_proof_stays_first_party(
 @pytest.mark.parametrize(
     ("connector", "template_names"),
     [
-        ("amp", ("amp-plugin.ts", "amp-plugin-secure-client.ts")),
+        ("amp", ("amp-plugin.ts", "amp-plugin-managed.ts", "amp-plugin-secure-client.ts")),
         ("opencode", ("opencode-plugin.js", "opencode-plugin-managed.js", "opencode-plugin-secure-client.js")),
     ],
 )
@@ -599,19 +602,29 @@ def test_bridge_template_fingerprints_match_gateway_sources(
     assert digests == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
 
 
-def test_managed_opencode_bridge_stays_first_party(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    ("connector", "relative_path"),
+    [
+        ("opencode", Path(".config/opencode/plugins/defenseclaw.js")),
+        ("amp", Path(".config/amp/plugins/defenseclaw.ts")),
+    ],
+)
+def test_managed_connector_bridge_stays_first_party(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    connector: str,
+    relative_path: Path,
 ) -> None:
     home = tmp_path / "home"
     data_dir = home / ".defenseclaw"
-    target = home / ".config/opencode/plugins/defenseclaw.js"
+    target = home / relative_path
     repository_root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
     published = _render_bridge_publication(
-        repository_root, data_dir, connector="opencode", managed=True
+        repository_root, data_dir, connector=connector, managed=True
     )
-    _write_bridge_publication(data_dir, target, connector="opencode", payload=published)
+    _write_bridge_publication(data_dir, target, connector=connector, payload=published)
     assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
 
 

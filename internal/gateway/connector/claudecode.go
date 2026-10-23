@@ -232,17 +232,24 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 }
 
 // checkAgentSettings refuses, before Setup changes anything, user
-// settings Setup must not rewrite: a settings file that does not parse, or a
+// settings Setup must not rewrite: a settings link the gateway cannot
+// inspect (GAP-1062), a settings file that does not parse, or a
 // disableAllHooks=true that switches every hook off (the user's choice,
-// GAP-1066). The registration verifier rejects the second after Setup, and
+// GAP-1066). The registration verifier rejects the last after Setup, and
 // rolling back then removed the hooks an earlier setup installed. A gateway
-// start keeps the other connectors (GAP-0578). Managed installs, Secure
+// start keeps the other connectors (GAP-0578), and `defenseclaw setup`
+// refuses before it restarts the gateway: a link out of the home left the
+// gateway stopped after the rollback (GAP-0634). Managed installs, Secure
 // Client included, keep their setup path.
 func (c *ClaudeCodeConnector) checkAgentSettings(opts SetupOpts) error {
 	if opts.ManagedEnterprise {
 		return nil
 	}
-	if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
+	settingsPath := claudeCodeSettingsPath()
+	if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("Claude Code user settings %s: %w; then run: defenseclaw-gateway restart", settingsPath, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	if err := claudeCodeSettingsParseable(settingsPath); err != nil {
 		return refuseForAgentConfig(err)
 	}
 	sources, err := inspectClaudeCodeUserSources(opts)
@@ -1539,14 +1546,6 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// spaces. Older shell-form commands are still recognized during migration.
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
-	if !opts.ManagedEnterprise {
-		// Refuse a link the gateway cannot inspect before any hook is
-		// written, so a refusal never leaves fail-closed hooks behind (GAP-1062).
-		if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
-			return fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-		}
-	}
-
 	return withFileLock(settingsPath, func() error {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
 			return fmt.Errorf("capture claude settings backup: %w", err)
@@ -2619,6 +2618,11 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				return atomicTransformResult{}, fmt.Errorf("canonicalize restored settings: %w", err)
 			}
 			if bytes.Equal(canonical, originalCanonical) {
+				if !exactRestore {
+					// Nothing of DefenseClaw's was in the file: leave its bytes
+					// and mode as the user has them (GAP-0650).
+					return atomicTransformResult{Data: data, Keep: true}, nil
+				}
 				// Reconciliation may tear down an already-clean connector after
 				// uninstall restored and discarded its backup. Keep those bytes
 				// as well as a pristine backup's original formatting.

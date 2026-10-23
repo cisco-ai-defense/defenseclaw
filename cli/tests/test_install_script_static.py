@@ -58,6 +58,26 @@ def _run(args: list[str], tmp_path: Path, **env: str) -> subprocess.CompletedPro
     return subprocess.run([BASH, *args], capture_output=True, text=True, env=environment, timeout=60, check=False)
 
 
+def _run_rollback_with_no_agents(args: list[str], tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
+    # The rollback fixtures model an account with closed agents. A shared CI
+    # account may have an unrelated OpenCode process running beside this test.
+    inventory = tmp_path / "process-inventory"
+    inventory.mkdir(exist_ok=True)
+    ps = inventory / "ps"
+    real_ps = shutil.which("ps")
+    assert real_ps is not None
+    ps.write_text(
+        '#!/bin/sh\n'
+        'if [ "$#" -eq 8 ] && [ "$1" = -u ] && [ "$3" = -o ] && [ "$4" = pid= ] && '
+        '[ "$5" = -o ] && [ "$6" = comm= ] && [ "$7" = -o ] && [ "$8" = args= ]; then exit 0; fi\n'
+        f'exec "{real_ps}" "$@"\n',
+        encoding="ascii",
+    )
+    ps.chmod(0o755)
+    path = f"{inventory}:{env.pop('PATH', os.environ.get('PATH', '/usr/bin:/bin'))}"
+    return _run(args, tmp_path, PATH=path, **env)
+
+
 def test_scripts_parse_under_bash() -> None:
     for script in (INSTALL_SH, HANDOFF_SH):
         subprocess.run([BASH, "-n", str(script)], check=True)
@@ -804,7 +824,7 @@ def test_a_rollback_whose_gateway_does_not_start_is_undone_and_exits_1(tmp_path:
     script = _stamped(tmp_path, "1.0.2")
     env = {"DEFENSECLAW_APP_PATH": "none"}
 
-    back = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+    back = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert back.returncode == 1, back.stdout + back.stderr
     assert "Rolling back to DefenseClaw 1.0.1" in back.stdout
@@ -819,9 +839,9 @@ def test_a_rollback_whose_gateway_does_not_start_is_undone_and_exits_1(tmp_path:
     # second one rolls forward.
     older = dc_home / "previous" / "bin" / "defenseclaw-gateway"
     older.write_text(older.read_text(encoding="utf-8").replace("start) exit 1", "start) exit 0"), encoding="utf-8")
-    back = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+    back = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, **env)
     assert back.returncode == 0, back.stdout + back.stderr
-    forward = _run([str(script), "--rollback", "--yes"], tmp_path, **env)
+    forward = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, **env)
 
     assert forward.returncode == 0, forward.stdout + forward.stderr
     assert "Rolling forward to DefenseClaw 1.0.2" in forward.stdout
@@ -859,7 +879,7 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
     script = _stamped(tmp_path, "1.0.1")
 
-    back = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+    back = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
 
     assert back.returncode == 0, back.stdout + back.stderr
     assert "Could not remove" not in back.stdout + back.stderr
@@ -873,7 +893,7 @@ def test_a_rollback_to_0_x_removes_the_1_0_connector_registrations_first(tmp_pat
     assert kept.read_text(encoding="utf-8") == "kept-token\n"
 
     calls.unlink()
-    forward = _run([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+    forward = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
 
     assert forward.returncode == 0, forward.stdout + forward.stderr
     # Only the GAP-0009 check of which gateway can prune hook entries; neither fake can.
@@ -902,7 +922,7 @@ def test_a_rollback_to_0_x_names_only_the_installer_command_to_return(tmp_path: 
             (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
         script = _stamped(case, current)
 
-        back = _run([str(script), "--rollback", "--yes"], case, DEFENSECLAW_APP_PATH="none")
+        back = _run_rollback_with_no_agents([str(script), "--rollback", "--yes"], case, DEFENSECLAW_APP_PATH="none")
         out = back.stdout + back.stderr
 
         assert back.returncode == 0, out
@@ -965,7 +985,7 @@ def _rollback_to_0_8_with_a_damaged_store(tmp_path: Path, starts: bool) -> tuple
     (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
     _damaged_audit_db(dc_home / "previous" / "data" / "audit.db")
     try:
-        result = _run([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+        result = _run_rollback_with_no_agents([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
     finally:
         subprocess.run(["pkill", "-f", str(tmp_path / "defenseclaw-sleep")], check=False)
     return result, dc_home
@@ -1041,7 +1061,7 @@ def test_a_rollback_refused_on_hook_drift_prints_only_the_fix_that_works(tmp_pat
     (dc_home / "previous" / "VERSION").write_text("0.8.10\n", encoding="utf-8")
     (dc_home / "previous" / "GATEWAY_WAS_RUNNING").write_text("true\n", encoding="utf-8")
 
-    back = _run([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
+    back = _run_rollback_with_no_agents([str(_stamped(tmp_path, "1.0.1")), "--rollback", "--yes"], tmp_path, DEFENSECLAW_APP_PATH="none")
 
     assert back.returncode == 1, back.stdout + back.stderr
     out = back.stdout + back.stderr
@@ -1428,6 +1448,36 @@ def _install_sh_functions(*names: str) -> str:
         start = text.index(f"{name}() {{")
         bodies.append(text[start : text.index("\n}\n", start) + 3])
     return helpers + "".join(bodies)
+
+
+def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path: Path) -> None:
+    # A 1.0.3 plugin already loaded in an agent cannot see a new install lock.
+    # The installer must leave its gateway running until that agent exits.
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = source[source.index('if [[ "${ROLLBACK}" == true ]]; then') : source.index('# ──', source.index('if [[ "${ROLLBACK}" == true ]]; then') + 1)]
+    assert rollback.index("assert_no_loaded_plugin_agents") < rollback.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"')
+    probe = tmp_path / "ps"
+    probe.write_text('#!/bin/sh\nprintf "%s\\n" "$DC_TEST_PS_ROWS"\n', encoding="ascii")
+    probe.chmod(0o755)
+    body = _install_sh_functions("loaded_plugin_agents", "assert_no_loaded_plugin_agents")
+    for rows, expected in [
+        ("1 bash bash", True),
+        ("2 opencode opencode", False),
+        ("3 amp amp", False),
+        ("4 node node /opt/node_modules/@sourcegraph/amp/cli.js", False),
+        # macOS truncates `comm` to the start of the absolute launch path.
+        ("5 /Users/u/.openc /Users/u/.opencode/bin/opencode", False),
+        ("6 /Users/u/.amp/b /Users/u/.amp/bin/amp", False),
+    ]:
+        run = subprocess.run(
+            [BASH, "-c", 'die() { printf "%s\\n" "$*" >&2; return 1; }\n' + body + "assert_no_loaded_plugin_agents"],
+            env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "DC_TEST_PS_ROWS": rows},
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+        assert (run.returncode == 0) is expected, (rows, run.stdout, run.stderr)
+
+    upgrade_guard = source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false")
+    assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
 
 
 def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:

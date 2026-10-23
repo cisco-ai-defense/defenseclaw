@@ -525,6 +525,38 @@ installed_version() {
     done
 }
 
+# Older OpenCode and Amp processes retain their plugin in memory. Releases
+# before this one do not inspect .install.lock, so stopping the gateway under
+# one would let an open-mode tool call through. Inspect this account's native
+# agent processes immediately before a gateway swap; an unreadable process
+# list cannot establish that the swap is safe.
+loaded_plugin_agents() {
+    local processes
+    processes="$(ps -u "$(id -u)" -o pid= -o ucomm= -o args= 2>/dev/null)" || return 2
+    printf '%s\n' "$processes" | awk '
+        {
+            pid=$1; executable=tolower($2); sub(/^.*\//, "", executable)
+            # macOS can truncate the middle column to a launch-path prefix.
+            # argv[0] still carries the executable path in that case.
+            command=tolower($3); sub(/^.*\//, "", command)
+            agent=""
+            if (executable == "opencode" || executable == "opencode.exe" || command == "opencode" || command == "opencode.exe") agent="OpenCode"
+            else if (executable == "amp" || executable == "amp.exe" || command == "amp" || command == "amp.exe") agent="Amp"
+            else if (executable ~ /^(node|bun)(\.exe)?$/) {
+                args=tolower($0)
+                if (args ~ /(^|[\/[:space:]])opencode([\/[:space:]]|$)/) agent="OpenCode"
+                else if (args ~ /@sourcegraph\/amp([\/[:space:]]|$)/ || args ~ /(^|[\/[:space:]])amp([\/[:space:]]|$)/) agent="Amp"
+            }
+            if (agent != "") print agent " (PID " pid ")"
+        }'
+}
+
+assert_no_loaded_plugin_agents() {
+    local agents
+    agents="$(loaded_plugin_agents)" || die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
+}
+
 stop_gateway() {
     # stop_gateway BINARY: stop the running gateway, preferring its own binary.
     # The stop is the install's, not the operator's: the gateway.stopped
@@ -745,6 +777,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     saved_was_running="$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null || true)"
     restart="${was_running}"
     [[ "${saved_was_running}" == true ]] && restart=true
+    assert_no_loaded_plugin_agents
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
         remove_connector_registrations_for_legacy
@@ -1014,6 +1047,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
+assert_no_loaded_plugin_agents
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
 OLD_GATEWAY_PID="$(gateway_pid || true)"

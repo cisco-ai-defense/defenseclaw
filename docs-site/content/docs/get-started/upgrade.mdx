@@ -24,6 +24,17 @@ The command downloads the latest release's installer (`install.sh` on macOS and 
 
 An upgrade sets each hook's fail mode from your config before the new hook runs. A fail mode you set to open stays open; outside Secure Client one you never set is closed.
 
+End every running agent session before upgrading. Quit OpenCode and Amp
+processes completely, then start a new agent process after the installer
+reports the gateway healthy. OpenCode and Amp load their DefenseClaw plugin
+once per process. The installer checks for running OpenCode and Amp processes
+before stopping the gateway and refuses the swap if it finds one; close it and
+run the installer again. A previous release's plugin already loaded in memory
+cannot gain the new install-lock check: with `hook_fail_mode: open`, it may
+allow tool calls if the gateway is stopped, even after the installer replaces
+the plugin on disk. Keep those agents closed until the gateway is healthy.
+Managed installs keep the fail mode the administrator set.
+
 If a step fails, the installer puts the previous version back, restarts it and keeps the failed attempt in `~/.defenseclaw/.failed-<time>`. Every run writes a log to `~/.defenseclaw/logs/`. On Windows the installer continues in a new PowerShell window so the running command can release its files.
 
 | Command | What it does |

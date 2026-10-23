@@ -512,7 +512,23 @@ function gatewayStopped(error: unknown): boolean {
 	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
 
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// perUserGatewayDownText is what a per-user install that fails closed says
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// The installer holds this data-directory lock while it replaces this
+// account's stopped gateway. An open outage mode cannot bypass that upgrade.
+const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
+	"and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state."
+
+async function installWindow(): Promise<boolean> {
+	try {
+		await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"))
+		return true
+	} catch (error) {
+		// Only a missing lock ends the install window. An unreadable lock must
+		// never turn an upgrade into a fail-open outage.
+		return (error as { code?: unknown } | null)?.code !== "ENOENT"
+	}
+}
+
+{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// perUserGatewayDownText is what a per-user install that fails closed says
 // when its gateway gave no usable answer: why (an install or upgrade, a
 // `defenseclaw-gateway stop`, a stopped, busy or failing gateway) and what
 // brings it back, in the words of the native and shell hooks, instead of the
@@ -531,7 +547,7 @@ async function perUserGatewayDownText(error: unknown, status: number): Promise<s
 	let text: string
 	if (await present(".install.lock")) {
 		text = "DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done (fail mode closed). " +
-			"Try again in a moment; if it does not come back, run `defenseclaw-gateway start`."
+			"Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install."
 	} else if (await present("gateway.stopped")) {
 		text = "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
 			"Start it with `defenseclaw-gateway start`, then try again."
@@ -673,16 +689,21 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	}
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
-		let body: string
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}		let body: string
 		try {
 			body = JSON.stringify(payload)
 		} catch (error) {
-			return failureResponse(`payload serialization: ${safeError(error)}`)
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}			return failureResponse(`payload serialization: ${safeError(error)}`)
 		}
 
 		const originalBytes = utf8Bytes(body)
 		if (originalBytes > DC_MAX_BODY_BYTES) {
-			if (actionable) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			if (actionable) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}				return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
+			}
 			const reduced = {
 				hook_event_name: payload.hook_event_name || "",
 				session_id: payload.session_id || "",
@@ -742,7 +763,8 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal){{end}}
-			if (!response.ok) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}			if (!response.ok) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
 					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
 				}
@@ -750,13 +772,16 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 
 			const data = await response.json() as GatewayResponse
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
 				return failureResponse("invalid gateway verdict")
 			}
 			return data
 		} catch (error) {
 			if (await deploymentRemoved()) return { action: "allow" }
-			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{end}}			if (DC_FAIL_MODE === "closed" && (DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) {
 				return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 			}
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (DC_FAIL_MODE === "closed" || await perUserInstallInProgress()) {

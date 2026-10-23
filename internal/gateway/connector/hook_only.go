@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1527,6 +1528,16 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	}
 	if err := openCodeWritePluginFile(path, renderedBody, 0o600); err != nil {
 		return rollback(fmt.Errorf("%s write plugin: %w", c.name, err))
+	}
+	// The plugin carries its own fail mode and reads no shell hook runtime
+	// record. An earlier release or reconcile may have left a stale mode in
+	// that record (GAP-0635). Clean it after publishing the plugin: damage to
+	// unused shared state must neither block Setup nor alter that state.
+	if !opts.ManagedEnterprise {
+		hookDir := filepath.Join(opts.DataDir, "hooks")
+		if err := clearHookConfigSidecarEntry(hookDir, c.name); err != nil {
+			log.Printf("[connector] %s setup: could not remove unused hook runtime record in %s: %v", c.name, hookDir, err)
+		}
 	}
 	return nil
 }
@@ -5678,7 +5689,8 @@ func removeJSONHookReferencesProfile(path string, secureClient bool, hookScripts
 		if hooks, ok := pruned["hooks"].(map[string]interface{}); ok {
 			before, _ := cfg["hooks"].(map[string]interface{})
 			pruneNewlyEmptyHookEntries(before, hooks)
-			if len(hooks) == 0 {
+			// An empty hooks object the user already had is theirs (GAP-0650).
+			if len(hooks) == 0 && len(before) > 0 {
 				delete(pruned, "hooks")
 			}
 		}

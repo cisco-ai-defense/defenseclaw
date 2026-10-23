@@ -576,6 +576,22 @@ async function defenseclawLogFailOpen(reason, category) {
   }
 }
 
+// The installer holds this data-directory lock while it replaces this
+// account's stopped gateway. An open outage mode cannot bypass that upgrade.
+const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
+  "and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state.";
+
+async function defenseclawInstallWindow() {
+  try {
+    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
+    return true;
+  } catch (err) {
+    // Only a missing lock ends the install window. An unreadable lock must
+    // never turn an upgrade into a fail-open outage.
+    return !(err && err.code === "ENOENT");
+  }
+}
+
 async function defenseclawPerUserInstallInProgress() {
   if (DC_FAIL_MODE !== "open") return false;
   try {
@@ -597,6 +613,7 @@ async function defenseclawFailModeNow(mode, actionable) {
 }
 
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
   let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
@@ -639,6 +656,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       body: JSON.stringify(payload),
       signal: controller.signal,
     }, token), controller.signal);
+    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
     if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
@@ -650,6 +668,8 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return null;
     }
     const data = await res.json();
+    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       if (await defenseclawFailModeNow(DC_FAIL_MODE, actionable) === "open") {
         if (actionable) await defenseclawLogFailOpen("invalid gateway verdict", "response");
@@ -670,6 +690,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
+    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
     if (await defenseclawFailModeNow(DC_TRANSPORT_FAIL_MODE, actionable) === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
@@ -701,7 +722,7 @@ async function defenseclawPerUserGatewayDownText(err, status) {
   let text;
   if (await present(".install.lock")) {
     text = "DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done (fail mode closed). " +
-      "Try again in a moment; if it does not come back, run `defenseclaw-gateway start`.";
+      "Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install.";
   } else if (await present("gateway.stopped")) {
     text = "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
       "Start it with `defenseclaw-gateway start`, then try again.";

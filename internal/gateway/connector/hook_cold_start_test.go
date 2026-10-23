@@ -57,19 +57,37 @@ exit 0
 `
 
 type coldStartHookRun struct {
-	capDir  string
-	dataDir string
-	home    string
-	stdout  string
-	stderr  string
-	err     error
-	elapsed time.Duration
+	capDir   string
+	dataDir  string
+	home     string
+	hooksDir string
+	stdout   string
+	stderr   string
+	err      error
+	elapsed  time.Duration
 }
 
 func runHookForColdStart(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), extraEnv ...string) coldStartHookRun {
+	return runHookForColdStartWithManaged(t, c, script, args, prepare, false, extraEnv...)
+}
+
+func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), managed bool, extraEnv ...string) coldStartHookRun {
 	t.Helper()
 	hooksDir := t.TempDir()
-	if err := writePerUserHooksForTestFailMode(hooksDir, freeAPIAddr(t), "cold-start-scoped-token", c, extraEnv); err != nil {
+	apiAddr := freeAPIAddr(t)
+	var err error
+	if managed {
+		// An explicit managed binary selects standalone, not Secure Client.
+		opts := SetupOpts{
+			APIAddr: apiAddr, HookAPIToken: "cold-start-scoped-token", HookAPITokenScoped: true,
+			ManagedEnterprise: true, ManagedHookBinary: "/usr/bin/defenseclaw-hook",
+			HookFailMode: "open", GuardrailMode: "observe",
+		}
+		err = WriteHookScriptsForConnectorObjectWithOpts(hooksDir, opts, c)
+	} else {
+		err = writePerUserHooksForTestFailMode(hooksDir, apiAddr, "cold-start-scoped-token", c, extraEnv)
+	}
+	if err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
 	stubDir := t.TempDir()
@@ -118,8 +136,42 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 	// The hook's registered timeout starts with the process, after fixture
 	// directories and script snapshots have been written.
 	started := time.Now()
-	err := cmd.Run()
-	return coldStartHookRun{capDir: capDir, dataDir: dataDir, home: home, stdout: stdout.String(), stderr: stderr.String(), err: err, elapsed: time.Since(started)}
+	err = cmd.Run()
+	return coldStartHookRun{capDir: capDir, dataDir: dataDir, home: home, hooksDir: hooksDir, stdout: stdout.String(), stderr: stderr.String(), err: err, elapsed: time.Since(started)}
+}
+
+func TestManagedShellHookNeverColdStartsAGateway(t *testing.T) {
+	// A managed hook has no authority to start the machine gateway, even if
+	// its administrator selected open for an outage. One refused call is sent.
+	run := runHookForColdStartWithManaged(t, NewClaudeCodeConnector(), "claude-code-hook.sh", nil, nil, true,
+		"DEFENSECLAW_FAIL_MODE=open", "DC_COLD_FAILS=1000")
+	if data, err := os.ReadFile(filepath.Join(run.hooksDir, "claude-code-hook.sh")); err != nil ||
+		!strings.Contains(string(data), "_DC_SECURE_CLIENT_HOOK=0") {
+		t.Fatalf("hook is not the managed standalone render: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := readColdStartCapture(t, run.capDir, "gateway.log"); got != "" {
+		t.Fatalf("managed hook started the gateway: %q", got)
+	}
+	if got := strings.TrimSpace(readColdStartCapture(t, run.capDir, "count")); got != "1" {
+		t.Fatalf("managed hook sent %q requests, want one", got)
+	}
+	// Exercise the cold-start helper itself with the managed marker. The
+	// end-to-end path returns before calling it, so this pins both guards.
+	cmd := exec.Command("bash", "-c", `source "$1"; defenseclaw_gateway_cold_start`, "bash", filepath.Join(run.hooksDir, "_hardening.sh"))
+	cmd.Env = append(sanitizedTestEnv(),
+		"HOME="+run.home, "DEFENSECLAW_AGENT_HOME="+run.home, "DEFENSECLAW_HOME="+run.dataDir,
+		"DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_GATEWAY_AUTOSTART=1", "DEFENSECLAW_HOOK_SOCKET=", "DC_COLD_CAP="+run.capDir,
+		"PATH="+filepath.Join(run.home, ".local", "bin")+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	if output, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("managed cold-start helper returned success: %q", output)
+	} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 {
+		t.Fatalf("managed cold-start helper: %v, output=%q", err, output)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if got := readColdStartCapture(t, run.capDir, "gateway.log"); got != "" {
+		t.Fatalf("managed cold-start helper started the gateway: %q", got)
+	}
 }
 
 // waitColdStartCapture waits for the background start to write name.
@@ -223,6 +275,8 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 		"stopped with defenseclaw-gateway stop": {prepare: func(dataDir string) {
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
 		}, hint: "stopped with `defenseclaw-gateway stop`; run `defenseclaw-gateway start` to resume protection"},
+		// The install window is not an outage: an open fail mode does not let
+		// the call through unchecked (GAP-0649).
 		"install in progress": {prepare: func(dataDir string) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
 		}, hint: installing, retried: true, closed: true},
@@ -230,6 +284,12 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
 		}, hint: installing, retried: true, closed: true},
+		"install with inherited socket marker": {prepare: func(dataDir string) {
+			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
+		}, env: []string{"DEFENSECLAW_HOOK_SOCKET=/tmp/inherited.sock"}, hint: installing, retried: true, closed: true},
+		"install with inherited managed marker": {prepare: func(dataDir string) {
+			_ = os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700)
+		}, env: []string{"DEFENSECLAW_MANAGED_HOOK=1"}, hint: installing, retried: true, closed: true},
 		"no configuration": {prepare: func(dataDir string) {
 			_ = os.Remove(filepath.Join(dataDir, "config.yaml"))
 		}, hint: waited, retried: true},
@@ -268,11 +328,14 @@ func TestShellHookDoesNotColdStartAStoppedGateway(t *testing.T) {
 				t.Errorf("stderr = %q, want no start advice", run.stderr)
 			}
 			if tc.closed {
+				reason := failClosedDenyReason(t, run)
 				if !strings.Contains(run.stdout, `"permissionDecision":"deny"`) ||
 					!strings.Contains(run.stdout, "is being installed or upgraded for this account") ||
 					!strings.Contains(run.stdout, "defenseclaw-gateway status") ||
+					!strings.Contains(reason, "run the installer again") ||
+					strings.Contains(reason, "defenseclaw-gateway start") ||
 					strings.Contains(run.stdout, "stopped with") || strings.Contains(run.stdout, "systemMessage") {
-					t.Errorf("stdout = %q, want the install-time native deny and next step", run.stdout)
+					t.Errorf("stdout = %q, want the install-time native deny, its recovery step and status", run.stdout)
 				}
 				return
 			}

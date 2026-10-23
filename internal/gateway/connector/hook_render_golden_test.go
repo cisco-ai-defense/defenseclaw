@@ -337,11 +337,7 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 
 func TestBridgeHostTemplatesGolden(t *testing.T) {
 	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
-		variants := []bool{false}
-		if asset == "opencode-plugin.js" {
-			variants = append(variants, true)
-		}
-		for _, managed := range variants {
+		for _, managed := range []bool{false, true} {
 			got, err := renderBridgeHostTemplate(asset, managed)
 			if err != nil {
 				t.Fatalf("render %s managed=%v: %v", asset, managed, err)

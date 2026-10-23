@@ -616,6 +616,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             # rollback. Older/unrecognized installers need this outer check.
             Wait-VenvFree
             $restartCurrent = [bool](Get-GatewayProcess)
+            Assert-NoLoadedPluginAgents
             if (-not (Stop-Gateway)) { Die "The gateway did not stop; the release installer was not started" }
             Stop-Watchdog
             Assert-GatewayQuiescent "Version change to $target"
@@ -815,6 +816,49 @@ function Get-GatewayProcess {
     $recorded = [string](Get-Field $record "executable")
     if ($recorded -and $process.Path -ne $recorded) { return $null }
     return $process
+}
+
+# A loaded 1.0.3 OpenCode or Amp plugin cannot acquire this release's lock
+# check until its agent process exits. Recognize native binaries and the
+# Node/Bun launchers used by package installs without reading plugin files.
+function Get-LoadedPluginAgent($Process) {
+    $name = ([string]$Process.Name).ToLowerInvariant()
+    if ($name -match '^opencode(\.exe)?$') { return "opencode" }
+    if ($name -match '^amp(\.exe)?$') { return "amp" }
+    if ($name -notmatch '^(node|bun)(\.exe)?$') { return "" }
+    $command = [string]$Process.CommandLine
+    if ($command -match '(?i)(?:^|[\\/\s])opencode(?:[\\/\s]|$)') { return "opencode" }
+    if ($command -match '(?i)@sourcegraph[\\/]amp(?:[\\/\s]|$)' -or
+        $command -match '(?i)(?:^|[\\/\s])amp(?:[\\/\s]|$)') { return "amp" }
+    return ""
+}
+
+function Assert-NoLoadedPluginAgents {
+    $loaded = @()
+    $current = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try { $currentSession = (Get-Process -Id $PID -ErrorAction Stop).SessionId } catch {
+        Die "Could not check this installer's process session; the gateway was not stopped"
+    }
+    try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
+        Die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    }
+    foreach ($process in $processes) {
+        $agent = Get-LoadedPluginAgent $process
+        if (-not $agent) { continue }
+        $owner = $null
+        try { $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop } catch { }
+        if ($null -eq $owner -or [int]$owner.ReturnValue -ne 0) {
+            # A standard user may not read another account's process owner
+            # on a shared host. Ignore that uncertainty only across sessions;
+            # a readable same-account process in any session still blocks.
+            if ($null -ne $process.SessionId -and [int]$process.SessionId -ne [int]$currentSession) { continue }
+            Die "Could not check the owner of a running $agent process; the gateway was not stopped"
+        }
+        if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }
+    }
+    if ($loaded.Count) {
+        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: $($loaded -join ', ')"
+    }
 }
 
 function Get-InstallGatewayState {
@@ -3625,6 +3669,7 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
     $startAfter = $wasRunning -or $savedWasRunning -eq "true"
+    Assert-NoLoadedPluginAgents
     # The rollback's lifecycle transaction: the install it leaves (proven
     # back by Undo-Rollback on any failure) and the one it goes to, which
     # stays in previous\ until this rollback is proven.
@@ -4035,6 +4080,7 @@ function Invoke-Install {
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
 
     Assert-InstallRoom $FinalEnvRoom "the final Python environment"
+    Assert-NoLoadedPluginAgents
     Wait-VenvFree
     if ($Run.UnprovenReplacement) {
         try { Prepare-UnprovenReplacement $stagedGateway $stagedBinaries } catch {
@@ -4046,6 +4092,13 @@ function Invoke-Install {
         Disable-SetupHooks
         if ($Setup.CodexHome -and -not $env:CODEX_HOME) { $env:CODEX_HOME = $Setup.CodexHome }
         if ($Setup.ClaudeConfigDir -and -not $env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $Setup.ClaudeConfigDir }
+    }
+    # Wait-VenvFree and setup work can outlive the first scan: check again
+    # before the lifecycle record and the gateway stop, so a newly started
+    # OpenCode or Amp process holding an older plugin is refused.
+    try { Assert-NoLoadedPluginAgents } catch {
+        if ($Setup) { Restore-SetupInstall -KeepStopped }
+        throw
     }
     if ($Run.UnprovenReplacement -and (Get-GatewayProcess)) {
         try { Prepare-UnprovenReplacement $stagedGateway $stagedBinaries } catch {

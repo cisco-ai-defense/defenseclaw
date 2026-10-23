@@ -3143,6 +3143,13 @@ func TestCopilotShellBootstrapFailuresFollowProfile(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertCopilotShellBootstrapFailure(t, string(script), tc.failure)
+		if !tc.secureClient {
+			for _, required := range []string{`copilot_per_user_install_block() {`, `copilot_per_user_install_block "$@" || true`} {
+				if !strings.Contains(string(script), required) {
+					t.Errorf("per-user Copilot shell bootstrap missing install guard %q", required)
+				}
+			}
+		}
 	}
 }
 

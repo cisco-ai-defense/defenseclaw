@@ -812,6 +812,116 @@ foreach ($legacySetup in @($false, $true)) {
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
+    # A running 1.0.3 Amp or OpenCode process retains its old plugin even
+    # after the installer replaces the file. Keep the old gateway enforcing.
+    classifier = _ps1_function("Get-LoadedPluginAgent")
+    guard = _ps1_function("Assert-NoLoadedPluginAgents")
+    assert "Get-CimInstance Win32_Process" in guard
+    assert "GetOwner" in guard
+    install = _ps1_function("Invoke-Install")
+    rollback = _ps1_function("Invoke-Rollback")
+    handoff = _ps1_function("Invoke-ReleaseInstaller")
+    assert install.index("Assert-NoLoadedPluginAgents") < install.index("Stop-Gateway")
+    # Wait-VenvFree and setup work can outlive the first scan. Recheck at
+    # the gateway-stop boundary so a newly started old plugin is refused.
+    setup = install.index("Disable-SetupHooks")
+    stop = install.index("Stop-Gateway", setup)
+    assert install.index("Assert-NoLoadedPluginAgents", setup) < stop
+    assert re.search(
+        r"try\s*\{\s*Assert-NoLoadedPluginAgents\s*\}\s*catch\s*\{\s*"
+        r"if \(\$Setup\) \{ Restore-SetupInstall -KeepStopped \}\s*throw\s*\}",
+        install[setup:stop],
+    )
+    assert rollback.index("Assert-NoLoadedPluginAgents") < rollback.index("Stop-Gateway")
+    assert handoff.index("Assert-NoLoadedPluginAgents") < handoff.index("Stop-Gateway")
+    if not POWERSHELL:
+        return
+    script = classifier + "\n" + "\n".join(
+        f'$p = [pscustomobject]@{{ Name = "{name}"; CommandLine = "{command}" }}; '
+        "Get-LoadedPluginAgent $p"
+        for name, command in [
+            ("opencode.exe", "opencode.exe"),
+            ("amp.exe", "amp.exe"),
+            ("node.exe", "node.exe C:/node_modules/@sourcegraph/amp/cli.js"),
+            ("node.exe", "node.exe unrelated.js"),
+        ]
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert [line for line in result.stdout.splitlines() if line] == ["opencode", "amp", "amp"]
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")
+def test_windows_agent_scan_ignores_other_session_owner_denial() -> None:
+    guard = _ps1_function("Assert-NoLoadedPluginAgents")
+    script = guard + r'''
+function Die($Message) { throw $Message }
+$session = (Get-Process -Id $PID).SessionId
+$script:scanSession = $session + 1
+$script:ownerReturn = 2
+$script:ownerDomain = ''
+$script:ownerUser = ''
+function Get-CimInstance($ClassName) {
+    [pscustomobject]@{ Name = 'opencode.exe'; CommandLine = 'opencode.exe'; ProcessId = 7001; SessionId = $script:scanSession }
+}
+function Invoke-CimMethod($InputObject, $MethodName) {
+    [pscustomobject]@{ ReturnValue = $script:ownerReturn; Domain = $script:ownerDomain; User = $script:ownerUser }
+}
+function Get-LoadedPluginAgent($Process) { return 'opencode' }
+Assert-NoLoadedPluginAgents
+"other-session-owner-denied-ok"
+$script:scanSession = $session
+try {
+    Assert-NoLoadedPluginAgents
+    throw 'same-session-owner-denial-was-ignored'
+} catch {
+    if ($_.Exception.Message -notlike 'Could not check the owner*') { throw }
+}
+"same-session-owner-denied-closed"
+$parts = [Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\', 2
+$script:ownerDomain = $parts[0]
+$script:ownerUser = $parts[1]
+$script:ownerReturn = 0
+$script:scanSession = $session + 1
+try {
+    Assert-NoLoadedPluginAgents
+    throw 'same-account-other-session-was-ignored'
+} catch {
+    if ($_.Exception.Message -notlike 'Close OpenCode and Amp*') { throw }
+}
+"same-account-other-session-denied-closed"
+'''
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "other-session-owner-denied-ok" in result.stdout
+    assert "same-session-owner-denied-closed" in result.stdout
+    assert "same-account-other-session-denied-closed" in result.stdout
+
+
+def test_refused_late_swap_restores_setup_hooks_without_restarting_gateway(tmp_path: Path) -> None:
+    if not POWERSHELL:
+        pytest.skip("PowerShell is unavailable")
+    staged = tmp_path / "hook-runtime-state.json"
+    restored = tmp_path / "active-state.json"
+    staged.write_text("enforcing", encoding="ascii")
+    root = str(tmp_path).replace("'", "''")
+    destination = str(restored).replace("'", "''")
+    script = _ps1_function("Restore-SetupInstall") + f"""
+$Staging = '{root}'
+$SetupHookState = '{destination}'
+$WasRunning = $true
+$Setup = [pscustomobject]@{{ Root = '{root}' }}
+function Move-Path([string]$Source, [string]$Destination) {{ Move-Item -LiteralPath $Source -Destination $Destination -Force }}
+function Start-SetupGateway {{ throw 'the gateway was never stopped' }}
+Restore-SetupInstall -KeepStopped
+"""
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert restored.read_text(encoding="ascii") == "enforcing"
+    assert not staged.exists()
+
+
 _GUARDRAIL_CONFIGS = {
     # What 'uninstall --binaries' and 'setup guardrail --disable' save.
     "off": ("guardrail:\n  enabled: false\n  mode: action\n  judge:\n    enabled: true\ngateway:\n  port: 18970\n", True),
