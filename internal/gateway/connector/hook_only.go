@@ -39,6 +39,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"gopkg.in/yaml.v3"
 )
@@ -1330,6 +1331,21 @@ func managedPluginHookSocket(opts SetupOpts) (string, int) {
 	return filepath.Clean(socket), uid
 }
 
+// managedPluginLifecycleMarker uses the same marker as native and shell
+// managed hooks, only when this plugin is bound to the standalone Unix
+// socket. A configured or per-user socket cannot name the lifecycle.
+func managedPluginLifecycleMarker(opts SetupOpts) string {
+	socket, _ := managedPluginHookSocket(opts)
+	if socket == "" {
+		return ""
+	}
+	layout, err := managed.StandaloneLayoutFor(runtime.GOOS)
+	if err != nil || socket != layout.HookSocketPath {
+		return ""
+	}
+	return layout.LifecycleMarkerPath
+}
+
 // managedPluginForeignHookGuard returns the administrator-owned hook binary
 // a standalone managed plugin runs for the foreign-hook guard, or "" for
 // any other install.
@@ -1449,6 +1465,7 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		ServiceUID:         serviceUID,
 		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
 		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
+		LifecycleMarkerJS:  javaScriptStringContent(managedPluginLifecycleMarker(opts)),
 		ListenerProofJS:    managedPluginListenerProofJS(opts),
 		FailMode:           failMode,
 		OutageFailMode:     pluginOutageFailMode(opts),

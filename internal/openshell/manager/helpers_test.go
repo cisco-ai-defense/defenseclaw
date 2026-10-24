@@ -341,18 +341,19 @@ func (f *fakeImporter) counts() (imported, updated int) {
 // builds the generated family record: one the audit schema refuses is not
 // kept and fails the test at cleanup (production drops the error).
 type memTelemetry struct {
-	mu        sync.Mutex
-	check     *audit.SandboxRecorder
-	refused   []string
-	lifecycle []audit.SandboxLifecycleEvent
-	egress    []audit.SandboxEgressEvent
-	approvals []audit.SandboxApprovalEvent
-	policy    []audit.SandboxPolicyEvent
-	health    []audit.SandboxHealthEvent
-	findings  []audit.SandboxFindingEvent
-	workspace []audit.SandboxWorkspaceEvent
-	activity  []audit.SandboxActivityEvent
-	processes []audit.SandboxProcessEvent
+	mu           sync.Mutex
+	check        *audit.SandboxRecorder
+	refused      []string
+	lifecycle    []audit.SandboxLifecycleEvent
+	egress       []audit.SandboxEgressEvent
+	approvals    []audit.SandboxApprovalEvent
+	askDecisions []audit.SandboxAskDecidedEvent
+	policy       []audit.SandboxPolicyEvent
+	health       []audit.SandboxHealthEvent
+	findings     []audit.SandboxFindingEvent
+	workspace    []audit.SandboxWorkspaceEvent
+	activity     []audit.SandboxActivityEvent
+	processes    []audit.SandboxProcessEvent
 }
 
 func newMemTelemetry() *memTelemetry {
@@ -384,6 +385,13 @@ func (t *memTelemetry) RecordSandboxEgress(ctx context.Context, e audit.SandboxE
 
 func (t *memTelemetry) RecordSandboxApproval(ctx context.Context, e audit.SandboxApprovalEvent) error {
 	return keep(t, "approval", &t.approvals, e, func() error { return t.check.RecordSandboxApproval(ctx, e) })
+}
+
+func (t *memTelemetry) RecordManagedAskDecision(_ context.Context, e audit.SandboxAskDecidedEvent) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.askDecisions = append(t.askDecisions, e)
+	return nil
 }
 
 func (t *memTelemetry) RecordSandboxPolicy(ctx context.Context, e audit.SandboxPolicyEvent) error {

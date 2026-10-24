@@ -153,9 +153,31 @@ func TestLauncherRefusesEveryCommandThatIsNotSandbox(t *testing.T) {
 			t.Errorf("%v: ran %v and printed %q before refusing", args, ran, stdout.String())
 		}
 	}
-	const want = "This computer is managed; only `defenseclaw sandbox` commands are available here."
+	const want = "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 	if launcherRefusal != want {
 		t.Fatalf("refusal text = %q, want %q", launcherRefusal, want)
+	}
+}
+
+func TestLauncherStatusAndTUIPointToTheManagedDailyView(t *testing.T) {
+	for _, name := range []string{"status", "tui"} {
+		t.Run(name, func(t *testing.T) {
+			var ran []string
+			root := launcherTestRoot(&ran)
+			var stdout, stderr bytes.Buffer
+			root.SetOut(&stdout)
+			root.SetErr(&stderr)
+			if code := executeLauncher(context.Background(), root, []string{name}); code != 2 {
+				t.Fatalf("%s exit %d, want a bounded launcher refusal", name, code)
+			}
+			message := stderr.String()
+			if !strings.Contains(message, "This computer is managed") ||
+				!strings.Contains(message, "defenseclaw sandbox status") ||
+				!strings.Contains(message, "defenseclaw sandbox policy explain") ||
+				stdout.Len() != 0 || len(ran) != 0 {
+				t.Fatalf("%s did not give the caller a read-only route: stderr=%q stdout=%q ran=%v", name, message, stdout.String(), ran)
+			}
+		})
 	}
 }
 
@@ -170,12 +192,18 @@ func TestLauncherHelpShowsOnlySandbox(t *testing.T) {
 			t.Fatalf("%v: exit %d, stderr %q", args, code, stderr.String())
 		}
 		out := stdout.String()
-		if !strings.Contains(out, "defenseclaw sandbox run claude") || !strings.Contains(out, "sandbox") {
+		if !strings.Contains(out, "defenseclaw sandbox run claude") || !strings.Contains(out, "defenseclaw sandbox status") || !strings.Contains(out, "sandbox") {
 			t.Errorf("%v: help does not offer the sandbox tree:\n%s", args, out)
 		}
-		for _, hidden := range []string{"status", "setup", "enterprise", "completion", "sidecar"} {
+		for _, hidden := range []string{"setup", "enterprise", "completion", "sidecar"} {
 			if strings.Contains(out, hidden) {
 				t.Errorf("%v: help mentions %q:\n%s", args, hidden, out)
+			}
+		}
+		for _, line := range strings.Split(out, "\n") {
+			if line == "  status" || strings.HasPrefix(line, "  status ") || strings.HasPrefix(line, "  status\t") ||
+				line == "  defenseclaw status" || strings.HasPrefix(line, "  defenseclaw status ") {
+				t.Errorf("%v: help offers the administrator-only status command:\n%s", args, out)
 			}
 		}
 		if len(ran) != 0 {

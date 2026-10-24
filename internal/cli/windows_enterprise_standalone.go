@@ -122,6 +122,10 @@ type windowsEnterpriseInstallerReport struct {
 	// could not remove ("user (SID) [connectors]: item", or a machine item).
 	// Decoded leniently, like the registration lists.
 	RollbackLeftovers json.RawMessage `json:"rollback_leftovers"`
+	// A linked or unreadable user agent file cannot be captured for rollback.
+	// Setup still proceeds with the machine transaction and reports each skip.
+	UserNativeOTLPCaptureSkipped json.RawMessage `json:"user_native_otlp_capture_skipped"`
+
 	// StaleLifecycleJournalRemoved is set when the lifecycle removed a
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
@@ -812,15 +816,30 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 		result.SecurityComplete, result.Noop, result.NoopReason = false, false, ""
 		result.AddError("lifecycle_error", "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt")
 	}
-	if state == nil && len(result.Warnings) == warnings {
-		// Name the check that did not run, such as an installed CLI the
-		// custody check refuses (rel-1-0-4 GAP-0594), instead of omitting the
-		// policy block silently.
-		cause := "the installed CLI reported no effective policy digest"
-		if err != nil {
-			cause = err.Error()
+	if state == nil {
+		result.SecurityComplete = false
+		if len(result.Warnings) > warnings {
+			// A digest response with a build error already named the cause.
+			// Verify must fail on that cause rather than echo it as a warning.
+			if result.Action == "verify" {
+				message := result.Warnings[len(result.Warnings)-1]
+				result.Warnings = result.Warnings[:len(result.Warnings)-1]
+				result.AddError(message.Code, message.Message)
+			}
+		} else {
+			// Name a check that never returned a digest, including an installed
+			// CLI the custody check refused to run (GAP-0594).
+			cause := "the installed CLI reported no effective policy digest"
+			if err != nil {
+				cause = err.Error()
+			}
+			message := "the effective policy the gateway enforces could not be checked: " + cause
+			if result.Action == "verify" {
+				result.AddError("policy_unverified", message)
+			} else {
+				result.AddWarning("policy_unverified", message)
+			}
 		}
-		result.AddWarning("policy_unverified", "the effective policy the gateway enforces could not be checked: "+cause)
 	}
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
@@ -1601,13 +1620,35 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 // addWindowsEnterpriseMachineStateWarning names the machine folders outside
 // StateRoot that the uninstall could not remove. Every standalone uninstall
 // removes them, not only --purge, so the MDM default uninstall reports them
-// too (GAP-1734).
+// too (GAP-1734). A retained selector shared with another deployment is
+// intentional, and two cleanup steps can report the same path (GAP-0571).
 func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
-	if kept := windowsEnterpriseReportStrings(report.MachineStateRemaining); len(kept) > 0 {
+	var failed, kept []string
+	seen := map[string]bool{}
+	for _, entry := range windowsEnterpriseReportStrings(report.MachineStateRemaining) {
+		path, reason, _ := strings.Cut(entry, ": ")
+		key := strings.ToLower(path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if strings.HasPrefix(reason, "kept: ") {
+			kept = append(kept, entry)
+		} else {
+			failed = append(failed, entry)
+		}
+	}
+	if len(failed) > 0 {
 		result.AddWarning("machine_state_remaining", fmt.Sprintf(
 			"the uninstall could not remove %d DefenseClaw machine folder(s); remove them from an elevated prompt: %s",
-			len(kept),
-			windowsEnterpriseBoundedLabels(kept),
+			len(failed),
+			windowsEnterpriseBoundedLabels(failed),
+		))
+	}
+	if len(kept) > 0 {
+		result.AddWarning("machine_state_kept", fmt.Sprintf(
+			"the uninstall kept %d DefenseClaw machine file(s) or folder(s) on purpose; leave them in place: %s",
+			len(kept), windowsEnterpriseBoundedLabels(kept),
 		))
 	}
 }
@@ -1626,6 +1667,14 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
 	)
 	warnings = append(warnings, windowsEnterpriseRollbackLeftoverWarnings(report.RollbackLeftovers)...)
+	if skipped := windowsEnterpriseReportStrings(report.UserNativeOTLPCaptureSkipped); len(skipped) != 0 {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "user_native_otlp_capture_skipped",
+			Message: "Setup skipped native OTLP rollback preimages for these user paths; the machine operation continued, " +
+				"but a rollback cannot restore the skipped paths. Inspect their links or access permissions, " +
+				"then run Setup /ensure again: " + windowsEnterpriseBoundedLabels(skipped),
+		})
+	}
 	if removed := strings.TrimSpace(report.StaleLifecycleJournalRemoved); removed != "" {
 		// The lifecycle deleted a protected journal on its own; say so in
 		// the result and the lifecycle log (GAP-1680).
@@ -1752,9 +1801,11 @@ const (
 		"reset its permissions or remove it if that account no longer uses DefenseClaw, then run Setup /ensure again to remove the old copies"
 )
 
-// windowsEnterpriseRollbackLeftoverWarnings names each item the rollback of
-// a failed first install could not remove, with what removes it. A file the
-// account changed after DefenseClaw wrote it is kept whole, so only a manual
+// windowsEnterpriseRollbackLeftoverWarnings names each item a rollback could
+// not restore or remove. A native OTLP user preimage needs manual repair;
+// an upgrade rollback retains the restored release. For a failed first
+// install, a file the account changed after DefenseClaw wrote it is kept
+// whole, so only a manual
 // edit removes DefenseClaw's entries from it. Everything else is removed by a
 // successful install followed by an uninstall, both as LocalSystem while the
 // accounts are signed in (an uninstall acts only for signed-in accounts). An
@@ -1764,10 +1815,19 @@ const (
 // that is a per-user folder the rolled back change created
 // (Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep).
 const windowsEnterpriseRollbackCreatedFolderLeftover = ": a per-user DefenseClaw folder this change created; the rollback could not remove it ("
+const windowsEnterpriseNativeOTLPRollbackLeftover = "native OTLP user rollback: "
 
 func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
 	var warnings []enterprisestatus.Message
 	for _, leftover := range windowsEnterpriseReportStrings(raw) {
+		if detail, ok := strings.CutPrefix(leftover, windowsEnterpriseNativeOTLPRollbackLeftover); ok {
+			warnings = append(warnings, enterprisestatus.Message{
+				Code: "rollback_leftover",
+				Message: "the rollback could not restore " + detail + "; the restored release is running; " +
+					"inspect that link or its permissions and restore it by hand",
+			})
+			continue
+		}
 		if strings.Contains(leftover, windowsEnterpriseRollbackCreatedFolderLeftover) {
 			// A rollback whose per-user runtime cleanup failed went on and
 			// put the previous release back (GAP-0856); the folder is not

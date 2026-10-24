@@ -140,7 +140,7 @@ func TestAuditWALAlarmRaisesRepeatsAndClears(t *testing.T) {
 		t.Fatalf("under the bound: %q", line)
 	}
 	over := int64(auditWALAlarmBytes) + 1<<20
-	if line := alarm.observe(start, over); !strings.Contains(line, "WARNING: the audit WAL file is 1025 MiB, over its 1024 MiB bound") {
+	if line := alarm.observe(start, over); !strings.Contains(line, "WARNING: the audit WAL file is 257 MiB, over its 256 MiB bound") {
 		t.Fatalf("over the bound: %q", line)
 	}
 	if line := alarm.observe(start.Add(time.Minute), over); line != "" {
@@ -149,10 +149,20 @@ func TestAuditWALAlarmRaisesRepeatsAndClears(t *testing.T) {
 	if line := alarm.observe(start.Add(auditWALAlarmRepeat), over); !strings.Contains(line, "WARNING") {
 		t.Fatalf("not repeated after %s: %q", auditWALAlarmRepeat, line)
 	}
-	if line := alarm.observe(start.Add(auditWALAlarmRepeat+time.Second), 0); !strings.Contains(line, "back under its 1024 MiB bound") {
+	if line := alarm.observe(start.Add(auditWALAlarmRepeat+time.Second), 0); !strings.Contains(line, "back under its 256 MiB bound") {
 		t.Fatalf("cleared: %q", line)
 	}
 	if line := alarm.observe(start.Add(auditWALAlarmRepeat+2*time.Second), 0); line != "" {
 		t.Fatalf("cleared twice: %q", line)
+	}
+}
+
+// The flood ceiling is 256 MiB; a warning at four times that size arrives
+// only after the published bound has already failed for many guard ticks.
+func TestAuditWALAlarmStartsAtPublishedCeiling(t *testing.T) {
+	var alarm auditWALAlarm
+	line := alarm.observe(time.Now(), auditWALLimitBytes+(1<<20))
+	if !strings.Contains(line, "WARNING: the audit WAL file is 257 MiB, over its 256 MiB bound") {
+		t.Fatalf("first over-ceiling alarm = %q", line)
 	}
 }

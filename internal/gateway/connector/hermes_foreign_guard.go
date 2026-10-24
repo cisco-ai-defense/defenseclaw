@@ -52,6 +52,19 @@ const shellHookForeignGuardBlock = `# Standalone foreign-hook guard. Hermes runs
 # which cannot start under the address-space limit set above.
 DEFENSECLAW_FOREIGN_GUARD=@GUARD@
 DEFENSECLAW_GUARD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || DEFENSECLAW_GUARD_EVENT=""
+# The lifecycle marker is published before the gateway can stop. Answer a
+# pre-tool call here, before spawning the native guard or waiting on its
+# session exchange. A session-start record still follows its usual path:
+# Hermes cannot stop a session at that event.
+case "$DEFENSECLAW_GUARD_EVENT" in
+  pre_tool_call|"")
+    if defenseclaw_managed_lifecycle_held; then
+      defenseclaw_log_hook_failure hermes hermes-hook "managed lifecycle in progress" policy closed
+      hermes_block transport "the DefenseClaw gateway is being installed or upgraded on this computer; try again in a moment."
+      exit 0
+    fi
+    ;;
+esac
 case "$DEFENSECLAW_GUARD_EVENT" in
   pre_tool_call|on_session_start|"")
     DEFENSECLAW_GUARD_STATUS=0

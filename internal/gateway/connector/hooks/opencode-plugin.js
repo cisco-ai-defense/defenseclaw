@@ -55,6 +55,7 @@ const DC_TOKEN_PATTERN = /^[A-Za-z0-9:._-]{1,512}$/;
 const DC_HOOK_SOCKET = "";
 const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
+const DC_LIFECYCLE_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
 const DC_FAIL_MODE = "{{if and .Managed .SecureClient}}{{.FailMode}}{{else}}closed{{end}}"; // per-user and standalone hooks stay closed
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
@@ -81,6 +82,9 @@ const DC_FOREIGN_GUARD = "{{.ForeignHookGuardJS}}";
 // the deployment was uninstalled and this plugin stops failing closed. A
 // standard user cannot remove the marker. Empty keeps the fail mode.
 const DC_INSTALL_MARKER = "{{.InstallMarkerJS}}";
+// The standalone Unix lifecycle publishes this public, root-owned marker
+// before it can stop the gateway and removes it after readiness or recovery.
+const DC_LIFECYCLE_MARKER = "{{.LifecycleMarkerJS}}";
 // Windows standalone installs reach the gateway over loopback TCP, where a
 // local user can hold the port while the gateway restarts, and this plugin
 // cannot compare the listener with the gateway service the way the hook
@@ -331,6 +335,19 @@ async function defenseclawDeploymentRemoved() {
     return !!err && err.code === "ENOENT";
   }
 }
+
+async function defenseclawManagedLifecycleHeld() {
+  if (!DC_LIFECYCLE_MARKER) return false;
+  try {
+    await lstat(DC_LIFECYCLE_MARKER);
+    return true;
+  } catch (err) {
+    // Only a definite absence ends the install window.
+    return !err || err.code !== "ENOENT";
+  }
+}
+
+const DC_MANAGED_LIFECYCLE_TEXT = "DefenseClaw is being installed or upgraded on this computer; try again in a moment.";
 
 // defenseclawGatewayJSON parses a gateway answer and refuses one that
 // repeats a key in any object. JSON.parse keeps the last copy, so
@@ -814,6 +831,7 @@ async function defenseclawFailModeNow(mode, actionable) {
 }
 
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
+  if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 {{end}}  let token;
   try {
@@ -869,6 +887,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
 {{end}}      return null;
     }
     const data = defenseclawGatewayJSON(await res.text());
+    if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 {{end}}
 {{if .Sandbox}}    // A reply without a known verdict is as untrustworthy as no reply.
@@ -1131,6 +1150,7 @@ function defenseclawToast(client, reason) {
   return {
     config: async (config) => {
       defenseclawConfigure(config);
+      if (await defenseclawManagedLifecycleHeld()) return;
       await defenseclawPostLoadHeartbeat(cwd);
     },
     // OpenCode publishes its session lifecycle through the generic event
@@ -1150,6 +1170,7 @@ function defenseclawToast(client, reason) {
     // The decision is resolved BEFORE the throw so a fail-open transport
     // error never turns into an accidental block.
     "tool.execute.before": async (input, output) => {
+      if (await defenseclawManagedLifecycleHeld()) throw defenseclawBlock(client, DC_MANAGED_LIFECYCLE_TEXT);
       // Every call runs the check, also after a block at load (which holds
       // for the process), so the gateway records each denied call.
       const startupBlock = await defenseclawStartupGuard;

@@ -96,8 +96,8 @@ func TestSandboxManagedRecordsMoveTheirFleetCounter(t *testing.T) {
 			with(map[string]any{"defenseclaw.metric.kind": "sandbox", "defenseclaw.sandbox.managed.action": "stop"})},
 		{"foreign container", SandboxForeignContainerEvent{Sandbox: SandboxIdentity{Name: "claude-dev", Managed: identity.Managed}, Subject: subject},
 			observability.TelemetryInstrumentDefenseClawSandboxManagedForeignItems,
-			with(map[string]any{"defenseclaw.metric.kind": "container", "defenseclaw.sandbox.managed.action": "alert"},
-				"defenseclaw.sandbox.driver", "defenseclaw.connector.source")},
+			with(map[string]any{"defenseclaw.metric.kind": "container", "defenseclaw.sandbox.managed.action": "alert",
+				"defenseclaw.connector.source": "unknown"}, "defenseclaw.sandbox.driver")},
 		{"resolved on the offline floor", SandboxPolicyResolvedEvent{Sandbox: floor, Subject: subject, Reason: "offline_floor"},
 			observability.TelemetryInstrumentDefenseClawSandboxManagedProvisional,
 			with(map[string]any{"defenseclaw.metric.result": "provisional"})},
@@ -170,7 +170,7 @@ func TestSandboxManagedCountersTakeOnlyClosedValues(t *testing.T) {
 			SandboxManagedMetricOther},
 		{"connector", observability.TelemetryInstrumentDefenseClawSandboxManagedRefusals, "defenseclaw.connector.source",
 			SandboxHostRunRefusedEvent{Sandbox: unknownConnector, Subject: subject, Reason: "required_for"},
-			nil},
+			"unknown"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

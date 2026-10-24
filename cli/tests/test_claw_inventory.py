@@ -3011,6 +3011,28 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
 
         self.assertEqual(agents, [])
 
+    def test_codex_agent_over_the_read_cap_is_listed_not_dropped(self):
+        # GAP-1083: a valid custom agent just over 1 MiB vanished from the
+        # AIBOM with no error; it is listed as not read, with the reason.
+        agents_dir = Path(self.tmp) / "agents"
+        agents_dir.mkdir()
+        cap = 1024 * 1024
+        header = 'name = "{name}"\ndeveloper_instructions = "SECRET-PROMPT-1083"\ndescription = "'
+        for stem, size in (("near", cap - 64), ("over", cap + 64)):
+            text = header.format(name=stem)
+            text += "d" * (size - len(text) - 2) + '"\n'
+            (agents_dir / f"{stem}.toml").write_bytes(text.encode("utf-8"))
+            self.assertEqual((agents_dir / f"{stem}.toml").stat().st_size, size)
+
+        agents = {row["id"]: row for row in _agents_from_codex_toml_dirs([str(agents_dir)])}
+
+        self.assertEqual(sorted(agents), ["near", "over"])
+        self.assertTrue(agents["near"]["eligible"])
+        self.assertNotIn("parse_error", agents["near"])
+        self.assertFalse(agents["over"]["eligible"])
+        self.assertIn(f"exceeds {cap} byte inventory limit", agents["over"]["parse_error"])
+        self.assertNotIn("SECRET-PROMPT-1083", repr(agents["over"]))
+
     def test_codex_rule_reparse_file_is_not_inventoried(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")
         codex_home = Path(self.tmp) / "codex-home"

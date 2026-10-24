@@ -199,6 +199,9 @@ func agentVerdictReason(action, sourceReason, displayReason string, policy redac
 		if sentence := agentMCPAdmissionPendingSentence(sourceReason); sentence != "" {
 			return sentence
 		}
+		if sentence := agentProjectSkillPendingSentence(sourceReason); sentence != "" {
+			return sentence
+		}
 	}
 	subject := agentBlockListSubject(sourceReason)
 	if subject == "" {
@@ -492,6 +495,23 @@ func agentMCPAdmissionPendingSentence(reason string) string {
 	}
 	return "DefenseClaw is still scanning MCP server " + values["asset_name"] + ", so its tools are blocked until the scan finishes. " +
 		"Try the same call again in about a minute. If the scan rejects the server, its calls stay blocked."
+}
+
+// A project skill awaiting its first scan is a temporary refusal, so name
+// the scan step instead of the generic permanent-block or registry wording.
+func agentProjectSkillPendingSentence(reason string) string {
+	values, ok := agentAssetPolicyFields(reason)
+	if !ok || values["reason_code"] != "project-skill-pending" || values["asset_type"] != "skill" || values["asset_name"] == "" {
+		return ""
+	}
+	prefix := "DefenseClaw has not scanned project skill " + values["asset_name"] + " yet, so it is blocked. "
+	if standaloneEnterpriseActive.Load() {
+		if reasonDisplayGOOS == "windows" {
+			return prefix + "Wait for the managed skill watcher to scan it, or ask your administrator to review the scan; then retry the skill."
+		}
+		return prefix + "Ask your administrator to run `defenseclaw-gateway scan skill PATH` for its folder; then retry the skill."
+	}
+	return prefix + "Run `defenseclaw skill scan --path PATH` for its folder; then retry the skill."
 }
 
 // agentOrderedRulePrefix starts the note an ordered tool-call chain match

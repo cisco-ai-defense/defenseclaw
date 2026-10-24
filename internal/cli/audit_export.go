@@ -311,28 +311,15 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 
 	out := io.Writer(os.Stdout)
 	if auditExportOut != "" && auditExportOut != "-" {
-		// ("Audit export output file is created with
-		// default-readable permissions before chmod"): os.Create uses
-		// O_CREATE|O_TRUNC with mode 0666 masked by the process umask,
-		// so on a 022 umask host the file briefly exists as 0644
-		// before the os.Chmod tightens it. A local attacker watching
-		// a shared directory (or holding an FD opened during that
-		// window) could read sensitive audit content written
-		// afterwards. Open with O_CREATE|O_EXCL|0o600 so the file is
-		// 0600 from creation and we refuse to clobber an existing
-		// file (which could be an attacker-pre-created decoy).
-		// --force removes the old file first, so the new one is still
-		// created with O_EXCL and 0600 (GAP-1398).
+		// Create exclusively, with private permissions before any content is
+		// written: 0600 on Unix and the audit store's protected DACL on
+		// Windows. --force removes the old file before this private create.
 		if auditExportForce {
 			if rmErr := os.Remove(auditExportOut); rmErr != nil && !os.IsNotExist(rmErr) {
 				return fmt.Errorf("audit export: remove existing output %s: %w", auditExportOut, rmErr)
 			}
 		}
-		f, openErr := os.OpenFile(
-			auditExportOut,
-			os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC,
-			0o600,
-		)
+		f, openErr := audit.CreateExportFileExclusive(auditExportOut)
 		if openErr != nil {
 			if os.IsExist(openErr) {
 				return fmt.Errorf("audit export: %s already exists; pass --force to overwrite it or choose another -o path", auditExportOut)

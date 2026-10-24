@@ -2737,6 +2737,9 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 	oldOverride := defenseclawHookBinaryOverride
 	defenseclawHookBinaryOverride = filepath.Join(dir, "Defense Claw", windowsHookBinaryName)
 	defer func() { defenseclawHookBinaryOverride = oldOverride }()
+	// The installed full hook of a packaged install, which PreToolUse runs.
+	installedHook := filepath.Join(dir, "Programs", "DefenseClaw", "bin", windowsHookBinaryName)
+	pinClaudeCodePreToolGuard(t, installedHook)
 
 	c := NewClaudeCodeConnector()
 	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
@@ -2752,12 +2755,27 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 		t.Fatal(err)
 	}
 	hooks := settings["hooks"].(map[string]interface{})
-	entries := hooks["PreToolUse"].([]interface{})
-	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	prompt := hooks["UserPromptSubmit"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
 	// Per-user Setup runs the launcher through cmd.exe so a missing launcher
 	// blocks (GAP-1091); the handler still reads as the exec form it runs.
-	if got := handler["command"]; got != claudeCodeWindowsCommandProcessor() {
-		t.Fatalf("command = %q, want %q", got, claudeCodeWindowsCommandProcessor())
+	if got := prompt["command"]; got != claudeCodeWindowsCommandProcessor() {
+		t.Fatalf("UserPromptSubmit command = %q, want %q", got, claudeCodeWindowsCommandProcessor())
+	}
+	if view := claudeCodeExecView(prompt).(map[string]interface{}); view["command"] != defenseclawHookBinaryOverride {
+		t.Fatalf("UserPromptSubmit launcher = %q, want %q", view["command"], defenseclawHookBinaryOverride)
+	}
+	entries := hooks["PreToolUse"].([]interface{})
+	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	// PreToolUse runs the installed hook as the launcher guard: Cursor
+	// imports this file and runs only the command, and cmd.exe without its
+	// args blocked every Cursor tool call (GAP-1011); the launcher itself,
+	// started while missing, let the tool call run.
+	if got := handler["command"]; got != installedHook {
+		t.Fatalf("PreToolUse command = %q, want the installed hook %q", got, installedHook)
+	}
+	wantGuard := []interface{}{ClaudeCodeLauncherGuardSubcommand, defenseclawHookBinaryOverride, "hook", "--connector", "claudecode"}
+	if got := handler["args"]; !reflect.DeepEqual(got, wantGuard) {
+		t.Fatalf("PreToolUse args = %#v, want %#v", got, wantGuard)
 	}
 	view := claudeCodeExecView(handler).(map[string]interface{})
 	if got := view["command"]; got != defenseclawHookBinaryOverride {
@@ -5908,7 +5926,9 @@ func TestCodexSurgicalRestoreRejectsStaleManagedTelemetryBackup(t *testing.T) {
 	}
 	cfg := map[string]interface{}{"otel": currentOtel, "notify": notify}
 
-	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexOtelEntries(cfg, backup, opts); err != nil {
+		t.Fatal(err)
+	}
 	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
 		t.Fatalf("restore Codex notify: %v", err)
 	}
@@ -5967,7 +5987,9 @@ func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
 	}
 	cfg := map[string]interface{}{"otel": managedOtel, "notify": managedNotify}
 
-	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexOtelEntries(cfg, backup, opts); err != nil {
+		t.Fatal(err)
+	}
 	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
 		t.Fatalf("restore Codex notify: %v", err)
 	}
@@ -5988,7 +6010,9 @@ func TestCodexSurgicalRestorePreservesEditedTelemetryEnvironment(t *testing.T) {
 	managedOtel["environment"] = "operator-edited"
 	cfg := map[string]interface{}{"otel": managedOtel}
 
-	restoreCodexOtelEntries(cfg, codexConfigBackup{}, opts)
+	if err := restoreCodexOtelEntries(cfg, codexConfigBackup{}, opts); err != nil {
+		t.Fatal(err)
+	}
 	restoredOtel, ok := cfg["otel"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("surgical restore removed edited Codex OTel table: %#v", cfg)
@@ -6213,7 +6237,9 @@ func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *t
 	// Native acceptance changes gateway.api_port before uninstall. Exercise
 	// the surgical restore directly: the old scoped exporter is still owned,
 	// while current operator fields and displaced original fields survive.
-	restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189"})
+	if err := restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189"}); err != nil {
+		t.Fatal(err)
+	}
 	restored, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -6260,7 +6286,9 @@ func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testin
 		t.Fatal(err)
 	}
 	cfg := map[string]interface{}{"otel": map[string]interface{}{"exporter": currentExporter}}
-	restoreCodexOtelEntries(cfg, codexConfigBackup{HadOtelBlock: true, OriginalOtel: original}, SetupOpts{})
+	if err := restoreCodexOtelEntries(cfg, codexConfigBackup{HadOtelBlock: true, OriginalOtel: original}, SetupOpts{OTLPPathToken: "synthetic-product-token"}); err != nil {
+		t.Fatal(err)
+	}
 
 	otel := cfg["otel"].(map[string]interface{})
 	exporter := otel["exporter"].(map[string]interface{})
@@ -6302,10 +6330,12 @@ func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testin
 	currentHeaders["authorization"] = "Bearer synthetic-product-token"
 	currentHeaders["x-defenseclaw-client"] = "codex-otel/legacy"
 	currentHeaders["x-defenseclaw-source"] = "codex-legacy"
-	restoreCodexOtelEntries(withContaminatedOriginal, codexConfigBackup{
+	if err := restoreCodexOtelEntries(withContaminatedOriginal, codexConfigBackup{
 		HadOtelBlock: true,
 		OriginalOtel: contaminatedOriginal,
-	}, SetupOpts{})
+	}, SetupOpts{OTLPPathToken: "synthetic-product-token"}); err != nil {
+		t.Fatal(err)
+	}
 	cleaned := codexExporterHeaders(withContaminatedOriginal["otel"].(map[string]interface{})["exporter"])
 	for _, key := range []string{"authorization", "x-defenseclaw-client", "x-defenseclaw-source"} {
 		if _, exists := cleaned[key]; exists {
@@ -6314,6 +6344,34 @@ func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testin
 	}
 	if cleaned["x-operator-header"] != "preserve-current" {
 		t.Fatalf("surgical cleanup discarded unrelated header: %#v", cleaned)
+	}
+}
+
+func TestRestoreCodexOtelEntriesKeepsChangedAuthorizationOverOlderBackup(t *testing.T) {
+	current := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://operator.example.test/v1/logs",
+			"headers": map[string]interface{}{
+				"authorization":        "Bearer new-operator-token",
+				"x-defenseclaw-source": "codex",
+				"x-defenseclaw-client": "codex-otel/1.0",
+			},
+		},
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock: true,
+		OriginalOtel: json.RawMessage(`{"exporter":{"otlp-http":{"endpoint":"https://operator.example.test/v1/logs","headers":{"authorization":"Bearer old-operator-token"}}}}`),
+	}
+	cfg := map[string]interface{}{"otel": map[string]interface{}{"exporter": current}}
+	if err := restoreCodexOtelEntries(cfg, backup, SetupOpts{OTLPPathToken: "product-token"}); err != nil {
+		t.Fatal(err)
+	}
+	headers := codexExporterHeaders(cfg["otel"].(map[string]interface{})["exporter"])
+	if headers["authorization"] != "Bearer new-operator-token" {
+		t.Fatal("current operator authorization was replaced by an older backup")
+	}
+	if _, exists := headers["x-defenseclaw-source"]; exists {
+		t.Fatal("product marker survived")
 	}
 }
 

@@ -71,9 +71,10 @@ func UnverifiedVersionsFor(connectorName string) string {
 
 // surfaceRejection is one surface that was not admitted.
 type surfaceRejection struct {
-	surface connector.AgentSurface
-	reason  string
-	refused bool // unverified_versions is refuse for the connector
+	surface      connector.AgentSurface
+	reason       string
+	refused      bool // unverified_versions is refuse for the connector
+	belowMinimum bool // explicit engine version predates every known hook contract
 }
 
 // surfaceAdmission is the decision over one user's surfaces of one
@@ -99,7 +100,9 @@ func admitSurfaces(connectorName, policy string, surfaces []connector.AgentSurfa
 		resolution := connector.ResolveSurfaceHookContract(connectorName, surface.Surface, surface.EngineVersion)
 		ok, reason := resolution.Admitted(policy)
 		if !ok {
-			out.rejected = append(out.rejected, surfaceRejection{surface: surface, reason: reason, refused: policy == connector.UnverifiedVersionsRefuse})
+			out.rejected = append(out.rejected, surfaceRejection{surface: surface, reason: reason,
+				refused:      policy == connector.UnverifiedVersionsRefuse,
+				belowMinimum: surfaceBelowFirstHookContract(connectorName, surface.EngineVersion)})
 			continue
 		}
 		out.admitted = append(out.admitted, surface)
@@ -108,6 +111,23 @@ func admitSurfaces(connectorName, policy string, surfaces []connector.AgentSurfa
 		}
 	}
 	return out
+}
+
+func surfaceBelowFirstHookContract(name, version string) bool {
+	version = connector.NormalizeAgentVersion(name, version)
+	if version == "" {
+		return false
+	}
+	minimum := ""
+	for _, contract := range connector.KnownHookContracts(name) {
+		for _, candidate := range append([]string{contract.MinAgentVersion}, contract.ExactAgentVersions...) {
+			floor := connector.NormalizeAgentVersion(name, candidate)
+			if floor != "" && (minimum == "" || connector.CompareAgentVersions(floor, minimum) < 0) {
+				minimum = floor
+			}
+		}
+	}
+	return minimum != "" && connector.CompareAgentVersions(version, minimum) < 0
 }
 
 // rowVersion is the version a (user, connector) row is enrolled at: the

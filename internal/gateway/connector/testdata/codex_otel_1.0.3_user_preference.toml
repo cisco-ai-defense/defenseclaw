@@ -1,0 +1,3 @@
+[otel] # operator preference without a DefenseClaw exporter
+environment = 'fixture-os'
+log_user_prompt = true

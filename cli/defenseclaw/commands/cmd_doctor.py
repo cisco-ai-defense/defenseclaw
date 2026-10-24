@@ -7350,6 +7350,49 @@ def _codex_otel_exports_to_defenseclaw(otel) -> bool:
     return False
 
 
+def _codex_retired_otel_endpoint(otel, api_port: int) -> str:
+    """Name a marked legacy loopback exporter aimed away from this gateway."""
+    if not isinstance(otel, dict):
+        return ""
+    for key in ("exporter", "trace_exporter", "metrics_exporter"):
+        exporter = otel.get(key)
+        http = exporter.get("otlp-http") if isinstance(exporter, dict) else None
+        if not isinstance(http, dict):
+            continue
+        headers = http.get("headers")
+        if not isinstance(headers, dict) or not (
+            headers.get("x-defenseclaw-source") == "codex"
+            or headers.get("x-defenseclaw-client") == "codex-otel/1.0"
+        ):
+            continue
+        endpoint = http.get("endpoint")
+        if not isinstance(endpoint, str):
+            continue
+        try:
+            parsed = urllib.parse.urlsplit(endpoint)
+            host = parsed.hostname or ""
+        except ValueError:
+            continue
+        if host.rstrip(".").lower() == "localhost":
+            loopback = True
+        else:
+            try:
+                loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loopback = False
+        if not loopback or parsed.scheme != "http" or parsed.username is not None or parsed.query or parsed.fragment:
+            continue
+        if parsed.path not in ("/v1/logs", "/v1/traces", "/v1/metrics"):
+            continue
+        try:
+            port = parsed.port
+        except ValueError:
+            continue
+        if port and port != api_port:
+            return f"otel.{key}.otlp-http.endpoint"
+    return ""
+
+
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """Bind Codex's configured OTel tag to trusted live runtime status.
 
@@ -7360,6 +7403,7 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """
     expected = str(getattr(cfg, "environment", "") or "").strip()
     config_path = _codex_effective_config_path(cfg)
+    otel = {}
     try:
         with open(config_path, "rb") as fh:
             raw = fh.read(1024 * 1024 + 1)
@@ -7382,6 +7426,14 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
 
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
+    elif stale := _codex_retired_otel_endpoint(otel, _gateway_api_port(cfg)):
+        _emit(
+            "fail",
+            "Codex OTel environment",
+            f"config.toml {stale} still points at a retired loopback port; "
+            "remove this exporter, then rerun Codex setup",
+            r=r,
+        )
     elif not _codex_otel_exports_to_defenseclaw(otel):
         # Host Codex sends no native OTLP to DefenseClaw since 1.0.4: setup
         # writes [otel] only inside an OpenShell sandbox and puts the user's
@@ -18226,7 +18278,7 @@ def _drifted_hook_connectors(cfg) -> list[str]:
         unguarded_tool_call_hooks,
     )
 
-    # Codex hook entries left without a command keep Codex from starting, and
+    # Codex hook entries left without a command may leave Codex running unguarded, and
     # an edited hook entry fails or runs unguarded; the restart re-runs the
     # gateway's setup of the connector, which removes or replaces them
     # (GAP-1102, GAP-0906, GAP-0907, rel-1-0-4 GAP-0538).

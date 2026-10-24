@@ -561,68 +561,20 @@ func TestWalkWindowsRulePackTreeChecksEveryFileInThePack(t *testing.T) {
 	}
 }
 
-// GAP-0953: the fix Setup prints for a refused config runs as printed in
-// PowerShell and leaves the folder and the config to SYSTEM and
-// Administrators. A new folder under C:\ on a Windows client edition holds
-// Authenticated Users Modify as its own entry, which /inheritance:r keeps;
-// the old fix failed to parse in PowerShell, kept that entry and, with /T,
-// left the config with an empty DACL.
-func TestDescribeUntrustedSourceFixRunsInPowerShell(t *testing.T) {
-	if !windows.GetCurrentProcessToken().IsElevated() {
-		t.Skip("the fixed folder is readable only by SYSTEM and Administrators")
-	}
-	powershell, err := exec.LookPath("powershell.exe")
-	if err != nil {
-		t.Skip("Windows PowerShell is not available")
-	}
-	root := t.TempDir()
-	folder := filepath.Join(root, "Staging")
-	if err := os.Mkdir(folder, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	daclOf := func(path string) *windows.ACL {
-		t.Helper()
-		sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-		if err != nil {
-			t.Fatal(err)
-		}
-		dacl, _, err := sd.DACL()
-		if err != nil || dacl == nil {
-			t.Fatalf("DACL of %s: %v", path, err)
-		}
-		return dacl
-	}
-	clientEdition, err := windows.SecurityDescriptorFromString(
-		"D:P(A;OICI;0x1301bf;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)")
-	if err != nil {
-		t.Fatal(err)
-	}
-	own, _, err := clientEdition.DACL()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := windows.SetNamedSecurityInfo(folder, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, own, nil); err != nil {
-		t.Fatal(err)
-	}
-	config := filepath.Join(folder, "config.yaml")
-	if err := os.WriteFile(config, []byte("deployment_mode: managed_enterprise\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	refused := rejectUntrustedWindowsWriteACEs(config, daclOf(config))
-	text, ok := DescribeUntrustedSource("config", config, refused)
-	if !ok {
-		t.Fatalf("refusal %v is not described", refused)
-	}
-	runPrintedFix(t, powershell, root, text)
-	for _, path := range []string{folder, config} {
-		dacl := daclOf(path)
-		if dacl.AceCount == 0 {
-			t.Fatalf("the printed fix left %s with an empty DACL", path)
-		}
-		if err := rejectUntrustedWindowsWriteACEs(path, dacl); err != nil {
-			t.Fatalf("after the printed fix: %v", err)
-		}
+// GAP-1112: a refused config under an enrolled user's home must never tell
+// the operator to change that home's ACL, recursively or otherwise.
+func TestDescribeUntrustedSourceKeepsOriginalACL(t *testing.T) {
+	const source = `C:\Users\dcw-std1\staging\config.yaml`
+	for _, refusedPath := range []string{source, `C:\Users\dcw-std1\staging`, `C:\Users\dcw-std1`} {
+		t.Run(refusedPath, func(t *testing.T) {
+			refused := &UntrustedPrincipalError{Path: refusedPath, SID: "S-1-5-11", text: "untrusted source"}
+			message, ok := DescribeUntrustedSource("config", source, refused)
+			if !ok || !strings.Contains(message, source) || !strings.Contains(message, refusedPath) ||
+				!strings.Contains(message, "Copy the config into a dedicated administrator-only staging folder") ||
+				strings.Contains(strings.ToLower(message), "icacls") {
+				t.Fatalf("unsafe or incomplete refusal: %q, described=%v", message, ok)
+			}
+		})
 	}
 }
 

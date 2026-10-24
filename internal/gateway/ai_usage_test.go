@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -396,6 +397,34 @@ func TestSecureClientDiscoveryRejectsIDEInventoryMember(t *testing.T) {
 	api.handleAIUsageDiscovery(w, req)
 	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "invalid JSON body") {
 		t.Fatalf("status = %d, body = %s", w.Code, w.Body.String())
+	}
+}
+
+func TestExternalDiscoveryRejectsSummaryThatCanonicalTelemetrySkips(t *testing.T) {
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, &config.Config{})
+	service := inventory.NewContinuousDiscoveryServiceWithOptions(
+		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir()}, nil)
+	t.Cleanup(func() { _, _ = service.CloseIfNeverStarted() })
+	api.SetAIDiscoveryService(service)
+	for _, tc := range []struct {
+		name, result, privacy string
+		count                 int
+		want                  int
+	}{
+		{"valid", "ok", "enhanced", 0, http.StatusOK},
+		{"unsupported result", "complete", "enhanced", 0, http.StatusBadRequest},
+		{"missing privacy", "ok", "", 0, http.StatusBadRequest},
+		{"negative count", "ok", "enhanced", -1, http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"summary":{"scan_id":"%s","source":"sidecar","result":"%s","privacy_mode":"%s","total_signals":%d},"signals":[]}`,
+				strings.ReplaceAll(tc.name, " ", "-"), tc.result, tc.privacy, tc.count)
+			w := httptest.NewRecorder()
+			api.handleAIUsageDiscovery(w, httptest.NewRequest(http.MethodPost, "/api/v1/ai-usage/discovery", strings.NewReader(body)))
+			if w.Code != tc.want {
+				t.Fatalf("status = %d, want %d: %s", w.Code, tc.want, w.Body.String())
+			}
+		})
 	}
 }
 

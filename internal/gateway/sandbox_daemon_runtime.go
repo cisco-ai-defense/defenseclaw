@@ -819,14 +819,24 @@ func (d *SandboxDaemon) Run(ctx context.Context) error {
 	}
 	// A daemon restarted while sandboxes run (a crash) binds the ports
 	// again at once, or stops them: their hooks must reach this daemon.
+	listenersFailed := false
+	listFailed := false
 	if d.lockLifecycle(ctx) == nil {
-		if n, err := d.runningSandboxes(ctx); err == nil && n > 0 {
+		if n, err := d.runningSandboxes(ctx); err != nil {
+			listFailed = true
+		} else if n > 0 {
 			if err := d.ensureListeners(); err != nil {
 				d.logf("listeners at start: %v", err)
-				stopSandboxesWithoutListener(ctx, d.rt.manager, d.rt.publish, "ingress", map[string]bool{})
+				listenersFailed = true
 			}
 		}
 		d.unlockLifecycle()
+	}
+	if listFailed {
+		go d.retryStartupListeners(ctx)
+	}
+	if listenersFailed {
+		go d.containLostListener(ctx, "ingress")
 	}
 
 	err := d.superviseLoop(ctx, serveErr)
@@ -842,6 +852,39 @@ func (d *SandboxDaemon) Run(ctx context.Context) error {
 	d.api.SetSandboxController(nil)
 	d.opts.Health.SetSandbox(StateStopped, "", nil)
 	return err
+}
+
+// retryStartupListeners waits out a transient OpenShell List failure. Only
+// an actual bind failure needs containment; a recovered List with free ports
+// lets the daemon restore its listeners without stopping healthy sandboxes.
+func (d *SandboxDaemon) retryStartupListeners(ctx context.Context) {
+	every := d.rt.recheck
+	if every <= 0 {
+		every = time.Second
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+		if err := d.lockLifecycle(ctx); err != nil {
+			return
+		}
+		n, err := d.runningSandboxes(ctx)
+		if err == nil && n > 0 {
+			if bindErr := d.ensureListeners(); bindErr != nil {
+				d.logf("listeners at start: %v", bindErr)
+				d.unlockLifecycle()
+				d.containLostListener(ctx, "ingress")
+				return
+			}
+		}
+		d.unlockLifecycle()
+		if err == nil {
+			return
+		}
+	}
 }
 
 // superviseLoop runs the idle, restart and listener checks.
@@ -1630,13 +1673,13 @@ func (d *SandboxDaemon) ensureListeners() error {
 		}
 	}()
 	go func() {
+		var failed *listenerFailure
 		select {
 		case failure := <-lost:
-			// A listener died under running sandboxes: stop them (their
-			// hooks and egress would reach whatever binds the port next)
-			// and let the next create bind both again.
+			// A listener died under running sandboxes. Once both are
+			// released, keep containing until a create binds them again.
+			failed = &failure
 			cancel()
-			stopSandboxesWithoutListener(context.WithoutCancel(ctx), d.rt.manager, d.rt.publish, failure.part, map[string]bool{})
 		case <-ctx.Done():
 		}
 		wg.Wait()
@@ -1646,8 +1689,39 @@ func (d *SandboxDaemon) ensureListeners() error {
 			d.listenCancel, d.listenDone = nil, nil
 		}
 		d.listenMu.Unlock()
+		if failed != nil {
+			d.containLostListener(d.runCtx, failed.part)
+		}
 	}()
 	return nil
+}
+
+// containLostListener retries the existing containment pass while this
+// managed daemon owns neither listener. The lifecycle lock orders a pass
+// with create and rebind, so a newly rebound listener cannot be followed
+// by a stale stop attempt.
+func (d *SandboxDaemon) containLostListener(ctx context.Context, part string) {
+	every := d.rt.recheck
+	if every <= 0 {
+		every = sandboxListenerRecheck
+	}
+	unstoppable := map[string]bool{}
+	for {
+		if err := d.lockLifecycle(ctx); err != nil {
+			return
+		}
+		if d.listening() {
+			d.unlockLifecycle()
+			return
+		}
+		stopSandboxesWithoutListener(ctx, d.rt.fleet, d.rt.publish, part, unstoppable)
+		d.unlockLifecycle()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
 }
 
 type listenerFailure struct {
@@ -1745,6 +1819,7 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 	}
 	if d.openShell != nil {
 		out.OtherGateways = d.openShell.OtherGateways(ctx, s)
+		out.RenderedConfigDrift = d.openShell.RenderedConfigDrift(s)
 	}
 	// A running sandbox keeps its driver. Without one, report the managed
 	// gateway's refreshed choice for the next run. The last create's choice

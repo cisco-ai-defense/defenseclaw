@@ -76,11 +76,11 @@ func serveListProviders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	reg, _, ports := providerRegistrySnapshot()
+	reg, ports, overlayApplied := providerRegistryResponseSnapshot()
 	resp := providersListResponse{
 		OllamaPorts:    ports,
 		OverlayPath:    configs.CustomProvidersPath(),
-		OverlayApplied: overlayExists(configs.CustomProvidersPath()),
+		OverlayApplied: overlayApplied,
 	}
 	if reg != nil {
 		resp.Providers = reg.Providers
@@ -143,7 +143,7 @@ func serveReloadProviders(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "reload failed", http.StatusInternalServerError)
 		return
 	}
-	reg, _, _ := providerRegistrySnapshot()
+	reg, _, overlayApplied := providerRegistryResponseSnapshot()
 	providerCount := 0
 	if reg != nil {
 		providerCount = len(reg.Providers)
@@ -156,17 +156,8 @@ func serveReloadProviders(w http.ResponseWriter, r *http.Request) {
 		"status":          "ok",
 		"provider_count":  providerCount,
 		"overlay_path":    configs.CustomProvidersPath(),
-		"overlay_applied": overlayExists(configs.CustomProvidersPath()),
+		"overlay_applied": overlayApplied,
 	})
-}
-
-// overlayExists is a tiny helper isolated for testability.
-func overlayExists(path string) bool {
-	if path == "" {
-		return false
-	}
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // emitLifecycleReload writes a gateway lifecycle event so the TUI

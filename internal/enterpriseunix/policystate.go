@@ -186,7 +186,7 @@ func gatewayPolicyDigest(body []byte) string {
 
 // describePolicy fills Result.Policy. The digest is computed from the
 // installed config (computePolicy); when that is not possible the last
-// applied record stands in. With neither there is no digest to report and
+// applied record is shown only as diagnostic context. With neither there is no digest to report and
 // Result.Policy stays nil, as on Windows: the lifecycle-result schema
 // requires effective_digest to be a sha256 digest. A change action records
 // policy-state.json once the gateway reports the computed digest, and warns
@@ -243,15 +243,18 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds"
 		report(codePolicyReloadRejected, message)
 	}
-	if state.EffectiveDigest == "" {
-		// Without a computed digest or an applied record, no action can
-		// certify the policy the gateway enforces. Verify and a committed
-		// change fail with the cause; status and a no-op ensure warn.
+	if !computed || state.EffectiveDigest == "" {
+		// A saved digest cannot certify today's installed policy when the
+		// current assets cannot be built. It remains useful context, but
+		// neither it nor a matching gateway digest proves an apply.
 		reason := "no effective policy digest or applied policy record is available"
 		if computeErr != nil {
 			reason = computeErr.Error()
 		}
 		report(codePolicyUnverified, "the effective policy the gateway enforces could not be checked: "+reason)
+		if state.EffectiveDigest != "" {
+			r.Policy = state
+		}
 		return
 	}
 	generation := l.installedGenerationMismatch(gateway)

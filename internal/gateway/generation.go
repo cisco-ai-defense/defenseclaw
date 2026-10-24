@@ -139,8 +139,9 @@ type scannerSettings struct {
 // generationProviders is the LLM provider registry of one generation, built
 // from the embedded providers and llm_providers.
 type generationProviders struct {
-	Providers   []configs.Provider
-	OllamaPorts []int
+	Providers      []configs.Provider
+	OllamaPorts    []int
+	OverlayApplied bool
 }
 
 // PolicyHealth is the "policy" object of /health and /status. It is omitted

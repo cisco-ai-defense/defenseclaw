@@ -429,17 +429,53 @@ CLAUDE_LAUNCHER_GUARD_WORDS = (
 ).split()
 
 
-def claude_launcher_guard_view(handler: Any) -> Any:
-    """The exec-form handler a generated cmd.exe launcher guard runs, else *handler* unchanged.
+# The per-user Windows PreToolUse handler runs the installed full hook as this
+# guard instead of cmd.exe, which Cursor's argument-free import of the hook
+# could not run (GAP-1011). Keep it identical to ClaudeCodeLauncherGuardArgv.
+CLAUDE_LAUNCHER_GUARD_SUBCOMMAND = "launcher-guard"
 
-    Doctor's hook matrix and the status registration check both read a
-    Claude Code handler through this view (GAP-0463).
+
+def _claude_guardable_hook_executable(path: str) -> bool:
+    return (
+        path.strip() == path
+        and path != ""
+        and not any(ch in path for ch in '"%!\r\n')
+        and (ntpath.isabs(path) or os.path.isabs(path))
+        and ntpath.basename(path).lower() == "defenseclaw-hook.exe"
+    )
+
+
+def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> dict | None:
+    if len(args) != 5 or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
+        return None
+    if args[2:] != ["hook", "--connector", "claudecode"]:
+        return None
+    launcher = args[1]
+    if not _claude_guardable_hook_executable(command) or not _claude_guardable_hook_executable(launcher):
+        return None
+    if ntpath.normcase(ntpath.normpath(command)) == ntpath.normcase(ntpath.normpath(launcher)):
+        return None
+    view = dict(handler)
+    view["command"] = launcher
+    view["args"] = list(args[2:])
+    return view
+
+
+def claude_launcher_guard_view(handler: Any) -> Any:
+    """The exec-form handler a generated launcher guard runs, else *handler* unchanged.
+
+    The guard is the cmd.exe launcher guard or the PreToolUse guard. Doctor's
+    hook matrix and the status registration check both read a Claude Code
+    handler through this view (GAP-0463).
     """
     if not isinstance(handler, dict):
         return handler
     command, args = handler.get("command"), handler.get("args")
     if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         return handler
+    pretool = _claude_pretool_guard_view(handler, command, args)
+    if pretool is not None:
+        return pretool
     system_root = os.environ.get("SystemRoot") or "C:\\Windows"
     processor = ntpath.join(system_root, "System32", "cmd.exe")
     if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):
@@ -847,7 +883,7 @@ def _load_agent_document(path: Path, raw: bytes | None = None) -> Any:
 
 
 def _commandless_codex_handlers(document: Any) -> int:
-    """Codex hook handlers that have no command: Codex refuses to load the file."""
+    """Codex hook handlers without a command, which may leave hooks inactive."""
 
     hooks = document.get("hooks") if isinstance(document, dict) else None
     if not isinstance(hooks, dict):
@@ -874,8 +910,8 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
     The hook entries can be intact while the agent runs none of them: Claude
     Code with ``disableAllHooks`` (GAP-1066; in the settings of the project in
     the current folder, GAP-1067) or Codex with ``[features] hooks = false``
-    (GAP-1094). Codex also refuses to start when hook entries have lost their
-    command, for example after hook lines were deleted by hand (GAP-1102).
+    (GAP-1094). Codex may run without DefenseClaw hooks when entries lose their
+    command, for example after hook lines are deleted by hand (GAP-1102).
     Copilot reads ``disableAllHooks`` from its user and repository settings
     (rel-1-0-4 GAP-0580) and from the hook registration files themselves;
     settings that cannot be read fail too, since what Copilot does with them
@@ -920,7 +956,7 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                 problems.append(
                     HookProblem(
                         f"{path} has {orphans} Codex hook {noun} without a command (left when hook lines were "
-                        "deleted), so Codex refuses to start",
+                        "deleted), so Codex may run without its DefenseClaw hooks",
                         f"run `{setup_command(connector)} --yes`; it removes the entries without a command",
                     )
                 )

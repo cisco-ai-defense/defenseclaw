@@ -53,13 +53,22 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     # The snapshot's hook preimage is the prior release's bytes.
     assert "$preimageSource = $earlyHookPreimage" in transaction
     assert "Copy-Item -LiteralPath $preimageSource -Destination $backup -Force" in transaction
-    # A failed snapshot puts the prior hook back before it restarts the
-    # prior services.
+    # A failed snapshot keeps this release's hook in place until the prior
+    # gateway has passed its restored-service readiness check.
     catch = transaction[transaction.index("$restartErrors = [Collections.Generic.List[string]]::new()") :]
-    assert catch.index("Restore-DefenseClawEarlyHook") < catch.index("Start-DefenseClawTransactionServices")
-    # So does the recovery of an interrupted transaction.
+    assert "if (-not (Test-DefenseClawStandaloneProfile))" in catch
+    assert catch.index("Start-DefenseClawTransactionServices") < catch.rindex("Restore-DefenseClawEarlyHook")
+    # So does the recovery of an interrupted transaction. A 1.0.2 Hermes
+    # hook at its registered path answers open if restored while SCM is down.
     recovery = _function_body(module, "Recover-DefenseClawQuiescingIntent")
-    assert recovery.index("Restore-DefenseClawEarlyHook") < recovery.index("Start-DefenseClawTransactionServices")
+    assert "if (-not (Test-DefenseClawStandaloneProfile))" in recovery
+    assert recovery.index("Start-DefenseClawTransactionServices") < recovery.rindex("Restore-DefenseClawEarlyHook")
+    restore = _function_body(module, "Restore-DefenseClawTransaction")
+    assert "Hold-DefenseClawEarlyHookGuard" in restore
+    assert "if ($transitionHookSHA256 -ne ''" in restore
+    assert restore.index("Start-DefenseClawTransactionServices") < restore.index("Restore-DefenseClawSnapshotHookAfterActivation")
+    deferred = _function_body(module, "Restore-DefenseClawTransactionWithManagedHooksRollback")
+    assert deferred.index("Start-DefenseClawTransactionServices") < deferred.index("Restore-DefenseClawSnapshotHookAfterActivation")
     # Install, Upgrade and Repair hand it the authenticated replacement hook.
     assert "-EarlyHookSource $earlyHookSource" in module
     assert "$earlyHookSource = $Sources['hook']" in module
@@ -79,7 +88,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Publish-DefenseClawEarlyHook', 'Restore-DefenseClawEarlyHook', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds')) {
+foreach ($name in @('Publish-DefenseClawEarlyHook', 'Restore-DefenseClawEarlyHook', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -96,9 +105,12 @@ function Write-DefenseClawJsonAtomic {
 }
 function Install-DefenseClawSourceDescriptor {
     param([hashtable]$Source, [string]$Destination)
-    $script:events.Add('publish:' + (Get-Content -LiteralPath $Destination -Raw))
+    $previous = if (Test-Path -LiteralPath $Destination) { Get-Content -LiteralPath $Destination -Raw } else { '<absent>' }
+    $script:events.Add('publish:' + [IO.Path]::GetFileName($Destination) + ':' + $previous)
     Copy-Item -LiteralPath $Source.path -Destination $Destination -Force
 }
+function Test-DefenseClawStandaloneProfile { return $true }
+function Assert-DefenseClawDescendant { param([string]$Path, [string]$Root, [string]$Label) return $Path }
 function Write-DefenseClawLifecyclePhase {
     param([string]$Stage)
     $script:events.Add('phase:' + $Stage)
@@ -115,7 +127,10 @@ if ($Case -like 'drain*') {
     }
 }
 function Install-DefenseClawFileAtomic {
-    param([string]$Source, [string]$Destination, [string]$ExpectedSHA256)
+    param([string]$Source, [string]$Destination, [string]$ExpectedSHA256, [switch]$SkipIfContentMatches)
+    if ($ExpectedSHA256 -and (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash -ne $ExpectedSHA256) {
+        throw 'source digest mismatch'
+    }
     $script:events.Add('restore')
     Copy-Item -LiteralPath $Source -Destination $Destination -Force
 }
@@ -126,7 +141,7 @@ $hook = Join-Path $bin 'defenseclaw-hook.exe'
 $new = Join-Path $Scratch 'new-hook.exe'
 Set-Content -LiteralPath $hook -Value 'hook-1.0.2' -NoNewline
 Set-Content -LiteralPath $new -Value 'hook-1.0.4' -NoNewline
-$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json') }
+$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch }
 $intent = [ordered]@{ schema_version = 1; phase = 'quiescing' }
 $result = [ordered]@{ case = $Case; threw = '' }
 try {
@@ -136,6 +151,7 @@ try {
             $result.preimage = $preimage
             $result.preimage_bytes = Get-Content -LiteralPath $preimage -Raw
             $result.hook = Get-Content -LiteralPath $hook -Raw
+            $result.guard = Get-Content -LiteralPath $intent['early_hook_guard_copy'] -Raw
             $result.pending = (Get-Content -LiteralPath $layout.PendingPath -Raw | ConvertFrom-Json).early_hook_preimage
             # Recovery reads the intent back from pending.json.
             $read = Get-Content -LiteralPath $layout.PendingPath -Raw | ConvertFrom-Json
@@ -146,6 +162,31 @@ try {
             [void](Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
             Restore-DefenseClawEarlyHook -Layout $layout -Intent $intent -TransactionDirectory $transaction
             $result.restored = Get-Content -LiteralPath $hook -Raw
+        }
+        'recovery-guard' {
+            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+            # Simulate an interrupted older rollback that republished its
+            # 1.0.2 hook before service restoration was complete.
+            Copy-Item -LiteralPath $intent['early_hook_preimage'] -Destination $hook -Force
+            [void](Hold-DefenseClawEarlyHookGuard -Layout $layout -TransactionDirectory $transaction -GuardCopy $intent['early_hook_guard_copy'] -GuardSHA256 $intent['early_hook_guard_sha256'])
+            $result.during_restore = Get-Content -LiteralPath $hook -Raw
+            $script:events.Add('gateway-ready')
+            $snapshot = [pscustomobject]@{
+                early_hook_guard_copy = $intent['early_hook_guard_copy']
+                early_hook_preimage_sha256 = $intent['early_hook_preimage_sha256']
+                files = @([pscustomobject]@{
+                    path = $hook
+                    backup = $intent['early_hook_preimage']
+                    existed = $true
+                })
+            }
+            Restore-DefenseClawSnapshotHookAfterActivation -Snapshot $snapshot -Layout $layout
+            $result.restored = Get-Content -LiteralPath $hook -Raw
+        }
+        'guard-tamper' {
+            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+            Set-Content -LiteralPath $intent['early_hook_guard_copy'] -Value 'tampered' -NoNewline
+            [void](Hold-DefenseClawEarlyHookGuard -Layout $layout -TransactionDirectory $transaction -GuardCopy $intent['early_hook_guard_copy'] -GuardSHA256 $intent['early_hook_guard_sha256'])
         }
         'first-install' {
             $result.preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent
@@ -216,7 +257,12 @@ def test_the_replacement_hook_goes_in_after_its_preimage_is_recorded(tmp_path: P
     assert result["hook"] == "hook-1.0.4", result
     assert result["pending"] == result["preimage"], result
     # The intent names the preimage before the hook changes.
-    assert result["events"][:2] == ["intent:True", "publish:hook-1.0.2"], result
+    assert result["guard"] == "hook-1.0.4", result
+    assert result["events"][:3] == [
+        "publish:early-hook-closed.exe:<absent>",
+        "intent:True",
+        "publish:defenseclaw-hook.exe:hook-1.0.2",
+    ], result
     # Recovery of the interrupted transaction puts the prior hook back.
     assert result["restored"] == "hook-1.0.2", result
 
@@ -225,6 +271,19 @@ def test_a_failed_snapshot_puts_the_prior_hook_back(tmp_path: Path) -> None:
     result = _run(tmp_path, "snapshot-failure")
     assert result["threw"] == "", result
     assert result["restored"] == "hook-1.0.2", result
+
+
+def test_recovery_republishes_closed_hook_until_restored_gateway_is_ready(tmp_path: Path) -> None:
+    result = _run(tmp_path, "recovery-guard")
+    assert result["threw"] == "", result
+    assert result["during_restore"] == "hook-1.0.4", result
+    assert result["restored"] == "hook-1.0.2", result
+    assert result["events"][-2:] == ["gateway-ready", "restore"], result
+
+
+def test_recovery_refuses_a_modified_closed_hook_copy(tmp_path: Path) -> None:
+    result = _run(tmp_path, "guard-tamper")
+    assert "closed hook guard changed" in result["threw"], result
 
 
 @pytest.mark.parametrize("case", ["first-install", "no-source"])
@@ -242,8 +301,12 @@ def test_the_early_publish_waits_for_the_replaced_hooks_calls(tmp_path: Path) ->
     events = result["events"]
     # The swap, then looks until the replaced hook's process has ended, then
     # the transaction goes on (and disables and stops the services).
-    assert events[:2] == ["intent:True", "publish:hook-1.0.2"], result
-    assert events[2:] == ["look:1", "look:2", "look:3", "returned"], result
+    assert events[:3] == [
+        "publish:early-hook-closed.exe:<absent>",
+        "intent:True",
+        "publish:defenseclaw-hook.exe:hook-1.0.2",
+    ], result
+    assert events[3:] == ["look:1", "look:2", "look:3", "returned"], result
 
 
 def test_the_wait_for_the_replaced_hooks_calls_is_bounded(tmp_path: Path) -> None:

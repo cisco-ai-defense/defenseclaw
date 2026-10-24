@@ -5,7 +5,11 @@ package enterprisehooks
 
 import (
 	"encoding/json"
+	"io"
+	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -34,7 +38,6 @@ type PrivateAgentInstall struct {
 	Untrusted bool `json:"untrusted,omitempty"`
 }
 
-const privateAgentInstallMaxEntries = 1024
 const privateAgentInstallMaxFindings = 64
 const PrivateAgentInstallMaxFindings = privateAgentInstallMaxFindings
 
@@ -45,6 +48,111 @@ const PrivateAgentInstallMaxFindings = privateAgentInstallMaxFindings
 // the scan incomplete when a manager holds more.
 const privateAgentInstallMaxVersionDirs = 64
 
+// privateInstallWalkMaxEntries bounds the directory entries the scan lists
+// below one home while it looks for npm prefixes at any depth (GAP-0988).
+// Inside a node_modules tree it lists package names only, never package
+// contents. Tests lower it.
+var privateInstallWalkMaxEntries = 1 << 19
+
+// privateInstallWalk is one bounded walk of a home (walkPrivateNPMPrefixes).
+// open opens a directory to list; unreachable reports a listing error that
+// hides nothing the account can run below dir.
+type privateInstallWalk struct {
+	open        func(dir string) (*os.File, error)
+	unreachable func(dir string, err error) bool
+	// homeLinks returns a link directly below the home that names a
+	// directory as a prefix, without descending into it (Unix only: the
+	// Windows scan never follows a reparse point as LocalSystem).
+	homeLinks bool
+	budget    int
+	complete  bool
+}
+
+// walkPrivateNPMPrefixes returns every npm prefix below home, at any depth:
+// each directory that holds a node_modules directory (npm install --prefix
+// anywhere, a project's own dependencies) and, inside node_modules, each
+// package or pnpm store entry with a node_modules of its own. It never
+// descends through a link or other reparse point, so a link cannot loop
+// it or lead it outside the home. complete is false when the walk ran out
+// of its bound or a directory could not be listed: the scan then says so
+// instead of reporting the account clean.
+func walkPrivateNPMPrefixes(home string, w privateInstallWalk) (prefixes []string, complete bool) {
+	w.budget, w.complete = privateInstallWalkMaxEntries, true
+	type pending struct {
+		dir     string
+		modules bool // dir is a node_modules directory
+	}
+	stack := []pending{{dir: home}}
+	probe := func(pkg string) {
+		modules := filepath.Join(pkg, "node_modules")
+		if info, err := os.Lstat(modules); err == nil && info.Mode().Type() == fs.ModeDir {
+			prefixes = append(prefixes, pkg)
+			stack = append(stack, pending{dir: modules, modules: true})
+		}
+	}
+	for len(stack) > 0 && w.budget >= 0 {
+		next := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for _, entry := range w.list(next.dir) {
+			name, child := entry.Name(), filepath.Join(next.dir, entry.Name())
+			if entry.Type() != fs.ModeDir {
+				if w.homeLinks && next.dir == home && entry.Type()&fs.ModeSymlink != 0 {
+					if info, err := os.Stat(child); err == nil && info.IsDir() {
+						prefixes = append(prefixes, child)
+					}
+				}
+				continue
+			}
+			switch {
+			case !next.modules && name == "node_modules":
+				prefixes = append(prefixes, next.dir)
+				stack = append(stack, pending{dir: child, modules: true})
+			case !next.modules:
+				stack = append(stack, pending{dir: child})
+			case strings.HasPrefix(name, "@") || name == ".pnpm":
+				// A scope's packages; pnpm's <name>@<version> store entries.
+				for _, inner := range w.list(child) {
+					if inner.Type() == fs.ModeDir {
+						probe(filepath.Join(child, inner.Name()))
+					}
+				}
+			default:
+				probe(child)
+			}
+		}
+	}
+	return prefixes, w.complete && w.budget >= 0
+}
+
+// list reads dir's entries in batches, charging each to the walk's bound.
+func (w *privateInstallWalk) list(dir string) []fs.DirEntry {
+	if w.budget < 0 {
+		return nil
+	}
+	f, err := w.open(dir)
+	if err != nil {
+		if !w.unreachable(dir, err) {
+			w.complete = false
+		}
+		return nil
+	}
+	defer f.Close()
+	var out []fs.DirEntry
+	for {
+		batch, err := f.ReadDir(256)
+		if w.budget -= len(batch); w.budget < 0 {
+			return nil
+		}
+		out = append(out, batch...)
+		if err != nil {
+			if err != io.EOF && !w.unreachable(dir, err) {
+				w.complete = false
+			}
+			return out
+		}
+	}
+}
+
 // The parts of the separate-copy scan that can be left unfinished.
 const (
 	PrivateInstallSkippedHome            = "home_unreadable"
@@ -54,6 +162,7 @@ const (
 	PrivateInstallSkippedLocation        = "location_unreadable"
 	PrivateInstallSkippedOutsideRoots    = "path_outside_scan_roots"
 	PrivateInstallSkippedUnresolved      = "account_not_inspected"
+	PrivateInstallSkippedExtensions      = "extensions_folder_limit"
 )
 
 var privateInstallSkippedText = map[string]string{
@@ -64,6 +173,7 @@ var privateInstallSkippedText = map[string]string{
 	PrivateInstallSkippedLocation:        "an install location could not be read safely",
 	PrivateInstallSkippedOutsideRoots:    "discovery named a copy outside the locations DefenseClaw scans",
 	PrivateInstallSkippedUnresolved:      "the enrolled account could not be inspected this cycle",
+	PrivateInstallSkippedExtensions:      "an editor's extensions folder holds more entries than the scan reads, or could not be read",
 }
 
 // KnownPrivateInstallSkipped returns code when it is a PrivateInstallSkipped*

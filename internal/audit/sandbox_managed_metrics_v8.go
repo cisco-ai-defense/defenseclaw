@@ -31,7 +31,8 @@ import (
 // ever a label. A reason or a setting field can come from the sandbox
 // daemon, which runs as the managed user, so the counters take them from
 // the closed lists below: any other value is counted as other (the record
-// keeps the value), and a connector that is not a built-in one is left out.
+// keeps the value), and a connector that is not a built-in one is grouped
+// under one bounded unknown label.
 
 // SandboxManagedMetricOther is the counter label of a reason or setting
 // field outside the closed lists.
@@ -118,7 +119,7 @@ func sandboxManagedLabelsFor(identity SandboxIdentity, fields sandboxV8Fields) s
 
 func sandboxManagedMetricConnector(name string) observability.Optional[string] {
 	if name == "" || !connector.IsKnownBuiltinConnector(name) {
-		return observability.Absent[string]()
+		return observability.Present("unknown")
 	}
 	return observability.Present(name)
 }

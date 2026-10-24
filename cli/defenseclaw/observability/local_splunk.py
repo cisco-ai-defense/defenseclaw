@@ -1195,6 +1195,9 @@ def start_native_local_splunk(
         _copy_bundle(stage_source, stage_dir)
         prior_values = _parse_dotenv(stable_dir / ENV_FILE_REL, require_private=True) if previous else {}
         template = _parse_dotenv(stage_dir / ENV_EXAMPLE_REL)
+        # A no-refresh upgrade copies the old bundle, but the retired image
+        # must resolve against the image shipped with this release.
+        template["SPLUNK_IMAGE"] = _parse_dotenv(source_dir / ENV_EXAMPLE_REL).get("SPLUNK_IMAGE", "")
         credentials = _credential_values(
             template,
             prior_values,

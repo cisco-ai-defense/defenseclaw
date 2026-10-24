@@ -13,6 +13,32 @@ import requests
 from defenseclaw import gateway
 
 
+def test_missing_gateway_pid_is_definitely_offline_before_a_setup_audit_send() -> None:
+    from defenseclaw import config, upgrade_shim
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.logger import _is_definite_preconnect_failure
+
+    client = gateway.OrchestratorClient(host="127.0.0.1", port=18960, token="t" * 64)
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=18960))
+    for code, definite in (("missing", True), ("identity", False)):
+        trust = SimpleNamespace(
+            trusted=False,
+            code=code,
+            detail="the gateway is not running (PID file is missing)" if definite else "listener identity failed",
+        )
+        with (
+            mock.patch.object(upgrade_shim, "managed_descriptor", return_value=None),
+            mock.patch.object(gateway, "_managed_connected_verifier_spec", return_value=None),
+            mock.patch.object(config, "load", return_value=cfg),
+            mock.patch.object(gateway, "gateway_api_client_host", return_value="127.0.0.1"),
+            mock.patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=trust),
+            mock.patch.object(requests.adapters.HTTPAdapter, "send", side_effect=AssertionError("token sent")),
+        ):
+            with pytest.raises(gateway.GatewayListenerNotOwnedError) as failure:
+                client.status()
+        assert _is_definite_preconnect_failure(failure.value) is definite
+
+
 def test_cli_checks_connected_socket_before_sending_after_listener_replacement() -> None:
     received: list[str] = []
 
@@ -153,6 +179,7 @@ def test_mac_listener_owner_checks_the_configured_address() -> None:
 
     with (
         mock.patch.object(gateway.sys, "platform", "darwin"),
+        mock.patch.object(gateway.os, "getuid", return_value=1000, create=True),
         mock.patch.object(doctor_gateway, "trusted_lsof_path", return_value="/usr/sbin/lsof"),
         mock.patch("subprocess.run", side_effect=lsof_result) as lsof,
         mock.patch.object(gateway.socket, "create_connection") as connect,

@@ -547,7 +547,7 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	case "remove":
 		mutate = func(context.Context) error {
 			path := filepath.Join(env.P(env.Layout.SecretsDir), opts.name)
-			if opts.undoRotation != "" {
+			if opts.undoRotation != "" || opts.ifStored != "" {
 				stored, readErr := os.ReadFile(path)
 				if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
 					return err

@@ -23,13 +23,14 @@ func TestCopilotAdapterRefusesInvalidEventBinding(t *testing.T) {
 			continue
 		}
 		found = true
+		dir := t.TempDir()
 		body, err := renderHookTemplate("copilot-hook.ps1", templateData{
-			FailMode: "closed", HookBinaryPS: "missing-hook.exe", CopilotHookTimeoutMS: 1000,
+			FailMode: "closed", HookBinaryPS: filepath.Join(dir, "missing-hook.exe"), CopilotHookTimeoutMS: 1000,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		script := filepath.Join(t.TempDir(), "copilot-hook.ps1")
+		script := filepath.Join(dir, "copilot-hook.ps1")
 		if err := os.WriteFile(script, body, 0o600); err != nil {
 			t.Fatal(err)
 		}

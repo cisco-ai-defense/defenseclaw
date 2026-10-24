@@ -85,7 +85,7 @@ func buildGenerationProvidersForScope(cfg *config.Config, scope digestScope, off
 			}}})
 		}
 	}
-	return &generationProviders{Providers: reg.Providers, OllamaPorts: reg.OllamaPorts}, nil
+	return &generationProviders{Providers: reg.Providers, OllamaPorts: reg.OllamaPorts, OverlayApplied: legacyOverlay}, nil
 }
 
 // providerFromConfig converts one llm_providers.custom entry. A TLS CA file
@@ -208,5 +208,5 @@ func applyGenerationProviders(p *generationProviders) {
 	if p == nil {
 		return
 	}
-	setProviderRegistry(&configs.ProvidersConfig{Providers: p.Providers, OllamaPorts: p.OllamaPorts})
+	setProviderRegistryWithOverlay(&configs.ProvidersConfig{Providers: p.Providers, OllamaPorts: p.OllamaPorts}, p.OverlayApplied)
 }

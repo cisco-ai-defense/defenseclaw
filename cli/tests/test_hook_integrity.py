@@ -398,7 +398,22 @@ def test_codex_hooks_turned_off_or_left_without_command_fail_doctor(tmp_path):
 
     config.write_text(entry + entry + f"command = '{command}'\n")
     problems = hook_registration_problems(cfg, "codex")
-    assert problems and "without a command" in problems[0] and "refuses to start" in problems[0]
+    assert problems and "without a command" in problems[0]
+    assert "may run without its DefenseClaw hooks" in problems[0]
+
+    # GAP-0976: Doctor must inspect the config file passed to it even when
+    # stale trust records still contain the word "defenseclaw".
+    config.write_text(entry + "[hooks.state]\nold_defenseclaw = true\n")
+    result = _DoctorResult()
+    _check_codex_hooks(cfg, result, platform_name="posix", config_path=str(config))
+    row = next(check for check in result.checks if check["label"] == "Codex hooks")
+    assert row["status"] == "fail", row
+
+    config.write_text(entry + f"command = '{command}'\n" + entry + "[hooks.state]\nold_defenseclaw = true\n")
+    result = _DoctorResult()
+    _check_codex_hooks(cfg, result, platform_name="posix", config_path=str(config))
+    row = next(check for check in result.checks if check["label"] == "Codex hooks")
+    assert row["status"] == "fail", row
 
 
 _EDITED_GOLDEN = (

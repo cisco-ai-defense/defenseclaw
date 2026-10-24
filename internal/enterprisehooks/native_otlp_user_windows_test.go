@@ -14,8 +14,107 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
+
+// A managed profile directory gives the target write access but reserves
+// WRITE_DAC for SYSTEM. The native exporter edit must not try to replace that
+// directory's DACL while impersonating the target account.
+func TestWindowsManagedNativeOTLPCleanupKeepsProtectedDataDir(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sid := user.User.Sid
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.Mkdir(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, scope := range []connector.OTLPPathTokenScope{
+		connector.OTLPScopeCodex,
+		connector.OTLPScopeClaude,
+	} {
+		if _, err := connector.EnsureOTLPPathToken(dataDir, scope); err != nil {
+			t.Fatalf("seed %s scoped token: %v", scope, err)
+		}
+	}
+	if err := windows.SetNamedSecurityInfo(dataDir, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsUserPathProtection(dataDir, sid, true); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := map[string]string{
+		filepath.Join(home, ".codex", "config.toml"):    "[otel.exporter.otlp-http]\nendpoint = 'http://127.0.0.1:19010/v1/logs'\n[otel.exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\nx-defenseclaw-client = 'codex-otel/1.0'\n",
+		filepath.Join(home, ".claude", "settings.json"): `{"env":{"OTEL_EXPORTER_OTLP_ENDPOINT":"http://127.0.0.1:19010/otlp/claudecode/` + strings.Repeat("a", 64) + `","OTEL_EXPORTER_OTLP_HEADERS":"x-defenseclaw-source=claudecode,x-defenseclaw-client=claudecode-otel/1.0"}}`,
+	}
+	for path, body := range paths {
+		parent := filepath.Dir(path)
+		if err := os.MkdirAll(parent, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(parent, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := safefile.ProtectDirectory(parent); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.OWNER_SECURITY_INFORMATION, sid, nil, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		if err := safefile.ProtectFile(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	oldCodex, oldClaude := connector.CodexConfigPathOverride, connector.ClaudeCodeSettingsPathOverride
+	connector.CodexConfigPathOverride = filepath.Join(home, ".codex", "config.toml")
+	connector.ClaudeCodeSettingsPathOverride = filepath.Join(home, ".claude", "settings.json")
+	t.Cleanup(func() {
+		connector.CodexConfigPathOverride, connector.ClaudeCodeSettingsPathOverride = oldCodex, oldClaude
+	})
+	impersonation, err := createWindowsManagedRuntimeRestrictedToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer impersonation.Close()
+	for _, name := range []string{"codex", "claudecode"} {
+		err := connector.WithUserHomeDir(home, func() error {
+			return runWindowsEnterpriseImpersonatedCallback(impersonation, sid, func() error {
+				return removeWindowsManagedUserNativeOTLPAsTarget(name, dataDir)
+			})
+		})
+		if err != nil {
+			t.Fatalf("%s: cleanup: %v", name, err)
+		}
+		if err := windowsManagedUserNativeOTLPAbsent(name, home, dataDir, sid); err != nil {
+			t.Fatalf("%s: cleanup left product exporter: %v", name, err)
+		}
+	}
+	for _, scope := range []connector.OTLPPathTokenScope{
+		connector.OTLPScopeCodex,
+		connector.OTLPScopeClaude,
+	} {
+		path, err := connector.OTLPPathTokenFilePath(dataDir, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s scoped token survived cleanup: %v", scope, err)
+		}
+	}
+	if err := validateWindowsUserPathElement(dataDir, sid, true, true, true); err != nil {
+		t.Fatalf("native exporter cleanup changed the managed data directory ACL: %v", err)
+	}
+}
 
 // GAP-0836: on the managed Windows host std1's Codex and Claude Code configs
 // kept the exporters of an earlier per-user install on 127.0.0.1:19010 while
@@ -67,10 +166,14 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
+		setWindowsTestPathExactOwner(t, filepath.Dir(path), sid)
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		setWindowsTestPathExactOwner(t, path, sid)
 	}
+	setWindowsTestPathExactOwner(t, home, sid)
+	setWindowsTestPathExactOwner(t, dataDir, sid)
 
 	for _, name := range []string{"codex", "claudecode"} {
 		err := windowsManagedUserNativeOTLPAbsent(name, home, dataDir, sid)
@@ -109,6 +212,72 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 	}
 }
 
+// Verify runs as the guardian, not the account that owns its old per-user
+// token. It reports an orphaned token as residue without treating the
+// guardian's different SID as a settings-inspection failure.
+func TestWindowsManagedNativeOTLPVerifyIgnoresOtherUserToken(t *testing.T) {
+	viewer, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _, _, err := windows.LookupSID("", "Guest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viewer.User.Sid.Equals(target) {
+		t.Skip("verification must use a SID distinct from the token owner")
+	}
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	operatorSettings := []byte(`{"model":"opus","env":{"OTEL_EXPORTER_OTLP_ENDPOINT":"https://collector.example.test"}}`)
+	if err := os.WriteFile(settingsPath, operatorSettings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, connector.OTLPScopeClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, tokenPath, target)
+	if _, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeClaude); err == nil {
+		t.Fatal("foreign-owned token unexpectedly passed the gateway trust check")
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("claudecode", home, dataDir, target); err == nil ||
+		!strings.Contains(err.Error(), "native OTLP exporter") || strings.Contains(err.Error(), "load Claude native OTLP credential") {
+		t.Fatalf("verify did not report only the orphaned token residue: %v", err)
+	}
+	markedSettings := []byte(`{"model":"opus","env":{"OTEL_EXPORTER_OTLP_ENDPOINT":"https://collector.example.test","OTEL_EXPORTER_OTLP_HEADERS":"authorization=Bearer ` +
+		strings.Repeat("a", 64) + `,x-defenseclaw-source=claudecode"}}`)
+	if err := os.WriteFile(settingsPath, markedSettings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("claudecode", home, dataDir, target); err == nil ||
+		!strings.Contains(err.Error(), "native OTLP exporter") || strings.Contains(err.Error(), "load Claude native OTLP credential") {
+		t.Fatalf("marked exporter failed inspection on foreign token: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, operatorSettings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, tokenPath, viewer.User.Sid)
+	if err := connector.WithUserHomeDir(home, func() error {
+		return removeWindowsManagedUserNativeOTLPAsTarget("claudecode", dataDir)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("claudecode", home, dataDir, target); err != nil {
+		t.Fatalf("verify after target cleanup: %v", err)
+	}
+}
+
 // The same row through the real Claude Code managed Install and Verify.
 func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
@@ -133,6 +302,22 @@ func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T)
 	if err := os.WriteFile(settingsPath+".lock", nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	setWindowsTestPathExactOwner(t, filepath.Dir(settingsPath), fixture.targetSID)
+	setWindowsTestPathExactOwner(t, settingsPath, fixture.targetSID)
+	setWindowsTestPathExactOwner(t, settingsPath+".lock", fixture.targetSID)
+	// A released per-user install records this same bearer in its scoped
+	// sidecar; without that evidence a changed operator bearer is retained.
+	tokenPath, err := connector.OTLPPathTokenFilePath(filepath.Join(fixture.home, ".defenseclaw"), connector.OTLPScopeClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(bearer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, tokenPath, fixture.targetSID)
 	if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "native OTLP exporter") {
 		t.Fatalf("Verify accepted a stale per-user exporter: %v", err)
 	}

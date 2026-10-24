@@ -3580,6 +3580,26 @@ class TestBareSetupBatch(_BaseSetup):
 
 
 class TestGatewayOfflineStaging(_BaseSetup):
+    def test_port_change_with_missing_gateway_pid_reports_offline_note(self):
+        from defenseclaw import config
+        from defenseclaw.commands.cmd_doctor import _GatewayTrust
+        from defenseclaw.logger import Logger
+
+        self.app.logger = Logger.from_config(self.app.cfg)
+        self._seed_map("codex")
+        with patch.dict(os.environ, {"DEFENSECLAW_GATEWAY_TOKEN": "t" * 64}), patch.object(
+            config, "load", return_value=self.app.cfg
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=_GatewayTrust("missing", "the gateway is not running (PID file is missing)"),
+        ), patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=False):
+            result = _invoke(["gateway", "--api-port", "19092", "--non-interactive"], self.app)
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(self.app.cfg.gateway.api_port, 19092)
+        self.assertIn("the gateway isn't running, so this change takes effect when it starts", result.output)
+        self.assertNotIn("did not accept its setup audit event", result.output)
+
     def test_no_verify_saves_and_warns_when_canonical_runtime_is_offline(self):
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError(

@@ -534,20 +534,74 @@ def test_grafana_auth_check_denies_anonymous_and_accepts_managed_login(
         None,
         None,
     )
-    authenticated = MagicMock()
-    authenticated.__enter__.return_value.status = 200
-
-    with patch(
-        "defenseclaw.observability.local_stack.urllib.request.urlopen",
-        side_effect=[unauthorized, authenticated],
-    ) as urlopen:
+    with (
+        patch("defenseclaw.observability.local_stack.urllib.request.urlopen", side_effect=[unauthorized]) as urlopen,
+        patch("defenseclaw.observability.local_stack._grafana_basic_get", return_value=(200, b"[]")) as basic_get,
+    ):
         LocalStackController._verify_grafana_authentication(subject, password)
 
     anonymous_request = urlopen.call_args_list[0].args[0]
-    authenticated_request = urlopen.call_args_list[1].args[0]
     assert anonymous_request.get_header("Authorization") is None
-    assert authenticated_request.get_header("Authorization", "").startswith("Basic ")
-    assert password not in authenticated_request.full_url
+    basic_get.assert_called_once_with(password)
+    assert password not in anonymous_request.full_url
+
+
+def test_grafana_admin_password_never_reaches_an_unverified_connected_peer(controller) -> None:
+    subject, _runner = controller
+    password = "A" * 40
+    unauthorized = urllib.error.HTTPError("http://127.0.0.1:3000/api/search", 401, "Unauthorized", None, None)
+    credential_requests = []
+
+    def answer(request, *, timeout):  # noqa: ANN001, ANN202
+        if request.get_header("Authorization"):
+            credential_requests.append(request)
+            accepted = MagicMock()
+            accepted.__enter__.return_value.status = 200
+            return accepted
+        raise unauthorized
+
+    peer = MagicMock()
+    peer.getsockname.return_value = ("127.0.0.1", 51000)
+    peer.getpeername.return_value = ("127.0.0.1", 3000)
+    refused = False
+    with (
+        patch("defenseclaw.observability.local_stack.urllib.request.urlopen", side_effect=answer),
+        patch("defenseclaw.observability.local_stack.socket.create_connection", return_value=peer),
+        patch("defenseclaw.observability.local_stack.CommandRunner.run", return_value=MagicMock(returncode=1)),
+        patch("defenseclaw.gateway._managed_connected_verifier_spec", return_value=None),
+        patch("defenseclaw.gateway._per_user_connected_verifier", return_value="trusted-gateway"),
+    ):
+        try:
+            LocalStackController._verify_grafana_authentication(subject, password)
+        except LocalStackError:
+            refused = True
+    assert credential_requests == []
+    peer.sendall.assert_not_called()
+    assert refused
+
+
+def test_grafana_admin_password_uses_the_verified_socket_without_redirecting() -> None:
+    from defenseclaw.observability import local_stack
+
+    password = "A" * 40
+    peer = MagicMock()
+    peer.getsockname.return_value = ("127.0.0.1", 51002)
+    peer.getpeername.return_value = ("127.0.0.1", 3000)
+    peer.makefile.return_value = io.BytesIO(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:3001/\r\nContent-Length: 0\r\n\r\n")
+    with (
+        patch("defenseclaw.observability.local_stack.socket.create_connection", return_value=peer) as dial,
+        patch("defenseclaw.observability.local_stack.CommandRunner.run", return_value=MagicMock(returncode=0)) as verify,
+        patch("defenseclaw.gateway._managed_connected_verifier_spec", return_value=None),
+        patch("defenseclaw.gateway._per_user_connected_verifier", return_value="trusted-gateway"),
+    ):
+        status, body = local_stack._grafana_basic_get(password)
+    assert (status, body) == (302, b"")
+    dial.assert_called_once_with(("127.0.0.1", 3000), timeout=3)
+    assert verify.call_args.args[0][1:2] == ["local-peer-verify-connected"]
+    sent = b"".join(call.args[0] for call in peer.sendall.call_args_list)
+    assert b"Authorization: Basic " in sent
+    assert password.encode() not in sent
+    peer.close.assert_called_once()
 
 
 def test_grafana_auth_check_rejects_anonymous_success(controller) -> None:

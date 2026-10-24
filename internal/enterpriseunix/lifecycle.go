@@ -374,6 +374,11 @@ func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 		result: enterprisestatus.New(opts.Action, managed.ProfileStandalone, env.GOOS, env.ProductVersion),
 	}
 	failure := l.run(ctx)
+	// A no-op ensure and a committed change report the same observed host
+	// limits as status and verify. They do not change these kernel settings.
+	if l.result.Installed && opts.Action != ActionStatus && opts.Action != ActionVerify && opts.Action != ActionUninstall {
+		l.warnOpenPolicyViews()
+	}
 	// A run can describe the deployment more than once (after a follow-up
 	// transaction, or a refused one), and each pass reports the same
 	// standing warnings; the result names each problem once.
@@ -522,6 +527,18 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.
 		defer func() { l.recordPackageResult(failure) }()
+	}
+	if l.opts.Action == ActionInstall || l.opts.Action == ActionUpgrade ||
+		l.opts.Action == ActionEnsure || l.opts.Action == ActionRepair {
+		defer func() {
+			if len(r.Errors) != 0 || !r.Installed || r.InstalledVersion != env.ProductVersion {
+				return
+			}
+			current, err := env.loadDeployment()
+			if err == nil && current != nil && current.ProductVersion == env.ProductVersion {
+				l.invalidateLegacyHookSessions(ctx)
+			}
+		}()
 	}
 
 	if !l.recoverInterrupted(ctx) && l.opts.Action != ActionUninstall {

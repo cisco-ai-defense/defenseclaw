@@ -19,7 +19,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import json
 import re
 import shutil
 import subprocess
@@ -805,6 +804,8 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
 # transaction, run with the transaction's record and proof stubbed out (the
 # transaction has its own tests below, fix/r104-windows).
 _NO_TXN = (
+    "function Write-DurableText { param($Path, $Text) [IO.File]::WriteAllText($Path, $Text) }\n"
+    "function Save-LifecycleHookTransition { param($Slot) Undo-HookFirst $Slot; return '' }\n"
     "function Write-LifecycleManifest { return $null }\n"
     "function Read-LifecycleManifest { return $null }\n"
     "function New-RecoveryManifest { return $null }\n"
@@ -957,7 +958,6 @@ foreach ($legacySetup in @($false, $true)) {
 def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
     # A running 1.0.3 Amp or OpenCode process retains its old plugin even
     # after the installer replaces the file. Keep the old gateway enforcing.
-    classifier = _ps1_function("Get-LoadedPluginAgent")
     guard = _ps1_function("Assert-NoLoadedPluginAgents")
     assert "Get-CimInstance Win32_Process" in guard
     assert "GetOwner" in guard
@@ -977,68 +977,37 @@ def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
     )
     assert rollback.index("Assert-NoLoadedPluginAgents") < rollback.index("Stop-Gateway")
     assert handoff.index("Assert-NoLoadedPluginAgents") < handoff.index("Stop-Gateway")
-    if not POWERSHELL:
-        return
-    script = classifier + "\n" + "\n".join(
-        f'$p = [pscustomobject]@{{ Name = "{name}"; CommandLine = "{command}" }}; '
-        "Get-LoadedPluginAgent $p"
-        for name, command in [
-            ("opencode.exe", "opencode.exe"),
-            ("amp.exe", "amp.exe"),
-            ("node.exe", "node.exe C:/node_modules/@sourcegraph/amp/cli.js"),
-            ("node.exe", "node.exe unrelated.js"),
-        ]
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows identity required")
+@pytest.mark.allow_subprocess
+def test_windows_agent_scan_audits_owner_denial_and_refuses_the_same_account() -> None:
+    # An unreadable owner (another account on a shared host) cannot prove a
+    # live agent of this account: audit it and go on. A readable owner that is
+    # this account refuses the swap in any session (w25-setup + GAP-1128).
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        "function Get-InstalledAgentPrograms { return @{ 'c:\\agent.exe' = 'opencode' } }\n"
+        "$script:row = [pscustomobject]@{ ProcessId = 7001; ExecutablePath = 'C:\\agent.exe'; CommandLine = 'agent'; SessionId = 9 }\n"
+        "function Get-CimInstance { param($Class, $Filter, $ErrorAction) return $script:row }\n"
+        "function Get-LoadedPluginAgent($Process) { return 'opencode' }\n"
+        "$script:owner = [pscustomobject]@{ ReturnValue = 2; Domain = ''; User = '' }\n"
+        "function Invoke-CimMethod { param($InputObject, $MethodName, $ErrorAction) return $script:owner }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Output \"audit: $Reason\" }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        + _ps1_function("Assert-NoLoadedPluginAgents")
+        + "Assert-NoLoadedPluginAgents\n'owner-denied-audited'\n"
+        "$parts = [Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\\\', 2\n"
+        "$script:owner = [pscustomobject]@{ ReturnValue = 0; Domain = $parts[0]; User = $parts[1] }\n"
+        "try { Assert-NoLoadedPluginAgents; throw 'same-account-was-ignored' } "
+        "catch { if ($_.Exception.Message -notlike 'Close OpenCode and Amp*') { throw } }\n"
+        "'same-account-refused'\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stderr
-    assert [line for line in result.stdout.splitlines() if line] == ["opencode", "amp", "amp"]
-
-
-@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")
-def test_windows_agent_scan_ignores_other_session_owner_denial() -> None:
-    guard = _ps1_function("Assert-NoLoadedPluginAgents")
-    script = guard + r'''
-function Die($Message) { throw $Message }
-$session = (Get-Process -Id $PID).SessionId
-$script:scanSession = $session + 1
-$script:ownerReturn = 2
-$script:ownerDomain = ''
-$script:ownerUser = ''
-function Get-CimInstance($ClassName) {
-    [pscustomobject]@{ Name = 'opencode.exe'; CommandLine = 'opencode.exe'; ProcessId = 7001; SessionId = $script:scanSession }
-}
-function Invoke-CimMethod($InputObject, $MethodName) {
-    [pscustomobject]@{ ReturnValue = $script:ownerReturn; Domain = $script:ownerDomain; User = $script:ownerUser }
-}
-function Get-LoadedPluginAgent($Process) { return 'opencode' }
-Assert-NoLoadedPluginAgents
-"other-session-owner-denied-ok"
-$script:scanSession = $session
-try {
-    Assert-NoLoadedPluginAgents
-    throw 'same-session-owner-denial-was-ignored'
-} catch {
-    if ($_.Exception.Message -notlike 'Could not check the owner*') { throw }
-}
-"same-session-owner-denied-closed"
-$parts = [Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\', 2
-$script:ownerDomain = $parts[0]
-$script:ownerUser = $parts[1]
-$script:ownerReturn = 0
-$script:scanSession = $session + 1
-try {
-    Assert-NoLoadedPluginAgents
-    throw 'same-account-other-session-was-ignored'
-} catch {
-    if ($_.Exception.Message -notlike 'Close OpenCode and Amp*') { throw }
-}
-"same-account-other-session-denied-closed"
-'''
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "other-session-owner-denied-ok" in result.stdout
-    assert "same-session-owner-denied-closed" in result.stdout
-    assert "same-account-other-session-denied-closed" in result.stdout
+    assert "audit: process owner unreadable" in result.stdout
+    assert "owner-denied-audited" in result.stdout
+    assert "same-account-refused" in result.stdout
 
 
 def test_refused_late_swap_restores_setup_hooks_without_restarting_gateway(tmp_path: Path) -> None:
@@ -3780,13 +3749,189 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     assert positions == sorted(positions), save
     first = _ps1_function("Install-HookFirst")
     assert first.index("Save-HookCloser $Slot $gateway") < first.index('(Join-Path $Slot "HOOK_FIRST")') < first.index("Install-File $staged $live")
-    # An unfinished snapshot puts the old hook back before anything else.
+    # A rollback keeps the checked hook at the registered path until the
+    # restored gateway has passed its readiness and connector proof.
     undo = _ps1_function("Undo-Snapshot")
-    assert undo.index("Undo-HookFirst $Slot") < undo.index("Move-Path")
+    assert undo.index("Save-LifecycleHookTransition $Slot") < undo.index("Move-Path")
     install = _ps1_function("Invoke-Install")
     assert install.index("Save-BinarySnapshot") < install.index("if (-not (Stop-Gateway))")
-    # A finished one is restored with the rest of the bin folder.
-    assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
+    restore = _ps1_function("Restore-Slot")
+    assert restore.index("Save-LifecycleHookTransition $Slot") < restore.index('Restore-BinDir (Join-Path $Slot "bin")')
+    proof = _ps1_function("Assert-LifecycleRestored")
+    assert proof.index("Wait-LifecycleProof") < proof.index("Restore-PriorHookAfterProof")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("prior_version", ["0.8.10", "1.0.0", "1.0.2", "1.0.3"])
+def test_windows_rollback_holds_checked_hook_until_prior_gateway_is_proven(tmp_path: Path, prior_version: str) -> None:
+    # The registered 1.0.2 hook answered open while Restore-BinDir copied it
+    # back ahead of the gateway. This exercises the real binary restore and
+    # lifecycle proof with all supported prior-release families. A failed
+    # proof must leave the checked new hook and durable record for a retry.
+    transition_names = (
+        "Get-LifecycleHookTransition", "Save-LifecycleHookTransition", "Restore-PriorHookAfterProof",
+        "Ensure-LifecycleHookGuard",
+    )
+    optional_transition = "\n".join(
+        _ps1_function(name) for name in transition_names if f"function {name}(" in _text()
+    )
+    body = (
+        _ps1_function("Read-Text")
+        + _ps1_function("Restore-BinDir")
+        + _ps1_function("Assert-BinDirRestored")
+        + _ps1_function("Undo-HookFirst")
+        + _ps1_function("Undo-Snapshot")
+        + optional_transition
+        + r"""
+$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')
+$Slot = Join-Path $DataDir 'previous.new'
+New-Item -ItemType Directory -Path (Join-Path $Slot 'bin'), (Join-Path $Slot 'closer') -Force | Out-Null
+function Install-File { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+function Remove-Aside { param($Path) Remove-Item -LiteralPath $Path -Force }
+[IO.File]::WriteAllText((Join-Path $Slot 'bin\defenseclaw-gateway.exe'), 'old gateway')
+[IO.File]::WriteAllText((Join-Path $Slot 'bin\defenseclaw-hook.exe'), 'old hook')
+[IO.File]::WriteAllText((Join-Path $Slot 'closer\defenseclaw-hook.exe'), 'checked new hook')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'failed new gateway')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-hook.exe'), 'checked new hook')
+$priorSHA = Get-Sha256 (Join-Path $Slot 'bin\defenseclaw-hook.exe')
+$guardSHA = Get-Sha256 (Join-Path $Slot 'closer\defenseclaw-hook.exe')
+$gatewaySHA = Get-Sha256 (Join-Path $Slot 'bin\defenseclaw-gateway.exe')
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_GUARD'), $guardSHA)
+$state = [ordered]@{ Schema = 1; Operation = 'upgrade'; From = '__PRIOR__'; To = '1.0.4'; Slot = $Slot
+    Bins = [ordered]@{ 'defenseclaw-gateway.exe' = $gatewaySHA
+        'defenseclaw-hook.exe' = $priorSHA }; GatewayWasRunning = $true; Connectors = @(); Config = ''
+    ExternalConfig = ''; ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = ''; Committed = $false }
+Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+$recordBeforeRestore = Read-LifecycleManifest
+$transitionCommand = Get-Command Save-LifecycleHookTransition -ErrorAction SilentlyContinue
+$guardForRestore = if ($transitionCommand) { Save-LifecycleHookTransition $Slot } else { '' }
+Restore-BinDir (Join-Path $Slot 'bin') $guardForRestore
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+    throw 'the registered prior hook ran before gateway readiness'
+}
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-gateway.exe')) -ne $gatewaySHA) { throw 'prior gateway not restored' }
+$failed = $false
+try { Assert-LifecycleRestored $recordBeforeRestore } catch { $failed = $true }
+if (-not $failed -or -not (Test-Path -LiteralPath $LifecycleManifest) -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+    throw 'unproven restore released the registered prior hook or lifecycle record'
+}
+# Model a process stop immediately after prior-hook publication, before the
+# record is retired. The retry must put the checked guard back before proof.
+Copy-Item -LiteralPath (Join-Path $Slot 'bin\defenseclaw-hook.exe') -Destination (Join-Path $BinDir 'defenseclaw-hook.exe') -Force
+try { Assert-LifecycleRestored $recordBeforeRestore } catch { }
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest)) { throw 'interrupted publication did not restore the guard' }
+$script:gateway = [pscustomobject]@{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+$script:digestHelp = $false
+function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if ($script:gateway) { return 0 }; return 1 }
+Assert-LifecycleRestored $recordBeforeRestore
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Test-Path -LiteralPath $LifecycleManifest)) { throw 'proved rollback did not finish the hook transition' }
+# The unfinished-snapshot undo follows the same transition. Its snapshot is
+# consumed before the caller proves the prior gateway, so the record and both
+# hook copies must survive in .lifecycle-closer.
+$early = Join-Path $DataDir 'early.new'
+New-Item -ItemType Directory -Path (Join-Path $early 'bin'), (Join-Path $early 'closer') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $Slot 'bin\defenseclaw-hook.exe') -Destination (Join-Path $early 'bin\defenseclaw-hook.exe')
+Copy-Item -LiteralPath (Join-Path $Slot 'closer\defenseclaw-hook.exe') -Destination (Join-Path $early 'closer\defenseclaw-hook.exe')
+Copy-Item -LiteralPath (Join-Path $early 'closer\defenseclaw-hook.exe') -Destination (Join-Path $BinDir 'defenseclaw-hook.exe') -Force
+[IO.File]::WriteAllText((Join-Path $early 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $early 'HOOK_GUARD'), $guardSHA)
+$state['Slot'] = $early
+Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+$earlyRecord = Read-LifecycleManifest
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+function Remove-Tree { param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }
+$script:gateway = $null
+Undo-Snapshot $early
+if ((Test-Path -LiteralPath $early) -or (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest)) { throw 'early undo released the prior hook before gateway proof' }
+$script:gateway = [pscustomobject]@{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+Assert-LifecycleRestored $earlyRecord
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Test-Path -LiteralPath $LifecycleManifest)) { throw 'proved early undo did not finish the hook transition' }
+'OK'
+"""
+    ).replace("__PRIOR__", prior_version)
+    result = _txn_harness(tmp_path, body)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("prior_version", ["0.8.10", "1.0.0", "1.0.2", "1.0.3"])
+def test_windows_rollback_finishes_for_a_previously_stopped_gateway(tmp_path: Path, prior_version: str) -> None:
+    # A stopped prior gateway has no readiness to prove. Its restored bytes
+    # and closed hooks must be proven before the old hook and lock return.
+    body = (
+        _ps1_function("Read-Text")
+        + _ps1_function("Restore-BinDir")
+        + _ps1_function("Assert-BinDirRestored")
+        + "\n".join(_ps1_function(name) for name in (
+            "Get-LifecycleHookTransition", "Save-LifecycleHookTransition",
+            "Restore-PriorHookAfterProof", "Ensure-LifecycleHookGuard",
+        ))
+        + r"""
+$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')
+$slot = Join-Path $DataDir 'previous.new'
+New-Item -ItemType Directory -Path (Join-Path $slot 'bin'), (Join-Path $slot 'closer') -Force | Out-Null
+function Write-Warn { param($Message) }
+function Install-File { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+function Remove-Aside { param($Path) Remove-Item -LiteralPath $Path -Force }
+[IO.File]::WriteAllText((Join-Path $slot 'bin\defenseclaw-gateway.exe'), 'old gateway')
+[IO.File]::WriteAllText((Join-Path $slot 'bin\defenseclaw-hook.exe'), 'old hook')
+[IO.File]::WriteAllText((Join-Path $slot 'closer\defenseclaw-hook.exe'), 'checked new hook')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'failed new gateway')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-hook.exe'), 'checked new hook')
+$sidecar = Join-Path $DataDir 'hooks\.hookcfg'
+[IO.File]::WriteAllText($sidecar, '{"fail_modes":{"codex":"open"}}')
+$priorSHA = Get-Sha256 (Join-Path $slot 'bin\defenseclaw-hook.exe')
+$guardSHA = Get-Sha256 (Join-Path $slot 'closer\defenseclaw-hook.exe')
+$gatewaySHA = Get-Sha256 (Join-Path $slot 'bin\defenseclaw-gateway.exe')
+[IO.File]::WriteAllText((Join-Path $slot 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $slot 'HOOK_GUARD'), $guardSHA)
+$record = [ordered]@{ Schema = 1; Operation = 'upgrade'; From = '__PRIOR__'; To = '1.0.4'; Slot = $slot
+    Bins = [ordered]@{ 'defenseclaw-gateway.exe' = $gatewaySHA; 'defenseclaw-hook.exe' = $priorSHA }
+    GatewayWasRunning = $false; Connectors = @('codex'); Config = ''; ExternalConfig = ''
+    ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = ''; Committed = $false }
+Write-DurableText $LifecycleManifest ($record | ConvertTo-Json -Depth 4)
+$guardForRestore = Save-LifecycleHookTransition $slot
+[IO.File]::WriteAllText((Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'), 'checked closer')
+Restore-BinDir (Join-Path $slot 'bin') $guardForRestore
+$script:closeFails = $true
+function Invoke-Native {
+    param($FilePath, $Arguments, [switch]$Quiet)
+    if ($script:closeFails) { return 1 }
+    if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') {
+        if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+            throw 'old hook was published before closure'
+        }
+        [IO.File]::WriteAllText($sidecar, '{"fail_modes":{"codex":"closed"}}')
+        $script:closes++
+        return 0
+    }
+    throw 'a stopped gateway was probed for readiness'
+}
+try { Assert-LifecycleRestored (Read-LifecycleManifest); throw 'hook closure failure was accepted' }
+catch { if ($_.Exception.Message -eq 'hook closure failure was accepted') { throw } }
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest) -or
+    [IO.File]::ReadAllText($sidecar) -notmatch '"open"') { throw 'failed closure released the guard' }
+$script:closeFails = $false
+Assert-LifecycleRestored (Read-LifecycleManifest)
+if ($script:closes -ne 1 -or (Test-Path -LiteralPath $LifecycleManifest) -or
+    [IO.File]::ReadAllText($sidecar) -notmatch '"closed"' -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-gateway.exe')) -ne $gatewaySHA -or $script:gateway) {
+    throw 'stopped prior install was not proven and retired'
+}
+'OK'
+"""
+    ).replace("__PRIOR__", prior_version)
+    result = _txn_harness(tmp_path, body)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
 def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits() -> None:
@@ -3946,6 +4091,10 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
         + _ps1_function("Enable-SetupHooks")
         + _ps1_function("Restore-SetupInstall")
         + _ps1_function("Start-SwapHookFailModes")
+        # This test exercises handoff timing; the publisher's byte and digest
+        # contract has its own test below. Model a valid atomic publisher.
+        + "function Publish-SetupLauncherTrampoline { [IO.File]::WriteAllText($SetupHookState, 'delegated'); return $true }\n"
+        + "function Test-SetupLauncherTrampoline { return (Test-Path -LiteralPath $SetupHookState) -and ([IO.File]::ReadAllText($SetupHookState) -eq 'delegated') }\n"
         + "try { $was = [bool](Start-SwapHookFailModes 'staged-gateway.exe' (Get-GatewayProcess)); Write-Host \"was=$was\" } "
         + "catch { Write-Host \"thrown=$($_.Exception.Message)\" }\n"
         + "foreach ($e in $events) { Write-Host \"event $e\" }\n"
@@ -3965,11 +4114,10 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
     lines = completed.stdout.splitlines()
     assert [line[len("event ") :] for line in lines if line.startswith("event ")] == want_events, (case, completed.stdout)
     assert any(line.startswith(want_out) for line in lines), (case, completed.stdout)
-    # The launcher is disabled here only when the swap goes on with Setup's
-    # gateway down; with one running Invoke-Install disables it right before the stop.
-    want_end = "disabled" if setup and want_out == "was=False" else "enabled"
-    assert f"end={want_end}" in lines, (case, completed.stdout)
-    assert not (staging / "hook-runtime-state.json").exists() or want_end == "disabled", (case, completed.stdout)
+    # With no gateway running, the launcher delegates to the staged hook;
+    # its state remains present throughout the swap.
+    assert "end=enabled" in lines, (case, completed.stdout)
+    assert not (staging / "hook-runtime-state.json").exists() or setup, (case, completed.stdout)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -4053,6 +4201,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         + _bin_dir_functions()
         + _ps1_function("Read-Text")
         + _ps1_function("Get-Sha256")
+        + _ps1_function("Write-DurableText")
         + _ps1_function("Install-HookFirst")
         + _ps1_function("Save-HookCloser")
         + _ps1_function("Undo-HookFirst")
@@ -5259,6 +5408,7 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
     script = tmp_path / "txn.ps1"
     script.write_text(
         "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        "if ($PSVersionTable.PSVersion.Major -lt 6) { Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop }\n"
         f"$DataDir = '{data}'\n$BinDir = '{bin_dir}'\n$Local = ''\n$Setup = $null\n"
         "$ManagedBinaries = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')\n"
         "$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'\n"
@@ -5712,6 +5862,44 @@ function Write-Warn([string]$m) {{ Write-Host "warn $m" }}
 """
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("publication", ["success", "refused", "throws"])
+def test_setup_launcher_state_stays_active_until_atomic_handoff(tmp_path: Path, publication: str) -> None:
+    # GAP-1071: a cached Setup launcher must never observe a missing state
+    # while the installer prepares the replacement, including on errors.
+    state = tmp_path / "hook-runtime-state.json"
+    state.write_text("original", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    publish = {
+        "success": "[IO.File]::WriteAllText($SetupHookState, 'delegated'); return $true",
+        "refused": "return $false",
+        "throws": "throw 'publication failed'",
+    }[publication]
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$SetupHookState = '{state}'\n$Staging = '{staging}'\n"
+        "function Move-Path([string]$From, [string]$To) { [IO.File]::Move($From, $To) }\n"
+        "function Protect-SetupLauncherFile([string]$Path) { }\n"
+        "function Invoke-Quietly([scriptblock]$Action) { try { & $Action } catch { } }\n"
+        "function Publish-SetupLauncherTrampoline([string]$Template, [string]$Hook, [string]$Gateway) {\n"
+        "  if (-not (Test-Path -LiteralPath $SetupHookState)) { throw 'cached launcher saw missing state' }\n"
+        f"  {publish}\n"
+        "}\n"
+        + _ps1_function("Disable-SetupHooks")
+        + "try { Disable-SetupHooks; Write-Host 'result=ok' } catch { Write-Host \"result=error:$($_.Exception.Message)\" }\n"
+        + "Write-Host \"state=$(if (Test-Path -LiteralPath $SetupHookState) { [IO.File]::ReadAllText($SetupHookState) } else { 'missing' })\"\n"
+    )
+    result = _run_powershell(script)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    if publication == "success":
+        assert "result=ok" in output and "state=delegated" in output, output
+        assert (staging / "hook-runtime-state.json").read_text(encoding="utf-8") == "original"
+    else:
+        assert "result=error:" in output and "state=original" in output, output
+
+
 def _sha256(path: Path) -> str:
     import hashlib
 
@@ -5793,14 +5981,17 @@ def test_setup_launcher_delegates_to_this_releases_hook(tmp_path: Path, shell: s
         [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "warn" not in completed.stdout, completed.stdout
     kept = staging / "hook-runtime-state.json"
     if case in ("full-launcher", "launcher-changed"):
-        # Nothing to delegate to: Setup's state is set aside, as before.
-        assert not state.exists() and kept.read_text(encoding="utf-8") == original_text, completed.stdout
+        # An old or changed launcher cannot be delegated. Abort with its
+        # original state still active, before the gateway is stopped.
+        assert completed.returncode != 0, completed.stdout + completed.stderr
+        assert state.read_text(encoding="utf-8") == original_text, completed.stdout
+        assert kept.read_text(encoding="utf-8") == original_text, completed.stdout
         assert not delegated.exists() or not any(delegated.iterdir()), completed.stdout
         return
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "warn" not in completed.stdout, completed.stdout
     if case == "enable":
         assert state.read_text(encoding="utf-8") == original_text, completed.stdout
         assert not kept.exists(), completed.stdout
@@ -6172,3 +6363,291 @@ def test_the_windows_stopped_upgrade_reconcile_names_the_cause(
         ), text
     if not binary:
         assert "defenseclaw-gateway.exe is missing" in text, text
+
+
+# Win32_Process rows (ExecutablePath, CommandLine) and whether each is an
+# agent. The agent is told by its executable, never by a name (GAP-1128).
+_WINDOWS_AGENT_ROWS = [
+    (r"C:\Users\u\.opencode\bin\opencode.exe", "opencode.exe", "opencode"),
+    (r"C:\Tools\opencode.exe", "opencode.exe", ""),
+    (r"C:\work\node_modules\opencode-ai\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node "C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode"', "opencode"),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node --conditions C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode C:\work\worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node --conditions="dev C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode" C:\work\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\work\worker.js C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\Users\u\AppData\Roaming\npm\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
+    (r"C:\Users\u\.bun\bin\bun.exe", r"bun C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Users\u\.amp\bin\amp.exe", "amp.exe", "amp"),
+    ("", "opencode.exe", ""),
+]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_windows_agent_is_told_only_by_its_recorded_entry() -> None:
+    # Fake WMI rows retain exact Windows command-line boundaries. The map is
+    # what the agent installer recorded, independent of names and manifests.
+    installed = (
+        "$script:InstalledAgentPrograms = @{ "
+        "'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode'; "
+        "'c:\\users\\u\\.amp\\bin\\amp.exe' = 'amp'; "
+        "'c:\\users\\u\\appdata\\roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode' = 'opencode'; "
+        "'c:\\users\\u\\appdata\\roaming\\npm\\node_modules\\@sourcegraph\\amp\\dist\\main.js' = 'amp' }\n"
+    )
+    rows = "\n".join(
+        "$p = [pscustomobject]@{{ ProcessId = {}; ExecutablePath = '{}'; CommandLine = '{}' }}; "
+        "'[' + (Get-LoadedPluginAgent $p) + ']'".format(
+            index + 1, program.replace("'", "''"), command.replace("'", "''")
+        )
+        for index, (program, command, _) in enumerate(_WINDOWS_AGENT_ROWS)
+    )
+    resolver = (
+        "function Resolve-AgentPath([string]$Path) { if (-not $Path) { return '' }; "
+        "return $Path.Replace('/', '\\').ToLowerInvariant() }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: PID $ProcessId $Reason\" }\n"
+    )
+    script = ("Set-StrictMode -Version Latest\n" + resolver + _ps1_function("Get-LoadedPluginAgent")
+              + _ps1_function("Split-CommandLine") + installed + rows)
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    got = [line for line in result.stdout.splitlines() if line.startswith("[")]
+    assert got == [f"[{agent}]" for _, _, agent in _WINDOWS_AGENT_ROWS], list(zip(_WINDOWS_AGENT_ROWS, got))
+    assert "audit: PID 13" not in result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_agent_scan_with_no_installed_entry_skips_process_rows() -> None:
+    script = (
+        "function Get-InstalledAgentPrograms { return @{} }\n"
+        "function Get-CimInstance { param($Class, $ErrorAction) "
+        "return @([pscustomobject]@{ ProcessId = 1; ExecutablePath = $null; CommandLine = '' }, "
+        "[pscustomobject]@{ ProcessId = 2; ExecutablePath = 'C:\\Windows\\notepad.exe'; CommandLine = '' }) }\n"
+        "function Get-LoadedPluginAgent($Process) { Write-Host 'scanned'; return '' }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        + _ps1_function("Assert-NoLoadedPluginAgents")
+        + "Assert-NoLoadedPluginAgents\n'scan-passed'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "scan-passed", result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_unrelated_executable_needs_no_path_resolution() -> None:
+    script = (
+        "function Resolve-AgentPath([string]$Path) { Write-Host 'resolved'; return $Path }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Split-CommandLine")
+        + "$script:InstalledAgentPrograms = @{ 'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode' }\n"
+        + "$p = [pscustomobject]@{ ProcessId = 1; ExecutablePath = 'C:\\Windows\\notepad.exe'; CommandLine = 'notepad.exe' }\n"
+        + "'[' + (Get-LoadedPluginAgent $p) + ']'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]", result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(("name", "package", "entry_name", "shim", "want"), [
+    ("opencode", "opencode-ai", "bin/opencode", True, "opencode"),
+    ("amp", "@sourcegraph/amp", "dist/main.js", True, "amp"),
+    ("opencode", "opencode-ai", "bin/opencode", False, ""),
+    ("opencode", "opencode-ai", "bin/worker.js", True, ""),
+])
+def test_windows_node_adjacent_npm_entry_counts_without_appdata(
+    tmp_path: Path, name: str, package: str, entry_name: str, shim: bool, want: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    node = runtime / "node.exe"
+    node.write_bytes(b"MZ")
+    if shim:
+        (runtime / f"{name}.cmd").write_text("@echo off", encoding="utf-8")
+    entry = runtime / "node_modules" / package / entry_name
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    data = tmp_path / "data"
+    data.mkdir()
+    script = (
+        _ps1_function("Resolve-AgentPath") + _ps1_function("Get-InstalledAgentPrograms")
+        + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Split-CommandLine")
+        + "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + f"$env:USERPROFILE = '{tmp_path / 'profile'}'\n$env:APPDATA = '{tmp_path / 'roaming'}'\n"
+        + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n$DataDir = '{data}'\n"
+        + f"$p = [pscustomobject]@{{ ProcessId = 1; ExecutablePath = '{node}'; CommandLine = 'node " +
+          f'"{entry}"' + "' }\n"
+        + "$script:InstalledAgentPrograms = Get-InstalledAgentPrograms @($p)\n"
+        + f"$script:InstalledAgentPrograms.ContainsKey((Resolve-AgentPath '{entry}').ToLowerInvariant())\n"
+        + ("'[' + (Get-LoadedPluginAgent $p) + ']'\n" if os.name == "nt" else "")
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    expected = [str(bool(want))] + ([f"[{want}]"] if os.name == "nt" else [])
+    assert result.stdout.strip().splitlines() == expected, (result.stdout, result.stderr)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_installed_entries_are_exact_files(tmp_path: Path) -> None:
+    profile, roaming, local, data = (tmp_path / name for name in ("profile", "roaming", "local", "data"))
+    data.mkdir()
+    native = profile / ".amp" / "bin" / "amp.exe"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"MZ")
+    entry = roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("node entry", encoding="utf-8")
+    (roaming / "npm" / "opencode.cmd").write_text("@echo off", encoding="utf-8")
+    unrecorded = roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "worker.js"
+    unrecorded.write_text("worker", encoding="utf-8")
+    (entry.parent.parent / "package.json").write_text('{"author":{"name":"opencode-ai"},"name":"other"}', encoding="utf-8")
+    on_path = tmp_path / "tools" / "opencode.exe"
+    on_path.parent.mkdir()
+    on_path.write_bytes(b"MZ")
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        + _ps1_function("Resolve-AgentPath") + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$env:USERPROFILE = '{profile}'\n$env:APPDATA = '{roaming}'\n$env:LOCALAPPDATA = '{local}'\n$env:PATH = '{on_path.parent}'\n$DataDir = '{data}'\n"
+        + "$i = Get-InstalledAgentPrograms\nforeach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    lines = sorted(line for line in result.stdout.splitlines() if "=" in line)
+    assert lines == sorted([f"{str(native).lower()}=amp", f"{str(entry).lower()}=opencode"]), result.stdout
+    assert str(on_path).lower() not in result.stdout and str(unrecorded).lower() not in result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(("selected", "want"), [
+    ("relative/opencode.exe", "0"),
+    ("C:/scratch/opencode.exe", "1"),
+])
+def test_windows_hook_lock_entry_requires_an_absolute_path(tmp_path: Path, selected: str, want: str) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "hook_contract_lock.json").write_text(json.dumps({"connectors": {
+        "opencode": {"agent_executable_source": "setup-selected", "agent_executable": selected},
+        "amp": {},
+    }}), encoding="utf-8")
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        "function Resolve-AgentPath([string]$Path) { "
+        "if ($Path -eq 'relative\\opencode.exe' -or $Path -eq 'C:\\scratch\\opencode.exe') { "
+        "return 'C:\\scratch\\opencode.exe' }; return '' }\n"
+        + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$DataDir = '{data}'\n"
+        + f"$env:USERPROFILE = '{tmp_path / 'profile'}'\n"
+        + f"$env:APPDATA = '{tmp_path / 'roaming'}'\n"
+        + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n"
+        + "(Get-InstalledAgentPrograms).Count\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0 and result.stdout.strip() == want, (result.stdout, result.stderr)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_entry_resolution_follows_a_parent_link(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    entry = real / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory links require a Windows developer token")
+    script = (_ps1_function("Resolve-AgentPath")
+              + f"Resolve-AgentPath '{alias / 'bin' / 'opencode'}'")
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().lower() == str(entry.resolve()).lower(), result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None or shutil.which("node") is None, reason="native Windows Node required")
+@pytest.mark.allow_subprocess
+def test_windows_relative_node_entry_does_not_use_the_installers_cwd(tmp_path: Path) -> None:
+    entry = tmp_path / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    node = Path(shutil.which("node")).resolve()
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        + _ps1_function("Resolve-AgentPath") + _ps1_function("Get-LoadedPluginAgent")
+        + _ps1_function("Split-CommandLine")
+        + "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + f"$script:InstalledAgentPrograms = @{{ '{str(entry).lower()}' = 'opencode' }}\n"
+        + f"$p = [pscustomobject]@{{ ProcessId = 1; ExecutablePath = '{node}'; CommandLine = 'node node_modules\\opencode-ai\\bin\\opencode' }}\n"
+        + "'[' + (Get-LoadedPluginAgent $p) + ']'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "[]" in result.stdout and "audit: relative Node script cwd unreadable" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows identity required")
+@pytest.mark.allow_subprocess
+def test_windows_vanished_agent_process_is_audited_without_refusal() -> None:
+    # A PID can exit between the first WMI enumeration and the ownership
+    # check. Its old row cannot establish that an agent is still live.
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        "function Get-InstalledAgentPrograms { return @{ 'c:\\agent.exe' = 'opencode' } }\n"
+        "function Get-CimInstance { param($Class, $Filter, $ErrorAction) "
+        "if ($Filter) { return $null }; "
+        "return [pscustomobject]@{ ProcessId = 123; ExecutablePath = 'C:\\agent.exe'; CommandLine = 'agent' } }\n"
+        "function Get-LoadedPluginAgent($Process) { return 'opencode' }\n"
+        "function Invoke-CimMethod { throw 'owner query must not run for a vanished PID' }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Output \"audit: $Reason\" }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        + _ps1_function("Assert-NoLoadedPluginAgents")
+        + "Assert-NoLoadedPluginAgents\n'scan-passed'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "audit: process vanished or changed during lookup" in result.stdout
+    assert "scan-passed" in result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_windows_command_line_splits_as_node_reads_it() -> None:
+    # Review loop 2: Split-CommandLine follows CommandLineToArgvW and the C
+    # runtime, which Node and Bun use for their arguments.
+    rows = [
+        (r'"C:\Program Files\nodejs\node.exe" a "b c" d', [r"C:\Program Files\nodejs\node.exe", "a", "b c", "d"]),
+        (r'node --x="a b" c', ["node", "--x=a b", "c"]),
+        (r'node a\\\"b "c\\" d', ["node", 'a\\"b', "c\\", "d"]),
+        (r'node "a""b" c', ["node", 'a"b', "c"]),
+        (r"node a\b\\c	 x", ["node", r"a\b\\c", "x"]),
+        (r'node "" x', ["node", "", "x"]),
+        (r'C:\a"b c', ['C:\\a"b', "c"]),
+        ("", []),
+    ]
+    script = "Set-StrictMode -Version Latest\n" + _ps1_function("Split-CommandLine") + "\n".join(
+        "ConvertTo-Json -Compress -InputObject @(Split-CommandLine '{}')".format(line.replace("'", "''")) for line, _ in rows
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert [json.loads(line) for line in result.stdout.splitlines() if line.strip()] == [words for _, words in rows]
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")
+@pytest.mark.allow_subprocess
+def test_windows_process_rows_carry_the_executable_the_agent_check_reads() -> None:
+    # Get-LoadedPluginAgent reads Win32_Process.ExecutablePath: this
+    # account's own processes carry it.
+    script = "(Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\").ExecutablePath"
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().lower().endswith(".exe"), result.stdout
