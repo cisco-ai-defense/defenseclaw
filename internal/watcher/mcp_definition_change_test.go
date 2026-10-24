@@ -159,6 +159,61 @@ func TestRestoredMCPServerIsReleasedByItsCleanAdmission(t *testing.T) {
 	}
 }
 
+// GAP-1365: the scanner's verdict can recover without a change to the MCP
+// definition (for example, after its rules or judge change). The recovery
+// scan must apply admission, rather than only recording finding drift.
+func TestMCPRecoveryRescanReleasesOnlyItsOwnRejection(t *testing.T) {
+	base := t.TempDir()
+	h := newDefinitionChangeHarness(t, enrolledMCPServer(base, "1001", "decoy"), enrolledMCPServer(base, "1002", "decoy"))
+	h.w.cfg.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
+	if got := h.poll(); len(got) != 2 || got[0].Verdict != VerdictRejected || got[1].Verdict != VerdictRejected {
+		t.Fatalf("initial admission %+v, want two rejected servers", got)
+	}
+	if h.journal(h.servers[0]).Runtime != "disable" || h.journal(h.servers[1]).Runtime != "disable" {
+		t.Fatal("initial HIGH findings did not disable both servers")
+	}
+
+	// A scanner setting change makes the unchanged server eligible for a
+	// recovery rescan. First prove a continuing HIGH verdict keeps it off.
+	h.w.cfg.Scanners.MCPScanner.ScanPrompts = true
+	evt := InstallEvent{Type: InstallMCP, Name: h.servers[0].Name, Path: MCPEventPath(h.servers[0]), Connector: h.servers[0].Connector}
+	before := len(h.admitted)
+	if got := h.w.rescanTarget(context.Background(), evt, nil); got != rescanScanned {
+		t.Fatalf("continuing HIGH recovery scan = %v, want scanned", got)
+	}
+	if len(h.admitted) != before+1 || h.admitted[before].Verdict != VerdictRejected || h.journal(h.servers[0]).Runtime != "disable" {
+		t.Fatalf("continuing HIGH admission %+v, journal %+v; want still rejected", h.admitted[before:], h.journal(h.servers[0]))
+	}
+
+	// The next scanner revision finds this same definition clean.
+	h.w.cfg.Scanners.MCPScanner.ScanResources = true
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
+	before = len(h.admitted)
+	if got := h.w.rescanTarget(context.Background(), evt, nil); got != rescanScanned {
+		t.Fatalf("clean recovery scan = %v, want scanned", got)
+	}
+	if len(h.admitted) != before+1 || h.admitted[before].Verdict != VerdictClean || !h.journal(h.servers[0]).IsEmpty() {
+		t.Fatalf("clean admission %+v, journal %+v; want server restored", h.admitted[before:], h.journal(h.servers[0]))
+	}
+	if h.journal(h.servers[1]).Runtime != "disable" {
+		t.Fatalf("another account's server was released: %+v", h.journal(h.servers[1]))
+	}
+	if h.pending(h.servers[0]) {
+		t.Fatal("recovered server remained behind the pending gate")
+	}
+
+	// An administrator's later hold is separate from watcher enforcement.
+	key := MCPJournalName(h.servers[0])
+	if err := h.store.SetActionFieldForConnector("mcp", key, "claudecode", "runtime", "disable", "operator: hold"); err != nil {
+		t.Fatal(err)
+	}
+	h.w.cfg.Scanners.MCPScanner.ScanInstructions = true
+	h.w.rescanTarget(context.Background(), evt, nil)
+	if h.journal(h.servers[0]).Runtime != "disable" {
+		t.Fatal("clean rescan lifted the administrator's hold")
+	}
+}
+
 // A per-user gateway journals a project server under its bare name, so two
 // projects' servers of one name share a row. Restoring one of them must not
 // free the other's rejection.
