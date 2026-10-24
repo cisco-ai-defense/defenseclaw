@@ -611,7 +611,17 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		if err != nil || len(listed) > maxEncodedTargets {
 			return ""
 		}
-		encoded, err := json.Marshal(map[string]string{StartupFilesKey: string(listed)})
+		facts := map[string]string{StartupFilesKey: string(listed)}
+		// The start directories' identities, so the gateway knows another
+		// spelling of one later (ReachedInstructionsKey).
+		if reached := reachedEvidence(InstructionDirectories(cwd, home)); reached != "" {
+			facts[ReachedInstructionsKey] = reached
+		}
+		encoded, err := json.Marshal(facts)
+		if err == nil && len(encoded) > maxEncodedTargets {
+			delete(facts, ReachedInstructionsKey)
+			encoded, err = json.Marshal(facts)
+		}
 		if err != nil || len(encoded) > maxEncodedTargets {
 			return ""
 		}
@@ -936,6 +946,26 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		targets[key] = writeIdentities[file]
 		size += entry
 	}
+	// The first sighting of every directory the call works in or writes to
+	// (ReachedInstructionsKey). One that does not fit is omitted: the
+	// gateway keeps the call-time proof for those directories.
+	reached := []string{cwd}
+	for _, target := range slices.Sorted(maps.Keys(targets)) {
+		if strings.HasPrefix(target, "\x00") || !filepath.IsAbs(target) {
+			continue
+		}
+		reached = append(reached, filepath.Dir(target))
+		if resolved := targets[target]; filepath.IsAbs(resolved) {
+			reached = append(reached, filepath.Dir(resolved))
+		}
+	}
+	if value := reachedEvidence(append(reached, InstructionDirectories(cwd, home)...)); value != "" {
+		entry := len(jsonString(ReachedInstructionsKey)) + 1 + len(jsonString(value)) + 1
+		if size+entry <= maxEncodedTargets && len(targets) < 2*MaxWriteTargets+5 {
+			targets[ReachedInstructionsKey] = value
+			size += entry
+		}
+	}
 	if truncated {
 		targets[TruncatedKey] = "1"
 	}
@@ -1122,6 +1152,11 @@ func Decode(value string) (map[string]string, bool) {
 	}
 	if _, present := targets[StartupFilesKey]; present {
 		if _, ok := StartupFiles(targets); !ok {
+			return nil, false
+		}
+	}
+	if _, present := targets[ReachedInstructionsKey]; present {
+		if _, _, ok := ReachedInstructions(targets); !ok {
 			return nil, false
 		}
 	}

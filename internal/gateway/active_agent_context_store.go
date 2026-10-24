@@ -34,6 +34,7 @@ type instructionLoadRecord struct {
 	StartupFiles         map[string]string `json:"startup_files,omitempty"`
 	StartupKnown         bool              `json:"startup_known,omitempty"`
 	StartupDirs          []string          `json:"startup_dirs,omitempty"`
+	StartupDirIDs        map[string]string `json:"startup_dir_ids,omitempty"`
 }
 
 func (a *APIServer) instructionLoadDir() string {
@@ -68,6 +69,7 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 		Files: session.files, CaseInsensitiveFiles: session.caseInsensitiveFiles,
 		Identities: session.identities, StartupFiles: session.startupFiles,
 		StartupKnown: session.startupKnown, StartupDirs: session.startupDirs,
+		StartupDirIDs: session.startupDirIDs,
 	})
 	if err != nil || len(data) > maxInstructionLoadRecordBytes || os.MkdirAll(dir, 0o700) != nil {
 		return
@@ -168,24 +170,32 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 		}
 	}
 	if len(record.StartupFiles) > maxStartupInstructionFiles || len(record.StartupDirs) > maxStartupDirectories ||
-		(len(record.StartupFiles) > 0 || len(record.StartupDirs) > 0) && !record.StartupKnown {
+		(len(record.StartupFiles) > 0 || len(record.StartupDirs) > 0 || len(record.StartupDirIDs) > 0) && !record.StartupKnown {
 		return instructionLoadRecord{}, false
 	}
+	// The snapshot is read back exactly as instructionSnapshot records it
+	// (recordedStartupDir, recordedStartupFile): every instruction name,
+	// openclaw.json included, so one recorded file never drops the record.
 	for _, dir := range record.StartupDirs {
-		// A directory is recorded as instructionDirectoryKey spells it: the
-		// parent of an instruction file, so "c:" for a Windows drive root.
-		if dir == "" || strings.HasSuffix(dir, "/") && dir != "/" ||
-			!recordedInstructionFile(strings.TrimSuffix(dir, "/")+"/AGENTS.md") {
+		if !recordedStartupDir(dir) {
+			return instructionLoadRecord{}, false
+		}
+	}
+	for dir, identity := range record.StartupDirIDs {
+		if !slices.Contains(record.StartupDirs, dir) || !recordedFileIdentity(identity) {
 			return instructionLoadRecord{}, false
 		}
 	}
 	for file, identity := range record.StartupFiles {
-		if !recordedInstructionFile(file) || len(identity) > 64 || identity == "" ||
-			strings.Trim(identity, "0123456789abcdef:") != "" {
+		if !recordedStartupFile(file) || !recordedFileIdentity(identity) {
 			return instructionLoadRecord{}, false
 		}
 	}
 	return record, true
+}
+
+func recordedFileIdentity(identity string) bool {
+	return identity != "" && len(identity) <= 64 && strings.Trim(identity, "0123456789abcdef:") == ""
 }
 
 // recordedInstructionFile reports a loaded file as seedKey and seedSandboxKey

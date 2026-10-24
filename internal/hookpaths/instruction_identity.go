@@ -42,6 +42,100 @@ const (
 	WriteIdentityPrefix  = "\x00write-identity:"
 )
 
+// ReachedInstructionsKey carries the hook client's first sighting of the
+// directories a call reaches, read as the user before the call runs: each
+// directory's file system identity ("" when it is missing) and the
+// instruction files it holds. A gateway that cannot read the user's files
+// (ProtectHome) adds the directories its session had not reached yet to the
+// session's snapshot with them, so a file the session creates in a
+// directory it reached later stays the session's own (GAP-1363). On a
+// SessionStart it carries the start directories' identities.
+const ReachedInstructionsKey = "\x00reached-instructions"
+
+// MaxReachedDirectories bounds the directories one call's sighting adds;
+// the rest keep the call-time proof.
+const MaxReachedDirectories = 160
+
+type reachedInstructions struct {
+	Directories map[string]string `json:"d"`
+	Files       map[string]string `json:"f"`
+}
+
+// reachedEvidence is the ReachedInstructionsKey value for directories, or
+// "" when they hold more instruction files than a snapshot does.
+func reachedEvidence(directories []string) string {
+	sighting := reachedInstructions{Directories: make(map[string]string)}
+	var read []string
+	for _, directory := range directories {
+		if !filepath.IsAbs(directory) || len(directory) > MaxWriteTargetPathBytes {
+			continue
+		}
+		directory = filepath.Clean(directory)
+		if _, seen := sighting.Directories[directory]; seen {
+			continue
+		}
+		if len(read) == MaxReachedDirectories {
+			break
+		}
+		sighting.Directories[directory] = DirectoryIdentity(directory)
+		read = append(read, directory)
+	}
+	sighting.Files = InstructionFilesIn(read)
+	if len(read) == 0 || sighting.Files == nil {
+		return ""
+	}
+	encoded, err := json.Marshal(sighting)
+	if err != nil {
+		return ""
+	}
+	return string(encoded)
+}
+
+// ReachedInstructions decodes the ReachedInstructionsKey sighting: the
+// directories the client read, with their identities, and the instruction
+// files they held. Every file is in a listed directory.
+func ReachedInstructions(targets map[string]string) (directories, files map[string]string, ok bool) {
+	raw, present := targets[ReachedInstructionsKey]
+	if !present || len(raw) > maxEncodedTargets {
+		return nil, nil, false
+	}
+	var sighting reachedInstructions
+	if json.Unmarshal([]byte(raw), &sighting) != nil || len(sighting.Directories) == 0 ||
+		len(sighting.Directories) > MaxReachedDirectories || sighting.Files == nil ||
+		len(sighting.Files) > maxStartupInstructionFiles {
+		return nil, nil, false
+	}
+	for directory, identity := range sighting.Directories {
+		if !filepath.IsAbs(directory) || len(directory) > MaxWriteTargetPathBytes ||
+			filepath.Clean(directory) != directory || identity != "" && !validFileIdentity(identity) {
+			return nil, nil, false
+		}
+	}
+	for file, identity := range sighting.Files {
+		if !filepath.IsAbs(file) || len(file) > MaxWriteTargetPathBytes ||
+			filepath.Clean(file) != file || !validFileIdentity(identity) {
+			return nil, nil, false
+		}
+		if _, named := InstructionFileName(filepath.Base(file), instructionNameFold()); !named {
+			return nil, nil, false
+		}
+		if _, listed := sighting.Directories[filepath.Dir(file)]; !listed {
+			return nil, nil, false
+		}
+	}
+	return sighting.Directories, sighting.Files, true
+}
+
+// DirectoryIdentity is the identity of the directory path reaches,
+// following links. It is empty when the directory is missing.
+func DirectoryIdentity(path string) string {
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		return ""
+	}
+	return directoryIdentityForPath(path, info)
+}
+
 const maxStartupInstructionFiles = 256
 
 // IsSessionStartEvent covers the lifecycle spellings sent by the built-in
@@ -162,7 +256,7 @@ func validFileIdentity(identity string) bool {
 // for the cognitive-file proof only.
 func clientIdentityFact(key string) bool {
 	return key == InstructionIdentityKey || key == FileIdentitiesKey ||
-		key == StartupFilesKey || strings.HasPrefix(key, WriteIdentityPrefix) ||
+		key == StartupFilesKey || key == ReachedInstructionsKey || strings.HasPrefix(key, WriteIdentityPrefix) ||
 		strings.HasPrefix(key, LoadedIdentityPrefix)
 }
 

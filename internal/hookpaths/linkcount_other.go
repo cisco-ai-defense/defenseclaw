@@ -22,6 +22,9 @@ func fileIdentity(info os.FileInfo) string {
 
 func fileIdentityForPath(_ string, info os.FileInfo) string { return fileIdentity(info) }
 
+// directoryIdentityForPath is fileIdentityForPath for a directory.
+func directoryIdentityForPath(_ string, info os.FileInfo) string { return fileIdentity(info) }
+
 // linkCount returns the number of hard links to a file. An unknown count is
 // reported as more than one so the caller fails closed.
 func linkCount(_ string, info os.FileInfo) uint64 {
