@@ -799,6 +799,30 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 }
 
 func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	return verifyWindowsGenericManagedResultWithSessionAttestation(ctx, opts, true)
+}
+
+// VerifyWindowsManagedRegistration proves the Hermes hook that Setup wrote
+// before the guardian publishes machine readiness. It does not attest a
+// session-only HERMES_HOME; public Verify keeps that coverage refusal.
+func VerifyWindowsManagedRegistration(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "hermes") || secureClientHookDelivery() {
+		return Verify(ctx, opts)
+	}
+	if err := requireWindowsEnterpriseManagedAgentVersion(opts.ConnectorName, opts.AgentVersion); err != nil {
+		return InstallResult{}, err
+	}
+	if err := requireWindowsEnterpriseStandaloneAgentFloor(opts.ConnectorName, opts.AgentVersion); err != nil {
+		return InstallResult{}, err
+	}
+	result, err := verifyWindowsGenericManagedResultWithSessionAttestation(ctx, opts, false)
+	if err == nil {
+		err = requireWindowsStandaloneAgentVersionUnchanged(opts, result)
+	}
+	return result, err
+}
+
+func verifyWindowsGenericManagedResultWithSessionAttestation(ctx context.Context, opts InstallOptions, attestSession bool) (InstallResult, error) {
 	if err := windowsEnterpriseAdministratorCheck(); err != nil {
 		return InstallResult{}, err
 	}
@@ -822,7 +846,7 @@ func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions)
 		if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 			return err
 		}
-		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, true); err != nil {
+		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, attestSession); err != nil {
 			return err
 		}
 		lock, err := connector.LoadHookContractLockEntryForMode(

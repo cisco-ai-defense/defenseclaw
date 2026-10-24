@@ -22,6 +22,10 @@ import (
 	"github.com/spf13/cobra"
 )
 
+func enterpriseHookGuardianVerify(ctx context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+	return enterprisehooks.Verify(ctx, opts)
+}
+
 var enterpriseHookSIDProfilePath = func(string) (string, error) {
 	return "", fmt.Errorf("SID-only targets are supported only on native Windows")
 }

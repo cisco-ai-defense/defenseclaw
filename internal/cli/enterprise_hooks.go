@@ -597,7 +597,7 @@ type enterpriseHookReconcileRun struct {
 }
 
 var (
-	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
+	enterpriseHookReconcileVerifier         = enterpriseHookGuardianVerify
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
 	// enterpriseHookReconcileTargetRelease names the other DefenseClaw
