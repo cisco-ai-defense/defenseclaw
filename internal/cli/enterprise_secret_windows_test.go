@@ -15,6 +15,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,14 +143,14 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 			t.Fatal(err)
 		}
 	}
-	previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted
+	previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted, previousAbsentParentTrusted := windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted, windowsSecretAbsentConfigParentTrusted
 	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs
 	previousChangeSpool := windowsChangeSpool
 	previousManaged := managedHostWindowsStandalone
 	previousLive := windowsSecretGatewayLive
 	t.Cleanup(func() {
 		windowsSecretGatewayLive = previousLive
-		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted = previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted
+		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted, windowsSecretAbsentConfigParentTrusted = previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted, previousAbsentParentTrusted
 		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
 		windowsChangeSpool = previousChangeSpool
 		managedHostWindowsStandalone = previousManaged
@@ -177,6 +179,7 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return &fakeWindowsSecretRecovery{}, nil }
 	windowsSecretGatewayLive = func() (bool, error) { return true, nil }
 	windowsSecretConfigTrusted = func(string) error { return nil }
+	windowsSecretAbsentConfigParentTrusted = func(string) error { return nil }
 	windowsSecretLockBundleStore = func(_ context.Context, dir string, wait time.Duration) (func(), error) {
 		if dir != layout.LifecycleDir {
 			t.Errorf("bundle.lock taken in %q, want %q", dir, layout.LifecycleDir)
@@ -582,7 +585,7 @@ func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code s
 		}
 	}
 	allowed := map[string]bool{"elevation_required": true, "invalid_arguments": true, "not_installed": true, "lifecycle_busy": true,
-		"credential_in_use": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true,
+		"credential_in_use": true, "credential_changed": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true,
 		"rotation_confirmed": true, "confirmed_bundle_changed": true}
 	exit := commandExitCode(err)
 	if doc.SchemaVersion != 1 || doc.OK || doc.Action != action || doc.GatewayRestarted || len(doc.Errors) != 1 ||
@@ -1260,16 +1263,195 @@ func TestWindowsSecretUndoRotationRemovesWhatAFailedRotationAdded(t *testing.T) 
 	}
 	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
 	windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
-	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: other}, "")
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: other, ifStored: windowsTestSHA256("new-key")}, "")
 	windowsSecretFailureDoc(t, out, err, "remove", "rotation_confirmed")
 	if !windowsSecretStored(dir, name) {
 		t.Fatal("a refused put-back removed the credential")
 	}
-	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none"}, "")
+	// Without the config from before the rotation (--undo-config), or with
+	// another one, the reference stands (loop round 1, review at b97e9ab4).
+	for _, undoConfig := range []string{"", "none", windowsTestSHA256(standaloneGatewayCheckConfig)} {
+		out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: undoConfig, ifStored: windowsTestSHA256("new-key")}, "")
+		windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
+		if !windowsSecretStored(dir, name) {
+			t.Fatalf("a put-back with --undo-config %q removed a credential the installed config references", undoConfig)
+		}
+	}
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: windowsTestSHA256(cfg), ifStored: windowsTestSHA256("new-key")}, "")
 	if err != nil {
 		t.Fatalf("put-back: %v\n%s", err, out)
 	}
 	if windowsSecretStored(dir, name) {
 		t.Fatal("the put-back left the credential the failed rotation added")
+	}
+}
+
+func windowsTestSHA256(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+// Loop round 1 (review at b97e9ab4): the wrapper journaled an absent
+// credential and stored a new value with no bundle confirmed; before its
+// lifecycle finished, another ensure installed a config that uses the
+// value; the lifecycle then failed. The put-back (remove --undo-rotation
+// none) skipped credential_in_use, deleted the credential that config needs
+// and restarted the gateway. It now takes a referenced credential only while
+// the config journaled before the rotation (--undo-config) is installed;
+// otherwise credential_in_use, and the credential stays.
+func TestWindowsSecretUndoRotationKeepsACredentialALaterConfigUses(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := bundleStore
+	t.Cleanup(func() { bundleStore = previous })
+	store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	const name = "ai-defense-api-key"
+	unused := standaloneGatewayCheckConfig
+	uses := strings.Replace(unused, "enterprise:\n  profile: standalone\n",
+		"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n", 1)
+	if uses == unused {
+		t.Fatal("the test config has no enterprise profile line to extend")
+	}
+	reapplied := uses + "# installed again by another ensure\n"
+	for _, tc := range []struct {
+		name, before, after string
+		removed             bool
+	}{
+		{"a config installed since uses it", unused, uses, false},
+		{"a config installed since still uses it", uses, reapplied, false},
+		{"the config from before uses it", uses, uses, true},
+		{"a config installed since does not use it", uses, unused, true},
+		// A bundle confirmed since the rotation (here: the journaled one
+		// is no longer confirmed) proves it committed: rotation_confirmed,
+		// whatever config is installed now, so the wrapper retires its
+		// entry instead of keeping it for good.
+		{"a bundle confirmed since and a config installed since", unused, uses, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(layout.ConfigPath, []byte(tc.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(layout.ConfigPath, []byte(tc.after), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			undoRotation, code := "none", "credential_in_use"
+			if strings.HasPrefix(tc.name, "a bundle confirmed since") {
+				undoRotation, code = strings.Repeat("a", 64), "rotation_confirmed"
+			}
+			out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: undoRotation, undoConfig: windowsTestSHA256(tc.before), ifStored: windowsTestSHA256("new-key")}, "")
+			if tc.removed {
+				if err != nil {
+					t.Fatalf("put-back: %v\n%s", err, out)
+				}
+				if windowsSecretStored(dir, name) {
+					t.Fatal("the put-back left the credential the failed rotation added")
+				}
+				return
+			}
+			windowsSecretFailureDoc(t, out, err, "remove", code)
+			if code == "rotation_confirmed" {
+				if !windowsSecretStored(dir, name) {
+					t.Fatal("a put-back refused rotation_confirmed removed the credential")
+				}
+				return
+			}
+			if !strings.Contains(out, "not the config installed before the rotation") || strings.Contains(out, "new-key") {
+				t.Fatalf("refusal does not say why, or prints the value:\n%s", out)
+			}
+			if !windowsSecretStored(dir, name) {
+				t.Fatal("the put-back removed a credential a config installed since uses")
+			}
+		})
+	}
+}
+
+// A journaled absent credential can be restored when no config.yaml existed
+// before the rotation or at replay. The ordinary remove path still requires
+// an inspectable config.
+func TestWindowsSecretUndoRotationRemovesAnAddedCredentialWithoutConfig(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(layout.ConfigPath); err != nil {
+		t.Fatal(err)
+	}
+	previous := bundleStore
+	t.Cleanup(func() { bundleStore = previous })
+	store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	const name = "ai-defense-api-key"
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "state_invalid")
+	windowsSecretAbsentConfigParentTrusted = func(string) error { return errors.New("untrusted parent") }
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{
+		name: name, json: true, undoRotation: "none", undoConfig: "none", ifStored: windowsTestSHA256("new-key"),
+	}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "state_invalid")
+	if !windowsSecretStored(dir, name) {
+		t.Fatal("the failed rotation's credential was removed through an untrusted config parent")
+	}
+	windowsSecretAbsentConfigParentTrusted = func(string) error { return nil }
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{
+		name: name, json: true, undoRotation: "none", undoConfig: "none", ifStored: windowsTestSHA256("new-key"),
+	}, "")
+	if err != nil {
+		t.Fatalf("undo absent-config rotation: %v\n%s", err, out)
+	}
+	if windowsSecretStored(dir, name) {
+		t.Fatal("the failed rotation's added credential remains")
+	}
+}
+
+// Both put-back forms compare the exact value the rotation wrote under the
+// credential locks. A later direct administrator save must survive even if
+// the config and confirmed bundle still match the journal's older identity.
+func TestWindowsSecretUndoRotationKeepsALaterCredentialValue(t *testing.T) {
+	for _, action := range []string{"set", "remove"} {
+		t.Run(action, func(t *testing.T) {
+			dir := windowsSecretTestHarness(t)
+			layout, err := windowsSecretLayout()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if action == "remove" {
+				if err := os.Remove(layout.ConfigPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			previous := bundleStore
+			t.Cleanup(func() { bundleStore = previous })
+			store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+			bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+			const name = "ai-defense-api-key"
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+				t.Fatal(err)
+			}
+			credential := filepath.Join(dir, name)
+			if err := os.WriteFile(credential, []byte("admin-new-key"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			opts := enterpriseSecretOptions{name: name, json: true, undoRotation: "none", ifStored: windowsTestSHA256("new-key"), undoConfig: "none"}
+			input := ""
+			if action == "set" {
+				opts.fromStdin, input = true, "old-key\n"
+			}
+			out, err := runWindowsSecretCommand(t, action, opts, input)
+			windowsSecretFailureDoc(t, out, err, action, "credential_changed")
+			if raw, err := os.ReadFile(credential); err != nil || string(raw) != "admin-new-key" {
+				t.Fatalf("administrator's value changed to %q: %v", raw, err)
+			}
+		})
 	}
 }

@@ -433,11 +433,11 @@ func windowsEnterpriseStandaloneSetupCommand(action, configPath string, purge bo
 }
 
 // windowsEnterprisePendingInspectionStep is what status and verify say about
-// a pending transaction. Status named only not_ready and the installed
-// version, and verify said "run Repair", which an administrator shell cannot
-// use to recover it; a failed Setup names this same command.
+// a pending transaction. Its service states are reported separately: an
+// in-flight ensure can have all four services running. A failed Setup names
+// this same recovery command.
 func windowsEnterprisePendingInspectionStep(configPath string) string {
-	return "A lifecycle transaction is pending, so the DefenseClaw services stay stopped until it finishes or is recovered. " +
+	return "A lifecycle transaction is pending; check the reported service states until it finishes or is recovered. " +
 		"If no DefenseClaw Setup or lifecycle command is running now, run DefenseClaw Setup (this release or a newer one) as LocalSystem: " +
 		windowsEnterpriseStandaloneSetupCommand("ensure", configPath, false) + "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 }

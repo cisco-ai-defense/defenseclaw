@@ -28,8 +28,8 @@ const (
 )
 
 // Delegate synchronously invokes the exact installed full hook selected by
-// trusted active state. Any state or target failure is an intentional success
-// no-op, preserving cached hook behavior after disable or uninstall.
+// trusted active state. Disabled or removed state remains a no-op; an active
+// state's missing or unstartable full hook answers the invocation closed.
 func Delegate(
 	executable string,
 	args []string,
@@ -53,6 +53,7 @@ func delegateAt(
 	stderr io.Writer,
 ) int {
 	var command *exec.Cmd
+	var unavailable string
 	ctx, cancel := context.WithTimeout(context.Background(), delegationLockTimeout)
 	defer cancel()
 	err := WithGatewayStartLock(ctx, func() error {
@@ -64,6 +65,7 @@ func delegateAt(
 		}
 		locked, lockErr := LockVerifiedHook(state)
 		if lockErr != nil {
+			unavailable = "installed full hook could not be verified: " + lockErr.Error()
 			return nil
 		}
 		defer locked.Close()
@@ -84,12 +86,19 @@ func delegateAt(
 		// parent-owned generation marker, which is replaced with the exact state
 		// whose full-hook handle remains locked through CreateProcess.
 		if startErr := candidate.Start(); startErr != nil {
+			unavailable = "installed full hook could not be started: " + startErr.Error()
 			return nil
 		}
 		command = candidate
 		return nil
 	})
-	if err != nil || command == nil {
+	if err != nil {
+		unavailable = "stable hook lifecycle lock unavailable: " + err.Error()
+	}
+	if unavailable != "" {
+		return answerUnavailableDelegation(args, stdin, stdout, stderr, unavailable)
+	}
+	if command == nil {
 		return 0
 	}
 	if err := command.Wait(); err != nil {

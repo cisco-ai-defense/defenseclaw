@@ -16670,10 +16670,22 @@ function Complete-DefenseClawInstallRollbackIntent {
             )) `
             -Expected $quarantineAcl
         Assert-DefenseClawManagedTreeNoReparse -Root $path
+        $removalOptions = @{}
+        if ([string]$claim[0] -ceq 'InstallRoot' -and
+            (Test-DefenseClawStandaloneProfile)) {
+            # A hook process already started from this fresh install may
+            # briefly hold its executable after registrations were restored.
+            # The protected rollback receipt and this exact quarantined root
+            # authorize a bounded retry; no other root gets that window.
+            $removalOptions.RetryHeldFileMilliseconds = 60000
+            $removalOptions.ExpectedRootIdentity = [string]$rechecked.Identity
+            $removalOptions.ExpectedRootSecurityDescriptor = [byte[]]$rechecked.SecurityDescriptor
+        }
         Remove-DefenseClawManagedTree `
             -Path $path `
             -RequiredBase ([string]$claim[3]) `
-            -Label ([string]$claim[0])
+            -Label ([string]$claim[0]) `
+            @removalOptions
         if ($null -ne
             $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
                 $path
@@ -26405,6 +26417,28 @@ function Restore-DefenseClawRetainedStateAclsFromTransaction {
         -Expected $expected
 }
 
+function Test-DefenseClawManagedTreeRetryRoot {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$ExpectedIdentity,
+        [Parameter(Mandatory)][byte[]]$ExpectedSecurityDescriptor
+    )
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $current = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists($Path)
+    if ($null -eq $current) {
+        return $false
+    }
+    if ([string]$current.Identity -cne $ExpectedIdentity) {
+        throw 'transaction-created InstallRoot identity changed during rollback deletion'
+    }
+    if ([Convert]::ToBase64String([byte[]]$current.SecurityDescriptor) -cne
+        [Convert]::ToBase64String($ExpectedSecurityDescriptor)) {
+        throw 'transaction-created InstallRoot security descriptor changed during rollback deletion'
+    }
+    Assert-DefenseClawManagedTreeNoReparse -Root $Path
+    return $true
+}
+
 function Remove-DefenseClawManagedTree {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -26415,10 +26449,32 @@ function Remove-DefenseClawManagedTree {
         # specify the AF_UNIX socket's exact full path so a stale
         # socket-reparse-point does not trip the pre-remove reparse
         # veto. Callers on other trees leave it empty for strict mode.
-        [string]$AllowAFUnixSocketAt = ''
+        [string]$AllowAFUnixSocketAt = '',
+        [int]$RetryHeldFileMilliseconds = 0,
+        [string]$ExpectedRootIdentity = '',
+        [byte[]]$ExpectedRootSecurityDescriptor
     )
+    if ($RetryHeldFileMilliseconds -lt 0 -or
+        $RetryHeldFileMilliseconds -gt 60000) {
+        throw 'rollback InstallRoot holder retry must be between 0 and 60000 milliseconds'
+    }
+    if ($RetryHeldFileMilliseconds -gt 0 -and
+        ($Label -cne 'InstallRoot' -or
+            -not (Test-DefenseClawStandaloneProfile) -or
+            $ExpectedRootIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$' -or
+            $null -eq $ExpectedRootSecurityDescriptor -or
+            $ExpectedRootSecurityDescriptor.Length -eq 0)) {
+        throw 'rollback InstallRoot holder retry requires the standalone profile and a recorded root identity and descriptor'
+    }
     $safe = Assert-DefenseClawSafeRoot -Path $Path -Label $Label -RequiredBase $RequiredBase
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
+        return
+    }
+    if ($RetryHeldFileMilliseconds -gt 0 -and
+        -not (Test-DefenseClawManagedTreeRetryRoot `
+            -Path $safe `
+            -ExpectedIdentity $ExpectedRootIdentity `
+            -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
         return
     }
     Assert-DefenseClawManagedTreeNoReparse `
@@ -26456,6 +26512,39 @@ function Remove-DefenseClawManagedTree {
             $lastError = $_
             if ($attempt -lt 5) {
                 Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds (500 * $attempt)
+            }
+        }
+    }
+    if ($RetryHeldFileMilliseconds -gt 0 -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
+        # An executing hook answers AccessDenied even to SYSTEM. Extend the
+        # window only after Restart Manager proves a real holder; a deny ACE
+        # or an unqueryable root keeps the ordinary refusal. The protected
+        # rollback intent remains until the root is actually absent.
+        $holders = @(Get-DefenseClawInstallRootHolders `
+            -InstallRoot $safe `
+            -FailOnQueryError)
+        if ($holders.Count -gt 0) {
+            $clock = [Diagnostics.Stopwatch]::StartNew()
+            while ($clock.ElapsedMilliseconds -lt $RetryHeldFileMilliseconds) {
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
+                if (-not (Test-DefenseClawManagedTreeRetryRoot `
+                    -Path $safe `
+                    -ExpectedIdentity $ExpectedRootIdentity `
+                    -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
+                    return
+                }
+                try {
+                    Microsoft.PowerShell.Management\Remove-Item `
+                        -LiteralPath $target `
+                        -Recurse `
+                        -Force `
+                        -ErrorAction Stop
+                    return
+                }
+                catch {
+                    $lastError = $_
+                }
             }
         }
     }

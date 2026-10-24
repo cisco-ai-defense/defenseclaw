@@ -82,7 +82,10 @@ var (
 	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
 		return exec.Command(executable, "enterprise", "secret", "recover-gateway")
 	}
-	windowsSecretConfigTrusted = managed.ValidateTrustedConfigPath
+	windowsSecretConfigTrusted             = managed.ValidateTrustedConfigPath
+	windowsSecretAbsentConfigParentTrusted = func(path string) error {
+		return managed.ValidateTrustedDirectoryAncestor(path, "installed config directory")
+	}
 	// windowsSecretLockBundleStore, windowsSecretLifecycleLockPath and
 	// windowsSecretLifecycleLock are the two locks set and remove take.
 	windowsSecretLockBundleStore   = lockWindowsBundleStoreWithin
@@ -305,17 +308,30 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, err
 	}
 	var installedConfig []byte
+	var inUse error
 	if action == "remove" {
-		installedConfig, err = readWindowsSecretInstalledConfig(layout)
+		installedConfig, err = readWindowsSecretInstalledConfig(layout, opts.undoRotation != "" && opts.undoConfig == "none")
 		if err != nil {
 			return windowsSecretChange{}, err
 		}
 		// A put-back (--undo-rotation) removes what a failed rotation added
-		// to the config confirmed before it, which may reference the
-		// credential with no value stored (checkSecretTransaction decides).
-		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && opts.undoRotation == "" {
-			return windowsSecretChange{}, secretFailed("credential_in_use", windowsSecretExitFailure,
-				fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at))
+		// to the config installed before it, which may reference the
+		// credential with no value stored: only while that same config is
+		// installed (--undo-config, read under the lifecycle lock), and
+		// checkSecretTransaction decides the rest. A config installed since
+		// may use the stored value, so it keeps it.
+		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && !undoRotationOnConfig(opts, installedConfig) {
+			err := fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at)
+			if opts.undoRotation != "" {
+				err = fmt.Errorf("the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)
+			}
+			inUse = secretFailed("credential_in_use", windowsSecretExitFailure, err)
+			// A put-back first learns whether its rotation committed
+			// (rotation_confirmed, below), the only refusal that retires
+			// the wrapper's entry; neither refusal changes anything.
+			if opts.undoRotation == "" {
+				return windowsSecretChange{}, inUse
+			}
 		}
 	}
 	// Start an independent child before changing credentials, but only arm it
@@ -338,7 +354,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
-	if opts.ifConfirmed != "" || opts.undoRotation != "" {
+	if opts.ifConfirmed != "" || opts.undoRotation != "" || opts.ifStored != "" {
 		var stored []byte
 		entry, raw, readErr := store.openCredential(opts.name)
 		if readErr == nil {
@@ -348,6 +364,9 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
 			return windowsSecretChange{}, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
 		}
+	}
+	if inUse != nil {
+		return windowsSecretChange{}, inUse
 	}
 	// A change this computer could not audit is not made: the spool must
 	// hold room for its change event before the credential is written or
@@ -445,10 +464,26 @@ func requireWindowsSecretDeployment() error {
 // readWindowsSecretInstalledConfig proves the active config can be inspected
 // before remove changes the credential. A missing, unreadable, or malformed
 // config cannot prove that the key is unused (GAP-0674, GAP-1507).
-func readWindowsSecretInstalledConfig(layout managed.StandaloneLayout) ([]byte, error) {
+func readWindowsSecretInstalledConfig(layout managed.StandaloneLayout, allowAbsent bool) ([]byte, error) {
 	if strings.TrimSpace(layout.ConfigPath) == "" {
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
 			errors.New("cannot locate the installed config; nothing was removed"))
+	}
+	if allowAbsent {
+		// Only an absent-credential undo that journaled no config may treat
+		// ENOENT as an empty reference roster. The stored-value comparison
+		// still runs under the same locks before removal. Ordinary remove and
+		// a journal from a prior config keep the state_invalid refusal.
+		if _, err := os.Lstat(layout.ConfigPath); errors.Is(err, os.ErrNotExist) {
+			if err := windowsSecretAbsentConfigParentTrusted(filepath.Dir(layout.ConfigPath)); err != nil {
+				return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+					fmt.Errorf("cannot trust the directory of the absent installed config %s (%v); nothing was removed", layout.ConfigPath, err))
+			}
+			return nil, nil
+		} else if err != nil {
+			return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
+				fmt.Errorf("cannot inspect the installed config %s (%v); nothing was removed", layout.ConfigPath, err))
+		}
 	}
 	if err := windowsSecretConfigTrusted(layout.ConfigPath); err != nil {
 		return nil, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure,
