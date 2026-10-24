@@ -1818,6 +1818,9 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))
 		w.recordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
+		if w.keepsUnverifiedMCPServer(evt, targetType, connector, result, err) {
+			return w.keepUnverifiedMCPServer(ctx, evt, targetType, s.Name(), err)
+		}
 		// Avarice F-3187: a scanner error must NOT leave the
 		// freshly-detected install in place. The legacy code
 		// recorded `scan-error` and returned without quarantine,
@@ -2470,6 +2473,54 @@ func (w *InstallWatcher) mcpNameSharedByAnotherServer(evt InstallEvent) bool {
 		}
 	}
 	return false
+}
+
+// keepsUnverifiedMCPServer reports an MCP server whose scan ended without a
+// verdict and that scanners.mcp_scanner.unverified_server warn keeps, as mcp
+// set adds it (GAP-1195): the scan did not finish (a timeout, a launcher or
+// scanner that exited, an unreachable server) and reported no finding, the
+// scanner did not refuse the server's definition, and the live policy
+// neither refuses unverified servers (block, or unset on a managed
+// standalone deployment) nor blocks this server. Secure Client keeps its
+// fail-closed admission.
+func (w *InstallWatcher) keepsUnverifiedMCPServer(evt InstallEvent, targetType, connector string, result *scanner.ScanResult, err error) bool {
+	if evt.Type != InstallMCP || w.secureClientActive() || scanner.MCPScanRefused(err) ||
+		(result != nil && len(result.Findings) > 0) {
+		return false
+	}
+	cfg := w.admissionPolicySnapshot().Config
+	if cfg == nil || cfg.MCPUnverifiedServerBlocks() {
+		return false
+	}
+	decision := cfg.EvaluateAssetPolicy(w.withMCPDefinition(cfg, evt, config.AssetPolicyInput{
+		TargetType: targetType, Name: evt.Name, DeclaredNames: declaredAssetNames(cfg, evt),
+		Connector: connector, SourcePath: evt.Path, RuntimeSurface: "watcher",
+	}))
+	if decision.Enabled && decision.RawAction == "block" && decision.Action == "block" {
+		return false
+	}
+	return !w.admissionInputFor(cfg, evt, targetType, connector).BlockListed()
+}
+
+// unverifiedMCPReason leads the reason of an MCP server kept unverified.
+const unverifiedMCPReason = "scan did not finish, kept unverified (scanners.mcp_scanner.unverified_server: warn): "
+
+// keepUnverifiedMCPServer keeps an MCP server whose scan did not finish: a
+// MEDIUM audit row says so, a block an earlier failed scan left is released,
+// and with no baseline the rescan scans it again, so a later verdict decides.
+func (w *InstallWatcher) keepUnverifiedMCPServer(ctx context.Context, evt InstallEvent, targetType, scannerName string, err error) AdmissionResult {
+	reason := unverifiedMCPReason + err.Error()
+	w.releaseScanFailureBlock(evt, targetType)
+	_ = w.logger.LogEventCtx(ctx, audit.Event{
+		Action:   string(audit.ActionInstallAllowed),
+		Target:   evt.Path,
+		Actor:    "defenseclaw",
+		Details:  fmt.Sprintf("type=%s reason=unverified scanner=%s %s", targetType, scannerName, reason),
+		Severity: "MEDIUM",
+	})
+	fmt.Fprintf(os.Stderr, "[watch] %s %s: %s\n", evt.Type, evt.Name, reason)
+	w.recordAdmission(ctx, "scan-error", targetType)
+	return AdmissionResult{Event: evt, Verdict: VerdictScanError, Reason: reason}
 }
 
 func (w *InstallWatcher) recordScanFailureBlock(evt InstallEvent, targetType, reason string) {
