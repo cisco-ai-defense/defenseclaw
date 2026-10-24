@@ -94,7 +94,7 @@ The gateway ships three rule packs, `default`, `strict` and `permissive`, under 
        my-pack: {path: /etc/defenseclaw/policies/guardrail/my-pack, digest: "sha256:<digest>"}
    ```
 
-   The lifecycle refuses a pack that does not exist or whose digest does not match. A custom pack switch through `ensure` can apply in the running gateway without a restart when it changes only hot config values, the existing gateway is healthy, and that gateway confirms the new policy digest. Otherwise, `ensure` restarts the gateway to load the valid change, including when a hot reload cannot be confirmed. If the gateway cannot load the pack, `ensure` fails and the previous config stays in force.
+   The lifecycle refuses a pack that does not exist or whose digest does not match. On a normal `ensure` run (without `--no-start`), a custom pack switch can apply in an already running gateway without a restart when it changes only hot config values, the existing gateway is healthy, and that gateway confirms the new policy digest. If the gateway was running but those conditions are not met, `ensure` restarts it to load the valid change, including when a hot reload cannot be confirmed. If the gateway was stopped, `ensure` starts it. With `--no-start`, `ensure` does not start or restart the gateway. If the gateway cannot load the pack, `ensure` fails and the previous config stays in force.
 
 To change a pack that is in use, create the edited copy in a new folder (for example `my-pack-v2`), validate it, and switch `rule_pack` and `custom_packs` to it, so `ensure` applies it with rollback. A pack edited in place no longer matches its pinned digest, so the gateway refuses it until you pin the new digest.
 

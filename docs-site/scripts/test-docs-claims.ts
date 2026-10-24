@@ -53,12 +53,16 @@ describe('Managed custom rule-pack apply', () => {
     const hotApply = source('internal/enterpriseunix/hotapply.go')
       .split('func (l *lifecycle) hotConfigApply(')[1]?.split('// installedConfigReplaced')[0] ?? '';
     assert.match(hotApply, /l\.opts\.Action != ActionEnsure/);
+    assert.match(hotApply, /l\.opts\.NoStart/);
     assert.match(hotApply, /configwrite\.ManagedConfigRestartRequired\(/);
     assert.match(hotApply, /!env\.Services\.Active\(ctx, gateway\)/);
     assert.match(hotApply, /gatewayPolicyDigest\(body\) != ""/);
     const lifecycle = source('internal/enterpriseunix/lifecycle.go');
     assert.match(lifecycle, /hot := l\.hotConfigApply\(ctx, record, p, adopting\)/);
     assert.match(lifecycle, /if gateway, ok := gatewayUnitOf\(units\); hot && ok \{\s*keep\[gateway\.Name\] = true/);
+    assert.match(lifecycle, /if !l\.opts\.NoStart \{\s*if err := l\.activate\(ctx, units, restartSockets, hot, p\)/);
+    const activate = lifecycle.split('func (l *lifecycle) activate(')[1]?.split('// unitActivationError')[0] ?? '';
+    assert.match(activate, /if err := env\.Services\.Start\(ctx, unit\)/);
     const settle = source('internal/enterpriseunix/hotapply.go')
       .split('func (l *lifecycle) settleHotGateway(')[1]?.split('func (', 1)[0] ?? '';
     assert.match(settle, /if applied \{[\s\S]*?gatewayKeptRunning = true/);
@@ -66,7 +70,10 @@ describe('Managed custom rule-pack apply', () => {
 
     const reference = page('enterprise/configure/reference.mdx');
     const customPack = reference.split('### Custom rule packs')[1]?.split('### Network proxy')[0] ?? '';
-    assert.match(customPack, /custom pack switch.{0,250}without a restart.{0,250}otherwise.{0,120}restarts the gateway/i);
+    assert.match(customPack, /without `--no-start`.{0,250}custom pack switch.{0,250}without a restart/i);
+    assert.match(customPack, /gateway was running.{0,250}restarts it/i);
+    assert.match(customPack, /gateway was stopped.{0,100}starts it/i);
+    assert.match(customPack, /with `--no-start`.{0,100}does not start or restart/i);
     assert.match(customPack, /hot reload cannot be confirmed/i);
     assert.doesNotMatch(customPack, /applies the new pack in the running gateway without a restart/);
   });
