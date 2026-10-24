@@ -31,6 +31,7 @@ const (
 // those same users (stubSignedInSessions adds a disconnected one).
 func stubActiveSessions(t *testing.T, sessions map[string][]string) {
 	t.Helper()
+	stubWindowsSurfaceReadAs(t)
 	previous := windowsActiveSessionGroups
 	t.Cleanup(func() { windowsActiveSessionGroups = previous })
 	windowsActiveSessionGroups = func() (map[string][]string, error) {
@@ -45,6 +46,15 @@ func stubActiveSessions(t *testing.T, sessions map[string][]string) {
 		sids = append(sids, sid)
 	}
 	stubSignedInSessions(t, sids...)
+}
+
+// Synthetic signed-in sessions must also be able to read their own profile.
+// Tests that exercise failed impersonation replace this stub explicitly.
+func stubWindowsSurfaceReadAs(t *testing.T) {
+	t.Helper()
+	previous := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previous })
 }
 
 // stubSignedInSessions stubs the users who have a session, active or
