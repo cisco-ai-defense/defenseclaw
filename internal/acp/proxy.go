@@ -155,8 +155,11 @@ type proxyState struct {
 	pendingAgent  map[string]string
 	activePrompt  string
 	activeSession string
-	turnBuffer    []byte
-	turnFrames    []json.RawMessage
+	// promptDelivered distinguishes a refused request from a failure after
+	// the agent may already have performed tool actions.
+	promptDelivered bool
+	turnBuffer      []byte
+	turnFrames      []json.RawMessage
 	// abortedPrompts holds prompts the guard ended for the editor while the
 	// agent was still working on them; the agent's late answer is dropped
 	// instead of failing the whole proxy as an unmatched response.
@@ -326,6 +329,7 @@ func (s *proxyState) track(msg Message, direction Direction, mode Mode) (string,
 			}
 			s.activePrompt = key
 			s.activeSession = promptSessionID(msg)
+			s.promptDelivered = false
 			delete(s.mutedSessions, s.activeSession)
 			s.turnBuffer = s.turnBuffer[:0]
 			s.turnFrames = s.turnFrames[:0]
@@ -379,38 +383,57 @@ func (s *proxyState) bufferOrFlush(
 	direction Direction,
 	matchedMethod string,
 	frame []byte,
-) ([]byte, json.RawMessage, string, error) {
+) ([]byte, json.RawMessage, string, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if direction != AgentToClient || s.activePrompt == "" {
-		return append(frame, '\n'), nil, "", nil
+		return append(frame, '\n'), nil, "", false, nil
 	}
 	// Agent requests must be delivered after evaluation so the editor can
 	// answer them; buffering them would deadlock the turn. Non-prompt
 	// responses likewise belong to an independently pending client request.
 	if msg.IsRequest() || (msg.Method == "" && matchedMethod != "session/prompt") {
-		return append(frame, '\n'), nil, "", nil
+		return append(frame, '\n'), nil, "", false, nil
 	}
 	if len(s.turnBuffer)+len(frame)+1 > MaxTurnBuffer {
-		return nil, nil, "", errors.New("ACP turn output exceeded the bounded action-mode buffer")
+		return nil, nil, "", false, errors.New("ACP turn output exceeded the bounded action-mode buffer")
 	}
 	s.turnBuffer = append(s.turnBuffer, frame...)
 	s.turnBuffer = append(s.turnBuffer, '\n')
 	s.turnFrames = append(s.turnFrames, append(json.RawMessage(nil), msg.Raw...))
 	if matchedMethod != "session/prompt" || msg.IDKey() != s.activePrompt {
-		return nil, nil, "", nil
+		return nil, nil, "", false, nil
 	}
 	out := append([]byte(nil), s.turnBuffer...)
 	aggregate, err := BuildTurnEvaluationPayload(s.turnFrames)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", false, err
 	}
 	session := s.activeSession
+	delivered := s.promptDelivered
 	s.turnBuffer = s.turnBuffer[:0]
 	s.turnFrames = s.turnFrames[:0]
 	s.activePrompt = ""
 	s.activeSession = ""
-	return out, aggregate, session, nil
+	s.promptDelivered = false
+	return out, aggregate, session, delivered, nil
+}
+
+func (s *proxyState) markPromptDelivered(msg Message) {
+	if msg.Method != "session/prompt" || !msg.IsRequest() {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.activePrompt == msg.IDKey() {
+		s.promptDelivered = true
+	}
+}
+
+func (s *proxyState) deliveredActivePrompt() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.activePrompt != "" && s.promptDelivered
 }
 
 // finishIfPromptResponse ends the active turn when msg is the agent's own
@@ -426,6 +449,7 @@ func (s *proxyState) finishIfPromptResponse(msg Message) (string, bool) {
 	session := s.activeSession
 	s.activePrompt = ""
 	s.activeSession = ""
+	s.promptDelivered = false
 	s.turnBuffer = s.turnBuffer[:0]
 	s.turnFrames = s.turnFrames[:0]
 	return session, true
@@ -457,6 +481,7 @@ func (s *proxyState) abortPrompt() (json.RawMessage, string) {
 	}
 	s.activePrompt = ""
 	s.activeSession = ""
+	s.promptDelivered = false
 	s.turnBuffer = s.turnBuffer[:0]
 	s.turnFrames = s.turnFrames[:0]
 	return id, session
@@ -617,6 +642,7 @@ func (s *proxyState) reject(msg Message, direction Direction) {
 	if msg.Method == "session/prompt" && s.activePrompt == msg.IDKey() {
 		s.activePrompt = ""
 		s.activeSession = ""
+		s.promptDelivered = false
 		s.turnBuffer = s.turnBuffer[:0]
 		s.turnFrames = s.turnFrames[:0]
 	}
@@ -646,6 +672,18 @@ func unavailableReason(err error) string {
 		return gatewayNotReadyReason
 	}
 	return evaluationUnavailableReason
+}
+
+// postDeliveryRefusalReason is for an ACP check that failed after the guard
+// forwarded the prompt. A tool may already have run, so the editor must not
+// say the turn was never delivered or suggest retrying it blindly.
+func postDeliveryRefusalReason(managed bool) string {
+	next := "Run defenseclaw acp status if checking keeps failing."
+	if managed {
+		next = "Contact your administrator if checking keeps failing."
+	}
+	return "DefenseClaw could not check the agent's response. Your prompt may already have reached the agent. " +
+		"Tool actions may have run. Inspect their results before retrying. " + next
 }
 
 // authenticationFailure is an evaluation that failed authentication: an
@@ -1001,7 +1039,11 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			if opts.Mode == ModeAction || observeRefuses(opts, state, msg, evalErr) {
 				// Fail closed for this frame only, exactly as for a block.
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
-				verdict = Verdict{Action: "block", Reason: state.refusalReason(opts, evalErr)}
+				reason := state.refusalReason(opts, evalErr)
+				if direction == AgentToClient && state.deliveredActivePrompt() {
+					reason = postDeliveryRefusalReason(opts.Managed)
+				}
+				verdict = Verdict{Action: "block", Reason: reason}
 				if opts.Mode != ModeAction {
 					if err := writeBlock(state, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
 						return err
@@ -1024,7 +1066,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			logf(opts.Stderr, "[defenseclaw-acp] would block %s %s: %s\n", direction, msg.Method, verdict.Reason)
 		}
 		if opts.Mode == ModeAction {
-			out, aggregate, session, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)
+			out, aggregate, session, delivered, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)
 			if bufferErr != nil {
 				return bufferErr
 			}
@@ -1045,7 +1087,11 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 						return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
 					}
 					logf(opts.Stderr, "[defenseclaw-acp] completed-turn evaluation unavailable, refused the turn: %v\n", turnErr)
-					turnVerdict = Verdict{Action: "block", Reason: state.refusalReason(opts, turnErr)}
+					reason := state.refusalReason(opts, turnErr)
+					if delivered {
+						reason = postDeliveryRefusalReason(opts.Managed)
+					}
+					turnVerdict = Verdict{Action: "block", Reason: reason}
 				}
 				if turnVerdict.Action == "block" || turnVerdict.Action == "confirm" {
 					if _, err := dst.Write(blockedTurnFrames(msg.ID, session, turnVerdict.Reason)); err != nil {
@@ -1055,12 +1101,23 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				}
 			}
 			if len(out) > 0 {
+				if direction == ClientToAgent {
+					state.markPromptDelivered(msg)
+				}
 				if _, err := dst.Write(out); err != nil {
 					return err
 				}
 			}
-		} else if _, err := fmt.Fprintln(dst, string(frame)); err != nil {
-			return err
+		} else {
+			if direction == ClientToAgent {
+				state.markPromptDelivered(msg)
+			}
+			if _, err := fmt.Fprintln(dst, string(frame)); err != nil {
+				return err
+			}
+		}
+		if direction == AgentToClient && opts.Mode == ModeObserve && matchedMethod == "session/prompt" {
+			state.finishIfPromptResponse(msg)
 		}
 		if direction == ClientToAgent && msg.Method == "session/prompt" && msg.IsRequest() {
 			state.armSilenceNotice(opts, promptSessionID(msg), rejectDst)
