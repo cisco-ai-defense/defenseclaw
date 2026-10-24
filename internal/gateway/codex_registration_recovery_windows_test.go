@@ -399,7 +399,9 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/codex/hook", bytes.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:49152"
-	req.Header.Set("Authorization", "Bearer "+hookToken)
+	// Teardown revoked the first scoped token; re-addition issued the one
+	// published to the recovered hook.
+	req.Header.Set("Authorization", "Bearer "+restartOpts.HookAPIToken)
 	setTestCodexHookBinding(req, "SessionStart", restartOpts.HookContractID)
 	recorder := httptest.NewRecorder()
 	requestDone := make(chan struct{})
@@ -525,7 +527,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 		bytes.NewReader(body),
 	)
 	lockRepairRequest.RemoteAddr = "127.0.0.1:49153"
-	lockRepairRequest.Header.Set("Authorization", "Bearer "+hookToken)
+	lockRepairRequest.Header.Set("Authorization", "Bearer "+restartOpts.HookAPIToken)
 	setTestCodexHookBinding(lockRepairRequest, "SessionStart", restartOpts.HookContractID)
 	lockRepairRecorder := httptest.NewRecorder()
 	api.tokenAuth(api.handleAgentHook("codex")).ServeHTTP(lockRepairRecorder, lockRepairRequest)
