@@ -1497,23 +1497,18 @@ type MCPScannerConfig struct {
 	// UnverifiedServer is what `defenseclaw mcp set` and the gateway's
 	// install admission do with a server they could not verify (its scan did
 	// not finish): "warn" adds or keeps it with a warning and an audit record,
-	// "block" refuses it. Unset is "warn", and "block" on a managed standalone
-	// deployment (MCPUnverifiedServerBlocks).
+	// "block" refuses it. Unset is "warn" in the balanced preset.
 	UnverifiedServer string `mapstructure:"unverified_server" yaml:"unverified_server,omitempty"`
 }
 
 // MCPUnverifiedServerBlocks reports whether an MCP server whose scan did not
-// finish is refused: scanners.mcp_scanner.unverified_server is block, or it
-// is unset on a managed standalone deployment. It reads the setting as the
-// CLI's mcp set does (GAP-1195).
+// finish is refused: scanners.mcp_scanner.unverified_server is block.
+// It reads the setting as the CLI's mcp set does (GAP-1195).
 func (c *Config) MCPUnverifiedServerBlocks() bool {
 	if c == nil {
 		return true
 	}
-	if value := strings.ToLower(strings.TrimSpace(c.Scanners.MCPScanner.UnverifiedServer)); value != "" {
-		return value == "block"
-	}
-	return c.StandaloneEnterprise()
+	return strings.EqualFold(strings.TrimSpace(c.Scanners.MCPScanner.UnverifiedServer), "block")
 }
 
 // AnalyzersArg renders EffectiveAnalyzers as the scanner's comma-separated

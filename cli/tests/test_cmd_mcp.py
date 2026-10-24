@@ -1995,17 +1995,14 @@ class TestMCPSetUnverifiedServer(MCPCommandTestBase):
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
-    def test_managed_device_refuses_by_default(self, mock_scan, mock_set):
+    def test_managed_device_warns_by_default(self, mock_scan, mock_set):
         from defenseclaw.scanner.mcp import MCPStdioLaunchError
 
         mock_scan.side_effect = MCPStdioLaunchError(self._DID_NOT_FINISH[0])
         with patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=True):
             result = self._set("--connector", "codex")
-            self.assertEqual(result.exit_code, 1, result.output)
-            mock_set.assert_not_called()
-            self.app.cfg.scanners.mcp_scanner.unverified_server = "warn"
-            result = self._set("--connector", "codex")
             self.assertEqual(result.exit_code, 0, result.output)
+            mock_set.assert_called_once()
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")

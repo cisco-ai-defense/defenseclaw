@@ -522,7 +522,7 @@ scanners:
 | `judge_source` | `inherit` | `inherit` uses the top-level `llm:` block. `override` uses `scanners.mcp_scanner.llm`. |
 | `llm` | empty | The scanner's own judge settings. It must be empty with `inherit` and needs a `model` with `override`. |
 | `scan_prompts`, `scan_resources`, `scan_instructions` | `false` | Also scan the server's prompts, resources and instructions on every scan. |
-| `unverified_server` | `warn` | What `mcp set` and the gateway's install admission do when the scan did not finish (a timeout, a launcher that exited, an unreachable URL) or an OpenCode command is outside the trusted install prefixes. `warn` adds or keeps the server with a warning and an audit record; `block` refuses it, and the gateway blocks and disables it (strict). |
+| `unverified_server` | `warn` | What `mcp set` and the gateway's install admission do when the scan did not finish (a timeout, an unresolved hostname, a launcher that exited, an unreachable URL) or an OpenCode command is outside the trusted install prefixes. `warn` adds or keeps the server with a warning and an audit record, including on managed standalone hosts; `block` refuses it, and the gateway blocks and disables it (strict). Secure Client uses separate closed admission. |
 
 The Cisco AI Defense endpoint and key are not scanner keys. They stay in `cisco_ai_defense` (`endpoint`, `api_key_env`, `timeout_ms`), shared with the guardrail.
 

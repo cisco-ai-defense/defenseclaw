@@ -2538,14 +2538,11 @@ def _unverified_server_blocks(cfg) -> bool:
     A server is unverified when its pre-add scan did not finish (a timeout, a
     launcher that exited, an unreachable URL) or, for OpenCode, when its
     command is outside the trusted install prefixes. ``warn`` adds it with a
-    warning and an audit record; ``block`` refuses it. Unset is ``warn``, and
-    ``block`` on a managed standalone device.
+    warning and an audit record; ``block`` refuses it. Unset is ``warn``.
     """
     scanners = getattr(cfg, "scanners", None)
     value = str(getattr(getattr(scanners, "mcp_scanner", None), "unverified_server", "") or "").strip().lower()
-    if value:
-        return value == "block"
-    return asset_lists.is_managed_standalone(cfg)
+    return value == "block"
 
 
 def _scan_did_not_finish(failures: list[Exception]) -> bool:

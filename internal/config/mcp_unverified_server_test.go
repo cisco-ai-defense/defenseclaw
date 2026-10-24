@@ -8,8 +8,7 @@ import "testing"
 
 // GAP-1195 (review loop 2): the gateway reads scanners.mcp_scanner.
 // unverified_server as mcp set does: an explicit value wins, unset is warn,
-// and block on a managed standalone deployment (Secure Client keeps its own
-// admission).
+// including managed standalone (Secure Client keeps its own admission).
 func TestMCPUnverifiedServerBlocks(t *testing.T) {
 	standalone := func(value string) *Config {
 		return &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"},
@@ -26,7 +25,7 @@ func TestMCPUnverifiedServerBlocks(t *testing.T) {
 		{"per-user unset", perUser(""), false},
 		{"per-user warn", perUser("warn"), false},
 		{"per-user block", perUser(" Block "), true},
-		{"standalone unset", standalone(""), true},
+		{"standalone unset", standalone(""), false},
 		{"standalone warn", standalone("warn"), false},
 		{"standalone block", standalone("block"), true},
 		{"no config", nil, true},

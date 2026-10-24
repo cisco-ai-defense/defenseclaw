@@ -45,7 +45,7 @@ func (s *erringScanner) Scan(context.Context, string) (*scanner.ScanResult, erro
 // blocked and disabled it when its own scan failed the same way, because it
 // never read scanners.mcp_scanner.unverified_server. The watcher keeps such a
 // server under warn (audited, scanned again later) and blocks it under block,
-// unset on a managed standalone deployment, a scanner refusal of the server's
+// a scanner refusal of the server's
 // definition, a partial scan with findings, and a block the policy adds while
 // the scan runs. A skill whose scan fails is still blocked in every tier.
 func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
@@ -65,7 +65,7 @@ func TestUnverifiedMCPServerFollowsTheUnverifiedServerSetting(t *testing.T) {
 		{name: "default exit is kept", err: fmt.Errorf("mcp-scanner exited 1"), wantKept: true},
 		{name: "warn on managed standalone is kept", setting: "warn", managed: true, err: timeout, wantKept: true},
 		{name: "block is blocked", setting: "block", err: timeout},
-		{name: "unset on managed standalone is blocked", managed: true, err: timeout},
+		{name: "unset on managed standalone is kept", managed: true, err: timeout, wantKept: true},
 		{name: "scanner refusal is blocked", err: refusal},
 		{name: "child refusal text is blocked", err: fmt.Errorf("scanner: mcp-scanner exited 1: ValueError: refusing to scan local MCP server %q: node is not npx or uvx", "context7")},
 		{name: "partial scan with findings is blocked", err: fmt.Errorf("mcp-scanner exited 3"),
