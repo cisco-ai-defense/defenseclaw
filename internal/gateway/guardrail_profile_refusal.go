@@ -12,8 +12,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// A profile decision that depends on an unproven identity fact or an
-// uncompiled meet is refused on every blocking surface. Name remains
+// A profile decision that depends on an unproven identity fact is refused
+// on every blocking surface. Name remains
 // diagnostic context for surfaces whose events cannot be blocked.
 
 func profileRefusal(ctx context.Context) string {
