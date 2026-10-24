@@ -23,6 +23,11 @@ func actionWindowsExpandShortPath(value string) (string, bool) {
 		n, err := windows.GetLongPathName(name, &buf[0], uint32(len(buf)))
 		if err == nil && n > 0 && n < uint32(len(buf)) {
 			suffix := strings.TrimPrefix(full[len(prefix):], `\`)
+			// An unresolved 8.3 component has no known file identity. Let the
+			// caller audit it and apply the protected-directory fallback.
+			if strings.Contains(suffix, "~") {
+				return "", false
+			}
 			return filepath.ToSlash(filepath.Join(windows.UTF16ToString(buf[:n]), suffix)), true
 		}
 		parent := filepath.Dir(prefix)

@@ -46,3 +46,25 @@ func TestR104ActionWindowsExistingShortTarget(t *testing.T) {
 		t.Fatalf("short target with dot-dot %q decision = %q", throughMissing, got)
 	}
 }
+
+func TestR104ActionWindowsUnresolvedShortUnderSSH(t *testing.T) {
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	if err := os.MkdirAll(filepath.Join(home, ".ssh"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(cwd, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(home, ".ssh", "missing~1")
+	if _, known := actionWindowsPath(missing, cwd, home); known {
+		t.Fatal("unresolved short component treated as a known path")
+	}
+	if got := ActionCommandDecision("cp report.pub "+missing, cwd, home); got != "protected-target" {
+		t.Fatalf("protected-directory unresolved short decision = %q", got)
+	}
+	ordinary := filepath.Join(cwd, "missing~1")
+	if got := ActionCommandDecision("cp report.pub "+ordinary, cwd, home); got != "" {
+		t.Fatalf("ordinary unresolved short decision = %q", got)
+	}
+}
