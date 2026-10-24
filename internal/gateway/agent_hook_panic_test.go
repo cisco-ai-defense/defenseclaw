@@ -484,6 +484,63 @@ func TestHandleAgentHook_AntigravityConfirmSurvivesOutputEncodingFailure(t *test
 	}
 }
 
+type panickingHookOutputValue struct{}
+
+func (panickingHookOutputValue) MarshalJSON() ([]byte, error) {
+	panic("synthetic hook output encoding panic")
+}
+
+func TestHandleAgentHook_AnswerEncodingPanicCountsOnce(t *testing.T) {
+	previous, had := hookProfileRuntimes["antigravity"]
+	hookProfileRuntimes["antigravity"] = func(profile connector.HookProfile) hookProfileRuntime {
+		runtime := defaultHookProfileRuntime(profile)
+		runtime.Evaluate = func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+			return agentHookResponse{
+				Action: "confirm", RawAction: "confirm", Mode: "action", Reason: "review this command",
+				HookOutput: map[string]interface{}{"decision": "force_ask", "bad": panickingHookOutputValue{}},
+			}
+		}
+		return runtime
+	}
+	t.Cleanup(func() {
+		if had {
+			hookProfileRuntimes["antigravity"] = previous
+		} else {
+			delete(hookProfileRuntimes, "antigravity")
+		}
+	})
+	runtime, _ := newProxyGeneratedTraceRuntime(t)
+	capture := &managedAIDFailOpenCapture{lifecycleV8Runtime: runtime}
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	api.bindObservabilityV8Runtimes(capture, nil, nil, capture)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/antigravity/hook", strings.NewReader(
+		`{"hook_event_name":"PreToolUse","session_id":"encoding-panic","toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Antigravity-Event", "PreToolUse")
+	w := httptest.NewRecorder()
+	api.handleAgentHook("antigravity").ServeHTTP(w, req)
+	var answer struct {
+		Action string `json:"action"`
+		Output struct {
+			Decision string `json:"decision"`
+		} `json:"hook_output"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("invalid native answer %q: %v", w.Body.String(), err)
+	}
+	if answer.Action != "confirm" || answer.Output.Decision != "force_ask" {
+		t.Fatalf("answer=%+v, want finalized confirmation", answer)
+	}
+	row := soleHookDecisionForTest(t, store)
+	if row.Structured["action"] != "confirm" || row.Enforced {
+		t.Fatalf("audit row=%+v, want native confirmation", row)
+	}
+	if got := countGeneratedMetricRecordsByName(capture.metricRecords, observability.TelemetryInstrumentDefenseClawPanicsTotal); got != 1 {
+		t.Fatalf("answer encoding panic count=%d, want one", got)
+	}
+}
+
 // TestHandleAgentHook_SandboxPanicFailsClosed: a request authenticated with
 // a sandbox binding is blocked, with a reason that says DefenseClaw failed,
 // when the evaluator panics or when a panic after evaluation reaches the

@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -15,8 +16,16 @@ import (
 // hookAnswerBody encodes the finalized verdict before any response bytes are
 // sent. A bad connector output is replaced with the same action's native
 // control, so the hook can apply the verdict recorded by the audit row.
-func hookAnswerBody(profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
-	body, err := encodeHookAnswer(profile, resp, receiptID, nil)
+func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse, receiptID string) []byte {
+	counted := false
+	onPanic := func(recovered any) {
+		defer func() { _ = recover() }()
+		if !counted {
+			counted = true
+			a.handleHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("hook answer encoding panic: %v", recovered))
+		}
+	}
+	body, err := encodeHookAnswer(profile, resp, receiptID, onPanic)
 	if err == nil {
 		return body
 	}
@@ -26,20 +35,21 @@ func hookAnswerBody(profile connector.HookProfile, connectorName string, req age
 		req.ConnectorName = connectorName
 	}
 	fallback := resp
-	fallback.HookOutput = callbackFreeHookOutput(profile, req, resp)
-	if body, err = encodeHookAnswer(profile, fallback, receiptID, nil); err == nil {
+	fallback.HookOutput = callbackFreeHookOutput(profile, req, resp, onPanic)
+	if body, err = encodeHookAnswer(profile, fallback, receiptID, onPanic); err == nil {
 		return body
 	}
 	// The outer answer fields are fixed types. This final form is readable
 	// even if a future callback-free output has an encoding defect.
 	fallback.HookOutput = nil
-	body, _ = encodeHookAnswer(profile, fallback, receiptID, nil)
+	body, _ = encodeHookAnswer(profile, fallback, receiptID, onPanic)
 	return body
 }
 
-func callbackFreeHookOutput(profile connector.HookProfile, req agentHookRequest, resp agentHookResponse) (output map[string]interface{}) {
+func callbackFreeHookOutput(profile connector.HookProfile, req agentHookRequest, resp agentHookResponse, onPanic func(any)) (output map[string]interface{}) {
 	defer func() {
-		if recover() != nil {
+		if recovered := recover(); recovered != nil {
+			onPanic(recovered)
 			output = nil
 		}
 	}()

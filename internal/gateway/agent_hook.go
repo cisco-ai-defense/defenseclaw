@@ -531,7 +531,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
 		defer dedupeTicket.release()
 		if deduped {
-			writeHookAnswer(w, hookAnswerBody(profile, connectorName, req, copilotDedupedResponse(profile, req, earlier), ""))
+			writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, copilotDedupedResponse(profile, req, earlier), ""))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -621,7 +621,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					// the HTTP server's serving goroutine.
 					func() {
 						defer func() { _ = recover() }()
-						body := hookAnswerBody(profile, connectorName, req, resp, "")
+						body := a.hookAnswerBody(ctx, profile, connectorName, req, resp, "")
 						attemptedWrite = true
 						writeHookAnswer(w, body)
 					}()
@@ -805,7 +805,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				fmt.Fprintf(os.Stderr, "[gateway] sandbox tool-call chain finalization failed connector=%s event=%s: %v\n",
 					connectorName, req.HookEventName, err)
 			}
-			body := hookAnswerBody(profile, connectorName, req, wireResp, pending.ID)
+			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, pending.ID)
 			a.scheduleSandboxHookReceiptRecovery(pending.ID)
 			// The first request is done; a later authenticated receipt owns
 			// this journal row. The bounded recovery pass may now inspect it.
@@ -820,7 +820,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// can establish that an unreceipted hook missed that answer.
 		hungUpBeforeAnswer := r.Context().Err() != nil
 		if delivery != nil {
-			body := hookAnswerBody(profile, connectorName, req, wireResp, "")
+			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
 			attemptedWrite = true
 			receipt := delivery.offer(w, func() {
 				writeHookAnswer(w, body)
@@ -875,7 +875,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		)
 
 		if delivery == nil {
-			body := hookAnswerBody(profile, connectorName, req, wireResp, "")
+			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
 			attemptedWrite = true
 			writeHookAnswer(w, body)
 		}
