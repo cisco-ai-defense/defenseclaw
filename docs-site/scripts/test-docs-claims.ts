@@ -79,6 +79,7 @@ describe('Cursor observe outage mode', () => {
     for (const stale of ['features/guardrail.mdx', 'reference/commands/installer.mdx', 'appendix/coverage-by-layer.mdx']) {
       assert.ok(!/Per-user Cursor (?:in )?observe (?:mode )?(?:still|also) blocks/i.test(page(stale)), stale);
     }
+    assert.match(failModes, /On a per-user install the outage behavior follows the policy tier.{0,600}Every other failure blocks in every tier/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
     assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
@@ -440,6 +441,7 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     assert.ok(page('get-started/upgrade.mdx').includes('whatever an earlier config or registration saved, and fail closed for every other failure'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('The hooks follow the mode Setup recorded for the connector'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user install ignores a saved value'));
   });
 });
 
