@@ -358,17 +358,19 @@ func TestMeetJudgesOneActionWithinOneSemanticBudget(t *testing.T) {
 			t.Fatalf("meet judged %d semantic findings; the members' work together must fit one action's budget", got)
 		}
 		// A promoted artifact is one action too.
-		requireNativePOSIXArtifactHost(t)
-		dir := t.TempDir()
-		script := filepath.Join(dir, "echo.sh")
-		if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: fmt.Sprintf("bash %q", script), CWD: dir})
-		artifact := promotedArtifactFindings(ctx, agentHookRequest{ConnectorName: "codex"}, facts, true, nil)
-		if got := budgetFindings(artifact, "BUD-A") + budgetFindings(artifact, "BUD-B"); got == 0 || got >= 60 {
-			t.Fatalf("promoted artifact: %d semantic findings; want the members' work within one budget", got)
-		}
+		t.Run("promoted artifact", func(t *testing.T) {
+			requireNativePOSIXArtifactHost(t)
+			dir := t.TempDir()
+			script := filepath.Join(dir, "echo.sh")
+			if err := os.WriteFile(script, []byte("#!/bin/sh\necho hi\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: fmt.Sprintf("bash %q", script), CWD: dir})
+			artifact := promotedArtifactFindings(ctx, agentHookRequest{ConnectorName: "codex"}, facts, true, nil)
+			if got := budgetFindings(artifact, "BUD-A") + budgetFindings(artifact, "BUD-B"); got == 0 || got >= 60 {
+				t.Fatalf("promoted artifact: %d semantic findings; want the members' work within one budget", got)
+			}
+		})
 	})
 
 	t.Run("overlapping packs judge a shared expression once", func(t *testing.T) {
