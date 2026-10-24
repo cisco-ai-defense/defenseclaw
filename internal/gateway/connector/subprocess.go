@@ -98,6 +98,10 @@ type templateData struct {
 	// shellHookSocketTransport). Empty keeps the TCP transport, and the
 	// rendered hook is then byte-identical to one without the block.
 	HookSocketTransportSH string
+	// HermesNativeHookSH is a trusted, quoted managed hook binary path. The
+	// Hermes shell keeps its registered command while the native hook handles
+	// the answer and its delivery receipt.
+	HermesNativeHookSH string
 	// ManagedHTTPFailureSH is the one answer classifier rendered into each
 	// standalone managed shell hook. Other profiles keep their pinned bytes.
 	ManagedHTTPFailureSH string
@@ -571,7 +575,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 // shell hook runs the guard). The shared inspect-* scripts keep TCP: no
 // per-user enterprise hook registration invokes them. failModeSource is the
 // sidecar source of failMode (HookFailModeSourceConfig for resolved modes).
-func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, failModeSource string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) error {
+func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, failModeSource string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool, hermesNativeHook ...string) error {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -590,7 +594,7 @@ func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, fail
 		return err
 	}
 
-	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard, secureClient, secureClientDelivery)
+	scripts, err := renderHookScripts(apiAddr, failMode, tokenFile, extras, managed, connectorName, scopedToken, socketTransport, foreignGuard, secureClient, secureClientDelivery, hermesNativeHook...)
 	if err != nil {
 		return err
 	}
@@ -624,7 +628,7 @@ type renderedHookScript struct {
 // scripts and the connector-owned lifecycle scripts named in extras, in the
 // order writeHookScriptsCommonWithTransport writes them. tokenFile is the
 // basename of the token file the connector scripts read.
-func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) ([]renderedHookScript, error) {
+func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool, hermesNativeHook ...string) ([]renderedHookScript, error) {
 	// A per-user script bakes closed for every failure; its outage mode (the
 	// policy tier's, OutageHookFailMode) is the runtime record, and its
 	// derived-from header names it for doctor.
@@ -652,6 +656,10 @@ func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, man
 		// socket; see WriteHookScriptsForConnectorObjectWithOpts.
 		HookSocketTransportSH: socketTransport,
 		ForeignHookGuardSH:    foreignGuard,
+	}
+	if managed && !secureClient && socketTransport != "" && connectorData.ConnectorName == "hermes" &&
+		len(hermesNativeHook) == 1 && filepath.IsAbs(hermesNativeHook[0]) && !strings.ContainsAny(hermesNativeHook[0], "\x00\r\n") {
+		connectorData.HermesNativeHookSH = shellSingleQuote(hermesNativeHook[0])
 	}
 	// The inspect-* family has one physical copy per data directory.  Its
 	// bytes must therefore depend only on install-wide inputs; connector mode,
@@ -760,7 +768,7 @@ func renderedHookRuntimeFiles(conn Connector, opts SetupOpts) ([]renderedHookRun
 	}
 	scripts, err := renderHookScripts(opts.APIAddr, render.failMode, tokenFile, render.extras, opts.ManagedEnterprise,
 		conn.Name(), render.scopedToken, render.socketTransport, render.foreignGuard, shellHookSecureClientProfile(opts),
-		shellHookSecureClientDelivery(opts))
+		shellHookSecureClientDelivery(opts), render.hermesNativeHook)
 	if err != nil {
 		return nil, err
 	}
@@ -2038,7 +2046,7 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	render := resolveConnectorHookRender(opts, c)
 	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.failModeSource, render.extras, opts.ManagedEnterprise,
 		c.Name(), render.scopedToken, render.socketTransport, render.foreignGuard, shellHookSecureClientProfile(opts),
-		shellHookSecureClientDelivery(opts))
+		shellHookSecureClientDelivery(opts), render.hermesNativeHook)
 }
 
 // connectorHookRender is what WriteHookScriptsForConnectorObjectWithOpts
@@ -2047,11 +2055,12 @@ type connectorHookRender struct {
 	extras   []string
 	failMode string
 	// failModeSource records the resolved mode's provenance.
-	failModeSource  string
-	token           string
-	scopedToken     bool
-	socketTransport string
-	foreignGuard    string
+	failModeSource   string
+	token            string
+	scopedToken      bool
+	socketTransport  string
+	foreignGuard     string
+	hermesNativeHook string
 }
 
 // Secure Client renders managed hooks into each user's home. The trusted
@@ -2103,6 +2112,9 @@ func resolveConnectorHookRender(opts SetupOpts, c Connector) connectorHookRender
 	}
 	if socket, serviceUID := managedPluginHookSocket(opts); socket != "" {
 		render.socketTransport = shellHookSocketTransport(socket, serviceUID, managedSessionFactsBinary(opts), render.foreignGuard)
+		if normalizeConnectorName(c.Name()) == "hermes" {
+			render.hermesNativeHook = managedSessionFactsBinary(opts)
+		}
 	}
 	return render
 }

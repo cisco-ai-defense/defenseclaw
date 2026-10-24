@@ -274,7 +274,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// when the decision waits on a remote scanner (hook_progress.go).
 		w, r, closeProgress := withHookProgress(w, r)
 		defer closeProgress()
-		delivery := a.beginHookDeliveryReceipt(w, r)
+		delivery := hookDeliveryReceiptForRequest(r)
+		if delivery == nil {
+			delivery = a.beginHookDeliveryReceipt(w, r)
+		}
 		// Resolve the identity-based guardrail profile once, after
 		// authentication, from the route's connector, the verified subject
 		// and the agent identity derived from both (never the payload).
@@ -448,8 +451,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// The agent identity (agt-) the hook runs under comes from the
 		// verified caller, not the payload. It scopes the agent ids the
 		// request mints.
-		agentIdentityID := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload}).ID
-		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, agentIdentityID)
+		identityFacts := resolveHookAgentIdentity(r.Context(), agentHookRequest{ConnectorName: connectorName, Payload: payload})
+		req := normalizeAgentHookRequestWithRawProfileEvent(connectorName, payload, rawBody, profile, registeredEvent, identityFacts.ID)
+		r = r.WithContext(withHookIdentitySnapshot(r.Context(), identityFacts))
 		if len(profile.SupportedEvents) > 0 && !eventIn(req.HookEventName, profile.SupportedEvents) {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "event_outside_contract", int64(len(rawBody)))
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{

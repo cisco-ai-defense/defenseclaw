@@ -599,7 +599,7 @@ func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgent
 	if facts.ID == "" || !strings.EqualFold(facts.ID, agent) {
 		return profileAgentClaim{}, false
 	}
-	return facts.LegacyClaim, true
+	return legacyAgentClaim(facts.LegacyID, facts.UserID, facts.MachineHash, facts.account, facts.self), true
 }
 
 // guardrailProfileInspectMiddleware resolves the profile for the inspect

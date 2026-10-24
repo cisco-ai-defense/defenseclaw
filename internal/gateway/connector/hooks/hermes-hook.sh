@@ -320,7 +320,26 @@ fail_response() {
   exit 0
 }
 {{end}}
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}{{if .HermesNativeHookSH}}# The registered Hermes command remains this shell hook. The trusted native
+# hook speaks the managed answer/receipt protocol for the same payload.
+# Restore the original soft virtual-memory limit before starting Go. Buffer
+# its one JSON answer so a missing executable or failed native hook cannot
+# leave Hermes with an empty answer (Hermes ignores the process status).
+ulimit -S -v "${_DC_HOOK_NATIVE_VMEM_LIMIT:-$(ulimit -H -v)}" 2>/dev/null || :
+_DC_NATIVE_STATUS=0
+_DC_NATIVE_ANSWER="$(HOME="${DEFENSECLAW_GUARD_AGENT_HOME:-${DEFENSECLAW_AGENT_HOME:-$HOME}}" {{.HermesNativeHookSH}} hook --connector hermes --enterprise-managed <<<"$PAYLOAD")" || _DC_NATIVE_STATUS=$?
+if [ "$_DC_NATIVE_STATUS" -eq 0 ] && [ -z "$_DC_NATIVE_ANSWER" ]; then
+  # Native Hermes returns an empty successful answer only for its neutral
+  # allow result; managed failures print a block directive or exit nonzero.
+  exit 0
+fi
+if [ "$_DC_NATIVE_STATUS" -eq 0 ] && printf '%s' "$_DC_NATIVE_ANSWER" | _dc_jq -e 'type == "object" and (.action == "allow" or .action == "block")' >/dev/null 2>&1; then
+  printf '%s\n' "$_DC_NATIVE_ANSWER"
+  exit 0
+fi
+hermes_block response "the trusted native hook could not start"
+exit 2
+{{end}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
