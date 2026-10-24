@@ -164,6 +164,10 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// gatewayAuditFailure is the active mandatory event-history write failure
+	// in the gateway's latest /health answer, used when describe computes
+	// security_complete after reading that answer.
+	gatewayAuditFailure bool
 	// keepThroughRollback names the units a rollback leaves running: the
 	// gateway and the sensor helper of an interrupted hot transaction
 	// (recoverInterrupted, GAP-0238).

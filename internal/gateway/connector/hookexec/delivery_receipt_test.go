@@ -21,7 +21,7 @@ import (
 // The managed OpenCode plugin runs this hook, so its tool calls send the
 // receipt too (GAP-0286).
 func TestManagedHookAcknowledgesItsCommittedAnswerOnTheSameRequest(t *testing.T) {
-	for _, connector := range []string{"claudecode", "codex", "opencode"} {
+	for _, connector := range []string{"claudecode", "codex", "hermes", "opencode"} {
 		if !DeliveryReceiptEvent(connector, managedToolEvent(connector)) {
 			t.Errorf("DeliveryReceiptEvent(%s) = false, want the receipt the hook sends", connector)
 		}
@@ -296,18 +296,25 @@ func TestManagedHookEndsAnAdvertisedReceiptRequestAtItsDeadline(t *testing.T) {
 }
 
 func managedToolEvent(connector string) string {
-	if connector == "opencode" {
+	switch connector {
+	case "hermes":
+		return "pre_tool_call"
+	case "opencode":
 		return "tool.execute.before"
+	default:
+		return "PreToolUse"
 	}
-	return "PreToolUse"
 }
 
 func managedToolCall(connector string) func(*Options) {
 	return func(opts *Options) {
 		managedCodex(opts)
 		opts.Event = managedToolEvent(connector)
-		if connector == "opencode" {
+		switch connector {
+		case "opencode":
 			opts.Stdin = strings.NewReader(`{"hook_event_name":"tool.execute.before","tool_name":"bash","tool_input":{"command":"ls"}}`)
+		case "hermes":
+			opts.Stdin = strings.NewReader(`{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo ok"}}`)
 		}
 	}
 }
