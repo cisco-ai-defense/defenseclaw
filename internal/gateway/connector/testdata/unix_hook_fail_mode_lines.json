@@ -18,7 +18,8 @@
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
     "FAIL_MODE=\"closed\"",
     "  FAIL_MODE=\"closed\"",
-    "            [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed"
+    "            [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed",
+    "  [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed"
   ],
   "claude-code-hook.sh/open": [
     "_DC_BOOT_FAIL_MODE=\"closed\"",
@@ -27,7 +28,8 @@
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
     "FAIL_MODE=\"closed\"",
     "  FAIL_MODE=\"closed\"",
-    "            [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed"
+    "            [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed",
+    "  [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed"
   ],
   "codex-hook.sh/closed": [
     "_DC_BOOT_FAIL_MODE=\"closed\"",
@@ -36,6 +38,7 @@
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
     "FAIL_MODE=\"closed\"",
     "  FAIL_MODE=\"closed\"",
+    "  [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed",
     "        [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed"
   ],
   "codex-hook.sh/open": [
@@ -45,6 +48,7 @@
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
     "FAIL_MODE=\"closed\"",
     "  FAIL_MODE=\"closed\"",
+    "  [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed",
     "        [ \"$FAIL_MODE\" = \"closed\" ] || FAIL_MODE=closed"
   ],
   "copilot-hook.sh/closed": [
