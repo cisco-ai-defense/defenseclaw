@@ -430,11 +430,12 @@ func (f *fakeRelay) Events(_ context.Context, batch sandboxrelay.EventBatch) err
 // fakeOpenShell is a daemonOpenShell whose answers the test sets; the zero
 // value finds nothing to do.
 type fakeOpenShell struct {
-	drift    []openshell.SettingDrift
-	driftErr error
-	prepare  func(sandboxrelay.DaemonSettings) (bool, error)
-	prepared atomic.Int64
-	stopped  atomic.Int64
+	drift         []openshell.SettingDrift
+	driftErr      error
+	renderedDrift bool
+	prepare       func(sandboxrelay.DaemonSettings) (bool, error)
+	prepared      atomic.Int64
+	stopped       atomic.Int64
 	// holder is the gateway port's listener: 0 free, else the uid.
 	holder atomic.Int64
 }
@@ -450,6 +451,9 @@ func (f *fakeOpenShell) OtherGateways(context.Context, sandboxrelay.DaemonSettin
 
 func (f *fakeOpenShell) Drift(sandboxrelay.DaemonSettings) ([]openshell.SettingDrift, error) {
 	return f.drift, f.driftErr
+}
+func (f *fakeOpenShell) RenderedConfigDrift(sandboxrelay.DaemonSettings) bool {
+	return f.renderedDrift
 }
 func (f *fakeOpenShell) Prepare(_ context.Context, s sandboxrelay.DaemonSettings) (bool, error) {
 	f.prepared.Add(1)

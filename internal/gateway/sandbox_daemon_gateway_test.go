@@ -369,3 +369,32 @@ func TestAccountOpenShellManagedGatewayCommandDrift(t *testing.T) {
 		t.Fatalf("setup mode, another install: %v %v", drift, err)
 	}
 }
+
+func TestAccountOpenShellReportsChangedManagedRender(t *testing.T) {
+	r := newOpenShellRig(t, "linux")
+	r.holder = func(int) int { return 5001 }
+	r.active, r.pid = true, 77
+	r.o.adminBinary = func(name string) (string, error) { return "/usr/bin/" + name, nil }
+	configPath := filepath.Join(t.TempDir(), openshell.GatewayTOMLFile)
+	r.args = "/usr/bin/openshell-gateway --config " + configPath
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{BindAddress: "127.0.0.1:17671"}, "sha256:edited", nil
+	}
+	s := sandboxrelay.DaemonSettings{Enterprise: sandboxrelay.EnterpriseOpenShell{
+		Install: "prerequisite", Driver: "docker", GatewayPort: 17670,
+		GatewayConfigPath: configPath, GatewayConfigDigest: "sha256:installed",
+	}}
+	drift, err := r.o.Drift(s)
+	if err != nil || len(drift) != 1 || driftEventField(drift[0].Field) != "gateway_configuration" {
+		t.Fatalf("edited managed render drift = %v, %v", drift, err)
+	}
+	if !r.o.RenderedConfigDrift(s) {
+		t.Fatal("status missed the edited render")
+	}
+	r.o.readRendered = func(string, string) (openshell.RenderedGateway, string, error) {
+		return openshell.RenderedGateway{}, "", errors.New("invalid edited render")
+	}
+	if !r.o.RenderedConfigDrift(s) {
+		t.Fatal("status missed the malformed edited render")
+	}
+}

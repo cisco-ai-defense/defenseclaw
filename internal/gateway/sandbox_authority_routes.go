@@ -249,9 +249,8 @@ func sandboxEnterprise(cfg *config.Config, floor config.OpenShellAdminConfig) sa
 }
 
 // sandboxRenderedGateway is the gateway.toml the lifecycle renders from
-// enterprise.openshell (<ConfigDir>/openshell, root's, world-readable, no
-// secrets) and the digest of it and gateway.env, as `ensure` computes it
-// (openshell.RenderedDigest); "" for both before the first render.
+// enterprise.openshell and its independent pinned digest. Reading a digest
+// of gateway.toml itself would accept a hand edit as its own baseline.
 var sandboxRenderedGateway = func(goos string) (path, digest string) {
 	layout, err := managed.StandaloneLayoutFor(goos)
 	if err != nil || layout.ConfigDir == "" {
@@ -259,15 +258,14 @@ var sandboxRenderedGateway = func(goos string) (path, digest string) {
 	}
 	dir := filepath.Join(layout.ConfigDir, "openshell")
 	path = filepath.Join(dir, openshell.GatewayTOMLFile)
-	tomlData, err := os.ReadFile(path)
-	if err != nil {
+	if _, err := os.Stat(path); err != nil {
 		return "", ""
 	}
-	envData, err := os.ReadFile(filepath.Join(dir, openshell.GatewayEnvFile))
+	digest, err = openshell.ReadRenderedGatewayDigest(filepath.Join(dir, openshell.GatewayRenderedDigestFile))
 	if err != nil {
-		envData = nil
+		return path, "invalid"
 	}
-	return path, openshell.RenderedDigest(tomlData, envData)
+	return path, digest
 }
 
 // sandboxSettingsDigest digests the host sandbox settings a daemon runs
