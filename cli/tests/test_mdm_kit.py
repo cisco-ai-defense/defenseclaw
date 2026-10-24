@@ -605,6 +605,17 @@ $failure = Rotate
 $rotated = Get-Stored
 Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
 $out.retireNext = "$($null -eq $failure) $rotated $(Get-Stored) $(Get-Journal)"
+
+# 16b. The same on a config-only device (no bundle signs the credential):
+#      before, the next ensure stored the zeroed entry as the credential.
+$script:inUse = $false; Reset-Device 'old-key'; Use-OldBundle $null
+[void](Rotate)
+function Remove-Item { throw 'stopped before the delete' }
+$problems = @(Complete-WrapperSecretJournal -Name $SecretName)
+Microsoft.PowerShell.Management\Remove-Item -LiteralPath function:\Remove-Item
+$script:calls = @()
+$resumed = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.retireConfigOnly = "$(Get-Stored) $(Get-Journal) $(@($script:calls).Count) $($problems.Count) $($resumed.Count)"
 $out | ConvertTo-Json -Compress
 """
 
@@ -681,6 +692,7 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "retireStopped": f"new-key ai-defense-api-key@{a}.retired:0 1",
         "retireResumed": "new-key 0 0 0",
         "retireNext": "True newer-key new-key 0",
+        "retireConfigOnly": "new-key 0 0 1 0",
         "linkEntry": out["linkEntry"],
     }, out
     # Where this account can make a link, it is refused and left in place.
