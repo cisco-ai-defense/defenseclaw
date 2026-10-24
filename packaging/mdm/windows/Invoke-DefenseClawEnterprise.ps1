@@ -332,6 +332,9 @@ $script:MaxAnchorBytes = 256KB
 $script:Staging = $null
 $script:LogPath = $null
 $script:ResultAction = 'ensure'
+# The installed CLI while a credential this run rotated waits for its
+# lifecycle to settle (credential rotation journal); every exit puts it back.
+$script:RotationCli = ''
 
 function Write-WrapperLog {
     param([string]$Message)
@@ -344,6 +347,18 @@ function Write-WrapperLog {
 
 function Exit-Wrapper {
     param([int]$ExitCode, [string]$Code, [string]$Message)
+    # The credential rotation and the bundle apply are one transaction: a run
+    # that stops after the rotation and before its lifecycle settled puts the
+    # old value back first. What is not put back stays journaled.
+    if ($script:RotationCli) {
+        $rotationCli = $script:RotationCli
+        $script:RotationCli = ''
+        try {
+            Undo-WrapperSecretRotation -Cli $rotationCli
+        } catch {
+            Write-WrapperLog -Message "putting back credential '$SecretName' failed: $($_.Exception.Message); the next ensure tries again"
+        }
+    }
     $json = ConvertTo-DefenseClawResultJson -Action $script:ResultAction -ExitCode $ExitCode -Code $Code -Message $Message
     [Console]::Out.WriteLine($json)
     Write-WrapperLog -Message "result $json"
@@ -961,6 +976,8 @@ if ($null -ne $installedDeployment -and (Test-WrapperSecretSetBundle -Cli $insta
         Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' $failure.Message
     }
     $secretStored = $true
+    # From here until the lifecycle settles it, every exit puts it back.
+    $script:RotationCli = $installedDeployment.Cli
 }
 
 $exitCode = 0
@@ -995,12 +1012,12 @@ try {
         $exitCode = Write-LifecycleResult -Run $run -Label 'defenseclaw.exe'
     }
 } catch {
-    $launchFailure = $_.Exception.Message
-    if ($secretStored) { Undo-WrapperSecretRotation -Cli $installedDeployment.Cli }
-    Exit-Wrapper $script:ExitFailure 'mdm_lifecycle_launch_failed' $launchFailure
+    # Exit-Wrapper puts a rotated credential back.
+    Exit-Wrapper $script:ExitFailure 'mdm_lifecycle_launch_failed' $_.Exception.Message
 }
 
 if ($secretStored) {
+    $script:RotationCli = ''
     # Success confirmed the bundle that signs the stored value.
     if ($exitCode -eq 0) {
         [void](Complete-WrapperSecretJournal -Name $SecretName)

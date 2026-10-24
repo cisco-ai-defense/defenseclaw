@@ -37,6 +37,11 @@ func TestWindowsCursorMachineGuardRepairKeepsAHooksFileThatIsNotJSON(t *testing.
 		{"a save cut short", []byte(`{"version":1,"hooks":{"adminEvent":[{"type":"command","command":"admin-hook"}`)},
 		{"byte order mark only", []byte("\xef\xbb\xbf")},
 		{"two documents", []byte(`{"version":1,"hooks":{}}{"version":1,"hooks":{}}`)},
+		// Continuation 2 review: JSON a new render would change. A duplicate
+		// key lost the administrator's first value.
+		{"duplicate hooks key", []byte(`{"version":1,"hooks":{"adminEvent":[{"command":"a"}]},"hooks":{"adminEvent":[{"command":"b"}]}}`)},
+		{"duplicate event", []byte(`{"version":1,"hooks":{"adminEvent":[{"command":"a"}],"adminEvent":[{"command":"b"}]}}`)},
+		{"null", []byte("null")},
 	}
 	adapterDamage := []struct {
 		name  string

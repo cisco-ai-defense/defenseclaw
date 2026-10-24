@@ -2436,6 +2436,20 @@ function Save-HookCloser([string]$Slot, [string]$Gateway) {
     }
 }
 
+function Get-RecordedAcceptedConnectors($Manifest, [bool]$GatewayStopped) {
+    # The connectors an earlier -AcceptCurrentInstall run recorded for the
+    # gateway it accepted (Save-AcceptedConnectors). A retry's restore proves
+    # them from the start, also one that fails before this run asks that
+    # gateway again. A gateway an earlier run stopped without recording them
+    # is held to every connector the effective config enables, as
+    # Save-AcceptedConnectors holds it.
+    if ($Manifest -and $Manifest.PSObject.Properties["ReplacementConnectors"]) {
+        return @(@($Manifest.ReplacementConnectors) | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
+    }
+    if ($GatewayStopped) { return @(Get-HeldConnectors $null) }
+    return @()
+}
+
 function Save-AcceptedConnectors([string]$Closer, $Running) {
     # The connectors the gateway -AcceptCurrentInstall accepted guards. Its
     # restore (the journal, Restore-AcceptedReplacement) must show each one
@@ -3394,6 +3408,7 @@ function Resume-InterruptedRun {
         $Run.UnprovenReplacement = $manifest
         $Run.UnprovenGatewayWasRunning = $wasRunningUnproven
         $Run.UnprovenAcceptedBins = Get-BinariesState $BinDir
+        $Run.UnprovenConnectors = @(Get-RecordedAcceptedConnectors $manifest ($wasRunningUnproven -and -not (Get-GatewayProcess)))
         Write-Warn "An older installer added programs after the interrupted first install recorded none ($($added -join '; ')); they are accepted as they are now (-AcceptCurrentInstall). Its gateway stays running while this release is staged; if this release is not installed and proven, they are restored and proven instead"
         return
     }

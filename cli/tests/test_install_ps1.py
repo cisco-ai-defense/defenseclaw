@@ -285,6 +285,49 @@ $journal = Write-LifecycleManifest 'upgrade' '1.0.3' '1.0.4' (Join-Path $DataDir
     assert f"SAVED={joined}\n" in out and f"JOURNAL={joined}\n" in out, out
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_an_accepted_retry_proves_the_connectors_its_record_lists_from_the_start(tmp_path: Path) -> None:
+    # Continuation 2 review: a retry of -AcceptCurrentInstall over a record
+    # an earlier accepted run wrote (ReplacementConnectors, its gateway
+    # stopped) started with no connector roster. A failure before this run
+    # asked the gateway again restored it and proved none of them. The
+    # retry now starts from the record's list (or, with none recorded and
+    # the gateway stopped, every connector the config enables).
+    result = _txn_harness(tmp_path, _resume_functions("Start-AcceptedReplacement", "Restore-AcceptedReplacement") + r"""
+function Write-Warn { param($Message) }
+function Write-Err { param($Message) }
+function Start-Gateway { $script:gateway = [pscustomobject]@{ Id = 200; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }; return 0 }
+$record = @{ Schema = 1; Operation = 'install'; From = ''; To = '1.0.4'; Slot = ''; SetupRoot = ''; Bins = @{};
+    GatewayWasRunning = $false; Connectors = @(); Config = ''; ExternalConfig = ''; ExternalConfigSha256 = '';
+    HookFailModes = ''; BinDirProtected = $false; Committed = $false; ReplacementGatewayWasRunning = $true;
+    ReplacementConnectors = @('codex', 'claudecode') }
+Write-DurableText $LifecycleManifest ($record | ConvertTo-Json -Depth 4)
+$manifest = Read-LifecycleManifest
+$script:enabled = @('cursor')
+"RECORDED=$(@(Get-RecordedAcceptedConnectors $manifest $true) -join ',')"
+"UNRECORDED_STOPPED=$(@(Get-RecordedAcceptedConnectors ([pscustomobject]@{ Schema = 1 }) $true) -join ',')"
+"UNRECORDED_RUNNING=$(@(Get-RecordedAcceptedConnectors ([pscustomobject]@{ Schema = 1 }) $false) -join ',')"
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'older gateway')
+$Run.UnprovenReplacement = $manifest; $Run.UnprovenGatewayWasRunning = $true
+$Run.UnprovenAcceptedBins = Get-BinariesState $BinDir
+$Run.UnprovenConnectors = @(Get-RecordedAcceptedConnectors $manifest $true)
+$script:health = '{"running": true, "health": {"connectors": [{"name": "codex", "state": "running"}, {"name": "claudecode", "state": "error"}]}}'
+$script:gateway = $null
+"DOWN=$(Restore-AcceptedReplacement)"
+$script:health = '{"running": true, "health": {"connectors": [{"name": "codex", "state": "running"}, {"name": "claudecode", "state": "running"}]}}'
+$script:gateway = $null
+"UP=$(Restore-AcceptedReplacement)"
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    assert "RECORDED=claudecode,codex\n" in out and "UNRECORDED_STOPPED=cursor\n" in out and "UNRECORDED_RUNNING=\n" in out, out
+    assert "DOWN= The accepted install's gateway is not proven running" in out and "claudecode" in out.split("DOWN=")[1].split("\n")[0], out
+    assert "UP= The accepted install's gateway is running.\n" in out, out
+    resume = _ps1_function("Resume-InterruptedRun")
+    seeded = resume.index("$Run.UnprovenConnectors = @(Get-RecordedAcceptedConnectors $manifest")
+    assert resume.index("$Run.UnprovenAcceptedBins = Get-BinariesState $BinDir") < seeded
+
+
 @pytest.mark.parametrize("enabled", ["true", "True", "\"true\"", "1"])
 def test_effective_config_roster_reads_an_enabled_guardrail_as_the_gateway_does(tmp_path: Path, enabled: str) -> None:
     # The gateway reads guardrail.enabled with strconv.ParseBool semantics.
@@ -5168,7 +5211,8 @@ _TXN_FUNCTIONS = (
     "Read-LifecycleManifest", "Complete-LifecycleManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
     "Set-RecoveryPending", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored", "Get-Field", "Get-Sha256", "New-RecoveryManifest",
     "Close-AllHooks", "Save-LifecycleCloser", "Test-SameBinaries",
-    "Set-RecoverySetupRoot", "Start-RecoveredGateway", "Read-Json", "Get-HeldConnectors", "Save-AcceptedConnectors",
+    "Set-RecoverySetupRoot", "Start-RecoveredGateway", "Read-Json", "Get-HeldConnectors", "Get-RecordedAcceptedConnectors",
+    "Save-AcceptedConnectors",
 )
 
 

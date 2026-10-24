@@ -986,12 +986,16 @@ off the device. The agent does not read `/health` itself (section 7); the
   signs only the old one until B is confirmed. When the apply of B fails, put
   the old value back with `secret set` (no `--bundle`): it is stored only
   while the confirmed bundle signs it, so a refusal (`secret_ref_mismatch`)
-  means B was confirmed and the new value stays. `Invoke-DefenseClawEnterprise.ps1`
-  journals the stored value in an administrator-only folder
-  (`%ProgramData%\Cisco\DefenseClaw-MDM\rotation`) before the rotation and
-  puts it back this way when the lifecycle fails, or at the start of the next
-  ensure when a run stopped before it finished; a credential that was not
-  stored is put back with `secret remove`.
+  means B was confirmed and the new value stays. A credential that was not
+  stored is put back with `secret remove`. Both kits do this:
+  `Invoke-DefenseClawEnterprise.ps1` journals the stored value in an
+  administrator-only folder (`%ProgramData%\Cisco\DefenseClaw-MDM\rotation`)
+  before the rotation and puts it back when the lifecycle fails or the run
+  stops early for any other reason, or at the start of the next ensure when
+  the run was killed. `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
+  old value in memory only and puts it back when the bundle apply or the
+  ensure before it fails, the run stops early, or the MDM stops it (HUP, INT,
+  TERM); a run killed outright (`SIGKILL`) cannot, so redeliver the bundle.
 - Upgrade from 1.0.2 or 1.0.3: a bundle signed before 1.0.4 has no
   `value_sha256`, so on 1.0.4 `bundle verify`, `bundle apply` (also a repeat
   delivery of the confirmed bundle, which an older build answered

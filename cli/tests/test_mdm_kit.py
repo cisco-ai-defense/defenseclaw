@@ -503,12 +503,257 @@ def test_windows_wrapper_settles_the_credential_journal_around_the_lifecycle() -
     resume = main.index("Complete-WrapperSecretJournal -Cli $resumeCli -Restore")
     journal = main.index("Save-WrapperSecretJournal -Name $SecretName")
     rotate = main.index("$failure = Set-WrapperSecret -Extra @('--bundle', $bundle)")
+    armed = main.index("$script:RotationCli = $installedDeployment.Cli")
     lifecycle = main.index("$arguments = @('enterprise', 'windows', $normalizedAction")
-    launch = main.index("if ($secretStored) { Undo-WrapperSecretRotation -Cli $installedDeployment.Cli }")
-    settle = main.index("[void](Complete-WrapperSecretJournal -Name $SecretName)", launch)
+    disarmed = main.index("$script:RotationCli = ''", lifecycle)
+    settle = main.index("[void](Complete-WrapperSecretJournal -Name $SecretName)", disarmed)
     undo = main.index("Undo-WrapperSecretRotation -Cli $installedDeployment.Cli", settle)
-    assert resume < journal < rotate < lifecycle < launch < settle < undo
+    assert resume < journal < rotate < armed < lifecycle < disarmed < settle < undo
     assert main.index("if ($normalizedAction -eq 'ensure')") < resume
+
+
+# Continuation 2, loop round 1 (Windows consolidation, GAP-1095): the
+# credential rotation is part of the bundle apply's transaction. Windows: an
+# exit between the rotation and the settle (mdm_not_installed after the
+# rotation, a lifecycle with no result, a launch failure) went through
+# Exit-Wrapper, which did not put the old value back, so that failed ensure
+# left the new value with the old bundle until the next ensure.
+_EXIT_PROBE_TAIL = r"""
+function ConvertTo-DefenseClawResultJson { param($Action, $ExitCode, $Code, $Message) return "{""code"":""$Code""}" }
+function Remove-WrapperStaging { }
+$script:ResultAction = 'ensure'
+$script:RotationCli = ''
+Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:delivered = 'new-key'; $script:inUse = $true
+[void](Rotate)
+[Console]::Error.WriteLine("ROTATED=$(Get-Stored)")
+if ('__CASE__' -eq 'armed') { $script:RotationCli = 'defenseclaw.exe' }
+if ('__CASE__' -eq 'settled') { $script:RotationCli = ''; $script:confirmed = 'new-key'; [void](Complete-WrapperSecretJournal -Name $SecretName) }
+Exit-Wrapper 1603 'mdm_not_installed' 'the deployment is not installed'
+"""
+
+
+def _any_pwsh7() -> str | None:
+    # PowerShell 7 on Windows, or pwsh on Linux and macOS: the probe uses no
+    # Windows-only API.
+    candidates = [shutil.which("pwsh.exe"), shutil.which("pwsh")]
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidates.append(str(Path(program_files) / "PowerShell" / "7" / "pwsh.exe"))
+    return next((c for c in candidates if c and Path(c).is_file()), None)
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+@pytest.mark.parametrize(("case", "stored", "journal"), [("armed", "old-key", 0), ("settled", "new-key", 0)])
+def test_windows_wrapper_exit_puts_back_a_credential_rotated_before_the_lifecycle(
+    tmp_path: Path, case: str, stored: str, journal: int,
+) -> None:
+    engine = _any_pwsh7()
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    functions = []
+    for name in ("Get-WrapperSecretErrorCode", "Set-WrapperSecret", "Get-WrapperRotationJournal",
+                 "Get-WrapperStoredSecretPath", "Save-WrapperSecretJournal", "Remove-WrapperJournalEntry",
+                 "Complete-WrapperSecretJournal", "Undo-WrapperSecretRotation", "Exit-Wrapper"):
+        start = text.index(f"function {name} {{")
+        functions.append(text[start : text.index("\n}\n", start) + 3])
+    prefix = _ROTATION_PROBE[: _ROTATION_PROBE.index("$out = [ordered]@{}")]
+    probe = tmp_path / "exit-probe.ps1"
+    probe.write_text(
+        (prefix + _EXIT_PROBE_TAIL.replace("__CASE__", case))
+        .replace("__ROOT__", str(tmp_path).replace("'", "''")).replace("__FUNCTIONS__", "\n".join(functions)),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 1603, result.stdout + result.stderr
+    assert "ROTATED=new-key" in result.stderr, result.stderr
+    assert result.stdout.strip().splitlines()[-1] == '{"code":"mdm_not_installed"}', result.stdout
+    store = tmp_path / "ProgramData"
+    secret = next(path for path in store.rglob("*") if path.is_file() and path.name.endswith("ai-defense-api-key")
+                  and "rotation" not in str(path))
+    assert secret.read_text(encoding="utf-8") == stored
+    entries = [path for path in store.rglob("*") if path.is_file() and "rotation" in str(path)]
+    assert len(entries) == journal, entries
+
+
+def test_windows_wrapper_every_exit_after_the_rotation_settles_it() -> None:
+    # Every exit between the rotation and the settle goes through
+    # Exit-Wrapper (no bare exit), and the launch failure needs no extra put
+    # back: Exit-Wrapper does it.
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    main = text[text.index("$staging = New-WrapperStaging"):]
+    armed = main.index("$script:RotationCli = $installedDeployment.Cli")
+    disarmed = main.index("$script:RotationCli = ''", armed)
+    window = main[armed:disarmed]
+    assert not re.search(r"^\s*exit\b", window, re.MULTILINE), window
+    assert "Undo-WrapperSecretRotation" not in window
+    exit_wrapper = text[text.index("function Exit-Wrapper {"):]
+    exit_wrapper = exit_wrapper[: exit_wrapper.index("\n}\n")]
+    assert exit_wrapper.index("Undo-WrapperSecretRotation -Cli $rotationCli") < exit_wrapper.index("exit $ExitCode")
+
+
+# GAP-1095: the Linux and macOS kit also stores a credential with the bundle
+# it came with (secret set --bundle) before ensure and bundle apply. A failed
+# or interrupted run left the new value with the still-confirmed bundle.
+# The kit now keeps the old value in memory and puts it back (secret set, or
+# secret remove when none was stored) on every exit but a successful bundle
+# apply; the gateway decides, as on Windows. The fake gateway has its rules.
+_FAKE_SECRET_GATEWAY = r"""#!/bin/sh
+printf '%s\n' "$*" >>"$FAKE/calls"
+if [ "$1" = --version-json ]; then echo '{"secret_set_bundle":true}'; exit 0; fi
+store="$SECRETS/$5"
+refuse() { printf '{"schema_version":2,"ok":false,"errors":[{"code":"%s","message":"%s refused"}]}\n' "$1" "$1"; exit 1; }
+case "$3" in
+set)
+    value=$(cat)
+    current=""
+    [ ! -f "$store" ] || current=$(cat "$store")
+    if [ ! -f "$store" ] || [ "$value" != "$current" ]; then
+        signed=0
+        if [ ! -f "$FAKE/confirmed" ] || [ "$value" = "$(cat "$FAKE/confirmed")" ]; then signed=1; fi
+        case " $* " in *" --bundle "*) [ "$value" != "$(cat "$FAKE/delivered")" ] || signed=1 ;; esac
+        [ "$signed" = 1 ] || refuse secret_ref_mismatch
+        mkdir -p "$SECRETS"
+        printf '%s\n' "$value" >"$store"
+    fi
+    echo '{"schema_version":2,"ok":true,"errors":[]}'
+    exit 0 ;;
+remove)
+    [ ! -f "$FAKE/in_use" ] || refuse credential_in_use
+    rm -f "$store"
+    echo '{"schema_version":2,"ok":true,"errors":[]}'
+    exit 0 ;;
+esac
+exit 2
+"""
+
+_SECRET_ROTATION_FUNCTIONS = ("dc_secret_json_error", "dc_secret_set_bundle", "dc_read_stored_secret",
+                              "dc_save_secret_previous", "dc_restore_secret", "dc_store_secret",
+                              "dc_restore_anchors", "dc_cleanup")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize(
+    ("case", "previous", "confirmed", "delivered", "in_use", "then", "stored", "puts_back"),
+    [
+        # The bundle apply (or the ensure before it) fails: the old value goes back.
+        ("failed", "old-key", "old-key", "new-key", False, "exit 1", "old-key", "set"),
+        # The MDM stops the run (TERM) after the rotation.
+        ("cancelled", "old-key", "old-key", "new-key", False, "kill -TERM $$; sleep 5", "old-key", "set"),
+        # The bundle apply succeeded: the new value stays, nothing is put back.
+        ("applied", "old-key", "old-key", "new-key", False, "applied", "new-key", ""),
+        # The run failed after the new bundle was confirmed: the gateway refuses the old value.
+        ("confirmed", "old-key", "old-key", "new-key", False, "echo new-key >\"$FAKE/confirmed\"; exit 1", "new-key", "set"),
+        # No credential was stored before: a failed run removes it again ...
+        ("absent", None, None, "new-key", False, "exit 1", None, "remove"),
+        # ... unless the installed config now uses it.
+        ("absent-in-use", None, None, "new-key", True, "exit 1", "new-key", "remove"),
+        # The gateway refused the rotation: nothing changed, nothing is put back.
+        ("refused", "old-key", "old-key", "other-key", False, "exit 0", "old-key", ""),
+    ],
+)
+def test_unix_wrapper_puts_back_a_rotated_credential_unless_its_bundle_applies(
+    tmp_path: Path, os_dir: str, case: str, previous: str | None, confirmed: str | None, delivered: str,
+    in_use: bool, then: str, stored: str | None, puts_back: str,
+) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in _SECRET_ROTATION_FUNCTIONS)
+    fake, secrets, stage = tmp_path / "fake", tmp_path / "secrets", tmp_path / "stage"
+    for folder in (fake, secrets, stage):
+        folder.mkdir()
+    gateway = tmp_path / "gateway"
+    gateway.write_text(_FAKE_SECRET_GATEWAY, encoding="utf-8")
+    gateway.chmod(0o755)
+    if previous is not None:
+        (secrets / "ai-key").write_text(previous + "\n", encoding="utf-8")
+    if confirmed is not None:
+        (fake / "confirmed").write_text(confirmed, encoding="utf-8")
+    (fake / "delivered").write_text(delivered, encoding="utf-8")
+    if in_use:
+        (fake / "in_use").write_text("", encoding="utf-8")
+    after = 'DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS=""; exit 0' if then == "applied" else then
+    script = f"""set -eu
+DC_ACTION=ensure DC_STAGE="{stage}" DC_LOG="{tmp_path / 'kit.log'}" DC_EXIT_FAILURE=1 DC_MAX_SECRET_BYTES=16384
+DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
+DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0
+dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
+dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
+{functions}
+trap dc_cleanup EXIT
+trap 'dc_fail_result 1 mdm_cancelled cancelled' HUP INT TERM
+bundle="{tmp_path / 'policy.dcbundle'}" secret_data=new-key
+dc_store_secret "{gateway}"
+echo "rotated=$(cat "$DC_SECRETS_DIR/ai-key")"
+{after}
+"""
+    result = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"], "FAKE": str(fake), "SECRETS": str(secrets)},
+                            capture_output=True, text=True, timeout=30)
+    out = result.stdout + result.stderr
+    calls = (fake / "calls").read_text(encoding="utf-8").splitlines()
+    rotations = [call for call in calls if " --bundle " in call]
+    assert len(rotations) == 1, (calls, out)
+    if case == "refused":
+        assert "secret_ref_mismatch" in out and "rotated" not in out, out
+    else:
+        assert "rotated=new-key" in out, out
+    put_back = [call.split()[2] for call in calls if call.startswith("enterprise secret") and " --bundle " not in call]
+    assert put_back == ([puts_back] if puts_back else []), (calls, out)
+    secret = secrets / "ai-key"
+    assert (secret.read_text(encoding="utf-8").strip() if secret.exists() else None) == stored, out
+    assert not stage.exists(), "the stage is removed after the put-back"
+    if case in ("confirmed", "absent-in-use"):
+        assert "kept the delivered value of credential ai-key" in (tmp_path / "kit.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+def test_unix_wrapper_does_not_rotate_a_credential_that_is_a_link(tmp_path: Path) -> None:
+    wrapper = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in _SECRET_ROTATION_FUNCTIONS)
+    fake, secrets, stage = tmp_path / "fake", tmp_path / "secrets", tmp_path / "stage"
+    for folder in (fake, secrets, stage):
+        folder.mkdir()
+    (tmp_path / "elsewhere").write_text("old-key\n", encoding="utf-8")
+    (secrets / "ai-key").symlink_to(tmp_path / "elsewhere")
+    (fake / "delivered").write_text("new-key", encoding="utf-8")
+    gateway = tmp_path / "gateway"
+    gateway.write_text(_FAKE_SECRET_GATEWAY, encoding="utf-8")
+    gateway.chmod(0o755)
+    script = f"""set -eu
+DC_ACTION=ensure DC_STAGE="{stage}" DC_LOG="" DC_EXIT_FAILURE=1 DC_MAX_SECRET_BYTES=16384
+DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
+DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0
+dc_log() {{ :; }}
+dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}
+{functions}
+trap dc_cleanup EXIT
+bundle="{tmp_path / 'policy.dcbundle'}" secret_data=new-key
+dc_store_secret "{gateway}"
+"""
+    result = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"], "FAKE": str(fake), "SECRETS": str(secrets)},
+                            capture_output=True, text=True, timeout=30)
+    assert result.returncode == 1 and "fail 1 mdm_secret_failed" in result.stdout, result.stdout + result.stderr
+    assert (fake / "calls").read_text(encoding="utf-8").splitlines() == ["--version-json"]
+    assert (tmp_path / "elsewhere").read_text(encoding="utf-8") == "old-key\n"
+
+
+def test_unix_wrapper_settles_the_rotated_credential_with_the_bundle_apply() -> None:
+    # dc_main: the success branch of the bundle apply keeps the stored value
+    # (and only it), the failure branch puts it back, and every other exit
+    # does so in dc_cleanup before the stage goes.
+    for os_dir in ("linux", "macos"):
+        text = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+        main = _shell_function(text, "dc_main")
+        apply = main.index('bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m')
+        success = main.index('DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS=""', apply)
+        failure = main.index("dc_restore_secret || true", success)
+        assert main.index('if [ "$status" = 0 ]; then', apply) < success < main.index("else", success) < failure
+        assert main.count("DC_SECRET_ROTATED=0") == 1
+        cleanup = _shell_function(text, "dc_cleanup")
+        assert cleanup.index("dc_restore_secret || true") < cleanup.index('rm -rf "$DC_STAGE"')
+        store = _shell_function(text, "dc_store_secret")
+        assert store.index('set -- --bundle "$bundle"') < store.index('dc_save_secret_previous "$gateway"') < store.index("enterprise secret set")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")

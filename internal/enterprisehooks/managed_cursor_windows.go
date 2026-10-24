@@ -963,9 +963,11 @@ func mergeWindowsCursorManagedRebuildHooks(
 		}
 		base = snapshot.data
 	}
-	hooks, err := connector.SpliceWindowsCursorEnterpriseHooks(base, adapterPath, failMode)
-	if err != nil && snapshot.existed && !json.Valid(snapshot.data) {
-		return nil, fmt.Errorf("enterprise hooks: %s is not JSON, so the Cursor machine guard cannot be registered in it; "+
+	// Only DefenseClaw's own entries change: a file it cannot edit in place
+	// (not JSON, or a duplicate key) is the administrator's to fix.
+	hooks, err := connector.SpliceWindowsCursorEnterpriseHooksInPlace(base, adapterPath, failMode)
+	if err != nil && snapshot.existed && (!json.Valid(snapshot.data) || errors.Is(err, connector.ErrWindowsCursorHooksNotEditableInPlace)) {
+		return nil, fmt.Errorf("enterprise hooks: %s is not JSON DefenseClaw can edit in place, so the Cursor machine guard cannot be registered in it; "+
 			"it was left as it is: fix the file or remove it, then run repair again: %w", snapshot.path, err)
 	}
 	if err != nil {
