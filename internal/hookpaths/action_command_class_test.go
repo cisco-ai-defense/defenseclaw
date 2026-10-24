@@ -359,6 +359,25 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 	}
 }
 
+func TestR104ActionWindowsWrappedRedirectRoles(t *testing.T) {
+	home, cwd := `C:\Users\alice`, `C:\Users\alice\project`
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{`env -S "cmd /c echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`env -- BUILD=1 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`nice -n 5 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`env -S "cmd /c echo %USERPROFILE%\.ssh\authorized_keys"`, false},
+		{`env -- BUILD=1 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, false},
+		{`nice -n 5 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, false},
+	} {
+		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.block {
+			t.Errorf("protected write=%v, want %v for %q", got, tc.block, tc.command)
+		}
+	}
+}
+
 func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 	const cwd = `C:\Users\alice\project`
 	const home = `C:\Users\alice`

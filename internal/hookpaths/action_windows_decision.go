@@ -296,6 +296,9 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 	if depth >= 8 || len(command) > MaxPayloadBytes {
 		return false
 	}
+	if actionWindowsDotNetFileWrite(command, cwd, home) {
+		return true
+	}
 	words, ok := actionWindowsWords(command)
 	if !ok || len(words) == 0 {
 		return false
@@ -324,6 +327,9 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 	}
 	if program == "source" || program == "." {
 		return false
+	}
+	if program == "env" || program == "nice" {
+		return actionWindowsResolvedWrapperTarget(program, words, cwd, home, depth)
 	}
 	for _, extension := range []string{".ps1", ".psm1", ".cmd", ".bat", ".sh", ".bash", ".py", ".js", ".rb", ".pl"} {
 		if strings.HasSuffix(program, extension) {
@@ -379,6 +385,73 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 		}
 	}
 	return false
+}
+
+// Unwrap only known option forms. The child is inspected as its own command,
+// so a path in a wrapper option or environment assignment is never a target.
+func actionWindowsResolvedWrapperTarget(program string, words []string, cwd, home string, depth int) bool {
+	index := 1
+	for index < len(words) {
+		option := strings.ToLower(words[index])
+		if option == "--" {
+			index++
+			break
+		}
+		if program == "env" {
+			switch {
+			case option == "-s" || option == "--split-string":
+				return index+1 < len(words) && actionWindowsResolvedProtectedTarget(words[index+1], cwd, home, depth+1)
+			case option == "-i" || option == "--ignore-environment" || option == "-v" || option == "-0" ||
+				strings.HasPrefix(option, "--unset=") || strings.HasPrefix(option, "-u") && len(option) > 2:
+				index++
+			case option == "-u" || option == "--unset" || option == "-c" || option == "--chdir":
+				if index+1 >= len(words) {
+					return false
+				}
+				if option == "-c" || option == "--chdir" {
+					var resolved bool
+					cwd, resolved = actionWindowsPath(words[index+1], cwd, home)
+					if !resolved {
+						return false
+					}
+				}
+				index += 2
+			case strings.HasPrefix(option, "--chdir="):
+				var resolved bool
+				cwd, resolved = actionWindowsPath(strings.TrimPrefix(words[index], "--chdir="), cwd, home)
+				if !resolved {
+					return false
+				}
+				index++
+			case strings.Contains(option, "=") && !strings.HasPrefix(option, "-"):
+				index++
+			case strings.HasPrefix(option, "-"):
+				return false
+			default:
+				return actionWindowsResolvedProtectedTarget(strings.Join(words[index:], " "), cwd, home, depth+1)
+			}
+			continue
+		}
+		switch {
+		case option == "-n" || option == "--adjustment":
+			if index+1 >= len(words) {
+				return false
+			}
+			index += 2
+		case strings.HasPrefix(option, "-n") && len(option) > 2 || strings.HasPrefix(option, "--adjustment="):
+			index++
+		case strings.HasPrefix(option, "-"):
+			return false
+		default:
+			return actionWindowsResolvedProtectedTarget(strings.Join(words[index:], " "), cwd, home, depth+1)
+		}
+	}
+	if program == "env" {
+		for index < len(words) && strings.Contains(words[index], "=") && !strings.HasPrefix(words[index], "-") {
+			index++
+		}
+	}
+	return index < len(words) && actionWindowsResolvedProtectedTarget(strings.Join(words[index:], " "), cwd, home, depth+1)
 }
 
 func actionWindowsWriteProgram(program string) bool {
