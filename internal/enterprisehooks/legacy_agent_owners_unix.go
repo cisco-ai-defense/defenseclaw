@@ -283,6 +283,11 @@ type homeProof struct {
 	dev, ino uint64
 	birth    int64
 	hasBirth bool
+	// ctime is the status change time in nanoseconds (hasCtime): never
+	// before the creation time, and changed by a chown or a rename. It is
+	// not part of the token.
+	ctime    int64
+	hasCtime bool
 }
 
 // LegacyAgentOwnersRecorded reports whether dir holds the migration map.
@@ -465,22 +470,40 @@ func unnamedLegacyAgentOwners(ctx context.Context, dir string, owners map[int]Le
 	return false
 }
 
+// legacyAgentOwnerClockSkew is how far a file server's clock may lag the
+// guardian's: a status change time proves a home older than the map only
+// when it is earlier by more than this.
+const legacyAgentOwnerClockSkew = 5 * time.Minute
+
 // legacyAgentOwnerHomeCreatedBy reports whether home, the home directory
 // of the account that holds a uid now, was created no later than at, when
 // the migration map was written: the account held the uid at the upgrade,
-// since an account given the uid later gets a home created later. known is
-// false when the home is not there or its file system keeps no creation
-// time, where the home proves nothing either way.
+// since an account given the uid later gets a home created later. Where
+// the file system keeps no creation time (NFS, tmpfs, ext3), a status
+// change time earlier than at by more than legacyAgentOwnerClockSkew proves
+// it too: it is never before the creation, and a chown or a rename changes
+// it, so the uid that owns the home now owned it then (review of r104
+// Q-identity, continuation 5, loop round 1: a home the map could not
+// record, outside the home roots or not mounted when it was written, never
+// bound). known is false when the home is not there, or keeps no creation
+// time and changed since (or within the skew), where the home proves
+// nothing either way: the account stays pending, and every pass tries
+// again.
 func legacyAgentOwnerHomeCreatedBy(home string, at time.Time) (createdBy, known bool) {
 	home = strings.TrimSpace(home)
 	if home == "" || !filepath.IsAbs(home) || at.IsZero() {
 		return false, false
 	}
 	proof, ok := homeIdentityOf(home)
-	if !ok || !proof.hasBirth {
+	switch {
+	case !ok:
 		return false, false
+	case proof.hasBirth:
+		return proof.birth <= at.UnixNano(), true
+	case proof.hasCtime && proof.ctime <= at.Add(-legacyAgentOwnerClockSkew).UnixNano():
+		return true, true
 	}
-	return proof.birth <= at.UnixNano(), true
+	return false, false
 }
 
 // legacyAgentOwnerHomeRecorded reports whether home, the home directory of
@@ -630,9 +653,10 @@ func (c *closedLegacyAgentOwnerMaps) forget(dir string) {
 // it (a uid now held by another name stays pending). A pending account
 // without a name is bound to the account owners proves for its uid only
 // when that account's home was created before the map was written
-// (legacyAgentOwnerHomeCreatedBy) or, where its file system keeps no
-// creation time, is a home the map recorded for the uid
-// (legacyAgentOwnerHomeRecorded). Shards it changes are
+// (legacyAgentOwnerHomeCreatedBy, by its creation or, without one, its
+// status change time) or, where its file system keeps no creation time, is
+// a home the map recorded for the uid (legacyAgentOwnerHomeRecorded); any
+// other stays pending, and the next pass tries again. Shards it changes are
 // written before the main file, which is rewritten last, with its open mark
 // cleared once nothing is pending.
 func fillLegacyAgentOwners(dir string, owners map[int]LegacyAgentOwner, setOwnership func(string) error, logf func(string, ...any)) (bool, error) {
@@ -717,7 +741,8 @@ func logUnboundLegacyAgentOwner(dir string, uid int, user string, logf func(stri
 		return
 	}
 	logf("[hook-guardian] agent identity migration map: uid %d had no name at the upgrade, and nothing proves that %s, who holds it now, "+
-		"held it then (its home keeps no creation time and is not a home the map recorded for the uid); a 1.0.x agents entry of the uid "+
+		"held it then (its home keeps no creation time, changed after the upgrade and is not a home the map recorded for the uid; "+
+		"it is checked again at every pass); a 1.0.x agents entry of the uid "+
 		"applies only in the strictest combination with the other profiles that may apply. To apply it again, replace it with a users "+
 		"entry for the account or its current agents ID (defenseclaw agent identities --user %s)", uid, user, user)
 }

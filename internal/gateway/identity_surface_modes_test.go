@@ -91,7 +91,7 @@ func TestUnprovenRefusalFollowsTheConnectorsOwnModes(t *testing.T) {
 		{name: "global strict action, a request without a connector", profile: "strict-codex-observe", connector: "",
 			hook: true, inspect: true},
 		{name: "strict inspect action, observe hook", profile: "strict-pack", connector: "codex",
-			base: func(c *config.Config) { c.Guardrail.Mode, c.Codex.Mode = "action", "observe" },
+			base:    func(c *config.Config) { c.Guardrail.Mode, c.Codex.Mode = "action", "observe" },
 			inspect: true, hookMode: "observe"},
 		{name: "strict hook action, observe inspect", profile: "strict-pack", connector: "codex",
 			base: func(c *config.Config) { c.Codex.Mode = "action" },

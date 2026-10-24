@@ -24,7 +24,8 @@ func homeIdentity(home string) (homeProof, bool) {
 	if err := syscall.Stat(home, &st); err != nil || st.Mode&syscall.S_IFMT != syscall.S_IFDIR {
 		return homeProof{}, false
 	}
-	proof := homeProof{dev: uint64(st.Dev), ino: st.Ino}
+	proof := homeProof{dev: uint64(st.Dev), ino: st.Ino,
+		ctime: int64(st.Ctimespec.Sec)*1_000_000_000 + int64(st.Ctimespec.Nsec), hasCtime: true}
 	if st.Birthtimespec.Sec != 0 || st.Birthtimespec.Nsec != 0 {
 		proof.birth, proof.hasBirth = st.Birthtimespec.Sec*1_000_000_000+st.Birthtimespec.Nsec, true
 	}

@@ -1550,7 +1550,14 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool") {
+	serverConnector := authenticatedInspectConnector(r.Context())
+	if serverConnector == "" {
+		serverConnector = canonicalConnectorRulePackKey(a.connectorName())
+	}
+	// Refused where a strict candidate blocks the connector whose mode the
+	// verdict takes (applyMode below), not the global settings an
+	// unscoped credential's decision read.
+	if a.refuseProfileInspectFor(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool", serverConnector) {
 		return
 	}
 
@@ -1562,10 +1569,6 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if req.Tool == "" {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tool is required"})
 		return
-	}
-	serverConnector := authenticatedInspectConnector(r.Context())
-	if serverConnector == "" {
-		serverConnector = canonicalConnectorRulePackKey(a.connectorName())
 	}
 	requestedConnector := canonicalConnectorRulePackKey(req.Connector)
 	if requestedConnector != "" && requestedConnector != serverConnector {

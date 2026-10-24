@@ -30,7 +30,7 @@ func homeIdentity(home string) (homeProof, bool) {
 	if err := unix.Stat(home, &st); err != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR {
 		return homeProof{}, false
 	}
-	proof := homeProof{dev: st.Dev, ino: st.Ino}
+	proof := homeProof{dev: st.Dev, ino: st.Ino, ctime: int64(st.Ctim.Sec)*1_000_000_000 + int64(st.Ctim.Nsec), hasCtime: true}
 	var stx unix.Statx_t
 	if err := unix.Statx(unix.AT_FDCWD, home, 0, unix.STATX_INO|unix.STATX_BTIME, &stx); err == nil &&
 		stx.Mask&(unix.STATX_INO|unix.STATX_BTIME) == unix.STATX_INO|unix.STATX_BTIME && stx.Ino == st.Ino &&

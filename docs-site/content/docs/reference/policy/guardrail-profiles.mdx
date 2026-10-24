@@ -133,8 +133,11 @@ recorded name. An account no lookup could name at all is added once its home is
 proven to be the one it had at the upgrade: a home created before the map, or,
 where the file system keeps no creation time (NFS, tmpfs), a home directory
 its UID owned under a home root (`/home`, `/Users`, or the parent of other
-accounts' homes) when the map was written. The hook guardian logs an account it
-cannot prove; replace its `agents` entry with a `users` entry or its current
+accounts' homes) when the map was written, or a home whose status (ctime) has
+not changed since more than five minutes before the map was written. The
+account stays pending until one of these proves it, and every pass checks
+again. The hook guardian logs, once, an account it cannot prove yet; to apply
+the entry now, replace its `agents` entry with a `users` entry or its current
 `agt-` ID.
 
 An account the map does not record (a later account given the UID, a namesake
@@ -191,7 +194,11 @@ How the keys combine:
   is refused only where that profile blocks it: hooks by the hook mode
   (`codex.mode`, `connector_hooks`, else the guardrail mode), inspect and the
   LLM proxy by the guardrail mode. So a strict profile whose global mode is
-  action does not refuse a connector it sets to observe. A fact no assignment needs does not make the
+  action does not refuse a connector it sets to observe. `/api/v1/inspect/tool`
+  called with a token not scoped to a connector applies the mode of the
+  gateway's own connector, and is refused by that connector's settings. An ACP
+  pair applies its own ACP mode: in observe mode the refusal is logged as
+  would-block and the request goes on. A fact no assignment needs does not make the
   decision uncertain. An account is recognized by its SID (SSSD or
   Windows) or by its macOS local record; for an account that has neither (a
   local or LDAP Linux account, a macOS directory account with no local record)

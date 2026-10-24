@@ -209,6 +209,11 @@ type profileDecision struct {
 	// alone shows Candidates.
 	Unproven   []string
 	Candidates []string
+	// unprovenWhy names the unproven facts for Refused and Uncertain
+	// (identityUncertainty), so a surface whose mode is another
+	// connector's decides its refusal for that connector
+	// (profileRefusedFor).
+	unprovenWhy string
 }
 
 // guardrailProfileSet is every profile derived from one configuration.

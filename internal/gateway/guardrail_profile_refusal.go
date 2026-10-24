@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
@@ -76,6 +77,28 @@ func (a *APIServer) profileRefused(ctx context.Context, surfaces profileSurfaces
 	return ""
 }
 
+// profileRefusedFor is profileRefused for a request whose mode is
+// connectorName's, which need not be the connector its decision was taken
+// for (profileRequestConnector): /api/v1/inspect/tool applies the mode of
+// the gateway's own connector to a credential not scoped to one. An
+// unproven decision is refused there only where a strict candidate blocks
+// connectorName (decideUnproven), so a candidate's global strict action
+// does not refuse a connector it sets to observe, and its strict action
+// for that connector refuses it (review of r104 Q-identity, continuation 5,
+// loop round 1).
+func (a *APIServer) profileRefusedFor(ctx context.Context, surfaces profileSurfaces, connectorName string) string {
+	resolved := a.resolvedProfile(ctx)
+	if resolved == nil {
+		return ""
+	}
+	d := resolved.decision
+	if connectorName = config.NormalizeConnectorName(connectorName); resolved.set != nil && len(d.Unproven) > 0 && d.unprovenWhy != "" &&
+		connectorName != config.NormalizeConnectorName(profileRequestConnector(ctx)) {
+		resolved.set.decideUnproven(&d, connectorName)
+	}
+	return d.refusedOn(surfaces)
+}
+
 // refuseProfileHook answers a hook whose profile decision is refused on
 // hooks with a block, rendered for the agent. Whether a connector honours a
 // block for that event is reported separately as WouldBlock.
@@ -112,7 +135,13 @@ func (a *APIServer) refuseProfileHook(
 // whether it did. Each inspect handler calls it, so a sandbox relay of the
 // request, which does not pass the inspect middleware, is refused too.
 func (a *APIServer) refuseProfileInspect(w http.ResponseWriter, r *http.Request, route, action, target string) bool {
-	reason := a.profileRefused(r.Context(), profileSurfaceInspect)
+	return a.refuseProfileInspectFor(w, r, route, action, target, profileRequestConnector(r.Context()))
+}
+
+// refuseProfileInspectFor is refuseProfileInspect for a handler that
+// applies connectorName's inspect mode (profileRefusedFor).
+func (a *APIServer) refuseProfileInspectFor(w http.ResponseWriter, r *http.Request, route, action, target, connectorName string) bool {
+	reason := a.profileRefusedFor(r.Context(), profileSurfaceInspect, connectorName)
 	if reason == "" {
 		return false
 	}

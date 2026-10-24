@@ -200,8 +200,12 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	// lazily, the request had no connector, so a connectors assignment never
 	// selected ACP traffic (GAP-0311).
 	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
-	// Identity uncertainty refuses in every mode; an ACP method denial
-	// continues to use the mode's normal observe/action behavior.
+	// An unproven identity fact a strict candidate blocks, and a method
+	// the ACP profile denies, block in action mode. The ACP mode is the one
+	// that applies, so in observe mode both are reported as would-block:
+	// an identity refusal blocked an observe ACP pair, which its own
+	// verdicts never do (review of r104 Q-identity, continuation 5, loop
+	// round 1).
 	blockReason, refused := "", profileRefusal(ctx, profileSurfacesAll)
 	if refused != "" {
 		blockReason = refused
@@ -211,7 +215,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	if blockReason != "" {
 		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: blockReason,
 			FailMode: acpProfileFailMode(profile, mode)}
-		if mode != string(acp.ModeAction) && refused == "" {
+		if mode != string(acp.ModeAction) {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
 		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, &ToolInspectVerdict{

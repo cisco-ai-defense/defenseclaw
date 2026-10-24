@@ -33,6 +33,14 @@ import (
 // account given the uid after the upgrade, with another home, is not bound,
 // and an account that cannot be bound is logged once, with what keeps its
 // entries.
+//
+// Loop round 1 of continuation 5: a home the map could not record (outside
+// the home roots, or not mounted when it was written) never bound on such
+// a file system. Its status change time (ctime) is never before its
+// creation, and a chown or a rename changes it, so a home whose ctime is
+// before the map, by more than the clock skew allowed, was created before
+// it under the uid that owns it now: that account is bound. A home changed
+// since stays pending, retried at every pass, and is logged once.
 func TestUnnamedAccountBindsWithoutAHomeCreationTime(t *testing.T) {
 	unnamedUID := os.Getuid() // the test directories' owner
 	if unnamedUID <= 0 {
@@ -45,16 +53,31 @@ func TestUnnamedAccountBindsWithoutAHomeCreationTime(t *testing.T) {
 		// when the map is written. later: the account NSS gives the uid
 		// once it answers was given it after the upgrade, with a new home.
 		atUpgrade, later bool
-		bound            bool
+		// outside: the home is not under a home root, so the map records
+		// no home for the uid. ctime is the home's status change time:
+		// "before" an hour before the map, "after" an hour after it, "none"
+		// unknown, "" the file system's own (just before the map, within
+		// the clock skew).
+		outside bool
+		ctime   string
+		bound   bool
 	}{
 		{name: "the home was there at the upgrade", atUpgrade: true, bound: true},
 		{name: "the home was not there at the upgrade (an automounted home)", atUpgrade: false},
 		{name: "the uid is given to another account after the upgrade", atUpgrade: true, later: true},
+		{name: "a home outside the home roots, unchanged since before the upgrade", atUpgrade: true, outside: true, ctime: "before", bound: true},
+		{name: "a home outside the home roots, changed after the upgrade", atUpgrade: true, outside: true, ctime: "after"},
+		{name: "a home outside the home roots, changed just before the upgrade", atUpgrade: true, outside: true},
+		{name: "a home outside the home roots, with no status change time", atUpgrade: true, outside: true, ctime: "none"},
+		{name: "an automounted home unchanged since before the upgrade", atUpgrade: false, ctime: "before", bound: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, root := t.TempDir(), t.TempDir()
 			bobHome := t.TempDir() // outside the home root
 			aliceHome := filepath.Join(root, "alice")
+			if tc.outside {
+				aliceHome = filepath.Join(t.TempDir(), "alice")
+			}
 			if tc.atUpgrade {
 				if err := os.Mkdir(aliceHome, 0o700); err != nil {
 					t.Fatal(err)
@@ -78,6 +101,16 @@ func TestUnnamedAccountBindsWithoutAHomeCreationTime(t *testing.T) {
 			homeIdentityOf = func(home string) (homeProof, bool) {
 				proof, ok := homeIdentity(home)
 				proof.birth, proof.hasBirth = 0, false
+				if home == aliceHome {
+					switch tc.ctime {
+					case "before":
+						proof.ctime, proof.hasCtime = time.Now().Add(-time.Hour).UnixNano(), true
+					case "after":
+						proof.ctime, proof.hasCtime = time.Now().Add(time.Hour).UnixNano(), true
+					case "none":
+						proof.ctime, proof.hasCtime = 0, false
+					}
+				}
 				return proof, ok
 			}
 			legacyAgentHomeRoots = func([]int) []string { return []string{root, filepath.Join(root, "missing")} }
