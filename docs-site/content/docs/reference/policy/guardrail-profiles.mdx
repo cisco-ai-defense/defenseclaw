@@ -169,9 +169,14 @@ How the keys combine:
   `block_at` and the strictest HILT of the candidates whose hooks block, and
   inspect and the LLM proxy those of the candidates that inspect in action
   mode, so the combination blocks only what one of its candidates blocks on
-  that surface. `profile-explain` shows the hooks' levels. The rules of every rule pack are
-  enforced; suppressions apply only when all packs share them (allows are the
-  intersection). Every sensitive tool any pack inspects is inspected. The
+  that surface. `profile-explain` shows the hooks' levels. Each rule keeps
+  the candidate whose pack has it: on a surface, it blocks or asks only at a
+  level where a candidate that enforces there, with that rule, would, so a
+  rule of a candidate that only observes that surface never blocks there.
+  Every candidate's rules are kept, also when together they exceed the rule
+  limits of one pack. Suppressions apply only when the packs of all
+  candidates that enforce on the surface share them (allows are the
+  intersection). Every sensitive tool any of them inspects is inspected. The
   sandbox limits of all candidates are combined: requirements and blocks are
   unions, allowed lists are intersections, and false wins. If no sandbox can
   satisfy them all (for example two different required packs), no sandbox
