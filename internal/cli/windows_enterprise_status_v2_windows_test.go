@@ -131,10 +131,31 @@ func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
 		result.Connectors["hermes"].HooksInstalled != enterprisestatus.HooksInstalledUnknown {
 		t.Fatalf("unverified Hermes cause or coverage missing: errors=%+v connector=%+v", result.Errors, result.Connectors["hermes"])
 	}
+	// The unknown state publishes no targets: the lifecycle schema forbids them.
+	document, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contracttest.Compile(t).Validate(t, "lifecycle-result.schema.json", document)
+	if result.Connectors["hermes"].Targets != nil {
+		t.Fatalf("unknown Hermes coverage kept targets: %+v", result.Connectors["hermes"])
+	}
+	// Ensure prints no block but cannot certify what verify refuses.
+	ensure := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.4")
+	ensure.Installed, ensure.CoverageComplete, ensure.SecurityComplete = true, true, true
+	applyWindowsEnterpriseStatusV2(ensure)
+	if code := ensure.Finish("windows", 0); code != 0 || ensure.SecurityComplete || ensure.CoverageComplete || ensure.Connectors != nil ||
+		messagesWithCode(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable) != 1 {
+		t.Fatalf("ensure with unverified Hermes: code=%d security=%v coverage=%v connectors=%v warnings=%+v",
+			code, ensure.SecurityComplete, ensure.CoverageComplete, ensure.Connectors, ensure.Warnings)
+	}
 }
 
 func TestWindowsVerifyV2KeepsCompleteResultWhenHermesIsNotInstalled(t *testing.T) {
-	cfg := windowsStatusV2Config()
+	// Keep the fixture limited to a connector whose hook process is not
+	// separately known to fail open. This assertion is about Hermes absence.
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"amp": {}}
 	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
 		cfg: cfg, guardianKnown: true,
 	})
@@ -174,16 +195,23 @@ func TestWindowsStatusV2GatewayAndConfigFailures(t *testing.T) {
 	}
 }
 
+// Every action names the hook-process limit and lowers security_complete;
+// only status and verify print the connectors block (ensure reported
+// security_complete true where status and verify reported false).
 func TestWindowsManagedCodexStatusAndVerifyShowHookProcessFailure(t *testing.T) {
-	for _, action := range []string{"status", "verify", "ensure"} {
+	for _, action := range []string{"status", "verify", "ensure", "install", "repair", "upgrade"} {
 		t.Run(action, func(t *testing.T) {
-			cfg := windowsStatusV2Config()
+			cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"codex": {Mode: "action"}}
 			fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{cfg: cfg})
 			result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
 			result.Installed, result.SecurityComplete = true, true
 			applyWindowsEnterpriseStatusV2(result)
-			if messagesWithCode(result.Warnings, "hook_process_fail_open") == 0 || result.SecurityComplete {
+			if messagesWithCode(result.Warnings, "hook_process_fail_open") != 1 || result.SecurityComplete {
 				t.Fatalf("%s warning=%v security_complete=%v", action, result.Warnings, result.SecurityComplete)
+			}
+			if published := result.Connectors != nil; published != (action == "status" || action == "verify") {
+				t.Fatalf("%s connectors block published=%v", action, published)
 			}
 		})
 	}

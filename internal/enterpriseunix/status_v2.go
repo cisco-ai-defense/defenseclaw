@@ -31,10 +31,10 @@ import (
 )
 
 // The status v2 blocks (enterprisestatus connector_block.go,
-// openshell_block.go, identity_block.go) on Linux and macOS: status and
-// verify only, from files and rows the other describe steps already read.
-// The Hermes block also reports the session-home attestation limit, which
-// makes managed verification incomplete when a Hermes target is possible.
+// openshell_block.go, identity_block.go) on Linux and macOS appear on status
+// and verify only. Hermes session-home attestation and the hook-process
+// failure limit also run for lifecycle changes, so those actions cannot claim
+// coverage or security that verify cannot prove.
 
 // statusV2 reports whether this run prints the status v2 blocks.
 func (l *lifecycle) statusV2() bool {
@@ -49,7 +49,6 @@ func (l *lifecycle) describeStatusV2(record *Deployment) {
 	}
 	r := l.result
 	l.describeConnectors(record)
-	r.AddHookProcessFailureWarnings()
 	if r.Identity == nil {
 		r.Identity = enterprisestatus.IdentityGatewayNotReady()
 	}
@@ -57,8 +56,10 @@ func (l *lifecycle) describeStatusV2(record *Deployment) {
 
 // describeConnectors builds the connectors block from the installed config,
 // the enumerator's manifest and unprotected-agents record, and the guardian
-// state the attestation vouches for. The fail mode is the hook renderer's
-// (enterprisehooks.ManagedHookFailMode).
+// state the attestation vouches for. Only status/verify publish the block;
+// every lifecycle action uses its Hermes coverage verdict and hook-process
+// failure limit. The fail mode is
+// the hook renderer's (enterprisehooks.ManagedHookFailMode).
 func (l *lifecycle) describeConnectors(record *Deployment) {
 	env, r := l.env, l.result
 	registry := connector.NewDefaultRegistry()
@@ -111,6 +112,9 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 	if state, ok := block["hermes"]; ok && state.Enabled &&
 		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
 		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
+		// Persistent-home targets cannot establish coverage of a session-only
+		// HERMES_HOME. Do not publish their counts as coverage for this state.
+		state.Targets = nil
 		block["hermes"] = state
 		r.CoverageComplete, r.SecurityComplete = false, false
 		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(env.GOOS, "hermes", true, false); err != nil {
@@ -122,10 +126,13 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 			}
 		}
 	}
-	r.Connectors = block
-	if hidden > 0 {
-		r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+
-			"they are not plain version strings", hidden))
+	r.AddHookProcessFailureWarnings(block)
+	if l.statusV2() {
+		r.Connectors = block
+		if hidden > 0 {
+			r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+
+				"they are not plain version strings", hidden))
+		}
 	}
 }
 

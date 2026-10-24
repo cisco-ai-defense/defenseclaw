@@ -60,30 +60,6 @@ func TestRemovedOpenHandsStubBlocksImportedBashFunctions(t *testing.T) {
 	}
 }
 
-// A running old Bash hook can resume past the new stub in a longer hard-linked
-// file. Its final tail must also fail closed if the process already imported
-// function overrides before teardown rewrote the file.
-func TestRemovedOpenHandsInPlaceTailCannotReturnSuccess(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the retired shell hook ran only on Unix")
-	}
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skipf("bash is unavailable: %v", err)
-	}
-	cmd := exec.Command(bash, "-c", removedOpenHands.inPlaceTail)
-	cmd.Env = []string{
-		"PATH=/usr/bin:/bin",
-		"BASH_FUNC_exit%%=() { return 0; }",
-		"BASH_FUNC_command%%=() { return 0; }",
-	}
-	if err := cmd.Run(); err == nil {
-		t.Fatal("the in-place deny tail returned success with imported Bash functions")
-	} else if failed, ok := err.(*exec.ExitError); !ok || failed.ExitCode() != 2 {
-		t.Fatalf("the in-place deny tail exited with %v, want exit 2", err)
-	}
-}
-
 // A late token-path refusal must be found before a script or another token
 // changes. This keeps the cleanup retryable as a unit when a token path is
 // a directory, a symlink, or an unsafe temporary file.

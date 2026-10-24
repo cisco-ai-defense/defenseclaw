@@ -995,7 +995,8 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                     if (cmode or "") == "action"
                     else "is in action mode for guardrail profile(s) " + ", ".join(_action_profiles_for(gc, name))
                 )
-                managed_host = str(getattr(app.cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+                deployment = str(getattr(app.cfg, "deployment_mode", "") or "")
+                managed_host = deployment.strip().lower() == "managed_enterprise"
                 fix = (
                     f"set closed with defenseclaw guardrail fail-mode closed{scope}"
                     if managed_host
@@ -1845,7 +1846,8 @@ def _refuse_a_mode_the_policy_tier_does_not_give(app: AppContext, mode: str, con
         return
     known = set(_active_connector_keys(app)) | set(getattr(gc, "connectors", {}) or {})
     if connector_flag:
-        targets = [connector_flag] if normalize_connector(connector_flag) in {normalize_connector(k) for k in known} or not known else []
+        known_keys = {normalize_connector(k) for k in known}
+        targets = [connector_flag] if normalize_connector(connector_flag) in known_keys or not known else []
     else:
         targets = sorted(known) or [_resolve_active_connector(app.cfg)]
     if any(resolver(name) != mode for name in targets if name):
