@@ -602,8 +602,8 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 		// The restart would stop a running MicroVM without a flush.
 		{"MicroVMs running", "", true, SetupOptions{}, openshell.DriverVM, 2, nil, false,
 			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell " +
-				"reports every MicroVM sandbox on the gateway stopped, which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); " +
-				"dc-claude-theirs-b (ready): `defenseclaw sandbox stop dc-claude-theirs-b` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-b` (raw OpenShell sandbox); then try again", "→ then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
+				"reports every MicroVM sandbox on the gateway stopped, which it does not for these: dc-claude-theirs-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); " +
+				"dc-claude-theirs-b (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-b` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-claude-theirs-b` (raw OpenShell sandbox); then try again", "→ then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
 		{"MicroVMs running, --install-openshell", "", false, flag, openshell.DriverVM, 2, nil, false,
 			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell"}},
 		{"no MicroVM running", "", false, flag, openshell.DriverVM, 0, nil, true,
@@ -1914,7 +1914,7 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	report := on(openshell.DriverVM)
 	const question = `Fix "MicroVM resources": raise them and restart the gateway?`
 	const stops = "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, " +
-		"which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); then try again"
+		"which it does not for these: dc-claude-theirs-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); then try again"
 
 	ta := newTestApp(t, "\n")
 	ta.IO.TTY = true
