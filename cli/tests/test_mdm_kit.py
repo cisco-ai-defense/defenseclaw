@@ -566,7 +566,8 @@ def test_windows_wrapper_exit_puts_back_a_credential_rotated_before_the_lifecycl
         [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(probe)],
         capture_output=True, text=True, timeout=120, check=False,
     )
-    assert result.returncode == 1603, result.stdout + result.stderr
+    # 1603, or 1603 mod 256 where exit codes are 8 bits (pwsh on Linux).
+    assert result.returncode in (1603, 1603 % 256), result.stdout + result.stderr
     assert "ROTATED=new-key" in result.stderr, result.stderr
     assert result.stdout.strip().splitlines()[-1] == '{"code":"mdm_not_installed"}', result.stdout
     store = tmp_path / "ProgramData"

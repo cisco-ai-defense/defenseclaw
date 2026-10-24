@@ -312,6 +312,7 @@ $Run.UnprovenReplacement = $manifest; $Run.UnprovenGatewayWasRunning = $true
 $Run.UnprovenAcceptedBins = Get-BinariesState $BinDir
 $Run.UnprovenConnectors = @(Get-RecordedAcceptedConnectors $manifest $true)
 $script:health = '{"running": true, "health": {"connectors": [{"name": "codex", "state": "running"}, {"name": "claudecode", "state": "error"}]}}'
+$script:digest = '{"effective_digest": "sha256:aa", "gateway_reported_digest": "sha256:aa"}'
 $script:gateway = $null
 "DOWN=$(Restore-AcceptedReplacement)"
 $script:health = '{"running": true, "health": {"connectors": [{"name": "codex", "state": "running"}, {"name": "claudecode", "state": "running"}]}}'
