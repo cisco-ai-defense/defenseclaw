@@ -63,7 +63,7 @@ DefenseClaw backs up `settings.json` first. Teardown restores the backup, or rem
 - `disableAllHooks: true` in any Claude Code settings file turns every hook off. The gateway raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED, and `defenseclaw doctor` fails the **Claude Code hooks** row. Remove the key and restart Claude Code.
 - A project's `.claude/settings.json`, or a file passed with `claude --settings`, can do the same for its sessions. DefenseClaw cannot see a `--settings` file.
 - Commands you type in Claude Code's own bash mode are your input, not an agent action. They are not checked.
-- Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. A gateway outage blocks supported events in every policy tier.
+- Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. During an outage the default and permissive policies let the call run with a warning, strict blocks it.
 - Per-user hooks live in a file you own. The [enterprise standalone profile](/docs/enterprise/configure/machine-policy) puts them in machine policy instead.
 
 ## On a managed computer

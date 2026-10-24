@@ -48,7 +48,7 @@ def _per_user_set_mechanics(request: pytest.FixtureRequest, monkeypatch: pytest.
     values; the tests named ``*refused*`` check the refusal itself.
     """
     if "refused" not in request.node.name:
-        monkeypatch.setattr(cmd_guardrail, "_refuse_per_user_open_mode", lambda *_a, **_k: None)
+        monkeypatch.setattr(cmd_guardrail, "_refuse_a_mode_the_policy_tier_does_not_give", lambda *_a, **_k: None)
 
 
 def make_ctx(*, enabled: bool = True, connector: str = "openclaw",
@@ -429,9 +429,11 @@ class FailModeCommandTests(unittest.TestCase):
         app = make_ctx(enabled=True, hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        # A per-user install closes outages in every policy tier.
-        self.assertIn("gateway outage: closed in every policy tier", result.output)
-        self.assertIn("hooks block when the gateway is unavailable", " ".join(result.output.split()))
+        # A per-user install shows the policy-tier rule, not the saved value
+        # (oss-outage-open).
+        self.assertIn("gateway outage: follows the policy tier", result.output)
+        self.assertIn("strict blocks it", " ".join(result.output.split()))
+        self.assertIn("defenseclaw guardrail use-pack strict", result.output)
 
     def test_single_connector_observe_mode_outside_secure_client_names_the_fail_mode_fix(self):
         # B-01 (owner rule): outside Secure Client observe mode never keeps a
@@ -469,7 +471,7 @@ class FailModeCommandTests(unittest.TestCase):
         app = make_ctx(enabled=True, connector="codex", hook_fail_mode="closed")
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("closed in every policy tier", result.output)
+        self.assertIn("follows the policy tier", result.output)
         self.assertNotIn("Hermes", result.output)
 
     def test_set_closed_omits_hermes_when_not_configured(self):
@@ -1124,9 +1126,10 @@ class CursorModePostureTests(unittest.TestCase):
                 cmd_guardrail.mode_cmd, ["action", "--connector", "cursor"], obj=app
             )
         self.assertEqual(result.exit_code, 0, result.output)
-        # The saved open does not reopen a per-user outage.
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
-        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "closed")
+        # The guardrail mode no longer pins Cursor's fail mode: its outage
+        # mode follows the policy tier (here the saved open's default tier).
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "open")
+        self.assertEqual(app.cfg.guardrail.connectors["cursor"].hook_fail_mode, "open")
 
 
 class PerConnectorFailModeTests(unittest.TestCase):
@@ -1148,15 +1151,20 @@ class PerConnectorFailModeTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
-    def test_per_user_open_is_refused_before_changing_config(self):
-        # A saved open cannot change the closed per-user outage mode.
+    def test_per_user_value_the_tier_does_not_give_is_refused_before_changing_config(self):
+        # The strict tier (a saved closed, fail_mode_tier) refuses open, the
+        # default tier refuses closed (oss-outage-open).
         app = make_multi_ctx({"codex": None, "claudecode": None})
         app.cfg.guardrail.hook_fail_mode = "closed"
         runner = CliRunner()
         for args in (["open", "--yes"], ["open", "--connector", "codex", "--yes"]):
             result = runner.invoke(cmd_guardrail.fail_mode_cmd, args, obj=app)
             self.assertNotEqual(result.exit_code, 0, result.output)
-            self.assertIn("block when the gateway is unavailable in every policy tier", " ".join(result.output.split()))
+            self.assertIn("follows the policy tier", " ".join(result.output.split()))
+        app.cfg.guardrail.hook_fail_mode = "open"
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--connector", "codex", "--yes"], obj=app)
+        self.assertNotEqual(result.exit_code, 0, result.output)
+        self.assertIn("use-pack strict", result.output)
         app.cfg.save.assert_not_called()
 
     def test_set_one_connector_closed_persists_and_restarts_only_it(self):
@@ -1172,9 +1180,10 @@ class PerConnectorFailModeTests(unittest.TestCase):
                 obj=app,
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        # Only codex gets the override; claudecode still closes outages.
+        # Only codex gets the override; claudecode keeps the global default
+        # (open, the default tier).
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("codex"), "closed")
-        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "closed")
+        self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("claudecode"), "open")
         # Global default is untouched.
         self.assertEqual(app.cfg.guardrail.hook_fail_mode, "open")
         app.cfg.save.assert_called_once()
@@ -1455,11 +1464,11 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(app.cfg.guardrail.connectors["codex"].hook_fail_mode, "closed")
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
-        self.assertIn("block when the gateway is unavailable in every policy tier", " ".join(result.output.split()))
+        self.assertIn("follows the policy tier", " ".join(result.output.split()))
 
         result = runner.invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "cursor", "--yes"], obj=app)
         self.assertEqual(result.exit_code, 1, msg=result.output)
-        self.assertIn("block when the gateway is unavailable in every policy tier", " ".join(result.output.split()))
+        self.assertIn("follows the policy tier", " ".join(result.output.split()))
         self.assertEqual(app.cfg.guardrail.effective_hook_fail_mode("cursor"), "closed")
 
     def test_confirm_refuses_when_output_is_piped(self):

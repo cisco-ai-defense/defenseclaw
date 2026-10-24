@@ -1580,9 +1580,9 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	}
 	for _, row := range rows {
 		name, _ := row["connector"].(string)
-		// The saved open does not reopen a per-user gateway outage.
-		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "closed" || row["enabled"] != true {
-			t.Fatalf("%s published posture = %#v, want action/closed/enabled", name, row)
+		// hook_fail_mode is the hooks' outage mode: the default tier's open.
+		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "open" || row["enabled"] != true {
+			t.Fatalf("%s published posture = %#v, want action/open/enabled", name, row)
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||

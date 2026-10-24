@@ -196,8 +196,8 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	expected := rotationConnectorState{
 		Version: 1,
 		Connectors: []rotationConnectorPolicy{
-			{Name: "claudecode", Mode: "action", HookFailMode: "closed", Enabled: true},
-			{Name: "codex", Mode: "action", HookFailMode: "closed", Enabled: true},
+			{Name: "claudecode", Mode: "action", HookFailMode: "open", Enabled: true}, // the default tier outage mode
+			{Name: "codex", Mode: "action", HookFailMode: "open", Enabled: true},      // the default tier outage mode
 		},
 	}
 	fallback := config.DefaultConfig()
@@ -219,7 +219,7 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	mixed := expected
 	mixed.Connectors = append([]rotationConnectorPolicy(nil), expected.Connectors...)
 	mixed.Connectors[0].Mode = "observe"
-	mixed.Connectors[0].HookFailMode = "closed"
+	mixed.Connectors[0].HookFailMode = "open"
 	fallback.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Mode: "observe", HookFailMode: "open"}
 	if err := verifyRotationConfigState(fallback, mixed); err != nil {
 		t.Fatalf("exact mixed connector state rejected: %v", err)

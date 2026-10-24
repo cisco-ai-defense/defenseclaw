@@ -237,9 +237,8 @@ func (c *lockRestoreFailureConnector) Setup(_ context.Context, opts connector.Se
 
 func (c *postureChangingConnector) Setup(_ context.Context, opts connector.SetupOpts) error {
 	c.setupCalls++
-	posture := fmt.Sprintf("%s|%s|hilt=%t", opts.GuardrailMode, opts.HookFailMode, opts.HILTEnabled)
-	c.setupModes = append(c.setupModes, posture)
-	return os.WriteFile(c.artifactPath, []byte(posture+"\n"), 0o600)
+	c.setupModes = append(c.setupModes, opts.HookFailMode)
+	return os.WriteFile(c.artifactPath, []byte(opts.HookFailMode+"\n"), 0o600)
 }
 
 func (c *postureChangingConnector) Teardown(context.Context, connector.SetupOpts) error {
@@ -1008,14 +1007,14 @@ func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t
 	s.cfg.Guardrail.Enabled = true
 	s.cfg.Guardrail.Mode = "observe"
 	s.cfg.Guardrail.HookFailMode = "closed"
-	// The outage mode stays closed while the approval posture changes.
-	// Publication failure must restore the prior registration and lock.
+	// The default tier: the current outage mode is open (oss-outage-open),
+	// changed from the prior install's closed.
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"codex": {Mode: "observe", HookFailMode: "closed", HILT: &config.HILTConfig{Enabled: true, MinSeverity: "HIGH"}},
+		"codex": {Mode: "observe", HookFailMode: "closed"},
 	}
 	s.health = NewSidecarHealth()
 	artifactPath := filepath.Join(testenv.PrivateTempDir(t), "codex-registration-posture")
-	if err := os.WriteFile(artifactPath, []byte("observe|closed|hilt=false\n"), 0o600); err != nil {
+	if err := os.WriteFile(artifactPath, []byte("closed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := connector.SaveActiveConnectors(s.cfg.DataDir, []string{"codex"}); err != nil {
@@ -1058,22 +1057,22 @@ func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t
 	if err != nil {
 		t.Fatalf("setup transaction: %v", err)
 	}
-	if body, readErr := os.ReadFile(artifactPath); readErr != nil || string(body) != "observe|closed|hilt=true\n" {
-		t.Fatalf("setup posture = %q, %v; want enabled approval with closed outage before publication", body, readErr)
+	if body, readErr := os.ReadFile(artifactPath); readErr != nil || string(body) != "open\n" {
+		t.Fatalf("setup posture = %q, %v; want changed open posture before publication", body, readErr)
 	}
 
 	err = s.publishMultiConnectorReadyState(context.Background(), transaction, []string{"codex"}, nil)
 	if err == nil || !strings.Contains(err.Error(), "restored applied connectors to their pre-setup state") {
 		t.Fatalf("publication error = %v, want successful prior-posture rollback", err)
 	}
-	if !reflect.DeepEqual(applied.setupModes, []string{"observe|closed|hilt=true", "observe|closed|hilt=false"}) {
-		t.Fatalf("setup postures = %v, want current approval then prior posture reapplication", applied.setupModes)
+	if !reflect.DeepEqual(applied.setupModes, []string{"open", "closed"}) {
+		t.Fatalf("setup postures = %v, want current open then prior closed reapplication", applied.setupModes)
 	}
 	if applied.teardownCalls != 0 {
 		t.Fatalf("teardownCalls = %d, want prior active connector re-applied rather than torn down", applied.teardownCalls)
 	}
-	if body, readErr := os.ReadFile(artifactPath); readErr != nil || string(body) != "observe|closed|hilt=false\n" {
-		t.Fatalf("restored posture = %q, %v; want exact prior observe/closed posture", body, readErr)
+	if body, readErr := os.ReadFile(artifactPath); readErr != nil || string(body) != "closed\n" {
+		t.Fatalf("restored posture = %q, %v; want exact prior closed posture", body, readErr)
 	}
 	if afterLock, readErr := os.ReadFile(filepath.Join(s.cfg.DataDir, "hook_contract_lock.json")); readErr != nil || !reflect.DeepEqual(afterLock, priorLock) {
 		t.Fatalf("restored lock = %q, %v; want exact prior bytes %q", afterLock, readErr, priorLock)
@@ -2404,8 +2403,8 @@ func TestSetupConnectorsIsolatedPreflightsAllScopedTokens(t *testing.T) {
 }
 
 // TestConnectorSetupOpts_PerConnectorHookFailMode verifies the SetupOpts carry
-// each connector's outage mode (EffectiveHookOutageFailModeForConnector),
-// closed on a per-user install whatever hook_fail_mode it saved.
+// each connector's outage mode (EffectiveHookOutageFailModeForConnector): its
+// policy tier's, whatever hook_fail_mode it saves (oss-outage-open).
 func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.Guardrail.Mode = "action"
@@ -2416,8 +2415,8 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	}
 
 	codexOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "codex"}}, "tok", "a", "b")
-	if codexOpts.HookFailMode != "closed" {
-		t.Errorf("codex HookFailMode=%q, want the closed per-user outage mode", codexOpts.HookFailMode)
+	if codexOpts.HookFailMode != "open" {
+		t.Errorf("codex HookFailMode=%q, want the default tier's open", codexOpts.HookFailMode)
 	}
 	cursorOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}, "tok", "a", "b")
 	if cursorOpts.HookFailMode != "closed" {
@@ -3136,13 +3135,13 @@ func assertPathMissing(t *testing.T, path string) {
 // TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient: the gateway
 // renders an unset hook fail mode open under Secure Client (#1163), and tells
 // the renderer so; a managed standalone install renders it closed, and an OSS
-// install renders closed in every policy tier.
+// install its default tier's outage mode, open (oss-outage-open).
 func TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient(t *testing.T) {
 	for _, tc := range []struct {
 		name, deploymentMode, profile, want string
 		secureClient                        bool
 	}{
-		{"oss", "", "", "closed", false},
+		{"oss", "", "", "open", false},
 		{"standalone", "managed_enterprise", "standalone", "closed", false},
 		{"secure_client", "managed_enterprise", "secure_client", "open", true},
 	} {

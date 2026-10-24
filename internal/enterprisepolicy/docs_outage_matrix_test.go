@@ -49,6 +49,7 @@ var outageTableOSes = []string{"linux", "darwin", "windows"}
 
 type documentedOutage struct {
 	PerUserClosed string `json:"perUserClosed"`
+	PerUserOpen   string `json:"perUserOpen"`
 	// ManagedOpen is the administrator's open with the default machine
 	// policy (foreign_hooks: remove, so the foreign-hook guard runs where it
 	// covers the connector); ManagedOpenNoGuard with foreign_hooks report or
@@ -117,6 +118,7 @@ func codeOutage(t *testing.T, conn connector.Connector) documentedOutage {
 	managedOpen, guardBlocksSomewhere := managedOpenWithDefaultGuard(t, conn.Name(), noGuard)
 	return documentedOutage{
 		PerUserClosed:      outage.PerUserClosed,
+		PerUserOpen:        outage.PerUserOpen,
 		ManagedOpen:        managedOpen,
 		ManagedOpenNoGuard: noGuard,
 		HeldUntilRestart:   outage.GuardCheckedAtLoad && guardBlocksSomewhere,

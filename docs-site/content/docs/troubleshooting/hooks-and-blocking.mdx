@@ -69,9 +69,9 @@ The message reads `<connector>'s agent changed`.
 
 ## Every tool call is blocked while the gateway is down
 
-**Cause.** Per-user hooks block while the gateway is not running in every policy tier. Managed hooks block by default; an administrator can choose an outage-only `open` mode. An install or upgrade in progress blocks in every policy.
+**Cause.** The connector runs the strict policy (or the install is managed), whose hooks block while the gateway is not running. With the default or permissive policy an outage lets calls run with a warning instead; an install or upgrade in progress blocks in every policy.
 
-**Fix.** Start the gateway: `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. A managed administrator can choose `guardrail.hook_fail_mode: open` for a classified outage only.
+**Fix.** Start the gateway: `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. To let calls run with a warning during an outage, use the default policy: `defenseclaw guardrail use-pack default` (your decision; `hook-failures.jsonl` records each unchecked call).
 
 **Check.** `defenseclaw guardrail fail-mode` shows each connector's outage mode and policy tier.
 

@@ -59,9 +59,11 @@ against the hook code on every change.
 
 <OutageMatrix />
 
-- **Per-user** is an install without a managed deployment. A gateway outage
-  blocks the call in every policy tier. The hook records the failure in
-  `hook-failures.jsonl` when its runtime is available
+- **Per-user** is an install without a managed deployment. Its outage mode
+  follows the connector's policy tier (rule pack): the default (balanced) and
+  permissive policies let the call run with a warning and a
+  `hook-failures.jsonl` record, the strict policy blocks it. Every other
+  failure blocks in every tier
   ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail
   mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
@@ -108,8 +110,8 @@ Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), A
 
 ### Which connectors fail closed?
 
-Every listed connector can block a gateway outage: on a per-user install in
-every policy tier, on a managed host by default. Copilot CLI, Antigravity and
+Every listed connector can block a gateway outage: on a per-user install in the
+strict policy, on a managed host by default. Copilot CLI, Antigravity and
 Hermes hooks block delivery failures when the effective mode is `closed`.
 Hermes 0.21+ blocks a `pre_tool_call` on hook spawn error or timeout when Setup has written `fail_closed: true`; it can still run after a killed hook exits non-2 with empty stdout. Earlier Hermes contracts also fail open on timeout. Other agents may still allow a call when the hook process times out or cannot start. The table marks gateway delivery behavior separately from agent-side process failure.
 
@@ -118,7 +120,7 @@ Hermes 0.21+ blocks a `pre_tool_call` on hook spawn error or timeout when Setup 
   also in observe mode. The default is `closed`. If the administrator explicitly selects `open`,
   a gateway outage can allow the call. Oversized input, a gateway 5xx, an unusable
   answer and other transport errors still block. See [Fail modes](/docs/reference/configuration/fail-modes).
-- On a per-user install, the hook records gateway outage blocks in `hook-failures.jsonl`, and the gateway reports them when it starts again ([Reporting](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
+- On a per-user install, every hook and plugin records a call that ran unchecked in `hook-failures.jsonl`, and the gateway turns those records into a `guardrail-degraded` alert when it starts again ([Reporting](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
 - Cursor writes `failClosed: true` outside Secure Client in action and observe mode. Observe still allows ordinary calls and records `would_block` findings; the host flag covers a hook process that cannot answer.
 
 ### I want to run the agent in an OpenShell sandbox

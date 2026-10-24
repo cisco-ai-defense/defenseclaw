@@ -58,21 +58,22 @@ def _run(cfg, args: list[str]):
 
 def test_the_persisted_fail_mode_example_is_the_command_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # The page's own setup: Claude Code in the default policy tier and Codex in
-    # the strict one. Both close outages regardless of saved hook_fail_mode.
+    # the strict one (oss-outage-open); the saved hook_fail_mode does not
+    # change what a per-user hook does.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": "open"})
     cfg.guardrail.connectors["codex"].rule_pack = "strict"
     assert _lines(_run(cfg, [])) == _page_example()
 
 
-def test_a_per_user_open_value_is_refused_as_the_page_says(
+def test_a_per_user_value_the_tier_does_not_give_is_refused_as_the_page_says(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
-    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "codex", "--yes"], obj=app)
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--connector", "codex", "--yes"], obj=app)
     assert result.exit_code == 1, result.output
-    assert "block when the gateway is unavailable in every policy tier" in result.output
+    assert "use-pack strict" in result.output
     page = " ".join(PAGE.read_text(encoding="utf-8").split())
-    assert "`open` changes nothing on a per-user install, explains the rule and exits 1." in page
+    assert "Another value changes nothing, explains the rule and exits 1." in page
