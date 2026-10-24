@@ -93,7 +93,10 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 				CodexConfigPathOverride = configPath
 				t.Cleanup(func() { CodexConfigPathOverride = prior })
 				c := NewCodexConnector()
-				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos, ManagedEnterprise: true}
+				// Use the per-user path to save the operator's preimage. Current
+				// managed Windows Setup must run through the machine installer;
+				// the released per-user OTEL shape is written below.
+				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos}
 				if err := c.Setup(context.Background(), earlier); err != nil {
 					t.Fatalf("seed earlier setup backup: %v", err)
 				}
