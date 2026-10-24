@@ -155,10 +155,9 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		words := make([]string, len(call.Args))
 		for i, arg := range call.Args {
 			value, known := StaticWord(arg, home)
-			if !known {
-				return !found
+			if known {
+				words[i] = value
 			}
-			words[i] = value
 		}
 		found = actionPrivateKeyReadWords(words, cwd, home, false, 0)
 		return !found
@@ -181,6 +180,19 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 		return false
 	case "env", "sudo":
 		index := 1
+		conservativeRead := func() bool {
+			for _, word := range words[index:] {
+				if windows {
+					protected, _ := actionWindowsProtected(word, cwd, home, true)
+					if protected {
+						return true
+					}
+				} else if word != "" && actionPrivateReadPath(word, cwd, home) {
+					return true
+				}
+			}
+			return false
+		}
 		for index < len(words) {
 			word := words[index]
 			if word == "--" {
@@ -193,7 +205,7 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 					index++
 				case word == "-u" || word == "--unset" || word == "-C" || word == "--chdir":
 					if index+1 >= len(words) {
-						return false
+						return conservativeRead()
 					}
 					if word == "-C" || word == "--chdir" {
 						cwd = OperandPath(words[index+1], cwd)
@@ -208,28 +220,51 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 					strings.Contains(word, "=") && !strings.HasPrefix(word, "-"):
 					index++
 				case strings.HasPrefix(word, "-"):
-					return false
+					return conservativeRead()
 				default:
 					return actionPrivateKeyReadWords(words[index:], cwd, home, windows, depth+1)
 				}
 				continue
 			}
-			if word == "-l" || word == "-ll" || word == "--list" {
+			if word == "--list" {
 				return false
 			}
 			switch {
-			case strings.Contains(" -u -g -h -p -C -r -t --user --group --host --prompt --close-from --role --type ", " "+word+" "):
+			case strings.Contains(" --user --group --host --prompt --close-from --role --type --chdir ", " "+word+" "):
 				if index+1 >= len(words) {
-					return false
+					return conservativeRead()
+				}
+				if word == "--chdir" {
+					cwd = OperandPath(words[index+1], cwd)
 				}
 				index += 2
-			case strings.Contains(" -n -E -H -S -b -k -K -v -i -s --login --shell --non-interactive --preserve-env ", " "+word+" ") ||
+			case strings.Contains(" --login --shell --non-interactive --preserve-env --askpass ", " "+word+" ") ||
 				strings.HasPrefix(word, "--user=") || strings.HasPrefix(word, "--group=") ||
-				strings.HasPrefix(word, "--preserve-env=") ||
-				len(word) > 2 && (strings.HasPrefix(word, "-u") || strings.HasPrefix(word, "-g")):
+				strings.HasPrefix(word, "--preserve-env="):
 				index++
-			case strings.HasPrefix(word, "-"):
-				return false
+			case strings.HasPrefix(word, "--chdir="):
+				cwd = OperandPath(strings.TrimPrefix(word, "--chdir="), cwd)
+				index++
+			case strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "--"):
+				valueAfter, listing, known := actionSudoShortOption(word)
+				if listing {
+					return false
+				}
+				if !known {
+					return conservativeRead()
+				}
+				if valueAfter {
+					if index+1 >= len(words) {
+						return conservativeRead()
+					}
+					if strings.HasSuffix(word, "D") {
+						cwd = OperandPath(words[index+1], cwd)
+					}
+					index++
+				}
+				index++
+			case strings.HasPrefix(word, "-") || word == "":
+				return conservativeRead()
 			default:
 				return actionPrivateKeyReadWords(words[index:], cwd, home, windows, depth+1)
 			}
@@ -270,6 +305,26 @@ func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, d
 		}
 	}
 	return false
+}
+
+// sudo accepts combined short switches and an attached value for the last
+// value-taking switch. Keep unknown forms on the conservative read path.
+func actionSudoShortOption(word string) (valueAfter, listing, known bool) {
+	if len(word) < 2 || word[0] != '-' || word[1] == '-' {
+		return false, false, false
+	}
+	for i := 1; i < len(word); i++ {
+		switch word[i] {
+		case 'l':
+			return false, true, true
+		case 'u', 'g', 'h', 'p', 'C', 'r', 't', 'D':
+			return i+1 == len(word), false, true
+		case 'n', 'E', 'H', 'S', 'b', 'k', 'K', 'v', 'i', 's', 'A':
+		default:
+			return false, false, false
+		}
+	}
+	return false, false, true
 }
 
 func actionResolvedProtectedTarget(command, cwd, home string) bool {
