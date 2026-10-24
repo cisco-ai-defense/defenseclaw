@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Model a per-user policy tier with the saved fail mode in fail-mode mechanics tests."""
+"""Model policy tier labels in fail-mode CLI mechanics tests."""
 
 from __future__ import annotations
 
@@ -13,12 +13,9 @@ from defenseclaw import config as dcconfig
 def policy_tier_follows_the_saved_fail_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """A connector saved ``closed`` is in the strict tier, one saved ``open`` in the default tier.
 
-    A per-user hook's outage mode follows its policy tier (oss-outage-open:
-    strict closes, default and permissive open), never the saved value. The
-    modules that import this fixture exercise registration, refresh, drift and
-    message mechanics for a closed or an open hook, so they keep naming the
-    hook's mode with ``hook_fail_mode``. test_managed_fail_mode tests the
-    tier itself.
+    Per-user outages remain closed in every tier. The modules importing this
+    fixture use the tier labels for registration and message scenarios without
+    building a rule pack on disk. test_managed_fail_mode tests the resolver.
     """
 
     def tier(self: dcconfig.GuardrailConfig, connector: str = "") -> str:

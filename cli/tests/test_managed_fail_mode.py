@@ -79,9 +79,8 @@ def test_hook_fail_mode_matrix(connector, deployment, mode, global_mode, connect
     if want is None:
         want = DEPLOYMENTS[deployment][2]
     if deployment == "per-user":
-        # A per-user outage mode follows the policy tier, never the saved
-        # value: the default tier is open (oss-outage-open).
-        want = "open"
+        # No saved value or policy tier can open a per-user outage.
+        want = "closed"
     assert cfg.guardrail.effective_hook_fail_mode(connector) == want
     assert cfg.managed_outside_secure_client() is (deployment == "standalone")
 
@@ -113,19 +112,17 @@ def test_machine_marker_makes_any_managed_config_standalone(monkeypatch: pytest.
 @pytest.mark.parametrize(
     ("global_pack", "connector_pack", "saved", "want"),
     [
-        ("", "", "closed", "open"),
-        ("default", "", "closed", "open"),
-        ("permissive", "", "closed", "open"),
+        ("", "", "closed", "closed"),
+        ("default", "", "closed", "closed"),
+        ("permissive", "", "closed", "closed"),
         ("strict", "", "open", "closed"),
-        ("strict", "permissive", "closed", "open"),
+        ("strict", "permissive", "closed", "closed"),
         ("default", "strict", "open", "closed"),
     ],
 )
-def test_per_user_outage_mode_follows_the_policy_tier(connector, global_pack, connector_pack, saved, want):
-    # Owner decision 2026-10-23: a per-user install fails open for a gateway
-    # outage in the default and permissive tiers and closed in strict; the
-    # saved hook_fail_mode does not change it. A managed install keeps its
-    # administrator's mode whatever the tier.
+def test_per_user_outage_mode_stays_closed_across_policy_tiers(connector, global_pack, connector_pack, saved, want):
+    # A per-user install fails closed for a gateway outage in every tier.
+    # A managed install keeps its administrator's mode.
     guardrail = GuardrailConfig(mode="action", hook_fail_mode=saved, rule_pack=global_pack)
     if connector_pack:
         guardrail.connectors = {connector: PerConnectorGuardrailConfig(rule_pack=connector_pack, hook_fail_mode=saved)}

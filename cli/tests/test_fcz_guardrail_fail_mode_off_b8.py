@@ -40,15 +40,14 @@ def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.Mo
 
 
 def test_fail_mode_open_on_per_user_openclaw_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # A per-user value the policy tier does not give is refused, also for a
-    # connector without hooks (oss-outage-open).
+    # A per-user open value is refused, also for a connector without hooks.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"openclaw": ""})
     cfg.guardrail.connectors = {}
     cfg.guardrail.connector = "openclaw"
     cfg.guardrail.hook_fail_mode = "closed"
     result = _fail_mode(cfg, "open")
     assert result.exit_code == 1, result.output
-    assert "follows the policy tier" in " ".join(result.output.split())
+    assert "block when the gateway is unavailable in every policy tier" in " ".join(result.output.split())
     assert cfg.guardrail.hook_fail_mode == "closed"
 
     bare = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=_app(cfg))

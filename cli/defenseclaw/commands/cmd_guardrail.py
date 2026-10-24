@@ -1799,34 +1799,15 @@ def _apply_global_fail_mode_transaction(
 # What a per-user hook does while its gateway is down (Go
 # config.HookOutageFailMode), as `guardrail fail-mode` explains it.
 _PER_USER_OUTAGE_RULE = (
-    "On a per-user install the gateway-outage mode follows the policy tier: the default (balanced) and "
-    "permissive rule packs let a call run with a warning while the gateway is not running, strict blocks it. "
-    "Every other failure (an error or unusable gateway answer, a missing token, an install or upgrade) blocks."
+    "On a per-user install, hooks block when the gateway is unavailable in every policy tier. "
+    "An error or unusable gateway answer, a missing token, and an install or upgrade also block."
 )
 
 
-def _refuse_a_mode_the_policy_tier_does_not_give(app: AppContext, mode: str, connector_flag: str | None) -> None:
-    """Refuse a per-user ``fail-mode`` value the connectors' policy tier does not give.
-
-    A per-user hook's gateway-outage mode follows its policy tier (owner
-    decision 2026-10-23, Go config.HookOutageFailMode). With the tier's value
-    the command refreshes and verifies the installed hooks; any other value
-    would not change what they do. A connector the config does not know is
-    left to the usual "not configured" error.
-    """
-    gc = app.cfg.guardrail
-    resolver = getattr(gc, "effective_hook_fail_mode", None)
-    if not callable(resolver):
-        return
-    known = set(_active_connector_keys(app)) | set(getattr(gc, "connectors", {}) or {})
-    if connector_flag:
-        known_keys = {normalize_connector(k) for k in known}
-        targets = [connector_flag] if normalize_connector(connector_flag) in known_keys or not known else []
-    else:
-        targets = sorted(known) or [_resolve_active_connector(app.cfg)]
-    if any(resolver(name) != mode for name in targets if name):
+def _refuse_per_user_open_mode(mode: str) -> None:
+    """Refuse an open per-user outage mode, even before connector setup."""
+    if mode == "open":
         ux.err(_PER_USER_OUTAGE_RULE, indent="  ")
-        click.echo(f"  {ux.dim('Fail closed during an outage:')} defenseclaw guardrail use-pack strict")
         raise SystemExit(1)
 
 
@@ -1835,7 +1816,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
 
     gc = app.cfg.guardrail
     click.echo()
-    click.echo(f"  {ux.bold('gateway outage:')} follows the policy tier (rule pack)")
+    click.echo(f"  {ux.bold('gateway outage:')} closed in every policy tier")
     click.echo()
     click.echo(f"  {ux._style('per connector:', fg='bright_black', bold=True)}")
     for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg)):
@@ -1847,7 +1828,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         else:
             tier = gc.hook_policy_tier(name) if hasattr(gc, "hook_policy_tier") else "default"
             resolver = getattr(gc, "effective_hook_fail_mode", None)
-            outage = resolver(name) if callable(resolver) else ("closed" if tier == "strict" else "open")
+            outage = resolver(name) if callable(resolver) else "closed"
             notes = [f"{tier} tier"]
             limit = upstream_hook_limit(name)
             if outage == "closed" and limit:
@@ -1861,7 +1842,6 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         click.echo(f"      - {_connector_label(name)} ({name}): {shown}")
     click.echo()
     ux.subhead(_PER_USER_OUTAGE_RULE, indent="  ")
-    click.echo(f"  {ux.dim('Fail closed during an outage:')} defenseclaw guardrail use-pack strict")
     click.echo(f"  {ux.dim('Gateway down:')} defenseclaw-gateway start; defenseclaw doctor if it does not start")
     click.echo()
 
@@ -1893,19 +1873,19 @@ def fail_mode_cmd(
     """Show or change the hook failure behavior.
 
     The hook fail mode controls what generated hooks do when delivery or
-    authentication fails, or when the DefenseClaw gateway returns a 4xx,
-    an unparseable JSON body, or no ``action`` field. Two values are supported:
+    the gateway response fails. On a per-user install hooks block gateway
+    outages in every policy tier, and ``open`` is unavailable. Managed
+    administrators can select ``open`` for a classified outage; Secure Client
+    keeps its own default. Two values are supported where available:
 
       \b
-      open   — allow the tool/prompt and log the failure.
-               A gateway outage never blocks your agent.
+      open   — allow an eligible managed outage and log the failure.
       closed — block supported events when inspection is unavailable.
                The default on a new install: every prompt and
                tool call is inspected or blocked.
 
-    Transport failures (gateway unreachable / timeout / 5xx) follow the
-    same connector-scoped setting. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
-    additionally forces transport and missing-token failures closed.
+    Errors, unusable gateway answers, missing tokens and install windows
+    block outside Secure Client in either mode.
 
     Without an argument this prints the current value. With
     ``open`` or ``closed`` it persists the choice to ~/.defenseclaw/
@@ -1923,7 +1903,7 @@ def fail_mode_cmd(
     managed_host = str(getattr(app.cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
     secure_client = bool(getattr(app.cfg.guardrail, "_secure_client", False))
     if mode is not None and not managed_host and not secure_client:
-        _refuse_a_mode_the_policy_tier_does_not_give(app, mode, connector_flag)
+        _refuse_per_user_open_mode(mode)
     if connector_flag:
         _set_connector_fail_mode(
             app, connector_flag, mode, restart=restart, yes=yes

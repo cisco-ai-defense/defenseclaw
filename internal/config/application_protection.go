@@ -381,7 +381,7 @@ func (c *Config) EffectiveActionHookFailModeForConnector(connector string) strin
 // failure that is not a gateway outage. A managed host may use an
 // administrator's explicit open during an outage; Secure Client also
 // defaults to open. A per-user install is closed here, including values
-// retained from an older config: its outage mode follows its policy tier
+// retained from an older config: its outage mode is closed in every tier
 // (EffectiveHookOutageFailModeForConnector, HookOutageFailMode).
 func (c *Config) effectiveHookFailModeForConnector(connector string, _ bool) string {
 	if c == nil {

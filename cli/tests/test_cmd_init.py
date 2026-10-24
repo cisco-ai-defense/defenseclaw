@@ -456,7 +456,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         )
         with (
             patch.object(cmd_init.platform_support, "host_os", return_value="linux"),
-            patch.object(cmd_init, "_closed_fail_mode_connectors", return_value=["openclaw"]),
             patch.object(cmd_init, "_sandboxes_possible", return_value=False),
             patch.object(cmd_init, "_unguarded_acp_summary", return_value=""),
         ):
@@ -1263,8 +1262,8 @@ class TestInitFirstRunBackend(unittest.TestCase):
         setup = {step["name"]: step for step in summary["setup"]}
         self.assertIn("hermes, mode=action", setup["Guardrail"]["detail"])
         # GAP-1251: the summary names the resulting hook fail mode.
-        # A per-user outage follows the default policy tier (oss-outage-open).
-        self.assertIn("fail mode=open", setup["Guardrail"]["detail"])
+        # Every per-user policy tier closes a gateway outage.
+        self.assertIn("fail mode=closed", setup["Guardrail"]["detail"])
 
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
@@ -3266,9 +3265,8 @@ class TestInitFailModeFlag(unittest.TestCase):
 
         from defenseclaw.config import load
 
-        # The saved value does not move a per-user outage mode: the default
-        # tier's open (oss-outage-open).
-        self.assertEqual(load(data_dir=self.tmp_dir).guardrail.effective_hook_fail_mode("codex"), "open")
+        # The saved value cannot reopen a per-user outage.
+        self.assertEqual(load(data_dir=self.tmp_dir).guardrail.effective_hook_fail_mode("codex"), "closed")
 
 
 class TestInitHITLFlags(unittest.TestCase):
@@ -3481,9 +3479,8 @@ class TestMultiConnectorInit(unittest.TestCase):
             self.assertNotIn("hermes", gc.connectors)
             self.assertEqual(gc.judge.hook_connectors, ["codex"])
             self.assertEqual(reloaded.active_connectors(), ["claudecode", "codex", "cursor"])
-            # Cursor follows the default tier's outage mode in action mode
-            # too (oss-outage-open) and has no native approval prompt.
-            self.assertEqual(gc.effective_hook_fail_mode("cursor"), "open")
+            # Cursor closes the outage in action mode too and has no native approval prompt.
+            self.assertEqual(gc.effective_hook_fail_mode("cursor"), "closed")
             self.assertFalse(gc.effective_hilt("cursor").enabled)
             cc = gc.connectors["claudecode"]
             self.assertEqual(cc.mode, "action")
@@ -4421,7 +4418,7 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.assertIn(cfg["guardrail"]["connectors"]["codex"].get("mode", ""), ("", "observe"))
         # GAP-1517: the summary names each action connector's fail mode.
         guardrail = [s for s in json.loads(result.output)["setup"] if s["name"] == "Guardrail"]
-        self.assertRegex(guardrail[0]["detail"], r"claudecode=action \(fail (open|closed)\), codex=observe$")
+        self.assertRegex(guardrail[0]["detail"], r"claudecode=action \(fail closed\), codex=observe$")
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
@@ -4451,7 +4448,7 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         ]
         result = self._invoke(args)
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        self.assertIn("claudecode=action (fail open)", result.output)
+        self.assertIn("claudecode=action (fail closed)", result.output)
         self.assertNotIn("defenseclaw guardrail fail-mode open", result.output)
 
         result = self._invoke([*args, "--fail-mode", "open"])

@@ -31,25 +31,20 @@ const guardTestDebounce = 40 * time.Millisecond
 // Exercise the real rendered Amp artifact and the live policy resolver, not a
 // mock that can conceal installation/repair policy drift. Both boot paths use
 // connectorSetupOptsChecked; repair must reproduce those same bytes. This is
-// an OSS install: the plugin bakes closed for every failure, and its outage
-// mode follows the policy tier (oss-outage-open), never a saved value, in
-// both observe and action mode.
+// an OSS install: the plugin bakes closed for every failure and every
+// policy tier, never a saved open value, in both observe and action mode.
 func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 	for _, mode := range []string{"observe", "action"} {
 		for _, tc := range []struct {
-			name, global, override, pack, wantObserve, wantAction string
+			name, global, override, pack string
 		}{
-			{"default", "", "", "", "open", "open"},
-			{"explicit-open", "open", "", "", "open", "open"},
-			{"global-closed", "closed", "", "", "open", "open"},
-			{"override-open", "closed", "open", "", "open", "open"},
-			{"override-closed", "open", "closed", "", "open", "open"},
-			{"strict", "open", "open", "strict", "closed", "closed"},
+			{"default", "", "", ""},
+			{"explicit-open", "open", "", ""},
+			{"global-closed", "closed", "", ""},
+			{"override-open", "closed", "open", ""},
+			{"override-closed", "open", "closed", ""},
+			{"strict", "open", "open", "strict"},
 		} {
-			want := tc.wantAction
-			if mode == "observe" {
-				want = tc.wantObserve
-			}
 			t.Run(mode+"/"+tc.name, func(t *testing.T) {
 				root := t.TempDir()
 				pluginPath := filepath.Join(root, "amp", "plugins", "defenseclaw.ts")
@@ -67,8 +62,8 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 				s := &Sidecar{cfg: cfg}
 				conn := connector.NewAMPConnector()
 				opts := mustConnectorSetupOpts(t, s, conn, "", "127.0.0.1:4000", "127.0.0.1:18970")
-				if opts.HookFailMode != want {
-					t.Fatalf("initial delivery mode = %q, want %q", opts.HookFailMode, want)
+				if opts.HookFailMode != "closed" {
+					t.Fatalf("initial delivery mode = %q, want closed", opts.HookFailMode)
 				}
 				// Native Windows Amp setup admits only a protected,
 				// setup-selected executable; seed that evidence (no-op elsewhere).
@@ -83,7 +78,7 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				if !bytes.Contains(original, []byte(`const DC_FAIL_MODE: string = "closed"`)) ||
-					!bytes.Contains(original, []byte(fmt.Sprintf(`const DC_OUTAGE_FAIL_MODE: string = "%s"`, want))) {
+					!bytes.Contains(original, []byte(`const DC_OUTAGE_FAIL_MODE: string = "closed"`)) {
 					t.Fatal("initial plugin does not contain the selected delivery mode")
 				}
 				guard := NewHookConfigGuard(nil, nil, time.Hour)

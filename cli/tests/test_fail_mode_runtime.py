@@ -626,9 +626,10 @@ def test_windows_resolver_reports_effective_mixed_modes(monkeypatch: pytest.Monk
     ):
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
-    # Each connector runs its own tier's outage mode (oss-outage-open).
+    # The older open record must be reported as drift from the closed mode.
     assert claude.current and claude.runtime == "closed"
-    assert codex.current and codex.desired == "open" and codex.runtime == "open"
+    assert not codex.current and codex.desired == "closed" and codex.runtime == "open"
+    assert "windows-sidecar-open" in codex.drift
 
 
 def test_windows_resolver_accepts_sealed_claude_v2_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -649,7 +650,7 @@ def test_windows_resolver_accepts_sealed_claude_v2_contract(monkeypatch: pytest.
     assert "registration-contract-stale" not in state.drift
 
 
-def test_windows_resolver_initial_open_open_and_reverse_mixed_mode(
+def test_windows_resolver_detects_old_open_records_and_a_closed_repair(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
@@ -658,15 +659,15 @@ def test_windows_resolver_initial_open_open_and_reverse_mixed_mode(
         patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
     ):
-        # The default tier's open is current (oss-outage-open).
-        assert resolve_connector_fail_mode(cfg, "claudecode").current
-        assert resolve_connector_fail_mode(cfg, "codex").current
+        # Both old open records are stale under the closed per-user rule.
+        assert not resolve_connector_fail_mode(cfg, "claudecode").current
+        assert not resolve_connector_fail_mode(cfg, "codex").current
 
         cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
         _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "closed"})
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
-    assert claude.current and claude.runtime == "open" and claude.desired == "open"
+    assert not claude.current and claude.runtime == "open" and claude.desired == "closed"
     assert codex.current and codex.runtime == "closed"
 
 
@@ -674,8 +675,8 @@ def test_cli_status_reports_old_open_mode_as_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
-    # Codex's tier gives open, but its installed hook still records closed.
-    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
+    # A saved open and an old open hook disagree with this release's closed mode.
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()

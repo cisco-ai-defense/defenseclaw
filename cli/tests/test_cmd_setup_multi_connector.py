@@ -315,10 +315,10 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(gc.connectors["codex"].mode, "observe")
         self.assertEqual(gc.connectors["codex"].hook_fail_mode, "open")
         self.assertEqual(gc.connectors["cursor"].mode, "action")
-        # The guardrail mode does not pin Cursor's fail mode (oss-outage-open).
+        # The guardrail mode does not pin a saved Cursor fail mode.
         self.assertEqual(gc.connectors["cursor"].hook_fail_mode, "")
         self.assertFalse(gc.connectors["cursor"].hilt.enabled)
-        self.assertIn("cursor gateway outage=open (failClosed=true)", result.output)
+        self.assertIn("cursor gateway outage=closed (failClosed=true)", result.output)
 
     def test_later_setup_revalidates_every_active_connector_before_success(self):
         self._seed_single("codex")
@@ -1384,9 +1384,9 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         self.assertEqual(gc.connector, "devin")
         self.assertEqual(self.app.cfg.claw.mode, "devin")
 
-    def test_add_seed_does_not_pin_observe_fail_open(self):
-        # GAP-1109: seeding an observe predecessor must not pin its derived
-        # "open" fail mode, so switching it to action inherits closed.
+    def test_add_seed_does_not_pin_observe_fail_mode(self):
+        # GAP-1109: seeding an observe predecessor must not pin a derived
+        # fail mode, so switching it to action inherits the current value.
         gc = self.app.cfg.guardrail
         gc.connector = "claudecode"
         gc.connectors = {}
@@ -1394,10 +1394,9 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         gc.hook_fail_mode = "closed"
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "")
-        # A per-user outage follows the default tier, whatever is saved
-        # (oss-outage-open); Secure Client keeps the global closed in observe
-        # and action mode.
-        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
+        # A per-user outage stays closed, whatever is saved; Secure Client
+        # keeps the global closed in observe and action mode.
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc._secure_client = True
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc.connectors["claudecode"].mode = "action"
@@ -3920,8 +3919,8 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 self.assertEqual(gc.connectors[connector].mode, "action")
                 self.assertEqual(gc.connectors[connector].hook_fail_mode, "closed")
                 self.assertEqual(gc.effective_mode(connector), "action")
-                # Saved, but a per-user outage follows the default tier.
-                self.assertEqual(gc.effective_hook_fail_mode(connector), "open")
+                # The saved closed mode and per-user outage decision agree.
+                self.assertEqual(gc.effective_hook_fail_mode(connector), "closed")
 
 
     def test_toggling_one_connector_mode_lands_per_connector(self):

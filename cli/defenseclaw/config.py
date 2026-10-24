@@ -2657,13 +2657,9 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - a per-user host reports its gateway-outage mode, which follows the
-          connector's policy tier (Go ``config.HookOutageFailMode``, owner
-          decision 2026-10-23): ``closed`` for a strict rule pack, ``open``
-          for default (balanced) and permissive. A saved per-user
-          ``hook_fail_mode`` does not change it, and every failure that is
-          not an outage (an answer the gateway gave, a malformed or partial
-          one, a missing token, the install window) blocks in every tier.
+        - a per-user host reports ``closed`` for a gateway outage in every
+          policy tier (Go ``config.HookOutageFailMode``). A saved per-user
+          ``hook_fail_mode`` cannot reopen it.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
@@ -2683,13 +2679,13 @@ class GuardrailConfig:
             if self.hook_fail_mode.strip():
                 return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
-        return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
+        return "closed"
 
     def hook_policy_tier(self, connector: str = "") -> str:
         """The connector's policy tier: its rule pack's posture (strict, default or permissive).
 
-        Mirrors Go ``Config.HookPolicyTierForConnector``: the pack manifest's
-        posture, else the pack folder's name (``policy_catalog.pack_profile``).
+        Reads the pack manifest's posture, else the pack folder's name
+        (``policy_catalog.pack_profile``).
         """
         from defenseclaw import policy_catalog
 

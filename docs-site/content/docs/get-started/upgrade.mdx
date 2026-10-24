@@ -22,7 +22,7 @@ The command downloads the latest release's installer (`install.sh` on macOS and 
 3. Stops the gateway, keeps the current install in `~/.defenseclaw/previous`, swaps in the new version and runs `defenseclaw migrate`.
 4. Starts the gateway and waits for it to report healthy.
 
-An upgrade refreshes the installed hooks. Per-user hooks take the outage mode of their policy tier (the default and permissive policies let a call run with a warning while the gateway is down, strict blocks it) whatever an earlier config or registration saved, and fail closed for every other failure; restart running agents so they discard old hook and native telemetry settings already loaded in memory. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`; Secure Client keeps its managed fail mode.
+An upgrade refreshes the installed hooks. Per-user hooks block gateway outages in every policy tier, whatever an earlier config or registration saved; restart running agents so they discard old hook and native telemetry settings already loaded in memory. Managed standalone hooks default closed and honor an administrator's explicit outage-only `open`; Secure Client keeps its managed fail mode.
 
 End every running agent session before upgrading. Quit OpenCode and Amp
 processes completely, then start a new agent process after the installer
