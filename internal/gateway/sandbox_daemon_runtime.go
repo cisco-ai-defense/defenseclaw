@@ -2100,10 +2100,10 @@ func managedSettingsRefusal(s sandboxrelay.DaemonSettings) error {
 	return nil
 }
 
-// readyHarnesses are the agents a ready may be for: it names none, and a
-// create may run any harness. The agent this daemon's managed configuration
-// runs (managedConnector) comes first, then every other harness.
-func (d *SandboxDaemon) readyHarnesses() []string {
+// olderCLIReadyHarnesses are the agents a ready that names none may be for:
+// the agent this daemon's managed configuration runs (managedConnector)
+// first, then every other harness a create may run.
+func (d *SandboxDaemon) olderCLIReadyHarnesses() []string {
 	first := d.managedConnector("")
 	out := []string{first}
 	for _, name := range harness.Names() {
@@ -2114,33 +2114,56 @@ func (d *SandboxDaemon) readyHarnesses() []string {
 	return out
 }
 
+// Ready asks the managed gateway at most readyViewsInFlight policy views at
+// once. The gateway admits sandboxBudgetPolicy.InFlight (8) policy requests
+// per account and answers more with 429; half leaves room for the account's
+// other policy calls (a status view, the registrations' policy polls).
+const readyViewsInFlight = 4
+
+// A rate-limited policy view is asked again after readyViewRetryFirst,
+// doubling up to readyViewRetryMax, within the view's own bound.
+const (
+	readyViewRetryFirst = 100 * time.Millisecond
+	readyViewRetryMax   = time.Second
+)
+
 // readyPolicyRefusal refuses a ready unless the managed gateway's current
 // policy allows sandboxes for one of the candidate agents. Ready has no run
 // registration yet, so it asks before it installs OpenShell or starts its
 // gateway: a forbidden profile must leave no runtime behind, including when
 // Ready is called directly (GAP-0534). Profiles match per connector, so each
-// candidate gets its own view: the first agent's profile forbidding
-// sandboxes does not refuse a run of an agent whose profile allows them,
-// whose create then judges that run. Every candidate is asked at once,
-// within one view's bound (managedViewTimeout), so an agent whose view is
-// slow or unanswered neither holds up nor refuses a ready another agent's
-// profile allows: the first allowed answer readies. With none allowed, a
+// candidate gets its own view (readyPolicyView). The views go in candidate
+// order, readyViewsInFlight at a time, each within its own bound, so a view
+// that is slow or unanswered neither holds up nor refuses a ready another
+// agent's profile allows, and the asking stays inside the gateway's
+// admission limit: the first allowed answer readies. With none allowed, a
 // view the gateway did not answer fails the ready closed with its reason
 // (the earliest candidate's, so the daemon's own agent's first); else the
 // organization's refusal stands.
 func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []string) error {
-	askCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+	askCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	type answer struct {
 		index   int
 		allowed bool
 		err     error
 	}
+	next := make(chan int, len(candidates))
+	for index := range candidates {
+		next <- index
+	}
+	close(next)
 	answers := make(chan answer, len(candidates))
-	for index, name := range candidates {
+	for range min(readyViewsInFlight, len(candidates)) {
 		go func() {
-			view, _, err := d.managedExplain(askCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
-			answers <- answer{index: index, allowed: err == nil && view.Allowed, err: err}
+			for index := range next {
+				if err := askCtx.Err(); err != nil {
+					answers <- answer{index: index, err: err}
+					continue
+				}
+				allowed, err := d.readyPolicyView(askCtx, candidates[index])
+				answers <- answer{index: index, allowed: allowed, err: err}
+			}
 		}()
 	}
 	errs := make([]error, len(candidates))
@@ -2160,6 +2183,34 @@ func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []str
 		Message: "Your organization doesn't allow sandboxes for your account.", Detail: sandboxrelay.ReasonNotAllowed}
 }
 
+// readyPolicyView is whether the managed gateway's policy view of one agent
+// allows sandboxes, within one view's bound (managedViewTimeout). A view
+// the gateway's admission limit refused (429) is asked again within that
+// bound; when the bound ends first, the 429 is the view's error, which fails
+// the ready closed unless another agent is allowed.
+func (d *SandboxDaemon) readyPolicyView(ctx context.Context, name string) (bool, error) {
+	viewCtx, cancel := context.WithTimeout(ctx, managedViewTimeout)
+	defer cancel()
+	wait := readyViewRetryFirst
+	for {
+		view, _, err := d.managedExplain(viewCtx, sandboxapi.ExplainRequest{Harness: name}, nil)
+		if err == nil {
+			return view.Allowed, nil
+		}
+		if sandboxapi.AsError(err).Status != http.StatusTooManyRequests {
+			return false, err
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-viewCtx.Done():
+			timer.Stop()
+			return false, err
+		case <-timer.C:
+		}
+		wait = min(2*wait, readyViewRetryMax)
+	}
+}
+
 // Ready readies the account's OpenShell for a first run (readyOpenShell:
 // setup mode installs the pinned release; both modes start and register the
 // account's managed gateway) and answers the status. A run needs that before
@@ -2167,9 +2218,20 @@ func (d *SandboxDaemon) readyPolicyRefusal(ctx context.Context, candidates []str
 // openshell CLI, and refused every run of an account whose OpenShell was not
 // installed or started yet, before the create that readies it ran
 // (GAP-0437, GAP-0441). The managed gateway's policy must allow sandboxes
-// for an agent the run may be for first (readyPolicyRefusal).
-func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Status, error) {
+// for the named agent first, and only its view is asked
+// (readyPolicyRefusal). A request that names no agent, from a CLI of
+// DefenseClaw 1.0.3 or older, does not say which agent it will run: it
+// readies when the policy allows any agent a create may run
+// (olderCLIReadyHarnesses), and the create judges the run's own agent, as a
+// 1.0.3 daemon did. Kept through the 1.0.4 upgrade window.
+func (c *managedSandboxController) Ready(ctx context.Context, req sandboxapi.ReadyRequest) (*sandboxapi.Status, error) {
 	d := c.d
+	candidates := []string{req.Harness}
+	if strings.TrimSpace(req.Harness) == "" {
+		candidates = d.olderCLIReadyHarnesses()
+	} else if _, ok := harness.Get(config.NormalizeConnectorName(req.Harness)); !ok {
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInvalid, "a supported sandbox harness is required to ready OpenShell")
+	}
 	if err := d.lockLifecycle(ctx); err != nil {
 		return nil, managedBusyError(err)
 	}
@@ -2184,7 +2246,7 @@ func (c *managedSandboxController) Ready(ctx context.Context) (*sandboxapi.Statu
 		} else {
 			// The account's current policy, before installing OpenShell or
 			// starting its gateway (readyPolicyRefusal).
-			err = d.readyPolicyRefusal(ctx, d.readyHarnesses())
+			err = d.readyPolicyRefusal(ctx, candidates)
 			if err == nil {
 				// Status reports unavailable until this process holds both
 				// listeners. Bind them before setup installs anything, so a

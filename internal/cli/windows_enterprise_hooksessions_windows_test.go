@@ -509,13 +509,37 @@ func TestWindowsRecordedDeploymentRefusalsKeepTheSessionKeys(t *testing.T) {
 		deployment.Profile = profile
 		return deployment, nil
 	}
-	windowsEnterpriseStandaloneRecoveryPending = func(*windowsEnterpriseLifecycleOptions) bool { return pending }
+	// A case with a record writes it in a scratch lifecycle folder and the
+	// real predicate decides (S2 review, loop round 2).
+	originalRoots := windowsEnterpriseStandaloneRecoveryRoots
+	t.Cleanup(func() { windowsEnterpriseStandaloneRecoveryRoots = originalRoots })
+	recoveryBase := filepath.Join(t.TempDir(), "roots")
+	recoveryRoots := winpath.EnterpriseRoots{
+		InstallRoot:  filepath.Join(recoveryBase, "pf", "Cisco", "DefenseClaw"),
+		StateRoot:    filepath.Join(recoveryBase, "pd", "Cisco", "DefenseClaw"),
+		LifecycleDir: filepath.Join(recoveryBase, "pd", "Cisco", "DefenseClaw-Lifecycle"),
+	}
+	windowsEnterpriseStandaloneRecoveryRoots = func() (winpath.EnterpriseRoots, error) { return recoveryRoots, nil }
+	certificationScope := &windowsEnterpriseLifecycleOptions{
+		installRoot:         filepath.Join(recoveryBase, "pf", "Cisco", "DefenseClaw-Cert", "0123456789"),
+		stateRoot:           filepath.Join(recoveryBase, "pd", "Cisco", "DefenseClaw-Cert", "0123456789"),
+		gatewayServiceName:  "DefenseClawCertGateway_0123456789",
+		guardianServiceName: "DefenseClawCertGuardian_0123456789",
+	}
+	record := ""
+	windowsEnterpriseStandaloneRecoveryPending = func(opts *windowsEnterpriseLifecycleOptions) bool {
+		if record != "" {
+			return originalPending(opts)
+		}
+		return pending
+	}
 	installed := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled}
 	waiting := winpath.EnterpriseDeployment{State: winpath.EnterpriseDeploymentInstalled, DeferredConfigPending: true}
 	for _, tc := range []struct {
 		name, action      string
 		deployment        winpath.EnterpriseDeployment
 		pending           bool
+		record            string
 		config, manifest  string
 		deferred, noStart bool
 		refused           bool
@@ -543,10 +567,31 @@ func TestWindowsRecordedDeploymentRefusalsKeepTheSessionKeys(t *testing.T) {
 			deployment: waiting, pending: true, deferred: true},
 		{name: "install over an installed deployment", action: "install", deployment: installed,
 			config: `C:\stage\config.yaml`, manifest: `C:\stage\targets.yaml`},
+		{name: "deferred install over an installed deployment beside a certification run's rollback intent", action: "install",
+			deployment: installed, record: "certification", deferred: true, refused: true},
+		{name: "deferred install retried over its own scope's rollback intent", action: "install",
+			deployment: installed, record: "own", deferred: true},
 	} {
 		key := windowsHookSessionTestAllow(t, root, identity)
 		*kills, *installerRuns = 0, 0
-		recorded, pending = tc.deployment, tc.pending
+		recorded, pending, record = tc.deployment, tc.pending, tc.record
+		if err := os.RemoveAll(recoveryRoots.LifecycleDir); err != nil {
+			t.Fatal(err)
+		}
+		if tc.record != "" {
+			scope := &windowsEnterpriseLifecycleOptions{}
+			if tc.record == "certification" {
+				scope = certificationScope
+			}
+			paths := windowsEnterpriseStandaloneRecoveryRecordPaths(recoveryRoots, scope)
+			intent := paths[len(paths)-1]
+			if err := os.MkdirAll(filepath.Dir(intent), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(intent, []byte("{}"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
 		opts := &windowsEnterpriseLifecycleOptions{profile: "standalone", resolvedProfile: "standalone", jsonOutput: true,
 			configPath: tc.config, manifestPath: tc.manifest, deferredConfig: tc.deferred, noStart: tc.noStart}
 		result, err := runWindowsHookSessionTestAction(t, tc.action, opts)

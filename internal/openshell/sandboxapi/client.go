@@ -320,13 +320,32 @@ func (c *Client) Status(ctx context.Context) (*Status, error) {
 }
 
 // Ready asks a managed computer's sandbox daemon to ready the account's
-// OpenShell for a run and returns the status after it (PathReady).
-func (c *Client) Ready(ctx context.Context) (*Status, error) {
+// OpenShell for a run and returns the status after it (PathReady). A daemon
+// of DefenseClaw 1.0.3 or older, whose decoder refuses any field it does
+// not know, refuses ReadyRequest.Harness: the request then goes again as
+// the empty object that daemon takes, which judges no agent there (the
+// run's create still does). Kept while a managed computer can run a 1.0.3
+// daemon under a 1.0.4 CLI, through the 1.0.4 upgrade window.
+func (c *Client) Ready(ctx context.Context, req ReadyRequest) (*Status, error) {
 	var out Status
-	if err := c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out); err != nil {
+	err := c.do(ctx, http.MethodPost, PathReady, nil, req, &out)
+	if err != nil && req.Harness != "" && unknownFieldRefused(err, "harness") {
+		out = Status{}
+		err = c.do(ctx, http.MethodPost, PathReady, nil, struct{}{}, &out)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// unknownFieldRefused reports an older daemon's refusal of a request field
+// its strict decoder does not know (field, as JSON names it): a daemon of
+// DefenseClaw 1.0.3 or older answers "invalid JSON body: json: unknown
+// field" for every field 1.0.4 added.
+func unknownFieldRefused(err error, field string) bool {
+	e := AsError(err)
+	return e.Code == CodeInvalid && strings.Contains(e.Message, `unknown field "`+field+`"`)
 }
 
 // List returns every DefenseClaw sandbox.

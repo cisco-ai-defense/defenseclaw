@@ -1501,3 +1501,63 @@ def test_deferred_install_freshness_waits_for_pre_layout_recovery(tmp_path: Path
         "MetadataPath": False,
         "PendingPath:dir": False,
     }, pending
+
+
+def test_lifecycle_scope_hash_matches_the_cli(tmp_path: Path) -> None:
+    """S2 review (loop round 2): the CLI leaves a deferred-install refusal to
+    the installer only for a recovery record of this run's own deployment
+    scope, at the exact paths Get-DefenseClawLayout names (the scope's
+    pending.json, purge-, self-uninstall- and install-rollback-<scope>.json),
+    so another scope's record no longer makes the CLI remove every
+    account's session keys before the installer refuses. The CLI's scope
+    is Get-DefenseClawStableScopeSHA256 of the same four values, with the
+    installer's default service names."""
+    import hashlib
+
+    module = _text(MODULE)
+    pending = _function_body(module, "Test-DefenseClawPreLayoutRecoveryPending")
+    assert "@('PendingPath', 'PurgeIntentPath', 'SelfUninstallReceiptPath', 'InstallRollbackIntentPath')" in pending
+    layout = _function_body(module, "Get-DefenseClawLayout")
+    for record in ("purge", "self-uninstall", "install-rollback"):
+        assert f'"{record}-$purgeScope.json"' in layout, record
+    assert "PendingPath = (Microsoft.PowerShell.Management\\Join-Path $installState 'pending.json')" in layout
+    scope_values = layout[layout.index("$purgeScope = Get-DefenseClawStableScopeSHA256 -Values @(") :]
+    scope_values = scope_values[: scope_values.index("\n    )\n")]
+    assert re.findall(r"\$(InstallRoot|StateRoot|GatewayServiceName|GuardianServiceName)\b", scope_values) == [
+        "InstallRoot",
+        "StateRoot",
+        "GatewayServiceName",
+        "GuardianServiceName",
+    ]
+    installer = _text(INSTALLER)
+    assert "[string]$GatewayServiceName = 'DefenseClawGateway'," in installer
+    assert "[string]$GuardianServiceName = 'DefenseClawHookGuardian'," in installer
+    go = (ROOT / "internal" / "cli" / "windows_enterprise_config_preflight_windows.go").read_text(encoding="utf-8")
+    assert 'windowsEnterpriseInstallerGatewayService  = "DefenseClawGateway"' in go
+    assert 'windowsEnterpriseInstallerGuardianService = "DefenseClawHookGuardian"' in go
+    assert '[]string{"purge", "self-uninstall", "install-rollback"}' in go
+    go_test = (ROOT / "internal" / "cli" / "windows_enterprise_config_preflight_windows_test.go").read_text(encoding="utf-8")
+    golden = re.search(r'windowsEnterpriseProductionScopeSHA256 = "([0-9a-f]{64})"', go_test).group(1)
+    values = [r"C:\Program Files\Cisco\DefenseClaw", r"C:\ProgramData\Cisco\DefenseClaw", "DefenseClawGateway", "DefenseClawHookGuardian"]
+    assert hashlib.sha256("\0".join(v.lower() for v in values).encode("utf-8")).hexdigest() == golden
+
+    engine = _portable_pwsh()
+    if engine is None:
+        pytest.skip("PowerShell 7 (pwsh) is not installed")
+    harness = tmp_path / "scope.ps1"
+    quoted = ", ".join("'" + v.replace("'", "''") + "'" for v in values)
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\nSet-StrictMode -Version Latest\n"
+        + _function_body(module, "Get-DefenseClawStableScopeSHA256")
+        + f"\nGet-DefenseClawStableScopeSHA256 -Values @({quoted})\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.strip() == golden
