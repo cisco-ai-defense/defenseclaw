@@ -4477,9 +4477,9 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		}
 	}
 
-	// Setup owns log_user_prompt only while it retains the value Setup wrote.
-	// A current false/non-boolean value is an operator edit and must survive.
-	if value, exists := current["log_user_prompt"]; exists && value == true {
+	// A bare prompt-capture preference has no product ownership marker.
+	// Only a marked exporter proves Setup wrote the adjacent true value.
+	if value, exists := current["log_user_prompt"]; exists && value == true && currentLooksManaged {
 		if original != nil {
 			if saved, hadSaved := original["log_user_prompt"]; hadSaved {
 				// A stale managed snapshot cannot prove that Setup's true value

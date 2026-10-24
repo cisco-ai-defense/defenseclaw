@@ -155,11 +155,12 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 
 // The 1.0.2 and 1.0.3 renderers wrote the same three marked /v1/<signal>
 // exporters. Upgrade may remove that product table. If the operator replaced
-// it after setup, the hook refresh must retain the replacement's exact bytes.
+// it after setup, the hook refresh must retain the replacement's exact bytes,
+// including a standalone prompt-capture preference without any exporter.
 func TestCodexReleasedOtelUpgradePreservesOperatorBytes(t *testing.T) {
 	for _, release := range []string{"1.0.2", "1.0.3"} {
 		for _, goos := range []string{"linux", "darwin", "windows"} {
-			for _, owner := range []string{"product", "user_edited"} {
+			for _, owner := range []string{"product", "user_edited", "user_preference"} {
 				t.Run(release+"/"+goos+"/"+owner, func(t *testing.T) {
 					dir := t.TempDir()
 					configPath := filepath.Join(dir, "config.toml")
