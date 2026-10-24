@@ -26,14 +26,14 @@
     "/etc/hermes/.env": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 276,
-      "sha256": "533b47ee6519eead8f5287b391949590b0d35bb088c198a10d66479b37825857"
+      "size": 289,
+      "sha256": "872dc6d18b304086ad3fec27e57c4acb7506823739181080a8d3181e8fdf6959"
     },
     "/etc/hermes/config.yaml": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 3287,
-      "sha256": "3bfa7c7cbff9b50ea7417b27d736fd7659b142ad346137b1dd4b91504f45cdfc"
+      "size": 3315,
+      "sha256": "643055bc7ba5edb3d4f60163399c8ae0714dbb57c65e13e14ec46c8ca8785fc7"
     },
     "/sandbox/.hermes/config.yaml": {
       "mode": "-rw-------",

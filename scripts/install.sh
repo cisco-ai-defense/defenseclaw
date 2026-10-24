@@ -1147,11 +1147,15 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
-# until 1.1: an upgrade never ends with a removed connector's hook left unsealed.
-if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" == true ]] && ! finish_retired_connector_cleanup; then
+# until 1.1: an upgrade or repair never ends with a removed connector's hook
+# left unsealed, whether or not its gateway was running before it.
+if [[ -n "${PREV_VERSION}" ]] && ! finish_retired_connector_cleanup; then
     START_RC=3
 fi
 report_retired_connector_leftovers
+if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" != true ]] && ! reconcile_stopped_connectors; then
+    START_RC=3
+fi
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -1851,7 +1855,16 @@ restart_old() {
         return 0
     fi
     if [[ "${WAS_RUNNING}" == true ]]; then
-        start_gateway >/dev/null 2>&1 && return 0
+        local rc=0
+        start_gateway >/dev/null 2>&1 || rc=$?
+        [[ ${rc} -ne 0 ]] || return 0
+        if [[ ${rc} -eq 3 ]]; then
+            # It runs, but does not guard every connector (GAP-0878).
+            RESTORED_NOTE="Your previous install is back and its gateway runs, but a connector needs attention before it is guarded again."
+            warn "${RESTORED_NOTE}"
+            info "See which with: defenseclaw doctor"
+            return 0
+        fi
         # Say plainly that the gateway that ran before is down now (GAP-1349).
         RESTORED_NOTE="Your previous install is back, but its gateway is not running (see above)."
         warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
@@ -1872,7 +1885,7 @@ reset_audit_journal_mode() {
 }
 
 start_gateway() {
-    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate="" every=""
     # Each start explains only itself: the explanation of a failed new
     # gateway skipped the wait for the restored one, which was then
     # reported as not running while it came up (GAP-1241).
@@ -1886,10 +1899,16 @@ start_gateway() {
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.0; then delegate=1; fi
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
+    # GAP-0878: a gateway that has --require-every-connector exits 3, not 0,
+    # when its boot left a configured connector unguarded. An older one (a
+    # restored or rolled-back install) refuses the flag, so ask it first.
+    if [[ -z "${delegate}" ]] && "${BIN_DIR}/defenseclaw-gateway" start --require-every-connector --help >/dev/null 2>&1; then
+        every=--require-every-connector
+    fi
     if [[ -n "${delegate}" ]]; then
         PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
     else
-        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start ${every:+"${every}"} || rc=$?
     fi
     if [[ -n "${delegate}" && ${rc} -eq 0 ]]; then
         # Launched, not yet ready: it is up only once the loop below says so.
@@ -1911,7 +1930,12 @@ start_gateway() {
         if [[ -z "${START_EXPLAINED:-}" ]] && "${BIN_DIR}/defenseclaw-gateway" status >/dev/null 2>&1; then
             # Answering twice in a row, without a refusal in between: it is up.
             up=$((up + 1))
-            [[ ${up} -lt 2 ]] || { ok "The gateway finished starting"; return 0; }
+            if [[ ${up} -ge 2 ]]; then
+                ok "The gateway finished starting"
+                # Its start gave up before it could check the connectors.
+                [[ -z "${every}" ]] || PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start "${every}" >/dev/null || return 3
+                return 0
+            fi
         else
             up=0
         fi
@@ -1992,13 +2016,19 @@ finish_swap() {
 
 # until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
 # down when it starts, but a start that brings the other connectors up only
-# logs one it could not finish. Check each here: one not done is torn down
-# again, and one still not done (an agent config that runs a hook DefenseClaw
-# could not put the sealed stub under) is named with its cause and step, and
-# the install exits 3, not 0.
+# logs one it could not finish, and an upgrade of a stopped gateway does not
+# start it. Check each here: one not done is torn down again, and one still
+# not done (an agent config that runs a hook DefenseClaw could not put the
+# sealed stub under) is named with its cause and step, and the install exits
+# 3, not 0. Without a config nothing was set up and the gateway cannot read
+# one, so there is nothing to check.
 finish_retired_connector_cleanup() {
     local gateway="${BIN_DIR}/defenseclaw-gateway" name why failed=0
-    [[ -x "${gateway}" ]] || return 0
+    [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]] || return 0
+    if [[ ! -x "${gateway}" ]]; then
+        err "DefenseClaw ${VERSION} could not check that the removed OpenHands and OmniGent connectors are blocked: ${gateway} is missing"
+        return 1
+    fi
     for name in openhands omnigent; do
         "${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 && continue
         "${gateway}" connector teardown --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 || true
@@ -2024,6 +2054,31 @@ record_saved_installer() {
         && printf '%s  install.sh\n' "$(sha256_of "${INSTALLER_DIR}/install.sh")" > "${record}.new" \
         && mv -f "${record}.new" "${record}" \
         || warn "Could not record the digest of the saved installer, so 'defenseclaw rollback' will not run it; record it again with: defenseclaw upgrade --version ${VERSION} --yes"
+}
+
+# A gateway that was not running before an upgrade or repair is not started,
+# so nothing rendered this release's hooks: a connector kept the hook an
+# earlier release wrote (a 1.0.3 Hermes hook cannot answer this release's
+# execution probe) and the install exited 0 with it unprotected. The new
+# gateway puts every connector the config guards on its current hook and
+# reads each back; one it cannot is named with the cause, and the install
+# exits 3. Without a config nothing was set up. An older gateway (a
+# downgrade) has no --every-connector and renders its hooks when it starts.
+reconcile_stopped_connectors() {
+    local gateway="${BIN_DIR}/defenseclaw-gateway" out rc=0 why
+    [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]] || return 0
+    if [[ ! -x "${gateway}" ]]; then
+        err "DefenseClaw ${VERSION} could not put the connectors on their current hooks: ${gateway} is missing"
+        return 1
+    fi
+    "${gateway}" connector reconcile --every-connector --help >/dev/null 2>&1 || return 0
+    out="$(DEFENSECLAW_CONFIG="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}" \
+        "${gateway}" connector reconcile --every-connector --data-dir "${DEFENSECLAW_HOME}" 2>&1)" || rc=$?
+    printf '%s\n' "${out}" >>"${LOG}"
+    [[ ${rc} -ne 0 ]] || return 0
+    why="$(printf '%s\n' "${out}" | sed -n 's/^Error: //p' | tail -n 1)"
+    err "DefenseClaw ${VERSION} could not put every connector on its current hook while the gateway is stopped: ${why:-exit ${rc}, see ${LOG}}"
+    return 1
 }
 
 # until 1.1: the removed connectors' teardown deliberately keeps vendor

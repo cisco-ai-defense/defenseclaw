@@ -106,6 +106,7 @@ from defenseclaw.connector_contracts import (
     assess_kiro_signal,
     compare_agent_versions,
     connector_lock_contract_invariant,
+    known_broken_entry,
     normalize_agent_version,
     normalize_connector,
     openclaw_needs_interception_advisory,
@@ -5555,6 +5556,9 @@ def _connector_contract_upgrade_guidance(
 
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
+    broken, _ = known_broken_entry(key, normalized_version)
+    if broken is not None:
+        return f"Install a {label} release that is not known broken ({broken['issue']}), then run: {rerun}."
     contracts = HOOK_CONTRACTS.get(key, ())
     if key == "kiro":
         return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then run: {rerun}."
@@ -5828,6 +5832,9 @@ def _check_connector_version_supported_for_setup(
             )
         elif emit:
             ux.ok(f"{label}: version {version_display} is supported by {contract}.")
+        if emit and compatibility.warning:
+            # Hermes 0.19.0-0.21.0: guarded, except their TUI and dashboard chat.
+            ux.warn(f"{label} {version_display}: {compatibility.warning}.")
         return True
 
     if compatibility.status == STATUS_NOT_GATED:
