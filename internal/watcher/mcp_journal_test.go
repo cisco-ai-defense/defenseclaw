@@ -27,6 +27,7 @@ func enrolledMCPServer(base, account, args string) config.MCPServerEntry {
 // both outcomes stay apart across rescans.
 func TestTwoAccountsSameNameMCPServerVerdictsStayApart(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Scanners.MCPScanner.UnverifiedServer = "block" // the strict tier blocks a server whose scan failed (GAP-1195)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
 	base := t.TempDir()
 	u1 := enrolledMCPServer(base, "1001", "decoy")

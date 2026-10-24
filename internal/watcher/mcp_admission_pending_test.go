@@ -104,6 +104,7 @@ func TestMCPAdmissionPendingKeepsOtherCallsAsBefore(t *testing.T) {
 // servers no longer configured.
 func TestRemovedMCPServerLeavesNoAdmissionIssue(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Scanners.MCPScanner.UnverifiedServer = "block" // the strict tier blocks a server whose scan failed (GAP-1195)
 	servers := []config.MCPServerEntry{{Name: "gone", Command: "npx", Args: []string{"-y", "."},
 		Connector: "claudecode", Project: filepath.Join(t.TempDir(), "proj"), SourceScope: "project"}}
 	w := New(cfg, nil, nil, store, logger, nil, nil)

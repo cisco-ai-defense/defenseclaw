@@ -42,6 +42,16 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def test_remote_dns_failure_is_an_unfinished_scan(monkeypatch):
+    """An unresolved name has no IP to pin, so admission gets no verdict."""
+    from defenseclaw.registries import ssrf
+
+    monkeypatch.setattr(ssrf, "_default_resolver", lambda _host: [])
+    wrapper = MCPScannerWrapper(MCPScannerConfig(analyzers="api"))
+    with pytest.raises(RuntimeError, match="could not resolve host"):
+        wrapper.scan("https://docs.example.invalid/mcp")
+
+
 def test_pinned_dns_enters_before_scan_coroutine_is_created():
     factory_called = False
 

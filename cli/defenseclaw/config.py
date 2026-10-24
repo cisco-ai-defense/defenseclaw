@@ -1511,6 +1511,12 @@ class MCPScannerConfig:
     # comma-separated string here; a v9 list loads joined with commas.
     judge_source: str = ""
     yara: MCPScannerYARAConfig = field(default_factory=MCPScannerYARAConfig)
+    #: What ``mcp set`` and the gateway's install admission do with a server
+    #: they could not verify (its scan did not finish, or an OpenCode command
+    #: outside the trusted prefixes): ``warn`` (unset) adds or keeps it with a
+    #: warning and an audit record, ``block`` refuses it (strict). Unset is
+    #: ``block`` on a managed standalone device.
+    unverified_server: str = ""
 
 
 @dataclass
@@ -4966,8 +4972,9 @@ def _serialize_v9_scanner_keys(scanners: Any) -> None:
             _prune_v9_block(skill, key, drop_false=True)
     mcp = scanners.get("mcp_scanner")
     if isinstance(mcp, dict):
-        if not mcp.get("judge_source"):
-            mcp.pop("judge_source", None)
+        for key in ("judge_source", "unverified_server"):
+            if not mcp.get(key):
+                mcp.pop(key, None)
         _prune_v9_block(mcp, "virustotal", drop_false=True)
         _prune_v9_block(mcp, "yara")
 
@@ -6413,6 +6420,7 @@ def _merge_mcp_scanner(raw: Any) -> MCPScannerConfig:
             llm=_merge_llm(raw.get("llm")),
             judge_source=str(raw.get("judge_source", "") or ""),
             yara=_merge_mcp_scanner_yara(raw.get("yara")),
+            unverified_server=str(raw.get("unverified_server", "") or ""),
         )
     return MCPScannerConfig()
 

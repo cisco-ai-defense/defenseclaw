@@ -415,7 +415,9 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_set_unreachable_says_not_added(self, mock_scan, mock_set):
-        # GAP-2398: one clear result and the right next step.
+        # GAP-2398: one clear result and the right next step, when
+        # unverified servers are refused (the strict setting, GAP-1195).
+        self.app.cfg.scanners.mcp_scanner.unverified_server = "block"
         mock_scan.side_effect = RuntimeError(
             "Connection to MCP server at http://example.com/mcp was cancelled."
         )
@@ -433,6 +435,7 @@ class TestMCPConnectorScope(MCPCommandTestBase):
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_set_allow_private_reaches_pre_add_scan(self, mock_scan, mock_set):
         # GAP-2435: the --allow-private hint must name an option mcp set accepts.
+        self.app.cfg.scanners.mcp_scanner.unverified_server = "block"
         mock_scan.side_effect = RuntimeError("connection refused")
         args = ["set", "loop", "--url", "http://127.0.0.1:9/mcp", "--connector", "codex"]
         result = self.invoke(args + ["--allow-private"])
@@ -462,6 +465,18 @@ class TestMCPConnectorScope(MCPCommandTestBase):
         self.assertFalse(
             self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "codex")
         )
+
+    def test_unblock_clears_scan_rejections_without_configured_servers(self):
+        for connector in ("claudecode", "codex", "copilot"):
+            self.app.store.set_action_field(
+                "mcp", "context7", "install", "block", "scan rejected", connector,
+            )
+
+        result = self.invoke(["unblock", "context7"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        for connector in ("claudecode", "codex", "copilot"):
+            self.assertIn(f"Unblocked 'context7' ({connector})", result.output)
+            self.assertFalse(self.app.store.has_action("mcp", "context7", "install", "block", connector))
 
     def test_bare_unblock_clears_unscoped_and_connector_block(self):
         pe = PolicyEngine(self.app.store, self.app.cfg)
@@ -1894,6 +1909,162 @@ class TestMCPScan(MCPCommandTestBase):
         mock_scan.assert_called_once()
 
 
+class TestMCPSetUnverifiedServer(MCPCommandTestBase):
+    """GAP-1195, GAP-1210: in the default setup ``mcp set`` adds a server it
+    could not verify (its scan did not finish, an OpenCode command outside
+    the trusted prefixes) with a warning and an audit record;
+    scanners.mcp_scanner.unverified_server block (strict) refuses it."""
+
+    _DID_NOT_FINISH = (
+        "MCP stdio timeout for launcher 'npx': the server did not complete "
+        "initialize/initialized/tools/list within 60 seconds",
+        "MCP stdio launcher 'npx' exited with code 1 before completing initialize/initialized/tools/list",
+        "MCP stdio protocol failure for launcher 'uvx' during initialize/initialized/tools/list",
+        "failed to connect to local server 'context7' (npx): connection closed",
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.app.cfg.active_connectors = lambda: ["codex"]  # type: ignore[method-assign]
+
+    def _set(self, *extra: str):
+        return self.invoke(
+            ["set", "context7", "--command", "npx", "--args", '["-y", "@upstash/context7-mcp"]', *extra]
+        )
+
+    def _mcp_set_events(self):
+        return [e for e in self.app.store.list_events(50) if e.action == "mcp-set"]
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scan_that_did_not_finish_adds_with_warning_and_audit(self, mock_scan, mock_set):
+        from defenseclaw.scanner.mcp import MCPScanIncompleteError, MCPStdioLaunchError
+
+        failures = [MCPStdioLaunchError(text) for text in self._DID_NOT_FINISH[:3]] + [
+            RuntimeError(self._DID_NOT_FINISH[3]),
+            RuntimeError("Connection to MCP server at https://mcp.example.com/mcp was cancelled."),
+            MCPScanIncompleteError("the scan of MCP server 'context7' is incomplete, so it has no verdict"),
+        ]
+        for failure in failures:
+            with self.subTest(failure=str(failure)):
+                mock_set.reset_mock()
+                mock_scan.side_effect = failure
+                result = self._set("--connector", "codex")
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("could not be scanned, so it is added unscanned", result.output)
+                self.assertIn("scanners.mcp_scanner.unverified_server", result.output)
+                self.assertNotIn("was not added", result.output)
+                self.assertEqual(mock_set.call_args.kwargs.get("connector"), "codex")
+                self.assertIn("unverified=scan-did-not-finish", self._mcp_set_events()[0].details)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scan_that_did_not_finish_adds_to_every_connector(self, mock_scan, mock_set):
+        from defenseclaw.scanner.mcp import MCPStdioLaunchError
+
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex", "copilot"]  # type: ignore[method-assign]
+        mock_scan.side_effect = MCPStdioLaunchError(self._DID_NOT_FINISH[0])
+        result = self._set()
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(
+            sorted(call.kwargs.get("connector") for call in mock_set.call_args_list),
+            ["claudecode", "codex", "copilot"],
+        )
+        self.assertEqual(mock_scan.call_count, 1)
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_unresolved_remote_dns_uses_unverified_server_setting(self, mock_set):
+        from defenseclaw.registries import ssrf
+
+        args = ["set", "docs", "--url", "https://docs.example.invalid/mcp", "--connector", "codex"]
+        with patch.object(ssrf, "_default_resolver", return_value=[]):
+            result = self.invoke(args)
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("could not be scanned, so it is added unscanned", result.output)
+            self.assertIn("unverified=scan-did-not-finish", self._mcp_set_events()[0].details)
+            mock_set.assert_called_once()
+
+            self.app.cfg.scanners.mcp_scanner.unverified_server = "block"
+            mock_set.reset_mock()
+            result = self.invoke(args)
+            self.assertEqual(result.exit_code, 1, result.output)
+            mock_set.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_block_refuses_a_scan_that_did_not_finish(self, mock_scan, mock_set):
+        from defenseclaw.scanner.mcp import MCPStdioLaunchError
+
+        self.app.cfg.scanners.mcp_scanner.unverified_server = "block"
+        for text in self._DID_NOT_FINISH:
+            with self.subTest(failure=text):
+                mock_scan.side_effect = MCPStdioLaunchError(text)
+                result = self._set("--connector", "codex")
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("'context7' was not added.", result.output)
+                mock_set.assert_not_called()
+        self.assertEqual(self._mcp_set_events(), [])
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_managed_device_warns_by_default(self, mock_scan, mock_set):
+        from defenseclaw.scanner.mcp import MCPStdioLaunchError
+
+        mock_scan.side_effect = MCPStdioLaunchError(self._DID_NOT_FINISH[0])
+        with patch("defenseclaw.enforce.asset_lists.is_managed_standalone", return_value=True):
+            result = self._set("--connector", "codex")
+            self.assertEqual(result.exit_code, 0, result.output)
+            mock_set.assert_called_once()
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_scanner_refusal_still_refuses_by_default(self, mock_scan, mock_set):
+        # The scanner's own refusals are about the definition, not a scan
+        # that could not finish: an unsupported launcher, a private URL.
+        for refusal in (
+            ValueError("refusing to scan local MCP server 'context7': only npx or uvx are started"),
+            ValueError("refusing to scan MCP URL 'http://127.0.0.1:9/mcp': private address"),
+        ):
+            with self.subTest(refusal=str(refusal)):
+                mock_scan.side_effect = refusal
+                result = self._set("--connector", "codex")
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn("was not added", result.output)
+                mock_set.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    @patch("defenseclaw.commands.cmd_mcp.shutil.which")
+    @patch("defenseclaw.inventory.agent_discovery._is_trusted_binary_path", return_value=False)
+    def test_opencode_untrusted_or_missing_command_warns_and_writes_by_default(self, _trust, mock_which, mock_set):
+        self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
+        for resolved, expected in (
+            ("/opt/node22/bin/npx", "not in a trusted install prefix"),
+            ("/Users/dev/.nvm/versions/node/v22.11.0/bin/npx", "not in a trusted install prefix"),
+            (None, "was not found on PATH"),
+        ):
+            with self.subTest(resolved=resolved):
+                mock_set.reset_mock()
+                mock_which.return_value = resolved
+                result = self.invoke(
+                    ["set", "context7", "--command", "npx", "--args", '["-y", "@upstash/context7-mcp"]',
+                     "--connector", "opencode", "--skip-scan"]
+                )
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn(expected, result.output)
+                self.assertIn("Writing it anyway", result.output)
+                self.assertEqual(mock_set.call_args.kwargs.get("connector"), "opencode")
+                self.assertIn("unverified=opencode-command-untrusted", self._mcp_set_events()[0].details)
+        self.app.cfg.scanners.mcp_scanner.unverified_server = "block"
+        mock_set.reset_mock()
+        mock_which.return_value = "/opt/node22/bin/npx"
+        result = self.invoke(
+            ["set", "context7", "--command", "npx", "--connector", "opencode", "--skip-scan"]
+        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("refused [opencode]", result.output)
+        mock_set.assert_not_called()
+
+
 class TestMCPSetOpencodeGate(MCPCommandTestBase):
     """M5: `mcp set --connector opencode` writes an executable opencode RUNS,
     so the CLI validates/sanitises the server name + command and blocks an
@@ -1927,8 +2098,9 @@ class TestMCPSetOpencodeGate(MCPCommandTestBase):
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.commands.cmd_mcp.shutil.which", return_value="/tmp/untrusted/npx")
     @patch("defenseclaw.inventory.agent_discovery._is_trusted_binary_path", return_value=False)
-    def test_opencode_blocks_untrusted_command_by_default(self, _trust, _which, mock_set):
+    def test_opencode_blocks_untrusted_command_when_unverified_servers_block(self, _trust, _which, mock_set):
         self.app.cfg.active_connectors = lambda: ["opencode"]  # type: ignore[method-assign]
+        self.app.cfg.scanners.mcp_scanner.unverified_server = "block"
 
         result = self.invoke(
             ["set", "demo", "--command", "npx", "--connector", "opencode", "--skip-scan"]
