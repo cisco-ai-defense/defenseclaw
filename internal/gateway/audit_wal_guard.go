@@ -20,17 +20,16 @@ const (
 	auditWALGuardInterval = 2 * time.Second
 	// auditWALLimitBytes is the published on-disk flood ceiling. The
 	// registered T9 flood grew the WAL by up to about 18 MiB/s at 10 hooks/s.
-	auditWALLimitBytes = 256 << 20
+	auditWALLimitBytes = audit.WALHardLimitBytes
 	// Start the bounded catch-up with room for two guard ticks at 10 hooks/s.
 	// A catch-up first requested at the ceiling can arrive one or more ticks
 	// late and leave the on-disk WAL above it (GAP-0952).
 	auditWALGuardHeadroomBytes = 80 << 20
 	auditWALGuardTriggerBytes  = auditWALLimitBytes - auditWALGuardHeadroomBytes
-	// auditWALWriterBudget bounds the idle-gap trim and catch-up writer holds.
-	// A catch-up over the limit also holds it for at most 100 ms; after a
-	// miss, the next pass settles checkpoint pages off the writer.
-	// Hooks need that connection for correlation and their verdict records, so
-	// never let maintenance consume a hook's budget.
+	// auditWALWriterBudget bounds the ordinary writer hold. Once the WAL
+	// reaches the published ceiling, the guard uses a fixed emergency hold
+	// to restart a log whose final copy needs more time. Hook audit writes
+	// can see that occasional latency spike.
 	auditWALWriterBudget = 200 * time.Millisecond
 	// auditWALCopyTimeout bounds the copy on the dedicated checkpoint
 	// connection, which does not hold off the writer. SQLite keeps a
