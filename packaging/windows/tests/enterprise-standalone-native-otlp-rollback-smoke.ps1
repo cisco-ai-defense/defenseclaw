@@ -313,3 +313,4 @@ try {
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
+'enterprise-standalone-native-otlp-rollback-smoke: OK'
