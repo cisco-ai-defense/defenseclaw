@@ -53,7 +53,7 @@ func writeFile(t *testing.T, path string, data []byte) {
 // server key on one line, as the real check does for the parsed document.
 // The Hermes .env assignment check (FILE then a pattern) runs on the system
 // Python: it needs nothing but the standard library.
-const yamlCheckStub = "#!/bin/sh\n[ $# -eq 5 ] && exec /usr/bin/python3 \"$@\"\n/usr/bin/grep -qE '^secrets: *[^ ]|^server: *[^ l]' \"$4\" && exit 3\nexit 0\n"
+const yamlCheckStub = "#!/bin/sh\n[ $# -ge 5 ] && exec /usr/bin/python3 \"$@\"\n/usr/bin/grep -qE '^secrets: *[^ ]|^server: *[^ l]' \"$4\" && exit 3\nexit 0\n"
 
 // launcher's pinned interpreter, which runs its YAML checks, replaced by py
 // (yamlCheckStub when empty). Other launchers are left as they are.
@@ -149,6 +149,10 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 		"op env pytest switch":        {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
 		"profile env pytest switch":   {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
 		"env commented pytest switch": {".env", []byte("# PYTEST_CURRENT_TEST=1\n"), ""},
+		"env commented managed dir": {".env", []byte("# HERMES_MANAGED_DIR=/tmp/old\n"), ""},
+		"env indented managed dir comment": {".env", []byte("  # HERMES_MANAGED_DIR=/tmp/old\n"), ""},
+		"env utf-16 managed dir comment": {".env", utf16LE("# HERMES_MANAGED_DIR=/tmp/old\n"), ""},
+		"env managed dir after comment": {".env", []byte("# HERMES_MANAGED_DIR=/tmp/old\nHERMES_MANAGED_DIR=/tmp/new\n"), "sets HERMES_MANAGED_DIR"},
 		// Only a real assignment, as python-dotenv reads it, sets a loader,
 		// interpreter or Tirith variable; a comment or a value that only
 		// mentions one does not (1.0.4 review).

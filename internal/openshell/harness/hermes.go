@@ -352,7 +352,7 @@ func hermesModelArg(args []string) (flag, override string) {
 }
 
 // hermesEnvFileNames are the Hermes variables a Hermes .env or .op.env may
-// not name (extended regular expressions), matched anywhere in the file
+// not name (extended regular expressions), matched on non-comment lines
 // with NUL bytes removed: Hermes strips NULs and splits KEY=VALUE pairs
 // glued to a previous value (for the names it knows) before it loads a .env
 // (utf-8, latin-1 or UTF-16), so such a name is still set.
@@ -372,11 +372,13 @@ var hermesEnvFileNames = []string{
 // (managed_scope.get_managed_dir), and the launcher sets that (GAP-1122).
 var hermesEnvFileGenericNames = []string{"TIRITH_[A-Z_]*", "PYTHON[A-Z0-9_]*", "LD_[A-Z_]*"}
 
-// hermesEnvFilePattern is the extended regular expression of hermesEnvFileNames.
+// hermesEnvFilePattern is the regular expression of hermesEnvFileNames.
 var hermesEnvFilePattern = strings.Join(hermesEnvFileNames, "|")
 
 // hermesEnvAssignmentCheck prints the first key of the .env file argv[1]
-// that matches the regular expression argv[2] where it starts. It reads the
+// that matches the known-name expression argv[2] anywhere on a non-comment
+// line with an assignment, or the generic-key expression argv[3] at the
+// start of a binding. It reads the
 // file as Hermes may (utf-8 without a BOM, latin-1, UTF-16 with a BOM, NUL
 // bytes removed) and every line as python-dotenv starts a binding: optional
 // whitespace and export, an unquoted or single-quoted key, then "=". Each
@@ -384,18 +386,25 @@ var hermesEnvFilePattern = strings.Join(hermesEnvFileNames, "|")
 // value that spans lines.
 const hermesEnvAssignmentCheck = `import codecs, re, sys
 raw = open(sys.argv[1], "rb").read()
-texts = [raw.decode("utf-8-sig", "replace"), raw.decode("latin-1")]
 if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-    try:
-        texts.append(raw.decode("utf-16"))
-    except UnicodeDecodeError:
-        pass
+    texts = [raw.decode("utf-16", "replace")]
+else:
+    texts = [raw.decode("utf-8-sig", "replace")]
+    if not raw.startswith(codecs.BOM_UTF8):
+        texts.append(raw.decode("latin-1"))
 binding = re.compile(r"\s*(?:export[^\S\r\n]+)?(?:\x27([^\x27]+)\x27|([^=#\s]+))[^\S\r\n]*=")
-name = re.compile(sys.argv[2])
+known = re.compile(r"(" + sys.argv[2] + r")[^\S\r\n]*=")
+generic = re.compile(sys.argv[3])
 for text in texts:
     for line in re.split(r"\r\n|\r|\n", text.replace("\0", "")):
+        if line.lstrip().startswith("#"):
+            continue
+        m = known.search(line)
+        if m:
+            print(m.group(1))
+            sys.exit(0)
         m = binding.match(line)
-        if m and name.match(m.group(1) or m.group(2)):
+        if m and generic.match(m.group(1) or m.group(2)):
             print(m.group(1) or m.group(2))
             sys.exit(0)`
 
@@ -445,9 +454,8 @@ check_home() {
   for f in "$h/.env" "$h/.op.env"; do
     [ -e "$f" ] || continue
     [ -f "$f" ] && [ -r "$f" ] || refuse "$f is not a readable regular file" "Remove it and start Hermes again."
-    hit="$(/usr/bin/tr -d '\000' <"$f" | /usr/bin/grep -aoE '` + hermesEnvFilePattern + `' | /usr/bin/head -n 1)"
-    [ -n "$hit" ] || hit="$(` + shellQuote(hermesTool.interpreter()) + ` -I -c '` + hermesEnvAssignmentCheck + `' "$f" '` +
-	strings.Join(hermesEnvFileGenericNames, "|") + `' 2>/dev/null)" ||
+    hit="$(` + shellQuote(hermesTool.interpreter()) + ` -I -c '` + hermesEnvAssignmentCheck + `' "$f" '` +
+	hermesEnvFilePattern + `' '` + strings.Join(hermesEnvFileGenericNames, "|") + `' 2>/dev/null)" ||
       refuse "$f cannot be read for the variables Hermes loads from it" "Fix or remove it and start Hermes again."
     [ -z "$hit" ] || refuse "$f sets $hit" "It could switch DefenseClaw's hooks off or load code next to them; remove it and start Hermes again."
   done
