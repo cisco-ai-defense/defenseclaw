@@ -131,6 +131,84 @@ func actionWindowsDotNetFileCommand(command, cwd, home string, depth int) bool {
 		return false
 	}
 	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
+	switch program {
+	case "cmd":
+		for i := 1; i < len(words); i++ {
+			option := strings.ToLower(words[i])
+			if option == "/c" || option == "/k" {
+				return i+1 < len(words) && actionWindowsDotNetFileCommand(strings.Join(words[i+1:], " "), cwd, home, depth+1)
+			}
+			if option != "/d" && option != "/s" && option != "/q" &&
+				!strings.HasPrefix(option, "/v:") && !strings.HasPrefix(option, "/e:") && !strings.HasPrefix(option, "/f:") {
+				return false
+			}
+		}
+		return false
+	case "env", "sudo":
+		index := 1
+		for index < len(words) {
+			option := words[index]
+			if option == "--" {
+				index++
+				break
+			}
+			if program == "env" {
+				switch {
+				case option == "-S" || option == "--split-string":
+					return index+1 < len(words) && actionWindowsDotNetFileCommand(words[index+1], cwd, home, depth+1)
+				case option == "-i" || option == "--ignore-environment" || option == "-v" || option == "-0":
+					index++
+				case option == "-u" || option == "--unset" || option == "-C" || option == "--chdir":
+					if index+1 >= len(words) {
+						return false
+					}
+					if option == "-C" || option == "--chdir" {
+						var resolved bool
+						cwd, resolved = actionWindowsPath(words[index+1], cwd, home)
+						if !resolved {
+							return false
+						}
+					}
+					index += 2
+				case strings.HasPrefix(option, "--chdir="):
+					var resolved bool
+					cwd, resolved = actionWindowsPath(strings.TrimPrefix(option, "--chdir="), cwd, home)
+					if !resolved {
+						return false
+					}
+					index++
+				case strings.HasPrefix(option, "--unset=") || strings.HasPrefix(option, "-u") && len(option) > 2 ||
+					strings.Contains(option, "=") && !strings.HasPrefix(option, "-"):
+					index++
+				case strings.HasPrefix(option, "-"):
+					return false
+				default:
+					return actionWindowsDotNetFileCommand(strings.Join(words[index:], " "), cwd, home, depth+1)
+				}
+				continue
+			}
+			if option == "-l" || option == "-ll" || option == "--list" {
+				return false
+			}
+			switch {
+			case strings.Contains(" -u -g -h -p -C -r -t --user --group --host --prompt --close-from --role --type ", " "+option+" "):
+				if index+1 >= len(words) {
+					return false
+				}
+				index += 2
+			case strings.Contains(" -n -E -H -S -b -k -K -v -i -s --login --shell --non-interactive --preserve-env ", " "+option+" ") ||
+				strings.HasPrefix(option, "--user=") || strings.HasPrefix(option, "--group=") ||
+				strings.HasPrefix(option, "--preserve-env=") ||
+				len(option) > 2 && (strings.HasPrefix(option, "-u") || strings.HasPrefix(option, "-g")):
+				index++
+			case strings.HasPrefix(option, "-"):
+				return false
+			default:
+				return actionWindowsDotNetFileCommand(strings.Join(words[index:], " "), cwd, home, depth+1)
+			}
+		}
+		return index < len(words) && actionWindowsDotNetFileCommand(strings.Join(words[index:], " "), cwd, home, depth+1)
+	}
 	if program != "pwsh" && program != "powershell" {
 		return false
 	}
