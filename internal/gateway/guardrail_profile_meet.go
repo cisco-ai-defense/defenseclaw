@@ -258,7 +258,7 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 		if inspectBlock || connectorName == "" {
 			out.mode = "action"
 		}
-		if !(hookBlock && surfaces&profileSurfaceHooks != 0) && !(inspectBlock && surfaces&profileSurfaceInspect != 0) {
+		if enforces := hookBlock && surfaces&profileSurfaceHooks != 0 || inspectBlock && surfaces&profileSurfaceInspect != 0; !enforces {
 			continue
 		}
 		block, _ := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
