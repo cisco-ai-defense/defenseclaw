@@ -832,6 +832,12 @@ func atomicWrite(_ Options, path string, data []byte, public bool) error {
 // atomicWriteSDDL writes data beside path, applies sddl and renames it
 // into place.
 func atomicWriteSDDL(path string, data []byte, sddl string) error {
+	return atomicWriteSDDLWith(path, data, sddl, func(tmp string) error { return os.Rename(tmp, path) })
+}
+
+// atomicWriteSDDLWith is atomicWriteSDDL with the final move of the
+// protected temporary file supplied by the caller.
+func atomicWriteSDDLWith(path string, data []byte, sddl string, publish func(tmp string) error) error {
 	dir := filepath.Dir(path)
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
@@ -861,7 +867,7 @@ func atomicWriteSDDL(path string, data []byte, sddl string) error {
 		cleanup()
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := publish(tmp); err != nil {
 		cleanup()
 		return err
 	}

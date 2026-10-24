@@ -269,7 +269,7 @@ func TestEnumerateWindowsStandaloneReportsAnInstalledCodexItCannotRead(t *testin
 		t.Fatalf("unprotected = %+v, want the Entra user's codex", reported)
 	}
 	message := reported[0].Message()
-	for _, want := range []string{bin, "version could not be read", "npm install -g @openai/codex", "requirements.toml is not published"} {
+	for _, want := range []string{bin, "version could not be read", "npm install -g @openai/codex", windowsCodexUnpublishedConsequence} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("message %q does not contain %q", message, want)
 		}

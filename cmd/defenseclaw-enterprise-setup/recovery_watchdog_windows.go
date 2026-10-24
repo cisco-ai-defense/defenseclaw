@@ -16,20 +16,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"syscall"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 var (
 	enterpriseSetupArmUninstallRecovery = armStandaloneUninstallRecovery
-	setupRecoveryCreationFlags          = standaloneSetupRecoveryCreationFlags
+	setupRecoveryStart                  = processutil.StartIndependent
 	setupRecoveryOpenParent             = openStandaloneSetupParent
 	setupRecoveryLayout                 = managed.StandaloneWindowsLayout
 	setupRecoveryNeeded                 = standaloneUninstallRecoveryNeeded
@@ -38,24 +37,23 @@ var (
 
 // armStandaloneUninstallRecovery runs before the lifecycle worker. A killed
 // Setup must not strand a transaction after the worker removed managed hooks.
+// The watcher must outlive Setup's process job (processutil.StartIndependent),
+// including the unreadable job of the documented LocalSystem scheduled task
+// (GAP-0960).
 func armStandaloneUninstallRecovery() error {
 	executable, err := os.Executable()
 	if err != nil {
 		return err
 	}
-	flags, err := setupRecoveryCreationFlags()
-	if err != nil {
-		return err
-	}
 	child := exec.Command(executable, "--internal-recover-after-parent", strconv.Itoa(os.Getpid()))
 	child.Dir = filepath.Dir(executable)
-	child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
 	ready, err := child.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("create uninstall recovery readiness pipe: %w", err)
 	}
-	if err := child.Start(); err != nil {
-		return err
+	if err := setupRecoveryStart(child); err != nil {
+		_ = ready.Close()
+		return fmt.Errorf("start uninstall recovery: %w", err)
 	}
 	// Do not start the worker merely because CreateProcess succeeded. An
 	// immediately failing watcher would leave a killed Setup without recovery.
@@ -81,30 +79,6 @@ func armStandaloneUninstallRecovery() error {
 	}
 	_ = ready.Close()
 	return child.Process.Release()
-}
-
-func standaloneSetupRecoveryCreationFlags() (uint32, error) {
-	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-	err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation,
-		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
-	return standaloneSetupRecoveryFlagsForJob(info.BasicLimitInformation.LimitFlags, err)
-}
-
-func standaloneSetupRecoveryFlagsForJob(limits uint32, err error) (uint32, error) {
-	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
-	if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
-		return flags, nil // Setup is not in a job.
-	}
-	if err != nil {
-		return 0, fmt.Errorf("inspect uninstall recovery process job: %w", err)
-	}
-	if limits&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0 {
-		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
-	} else if limits&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0 &&
-		limits&windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK == 0 {
-		return 0, errors.New("uninstall recovery cannot survive Setup's enclosing process job; nothing was changed")
-	}
-	return flags, nil
 }
 
 func runStandaloneSetupRecoveryWatchdog(parentArgument string, stdout, stderr io.Writer) int {

@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -258,13 +259,24 @@ func settleWindowsAppliedBundle(driver *enterprisebundle.Driver, installed []byt
 
 // windowsStagedBundleGeneration ties the installer child process's config
 // generation to the receipt staged by the parent before Setup installs it.
+// In the ensure that delivers a bundle, the generation repair before the
+// transaction attributes bytes that receipts of different bundles render to
+// that delivery (windowsBundleDeliveryReceipt).
 func windowsStagedBundleGeneration(path string, raw []byte) (configwrite.Options, bool, error) {
 	layout, err := windowsBundleLayout()
 	if err != nil || !strings.EqualFold(filepath.Clean(path), filepath.Clean(layout.ConfigPath)) {
 		return configwrite.Options{}, false, nil
 	}
-	return newWindowsBundleDriver(layout).ConfigGenerationOptions(raw)
+	driver := newWindowsBundleDriver(layout)
+	if id := windowsBundleDeliveryReceipt.Load(); id != nil {
+		driver.CurrentReceiptID = *id
+	}
+	return driver.ConfigGenerationOptions(raw)
 }
+
+// windowsBundleDeliveryReceipt is the receipt of the bundle this process
+// delivers, from Prepare until the run releases the bundle store.
+var windowsBundleDeliveryReceipt atomic.Pointer[string]
 
 // windowsBundleCurrent reports a current (confirmed) policy bundle in the
 // Windows bundle store.
@@ -347,6 +359,7 @@ func windowsStagedAnchorsRefusalCode(result *enterprisestatus.Result, p *enterpr
 }
 
 func (run *windowsBundleRun) release() {
+	windowsBundleDeliveryReceipt.Store(nil)
 	// A transaction can commit its config before Finish advances the receipt
 	// from staged to applied. Preserve its anchors until settle classifies
 	// the committed receipt, even when this run exits before Finish.
@@ -993,6 +1006,10 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	if err != nil {
 		return refuseAnchors(string(enterprisebundle.FailureCode(err)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
 	}
+	if prepared.Receipt != nil {
+		id := prepared.Receipt.ReceiptID
+		windowsBundleDeliveryReceipt.Store(&id)
+	}
 	if prepared.Receipt != nil && run.anchorStage != "" {
 		if err := run.bindReceiptAnchors(); err != nil {
 			_ = driver.Store.Fail(prepared.Receipt, enterprisebundle.CodeStateInvalid, "cannot retain the verified trust anchors for this receipt")
@@ -1294,6 +1311,13 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 			failure = append(failure, e.Code)
 		}
 		policy := enterprisebundle.GatewayPolicy{}
+		if len(failure) > 0 || installed != p.ConfigSHA256 {
+			// One live read lets Finish prove what the gateway enforces before
+			// it records a rollback (rolled_back) for a failed transaction.
+			if next := windowsBundlePolicy(run.ctx); next != nil {
+				policy = *next
+			}
+		}
 		for i := 0; len(failure) == 0 && installed == p.ConfigSHA256 && i <= windowsBundlePolicyWaits; i++ {
 			if i > 0 {
 				windowsBundleSleep(5 * time.Second)
@@ -1320,6 +1344,13 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 				// committed config whose gateway is down, stays applied for the
 				// next run. Neither is a failed delivery.
 				result.AddError(code, fmt.Sprintf("policy bundle %s version %d: %s", p.Receipt.BundleID, p.Receipt.Version, err.Error()))
+			case p.InstalledPending != nil:
+				// Another receipt's committed config stays installed: neither
+				// this bundle's policy nor the last good one is in force.
+				result.AddError(code, fmt.Sprintf("policy bundle %s version %d was not applied: %s", p.Receipt.BundleID, p.Receipt.Version, err.Error()))
+				result.AddWarning(enterprisebundle.WarnBundlePending, fmt.Sprintf(
+					"policy bundle %s version %d (receipt %s) is installed and not confirmed yet; retry ensure once the gateway is available to settle it",
+					p.InstalledPending.BundleID, p.InstalledPending.Version, p.InstalledPending.ReceiptID))
 			default:
 				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}

@@ -3885,16 +3885,45 @@ func TestAPIPolicyReloadWithoutPolicyDirRefusesManagedConfig(t *testing.T) {
 	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
 	called := 0
 	api.SetPolicyReloader(func() error { called++; return nil })
-	w := httptest.NewRecorder()
-	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
-	if w.Code != http.StatusForbidden || called != 0 || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) {
+	reload := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
+		return w
+	}
+	if w := reload(); w.Code != http.StatusForbidden || called != 0 || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) {
 		t.Fatalf("reload = %d %s, calls = %d; want signed-bundle refusal without reload", w.Code, w.Body.String(), called)
 	}
-	api.SetPolicyReloader(func() error { return errors.New("guardrail generation rejected") })
-	w = httptest.NewRecorder()
+	recorded := 0
+	api.SetRecordedGenerationReloader(func() error { recorded++; return fmt.Errorf("%w: hand edit", errNoRecordedGeneration) })
+	if w := reload(); w.Code != http.StatusForbidden || called != 0 || recorded != 1 ||
+		!strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) || !strings.Contains(w.Body.String(), "recorded by the lifecycle") {
+		t.Fatalf("unrecorded reload = %d %s, calls = %d/%d; want the named refusal", w.Code, w.Body.String(), called, recorded)
+	}
+	api.SetRecordedGenerationReloader(func() error { return errors.New("guardrail generation rejected") })
+	if w := reload(); w.Code != http.StatusInternalServerError || called != 0 || !strings.Contains(w.Body.String(), "guardrail generation rejected") {
+		t.Fatalf("rejected recorded generation = %d %s; want its cause", w.Code, w.Body.String())
+	}
+}
+
+// The Windows lifecycle reloads a signed bundle's recorded generation over
+// the API because the file watcher can miss the atomic replacement; the
+// managed guard must not refuse that load (it did, so every policy-only
+// bundle depended on the watcher).
+func TestAPIPolicyReloadOnManagedHostLoadsTheRecordedGeneration(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	logger := audit.NewLogger(capture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
+	managedCfg := &config.Config{DeploymentMode: "managed_enterprise"}
+	managedCfg.Enterprise.Profile = "standalone"
+	api := &APIServer{health: NewSidecarHealth(), store: capture.store, logger: logger, scannerCfg: managedCfg}
+	api.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+	plain, recorded := 0, 0
+	api.SetPolicyReloader(func() error { plain++; return nil })
+	api.SetRecordedGenerationReloader(func() error { recorded++; return nil })
+	w := httptest.NewRecorder()
 	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
-	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) {
-		t.Fatalf("rejected reload = %d %s; want signed-bundle refusal", w.Code, w.Body.String())
+	if w.Code != http.StatusOK || plain != 0 || recorded != 1 || !strings.Contains(w.Body.String(), `"reloaded"`) {
+		t.Fatalf("recorded generation reload = %d %s, calls = %d/%d; want reloaded through the recorded-generation path", w.Code, w.Body.String(), plain, recorded)
 	}
 }
 

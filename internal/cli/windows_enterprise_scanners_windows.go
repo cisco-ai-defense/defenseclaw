@@ -362,7 +362,7 @@ func checkUntrustedWindowsScannerRuntimeBeforeStart(moduleAction string, opts *w
 
 // refuseUntrustedWindowsScannerRuntimeBeforeChange is the retire's refusal
 // (checkUntrustedWindowsScannerRuntimeBeforeStart), read before a lifecycle
-// action's first change, the removal of the session keys included.
+// action's first change.
 func refuseUntrustedWindowsScannerRuntimeBeforeChange(moduleAction string, opts *windowsEnterpriseLifecycleOptions) error {
 	_, _, err := checkUntrustedWindowsScannerRuntimeBeforeStart(moduleAction, opts)
 	return err

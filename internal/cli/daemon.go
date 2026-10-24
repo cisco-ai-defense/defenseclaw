@@ -1804,12 +1804,18 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 				)
 				if expectationErr != nil {
 					err = expectationErr
-				} else {
+				} else if presented, revokedAll, presentedErr := rotationHookTokensStillPresented(
+					requirements.expectedDataDir,
+					expectedHookTokens,
+					requirements.expectedConnectorState.OrphanHookTokenFingerprints,
+				); presentedErr != nil {
+					err = presentedErr
+				} else if !revokedAll {
 					err = verifyRotationConnectorHookAuthentication(
 						client,
 						statusURL,
 						requirements.expectedDataDir,
-						expectedHookTokens,
+						presented,
 					)
 				}
 				if err != nil {
@@ -2124,6 +2130,40 @@ var loadRotationHookAPIToken = connector.LoadHookAPIToken
 func rotationHookTokenFingerprint(token string) string {
 	digest := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(digest[:])
+}
+
+// rotationHookTokensStillPresented drops the rotated credentials of
+// unconfigured connectors (orphans) that this gateway's own start revoked:
+// its teardown of such a connector removes the credential only after
+// VerifyClean proves no agent registers its hooks (revokePerUserHookAPIToken),
+// so nothing presents it any more. Every other expectation stays, and a
+// present orphan credential must still match and authenticate. revokedAll
+// reports that every expectation was such a revoked orphan. The rotation
+// controller checks again that each vanished orphan's hook is gone.
+func rotationHookTokensStillPresented(
+	dataDir string,
+	expected rotationHookTokenFingerprints,
+	orphans rotationHookTokenFingerprints,
+) (rotationHookTokenFingerprints, bool, error) {
+	if len(orphans) == 0 {
+		return expected, false, nil
+	}
+	presented := make(rotationHookTokenFingerprints, len(expected))
+	revoked := 0
+	for name, fingerprint := range expected {
+		if _, orphan := orphans[name]; orphan {
+			path, err := connector.HookAPITokenFilePath(dataDir, name)
+			if err != nil {
+				return nil, false, fmt.Errorf("connector %s hook credential path is invalid", name)
+			}
+			if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
+				revoked++
+				continue
+			}
+		}
+		presented[name] = fingerprint
+	}
+	return presented, len(expected) > 0 && revoked == len(expected), nil
 }
 
 func verifyRotationConnectorHookAuthentication(
