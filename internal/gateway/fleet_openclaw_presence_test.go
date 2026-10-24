@@ -214,6 +214,10 @@ func TestGatewayShouldConnect_OpenClawNotInstalled(t *testing.T) {
 		}, false, true},
 		{"openclaw_binary_installed", func(t *testing.T, cfg *config.Config) { stubOpenClawBinary(t, true) }, false, true},
 		{"explicit_guardrail_connector", func(t *testing.T, cfg *config.Config) { cfg.Guardrail.Connector = "openclaw" }, false, true},
+		{"explicit_connector_fleet_mode_zero", func(t *testing.T, cfg *config.Config) {
+			cfg.Guardrail.Connector = "openclaw"
+			cfg.Gateway.FleetMode = "0"
+		}, false, false},
 		{"openclaw_in_connectors_map", func(t *testing.T, cfg *config.Config) {
 			cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"OpenClaw": {}}
 		}, false, true},
@@ -223,6 +227,13 @@ func TestGatewayShouldConnect_OpenClawNotInstalled(t *testing.T) {
 		{"fleet_mode_enabled", func(t *testing.T, cfg *config.Config) { cfg.Gateway.FleetMode = "enabled" }, false, true},
 		{"fleet_mode_typo_falls_through_to_dial", func(t *testing.T, cfg *config.Config) { cfg.Gateway.FleetMode = "enabledd" }, false, true},
 		{"fleet_mode_disabled", func(t *testing.T, cfg *config.Config) { cfg.Gateway.FleetMode = "disabled" }, false, false},
+		{"fleet_mode_off", func(t *testing.T, cfg *config.Config) { cfg.Gateway.FleetMode = "off" }, false, false},
+		{"fleet_mode_false", func(t *testing.T, cfg *config.Config) { cfg.Gateway.FleetMode = "false" }, false, false},
+		{"fleet_mode_zero", func(t *testing.T, cfg *config.Config) { cfg.Gateway.FleetMode = "0" }, false, false},
+		{"remote_fleet_mode_disabled", func(t *testing.T, cfg *config.Config) {
+			cfg.Gateway.Host = "10.0.0.5"
+			cfg.Gateway.FleetMode = "disabled"
+		}, false, false},
 		{"zeptoclaw_claw_mode", func(t *testing.T, cfg *config.Config) { cfg.Claw.Mode = "zeptoclaw" }, false, true},
 	}
 	for _, tc := range cases {
@@ -230,6 +241,12 @@ func TestGatewayShouldConnect_OpenClawNotInstalled(t *testing.T) {
 			cfg := clawModeDefaultConfig()
 			withoutOpenClaw(t, cfg)
 			tc.mutate(t, cfg)
+			switch tc.name {
+			case "fleet_mode_disabled", "fleet_mode_off", "fleet_mode_false", "fleet_mode_zero", "remote_fleet_mode_disabled":
+				if !cfg.OpenClawImpliedButNotInstalled() {
+					t.Error("disabled fleet kept an absent implied OpenClaw connector in config")
+				}
+			}
 
 			if got := openClawImpliedButNotInstalled(cfg); got != tc.notInstalls {
 				t.Errorf("openClawImpliedButNotInstalled = %v, want %v", got, tc.notInstalls)
