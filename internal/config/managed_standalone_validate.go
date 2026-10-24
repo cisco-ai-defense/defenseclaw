@@ -51,6 +51,9 @@ func ValidateManagedStandaloneConfig(raw []byte, cfg *Config, plan *Observabilit
 	if err := ValidateManagedStandaloneListener(cfg, layout.GOOS); err != nil {
 		return err
 	}
+	if err := ValidateManagedGuardrailProxyBind(cfg); err != nil {
+		return err
+	}
 	dirs := cfg.ReferencedRulePackDirs()
 	for _, label := range RulePackCheckOrder(dirs) {
 		dir := dirs[label]

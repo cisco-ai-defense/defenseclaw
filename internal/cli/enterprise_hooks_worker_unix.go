@@ -434,9 +434,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			}
 			if name == "kiro" {
 				// The Kiro IDE is read, never run, so static discovery reads it too.
-				if ide, _ := enterpriseHookWorkerDiscoverKiroIDE(request.Home); ide != "" {
-					versions[enterprisehooks.KiroIDEDiscoveryKey] = ide
-				}
+				enterprisehooks.PutUnixKiroIDEForms(enterpriseHookWorkerDiscoverKiroIDE(request.Home), versions, reasons)
 			}
 		}
 		installs := enterprisehooks.DiscoverUnixPrivateAgentInstalls(request.Home, request.Connectors)
@@ -493,7 +491,7 @@ var (
 	enterpriseHookWorkerDiscoverVersion       = enterprisehooks.DiscoverUnixAgentVersion
 	enterpriseHookWorkerDiscoverStaticVersion = enterprisehooks.DiscoverUnixAgentVersionStatically
 	enterpriseHookWorkerDiscoverSurfaces      = enterprisehooks.DiscoverUnixAgentSurfaces
-	enterpriseHookWorkerDiscoverKiroIDE       = enterprisehooks.DiscoverUnixKiroIDEVersion
+	enterpriseHookWorkerDiscoverKiroIDE       = enterprisehooks.DiscoverUnixKiroIDEForms
 )
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {

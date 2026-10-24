@@ -94,11 +94,13 @@ from defenseclaw.config import (
 )
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
+    KIRO_CLI_HOOK_FLOOR,
     PROXY_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
+    assess_kiro_signal,
     compare_agent_versions,
     connector_lock_contract_invariant,
     normalize_agent_version,
@@ -5632,6 +5634,50 @@ def _installed_picked_connector(data_dir: str | None, installed: list[str] | Non
     return picked if picked in installed else None
 
 
+def _non_interactive_guardrail_connector(app: AppContext, gc) -> str:
+    """Return the connector a non-interactive ``setup guardrail`` configures.
+
+    Precedence:
+      1. the configured primary, roster or non-default ``claw.mode``
+         (``Config.active_connector``);
+      2. otherwise the ``picked_connector`` hint, only when that agent is
+         installed;
+      3. otherwise an older implied OpenClaw that the loader kept.
+
+    Whether an implied OpenClaw (3) exists is the loader's decision
+    (``openclaw_implied_but_not_installed``). OpenClaw from 1 is kept only
+    when this host has OpenClaw or a fleet link points at an OpenClaw gateway
+    (``openclaw_setup_fleet_link_configured``). A stale OpenClaw instead
+    yields the installed hint when it is in the enabled roster, else the
+    first installed enabled roster connector, else (no roster) the installed
+    hint. With none of these the result is ``""`` and setup refuses: a
+    default never selects an agent the host does not have (GAP-0568), and
+    roster entries stay enrolled either way.
+    """
+    cfg = app.cfg
+    data_dir = getattr(cfg, "data_dir", None)
+    configured = cfg.active_connector() if cfg.has_connector_configured() else ""
+    pinned = bool(str(gc.connector or "").strip() or gc.connectors) or configured not in {"", "openclaw"}
+    if not pinned:
+        return _installed_picked_connector(data_dir) or configured
+    if configured != "openclaw" or openclaw_presence.openclaw_setup_fleet_link_configured(cfg):
+        return configured
+    installed = _detect_installed_connectors()
+    if platform_support.connector_supported_on_os("openclaw") and (
+        "openclaw" in installed or openclaw_presence.openclaw_installed(cfg)
+    ):
+        return "openclaw"
+    picked = _installed_picked_connector(data_dir, installed)
+    if not gc.connectors:
+        return picked or ""
+    enrolled = [
+        name
+        for name in cfg.active_connectors()
+        if name in installed and getattr(_existing_connector_override(gc, name), "enabled", None) is not False
+    ]
+    return picked if picked in enrolled else next(iter(enrolled), "")
+
+
 def _select_connector_interactive(current: str, data_dir: str | None = None) -> str:
     """Present a numbered menu and return the selected connector name.
 
@@ -5728,6 +5774,8 @@ def _connector_contract_upgrade_guidance(
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     contracts = HOOK_CONTRACTS.get(key, ())
+    if key == "kiro":
+        return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then run: {rerun}."
     if not contracts:
         return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
 
@@ -5855,6 +5903,7 @@ def _check_connector_version_supported_for_setup(
     _allow_prompt: bool = True,
     _trusted_prompt_cache: dict[str, bool] | None = None,
     _discovery: Any = None,
+    _refusal_scope: dict[str, Any] | None = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -5869,6 +5918,9 @@ def _check_connector_version_supported_for_setup(
     trusting a prefix — pass ``False`` to force the non-interactive path.
     ``_trusted_prompt_cache`` is a flow-local map keyed by trusted directory so
     batch setup can avoid asking the same yes/no question repeatedly.
+    ``_refusal_scope`` receives ``observe_admitted=False`` and the reason when
+    the refusal holds in every mode, so an action refusal is not turned into
+    an observe setup (:func:`_observe_fallback_admitted`, GAP-0828).
     """
     connector = normalize_connector(connector)
     label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
@@ -5917,20 +5969,50 @@ def _check_connector_version_supported_for_setup(
         if problem := codex_setup_version_problem(raw_version):
             if emit:
                 ux.err(problem)
+            _refuse_in_every_mode(_refusal_scope, problem)
             return False
         if _discovery is None and platform_support.host_os() != "windows":
             if not agent_discovery._write_cache(disc, data_dir=data_dir):
                 if emit:
                     ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
+                _refuse_in_every_mode(_refusal_scope, "Codex version evidence could not be saved for gateway restart")
                 return False
 
     compatibility = resolve_connector_contract(connector, raw_version)
+    if connector == "kiro":
+        # Every installed Kiro form is judged on its own (assess_kiro, the
+        # table Go's AssessKiro holds too): setup covers a protected form,
+        # and each other form is named as not protected. An installed form
+        # whose version could not be read is unknown, and unknown is not
+        # protected (GAP-0895, GAP-0829).
+        kiro = assess_kiro_signal(signal)
+        installed = installed or bool(kiro.forms)
+        if kiro.selected is not None:
+            raw_version = kiro.selected.version
+            compatibility = resolve_connector_contract(connector, raw_version)
+            if emit:
+                for form in kiro.unprotected():
+                    ux.warn(f"{label}: {form.reason}; it is not counted as protected.")
+        elif kiro.every_mode_refusal and compatibility.status != STATUS_UNKNOWN and not allow_drift:
+            # A Kiro IDE below its floor reads no global hooks; with no
+            # protected form, observe setup would stage hooks it never runs.
+            if emit:
+                ux.err(f"{label}: {kiro.every_mode_refusal}")
+                ux.subhead("Refusing Kiro setup in observe and action mode before activation.")
+                ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+            _refuse_in_every_mode(_refusal_scope, kiro.every_mode_refusal)
+            return False
+        elif kiro.forms and not kiro.every_mode_refusal and compatibility.status == STATUS_NOT_GATED:
+            # Only unknown forms: action refuses, observe warns.
+            compatibility = replace(compatibility, status=STATUS_UNVERSIONED)
     # Some CLIs end their version banner with a period ("... 1.0.90.").
     version_display = raw_version.rstrip(".") or "(not probed)"
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:
-        if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
+        # Kiro is not version-gated, but nothing proves a protected Kiro form
+        # on this host, so action mode refuses it like a gated connector.
+        if action_mode and (compatibility.status != STATUS_NOT_GATED or connector == "kiro") and not allow_drift:
             # F9: no agent on this host is not the same as no verified hook
             # surface. In the layout the sandbox documentation recommends the
             # agent lives inside the harness image, and that image carries a
@@ -5981,7 +6063,13 @@ def _check_connector_version_supported_for_setup(
         detail = f"{label}: version not available"
         if probe_error:
             detail += f" ({probe_error})"
-        detail += f"; using default hook contract {contract}."
+        if connector == "kiro":
+            detail += (
+                f"; Kiro CLI is supported from {KIRO_CLI_HOOK_FLOOR}, so this install is not "
+                "counted as protected until its version is read."
+            )
+        else:
+            detail += f"; using default hook contract {contract}."
         # SU-08: the untrusted-binary-prefix remediation prompt used to be
         # nested inside the action-mode branch, so an OBSERVE-mode setup with an
         # untrusted binary path only got a bare warning and no way to fix it.
@@ -6034,6 +6122,7 @@ def _check_connector_version_supported_for_setup(
                     data_dir=data_dir,
                     _allow_prompt=False,
                     _trusted_prompt_cache=_trusted_prompt_cache,
+                    _refusal_scope=_refusal_scope,
                 )
             if _trusted_prompt_cache is not None:
                 _trusted_prompt_cache[parent] = False
@@ -6073,6 +6162,9 @@ def _check_connector_version_supported_for_setup(
     # Refused in observe mode too: a gateway started with this connector alone
     # refuses a version with no contract in every mode, so "continuing in
     # observe mode" left the gateway down after the restart (GAP-0554).
+    # OpenCode needs a validated plugin contract, and a kiro-cli below the
+    # floor has a surface that sends no hooks (GAP-0227): their messages say so.
+    strict_unknown = connector in {"opencode", "kiro"}
     if compatibility.status == STATUS_UNKNOWN and not allow_drift:
         if emit:
             ux.err(detail)
@@ -6082,6 +6174,8 @@ def _check_connector_version_supported_for_setup(
                     "OpenCode requires a bounded validated plugin contract in both observe and action mode; "
                     "refusing setup before activation."
                 )
+            elif strict_unknown:
+                ux.subhead("Refusing Kiro setup in observe and action mode before activation.")
             else:
                 mode_name = "action" if action_mode else "observe"
                 ux.subhead(
@@ -6089,11 +6183,47 @@ def _check_connector_version_supported_for_setup(
                     "this connector alone refuses a version without a hook contract. Nothing was changed."
                 )
             ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+        _refuse_in_every_mode(_refusal_scope, f"{detail} {upgrade_guidance}")
         return False
     if emit:
         ux.warn(detail + " Continuing because the explicit drift override is set.")
         ux.subhead(upgrade_guidance)
     return True
+
+
+def _refuse_in_every_mode(scope: dict[str, Any] | None, reason: str) -> None:
+    """Record that a setup refusal does not depend on the requested mode."""
+    if scope is not None:
+        scope["observe_admitted"] = False
+        scope["reason"] = reason
+
+
+def _observe_fallback_admitted(scope: dict[str, Any] | None) -> bool:
+    """Whether a refused action request may be configured in observe mode.
+
+    Only a refusal that depends on action mode falls back (no local install,
+    an unreadable version, a version outside the action contract). A refusal
+    that holds in every mode stays a refusal: a kiro-cli below its hook floor
+    runs headless sessions that load no hooks, so an observe fallback would
+    stage an agent DefenseClaw never sees (GAP-0828); the same holds for an
+    OpenCode version outside its plugin contract and for an old Codex.
+    """
+    return (scope or {}).get("observe_admitted", True) is not False
+
+
+def _kiro_setup_refusal(*, data_dir: str | os.PathLike[str] | None, _discovery: Any = None) -> str:
+    """The reason no setup mode can protect the installed Kiro, else "".
+
+    First-run and init extras configure connectors without the setup command;
+    they ask this before they write a Kiro connector in any mode (GAP-0828).
+    """
+    scope: dict[str, Any] = {}
+    if _check_connector_version_supported_for_setup(
+        "kiro", mode="observe", emit=False, data_dir=data_dir, _allow_prompt=False,
+        _discovery=_discovery, _refusal_scope=scope,
+    ):
+        return ""
+    return str(scope.get("reason") or "Kiro cannot be protected in observe or action mode")
 
 
 def _windows_opencode_requires_exact_selection(connector: str) -> bool:
@@ -7054,13 +7184,10 @@ def setup_guardrail(
         # flip ``gc.judge.enabled`` on, so the hook-gate default only fires when
         # this run actually turns the judge on (not on every re-run).
         judge_enabled_by_this_run = False
-        # Connector resolution order in non-interactive mode:
-        #   1. explicit --connector / --agent flag
-        #   2. configured primary, roster, or non-default claw.mode; a saved
-        #      OpenClaw with no local installation keeps a remote/fleet link
-        #   3. <data_dir>/picked_connector, only when that agent is installed
-        #   4. an older implied OpenClaw kept by the loader
-        # There is no connector fallback on an unconfigured host.
+        # Connector resolution order in non-interactive mode: an explicit
+        # --connector / --agent flag, then _non_interactive_guardrail_connector
+        # (configured primary or roster, installed picked hint, older implied
+        # OpenClaw). There is no connector fallback on an unconfigured host.
         # We deliberately do NOT run filesystem auto-detect (the
         # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
         # those directories often pre-exist on developer workstations
@@ -7068,32 +7195,7 @@ def setup_guardrail(
         # back during scripted installs. Filesystem detection is only
         # used in the interactive picker where the operator can see and
         # confirm the suggested default.
-        if explicit_connector:
-            target_connector = explicit_connector
-        elif (
-            gc.connector == "openclaw"
-            and not gc.connectors
-            and not openclaw_presence.openclaw_fleet_link_configured(app.cfg)
-        ):
-            # An older local setup could pin OpenClaw before the operator
-            # picked an agent. A remote host or explicit fleet mode above
-            # remains authoritative even without a local OpenClaw binary.
-            installed = _detect_installed_connectors()
-            target_connector = (
-                "openclaw"
-                if platform_support.connector_supported_on_os("openclaw")
-                and ("openclaw" in installed or openclaw_presence.openclaw_installed(app.cfg))
-                else _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
-                or ""
-            )
-        elif gc.connector or gc.connectors:
-            target_connector = app.cfg.active_connector()
-        elif app.cfg.has_connector_configured() and app.cfg.active_connector() != "openclaw":
-            target_connector = app.cfg.active_connector()
-        else:
-            target_connector = _installed_picked_connector(getattr(app.cfg, "data_dir", None)) or (
-                app.cfg.active_connector() if app.cfg.has_connector_configured() else ""
-            )
+        target_connector = explicit_connector or _non_interactive_guardrail_connector(app, gc)
         if not target_connector:
             raise click.ClickException(no_connector_message)
         _ensure_connector_available(normalize_connector(target_connector))
@@ -7118,7 +7220,7 @@ def setup_guardrail(
                 # is not set up; the summary, claw.mode and the gateway's
                 # primary must follow the connector this run configures.
                 gc.connector = target_connector
-        elif not gc.connector or gc.connector == "openclaw":
+        elif not (gc.connector or "").strip() or normalize_connector(gc.connector.strip()) == "openclaw":
             gc.connector = target_connector
         per_connector_target = bool(
             explicit_connector
@@ -8824,11 +8926,18 @@ def _restore_setup_agent_selection_snapshot(cfg, snapshot: _SetupConfigSnapshot)
 
 def _restore_setup_agent_discovery_snapshot(cfg, snapshot: _SetupConfigSnapshot) -> None:
     """Restore peer versions that the prior guarded runtime used at startup."""
+    _restore_setup_agent_discovery_state(
+        cfg, snapshot.agent_discovery_existed, snapshot.agent_discovery_bytes
+    )
+
+
+def _restore_setup_agent_discovery_state(cfg, existed: bool, body: bytes) -> None:
+    """Restore the protected cache captured before setup's version preflight."""
     if not cfg.data_dir:
         return
     path = os.path.join(os.path.abspath(os.fspath(cfg.data_dir)), _AGENT_DISCOVERY_FILENAME)
-    if snapshot.agent_discovery_existed:
-        atomic_write_private_bytes(path, snapshot.agent_discovery_bytes)
+    if existed:
+        atomic_write_private_bytes(path, body)
     elif os.path.lexists(path):
         delete_file_durable(path)
 
@@ -10337,6 +10446,16 @@ def _apply_hook_connector_setup(
         desired_mode = "observe"
 
     exact_windows_opencode = _windows_opencode_requires_exact_selection(connector)
+    prior_discovery: tuple[bool, bytes, tuple[int, int, int, int] | None] | None = None
+
+    def restore_preflight_discovery() -> None:
+        if prior_discovery is None:
+            return
+        try:
+            _restore_setup_agent_discovery_state(app.cfg, prior_discovery[0], prior_discovery[1])
+        except OSError as exc:
+            raise click.ClickException("connector setup preflight could not restore agent_discovery.json") from exc
+
     # Preserve the predecessor's ordering for every non-OpenCode connector:
     # generic version admission still precedes rule-pack validation and the
     # setup snapshot. Only native-Windows OpenCode takes the exact-selection
@@ -10357,7 +10476,13 @@ def _apply_hook_connector_setup(
         }
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
-        if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
+        # The scope records why a refusal holds; the train has no observe
+        # fallback for a refused version (GAP-0554).
+        refusal_scope: dict[str, Any] = {}
+        if not _check_connector_version_supported_for_setup(
+            connector, _refusal_scope=refusal_scope, **version_check_kwargs
+        ):
+            restore_preflight_discovery()
             return False
 
     cfg = app.cfg
@@ -10369,6 +10494,7 @@ def _apply_hook_connector_setup(
             capture_codex_backup=connector == "codex" and restart,
         )
     except _SetupGatewayNoAnswerError as exc:
+        restore_preflight_discovery()
         # Same next step as the busy-gateway restart check (GAP-1668).
         ux.echo(
             f"  ✗ Setup did not start: {exc}; the host may be busy.\n"
@@ -10377,6 +10503,7 @@ def _apply_hook_connector_setup(
         )
         return False
     except OSError as exc:
+        restore_preflight_discovery()
         ux.echo(
             f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
             f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",

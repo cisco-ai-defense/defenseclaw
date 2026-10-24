@@ -2282,7 +2282,7 @@ def _hilt_preview_lines(app: AppContext, key: str, label: str, enabled: bool, mi
         if enabled and not has_native_approval_prompt(key):
             # Whatever the mode, a connector without a native approval prompt
             # alerts instead of asking (_hilt_enable_notice).
-            lines.append(_hilt_enable_notice(key, min_severity))
+            lines.append(_hilt_enable_notice(key, min_severity, secure_client=asset_lists.is_secure_client(app.cfg)))
         return lines
     base = preview.base
     if base.mode != "action":
@@ -2292,7 +2292,7 @@ def _hilt_preview_lines(app: AppContext, key: str, label: str, enabled: bool, mi
         ]
     elif base.enabled:
         # A connector without a native approval prompt alerts instead.
-        lines = [_hilt_enable_notice(key, base.min_severity)]
+        lines = [_hilt_enable_notice(key, base.min_severity, secure_client=asset_lists.is_secure_client(app.cfg))]
     else:
         lines = [f"{label} will NOT prompt — actions resolve straight to allow/alert/block."]
     return lines + _hilt_profile_notes(preview, label)
@@ -2361,14 +2361,37 @@ def _warn_still_fail_open(gc, open_names: list[str]) -> None:
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
-def _hilt_enable_notice(connector: str, severity: str) -> str:
+def _hilt_enable_notice(
+    connector: str, severity: str, *, mode: str = "action", secure_client: bool = False
+) -> str:
     label = _connector_label(connector)
+    observe_note = (
+        f"{label} is in observe mode; HILT at/above {severity} does not pause actions "
+        "until action mode is enabled. "
+        if mode.strip().lower() != "action"
+        else ""
+    )
+    if normalize_connector(connector) == "copilot":
+        if secure_client:
+            return (
+                observe_note +
+                f"{label} Secure Client will prompt for approval on supported confirmable "
+                f"actions at/above {severity} (CRITICAL findings still block outright)."
+            )
+        return (
+            observe_note +
+            f"{label} cannot prove an approval prompt is available; action-mode "
+            f"confirmations at/above {severity} are denied and audited as block "
+            "(raw_action=confirm). CRITICAL findings still block outright."
+        )
     if has_native_approval_prompt(connector):
         return (
+            observe_note +
             f"{label} will prompt for approval on supported confirmable actions at/above "
             f"{severity} (CRITICAL findings still block outright)."
         )
     return (
+        observe_note +
         f"{label} has no implemented native approval prompt; confirm verdicts at/above "
         f"{severity} produce alerts with raw_action=confirm preserved. CRITICAL findings still block outright."
     )

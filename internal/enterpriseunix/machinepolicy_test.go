@@ -56,6 +56,320 @@ func descriptorConnectors(t *testing.T, h *testHost) []string {
 	return descriptor.MachinePolicyConnectors
 }
 
+func TestLifecyclePinsPublishedPolicyViewAndRepairsDrift(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	opts := enterprisepolicy.LayoutOptions(h.env.Layout, "", "")
+	opts.Root, opts.SkipTrustChecks = h.env.Root, true
+	assertPin := func() string {
+		t.Helper()
+		descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		observed, err := enterprisepolicy.PolicyViewDigest(opts, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if descriptor.PolicyViewDigests["codex"] != observed {
+			t.Fatalf("descriptor policy pin %q does not match published %q", descriptor.PolicyViewDigests["codex"], observed)
+		}
+		return observed
+	}
+	pinned := assertPin()
+	path := h.env.P(codexRequirements)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := enterprisepolicy.PolicyViewDigest(opts, "codex")
+	if err != nil || changed == pinned {
+		t.Fatalf("policy drift kept the trusted pin: %q, %v", changed, err)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if after := assertPin(); after != pinned {
+		t.Fatalf("repair changed the intended policy digest: %q, want %q", after, pinned)
+	}
+	// An administrator can add unrelated valid policy text without removing
+	// the hook. Reconcile must publish a pin for those bytes after verifying
+	// the current policy view, without needing a full ensure transaction.
+	withNote := []byte(h.read(codexRequirements) + "\n# administrator note\n")
+	if err := os.WriteFile(path, withNote, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	changed, err = enterprisepolicy.PolicyViewDigest(opts, "codex")
+	if err != nil || changed == pinned {
+		t.Fatalf("admin policy edit kept the previous pin: %q, %v", changed, err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status hid a policy-view mismatch while the hook refuses calls: %+v", status)
+	}
+	result := h.run(Options{Action: ActionReconcile})
+	requireOK(t, result)
+	if after := assertPin(); after == pinned {
+		t.Fatalf("reconcile did not pin the updated policy view: %q", after)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Files[h.env.Layout.DescriptorPath] != sha256Bytes([]byte(h.read(h.env.Layout.DescriptorPath))) {
+		t.Fatal("reconcile did not record the updated descriptor digest")
+	}
+	if status := h.run(Options{Action: ActionStatus}); hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status still reports a stale pin after reconcile: %+v", status.Warnings)
+	}
+	// A failed root-side policy verification must leave the old pin in
+	// place, and reconcile must say that the managed hook still refuses.
+	pinned = assertPin()
+	if err := os.WriteFile(path, append(withNote, []byte("# second administrator note\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.env.MachinePolicy = &unverifiedPolicy{MachinePolicyManager: h.env.MachinePolicy}
+	result = h.run(Options{Action: ActionReconcile})
+	if !hasWarning(result, codeMachinePolicyIncomplete) || result.SecurityComplete {
+		t.Fatalf("reconcile hid its stale policy pin: %+v", result)
+	}
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if descriptor.PolicyViewDigests["codex"] != pinned {
+		t.Fatal("reconcile re-pinned a view that the root-side verifier rejected")
+	}
+	t.Run("administrator Claude policy and drop-in", func(t *testing.T) {
+		h := newTestHost(t, "linux")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "claudecode")}))
+		opts := enterprisepolicy.LayoutOptions(h.env.Layout, "", "")
+		opts.Root, opts.SkipTrustChecks = h.env.Root, true
+		previous := ""
+		for _, file := range []string{"/etc/claude-code/managed-settings.json", "/etc/claude-code/managed-settings.d/40-admin.json"} {
+			writeHostFile(t, h, file, `{"permissions":{"deny":["Bash(status)"]}}`)
+			if got := h.run(Options{Action: ActionReconcile}); hasWarning(got, codeMachinePolicyIncomplete) {
+				t.Fatalf("reconcile did not accept verified administrator policy %s: %+v", file, got.Warnings)
+			}
+			descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			observed, err := enterprisepolicy.PolicyViewDigest(opts, "claudecode")
+			if err != nil || observed == previous || descriptor.PolicyViewDigests["claudecode"] != observed {
+				t.Fatalf("administrator policy %s was not pinned: observed %q, previous %q, descriptor %q, err %v", file, observed, previous, descriptor.PolicyViewDigests["claudecode"], err)
+			}
+			previous = observed
+		}
+	})
+	t.Run("policy changes during root verification", func(t *testing.T) {
+		h := newTestHost(t, "linux")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+		descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		pinned := descriptor.PolicyViewDigests["codex"]
+		path := h.env.P(codexRequirements)
+		original := h.read(codexRequirements)
+		if err := os.WriteFile(path, []byte(original+"\n# first administrator edit\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		changing := &policyEditAfterVerify{
+			MachinePolicyManager: h.env.MachinePolicy,
+			path:                 path,
+			data:                 []byte(original + "\n# second administrator edit\n"),
+		}
+		h.env.MachinePolicy = changing
+		result := h.run(Options{Action: ActionReconcile})
+		if !changing.edited || changing.editErr != nil {
+			t.Fatalf("test policy change failed: edited=%v err=%v", changing.edited, changing.editErr)
+		}
+		if !hasWarning(result, codeMachinePolicyIncomplete) || result.SecurityComplete {
+			t.Fatalf("reconcile hid a policy change during verification: warnings=%+v security_complete=%v", result.Warnings, result.SecurityComplete)
+		}
+		descriptor, err = managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if descriptor.PolicyViewDigests["codex"] != pinned {
+			t.Fatal("reconcile pinned policy bytes that changed during root verification")
+		}
+	})
+}
+
+type unverifiedPolicy struct{ MachinePolicyManager }
+
+func (p *unverifiedPolicy) Verify(*config.Config) (enterprisepolicy.Result, error) {
+	return enterprisepolicy.Result{}, errors.New("root-side policy verification failed")
+}
+
+type policyEditAfterVerify struct {
+	MachinePolicyManager
+	path    string
+	data    []byte
+	edited  bool
+	editErr error
+}
+
+func (p *policyEditAfterVerify) Verify(cfg *config.Config) (enterprisepolicy.Result, error) {
+	result, err := p.MachinePolicyManager.Verify(cfg)
+	p.edited = true
+	p.editErr = os.WriteFile(p.path, p.data, 0o644)
+	return result, err
+}
+
+func TestEnsureMigratesDescriptorWithoutPolicyPin(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	descriptorPath := h.env.Layout.DescriptorPath
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(descriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor.PolicyViewDigests = nil // previous release's on-disk descriptor
+	data, err := managed.MarshalRuntimeDescriptor(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(descriptorPath), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Files[descriptorPath] = sha256Bytes(data)
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status hid a legacy descriptor without a policy pin: %+v", status)
+	}
+	result := h.run(Options{Action: ActionEnsure})
+	requireOK(t, result)
+	if result.Noop {
+		t.Fatal("ensure kept a legacy descriptor without a policy-view pin")
+	}
+	updated, err := managed.ParseRuntimeDescriptor([]byte(h.read(descriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.PolicyViewDigests["codex"] == "" {
+		t.Fatal("ensure did not publish the policy-view pin")
+	}
+}
+
+func TestDarwinPublishedPinDetectsPrivateManagedPreference(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	opts := enterprisepolicy.LayoutOptions(h.env.Layout, "", "")
+	opts.Root, opts.SkipTrustChecks = h.env.Root, true
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := enterprisepolicy.PolicyViewDigest(opts, "codex")
+	if err != nil || pinned == "" || descriptor.PolicyViewDigests["codex"] != pinned {
+		t.Fatalf("macOS descriptor did not pin its published policy: %q, %v", pinned, err)
+	}
+	pref := h.env.P("/Library/Managed Preferences/com.openai.codex.plist")
+	if err := os.MkdirAll(filepath.Dir(pref), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pref, []byte("private policy override"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := enterprisepolicy.PolicyViewDigest(opts, "codex")
+	if err != nil || changed == pinned {
+		t.Fatalf("macOS private preference kept the trusted policy digest: %q, %v", changed, err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("macOS status hid a private policy source: %+v", status)
+	}
+}
+
+func TestDarwinLifecyclePinsPerAccountPreferencesAndRepairsDrift(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	write := func(account string) {
+		t.Helper()
+		path := h.env.P("/Library/Managed Preferences/" + account + "/com.openai.codex.plist")
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("<?xml version=\"1.0\"?><plist><dict></dict></plist>"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("alice")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	getPins := func() map[string]managed.PolicyViewFilePin {
+		t.Helper()
+		descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return descriptor.PolicyViewUserSources["codex"]
+	}
+	if pins := getPins(); len(pins) != 1 || pins["alice"].SHA256 == "" {
+		t.Fatalf("install did not attest alice's preference: %+v", pins)
+	}
+	write("bob")
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status hid a new per-account source: %+v", status)
+	}
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	if pins := getPins(); len(pins) != 2 || pins["bob"].SHA256 == "" {
+		t.Fatalf("ensure did not attest bob's preference: %+v", pins)
+	}
+}
+
+func TestDarwinEnsureMigratesDescriptorWithoutPerAccountPins(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	pref := h.env.P("/Library/Managed Preferences/alice/com.openai.codex.plist")
+	if err := os.MkdirAll(filepath.Dir(pref), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pref, []byte("<?xml version=\"1.0\"?><plist><dict></dict></plist>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.3"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	path := h.env.Layout.DescriptorPath
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor.PolicyViewUserSources = nil // an older committed descriptor
+	data, err := managed.MarshalRuntimeDescriptor(descriptor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(path), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	record, err := h.env.loadDeployment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	record.Files[path] = sha256Bytes(data)
+	if err := h.env.saveDeployment(record); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("status hid missing per-account pins: %+v", status)
+	}
+	result := h.run(Options{Action: ActionEnsure})
+	requireOK(t, result)
+	if result.Noop {
+		t.Fatal("ensure kept a descriptor without per-account pins")
+	}
+	updated, err := managed.ParseRuntimeDescriptor([]byte(h.read(path)))
+	if err != nil || updated.PolicyViewUserSources["codex"]["alice"].SHA256 == "" {
+		t.Fatalf("ensure did not attest alice's preference: %+v, %v", updated, err)
+	}
+}
+
 func TestHookBinaryIsTheMachinePolicyCommand(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		layout, err := managed.StandaloneLayoutFor(goos)
@@ -328,10 +642,8 @@ func TestTamperedClaudeDropInIsFoundAndPutBackByEnsure(t *testing.T) {
 	}
 }
 
-// GAP-1348: a Copilot drop-in whose hook command kept DefenseClaw's prefix
-// but gained a redirection and a successful fallback discarded the deny,
-// while verify reported coverage and the guardian checked only Claude's
-// drop-in. Verify fails, the guardian finds it, and ensure puts it back.
+// A Copilot handler with a shell suffix can discard the deny. Verify must
+// fail, and Ensure must restore DefenseClaw's own single-field handler.
 func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
@@ -353,7 +665,9 @@ func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
 	}
 	verify := h.run(Options{Action: ActionVerify})
 	requireError(t, verify, codeVerify)
-	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "not the command DefenseClaw publishes") {
+	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "not the command DefenseClaw publishes") ||
+		!strings.Contains(messagesOf(verify.Errors, codeVerify), "next lifecycle run") ||
+		strings.Contains(messagesOf(verify.Errors, codeVerify), "move independent content to a separate handler") {
 		t.Fatalf("verify must report the modified Copilot hook: %+v", verify.Errors)
 	}
 	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{dropIn}) {
@@ -363,6 +677,75 @@ func TestTamperedCopilotDropInFailsVerifyAndIsPutBack(t *testing.T) {
 	requireOK(t, ensure)
 	if h.read(dropIn) != want || len(h.env.TamperedFiles()) != 0 {
 		t.Fatalf("ensure did not put the Copilot drop-in back: changes=%v", ensure.Changes)
+	}
+}
+
+func TestTamperedCopilotDropInWithCWDIsPutBackByEnsure(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
+	writeFreshLedger(t, h)
+	dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+	want := h.read(dropIn)
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(want), &doc); err != nil {
+		t.Fatal(err)
+	}
+	pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+	pre["bash"] = pre["bash"].(string) + " >/dev/null 2>&1 || true"
+	pre["cwd"] = "/tmp"
+	edited, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(dropIn), edited, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	verify := h.run(Options{Action: ActionVerify})
+	requireError(t, verify, codeVerify)
+	if !strings.Contains(messagesOf(verify.Errors, codeVerify), "not the command DefenseClaw publishes") {
+		t.Fatalf("verify did not report the fail-open command: %+v", verify.Errors)
+	}
+	if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{dropIn}) {
+		t.Fatalf("the guardian check found %v", got)
+	}
+	ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+	requireOK(t, ensure)
+	if h.read(dropIn) != want || len(h.env.TamperedFiles()) != 0 {
+		t.Fatalf("ensure did not restore the Copilot drop-in: changes=%v", ensure.Changes)
+	}
+}
+
+func TestCombinedCopilotDropInEnsureRefusesIndependentContent(t *testing.T) {
+	for _, field := range []string{"command", "operator"} {
+		t.Run(field, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
+			writeFreshLedger(t, h)
+			dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(h.read(dropIn)), &doc); err != nil {
+				t.Fatal(err)
+			}
+			pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
+			pre[field] = "operator-tool"
+			combined, err := json.Marshal(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(dropIn), combined, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			verify := h.run(Options{Action: ActionVerify})
+			requireError(t, verify, codeVerify)
+			if !strings.Contains(messagesOf(verify.Errors, codeVerify), "move independent content to a separate handler") {
+				t.Fatalf("verify did not identify the combined handler: %+v", verify.Errors)
+			}
+			ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
+			if ensure.OK || ensure.SecurityComplete || h.read(dropIn) != string(combined) ||
+				!strings.Contains(fmt.Sprint(ensure.Errors), "move independent content to a separate handler") {
+				t.Fatalf("ensure changed or claimed the combined handler: %+v", ensure)
+			}
+		})
 	}
 }
 
@@ -749,6 +1132,21 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 			t.Fatalf("%s must warn that the Local hook file is pending: %+v", action, got.Warnings)
 		}
 	}
+	// An independent handler at DefenseClaw's Local path is retained by
+	// the guardian. Even without a guardian record it is not pending work.
+	writeHostFile(t, h, hookFile, `{"hooks":{"PreToolUse":[{"type":"command","command":"operator-tool"}]}}`)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := h.run(Options{Action: action})
+		requireError(t, got, codeVerify)
+		if got.SecurityComplete || hasWarning(got, codeGuardianUserFilePending) ||
+			!strings.Contains(messagesOf(got.Errors, codeVerify), hookFile) ||
+			!strings.Contains(messagesOf(got.Errors, codeVerify), "move the independent handlers aside") {
+			t.Fatalf("%s claimed a retained Local hook file would be rewritten: %+v", action, got)
+		}
+	}
+	if err := os.Remove(h.env.P(hookFile)); err != nil {
+		t.Fatal(err)
+	}
 	// The guardian records alice in its data directory, where it writes
 	// the record (GAP-1761).
 	writeHostFile(t, h, filepath.Join(h.env.Layout.GuardianAuthDir, "copilot-vscode-accounts.json"),
@@ -772,6 +1170,14 @@ func TestVerifyFailsWhileTheCopilotLocalHookFileIsMissing(t *testing.T) {
 	}
 	requireOK(t, h.run(Options{Action: ActionStatus}))
 	requireOK(t, h.run(Options{Action: ActionVerify}))
+	writeHostFile(t, h, hookFile, `{"hooks":{"PreToolUse":[{"type":"command","command":"operator-tool"}]}}`)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := h.run(Options{Action: action})
+		requireError(t, got, codeVerify)
+		if got.SecurityComplete || !strings.Contains(messagesOf(got.Errors, codeVerify), hookFile) {
+			t.Fatalf("%s accepted a retained Local file after guardian enrollment: %+v", action, got)
+		}
+	}
 	// A deleted account's home is gone: nothing to rewrite, no failure
 	// (GAP-1209).
 	if err := os.RemoveAll(h.env.P("/home/alice")); err != nil {

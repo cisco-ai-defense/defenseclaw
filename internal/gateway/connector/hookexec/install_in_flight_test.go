@@ -221,7 +221,7 @@ func TestNativeHookAnswersClosedWhenAnInstallStartsWhileTheAnswerIsRead(t *testi
 						installing.code, installing.stdout, installing.stderr, got, closedBlocks)
 				}
 				open := answer(t, "open", false)
-				closesOpen := failure.unusable && !(form.connector == "hermes" && failure.name == "no verdict")
+				closesOpen := failure.unusable && (form.connector != "hermes" || failure.name != "no verdict")
 				if got := nativeAnswerBlocks(open.code, open.stdout); failure.failure && got != closesOpen {
 					t.Fatalf("fail mode open without an install: exit %d stdout %q stderr %q blocks=%v, want blocks=%v", open.code, open.stdout, open.stderr, got, closesOpen)
 				}

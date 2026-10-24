@@ -172,6 +172,15 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
         problems.append("security_complete is false")
     if args.security_incomplete and document["security_complete"] is not False:
         problems.append("security_complete is true, want false")
+    if args.policy_view_status:
+        if document["platform"] != "linux":
+            problems.append("policy-view status is Linux-only")
+        if document["coverage_complete"] is not True:
+            problems.append("policy-view status has coverage_complete false")
+        open_view = any(message["code"] in ("unprivileged_user_namespaces", "unprivileged_ptrace")
+                        for message in document.get("warnings") or [])
+        if document["security_complete"] is open_view:
+            problems.append("security_complete does not match the open policy-view warnings")
     # The warning texts follow the problems in the failure output.
     allowed = set(args.allow_warning)
     # security_incomplete explains a false security_complete, which
@@ -220,12 +229,17 @@ def machine_policy_problems(policies: Dict[str, Any], args: argparse.Namespace) 
         if connector in args.machine_policy and (not isinstance(owned, int) or isinstance(owned, bool) or owned < 1):
             problems.append(f"machine_policy.{connector} owns no entries")
         if connector in args.machine_policy_enforced and entry.get("effective_lock") != "enforce":
-            problems.append(f"machine_policy.{connector}.effective_lock is {entry.get('effective_lock')!r}, want 'enforce'")
+            problems.append(
+                f"machine_policy.{connector}.effective_lock is {entry.get('effective_lock')!r}, want 'enforce'"
+            )
     return problems
 
 
 def describe(document: Dict[str, Any]) -> str:
-    return "action={} ok={} noop={} installed={} installed_version={} exit_code={} coverage_complete={} security_complete={}".format(
+    return (
+        "action={} ok={} noop={} installed={} installed_version={} exit_code={} "
+        "coverage_complete={} security_complete={}"
+    ).format(
         document.get("action"),
         document.get("ok"),
         document.get("noop"),
@@ -267,6 +281,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--security-incomplete",
         action="store_true",
         help="require security_complete to be false (Windows before the live Claude Code policy proof)",
+    )
+    security.add_argument(
+        "--policy-view-status",
+        action="store_true",
+        help="require security_complete to be false exactly when Linux warns of open policy-view routes",
     )
     parser.add_argument(
         "--expect-error",

@@ -74,16 +74,10 @@ def test_the_closed_global_footer_the_page_quotes_is_the_command_output(
     cfg.guardrail.hook_fail_mode = "closed"
     output = _lines(_run(cfg, []))
     page = PAGE.read_text(encoding="utf-8").split("## Persisted fail mode", 1)[1].split("\n## ", 1)[0]
-    quoted = re.search(
-        r"With `guardrail.hook_fail_mode: closed` the last lines read `([^`]+)` and `([^`]+)`, with a warning `([^`]+)` between them",
-        page,
-    )
-    assert quoted, "the page no longer describes the closed-global footer"
-    block, switch, still_open = quoted.groups()
-    # The warning glyph is the terminal's: "⚠" on UTF-8, "!" on a Windows code page.
-    warning = re.sub(r"^  [⚠!] ", "  ", output[-2])
-    assert [output[-3], warning, output[-1]] == [
-        f"  {block}",
-        f"  {still_open.replace('<names>', 'claudecode')}",
-        f"  {switch}",
-    ]
+    # A per-user connector is closed whatever it saved (sa-port-peer): the
+    # footer is the BLOCK line alone, with no "Still fail-open" warning.
+    footer = "  Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above."
+    assert output[-1] == footer, output
+    assert f"```text\n{footer}\n```" in page
+    assert not any("Still fail-open" in line for line in output), output
+    assert "Still fail-open" not in page

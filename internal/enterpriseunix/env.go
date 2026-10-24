@@ -178,6 +178,9 @@ const (
 	TrustRulePack
 	// TrustRuntimeFile is a policy-tree file the service account may own.
 	TrustRuntimeFile
+	// TrustAdminDir is an administrator-owned directory and all its
+	// ancestors. Host security files are written only below such a path.
+	TrustAdminDir
 )
 
 // Env binds the lifecycle to one host. Zero values are replaced by
@@ -499,6 +502,8 @@ func defaultTrust(path string, kind TrustKind) error {
 		return managed.ValidateTrustedServiceRuntimeFilePath(path, "managed runtime file", "")
 	case TrustRulePack:
 		return rulePackTrust(path)
+	case TrustAdminDir:
+		return managed.ValidateTrustedInstallMarkerDir(path, "managed host security directory")
 	}
 	return fmt.Errorf("unknown trust kind %d", kind)
 }

@@ -1978,13 +1978,19 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 		return
 	}
 	for _, agent := range agents {
-		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified || agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete {
-			// No hook contract: the agent runs with no DefenseClaw hook, so
-			// the deployment does not cover it (GAP-0151).
+		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||
+			agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			// No contract, an incomplete install scan, a headless CLI path
+			// without hooks, or an IDE that cannot read global hooks: the
+			// deployment does not cover it (GAP-0151).
 			result.CoverageComplete = false
 		}
 		// unverified_versions: refuse that nothing enforces fails verify.
-		if agent.Refusal == enterprisehooks.RefusalMissing && result.Action == "verify" {
+		if result.Action == "verify" && (agent.Refusal == enterprisehooks.RefusalMissing ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor) {
 			result.AddError(agent.Code, agent.Message())
 		} else {
 			result.AddWarning(agent.Code, agent.Message())

@@ -109,13 +109,56 @@ def test_contract_lock_accepts_kiro_not_gated_without_hook_paths() -> None:
             "kiro",
             {
                 "connector": "kiro",
-                "raw_agent_version": "kiro-cli 2.22.0",
+                "raw_agent_version": "kiro-cli 2.27.1",
                 "compatibility_status": "not-gated",
                 "hook_fail_mode": "open",
             },
         )
         == ""
     )
+
+
+@pytest.mark.parametrize("mode", ("observe", "action"))
+def test_kiro_cli_below_hook_floor_is_refused_by_setup_and_its_lock(mode: str, tmp_path: Path) -> None:
+    """GAP-0227: before kiro-cli 2.27.1 a non-interactive ``--v3`` run loads no
+    hooks, so setup refuses that kiro-cli in both modes and its registration
+    lock no longer counts as a supported not-gated one. The Kiro IDE launcher's
+    bare version is not a kiro-cli version and is not gated."""
+
+    def setup_accepts(version: str) -> bool:
+        signal = SimpleNamespace(version=version, installed=True, error="", binary_path="")
+        return cmd_setup._check_connector_version_supported_for_setup(
+            "kiro", mode=mode, emit=False, data_dir=str(tmp_path),
+            _discovery=SimpleNamespace(agents={"kiro": signal}),
+        )
+
+    def lock(version: str) -> str:
+        return connector_lock_contract_invariant(
+            "kiro",
+            {"connector": "kiro", "raw_agent_version": version, "compatibility_status": "not-gated", "hook_fail_mode": "closed"},
+        )
+
+    for below in ("kiro-cli 2.26.1", "kiro-cli 2.24.1"):
+        assert not setup_accepts(below), below
+        assert lock(below) == "contract", below
+    for supported in ("kiro-cli 2.27.1", "kiro-cli 3.0.0", "1.1.14"):
+        assert setup_accepts(supported), supported
+        assert lock(supported) == "", supported
+
+
+@pytest.mark.parametrize("mode", ("observe", "action"))
+def test_kiro_setup_accepts_supported_ide_and_reports_old_cli(mode: str, tmp_path: Path, monkeypatch) -> None:
+    warnings: list[str] = []
+    monkeypatch.setattr(cmd_setup.ux, "warn", warnings.append)
+    signal = SimpleNamespace(
+        version="1.0.182", installed=True, error="", binary_path="/usr/local/bin/kiro",
+        kiro_cli_version="kiro-cli 2.26.1", kiro_ide_version="1.0.182",
+    )
+    assert cmd_setup._check_connector_version_supported_for_setup(
+        "kiro", mode=mode, emit=True, data_dir=str(tmp_path),
+        _discovery=SimpleNamespace(agents={"kiro": signal}),
+    )
+    assert any("kiro-cli 2.26.1 is below 2.27.1" in warning for warning in warnings)
 
 
 @pytest.mark.parametrize("connector", ("antigravity",))
@@ -995,7 +1038,7 @@ def test_snapshot_accepts_superset_active_roster(tmp_path: Path) -> None:
             "codex": _entry("codex", tmp_path),
             "kiro": {
                 "connector": "kiro",
-                "raw_agent_version": "kiro-cli 2.22.0",
+                "raw_agent_version": "kiro-cli 2.27.1",
                 "compatibility_status": "not-gated",
                 "hook_fail_mode": "open",
             },

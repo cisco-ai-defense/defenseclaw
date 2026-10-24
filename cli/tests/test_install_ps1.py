@@ -986,7 +986,7 @@ def test_refused_late_swap_restores_setup_hooks_without_restarting_gateway(tmp_p
     staged.write_text("enforcing", encoding="ascii")
     root = str(tmp_path).replace("'", "''")
     destination = str(restored).replace("'", "''")
-    script = _ps1_function("Restore-SetupInstall") + f"""
+    script = _ps1_function("Enable-SetupHooks") + _ps1_function("Restore-SetupInstall") + f"""
 $Staging = '{root}'
 $SetupHookState = '{destination}'
 $WasRunning = $true
@@ -3102,6 +3102,7 @@ function Die([string]$Message) {{ throw $Message }}
 function Invoke-Quietly([scriptblock]$Block) {{ & $Block }}
 function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
 function Get-InstalledVersion {{ return '1.0.3' }}
+function Assert-NoLoadedPluginAgents {{ }}
 function Assert-NoActiveConnectorRecovery {{ }}
 function Save-Url([string]$Url, [string]$To) {{ [IO.File]::WriteAllText($To.Replace([char]92, [IO.Path]::DirectorySeparatorChar), '{installer.replace("'", "''")}'); return $true }}
 function Get-ListedSha256 {{ return 'verified' }}
@@ -4056,7 +4057,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     real = "".join(
         _ps1_function(name)
         for name in (
-            "Invoke-Quietly", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
+            "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun",
         )
@@ -4205,7 +4206,7 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
     real = "".join(
         _ps1_function(name)
         for name in (
-            "Invoke-Quietly", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
+            "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote",
         )
@@ -5567,6 +5568,7 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\nfunction Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
         "function Die([string]$m) { throw $m }\n"
         "function Get-InstalledVersion { return '1.0.4' }\n"
+        "function Assert-NoLoadedPluginAgents { }\n"
         "function Assert-NoActiveConnectorRecovery { }\nfunction Confirm-Step { return $true }\n"
         "function Test-HookRollbackRestoreAvailable { return $false }\nfunction Wait-VenvFree { }\n"
         "function Test-RollbackData { return $false }\nfunction Get-GatewayProcess { return $true }\n"

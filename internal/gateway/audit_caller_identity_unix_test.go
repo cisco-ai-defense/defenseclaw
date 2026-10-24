@@ -114,21 +114,26 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 		t.Fatalf("refusal row connector=%q structured=%v", refusal.Connector, refusal.Structured)
 	}
 
-	// A hook that refused its agent in a private user namespace reports it,
-	// so the refusal is audited like the one above (GAP-0923).
-	report, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader("{}"))
-	report.Header.Set("Content-Type", "application/json")
-	report.Header.Set("X-DefenseClaw-Connector", "claudecode")
-	report.Header.Set(hookexec.ClientRefusalHeader, hookexec.ManagedUserNamespaceReason)
-	if response, err := client.Do(report); err != nil || response.StatusCode != http.StatusForbidden {
-		t.Fatalf("user namespace refusal report = %v %v", response, err)
-	} else {
-		_ = response.Body.Close()
+	// A hook that refused an unsafe process context reports its fixed reason,
+	// so the refusal is audited like the unenrolled-account refusal above.
+	for _, reason := range []string{
+		hookexec.ManagedUserNamespaceReason, hookexec.ManagedMountNamespaceReason,
+		hookexec.ManagedTracedProcessReason, hookexec.ManagedProcessContextUnknownReason,
+	} {
+		report, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader("{}"))
+		report.Header.Set("Content-Type", "application/json")
+		report.Header.Set("X-DefenseClaw-Connector", "claudecode")
+		report.Header.Set(hookexec.ClientRefusalHeader, reason)
+		if response, err := client.Do(report); err != nil || response.StatusCode != http.StatusForbidden {
+			t.Fatalf("process-context refusal %q = %v %v", reason, response, err)
+		} else {
+			_ = response.Body.Close()
+		}
+		waitForAuditRow(t, store, "api-auth-failure for "+reason, func(event audit.Event) bool {
+			return event.Action == string(audit.ActionAPIAuthFailure) && event.Structured["defenseclaw.admin.principal_ref"] == "uid:7101" &&
+				event.Structured["defenseclaw.admin.reason"] == reason && event.Connector == "claudecode"
+		})
 	}
-	waitForAuditRow(t, store, "api-auth-failure for the user namespace refusal", func(event audit.Event) bool {
-		return event.Action == string(audit.ActionAPIAuthFailure) && event.Structured["defenseclaw.admin.principal_ref"] == "uid:7101" &&
-			event.Structured["defenseclaw.admin.reason"] == hookexec.ManagedUserNamespaceReason && event.Connector == "claudecode"
-	})
 
 	// A foreign-hook guard denial recorded by the session exchange.
 	exchange := map[string]any{

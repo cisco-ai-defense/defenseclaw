@@ -555,6 +555,7 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 
 func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "openclaw"
 	t.Setenv("PATH", "")
 
 	pluginDir := filepath.Join(cfg.DataDir, "plugins")
@@ -823,6 +824,7 @@ args = ["mcp.js"]
 
 func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "openclaw"
 	t.Setenv("PATH", "")
 
 	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")

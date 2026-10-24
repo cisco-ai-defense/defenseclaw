@@ -12,6 +12,8 @@ package managed
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -53,6 +55,12 @@ type RuntimeDescriptor struct {
 	// published through vendor machine policy, so every local user of that
 	// agent is inspected without a per-user registration.
 	MachinePolicyConnectors []string `json:"machine_policy_connectors"`
+	// PolicyViewDigests pin the vendor policy bytes the lifecycle published.
+	// Unix hooks compare their own policy view with this trusted descriptor.
+	PolicyViewDigests map[string]string `json:"policy_view_digests,omitempty"`
+	// PolicyViewUserSources are root-attested macOS preferences, keyed by
+	// connector and account. A hook checks only its own account's source.
+	PolicyViewUserSources map[string]map[string]PolicyViewFilePin `json:"policy_view_user_sources,omitempty"`
 	// OpenHookConnectors lists connectors whose hook fail mode the
 	// administrator's config resolves open: the `--enterprise-managed` hook
 	// runtime lets a call it cannot get a verdict for through, instead of
@@ -99,7 +107,45 @@ func (d *RuntimeDescriptor) Validate() error {
 			seen[name] = true
 		}
 	}
+	for name, digest := range d.PolicyViewDigests {
+		if !d.HasMachinePolicyConnector(name) {
+			return fmt.Errorf("managed runtime descriptor has a policy-view digest for unlisted connector %q", name)
+		}
+		if decoded, err := hex.DecodeString(digest); err != nil || len(decoded) != sha256.Size || strings.ToLower(digest) != digest {
+			return fmt.Errorf("managed runtime descriptor has an invalid policy-view digest for %s", name)
+		}
+	}
+	for connector, accounts := range d.PolicyViewUserSources {
+		if !d.HasMachinePolicyConnector(connector) || connector != "codex" && connector != "claudecode" || len(accounts) > 128 {
+			return fmt.Errorf("managed runtime descriptor has invalid policy-view accounts for %q", connector)
+		}
+		for account, pin := range accounts {
+			if account == "" || account == "." || account == ".." || len(account) > 255 ||
+				strings.ContainsAny(account, "/\\\x00") || !validSHA256(pin.SHA256) || pin.Size < 0 ||
+				pin.Inode == 0 || pin.CTime == 0 {
+				return fmt.Errorf("managed runtime descriptor has invalid %s policy-view source for account %q", connector, account)
+			}
+		}
+	}
 	return nil
+}
+
+// PolicyViewFilePin is a privileged attestation of a protected per-account
+// policy file. The hook checks this identity and digest for its own account
+// and refuses when it cannot read that account's preference directly.
+type PolicyViewFilePin struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+	Mode   uint32 `json:"mode"`
+	Device uint64 `json:"device"`
+	Inode  uint64 `json:"inode"`
+	MTime  int64  `json:"mtime"`
+	CTime  int64  `json:"ctime"`
+}
+
+func validSHA256(value string) bool {
+	decoded, err := hex.DecodeString(value)
+	return err == nil && len(decoded) == sha256.Size && strings.ToLower(value) == value
 }
 
 // HookFailMode is the hook fail mode the descriptor records for connector:
@@ -149,6 +195,9 @@ func MarshalRuntimeDescriptor(d *RuntimeDescriptor) ([]byte, error) {
 	data, err := json.MarshalIndent(&canonical, "", "  ")
 	if err != nil {
 		return nil, err
+	}
+	if len(data)+1 > runtimeDescriptorLimit {
+		return nil, fmt.Errorf("managed runtime descriptor exceeds %d bytes", runtimeDescriptorLimit)
 	}
 	return append(data, '\n'), nil
 }
