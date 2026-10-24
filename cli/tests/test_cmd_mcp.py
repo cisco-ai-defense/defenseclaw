@@ -1961,6 +1961,24 @@ class TestMCPSetUnverifiedServer(MCPCommandTestBase):
         self.assertEqual(mock_scan.call_count, 1)
 
     @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
+    def test_unresolved_remote_dns_uses_unverified_server_setting(self, mock_set):
+        from defenseclaw.registries import ssrf
+
+        args = ["set", "docs", "--url", "https://docs.example.invalid/mcp", "--connector", "codex"]
+        with patch.object(ssrf, "_default_resolver", return_value=[]):
+            result = self.invoke(args)
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertIn("could not be scanned, so it is added unscanned", result.output)
+            self.assertIn("unverified=scan-did-not-finish", self._mcp_set_events()[0].details)
+            mock_set.assert_called_once()
+
+            self.app.cfg.scanners.mcp_scanner.unverified_server = "block"
+            mock_set.reset_mock()
+            result = self.invoke(args)
+            self.assertEqual(result.exit_code, 1, result.output)
+            mock_set.assert_not_called()
+
+    @patch("defenseclaw.commands.cmd_mcp._set_mcp_via_connector")
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_block_refuses_a_scan_that_did_not_finish(self, mock_scan, mock_set):
         from defenseclaw.scanner.mcp import MCPStdioLaunchError

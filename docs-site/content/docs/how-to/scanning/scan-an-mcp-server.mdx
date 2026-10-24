@@ -39,7 +39,7 @@ Scan an MCP server before an agent calls it.
    defenseclaw mcp set context7 --command npx --args '["-y", "@upstash/context7-mcp"]'
    ```
 
-   A first `npx -y` download can take longer than the scan waits. When the scan does not finish, `mcp set` adds the server with a warning and records the failed scan in the audit log; scan it later with `defenseclaw mcp scan context7`. To refuse such servers instead, run `defenseclaw config set scanners.mcp_scanner.unverified_server block`.
+   A first `npx -y` download can take longer than the scan waits, and a remote hostname may temporarily fail to resolve. When the scan does not finish, `mcp set` adds the server with a warning and records the failed scan in the audit log; scan it later with `defenseclaw mcp scan context7`. To refuse such servers instead, run `defenseclaw config set scanners.mcp_scanner.unverified_server block`.
 
 ## Use it in CI
 
