@@ -12670,6 +12670,55 @@ def _prune_orphaned_connector_hooks(cfg, connector: str) -> tuple[list[str], str
     return [str(path) for path in removed.get(connector) or []], ""
 
 
+def _plugin_teardown_problem(cfg, connector: str) -> str:
+    """Why teardown could not prove it removes *connector*'s plugin, else "".
+
+    OpenCode and Amp load DefenseClaw as one plugin file. Teardown removes it
+    only when it is unchanged since setup and keeps an edited one, and the
+    gateway then refuses to start because the teardown is unverified. Remove
+    and every guardrail disable ask this before they save configuration, so
+    an edited plugin never leaves a saved disable and a gateway that cannot
+    start (GAP-0986).
+    """
+    if connector not in {"opencode", "amp"}:
+        return ""
+    from defenseclaw.commands.cmd_doctor import _managed_plugin_drift, managed_backup_target_after_home_move
+    from defenseclaw.connector_paths import managed_plugin_path
+
+    try:
+        # The receipt binds only the DefenseClaw plugin. The agent's own
+        # settings (Amp's settings.json and friends) are not DefenseClaw
+        # artifacts and never prove or disprove the teardown.
+        candidates = [managed_plugin_path(connector)]
+        receipt = os.path.join(cfg.data_dir, "connector_backups", connector, "config.json")
+        existed, body, _generation = _capture_protected_setup_file(
+            receipt, _SETUP_CONFIG_MAX_BYTES, "plugin backup", trust_windows_administrators=True,
+        )
+        if existed:
+            record = _json.loads(body)
+            if (
+                not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != 1
+                or record.get("connector") != connector or record.get("logical_name") != "config"
+                or type(record.get("existed")) is not bool
+                or not isinstance(record.get("path"), str) or not os.path.isabs(record["path"])
+                or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("post_sha256") or ""))
+            ):
+                raise ValueError("invalid plugin backup identity")
+            # After a supported home move the receipt still names the
+            # old home; it then proves this home's copy, digest included.
+            candidates.append(managed_backup_target_after_home_move(receipt, record["path"]) or record["path"])
+        for path in set(candidates):
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                continue
+            if problem := _managed_plugin_drift(cfg, path, connector):
+                return problem
+    except (OSError, ValueError) as exc:
+        return str(exc) or exc.__class__.__name__
+    return ""
+
+
 def _remove_connector(
     app: AppContext,
     *,
@@ -12780,46 +12829,13 @@ def _remove_connector(
         click.echo("  Aborted; no changes made.")
         return True
 
-    if match in {"opencode", "amp"}:
-        from defenseclaw.commands.cmd_doctor import _managed_plugin_drift, managed_backup_target_after_home_move
-        from defenseclaw.connector_paths import managed_plugin_path
-
-        try:
-            # The receipt binds only the DefenseClaw plugin. The agent's own
-            # settings (Amp's settings.json and friends) are not DefenseClaw
-            # artifacts and never prove or disprove the teardown.
-            candidates = [managed_plugin_path(match)]
-            receipt = os.path.join(cfg.data_dir, "connector_backups", match, "config.json")
-            existed, body, _generation = _capture_protected_setup_file(
-                receipt, _SETUP_CONFIG_MAX_BYTES, "plugin backup", trust_windows_administrators=True,
-            )
-            if existed:
-                record = _json.loads(body)
-                if (
-                    not isinstance(record, dict) or type(record.get("version")) is not int or record["version"] != 1
-                    or record.get("connector") != match or record.get("logical_name") != "config"
-                    or type(record.get("existed")) is not bool
-                    or not isinstance(record.get("path"), str) or not os.path.isabs(record["path"])
-                    or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("post_sha256") or ""))
-                ):
-                    raise ValueError("invalid plugin backup identity")
-                # After a supported home move the receipt still names the
-                # old home; it then proves this home's copy, digest included.
-                candidates.append(managed_backup_target_after_home_move(receipt, record["path"]) or record["path"])
-            for path in set(candidates):
-                try:
-                    os.lstat(path)
-                except FileNotFoundError:
-                    continue
-                if problem := _managed_plugin_drift(cfg, path, match):
-                    raise ValueError(problem)
-        except (OSError, ValueError) as exc:
-            ux.echo(
-                f"  ✗ Cannot remove {match}: its plugin teardown is unverified ({exc}). "
-                f"Preserve your edits, then run `defenseclaw setup {match} --yes --restart` "
-                "and retry removal. No configuration was saved.", err=True,
-            )
-            return False
+    if problem := _plugin_teardown_problem(cfg, match):
+        ux.echo(
+            f"  ✗ Cannot remove {match}: its plugin teardown is unverified ({problem}). "
+            f"Preserve your edits, then run `defenseclaw setup {match} --yes --restart` "
+            "and retry removal. No configuration was saved.", err=True,
+        )
+        return False
 
     setup_snapshot: _SetupConfigSnapshot | None = None
     runtime_rollback = _windows_runtime_rollback(restart)

@@ -1941,6 +1941,98 @@ class TestRemoveConnector(unittest.TestCase):
                     with open(plugin, "rb") as stream:
                         self.assertEqual(stream.read(), plugin_bytes)
 
+    # GAP-0986: `guardrail disable` saved guardrail.enabled=false with an
+    # edited OpenCode plugin; the gateway teardown kept the edited plugin,
+    # reported itself incomplete and the gateway could not start. Every
+    # disable that tears a plugin connector down now refuses first, as remove
+    # does: nothing is saved, nothing restarts, the plugin keeps its bytes.
+    def test_guardrail_disable_refuses_before_saving_with_an_edited_plugin(self):
+        from defenseclaw.commands.cmd_guardrail import guardrail as guardrail_group
+
+        home = self.app.cfg.data_dir
+        shapes = (
+            ("single", ["disable", "--yes"]),
+            ("single no restart", ["disable", "--yes", "--no-restart"]),
+            ("peer global", ["disable", "--yes"]),
+            ("peer scoped", ["disable", "--connector", "{c}", "--yes"]),
+            ("peer scoped no restart", ["disable", "--connector", "{c}", "--yes", "--no-restart"]),
+        )
+        for connector in ("opencode", "amp"):
+            for shape, args in shapes:
+                for edited in (True, False):
+                    with self.subTest(connector=connector, shape=shape, edited=edited):
+                        if shape.startswith("single"):
+                            self._seed_single(connector)
+                        else:
+                            self._seed_map("codex", connector)
+                        self.app.cfg.guardrail.enabled = True
+                        plugin = self._seed_intact_plugin(connector, home)
+                        if edited:
+                            with open(plugin, "ab") as stream:
+                                stream.write(b"// operator comment\n")
+                        with open(plugin, "rb") as stream:
+                            before = stream.read()
+                        with (
+                            self._plugin_home(home),
+                            patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+                            patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+                            patch("defenseclaw.commands.cmd_guardrail._note_running_agent_restart"),
+                            patch("defenseclaw.commands.cmd_guardrail._log_guardrail_action"),
+                            patch.object(self.app.cfg, "save") as save,
+                        ):
+                            result = CliRunner().invoke(
+                                guardrail_group, [a.format(c=connector) for a in args], obj=self.app,
+                                catch_exceptions=False,
+                            )
+                        scoped = "scoped" in shape
+                        entry = self.app.cfg.guardrail.connectors.get(connector)
+                        if edited:
+                            self.assertNotEqual(result.exit_code, 0, result.output)
+                            self.assertIn("plugin teardown is unverified", result.output)
+                            self.assertIn(f"defenseclaw setup {connector} --yes --restart", result.output)
+                            self.assertIn("No configuration was saved", result.output)
+                            save.assert_not_called()
+                            restart.assert_not_called()
+                            self.assertTrue(self.app.cfg.guardrail.enabled)
+                            if scoped:
+                                self.assertTrue(self.app.cfg.guardrail.effective_enabled(connector))
+                        else:
+                            self.assertEqual(result.exit_code, 0, result.output)
+                            save.assert_called()
+                            if scoped:
+                                self.assertFalse(entry.enabled)
+                            else:
+                                self.assertFalse(self.app.cfg.guardrail.enabled)
+                            self.assertEqual(restart.call_count, 0 if "no restart" in shape else 1)
+                        with open(plugin, "rb") as stream:
+                            self.assertEqual(stream.read(), before)
+                        os.remove(plugin)
+
+    # A connector disabled on its own was torn down before; a global disable
+    # of the others does not judge its plugin again.
+    def test_guardrail_disable_skips_a_plugin_connector_already_off(self):
+        from defenseclaw.commands.cmd_guardrail import guardrail as guardrail_group
+
+        home = self.app.cfg.data_dir
+        self._seed_map("codex", "opencode")
+        self.app.cfg.guardrail.enabled = True
+        self.app.cfg.guardrail.connectors["opencode"].enabled = False
+        plugin = self._seed_intact_plugin("opencode", home)
+        with open(plugin, "ab") as stream:
+            stream.write(b"// operator comment\n")
+        with (
+            self._plugin_home(home),
+            patch("defenseclaw.commands.cmd_guardrail._gateway_running", return_value=False),
+            patch("defenseclaw.commands.cmd_setup._restart_services") as restart,
+            patch("defenseclaw.commands.cmd_guardrail._note_running_agent_restart"),
+            patch("defenseclaw.commands.cmd_guardrail._log_guardrail_action"),
+            patch.object(self.app.cfg, "save"),
+        ):
+            result = CliRunner().invoke(guardrail_group, ["disable", "--yes"], obj=self.app, catch_exceptions=False)
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.app.cfg.guardrail.enabled)
+        restart.assert_called_once()
+
     def test_remove_restart_bounces_gateway(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce() as bounce:

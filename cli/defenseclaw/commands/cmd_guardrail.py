@@ -287,6 +287,30 @@ def _note_running_agent_restart() -> None:
     )
 
 
+def _refuse_unverified_plugin_teardown(app: AppContext, connectors: list[str]) -> None:
+    """Stop a disable before it saves when a plugin teardown cannot be proven.
+
+    A disable saved with an edited OpenCode or Amp plugin left the gateway
+    unable to start: teardown keeps the edited plugin and then reports itself
+    incomplete (GAP-0986). Refuse first, with the one repair, as remove does.
+    """
+    from defenseclaw.commands import cmd_setup
+
+    for name in connectors:
+        key = str(name or "").strip().lower()
+        if problem := cmd_setup._plugin_teardown_problem(app.cfg, key):
+            ux.err(
+                f"Cannot disable {_connector_label(key)} ({key}): its plugin teardown is unverified ({problem}).",
+                indent="  ",
+            )
+            ux.subhead(
+                f"Preserve your edits, then run `defenseclaw setup {key} --yes --restart` and retry. "
+                "No configuration was saved.",
+                indent="    ",
+            )
+            raise SystemExit(1)
+
+
 def _toggle_connector_guardrail(
     app: AppContext, requested: str, *, enable: bool, restart: bool, yes: bool
 ) -> None:
@@ -342,6 +366,7 @@ def _toggle_connector_guardrail(
 
     if not enable:
         _preflight_config_write(app)
+        _refuse_unverified_plugin_teardown(app, [key])
 
     # Disabling the last remaining enabled connector is effectively a global
     # disable — warn so the operator can use the clearer command.
@@ -1136,6 +1161,7 @@ def disable_cmd(
     _actives = _active_connector_set(app.cfg, connector)
     _already_off = [name for name in _actives if _disabled_on_its_own(gc, name)]
     _torn_down = [name for name in _actives if name not in _already_off]
+    _refuse_unverified_plugin_teardown(app, _torn_down)
 
     click.echo()
     if len(_actives) > 1 or _already_off:
