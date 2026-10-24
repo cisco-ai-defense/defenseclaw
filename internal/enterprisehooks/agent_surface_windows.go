@@ -14,6 +14,7 @@ package enterprisehooks
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -139,7 +140,10 @@ func DiscoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 	err := windowsSurfaceReadAs(sid, profileHome, func() error {
 		seen := map[string]bool{}
 		for _, root := range roots {
-			dir, version := newestWindowsExtensionDir(root.dir, probe.id)
+			dir, version, err := newestWindowsExtensionDir(root.dir, probe.id)
+			if err != nil {
+				return err
+			}
 			if dir == "" || seen[strings.ToLower(dir)] {
 				continue
 			}
@@ -241,8 +245,11 @@ func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bo
 // newestWindowsExtensionDir returns the newest "<id>-<version>[-<platform>]"
 // folder of extension id under root and its version, leaving out folders
 // the editor marked obsolete (.obsolete format is a live check).
-func newestWindowsExtensionDir(root, id string) (string, string) {
-	entries := readWindowsDirBounded(root)
+func newestWindowsExtensionDir(root, id string) (string, string, error) {
+	entries, overflow := readWindowsDirBounded(root)
+	if overflow {
+		return "", "", fmt.Errorf("extension folder %s has more than %d entries", root, windowsSurfaceMaxEntries)
+	}
 	obsolete := map[string]bool{}
 	if data, err := readBoundedWindowsAgentPackageJSON(filepath.Join(root, ".obsolete")); err == nil {
 		_ = json.Unmarshal(data, &obsolete)
@@ -265,14 +272,15 @@ func newestWindowsExtensionDir(root, id string) (string, string) {
 			best, bestVersion = filepath.Join(root, name), version
 		}
 	}
-	return best, bestVersion
+	return best, bestVersion, nil
 }
 
 // newestWindowsVersionDir returns the highest dotted-numeric folder name
 // under dir.
 func newestWindowsVersionDir(dir string) string {
 	best := ""
-	for _, entry := range readWindowsDirBounded(dir) {
+	entries, _ := readWindowsDirBounded(dir)
+	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() && windowsNativeClaudeVersionName(name) && (best == "" || compareWindowsEnterpriseVersion(name, best) > 0) {
 			best = name
@@ -285,7 +293,8 @@ func newestWindowsVersionDir(dir string) string {
 // package folder names.
 func newestWindowsPackageVersion(dir, prefix string) string {
 	best := ""
-	for _, entry := range readWindowsDirBounded(dir) {
+	entries, _ := readWindowsDirBounded(dir)
+	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || !strings.HasPrefix(name, prefix) {
 			continue
@@ -298,17 +307,20 @@ func newestWindowsPackageVersion(dir, prefix string) string {
 	return best
 }
 
-func readWindowsDirBounded(dir string) []os.DirEntry {
+func readWindowsDirBounded(dir string) ([]os.DirEntry, bool) {
 	if winpath.RejectReparseChain(dir) != nil {
-		return nil
+		return nil, false
 	}
 	file, err := os.Open(dir)
 	if err != nil {
-		return nil
+		return nil, false
 	}
 	defer file.Close()
-	entries, _ := file.ReadDir(windowsSurfaceMaxEntries)
-	return entries
+	entries, _ := file.ReadDir(windowsSurfaceMaxEntries + 1)
+	if len(entries) > windowsSurfaceMaxEntries {
+		return entries[:windowsSurfaceMaxEntries], true
+	}
+	return entries, false
 }
 
 // windowsStandaloneSurfaces is the admission of the profile's app and
@@ -326,6 +338,10 @@ func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowC
 	surfaces, err := DiscoverWindowsAgentSurfaces(canonicalManifestTargetSID(row.SID), row.UserHome, name)
 	if err != nil {
 		logfSafely(logf, row.SID, "(SID, "+name+") app and extension discovery failed: "+err.Error())
+		if rowContext.report != nil {
+			rowContext.report(UnprotectedAgent{User: rowContext.user, SID: row.SID, Connector: name,
+				Code: UnprotectedCodeInstallScanIncomplete, Reason: "app and extension inventory is incomplete: " + err.Error()})
+		}
 		return surfaceAdmission{}, false
 	}
 	return admitSurfaces(name, UnverifiedVersionsFor(name), surfaces), true

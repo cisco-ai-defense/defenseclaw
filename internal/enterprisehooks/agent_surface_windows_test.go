@@ -14,6 +14,7 @@ package enterprisehooks
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,6 +113,43 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	impersonated, rowContext.sessionActive = 0, false
 	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, ""); got != "" || impersonated != 0 {
 		t.Fatalf("signed-out version = %q, impersonated %d times", got, impersonated)
+	}
+}
+
+func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".vscode", "extensions")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < windowsSurfaceMaxEntries-1; i++ {
+		path := filepath.Join(root, fmt.Sprintf("unrelated-%04d", i))
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, "anthropic.claude-code-2.1.220-win32-x64"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-2-3-1001"
+	previousReadAs := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previousReadAs })
+	if surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode"); err != nil || len(surfaces) != 1 {
+		t.Fatalf("exactly %d entries: surfaces=%+v error=%v", windowsSurfaceMaxEntries, surfaces, err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "one-more"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode"); err == nil {
+		t.Fatalf("overflow produced no incomplete error: %+v", surfaces)
+	}
+	var reported []UnprotectedAgent
+	row := &ManifestTarget{SID: sid, UserHome: home, Connector: "claudecode"}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+	_ = windowsStandaloneSurfaceVersion(row, nil, ctx, "2.1.300")
+	if len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("overflow must make signed-in coverage incomplete: %+v", reported)
 	}
 }
 
