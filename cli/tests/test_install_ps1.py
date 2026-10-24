@@ -3750,6 +3750,27 @@ _WINDOWS_AGENT_ROWS = [
     (r"C:\Users\u\src\node_modules\opencode-clone\bin\opencode.exe", "opencode.exe", ""),
     (r"C:\Tools\amp.exe", "amp.exe", ""),
     ("", "opencode.exe", ""),
+    # R1 review: an option's value is never the script Node or Bun runs, and
+    # -e, -p, --run and --test run none.
+    (r"C:\Program Files\nodejs\node.exe",
+     r'"C:\Program Files\nodejs\node.exe" --conditions C:\work\node_modules\opencode-ai\feature C:\work\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node -C C:\w\node_modules\opencode-ai\feature worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node -r C:\w\node_modules\@sourcegraph\amp\dist\main.js worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node --import C:/w/node_modules/opencode-ai/bin/opencode worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"""node -e "require('C:/w/node_modules/@sourcegraph/amp/dist/main.js')" """, ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node --test C:\w\node_modules\opencode-ai\t.test.js", ""),
+    (r"C:\Users\u\.bun\bin\bun.exe", r"bun --preload C:\w\node_modules\opencode-ai\p.ts app.ts", ""),
+    # ... while the script after the options and their values still is.
+    (r"C:\Program Files\nodejs\node.exe", r"node --conditions dev -- C:\w\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
+    (r"C:\Program Files\nodejs\node.exe", r"node -c C:\w\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
+    (r"C:\Users\u\.bun\bin\bun.exe",
+     r"bun run --smol -r .\p.ts C:\Users\u\.bun\install\global\node_modules\opencode-ai\bin\opencode", "opencode"),
+    # R1 review: only the Windows packages OpenCode publishes.
+    (r"C:\w\node_modules\opencode-windows-tools\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\w\node_modules\opencode-windows-x64-extra\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\w\node_modules\opencode-linux-x64\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\w\node_modules\opencode-windows-arm64\bin\opencode.exe", "opencode.exe", "opencode"),
+    (r"C:\w\node_modules\opencode-windows-x64-baseline\bin\opencode.exe", "opencode.exe", "opencode"),
 ]
 
 

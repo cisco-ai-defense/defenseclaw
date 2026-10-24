@@ -521,9 +521,11 @@ loaded_plugin_agents() {
 
 # agent_program PID: the program file process PID runs, as the kernel found
 # it: /proc/PID/exe on Linux, lsof's first txt file on macOS. A process
-# cannot choose it, as it can its name or argv[0].
+# cannot choose it, as it can its name or argv[0]. The lookup goes by the
+# OS: a Linux process that exited since ps listed it has no /proc entry and
+# is skipped at once; lsof, a slow scan there, never runs on Linux.
 agent_program() {
-    if [[ -d "/proc/$1" ]]; then
+    if [[ "${OSTYPE:-}" == linux* ]]; then
         readlink "/proc/$1/exe" 2>/dev/null
         return
     fi
@@ -548,8 +550,11 @@ installed_agent_programs() {
 # agent_of PROGRAM ARGS INSTALLED: OpenCode or Amp when a process running
 # PROGRAM with the command line ARGS is that agent, else nothing.
 agent_of() {
-    local program="${1% (deleted)}" args="$2" installed="$3" agent path lower script
-    local opencode_binary='/node_modules/opencode-(ai|linux-[a-z0-9-]+|darwin-[a-z0-9-]+)/bin/\.?opencode$'
+    local program="${1% (deleted)}" args="$2" installed="$3" agent path lower runtime script
+    # The OpenCode binary of opencode-ai or of one of the platform packages it
+    # publishes (opencode-linux-x64-baseline-musl, opencode-darwin-arm64, ...),
+    # by exact name: another package named opencode-* is not OpenCode.
+    local opencode_binary='/node_modules/opencode-(ai|linux-(x64|arm64)(-baseline)?(-musl)?|darwin-(x64|arm64)(-baseline)?)/bin/\.?opencode$'
     while read -r agent path; do
         [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
@@ -559,17 +564,15 @@ agent_of() {
         return 0
     fi
     case "${lower##*/}" in
-        node | nodejs | bun) ;;
+        node | nodejs) runtime=node ;;
+        bun) runtime=bun ;;
         *) return 0 ;;
     esac
-    # The script Node or Bun runs: the first operand after its options.
     set -f
     # shellcheck disable=SC2086 # split the command line into its words
     set -- ${args}
     set +f
-    [[ $# -gt 0 ]] && shift
-    while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
-    script="${1:-}"
+    script="$(script_operand "${runtime}" "$@")"
     # A script started by its #! line is named by the path PATH found (often
     # a link into the package): resolve it as the kernel did.
     [[ "${script}" != */* ]] || script="$(readlink -f "${script}" 2>/dev/null || printf '%s' "${script}")"
@@ -582,6 +585,40 @@ agent_of() {
         */node_modules/@sourcegraph/amp/*) printf 'Amp' ;;
     esac
     return 0
+}
+
+# script_operand RUNTIME WORD...: the script Node or Bun (RUNTIME node or
+# bun) runs for the command line WORD... (its program first), or nothing
+# when it runs none (-e, -p, --run, --test). An option's value is never the
+# script: the options that take it in the next word are listed (from node
+# and bun --help; install.ps1 Get-ScriptOperand has the same lists). Any
+# other option is a switch, and --option=value is one word.
+script_operand() {
+    local runtime="$1" value_options no_script
+    if [[ "${runtime}" == bun ]]; then
+        value_options="-r --preload --require --import --cwd -c --config --env-file --conditions -d --define --drop -l --loader --tsconfig-override --main-fields --extension-order --jsx-factory --jsx-fragment --jsx-import-source --jsx-runtime --port --title --console-depth --fetch-preconnect --max-http-header-size --dns-result-order --install --unhandled-rejections --user-agent -F --filter --shell --elide-lines --cpu-prof-name --cpu-prof-dir"
+        no_script="-e --eval -p --print"
+    else
+        value_options="-C --conditions -r --require --import --loader --experimental-loader --input-type --env-file --env-file-if-exists --experimental-config-file --experimental-default-type --experimental-sea-config --experimental-test-isolation --test-isolation --test-global-setup --experimental-policy --policy-integrity --experimental-specifier-resolution --es-module-specifier-resolution --allow-fs-read --allow-fs-write --build-snapshot-config --snapshot-blob --cpu-prof-dir --cpu-prof-interval --cpu-prof-name --heap-prof-dir --heap-prof-interval --heap-prof-name --heapsnapshot-near-heap-limit --heapsnapshot-signal --diagnostic-dir --report-dir --report-directory --report-filename --report-signal --redirect-warnings --disable-proto --disable-warning --dns-result-order --icu-data-dir --openssl-config --inspect-port --debug-port --inspect-publish-uid --localstorage-file --max-http-header-size --max-old-space-size-percentage --network-family-autoselection-attempt-timeout --secure-heap --secure-heap-min --test-concurrency --test-coverage-branches --test-coverage-exclude --test-coverage-functions --test-coverage-include --test-coverage-lines --test-name-pattern --test-reporter --test-reporter-destination --test-shard --test-skip-pattern --test-timeout --title --tls-cipher-list --tls-keylog --trace-event-categories --trace-event-file-pattern --trace-require-module --unhandled-rejections --use-largepages --v8-pool-size --watch-kill-signal --watch-path"
+        no_script="-e --eval -p --print --run --test"
+    fi
+    shift
+    [[ $# -gt 0 ]] && shift
+    while [[ $# -gt 0 ]]; do
+        [[ " ${no_script} " != *" ${1%%=*} "* ]] || return 0
+        case "$1" in
+            --) shift; break ;;
+            -?*=*) shift ;;
+            -?*)
+                [[ $# -gt 1 && " ${value_options} " == *" $1 "* ]] && shift
+                shift
+                ;;
+            # bun run SCRIPT
+            run) [[ "${runtime}" == bun ]] || break; shift ;;
+            *) break ;;
+        esac
+    done
+    printf '%s' "${1:-}"
 }
 
 assert_no_loaded_plugin_agents() {

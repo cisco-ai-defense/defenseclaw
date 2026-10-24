@@ -1397,7 +1397,8 @@ def _install_sh_functions(*names: str) -> str:
     return helpers + "".join(bodies)
 
 
-_AGENT_SCAN = ("loaded_plugin_agents", "agent_program", "installed_agent_programs", "agent_of", "assert_no_loaded_plugin_agents")
+_AGENT_SCAN = ("loaded_plugin_agents", "agent_program", "installed_agent_programs", "agent_of", "script_operand",
+               "assert_no_loaded_plugin_agents")
 
 
 def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str]:
@@ -1444,6 +1445,8 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("program named opencode, not installed", None),
         ("script named opencode", None),
         ("argv0 opencode", None),
+        # R1 review: an opencode-* package that OpenCode does not publish.
+        ("binary of another opencode-linux-* package", None),
         # A real agent, by the program file it runs, refuses.
         ("native installer opencode", "OpenCode"),
         ("opencode on PATH through a link", "OpenCode"),
@@ -1503,6 +1506,9 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         link.symlink_to(program)
         path.append(link.parent)
         argv = [str(link), "60"]
+    elif case == "binary of another opencode-linux-* package":
+        program = _program(tmp_path / "work" / "node_modules" / "opencode-linux-tools" / "bin" / "opencode", sleep)
+        argv = [str(program), "60"]
     elif case == "opencode npm binary":
         program = _program(tmp_path / "npm" / "lib" / "node_modules" / "opencode-linux-x64" / "bin" / "opencode", sleep)
         argv = [str(program), "60"]
@@ -1570,15 +1576,118 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         ("/Users/u/src/node_modules/opencode-clone/bin/opencode", "opencode", "", ""),
         ("/usr/local/bin/amp", "amp", "", ""),
         ("/bin/sh", "/bin/sh /Users/u/src/opencode/opencode", "", ""),
+        # R1 review: an option's value is never the script Node or Bun runs,
+        # and -e, -p, --run and --test run none.
+        ("/usr/bin/node", "node --conditions /tmp/work/node_modules/opencode-ai/feature /tmp/work/worker.js", "", ""),
+        ("/usr/bin/node", "node -C /w/node_modules/opencode-ai/feature worker.js", "", ""),
+        ("/usr/bin/node", "node -r /w/node_modules/@sourcegraph/amp/dist/main.js worker.js", "", ""),
+        ("/usr/bin/node", "node --import /w/node_modules/opencode-ai/bin/opencode --watch-path /w/node_modules/@sourcegraph/amp worker.js", "", ""),
+        ("/usr/bin/nodejs", "nodejs --loader /w/node_modules/opencode-ai/l.mjs worker.js", "", ""),
+        ("/usr/bin/node", "node --require /npm/lib/node_modules/x/opencode worker.js", "OpenCode /npm/lib/node_modules/x/opencode", ""),
+        ("/usr/bin/node", "node -e require('/w/node_modules/@sourcegraph/amp/dist/main.js')", "", ""),
+        ("/usr/bin/node", "node --print /w/node_modules/opencode-ai/bin/opencode", "", ""),
+        ("/usr/bin/node", "node --eval=1 /w/node_modules/opencode-ai/bin/opencode", "", ""),
+        ("/usr/bin/node", "node --run /w/node_modules/opencode-ai/bin/opencode", "", ""),
+        ("/usr/bin/node", "node --test /w/node_modules/opencode-ai/test/a.test.js", "", ""),
+        ("/Users/u/.bun/bin/bun", "bun --preload /w/node_modules/opencode-ai/p.ts app.ts", "", ""),
+        ("/Users/u/.bun/bin/bun", "bun run -c /w/node_modules/@sourcegraph/amp/bunfig.toml app.ts", "", ""),
+        # ... while the script after the options and their values still is.
+        ("/usr/bin/node", "node --conditions dev --require ./setup.js /w/node_modules/@sourcegraph/amp/dist/main.js", "", "Amp"),
+        ("/usr/bin/node", "node --title=amp --no-warnings -- /w/node_modules/@sourcegraph/amp/dist/main.js", "", "Amp"),
+        ("/usr/bin/node", "node -c /w/node_modules/@sourcegraph/amp/dist/main.js", "", "Amp"),
+        ("/Users/u/.bun/bin/bun", "bun run --smol -r ./p.ts /Users/u/.bun/install/global/node_modules/opencode-ai/bin/opencode", "", "OpenCode"),
+        # R1 review: only the platform packages OpenCode publishes.
+        ("/w/node_modules/opencode-linux-tools/bin/opencode", "opencode", "", ""),
+        ("/w/node_modules/opencode-darwin-helper/bin/opencode", "opencode", "", ""),
+        ("/w/node_modules/opencode-linux-x64-extra/bin/opencode", "opencode", "", ""),
+        ("/w/node_modules/opencode-windows-x64/bin/opencode", "opencode", "", ""),
+        *[(f"/w/node_modules/opencode-{name}/bin/opencode", "opencode", "", "OpenCode") for name in (
+            "linux-x64", "linux-arm64", "linux-x64-musl", "linux-arm64-musl", "linux-x64-baseline",
+            "linux-x64-baseline-musl", "darwin-x64", "darwin-arm64", "darwin-x64-baseline")],
     ],
 )
 def test_an_agent_is_told_by_its_program_file(tmp_path: Path, program: str, args: str, installed: str, agent: str) -> None:
     result = subprocess.run(
-        [BASH, "-c", _install_sh_functions("agent_of") + 'agent_of "$1" "$2" "$3"', "agent_of", program, args, installed],
+        [BASH, "-c", _install_sh_functions("agent_of", "script_operand") + 'agent_of "$1" "$2" "$3"', "agent_of", program, args, installed],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == agent, (program, args)
+
+
+@pytest.mark.skipif(shutil.which("node") is None or not Path("/proc/self/exe").exists(), reason="runs Node, reads /proc")
+def test_a_real_node_option_value_naming_opencode_ai_does_not_refuse(tmp_path: Path) -> None:
+    # R1 review: a Node worker started with --conditions <a path in
+    # opencode-ai> (which need not exist) was taken for OpenCode.
+    node = Path(shutil.which("node")).resolve()
+    worker = tmp_path / "work" / "worker.js"
+    worker.parent.mkdir(parents=True)
+    worker.write_text("setTimeout(() => {}, 60000)\n", encoding="utf-8")
+    proc = _started([str(node), "--conditions", str(tmp_path / "work" / "node_modules" / "opencode-ai" / "feature"), str(worker)], node)
+    try:
+        result = _agent_scan(tmp_path / "home", [])
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "scan-passed" in result.stdout
+
+
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
+def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Path) -> None:
+    # R1 review: a matched process that exited after the ps snapshot sent
+    # Linux to the macOS lsof lookup, a scan of seconds per process.
+    gone = subprocess.Popen(["true"])
+    gone.wait()
+    stubs, marker = tmp_path / "stubs", tmp_path / "lsof-ran"
+    stubs.mkdir()
+    (stubs / "ps").write_text(f"#!/bin/sh\necho '{gone.pid} node /w/node_modules/opencode-ai/bin/opencode'\n", encoding="utf-8")
+    (stubs / "lsof").write_text(f"#!/bin/sh\ntouch '{marker}'\nsleep 30\n", encoding="utf-8")
+    for stub in stubs.iterdir():
+        stub.chmod(0o755)
+    started = time.monotonic()
+    result = _agent_scan(tmp_path / "home", [stubs])
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "scan-passed" in result.stdout
+    assert not marker.exists()
+    assert time.monotonic() - started < 10
+
+
+def test_the_program_lookup_goes_by_the_os(tmp_path: Path) -> None:
+    # Linux reads /proc/PID/exe only; elsewhere (macOS) lsof names the program.
+    (tmp_path / "lsof").write_text("#!/bin/sh\nprintf 'p1\\nftxt\\nn/opt/homebrew/bin/node\\n'\n", encoding="utf-8")
+    (tmp_path / "lsof").chmod(0o755)
+    def run(ostype: str, pid: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [BASH, "-c", _install_sh_functions("agent_program") + f"OSTYPE={ostype}\nagent_program {pid}"],
+            env={"PATH": f"{tmp_path}:/usr/bin:/bin"}, capture_output=True, text=True, timeout=30, check=False,
+        )
+
+    darwin = run("darwin23", 1)
+    assert (darwin.returncode, darwin.stdout.strip()) == (0, "/opt/homebrew/bin/node")
+    gone = run("linux-gnu", 999999999)
+    assert (gone.returncode != 0, gone.stdout) == (True, "")
+    if Path("/proc/self/exe").exists():
+        own = run("linux-gnu", "$$")
+        assert own.returncode == 0 and Path(own.stdout.strip()).name.startswith("bash"), own.stdout
+
+
+def test_the_node_and_bun_option_lists_are_the_same_on_windows() -> None:
+    # install.sh script_operand and install.ps1 Get-ScriptOperand tell the
+    # script from an option's value with one set of lists.
+    sh = INSTALL_SH.read_text(encoding="utf-8")
+    ps1 = (ROOT / "scripts" / "install.ps1").read_text(encoding="utf-8")
+    body = sh[sh.index("script_operand() {") :]
+    body = body[: body.index("\n}\n")]
+    function = ps1[ps1.index("function Get-ScriptOperand(") :]
+    function = function[: function.index("\n}\n")]
+    for sh_name, ps_name in (("value_options", "valueOptions"), ("no_script", "noScript")):
+        sh_lists = re.findall(rf'{sh_name}="([^"]*)"', body)
+        ps_lists = re.findall(rf'\${ps_name} = -split "([^"]*)"', function)
+        assert len(sh_lists) == 2 and sh_lists == ps_lists, (sh_name, sh_lists, ps_lists)
+    node_values = re.findall(r'value_options="([^"]*)"', body)[1].split()
+    assert {"-C", "--conditions", "-r", "--require", "--import", "--loader"} <= set(node_values)
+    assert "-c" not in node_values  # node -c is --check, a switch
 
 
 def test_a_refused_upgrade_leaves_no_staged_release(tmp_path: Path) -> None:

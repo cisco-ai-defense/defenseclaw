@@ -824,9 +824,12 @@ function Get-LoadedPluginAgent($Process) {
     }
     $key = $program.ToLowerInvariant()
     if ($installed.ContainsKey($key)) { return $installed[$key] }
-    if ($key -match '\\node_modules\\opencode-(ai|windows-[a-z0-9-]+)\\bin\\\.?opencode(\.exe)?$') { return "opencode" }
-    if ($key -notmatch '[\\/](node|bun)\.exe$') { return "" }
-    $operand = (Get-ScriptOperand ([string]$Process.CommandLine)).Replace('/', '\').ToLowerInvariant()
+    # The OpenCode binary of opencode-ai or of one of the Windows packages it
+    # publishes (opencode-windows-x64, -x64-baseline, -arm64), by exact name:
+    # another package named opencode-windows-* is not OpenCode.
+    if ($key -match '\\node_modules\\opencode-(ai|windows-(x64|arm64)(-baseline)?)\\bin\\\.?opencode(\.exe)?$') { return "opencode" }
+    if ($key -match '[\\/](node|bun)\.exe$') { $runtime = $Matches[1] } else { return "" }
+    $operand = (Get-ScriptOperand $runtime ([string]$Process.CommandLine)).Replace('/', '\').ToLowerInvariant()
     if ($operand.Contains('\node_modules\opencode-ai\')) { return "opencode" }
     if ($operand.Contains('\node_modules\@sourcegraph\amp\')) { return "amp" }
     return ""
@@ -849,12 +852,36 @@ function Get-InstalledAgentPrograms {
     return $installed
 }
 
-# The script Node or Bun runs: the first operand after the program and its
-# options in a Windows command line.
-function Get-ScriptOperand([string]$CommandLine) {
+# The script Node or Bun ($Runtime node or bun) runs for a Windows command
+# line, or "" when it runs none (-e, -p, --run, --test). An option's value
+# is never the script: the options that take it in the next word are listed
+# (from node and bun --help; install.sh script_operand has the same lists).
+# Any other option is a switch, and --option=value is one word. Options are
+# case-sensitive (Node's -C takes a value, its -c does not).
+function Get-ScriptOperand([string]$Runtime, [string]$CommandLine) {
+    if ($Runtime -eq "bun") {
+        $valueOptions = -split "-r --preload --require --import --cwd -c --config --env-file --conditions -d --define --drop -l --loader --tsconfig-override --main-fields --extension-order --jsx-factory --jsx-fragment --jsx-import-source --jsx-runtime --port --title --console-depth --fetch-preconnect --max-http-header-size --dns-result-order --install --unhandled-rejections --user-agent -F --filter --shell --elide-lines --cpu-prof-name --cpu-prof-dir"
+        $noScript = -split "-e --eval -p --print"
+    } else {
+        $valueOptions = -split "-C --conditions -r --require --import --loader --experimental-loader --input-type --env-file --env-file-if-exists --experimental-config-file --experimental-default-type --experimental-sea-config --experimental-test-isolation --test-isolation --test-global-setup --experimental-policy --policy-integrity --experimental-specifier-resolution --es-module-specifier-resolution --allow-fs-read --allow-fs-write --build-snapshot-config --snapshot-blob --cpu-prof-dir --cpu-prof-interval --cpu-prof-name --heap-prof-dir --heap-prof-interval --heap-prof-name --heapsnapshot-near-heap-limit --heapsnapshot-signal --diagnostic-dir --report-dir --report-directory --report-filename --report-signal --redirect-warnings --disable-proto --disable-warning --dns-result-order --icu-data-dir --openssl-config --inspect-port --debug-port --inspect-publish-uid --localstorage-file --max-http-header-size --max-old-space-size-percentage --network-family-autoselection-attempt-timeout --secure-heap --secure-heap-min --test-concurrency --test-coverage-branches --test-coverage-exclude --test-coverage-functions --test-coverage-include --test-coverage-lines --test-name-pattern --test-reporter --test-reporter-destination --test-shard --test-skip-pattern --test-timeout --title --tls-cipher-list --tls-keylog --trace-event-categories --trace-event-file-pattern --trace-require-module --unhandled-rejections --use-largepages --v8-pool-size --watch-kill-signal --watch-path"
+        $noScript = -split "-e --eval -p --print --run --test"
+    }
     $words = @([regex]::Matches($CommandLine, '"[^"]*"|\S+') | ForEach-Object { $_.Value.Trim('"') })
-    foreach ($word in @($words | Select-Object -Skip 1)) {
-        if ($word -and -not $word.StartsWith("-")) { return $word }
+    for ($i = 1; $i -lt $words.Count; $i++) {
+        $word = $words[$i]
+        if (-not $word) { continue }
+        if ($noScript -ccontains $word.Split('=')[0]) { return "" }
+        if ($word -ceq "--") {
+            if ($i + 1 -lt $words.Count) { return $words[$i + 1] }
+            return ""
+        }
+        if ($word.Length -gt 1 -and $word.StartsWith("-")) {
+            if (-not $word.Contains("=") -and $valueOptions -ccontains $word) { $i++ }
+            continue
+        }
+        # bun run SCRIPT
+        if ($Runtime -eq "bun" -and $word -ceq "run") { continue }
+        return $word
     }
     return ""
 }
