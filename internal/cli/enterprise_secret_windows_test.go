@@ -1237,7 +1237,7 @@ func TestWindowsSecretUndoRotationRemovesWhatAFailedRotationAdded(t *testing.T) 
 		t.Fatal(err)
 	}
 	cfg := strings.Replace(standaloneGatewayCheckConfig, "enterprise:\n  profile: standalone\n",
-		"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      credential: ai-defense-api-key\n", 1)
+		"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n", 1)
 	if cfg == standaloneGatewayCheckConfig {
 		t.Fatal("the test config has no enterprise profile line to extend")
 	}
