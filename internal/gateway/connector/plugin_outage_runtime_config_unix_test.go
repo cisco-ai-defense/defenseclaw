@@ -37,6 +37,7 @@ func writePluginOutageTokenForTest(t *testing.T, dataDir, connector string) stri
 // for the outage mode. The agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME,
 // which name another default-tier config, neither reopen an outage the
 // runtime's strict config closes nor close one its default config opens.
+// An inherited HOME also cannot choose a different native helper binary.
 func TestPerUserPluginOutageReadsOnlyItsRuntimesConfig(t *testing.T) {
 	nodeForTest(t)
 	for _, plugin := range []struct{ asset, name, connector, harness string }{
@@ -46,6 +47,7 @@ func TestPerUserPluginOutageReadsOnlyItsRuntimesConfig(t *testing.T) {
 		for _, tc := range []struct {
 			name, runtime, agent string
 			env                  func(other string) []string
+			fakeHomeMode         string
 			opens                bool
 		}{
 			{name: "DEFENSECLAW_CONFIG names a default config elsewhere", runtime: outageStrictTierConfig, agent: outageDefaultTierConfig,
@@ -58,6 +60,10 @@ func TestPerUserPluginOutageReadsOnlyItsRuntimesConfig(t *testing.T) {
 				env: func(other string) []string {
 					return []string{"DEFENSECLAW_HOME=" + other, "DEFENSECLAW_CONFIG=" + filepath.Join(other, "config.yaml")}
 				}, opens: true},
+			{name: "HOME names an open helper elsewhere", runtime: outageStrictTierConfig, agent: outageDefaultTierConfig,
+				env: func(other string) []string { return []string{"HOME=" + other} }, fakeHomeMode: "open"},
+			{name: "HOME names a closed helper elsewhere", runtime: outageDefaultTierConfig, agent: outageStrictTierConfig,
+				env: func(other string) []string { return []string{"HOME=" + other} }, fakeHomeMode: "closed", opens: true},
 		} {
 			t.Run(plugin.connector+"/"+tc.name, func(t *testing.T) {
 				t.Parallel()
@@ -68,6 +74,16 @@ func TestPerUserPluginOutageReadsOnlyItsRuntimesConfig(t *testing.T) {
 				token := writePluginOutageTokenForTest(t, dataDir, plugin.connector)
 				writeOutageTierConfig(t, dataDir, tc.runtime)
 				writeOutageTierConfig(t, other, tc.agent)
+				if tc.fakeHomeMode != "" {
+					binaryDir := filepath.Join(other, ".local", "bin")
+					if err := os.MkdirAll(binaryDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					fake := "#!/bin/sh\nif [ \"$1\" = hook-post ]; then exit 7; fi\nif [ \"$1\" = hook-outage-mode ]; then printf '%s\\n' " + tc.fakeHomeMode + "; exit 0; fi\nexit 1\n"
+					if err := os.WriteFile(filepath.Join(binaryDir, "defenseclaw-gateway"), []byte(fake), 0o700); err != nil {
+						t.Fatal(err)
+					}
+				}
 				// The plugin asks this runtime's config on each outage.
 				body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
 					TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
@@ -82,13 +98,25 @@ func TestPerUserPluginOutageReadsOnlyItsRuntimesConfig(t *testing.T) {
 					t.Fatalf("node: %v\n%s", err, out)
 				}
 				var result struct {
-					Verdict string `json:"verdict"`
+					Verdict string   `json:"verdict"`
+					Notices []string `json:"notices"`
 				}
 				if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
 					t.Fatalf("harness output %q: %v", out, err)
 				}
 				if (result.Verdict == "allow") != tc.opens {
 					t.Fatalf("verdict %q, want run=%v", result.Verdict, tc.opens)
+				}
+				if tc.fakeHomeMode != "" {
+					rows := hookFailureRecords(t, dataDir)
+					if tc.opens {
+						if len(result.Notices) != 1 || !strings.Contains(result.Notices[0], "fail mode open for an outage") ||
+							len(rows) != 1 || rows[0]["fail_mode"] != "open" {
+							t.Fatalf("runtime default-tier outage: notices=%q rows=%+v, want one of each", result.Notices, rows)
+						}
+					} else if len(rows) != 0 || strings.Contains(strings.Join(result.Notices, "\n"), "fail mode open for an outage") {
+						t.Fatalf("runtime strict-tier outage: notices=%q rows=%+v, want no fail-open outcome", result.Notices, rows)
+					}
 				}
 			})
 		}
