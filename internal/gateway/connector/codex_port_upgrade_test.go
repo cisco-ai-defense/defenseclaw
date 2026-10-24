@@ -79,6 +79,16 @@ func TestCodexPerUserUpgradeRevokesNativeExporterWithoutRemovingOperatorOTel(t *
 // /v1/<signal> URLs with the paired product headers. An API port change during
 // upgrade must not strand their bearer on a listener another account can hold.
 func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
+	// This is a per-user upgrade on a host whose Codex policy permits user
+	// hooks. Keep the fixture independent of a native runner's machine policy;
+	// the managed-only refusal is tested separately.
+	previousInspector := codexPolicyInspector
+	allowed := false
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{AllowManagedHooksOnly: &allowed, Source: "upgrade fixture"}, nil
+	}
+	t.Cleanup(func() { codexPolicyInspector = previousInspector })
+
 	for _, release := range []string{"0.8.10", "1.0.0-1.0.3"} {
 		for _, goos := range []string{"linux", "darwin", "windows"} {
 			t.Run(release+"/"+goos, func(t *testing.T) {
