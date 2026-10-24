@@ -23,6 +23,11 @@ func TestExactSQLClientShellEscapes(t *testing.T) {
 			client: SQLClientShellEscapeSQLite, program: "sqlite3",
 		},
 		{
+			name:   "SQLite with output redirect",
+			input:  Input{Tool: "shell", Command: `sqlite3 app.db '.shell /bin/sh' 2>/tmp/error`},
+			client: SQLClientShellEscapeSQLite, program: "sqlite3",
+		},
+		{
 			name:   "MySQL sh",
 			input:  Input{Tool: "shell", Command: `mysql -u root -p'fixture-password' -h db.invalid -D app -e '\! /bin/sh'`},
 			client: SQLClientShellEscapeMySQL, program: "mysql",
@@ -31,6 +36,11 @@ func TestExactSQLClientShellEscapes(t *testing.T) {
 			name:   "MariaDB bash",
 			input:  Input{Tool: "shell", Command: `mariadb --batch --database=app --execute='\! /bin/bash'`},
 			client: SQLClientShellEscapeMySQL, program: "mariadb",
+		},
+		{
+			name:   "MySQL with output redirect",
+			input:  Input{Tool: "shell", Command: `mysql -e '\! /bin/sh' >/tmp/output`},
+			client: SQLClientShellEscapeMySQL, program: "mysql",
 		},
 		{
 			name:   "structured argv",

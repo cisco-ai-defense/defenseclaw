@@ -573,13 +573,34 @@ func RemoveHookAPIToken(dataDir, connectorName string) error {
 	})
 }
 
+// A per-user teardown calls this only after VerifyClean proves the host no
+// longer registers the connector. Managed deployments own credential cleanup
+// at the machine lifecycle boundary.
+func revokePerUserHookAPIToken(opts SetupOpts, connectorName string) error {
+	if opts.ManagedEnterprise || strings.TrimSpace(opts.DataDir) == "" {
+		return nil
+	}
+	if _, err := os.Lstat(opts.DataDir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("%s inspect hook credential data dir: %w", connectorName, err)
+	}
+	if err := RemoveHookAPIToken(opts.DataDir, connectorName); err != nil {
+		return fmt.Errorf("%s revoke removed hook credential: %w", connectorName, err)
+	}
+	return nil
+}
+
 // LoadHookAPITokens loads connector-scoped hook API tokens for known connector
-// names. Missing tokens are omitted.
+// names. Missing tokens are omitted, and so are the tokens of the connectors
+// 1.0.4 removed: an upgraded host keeps the OpenHands one only so old hooks
+// reach the route that blocks them (removed.go keepHookToken); it
+// authenticates nothing.
 func LoadHookAPITokens(dataDir string, connectorNames []string) (map[string]string, error) {
 	out := map[string]string{}
 	for _, name := range connectorNames {
 		scope, err := normalizeHookAPITokenScope(name)
-		if err != nil {
+		if err != nil || IsRemovedConnector(scope) {
 			continue
 		}
 		tokenPath, err := HookAPITokenFilePath(dataDir, scope)

@@ -316,6 +316,13 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 	pending := func(running int) *sandboxapi.Status {
 		return &sandboxapi.Status{Running: running, Managed: &sandboxapi.ManagedStatus{PendingRestart: true}}
 	}
+	// pendingLive: no sandbox is ready, but live may still hold compute (a
+	// MicroVM in OpenShell's error state); a daemon before 1.0.4 reports
+	// no live count, only how many sandboxes it has.
+	pendingLive := func(live *int, sandboxes int) *sandboxapi.Status {
+		return &sandboxapi.Status{Sandboxes: sandboxes, Live: live, Managed: &sandboxapi.ManagedStatus{PendingRestart: true}}
+	}
+	one := 1
 	for _, test := range []struct {
 		name    string
 		goos    string
@@ -355,11 +362,21 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			answers: []*sandboxapi.Status{pending(2)},
 		},
 		{
+			// The restart takes the account's OpenShell gateway with it.
+			name: "a daemon with a sandbox that may still hold compute keeps its restart pending", goos: "linux",
+			answers: []*sandboxapi.Status{pendingLive(&one, 1)},
+		},
+		{
+			name: "a daemon before the live count keeps its restart pending while it has sandboxes", goos: "linux",
+			answers: []*sandboxapi.Status{pendingLive(nil, 2)},
+		},
+		{
 			name: "macos registers and starts the agent in the graphical session", goos: "darwin",
 			answers: []*sandboxapi.Status{nil, up},
 			fail:    map[string]string{"print gui/501/com.cisco.defenseclaw.sandbox": "Could not find service"},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl bootstrap gui/501 /Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
@@ -375,6 +392,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print user/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl bootstrap user/501 /Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist",
 				"/bin/launchctl print user/501/com.cisco.defenseclaw.openshell-gateway",
@@ -386,6 +404,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			answers: []*sandboxapi.Status{nil, up},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart gui/501/com.cisco.defenseclaw.sandbox",
@@ -396,6 +415,7 @@ func TestLauncherEnsureDaemon(t *testing.T) {
 			answers: []*sandboxapi.Status{pending(0), up},
 			calls: []string{
 				"/bin/launchctl print gui/501",
+				"/bin/launchctl print user/501",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.sandbox",
 				"/bin/launchctl print gui/501/com.cisco.defenseclaw.openshell-gateway",
 				"/bin/launchctl kickstart -k gui/501/com.cisco.defenseclaw.sandbox",
@@ -442,9 +462,13 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 		reported = append(reported, command+":"+reason)
 	}
 	t.Cleanup(func() { reportManagedCommandRefusal = previous })
+	// mp0.GAP-0002: the config, guardrail and policy writers are audited
+	// too, by their command words only, never an argument.
 	for _, args := range [][]string{
 		{"guardrail", "disable"}, {"uninstall", "--all"},
 		{"guardrail", "status"}, {"config", "set", "token=untrusted"},
+		{"config", "show"}, {"guardrail", "protection", "list"}, {"guardrail", "block-at", "LOW"},
+		{"policy", "edit", "x"}, {"policy", "show"}, {"config"},
 	} {
 		root := &cobra.Command{Use: "defenseclaw"}
 		root.SetErr(&bytes.Buffer{})
@@ -452,7 +476,7 @@ func TestLauncherReportsOnlyNamedManagedRefusals(t *testing.T) {
 			t.Fatalf("%v: exit %d, want refusal", args, code)
 		}
 	}
-	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:"; got != want {
+	if got, want := strings.Join(reported, ","), "guardrail disable:,uninstall:,config set:,guardrail block-at:,policy edit:"; got != want {
 		t.Fatalf("reported %q, want %q", got, want)
 	}
 }

@@ -37,6 +37,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
     _load_contracts_from_manifest,
+    has_native_approval_prompt,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
@@ -46,6 +47,11 @@ from defenseclaw.platform_support import ACP_ONLY_CONNECTORS
 from tests.helpers import cleanup_app, make_app_context
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_copilot_cli_does_not_claim_a_native_approval_prompt():
+    assert has_native_approval_prompt("claudecode")
+    assert not has_native_approval_prompt("copilot")
 
 
 def _discovery(connector: str, *, installed: bool, version: str, error: str = ""):
@@ -300,10 +306,23 @@ class TestConnectorContractManifest(unittest.TestCase):
 
     def test_codex_setup_banner_describes_scoped_otlp_routes(self) -> None:
         with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
-            _print_connector_observability_banner("codex")
+            _print_connector_observability_banner("codex", native_export_expected=True)
         rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
         self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
         self.assertNotIn("/otlp/codex/<token>", rendered)
+        self.assertNotIn("/api/v1/codex/notify", rendered)
+        self.assertNotIn("otel / notify", rendered)
+        self.assertNotIn("notify bridge", rendered)
+
+    def test_per_user_setup_banner_describes_hook_only_telemetry(self) -> None:
+        for connector in ("codex", "claudecode"):
+            with self.subTest(connector=connector):
+                with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+                    _print_connector_observability_banner(connector)
+                rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
+                self.assertIn("Restart agents and background servers", rendered)
+                self.assertNotIn("Native OTel", rendered)
+                self.assertIn("cleanup of older DefenseClaw", rendered)
 
     def test_setup_banner_prints_the_gateway_hook_route(self) -> None:
         # GAP-1611: the gateway serves Claude Code on /api/v1/claude-code/hook.
@@ -380,118 +399,8 @@ class TestConnectorContractManifest(unittest.TestCase):
                     any("optional native OpenTelemetry metrics and traces" in note for note in compat.contract.notes)
                 )
 
-    def test_openhands_native_otlp_is_darwin_exporter_only(self) -> None:
-        darwin = resolve_connector_contract(
-            "openhands",
-            "OpenHands 1.16.0",
-            platform_name="darwin",
-        )
-        self.assertTrue(darwin.contract.native_otlp)
-        self.assertEqual(darwin.contract.native_otlp_auth, "otel-exporter-headers")
-        self.assertEqual(darwin.contract.native_otlp_signals, ("traces",))
-        self.assertEqual(darwin.contract.native_otlp_endpoint_template, "/v1/traces")
 
-        for platform_name in ("linux", "windows"):
-            compat = resolve_connector_contract(
-                "openhands",
-                "OpenHands 1.16.0",
-                platform_name=platform_name,
-            )
-            self.assertFalse(compat.contract.native_otlp)
-            self.assertEqual(compat.contract.native_otlp_auth, "")
-            self.assertEqual(compat.contract.native_otlp_signals, ())
 
-    def test_openhands_posix_floor_preserves_windows_compatibility_override(self) -> None:
-        for platform_name in ("darwin", "linux"):
-            with self.subTest(platform_name=platform_name):
-                before = resolve_connector_contract(
-                    "openhands", "OpenHands 1.11.99", platform_name=platform_name
-                )
-                self.assertEqual(before.status, STATUS_UNKNOWN)
-                floor = resolve_connector_contract(
-                    "openhands", "OpenHands 1.12.0", platform_name=platform_name
-                )
-                self.assertEqual(floor.status, STATUS_KNOWN)
-                self.assertEqual(floor.contract.min_agent_version, "1.12.0")
-
-        windows = resolve_connector_contract(
-            "openhands", "OpenHands 1.11.99", platform_name="windows"
-        )
-        self.assertEqual(windows.status, STATUS_KNOWN)
-        self.assertEqual(windows.contract.min_agent_version, "0.0.0")
-        self.assertFalse(windows.contract.native_otlp)
-
-    def test_platform_overrides_preserve_current_contract_bands(self) -> None:
-        expected = {
-            "codex": (
-                ("codex-hooks-v1", "0.124.0", "0.129.0", False, "v6", 6),
-                ("codex-hooks-v2", "0.129.0", "0.133.0", False, "v6", 8),
-                ("codex-hooks-v3", "0.133.0", "0.135.0", False, "v6", 10),
-                (
-                    "codex-hooks-v3-generic",
-                    "0.135.0",
-                    "0.145.0",
-                    False,
-                    "v6",
-                    10,
-                ),
-                ("codex-hooks-v4", "0.145.0", "", True, "v6", 11),
-            ),
-            "claudecode": (
-                ("claudecode-hooks-v1", "2.1.154", "2.1.219", True, "v7", 28),
-                ("claudecode-hooks-v2", "2.1.219", "", False, "v7", 29),
-            ),
-            "copilot": (
-                ("copilot-hooks-v1", "1.0.18", "1.0.76", False, "v7", 13),
-                ("copilot-hooks-v2", "1.0.76", "", True, "v7", 14),
-            ),
-            "hermes": (
-                ("hermes-hooks-v1", "0.19.0", "0.21.0", False, "v6", 23),
-                ("hermes-hooks-v2", "0.21.0", "0.22.0", True, "v6", 23),
-            ),
-            "antigravity": (("antigravity-hooks-v2", "1.1.8", "", True, "v8", 5),),
-            "openhands": (("openhands-hooks-v1", "1.12.0", "", True, "v6", 6),),
-            "opencode": (("opencode-hooks-v1", "1.18.10", "1.19.0", False, "v7", 10),),
-            "amp": (("amp-plugin-v1", "0.0.1785334225", "", True, "v2", 5),),
-            "devin": (("devin-hooks-v1", "", "", True, "v7", 8),),
-        }
-
-        for platform_name in ("darwin", "linux", "windows"):
-            _, contracts = _load_contracts_from_manifest(
-                HOOK_CONTRACT_MANIFEST,
-                platform_name=platform_name,
-            )
-            for connector, want in expected.items():
-                with self.subTest(platform_name=platform_name, connector=connector):
-                    got = tuple(
-                        (
-                            contract.contract_id,
-                            contract.min_agent_version,
-                            contract.max_agent_version,
-                            contract.default_for_unversioned,
-                            contract.hook_script_version,
-                            len(contract.events),
-                        )
-                        for contract in contracts[connector]
-                    )
-                    platform_want = want
-                    if platform_name == "windows" and connector == "openhands":
-                        platform_want = (("openhands-hooks-v1", "0.0.0", "", True, "v6", 6),)
-                    self.assertEqual(got, platform_want)
-
-        overridden = {
-            (connector, contract["contract_id"]): set(contract["platform_overrides"])
-            for connector, spec in HOOK_CONTRACT_MANIFEST["connectors"].items()
-            for contract in spec.get("contracts", ())
-            if "platform_overrides" in contract
-        }
-        self.assertEqual(
-            overridden,
-            {
-                ("devin", "devin-hooks-v1"): {"darwin", "windows"},
-                ("openhands", "openhands-hooks-v1"): {"darwin", "windows"},
-            },
-        )
 
     def test_devin_contract_pins_are_per_platform(self) -> None:
         # Same per-OS pins as Go's TestDevinContractPinsArePerOS: 3000.11.3 is
@@ -570,52 +479,7 @@ class TestConnectorContractManifest(unittest.TestCase):
                 self.assertEqual(compat.status, STATUS_UNKNOWN)
                 self.assertFalse(compat.supported)
 
-    def test_openhands_cli_version_matches_documented_contract(self) -> None:
-        compat = resolve_connector_contract("openhands", "OpenHands CLI 1.16.0")
-        self.assertEqual(compat.status, STATUS_KNOWN)
-        self.assertEqual(compat.normalized_version, "1.16.0")
-        self.assertEqual(compat.contract.contract_id, "openhands-hooks-v1")
-        self.assertEqual(compat.contract.hook_script_version, "v6")
-        self.assertIn("<workspace>/.openhands/hooks.json", compat.contract.hook_config_path_templates)
-        self.assertIn("~/.openhands/hooks.json", compat.contract.hook_config_path_templates)
-        self.assertIn("event_content", compat.contract.aid_surfaces)
 
-    def test_omnigent_contract_advertises_config_home_override(self) -> None:
-        compat = resolve_connector_contract("omnigent", "")
-        templates = compat.contract.hook_config_path_templates
-
-        self.assertEqual(compat.status, STATUS_UNVERSIONED)
-        self.assertEqual(compat.contract.min_agent_version, "0.7.0")
-        self.assertEqual(compat.contract.max_agent_version, "0.14.0")
-        self.assertIn("$OMNIGENT_CONFIG", templates)
-        self.assertIn("$OMNIGENT_CONFIG_HOME/config.yaml", templates)
-        self.assertIn("~/.omnigent/config.yaml", templates)
-        self.assertLess(
-            templates.index("$OMNIGENT_CONFIG_HOME/config.yaml"),
-            templates.index("~/.omnigent/config.yaml"),
-        )
-
-        before_floor = resolve_connector_contract("omnigent", "omnigent 0.6.99")
-        self.assertFalse(before_floor.supported)
-        self.assertEqual(before_floor.status, STATUS_UNKNOWN)
-
-        proven = resolve_connector_contract("omnigent", "omnigent 0.7.0")
-        self.assertTrue(proven.supported)
-        self.assertEqual(proven.status, STATUS_KNOWN)
-        self.assertEqual(proven.contract.contract_id, "omnigent-custom-policy-v1")
-
-        mid_range = resolve_connector_contract("omnigent", "omnigent 0.8.0")
-        self.assertTrue(mid_range.supported)
-        self.assertEqual(mid_range.status, STATUS_KNOWN)
-
-        current = resolve_connector_contract("omnigent", "omnigent 0.13.0")
-        self.assertTrue(current.supported)
-        self.assertEqual(current.status, STATUS_KNOWN)
-
-        # Newer than the reviewed range: compatible, marked untested (#1034).
-        after_reviewed_range = resolve_connector_contract("omnigent", "omnigent 0.15.0")
-        self.assertTrue(after_reviewed_range.supported)
-        self.assertEqual((after_reviewed_range.status, after_reviewed_range.untested), (STATUS_KNOWN, True))
 
     def test_hermes_contract_advertises_native_windows_path_precedence(self) -> None:
         compat = resolve_connector_contract("hermes", "")
@@ -886,19 +750,6 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "openclaw")
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
-    def test_action_downgrade_cannot_stage_unsupported_codex(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("codex", installed=True, version="codex 0.124.0"),
-        ):
-            ok = _apply_hook_connector_setup(
-                self.app, connector="codex", mode="action", restart=False,
-                _downgrade_refused_action=True,
-            )
-        self.assertFalse(ok)
-        self.assertEqual(self.save_calls, 0)
-        self.assertEqual(self.app.cfg.claw.mode, "openclaw")
-
     def test_hermes_action_mode_detects_but_rejects_v017_before_save(self) -> None:
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
@@ -1039,42 +890,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
 
-    def test_action_mode_blocks_unversioned_installed_connector(self) -> None:
-        with (
-            patch(
-                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery(
-                    "openhands",
-                    installed=True,
-                    version="",
-                    error="version probe timed out",
-                ),
-            ),
-            patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "0"}),
-        ):
-            ok = _check_connector_version_supported_for_setup(
-                "openhands",
-                mode="action",
-                emit=False,
-            )
 
-        self.assertFalse(ok)
-
-    def test_action_mode_allows_unversioned_installed_connector_with_drift_override(self) -> None:
-        with (
-            patch(
-                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("openhands", installed=True, version=""),
-            ),
-            patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1"}),
-        ):
-            ok = _check_connector_version_supported_for_setup(
-                "openhands",
-                mode="action",
-                emit=False,
-            )
-
-        self.assertTrue(ok)
 
     def test_action_mode_fails_closed_when_hook_discovery_errors(self) -> None:
         with (

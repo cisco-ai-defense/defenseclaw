@@ -659,7 +659,8 @@ func validInboundString(t *testing.T, constraints familyFieldConstraints) string
 	candidates := []string{
 		"x", "test", "codex", "runtime-pipeline-test", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		"123e4567-e89b-12d3-a456-426614174000", "https://example.com/v1", "a/b:c_d.e-f",
-		"b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7",
+		"b-01JAZ3Y8Q2K7V4N6M5P0R9S8T7", "c-01JB8Z4X6T2Q9V3M5N7P1R0S4W",
+		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
 	for _, candidate := range candidates {
 		if constraints.maxUTF8Bytes > 0 && len(candidate) > constraints.maxUTF8Bytes {

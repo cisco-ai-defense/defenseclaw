@@ -1,0 +1,99 @@
+---
+title: Enterprise admin
+description: A runbook for an administrator's AI agent to write the standalone enterprise config, run ensure and verify a host.
+keywords:
+  - DefenseClaw enterprise agent runbook
+  - enterprise ensure
+  - enterprise verify
+---
+
+{/* sources: enterprise/get-started, enterprise/index (A minimal config), enterprise/mdm/index (Run ensure, exit codes), enterprise/operations */}
+
+<Callout title="Hand this page to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/for-agents/enterprise-admin/llms.md and follow it. I am the administrator of this computer. Ask me before running ensure.
+```
+</Callout>
+
+You are an AI agent working for an administrator, on an admin workstation or a test host the administrator names. Write the standalone config, check it, run `ensure` and verify the result.
+
+## Hard rules
+
+1. Never run this on a user's managed computer, or on any computer the administrator did not name. Per-user commands print `This computer is managed` (exit `2`) or `This device is managed` (exit `3`) on a managed computer; that is the product telling you to stop.
+2. Observe first. Write `guardrail.mode: observe`. Switching to `action` or changing a fail mode needs the administrator's yes to that exact change.
+3. Never print a key or token. The Cisco AI Defense key never goes in the config, a script body or a command line; use `enterprise secret set --from-stdin`.
+4. The config file must be owned by root (Windows: SYSTEM or Administrators) and writable by nobody else, or the wrapper refuses it.
+
+## Steps
+
+1. Write the config. Start from the Linux example; the macOS and Windows paths are on [Enterprise](/docs/enterprise#a-minimal-config).
+
+   ```yaml
+   config_version: 9
+   deployment_mode: managed_enterprise
+   data_dir: /var/lib/defenseclaw          # must be exactly this path
+   policy_dir: /etc/defenseclaw/policies
+   enterprise:
+     profile: standalone
+   gateway:
+     api_bind: 127.0.0.1
+     api_port: 18970
+   guardrail:
+     enabled: true
+     mode: observe
+     connectors:
+       codex: {}
+       claudecode: {}
+   ```
+
+   Expected: a root-owned file, mode not writable by group or others, at most 1 MiB.
+   If it differs: fix the owner and mode. Do not proceed.
+
+2. Check the candidate file before anything is installed.
+
+   ```bash
+   defenseclaw-gateway config validate ./config.yaml
+   ```
+
+   Expected: no error, and the previous config stays in force either way. The CLI is not installed on a managed host; run this where the gateway binary is, or from the unpacked release archive.
+   If it prints an error: report the setting it names and the profile; do not guess a value (`config_invalid` in [Enterprise troubleshooting](/docs/troubleshooting/enterprise)).
+
+3. Show the administrator the config and the artifact name and SHA-256 you will use. Ask: "Run ensure on this host?" Continue only on yes.
+
+4. Run `ensure` with the kit wrapper (Linux example, pinned by SHA-256).
+
+   ```bash
+   sudo ./defenseclaw-enterprise.sh --source <artifact> --sha256 "$PIN" --config-file /etc/mdm/defenseclaw/config.yaml
+   ```
+
+   Expected: one result document and exit code `0`. When the host already matches it reports `"noop": true`.
+   If it differs: read the exit code and `errors[].code`.
+
+   | Exit (Windows / Linux, macOS) | Meaning | You do |
+   | --- | --- | --- |
+   | `0` / `0` | Success or nothing to do | Continue |
+   | `1603` / `1` | Failed and rolled back | Report `errors[].code` |
+   | `1618` / `75` | Busy | Retry later, once |
+   | `1639` / `2` | Invalid arguments | Fix the assignment |
+
+5. Verify.
+
+   ```bash
+   sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+   ```
+
+   macOS: `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json`. Windows (elevated): `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone --json`.
+   Expected: `coverage_complete` and `security_complete` are `true`; on Linux and macOS `policy.applied` is `true`.
+   If it differs: report the fields and the error codes. See [Enterprise troubleshooting](/docs/troubleshooting/enterprise). Do not edit installed files by hand.
+
+## Report
+
+Reply with:
+
+- Host, OS and the artifact version and SHA-256 you used.
+- The config you wrote (no keys) and its mode.
+- The `ensure` exit code and result.
+- `verify` fields `coverage_complete`, `security_complete` and `policy.effective_digest`.
+- What needs the administrator's decision.

@@ -554,6 +554,8 @@ func TestSandboxAuthorityStopFailsClosedWhenTheRevokeIsNotStored(t *testing.T) {
 // while a re-match holds it, and their latency stays far inside the budget.
 func TestSandboxRelayedHookBurstDoesNotQueueOnTheRematchLock(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	// The train refuses a caller whose group membership is unconfirmed.
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
 	f.publishFirstGeneration()
 	resp := f.live(sbxAlice, 1)
 	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {
@@ -628,6 +630,8 @@ func (s *sandboxStoreWriteBetweenReads) GetWithRun(uid int, id string) (sandboxr
 // either the stale pair (due: it re-reads under the lock) or the new one.
 func TestSandboxRematchDueReadsTheRegistrationAndItsRunTogether(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	// The train refuses a caller whose group membership is unconfirmed.
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
 	f.publishFirstGeneration()
 	resp := f.live(sbxAlice, 1)
 	if rec := f.hook(sbxAlice, resp.Registration.ID, "claudecode", nil); rec.Code != http.StatusOK {

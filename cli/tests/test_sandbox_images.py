@@ -188,7 +188,7 @@ class VerifiedHarnessContractTest(unittest.TestCase):
         # Their sandbox contracts live in the Go tables only, so the setup gate
         # keeps its host-based verdict instead of accepting evidence the
         # gateway might refuse.
-        for connector in ("kiro", "omnigent"):
+        for connector in ("kiro", ):
             with self.subTest(connector=connector), tempfile.TemporaryDirectory() as tmp:
                 self.write_store(Path(tmp), [claudecode_image(connector=connector)])
                 self.assertIsNone(evidence_for(tmp, connector))

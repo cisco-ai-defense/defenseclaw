@@ -145,8 +145,7 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 	if connectorName == "kiro" {
 		label, source = "Kiro", "kiro-mcp-unreadable"
 	}
-	reason := fmt.Sprintf("the %s MCP servers of %s are blocked: DefenseClaw could not read %s (%s), so it cannot admit them; "+
-		"give SYSTEM read access to the file again or repair its JSON", label, state.Account(), state.Path, state.Reason)
+	reason := state.Blocked(label)
 	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, source)
 	decision.RegistryStatus = "unknown"
 	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(
@@ -165,7 +164,7 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.liveConfig()
 	if a.mcpRefreshBeforeCall == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
-		probe.Surface != "hook" || (hookEvent != "PreToolUse" && hookEvent != "PermissionRequest") {
+		probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
 	if err := a.mcpRefreshBeforeCall(ctx, connectorName); err == nil {
@@ -179,6 +178,16 @@ func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorN
 	return decision, true
 }
 
+// mcpCallAboutToRun reports a hook event sent before a tool runs, however
+// the connector spells it (Kiro CLI 2.x sends preToolUse).
+func mcpCallAboutToRun(hookEvent string) bool {
+	switch canonicalEvent(hookEvent) {
+	case "pretooluse", "permissionrequest":
+		return true
+	}
+	return false
+}
+
 // mcpAdmissionPendingDecision refuses the tool call of an MCP server the
 // install watcher admits but has not admitted yet (GAP-0112). Claude Code
 // starts a project's servers when it opens the project, before the
@@ -190,7 +199,7 @@ func (a *APIServer) mcpDefinitionRefreshDecision(ctx context.Context, connectorN
 func (a *APIServer) mcpAdmissionPendingDecision(ctx context.Context, connectorName, hookEvent string, probe mcpRuntimeProbe) (config.AssetPolicyDecision, bool) {
 	cfg := a.liveConfig()
 	if a.mcpAdmissionPending == nil || cfg == nil || cfg.SecureClientIntegration() || !probe.Matched ||
-		probe.Surface != "hook" || (hookEvent != "PreToolUse" && hookEvent != "PermissionRequest") {
+		probe.Surface != "hook" || !mcpCallAboutToRun(hookEvent) {
 		return config.AssetPolicyDecision{}, false
 	}
 	home, _ := callerHomeForAssets(ctx)
@@ -1988,8 +1997,8 @@ func runtimeAssetCanEnforce(event string) bool {
 	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest":
 		return true
 	}
-	// Generic hook-only connectors (hermes, cursor, devin,
-	// copilot, openhands) use varied case/spacing for the same semantic events
+	// Generic hook-only connectors (hermes, cursor, devin, copilot)
+	// use varied case/spacing for the same semantic events
 	// (preToolUse, pre_tool_call, beforeMCPExecution, beforeShellExecution,
 	// pre_run_command, premcptooluse, ...). Reusing the canonical
 	// tool-inspection set keeps the asset-policy enforcement gate

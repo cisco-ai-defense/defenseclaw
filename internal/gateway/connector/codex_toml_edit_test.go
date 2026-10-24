@@ -104,6 +104,64 @@ func TestCodexOwnedEditRecognizesCommentedTableHeader(t *testing.T) {
 	}
 }
 
+func TestCodexOwnedEditReplacesQuotedAndDottedOwnedTables(t *testing.T) {
+	// p0 GAP-1300: a valid quoted ["otel"] table was kept and a second
+	// [otel] appended, so the edited config no longer parsed.
+	desired := map[string]interface{}{
+		"notify": []string{"owned"},
+		"hooks":  map[string]interface{}{"Stop": []string{"owned"}},
+		"otel":   map[string]interface{}{"environment": "new"},
+	}
+	for name, before := range map[string]string{
+		"quoted table":         "model = \"gpt-5\"\n[\"otel\"]\nenvironment = \"old\"\n[profiles.review]\nmodel = \"gpt-5.1\"\n",
+		"literal subtable":     "model = \"gpt-5\"\n[ 'otel' . exporter ]\nendpoint = \"x\"\n",
+		"quoted hooks array":   "model = \"gpt-5\"\n[[\"hooks\".Stop]]\nmatcher = \"\"\n",
+		"root dotted key":      "model = \"gpt-5\"\notel.environment = \"old\"\n\"otel\".log_user_prompt = true\n",
+		"root inline table":    "model = \"gpt-5\"\nhooks = { Stop = [] }\n",
+		"quoted notify":        "\"notify\" = [\n  \"personal\",\n]\nmodel = \"gpt-5\"\n",
+		"escaped quoted table": "model = \"gpt-5\"\n[\"ot\\u0065l\"]\nenvironment = \"old\"\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			after, err := editCodexOwnedTOML([]byte(before), desired)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var cfg map[string]interface{}
+			if err := parseCodexTOML(after, &cfg); err != nil {
+				t.Fatalf("invalid rendered config %q: %v", after, err)
+			}
+			if cfg["model"] != "gpt-5" {
+				t.Fatalf("user settings lost: %#v", cfg)
+			}
+			otel, _ := cfg["otel"].(map[string]interface{})
+			if len(otel) != 1 || otel["environment"] != "new" {
+				t.Fatalf("otel = %#v", cfg["otel"])
+			}
+			if notify, _ := cfg["notify"].([]interface{}); len(notify) != 1 || notify[0] != "owned" {
+				t.Fatalf("notify = %#v", cfg["notify"])
+			}
+		})
+	}
+}
+
+func TestCodexOwnedEditKeepsOtherTablesNamedLikeOwnedKeys(t *testing.T) {
+	before := []byte("[profiles.review]\notel = \"x\"\n[\"otel-extra\"]\nkeep = 1\n")
+	after, err := editCodexOwnedTOML(before, map[string]interface{}{"otel": map[string]interface{}{"environment": "new"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg map[string]interface{}
+	if err := parseCodexTOML(after, &cfg); err != nil {
+		t.Fatalf("invalid rendered config %q: %v", after, err)
+	}
+	if cfg["profiles"].(map[string]interface{})["review"].(map[string]interface{})["otel"] != "x" {
+		t.Fatalf("profile key lost: %#v", cfg)
+	}
+	if cfg["otel-extra"].(map[string]interface{})["keep"] != int64(1) {
+		t.Fatalf("other table lost: %#v", cfg)
+	}
+}
+
 func TestCodexBOMReaders(t *testing.T) {
 	raw := append([]byte{0xef, 0xbb, 0xbf}, []byte("# user comment\n[hooks]\ncommand = \"defenseclaw-hook\"\n[mcp_servers.demo]\ncommand = \"demo\"\n")...)
 	path := filepath.Join(t.TempDir(), "config.toml")

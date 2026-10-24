@@ -1,0 +1,12 @@
+{
+  "title": "Troubleshooting",
+  "pages": [
+    "doctor",
+    "install-and-upgrade",
+    "hooks-and-blocking",
+    "gateway-and-keys",
+    "windows",
+    "sandboxes",
+    "enterprise"
+  ]
+}

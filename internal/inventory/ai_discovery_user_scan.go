@@ -127,9 +127,14 @@ func UserScanDirForConfig(cfg *config.Config) string {
 // UserScanRecord is one user's spool file, <uid>.json. The guardian writes
 // UID and User from the account it started the scan for.
 type UserScanRecord struct {
-	Version   int               `json:"version"`
-	UID       int               `json:"uid"`
-	User      string            `json:"user"`
+	Version int    `json:"version"`
+	UID     int    `json:"uid"`
+	User    string `json:"user"`
+	// Holder identifies the account the guardian scanned for (a digest of
+	// its name and home, and its home inode), so a record is not kept for
+	// another account the uid is given to later. The gateway does not read
+	// it.
+	Holder    string            `json:"holder,omitempty"`
 	UpdatedAt time.Time         `json:"updated_at"`
 	Report    AIDiscoveryReport `json:"report"`
 }

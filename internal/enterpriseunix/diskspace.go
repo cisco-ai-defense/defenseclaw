@@ -97,6 +97,26 @@ func noSpace(err error) bool {
 		strings.Contains(err.Error(), syscall.ENOSPC.Error()))
 }
 
+// stateWriteCode is the code of a state write that failed: codeDiskFull when
+// the filesystem or quota is full, code otherwise. A full disk read as
+// bundle_state_unreadable or state_unreadable, a read problem, although
+// the write was what failed (GAP-0609).
+func stateWriteCode(err error, code string) string {
+	if noSpace(err) {
+		return codeDiskFull
+	}
+	return code
+}
+
+// stateWriteAction is the next step for a state write that failed for lack
+// of space, appended to its message, and "" for any other failure.
+func stateWriteAction(err error) string {
+	if noSpace(err) {
+		return "; free space on that filesystem and run the command again"
+	}
+	return ""
+}
+
 // failedWritePath is the path the failed operation in err named, or "".
 func failedWritePath(err error) string {
 	var linkErr *os.LinkError

@@ -109,6 +109,8 @@ class FakeDockerRunner:
         if command[1:2] == ("info",):
             if self.fail_info:
                 return CommandResult(command, 1, "", "daemon stopped")
+            if command[-1] == "{{.Architecture}}":
+                return CommandResult(command, 0, str(self.info.get("Architecture", "x86_64")), "")
             return CommandResult(command, 0, json.dumps(self.info), "")
         if command[1:2] == ("ps",):
             running_only = "status=running" in command

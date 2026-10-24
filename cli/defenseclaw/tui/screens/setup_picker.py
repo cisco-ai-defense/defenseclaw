@@ -141,6 +141,10 @@ class SetupPickerScreen(ModalScreen[str | None]):
             first_selectable(self.rows),
         )
         self._window: tuple[int, int] = (0, 0)
+        # Set by the first dismiss. Enter pressed again before the screen is
+        # gone dismissed it a second time and popped the screen below it:
+        # ScreenStackError "Cannot pop the last screen".
+        self._dismissed = False
 
     def compose(self) -> ComposeResult:
         with Vertical(id="setup-picker-dialog"):
@@ -192,18 +196,24 @@ class SetupPickerScreen(ModalScreen[str | None]):
         self.selected = move_selection(self.rows, self.selected, delta)
         self._refresh_list()
 
+    def _close(self, result: str | None) -> None:
+        if self._dismissed:
+            return
+        self._dismissed = True
+        self.dismiss(result)
+
     def action_choose(self) -> None:
         if self.selected is None or not (0 <= self.selected < len(self.rows)):
             return
-        self.dismiss(self.rows[self.selected].row_id)
+        self._close(self.rows[self.selected].row_id)
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self._close(None)
 
     def on_click(self, event: events.Click) -> None:
         if event.widget is self:
             event.stop()
-            self.dismiss(None)
+            self._close(None)
             return
         try:
             target = self.query_one("#setup-picker-list", Static)

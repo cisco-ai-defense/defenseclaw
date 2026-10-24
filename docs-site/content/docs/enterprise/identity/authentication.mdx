@@ -1,0 +1,158 @@
+---
+title: Identity and authentication
+description: Which directory identities DefenseClaw attributes agent activity to on Linux, Windows and macOS, how agents get their own stable identity, how to assign a profile to a group, and how to check what DefenseClaw knows about a user.
+keywords:
+  - DefenseClaw identity
+  - Active Directory Kerberos
+  - Entra ID
+  - Okta
+  - agent identity
+  - guardrail profiles
+---
+
+DefenseClaw ties each agent action to the person who ran it and to the agent that did it. Guardrail profiles can then give a group, a user, a connector or a single agent its own policy, and every decision records which profile applied.
+
+## Attribution, not authentication
+
+DefenseClaw reads identity only from the operating system the agent runs on.
+
+- It never calls an identity provider (no Entra, Okta or LDAP API calls).
+- It holds no identity credentials: no passwords, tokens, tickets or keys.
+- It adds no new secrets and no sign-in step.
+- Okta and Entra ID appear only through what the OS already knows: a joined device, Platform SSO, or a directory synced into AD or LDAP.
+
+Each fact has an assurance level, sent as `defenseclaw.user.principal.assurance`. `verified` means the gateway or the root guardian resolved it from how it authenticated the caller (kernel peer credentials or a per-user credential). `claimed` means the hook reported it from the user's own session, which the user could change. What is read on each OS is in [How DefenseClaw knows who a user is](/docs/enterprise/identity/sources).
+
+<Callout type="warn" title="Do not grant access from these fields">
+Identity in DefenseClaw records answers "who ran this agent". It is not an authenticated assertion for another system. Only `verified` facts can select a guardrail profile; headers, hook payloads and `claimed` facts never do.
+</Callout>
+
+## Supported identity types
+
+DefenseClaw reads local accounts, LDAP and SSSD, Active Directory over Kerberos, Entra ID and Okta from what the OS already knows, and records an assurance level for each fact. The per-OS table of what is read and how much is verified is in [Identity detail](/docs/enterprise/identity/reference#supported-identity-types). Okta on a Mac comes from Platform SSO; on Linux and Windows an Okta user is the AD or LDAP account the OS gets from Okta.
+
+## Agent identity
+
+Each agent gets an identity of its own instead of only inheriting the person's. The identities are digests of facts the gateway already holds, so they need no credential and stay the same across sessions and gateway restarts. On Linux and macOS the 1.0.4 ID includes the account's domain, so an upgrade from 1.0.0–1.0.3 changes it. An old `agents` entry keeps applying, with no rebind step, to the account a one-time migration map recorded for the UID ([guardrail profiles](/docs/reference/policy/guardrail-profiles)). Windows IDs of a SID are unchanged.
+
+<Flow
+  direction="TB"
+  caption="One person can run many agents, each agent many sessions, and each session sub-agents. A sub-agent shares its parent's agent ID and links to its parent and root. The agent ID is a hash of facts the gateway already holds."
+>
+  <Node id="h" kind="operator">{`Person\nuser.id, principal`}</Node>
+  <Node id="in" kind="generic">{`Machine ID, connector\nconfig root`}</Node>
+  <Node id="a" kind="agent" emphasis>{`Agent (agt-)\nper install and user`}</Node>
+  <Node id="s" kind="agent">{`Session (ais-)\none chat`}</Node>
+  <Node id="c" kind="agent">{`Sub-agent (ais-)\nparent, root, depth`}</Node>
+  <Edge from="h" to="a" label="runs" />
+  <Edge from="in" to="a" label="hashed with" />
+  <Edge from="a" to="s" label="starts" />
+  <Edge from="s" to="c" label="spawns" />
+</Flow>
+
+| Level | Attribute | How the ID is made |
+| --- | --- | --- |
+| Person | `user.id`, `defenseclaw.user.principal` | From the OS |
+| Agent | `defenseclaw.agent.identity.id` | `agt-` plus 16 hex digits of a SHA-256 over the machine ID, the verified user, the connector and its config root in the user's home |
+| Session | `defenseclaw.agent.instance_id` | `ais-` plus 16 hex digits over the agent ID and the session ID |
+| Sub-agent | `defenseclaw.agent.instance_id` | `ais-` over the parent instance and the sub-agent ID. It shares its parent's `agt-` |
+
+The rules for the machine ID, removed and renamed accounts, sessions and sub-agent lineage are in [Identity detail](/docs/enterprise/identity/reference#agent-identity-rules).
+
+List the identities the gateway has seen:
+
+```bash
+defenseclaw agent identities
+defenseclaw agent identities --user alice --connector codex --json
+```
+
+```text
+User                    Connector  Agent identity        Sessions  Last seen  Config root
+alice@corp.example.com  codex      agt-3f9c0a1b2c3d4e5f  4         2m ago     /home/alice@corp.example.com/.codex
+```
+
+The command lists every identity, most recently seen first. `--limit N` lists only the `N` most recent; when the list is cut short, the command says so on stderr and names the total. The gateway API returns 1000 identities a page (`limit` and `cursor`), and the TUI **Agents** tab shows the 1000 most recently seen as `Agents (1000+)`.
+
+### Sandboxed agents
+
+An agent in an OpenShell sandbox is attributed to the host user who started it. The binding alone supplies no verified directory facts or groups. A request whose assignment needs a fact no other verified record supplies is refused, with that fact named; otherwise a proven connector-only assignment or the default profile applies. Each sandbox has its own `agt-`. See [Identity detail](/docs/enterprise/identity/reference#sandboxed-agents).
+
+## Assign a profile to a group
+
+Define a profile, assign it to the group, then ask the gateway who gets it.
+
+```yaml title="~/.defenseclaw/config.yaml"
+guardrail:
+  mode: observe
+  profiles:
+    contractors:
+      mode: action
+      block_at: MEDIUM
+  profile_assignments:
+    - profile: contractors
+      match: {groups: ["contractors@corp.example.com"]}
+  default_profile: ""        # "" keeps the global guardrail.* behaviour
+```
+
+```bash
+defenseclaw config validate
+defenseclaw guardrail profile list
+defenseclaw guardrail profile explain --user bob@corp.example.com --connector codex
+```
+
+```text
+  user:    bob@CORP.EXAMPLE.COM (2 group(s))
+  profile: contractors
+  match:   group (contractors@corp.example.com)
+  digest:  sha256:4f460f32fe21aa052aa524027ba08c9f89fe695cbe39cea2fb0252e5e0a738bd
+  applies (codex): mode=action block_at=MEDIUM alert_at=pack hilt=off rule_pack=...
+```
+
+Use the group name exactly as `id -Gn` prints it. A Windows group is `CORP\Contractors`, the bare name or its SID. Users of a child domain of the joined domain match `users` assignments only when you list their domain in `ai_discovery.trusted_ad_child_domains`; see [Child domains of the joined realm](/docs/enterprise/identity/sources#child-domains-of-the-joined-realm). Precedence, worked scenarios, the audit record and delivery to managed hosts are in [User- and group-based policies](/docs/reference/policy/guardrail-profiles).
+
+## Check what DefenseClaw knows about a user
+
+On a host with the `defenseclaw` CLI (the OSS install):
+
+```bash
+defenseclaw guardrail profile explain --user alice@corp.example.com --json | jq .subject
+defenseclaw agent identities --user alice
+defenseclaw agent ide-plugins --user alice --ai-only
+```
+
+`subject` shows the user ID, the principal, the UPN and the groups as the gateway resolves them, the same way it does for a live request. `--user` takes the account name as `getent passwd` (or `id`) shows it, a uid or a SID, in any case.
+
+On a managed install, `defenseclaw` runs only `sandbox` commands. As root, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice@corp.example.com --connector codex` (macOS: `/opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos ...`; Windows: `defenseclaw.exe enterprise windows ...` from an elevated prompt). The full set is in [Identity detail](/docs/enterprise/identity/reference#check-a-user-on-a-managed-install). For troubleshooting, see [Troubleshooting identity](/docs/enterprise/identity/sources#troubleshooting-identity).
+
+## Turn off the principal or the IDE inventory
+
+Two settings decide how much personal data leaves the host:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `ai_discovery.include_user_principal` | `false` | Adds `defenseclaw.user.principal` and `defenseclaw.session.kerberos_principal` to every record that carries identity: hook decisions, tool activity, agent, model and tool spans, and `identity.observed`. Off by default, like `include_user_email`, because a principal names a person across systems. |
+| `ai_discovery.ide_inventory` | `all` | `all`, `ai_only` or `off`. Plugin lists can reveal personal tooling; `ai_only` keeps only AI plugins and `off` collects no IDE inventory. |
+
+```yaml title="~/.defenseclaw/config.yaml"
+config_version: 9
+ai_discovery:
+  include_user_principal: false   # the default; true sends the principal
+  ide_inventory: ai_only          # all | ai_only | off
+```
+
+On a per-user install, check the file with `defenseclaw config validate`; the running gateway reloads it. On a managed host, change the [machine configuration](/docs/enterprise/configure/configuration#where-the-config-lives) and apply it with `ensure` ([Change the config](/docs/enterprise/operate/lifecycle#change-the-config)). To validate the installed file on managed Windows, run from an elevated PowerShell:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' config validate --config 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml' --json
+```
+
+ The user ID, account name, domain, directory type, assurance and client address stay on in either case. More in [Identity detail](/docs/enterprise/identity/reference#what-stays-on).
+
+## Next
+
+<Cards>
+  <Card title="Join a Linux host to AD" href="/docs/enterprise/identity/ad-linux" description="SSSD join, InfoPipe and what DefenseClaw learns." />
+  <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity/sources" description="What the OS tells us, where it is read, and the limits." />
+  <Card title="User- and group-based policies" href="/docs/reference/policy/guardrail-profiles" description="Write assignments, read the audit record, ship to managed hosts." />
+  <Card title="Deploy with Microsoft Entra ID" href="/docs/enterprise/identity/entra-id" description="Entra-joined Windows and Azure Linux VMs." />
+</Cards>

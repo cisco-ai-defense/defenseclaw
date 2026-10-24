@@ -58,7 +58,7 @@ func TestManagedHermesToolCallBlocksWhenDefenseClawCannotCheck(t *testing.T) {
 	}{
 		{name: "gateway unreachable", want: "the DefenseClaw gateway is not available",
 			rt: &stubRT{err: errors.New("connection refused")}},
-		{name: "gateway 5xx", want: "the DefenseClaw gateway is not available",
+		{name: "gateway 5xx", want: "returned an answer DefenseClaw could not use",
 			rt: &stubRT{status: 503, body: "unavailable"}},
 		{name: "gateway refused", want: "returned an answer DefenseClaw could not use",
 			rt: &stubRT{status: 401, body: "unauthorized"}},
@@ -85,6 +85,7 @@ func TestManagedHermesToolCallBlocksWhenDefenseClawCannotCheck(t *testing.T) {
 					tc.mutate(o)
 				}
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			message := hermesBlockMessage(t, result.stdout)
 			if result.code != 0 || !strings.HasPrefix(message, "DefenseClaw blocked this tool call: ") ||
@@ -153,6 +154,7 @@ func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 				o.StrictAvailability = true
 				mutate(o)
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			if result.code != 0 || strings.Contains(result.stdout, `"block"`) {
 				t.Fatalf("code %d, stdout %q, want the neutral result", result.code, result.stdout)
@@ -250,11 +252,12 @@ func TestManagedHermesUnboundEventBlocksRefusedInput(t *testing.T) {
 						o.MaxBody = tc.maxBody
 					}
 					home = o.Home
+					o.FailureLogHome = userLogHome(o.Home)
 				})
 				if result.code != 0 {
 					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
 				}
-				if managed && tc.blocks {
+				if tc.blocks {
 					message := hermesBlockMessage(t, result.stdout)
 					if !strings.HasPrefix(message, "DefenseClaw blocked this tool call: ") {
 						t.Fatalf("message %q, want a tool-call block", message)
@@ -309,6 +312,7 @@ func TestManagedHermesDisagreeingEventFieldsBlock(t *testing.T) {
 				o.SecureClient = tc.secureClient
 				o.Stdin = strings.NewReader(tc.stdin)
 				home = o.Home
+				o.FailureLogHome = userLogHome(o.Home)
 			})
 			if result.code != 0 {
 				t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)

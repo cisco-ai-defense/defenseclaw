@@ -43,6 +43,18 @@ NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
 DOCTOR_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 MAX_AI_DISCOVERY_OVERVIEW_ROWS = 8
+# Text width of one Overview notice line in an 80-column terminal: the body is
+# 72 wide and the icon column takes 5. At 80x24 only the first line of a
+# notice is above the fold, so a notice whose key must stay visible fits here.
+OVERVIEW_NOTICE_WIDTH = 67
+# Shorter words for the degraded-cause heads, used only when the heads do not
+# fit on one notice line; the Runtime panel (N) keeps the full reasons.
+# "partial coverage: " heads the plane-badge fallback; DEGRADED already says it.
+_RUNTIME_HEAD_SHORT = (
+    (" available but not running", " not running"),
+    (" partially covered", " partial"),
+    ("partial coverage: ", ""),
+)
 # Cursor merges hooks Enterprise > Team > Project > User and has no API to
 # detect a higher-priority file, so DefenseClaw infers none. Plain words, not
 # the old "priority-conflict-detection=unavailable" token (GAP-2561).
@@ -121,8 +133,9 @@ class HealthSnapshot:
     # to the config-derived roster.
     connector: ConnectorHealth | None = None
     connectors: tuple[ConnectorHealth, ...] = ()
-    # The effective policy the gateway applied (/status ``policy``): its
-    # applied generation and effective_policy_digest ("" when not reported).
+    # The effective policy the gateway applied (/status ``policy``): the
+    # config generation it was built from (0 when not reported) and its
+    # effective_policy_digest ("" when not reported).
     policy_generation: int = 0
     policy_digest: str = ""
 
@@ -131,6 +144,8 @@ class HealthSnapshot:
         digest = self.policy_digest.removeprefix("sha256:")
         if not digest:
             return ""
+        if not self.policy_generation:
+            return digest[:digest_chars]
         return f"gen {self.policy_generation} · {digest[:digest_chars]}"
 
 
@@ -152,11 +167,9 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "cursor",
         "devin",
         "copilot",
-        "openhands",
         "antigravity",
         "opencode",
         "amp",
-        "omnigent",
         "kiro",
     }
 )
@@ -167,7 +180,7 @@ class OverviewConfig:
     data_dir: str = ""
     environment: str = ""
     policy_dir: str = ""
-    claw_mode: str = "openclaw"
+    claw_mode: str = ""
     guardrail_enabled: bool = False
     guardrail_connector: str = ""
     guardrail_mode: str = "observe"
@@ -650,11 +663,14 @@ class OverviewPanelModel:
             self.guardrail_profile = result
             # The unscoped gateway response also names connector assignments.
             # Keep only connector-wide entries: an agent assignment must not
-            # change the posture shown for every call on that connector.
+            # change the posture shown for every call on that connector. A
+            # failed account lookup holds for those entries too.
+            lookup_error = (result or {}).get("lookup_error")
             self.connector_guardrail_profiles = {
                 str(item["connector"]).strip().lower(): {
                     "profile": item["profile"],
                     "effective": {"mode": item.get("mode", "")},
+                    **({"lookup_error": lookup_error} if lookup_error else {}),
                 }
                 for item in (result or {}).get("overrides", [])
                 if isinstance(item, dict)
@@ -663,15 +679,29 @@ class OverviewPanelModel:
                 and item.get("profile")
             }
 
-    def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
-        """(name, effective settings) of the profile that decides for you."""
-
-        result = (
+    def _profile_result(self, connector: str = "") -> dict[str, Any]:
+        return (
             self.connector_guardrail_profiles.get(connector.strip().lower(), self.guardrail_profile)
             if connector else self.guardrail_profile
         ) or {}
+
+    def profile_lookup_error(self, connector: str = "") -> str:
+        """Why the gateway could not look up your account ("" when it could).
+
+        The profile it then names is a fallback, not the one your account
+        and groups select.
+        """
+
+        return " ".join(str(self._profile_result(connector).get("lookup_error") or "").split())
+
+    def _applied_profile(self, connector: str = "") -> tuple[str, dict[str, Any]] | None:
+        """(name, effective settings) of the profile that decides for you."""
+
+        result = self._profile_result(connector)
         name = str(result.get("profile") or "")
-        if not name or result.get("error"):
+        # A failed identity lookup named a fallback profile, which read as
+        # the one chosen for you (GAP-1271).
+        if not name or result.get("error") or result.get("lookup_error"):
             return None
         effective = result.get("effective")
         return name, effective if isinstance(effective, dict) else {}
@@ -766,7 +796,9 @@ class OverviewPanelModel:
                 return OverviewCommandIntent(label=label, args=args)
         return None
 
-    def build_notices(self, *, now: datetime | None = None) -> tuple[OverviewNotice, ...]:
+    def build_notices(self, *, now: datetime | None = None, connector: str = "") -> tuple[OverviewNotice, ...]:
+        """Overview notices; ``connector`` is the connector filter in effect ("" = All)."""
+
         now = now or datetime.now(timezone.utc)
         notices: list[OverviewNotice] = []
         gateway_availability = self.gateway_availability()
@@ -788,8 +820,7 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "warn",
-                    "DefenseClaw is not set up yet (no config.yaml). "
-                    "Press 0 for Setup, or run: defenseclaw init",
+                    "DefenseClaw is not set up yet - press 0 or run: defenseclaw init",
                 )
             )
         elif gateway_broken and guardrail_off and not self.skill_scanner_available:
@@ -811,7 +842,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        'Gateway is not running - press : and run "start" (or run defenseclaw-gateway start)',
+                        "Gateway is not running. Run: defenseclaw-gateway start",
                     )
                 )
         elif gateway_state in {"starting", "reconnecting"}:
@@ -839,6 +870,16 @@ class OverviewPanelModel:
                 )
             else:
                 notices.append(OverviewNotice("warn", "LLM guardrail not configured - press [g] to set up"))
+        if lookup_error := self.profile_lookup_error(connector):
+            if len(lookup_error) > 80:
+                lookup_error = lookup_error[:79].rstrip() + "…"
+            notices.append(
+                OverviewNotice(
+                    "warn",
+                    f"Couldn't look up your account, so your guardrail profile is unknown ({lookup_error}) - "
+                    "check it with: defenseclaw guardrail profile explain",
+                )
+            )
         if not self.skill_scanner_available:
             notices.append(
                 OverviewNotice(
@@ -864,6 +905,10 @@ class OverviewPanelModel:
                 )
             )
 
+        # A notice with a remedy fits one line at 80 columns (67 cells), or
+        # puts its remedy first: at 80x24 only the first line of a notice is
+        # above the fold, so a wrapped "press [d] to refresh" was cut off
+        # (GAP-0566, as GAP-1775).
         if self.doctor is not None and not self.doctor.is_empty():
             contradicted = tuple(check for check in self.doctor.checks if self.doctor_check_stale_reason(check))
             removed = tuple(check for check in contradicted if self._doctor_destination_removed(check))
@@ -873,7 +918,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        f"Doctor found {effective_failed} failure(s) - see the DOCTOR panel or run: defenseclaw doctor",
+                        f"Doctor found {effective_failed} failure(s) · run: defenseclaw doctor",
                     )
                 )
             elif contradicted and len(removed) == len(contradicted):
@@ -882,16 +927,14 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "info",
-                        f"The last doctor run ({format_age(self.doctor.age(now=now))}) checked "
-                        f"{len(removed)} telemetry destination(s) that no longer exist - press [d] to refresh",
+                        f"Doctor checked {len(removed)} removed destination(s) - press [d] to refresh",
                     )
                 )
             elif contradicted:
                 notices.append(
                     OverviewNotice(
                         "info",
-                        f"Doctor cache shows {len(contradicted)} stale failure(s) that /health disagrees with - "
-                        "press [d] to refresh",
+                        f"{len(contradicted)} stale failure(s): /health disagrees - press [d] to refresh",
                     )
                 )
             elif self.doctor.is_stale(now=now):
@@ -908,8 +951,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        f"Doctor repairs need attention ({', '.join(parts)}) - "
-                        "see the DOCTOR panel or rerun the selected repair",
+                        f"Doctor repairs: {', '.join(parts)} - see the DOCTOR panel",
                     )
                 )
             elif (
@@ -923,8 +965,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        "The last Doctor run ended with a failed outcome - "
-                        "see the DOCTOR panel or rerun: defenseclaw doctor",
+                        "The last Doctor run ended with a failed outcome - see DOCTOR panel",
                     )
                 )
             elif self.doctor.outcome_state(now=now) == "warning" and self.doctor.warned == 0:
@@ -941,9 +982,8 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        "Missing required API key(s): "
-                        f"{', '.join(preview)}{keys_overflow_suffix(len(missing), len(preview))} "
-                        "- run: defenseclaw keys fill-missing",
+                        "Missing required API key(s) · run: defenseclaw keys fill-missing · "
+                        f"{', '.join(preview)}{keys_overflow_suffix(len(missing), len(preview))}",
                     )
                 )
 
@@ -997,23 +1037,21 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "info",
-                    f"{runtime.unobserved} runtime finding(s) are inventory-unobserved. "
-                    "Open AI Discovery and press Scan now so Runtime can correlate them.",
+                    f"{runtime.unobserved} runtime finding(s) unobserved - press Scan now in AI Discovery",
                 )
             )
         elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
-            # One short line like the other notices; the Runtime panel (N)
-            # carries the full reason and what to do about it (GAP-2533).
-            why, tail = "", "no findings above the reporting floor"
+            # The Runtime panel (N) carries the full reason, the counts and
+            # what to do about it (GAP-2533).
+            title = runtime.health_title or "watching"
             if runtime.degraded_reason:
-                why, tail = f" ({runtime.degraded_reason})", "no findings; N for details"
-            notices.append(
-                OverviewNotice(
-                    "info",
-                    f"Runtime is {runtime.health_title or 'watching'}{why}: {runtime.processes} processes, "
-                    f"{runtime.connections} connections, {tail}",
+                message = runtime_degraded_notice(title, runtime.degraded_reason)
+            else:
+                message = (
+                    f"Runtime is {title}: {runtime.processes} processes, "
+                    f"{runtime.connections} connections, no findings above the reporting floor"
                 )
-            )
+            notices.append(OverviewNotice("info", message))
 
         return tuple(notices)
 
@@ -1367,11 +1405,10 @@ class OverviewPanelModel:
         ``"openclaw"`` for an empty / hook-only state. Precedence: explicit
         singular override (``guardrail.connector``) → the active *set*'s
         primary (``connector_modes`` — the multi-connector roster that the
-        singular ``config.active_connector()`` ignores, which is why a
-        ``[codex, openclaw]`` map used to surface a phantom ``openclaw``) →
-        the singular ``claw.mode`` → ``""`` (none configured). The Go-parity
-        ``config.active_connector()`` contract is deliberately left untouched;
-        this distinguishes "none configured" at the display layer only.
+        singular selection can omit, which is why a ``[codex, openclaw]`` map
+        used to surface a phantom ``openclaw``) →
+        the singular ``claw.mode`` → ``""`` (none configured). The config
+        resolver also returns ``""`` for an unconfigured install.
         Callers treat ``""`` as "no connector present" (e.g. the app's
         ``connector_present`` gate / merged-catalog fallback).
 
@@ -1631,6 +1668,8 @@ class OverviewPanelModel:
             roster = [self.active_connector_name()]
         if not connector and len(roster) == 1:
             connector = roster[0]
+        if self.profile_lookup_error(connector):
+            return f"{base}, profile unknown (user lookup failed)" if base else "profile unknown (user lookup failed)"
         if not connector and len(roster) > 1 and self.guardrail_profile:
             resolved = [self._applied_profile(name) for name in roster]
             if all(resolved):
@@ -1924,6 +1963,30 @@ def _connector_saw_traffic(connector: ConnectorHealth) -> bool:
     )
 
 
+def runtime_degraded_notice(title: str, summary: str, width: int = OVERVIEW_NOTICE_WIDTH) -> str:
+    """One Overview line for a degraded Runtime: the N key first, then the cause.
+
+    At 80x24 only a notice's first line is above the fold, so the line fits
+    ``width``: the cause heads in full when they fit, else in shorter words,
+    else the first head and how many more, else the first head and "…". The
+    cause is never dropped.
+    """
+
+    lead = f"Runtime {title} · N for details: "
+    heads = [head.strip() for head in summary.split(", ") if head.strip()] or [summary.strip()]
+    short = list(heads)
+    for long_words, short_words in _RUNTIME_HEAD_SHORT:
+        short = [head.replace(long_words, short_words) for head in short]
+    candidates = [", ".join(heads), ", ".join(short)]
+    if len(short) > 1:
+        candidates.append(f"{short[0]} +{len(short) - 1} more")
+    room = max(width - len(lead), 2)
+    for cause in candidates:
+        if len(cause) <= room:
+            return lead + cause
+    return lead + short[0][: room - 1].rstrip() + "…"
+
+
 def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> str:
     name = friendly_connector_name(connector_name)
     formatted = format_duration(uptime)
@@ -1939,12 +2002,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
             )
-        case "omnigent":
-            return (
-                f"{name} connector has seen 0 policy events since the gateway started {formatted} ago - "
-                "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
-            )
-        case "hermes" | "cursor" | "devin" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
+        case "hermes" | "cursor" | "devin" | "copilot" | "antigravity" | "opencode" | "amp":
             return (
                 f"{name} connector has seen 0 hook events since the gateway started {formatted} ago - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -1974,16 +2032,12 @@ def friendly_connector_name(connector: str) -> str:
             return "Devin"
         case "copilot":
             return "GitHub Copilot CLI"
-        case "openhands":
-            return "OpenHands"
         case "antigravity":
             return "Antigravity"
         case "opencode":
             return "OpenCode"
         case "amp":
             return "Amp"
-        case "omnigent":
-            return "OmniGent"
         case "kiro":
             return "Kiro"
         case value:
@@ -2039,7 +2093,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.agents/skills",
         ),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
-        ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
         ("antigravity", "skills"): (
             "~/.gemini/config/skills/<skill>/SKILL.md",
             "<workspace>/.agents/skills/<skill>/SKILL.md",
@@ -2058,7 +2111,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/skills",
             "~/.claude/plugins/cache/.../skills (unless Claude-compatible skills are disabled)",
         ),
-        ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
         ("codex", "mcps"): (
@@ -2075,7 +2127,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.devin/config*.json (legacy read-only compatibility)",
         ),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
-        ("openhands", "mcps"): ("~/.openhands/mcp.json",),
         ("antigravity", "mcps"): (
             "~/.gemini/config/mcp_config.json",
             "<workspace>/.agents/mcp_config.json",
@@ -2087,7 +2138,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
             "<skill>/mcp.json",
         ),
-        ("omnigent", "mcps"): ("unsupported/unverified by the OmniGent connector",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
         ("codex", "plugins"): (
@@ -2104,7 +2154,6 @@ def connector_source_label(connector: str, category: str) -> str:
         ("cursor", "plugins"): ("unsupported",),
         ("devin", "plugins"): ("unsupported (closed beta; no general plugin claim)",),
         ("copilot", "plugins"): ("copilot plugin list --json",),
-        ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
@@ -2132,7 +2181,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.config/amp/plugins/defenseclaw.ts (DefenseClaw policy plugin)",
             "<workspace>/.amp/plugins",
         ),
-        ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
         ("claudecode", "config"): (claude_config,),
         ("codex", "config"): (codex_config,),
@@ -2144,7 +2192,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "./.devin/hooks.v1.json",
         ),
         ("copilot", "config"): ("./.github/hooks/*.json",),
-        ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
         ("opencode", "config"): (
             f"{opencode_plugin} (managed bridge; lifecycle custody only)",
@@ -2155,7 +2202,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.config/amp/settings.json or settings.jsonc",
             "<workspace>/.amp/settings.json or settings.jsonc",
         ),
-        ("omnigent", "config"): ("$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",),
     }
     return ", ".join(sources.get((connector, category), ()))
 

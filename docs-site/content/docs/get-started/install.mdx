@@ -1,452 +1,125 @@
 ---
 title: Install
-description: Install DefenseClaw on macOS, Linux, or Windows with one command, or build the current checkout from source.
+description: Install DefenseClaw on macOS, Linux or Windows with one command, and check that it worked.
 keywords:
   - install DefenseClaw
-  - defenseclaw curl install
+  - defenseclaw install.sh
   - defenseclaw install.ps1
-  - defenseclaw source build
-  - defenseclaw make all
+  - download DefenseClaw
 ---
 
-<Callout title="Just want the command?">
-[Download](/docs/get-started/download) has the one-line install for your OS,
-the macOS app and the enterprise packages. This page covers the installer's
-options and exit codes, source builds and what the install creates.
-</Callout>
+import { OsPanel, OsTabs } from '@/components/install/os-download-tiles';
+import { InstallCommand } from '@/components/install/install-command';
+
+DefenseClaw installs for your own account with one command. You do not need administrator rights. The installer checks every file against the release's `checksums.txt` and installs `uv` if you do not have it; `uv` provides the Python runtime.
 
 ## Install
 
-macOS and Linux:
+Before a first install or upgrade, quit OpenCode and Amp completely. Their
+DefenseClaw plugins load only at process start, so an already running agent
+would not gain the new protection. The installer refuses to continue while
+either agent is running for your account. Start a new agent process after the
+installer reports the gateway healthy.
 
-```bash
-curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
-```
+Pick your system. The site detects it and remembers your choice.
 
-Windows (PowerShell):
+<OsTabs>
+<OsPanel os="macos">
 
-```powershell
-irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex
-```
+Requires a Mac with Apple silicon (`arm64`). Intel Macs are unsupported, and the installer stops before it changes anything.
 
-On a first install the installer asks which agent to guard (a number or a name;
-the default is `codex`). When it finishes, run the command it prints,
-`defenseclaw init --connector <agent>`, to set up that agent (see the
-[quickstart](/docs/get-started/quickstart)); plain `defenseclaw init` sets up
-every agent it finds. To set the agent up during the install, pass options: on
-macOS/Linux, end the command above with `bash -s -- --connector codex --quickstart`
-instead of `bash`; on Windows, run
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash" prompt="$" copyLabel="Copy the install command" />
 
-```powershell
-& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector codex -Quickstart
-```
+To install, guard one agent and run first-time setup in one step:
 
-The installer downloads the release's gateway, CLI wheel, and a hash-pinned
-list of the CLI's Python dependencies, and checks each file against the
-release's `checksums.txt`. When `cosign` 2.0 or later is installed it also verifies the
-Sigstore signature on `checksums.txt`. It installs `uv` if you do not have it,
-and `uv` provides the Python runtime; nothing else is required.
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart" prompt="$" copyLabel="Copy the install-and-setup command" />
 
-The same command upgrades or repairs an existing install and keeps your
-configuration and data. Day to day, use [`defenseclaw upgrade`](/docs/get-started/upgrade),
-which runs the latest release's installer for you.
+The optional menu-bar app is a separate download, `DefenseClawMac-<version>-macos-arm64.dmg`, from the [latest release](https://github.com/cisco-ai-defense/defenseclaw/releases/latest). See [macOS app](/docs/features/macos-app).
 
-| Option (`install.sh` / `install.ps1`) | What it does |
-| --- | --- |
-| `--yes` / `-Yes` | Do not prompt |
-| `--version X.Y.Z` / `-Version X.Y.Z` | Install a specific release |
-| `--local DIR` / `-Local DIR` | Take every release file from a directory instead of GitHub |
-| `--rollback` / `-Rollback` | Restore the install that the last upgrade replaced |
-| `--connector NAME` / `-Connector NAME` | First install only: the agent to guard |
-| `--no-openclaw` / `-NoOpenclaw` | First install only: same as connector `none` (configure no agent) |
-| `--quickstart` / `-Quickstart` | Run `defenseclaw quickstart` afterwards when nothing is configured yet (a first install, or an install that was never set up) |
-| `--quickstart-mode MODE` / `-QuickstartMode MODE` | `observe` or `action` for that quickstart (implies `--quickstart`) |
-| `-NoPersistPath` | Windows only: do not change the user `PATH` in the registry |
-| `-CosignPath FILE` | Windows only: the `cosign` to check the release signature with |
+</OsPanel>
 
-`--local` and `-Local` require a nonempty directory argument. An empty value
-is a usage error (exit `2`).
+<OsPanel os="linux">
 
-To install from a mirror instead of GitHub, set `DEFENSECLAW_REPO` to the
-mirror's base URL for that command, for example
-`curl -LsSf <install.sh URL> | DEFENSECLAW_REPO=https://mirror.example.com/defenseclaw bash`.
-A first install has no `config.yaml` yet, so the variable is the only way to
-name a mirror; once DefenseClaw is set up, `update.source` in `config.yaml`
-does the same for `defenseclaw upgrade`
-([Upgrade](/docs/get-started/upgrade#install-from-a-mirror)). The mirror only
-changes where the files come from. The installer still checks the release
-signature against the official release identity, so a mirror's downloads are
-refused unless `cosign` 2.0 or later is installed.
+Requires Linux on `x86_64` or `arm64`.
 
-The installers exit with one of these codes (`install.ps1` when run as a file;
-`irm | iex` reports a failure as an error instead):
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash" prompt="$" copyLabel="Copy the install command" />
 
-| Exit code | Meaning |
-| --- | --- |
-| `0` | DefenseClaw is installed. |
-| `1` | DefenseClaw was not installed. An upgrade puts the previous install back. |
-| `2` | Nothing was changed: an option or value the installer does not know, such as a misspelled flag or a connector name that is not on the list. Options that take a value also accept the `--name=value` form. |
-| `3` | DefenseClaw is installed, but a connector needs attention before it is guarded again. Run `defenseclaw doctor`. |
-| `4` | DefenseClaw is installed, but the first-run quickstart failed. The installer prints what failed and the `defenseclaw quickstart ...` command to run again once it is fixed. |
+To install, guard one agent and run first-time setup in one step:
 
-<Callout title="Supported platforms">
-macOS on Apple Silicon (`arm64`), Linux on `x86_64` and `arm64`, and Windows on
-`x64`. Intel Macs are unsupported; the installer stops before changing
-anything. Rosetta does not make an Intel Mac a supported target.
-</Callout>
+<InstallCommand command="curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash -s -- --connector claudecode --quickstart" prompt="$" copyLabel="Copy the install-and-setup command" />
+
+If the installer says `~/.local/bin` is not on your `PATH`, run the line it prints, then open a new shell.
+
+</OsPanel>
+
+<OsPanel os="windows">
+
+Requires Windows on `x64` with Windows PowerShell 5.1 or PowerShell 7. Windows on ARM64 is not certified, so the installer stops there. Run it as the user who uses DefenseClaw, not as an administrator.
+
+<InstallCommand command="irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1 | iex" prompt="PS>" copyLabel="Copy the install command" />
+
+To install, guard one agent and run first-time setup in one step:
+
+<InstallCommand command="& ([scriptblock]::Create((irm https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.ps1))) -Connector claudecode -Quickstart" prompt="PS>" copyLabel="Copy the install-and-setup command" />
+
+Open a new terminal if the installer says so. See [Windows](/docs/get-started/windows).
+
+</OsPanel>
+</OsTabs>
+
+On a first install the installer asks which agent to guard (a number or a name). If you ran the plain command, run the command it prints next, `defenseclaw init --connector <agent>`. Plain `defenseclaw init` sets up every agent it finds. Rerunning the installer upgrades or repairs an install and keeps your configuration.
 
 <Callout>
-Installing as `root` is supported but discouraged — DefenseClaw is per-user by design so each operator's audit DB and connector state stays isolated.
+On a computer your organization manages, the per-user installer and `defenseclaw upgrade` refuse to run. The organization installs DefenseClaw through its MDM. See [Enterprise](/docs/enterprise).
 </Callout>
 
-## Prerequisites for source builds
-
-| Requirement | Version |
-| --- | --- |
-| Python | 3.10-3.13 for source builds |
-| Go | 1.26.4+ (only for source builds) |
-| Git | Required to clone and identify a source checkout |
-| GNU Make and a POSIX shell | Required by the documented source workflow |
-| `uv` | Required by `make all` / the `pycli` target |
-| Node.js and npm | Required only when a source build selects the OpenClaw plugin; use the runtime version required by that OpenClaw release |
-| Docker | Optional, for local observability and Splunk bundles |
-
-Agent-specific dependencies and quirks live on the
-[connector pages](/docs/connectors#platform-support).
-
-The shell inspect hooks need `jq` or `python3`. If neither is installed, they block every checked call (or, with an explicit per-user open, let it go ahead with a notice).
-
-## What's bundled (LLM backends)
-
-The base install ships everything DefenseClaw needs to talk to the major LLM backends out of the box:
-
-| Backend | Status | Notes |
-| --- | --- | --- |
-| OpenAI / Anthropic / generic OpenAI-compatible | bundled | LiteLLM, the default LLM transport, is a base dependency. |
-| AWS Bedrock | bundled | `boto3` ships in `[project].dependencies` so SigV4, IAM credential modes, and Anthropic-on-Bedrock bearer tokens work without a follow-up `pip install`. |
-| Google Vertex AI | Gateway bundled; Python SDK opt-in | The Go gateway routes Vertex through its bundled Bifrost backend. Python CLI scanner/judge paths use LiteLLM and require the `[vertex]` extra for the Google SDK and supported Vertex authentication; the SDK pulls ~286 MB of transitive dependencies. Source contributors can add it to their isolated checkout with `uv sync --extra vertex`; never modify a release-managed runtime. There is no documented SDK-less Python fallback. |
-| Azure OpenAI | bundled | Routed via LiteLLM's `azure_openai` adapter. |
-| Self-hosted / internal endpoints | bundled | Configure via `defenseclaw setup provider add` → see [Unified LLM key → Custom providers](/docs/guardrail/unified-llm-key#custom-providers-for-internal-or-self-hosted-endpoints). |
-
-## Install from source
-
-<Callout title="Release version versus source metadata">
-A source build reports the checked-in source version. The Release workflow
-stamps the release version into its own build checkout, so a source build must
-not be represented as a published artifact.
-</Callout>
-
-| Goal | Command |
-|------|---------|
-| Normal same-checkout development | `make all` |
-| Build artifacts without installing | `make build` |
-| Show developer workflow help | `make help` |
-| Upgrade a release install | `defenseclaw upgrade` |
+## Check it worked
 
 ```bash
-git clone https://github.com/cisco-ai-defense/defenseclaw.git
-cd defenseclaw
-make all CONNECTOR=none
-defenseclaw init
+defenseclaw version
 ```
 
-`make all` installs the editable Python CLI, builds and installs the Go gateway,
-updates your PATH, and normally runs quickstart. The example sets
-`CONNECTOR=none` to skip that automatic first-run configuration, then invokes
-`defenseclaw init` explicitly. Omit `CONNECTOR=none` when you want `make all`
-to run quickstart itself. The OpenClaw plugin is installed when
-`CONNECTOR=openclaw` is selected.
+```text
+  DefenseClaw versions
 
-Source builds are for developing DefenseClaw, not for upgrading a release
-install. Running `make all` again in the same checkout reinstalls over your
-earlier source build. It refuses to replace an install from a different
-checkout, a newer source build or a release install. The lower-level
-`make install` and `scripts/install-dev.sh` only install into a fresh or
-separate development home. To upgrade a release install, use
-`defenseclaw upgrade`, and don't point `pip`, `uv` or an editable install at
-its Python environment.
+  COMPONENT  VERSION  STATUS   ORIGIN
+  ---------  -------  -------  ----------------------------------------
+  cli        X.Y.Z    ok       defenseclaw (python)
+  gateway    X.Y.Z    ok       ~/.local/bin/defenseclaw-gateway
+  …
 
-### Build from source on Windows
-
-Run the same workflow in Git Bash (Git for Windows) with GNU Make, Go, `uv`,
-and Python 3.10-3.13 from python.org.
-
-- Clone with `git -c core.autocrlf=false clone ...` so the shell scripts keep
-  LF line endings.
-- `make all` uses the first of `python3`, `python`, and `py -3` that runs, so
-  the Microsoft Store `python3` alias is skipped. When none runs, the build
-  stops with "no working Python 3 interpreter".
-- Files go to `%USERPROFILE%\.defenseclaw` and `%USERPROFILE%\.local\bin`,
-  the same places as a release install. `make all` refuses an account that
-  already has a release install and prints how to remove its binaries first
-  (`defenseclaw.cmd uninstall --binaries --yes`, which keeps your config and
-  audit log). You can also build in a separate Windows account.
-
-<Callout type="warning" title="Local dist output is not a release">
-`make dist` builds release-shaped files for testing the installer with
-`--local dist`. They are unsigned; do not present them as published binaries.
-</Callout>
-
-## What the install creates
-
-<Files>
-  <Folder name="~/.defenseclaw" defaultOpen>
-    <Folder name=".venv">
-      <File name="… (the CLI's Python environment)" />
-    </Folder>
-    <File name="config.yaml" />
-    <File name="config.generation.json" />
-    <File name="audit.db" />
-    <File name="device.key" />
-    <Folder name="hooks" defaultOpen>
-      <File name="claude-code-hook.sh" />
-      <File name="codex-hook.sh" />
-      <File name="… (one script per agent you set up)" />
-    </Folder>
-    <Folder name="policies" defaultOpen>
-      <Folder name="guardrail" defaultOpen>
-        <Folder name="default" />
-        <Folder name="strict" />
-        <Folder name="permissive" />
-      </Folder>
-      <Folder name="rego" />
-    </Folder>
-    <Folder name="installer" />
-    <Folder name="logs" />
-    <Folder name="previous" />
-  </Folder>
-  <Folder name="~/.local/bin" defaultOpen>
-    <File name="defenseclaw" />
-    <File name="defenseclaw-gateway" />
-    <File name="defenseclaw-acp" />
-    <File name="skill-scanner" />
-    <File name="mcp-scanner" />
-  </Folder>
-</Files>
-
-On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper`. Only the
-opt-in [sandbox kernel feed](/docs/sandboxes/linux#kernel-feed-tetragon) uses
-it, and `defenseclaw uninstall --binaries` removes it with the rest. macOS
-installs do not keep it.
-
-`config.yaml`, `config.generation.json` (the record of the last config write),
-`audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`,
-and the hook scripts by setting up an agent. Only `config.yaml` is policy: the
-hook scripts are derived from it. An upgrade from 0.x also leaves
-`config.yaml.v8.bak` and `migration-v9.json` next to it; see
-[Migrate config.yaml from v8 to v9](/docs/reference/migrate-v9). The full tree
-is in [Configuration](/docs/reference/configuration#on-disk-layout). The installer keeps
-`installer/` (the installer that performed the current install, used by
-`defenseclaw rollback`), `previous/` (the install the last upgrade replaced)
-and `logs/`. When the installer installs `uv` for you, `uv` and `uvx` are in
-`~/.local/bin` too.
-
-On Windows the same layout lives under `%USERPROFILE%`:
-`%USERPROFILE%\.defenseclaw\` holds configuration, data, and the Python
-environment, and `%USERPROFILE%\.local\bin\` holds the `defenseclaw.exe`
-launcher (with a `defenseclaw.cmd` copy for scripts that name it),
-`defenseclaw-gateway.exe`, `defenseclaw-hook.exe`, and `defenseclaw-acp.exe`,
-plus an extensionless `defenseclaw` launcher so the command also works in Git
-Bash.
-The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
-
-On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is
-not on it, the installer prints the line to add to your shell profile. Add it,
-then open a new shell before you run `defenseclaw`.
-
-## Startup behavior
-
-On Linux and macOS the gateway runs as a background process of your account.
-It starts when you run `defenseclaw quickstart`, `defenseclaw setup`, or
-`defenseclaw-gateway start`. The install adds no systemd unit, LaunchAgent, or
-login item. Instead, when the gateway is not running (after a reboot or a
-sign-out that ended your processes), the next agent hook call starts it with
-`defenseclaw-gateway start` in the background and sends its request again
-while it starts. This applies to the shell hooks of Claude Code, Codex,
-Cursor, GitHub Copilot, Devin, Hermes, Kiro, OpenHands, and Antigravity. The
-OpenCode and Amp plugins and the OmniGent policy do not start it.
-
-A hook call that meets a gateway restart (`defenseclaw-gateway restart`, an
-upgrade, or the start above) is sent again for up to about 3 seconds after the
-hook started, so a short restart is answered by the gateway that comes up,
-from its policy. A restart or outage that lasts longer ends the call within
-those 3 seconds with `gateway restarting or not running` instead of holding it
-until the gateway is back: a fail-closed hook blocks it, never allows it. The
-same holds for the per-user hooks on Windows. On Windows a per-user hook for
-a tool call also waits at most about 3.5 seconds for the gateway's decision and
-then applies its fail mode (`gateway did not answer in time`); a call the
-gateway is checking with Cisco AI Defense or the LLM judge gets up to about
-4 seconds. During
-an install or upgrade, which stops the gateway and starts it again, the shell
-hooks treat the stop as a restart and say that an install or upgrade is
-under way, not that the gateway was stopped.
-
-A hook does not start the gateway:
-
-- after `defenseclaw-gateway stop`, until you run `defenseclaw-gateway start`
-  or `defenseclaw-gateway restart`;
-- while an install or upgrade runs;
-- for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
-- when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set in the agent's environment.
-
-While the gateway is not running, fail-closed hooks block agent calls, in
-observe mode too, and only hooks you set to `hook_fail_mode: open` let them
-through with a `gateway unreachable` line on stderr (see
-[Fail modes](/docs/reference/fail-modes#which-value-applies)). On Windows a hook also starts a stopped
-gateway; see [Windows install lifecycle](/docs/get-started/windows/install-lifecycle#startup-behavior).
-
-When the watchdog runs (`gateway.watchdog.enabled`) and the gateway process
-stops on its own (a crash, or `kill -9`), the watchdog starts it again after
-`gateway.watchdog.debounce` failed health checks, under the same rules as a
-hook start. That covers an account with no connector hooks, whose IDE and agent
-inventory would otherwise stay dark until someone ran `defenseclaw-gateway
-start`.
-
-A gateway that is running but does not answer (frozen or hung) is not
-restarted by a hook or by the watchdog. The hook's line says the gateway did not answer and names
-the next step: check `defenseclaw-gateway status`, or run
-`defenseclaw-gateway restart`.
-
-## Verify
-
-```bash
-defenseclaw --version
-defenseclaw doctor
+  OK All components in sync.
 ```
 
-Doctor verifies:
+If you ran the plain install command, run `defenseclaw init --connector <agent>` before `defenseclaw doctor`. Before init, doctor shows one row and exits 1:
 
-| Check | What it verifies |
-| --- | --- |
-| Configuration | `config.yaml` exists, loads and passes validation. |
-| Audit database and device key | The audit database is intact, has the tables it needs and has room to grow; the device key and its provenance record are intact. |
-| Components and connectors | The CLI and gateway versions match, and each agent you set up runs a version DefenseClaw supports. |
-| Gateway | The running gateway is the one DefenseClaw started, answers its health check, and accepts the local API token. |
-| Policy and config migration | The **Policy** row: the gateway applies the policy that `config.yaml` and the assets it names compute to, and `config.yaml` was not edited outside the writer. The **Config migration** row appears after an upgrade from 0.x until you read the migration record. |
-| Guardrail, scanners and credentials | Enabled services are reachable, the scanner programs run, and configured keys are present. Doctor never prints a secret. |
-| Observability | Each configured destination is reachable and delivering. The local SQLite history keeps working when a destination fails. |
-
-Useful modes:
-
-```bash
-# Skip checks that cost money, send content, or send test traffic
-defenseclaw doctor --passive
-
-# Machine-readable schema v2
-defenseclaw doctor --json-output
-
-# Show the repairs doctor would make, without changing anything
-defenseclaw doctor --fix --dry-run
-
-# Make every repair doctor can, including ones that restart services
-defenseclaw doctor --fix --yes
-
-# Make one repair (and the repairs it depends on)
-defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize
-
-# Recreating the device key always asks first; don't add --yes
-defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
+```text
+  [FAIL] Config file  —  ~/.defenseclaw/config.yaml not found; DefenseClaw is not initialized, so no other check can run
 ```
 
-Doctor runs `skill-scanner --version` rather than only checking that the file
-exists, so a broken launcher shows up as a failure.
+After init, run `defenseclaw doctor`. Each row is `[PASS]`, `[WARN]`, `[FAIL]` or `[SKIP]`; the sidecar and hook rows are `[FAIL]` until you set up an agent and start the gateway. A trimmed example (your rows and counts differ):
 
-`--fix` makes its repairs before the checks run, so the summary describes the
-repaired state. A failed health check or failed or blocked repair
-exits 1. See the [Doctor CLI reference](/docs/reference/cli#doctor) for the
-machine contract and [Doctor repair safety](/docs/reference/cli#doctor-repair-safety)
-for token, recovery, compatibility, and approval boundaries.
+```text
+DefenseClaw Doctor
+==================
 
-## Uninstall
-
-```bash
-defenseclaw uninstall              # reversible: keeps ~/.defenseclaw/ and the binaries
-defenseclaw uninstall --all        # also delete ~/.defenseclaw/ (audit log, config, secrets)
-defenseclaw uninstall --binaries   # also remove the CLI, gateway, ACP guard and helper binaries
-defenseclaw uninstall --all --binaries --yes   # remove everything, without a prompt
-defenseclaw uninstall --dry-run    # show what would be removed, change nothing
+  [PASS] Audit database  -  ~/.defenseclaw/audit.db; SQLite quick_check=ok; required schema present
+  [PASS] Device identity  -  Ed25519 key custody and HMAC-bound provenance are valid
+  [PASS] Private files  -  only this account can read .env, device.key, audit.db and the data directory
+  …
+  -- Summary --
+  Health: … passed, … failed, … warnings, … skipped
 ```
 
-The default tears down the connector integrations and **leaves
-`~/.defenseclaw/` and the installed binaries on disk**, so a later
-`defenseclaw setup guardrail` can pick up where you left off. An agent config
-file you haven't changed since setup is restored exactly from its checked
-backup. If you edited it, only DefenseClaw's entries are removed and your
-changes stay. Use `--all` and `--binaries` to remove everything. On macOS and
-Linux, `--binaries` removes `defenseclaw`, `defenseclaw-gateway`,
-`defenseclaw-acp` and the scanner launchers (`skill-scanner`,
-`skill-scanner-api`, `skill-scanner-pre-commit`, `mcp-scanner`,
-`mcp-scanner-api` and `litellm`) from `~/.local/bin`, and the `uv` and `uvx`
-an installer added there while they are unchanged; with `--all`, what that uv
-downloaded goes too. The 0.8.x installer kept no record of the uv, the uv
-cache (`~/.cache/uv`) or the `~/.sigstore` folder it added, and it used a uv
-you already had, so the upgrade from 0.8.x records them only when all of this
-shows that installer put them there:
+{/* needs-live-capture: a full healthy doctor run from a release build */}
 
-- uv's install receipt (`~/.config/uv/uv-receipt.json`) names `~/.local/bin`,
-  only `uv` and `uvx`, and the uv version that `~/.local/bin/uv` reports and
-  that made the 0.8.x Python environment, and was written at most ten minutes
-  before that environment.
-- `uv` and `uvx` are your own regular files, not links.
-- Nothing in `~/.cache/uv` is older than the receipt, every package in it was
-  downloaded after the 0.8.x Python environment was made and is one that
-  environment holds (DefenseClaw among them), and uv has no tools installed.
-- For `~/.sigstore`: it holds only the public Sigstore cache, unused since,
-  and no `cosign` is on your `PATH`.
-
-`uninstall --all --binaries` then removes the recorded `uv` and `uvx` while
-they are unchanged, `~/.cache/uv` when nothing in it changed since the
-upgrade, `~/.sigstore` only when the 0.8.x installer's cache is still untouched,
-and `~/.config/uv` when it holds only that receipt. uv's Python
-folder (`~/.local/share/uv/python`) always stays, since other tools can use
-it. When the evidence is missing, or you updated or replaced `uv` since, the
-uninstall plan and its result name what stays (`uv`, `uvx`, `~/.cache/uv`,
-`~/.config/uv`) as not recorded as installed by DefenseClaw: remove them
-yourself if DefenseClaw added them.
-
-When sandbox state is present, uninstall also removes DefenseClaw's OpenShell
-sandboxes and images (on Linux and macOS; there are none on Windows). If
-teardown fails with `--all` or `--binaries`, rerun uninstall with
-`--skip-sandbox-teardown` and without `--all` or `--binaries`
-to keep the data needed for later teardown. Once Docker and OpenShell
-work again, run `defenseclaw-gateway sandbox teardown`, then uninstall again.
-Before stopping a live-mounted sandbox, review its
-changes (`defenseclaw sandbox review NAME`) or undo them
-(`defenseclaw sandbox undo NAME`). Work its agent already wrote in your folder
-stays unless you undo it; the plan names those sandboxes.
-
-A per-user uninstall for an account that never set up sandboxes completes
-without a teardown override. Its sandbox directory is absent or holds only
-empty lock files and empty folders, no OpenShell state or user gateway config
-sits beside them, and no OpenShell sandbox setting or wrapper is enabled.
-Neither `uninstall` nor `reset` reads the sandbox list or runs teardown then.
-Sandbox records, snapshots, non-empty files, links or unreadable entries in
-that directory still trigger teardown, as do enabled OpenShell settings. An
-empty lock file alongside OpenShell state or a user gateway config does too.
-
-A running sandbox stops uninstall before any change. Pull copy-mode work or
-review mount-mode changes, then stop the sandbox and retry. To stop and delete
-running sandboxes with the teardown, pass `--stop-sandboxes`; copy-mode work
-that has not been pulled back is lost.
-
-This list check applies only when sandbox teardown is planned. If the sandbox
-list cannot be read, `uninstall` and `reset` also stop before
-any change because teardown could delete a sandbox that still runs. Check
-with `defenseclaw sandbox list` (start the gateway first if prompted), pull
-back work or stop the sandboxes you want to keep, then retry; or use
-`--stop-sandboxes` to let teardown stop and delete them. The `error`,
-`stopping`, `creating` and `deleting` phases count as running; only
-`stopped`, `completed`, `deleted` and `missing` do not.
-
-Close your agent sessions first. One that stays open goes on without
-DefenseClaw: its hooks fail and nothing checks its tool calls. The plan and
-the end of the uninstall both say so.
+[Read doctor](/docs/troubleshooting/doctor) explains the rows. If a command is not found, see [Troubleshooting](/docs/troubleshooting).
 
 ## Next
 
 <Cards>
-  <Card title="Native Windows" href="/docs/get-started/windows" description="Native hook connectors, verification, and troubleshooting on Windows." />
-  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Run init and see your first block in 5 minutes." />
-  <Card title="Upgrade" href="/docs/get-started/upgrade" description="One command, automatic migrations, and rollback." />
-  <Card title="Setup Guardrail" href="/docs/guardrail" description="The full configuration surface for the central command." />
+  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Run init and see your first block in five minutes." />
+  <Card title="Installer options" href="/docs/reference/commands/installer" description="Flags, environment, exit codes, checksums and what the install creates." />
+  <Card title="Enterprise packages" href="/docs/enterprise/get-started" description="Admin-owned installs through your MDM." />
+  <Card title="Uninstall" href="/docs/get-started/uninstall" description="Remove DefenseClaw for your account." />
 </Cards>

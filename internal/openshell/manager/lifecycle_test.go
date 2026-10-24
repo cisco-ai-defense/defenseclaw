@@ -1194,7 +1194,7 @@ func TestGatewayUnavailable(t *testing.T) {
 		t.Fatal("redialed inside the backoff")
 	}
 	e.m.now = func() time.Time { return time.Now().Add(time.Minute) }
-	if st, _ := e.m.Status(t.Context()); !st.Available || st.Gateway == nil || st.Gateway.Version != "0.1.1" || st.Pack != "open" {
+	if st, _ := e.m.Status(t.Context()); !st.Available || st.Gateway == nil || st.Gateway.Version != openshell.SupportedMin || st.Pack != "open" {
 		t.Fatalf("status = %+v", st)
 	}
 	var degraded, restored bool

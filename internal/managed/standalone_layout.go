@@ -183,7 +183,7 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		LogDir:          state + `\logs`,
 		HookSocketDir:   install + `\ipc`,
 		HookSocketPath:  "",
-		HookRuntimeDir:  programData + `\Cisco\DefenseClaw-HookRuntime`,
+		HookRuntimeDir:  programData + `\Cisco\` + StandaloneWindowsHookRuntimeDirName,
 		SensorSocketDir: install + `\ipc`,
 		ServiceUser:     `NT SERVICE\` + StandaloneWindowsGatewaySvc,
 		ServiceGroup:    "",
@@ -200,6 +200,9 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
 	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\DefenseClaw-ScannerRuntime`
 }
+
+// StandaloneWindowsHookRuntimeDirName is the Windows HookRuntimeDir folder name.
+const StandaloneWindowsHookRuntimeDirName = "DefenseClaw-HookRuntime"
 
 // StandaloneWindowsScannerRuntimeName is the scanner runtime executable.
 const StandaloneWindowsScannerRuntimeName = "defenseclaw-scanners.exe"

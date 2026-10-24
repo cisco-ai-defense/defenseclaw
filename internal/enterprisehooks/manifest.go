@@ -46,26 +46,6 @@ type ManifestTarget struct {
 
 const enterpriseHookManifestMaxBytes int64 = 4 << 20
 
-// ManifestHomesDropped returns the targets of previous whose profile current
-// no longer lists, one per profile.
-func ManifestHomesDropped(previous, current Manifest) Manifest {
-	key := func(home string) string { return strings.ToLower(filepath.Clean(strings.TrimSpace(home))) }
-	kept := map[string]bool{}
-	for _, target := range current.Targets {
-		kept[key(target.UserHome)] = true
-	}
-	var dropped Manifest
-	for _, target := range previous.Targets {
-		home := key(target.UserHome)
-		if strings.TrimSpace(target.UserHome) == "" || kept[home] {
-			continue
-		}
-		kept[home] = true
-		dropped.Targets = append(dropped.Targets, target)
-	}
-	return dropped
-}
-
 func LoadManifest(path string) (Manifest, error) {
 	manifest, _, err := LoadManifestWithSHA256(path)
 	return manifest, err
@@ -151,17 +131,21 @@ func loadManifestWithSHA256(path string, validateTarget func(int, ManifestTarget
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
 	decoder.KnownFields(true)
 	decodeErr := decoder.Decode(&manifest)
-	if decodeErr != nil && decodeErr != io.EOF {
+	if decodeErr == io.EOF {
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s is empty; refusing to withdraw enrolled hooks", path)
+	}
+	if decodeErr != nil {
 		return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, decodeErr)
 	}
-	if decodeErr == nil {
-		var trailing any
-		if err := decoder.Decode(&trailing); err != io.EOF {
-			if err == nil {
-				err = fmt.Errorf("multiple YAML documents are not allowed")
-			}
-			return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
+	if manifest.Targets == nil {
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: manifest %s has no explicit targets; refusing to withdraw enrolled hooks", path)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			err = fmt.Errorf("multiple YAML documents are not allowed")
 		}
+		return Manifest{}, "", fmt.Errorf("enterprise hooks: parse manifest %s: %w", path, err)
 	}
 	if manifest.Version == 0 {
 		manifest.Version = 1

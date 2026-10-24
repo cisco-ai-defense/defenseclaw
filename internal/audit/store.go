@@ -31,12 +31,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -238,11 +238,19 @@ type Store struct {
 	// checkpoints. It is opened on first use and closed with the store.
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
+	// durableDB is a synchronous=FULL connection that makes committed
+	// writes power-loss durable (syncCommittedWrites). It is opened on
+	// first use under checkpointMu and closed with the store.
+	durableDB *sql.DB
 	// walGuardMu guards the checkpoint connection's data_version as of the
 	// previous WAL guard pass (CheckpointWALIfLarge).
 	walGuardMu      sync.Mutex
 	walGuardSeen    bool
 	walGuardVersion int64
+	// walBoundedMisses counts the bounded catch-ups in a row that gave the
+	// writer back before the log restarted (boundedCatchUpPolicy). Guarded
+	// by walGuardMu.
+	walBoundedMisses int
 	// walPressure is true while the last WAL guard pass left the log over
 	// its limit; background writers wait for it (awaitWALHeadroom).
 	walPressure atomic.Bool
@@ -600,9 +608,42 @@ func txExecContextObserved(
 	}
 	res, err := tx.ExecContext(ctx, query, args...)
 	if isSQLiteBusy(err) && observer != nil {
-		_ = observer.RecordSQLiteBusyMetric(ctx, op)
+		reportSQLiteBusyDetached(ctx, observer, op)
 	}
 	return res, err
+}
+
+// sqliteBusyDetachedReports bounds the BUSY reports of open transactions
+// that are still running: a burst of contention drops the reports beyond it
+// instead of piling up goroutines.
+var sqliteBusyDetachedReports = make(chan struct{}, 4)
+
+const sqliteBusyDetachedReportTimeout = 5 * time.Second
+
+// reportSQLiteBusyDetached reports a BUSY that a statement of an open
+// transaction met, in the background and bounded. The observer records the
+// busy metric and its correlation observations in the audit store, whose
+// pool has one connection, and the caller's open transaction holds that
+// connection until the statement's error has gone back up. Reported in line,
+// the observer waited for the connection its own caller held, with no
+// deadline, and every later audit write and managed hook queued behind it:
+// fresh native sessions were refused with HTTP 429 while /health answered
+// 200 (rel-1-0-4 GAP-0944).
+func reportSQLiteBusyDetached(ctx context.Context, observer SQLiteBusyObservabilityV8, op string) {
+	select {
+	case sqliteBusyDetachedReports <- struct{}{}:
+	default:
+		return
+	}
+	reportCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sqliteBusyDetachedReportTimeout)
+	go func() {
+		defer func() {
+			_ = recover()
+			cancel()
+			<-sqliteBusyDetachedReports
+		}()
+		_ = observer.RecordSQLiteBusyMetric(reportCtx, op)
+	}()
 }
 
 // ---------------------------------------------------------------------------
@@ -1891,7 +1932,7 @@ func tableExists(ex dbExecer, table string) (bool, error) {
 	return count > 0, nil
 }
 
-// unreadAuditIndexes are audit_events indexes no query reads. Every hook
+// unreadAuditIndexes are audit.db indexes no query needs. Every hook
 // writes several audit rows, and each index is another B-tree page per row in
 // the write-ahead log (GAP-0246, B-26), so a store outside Secure Client drops
 // them after the migrations, which still create them as main does. The schema
@@ -1922,6 +1963,13 @@ var unreadAuditIndexes = []struct{ name, create string }{
 	{"idx_audit_source_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_source_timestamp ON audit_events(source, timestamp)`},
 	{"idx_audit_connector", `CREATE INDEX IF NOT EXISTS idx_audit_connector ON audit_events(connector)`},
 	{"idx_audit_action_connector_timestamp", `CREATE INDEX IF NOT EXISTS idx_audit_action_connector_timestamp ON audit_events(action, connector, timestamp DESC)`},
+	// These two are the leading columns of a unique index on the same table
+	// (sqlite_autoindex_correlation_identifiers_2 and the correlation_receipts
+	// primary key), which serves every query they served. Their keys are
+	// random digests, so each hook call wrote another random page of each
+	// (rel-1-0-3 GAP-0320).
+	{"idx_correlation_identifiers_exact", `CREATE INDEX IF NOT EXISTS idx_correlation_identifiers_exact ON correlation_identifiers(connector_instance_id, namespace, identifier_kind, value_digest)`},
+	{"idx_correlation_receipts_source", `CREATE INDEX IF NOT EXISTS idx_correlation_receipts_source ON correlation_receipts(connector_instance_id, source_key_digest)`},
 }
 
 // trimUnreadAuditIndexes drops the unread indexes, or on a Secure Client
@@ -2099,6 +2147,48 @@ func (s *Store) DatabasePath() string {
 		return ""
 	}
 	return s.dbPath
+}
+
+// HasAuditEventID reports whether a durable event-history row already owns id.
+// Spool replay uses this before re-offering an occurrence after a crash.
+func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
+	if s == nil || !s.Ready() || id == "" {
+		return false, errors.New("audit: event lookup requires a ready store and id")
+	}
+	var one int
+	err := s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM audit_events WHERE id = ?`, id), &one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return one == 1, err
+}
+
+// StoredHookDecisionAction returns the decision a stored hook record holds:
+// the action in a connector hook row's envelope, or the effective action of
+// a hook_decision record. found is false when no row owns id; action is
+// empty when the row holds neither.
+func (s *Store) StoredHookDecisionAction(ctx context.Context, id string) (action string, found bool, err error) {
+	if s == nil || !s.Ready() || id == "" {
+		return "", false, errors.New("audit: hook decision lookup requires a ready store and id")
+	}
+	var envelopeAction, decisionAction string
+	err = s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx, `SELECT
+		CASE WHEN json_valid(COALESCE(structured_json,''))
+			THEN COALESCE(json_extract(structured_json,'$.action'),'') ELSE '' END,
+		CASE WHEN json_valid(COALESCE(projected_record_json,''))
+			THEN COALESCE(json_extract(projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'') ELSE '' END
+		FROM audit_events WHERE id = ?`, id), &envelopeAction, &decisionAction)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if envelopeAction != "" {
+		return envelopeAction, true, nil
+	}
+	return decisionAction, true, nil
 }
 
 // DatabaseFileReplaced reports whether the database path no longer names
@@ -2373,7 +2463,7 @@ func (s *Store) hasColumn(table, column string) (bool, error) {
 
 func (s *Store) LogEvent(e Event) error {
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -2518,7 +2608,7 @@ type SinkHealthInput struct {
 // InsertSinkHealth records a single sink delivery attempt outcome.
 func (s *Store) InsertSinkHealth(h SinkHealthInput) error {
 	if h.ID == "" {
-		h.ID = uuid.New().String()
+		h.ID = observability.NewTimeOrderedID()
 	}
 	if h.Timestamp.IsZero() {
 		h.Timestamp = time.Now().UTC()
@@ -2684,7 +2774,7 @@ func (b *JudgeBatch) InsertJudgeResponse(e JudgeResponse) error {
 		return nil
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -2842,7 +2932,7 @@ func (s *Store) InsertJudgeResponse(e JudgeResponse) error {
 		return nil
 	}
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -3068,7 +3158,7 @@ func (s *Store) ListEvents(limit int) ([]Event, error) {
 	}
 
 	rows, err := s.queryDB(context.Background(), "audit",
-		`SELECT id, timestamp, action, target, actor, details, structured_json, severity,
+		`SELECT id, timestamp, action, target, actor, details, `+s.structuredJSONReadSQL("")+`, severity,
 		        run_id, trace_id, request_id,
 		        session_id, turn_id, agent_name, agent_instance_id, policy_id,
 		        destination_app, tool_name, tool_id,
@@ -3235,7 +3325,7 @@ func (s *Store) SetActionForConnector(targetType, targetName, connector, sourceP
 	if err != nil {
 		return fmt.Errorf("audit: marshal actions: %w", err)
 	}
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	_, err = s.execDB(context.Background(), "audit",
 		`INSERT INTO actions (id, target_type, target_name, source_path, actions_json, reason, updated_at, connector)
@@ -3265,7 +3355,7 @@ func (s *Store) SetActionFieldForConnector(targetType, targetName, connector, fi
 	if err := validateActionFieldAndValue(field, value); err != nil {
 		return err
 	}
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	path := "$." + field
 	initJSON := "{}"
@@ -3972,7 +4062,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	legacyActions := legacyAlertEligibleActions()
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
-			event.details, event.structured_json, ` + alertEffectiveSeveritySQL() + `,
+			event.details, ` + s.structuredJSONReadSQL("event") + `, ` + alertEffectiveSeveritySQL() + `,
 			event.run_id,
 			event.trace_id, event.request_id, event.connector, event.enforced
 		 FROM audit_events AS event
@@ -4324,7 +4414,7 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 	}
 	e.Details = netguard.ScrubURLsInText(e.Details)
 	if e.ID == "" {
-		e.ID = uuid.New().String()
+		e.ID = observability.NewTimeOrderedID()
 	}
 	if e.Timestamp.IsZero() {
 		e.Timestamp = time.Now().UTC()
@@ -4385,7 +4475,7 @@ type SnapshotRow struct {
 
 // SetTargetSnapshot upserts a snapshot baseline for drift comparison.
 func (s *Store) SetTargetSnapshot(targetType, targetPath, contentHash, depHashes, cfgHashes, endpoints, scanID, scannerFingerprint string) error {
-	id := uuid.New().String()
+	id := observability.NewTimeOrderedID()
 	now := time.Now().UTC()
 	_, err := s.execDB(context.Background(), "audit",
 		`INSERT INTO target_snapshots (id, target_type, target_path, content_hash, dependency_hashes, config_hashes, network_endpoints, scan_id, captured_at, scanner_fingerprint)
@@ -4554,6 +4644,10 @@ func (s *Store) Close() error {
 	if s.checkpointDB != nil {
 		err = errors.Join(err, s.checkpointDB.Close())
 		s.checkpointDB = nil
+	}
+	if s.durableDB != nil {
+		err = errors.Join(err, s.durableDB.Close())
+		s.durableDB = nil
 	}
 	s.checkpointMu.Unlock()
 	s.dbPathGuard.close()

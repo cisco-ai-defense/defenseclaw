@@ -1,0 +1,11 @@
+{
+  "title": "Configuration",
+  "pages": [
+    "source-of-truth",
+    "env-vars",
+    "keys",
+    "paths",
+    "fail-modes",
+    "llm-providers"
+  ]
+}

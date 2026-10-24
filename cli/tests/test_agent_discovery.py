@@ -197,37 +197,6 @@ def test_antigravity_binary_digest_is_bounded_and_matches_stable_bytes(monkeypat
         ad._stable_binary_sha512(str(binary))
 
 
-def test_omnigent_version_probe_uses_bounded_slow_start_timeout(monkeypatch) -> None:
-    invocation: dict[str, object] = {}
-
-    def run(command, **kwargs):
-        invocation["command"] = command
-        invocation.update(kwargs)
-        return subprocess.CompletedProcess(
-            command,
-            0,
-            stdout=b"omnigent 0.7.0 (built 2026-07-27T22:01:50Z)\r\n",
-            stderr=b"",
-        )
-
-    monkeypatch.setattr(ad.subprocess, "run", run)
-
-    version, error = ad._version_for_agent_binary(
-        "omnigent",
-        r"C:\Users\tester\.local\bin\omnigent.exe",
-        ("--version",),
-        require_trusted_binary_paths=False,
-    )
-
-    assert (version, error) == ("omnigent 0.7.0 (built 2026-07-27T22:01:50Z)", "")
-    assert invocation["command"] == [
-        r"C:\Users\tester\.local\bin\omnigent.exe",
-        "--version",
-    ]
-    assert invocation["shell"] is False
-    assert invocation["timeout"] == 8.0
-    assert invocation["capture_output"] is True
-    assert invocation["text"] is False
 
 
 @pytest.fixture
@@ -359,7 +328,7 @@ def test_read_only_refresh_returns_fresh_scan_without_replacing_cache(monkeypatc
     monkeypatch.setattr(
         ad,
         "_scan_agent",
-        lambda name, **_kwargs: _signal(name, installed=name == "omnigent"),
+        lambda name, **_kwargs: _signal(name, installed=name == "hermes"),
     )
 
     refreshed = ad.discover_agents(
@@ -370,7 +339,7 @@ def test_read_only_refresh_returns_fresh_scan_without_replacing_cache(monkeypatc
     )
 
     assert refreshed.cache_hit is False
-    assert refreshed.agents["omnigent"].installed is True
+    assert refreshed.agents["hermes"].installed is True
     assert refreshed.agents["cursor"].installed is False
     assert cache.read_bytes() == original
 
@@ -594,10 +563,8 @@ def test_config_evidence_helper_rejects_directories(tmp_path):
     ("connector", "empty_dir"),
     [
         ("claudecode", (".claude",)),
-        ("openhands", (".openhands",)),
         ("antigravity", (".gemini", "antigravity-cli")),
         ("amp", (".config", "amp")),
-        ("omnigent", (".omnigent",)),
     ],
 )
 def test_empty_connector_directories_are_not_install_evidence(
@@ -712,11 +679,9 @@ def test_devin_canonical_user_mcp_file_is_configuration_evidence(
         ("copilot", (".copilot", "mcp-config.json")),
         # GAP-1481: the user-level hooks file DefenseClaw writes for Copilot.
         ("copilot", (".copilot", "hooks", "defenseclaw.json")),
-        ("openhands", (".openhands", "hooks.json")),
         ("antigravity", (".gemini", "config", "hooks.json")),
         ("opencode", (".config", "opencode", "opencode.json")),
         ("amp", (".config", "amp", "settings.json")),
-        ("omnigent", (".omnigent", "config.yaml")),
     ],
 )
 def test_each_connector_tracks_meaningful_config_separately_from_installation(
@@ -2050,11 +2015,9 @@ def test_devin_windows_cli_uses_exact_product_trust_root(monkeypatch, tmp_path):
         ("cursor", ("local", "cursor-agent", "agent.exe")),
         ("devin", ("local", "devin", "cli", "bin", "devin.exe")),
         ("copilot", ("roaming", "npm", "copilot.cmd")),
-        ("openhands", ("home", ".local", "bin", "openhands.exe")),
         ("antigravity", ("local", "agy", "bin", "agy.exe")),
         ("opencode", ("home", ".opencode", "bin", "opencode.exe")),
         ("amp", ("roaming", "npm", "amp.cmd")),
-        ("omnigent", ("home", ".local", "bin", "omnigent.exe")),
     ],
 )
 def test_windows_discovery_finds_known_binary_outside_path(
@@ -2363,33 +2326,6 @@ def test_cold_start_probe_timeout_is_retried_once_and_shown_short(monkeypatch, t
     assert ad._display_error(slow) == ad.VERSION_PROBE_TIMED_OUT
 
 
-def test_openhands_version_probe_prefers_cli_line_after_banner(monkeypatch, tmp_path):
-    _pin_home(monkeypatch, tmp_path)
-    calls = []
-    monkeypatch.setattr(ad.shutil, "which", lambda name: "/opt/bin/openhands")
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda path: True)
-
-    banner = """+----------------------------------------------------------------------+
-|  OpenHands SDK v1.21.0                                               |
-+----------------------------------------------------------------------+
-
-OpenHands CLI 1.16.0
-"""
-
-    def fake_run(args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout=banner, stderr="")
-
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
-
-    signal = ad._scan_agent("openhands")
-
-    assert signal.installed is True
-    assert signal.version == "OpenHands CLI 1.16.0"
-    args, kwargs = calls[0]
-    assert args == [os.path.abspath("/opt/bin/openhands"), "--version"]
-    assert kwargs["timeout"] == 30.0
-    assert kwargs["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 
 def test_hermes_version_probe_gets_longer_timeout(monkeypatch, tmp_path):
@@ -2512,27 +2448,6 @@ def test_version_probe_decoder_preserves_legacy_windows_output(monkeypatch):
     assert output == "Cursor 3.9.16 caf\u00e9"
 
 
-def test_windows_executable_suffixes_preserve_agent_specific_probe_rules(monkeypatch):
-    calls = []
-    monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kwargs: True)
-
-    def fake_run(args, **kwargs):
-        calls.append((args, kwargs))
-        return subprocess.CompletedProcess(
-            args=args,
-            returncode=0,
-            stdout="SDK banner\nOpenHands CLI 1.16.0\n",
-            stderr="",
-        )
-
-    monkeypatch.setattr(ad.subprocess, "run", fake_run)
-
-    version, error = ad._version_for_binary(r"C:\Tools\openhands.EXE", ("--version",))
-
-    assert error == ""
-    assert version == "OpenHands CLI 1.16.0"
-    assert calls[0][1]["timeout"] == 30.0
-    assert calls[0][1]["env"]["OPENHANDS_SUPPRESS_BANNER"] == "1"
 
 
 def test_claude_version_probe_gets_longer_timeout_with_exe_suffix(monkeypatch):
@@ -2579,20 +2494,6 @@ def test_which_discovers_cmd_wrapper(monkeypatch, tmp_path):
     assert ad._path_key(ad._which("cursor")) == ad._path_key(str(wrapper))
 
 
-def test_omnigent_discovery_honors_config_home(monkeypatch, tmp_path):
-    _pin_home(monkeypatch, tmp_path)
-    config_home = tmp_path / "omnigent-config-home"
-    config_home.mkdir()
-    config_path = config_home / "config.yaml"
-    config_path.write_text("policies: {}\n", encoding="utf-8")
-    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
-    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-
-    signal = ad._scan_agent("omnigent")
-
-    assert signal.installed is False
-    assert signal.configured is True
-    assert signal.config_path == str(config_path)
 
 
 def test_config_state_marks_selected_observe_connectors_active():
@@ -2630,18 +2531,6 @@ def test_config_state_marks_selected_observe_connectors_active():
         assert disc.agents[name].mode == "observe"
 
 
-def test_omnigent_discovery_does_not_fall_back_when_config_home_is_set(monkeypatch, tmp_path):
-    _pin_home(monkeypatch, tmp_path)
-    default_home = tmp_path / ".omnigent"
-    default_home.mkdir()
-    (default_home / "config.yaml").write_text("policies: {}\n", encoding="utf-8")
-    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "missing-custom-home"))
-    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
-
-    signal = ad._scan_agent("omnigent")
-
-    assert signal.installed is False
-    assert signal.config_path == ""
 
 
 # M-4 regression coverage: the version probe MUST refuse to exec a
@@ -2745,20 +2634,6 @@ def test_windows_defaults_are_narrow_and_reject_drive_root():
     assert ad._expand_bin_prefixes((Path(local_app_data).anchor,)) == []
 
 
-@pytest.mark.skipif(os.name == "nt", reason="requires unprivileged POSIX symlinks")
-def test_trust_check_canonicalises_operator_prefix_symlink(monkeypatch, tmp_path):
-    real_root = tmp_path / "real-tools"
-    binary = real_root / "bin" / "omnigent"
-    binary.parent.mkdir(parents=True)
-    binary.write_text("#!/bin/sh\nexit 0\n")
-    binary.chmod(0o755)
-    binary.parent.chmod(0o755)
-    alias = tmp_path / "tools-alias"
-    alias.symlink_to(real_root, target_is_directory=True)
-
-    monkeypatch.setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", str(alias))
-
-    assert ad._is_trusted_binary_path(str(alias / "bin" / "omnigent")) is True
 
 
 def test_trust_check_accepts_config_prefix_when_required(monkeypatch, tmp_path):
@@ -2983,8 +2858,8 @@ def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_p
 def test_first_installed_precedence():
     assert ad.first_installed(_discovery("claudecode"), "claudecode") == "claudecode"
     assert ad.first_installed(_discovery(*ad.DISCOVERABLE_CONNECTORS), "codex") == "codex"
-    assert ad.first_installed(_discovery(), "retired-example") == "codex"
-    assert ad.first_installed(_discovery(), "codex") == "codex"
+    assert ad.first_installed(_discovery(), "retired-example") == ""
+    assert ad.first_installed(_discovery(), "codex") == ""
     assert ad.first_installed(_discovery("openclaw"), "not-real") == "openclaw"
 
 
@@ -2997,7 +2872,8 @@ def test_render_discovery_table_includes_connectors_and_cache_state():
     assert "yes" in rendered
 
 
-def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path):
+@pytest.mark.parametrize("windows", [False, True])
+def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path, windows):
     """RHEL-U3-13: one slow --version on a busy host erased a peer's version,
     so the gateway refused that peer in action mode and setup of another
     connector did not converge."""
@@ -3016,7 +2892,7 @@ def test_timed_out_probe_keeps_version_of_unchanged_binary(monkeypatch, tmp_path
             )
         return fake
 
-    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: windows)
     monkeypatch.setattr(ad, "_scan_agent", scan("amp 0.0.1", ""))
     ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
 
@@ -3073,6 +2949,201 @@ def test_a_refresh_that_cannot_find_an_unchanged_binary_keeps_its_version(monkey
     monkeypatch.setattr(ad, "_scan_agent", scan(False))
     gone = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"]
     assert (gone.version, gone.installed) == ("", False)
+
+
+def test_an_unprobed_agent_keeps_the_version_of_the_candidate_last_probed(monkeypatch, tmp_path):
+    """GAP-0002: setup of one connector probes only it. A peer whose first
+    binary candidate is not the one the last scan probed lost its version,
+    and the restarted gateway stopped enforcing it."""
+    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    for binary in (first, probed):
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        old = os.stat(binary).st_mtime - 600
+        os.utime(binary, (old, old))
+
+    def scan(probe: bool):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "cursor":
+                return _signal(name)
+            if not probe:
+                return ad.AgentSignal(
+                    name=name, installed=True, config_path="", binary_path=str(first),
+                    version="", error=ad.VERSION_NOT_PROBED,
+                )
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(probed),
+                version="2026.10.01-14929f9", error="", skipped_binaries=(str(first),),
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first), str(probed)))
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan(False))
+    kept = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["cursor"]
+    assert (kept.version, kept.binary_path, kept.error) == ("2026.10.01-14929f9", str(probed), "")
+
+    # No longer a candidate: not the same binary, so no version.
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first),))
+    gone = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["cursor"]
+    assert (gone.version, gone.binary_path) == ("", str(first))
+
+
+def _cursor_scans(probed, skipped):
+    def scan(probe: bool, first_candidate: str = ""):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "cursor":
+                return _signal(name)
+            if not probe:
+                return ad.AgentSignal(
+                    name=name, installed=True, config_path="", binary_path=first_candidate,
+                    version="", error=ad.VERSION_NOT_PROBED,
+                )
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(probed),
+                version="2026.10.01-14929f9", error="", skipped_binaries=skipped,
+            )
+        return fake
+    return scan
+
+
+def _old_binaries(*binaries):
+    for binary in binaries:
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        old = os.stat(binary).st_mtime - 600
+        os.utime(binary, (old, old))
+
+
+def test_an_unprobed_agent_does_not_keep_a_version_across_a_newly_preferred_binary(monkeypatch, tmp_path):
+    """W2B review: a new higher-priority binary appeared after the scan that
+    versioned a fallback one; an unrelated setup carried the fallback's
+    version, which the gateway used to admit the action-mode contract."""
+    newer, probed = tmp_path / "cursor", tmp_path / "agent"
+    _old_binaries(newer, probed)
+    scan = _cursor_scans(probed, ())
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(probed),))
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(newer), str(probed)))
+    monkeypatch.setattr(ad, "_scan_agent", scan(False, str(newer)))
+    signal = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["cursor"]
+    assert (signal.version, signal.binary_path, signal.error) == ("", str(newer), ad.VERSION_NOT_PROBED)
+
+
+def test_an_unprobed_agent_does_not_keep_a_version_when_a_passed_over_binary_changed(monkeypatch, tmp_path):
+    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    _old_binaries(first, probed)
+    scan = _cursor_scans(probed, (str(first),))
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first), str(probed)))
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    os.utime(first, None)  # upgraded since: it may answer a probe now
+    monkeypatch.setattr(ad, "_scan_agent", scan(False, str(first)))
+    signal = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["cursor"]
+    assert (signal.version, signal.binary_path) == ("", str(first))
+
+
+def test_an_unprobed_agent_does_not_keep_the_version_of_an_untrusted_binary(monkeypatch, tmp_path):
+    first, probed = tmp_path / "cursor", tmp_path / "agent"
+    _old_binaries(first, probed)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda name, _spec: (str(first), str(probed)))
+    monkeypatch.setattr(ad, "_scan_agent", _cursor_scans(probed, (str(first),))(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    def unprobed() -> dict[str, ad.AgentSignal]:
+        return {"cursor": ad.AgentSignal(
+            name="cursor", installed=True, config_path="", binary_path=str(first),
+            version="", error=ad.VERSION_NOT_PROBED,
+        )}
+
+    for trusted, version in ((False, ""), (True, "2026.10.01-14929f9")):
+        monkeypatch.setattr(ad, "_is_trusted_binary_path", lambda _path, **_kw: trusted)
+        agents = unprobed()
+        ad._keep_versions_of_slow_unchanged_agents(agents, data_dir=tmp_path, require_trusted_binary_paths=True)
+        assert agents["cursor"].version == version, trusted
+
+
+def test_a_refresh_that_cannot_find_an_unprobed_agent_keeps_it_installed(monkeypatch, tmp_path):
+    """rel-1-0-3 GAP-0277: an upgrade run with a PATH without the agents'
+    folder reported installed but unconfigured agents as not installed."""
+    binary = tmp_path / "amp"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    def scan(found: bool):
+        def fake(name: str, **_kwargs) -> ad.AgentSignal:
+            if name != "amp":
+                return _signal(name)
+            if not found:
+                return ad.AgentSignal(name=name, installed=False, config_path="", binary_path="", version="", error="")
+            return ad.AgentSignal(
+                name=name, installed=True, config_path="", binary_path=str(binary),
+                version="", error=ad.VERSION_NOT_PROBED,
+            )
+        return fake
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan(True))
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path)
+
+    monkeypatch.setattr(ad, "_scan_agent", scan(False))
+    kept = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["amp"]
+    assert (kept.installed, kept.binary_path, kept.version, kept.error) == (
+        True, str(binary), "", ad.VERSION_NOT_PROBED,
+    )
+    assert ad._read_cache(data_dir=tmp_path).agents["amp"].installed is True
+
+    # Removed: not installed.
+    binary.unlink()
+    gone = ad.discover_agents(use_cache=False, refresh=True, data_dir=tmp_path).agents["amp"]
+    assert (gone.installed, gone.binary_path) == (False, "")
+def test_a_scan_restricted_to_one_connector_still_probes_every_enrolled_one(monkeypatch, tmp_path):
+    """GAP-0547: `setup codex` probed only Codex. Claude Code, enrolled in
+    action mode, had updated itself since the last scan, so its version was
+    not kept and the cache the restarted gateway reads had none: the gateway
+    refused claudecode ("agent version not probed") and could not start."""
+    data_dir = tmp_path / ".defenseclaw"
+    data_dir.mkdir()
+    (data_dir / "config.yaml").write_text(
+        "guardrail:\n  connectors:\n    claudecode: {mode: action}\n    codex: {mode: action}\n"
+        "    amp:\n      enabled: false\n",
+        encoding="utf-8",
+    )
+    claude = tmp_path / "claude"
+    claude.write_text("#!/bin/sh\n", encoding="utf-8")
+    versions = {"claudecode": "2.1.304 (Claude Code)"}
+    probed: list[str] = []
+
+    def probe(name, _path, _args, **_kwargs):
+        probed.append(name)
+        return versions.get(name, f"{name} 1.0"), ""
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(
+        ad, "_binary_candidates_for_agent",
+        lambda name, _spec: (str(claude),) if name == "claudecode" else (f"/opt/bin/{name}",),
+    )
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    ad.discover_agents(use_cache=False, refresh=True, data_dir=data_dir)
+
+    # The agent updates itself after that scan.
+    versions["claudecode"] = "2.1.308 (Claude Code)"
+    os.utime(claude, None)
+    probed.clear()
+    disc = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=data_dir)
+
+    assert sorted(probed) == ["claudecode", "codex"]
+    assert disc.agents["claudecode"].version == "2.1.308 (Claude Code)"
+    assert ad._read_cache(data_dir=data_dir).agents["claudecode"].version == "2.1.308 (Claude Code)"
+    # Not enrolled (or disabled): still not started (GAP-0901).
+    assert disc.agents["copilot"].error == ad.VERSION_NOT_PROBED
+    assert disc.agents["amp"].error == ad.VERSION_NOT_PROBED
 
 
 def test_cached_discovery_rechecks_config_files(monkeypatch, tmp_path):

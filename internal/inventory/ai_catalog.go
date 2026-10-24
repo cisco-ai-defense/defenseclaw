@@ -261,25 +261,94 @@ func CheckSignaturePackPins(cfg *config.Config) error {
 // SignaturePackEntry resolves one ai_discovery.signature_packs entry the way
 // the loader does (a ~ path, a directory of *.json, a glob). files are the
 // pack files it names now (a plain path stays listed while the file is not
-// there yet); watchDir is the folder a new pack would appear in, "" for an
-// entry that names one file.
-func SignaturePackEntry(entry string) (files []string, watchDir string) {
+// there yet); watchDirs are the folders a new pack would appear in, none for
+// an entry that names one file. A glob with wildcards in its folders
+// (/packs/*/pack.json) is watched at its last folder without one and at
+// every folder its wildcards match now (SignaturePackWildcardDirs), so a new
+// matching folder, and then the pack in it, reloads the catalog (GAP-0858).
+func SignaturePackEntry(entry string) (files []string, watchDirs []string) {
 	home, _ := platformDiscoveryHomeDir()
 	files, _ = expandSignaturePackCandidate(entry, home)
 	expanded := expandHome(entry, home)
 	if info, err := os.Stat(expanded); err == nil && info.IsDir() {
-		return files, filepath.Clean(expanded)
+		return files, []string{filepath.Clean(expanded)}
 	}
 	if hasGlobMeta(expanded) {
 		if dir := filepath.Dir(expanded); !hasGlobMeta(dir) {
-			return files, filepath.Clean(dir)
+			return files, []string{filepath.Clean(dir)}
 		}
-		return files, ""
+		return files, signaturePackGlobDirs(expanded)
 	}
 	if len(files) == 0 && expanded != "" {
 		files = []string{expanded}
 	}
-	return files, ""
+	return files, nil
+}
+
+// maxSignaturePackWatchDirs bounds the folders one glob entry is watched at.
+const maxSignaturePackWatchDirs = 256
+
+// SignaturePackWildcardDirs are the folders the wildcards in the folder part
+// of a glob entry match now, without its fixed base folder: they change when
+// a matching folder is created or removed, which the generation digest
+// records so the watch follows the new folder. Empty for every other entry.
+func SignaturePackWildcardDirs(entry string) []string {
+	home, _ := platformDiscoveryHomeDir()
+	expanded := expandHome(entry, home)
+	if !hasGlobMeta(filepath.Dir(expanded)) {
+		return nil
+	}
+	if dirs := signaturePackGlobDirs(expanded); len(dirs) > 1 {
+		return dirs[1:]
+	}
+	return nil
+}
+
+// signaturePackGlobDirs returns the last folder of pattern's folder part
+// before its first wildcard, then the folders each wildcard level matches,
+// at most maxSignaturePackWatchDirs in all.
+func signaturePackGlobDirs(pattern string) []string {
+	dir := filepath.Clean(filepath.Dir(pattern))
+	sep := string(filepath.Separator)
+	volume := filepath.VolumeName(dir)
+	rest := dir[len(volume):]
+	base := volume
+	if strings.HasPrefix(rest, sep) {
+		base += sep
+	}
+	parts := strings.Split(strings.Trim(rest, sep), sep)
+	i := 0
+	for ; i < len(parts) && !hasGlobMeta(parts[i]); i++ {
+		base = filepath.Join(base, parts[i])
+	}
+	if base == "" || !filepath.IsAbs(base) {
+		return nil
+	}
+	out := []string{filepath.Clean(base)}
+	level := out
+	for ; i < len(parts) && len(level) > 0; i++ {
+		var next []string
+		for _, parent := range level {
+			if hasGlobMeta(parent) {
+				continue // a matched name with wildcard characters cannot be globbed below
+			}
+			matches, err := filepath.Glob(filepath.Join(parent, parts[i]))
+			if err != nil {
+				return out
+			}
+			for _, match := range matches {
+				if info, err := os.Stat(match); err == nil && info.IsDir() {
+					next = append(next, filepath.Clean(match))
+				}
+			}
+		}
+		out = append(out, next...)
+		if len(out) >= maxSignaturePackWatchDirs {
+			return out[:maxSignaturePackWatchDirs]
+		}
+		level = next
+	}
+	return out
 }
 
 // Signature data added to the embedded catalog after 1.0.0. The Secure Client

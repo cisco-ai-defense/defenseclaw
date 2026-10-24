@@ -92,14 +92,6 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Status: PlatformSupported,
 		Reason: "Hermes native shell hooks use a direct DefenseClaw executable on native Windows x64; restart any open Hermes session after setup so it loads them.",
 	},
-	"openhands": {
-		Status: PlatformUnsupported,
-		Reason: "OpenHands CLI requires WSL; DefenseClaw does not implement a WSL connector path.",
-	},
-	"omnigent": {
-		Status: PlatformSupported,
-		Reason: "OmniGent is supported on native Windows in degraded mode; DefenseClaw uses its awaited in-process policy API without terminal wrapping or filesystem/network sandbox parity.",
-	},
 	"openclaw": {
 		Status: PlatformUnsupported,
 		Reason: "DefenseClaw on Windows is hook-only; OpenClaw integration requires the guardrail proxy.",

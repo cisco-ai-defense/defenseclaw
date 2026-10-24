@@ -16,6 +16,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -30,14 +31,16 @@ import (
 // successful gateway answer that carries no usable verdict (no action, an
 // unknown one, a block without a directive or with one that does not deny),
 // with DEFENSECLAW_FAIL_MODE=open in the environment. The allow and alert
-// answers of observe mode still let the call run.
+// answers of observe mode still let the call run. r104 W8 review P2 adds
+// Claude Code and Codex.
 func TestManagedStandaloneShellHooksBlockAnUnusableAnswer(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq is required to run the shell hooks")
 	}
 	for _, conn := range []Connector{
 		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
-		NewDevinConnector(), NewAntigravityConnector(), NewOpenHandsConnector(),
+		NewDevinConnector(), NewAntigravityConnector(), NewClaudeCodeConnector(),
+		NewCodexConnector(),
 	} {
 		hook := hookArgvConnectorCase(t, conn.Name())
 		for _, answer := range []struct {
@@ -82,7 +85,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 	}
 	for _, conn := range []Connector{
 		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
-		NewDevinConnector(), NewAntigravityConnector(), NewOpenHandsConnector(),
+		NewDevinConnector(), NewAntigravityConnector(),
 	} {
 		hook := hookArgvConnectorCase(t, conn.Name())
 		for _, answer := range []struct {
@@ -107,6 +110,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 					}))
 					t.Cleanup(server.Close)
 					home := t.TempDir()
+					installNativeGatewayForHookTest(t, home)
 					hookDir := filepath.Join(home, ".defenseclaw", "hooks")
 					opts := SetupOpts{
 						DataDir:            filepath.Join(home, ".defenseclaw"),
@@ -114,7 +118,9 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 						HookAPIToken:       "connector-scoped-token",
 						HookAPITokenScoped: true,
 						HookFailMode:       failMode,
-						GuardrailMode:      "observe",
+						// The operator's choice: Cursor's open outage needs it.
+						ConfiguredHookFailMode: failMode,
+						GuardrailMode:          "observe",
 					}
 					if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 						t.Fatal(err)
@@ -130,9 +136,11 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 							env = append(env, kv)
 						}
 					}
-					// Per-user Hermes, Cursor in observe and Antigravity render
-					// open (no fail-closed contract); a user who wants closed sets
-					// DEFENSECLAW_FAIL_MODE, as the A2R-02 cell did.
+					// No hook reads DEFENSECLAW_FAIL_MODE (GAP-0315): the mode
+					// rendered from the config decides. Cursor in observe keeps
+					// its outages closed without an explicit open
+					// (OutageHookFailMode), and per-user Antigravity follows
+					// closed (w3-g3-hooks).
 					cmd.Env = append(env, "HOME="+home, "DEFENSECLAW_FAIL_MODE="+failMode)
 					cmd.Stdin = strings.NewReader(hook.stdin)
 					var stdout, stderr bytes.Buffer
@@ -147,7 +155,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 					out := stdout.String()
 					blocked := code == 2 || strings.Contains(out, `"deny"`) ||
 						strings.Contains(out, `"block"`) || strings.Contains(out, `"continue":false`)
-					wantBlocked := answer.block || (!answer.usable && failMode == "closed")
+					wantBlocked := answer.block || !answer.usable
 					if blocked != wantBlocked {
 						t.Fatalf("exit %d stdout=%q stderr=%q: blocked = %v, want %v", code, out, stderr.String(), blocked, wantBlocked)
 					}
@@ -157,6 +165,102 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// r104 W4b2 review P1: a standalone managed shell hook (Linux, macOS) whose
+// administrator chose hook_fail_mode open lets a call through only on a
+// gateway outage (here the stopped service: no hook socket). A rate limit
+// (HTTP 429 after the resends, or a resend that fails after a 429), a 5xx,
+// an unusable answer and input too large to inspect are no outage and block,
+// as in the native hook runner. r104 W8 review P2: Claude Code and Codex
+// let a 4xx, a 429 and an unusable answer through in open.
+func TestManagedStandaloneShellHooksOpenOnlyForAnOutage(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is required to run the shell hooks")
+	}
+	answer := func(status int, body string) func(int, http.ResponseWriter) bool {
+		return func(_ int, w http.ResponseWriter) bool {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+			return true
+		}
+	}
+	truncatedAnswer := func(status int) func(int, http.ResponseWriter) bool {
+		return func(_ int, w http.ResponseWriter) bool {
+			w.Header().Set("Content-Length", "128")
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"unavailable"}`))
+			return true
+		}
+	}
+	rateLimited := `{"error":"rate_limited","reason":"enterprise_managed_rate_limited","retry_after_seconds":1}`
+	for _, conn := range []Connector{
+		NewHermesConnector(), NewKiroConnector(), NewCursorConnector(),
+		NewDevinConnector(), NewAntigravityConnector(), NewClaudeCodeConnector(), NewCopilotConnector(),
+		NewCodexConnector(),
+	} {
+		hook := hookArgvConnectorCase(t, conn.Name())
+		for _, tc := range []struct {
+			name      string
+			serve     func(int, http.ResponseWriter) bool
+			stdin     string
+			stopped   bool
+			untrusted bool
+			blocks    bool
+		}{
+			{name: "rate limited until the resends end", serve: answer(http.StatusTooManyRequests, rateLimited), blocks: true},
+			{name: "rate limited, then the resend fails", serve: func(n int, w http.ResponseWriter) bool {
+				if n == 1 {
+					return answer(http.StatusTooManyRequests, rateLimited)(n, w)
+				}
+				conn, _, err := w.(http.Hijacker).Hijack()
+				if err == nil {
+					_ = conn.Close()
+				}
+				return true
+			}, blocks: true},
+			{name: "gateway 5xx", serve: answer(http.StatusServiceUnavailable, `{"error":"unavailable"}`), blocks: true},
+			{name: "gateway 500", serve: answer(http.StatusInternalServerError, `{"error":"internal"}`), blocks: true},
+			{name: "gateway 502", serve: answer(http.StatusBadGateway, `{"error":"bad gateway"}`), blocks: true},
+			{name: "gateway 4xx", serve: answer(http.StatusBadRequest, `{"error":"bad request"}`), blocks: true},
+			{name: "gateway 401", serve: answer(http.StatusUnauthorized, `{"error":"unauthorized"}`), blocks: true},
+			{name: "gateway 403", serve: answer(http.StatusForbidden, `{"error":"forbidden"}`), blocks: true},
+			{name: "gateway 404", serve: answer(http.StatusNotFound, `{"error":"missing"}`), blocks: true},
+			{name: "gateway 400 truncated", serve: truncatedAnswer(http.StatusBadRequest), blocks: true},
+			{name: "gateway 503 truncated", serve: truncatedAnswer(http.StatusServiceUnavailable), blocks: true},
+			{name: "unusable answer", serve: answer(http.StatusOK, `{"action":"proceed"}`), blocks: true},
+			{name: "missing action", serve: answer(http.StatusOK, `{}`), blocks: true},
+			{name: "input too large to inspect", stdin: `{"pad":"` + strings.Repeat("x", 1100<<10) + `"}`, blocks: true},
+			{name: "gateway stopped", stopped: true, blocks: conn.Name() == "copilot"},
+			{name: "socket trust failed", untrusted: true, blocks: true},
+			{name: "allow verdict", serve: answer(http.StatusOK, `{"action":"allow"}`), blocks: false},
+		} {
+			t.Run(fmt.Sprintf("%s %s", conn.Name(), tc.name), func(t *testing.T) {
+				t.Parallel()
+				f := newHookSocketFixture(t, "dcoo", nil)
+				f.gateway.serve = tc.serve
+				if tc.stopped {
+					if err := os.Remove(f.socket); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if tc.untrusted {
+					f.untrustSocketDir(t)
+				}
+				stdin := hook.stdin
+				if tc.stdin != "" {
+					stdin = tc.stdin
+				}
+				code, stdout, stderr := runStandaloneShellHookInMode(t, f, conn, hook.script, hook.args, stdin, "open")
+				blocked := code == 2 || strings.Contains(stdout, `"deny"`) ||
+					strings.Contains(stdout, `"block"`) || strings.Contains(stdout, `"continue":false`)
+				if blocked != tc.blocks {
+					t.Fatalf("admin open: exit %d stdout=%q stderr=%q: blocked = %v, want %v", code, stdout, stderr, blocked, tc.blocks)
+				}
+			})
 		}
 	}
 }

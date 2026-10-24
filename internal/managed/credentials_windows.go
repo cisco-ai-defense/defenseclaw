@@ -42,6 +42,35 @@ func ResolveServiceCredentialAs(name, secretsDir, serviceAccount string) ([]byte
 	return resolveWindowsServiceCredential(name, secretsDir, serviceAccount)
 }
 
+// ReadServiceCredentialForACLRepair checks a credential's shape and value
+// before Windows Repair restamps the installed secrets store. It deliberately
+// omits only the DACL/reader checks that Set-DefenseClawStandaloneSecretsAcls
+// repairs. The caller must supply that installed store, and must run the
+// normal ResolveServiceCredential check again after the ACL restamp.
+func ReadServiceCredentialForACLRepair(name, secretsDir string) ([]byte, error) {
+	if !ValidCredentialName(name) {
+		return nil, fmt.Errorf("credential name %q is not valid", name)
+	}
+	if strings.TrimSpace(secretsDir) == "" {
+		return nil, ErrNoServiceCredential
+	}
+	path := filepath.Join(secretsDir, name)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNoServiceCredential
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect credential %s: %w", name, err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("credential %s is not a regular file", name)
+	}
+	if err := winpath.RejectReparseChain(path); err != nil {
+		return nil, fmt.Errorf("credential %s has an unsafe path: %w", name, err)
+	}
+	return readStoredCredential(name, path)
+}
+
 func resolveWindowsServiceCredential(name, secretsDir, serviceAccount string) ([]byte, CredentialSource, error) {
 	if strings.TrimSpace(secretsDir) == "" {
 		return nil, "", ErrNoServiceCredential

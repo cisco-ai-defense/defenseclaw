@@ -8,6 +8,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -88,22 +89,28 @@ func TestUnmatchedUserEntryWarns(t *testing.T) {
 // GAP-0361: a uid the account database cannot name now (a cold gateway with
 // the domain controller away) is explained as its hook calls are decided: a
 // users entry naming the uid selects its profile, as the hook's
-// kernel-verified uid does, and the rest default_lookup_failed with the
-// reason. Explain printed default_lookup_failed for it.
+// kernel-verified uid does; a request needing other missing facts is refused
+// and names them (default_lookup_failed). Explain used to report only the match.
 func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.T) {
 	prevFacts, prevCached, prevBlocking := profileExplainDirectoryFacts, profileExplainCachedSubject, identityLookupBlocking.Load()
 	t.Cleanup(func() {
 		profileExplainDirectoryFacts, profileExplainCachedSubject = prevFacts, prevCached
 		setIdentityLookupBlocking(prevBlocking)
 	})
+	lookupCalls := 0
 	profileExplainDirectoryFacts = func(string) (useridentity.DirectoryFacts, error) {
+		lookupCalls++
 		return useridentity.DirectoryFacts{}, errors.New("SSSD NSS responder: i/o timeout")
 	}
-	profileExplainCachedSubject = func(string, time.Time) (profileSubject, bool) { return profileSubject{}, false }
+	profileExplainCachedSubject = func(string, time.Time) (profileSubject, error) { return profileSubject{}, errNoCachedHolder }
 	setIdentityLookupBlocking(true)
 	subject, err := profileExplainUnresolved("94404076", unixidentity.ErrNotFound)
-	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !strings.Contains(subject.LookupError, "i/o timeout") {
+	if err != nil || subject.UserID != "94404076" || !subject.LookupFailed || !subject.accountUnresolved ||
+		!strings.Contains(subject.LookupError, "account database names no account") {
 		t.Fatalf("subject %+v, err %v; want the uid with the lookup failure", subject, err)
+	}
+	if lookupCalls != 0 {
+		t.Fatalf("unknown-account explain started %d directory lookup(s); it must not add a false health warning", lookupCalls)
 	}
 	set := &guardrailProfileSet{
 		profiles: map[string]config.DerivedGuardrailProfile{"contractors": {Digest: "d1"}, "engineering": {Digest: "d2"}, "offline-floor": {Digest: "d3"}},
@@ -113,8 +120,12 @@ func TestProfileExplainUIDTheDirectoryCannotNameMatchesItsUsersEntry(t *testing.
 		},
 		defaultProfile: "offline-floor",
 	}
-	if decision := set.match(&subject, profileSubjectLookup, "claudecode", ""); decision.Name != "contractors" || decision.Match != profileMatchUser {
-		t.Fatalf("decision = %+v; want contractors by the uid entry", decision)
+	// r104 identity: the uid entry matches, and the group entry may: the
+	// profile that covers the others, or their strictest combination,
+	// decides.
+	if decision := set.match(&subject, profileSubjectLookup, "claudecode", ""); decision.Match != profileMatchDefaultLookupFailed ||
+		!slices.Contains(decision.Candidates, "contractors") || !slices.Contains(decision.Candidates, "engineering") {
+		t.Fatalf("decision = %+v; want contractors (by the uid entry) and engineering among the candidates", decision)
 	}
 	other, _ := profileExplainUnresolved("94404077", unixidentity.ErrNotFound)
 	if decision := set.match(&other, profileSubjectLookup, "claudecode", ""); decision.Match != profileMatchDefaultLookupFailed {

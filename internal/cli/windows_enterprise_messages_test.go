@@ -81,3 +81,12 @@ func TestWindowsEnterpriseStandardUserMutationAnswerKeepsAttestation(t *testing.
 		t.Fatalf("plain answer = %q", plain)
 	}
 }
+
+func TestWindowsUntrustedPowerShellHealthNamesRecoveryAndUncheckedEnrollment(t *testing.T) {
+	message := windowsEnterpriseUncheckedHealthMessage("standalone", true)
+	for _, part := range []string{"enrollment were not checked", "counts read zero", "restore", "PowerShell 7", "then run", "enterprise windows verify --profile standalone --json"} {
+		if !strings.Contains(message, part) {
+			t.Fatalf("missing %q in %s", part, message)
+		}
+	}
+}

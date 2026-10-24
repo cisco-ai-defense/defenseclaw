@@ -128,12 +128,12 @@ class TestActiveConnectors(unittest.TestCase):
             guardrail=GuardrailConfig(
                 connector="codex",
                 connectors={
-                    "open-hands": PerConnectorGuardrailConfig(),
-                    "openhands": PerConnectorGuardrailConfig(),
+                    "codex": PerConnectorGuardrailConfig(),
+                    "CoDeX": PerConnectorGuardrailConfig(),
                 },
             )
         )
-        self.assertEqual(cfg.active_connectors(), ["openhands"])
+        self.assertEqual(cfg.active_connectors(), ["codex"])
 
 
 class TestEffectiveResolvers(unittest.TestCase):
@@ -165,20 +165,20 @@ class TestEffectiveResolvers(unittest.TestCase):
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
 
-    def test_cursor_fail_mode_tracks_mode_despite_stored_open(self):
+    def test_cursor_fail_mode_stays_closed_despite_stored_open(self):
         g = GuardrailConfig(
             mode="observe",
             hook_fail_mode="open",
             connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="open")},
         )
-        self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
         g.connectors["cursor"].mode = "action"
         self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
 
     def test_empty_block_inherits_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("empty"), "observe")
-        self.assertEqual(g.effective_hook_fail_mode("empty"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("empty"), "closed")
         self.assertEqual(g.effective_block_message("empty"), "global-msg")
         self.assertEqual(g.effective_rule_pack("empty"), "strict")
         self.assertFalse(g.effective_hilt("empty").enabled)
@@ -187,7 +187,7 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_unknown_and_empty_connector_use_global(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("nope"), "observe")
-        self.assertEqual(g.effective_hook_fail_mode(""), "open")
+        self.assertEqual(g.effective_hook_fail_mode(""), "closed")
 
     def test_config_version_9_rule_pack_resolves_and_a_global_selection_clears_it(self):
         from defenseclaw.commands.cmd_setup import _apply_rule_pack_selection
@@ -237,10 +237,10 @@ class TestEffectiveResolvers(unittest.TestCase):
             },
         )
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
-        # The global value applies in observe mode outside Secure Client.
+        # A per-user hook stays closed in observe mode.
         self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
         g.hook_fail_mode = "open"
-        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
         self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         # Under Secure Client an explicit value wins too: the global closed
         # closes a connector without its own value, and an unset global is
@@ -355,32 +355,6 @@ class TestEffectiveResolvers(unittest.TestCase):
         )
         self.assertEqual(with_empty.effective_mode("codex"), "action")
 
-    def test_connector_override_name_insensitive(self):
-        # Mirrors Go TestConnectorOverride_NameInsensitive: a per-connector
-        # override is honored even when the configured key differs from the
-        # requested (registry-canonical) name only by case or a hyphen/
-        # underscore alias. Otherwise an operator who hand-writes "OpenHands"
-        # or "open-hands" would silently get the global policy.
-        g = GuardrailConfig(
-            mode="observe",
-            block_message="global-msg",
-            connectors={
-                "Codex": PerConnectorGuardrailConfig(
-                    mode="action", block_message="codex-msg"
-                ),
-                "open-hands": PerConnectorGuardrailConfig(
-                    mode="action", enabled=False
-                ),
-            },
-        )
-        # Case-insensitive key.
-        self.assertEqual(g.effective_mode("codex"), "action")
-        self.assertEqual(g.effective_block_message("codex"), "codex-msg")
-        # Alias key: canonical "openhands" resolves "open-hands".
-        self.assertEqual(g.effective_mode("openhands"), "action")
-        self.assertFalse(g.effective_enabled("openhands"))
-        # Genuinely-absent connector still falls through to the global.
-        self.assertEqual(g.effective_mode("retired-example"), "observe")
 
     def test_effective_enabled(self):
         # Mirrors Go EffectiveEnabled: default True; False only on an
@@ -466,8 +440,8 @@ class TestGuardrailValidate(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             GuardrailConfig(
                 connectors={
-                    "openhands": PerConnectorGuardrailConfig(mode="action"),
-                    "open-hands": PerConnectorGuardrailConfig(mode="observe"),
+                    "claude-code": PerConnectorGuardrailConfig(mode="observe"),
+                    "claude_code": PerConnectorGuardrailConfig(mode="observe"),
                 }
             ).validate()
         self.assertIn("refer to the same connector", str(ctx.exception))
@@ -740,14 +714,6 @@ class TestResolveListConnector(unittest.TestCase):
         app = self._app(connector="claudecode", connectors=["codex", "cursor"])
         self.assertEqual(resolve_list_connector(app, "CURSOR"), "cursor")
 
-    def test_valid_override_accepts_alias(self):
-        from defenseclaw.commands import resolve_list_connector
-
-        # "open-hands" is a documented alias of the registry-canonical
-        # "openhands"; passing the alias must resolve the configured peer
-        # rather than raising "not configured".
-        app = self._app(connector="claudecode", connectors=["openhands", "codex"])
-        self.assertEqual(resolve_list_connector(app, "open-hands"), "openhands")
 
     def test_unknown_connector_raises(self):
         import click

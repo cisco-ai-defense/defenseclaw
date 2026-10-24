@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-verify-v1.json",
   "title": "enterprise bundle verify --json",
-  "description": "`enterprise bundle verify --json` (bundleVerifyResult, internal/cli/enterprise_bundle.go). Read-only: it runs every apply check (anchors, key, signature, manifest, tenant, device group, platform, version floor, minimum product version, file hashes, inline secrets, secret references and, on a managed device, credential presence, the config validator and the effective policy digest) and changes nothing. On a managed device it also lists the credentials the device lacks (secret_refs_missing) and predicts whether the apply restarts the gateway (restart_prediction). As root on a managed device the floor includes the confirmed bundle; otherwise a floor_unchecked warning says only the anchor min_version was checked. Exit 0 when ok; 1 (Linux, macOS) or 1603 (Windows) for a refusal; 2 or 1639 for invalid arguments (errors[0].code invalid_arguments).",
+  "description": "`enterprise bundle verify --json` (bundleVerifyResult, internal/cli/enterprise_bundle.go). Read-only: it runs every apply check (anchors, key, signature, manifest, tenant, device group, platform, version floor, minimum product version, file hashes, inline secrets, secret references and, on a managed device, credential presence and signed values, the config validator and the effective policy digest) and changes nothing. On a managed device it also lists the credentials the device lacks (secret_refs_missing) or stores with a value the bundle does not sign (secret_refs_mismatch) and predicts whether the apply restarts the gateway (restart_prediction). As root on a managed device the floor includes the confirmed bundle; otherwise a floor_unchecked warning says only the anchor min_version was checked. Exit 0 when ok; 1 (Linux, macOS) or 1603 (Windows) for a refusal; 2 or 1639 for invalid arguments (errors[0].code invalid_arguments).",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -32,7 +32,7 @@
         "already_applied",
         "refused"
       ],
-      "description": "already_applied: the bytes are the current confirmed bundle, and apply would be a success no-op."
+      "description": "already_applied: the bytes are the current confirmed bundle: apply writes no new receipt and re-installs the bundle config only when the installed config.yaml drifted from it (config_drift true; restart_prediction says whether that restarts the gateway)."
     },
     "platform": {
       "enum": [
@@ -96,8 +96,22 @@
       },
       "description": "Names (never values) of the secret_refs credentials this device does not hold, required and optional, in manifest order; [] when every one is stored. Present only on a managed device whose credential store could be read for every reference (root or SYSTEM); absent off a device, when the store could not be read (warning secret_presence_unchecked) and on a refusal before the credential check. A secret_ref_missing refusal lists every missing name, so the agent stores them all (enterprise secret set) before it verifies again. Absent on builds before 1.0.3."
     },
+    "secret_refs_mismatch": {
+      "type": "array",
+      "uniqueItems": true,
+      "maxItems": 64,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+      },
+      "description": "Names (never values) of the secret_refs credentials this device stores with a value the bundle does not sign (value_sha256), required and optional, in manifest order; [] when every stored one is the signed value. Present exactly when secret_refs_missing is. A secret_ref_mismatch refusal lists every such name: store the signed values with enterprise secret set (a new value needs enterprise secret set --bundle with the newer bundle that signs it), or sign the bundle again with --secret-file for the stored values. Absent on builds before 1.0.4."
+    },
     "restart_prediction": {
       "$ref": "#/$defs/restartPrediction"
+    },
+    "config_drift": {
+      "type": "boolean",
+      "description": "For result already_applied on a managed device (root or SYSTEM): true when the installed config.yaml is not the confirmed bundle's config (changed or deleted outside the lifecycle). Apply the same bundle again to repair it, scheduled by restart_prediction; with false nothing is to do. Absent for other results, off a device, when the installed config or the bundle store could not be read, and on builds before 1.0.4."
     },
     "warnings": {
       "type": "array",
@@ -145,7 +159,8 @@
           "errors": {
             "minItems": 1
           },
-          "restart_prediction": false
+          "restart_prediction": false,
+          "config_drift": false
         }
       }
     }
@@ -265,7 +280,7 @@
               "installed_config_unreadable"
             ]
           },
-          "description": "restart_settings: settings lists the restart-required settings; codex_machine_policy (Windows): Codex protection turns on or off, which runs the full lifecycle transaction; fleet_setup_required (Windows): the bundle changes fleet.enabled, which the apply refuses (deliver it through signed Setup); already_applied: the bundle is the confirmed one, apply changes nothing; installed_config_unreadable: the installed config.yaml could not be read (run as root or SYSTEM) or, on Windows, parsed."
+          "description": "restart_settings: settings lists the restart-required settings; codex_machine_policy (Windows): Codex protection turns on or off, which runs the full lifecycle transaction; fleet_setup_required (Windows): the bundle changes fleet.enabled, which the apply refuses (deliver it through signed Setup); already_applied: the bundle is the confirmed one and the installed config.yaml is its config (config_drift false; a drifted installed config is classified like any other change, and config_drift is true); installed_config_unreadable: the installed config.yaml could not be read (run as root or SYSTEM) or, on Windows, parsed."
         },
         "settings": {
           "type": "array",
@@ -333,6 +348,7 @@
       "expected_digest": "sha256:4f2a0c6e8b1d3f5a7c9e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a",
       "digest_verified": true,
       "secret_refs_missing": [],
+      "secret_refs_mismatch": [],
       "restart_prediction": {
         "gateway_restart": "required",
         "reason_codes": [
@@ -409,6 +425,7 @@
         "ai-defense-api-key",
         "splunk-hec-token"
       ],
+      "secret_refs_mismatch": [],
       "warnings": [],
       "errors": [
         {

@@ -26,7 +26,7 @@
 
 [Unit]
 Description=DefenseClaw sensor helper (privileged AI runtime acquisition)
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/ai-discovery/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/features/ai-discovery/
 Wants=network-online.target
 After=network-online.target
 After=tetragon.service

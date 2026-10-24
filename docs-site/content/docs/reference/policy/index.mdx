@@ -1,0 +1,17 @@
+---
+title: "Guardrail and policy reference"
+description: "Defaults, thresholds, profiles, rule packs, detections and the CEL engine."
+---
+
+The defaults, thresholds, profiles, rules and detections that decide each verdict.
+
+<Cards>
+  <Card title="Policy defaults" href="/docs/reference/policy/defaults" description="What a fresh install ships - three admission presets, three rule packs, block and alert levels, and the defaults init does not ask about." />
+  <Card title="Thresholds" href="/docs/reference/policy/thresholds" description="Where block_at and alert_at can be set, which scope wins, what the rule pack supplies by default, and how they hot-apply." />
+  <Card title="Guardrail profiles" href="/docs/reference/policy/guardrail-profiles" description="Profile keys, assignment matching, match reasons, how identity is verified, and worked scenarios for guardrail profiles." />
+  <Card title="Rules and custom packs" href="/docs/reference/policy/rules" description="The rule-pack keys in config.yaml - rule_pack, custom_packs and guardrail.rules - their scopes, layering, digest pinning and failure behavior." />
+  <Card title="Detection" href="/docs/reference/policy/detection" description="Reference for how DefenseClaw detects - ActionFacts, CEL, regex, exact semantic rules, bounded chains, YARA, protection packs, the LLM judge, suppressions, the session correlator and OPA." />
+  <Card title="Rule recipes" href="/docs/reference/policy/rule-recipes" description="Catalog of the regex rules and suppressions shipped with the bundled policy packs. Search, filter and copy the YAML." />
+  <Card title="Regex cookbook" href="/docs/reference/policy/regex-cookbook" description="RE2 regex patterns for DefenseClaw guardrails, quoted from the shipped strict pack — secrets, prompt injection, exfiltration endpoints and enterprise data — with what makes each one precise." />
+  <Card title="CEL reference" href="/docs/reference/policy/cel" description="The CEL engine, how to write CEL rules and the tool-call state they read." />
+</Cards>

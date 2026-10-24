@@ -91,6 +91,8 @@ class SyncReport:
     source_id: str = ""
     fetched: int = 0
     scanned: int = 0
+    skipped: int = 0
+    skip_reasons: list[str] = field(default_factory=list)
     promoted_skills: int = 0
     promoted_mcps: int = 0
     blocked: int = 0
@@ -109,6 +111,8 @@ class SyncReport:
             "source_id": self.source_id,
             "fetched": self.fetched,
             "scanned": self.scanned,
+            "skipped": self.skipped,
+            "skip_reasons": list(self.skip_reasons),
             "promoted_skills": self.promoted_skills,
             "promoted_mcps": self.promoted_mcps,
             "blocked": self.blocked,
@@ -207,6 +211,9 @@ def sync_source(
 
     if scan_callback is not None:
         _run_scans(source, manifest, idx, scan_callback, report)
+    elif report.fetched:
+        report.skipped = report.fetched
+        report.skip_reasons.append("no scanner was configured; entries remain pending")
     save_index(data_dir, source.id, idx)
 
     if auto_promote:
@@ -217,7 +224,8 @@ def sync_source(
         report.promoted_mcps = promoted_mcps
 
     source.last_sync = report.started_at
-    source.last_status = "ok" if not report.errors else f"error: {report.errors[0]}"[:240]
+    source.last_status = (f"error: {report.errors[0]}"[:240] if report.errors else
+                          "partial" if report.skipped or report.partial else "ok")
 
     report.blocked = sum(1 for v in idx.verdicts if v.status == "blocked")
     report.warnings = sum(1 for v in idx.verdicts if v.status == "warning")
@@ -295,10 +303,14 @@ def _run_scans(
             verdict.error = str(exc)[:240]
             report.errors.append(f"scan({entry.type}:{entry.name}): {exc}")
             continue
-        report.scanned += 1
         if scan_result is None:
             verdict.status = "pending"
+            report.skipped += 1
+            report.skip_reasons.append(
+                f"{entry.type}:{entry.name}: scanner returned no result; entry remains pending"
+            )
             continue
+        report.scanned += 1
         verdict.scan_id = getattr(scan_result, "scan_id", "") or ""
         verdict.target = scan_result.target
         verdict.findings = len(scan_result.findings)

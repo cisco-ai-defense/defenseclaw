@@ -1,226 +1,81 @@
 ---
 title: ZeptoClaw
-description: ZeptoClaw routes through DefenseClaw via api_base redirect plus response-scan. Full guardrail pipeline runs on every request.
+description: Guard ZeptoClaw by pointing its providers at the DefenseClaw guardrail proxy, which checks every request and response.
 keywords:
-  - DefenseClaw ZeptoClaw connector
-  - ZeptoClaw guardrail
+  - ZeptoClaw connector
+  - ZeptoClaw proxy
 ---
 
-ZeptoClaw is the second proxy connector. DefenseClaw rewrites `~/.zeptoclaw/config.json` providers to point at the local guardrail proxy; every request is inspected on its way out and every response on its way back.
+DefenseClaw rewrites the provider `api_base` values in `~/.zeptoclaw/config.json` to the local guardrail proxy. Every request is checked on the way out and every response on the way back. This is a proxy connector.
 
 ## Platform support
 
 | Platform | Status | Notes |
 | --- | --- | --- |
-| macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy. Subprocess policy is shell shims on both. |
-| Native Windows x64 | **Unsupported** | ZeptoClaw publishes macOS/Linux builds, and its DefenseClaw integration requires the guardrail proxy that DefenseClaw does not host on Windows. |
+| macOS and Linux | **Supported** | DefenseClaw hosts the guardrail proxy. |
+| Native Windows x64 | **Unsupported** | ZeptoClaw publishes no native Windows build, and the connector needs the guardrail proxy, which DefenseClaw does not host on Windows. |
 
-## Setup
+## Set up
 
-<Tabs items={['macOS / Linux', 'Windows']}>
-
-<Tab value="macOS / Linux">
+On a new install, run `defenseclaw init --connector zeptoclaw` first. Until DefenseClaw is initialized, `defenseclaw setup zeptoclaw` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
 ```bash
 defenseclaw setup zeptoclaw --mode observe --restart
 defenseclaw setup zeptoclaw --mode action --rule-pack default --restart
 ```
 
-</Tab>
+The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings; a gateway outage still stops proxied requests. Action enforces policy. Run `defenseclaw doctor` to check the result.
 
-<Tab value="Windows">
-
-<Callout type="warning" title="Native Windows setup is unsupported">
-DefenseClaw does not host the guardrail proxy on Windows, and ZeptoClaw does
-not publish a native Windows build for this integration. There is no supported
-WSL, Docker, VM, or mixed native/POSIX workaround; run the connector on macOS
-or Linux.
-</Callout>
-
-</Tab>
-
-</Tabs>
-
-`setup zeptoclaw` is the dedicated ZeptoClaw alias. It delegates to the shared
-guardrail setup backend and exposes the proxy connector's common setup
-options; it is not a byte-for-byte copy of every `setup guardrail` flag. See
-the [quick-alias reference](/docs/guardrail/aliases) for the alias and
-[full guardrail setup](/docs/guardrail) for the complete wizard. The
-proxy is always in the data path: `--mode observe` records without policy
-blocking, while `--mode action` enforces.
-
-#### What this command sets vs. leaves at defaults
-
-The flags above explicitly set: connector, mode, and (optionally) rule pack. Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/policies/defaults).
-
-| Knob | Value when omitted | Flag to override |
-| --- | --- | --- |
-| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
-| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
-| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
-| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
-| HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
-| HITL minimum severity | `HIGH` (when `--human-approval` is on; stored uppercase in config) | `--hilt-min-severity low\|medium\|high\|critical` (case-insensitive) |
-| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
-| Proxy port | `4000` | `--port <int>` |
-| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/observability/redaction#verify-policy). |
-| Check the result | `defenseclaw doctor` | none: setup no longer runs its own connectivity check |
-
-See [the full flag reference](/docs/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
-
-#### Common variations — pick the recipe that fits your phase
-
-<Tabs items={['Pilot (observe)', 'Action + HITL', 'Action + judge', 'Strict / regulated']}>
-
-<Tab value="Pilot (observe)">
+## Check it
 
 ```bash
-defenseclaw setup zeptoclaw \
-  --mode observe \
-  --rule-pack permissive \
-  --restart
+defenseclaw status
 ```
 
-The proxy is in the data path but nothing blocks. Every collected prompt and
-response produces a projection in mandatory SQLite event history. On a fresh v8
-configuration, the effective local profile is `none`, so registered prompt,
-response, tool, path, and identifier fields can remain full fidelity. A global
-or bucket profile can redact the local projection; optional destinations receive
-their own selected projection. Run this for at least a week before promoting —
-see [Defaults → tuning by risk tolerance](/docs/policies/defaults#tuning-by-risk-tolerance).
+The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
 
-</Tab>
 
-<Tab value="Action + HITL">
+## What it can block or ask
 
-```bash
-defenseclaw setup zeptoclaw \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --restart
-```
+<HookEventsList connector="zeptoclaw" />
 
-HIGH findings can produce a raw `confirm` action; CRITICAL still blocks unconditionally. ZeptoClaw has **no native ask surface**, so confirm takes its immediate fallback with `raw_action` preserved. The TUI and audit log can review the event but cannot approve and resume it. See the [HITL page](/docs/hitl) for the per-connector matrix.
+- The proxy can block a checked request, a checked response and a tool-call payload.
+- ZeptoClaw has no native ask. A confirm verdict takes an immediate fallback with the original action kept. Audit and the TUI can show it but cannot resume it.
 
-</Tab>
+## Files it changes
 
-<Tab value="Action + judge">
+| What | Where |
+| --- | --- |
+| Providers and private-endpoint setting | `~/.zeptoclaw/config.json` (`providers.*.api_base`, `safety.allow_private_endpoints`) |
+| Subprocess shims | on `PATH`, for `curl`, `wget`, `ssh`, `nc`, `pip` and `npm` |
 
-```bash
-export DEFENSECLAW_LLM_KEY='replace-with-your-key'
+`safety.allow_private_endpoints` is set to `true` so ZeptoClaw accepts the `127.0.0.1` address.
 
-defenseclaw setup zeptoclaw \
-  --mode action \
-  --human-approval \
-  --hilt-min-severity high \
-  --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
-  --judge-api-key-env DEFENSECLAW_LLM_KEY \
-  --restart
-```
+## Limits
 
-Adds the configured LLM judge as a second pass on regex-flagged prompts.
-Latency and provider cost depend on the selected judge model.
+- The shims inspect those six commands only. They give no syscall, filesystem or network isolation.
+- ZeptoClaw 0.9.2 sends `max_tokens`, which the Bedrock `gpt-5.6-luna` model refuses. Pick a model that accepts it.
+- The local event database keeps seven days of prompts and responses by default. Treat it as sensitive data and set `observability.local.retention_days` (see the reference).
+- ZeptoClaw does not run in an OpenShell sandbox.
 
-</Tab>
+## Turn it off
 
-<Tab value="Strict / regulated">
-
-```bash
-defenseclaw policy activate strict
-defenseclaw setup zeptoclaw \
-  --mode action \
-  --rule-pack strict \
-  --restart
-```
-
-Block MEDIUM and above, alert on LOW, and do not offer approval for findings
-that have already crossed the block threshold. The policy also writes the
-matching [admission](/docs/policies/admission) settings, including
-`allow_list_bypass_scan: false`, so first-party skills and plugins are scanned
-too.
-
-</Tab>
-
-</Tabs>
-
-<Callout title="Treat local event history as sensitive data">
-The mandatory database is configured by `observability.local` (by default,
-`~/.defenseclaw/audit.db`) and retains seven days on a fresh configuration. Set
-`observability.local.retention_days` to the reviewed retention period and limit
-host access to the DefenseClaw data directory. A global
-`observability.defaults.redaction_profile` or a bucket
-`redaction_profile` also governs SQLite; a destination or route profile governs
-only that export trust boundary. Verify the effective result with
-`defenseclaw config show --effective --section observability` and
-`defenseclaw observability plan`. See [Redaction](/docs/observability/redaction) for
-the resolution order and [Observability](/docs/observability#local-history)
-for retention behavior. Retention removes eligible rows and makes their pages
-available for SQLite reuse, but the database file does not shrink automatically.
-</Callout>
-
-#### Decision aids — should I turn this on?
-
-<Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="ZeptoClaw has no native ask. Confirm uses an immediate fallback with raw_action preserved for review." />
-  <Card href="/docs/guardrail#tabs-by-mode-non-interactive-recipes" title="Mode + judge recipes" description="Side-by-side bash for observe / action / action+HITL / action+judge — copy-paste ready." />
-  <Card href="/docs/policies/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
-</Cards>
-
-<Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
-</Callout>
-
-## Files DefenseClaw will modify
-
-<Files>
-  <Folder name="~/.zeptoclaw" defaultOpen>
-    <File name="config.json (providers.*.api_base, safety.allow_private_endpoints)" />
-  </Folder>
-  <Folder name="~/.defenseclaw">
-    <Folder name="hooks">
-      <File name="(generic hook scripts)" />
-    </Folder>
-  </Folder>
-</Files>
-
-`safety.allow_private_endpoints` is set to `true` so the rewritten api_base (a 127.0.0.1 URL) is accepted.
-
-## Model limits
-
-ZeptoClaw 0.9.2 sends `max_tokens` on its OpenAI-style chat requests. The
-Bedrock `gpt-5.6-luna` model refuses that parameter (HTTP 400,
-`unsupported_parameter`) and accepts `max_completion_tokens`, so a ZeptoClaw
-agent cannot use that model through the Bedrock OpenAI route until ZeptoClaw
-sends the newer parameter. This is the model's and the agent's request shape,
-not a DefenseClaw block: pick a model the agent can call, such as one served
-through the OpenAI-compatible route that accepts `max_tokens`.
-
-## Hook capabilities
-
-The proxy can block inspected requests, responses, and tool-call payloads.
-ZeptoClaw has no native ask event.
-
-<Callout>
-ZeptoClaw has no native ask surface. Confirm verdicts take an immediate fallback with `raw_action` preserved so operators can review the original request in the TUI or audit log; neither surface can resume it.
-</Callout>
-
-## Subprocess policy
-
-The policy is `shims` on every platform. Connector setup installs PATH shims
-for `curl`, `wget`, `ssh`, `nc`, `pip`, and `npm` that send each invocation to
-the gateway's tool-inspection endpoint before running the real binary. Shims
-inspect those command paths only; they do not provide syscall, filesystem, or
-network isolation.
-
-ZeptoClaw does not run in an OpenShell sandbox; OpenShell 0.1 support for it
-is pending in the [capability matrix](/docs/connectors/capability-matrix).
-
-## Disable
+For a per-user, single-connector install:
 
 ```bash
 defenseclaw guardrail disable --yes
 ```
+
+To drop the connector from the configuration, run `defenseclaw setup remove zeptoclaw --yes`. If ZeptoClaw is the last connector, removal refuses because the gateway would enforce nothing. To deliberately remove that last connector, run:
+
+```bash
+defenseclaw setup remove zeptoclaw --yes --force
+```
+
+Turn it back on by running the Set up command again, for example `defenseclaw setup zeptoclaw --restart`. Leaving out `--mode` keeps the mode you saved before disabling the guardrail. `defenseclaw guardrail enable` turns ZeptoClaw back on only when `guardrail.model` is set (`defenseclaw setup guardrail`); otherwise it stops with `Cannot enable: guardrail.model is not set.`
+
+ZeptoClaw is proxy-backed and cannot run next to hook connectors. While any hook connector is configured, `defenseclaw setup zeptoclaw` refuses and changes nothing; `defenseclaw setup zeptoclaw --replace` removes the hook connectors and sets up ZeptoClaw in their place.
+
+## Details
+
+Defaults, the full list of setup options, subprocess policy and model limits are in the [ZeptoClaw reference](/docs/reference/connectors/zeptoclaw).

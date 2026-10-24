@@ -70,6 +70,40 @@ func TestMigrateV9NormalizesCursorActionFailMode(t *testing.T) {
 	}
 }
 
+// An observe-mode Cursor closed is the operator's outage choice, which this
+// release's per-user Cursor hooks follow: the migration keeps it (1.0.0 to
+// 1.0.3 rewrote it to open, which then opened the hooks while the gateway
+// was down), and keeps an explicit open as written.
+func TestMigrateV9KeepsAnObserveCursorFailMode(t *testing.T) {
+	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
+	for _, test := range []struct{ name, guardrail, path, want string }{
+		{"connector closed", "\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: closed", "connectors", "closed"},
+		{"connector open", "\n  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open", "connectors", "open"},
+		{"global closed", "\n  connector: cursor\n  mode: observe\n  hook_fail_mode: closed", "global", "closed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			source := []byte("config_version: 8\ndata_dir: " + dir + "\nguardrail:" + test.guardrail + "\n  rule_pack_dir: \"\"\nobservability: {}\n")
+			migrated, err := MigrateV8InMemory(filepath.Join(dir, "config.yaml"), source, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var doc yaml.Node
+			if err := yaml.Unmarshal(migrated, &doc); err != nil {
+				t.Fatal(err)
+			}
+			guardrail := v8YAMLMapValue(v8DocumentRoot(&doc), "guardrail")
+			stored := v8YAMLMapValue(guardrail, "hook_fail_mode")
+			if test.path == "connectors" {
+				stored = v8YAMLMapValue(v8YAMLMapValue(v8YAMLMapValue(guardrail, "connectors"), "cursor"), "hook_fail_mode")
+			}
+			if got := yamlScalarValue(stored); got != test.want {
+				t.Fatalf("migrated Cursor hook fail mode = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 // An unreadable custom scanner policy must leave the v8 source intact so an
 // upgrade can retry after access to the policy is restored.
 func TestMigrateV9RetriesUnreadableCustomScannerPolicy(t *testing.T) {

@@ -1,0 +1,115 @@
+---
+title: Foreign-hook guard
+description: How the standalone profile stops hooks and plugins that DefenseClaw has not approved from changing an AI agent's tool call after inspection, which agents and files it covers, and how to approve or restore a hook.
+keywords:
+  - DefenseClaw foreign hooks
+  - hook rewrite
+  - allowed_hooks
+  - foreign_hooks
+  - managed_hooks_only
+---
+
+Most agents run every hook they find, and several let any hook change a tool call's input: Codex and Claude Code (`updatedInput`), Cursor (`updated_input`), Copilot (`modifiedArgs`), Devin (`updatedInput`), OpenCode (`tool.execute.before`), Amp plugins and Hermes (`pre_tool_call` shell hooks, run in order). A hook in a user's own config or in a repository could change a command after DefenseClaw inspected it. The foreign-hook guard covers that gap for agents without a vendor lock. A **foreign hook** is any hook or plugin that DefenseClaw did not write and you have not approved. Terms are in [Concepts](/docs/enterprise/plan/concepts).
+
+## Which connectors it covers
+
+| Connector | Covered | Why |
+| --- | --- | --- |
+| Cursor, Copilot, Devin, OpenCode, Amp | Every OS, unless `foreign_hooks: allow` | These agents have no vendor lock. Windows Amp keeps its guard's session record locally. |
+| Hermes | On Linux and macOS, unless `foreign_hooks: allow` | Hermes has no vendor lock and no way to order hooks. The Windows Hermes registration does not run the guard. |
+| Codex, Claude Code | Only with `managed_hooks_only: preserve` | By default the vendor lock already stops user and project hooks. |
+| Antigravity | Not covered | No vendor lock and no guard. Hooks a user or project adds run next to DefenseClaw's. |
+
+This holds on every OS. `preserve` also removes the vendor lock, except Codex's on Windows, which DefenseClaw always sets; see [Machine policy](/docs/enterprise/configure/machine-policy#locks-on-linux-and-macos) and [Windows differences](/docs/enterprise/configure/machine-policy#windows-differences).
+
+## What it does
+
+- **Removes foreign hooks from user-level config.** Within about five minutes the guardian backs up and removes unapproved hook entries and plugins from the user's own files, and logs each removal. Files it cannot read or verify are reported, never changed.
+- **Blocks while a foreign hook is present.** Before each call, `defenseclaw-hook` checks the user's files and the project files in the working directory and its parents up to the repository root. While an unapproved hook is present, tool calls are denied. Repository files are never changed.
+- **Keeps a session blocked until the agent restarts.** Agents read hooks when a session starts, so a hook present at session start blocks the rest of that session, even after you remove it. Remove the hook, then restart the agent. A block ends after 7 days.
+- **Follows redirected config.** Locations moved by variables such as `CLAUDE_CONFIG_DIR` or `CODEX_HOME` are checked too.
+
+The guard counts a hook as DefenseClaw's own only when the registration runs the administrator-owned `defenseclaw-hook` exactly as DefenseClaw renders it. The scanned files, the redirect rules and the limits are in [Foreign-hook guard detail](/docs/enterprise/configure/reference#foreign-hook-guard-detail).
+
+## What a blocked user sees
+
+```text
+enterprise_foreign_hook_blocked: your organization blocks cursor hooks it has
+not approved, because they can change a tool call after DefenseClaw checks it.
+The project file /home/alice/repo/.cursor/hooks.json defines a hook (digest
+sha256:3f5c…). Remove it, or ask your administrator to add the digest to
+enterprise.machine_policy.connectors.cursor.allowed_hooks. The agent can
+keep running a hook it loaded when the session started, even after the file
+changes, so DefenseClaw blocks tool calls for the rest of this session: after
+removing the hook, restart the agent.
+```
+
+The last sentence appears only when the hook was present at session start. With `foreign_hooks: report`, the agent runs; `enterprise policy show` lists the finding as `reported` with its file and digest. For Cursor, Copilot and Devin, `defenseclaw-hook` prints a warning that names the file and digest to stderr. Codex and Claude Code use that native-hook warning when `managed_hooks_only: preserve` makes the guard active. On Linux and macOS, Hermes prints a generic stderr warning without the file and digest; use `enterprise policy show` for those details. For OpenCode and Amp, use `enterprise policy show` to see the file and digest. An approval you add while a session is blocked applies to the next agent session.
+
+## Session records and gateway outages
+
+The [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) gives the result of an outage per connector and OS, with this guard and without it.
+
+The gateway keeps each agent session's hook snapshot in its private data directory. A session that loaded an unapproved hook stays blocked after the guardian removes the file, because the agent may still run its loaded copy. Restart the agent after removing or approving the hook. The guardian records removals so agent processes that started before a removal cannot use a stale allow.
+
+Every gateway-backed guarded call needs a fresh session answer. If the gateway is stopped, restarting, or cannot answer before the hook deadline, the guarded connector blocks the call, including when the administrator chose `hook_fail_mode: open`. The managed Windows Amp plugin keeps its session check locally and is rendered closed for gateway failures. This is the 1.0.3 outage limit (GAP-0352). An earlier online allow does not authorize a call during an outage. The hook names a known gateway stop, restart or answer timeout. If it cannot identify the cause, it reports:
+
+```text
+enterprise_foreign_hook_blocked: DefenseClaw could not check this agent
+session's hook record with its gateway, so the call is blocked. Retry when
+the DefenseClaw gateway is running; if the block continues, restart the agent.
+```
+
+The block applies to tool calls and, where the agent lets a hook block them, to prompts and session starts. Stop and session-end events get the agent's neutral answer so the agent can finish its turn.
+
+The guardian holds an account's removal lock while it records and removes an unapproved hook. A concurrent gateway check denies that account's call until the removal completes; other accounts are not delayed.
+
+## Approve a hook
+
+Add the hook's digest to `allowed_hooks`, for one connector or for all of them under `default`. The two lists are merged.
+
+```yaml title="config.yaml (excerpt)"
+enterprise:
+  machine_policy:
+    default:
+      allowed_hooks: []
+    connectors:
+      cursor:
+        allowed_hooks:
+          - sha256:3f5c…              # 64 hex characters; the prefix is optional
+      copilot:
+        foreign_hooks: report         # log findings, do not block
+      amp:
+        foreign_hooks: allow          # do not scan
+```
+
+| `foreign_hooks` | User-level foreign hooks | Project-level foreign hooks |
+| --- | --- | --- |
+| `remove` (default) | Tool calls denied until the guardian removes the hook (about five minutes) or you approve it | Tool calls denied until the hook is removed or approved |
+| `report` | Reported | Reported; calls allowed |
+| `allow` | Ignored | Ignored |
+
+A digest covers the hook entry and the content of every file its command may run, so the same entry with a different script gets a different digest. Details of what a digest covers are in the [guard detail](/docs/enterprise/configure/reference#what-a-digest-covers).
+
+**Get the digest.** Copy it from the block message, or list every finding for a user and repository. Each line shows the connector, `blocked`, `reported` or `allowlisted`, the scope, the file and `sha256:<digest>`.
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --user alice --project /home/alice/repo
+```
+
+On macOS use `/opt/cisco/defenseclaw/bin/defenseclaw-gateway`. On Windows, from an elevated prompt:
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --user alice --project C:\src\repo
+```
+
+## Restore a removed hook
+
+Before it changes a user's file, the guardian copies the original to:
+
+| OS | Backup directory |
+| --- | --- |
+| Linux and macOS | `~/.defenseclaw/foreign-hooks-backup/<connector>/<timestamp>/` |
+| Windows | `%USERPROFILE%\.defenseclaw\foreign-hooks-backup\<connector>\<timestamp>\` |
+
+`<timestamp>` is UTC, for example `20260926T141500Z`. Each backed-up file is named `<12 hex characters>-<original file name>`. Removed plugin files and folders are moved into the same directory. To bring a hook back, approve its digest first, then copy the file back; otherwise the guardian removes it again. An uninstall without purge keeps these backups. A purge deletes them with the rest of the DefenseClaw folder.

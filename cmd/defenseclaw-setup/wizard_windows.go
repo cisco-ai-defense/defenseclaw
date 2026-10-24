@@ -220,7 +220,6 @@ var (
 		{Label: "Cursor Agent", Value: "cursor"},
 		{Label: "Hermes Agent", Value: "hermes"},
 		{Label: "Devin CLI", Value: "devin"},
-		{Label: "OmniGent (native degraded)", Value: "omnigent"},
 		{Label: "OpenCode", Value: "opencode"},
 	}
 	wizardModeChoices = []wizardChoice{
@@ -745,11 +744,14 @@ func (w *setupWizard) finish() {
 	switch w.opts.Action {
 	case "uninstall":
 		setText(w.heading, "DefenseClaw was removed")
+		description := "DefenseClaw application files were removed. Configuration, connector backups, and audit history were preserved under %USERPROFILE%\\.defenseclaw."
 		if w.opts.DeleteUserData {
-			setText(w.description, "DefenseClaw application files and user data were removed.")
-		} else {
-			setText(w.description, "DefenseClaw application files were removed. Configuration, connector backups, and audit history were preserved under %USERPROFILE%\\.defenseclaw.")
+			description = "DefenseClaw application files and user data were removed."
 		}
+		if notes := removedConnectorNotesText(); notes != "" {
+			description += "\r\n\r\n" + notes
+		}
+		setText(w.description, description)
 	case "repair":
 		setText(w.heading, "DefenseClaw was repaired")
 		setText(w.description, wizardRepairCompletionDescription())
@@ -789,8 +791,6 @@ func wizardCompletionDescription(connector string) string {
 		return "Google Antigravity is configured with its native Windows hooks." + wizardInstalledUsage
 	case "opencode":
 		return "OpenCode is configured with the native Windows bridge plugin. Restart OpenCode to load it." + wizardInstalledUsage
-	case "omnigent":
-		return "OmniGent's native degraded policy integration is configured; terminal and sandbox parity are not included." + wizardInstalledUsage
 	default:
 		return "Open a terminal and run defenseclaw init when you are ready to configure a connector." + wizardInstalledUsage
 	}
@@ -912,6 +912,9 @@ func writeWizardLog(action string, code int, resultErr error) (string, error) {
 		phase,
 		detail,
 	)
+	if notes := removedConnectorNotesText(); notes != "" {
+		contents += "\r\n" + notes
+	}
 	path := filepath.Join(root, "setup.log")
 	if err := safefile.WritePrivate(path, []byte(contents)); err != nil {
 		return "", err
@@ -1044,6 +1047,9 @@ func applyInteractiveInstallDefaults(opts options, state *installState, autoStar
 	}
 	if !opts.ConnectorSet && validConnector(state.Connector) {
 		opts.Connector = state.Connector
+	} else if !opts.ConnectorSet && isRetiredNativeConnector(state.Connector) {
+		// until 1.1: never offer a removed connector as the selection.
+		opts.Connector = "none"
 	}
 	if !opts.ModeSet && validMode(state.Mode) {
 		opts.Mode = state.Mode

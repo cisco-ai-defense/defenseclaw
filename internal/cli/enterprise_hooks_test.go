@@ -1509,6 +1509,48 @@ func TestEnterpriseHookReconcileLogReportsRepairAsChange(t *testing.T) {
 	}
 }
 
+// A changed reconcile names each failing target and its reason; an unchanged
+// one stays a single summary line.
+func TestEnterpriseHookReconcileLogNamesFailingTargets(t *testing.T) {
+	run := enterpriseHookReconcileRun{
+		Rows: []enterpriseHookReconcileRow{
+			{Connector: "cursor", User: "alice", OK: true},
+			{Connector: "codex", User: "alice", Error: "enterprise hooks: connector codex hook verification failed:\n  owned hook command not present: SessionEnd trust state is not trusted"},
+			{Connector: "claudecode", UserHome: "/Users/bob", Pending: true},
+		},
+		Failures: 1,
+		Pending:  1,
+	}
+	var changed bytes.Buffer
+	writeEnterpriseHookReconcileLog(&changed, "fsnotify", "attention", run, 7, true, "")
+	const want = "[hook-guardian] target codex@alice failed: enterprise hooks: connector codex hook verification failed: owned hook command not present: SessionEnd trust state is not trusted\n"
+	if got := changed.String(); !strings.Contains(got, want) {
+		t.Fatalf("changed log = %q, want %q", got, want)
+	}
+	if got := changed.String(); strings.Contains(got, "target cursor@alice") || strings.Contains(got, "target claudecode@") {
+		t.Fatalf("changed log names a healthy or pending target: %q", got)
+	}
+	var unchanged bytes.Buffer
+	writeEnterpriseHookReconcileLog(&unchanged, "interval", "attention", run, 7, false, "")
+	if got := unchanged.String(); strings.Count(got, "\n") != 1 || strings.Contains(got, "target ") {
+		t.Fatalf("unchanged log = %q, want one summary line", got)
+	}
+	var hostile bytes.Buffer
+	writeEnterpriseHookReconcileLog(&hostile, "fsnotify", "attention", enterpriseHookReconcileRun{
+		Rows:     []enterpriseHookReconcileRow{{Connector: "codex", UserHome: "/Users/a\n[hook-guardian] reconcile status=ok\x1b[2J", Error: "bad\x00\x1b[31mred\rline"}},
+		Failures: 1,
+	}, 7, true, "")
+	if got := hostile.String(); strings.Count(got, "\n") != 2 || strings.ContainsAny(got, "\x00\x1b\r") {
+		t.Fatalf("control characters reached the log: %q", got)
+	}
+	if got := enterpriseHookReconcileRowLabel(enterpriseHookReconcileRow{Connector: "codex", SID: "S-1-5-21-1-2-3-1001"}); got != "codex@S-1-5-21-1-2-3-1001" {
+		t.Fatalf("SID-only row label = %q, want the SID", got)
+	}
+	if got := enterpriseHookReconcileLogDetail(strings.Repeat("x", 3000)); len([]rune(got)) != enterpriseHookReconcileLogMaxDetail+1 {
+		t.Fatalf("detail not bounded: %d runes", len([]rune(got)))
+	}
+}
+
 func TestEnterpriseHookWatchEventInSettleWindow(t *testing.T) {
 	base := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
@@ -1678,6 +1720,7 @@ func TestEnterpriseHookReconcileRowsHash(t *testing.T) {
 }
 
 func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	dir := t.TempDir()
 	manifest := filepath.Join(dir, "targets.yaml")
 	if err := os.WriteFile(manifest, []byte("version: 1\ntargets: []\n"), 0o666); err != nil {
@@ -1722,6 +1765,7 @@ func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
 }
 
 func TestEnterpriseHookManagedRuntimeRejectsUserOwnedDataDir(t *testing.T) {
+	skipIfLocalSystem(t, "LocalSystem owns its t.TempDir() tree, so the fixture cannot stand in for a file a standard account owns")
 	if os.Geteuid() == 0 {
 		t.Skip("root-owned temp dirs are valid managed runtime dirs")
 	}

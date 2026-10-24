@@ -184,7 +184,7 @@
     "path": "sandbox doctor",
     "use": "doctor",
     "short": "Check that this machine can run sandboxes",
-    "long": "Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration,\nversion and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,\nthe sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw\ndaemon, harness images, shell wrappers and the organization policy. Exits 1 when a\ncheck fails (with --output json the result is printed and the exit status is 0; read\n\"ok\").",
+    "long": "Checks the platform, Landlock, Docker, the OpenShell service, CLI, registration,\nversion and compute driver (on a Mac, the MicroVM driver: e2fsprogs, its signature,\nthe sandbox identity and resources), bind mounts, telemetry, ports, the DefenseClaw\ndaemon, harness images, shell wrappers and the organization policy. Exits 1 when a\ncheck fails, with --output json too and with --json (both print ok=false).",
     "flags": [
       {
         "name": "fix",
@@ -327,7 +327,7 @@
     "path": "sandbox kernel-feed install",
     "use": "install",
     "short": "Install or update the sandbox kernel feed service (as root; needs a unix-socket Tetragon)",
-    "long": "Copies the defenseclaw-sensor-helper of this install to /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper,\nchecks that this host's Tetragon serves a root-owned unix socket (never a TCP address) and that Docker\nanswers, then writes and starts defenseclaw-sandbox-feed.service. Run it again after an upgrade to update\nthe feed. Refused on a managed host, where sandboxes are not supported."
+    "long": "Copies the defenseclaw-sensor-helper of this install to /usr/local/libexec/defenseclaw/defenseclaw-sensor-helper,\nchecks that this host's Tetragon serves a root-owned unix socket (never a TCP address) and that Docker\nanswers, then writes and starts defenseclaw-sandbox-feed.service. Run it again after an upgrade to update\nthe feed. Refused on a managed host: its sandboxes are the managed deployment's, and this\nper-user feed installer is not part of it."
   },
   {
     "path": "sandbox kernel-feed status",
@@ -774,7 +774,7 @@
     "path": "sandbox run",
     "use": "run \u003charness\u003e [flags] [-- harness-args...]",
     "short": "Run a harness in a sandbox on this folder",
-    "long": "Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver)\nlive-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS\n(the MicroVM driver) every run works on a copy. The harness is claude, codex,\ncopilot, opencode, kiro, hermes, openhands, omnigent or antigravity (its command, agy,\nworks too; amp, cursor-agent and devin are not verified yet, so they do not run).\nSkip-permissions mode is on by default;\n--safe keeps the harness's own prompts. The harness gets your terminal; when it exits\nyou get a summary, a review of changed files that can run code on your machine, and\nthe choice to keep or undo the changes (from a copy: to bring them back, or leave them\nin the sandbox for pull). Arguments after -- go to the harness.\n\nA headless run in the foreground (--prompt, or the harness's own print flag after --)\ndeletes its sandbox when it ends and nothing is left in it to bring back or undo, as\n--rm does; --keep (or openshell.keep_headless) keeps it. Interactive sessions and\n--detach runs keep their sandbox.",
+    "long": "Runs the harness in a new sandbox on the current folder: on Linux (the Docker driver)\nlive-mounted by default with a pre-session snapshot, or a copy with --copy; on macOS\n(the MicroVM driver) every run works on a copy. The harness is claude, codex,\ncopilot, opencode, kiro, hermes or antigravity (its command, agy,\nworks too; amp, cursor-agent and devin are not verified yet, so they do not run).\nSkip-permissions mode is on by default;\n--safe keeps the harness's own prompts. The harness gets your terminal; when it exits\nyou get a summary, a review of changed files that can run code on your machine, and\nthe choice to keep or undo the changes (from a copy: to bring them back, or leave them\nin the sandbox for pull). Arguments after -- go to the harness.\n\nA headless run in the foreground (--prompt, or the harness's own print flag after --)\ndeletes its sandbox when it ends and nothing is left in it to bring back or undo, as\n--rm does; --keep (or openshell.keep_headless) keeps it. Interactive sessions and\n--detach runs keep their sandbox.",
     "example": "  defenseclaw sandbox run claude\n  defenseclaw sandbox run codex --copy --name fix-tests\n  defenseclaw sandbox run claude --detach --prompt \"fix the failing tests\"\n  defenseclaw sandbox run claude --credential STRIPE_API_KEY=api.stripe.com -- --model sonnet",
     "flags": [
       {
@@ -969,6 +969,11 @@
     "short": "Start a stopped sandbox for a new session",
     "long": "Starts a stopped sandbox for a new session. A mounted project gets a fresh undo\nsnapshot, unless the folder still holds changes an earlier session made that were\nneither undone nor kept at its end (a detached run, or one without a terminal to ask\non): then the earlier undo point stays, so \"sandbox undo\" still reverts them.\n--new-snapshot accepts those changes and takes a fresh snapshot.",
     "flags": [
+      {
+        "name": "end-vm",
+        "type": "bool",
+        "default": "false"
+      },
       {
         "name": "new-snapshot",
         "type": "bool",

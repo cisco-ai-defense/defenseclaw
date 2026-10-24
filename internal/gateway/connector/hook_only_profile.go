@@ -19,6 +19,8 @@ package connector
 import (
 	"fmt"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 )
 
 func hookOnlyProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
@@ -43,6 +45,20 @@ func hookOnlyProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 	default:
 		return HookVerdictOutput{Action: raw, WouldBlock: false}
 	}
+}
+
+// Copilot CLI does not report whether it can show a hook approval prompt.
+// In autopilot and -p it turns ask into a denial with no post hook, so a
+// gateway confirm would leave the audit action different from the result.
+// Until prompt availability is part of the trusted hook contract, deny an
+// action-mode confirmation at the synchronous preToolUse boundary. The VS
+// Code Local harness has a separate profile and keeps its native ask.
+func copilotCLIProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
+	if in.Mode == "action" && normalizedGuardrailAction(in.RawAction) == "confirm" &&
+		canonicalHookEvent(in.Event) == "pretooluse" && in.Caps.CanBlock && eventInProfile(in.Event, in.Caps.BlockEvents) {
+		return HookVerdictOutput{Action: "block", WouldBlock: false}
+	}
+	return hookOnlyProfileMapVerdict(in)
 }
 
 func openCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
@@ -111,7 +127,7 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		output = devinHookOutput(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
 	case "copilot":
 		output = copilotHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
-		if decision, ok := output["permissionDecision"]; ok && CopilotVSCodeLocalTool(in.Req.ToolName) {
+		if decision, ok := output["permissionDecision"]; ok && copilotargs.LocalTool(in.Req.ToolName) {
 			// The VS Code Local harness running the CLI hook file also gets
 			// its own decision shape (GAP-1903).
 			output["hookSpecificOutput"] = map[string]interface{}{
@@ -119,13 +135,6 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 				"permissionDecision":       decision,
 				"permissionDecisionReason": reason,
 			}
-		}
-	case "openhands":
-		if in.Action == "block" {
-			output = map[string]interface{}{"decision": "deny", "reason": reason}
-		} else if canonicalHookEvent(in.Req.HookEventName) == "userpromptsubmit" &&
-			(in.Action == "alert" || in.RawAction == "confirm") && in.AdditionalContext != "" {
-			output = map[string]interface{}{"additionalContext": in.AdditionalContext}
 		}
 	case "opencode":
 		// The DefenseClaw bridge plugin reads .decision and throws on
@@ -151,17 +160,6 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		if in.Action == "block" {
 			output = map[string]interface{}{"decision": "block", "reason": reason}
 		}
-	case "omnigent":
-		// The installed Python policy reads the unified top-level action
-		// and translates allow/block/confirm to ALLOW/DENY/ASK. No nested
-		// hook_output body is required by OmniGent's policy API.
-		return HookRespondOutput{}
-	}
-	if output == nil && in.Req.ConnectorName != "hermes" &&
-		in.Req.ConnectorName != "openhands" &&
-		in.Req.ConnectorName != "devin" &&
-		in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
-		output = map[string]interface{}{"systemMessage": in.AdditionalContext}
 	}
 	return HookRespondOutput{FieldName: "hook_output", Output: output}
 }
@@ -242,6 +240,11 @@ func cursorPermissionOutput(action, reason string, supportsAsk, supportsUserMess
 // https://antigravity.google/docs/hooks. PreToolUse is the sole hard policy
 // boundary: synchronous stdout {"decision":"deny"} blocks the tool. No
 // enforcement claim relies on the hook process exit code.
+//
+// A confirmation is "force_ask", never "ask": Antigravity's "ask" honors a
+// cached "Always Allow" grant, so a call the user once allowed always would
+// run with no fresh prompt, while "force_ask" always prompts and ignores
+// cached permissions (rel-1-0-4 GAP-0405).
 func antigravityHookOutputForProfile(event, action, _ string, reason, additional string) map[string]interface{} {
 	switch canonicalHookEvent(event) {
 	case "pretooluse":
@@ -249,7 +252,7 @@ func antigravityHookOutputForProfile(event, action, _ string, reason, additional
 		case "block":
 			return map[string]interface{}{"decision": "deny", "reason": reason}
 		case "confirm":
-			return map[string]interface{}{"decision": "ask", "reason": reason}
+			return map[string]interface{}{"decision": "force_ask", "reason": reason}
 		default:
 			return map[string]interface{}{"decision": "allow"}
 		}

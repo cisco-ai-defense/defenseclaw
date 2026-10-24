@@ -1972,7 +1972,6 @@ function Initialize-IsolatedProfile([string]$Root) {
     $env:HERMES_HOME = Join-Path $profile '.hermes'
     $env:ZEPTOCLAW_HOME = Join-Path $profile '.zeptoclaw'
     $env:OPENCODE_CONFIG_DIR = Join-Path $profile '.config\opencode'
-    $env:OMNIGENT_CONFIG_HOME = Join-Path $profile '.config\omnigent'
     $env:XDG_CONFIG_HOME = Join-Path $profile '.config'
     $env:UV_CACHE_DIR = Join-Path $safeRoot 'cache\uv'
     $env:UV_PYTHON_INSTALL_DIR = Join-Path $safeRoot 'cache\uv-python'
@@ -3906,7 +3905,7 @@ function Assert-PackagedAntigravitySupportedAvailability(
     $result = Invoke-Installed $Launcher @(
         'setup', 'antigravity', '--mode', 'action', '--yes', '--no-restart'
     ) `
-        @(0) 300 $LogPath
+        @(1) 300 $LogPath
     $combined = $result.StdOut + "`n" + $result.StdErr
     if ($combined -match '(?i)not_certified|preview') {
         throw "packaged Antigravity setup emitted a stale support gate or warning: $combined"
@@ -8533,7 +8532,7 @@ function Invoke-SelfTest {
     foreach ($name in @(
         'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA', 'TEMP', 'TMP',
         'DEFENSECLAW_HOME', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'HERMES_HOME',
-        'ZEPTOCLAW_HOME', 'OPENCODE_CONFIG_DIR', 'OMNIGENT_CONFIG_HOME',
+        'ZEPTOCLAW_HOME', 'OPENCODE_CONFIG_DIR',
         'XDG_CONFIG_HOME', 'UV_CACHE_DIR', 'PIP_CACHE_DIR', 'NPM_CONFIG_CACHE',
         'UV_PYTHON_INSTALL_DIR', 'UV_TOOL_DIR', 'UV_TOOL_BIN_DIR',
         'XDG_CACHE_HOME', 'PYTHONPYCACHEPREFIX', 'GIT_CONFIG_GLOBAL'

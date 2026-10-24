@@ -218,7 +218,7 @@ class ResidueArtifactsContractTests(unittest.TestCase):
     def test_built_in_connectors_present(self):
         expected = {
             "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
-            "devin", "hermes", "omnigent", "opencode", "openhands",
+            "devin", "hermes",  "opencode",
             legacy_connector.RETIRED_DESKTOP_ID, "zeptoclaw",
         }
         self.assertEqual(set(_CONNECTOR_RESIDUE_ARTIFACTS), expected)
@@ -257,14 +257,6 @@ class ResidueArtifactsContractTests(unittest.TestCase):
         self.assertIn(
             os.path.join("connector_backups", "hermes", "shell-hooks-allowlist.json.json"),
             _CONNECTOR_RESIDUE_ARTIFACTS["hermes"],
-        )
-        self.assertEqual(
-            set(_CONNECTOR_RESIDUE_ARTIFACTS["omnigent"]),
-            {
-                os.path.join("connector_backups", "omnigent", "config.json"),
-                os.path.join("connector_backups", "omnigent", "module.json"),
-                os.path.join("connector_backups", "omnigent", "pth.json"),
-            },
         )
         self.assertIn("zeptoclaw_backup.json", _CONNECTOR_RESIDUE_ARTIFACTS["zeptoclaw"])
         self.assertIn(

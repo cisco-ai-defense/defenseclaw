@@ -5,12 +5,160 @@ package gateway
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 )
+
+// GAP-1253: a stop writes the rows still queued and the counts of the windows
+// still open before the refusal audit returns.
+func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) {
+	sid := "S-1-5-21-1111-2222-3333-1042"
+	report := refusalpipe.Report{Connector: "claudecode", Reason: refusalpipe.ReasonSIDUnregistered, Tool: "Bash"}
+	codexReport := refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered}
+	ctx, cancel := context.WithCancel(context.Background())
+	release := make(chan struct{})
+	writerStarted := make(chan struct{})
+	var writerStart sync.Once
+	var mu sync.Mutex
+	var rows []unenrolledRefusalRow
+	write := func(ctx context.Context, row unenrolledRefusalRow) {
+		writerStart.Do(func() { close(writerStarted) })
+		<-release // a slow account lookup holds the writer past the stop
+		if ctx.Err() != nil {
+			t.Errorf("row written with a canceled context: %+v", row)
+		}
+		mu.Lock()
+		rows = append(rows, row)
+		mu.Unlock()
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runUnenrolledRefusalAudit(ctx, func(ctx context.Context, auditor *unenrolledRefusalAuditor) {
+			auditor.record(sid, report)
+			// The first row must be in the stalled writer before the
+			// remaining rows can test the queued and open-window paths.
+			select {
+			case <-writerStarted:
+			case <-time.After(10 * time.Second):
+				t.Error("refusal writer did not start")
+				cancel()
+				return
+			}
+			for range 49 {
+				auditor.record(sid, report)
+			}
+			auditor.record(sid, codexReport)
+			cancel()
+			<-ctx.Done()
+		}, write)
+	}()
+	<-ctx.Done()
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refusal audit did not return after the stop")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// The first Claude row can join the same queued window as its repeats
+	// when the writer stalls. Either row count is valid; the per-report totals
+	// must survive the stop without loss or duplication.
+	counts := make(map[refusalpipe.Report]int)
+	for _, row := range rows {
+		if row.SID != sid {
+			t.Fatalf("row has SID %q, want %q", row.SID, sid)
+		}
+		counts[row.Report] += row.Attempts
+	}
+	if len(counts) != 2 || counts[report] != 50 || counts[codexReport] != 1 {
+		t.Fatalf("rows after the stop = %+v (counts %+v), want 50 Claude and 1 Codex refusal", rows, counts)
+	}
+}
+
+// GAP-1253: a writer that stalls while first refusals for every table entry
+// fill the queue still gets, after the stop, the repeat counts of every open
+// window: no refusal is lost, the drained counts merge into the waiting rows.
+func TestUnenrolledRefusalStopKeepsEveryCountBehindAStalledWriter(t *testing.T) {
+	report := refusalpipe.Report{Connector: "claudecode", Reason: refusalpipe.ReasonSIDUnregistered, Tool: "Bash"}
+	ctx, cancel := context.WithCancel(context.Background())
+	release := make(chan struct{})
+	var mu sync.Mutex
+	attempts := 0
+	write := func(_ context.Context, row unenrolledRefusalRow) {
+		<-release
+		mu.Lock()
+		attempts += row.Attempts
+		mu.Unlock()
+	}
+	const repeats = 3
+	queue := newUnenrolledRefusalQueue(unenrolledRefusalMaxEntries)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runUnenrolledRefusalAuditQueue(ctx, queue, func(ctx context.Context, auditor *unenrolledRefusalAuditor) {
+			for i := range unenrolledRefusalMaxEntries {
+				sid := fmt.Sprintf("S-1-5-21-1111-2222-3333-%d", 2000+i)
+				for range 1 + repeats {
+					auditor.record(sid, report)
+				}
+			}
+			cancel()
+			<-ctx.Done()
+		}, write)
+	}()
+	// Release the writer only once the stop has drained and closed the queue.
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		queue.mu.Lock()
+		closed := queue.closed
+		queue.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the refusal audit did not drain after the stop")
+		}
+	}
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("refusal audit did not return after the stop")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if want := unenrolledRefusalMaxEntries * (1 + repeats); attempts != want {
+		t.Fatalf("refusals written after the stop = %d, want all %d", attempts, want)
+	}
+	if rows, lost := queue.lost(); rows != 0 || lost != 0 {
+		t.Fatalf("queue dropped %d rows (%d refusals)", rows, lost)
+	}
+}
+
+// A writer that falls behind costs rows past the queue bound, never silently:
+// the dropped rows and refusals are counted.
+func TestUnenrolledRefusalQueueCountsWhatItDrops(t *testing.T) {
+	queue := newUnenrolledRefusalQueue(1)
+	row := func(sid string, attempts int) unenrolledRefusalRow {
+		return unenrolledRefusalRow{SID: sid, Report: refusalpipe.Report{Connector: "codex"}, Attempts: attempts}
+	}
+	queue.push(row("S-1-5-21-1-1-1-1001", 1), false)
+	queue.push(row("S-1-5-21-1-1-1-1001", 4), false) // merged
+	queue.push(row("S-1-5-21-1-1-1-1002", 2), false) // past the bound
+	queue.push(row("S-1-5-21-1-1-1-1003", 3), true)  // a drain is never dropped
+	if rows, attempts := queue.pending(); rows != 2 || attempts != 8 {
+		t.Fatalf("pending = %d rows, %d refusals; want 2 rows, 8 refusals", rows, attempts)
+	}
+	if rows, attempts := queue.lost(); rows != 1 || attempts != 2 {
+		t.Fatalf("lost = %d rows, %d refusals; want 1 row, 2 refusals", rows, attempts)
+	}
+}
 
 // GAP-1242: a call the Windows standalone hook refuses for an excluded or
 // not-yet-enrolled account is written as a block row naming the account the

@@ -481,394 +481,6 @@ func TestHookLifecycleV8PreservesRootDirectNestedFactsAndOmitsMissingData(t *tes
 	}
 }
 
-func TestHookLifecycleV8InferredDelegationMarksProvenance(t *testing.T) {
-	fixture := newSidecarRuntimeFixture(t, true)
-	api := &APIServer{}
-	bindHookLifecycleV8(t, api, fixture.runtime)
-	args := json.RawMessage(`{"agents":[{"id":"child-1","name":"researcher"},{"id":"child-2","name":"reviewer"}]}`)
-	api.emitAgentHookLLMEvent(t.Context(), agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "gemini-session",
-		TurnID: "gemini-turn", AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
-		ToolName: "spawn_agent", ToolArgs: args,
-		Payload: map[string]any{"root_agent_id": "gemini-root", "tool_call_id": "spawn-call-1"},
-	}, args)
-	rows := readStoredHookLifecycleV8(t, fixture.path)
-	inferred := make(map[string]map[string]any)
-	for _, row := range rows {
-		if row.eventName == "subagent_start" {
-			inferred[fmt.Sprint(row.body["gen_ai.agent.name"])] = row.body
-		}
-	}
-	for _, name := range []string{"researcher", "reviewer"} {
-		body := inferred[name]
-		if body == nil || body["defenseclaw.agent.lineage.provenance"] != "inferred" ||
-			body["defenseclaw.agent.parent.id"] != "gemini-root" ||
-			fmt.Sprint(body["defenseclaw.agent.depth"]) != "1" {
-			t.Fatalf("inferred delegated lifecycle %q=%#v all=%#v", name, body, inferred)
-		}
-	}
-}
-
-func TestHookLifecycleV8DistinctStartsKeepExecutionScopedDedupeAndOperation(t *testing.T) {
-	api := &APIServer{}
-	req := agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "SessionStart", SessionID: "resume-session",
-		AgentID: "resume-agent", AgentName: "resume", AgentType: "openhands",
-		Payload: map[string]any{
-			"root_agent_id": "resume-agent", "agent_depth": 0, "source": "resume",
-		},
-	}
-
-	api.emitAgentHookLLMEvent(t.Context(), req, nil)
-	first, ok := api.hookLifecycleSnapshot(req.ConnectorName, req.SessionID, req.AgentID)
-	if !ok {
-		t.Fatal("first execution was not retained")
-	}
-	api.emitAgentHookLLMEvent(t.Context(), req, nil)
-	second, ok := api.hookLifecycleSnapshot(req.ConnectorName, req.SessionID, req.AgentID)
-	if !ok {
-		t.Fatal("second execution was not retained")
-	}
-
-	if first.ExecutionID == second.ExecutionID {
-		t.Fatalf("distinct starts reused execution %q", first.ExecutionID)
-	}
-	if first.OperationID == second.OperationID {
-		t.Fatalf("distinct executions reused operation %q", first.OperationID)
-	}
-	if got := len(api.hookLifecycleTransitions); got != 2 {
-		t.Fatalf("execution-scoped lifecycle dedupe keys=%d want=2", got)
-	}
-}
-
-func TestHookLifecycleV8FinalizesGenericOperationAfterTraceIdentity(t *testing.T) {
-	fixture := newSidecarRuntimeFixture(t, true)
-	api := &APIServer{}
-	bindHookLifecycleV8(t, api, fixture.runtime)
-	req := agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "Notification", SessionID: "event-session",
-		AgentID: "event-agent", AgentName: "event-agent", AgentType: "openhands",
-		Payload: map[string]any{"root_agent_id": "event-agent", "agent_depth": 0},
-	}
-
-	api.emitAgentHookLLMEvent(t.Context(), req, nil)
-	api.emitAgentHookLLMEvent(t.Context(), req, nil)
-	rows := readStoredHookLifecycleV8(t, fixture.path)
-	if len(rows) != 2 {
-		t.Fatalf("generic lifecycle rows=%d want=2", len(rows))
-	}
-	first := fmt.Sprint(rows[0].body["defenseclaw.operation.id"])
-	second := fmt.Sprint(rows[1].body["defenseclaw.operation.id"])
-	if first == "" || first == "<nil>" || second == "" || second == "<nil>" {
-		t.Fatalf("generic operations missing first=%q second=%q", first, second)
-	}
-	if first == second {
-		t.Fatalf("distinct generic deliveries reused operation %q", first)
-	}
-}
-
-func TestHookLifecycleV8ExactTopLevelReplayReusesCanonicalCursor(t *testing.T) {
-	fixture := newSidecarRuntimeFixture(t, true)
-	api := &APIServer{}
-	bindHookLifecycleV8(t, api, fixture.runtime)
-	req := agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "replay-session",
-		TurnID: "replay-turn", AgentID: "replay-agent", AgentName: "replay", AgentType: "openhands",
-		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf ok"}`),
-		Payload: map[string]any{
-			"root_agent_id": "replay-agent", "tool_call_id": "replay-call",
-		},
-	}
-
-	api.emitAgentHookLLMEvent(t.Context(), req, nil)
-	api.emitAgentHookLLMEvent(t.Context(), req, nil)
-
-	var replayRows []storedHookLifecycleV8
-	for _, row := range readStoredHookLifecycleV8(t, fixture.path) {
-		if row.eventName == "tool_start" && fmt.Sprint(row.body["gen_ai.agent.id"]) == req.AgentID {
-			replayRows = append(replayRows, row)
-		}
-	}
-	if len(replayRows) != 2 {
-		t.Fatalf("top-level replay rows=%d want=2; rows=%#v", len(replayRows), replayRows)
-	}
-	for _, key := range []string{
-		"defenseclaw.agent.phase",
-		"defenseclaw.agent.phase.previous",
-		"defenseclaw.agent.sequence",
-		"defenseclaw.operation.id",
-		"defenseclaw.agent.execution.id",
-	} {
-		if first, second := fmt.Sprint(replayRows[0].body[key]), fmt.Sprint(replayRows[1].body[key]); first != second {
-			t.Errorf("duplicate cursor %s=%q/%q", key, first, second)
-		}
-	}
-	if sequence := fmt.Sprint(replayRows[0].body["defenseclaw.agent.sequence"]); sequence != "1" {
-		t.Fatalf("canonical replay sequence=%s want=1", sequence)
-	}
-	if got := len(api.hookLifecycleTransitions); got != 1 {
-		t.Fatalf("logical transitions=%d want=1", got)
-	}
-
-	snapshot, ok := api.hookLifecycleSnapshot(req.ConnectorName, req.SessionID, req.AgentID)
-	if !ok || snapshot.Sequence != 1 {
-		t.Fatalf("retained replay cursor=%+v present=%v", snapshot, ok)
-	}
-	decision, _, ok := api.hookDecisionMeta(t.Context(), req)
-	if !ok || decision.Sequence != snapshot.Sequence || decision.Phase != snapshot.Phase ||
-		decision.PreviousPhase != snapshot.PreviousPhase || decision.OperationID != snapshot.OperationID {
-		t.Fatalf("duplicate decision cursor=%+v want snapshot=%+v present=%v", decision, snapshot, ok)
-	}
-}
-
-func TestHookLifecycleV8LateTopLevelReplayKeepsNewestRetainedCursor(t *testing.T) {
-	api := &APIServer{}
-	start := agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "late-replay-session",
-		TurnID: "late-replay-turn", AgentID: "late-replay-agent", AgentName: "replay", AgentType: "openhands",
-		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf ok"}`),
-		Payload: map[string]any{
-			"root_agent_id": "late-replay-agent", "tool_call_id": "late-replay-call",
-		},
-	}
-	completed := start
-	completed.HookEventName = "AfterTool"
-	completed.Content = "ok"
-
-	api.emitAgentHookLLMEvent(t.Context(), start, nil)
-	api.emitAgentHookLLMEvent(t.Context(), completed, nil)
-	api.emitAgentHookLLMEvent(t.Context(), start, nil)
-
-	snapshot, ok := api.hookLifecycleSnapshot(start.ConnectorName, start.SessionID, start.AgentID)
-	if !ok || snapshot.LifecycleEvent != "tool_end" || snapshot.Phase != "planning" || snapshot.Sequence != 2 {
-		t.Fatalf("late top-level replay replaced newest cursor=%+v present=%v", snapshot, ok)
-	}
-}
-
-func TestHookLifecycleV8LaterSubagentStopRepairsToolFirstLineage(t *testing.T) {
-	api := &APIServer{}
-	rootAgentID := stableLLMEventID("agent", "openhands", "shared-session", "root")
-	parent := agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "shared-session",
-		TurnID: "parent-turn", AgentID: rootAgentID, AgentName: "root", AgentType: "openhands",
-		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf parent"}`),
-		Payload: map[string]any{
-			"root_agent_id": rootAgentID, "agent_depth": 0, "tool_call_id": "parent-call",
-		},
-	}
-	childTool := agentHookRequest{
-		ConnectorName: "openhands", HookEventName: "BeforeTool", SessionID: "shared-session",
-		TurnID: "child-turn", AgentID: "agent-child", AgentName: "child", AgentType: "subagent",
-		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf child"}`),
-		Payload: map[string]any{"tool_call_id": "child-call"},
-	}
-	childStop := childTool
-	childStop.HookEventName = "SubagentStop"
-	childStop.Content = "done"
-	childStop.Payload = map[string]any{}
-
-	api.emitAgentHookLLMEvent(t.Context(), parent, nil)
-	api.emitAgentHookLLMEvent(t.Context(), childTool, nil)
-	placeholder, ok := api.hookLifecycleSnapshot(childTool.ConnectorName, childTool.SessionID, childTool.AgentID)
-	if !ok || placeholder.RootAgentID != "agent-child" || placeholder.AgentDepth != 0 {
-		t.Fatalf("tool-first placeholder was not reproduced: %+v present=%v", placeholder, ok)
-	}
-	api.emitAgentHookLLMEvent(t.Context(), childStop, nil)
-
-	snapshot, ok := api.hookLifecycleSnapshot(childTool.ConnectorName, childTool.SessionID, childTool.AgentID)
-	if !ok || snapshot.RootAgentID != rootAgentID || snapshot.ParentAgentID != rootAgentID || snapshot.AgentDepth != 1 {
-		t.Fatalf("later subagent stop did not repair tool-first lineage: %+v present=%v", snapshot, ok)
-	}
-	if snapshot.LineageProvenance != "inferred" {
-		t.Fatalf("partially inferred repaired lineage was mislabeled: %+v", snapshot)
-	}
-}
-
-func TestHookLifecycleV8InferredReplayReusesCanonicalCursorAndRetainsTerminal(t *testing.T) {
-	fixture := newSidecarRuntimeFixture(t, true)
-	api := &APIServer{}
-	bindHookLifecycleV8(t, api, fixture.runtime)
-	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
-	parent := llmEventMeta{
-		Source: "openhands", SessionID: "gemini-session", TurnID: "gemini-turn",
-		AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
-		RootAgentID: "gemini-root", RootSessionID: "gemini-session",
-		LifecycleID: "root-lifecycle", ExecutionID: "root-execution",
-		ToolName: "spawn_agent", ToolID: "spawn-call-1",
-	}
-
-	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
-	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
-	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, false)
-	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, false)
-
-	child := inferredDelegatedAgents(parent, parent.ToolName, arguments)[0]
-	var childRows []storedHookLifecycleV8
-	for _, row := range readStoredHookLifecycleV8(t, fixture.path) {
-		if fmt.Sprint(row.body["gen_ai.agent.id"]) == child.AgentID {
-			childRows = append(childRows, row)
-		}
-	}
-	if len(childRows) != 4 {
-		t.Fatalf("inferred replay rows=%d want=4; rows=%#v", len(childRows), childRows)
-	}
-	wantEvents := []string{"subagent_start", "subagent_start", "subagent_stop", "subagent_stop"}
-	wantSequences := []string{"1", "1", "2", "2"}
-	for index, row := range childRows {
-		if row.eventName != wantEvents[index] {
-			t.Errorf("inferred replay event[%d]=%q want=%q", index, row.eventName, wantEvents[index])
-		}
-		if sequence := fmt.Sprint(row.body["defenseclaw.agent.sequence"]); sequence != wantSequences[index] {
-			t.Errorf("inferred replay sequence[%d]=%s want=%s", index, sequence, wantSequences[index])
-		}
-	}
-	for _, pair := range [][2]int{{0, 1}, {2, 3}} {
-		for _, key := range []string{
-			"defenseclaw.agent.phase",
-			"defenseclaw.agent.phase.previous",
-			"defenseclaw.agent.sequence",
-			"defenseclaw.operation.id",
-			"defenseclaw.agent.execution.id",
-		} {
-			if first, second := fmt.Sprint(childRows[pair[0]].body[key]), fmt.Sprint(childRows[pair[1]].body[key]); first != second {
-				t.Errorf("inferred duplicate rows %d/%d %s=%q/%q", pair[0], pair[1], key, first, second)
-			}
-		}
-	}
-	if got := len(api.hookLifecycleTransitions); got != 2 {
-		t.Fatalf("inferred logical transitions=%d want=2", got)
-	}
-	snapshot, ok := api.hookLifecycleSnapshot(child.Source, child.SessionID, child.AgentID)
-	if !ok || snapshot.LifecycleEvent != "subagent_stop" || snapshot.Phase != "completed" || snapshot.Sequence != 2 {
-		t.Fatalf("retained inferred terminal=%+v present=%v", snapshot, ok)
-	}
-}
-
-func TestHookLifecycleV8InferredReplayAfterTerminalKeepsTerminalSnapshot(t *testing.T) {
-	api := &APIServer{}
-	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
-	parent := llmEventMeta{
-		Source: "openhands", SessionID: "gemini-session", TurnID: "gemini-turn",
-		AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
-		RootAgentID: "gemini-root", RootSessionID: "gemini-session",
-		LifecycleID: "root-lifecycle", ExecutionID: "root-execution",
-		ToolName: "spawn_agent", ToolID: "spawn-call-1",
-	}
-	child := inferredDelegatedAgents(parent, parent.ToolName, arguments)[0]
-
-	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
-	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, false)
-	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
-
-	snapshot, ok := api.hookLifecycleSnapshot(child.Source, child.SessionID, child.AgentID)
-	if !ok || snapshot.LifecycleEvent != "subagent_stop" || snapshot.Phase != "completed" || snapshot.Sequence != 2 {
-		t.Fatalf("late inferred replay replaced terminal snapshot=%+v present=%v", snapshot, ok)
-	}
-}
-
-func TestHookLifecycleV8InferredDelegationSeparatesParentExecutions(t *testing.T) {
-	fixture := newSidecarRuntimeFixture(t, true)
-	api := &APIServer{}
-	bindHookLifecycleV8(t, api, fixture.runtime)
-	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
-	parentA := llmEventMeta{
-		Source: "openhands", SessionID: "gemini-session", TurnID: "gemini-turn",
-		AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
-		RootAgentID: "gemini-root", RootSessionID: "gemini-session",
-		LifecycleID: "root-lifecycle", ExecutionID: "root-execution-a",
-		ToolName: "spawn_agent", ToolID: "spawn-call-1",
-	}
-	parentB := parentA
-	parentB.ExecutionID = "root-execution-b"
-
-	for _, parent := range []llmEventMeta{parentA, parentB} {
-		api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
-		api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, false)
-	}
-
-	child := inferredDelegatedAgents(parentA, parentA.ToolName, arguments)[0]
-	var childRows []storedHookLifecycleV8
-	for _, row := range readStoredHookLifecycleV8(t, fixture.path) {
-		if fmt.Sprint(row.body["gen_ai.agent.id"]) == child.AgentID {
-			childRows = append(childRows, row)
-		}
-	}
-	if len(childRows) != 4 {
-		t.Fatalf("inferred execution rows=%d want=4; rows=%#v", len(childRows), childRows)
-	}
-	wantEvents := []string{"subagent_start", "subagent_stop", "subagent_start", "subagent_stop"}
-	wantSequences := []string{"1", "2", "1", "2"}
-	for index, row := range childRows {
-		if row.eventName != wantEvents[index] {
-			t.Errorf("inferred execution event[%d]=%q want=%q", index, row.eventName, wantEvents[index])
-		}
-		if sequence := fmt.Sprint(row.body["defenseclaw.agent.sequence"]); sequence != wantSequences[index] {
-			t.Errorf("inferred execution sequence[%d]=%s want=%s", index, sequence, wantSequences[index])
-		}
-	}
-	executionAStart := fmt.Sprint(childRows[0].body["defenseclaw.agent.execution.id"])
-	executionAStop := fmt.Sprint(childRows[1].body["defenseclaw.agent.execution.id"])
-	executionBStart := fmt.Sprint(childRows[2].body["defenseclaw.agent.execution.id"])
-	executionBStop := fmt.Sprint(childRows[3].body["defenseclaw.agent.execution.id"])
-	if executionAStart == "" || executionAStart != executionAStop ||
-		executionBStart == "" || executionBStart != executionBStop || executionAStart == executionBStart {
-		t.Fatalf("inferred child executions A=%q/%q B=%q/%q",
-			executionAStart, executionAStop, executionBStart, executionBStop)
-	}
-	if got := len(api.hookLifecycleTransitions); got != 4 {
-		t.Fatalf("inferred execution transitions=%d want=4", got)
-	}
-}
-
-func TestHookLifecycleV8InferredDelegationRetainsExecutionAndSequence(t *testing.T) {
-	fixture := newSidecarRuntimeFixture(t, true)
-	api := &APIServer{}
-	bindHookLifecycleV8(t, api, fixture.runtime)
-	args := json.RawMessage(`{"agents":[{"id":"child-1","name":"researcher"}]}`)
-	base := agentHookRequest{
-		ConnectorName: "openhands", SessionID: "gemini-session", TurnID: "gemini-turn",
-		AgentID: "gemini-root", AgentName: "gemini", AgentType: "openhands",
-		ToolName: "spawn_agent", ToolArgs: args,
-		Payload: map[string]any{
-			"root_agent_id": "gemini-root", "tool_call_id": "spawn-call-1",
-		},
-	}
-	start := base
-	start.HookEventName = "BeforeTool"
-	api.emitAgentHookLLMEvent(t.Context(), start, args)
-	stop := base
-	stop.HookEventName = "AfterTool"
-	stop.Content = "delegated work completed"
-	api.emitAgentHookLLMEvent(t.Context(), stop, args)
-
-	rows := readStoredHookLifecycleV8(t, fixture.path)
-	var childRows []storedHookLifecycleV8
-	for _, row := range rows {
-		if (row.eventName == "subagent_start" || row.eventName == "subagent_stop") &&
-			fmt.Sprint(row.body["gen_ai.agent.name"]) == "researcher" {
-			childRows = append(childRows, row)
-		}
-	}
-	if len(childRows) != 2 {
-		t.Fatalf("inferred child lifecycle rows=%d want start+stop; all=%#v", len(childRows), rows)
-	}
-	if childRows[0].eventName != "subagent_start" || childRows[1].eventName != "subagent_stop" {
-		t.Fatalf("inferred child lifecycle order=%q,%q want subagent_start,subagent_stop",
-			childRows[0].eventName, childRows[1].eventName)
-	}
-	startExecution := fmt.Sprint(childRows[0].body["defenseclaw.agent.execution.id"])
-	stopExecution := fmt.Sprint(childRows[1].body["defenseclaw.agent.execution.id"])
-	if startExecution == "" || startExecution != stopExecution {
-		t.Fatalf("inferred start/stop executions=%q/%q", startExecution, stopExecution)
-	}
-	if startSequence := fmt.Sprint(childRows[0].body["defenseclaw.agent.sequence"]); startSequence != "1" {
-		t.Fatalf("inferred start sequence=%s want=1", startSequence)
-	}
-	if stopSequence := fmt.Sprint(childRows[1].body["defenseclaw.agent.sequence"]); stopSequence != "2" {
-		t.Fatalf("inferred stop sequence=%s want=2", stopSequence)
-	}
-}
-
 func hookLifecycleReloadPlan(
 	t *testing.T, fixture sidecarRuntimeFixture, collect bool, sampler string,
 ) *config.ObservabilityV8Plan {
@@ -1027,3 +639,391 @@ func TestHookLifecycleLineageProvenanceDistinguishesReportedAndInferred(t *testi
 }
 
 var _ sidecarRuntimeEmitter = (*failingHookLifecycleEmitter)(nil)
+
+func TestHookLifecycleV8DistinctStartsKeepExecutionScopedDedupeAndOperation(t *testing.T) {
+	api := &APIServer{}
+	req := agentHookRequest{
+		ConnectorName: "copilot", HookEventName: "SessionStart", SessionID: "resume-session",
+		AgentID: "resume-agent", AgentName: "resume", AgentType: "copilot",
+		Payload: map[string]any{
+			"root_agent_id": "resume-agent", "agent_depth": 0, "source": "resume",
+		},
+	}
+
+	api.emitAgentHookLLMEvent(t.Context(), req, nil)
+	first, ok := api.hookLifecycleSnapshot(req.ConnectorName, req.SessionID, req.AgentID)
+	if !ok {
+		t.Fatal("first execution was not retained")
+	}
+	api.emitAgentHookLLMEvent(t.Context(), req, nil)
+	second, ok := api.hookLifecycleSnapshot(req.ConnectorName, req.SessionID, req.AgentID)
+	if !ok {
+		t.Fatal("second execution was not retained")
+	}
+
+	if first.ExecutionID == second.ExecutionID {
+		t.Fatalf("distinct starts reused execution %q", first.ExecutionID)
+	}
+	if first.OperationID == second.OperationID {
+		t.Fatalf("distinct executions reused operation %q", first.OperationID)
+	}
+	if got := len(api.hookLifecycleTransitions); got != 2 {
+		t.Fatalf("execution-scoped lifecycle dedupe keys=%d want=2", got)
+	}
+}
+
+func TestHookLifecycleV8ExactTopLevelReplayReusesCanonicalCursor(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := &APIServer{}
+	bindHookLifecycleV8(t, api, fixture.runtime)
+	req := agentHookRequest{
+		ConnectorName: "copilot", HookEventName: "BeforeTool", SessionID: "replay-session",
+		TurnID: "replay-turn", AgentID: "replay-agent", AgentName: "replay", AgentType: "copilot",
+		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf ok"}`),
+		Payload: map[string]any{
+			"root_agent_id": "replay-agent", "tool_call_id": "replay-call",
+		},
+	}
+
+	api.emitAgentHookLLMEvent(t.Context(), req, nil)
+	api.emitAgentHookLLMEvent(t.Context(), req, nil)
+
+	var replayRows []storedHookLifecycleV8
+	for _, row := range readStoredHookLifecycleV8(t, fixture.path) {
+		if row.eventName == "tool_start" && fmt.Sprint(row.body["gen_ai.agent.id"]) == req.AgentID {
+			replayRows = append(replayRows, row)
+		}
+	}
+	if len(replayRows) != 2 {
+		t.Fatalf("top-level replay rows=%d want=2; rows=%#v", len(replayRows), replayRows)
+	}
+	for _, key := range []string{
+		"defenseclaw.agent.phase",
+		"defenseclaw.agent.phase.previous",
+		"defenseclaw.agent.sequence",
+		"defenseclaw.operation.id",
+		"defenseclaw.agent.execution.id",
+	} {
+		if first, second := fmt.Sprint(replayRows[0].body[key]), fmt.Sprint(replayRows[1].body[key]); first != second {
+			t.Errorf("duplicate cursor %s=%q/%q", key, first, second)
+		}
+	}
+	if sequence := fmt.Sprint(replayRows[0].body["defenseclaw.agent.sequence"]); sequence != "1" {
+		t.Fatalf("canonical replay sequence=%s want=1", sequence)
+	}
+	if got := len(api.hookLifecycleTransitions); got != 1 {
+		t.Fatalf("logical transitions=%d want=1", got)
+	}
+
+	snapshot, ok := api.hookLifecycleSnapshot(req.ConnectorName, req.SessionID, req.AgentID)
+	if !ok || snapshot.Sequence != 1 {
+		t.Fatalf("retained replay cursor=%+v present=%v", snapshot, ok)
+	}
+	decision, _, ok := api.hookDecisionMeta(t.Context(), req)
+	if !ok || decision.Sequence != snapshot.Sequence || decision.Phase != snapshot.Phase ||
+		decision.PreviousPhase != snapshot.PreviousPhase || decision.OperationID != snapshot.OperationID {
+		t.Fatalf("duplicate decision cursor=%+v want snapshot=%+v present=%v", decision, snapshot, ok)
+	}
+}
+
+func TestHookLifecycleV8FinalizesGenericOperationAfterTraceIdentity(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := &APIServer{}
+	bindHookLifecycleV8(t, api, fixture.runtime)
+	req := agentHookRequest{
+		ConnectorName: "copilot", HookEventName: "Notification", SessionID: "event-session",
+		AgentID: "event-agent", AgentName: "event-agent", AgentType: "copilot",
+		Payload: map[string]any{"root_agent_id": "event-agent", "agent_depth": 0},
+	}
+
+	api.emitAgentHookLLMEvent(t.Context(), req, nil)
+	api.emitAgentHookLLMEvent(t.Context(), req, nil)
+	rows := readStoredHookLifecycleV8(t, fixture.path)
+	if len(rows) != 2 {
+		t.Fatalf("generic lifecycle rows=%d want=2", len(rows))
+	}
+	first := fmt.Sprint(rows[0].body["defenseclaw.operation.id"])
+	second := fmt.Sprint(rows[1].body["defenseclaw.operation.id"])
+	if first == "" || first == "<nil>" || second == "" || second == "<nil>" {
+		t.Fatalf("generic operations missing first=%q second=%q", first, second)
+	}
+	if first == second {
+		t.Fatalf("distinct generic deliveries reused operation %q", first)
+	}
+}
+
+func TestHookLifecycleV8InferredDelegationMarksProvenance(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := &APIServer{}
+	bindHookLifecycleV8(t, api, fixture.runtime)
+	args := json.RawMessage(`{"agents":[{"id":"child-1","name":"researcher"},{"id":"child-2","name":"reviewer"}]}`)
+	api.emitAgentHookLLMEvent(t.Context(), agentHookRequest{
+		ConnectorName: "antigravity", HookEventName: "BeforeTool", SessionID: "parent-session",
+		TurnID: "parent-turn", AgentID: "parent-root", AgentName: "parent", AgentType: "antigravity",
+		ToolName: "spawn_agent", ToolArgs: args,
+		Payload: map[string]any{"root_agent_id": "parent-root", "tool_call_id": "spawn-call-1"},
+	}, args)
+	rows := readStoredHookLifecycleV8(t, fixture.path)
+	inferred := make(map[string]map[string]any)
+	for _, row := range rows {
+		if row.eventName == "subagent_start" {
+			inferred[fmt.Sprint(row.body["gen_ai.agent.name"])] = row.body
+		}
+	}
+	for _, name := range []string{"researcher", "reviewer"} {
+		body := inferred[name]
+		if body == nil || body["defenseclaw.agent.lineage.provenance"] != "inferred" ||
+			body["defenseclaw.agent.parent.id"] != "parent-root" ||
+			fmt.Sprint(body["defenseclaw.agent.depth"]) != "1" {
+			t.Fatalf("inferred delegated lifecycle %q=%#v all=%#v", name, body, inferred)
+		}
+	}
+}
+
+func TestHookLifecycleV8InferredDelegationRetainsExecutionAndSequence(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := &APIServer{}
+	bindHookLifecycleV8(t, api, fixture.runtime)
+	args := json.RawMessage(`{"agents":[{"id":"child-1","name":"researcher"}]}`)
+	base := agentHookRequest{
+		ConnectorName: "antigravity", SessionID: "parent-session", TurnID: "parent-turn",
+		AgentID: "parent-root", AgentName: "parent", AgentType: "antigravity",
+		ToolName: "spawn_agent", ToolArgs: args,
+		Payload: map[string]any{
+			"root_agent_id": "parent-root", "tool_call_id": "spawn-call-1",
+		},
+	}
+	start := base
+	start.HookEventName = "BeforeTool"
+	api.emitAgentHookLLMEvent(t.Context(), start, args)
+	stop := base
+	stop.HookEventName = "AfterTool"
+	stop.Content = "delegated work completed"
+	api.emitAgentHookLLMEvent(t.Context(), stop, args)
+
+	rows := readStoredHookLifecycleV8(t, fixture.path)
+	var childRows []storedHookLifecycleV8
+	for _, row := range rows {
+		if (row.eventName == "subagent_start" || row.eventName == "subagent_stop") &&
+			fmt.Sprint(row.body["gen_ai.agent.name"]) == "researcher" {
+			childRows = append(childRows, row)
+		}
+	}
+	if len(childRows) != 2 {
+		t.Fatalf("inferred child lifecycle rows=%d want start+stop; all=%#v", len(childRows), rows)
+	}
+	if childRows[0].eventName != "subagent_start" || childRows[1].eventName != "subagent_stop" {
+		t.Fatalf("inferred child lifecycle order=%q,%q want subagent_start,subagent_stop",
+			childRows[0].eventName, childRows[1].eventName)
+	}
+	startExecution := fmt.Sprint(childRows[0].body["defenseclaw.agent.execution.id"])
+	stopExecution := fmt.Sprint(childRows[1].body["defenseclaw.agent.execution.id"])
+	if startExecution == "" || startExecution != stopExecution {
+		t.Fatalf("inferred start/stop executions=%q/%q", startExecution, stopExecution)
+	}
+	if startSequence := fmt.Sprint(childRows[0].body["defenseclaw.agent.sequence"]); startSequence != "1" {
+		t.Fatalf("inferred start sequence=%s want=1", startSequence)
+	}
+	if stopSequence := fmt.Sprint(childRows[1].body["defenseclaw.agent.sequence"]); stopSequence != "2" {
+		t.Fatalf("inferred stop sequence=%s want=2", stopSequence)
+	}
+}
+
+func TestHookLifecycleV8InferredDelegationSeparatesParentExecutions(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := &APIServer{}
+	bindHookLifecycleV8(t, api, fixture.runtime)
+	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
+	parentA := llmEventMeta{
+		Source: "antigravity", SessionID: "parent-session", TurnID: "parent-turn",
+		AgentID: "parent-root", AgentName: "parent", AgentType: "antigravity",
+		RootAgentID: "parent-root", RootSessionID: "parent-session",
+		LifecycleID: "root-lifecycle", ExecutionID: "root-execution-a",
+		ToolName: "spawn_agent", ToolID: "spawn-call-1",
+	}
+	parentB := parentA
+	parentB.ExecutionID = "root-execution-b"
+
+	for _, parent := range []llmEventMeta{parentA, parentB} {
+		api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
+		api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, false)
+	}
+
+	child := inferredDelegatedAgents(parentA, parentA.ToolName, arguments)[0]
+	var childRows []storedHookLifecycleV8
+	for _, row := range readStoredHookLifecycleV8(t, fixture.path) {
+		if fmt.Sprint(row.body["gen_ai.agent.id"]) == child.AgentID {
+			childRows = append(childRows, row)
+		}
+	}
+	if len(childRows) != 4 {
+		t.Fatalf("inferred execution rows=%d want=4; rows=%#v", len(childRows), childRows)
+	}
+	wantEvents := []string{"subagent_start", "subagent_stop", "subagent_start", "subagent_stop"}
+	wantSequences := []string{"1", "2", "1", "2"}
+	for index, row := range childRows {
+		if row.eventName != wantEvents[index] {
+			t.Errorf("inferred execution event[%d]=%q want=%q", index, row.eventName, wantEvents[index])
+		}
+		if sequence := fmt.Sprint(row.body["defenseclaw.agent.sequence"]); sequence != wantSequences[index] {
+			t.Errorf("inferred execution sequence[%d]=%s want=%s", index, sequence, wantSequences[index])
+		}
+	}
+	executionAStart := fmt.Sprint(childRows[0].body["defenseclaw.agent.execution.id"])
+	executionAStop := fmt.Sprint(childRows[1].body["defenseclaw.agent.execution.id"])
+	executionBStart := fmt.Sprint(childRows[2].body["defenseclaw.agent.execution.id"])
+	executionBStop := fmt.Sprint(childRows[3].body["defenseclaw.agent.execution.id"])
+	if executionAStart == "" || executionAStart != executionAStop ||
+		executionBStart == "" || executionBStart != executionBStop || executionAStart == executionBStart {
+		t.Fatalf("inferred child executions A=%q/%q B=%q/%q",
+			executionAStart, executionAStop, executionBStart, executionBStop)
+	}
+	if got := len(api.hookLifecycleTransitions); got != 4 {
+		t.Fatalf("inferred execution transitions=%d want=4", got)
+	}
+}
+
+func TestHookLifecycleV8InferredReplayAfterTerminalKeepsTerminalSnapshot(t *testing.T) {
+	api := &APIServer{}
+	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
+	parent := llmEventMeta{
+		Source: "antigravity", SessionID: "parent-session", TurnID: "parent-turn",
+		AgentID: "parent-root", AgentName: "parent", AgentType: "antigravity",
+		RootAgentID: "parent-root", RootSessionID: "parent-session",
+		LifecycleID: "root-lifecycle", ExecutionID: "root-execution",
+		ToolName: "spawn_agent", ToolID: "spawn-call-1",
+	}
+	child := inferredDelegatedAgents(parent, parent.ToolName, arguments)[0]
+
+	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
+	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, false)
+	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
+
+	snapshot, ok := api.hookLifecycleSnapshot(child.Source, child.SessionID, child.AgentID)
+	if !ok || snapshot.LifecycleEvent != "subagent_stop" || snapshot.Phase != "completed" || snapshot.Sequence != 2 {
+		t.Fatalf("late inferred replay replaced terminal snapshot=%+v present=%v", snapshot, ok)
+	}
+}
+
+func TestHookLifecycleV8InferredReplayReusesCanonicalCursorAndRetainsTerminal(t *testing.T) {
+	fixture := newSidecarRuntimeFixture(t, true)
+	api := &APIServer{}
+	bindHookLifecycleV8(t, api, fixture.runtime)
+	arguments := `{"agents":[{"id":"child-1","name":"researcher"}]}`
+	parent := llmEventMeta{
+		Source: "antigravity", SessionID: "parent-session", TurnID: "parent-turn",
+		AgentID: "parent-root", AgentName: "parent", AgentType: "antigravity",
+		RootAgentID: "parent-root", RootSessionID: "parent-session",
+		LifecycleID: "root-lifecycle", ExecutionID: "root-execution",
+		ToolName: "spawn_agent", ToolID: "spawn-call-1",
+	}
+
+	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
+	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, true)
+	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, false)
+	api.emitInferredDelegatedAgentTransitions(t.Context(), parent, parent.ToolName, arguments, false)
+
+	child := inferredDelegatedAgents(parent, parent.ToolName, arguments)[0]
+	var childRows []storedHookLifecycleV8
+	for _, row := range readStoredHookLifecycleV8(t, fixture.path) {
+		if fmt.Sprint(row.body["gen_ai.agent.id"]) == child.AgentID {
+			childRows = append(childRows, row)
+		}
+	}
+	if len(childRows) != 4 {
+		t.Fatalf("inferred replay rows=%d want=4; rows=%#v", len(childRows), childRows)
+	}
+	wantEvents := []string{"subagent_start", "subagent_start", "subagent_stop", "subagent_stop"}
+	wantSequences := []string{"1", "1", "2", "2"}
+	for index, row := range childRows {
+		if row.eventName != wantEvents[index] {
+			t.Errorf("inferred replay event[%d]=%q want=%q", index, row.eventName, wantEvents[index])
+		}
+		if sequence := fmt.Sprint(row.body["defenseclaw.agent.sequence"]); sequence != wantSequences[index] {
+			t.Errorf("inferred replay sequence[%d]=%s want=%s", index, sequence, wantSequences[index])
+		}
+	}
+	for _, pair := range [][2]int{{0, 1}, {2, 3}} {
+		for _, key := range []string{
+			"defenseclaw.agent.phase",
+			"defenseclaw.agent.phase.previous",
+			"defenseclaw.agent.sequence",
+			"defenseclaw.operation.id",
+			"defenseclaw.agent.execution.id",
+		} {
+			if first, second := fmt.Sprint(childRows[pair[0]].body[key]), fmt.Sprint(childRows[pair[1]].body[key]); first != second {
+				t.Errorf("inferred duplicate rows %d/%d %s=%q/%q", pair[0], pair[1], key, first, second)
+			}
+		}
+	}
+	if got := len(api.hookLifecycleTransitions); got != 2 {
+		t.Fatalf("inferred logical transitions=%d want=2", got)
+	}
+	snapshot, ok := api.hookLifecycleSnapshot(child.Source, child.SessionID, child.AgentID)
+	if !ok || snapshot.LifecycleEvent != "subagent_stop" || snapshot.Phase != "completed" || snapshot.Sequence != 2 {
+		t.Fatalf("retained inferred terminal=%+v present=%v", snapshot, ok)
+	}
+}
+
+func TestHookLifecycleV8LateTopLevelReplayKeepsNewestRetainedCursor(t *testing.T) {
+	api := &APIServer{}
+	start := agentHookRequest{
+		ConnectorName: "copilot", HookEventName: "BeforeTool", SessionID: "late-replay-session",
+		TurnID: "late-replay-turn", AgentID: "late-replay-agent", AgentName: "replay", AgentType: "copilot",
+		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf ok"}`),
+		Payload: map[string]any{
+			"root_agent_id": "late-replay-agent", "tool_call_id": "late-replay-call",
+		},
+	}
+	completed := start
+	completed.HookEventName = "AfterTool"
+	completed.Content = "ok"
+
+	api.emitAgentHookLLMEvent(t.Context(), start, nil)
+	api.emitAgentHookLLMEvent(t.Context(), completed, nil)
+	api.emitAgentHookLLMEvent(t.Context(), start, nil)
+
+	snapshot, ok := api.hookLifecycleSnapshot(start.ConnectorName, start.SessionID, start.AgentID)
+	if !ok || snapshot.LifecycleEvent != "tool_end" || snapshot.Phase != "planning" || snapshot.Sequence != 2 {
+		t.Fatalf("late top-level replay replaced newest cursor=%+v present=%v", snapshot, ok)
+	}
+}
+
+func TestHookLifecycleV8LaterSubagentStopRepairsToolFirstLineage(t *testing.T) {
+	api := &APIServer{}
+	rootAgentID := stableLLMEventID("agent", "copilot", "shared-session", "root")
+	parent := agentHookRequest{
+		ConnectorName: "copilot", HookEventName: "BeforeTool", SessionID: "shared-session",
+		TurnID: "parent-turn", AgentID: rootAgentID, AgentName: "root", AgentType: "copilot",
+		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf parent"}`),
+		Payload: map[string]any{
+			"root_agent_id": rootAgentID, "agent_depth": 0, "tool_call_id": "parent-call",
+		},
+	}
+	childTool := agentHookRequest{
+		ConnectorName: "copilot", HookEventName: "BeforeTool", SessionID: "shared-session",
+		TurnID: "child-turn", AgentID: "agent-child", AgentName: "child", AgentType: "subagent",
+		ToolName: "Bash", ToolArgs: json.RawMessage(`{"command":"printf child"}`),
+		Payload: map[string]any{"tool_call_id": "child-call"},
+	}
+	childStop := childTool
+	childStop.HookEventName = "SubagentStop"
+	childStop.Content = "done"
+	childStop.Payload = map[string]any{}
+
+	api.emitAgentHookLLMEvent(t.Context(), parent, nil)
+	api.emitAgentHookLLMEvent(t.Context(), childTool, nil)
+	placeholder, ok := api.hookLifecycleSnapshot(childTool.ConnectorName, childTool.SessionID, childTool.AgentID)
+	if !ok || placeholder.RootAgentID != "agent-child" || placeholder.AgentDepth != 0 {
+		t.Fatalf("tool-first placeholder was not reproduced: %+v present=%v", placeholder, ok)
+	}
+	api.emitAgentHookLLMEvent(t.Context(), childStop, nil)
+
+	snapshot, ok := api.hookLifecycleSnapshot(childTool.ConnectorName, childTool.SessionID, childTool.AgentID)
+	if !ok || snapshot.RootAgentID != rootAgentID || snapshot.ParentAgentID != rootAgentID || snapshot.AgentDepth != 1 {
+		t.Fatalf("later subagent stop did not repair tool-first lineage: %+v present=%v", snapshot, ok)
+	}
+	if snapshot.LineageProvenance != "inferred" {
+		t.Fatalf("partially inferred repaired lineage was mislabeled: %+v", snapshot)
+	}
+}

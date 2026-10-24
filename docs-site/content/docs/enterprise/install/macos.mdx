@@ -1,0 +1,184 @@
+---
+title: macOS standalone deployment
+description: Install the standalone DefenseClaw enterprise LaunchDaemons on Apple silicon Macs from the pkg or the payload tarball, check the result, and remove them.
+keywords:
+  - DefenseClaw macOS enterprise
+  - defenseclaw-enterprise pkg
+  - LaunchDaemon
+  - _defenseclaw
+  - managed_enterprise macOS
+---
+
+The standalone macOS profile installs DefenseClaw machine-wide under
+`/opt/cisco/defenseclaw`, with LaunchDaemons labeled `com.cisco.defenseclaw.*` and
+a hidden service account, `_defenseclaw`. It is separate from the Cisco Secure
+Client module and refuses to install beside it. Standard users cannot stop the
+daemons or change the config, and the hook guardian restores DefenseClaw's hooks if
+a user removes them. Terms are in [Concepts](/docs/enterprise/plan/concepts).
+
+<Callout title="Deploying with an MDM?">
+This page installs on one Mac from an administrator shell. For Jamf Pro, Iru,
+Intune, Workspace ONE or another MDM, start with
+[Install with an MDM](/docs/enterprise/mdm). It uses the same pkg and config.
+</Callout>
+
+## Requirements
+
+| Requirement | Detail |
+| --- | --- |
+| macOS | 13.0 or later. The pkg refuses older versions |
+| Hardware | Apple silicon only. Releases build no Intel macOS binaries |
+| Privileges | root, through `sudo` or an MDM agent. Every `enterprise macos` action, status included, needs root |
+| Other profiles | No Secure Client DefenseClaw module. The pkg's pre-install script refuses when `/opt/cisco/secureclient/defenseclaw` or a `com.cisco.secureclient.defenseclaw*` LaunchDaemon exists |
+| Gatekeeper | Releases currently ship the pkg unsigned, pinned by `checksums.txt` ([details](/docs/enterprise/install/reference/macos#gatekeeper)) |
+
+## Layout
+
+Paths are under `/opt/cisco/defenseclaw`: binaries in `bin`, config in
+`etc/config.yaml`, data in `runtime`, the hook socket at `run/hook.sock`, logs in
+`/Library/Logs/Cisco/DefenseClaw`. The gateway runs as `_defenseclaw`; everything
+else runs as root. The LaunchDaemons, owners and modes, and both diagrams are in the
+[macOS deployment reference](/docs/enterprise/install/reference/macos#layout).
+
+## Install
+
+Stage the config first, then install the pkg or the tarball.
+
+### 1. Get and check the release
+
+Download `defenseclaw-enterprise-<version>-darwin-arm64.pkg` (or the `.tar.gz`),
+`checksums.txt` and `checksums.txt.bundle` from one GitHub release. Check the
+signature on `checksums.txt` with [cosign](https://docs.sigstore.dev/cosign/system_config/installation/),
+then the file against it:
+
+```bash
+VERSION=1.0.4  # the release you deploy
+cosign verify-blob --bundle checksums.txt.bundle \
+  --certificate-identity "https://github.com/cisco-ai-defense/defenseclaw/.github/workflows/release.yaml@refs/heads/main" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  checksums.txt
+grep " defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg\$" checksums.txt | shasum -a 256 -c
+```
+
+Pin that SHA-256 in your MDM. `pkgutil --check-signature` reports "no signature"
+on the unsigned pkg; the checks above are what protect it.
+
+### 2. Stage the config
+
+The lifecycle requires `config_version: 9`, `deployment_mode: managed_enterprise`,
+`enterprise.profile: standalone` and `data_dir: /opt/cisco/defenseclaw/runtime`. If
+you set `gateway.api_bind` or `gateway.api_port`, they must be `127.0.0.1` and
+`18970`.
+
+```yaml title="config.yaml"
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /opt/cisco/defenseclaw/runtime
+policy_dir: /opt/cisco/defenseclaw/etc/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    codex: {}
+    claudecode: {}
+ai_discovery:
+  enabled: true
+```
+
+AI Discovery is off unless the config sets `ai_discovery.enabled: true`, as above. Each key under `guardrail.connectors` turns on one agent
+([choose the agents](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)).
+Without a config the pkg installs a default that protects nothing.
+
+```bash
+sudo install -d -o root -g wheel -m 0755 /opt/cisco/defenseclaw/etc
+sudo install -o root -g wheel -m 0640 config.yaml /opt/cisco/defenseclaw/etc/config.yaml
+```
+
+### 3. Install the pkg
+
+```bash
+sudo installer -pkg "defenseclaw-enterprise-${VERSION}-darwin-arm64.pkg" -target /
+sudo cat /opt/cisco/defenseclaw/lifecycle/last-package-result.json
+```
+
+The post-install script runs `enterprise macos ensure --from-package`: it creates
+`_defenseclaw`, validates the config, writes and starts the LaunchDaemons, verifies,
+and rolls back on any failure. A failed apply fails the pkg install, and
+`/var/log/install.log` names the first error. No pkg? Use the
+[tarball](/docs/enterprise/install/reference/macos#the-tarball). Exit codes of the
+lifecycle: `0` success or nothing to do, `1` failed (rolled back), `2` invalid
+arguments, `75` another run holds the lock.
+
+### 4. Add the AI Defense key
+
+Optional. Set `enterprise.inspection.ai_defense.enabled: true` and
+`credential: ai-defense-api-key` in the config, then store the key:
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set \
+  --name ai-defense-api-key --from-file /var/root/ai-defense.key --json
+sudo rm /var/root/ai-defense.key
+```
+
+Rotation: [AI Defense key](/docs/enterprise/configure/ai-defense-key).
+
+## Verify the install
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json
+pkgutil --pkg-info com.cisco.defenseclaw.enterprise   # pkg installs only
+```
+
+`status` reports the state. `verify` also checks every file, permission (including
+macOS ACL entries), LaunchDaemon and readiness check, and exits `1` when anything
+fails. The JSON has the same shape as the [Linux sample](/docs/enterprise/install/linux#verify-the-install).
+
+| Field | Healthy value |
+| --- | --- |
+| `ok`, `errors` | `true`, empty |
+| `installed_version` | The version you deployed |
+| `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
+| `coverage_complete` | `true` when the enabled hooks are installed |
+| `security_complete` | `false` with Codex or Claude Code enabled; `hook_process_fail_open` warns that a stopped or timed-out hook can let a tool run |
+| `policy` | `applied` is `true` ([digest](/docs/enterprise/operate/operations#effective-policy-digest-and-config-generation)) |
+| `enrollment.targets` | Per-user targets. `0` is normal when you enable only machine-policy connectors |
+
+With no agent enabled, `status` warns `no_connectors_enabled` and `verify` fails.
+The enumerator enrolls accounts with uid 501 or higher by default
+([Enrollment](/docs/enterprise/configure/enrollment)). To reconcile at once:
+`sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos reconcile --json`.
+The gateway log is `/Library/Logs/Cisco/DefenseClaw/gateway/gateway.err.log`.
+
+## Remove
+
+Run as root from `/opt/cisco/defenseclaw/bin`.
+
+| Goal | Command |
+| --- | --- |
+| Remove the deployment, binaries, config, secrets, logs and the `_defenseclaw` account. Each user keeps `~/.defenseclaw` | `defenseclaw-gateway enterprise macos uninstall --json` |
+| Also remove each enrolled user's `~/.defenseclaw` and per-user binaries (use it in the same run) | `defenseclaw-gateway enterprise macos uninstall --purge --json` |
+| Keep config, secrets, data and logs for a reinstall | `defenseclaw-gateway enterprise macos uninstall --keep-state --json` |
+
+A pkg has no uninstaller, so the lifecycle removes the binaries itself and runs
+`pkgutil --forget com.cisco.defenseclaw.enterprise`. Details:
+[Remove](/docs/enterprise/install/reference/macos#remove).
+
+## More macOS tasks
+
+### Per-user installs
+
+The per-user product refuses to run on a managed Mac, and nothing migrates it. See
+[Per-user installs](/docs/enterprise/install/reference/macos#per-user-installs).
+
+### AI Discovery Plane C (Endpoint Security)
+
+Plane C reads kernel events through `eslogger`, which needs Full Disk Access for
+the sensor helper. See
+[Plane C](/docs/enterprise/install/reference/macos#ai-discovery-plane-c-endpoint-security)
+and [Privacy prompts](/docs/enterprise/install/reference/macos#privacy-prompts).

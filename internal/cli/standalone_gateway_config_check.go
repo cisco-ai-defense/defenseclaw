@@ -108,6 +108,12 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 		if err := runtimeConfig.Scanners.CheckPinnedFiles(); err != nil {
 			return fmt.Errorf("the gateway cannot use a scanner file that %s pins: %v", configPath, err)
 		}
+		// The inspection decode skips the listener check the gateway runs
+		// at start: api_bind 0.0.0.0 was installed and failed the
+		// transaction (GAP-0647).
+		if err := config.ValidateManagedEnterpriseListenerBindings(runtimeConfig); err != nil {
+			return fmt.Errorf("the gateway cannot use %s: %v", configPath, err)
+		}
 	}
 	if runtimeConfig == nil || !runtimeConfig.Guardrail.Enabled {
 		return nil
@@ -141,6 +147,98 @@ func validateStandaloneGatewayConfig(configPath, dataDir, credentialsDir string)
 	return nil
 }
 
+// compileStandaloneGatewayRepairRollbackConfig checks the installed config's
+// content, startup semantics and paths outside Repair's ACL scope while a
+// running gateway retains its last good policy. Repair later restamps managed
+// ACLs and runs the strict service validator before activation.
+func compileStandaloneGatewayRepairRollbackConfig(configPath, dataDir string) (*config.Config, error) {
+	restore := snapshotProcessEnvironment()
+	defer restore()
+	loaded, err := loadConfigV8FileWithCredentials(configPath, dataDir, "")
+	if err != nil {
+		var secretError *config.V8SecretReferenceError
+		if !errors.As(err, &secretError) {
+			return nil, err
+		}
+		// Setup does not inherit environment secrets resolved by the gateway
+		// service. An installed credential may also have ACL drift that Repair
+		// restamps. Compile with placeholders only for environment values and
+		// with a bounded, content-checked read of installed credentials.
+		raw, err := readConfigV8Source(configPath)
+		if err != nil {
+			return nil, err
+		}
+		secretsDir := managed.StandaloneSecretsDirForConfig(runtime.GOOS, configPath)
+		compiled, err := config.ParseCompileObservabilityV8(configPath, raw, config.ObservabilityV8CompileOptions{
+			DefaultDataDir: dataDir,
+			Secrets:        standaloneRepairRollbackSecrets{credentialsDir: secretsDir},
+		})
+		if err != nil {
+			return nil, err
+		}
+		runtimeConfig, err := config.LoadRuntimeV8InspectionCandidateFromBytes(configPath, raw)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := config.WithObservabilityV8ManagedAIDDestination(
+			compiled.Plan, config.ObservabilityV8ManagedAIDOptionsFromConfig(runtimeConfig, raw)); err != nil {
+			return nil, err
+		}
+		document, err := config.ParseV8YAML(configPath, raw)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateRuntimeV8ConnectorRoster(document, runtimeConfig); err != nil {
+			return nil, err
+		}
+		loaded = &loadedConfigV8File{runtime: runtimeConfig, compiled: compiled}
+	}
+	if loaded == nil || loaded.runtime == nil {
+		return nil, errors.New("config compiler returned no runtime configuration")
+	}
+	if !loaded.runtime.StandaloneEnterprise() {
+		return nil, fmt.Errorf("managed config resolves the %q enterprise profile, not %s",
+			loaded.runtime.EnterpriseProfile(), managed.ProfileStandalone)
+	}
+	if err := config.ValidateManagedEnterpriseListenerBindings(loaded.runtime); err != nil {
+		return nil, err
+	}
+	// The inspection loader omits the managed trust block, which also holds
+	// this Windows-only content check. A configured allowlist cannot take
+	// effect on Windows and would make the gateway refuse to restart.
+	if err := config.ValidateManagedEnterpriseWindowsPeerAuthKnobs(loaded.runtime); err != nil {
+		return nil, err
+	}
+	if err := checkJSONLDestinationPathsWithSkip(loaded.compiled,
+		strings.TrimSpace(os.Getenv(managed.WindowsServiceAccountEnv)), func(path string) bool {
+			return repairRollbackCanCreateJSONLInRestampedRuntime(path, dataDir)
+		}); err != nil {
+		return nil, fmt.Errorf("the gateway cannot use %s: %w", configPath, err)
+	}
+	if err := validateRepairRollbackPolicyInputs(loaded.runtime, configPath); err != nil {
+		return nil, err
+	}
+	// Pins and rule-pack contents cannot be repaired by an ACL restamp. Read
+	// them as Setup's elevated identity, without asking whether the service
+	// account can currently traverse the managed paths.
+	if err := loaded.runtime.Scanners.CheckPinnedFiles(); err != nil {
+		return nil, err
+	}
+	if loaded.runtime.Guardrail.Enabled {
+		for _, pack := range standaloneGatewayRulePackDirs(loaded.runtime) {
+			if _, err := guardrail.LoadRulePack(pack.dir); err != nil {
+				return nil, fmt.Errorf("the gateway cannot load the guardrail rule pack %s that %s names: %w",
+					pack.dir, configPath, err)
+			}
+		}
+		if err := gateway.CheckRulePacks(loaded.runtime); err != nil {
+			return nil, fmt.Errorf("the gateway cannot load the guardrail rule packs that %s selects: %w",
+				configPath, err)
+		}
+	}
+	return loaded.runtime, nil
+}
+
 // standaloneRulePackUnreadableText starts the refusal of a rule pack the
 // gateway service account cannot read. The Windows Setup preflight reports
 // it as rule_pack_unreadable, the code the enumerator's report gets and the
@@ -160,6 +258,16 @@ func (secrets standalonePathPreflightSecrets) ResolveObservabilityCredential(nam
 	return config.ResolveObservabilityV8ProtectedCredential(secrets.credentialsDir, name)
 }
 
+type standaloneRepairRollbackSecrets struct{ credentialsDir string }
+
+func (standaloneRepairRollbackSecrets) ResolveObservabilitySecret(string) (string, bool) {
+	return "preflight", true
+}
+
+func (secrets standaloneRepairRollbackSecrets) ResolveObservabilityCredential(name string) (string, bool) {
+	return resolveRepairRollbackCredential(name, secrets.credentialsDir)
+}
+
 // checkJSONLDestinationPaths refuses the first enabled jsonl destination
 // whose path local.JSONLPathProblem rejects, naming the destination, the
 // path and the rule (config validate, Windows Setup). gatewayAccount, the
@@ -168,6 +276,10 @@ func (secrets standalonePathPreflightSecrets) ResolveObservabilityCredential(nam
 // passed Setup, which runs as one, and the gateway then did not start
 // (GAP-1118).
 func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, gatewayAccount string) error {
+	return checkJSONLDestinationPathsWithSkip(compiled, gatewayAccount, nil)
+}
+
+func checkJSONLDestinationPathsWithSkip(compiled *config.ObservabilityV8CompiledConfig, gatewayAccount string, skipACLForMissingFile func(string) bool) error {
 	if compiled == nil || compiled.Plan == nil {
 		return nil
 	}
@@ -180,6 +292,12 @@ func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, 
 			continue
 		}
 		path := destination.Transport.Path
+		// Repair can restamp the exact runtime root before activation. A
+		// missing destination file directly under it then inherits the
+		// repaired ACL; all existing files and other folders remain checked.
+		if skipACLForMissingFile != nil && skipACLForMissingFile(path) {
+			continue
+		}
 		if problem := local.JSONLPathProblem(path, allowedWriters...); problem != "" {
 			return &config.V8SemanticError{
 				Path:    "$.observability.destinations",
@@ -200,6 +318,16 @@ func checkJSONLDestinationPaths(compiled *config.ObservabilityV8CompiledConfig, 
 				Summary: fmt.Sprintf("destination %q writes %s, but %v", destination.Name, path, err),
 				Action: fmt.Sprintf("grant that account Modify on the folder, for example: icacls \"%s\" /grant \"%s:(OI)(CI)M\", "+
 					"or point the destination at a folder it can write", folder, gatewayAccount),
+			}
+		}
+		if rotation := destination.Transport.Rotation; rotation != nil && rotation.Compress {
+			// Compression reads each rotated file back (GAP-1432).
+			if err := standaloneServiceCanReadRotatedFile(path, gatewayAccount); err != nil {
+				return &config.V8SemanticError{
+					Path:    "$.observability.destinations",
+					Summary: fmt.Sprintf("destination %q writes %s, but %v", destination.Name, path, err),
+					Action:  "grant that account Modify on the existing file (or let it inherit the folder permissions), or set rotation compress to false on the destination",
+				}
 			}
 		}
 	}
@@ -228,6 +356,17 @@ func standaloneNearestExistingFolder(path string) string {
 // A seam for tests.
 var standaloneServiceCanWriteFile = func(path, serviceAccount string) error {
 	err := managed.ValidateServiceCanWriteFile(path, serviceAccount)
+	if managed.IsServiceAccountUnresolved(err) {
+		return nil
+	}
+	return err
+}
+
+// standaloneServiceCanReadRotatedFile checks that the gateway service
+// account can read back the rotated files of a jsonl destination that
+// compresses them (a no-op off Windows). A seam for tests.
+var standaloneServiceCanReadRotatedFile = func(path, serviceAccount string) error {
+	err := managed.ValidateServiceCanReadRotatedFile(path, serviceAccount)
 	if managed.IsServiceAccountUnresolved(err) {
 		return nil
 	}

@@ -4,12 +4,15 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"path"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
 
 const (
@@ -191,11 +194,14 @@ func hookSpawnAliasScore(child, intent map[string]struct{}) int {
 	return score
 }
 
+// canonicalHookSpawnParent is the caller of a spawn tool as its session
+// retained it. Session and agent ids are caller-supplied, so only a retained
+// agent of the caller's own agent identity and user is taken.
 func (a *APIServer) canonicalHookSpawnParent(meta llmEventMeta) llmEventMeta {
 	if a == nil {
 		return meta
 	}
-	if snapshot, ok := a.hookSessionStateSnapshot(meta.Source, meta.SessionID, meta.AgentID); ok {
+	if snapshot, ok := a.hookSessionStateSnapshotMatching(meta.Source, meta.SessionID, meta.AgentID, &meta); ok {
 		parent := snapshot.meta
 		parent.ToolID = meta.ToolID
 		parent.ToolName = meta.ToolName
@@ -246,6 +252,15 @@ func (a *APIServer) rememberHookSpawnIntentAt(
 	}
 
 	if toolKey != "" {
+		if _, taken := a.hookSpawnTakenCalls[toolKey]; taken {
+			// The child's start already took this call's intent. Its result
+			// must not leave a second intent, which tied with the next
+			// spawn's and left that child's start a root (GAP-0533).
+			if phase == hookSpawnIntentCompleted {
+				delete(a.hookSpawnTakenCalls, toolKey)
+			}
+			return
+		}
 		if existing, ok := a.hookSpawnIntents[toolKey]; ok {
 			if existing.parent.AgentID != parent.AgentID || existing.parent.ExecutionID != parent.ExecutionID {
 				existing.ambiguous = true
@@ -339,128 +354,18 @@ func hookChildThreadKey(meta llmEventMeta) string {
 	return strings.ToLower(strings.TrimSpace(meta.Source)) + "\x00" + strings.TrimSpace(meta.SessionID) + "\x00" + meta.AgentIdentityID
 }
 
-// A thread can hook before the create_thread call that started it returns:
-// Codex starts the thread, then runs the PostToolUse hook of the call. On a
-// managed Linux host the thread SessionStart reached the gateway 100 ms before
-// the call result, so the thread was recorded as a root at depth 0
-// (GAP-0179). A create_thread call in flight is therefore noted at
-// PreToolUse, and the first hook of a Codex session not seen before, of the
-// same agent identity and user, is taken as its thread while every call in
-// flight has one parent. The result, when it arrives first, names the thread.
-const (
-	codexPendingThreadTTL = 2 * time.Minute
-	codexPendingThreadMax = 256
-)
-
-type codexPendingThread struct {
-	toolID    string
-	parent    llmEventMeta
-	child     string
-	createdAt time.Time
-}
-
-// noteCodexThreadCall remembers a create_thread call in flight.
-func (a *APIServer) noteCodexThreadCall(meta llmEventMeta, tool string) {
-	// Secure Client keeps the lineage of main (issue #1092).
-	if a == nil || a.managedAIDOnly() || !isCodexThreadSpawnTool(tool) || meta.AgentIdentityID == "" {
-		return
-	}
-	parent := a.canonicalHookSpawnParent(meta)
-	if strings.TrimSpace(parent.AgentID) == "" || parent.AgentDepth < 0 || parent.AgentDepth >= 64 {
-		return
-	}
-	now := time.Now().UTC()
-	a.llmPromptMu.Lock()
-	defer a.llmPromptMu.Unlock()
-	a.pruneCodexPendingThreadsLocked(now)
-	for len(a.codexPendingThreads) >= codexPendingThreadMax {
-		a.codexPendingThreads = a.codexPendingThreads[1:]
-	}
-	a.codexPendingThreads = append(a.codexPendingThreads, codexPendingThread{toolID: meta.ToolID, parent: parent, createdAt: now})
-}
-
-// pruneCodexPendingThreadsLocked drops the expired calls. Caller holds
-// a.llmPromptMu.
-func (a *APIServer) pruneCodexPendingThreadsLocked(now time.Time) {
-	kept := a.codexPendingThreads[:0]
-	for _, pending := range a.codexPendingThreads {
-		if now.Sub(pending.createdAt) <= codexPendingThreadTTL {
-			kept = append(kept, pending)
-		}
-	}
-	a.codexPendingThreads = kept
-}
-
-// finishCodexThreadCallLocked drops the call that returned: the one of its
-// tool call id, or else the oldest of its session. Caller holds a.llmPromptMu.
-func (a *APIServer) finishCodexThreadCallLocked(toolID, session string) {
-	match := -1
-	for i, pending := range a.codexPendingThreads {
-		if pending.parent.SessionID != session {
-			continue
-		}
-		if toolID != "" && pending.toolID == toolID {
-			match = i
-			break
-		}
-		if match < 0 {
-			match = i
-		}
-	}
-	if match >= 0 {
-		a.codexPendingThreads = append(a.codexPendingThreads[:match], a.codexPendingThreads[match+1:]...)
-	}
-}
-
-// claimCodexPendingThread links the first hook of a new Codex session to the
-// create_thread call in flight that started it, when the call result has not
-// named the thread yet.
-func (a *APIServer) claimCodexPendingThread(meta llmEventMeta) llmEventMeta {
-	if a == nil || a.managedAIDOnly() || meta.Source != "codex" || meta.AgentIdentityID == "" ||
-		strings.TrimSpace(meta.SessionID) == "" || meta.LineageProvenance == "reported" || meta.ParentAgentReported ||
-		strings.TrimSpace(meta.ParentAgentID) != "" || strings.TrimSpace(meta.ParentSessionID) != "" || meta.AgentDepth != 0 {
-		return meta
-	}
-	if _, seen := a.hookSessionStateSnapshot(meta.Source, meta.SessionID, ""); seen {
-		return meta
-	}
-	now := time.Now().UTC()
-	a.llmPromptMu.Lock()
-	defer a.llmPromptMu.Unlock()
-	if _, linked := a.hookChildThreads[hookChildThreadKey(meta)]; linked {
-		return meta
-	}
-	a.pruneCodexPendingThreadsLocked(now)
-	claimed := -1
-	for i, pending := range a.codexPendingThreads {
-		if pending.child != "" || pending.parent.SessionID == meta.SessionID || !sameHookIdentity(pending.parent, meta) {
-			continue
-		}
-		if claimed >= 0 && (pending.parent.SessionID != a.codexPendingThreads[claimed].parent.SessionID ||
-			pending.parent.AgentID != a.codexPendingThreads[claimed].parent.AgentID) {
-			return meta // calls in flight under two parents: the thread of either
-		}
-		if claimed < 0 {
-			claimed = i
-		}
-	}
-	if claimed >= 0 {
-		a.codexPendingThreads[claimed].child = meta.SessionID
-		a.storeHookChildThreadLocked(meta, a.codexPendingThreads[claimed].parent, now)
-	}
-	return meta
-}
-
 // rememberHookChildThread records the thread a completed create_thread call
-// started, so the first hook of that session is linked to the calling agent.
+// started, from the thread id the call returned, so the hooks of that session
+// are linked to the calling agent. Only that id is linked: another session
+// that starts while the call is in flight is a chat of its own. A thread that
+// hooked before the result arrived (Codex starts the thread, then runs the
+// call's PostToolUse hook) is linked from the result on: its retained state
+// takes the parent and it is not counted as a chat (GAP-0179).
 func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response string) {
 	// Secure Client keeps the lineage of main (issue #1092).
 	if a == nil || a.managedAIDOnly() || !isCodexThreadSpawnTool(tool) {
 		return
 	}
-	a.llmPromptMu.Lock()
-	a.finishCodexThreadCallLocked(meta.ToolID, meta.SessionID)
-	a.llmPromptMu.Unlock()
 	match := codexThreadIDPattern.FindStringSubmatch(response)
 	if match == nil || match[1] == strings.TrimSpace(meta.SessionID) {
 		return
@@ -472,8 +377,38 @@ func (a *APIServer) rememberHookChildThread(meta llmEventMeta, tool, response st
 	child := meta
 	child.SessionID = match[1]
 	a.llmPromptMu.Lock()
-	defer a.llmPromptMu.Unlock()
 	a.storeHookChildThreadLocked(child, parent, time.Now().UTC())
+	a.linkRetainedHookChildLocked(child, parent)
+	a.llmPromptMu.Unlock()
+	sharedAgentIdentities.markSubagentSession(child.AgentIdentityID, child.SessionID)
+}
+
+// linkRetainedHookChildLocked gives the retained root agent of child's
+// session, of the same agent identity, the parent: a thread that hooked
+// before its create_thread call returned. Caller holds a.llmPromptMu.
+func (a *APIServer) linkRetainedHookChildLocked(child, parent llmEventMeta) {
+	for _, key := range a.hookSessionStateOrder {
+		state, ok := a.hookSessionStates[key]
+		if !ok || state.meta.Source != child.Source || state.meta.SessionID != child.SessionID ||
+			state.meta.AgentIdentityID != child.AgentIdentityID || !sameHookIdentity(parent, state.meta) ||
+			!hookLifecycleUnresolvedSelfRoot(state.meta) {
+			continue
+		}
+		state.meta = linkHookChildToParent(state.meta, parent)
+		a.hookSessionStates[key] = state
+	}
+}
+
+// linkHookChildToParent sets meta's lineage one level under parent.
+func linkHookChildToParent(meta, parent llmEventMeta) llmEventMeta {
+	meta.ParentAgentID = parent.AgentID
+	meta.RootAgentID = firstNonEmpty(parent.RootAgentID, parent.AgentID)
+	meta.ParentSessionID = parent.SessionID
+	meta.RootSessionID = firstNonEmpty(parent.RootSessionID, parent.SessionID)
+	meta.AgentDepth = parent.AgentDepth + 1
+	meta.LineageProvenance = "inferred"
+	meta.ParentLineageResolved = true
+	return meta
 }
 
 // storeHookChildThreadLocked records that child's session is one parent
@@ -507,7 +442,9 @@ func (a *APIServer) storeHookChildThreadLocked(child, parent llmEventMeta, now t
 // (GAP-0371). A child session's first hook (not a sessionStart, which only a
 // chat sends) is therefore linked to the agent of a pending subagentStart of
 // the same agent identity, when every pending start shares one parent, and
-// subagentStop links the session it names in any case.
+// subagentStop links the session it names in any case. A session that is new
+// to this process but is in the audit history hooked before the gateway
+// restarted: it is an open chat, not the child (GAP-1066).
 const (
 	copilotSubagentTTL        = 30 * time.Minute
 	copilotSubagentMaxPending = 256
@@ -522,7 +459,7 @@ type copilotPendingSubagent struct {
 
 // applyCopilotSubagentLineage tracks Copilot sub-agent starts and stops and
 // links a child session's hooks to the agent that started it.
-func (a *APIServer) applyCopilotSubagentLineage(meta llmEventMeta, payload map[string]any) llmEventMeta {
+func (a *APIServer) applyCopilotSubagentLineage(ctx context.Context, meta llmEventMeta, payload map[string]any) llmEventMeta {
 	// Secure Client keeps the lineage of main (issue #1092).
 	if a == nil || meta.Source != "copilot" || a.managedAIDOnly() || meta.AgentIdentityID == "" ||
 		strings.TrimSpace(meta.SessionID) == "" {
@@ -542,7 +479,8 @@ func (a *APIServer) applyCopilotSubagentLineage(meta llmEventMeta, payload map[s
 		meta.ParentSessionID != "" || meta.LineageProvenance == "reported" {
 		return linked
 	}
-	if _, seen := a.hookSessionStateSnapshotMatching("copilot", meta.SessionID, "", &meta); seen {
+	if _, seen := a.hookSessionStateSnapshotMatching("copilot", meta.SessionID, "", &meta); seen ||
+		!a.copilotSubagentStartOpen(meta, now) || a.hookSessionInHistory(ctx, meta) {
 		return meta
 	}
 	a.llmPromptMu.Lock()
@@ -570,6 +508,37 @@ func (a *APIServer) applyCopilotSubagentLineage(meta llmEventMeta, payload map[s
 		return meta
 	}
 	return a.applyHookChildThreadLineage(meta)
+}
+
+// copilotSubagentStartOpen reports whether a sub-agent start of meta's agent
+// identity, in another session, waits for its child session.
+func (a *APIServer) copilotSubagentStartOpen(meta llmEventMeta, now time.Time) bool {
+	a.llmPromptMu.Lock()
+	defer a.llmPromptMu.Unlock()
+	for _, pending := range a.copilotSubagents {
+		if pending.identity == meta.AgentIdentityID && pending.child == "" &&
+			pending.parent.SessionID != meta.SessionID && now.Sub(pending.createdAt) <= copilotSubagentTTL {
+			return true
+		}
+	}
+	return false
+}
+
+// hookSessionInHistory reports whether the signed audit history holds a
+// lifecycle row of meta's agent in its session. A read that fails, or a
+// gateway without the history, reports false.
+func (a *APIServer) hookSessionInHistory(ctx context.Context, meta llmEventMeta) bool {
+	if ctx == nil || strings.TrimSpace(meta.AgentID) == "" {
+		return false
+	}
+	runtime, ok := a.observabilityV8RuntimeEmitter().(hookLifecycleHistoryRuntime)
+	if !ok || runtime == nil {
+		return false
+	}
+	_, found, err := runtime.LatestLifecycleProjection(ctx, audit.LifecycleProjectionQuery{
+		Connector: meta.Source, SessionID: meta.SessionID, AgentID: meta.AgentID,
+	})
+	return err == nil && found
 }
 
 func (a *APIServer) noteCopilotSubagentStart(meta llmEventMeta, now time.Time) {
@@ -670,18 +639,10 @@ func (a *APIServer) applyHookChildThreadLineage(meta llmEventMeta) llmEventMeta 
 	if !ok || time.Since(link.createdAt) > hookChildThreadTTL {
 		return meta
 	}
-	parent := link.parent
-	if !sameHookIdentity(parent, meta) {
+	if !sameHookIdentity(link.parent, meta) {
 		return meta
 	}
-	meta.ParentAgentID = parent.AgentID
-	meta.RootAgentID = firstNonEmpty(parent.RootAgentID, parent.AgentID)
-	meta.ParentSessionID = parent.SessionID
-	meta.RootSessionID = firstNonEmpty(parent.RootSessionID, parent.SessionID)
-	meta.AgentDepth = parent.AgentDepth + 1
-	meta.LineageProvenance = "inferred"
-	meta.ParentLineageResolved = true
-	return meta
+	return linkHookChildToParent(meta, link.parent)
 }
 
 // hookAgentStateKnown reports whether the agent's lifecycle is retained: a
@@ -719,6 +680,7 @@ func (a *APIServer) discardHookSpawnIntentLocked(
 ) {
 	if toolKey != "" {
 		a.removeHookSpawnIntentLocked(toolKey)
+		delete(a.hookSpawnTakenCalls, toolKey)
 		return
 	}
 	candidates := a.hookSpawnIntentCandidatesLocked(scope, parentAgentID, aliases)
@@ -758,6 +720,11 @@ func (a *APIServer) removeHookSpawnIntentLocked(key string) {
 }
 
 func (a *APIServer) evictHookSpawnIntentsLocked(now time.Time) {
+	for key, at := range a.hookSpawnTakenCalls {
+		if now.Sub(at) > hookSpawnIntentTTL {
+			delete(a.hookSpawnTakenCalls, key)
+		}
+	}
 	if len(a.hookSpawnIntentOrder) == 0 {
 		return
 	}
@@ -836,7 +803,29 @@ func (a *APIServer) takeHookSpawnIntentAt(
 	}
 	intent := a.hookSpawnIntents[best.key]
 	a.removeHookSpawnIntentLocked(best.key)
+	if intent.toolKey != "" && !intent.resultObserved {
+		a.noteTakenHookSpawnCallLocked(intent.toolKey, now)
+	}
 	return intent, true
+}
+
+// noteTakenHookSpawnCallLocked remembers a spawn call whose intent a child's
+// start took before the call's result arrived, until that result arrives or
+// the intent TTL ends. Caller holds a.llmPromptMu.
+func (a *APIServer) noteTakenHookSpawnCallLocked(toolKey string, now time.Time) {
+	if a.hookSpawnTakenCalls == nil {
+		a.hookSpawnTakenCalls = make(map[string]time.Time)
+	}
+	for len(a.hookSpawnTakenCalls) >= hookSpawnIntentMaxEntries {
+		oldest, oldestAt := "", now
+		for key, at := range a.hookSpawnTakenCalls {
+			if oldest == "" || at.Before(oldestAt) {
+				oldest, oldestAt = key, at
+			}
+		}
+		delete(a.hookSpawnTakenCalls, oldest)
+	}
+	a.hookSpawnTakenCalls[toolKey] = now
 }
 
 // hookSpawnTieSharesParentLocked reports whether a tie between the best

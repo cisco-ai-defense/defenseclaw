@@ -1,438 +1,97 @@
 ---
 title: Kiro
-description: Use Kiro IDE or Kiro CLI through one DefenseClaw connector. Each hook surface vetoes what Kiro honors there; ACP is an independent path.
+description: Guard Kiro IDE and Kiro CLI with DefenseClaw hooks, and optionally with the ACP guard.
+keywords:
+  - Kiro connector
+  - Kiro hooks
+  - Kiro CLI
 ---
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-Kiro is a regular DefenseClaw connector. First-run and
-`defenseclaw setup kiro` activate it whether you have Kiro IDE, Kiro CLI, or
-both, so DefenseClaw shows one Kiro row. Kiro talks to its model provider
-directly; DefenseClaw does not proxy that traffic. When Kiro CLI is present,
-an optional, independent [ACP path](#acp-guard) runs `kiro-cli acp` behind
-`defenseclaw-acp`.
+DefenseClaw installs hooks for Kiro IDE and Kiro CLI under one Kiro connector. This is a hook connector: Kiro talks to its model provider directly and no proxy is involved.
 
 ## Platform support
 
 <ConnectorSupport id="kiro" />
 
-| Platform | Status | Setup and enforcement boundary |
-| --- | --- | --- |
-| macOS and Linux | **Supported** | Native hooks through `defenseclaw setup kiro`: `.kiro/hooks/defenseclaw.json` for Kiro IDE and `kiro-cli --v3`, and a CLI 2.x `defenseclaw` agent for bare `kiro-cli`. Optional ACP guard through `defenseclaw acp setup`. |
-| Native Windows x64 | **Supported** | The same native hooks, run by DefenseClaw's native hook binary ([Native Windows](#native-windows)), plus the optional `defenseclaw-acp.exe` ACP guard. |
-| Windows ARM64 | **Not certified** | The guard cross-compiles, but the native Windows release is certified on x64 only. |
-
 ## Supported versions
 
-Kiro CLI must be **2.27.1 or later**. Before 2.27.1, a non-interactive
-`kiro-cli chat --v3` run (`--no-interactive`) loads no hooks at all, from the
-agent or the workspace ([Kiro headless mode](https://kiro.dev/docs/cli/headless/)),
-so its tool calls never reach DefenseClaw: on kiro-cli 2.26.1 such a run
-completed a tool call that sent DefenseClaw nothing. DefenseClaw therefore
-treats an older kiro-cli as unsupported:
+- **kiro-cli 2.27.1 or later.** Before 2.27.1 a non-interactive `kiro-cli chat --v3` run loads no hooks, so its tool calls never reach DefenseClaw. Setup refuses an older kiro-cli in observe and action mode when no supported Kiro IDE is installed beside it, and `defenseclaw doctor` reports it as unsupported.
+- **Kiro IDE 1.0.182 or later.** An older IDE reads only workspace hooks, so DefenseClaw's global hooks never run in it. Every setup refuses an older IDE, in observe and action mode, when no supported kiro-cli or Kiro IDE is installed beside it.
+- With a supported Kiro IDE beside an older kiro-cli, setup installs the global hooks for the IDE and reports the CLI separately as unsupported.
+- A Kiro install whose version could not be read is unknown and not protected. Action setup refuses it unless a supported form is installed; observe setup warns.
 
-- If it is the only supported Kiro installation, `defenseclaw setup kiro`
-  refuses it in observe and action mode before changing any Kiro file.
-- `defenseclaw doctor` reports that CLI as unsupported.
-- The enterprise guardian does not create a new row for that CLI (see
-  [Enterprise](#enterprise-standalone-profile)).
-- A CLI enrolled by an earlier managed release keeps its interactive hooks,
-  but `status` reports it as uncovered and `verify` fails until it is updated.
+## Set up
 
-When Kiro IDE 1.0.182 or later is installed alongside an older CLI, setup
-installs their shared global hooks for the IDE. Discovery and doctor report
-the CLI separately as unsupported: its non-interactive runs still send no
-hooks until it is updated. The managed guardian enrolls the IDE version and
-reports the older CLI as unprotected.
-
-Kiro IDE has its own floor, 1.0.182, for the global hook file. Every setup
-refuses an older IDE, in observe and action mode, when no supported kiro-cli
-or Kiro IDE is installed beside it: that IDE reads only workspace hooks, so
-DefenseClaw's global hooks never run in it. Managed `status` reports an
-installed older IDE as uncovered, and `verify` fails.
-
-DefenseClaw judges each installed Kiro form on its own: kiro-cli, a Kiro IDE
-installed for the user, and a Kiro IDE installed for the machine. A form whose
-version could not be read is unknown and not protected. That covers a version
-probe that failed or timed out, a Windows kiro-cli that has never run, and a
-`product.json` that names no version.
-
-- With no supported form, `defenseclaw setup kiro --mode action` and a managed
-  action-mode install refuse it. Observe setup warns.
-- Beside a supported form, setup installs the hooks for that form and names the
-  unknown one. Doctor reports it, and the guardian reports it as
-  `hook_contract_unverified` in `status` and `verify`.
-
-## Setup
+On a new install, run `defenseclaw init --connector kiro` first. Until DefenseClaw is initialized, `defenseclaw setup kiro` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
 ```bash
-defenseclaw setup kiro                # observe (default)
+defenseclaw setup kiro                # first setup defaults to observe
 defenseclaw setup kiro --mode action  # block where Kiro honors a veto
 ```
 
-Kiro has two hook surfaces, so setup installs two hook configs:
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so
+`/hooks` lists the hooks.
 
-- `.kiro/hooks/defenseclaw.json`, for Kiro IDE and `kiro-cli --v3`;
-- a CLI 2.x `defenseclaw` agent (`~/.kiro/agents/defenseclaw.json`), for bare
-  `kiro-cli`, because `kiro-cli` cannot put hooks on its built-in
-  `kiro_default` agent.
+## Check it
 
-Restart Kiro CLI or run `/agent swap defenseclaw` so `/hooks` lists them.
+```bash
+defenseclaw status
+```
 
-When you add an MCP server with Kiro, the running gateway reads the user
-`~/.kiro/settings/mcp.json` and the configured workspace's
-`.kiro/settings/mcp.json`. It scans a new server and records an admission
-verdict within about 30 seconds. In action mode, a blocked server is denied.
+The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
 
-### How the hook files are written
 
-- **Agent hooks (CLI 2.x).** The `preToolUse` and `postToolUse` hooks use the
-  matcher `*`: Kiro CLI reads matchers as globs, so `*` matches every tool.
-  Each hook sets `timeout_ms` 30000. Kiro ignores a hook that has not answered
-  within its timeout and runs the tool, and its default is about ten seconds:
-  measured on kiro-cli 2.24.1, a `preToolUse` hook that took 12 seconds to
-  block did not stop the tool.
-- **`.kiro/hooks` file.** It keeps the matcher `.*` on purpose and sets
-  `"timeout": 30`. Kiro IDE and the v3 engine of `kiro-cli --v3` read a
-  matcher as a regular expression, so `.*` matches every tool there, and `*`
-  is not a valid regular expression: a hook with it never runs. Measured on
-  kiro-cli 2.24.1: with `--v3`, the `PreToolUse` and `PostToolUse` hooks with
-  `.*` (or with no matcher) fire for every tool call, and the agent's `*` tool
-  hooks do not, so each tool call reaches DefenseClaw once. Bare `kiro-cli`
-  (the 2.x engine) does not read `.kiro/hooks` at all.
-- **Upgraded agents.** `kiro-cli --v3` offers to upgrade 2.0 agent configs at
-  start ("Enable auto-upgrade"), and `/upgrade-agent` does the same. Either
-  rewrites the agent's hooks into one list that both engines read, with a
-  `trigger` per entry, the matcher unchanged and `"timeout": 10`, and keeps
-  the old file as `defenseclaw.json.bak`. DefenseClaw keeps such an agent in
-  that form: setup replaces only its own entries (with `"timeout": 30`) and
-  keeps yours, and teardown removes only its own.
+## What it can block or ask
 
-## What each surface can veto
-
-In action mode DefenseClaw vetoes wherever Kiro honors the veto, and records a
-would-block where it does not:
+<HookEventsList connector="kiro" />
 
 | Surface | Reads | Blocks on |
 | --- | --- | --- |
 | Kiro IDE | `.kiro/hooks/*.json` | `PreToolUse` and `UserPromptSubmit` |
-| `kiro-cli --v3` | `.kiro/hooks/*.json` | `PreToolUse` only (for prompts, see below) |
+| `kiro-cli --v3` | `.kiro/hooks/*.json` | `PreToolUse` only |
 | `kiro-cli` (2.x) | `~/.kiro/agents/defenseclaw.json` | `PreToolUse` only |
 
-Kiro CLI 2.x documents exit code 2 as a block for `preToolUse` only; on any
-other trigger a non-zero exit is a failed hook whose stderr becomes a warning.
-The v1 hook schema adds `UserPromptSubmit`.
+- Where Kiro does not honor a veto, DefenseClaw records a would-block instead.
+- Kiro has no native ask.
+- The optional ACP guard is a separate path. Run `defenseclaw acp setup --client zed --agent kiro`, review observe-mode evidence, then add `--activate`. See the [ACP guard](/docs/features/acp-guard).
 
-Kiro documents that prompt veto for `kiro-cli --v3` too, but kiro-cli 2.24.1
-does not apply it. Its v3 engine attaches each prompt hook's result to the
-prompt, as `Output:` with the hook's output followed by `Exit Code:` and its
-status, and then calls the model. A prompt DefenseClaw blocks still reaches
-the model with DefenseClaw's reason attached, and the audit log records the
-block. An allowed prompt carries an empty result (`Exit Code: 0`) from each
-DefenseClaw prompt hook: `--v3` also runs the `defenseclaw` agent's hooks, so
-each prompt carries two results and writes two `UserPromptSubmit` audit rows.
-Models sometimes take those results for injected text and decline the
-request. A hook cannot avoid this on that engine, because Kiro attaches the
-result even when the hook prints nothing.
+## Files it changes
 
-<Callout type="info">
-This is resolved per request, from the hook config that invoked the hook —
-never from the version. v3 is not a release: it is the `--v3` flag on the 2.x
-binary, so `kiro-cli --version` reports 2.x for both surfaces. Setup marks the
-`.kiro/hooks` command with `--hook-surface v3` and the hook forwards that
-marker, so one host can run both surfaces with the correct veto on each.
-</Callout>
+| What | Where |
+| --- | --- |
+| Hooks for Kiro IDE and `kiro-cli --v3` | `.kiro/hooks/defenseclaw.json` (global: `~/.kiro/hooks/defenseclaw.json`) |
+| Agent for bare `kiro-cli` | `~/.kiro/agents/defenseclaw.json` |
+| Hook program, macOS and Linux | `~/.defenseclaw/hooks/kiro-hook.sh` |
+| Hook program, Windows | `defenseclaw-hook.exe` through a system PowerShell launcher |
 
-<Callout type="warn">
-Which Kiro builds read the global hook file. Kiro documents a global scope,
-`~/.kiro/hooks/`, that it merges with the project's `.kiro/hooks/` ("Hooks:
-All scopes merged"), for Kiro IDE 1.0.182 and later and for `kiro-cli --v3`.
-Older Kiro IDE builds read only `<workspace>/.kiro/hooks/*.json`, so
-DefenseClaw does not count them as protected: update Kiro IDE to 1.0.182 or
-later. `defenseclaw
-doctor`'s `Connector scope [kiro]` check passes when the global
-`~/.kiro/hooks/defenseclaw.json` holds DefenseClaw's hooks. Doctor reads the
-installed Kiro IDE's version from its `resources/app/product.json` (it never
-starts the IDE) and warns (`kiro_ide_below_global_hooks_floor`) when that IDE
-is older than 1.0.182, or (`kiro_ide_version_unknown`) when its
-`product.json` names no version; when it finds no IDE, the pass detail says
-that older builds are not covered. It fails
-(`kiro_hooks_not_workspace_scoped`) only when neither the global
-registration nor a workspace copy is present; run `defenseclaw setup kiro`
-to fix that.
+## Limits
 
-Doctor and the enterprise guardian look for the IDE's `product.json` in
-`Kiro.app/Contents/Resources/app` under `~/Applications` or `/Applications`
-on macOS, and on Linux under `/usr/share/kiro` (the deb package), `~/Kiro`
-or `/opt/Kiro` (the tar.gz package's `Kiro/` folder) followed by
-`resources/app`. On Windows doctor and the guardian read
-`%LOCALAPPDATA%\Programs\Kiro` and `%ProgramFiles%\Kiro`, the usual
-installer folders; those paths are not verified against a Kiro install yet.
-</Callout>
+- On `kiro-cli --v3`, a blocked prompt still reaches the model with DefenseClaw's reason attached, and the audit log records the block.
+- Kiro IDE before 1.0.182 reads only workspace hooks and is not counted as protected: update it to 1.0.182 or later ([Supported versions](#supported-versions)). When a supported kiro-cli is installed beside it, `defenseclaw setup kiro --workspace <project-root> --mode action --yes` also writes the project's workspace copy.
+- A hook that does not answer within Kiro's timeout is ignored and the tool runs.
+- An agent you pick with `--agent` or `/agent swap` runs without DefenseClaw's hooks.
+- In enterprise managed mode, ACP editors are enrolled with `defenseclaw-gateway enterprise acp enroll`; it is preview, not yet verified live. Windows ARM64 is not certified.
 
-## Hook capabilities
+## Turn it off
 
-<HookEventsList connector="kiro" />
-
-## Native Windows
-
-On Windows, Kiro runs DefenseClaw's native hook binary instead of
-`kiro-hook.sh`. Both hook configs hold the same kind of command: the system
-`cmd.exe /d /c`, which runs the system Windows PowerShell with
-`-EncodedCommand`, then `exit $LASTEXITCODE` on a second line. The script
-starts
-`defenseclaw-hook.exe hook --connector kiro --hook-surface v3` (the
-`.kiro/hooks` config) or `defenseclaw-hook.exe hook --connector kiro` (the CLI
-2.x agent) with .NET `Process.Start`, passes the hook's stderr through, waits
-for it and exits with its status. The binary forwards the surface to the
-gateway. It answers like the bash hook: no stdout, and exit 2 with the reason
-on stderr for a block. Constrained Language mode (WDAC or
-AppLocker script enforcement) does not allow the `Process.Start` calls, so in
-that mode the script runs the binary with the call operator (`&`) and pipes its
-output to `Out-Host`, which makes PowerShell wait for it and keep its exit
-status.
-
-Kiro proceeds past any exit status other than 0 and 2, so a block has to reach
-Kiro as exit 2. It does in every way Kiro can start the command:
-
-- `pwsh -Command` or `powershell -Command` (Kiro CLI 2.24 starts every hook as
-  `"pwsh" -Command "<command>"`). PowerShell reports a native exit status other
-  than 0 as 1 unless the command exits with it; the second line,
-  `exit $LASTEXITCODE`, does that.
-- `cmd.exe /c` (what Node's `shell: true` and `cmd /C` do), or a direct start.
-  `cmd.exe` stops reading the command at the line break, so it never runs the
-  second line.
-
-A hook that fails closed (an administrator-managed hook, or fail mode `closed`
-from the hook sidecar, `--fail-mode` or `DEFENSECLAW_FAIL_MODE`) also exits 2
-when it fails inside DefenseClaw: a usage error, an invalid flag value, or an
-unreachable gateway. With fail mode `open` those failures exit 1 and Kiro goes
-ahead with a warning, like every other fail-open failure.
-
-## Enterprise (standalone profile)
-
-The [enterprise guardian](/docs/enterprise/concepts#per-user-connector)
-enrolls Kiro per user on Linux, macOS and Windows. For each enrolled user it
-writes and repairs:
-
-- `~/.kiro/hooks/defenseclaw.json`, the global hook file that Kiro IDE and
-  `kiro-cli --v3` merge into every workspace;
-- the CLI 2.x agent `~/.kiro/agents/defenseclaw.json` and its
-  `chat.defaultAgent` entry in `~/.kiro/settings/cli.json`, for bare
-  `kiro-cli`.
-
-It never edits the user's own agents. When a user has set another
-`chat.defaultAgent`, the guardian makes `defenseclaw` the default instead
-(disabling Kiro or uninstalling puts the user's setting back and keeps every
-other key in `cli.json`). An agent the user picks explicitly
-(`--agent`, `/agent swap`) runs without DefenseClaw's hooks. A per-user
-`defenseclaw setup kiro` still adds the hooks to the user's own default agent.
-Kiro IDE hides an agent that has hooks, so `defenseclaw doctor` reports a
-custom `chat.defaultAgent`: `kiro_custom_agent_hooked` when it carries
-DefenseClaw's hooks (IDE sessions still use the global file), and
-`kiro_custom_agent_unhooked` when it does not (bare `kiro-cli` runs it
-without DefenseClaw's hooks; start `kiro-cli --v3` or
-`kiro-cli --agent defenseclaw`, or run `defenseclaw setup kiro` again).
-
-After Kiro is disabled on Linux or macOS, `~/.defenseclaw/hooks/kiro-hook.sh`
-remains as an inert stub that exits successfully. A running Kiro session may
-still call the path it cached until it restarts. The same stub is left by
-per-user `defenseclaw guardrail disable --connector kiro` and
-`defenseclaw setup remove kiro`.
-
-On macOS the guardian also finds `kiro-cli` inside `Kiro CLI.app`, in
-`~/Applications` or `/Applications`, before the app's shell setup links it
-into a bin directory.
-
-The guardian also discovers the Kiro IDE, reading its version from the
-`product.json` from the locations listed in the hook scope callout above
-as the user, without starting it. A user with the IDE and no kiro-cli
-version is enrolled at the IDE's version, shown with a `+kiro-ide` suffix
-(for example `1.2.4+kiro-ide`); the IDE's floor is 1.0.182, the first build
-that reads the global hook file. An IDE older than that reads only workspace
-hooks: it is reported as `kiro_ide_below_global_hooks_floor` in `status`,
-`enterprise policy show` and `verify`, and the user's kiro-cli row, if any,
-stays enrolled. The global file has to hold every DefenseClaw entry as
-the guardian renders it: an entry turned off with `"enabled": false` (Kiro
-skips it), removed or pointed at another command fails verification, and the
-guardian rewrites the file.
-
-It never writes a workspace copy, even when `claw.workspace_dir` is set. That
-directory is machine-wide, so every enrolled user would share the copy, and
-the global file already covers it. Teardown still removes a workspace copy
-that an earlier release wrote.
-
-Every profile requires kiro-cli 2.27.1 or later for a new enrollment (see
-[Supported versions](#supported-versions)). In both guardrail modes the guardian
-refuses a new row for an older kiro-cli and reports the reason, unless a
-supported IDE is installed; then it enrolls the IDE and reports the CLI. A
-user an earlier release already enrolled below 2.27.1 keeps being repaired at
-that version, on every OS, so the interactive sessions keep their hooks. `status`
-reports that CLI as uncovered and `verify` fails because its non-interactive `--v3`
-runs send no hooks until it is updated. A kiro-cli
-change to another version below 2.27.1 is refused as hook contract drift until
-kiro-cli reaches 2.27.1. The guardian follows a kiro-cli self-update at or
-above 2.27.1 and re-renders the user's hooks. It does not follow a downgrade
-below that version.
-
-On Windows the guardian writes the same files under `%USERPROFILE%\.kiro`,
-with the hook command described in [Native Windows](#native-windows).
-Windows discovery runs nothing. `kiro-cli.exe` records no version beside
-itself, but each run copies the build to
-`%LOCALAPPDATA%\Kiro-Cli\run\chat-cli-<version>.exe`; the guardian takes
-the copy whose size matches `kiro-cli.exe`. A kiro-cli that has never run has
-no copy, so its version is unknown. The guardian does not assume one: the
-user gets no kiro-cli row, and `enterprise windows status` reports the CLI as
-`hook_contract_unverified` (coverage incomplete) until its first run names the
-version; the next pass then enrolls or reports that version. A supported Kiro
-IDE still enrolls the user, and the CLI beside it is reported the same way. A
-row an earlier build enrolled at an assumed version is kept, so its hooks
-stay installed, and is reported until the CLI names its version. The IDE's version
-comes from the `product.json` folders in the hook scope callout above.
-
-Managed Windows pins each enrolled user to one of two reviewed hook
-contracts: `kiro-cli-windows-managed-hooks-v1` for kiro-cli 2.24.1 and later
-(new rows require 2.27.1),
-and `kiro-ide-windows-managed-hooks-v1` for Kiro IDE 1.0.182 and later (a
-`+kiro-ide` version). Both cover the global hook file, where
-DefenseClaw blocks on `UserPromptSubmit` and `PreToolUse` (kiro-cli `--v3`
-records a prompt block without vetoing the prompt), and the CLI 2.x agent,
-where only `preToolUse` can block; `PostToolUse` and `Stop` are audit only. Every
-hook command runs the standalone `defenseclaw-hook.exe` with
-`--enterprise-managed`. An older enrolled CLI row is kept for upgrade
-compatibility, while a new row below either floor is refused. Kiro hooks
-cannot rewrite tool input, so the foreign-hook guard does not apply. If an
-enrolment fails, the rollback removes DefenseClaw's hook files when their
-owner is the account, LocalSystem or Administrators, even if their
-permissions were changed after they were written. Anything else it finds in
-`%USERPROFILE%\.defenseclaw` it does not delete; it moves that folder aside
-(see [Recover a pending transaction](/docs/enterprise/windows#recover-a-pending-transaction)).
-
-## ACP guard
-
-The ACP guard is an enforcement path of its own and does not depend on the
-hook surfaces above: it vetoes prompts, output, permissions, filesystem,
-terminal, and extension methods at the protocol boundary regardless of which
-Kiro surface the editor launches. See the
-[ACP guard guide](/docs/acp-guard) for architecture, guarantees,
-configuration, supported agents, observability attributes, and the
-direct-launch bypass boundary.
-
-The [ACP guard](/docs/acp-guard) is available on every OS for per-user
-installs, for editors that start Kiro over ACP. ACP (Agent Client Protocol) editors are not supported in enterprise managed mode in DefenseClaw 1.0.
-
-On a per-user install:
-
-```bash
-defenseclaw acp setup --client zed --agent kiro
-# after reviewing observe-mode evidence
-defenseclaw acp setup --client zed --agent kiro --activate
-```
-
-The guard and `acp setup` run on macOS, Linux and native Windows; the
-[ACP guard guide](/docs/acp-guard) lists which editor and agent pairs have
-been tested. Use `--client jetbrains` for JetBrains AI
-Assistant. Setup resolves absolute executables, pins their digests, preserves
-foreign editor settings, and never places the ACP scoped token in the editor's
-JSON. The guard also never sends that token over loopback: request and verdict
-authentication use a fresh nonce-bound HMAC exchange.
-
-## In an OpenShell sandbox
-
-`defenseclaw sandbox run kiro` runs Kiro CLI in an NVIDIA OpenShell sandbox on
-Linux, or on a Mac with Apple silicon in a MicroVM of its own that works on a
-copy of your folder ([macOS](/docs/sandboxes/guide#macos)): the agent sees only
-your project folder, and DefenseClaw hooks gate every tool call. The [sandbox guide](/docs/sandboxes/guide) covers setup,
-the session and every flag. The first run builds the Kiro CLI image;
-`defenseclaw sandbox image build kiro` builds it ahead of time.
-`defenseclaw sandbox setup` builds the images of the harnesses in
-`openshell.harnesses` (Claude Code and Codex by default), and its `--harness`
-replaces that list, so name every harness you want:
-`defenseclaw sandbox setup --harness claudecode --harness codex --harness kiro`.
-
-- **User tier.** Kiro CLI reads hooks from the agent it runs with, and picks
-  that agent by the name inside any file in `~/.kiro/agents` or the project's
-  `.kiro/agents`. The DefenseClaw agent therefore lives alone in root-owned
-  `/usr/local/lib/defenseclaw/kiro`, and the launcher points
-  `KIRO_AGENT_CONFIG_DIR` there on every start, so Kiro reads no other agent.
-  It also drops the other Kiro variables that move Kiro's agents, settings or
-  shell, and refuses `--agent`, `--v3`, `--agent-engine`, `--cloud` and
-  `--repo`: DefenseClaw runs Kiro's local V2 agent engine, whose hooks it
-  verified. The image still pins kiro-cli 2.24.1, below the 2.27.1 floor in
-  [Supported versions](#supported-versions). Because the launcher refuses
-  `--v3`, the V3 non-interactive run that loads no hooks before 2.27.1 cannot
-  start there. The pin is a known limit until the image moves to a newly
-  pinned, hash-verified build. Kiro has no system settings tier and still loads user and project
-  settings and MCP servers, and an interactive session runs the TUI runtime
-  Kiro unpacks into the sandbox home (`~/.local/share/kiro-cli`), which the
-  agent can change for the next session, so the tier is user. Kiro vetoes a tool only on
-  exit code 2 from `preToolUse`, so the sandbox hook exits 2 on every failure.
-- **Skip-permissions.** On by default (the `open` and `balanced` packs): Kiro
-  starts with `--trust-all-tools`. `--safe`, or the `strict` pack, keeps its
-  prompts and drops `--trust-all-tools` from the arguments you pass.
-- **Model sign-in.** `sandbox run` shares no model credential for Kiro; its
-  `--llm` has no Kiro choice. Log in inside the sandbox: after the first run,
-  open a shell in it with `defenseclaw sandbox connect <name> --shell`, run
-  `/usr/local/lib/defenseclaw/bin/kiro-launch login --use-device-flow` (an
-  AWS Builder ID or IAM Identity Center device-code login; the launcher runs
-  `kiro-cli login` with the sandbox home pinned, Kiro's relocating variables
-  dropped and the egress proxy set), then resume Kiro with
-  `defenseclaw sandbox connect <name>`. The token stays in the sandbox home,
-  where the agent can read it and send it out, and a kept sandbox reuses it.
-  The daemon's `defenseclaw-kiro` provider profile, which binds a Kiro API key
-  (`KIRO_API_KEY`) as a placeholder, is not offered by `sandbox run`. Neither
-  sign-in was tested live: no Kiro account was available.
-- **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
-  and Codex sandboxes only.
-- **Kiro's own behaviour in a sandbox.**
-  - Ctrl-C during a shell tool call shows `● Cancelled …`, but the command
-    keeps running to its end: Kiro stops a cancelled command by signalling
-    its process group, which the OpenShell sandbox refuses, as it refuses
-    every harness's Ctrl-Z. DefenseClaw judged the command before it
-    started. To stop one that keeps running, open a shell with
-    `defenseclaw sandbox connect <name> --shell` and end it by name, for
-    example `pkill -f 'sleep 40'`.
-  - `● failed to retrieve governance settings — MCP and web tools disabled`
-    at the start is Kiro's account check, not a DefenseClaw policy: without
-    a working Kiro key or login Kiro cannot fetch its governance settings
-    and turns MCP servers and web tools off for the session. Kiro asks its
-    management service in four regions, including the us-gov ones, at every
-    start.
-  - With telemetry off (the image's settings), Kiro still sends its
-    CodeWhisperer telemetry events to `q.us-east-1.amazonaws.com`; no Kiro
-    setting stops them.
-- **Image and verification.** The image installs Kiro CLI 2.24.1 from its
-  release archive, checked against the SHA-256 in Kiro's release manifest.
-  It also unpacks the embedding model Kiro would otherwise download at a new
-  sandbox's first start (79 MiB, each file checked against the SHA-256 the
-  pinned Kiro carries), and the launcher keeps Kiro on the root-owned binary
-  instead of the copy it makes in its data directory
-  (`KIRO_SKIP_BINARY_PINNING=1`).
-  Verified end to end with Kiro's own scripted-response mode instead of a
-  model: every required hook reached DefenseClaw, a blocked shell call did not
-  run and an allowed one did, also with hookless agents planted in the home
-  and the project, and a live sandbox run with the DefenseClaw daemon got the
-  gateway's block verdict and had its egress proxy block an exfiltration
-  destination.
-
-## Disable
-
-If Kiro is the only connector DefenseClaw guards, turn the guardrail off:
+For a per-user, single-connector install:
 
 ```bash
 defenseclaw guardrail disable --yes
 ```
 
-If other connectors are configured too, turn off Kiro alone and keep the rest
-running:
+With the default gateway restart, disabling removes DefenseClaw's hook
+registrations from Kiro's hook and agent files and preserves your other Kiro
+settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
+remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force`
+if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert
+stub until Kiro restarts.
 
-```bash
-defenseclaw guardrail disable --connector kiro --yes
-```
+On a multi-connector install, add `--connector kiro` to `guardrail disable` and `guardrail enable` to change only this agent.
 
-Both keep Kiro's settings, so `defenseclaw guardrail enable` (with the same
-`--connector`) turns it back on. To drop Kiro from the configured connectors
-instead, run `defenseclaw setup remove kiro --yes`; add `--force` when it is
-the last connector. On Linux and macOS, `~/.defenseclaw/hooks/kiro-hook.sh`
-stays behind as an inert stub that exits successfully, because a running Kiro
-session may still call the path it cached until it restarts.
+## Details
+
+Hook file formats, Windows hook commands, the enterprise profile, ACP and the sandbox image are in the [Kiro reference](/docs/reference/connectors/kiro).

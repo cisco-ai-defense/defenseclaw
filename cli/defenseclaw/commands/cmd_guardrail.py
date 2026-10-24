@@ -63,17 +63,19 @@ import click
 from defenseclaw import ux
 from defenseclaw.config import _assert_config_write_allowed, config_path_for_data_dir
 from defenseclaw.config_writer import ConfigWriteError
-from defenseclaw.connector_contracts import normalize_connector
+from defenseclaw.connector_contracts import has_native_approval_prompt, normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.enforce import asset_lists
 from defenseclaw.fail_mode import (
     FileSnapshot,
     fail_mode_transaction_lock,
     reconcile_connector_registration,
+    registration_integrity_drift,
     resolve_connector_fail_mode,
     restore_fail_mode_transaction,
     snapshot_fail_mode_transaction,
     upstream_fail_open,
+    upstream_hook_limit,
 )
 
 # Note: ``defenseclaw.commands.cmd_setup._restart_services`` is
@@ -96,15 +98,27 @@ _CONNECTOR_LABELS = {
     "cursor": "Cursor",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
-    "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
     "amp": "Amp",
-    "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
 
 _RUNTIME_FAIL_MODE_CONNECTORS = frozenset({"amp", "claudecode", "codex", "opencode"})
+
+
+def _tracks_runtime_fail_mode(cfg, name: str) -> bool:
+    """Whether a fail-mode change must refresh and verify *name*'s installed hooks.
+
+    Copilot CLI, Antigravity and Hermes render the mode into their hook
+    outside Secure Client (upstream_hook_limit), so an older hook can still
+    render open while config.yaml says closed. Under Secure Client they stay
+    open whatever is configured, so there is nothing to refresh.
+    """
+    key = normalize_connector(name)
+    if key in _RUNTIME_FAIL_MODE_CONNECTORS:
+        return True
+    return bool(upstream_hook_limit(key)) and not upstream_fail_open(cfg, key)
 
 
 
@@ -162,7 +176,10 @@ def _resolve_active_connector(cfg) -> str:
     in-process configs that haven't been migrated yet.
     """
     if cfg is None:
-        return "openclaw"
+        return ""
+    configured = getattr(cfg, "has_connector_configured", None)
+    if callable(configured) and not configured():
+        return ""
     if hasattr(cfg, "active_connector") and callable(cfg.active_connector):
         try:
             name = (cfg.active_connector() or "").strip().lower()
@@ -174,7 +191,7 @@ def _resolve_active_connector(cfg) -> str:
         name = (cfg.guardrail.connector or "").strip().lower()
         if name:
             return name
-    return "openclaw"
+    return ""
 
 
 def _enabled_connectors_need_model(cfg, connector: str) -> bool:
@@ -227,7 +244,7 @@ def _active_connector_display(cfg, fallback: str) -> str:
 
 
 def _resolve_member_connector(app, requested: str) -> str | None:
-    """Return the canonical ``guardrail.connectors`` key matching
+    """Return the configured ``guardrail.connectors`` key matching
     ``requested`` (case/alias-insensitive), or ``None`` if it is not a member."""
     conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
     req = normalize_connector(requested)
@@ -237,10 +254,19 @@ def _resolve_member_connector(app, requested: str) -> str | None:
     return None
 
 
+def _active_connector_keys(app: AppContext) -> list[str]:
+    """Resolve active names to existing map keys before a bare policy write."""
+    return [
+        key
+        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
+        if (key := _resolve_member_connector(app, name)) is not None
+    ]
+
+
 def _verify_agents_before_enable(app: AppContext, connectors: list[str]) -> None:
     """Re-verify the agent executables an enable is about to set up.
 
-    Windows (and OpenHands on macOS) admit a connector only against a freshly
+    Windows admits a connector only against a freshly
     verified agent executable. ``guardrail disable`` removes the connector's
     proof and the short-lived selection from the last setup has expired, so an
     enable that only restarted the gateway left it refusing the connector as
@@ -296,6 +322,17 @@ def _toggle_connector_guardrail(
         raise SystemExit(1)
 
     label = _connector_label(key.strip().lower())
+
+    # With the global switch off the connector stays off whatever its own
+    # flag says: this said "already enabled", or saved the flag and reported
+    # setup complete, and changed nothing (GAP-0550).
+    if enable and not app.cfg.guardrail.enabled:
+        ux.err(f"The guardrail is off for every agent, so {label} stays off.", indent="  ")
+        ux.subhead(
+            f"Run {_turn_on_steps(app.cfg.guardrail, key)} to turn it back on; nothing was changed.",
+            indent="    ",
+        )
+        raise SystemExit(1)
 
     # No-op if already in the requested state.
     if app.cfg.guardrail.effective_enabled(key) == enable:
@@ -664,6 +701,8 @@ def _echo_status_json(
     for row in rows:
         item = {"connector": row["key"][0], "label": row["label"][0]}
         item.update({("fail_mode" if key == "fail" else key): row[key][0] for key in keys})
+        if item["fail_mode"] == "-":
+            item["fail_mode"] = None
         connectors.append(item)
     payload = {
         "enabled": (
@@ -723,6 +762,8 @@ def profile_status_text(cfg, result: dict) -> str:
         scoped.append(f"{item.get('profile')} for {subject} (by {item.get('match')})")
     if scoped:
         text += "; except " + ", ".join(scoped)
+    if result.get("agent_assignments_unchecked"):
+        text += "; agent-scoped assignments not checked: the gateway did not list this account's agents"
     return text
 
 
@@ -750,7 +791,7 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
     secure_client = _enterprise_profile(app.cfg) == "secure_client"
     gc = app.cfg.guardrail
     connector = _resolve_active_connector(app.cfg)
-    fail_mode = (getattr(gc, "hook_fail_mode", "") or "open").lower()
+    fail_mode = (getattr(gc, "hook_fail_mode", "") or "closed").lower()
     if not as_json:
         ux.section("Guardrail status", indent="  ")
         if secure_client:
@@ -865,13 +906,24 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                 fail_drift = f" (desired {runtime_state.desired}; drift: " + ", ".join(runtime_state.drift) + ")"
                 runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
         elif upstream_fail_open(app.cfg, name):
-            # Copilot CLI, Antigravity and Hermes fail open upstream whatever
-            # is configured; `defenseclaw status` reports the same.
+            # Under Secure Client, Copilot CLI, Antigravity and Hermes fail
+            # open upstream whatever is configured; `defenseclaw status`
+            # reports the same.
             cfm = "open"
             runtime_limit_rows.append(
                 f"{_connector_label(name)} ({name}) is upstream-enforced fail-open"
                 f" (configured provenance: {configured_cfm})"
             )
+        elif upstream_hook_limit(name):
+            # Everywhere else their hooks follow the fail mode they render.
+            runtime_state = resolve_connector_fail_mode(app.cfg, name)
+            cfm = runtime_state.effective
+            enforcing = gc.enabled and (gc.effective_enabled(name) if hasattr(gc, "effective_enabled") else True)
+            if runtime_state.drift and enforcing:
+                fail_drift = f" (desired {runtime_state.desired}; drift: " + ", ".join(runtime_state.drift) + ")"
+                runtime_drift_rows.append(f"{_connector_label(name)} ({name}){fail_drift}")
+            if cfm == "closed":
+                runtime_limit_rows.append(f"{_connector_label(name)} ({name}) is closed: {runtime_state.limit}")
         elif _cursor_stays_fail_closed(gc, name):
             # Cursor hooks always fail closed in action mode, whatever is
             # saved; show that, like `guardrail fail-mode` (GAP-1717).
@@ -908,18 +960,28 @@ def status_cmd(app: AppContext, connector_flag: str | None, as_json: bool = Fals
                     f"{_connector_label(name)} ({name}) is not guarded: {unrunnable}. Fail mode does not apply "
                     f"to a hook the agent does not run; repair: {repair_command(name, unrunnable)}"
                 )
-            elif (cmode or "") == "action" and cfm == "open" and not upstream_fail_open(app.cfg, name):
+            elif cfm == "open" and not upstream_fail_open(app.cfg, name) and (
+                (cmode or "") == "action" or _action_profiles_for(gc, name)
+            ):
                 # An upgrade keeps the fail mode an older setup chose, while a
-                # new setup gives an action connector closed (GAP-0415).
+                # new setup gives an action connector closed (GAP-0415). A
+                # guardrail profile that puts the connector in action mode
+                # for some accounts counts too (GAP-1282): fail mode is baked
+                # into the hooks, so a profile cannot close it.
                 scope = f" --connector {name}" if getattr(gc, "connectors", None) else ""
+                where = (
+                    "is in action mode"
+                    if (cmode or "") == "action"
+                    else "is in action mode for guardrail profile(s) " + ", ".join(_action_profiles_for(gc, name))
+                )
                 posture_rows.append(
-                    f"{_connector_label(name)} ({name}) is in action mode with fail mode open: while the gateway "
+                    f"{_connector_label(name)} ({name}) {where} with fail mode open: while the gateway "
                     f"is down its hooks allow calls that policy blocks; set closed with "
                     f"defenseclaw guardrail fail-mode closed{scope}"
                 )
         fail_raw = cfm
         cfm_display = _style_fail_mode(cfm)
-        if not (gc.enabled and c_enabled) and not as_json:
+        if not (gc.enabled and c_enabled):
             # A disabled connector has no hooks and so no fail mode; match
             # `guardrail fail-mode`, which shows "disabled (no hooks)" (GAP-1953).
             fail_raw = "-"
@@ -1395,6 +1457,21 @@ def _apply_scoped_fail_mode_transaction(
             )
 
 
+def _upstream_fail_open_note(connector: str) -> str:
+    """Why closed cannot block *connector*'s hook failures (upstream fail-open)."""
+    label = _connector_label(connector)
+    if normalize_connector(connector) == "hermes":
+        return (
+            "Timeout, nonzero exit, malformed output, authentication, and transport failures continue "
+            "in upstream Hermes. Only valid synchronous JSON can block."
+        )
+    return (
+        f"{label} has no fail-closed hook contract: a call its hook cannot check (gateway down, "
+        f"timeout, malformed response) is allowed, and {label} continues a call whose hook fails or "
+        "times out. Only a block decision from the gateway blocks it."
+    )
+
+
 def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, *, restart: bool, yes: bool) -> None:
     """Show or set the hook fail mode for a SINGLE connector.
 
@@ -1445,8 +1522,18 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     # whether it is an override or inherited from the global default.
     if mode is None:
         click.echo()
-        if normalize_connector(key) == "hermes" and upstream_fail_open(app.cfg, key):
-            runtime_value = "open (Hermes upstream; failures cannot be made fail-closed)"
+        if upstream_fail_open(app.cfg, key):
+            # Copilot CLI, Antigravity and (under Secure Client) Hermes fail
+            # open upstream whatever is saved, as the unscoped view, status and
+            # doctor say (GAP-0336).
+            runtime_value = (
+                f"open ({label} upstream; failures cannot be made fail-closed;"
+                f" configured provenance: {configured_mode})"
+            )
+        elif runtime_state.limit:
+            runtime_value = runtime_state.effective
+            if runtime_value == "closed":
+                runtime_value += f" ({runtime_state.limit})"
         elif normalize_connector(key) == "hermes":
             # Outside Secure Client the Hermes hook follows its resolved
             # value on every OS (GAP-0150, GAP-0269); it has no separate
@@ -1475,6 +1562,17 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         ux.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
 
+    if (
+        mode == "closed" and not restart and gc.enabled and _tracks_runtime_fail_mode(app.cfg, key)
+        and (runtime_state.desired != "closed" or not runtime_state.current)
+    ):
+        ux.err(f"{label} still has a hook that is not verified closed.", indent="  ")
+        ux.subhead(
+            f"Run: defenseclaw guardrail fail-mode closed --connector {key} --yes",
+            indent="    ",
+        )
+        raise SystemExit(1)
+
     click.echo()
     if mode == configured_mode:
         click.echo(f"  {ux.bold(f'Reconciling {label} hook runtime:')} {ux.accent(mode)}")
@@ -1483,24 +1581,21 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         ux.echo(
             f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} {ux.dim('→')} {ux.accent(mode)}"
         )
-    if normalize_connector(key) == "hermes" and mode == "closed" and upstream_fail_open(app.cfg, key):
+    if mode == "closed" and upstream_fail_open(app.cfg, key):
         ux.warn(
-            "Hermes will remain fail-open; this value is stored only as requested policy provenance.",
+            f"{label} will remain fail-open; this value is stored only as requested policy provenance.",
             indent="  ",
         )
-        ux.subhead(
-            "Timeout, nonzero exit, malformed output, authentication, and transport failures continue "
-            "in upstream Hermes. Only valid synchronous JSON can block.",
-            indent="    ",
-        )
+        ux.subhead(_upstream_fail_open_note(key), indent="    ")
     elif normalize_connector(key) == "hermes" and mode == "closed":
         ux.warn(f"Invalid or unavailable gateway responses will now BLOCK {label} tool calls.", indent="  ")
         ux.subhead(_HERMES_UPSTREAM_TIMEOUT_NOTE, indent="    ")
     elif mode == "closed":
         ux.warn(f"Invalid or unavailable gateway responses will now BLOCK {label}.", indent="  ")
         ux.subhead(
-            "A 4xx, malformed/incomplete response, timeout, or connection failure will exit 2 from this "
-            "connector's hooks. Make sure your gateway is healthy first.",
+            "A 4xx, malformed or incomplete response, timeout, or connection failure "
+            + _CLOSED_FAILURE_SIGNALS.get(normalize_connector(key), "will exit 2 from this connector's hooks.")
+            + " Make sure your gateway is healthy first.",
             indent="    ",
         )
     else:
@@ -1532,14 +1627,6 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     )
 
 
-def _multi_connector_fail_mode_targets(app: AppContext) -> list[str]:
-    """Return active connectors for bare fail-mode writes in multi installs."""
-    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        return []
-    return [name for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg)) if name in conns]
-
-
 def _apply_global_fail_mode_transaction(
     app: AppContext,
     *,
@@ -1566,17 +1653,12 @@ def _apply_global_fail_mode_transaction(
             raise click.Abort() from exc
 
         old_global = gc.hook_fail_mode
-        old_entries: dict[str, tuple[object | None, str]] = {}
+        old_entries: dict[str, tuple[object, str]] = {}
         gc.hook_fail_mode = mode
         if fail_mode_targets:
-            from defenseclaw.config import PerConnectorGuardrailConfig
-
             for name in fail_mode_targets:
-                entry = gc.connectors.get(name)
+                entry = gc.connectors[name]
                 old_entries[name] = (entry, str(getattr(entry, "hook_fail_mode", "") or ""))
-                if entry is None:
-                    entry = PerConnectorGuardrailConfig()
-                    gc.connectors[name] = entry
                 # Explicit fan-out makes the operation truthful in mixed
                 # observe/action installs and prevents old overrides from
                 # silently defeating the requested global posture.
@@ -1596,8 +1678,7 @@ def _apply_global_fail_mode_transaction(
                     if value != mode and name not in disabled
                 )
                 kept += "".join(
-                    f"; {_connector_label(name)} saved, stays disabled until "
-                    f"'defenseclaw guardrail enable --connector {name}'"
+                    f"; {_connector_label(name)} saved, stays disabled until {_turn_on_steps(gc, name)}"
                     for name in sorted(disabled)
                 )
                 changed = sum(1 for value in pinned.values() if value == mode)
@@ -1613,10 +1694,7 @@ def _apply_global_fail_mode_transaction(
             # registration file has been touched yet.
             gc.hook_fail_mode = old_global
             for name, (old_entry, old_mode) in old_entries.items():
-                if old_entry is None:
-                    gc.connectors.pop(name, None)
-                else:
-                    old_entry.hook_fail_mode = old_mode
+                old_entry.hook_fail_mode = old_mode
             ux.err(
                 f"Cannot write {config_path_for_data_dir(app.cfg.data_dir)}: {exc.strerror or exc}; "
                 "the previous config.yaml is unchanged.", indent="  ",
@@ -1631,19 +1709,27 @@ def _apply_global_fail_mode_transaction(
                 # refresh or verify; its value is only saved for later.
                 disabled = frozenset(name for name in transaction_targets if _disabled_on_its_own(gc, name))
                 live_targets = [name for name in transaction_targets if name not in disabled]
-                runtime_targets = [
-                    name for name in live_targets if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS
-                ]
-                if live_targets and len(runtime_targets) == len(live_targets):
+                runtime_targets = [name for name in live_targets if _tracks_runtime_fail_mode(app.cfg, name)]
+
+                # A mixed install needs a gateway restart for its other
+                # connectors. Close every mode-aware hook first: an old open
+                # Copilot or Hermes registration otherwise allows calls while
+                # the gateway is between processes.
+                if mode == "closed":
                     for name in runtime_targets:
                         reconcile_connector_registration(app.cfg, name)
+                if live_targets and len(runtime_targets) == len(live_targets):
+                    if mode != "closed":
+                        for name in runtime_targets:
+                            reconcile_connector_registration(app.cfg, name)
                 elif not _gateway_running(app):
                     # GAP-1370: like the --connector form, never start a
                     # gateway the user stopped; it loads the saved value
                     # when it starts.
                     gateway_stopped = True
-                    for name in runtime_targets:
-                        reconcile_connector_registration(app.cfg, name)
+                    if mode != "closed":
+                        for name in runtime_targets:
+                            reconcile_connector_registration(app.cfg, name)
                 else:
                     from defenseclaw.commands import cmd_setup
 
@@ -1665,10 +1751,7 @@ def _apply_global_fail_mode_transaction(
             except (OSError, RuntimeError, click.ClickException) as exc:
                 gc.hook_fail_mode = old_global
                 for name, (old_entry, old_mode) in old_entries.items():
-                    if old_entry is None:
-                        gc.connectors.pop(name, None)
-                    else:
-                        old_entry.hook_fail_mode = old_mode
+                    old_entry.hook_fail_mode = old_mode
                 try:
                     _rollback_fail_mode_transaction(app, snapshots)
                 except (OSError, ConfigWriteError) as rollback_exc:
@@ -1719,7 +1802,8 @@ def _apply_global_fail_mode_transaction(
 @click.option(
     "--restart/--no-restart",
     default=True,
-    help="Restart the gateway so hooks are regenerated with the new fail mode (default: on).",
+    help="Refresh and verify runtime registrations, restarting a running gateway only when full connector setup "
+    "is needed (default: on). --no-restart saves the desired value without refreshing registrations.",
 )
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @click.option(
@@ -1756,13 +1840,21 @@ def fail_mode_cmd(
 
     Without an argument this prints the current value. With
     ``open`` or ``closed`` it persists the choice to ~/.defenseclaw/
-    config.yaml and (when --restart is on) restarts the gateway so
-    the regenerated hooks pick up the new value immediately.
+    config.yaml. With --restart (the default), enabled connectors'
+    runtime registrations are refreshed and verified directly where
+    supported. A running gateway restarts only when full connector setup
+    is needed; a stopped gateway stays stopped. --no-restart saves the
+    desired value without refreshing runtime registrations; check
+    ``guardrail status`` for drift until reconciliation succeeds.
 
     With ``--connector X`` it scopes the fail mode to a single connector
     (multi-connector installs only), writing a per-connector override
     while the global default and the other connectors are left untouched.
     """
+    managed_host = str(getattr(app.cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    if mode == "open" and not managed_host:
+        ux.err("Fail-open is reserved for administrator-managed hosts during an outage.", indent="  ")
+        raise SystemExit(1)
     if connector_flag:
         _set_connector_fail_mode(
             app, connector_flag, mode, restart=restart, yes=yes
@@ -1770,9 +1862,11 @@ def fail_mode_cmd(
         return
 
     gc = app.cfg.guardrail
-    current = (gc.hook_fail_mode or "open").lower()
-    if current not in ("open", "closed"):
-        current = "open"
+    # A bare write sets the global value every unlisted connector inherits
+    # (an OpenShell policy connector, a connector set up later), so a no-op
+    # needs the saved global value to be exactly the requested one.
+    saved_global = str(gc.hook_fail_mode or "").strip().lower()
+    current = saved_global if managed_host and saved_global in ("open", "closed") else "closed"
 
     if mode is None:
         click.echo()
@@ -1798,15 +1892,33 @@ def fail_mode_cmd(
                 _eff = _state.runtime or "unknown"
                 if _state.drift:
                     _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
-            elif normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name):
-                _eff = f"open (Hermes upstream; configured provenance: {_eff})"
+            elif upstream_fail_open(app.cfg, _name):
+                # Under Secure Client, Copilot CLI, Antigravity and Hermes fail
+                # open upstream, as status, doctor and guardrail status say
+                # (GAP-0336).
+                _eff = f"open ({_connector_label(_name)} upstream; configured provenance: {_eff})"
+            elif upstream_hook_limit(_name):
+                _state = resolve_connector_fail_mode(app.cfg, _name)
+                _eff = _state.effective
+                if _state.drift:
+                    _eff += f" (desired {_state.desired}; drift: {', '.join(_state.drift)})"
+                elif _state.note:
+                    _eff += f" ({_state.note})"
             elif _is_proxy_connector(_name):
                 _eff = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
             elif _cursor_stays_fail_closed(gc, _name):
                 _eff = "closed (Cursor hooks always fail closed in action mode)"
-            if _eff.startswith("open") and not (
-                normalize_connector(_name) == "hermes" and upstream_fail_open(app.cfg, _name)
-            ):
+            if _enforcing and normalize_connector(_name) not in _RUNTIME_FAIL_MODE_CONNECTORS:
+                # A hook entry the agent skips, or one that does not run
+                # DefenseClaw's current hook, leaves calls unchecked whatever
+                # the fail mode (rel-1-0-4 GAP-0538, GAP-0600); the runtime
+                # connectors above, and Copilot CLI, Antigravity and Hermes
+                # resolved from their rendered hooks, carry it in their drift
+                # already, so a drift already named is not printed twice.
+                _drift = [d for d in registration_integrity_drift(app.cfg, _name) if d not in _eff]
+                if _drift:
+                    _eff += f" (drift: {', '.join(_drift)})"
+            if _eff.startswith("open") and not upstream_fail_open(app.cfg, _name):
                 _open_names.append(_name)
             _eff_disp = ux._style(_eff, fg="yellow") if _eff == "closed" else _eff
             click.echo(f"      - {_connector_label(_name)} ({_name}): {_eff_disp}")
@@ -1821,10 +1933,12 @@ def fail_mode_cmd(
             )
             click.echo(f"  {ux.dim('Switch to closed:')} defenseclaw guardrail fail-mode closed")
         else:
-            # Name Hermes only when it is configured (GAP-2116).
+            # Name only the configured upstream fail-open connectors (GAP-2116,
+            # GAP-0336).
+            _upstream_open = [_connector_label(n) for n in _actives if upstream_fail_open(app.cfg, n)]
             _hermes_note = (
-                "; Hermes remains fail-open"
-                if any(normalize_connector(n) == "hermes" for n in _actives) and upstream_fail_open(app.cfg, "hermes")
+                f"; {', '.join(_upstream_open)} {'remains' if len(_upstream_open) == 1 else 'remain'} fail-open"
+                if _upstream_open
                 else ""
             )
             ux.subhead(
@@ -1836,11 +1950,12 @@ def fail_mode_cmd(
                 # GAP-1109: a connector override (or observe mode) keeps these
                 # open although the global default is closed.
                 _warn_still_fail_open(gc, _open_names)
-            click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
+            if managed_host:
+                click.echo(f"  {ux.dim('Switch to open:')}   defenseclaw guardrail fail-mode open")
         click.echo()
         return
 
-    fail_mode_targets = _multi_connector_fail_mode_targets(app)
+    fail_mode_targets = _active_connector_keys(app)
     target_modes: dict[str, str] = {}
     runtime_states = {}
     if fail_mode_targets:
@@ -1857,9 +1972,11 @@ def fail_mode_cmd(
 
     if (
         fail_mode_targets
+        and saved_global == mode
         and all(target_modes[name] == desired_modes[name] for name in fail_mode_targets)
         and all(
             (runtime_states[name].desired == desired_modes[name] and runtime_states[name].current)
+            or upstream_fail_open(app.cfg, name)
             or _disabled_on_its_own(gc, name)
             or not gc.enabled
             for name in fail_mode_targets
@@ -1874,18 +1991,32 @@ def fail_mode_cmd(
         _refuse_cursor_fail_mode(gc, single_connector, mode, single_pinned)
     single_state = (
         resolve_connector_fail_mode(app.cfg, single_connector)
-        if not fail_mode_targets and normalize_connector(single_connector) in _RUNTIME_FAIL_MODE_CONNECTORS
+        if not fail_mode_targets and _tracks_runtime_fail_mode(app.cfg, single_connector)
         else None
     )
+    if mode == "closed" and not restart and gc.enabled:
+        unclosed = [
+            name for name in fail_mode_targets
+            if _tracks_runtime_fail_mode(app.cfg, name)
+            and not _disabled_on_its_own(gc, name)
+            and (runtime_states[name].desired != "closed" or not runtime_states[name].current)
+        ]
+        if single_state is not None and (single_state.desired != "closed" or not single_state.current):
+            unclosed.append(single_connector)
+        if unclosed:
+            ux.err("Registered hooks are not verified closed: " + ", ".join(unclosed), indent="  ")
+            ux.subhead("Run: defenseclaw guardrail fail-mode closed --yes", indent="    ")
+            raise SystemExit(1)
     if (
         not fail_mode_targets
-        and mode == current
+        and saved_global == mode
         and (single_state is None or (single_state.desired == mode and single_state.current))
+        and not registration_integrity_drift(app.cfg, single_connector)
     ):
-        if normalize_connector(single_connector) == "hermes" and upstream_fail_open(app.cfg, single_connector):
+        if upstream_fail_open(app.cfg, single_connector):
             ux.echo(
-                f"  {ux.dim('Configured Hermes fail-mode provenance is already')} {mode!r}"
-                f" {ux.dim('— runtime remains upstream fail-open.')}"
+                f"  {ux.dim(f'Configured {_connector_label(single_connector)} fail-mode provenance is already')}"
+                f" {mode!r} {ux.dim('— runtime remains upstream fail-open.')}"
             )
         else:
             ux.echo(f"  {ux.dim('Hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
@@ -1903,8 +2034,7 @@ def fail_mode_cmd(
             if guardrail_off and _disabled_on_its_own(gc, name):
                 click.echo(
                     f"      - {_connector_label(name)} ({name}): disabled (no hooks); "
-                    f"{desired_modes[name]} is saved; it stays disabled until "
-                    f"'defenseclaw guardrail enable --connector {name}'"
+                    f"{desired_modes[name]} is saved; it stays disabled until {_turn_on_steps(gc, name)}"
                 )
                 continue
             if guardrail_off:
@@ -1936,7 +2066,7 @@ def fail_mode_cmd(
             # connector shows its installed runtime value (GAP-1370).
             shown = gc.effective_hook_fail_mode(name) if hasattr(gc, "effective_hook_fail_mode") else old
             installed = getattr(runtime_states[name], "runtime", None)
-            if normalize_connector(name) in _RUNTIME_FAIL_MODE_CONNECTORS and installed:
+            if _tracks_runtime_fail_mode(app.cfg, name) and installed:
                 shown = installed
             if _cursor_stays_fail_closed(gc, name) and mode == "open":
                 click.echo(
@@ -1959,24 +2089,26 @@ def fail_mode_cmd(
     else:
         ux.echo(f"  {ux.bold('Changing hook fail mode:')} {current} {ux.dim('→')} {ux.accent(mode)}")
     active_names = fail_mode_targets or [single_connector]
-    hermes_targeted = any(normalize_connector(name) == "hermes" for name in active_names) and upstream_fail_open(
-        app.cfg, "hermes"
+    # Copilot CLI, Antigravity and (under Secure Client) Hermes stay fail-open
+    # upstream whatever is saved (GAP-0336): closed is provenance for them.
+    upstream_open = [name for name in active_names if upstream_fail_open(app.cfg, name)]
+    upstream_labels = ", ".join(_connector_label(name) for name in upstream_open)
+    upstream_note = (
+        f" {upstream_labels} {'remains' if len(upstream_open) == 1 else 'remain'} fail-open."
+        if upstream_open
+        else ""
     )
-    non_hermes_targeted = any(normalize_connector(name) != "hermes" for name in active_names)
-    if mode == "closed" and hermes_targeted and not non_hermes_targeted:
+    if mode == "closed" and upstream_open and len(upstream_open) == len(active_names):
         ux.warn(
-            "Hermes will remain fail-open; closed is stored only as requested policy provenance.",
+            f"{upstream_labels} will remain fail-open; closed is stored only as requested policy provenance.",
             indent="  ",
         )
-        ux.subhead(
-            "Only valid synchronous Hermes JSON can block. Timeout, nonzero exit, malformed output, "
-            "authentication, and transport failures continue upstream.",
-            indent="    ",
-        )
+        for name in upstream_open:
+            ux.subhead(_upstream_fail_open_note(name), indent="    ")
     elif mode == "closed" and guardrail_off:
         ux.subhead(
             "Once the guardrail is enabled, invalid or unavailable gateway responses will BLOCK "
-            "supported connectors." + (" Hermes remains fail-open." if hermes_targeted else ""),
+            "supported connectors." + upstream_note,
             indent="  ",
         )
     elif mode == "closed":
@@ -1986,8 +2118,7 @@ def fail_mode_cmd(
         )
         ux.subhead(
             "A 4xx, malformed/incomplete response, timeout, or connection failure blocks connectors "
-            "with a native fail-closed surface."
-            + (" Hermes remains fail-open." if hermes_targeted else ""),
+            "with a native fail-closed surface." + upstream_note,
             indent="    ",
         )
     elif all(_is_proxy_connector(name) for name in active_names):
@@ -2076,10 +2207,140 @@ def _refuse_cursor_fail_mode(gc, name: str, mode: str, pinned: str) -> None:
 # What fail mode closed cannot change for Hermes on Linux and macOS: its hook
 # blocks every failure DefenseClaw sees, but Hermes itself lets a call run when
 # a hook times out or cannot start (GAP-0150).
+# How a closed hook blocks a call it cannot check, for the connectors that
+# answer with the agent's own deny instead of exit 2.
+_CLOSED_FAILURE_SIGNALS = {
+    "copilot": (
+        "gets Copilot's own deny for preToolUse and permissionRequest; the hook exits 0. Copilot itself "
+        "still lets a call run when the hook times out or cannot start."
+    ),
+    "antigravity": (
+        'gets Antigravity\'s PreToolUse deny ({"decision":"deny"}); the hook exits 0. Antigravity itself '
+        "still lets a call run when the hook times out or cannot start."
+    ),
+}
+
+
 _HERMES_UPSTREAM_TIMEOUT_NOTE = (
     "A gateway that is down or gives an unusable answer blocks the Hermes tool call; Hermes itself "
     "still lets a call run when the hook times out or cannot start."
 )
+
+
+def _profile_connector_policies(gc, connector: str) -> list[tuple[str, str]]:
+    """``(profile, mode)`` for each guardrail profile, for *connector*.
+
+    *mode* is the mode the profile itself sets for the connector, "" when it
+    inherits. A profile's own per-connector value wins over its profile-wide
+    one, as the gateway resolves it (applyGuardrailProfile).
+    """
+    rows: list[tuple[str, str]] = []
+    target = normalize_connector(connector)
+    for pname, profile in sorted((getattr(gc, "profiles", None) or {}).items()):
+        mode = str(getattr(profile, "mode", "") or "").strip().lower()
+        for cname, override in (getattr(profile, "connectors", None) or {}).items():
+            if normalize_connector(cname) == target and str(getattr(override, "mode", "") or "").strip():
+                mode = str(override.mode).strip().lower()
+        rows.append((str(pname), mode))
+    return rows
+
+
+def _action_profiles_for(gc, connector: str) -> list[str]:
+    """Names of the guardrail profiles that put *connector* in action mode.
+
+    An unset mode inherits and is not counted.
+    """
+    return [name for name, mode in _profile_connector_policies(gc, connector) if mode == "action"]
+
+
+def _hilt_preview_lines(app: AppContext, key: str, label: str, enabled: bool, min_severity: str) -> list[str]:
+    """What saving this connector HILT block does, line by line.
+
+    The hook mode and HILT come from the gateway's own resolvers
+    (``defenseclaw-gateway connector hilt-preview``), never from a Python
+    copy: a legacy ``claude_code.mode``, ``codex.mode`` or
+    ``connector_hooks.<c>.mode`` wins over the guardrail mode there, and a
+    guardrail profile that sets a mode or its own HILT block changes what its
+    accounts get. When the gateway cannot answer, the preview says so and
+    promises nothing.
+    """
+    from defenseclaw import config_inspect
+
+    try:
+        preview = config_inspect.connector_hilt_preview(
+            normalize_connector(key),
+            enabled=enabled,
+            min_severity=min_severity,
+            config_path=str(config_path_for_data_dir(app.cfg.data_dir)),
+        )
+    except config_inspect.ConfigInspectError as exc:
+        lines = [
+            f"Could not resolve {label}'s hook mode with the gateway ({exc}). The saved HILT policy pauses "
+            f"actions only where {label} runs in action mode; check an account with: "
+            f"defenseclaw guardrail profile explain --user <name> --connector {normalize_connector(key)}"
+        ]
+        if enabled and not has_native_approval_prompt(key):
+            # Whatever the mode, a connector without a native approval prompt
+            # alerts instead of asking (_hilt_enable_notice).
+            lines.append(_hilt_enable_notice(key, min_severity, secure_client=asset_lists.is_secure_client(app.cfg)))
+        return lines
+    base = preview.base
+    if base.mode != "action":
+        lines = [
+            f"{label} is in {base.mode} mode, which does not pause actions for approval. "
+            "The saved HILT policy applies when the connector uses action mode."
+        ]
+    elif base.enabled:
+        # A connector without a native approval prompt alerts instead.
+        lines = [_hilt_enable_notice(key, base.min_severity, secure_client=asset_lists.is_secure_client(app.cfg))]
+    else:
+        lines = [f"{label} will NOT prompt — actions resolve straight to allow/alert/block."]
+    return lines + _hilt_profile_notes(preview, label)
+
+
+def _hilt_profile_notes(preview, label: str) -> list[str]:
+    """What a saved connector HILT change does for accounts on guardrail profiles.
+
+    *preview* is the gateway's answer (``connector_hilt_preview``). A profile
+    with its own HILT block is not reached by the change. One that follows it
+    but runs the connector in another hook mode than the accounts on no
+    profile pauses (action) or does not (observe) where the base line says the
+    opposite, so its accounts get their own line.
+    """
+    base = preview.base
+    action: list[str] = []
+    passive: list[str] = []
+    own: list[str] = []
+    for scope in preview.profiles:
+        if not scope.follows_connector_hilt:
+            own.append(scope.profile)
+        elif scope.mode != base.mode:
+            (action if scope.mode == "action" else passive).append(scope.profile)
+    notes: list[str] = []
+    if action:
+        names = ", ".join(action)
+        if base.enabled:
+            notes.append(
+                f"Guardrail profile(s) {names} put {label} in action mode: their accounts will be prompted "
+                f"for approval on confirmable actions at/above {base.min_severity} (CRITICAL findings still block "
+                "outright)."
+            )
+        else:
+            notes.append(
+                f"Guardrail profile(s) {names} put {label} in action mode: their accounts will NOT be prompted; "
+                "actions resolve straight to allow/alert/block."
+            )
+    if passive:
+        notes.append(
+            f"Guardrail profile(s) {', '.join(passive)} put {label} in observe mode: "
+            "their accounts are not paused for approval."
+        )
+    if own:
+        notes.append(
+            f"Guardrail profile(s) {', '.join(own)} set their own HILT policy: this change does not apply to "
+            "their accounts."
+        )
+    return notes
 
 
 def _warn_still_fail_open(gc, open_names: list[str]) -> None:
@@ -2098,6 +2359,42 @@ def _warn_still_fail_open(gc, open_names: list[str]) -> None:
 
 
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
+
+
+def _hilt_enable_notice(
+    connector: str, severity: str, *, mode: str = "action", secure_client: bool = False
+) -> str:
+    label = _connector_label(connector)
+    observe_note = (
+        f"{label} is in observe mode; HILT at/above {severity} does not pause actions "
+        "until action mode is enabled. "
+        if mode.strip().lower() != "action"
+        else ""
+    )
+    if normalize_connector(connector) == "copilot":
+        if secure_client:
+            return (
+                observe_note +
+                f"{label} Secure Client will prompt for approval on supported confirmable "
+                f"actions at/above {severity} (CRITICAL findings still block outright)."
+            )
+        return (
+            observe_note +
+            f"{label} cannot prove an approval prompt is available; action-mode "
+            f"confirmations at/above {severity} are denied and audited as block "
+            "(raw_action=confirm). CRITICAL findings still block outright."
+        )
+    if has_native_approval_prompt(connector):
+        return (
+            observe_note +
+            f"{label} will prompt for approval on supported confirmable actions at/above "
+            f"{severity} (CRITICAL findings still block outright)."
+        )
+    return (
+        observe_note +
+        f"{label} has no implemented native approval prompt; confirm verdicts at/above "
+        f"{severity} produce alerts with raw_action=confirm preserved. CRITICAL findings still block outright."
+    )
 
 
 def _set_connector_hilt(
@@ -2185,17 +2482,8 @@ def _set_connector_hilt(
         f"enabled={ux.accent(str(new_enabled).lower())} "
         f"min_severity={ux.accent(new_min)}"
     )
-    if new_enabled:
-        ux.subhead(
-            f"{label} will prompt for approval on confirmable actions at/above "
-            f"{new_min} (CRITICAL findings still block outright).",
-            indent="  ",
-        )
-    else:
-        ux.subhead(
-            f"{label} will NOT prompt — actions resolve straight to allow/alert/block.",
-            indent="  ",
-        )
+    for line in _hilt_preview_lines(app, key, label, new_enabled, new_min):
+        ux.subhead(line, indent="  ")
     click.echo()
 
     if not yes and not _confirm_proceed():
@@ -2265,18 +2553,6 @@ def _report_hot_hilt(app: AppContext) -> None:
 def _log_hilt(app: AppContext, details: str) -> None:
     """Audit a saved HILT change; a stopped gateway only skips the audit event."""
     _log_guardrail_action(app, "guardrail-hilt", details)
-
-
-def _multi_connector_hilt_targets(app: AppContext) -> list[str]:
-    """Return active connectors for bare HILT writes in multi installs."""
-    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        return []
-    return [
-        name
-        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
-        if name in conns
-    ]
 
 
 @guardrail.command("hilt")
@@ -2377,7 +2653,7 @@ def hilt_cmd(
         click.echo()
         return
 
-    hilt_targets = _multi_connector_hilt_targets(app)
+    hilt_targets = _active_connector_keys(app)
     target_hilts: dict[str, tuple[bool, str, bool, str]] = {}
     if hilt_targets:
         for name in hilt_targets:
@@ -2439,15 +2715,11 @@ def hilt_cmd(
         raise click.Abort()
 
     if hilt_targets:
-        from defenseclaw.config import HILTConfig, PerConnectorGuardrailConfig
+        from defenseclaw.config import HILTConfig
 
         for name in hilt_targets:
             _, _, desired_enabled, desired_min = target_hilts[name]
-            entry = gc.connectors.get(name)
-            if entry is None:
-                entry = PerConnectorGuardrailConfig()
-                gc.connectors[name] = entry
-            entry.hilt = HILTConfig(enabled=desired_enabled, min_severity=desired_min)
+            gc.connectors[name].hilt = HILTConfig(enabled=desired_enabled, min_severity=desired_min)
     else:
         gc.hilt.enabled = new_enabled
         gc.hilt.min_severity = new_min
@@ -2623,18 +2895,6 @@ def _set_connector_block_message(
     )
 
 
-def _multi_connector_block_message_targets(app: AppContext) -> list[str]:
-    """Return active connectors for bare block-message writes in multi installs."""
-    conns = getattr(app.cfg.guardrail, "connectors", {}) or {}
-    if not conns:
-        return []
-    return [
-        name
-        for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg))
-        if name in conns
-    ]
-
-
 @guardrail.command("block-message")
 @click.argument("message", required=False)
 @click.option(
@@ -2722,7 +2982,7 @@ def block_message_cmd(
         click.echo()
         return
 
-    block_message_targets = _multi_connector_block_message_targets(app)
+    block_message_targets = _active_connector_keys(app)
     target_messages: dict[str, str] = {}
     if block_message_targets:
         target_messages = {
@@ -2784,14 +3044,8 @@ def block_message_cmd(
 
     gc.block_message = new_msg
     if block_message_targets:
-        from defenseclaw.config import PerConnectorGuardrailConfig
-
         for name in block_message_targets:
-            entry = gc.connectors.get(name)
-            if entry is None:
-                entry = PerConnectorGuardrailConfig()
-                gc.connectors[name] = entry
-            entry.block_message = new_msg
+            gc.connectors[name].block_message = new_msg
     try:
         app.cfg.save()
         if block_message_targets:
@@ -2992,7 +3246,20 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
             path = named
         else:
             names = ", ".join(sorted(p.name for p in packs))
-            raise click.ClickException(f"no pack with the name {path!r} was found; available packs: {names}")
+            message = f"no pack with the name {path!r} was found; available packs: {names}"
+            if json_out:
+                # --json promises the versioned result on stdout (GAP-1053).
+                missing = rulepack_validation.RulePackValidationBridgeError(message, code="pack_not_found")
+                click.echo(
+                    json.dumps(
+                        rulepack_validation.bridge_error_wire(missing),
+                        ensure_ascii=True,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                )
+                raise SystemExit(1)
+            raise click.ClickException(message)
     try:
         result = rulepack_validation.validate_rule_pack(path)
     except rulepack_validation.RulePackValidationBridgeError as exc:
@@ -3041,6 +3308,8 @@ def validate_pack_cmd(path: str, json_out: bool) -> None:
         )
         click.echo(f"  digest: {summary['digest']}")
         click.echo(f"  files digest: {summary['files_digest']} (the guardrail.custom_packs pin)")
+        for warning in result.warnings:
+            click.echo("warning: " + warning, err=True)
     else:
         issue = result.error
         assert issue is not None
@@ -3231,6 +3500,20 @@ def _cursor_stays_fail_closed(gc, name: str) -> bool:
 def _disabled_on_its_own(gc, name: str) -> bool:
     """Whether *name* was turned off with `guardrail disable --connector` (no hooks)."""
     return hasattr(gc, "effective_enabled") and not gc.effective_enabled(name)
+
+
+def _turn_on_steps(gc, name: str) -> str:
+    """The commands that bring back *name*'s hooks, in order (GAP-0550).
+
+    With the global switch off, `guardrail enable --connector` exits 1, and
+    the global enable keeps a connector disabled on its own off.
+    """
+    steps = []
+    if not gc.enabled:
+        steps.append("'defenseclaw guardrail enable'")
+    if _disabled_on_its_own(gc, name):
+        steps.append(f"'defenseclaw guardrail enable --connector {name}'")
+    return ", then ".join(steps)
 
 
 def _gateway_running(app: AppContext) -> bool:
@@ -3476,6 +3759,11 @@ def _scope_key(connector_key: str | None, profile: str | None) -> str:
     return key
 
 
+def _rule_prune_scope(connector_key: str | None, profile: str | None) -> str:
+    """Keep the owning scope when its last rule override is removed."""
+    return _scope_key(None, profile) if profile else _scope_key(connector_key, None)
+
+
 def _scope_block(cfg, connector_key: str | None, profile: str | None):
     """The config block of a scope (None when it isn't written yet)."""
     block = cfg.guardrail
@@ -3493,6 +3781,70 @@ def _scope_rules(cfg, connector_key: str | None, profile: str | None):
     return getattr(block, "rules", None) if block is not None else None
 
 
+def _scope_pack_selections(cfg) -> dict[str, tuple[str | None, str | None, str]]:
+    """Every guardrail scope block: config path -> (connector, profile, its ``rule_pack``)."""
+    gc = cfg.guardrail
+    selected = {"guardrail": (None, None, str(getattr(gc, "rule_pack", "") or "").strip())}
+    for connector, block in sorted((getattr(gc, "connectors", None) or {}).items()):
+        selected[_scope_key(connector, None)] = (connector, None, str(getattr(block, "rule_pack", "") or "").strip())
+    for profile, block in sorted((getattr(gc, "profiles", None) or {}).items()):
+        selected[_scope_key(None, profile)] = (None, profile, str(getattr(block, "rule_pack", "") or "").strip())
+        for connector, sub in sorted((getattr(block, "connectors", None) or {}).items()):
+            selected[_scope_key(connector, profile)] = (
+                connector,
+                profile,
+                str(getattr(sub, "rule_pack", "") or "").strip(),
+            )
+    return selected
+
+
+def _app_protection_pack_selections(cfg) -> dict[str, tuple[str | None, str, bool]]:
+    """Every automatic-protection guardrail block: config path -> (connector,
+    its ``rule_pack``, whether it is on). The gateway loads these packs for
+    the connectors it protects automatically (appProtectionGuardrailOverride
+    in internal/config/application_protection.go); use-pack never writes them."""
+    ap = getattr(cfg, "application_protection", None)
+    if ap is None:
+        return {}
+    on = bool(getattr(ap, "enabled", False))
+
+    def _pack(block) -> str:
+        return str(getattr(getattr(block, "guardrail", None), "rule_pack", "") or "").strip()
+
+    selected = {"application_protection.guardrail": (None, _pack(ap), on)}
+    for connector, entry in sorted((getattr(ap, "connectors", None) or {}).items()):
+        selected[f"application_protection.connectors.{connector}.guardrail"] = (
+            connector,
+            _pack(entry),
+            on and getattr(entry, "enabled", None) is not False,
+        )
+    return selected
+
+
+def _repin_shared_scopes(cfg, name: str, written: set[str]) -> list[str]:
+    """The scopes outside *written* (config paths) that select custom pack
+    *name*: re-pinning its digest changes their policy too, so the prompt
+    and the result name them, automatic-protection scopes included."""
+    shared = []
+    for path, (connector, profile, selected) in _scope_pack_selections(cfg).items():
+        if path in written or selected != name:
+            continue
+        if connector is None and profile is None:
+            shared.append("the global pack (every connector without its own pack)")
+        else:
+            shared.append(_scope_words(connector, profile))
+    for path, (connector, selected, on) in _app_protection_pack_selections(cfg).items():
+        if selected != name:
+            continue
+        words = (
+            f"automatic protection for {_connector_label(connector)}"
+            if connector
+            else "automatic protection (connectors it protects that are not set up manually)"
+        )
+        shared.append(f"{words} ({path}{'' if on else ', when turned on'})")
+    return shared
+
+
 def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
     """Unset the ``guardrail.custom_packs`` pins no scope selects once the
     scopes in *after* (config path -> its new ``rule_pack``, "" when unset)
@@ -3501,14 +3853,11 @@ def _unused_pin_changes(cfg, after: dict[str, str]) -> tuple[list, list[str]]:
     from defenseclaw import config_writer
 
     gc = cfg.guardrail
-    selected = {"guardrail": getattr(gc, "rule_pack", "")}
-    for connector, block in (getattr(gc, "connectors", None) or {}).items():
-        selected[_scope_key(connector, None)] = getattr(block, "rule_pack", "")
-    for profile, block in (getattr(gc, "profiles", None) or {}).items():
-        selected[_scope_key(None, profile)] = getattr(block, "rule_pack", "")
-        for connector, sub in (getattr(block, "connectors", None) or {}).items():
-            selected[_scope_key(connector, profile)] = getattr(sub, "rule_pack", "")
+    selected = {path: pack for path, (_c, _p, pack) in _scope_pack_selections(cfg).items()}
     selected.update(after)
+    # An automatic-protection pack keeps its pin; the gateway refuses a pack
+    # name that is neither built in nor a custom_packs key.
+    selected.update({path: pack for path, (_c, pack, _on) in _app_protection_pack_selections(cfg).items()})
     used = {str(name or "").strip() for name in selected.values()}
     dropped = sorted(name for name in (getattr(gc, "custom_packs", None) or {}) if name not in used)
     return [config_writer.Change(f"guardrail.custom_packs.{name}", unset=True) for name in dropped], dropped
@@ -3568,15 +3917,24 @@ def _guardrail_write_error(exc: BaseException) -> str:
     return f"Failed to save config: {config_writer.plain_error(exc)}"
 
 
-def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> object:
+def _write_guardrail_config(
+    app: AppContext, changes, reason: str, fail, *, snapshot: tuple[str, str] | None = None
+) -> object:
     """Apply *changes* through the config writer; *fail(exit_code, message)*
-    reports a refused or failed write and exits."""
+    reports a refused or failed write and exits. With *snapshot* (the
+    ``(path, sha256)`` :func:`_read_config_snapshot` returned) the write is a
+    compare-and-swap: it lands only on those config.yaml bytes, and a file
+    changed or removed since then raises
+    :class:`config_writer.ConfigConflictError` for the caller."""
     from defenseclaw import config_writer
 
+    target, expect_sha256 = snapshot or (str(config_path_for_data_dir(app.cfg.data_dir)), None)
     try:
-        return config_writer.apply(
-            changes, _cli_actor(), reason, path=str(config_path_for_data_dir(app.cfg.data_dir))
-        )
+        return config_writer.apply(changes, _cli_actor(), reason, expect_sha256=expect_sha256, path=target)
+    except config_writer.ConfigConflictError as exc:
+        if expect_sha256 is not None:
+            raise
+        fail(1, _guardrail_write_error(exc))
     except config_writer.ManagedConfigWriteError:
         _refuse_managed_write(getattr(changes[0], "path", "") or "guardrail", reason, fail)
     except (config_writer.ConfigWriteError, OSError) as exc:
@@ -3588,6 +3946,56 @@ def _write_guardrail_config(app: AppContext, changes, reason: str, fail) -> obje
             detail += " The global rule pack was checked; use --connector or --profile for another scope."
         fail(1, detail)
     return None
+
+
+def _read_config_snapshot(app: AppContext, fail) -> tuple[str, str]:
+    """Read config.yaml once, load ``app.cfg`` from exactly those bytes, and
+    return ``(path, sha256)`` for a compare-and-swap write.
+
+    ``use-pack --repin`` shows every change from this one read and asks;
+    the write then lands only on these bytes. A pin lives in config.yaml, so
+    a missing or empty file is refused: the config still in memory is not
+    what is on disk, and nothing may build a config.yaml from it.
+    """
+    import hashlib
+
+    from defenseclaw import config as cfg_mod
+
+    path = config_path_for_data_dir(app.cfg.data_dir)
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except FileNotFoundError:
+        fail(1, f"--repin replaces a pin in config.yaml, and there is no {path}. Nothing was changed.")
+        raise
+    except OSError as exc:
+        fail(1, f"Failed to read config: {exc}. Nothing was changed.")
+        raise
+    try:
+        source = cfg_mod.parse_config_yaml(cfg_mod.decode_config_bytes(raw)) or {}
+    except Exception as exc:
+        fail(1, f"Failed to load config: {exc}. Nothing was changed.")
+        raise
+    if not source:
+        fail(1, f"--repin replaces a pin in config.yaml, and {path} is empty. Nothing was changed.")
+    try:
+        app.cfg = cfg_mod.load(parsed_source=source)
+    except Exception as exc:
+        fail(1, f"Failed to load config: {exc}. Nothing was changed.")
+        raise
+    return str(path), hashlib.sha256(raw).hexdigest()
+
+
+def _planned_change_lines(changes) -> list[str]:
+    """One line per config.yaml edit, exactly as the writer gets it."""
+    lines = []
+    for change in changes:
+        if change.unset:
+            lines.append(f"remove {change.path}")
+        else:
+            value = change.value if isinstance(change.value, str) else json.dumps(change.value, sort_keys=True)
+            lines.append(f"set {change.path} = {value}")
+    return lines
 
 
 @contextmanager
@@ -3686,6 +4094,12 @@ def _with_scope_options(fn):
     is_flag=True,
     help="Skip validating a built-in pack (a custom pack is always validated: its digest is pinned).",
 )
+@click.option(
+    "--repin",
+    is_flag=True,
+    help="Replace the pinned digest of a custom pack edited since it was pinned (shows both digests and asks).",
+)
+@click.option("--yes", is_flag=True, help="With --repin: skip the confirmation prompt.")
 @click.option("--json", "json_out", is_flag=True, help="Print the result as JSON.")
 @pass_ctx
 def use_pack_cmd(
@@ -3694,6 +4108,8 @@ def use_pack_cmd(
     connector: str | None,
     clear: bool,
     no_validate: bool,
+    repin: bool,
+    yes: bool,
     json_out: bool,
 ) -> None:
     """Switch the guardrail rule pack, globally or for one connector.
@@ -3704,8 +4120,9 @@ def use_pack_cmd(
     for a folder in the current directory that shares a pack's name). It is
     written as ``guardrail.rule_pack``; a custom directory is also pinned as
     ``guardrail.custom_packs.NAME`` with its validated digest, so an edited
-    pack is refused until ``use-pack NAME`` pins it again (it runs while that
-    stale pin fails the config check). Without ``--connector`` every
+    pack is refused until ``use-pack NAME --repin`` pins it again: it shows
+    the pinned and the new digest and asks (``--yes`` for scripts), and it
+    runs while that stale pin fails the config check. Without ``--connector`` every
     connector uses PACK and per-connector packs are removed. ``--clear
     --connector X`` removes X's pack. The running gateway picks it up on its
     next reload; nothing is restarted.
@@ -3763,8 +4180,13 @@ def use_pack_cmd(
         raise click.UsageError("--clear needs --connector NAME (the global pack can't be cleared, only switched).")
     if clear and pack:
         raise click.UsageError("Pass either PACK or --clear, not both.")
+    if clear and repin:
+        raise click.UsageError("--repin re-pins a custom pack; it can't be combined with --clear.")
     if not clear and not (pack or "").strip():
         raise click.UsageError("Missing PACK: a preset (default, strict, permissive) or a rule-pack directory.")
+    # A re-pin previews, confirms and writes one read of config.yaml.
+    snapshot = _read_config_snapshot(app, _fail) if repin else None
+    gc = app.cfg.guardrail
 
     if connector:
         connector_key, problem = _resolve_scope_connector(app, connector)
@@ -3860,6 +4282,22 @@ def use_pack_cmd(
         path = candidate
         pack_name, kind = policy_catalog.pack_name_for_path(app.cfg, path)
 
+    # A directory spelling is the same pinned pack even when its key differs
+    # from the basename (or it is reached through a symlink). Check every pin
+    # for that directory so conflicting aliases cannot silently re-pin it.
+    path_pins = []
+    if kind != "preset":
+        canonical = os.path.normcase(os.path.realpath(path))
+        path_pins = [
+            (name, pin)
+            for name, pin in sorted((getattr(gc, "custom_packs", None) or {}).items())
+            if getattr(pin, "path", "")
+            and os.path.normcase(os.path.realpath(policy_catalog.normalize_pack_path(pin.path))) == canonical
+        ]
+        if path_pins and kind != "registered":
+            pack_name = path_pins[0][0]
+            kind = "registered"
+
     if kind == "preset" and not os.path.isdir(path):
         _finish(
             ok=False,
@@ -3868,10 +4306,31 @@ def use_pack_cmd(
             path=path,
             message=f"The '{pack_name}' preset isn't installed at {path}; run defenseclaw init. Nothing was changed.",
         )
+    if kind == "preset" and repin:
+        raise click.UsageError(f"--repin re-pins a custom pack; '{pack_name}' is a built-in preset.")
 
     validation: dict | None = None
     warning = ""
     digest = ""
+    # (pinned, new) when --repin replaces a stale pin; never without --repin.
+    repinned: tuple[str, str] | None = None
+
+    def _refuse_stale_pin(pinned: str) -> None:
+        _finish(
+            ok=False,
+            exit_code=1,
+            pack_name=pack_name,
+            path=path,
+            validation=validation,
+            message=(
+                f"Rule pack {pack_name!r} no longer matches the digest pinned for it ({pinned or 'none'}; "
+                f"the pack is now sha256:{digest}). Review the pack, then re-pin it: defenseclaw guardrail "
+                f"use-pack {raw} --repin (or defenseclaw config set guardrail.custom_packs.{name_for_pin}.digest "
+                f"sha256:{digest}). Nothing was changed."
+            ),
+        )
+
+    name_for_pin = pack_name
     if kind != "preset" or not no_validate:
         try:
             result = rulepack_validation.validate_rule_pack(path)
@@ -3902,8 +4361,23 @@ def use_pack_cmd(
                 )
             # The pin covers the pack's own files, not the embedded defaults.
             digest = str((result.summary or {}).get("files_digest", "") or "")
-            pinned = str(getattr(registered, "digest", "") or "").strip().lower().removeprefix("sha256:")
+            # The pin of this pack: its key, or the key of the pin that names
+            # this directory when it was given by path (path_pins).
+            own_pin = registered if registered is not None else dict(path_pins).get(pack_name)
+            pinned = str(getattr(own_pin, "digest", "") or "").strip().lower().removeprefix("sha256:")
             if kind == "registered" and digest.lower() != pinned:
+                old_pin = f"sha256:{pinned}" if pinned else ""
+                if not repin:
+                    _refuse_stale_pin(old_pin)
+                repinned = (old_pin, f"sha256:{digest}")
+            # Another key that pins the same directory must not hide a stale
+            # pin either; --repin replaces only this pack's own pin.
+            for pin_name, pin in path_pins:
+                if pin_name == pack_name:
+                    continue
+                pinned = str(getattr(pin, "digest", "") or "").strip().lower().removeprefix("sha256:")
+                if digest and digest.lower() == pinned:
+                    continue
                 _finish(
                     ok=False,
                     exit_code=1,
@@ -3911,8 +4385,8 @@ def use_pack_cmd(
                     path=path,
                     validation=validation,
                     message=(
-                        f"Rule pack {pack_name!r} no longer matches the digest registered for it. Review the pack, "
-                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pack_name}.digest "
+                        f"Rule pack {pin_name!r} no longer matches the digest registered for it. Review the pack, "
+                        f"then pin it: defenseclaw config set guardrail.custom_packs.{pin_name}.digest "
                         f"sha256:{digest}. Nothing was changed."
                     ),
                 )
@@ -3928,16 +4402,43 @@ def use_pack_cmd(
         if existing is not None:
             existing_path = policy_catalog.normalize_pack_path(str(getattr(existing, "path", "") or ""))
             existing_digest = str(getattr(existing, "digest", "") or "").lower()
-            if existing_path != path or existing_digest != f"sha256:{digest.lower()}":
+            if existing_path != path:
                 _fail(
                     1,
                     f"Custom pack name {name!r} is already registered at {existing_path}. "
                     "Choose a different pack name or update the registered pack explicitly. Nothing was changed.",
                 )
-        else:
+            if existing_digest != f"sha256:{digest.lower()}":
+                # Same directory, edited since it was pinned: only --repin replaces the pin.
+                name_for_pin = name
+                if not repin:
+                    _refuse_stale_pin(existing_digest)
+                repinned = (existing_digest, f"sha256:{digest}")
+        if existing is None or repinned is not None:
             changes.append(
                 config_writer.Change(f"guardrail.custom_packs.{name}", {"path": path, "digest": f"sha256:{digest}"})
             )
+    elif repinned is not None:
+        # Keep the path the pin records, also when the pack was given by a
+        # directory that pin names (path_pins).
+        pin = registered if registered is not None else dict(path_pins).get(name)
+        changes.append(
+            config_writer.Change(
+                f"guardrail.custom_packs.{name}",
+                {"path": str(getattr(pin, "path", "") or ""), "digest": repinned[1]},
+            )
+        )
+    shared: list[str] = []
+    if repinned is not None:
+        # The pin is one guardrail.custom_packs key: every other scope that
+        # selects it enforces the edited pack too, so name them before asking.
+        written = {_scope_key(connector_key, None)}
+        if connector_key is None:
+            written |= {_scope_key(other, None) for other in (getattr(gc, "connectors", None) or {})}
+        shared = _repin_shared_scopes(app.cfg, name, written)
+    shared_note = (
+        f" The pin is shared, so the edited pack also applies to {', '.join(shared)}." if shared else ""
+    )
     key = _scope_key(connector_key, None)
     changes.append(config_writer.Change(f"{key}.rule_pack", name))
     cleared: list[str] = []
@@ -3954,6 +4455,28 @@ def use_pack_cmd(
     # Rule references the new pack does not ship would fail the whole save (GAP-0258, GAP-0261).
     stale, dropped = _stale_rule_changes(app.cfg, path, connector_key)
     changes.extend(stale)
+    if repinned is not None:
+        # Every edit the write makes, from the one read it is bound to.
+        planned = _planned_change_lines(changes)
+        if json_out and not yes:
+            _fail(
+                2,
+                f"Re-pinning {name!r} from {repinned[0] or 'none'} to {repinned[1]} needs your confirmation; "
+                f"pass --yes with --json.{shared_note} It would change config.yaml: {'; '.join(planned)}. "
+                "Nothing was changed.",
+            )
+        if not json_out:
+            ux.warn(
+                f"Re-pin {name!r} at {path}: pinned {repinned[0] or 'none'}, the pack is now {repinned[1]}. "
+                f"The gateway then enforces the edited pack.{shared_note}",
+                indent="  ",
+            )
+            click.echo("  This changes config.yaml:")
+            for line in planned:
+                click.echo(f"    {line}")
+            if not yes and not _confirm_proceed():
+                click.echo(f"  {ux.dim('Cancelled.')} Nothing was changed.")
+                raise SystemExit(1)
     previous_pack = (
         policy_catalog.pack_name_for_path(
             app.cfg, policy_catalog.configured_pack_dir(app.cfg, _scope_block(app.cfg, connector_key, None))
@@ -3961,7 +4484,15 @@ def use_pack_cmd(
         if connector_key and policy_catalog.configured_pack_dir(app.cfg, _scope_block(app.cfg, connector_key, None))
         else policy_catalog.global_pack(app.cfg).pack
     )
-    result = _write_guardrail_config(app, changes, f"guardrail use-pack {name}", _fail)
+    try:
+        result = _write_guardrail_config(app, changes, f"guardrail use-pack {name}", _fail, snapshot=snapshot)
+    except config_writer.ConfigConflictError:
+        # config.yaml changed or went away after the read the preview showed.
+        _fail(
+            1,
+            f"config changed, run again: {snapshot[0] if snapshot else 'config.yaml'} changed or was removed "
+            "after --repin read it. Nothing was changed.",
+        )
     if connector_key is None:
         message = f"All connectors now use the '{pack_name}' rule pack."
         if cleared:
@@ -3970,11 +4501,15 @@ def use_pack_cmd(
         message = f"{_connector_label(connector_key)} now uses the '{pack_name}' rule pack."
     if dropped:
         message += f" Dropped rule references the pack does not have: {'; '.join(dropped)}."
+    if repinned is not None:
+        message += f" Re-pinned {name!r} from {repinned[0] or 'none'} to {repinned[1]}.{shared_note}"
     _log_guardrail_change(
         app,
         "guardrail-use-pack",
         f"scope={connector_key or scope} pack={name} previous={previous_pack}"
-        + (f" cleared={','.join(cleared)}" if cleared else ""),
+        + (f" cleared={','.join(cleared)}" if cleared else "")
+        + (f" repinned={repinned[0] or 'none'}->{repinned[1]}" if repinned is not None else "")
+        + (f" repin_shared={';'.join(shared)}" if shared else ""),
     )
     _finish(
         ok=True,
@@ -4207,7 +4742,12 @@ def _change_protection(
         wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
         order = {p.name: index for index, p in enumerate(packs)}
         desired = sorted(wanted, key=lambda n: order.get(n, len(order)))
-        change = config_writer.Change(path, desired) if desired else config_writer.Change(path, unset=True)
+        change = (
+            config_writer.Change(path, desired)
+            if desired else config_writer.Change(
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+            )
+        )
         _preflight_config_write(app)
         verb = "enable" if enable else "disable"
         result = _write_guardrail_config(app, [change], f"guardrail protection {verb} {name}", _fail)
@@ -4329,14 +4869,22 @@ def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[
             if len(kept) != len(ids):
                 dropped.extend(f"{key}.rules.{field}: {i}" for i in ids if i not in known)
                 path = f"{key}.rules.{field}"
-                changes.append(config_writer.Change(path, kept) if kept else config_writer.Change(path, unset=True))
+                changes.append(
+                    config_writer.Change(path, kept)
+                    if kept else config_writer.Change(
+                        path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                    )
+                )
         overrides = dict(getattr(rules, "severity_overrides", None) or {})
         kept_overrides = {i: v for i, v in overrides.items() if i in known}
         if len(kept_overrides) != len(overrides):
             dropped.extend(f"{key}.rules.severity_overrides: {i}" for i in overrides if i not in known)
             path = f"{key}.rules.severity_overrides"
             changes.append(
-                config_writer.Change(path, kept_overrides) if kept_overrides else config_writer.Change(path, unset=True)
+                config_writer.Change(path, kept_overrides)
+                if kept_overrides else config_writer.Change(
+                    path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                )
             )
     return changes, dropped
 
@@ -4393,7 +4941,10 @@ def _change_rule_lists(
             changes.append(
                 config_writer.Change(f"{key}.rules.{remove_from}", rest)
                 if rest
-                else config_writer.Change(f"{key}.rules.{remove_from}", unset=True)
+                else config_writer.Change(
+                    f"{key}.rules.{remove_from}", unset=True,
+                    prune_empty_to=_rule_prune_scope(connector_key, profile_name),
+                )
             )
         if not changes:
             message = f"Rule {rule_id} is already turned {state} for {where}; nothing was changed."
@@ -4462,7 +5013,7 @@ def rule_severity_cmd(
     key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     scope_key = _scope_key(connector_key, profile_name)
-    prune_to = _scope_key(None, profile_name) if profile_name else scope_key
+    prune_to = _rule_prune_scope(connector_key, profile_name)
     change = (
         config_writer.Change(key, unset=True, prune_empty_to=prune_to)
         if level == "DEFAULT" else config_writer.Change(key, level)
@@ -4589,7 +5140,12 @@ def _change_suppression(
         else:
             updated = [s for s in current if s["id"] != sid]
         updated = [{k: v for k, v in s.items() if v} for s in updated]
-        change = config_writer.Change(path, updated) if updated else config_writer.Change(path, unset=True)
+        change = (
+            config_writer.Change(path, updated)
+            if updated else config_writer.Change(
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+            )
+        )
         _preflight_config_write(app)
         verb = "add" if entry is not None else "remove"
         result = _write_guardrail_config(app, [change], f"guardrail suppress {verb} {sid}", _fail)
@@ -4601,6 +5157,47 @@ def _change_suppression(
 # ---------------------------------------------------------------------------
 # guardrail mode — observe vs action without re-running setup
 # ---------------------------------------------------------------------------
+
+
+class _ActionHookInspectionError(Exception):
+    def __init__(self, connector: str) -> None:
+        self.connector = connector
+        super().__init__(connector)
+
+
+def _action_hook_switch_problems(
+    cfg, *, connector: str | None = None, global_mode: str | None = None
+) -> list[tuple[str, str]]:
+    """Find hooks-off settings for the enabled connectors an action request would cover."""
+    from defenseclaw import policy_catalog
+    from defenseclaw.hook_integrity import agent_hook_switch_problems
+
+    gc = cfg.guardrail
+    if not gc.enabled:
+        return []
+    if connector:
+        targets = [connector]
+    else:
+        desired_global_mode = gc.mode if global_mode is None else global_mode
+        try:
+            actives = cfg.active_connectors()
+        except Exception as exc:  # noqa: BLE001 - an unreadable roster cannot prove enforcement.
+            raise _ActionHookInspectionError("active connector roster") from exc
+        targets = []
+        for name in actives:
+            override = gc._connector_override(name)
+            mode = (getattr(override, "mode", "") or "").strip() if override is not None else ""
+            if gc.effective_enabled(name) and policy_catalog.mode_label(mode or desired_global_mode) == "action":
+                targets.append(name)
+
+    switched_off = []
+    for name in targets:
+        try:
+            problems = agent_hook_switch_problems(cfg, normalize_connector(name))
+        except Exception as exc:  # noqa: BLE001 - unknown agent settings cannot prove enforcement.
+            raise _ActionHookInspectionError(name) from exc
+        switched_off.extend((name, problem) for problem in problems)
+    return switched_off
 
 
 @guardrail.command("mode")
@@ -4709,6 +5306,37 @@ def mode_cmd(
     affected = [connector_key] if connector_key else [c for c in actives if not _override(c)]
     fail_before = {c: _cursor_pinned_fail_mode(gc, c) or gc.effective_hook_fail_mode(c) for c in affected}
     previous = _effective(connector_key)
+    becomes_action = mode == "action" or (clear and policy_catalog.mode_label(gc.mode) == "action")
+
+    if becomes_action and gc.enabled:
+        # An unchanged action request must check the agent too: its settings
+        # may have turned the hooks off since the last mode change. Check
+        # every connector the requested global action mode would cover, even
+        # when the gateway is stopped and no runtime read-back is available.
+        from defenseclaw.hook_integrity import repair_command
+
+        try:
+            switched_off = _action_hook_switch_problems(app.cfg, connector=connector_key, global_mode="action")
+        except _ActionHookInspectionError as exc:
+            _finish(
+                ok=False,
+                exit_code=1,
+                new_mode=previous,
+                previous=previous,
+                message=f"Nothing was changed: {_connector_label(exc.connector)} hook settings could not be inspected.",
+            )
+            return
+        if switched_off:
+            details = "; ".join(f"{_connector_label(name)}: {problem}" for name, problem in switched_off)
+            _finish(
+                ok=False,
+                exit_code=1,
+                new_mode=previous,
+                previous=previous,
+                notes=[f"Next: {repair_command(name, problem)}" for name, problem in switched_off],
+                message=f"Nothing was changed: action mode cannot guard these connectors: {details}",
+            )
+            return
 
     if connector_key is None:
         if (gc.mode or "").strip() == mode:
@@ -4750,7 +5378,6 @@ def mode_cmd(
     # after an observe-mode quickstart that never probed it). Probe, and record
     # the discovery evidence the gateway reads, before saving, so the switch
     # either works or changes nothing.
-    becomes_action = mode == "action" or (clear and policy_catalog.mode_label(gc.mode) == "action")
     if becomes_action:
         from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
 
@@ -5141,7 +5768,7 @@ def profile_group() -> None:
       explain  which profile a user, connector or agent resolves to
 
     Profiles live under ``guardrail.profiles`` in config.yaml; assignments
-    are tried in order and the first match wins. Only verified identities
+    are all tried and the strictest matching profile wins. Only verified identities
     select a profile, so ``explain`` asks the running gateway.
     """
 
@@ -5245,7 +5872,7 @@ def profile_list_cmd(app: AppContext, json_out: bool) -> None:
         detail = ux.dim("(" + (summary or "inherits everything") + ")")
         ux.echo(f"  • {ux.accent(name)}  {profile.description or ''} {detail}")
     click.echo()
-    ux.echo(f"  • {ux._style('assignments (first match wins):', fg='bright_black', bold=True)}")
+    ux.echo(f"  • {ux._style('assignments (strictest match wins):', fg='bright_black', bold=True)}")
     if not gc.profile_assignments:
         click.echo(f"      {ux.dim('none')}")
     for index, assignment in enumerate(gc.profile_assignments, start=1):
@@ -5300,8 +5927,8 @@ def _age_text(seconds) -> str:
 
 
 # How long explain waits for the gateway. The gateway looks the user up in the
-# directory before it answers, and that lookup is bounded at 20 s (and the
-# account lookup before it at 10 s), so the client waits longer than both.
+# directory before it answers, waiting at most 12 s for that lookup (and 10 s
+# for the account lookup before it), so the client waits longer than both.
 PROFILE_EXPLAIN_TIMEOUT_SECONDS = 35
 
 
@@ -5360,8 +5987,14 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
         notice = gateway_reload_notice(app.cfg)
         ux.subhead(notice or "Start it with: defenseclaw-gateway start", indent="  ")
         raise SystemExit(1) from None
+    # The gateway answers 200 with lookup_error for an account it could not
+    # name (a typo, or a bare name two accounts share); the answer is still
+    # printed, and the command fails (GAP-1239).
+    unresolved = bool(result.get("lookup_error")) and not (result.get("subject") or {}).get("user_id")
     if json_out:
         click.echo(json.dumps(result, indent=2, sort_keys=True))
+        if unresolved:
+            raise SystemExit(1)
         return
     ux.section("Guardrail profile resolution", indent="  ")
     # The answer is the gateway's, which may still run an earlier generation
@@ -5378,19 +6011,40 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
     profile = result.get("profile") or ux.dim("none (guardrail.* applies)")
     click.echo(f"  profile: {profile}")
     cache = result.get("cache") or {}
+    cache_refused = cache.get("refused") is True or bool(cache.get("refused_reason"))
+    cache_settled = cache.get("refused") is False and not cache_refused
     if result.get("match"):
         reason = result["match"]
         if result.get("matched_group"):
             reason += f" ({result['matched_group']})"
-        # GAP-0275: this lookup worked, but the gateway's own is failing and its
-        # requests get default_lookup_failed; "match: default" read as a verified no-match.
+        # GAP-0275: this lookup worked, but the gateway's own is failing.
+        # Show only the cache decision and refusal details the gateway supplied.
         if cache.get("match") == "default_lookup_failed" and result["match"] != "default_lookup_failed":
-            reason += " (requests get default_lookup_failed: the gateway's directory lookup for this account fails)"
+            if cache_refused:
+                missing_fact = cache.get("refused_reason") or "missing fact not supplied by gateway"
+                reason += f" (requests are refused: {missing_fact})"
+            elif cache_settled:
+                reason += (
+                    " (requests use the default profile (default_lookup_failed); "
+                    "no assignment needs the missing fact)"
+                )
+            else:
+                reason += " (gateway reports default_lookup_failed for requests; refusal state not supplied)"
         click.echo(f"  match:   {reason}")
+    if result.get("refused"):
+        # GAP-0522: requests that need an unproven identity fact are refused;
+        # the profile above is a candidate, not what the account gets.
+        click.echo(f"  refused: {result.get('refused_reason') or 'an identity fact is unproven'}")
     if result.get("digest"):
         click.echo(f"  digest:  {result['digest']}")
     if cache:
-        cache_decision = f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')})"
+        if cache_refused:
+            missing_fact = cache.get("refused_reason") or "missing fact not supplied by gateway"
+            cache_decision = f"(refused: {missing_fact}, match {cache.get('match')})"
+        elif cache.get("match") == "default_lookup_failed" and not cache_settled:
+            cache_decision = "(match default_lookup_failed; refusal state not supplied)"
+        else:
+            cache_decision = f"(profile {cache.get('profile') or 'none'}, match {cache.get('match')})"
         if cache.get("failing_since"):
             click.echo(
                 f"  cache:   requests have no cached directory facts {cache_decision}; "
@@ -5421,6 +6075,8 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
             f"rule_pack={effective.get('rule_pack_dir') or 'default'}"
         )
     click.echo()
+    if unresolved:
+        raise SystemExit(1)
 
 
 # Register `defenseclaw guardrail judge` (hook-lane judge gate). The

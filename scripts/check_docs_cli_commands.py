@@ -228,25 +228,51 @@ class DocumentedFlag:
 # "--with-judge / --no-judge".
 _FLAG_TABLE_HEADING = re.compile(r"^#{2,4}\s.*?`(?:defenseclaw\s+)?([a-z][a-z0-9 -]*)`\s+flags\s*$")
 _FLAG_TABLE_KEY = re.compile(r'^\s*"(--[^"]+)"\s*:')
+# A heading that is only a command, "## `defenseclaw init`" or "### `sandbox
+# setup`", and a markdown table under it whose first column is "Flag", with
+# rows such as "| `--fail-mode open\|closed` | ... |".
+_COMMAND_HEADING = re.compile(r"^#{2,4}\s+`(?:defenseclaw\s+)?([a-z][a-z0-9 -]*)`\s*$")
+_PIPE_FLAG_TABLE_HEADER = re.compile(r"^\|\s*Flags?\s*\|")
+_PIPE_FLAG = re.compile(r"(?<![\w-])--[a-z0-9][a-z0-9-]*")
 
 
 def flag_table_entries(path: Path, text: str) -> list[DocumentedFlag]:
-    """Return the flags of each TypeTable under a command's flags heading in *text*.
+    """Return the flags of each command flags table in *text*.
+
+    A flags table is a TypeTable under a command's flags heading, or a
+    markdown table with a "Flag" column under a command's heading.
 
     GAP-0468: the first-run page listed `quickstart --yes` and
     `--non-interactive` in such a table after the command dropped them, and
-    only shell fences and inline references were checked.
+    only shell fences and inline references were checked. GAP-0613: its
+    `init` table, a markdown table, listed `--agent`, which `init` never had.
     """
 
     entries: list[DocumentedFlag] = []
     command: tuple[str, ...] | None = None
-    in_table = False
+    pipe_command: tuple[str, ...] | None = None
+    in_table = in_pipe_table = False
     for line_number, line in enumerate(text.splitlines(), 1):
         if line.startswith("#"):
             heading = _FLAG_TABLE_HEADING.match(line.strip())
             command = tuple(heading.group(1).split()) if heading else None
-            in_table = False
+            heading = _COMMAND_HEADING.match(line.strip())
+            pipe_command = tuple(heading.group(1).split()) if heading else None
+            in_table = in_pipe_table = False
             continue
+        if pipe_command is not None:
+            row = line.strip()
+            if _PIPE_FLAG_TABLE_HEADER.match(row):
+                in_pipe_table = True
+                continue
+            if in_pipe_table and not row.startswith("|"):
+                in_pipe_table = False
+            if in_pipe_table:
+                first_cell = re.split(r"(?<!\\)\|", row)[1]
+                for span in re.findall(r"`([^`]*)`", first_cell):
+                    for flag in _PIPE_FLAG.findall(span):
+                        entries.append(DocumentedFlag(path, line_number, pipe_command, flag))
+                continue
         if command is None:
             continue
         if "<TypeTable" in line:

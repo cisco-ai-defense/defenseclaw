@@ -281,8 +281,8 @@ func TestManagedEnterpriseTransportDoesNotDialAPortNobodyListensOn(t *testing.T)
 	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
 		t.Fatalf("the try took %s, want the listen table read instead of a connect", elapsed)
 	}
-	if !errors.Is(err, errManagedGatewayNotRunning) || !gatewayRestartShaped(err) {
-		t.Fatalf("err = %v, want a restart-shaped not-running error", err)
+	if !errors.Is(err, errManagedGatewayPeerUnverified) || errors.Is(err, errManagedGatewayNotRunning) || !gatewayRestartShaped(err) {
+		t.Fatalf("err = %v, want a retryable peer refusal while the service runs", err)
 	}
 }
 

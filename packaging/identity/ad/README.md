@@ -4,10 +4,10 @@ An example machine config for the standalone enterprise profile on Linux and
 macOS computers joined to Active Directory, where the AD group a person is in
 picks their guardrail profile and their OpenShell sandbox policy. The guide is
 in the docs:
-[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/)
-(source: `docs-site/content/docs/enterprise/sandboxes.mdx`). How DefenseClaw
+[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/sandboxes/)
+(source: `docs-site/content/docs/enterprise/runtime/sandboxes.mdx`). How DefenseClaw
 reads AD users and groups from the operating system is in
-[Identity and authentication](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity-and-authentication/).
+[Identity and authentication](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/identity/authentication/).
 
 DefenseClaw never calls Active Directory. A Linux host that joined the domain
 with `realm join` (SSSD and Kerberos) or a Mac bound with the directory service

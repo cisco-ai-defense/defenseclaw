@@ -62,6 +62,13 @@ func TestBundleGenerationReloadAuditCarriesPrincipal(t *testing.T) {
 	if bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw); err != nil || !bound {
 		t.Fatalf("bootstrap: bound=%v err=%v", bound, err)
 	}
+	owner, ok := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	if !ok || owner == nil || owner.runtime == nil {
+		t.Fatal("bootstrap did not bind an owned runtime")
+	}
+	if err := owner.runtime.FlushReports(t.Context()); err != nil {
+		t.Fatalf("flush bootstrap reports: %v", err)
+	}
 	reader, err := sql.Open("sqlite", fixture.store.DatabasePath())
 	if err != nil {
 		t.Fatal(err)

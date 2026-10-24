@@ -68,10 +68,15 @@ func antigravityProfileDecode(payload map[string]interface{}) HookProfileRequest
 		}
 	}
 
+	// Only a tool-call event reads the flag, so it is set for every event
+	// whose payload has no readable toolCall: a registered PreToolUse whose
+	// payload claims another event, or carries a Claude Code shaped
+	// tool_name/tool_input, is refused rather than judged as an empty call.
+	req.ToolCallUnparsed = true
 	switch antigravityCanonicalEvent(req.HookEventName) {
 	case "pretooluse":
 		req.Direction = "tool_call"
-		antigravityExtractToolCall(&req, payload)
+		req.ToolCallUnparsed = !antigravityExtractToolCall(&req, payload)
 	case "posttooluse":
 		req.Direction = "tool_result"
 		req.ToolName = "tool"
@@ -100,18 +105,20 @@ func antigravityCanonicalEvent(event string) string {
 	return event
 }
 
-func antigravityExtractToolCall(req *HookProfileRequest, payload map[string]interface{}) {
+// antigravityExtractToolCall reads toolCall{name,args} and reports whether
+// it found both.
+func antigravityExtractToolCall(req *HookProfileRequest, payload map[string]interface{}) bool {
 	// This profile owns the nested args projection. Mark it authoritative even
 	// when extraction fails so the gateway never falls back to serializing the
 	// complete, attacker-influenced payload as if it were tool arguments.
 	req.ToolArgsAuthoritative = true
 	toolCall, ok := antigravityUniqueObject(payload, "toolCall", "tool_call")
 	if !ok {
-		return
+		return false
 	}
 	toolName, ok := antigravityUniqueString(toolCall, "name", "tool_name", "toolName")
 	if !ok {
-		return
+		return false
 	}
 	req.ToolName = toolName
 	args, ok := antigravityUniqueObject(toolCall,
@@ -119,11 +126,11 @@ func antigravityExtractToolCall(req *HookProfileRequest, payload map[string]inte
 		"tool_input", "toolInput",
 	)
 	if !ok {
-		return
+		return false
 	}
 	argBytes, err := json.Marshal(args)
 	if err != nil {
-		return
+		return false
 	}
 	req.ToolArgs = json.RawMessage(argBytes)
 	// Run_command-style tools surface Cwd + CommandLine. Generalised
@@ -138,6 +145,7 @@ func antigravityExtractToolCall(req *HookProfileRequest, payload map[string]inte
 		"CommandLine", "commandLine", "command",
 		"prompt", "input", "text",
 	)
+	return true
 }
 
 // antigravityToolArgsFromRawPayload returns the literal toolCall.args JSON

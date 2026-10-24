@@ -1593,7 +1593,7 @@
     {
       "type": "table",
       "title": "IDE plugins per user (records in range)",
-      "description": "One row per user, IDE and plugin from the `ide.plugin.discovered`, `ide.plugin.changed` and `ide.plugin.removed` records in the selected range. The Record column shows which change was seen; widen the range to include the first scan for a full list, or use `defenseclaw agent ide-plugins` for the current inventory.",
+      "description": "One row per host, user, IDE and plugin from the `ide.plugin.discovered`, `ide.plugin.changed` and `ide.plugin.removed` records in the selected range. The Record column shows which change was seen; widen the range to include the first scan for a full list, or use `defenseclaw agent ide-plugins` for the current inventory.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -1606,7 +1606,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
+          "expr": "sum by (host_name, user_id, user_name, ide, plugin, version, enabled, ai, record) (count_over_time({service_name=\"defenseclaw\"} | host_name=~\"$host\" | json | __error__=\"\" | (body_user_id=~\"$user\" or body_defenseclaw_user_name=~\"(?i)$user\" or body_defenseclaw_user_principal=~\"(?i)$user\") | event_name=~\"ide[.]plugin[.](discovered|changed|removed)\" | label_format user_id=\"{{.body_user_id}}\", user_name=\"{{.body_defenseclaw_user_name}}\", ide=\"{{.body_defenseclaw_ide_product}}\", plugin=\"{{.body_defenseclaw_ide_plugin_id}}\", version=\"{{.body_defenseclaw_ide_plugin_version}}\", enabled=\"{{.body_defenseclaw_ide_plugin_enabled}}\", ai=\"{{.body_defenseclaw_ide_plugin_ai}}\", record=\"{{.event_name}}\" [$__range]))",
           "queryType": "instant",
           "datasource": {
             "type": "loki",
@@ -1633,16 +1633,18 @@
               "Value": true
             },
             "indexByName": {
-              "user_name": 0,
-              "user_id": 1,
-              "ide": 2,
-              "plugin": 3,
-              "version": 4,
-              "enabled": 5,
-              "ai": 6,
-              "record": 7
+              "host_name": 0,
+              "user_name": 1,
+              "user_id": 2,
+              "ide": 3,
+              "plugin": 4,
+              "version": 5,
+              "enabled": 6,
+              "ai": 7,
+              "record": 8
             },
             "renameByName": {
+              "host_name": "Host",
               "user_name": "User",
               "user_id": "User ID",
               "ide": "IDE",

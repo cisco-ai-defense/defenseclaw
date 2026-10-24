@@ -19,8 +19,8 @@ package harness
 import "strings"
 
 // restoreUserHooksScript is the launcher fragment that puts a user-tier hook
-// file back from its root-owned canonical copy before every start (OpenHands
-// and agy read their hooks only from a file in the workload-writable HOME).
+// file back from its root-owned canonical copy before every start (agy
+// reads its hooks only from a file in the workload-writable HOME).
 // dir and file are paths the shell expands inside double quotes (they may
 // name $home); links are the paths, dir and file among them, that must not
 // be symbolic links; displayName names the harness in the refusals.

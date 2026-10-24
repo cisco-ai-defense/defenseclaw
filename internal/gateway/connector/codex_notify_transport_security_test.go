@@ -39,6 +39,7 @@ func TestCodexNotifyBridgeChainsUserProgramWithoutGateway(t *testing.T) {
 }
 
 func TestCodexNotifyBridgeKeepsSecureClientRendering(t *testing.T) {
+	useVerifiedSecureClientDeployment(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Bash bridge runs on Unix")
 	}
@@ -338,6 +339,7 @@ func capturedCurlAuthorizationToken(capture string) (string, bool) {
 }
 
 func TestSecureClientCodexNotifyBridgeKeepsOriginalIdentityHeaders(t *testing.T) {
+	useVerifiedSecureClientDeployment(t)
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix bridge")
 	}

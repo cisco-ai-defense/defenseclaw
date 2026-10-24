@@ -11,7 +11,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -240,16 +239,14 @@ func TestEnterpriseHookWorkerMatcherCoversInstallAndRemovalByConnector(t *testin
 	versions := map[string]string{
 		"amp": "0.0.1785334225", "codex": "codex-cli 0.142.0",
 		"claudecode": "2.1.187 (Claude Code)", "opencode": "1.18.33",
-		"kiro": "kiro-cli 2.27.1", "openhands": "1.16.0",
-		"antigravity": "1.2.11", "omnigent": "omnigent 0.7.0",
-		"hermes": "0.21.3", "cursor": "cursor 3.19.13",
+		"kiro":        "kiro-cli 2.27.1",
+		"antigravity": "1.2.11",
+		"hermes":      "0.21.3", "cursor": "cursor 3.19.13",
 		"devin": "3000.4.25", "copilot": "GitHub Copilot CLI 1.0.76",
 	}
 	seed := map[string]struct{ path, data string }{
 		"hermes":      {".hermes/config.yaml", "{}\n"},
-		"openhands":   {".openhands/hooks.json", "{}\n"},
 		"antigravity": {".gemini/config/hooks.json", "{}\n"},
-		"omnigent":    {".omnigent/config.yaml", "server: https://example.test\npolicy_modules: []\n"},
 		"devin":       {".config/devin/config.json", "{}\n"},
 	}
 	for _, name := range registry.Names() {
@@ -265,19 +262,9 @@ func TestEnterpriseHookWorkerMatcherCoversInstallAndRemovalByConnector(t *testin
 			t.Setenv("XDG_CONFIG_HOME", "")
 			t.Setenv("OPENCODE_CONFIG_DIR", "")
 			t.Setenv("CODEX_HOME", "")
-			if name == "kiro" || name == "copilot" || name == "openhands" {
+			if name == "kiro" || name == "copilot" {
 				enterprisehooks.SetStandaloneUnix(true)
 				t.Cleanup(func() { enterprisehooks.SetStandaloneUnix(false) })
-			}
-			if name == "openhands" && runtime.GOOS == "darwin" {
-				// Standalone Install records this image before macOS OpenHands admission.
-				executable := filepath.Join(home, ".local", "bin", "openhands")
-				if err := os.MkdirAll(filepath.Dir(executable), 0o700); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(executable, []byte("#!/bin/sh\necho 'OpenHands CLI 1.16.0'\n"), 0o700); err != nil {
-					t.Fatal(err)
-				}
 			}
 			if name == "kiro" {
 				if err := os.MkdirAll(filepath.Join(home, ".kiro", "hooks"), 0o700); err != nil {
@@ -288,11 +275,6 @@ func TestEnterpriseHookWorkerMatcherCoversInstallAndRemovalByConnector(t *testin
 				if err := os.MkdirAll(filepath.Join(home, ".copilot", "hooks"), 0o700); err != nil {
 					t.Fatal(err)
 				}
-			}
-			if name == "omnigent" {
-				previousSite := connector.OmnigentSitePackagesPathOverride
-				connector.OmnigentSitePackagesPathOverride = filepath.Join(home, ".local", "lib", "python", "site-packages")
-				t.Cleanup(func() { connector.OmnigentSitePackagesPathOverride = previousSite })
 			}
 			if fixture, ok := seed[name]; ok {
 				path := filepath.Join(home, fixture.path)

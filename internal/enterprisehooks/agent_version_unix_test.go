@@ -68,23 +68,6 @@ func TestExecUnixAgentVersionGivesStatefulAgentsAScratchDir(t *testing.T) {
 	}
 }
 
-// OpenHands needs about 11 s to answer --version; its uv tool environment
-// names the version without running it.
-func TestDiscoverUnixAgentVersionReadsUVToolMetadata(t *testing.T) {
-	home := t.TempDir()
-	dist := filepath.Join(home, ".local", "share", "uv", "tools", "openhands", "lib", "python3.12", "site-packages", "openhands-1.16.0.dist-info")
-	if err := os.MkdirAll(dist, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	other := filepath.Join(filepath.Dir(dist), "openhands_sdk-1.21.0.dist-info")
-	if err := os.MkdirAll(other, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got, reason := DiscoverUnixAgentVersion(context.Background(), home, "openhands", false); got != "1.16.0" {
-		t.Fatalf("version = %q (%s)", got, reason)
-	}
-}
-
 // A current Hermes refuses --version outside a committed dependency
 // environment, which left the managed enumerator without a Hermes version
 // and no hook written; the install stamp names the release without running

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import codecs
 import copy
+import hashlib
 import json
 import locale
 import logging
@@ -79,7 +80,9 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
     read_regular_file_no_follow,
+    tracked_host_owner_uid,
 )
+from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed, openclaw_only_implied
 
 # libyaml parses a 150 KB policy config in tens of milliseconds where the
 # pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
@@ -115,7 +118,11 @@ def read_config_text(path: str | os.PathLike[str]) -> str:
     with the locale encoding, as before.
     """
     with open(path, "rb") as handle:
-        data = handle.read()
+        return decode_config_bytes(handle.read())
+
+
+def decode_config_bytes(data: bytes) -> str:
+    """config.yaml bytes as text, the way :func:`read_config_text` reads them."""
     data = data.removeprefix(codecs.BOM_UTF8)
     try:
         return data.decode("utf-8")
@@ -759,7 +766,7 @@ def _managed_config_trust_problem(path: str) -> str | None:
         if acl_problem is not None:
             return acl_problem
 
-        owner_uid = getattr(info, "st_uid", None)
+        owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
         if owner_uid != 0:
@@ -2247,7 +2254,7 @@ class JudgeConfig:
 class WebhookConfig:
     # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
     # audit sink). See the published webhook guide:
-    # https://cisco-ai-defense.github.io/defenseclaw/docs/setup/webhooks/
+    # https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/set-up-webhook-alerts/
     #
     # ``name`` is the CLI-visible identifier used by
     # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.
@@ -2427,7 +2434,7 @@ class GuardrailProfileMatch:
 
 @dataclass
 class GuardrailProfileAssignment:
-    """One ordered ``guardrail.profile_assignments`` entry (first match wins).
+    """One ``guardrail.profile_assignments`` entry (the strictest match wins).
 
     Mirrors ``config.ProfileAssignment``.
     """
@@ -2590,9 +2597,9 @@ class GuardrailConfig:
         uniformly fall through to the global value. Lookup is
         connector-name-insensitive: an exact key hit is the fast path,
         otherwise keys are compared after ``connector_paths.normalize`` so
-        a request for the canonical name (e.g. ``"openhands"``) resolves an
+        a request for the canonical name (e.g. ``"claudecode"``) resolves an
         override written with different case or a hyphen/underscore alias
-        (e.g. ``"OpenHands"``, ``"open-hands"``). Mirrors
+        (e.g. ``"Claude-Code"``, ``"claude_code"``). Mirrors
         ``GuardrailConfig.connectorOverride`` in Go.
         """
         if not connector or not self.connectors:
@@ -2639,7 +2646,7 @@ class GuardrailConfig:
         return self.hilt
 
     def effective_hook_fail_mode(self, connector: str = "") -> str:
-        """The customer chooses open or closed; the default is closed (owner rule).
+        """Resolve hook failure behavior for this deployment profile.
 
         Mirrors Go ``Config.EffectiveHookFailModeForConnector``:
 
@@ -2650,10 +2657,7 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - everywhere else a fail mode that is not set is ``closed``, in
-          observe and action mode alike; only an explicit ``open`` opens a
-          hook, and Cursor follows its guardrail mode (action closed,
-          observe open).
+        - per-user hosts always fail closed, including old explicit opens.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
@@ -2673,16 +2677,7 @@ class GuardrailConfig:
             if self.hook_fail_mode.strip():
                 return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
-        # Cursor's native hook registration follows policy mode. A stored
-        # fail mode from an older setup cannot override that contract.
-        if str(connector).strip().lower() == "cursor":
-            return "closed" if self.effective_mode(connector).strip().lower() == "action" else "open"
-        pc = self._connector_override(connector)
-        if pc is not None and pc.hook_fail_mode.strip():
-            # Only an explicit open opens; any other value (closed, a typo) is
-            # closed, as in Go.
-            return _normalize_hook_fail_mode(pc.hook_fail_mode)
-        return _normalize_hook_fail_mode(self.hook_fail_mode)
+        return "closed"
 
     def secure_client_hook_fail_modes(self) -> bool:
         """Whether this guardrail belongs to a Secure Client config.
@@ -2778,7 +2773,7 @@ class GuardrailConfig:
             if not name.strip():
                 raise ValueError("guardrail.connectors: empty connector name is not allowed")
             # Reject two distinct keys that canonicalize to the same connector
-            # (e.g. "claude-code" + "claudecode", or "OpenHands" + "openhands").
+            # (e.g. "claude-code" + "claudecode").
             # connector_override()/active_connectors() resolve keys through
             # connector_paths.normalize, so a duplicate would make per-connector
             # lookups and the active-connector roster ambiguous. Mirrors the Go
@@ -3944,8 +3939,6 @@ def _validate_connector_name_list(path: str, names: list[str]) -> None:
 
 def _normalize_connector_key(name: str | None) -> str:
     n = (name or "").strip().lower()
-    if n in {"open-hands", "open_hands"}:
-        return "openhands"
     if n in {"claude-code", "claude_code"}:
         return "claudecode"
     return n
@@ -4002,6 +3995,10 @@ class Config:
     # document must never serialize the legacy audit_db/otel model over
     # the canonical observability graph.
     _source_config_version: int = field(default=0, repr=False, compare=False)
+    # config_generation of the config.yaml bytes load() read, -1 when not
+    # known (_generation_of_loaded_text). Audit rows of a decision made on
+    # this config name it (r103 GAP-0021).
+    _loaded_generation: int = field(default=-1, repr=False, compare=False)
     _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
@@ -4045,7 +4042,7 @@ class Config:
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
             workspace_dir=self.connector_workspace_dir(),
-        ) or _expand(self.claw.home_dir)
+        )
 
     def connector_workspace_dir(self) -> str:
         """Return the explicitly pinned connector workspace, if any."""
@@ -4072,16 +4069,26 @@ class Config:
         """Return the canonical connector name for this config.
 
         Mirrors ``Config.activeConnector`` in claw.go: precedence is
-        ``guardrail.connector`` → ``claw.mode`` → ``"openclaw"``,
-        whitespace-trimmed and lowercased. Public so cmd_doctor /
+        ``guardrail.connector`` → configured ``claw.mode`` → the roster,
+        whitespace-trimmed and lowercased. An unconfigured install returns
+        ``""``. Public so cmd_doctor /
         cmd_uninstall can answer "which framework is this install
         running against?" without recomputing the rule.
         """
+        if not self.has_connector_configured():
+            return ""
         if self.guardrail.connector.strip():
             return connector_paths.normalize(self.guardrail.connector)
+        if self.guardrail.connectors:
+            roster = sorted(
+                {connector_paths.normalize(name) for name in self.guardrail.connectors if name.strip()}
+            )
+            if roster:
+                mode = connector_paths.normalize(self.claw.mode)
+                return mode if mode in roster else roster[0]
         if self.claw.mode.strip():
             return connector_paths.normalize(self.claw.mode)
-        return "openclaw"
+        return ""
 
     def effective_webhooks(self, connector: str = "") -> list[WebhookConfig]:
         """Resolve which webhooks ``connector``'s events route to (D5b).
@@ -4094,22 +4101,26 @@ class Config:
         return self.observability.effective_webhooks(connector, self.webhooks)
 
     def has_connector_configured(self) -> bool:
-        """Return True when the operator has explicitly configured a connector.
+        """Return True when the config selects a connector.
 
         Distinguishes a genuinely unconfigured install — every connector
         marker empty, e.g. after ``setup remove`` clears the last one
-        (which persists ``claw.mode: ''``) — from a real single-connector
-        openclaw install, which pins ``claw.mode``/``guardrail.connector``
-        to ``openclaw`` (see ``cmd_setup``). :meth:`active_connectors` and
-        the shared list/scan resolver use this to avoid fabricating a
-        phantom ``openclaw`` when nothing is set up.
+        (which persists ``claw.mode: ''``) — from a single-connector
+        OpenClaw install or a legacy remote OpenClaw fleet. The shared
+        list/scan resolver uses this to avoid fabricating a phantom agent
+        when nothing is set up.
 
-        NOTE: a *missing* config file still loads ``claw.mode`` as the
-        ``"openclaw"`` default (``config.load``), so this reports True
-        there — the unconfigured signal is the explicit empty marker
-        written on removal, not file absence.
+        A *missing* config file or claw block loads ``claw.mode`` as the
+        ``"openclaw"`` default (``config.load``). With a loopback gateway,
+        that reports True only where OpenClaw is installed. A remote fleet
+        host also keeps the legacy connector (GAP-0568,
+        :func:`_mark_openclaw_not_installed`).
         """
-        return bool(self.guardrail.connectors or self.guardrail.connector.strip() or self.claw.mode.strip())
+        if any(name.strip() for name in self.guardrail.connectors) or self.guardrail.connector.strip():
+            return True
+        if getattr(self, "_openclaw_not_installed", False) and openclaw_only_implied(self):
+            return False
+        return bool(self.claw.mode.strip())
 
     def active_connectors(self) -> list[str]:
         """Return the full resolved set of connector names, sorted.
@@ -4127,9 +4138,8 @@ class Config:
         ``["openclaw"]`` — callers that fan out over connectors (``status``,
         ``aibom``, the shared list/scan resolver) then render an explicit
         "no connector configured" empty state instead of a phantom
-        openclaw. :meth:`active_connector` keeps its singular ``"openclaw"``
-        default untouched, so path resolution and other single-connector
-        callers are unaffected.
+        openclaw. :meth:`active_connector` also returns ``""`` so path
+        resolution does not invent an agent.
         """
         if self.guardrail.connectors:
             # Dedupe after normalization so two alias keys (e.g. "claude-code"
@@ -4166,8 +4176,7 @@ class Config:
         Polymorphic — when ``guardrail.connector`` is set, the
         connector-specific layout (for Codex, project and personal
         ``.agents/skills`` layers) is
-        returned; otherwise falls back to OpenClaw paths derived
-        from ``claw.home_dir`` and ``claw.config_file``.
+        returned; an unconfigured install has no agent paths.
 
         ``connector`` overrides the resolved connector so multi-connector
         callers (e.g. the TUI catalog focus selector via
@@ -4518,6 +4527,7 @@ class Config:
         # Load already moved a retired connector ID in memory; apply the same
         # rename to the on-disk document so any save persists it.
         legacy_connector.migrate_raw_config(existing, path)
+        _drop_retired_connector_settings(existing)
         merged = _merge_v8_modeled_changes(
             existing,
             dataclass_data,
@@ -4718,6 +4728,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     d.pop("_loaded_authoritative_dicts", None)
     d.pop("_loaded_owned_nested_values", None)
     d.pop("_source_config_version", None)
+    d.pop("_loaded_generation", None)
     d.pop("_loaded_v8_modeled_snapshot", None)
     d.pop("enterprise_openshell", None)
     gw = d.get("gateway")
@@ -5347,6 +5358,11 @@ def _apply_v8_modeled_delta(
     if current is _V8_MISSING:
         target.pop(key, None)
         return
+    if isinstance(current, dict) and baseline is _V8_MISSING and isinstance(target.get(key), dict):
+        # The load left the mapping out (all defaults) and another writer has
+        # since saved it: merge this change into it, do not replace it
+        # (GAP-1293).
+        baseline = {}
     if isinstance(current, dict) and isinstance(baseline, dict):
         child = target.get(key)
         if not isinstance(child, dict):
@@ -6308,6 +6324,22 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     return "closed"
 
 
+def _mark_openclaw_not_installed(cfg: Config) -> None:
+    """Record that a claw.mode which only implies OpenClaw has no OpenClaw behind it.
+
+    A config.yaml without a claw block loads ``claw.mode: openclaw``, and init
+    wrote that default before 1.0.4. With a loopback gateway and no local
+    OpenClaw, :meth:`Config.has_connector_configured` reports no connector,
+    so status and the TUI name none (GAP-0568). An explicit fleet mode keeps
+    the legacy connector. Mirrors the Go loader, which leaves a managed
+    enterprise service as it was.
+    """
+    if _is_managed_enterprise_mode(cfg.deployment_mode):
+        return
+    if openclaw_implied_but_not_installed(cfg):
+        object.__setattr__(cfg, "_openclaw_not_installed", True)
+
+
 def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> None:
     """Secure Client exception to the fail-closed hook default (#1163).
 
@@ -7216,6 +7248,134 @@ def _default_policy_dir(cfg_file: str, data_dir: str) -> str:
     return os.path.join(data_dir, "policies")
 
 
+# until 1.1: OpenHands and OmniGent were removed in 1.0.4 (#1182). Older
+# 0.8.x and 1.0.x files can still name them in connector fields.
+_RETIRED_CONNECTOR_NAMES = frozenset({"openhands", "omnigent", "open-hands", "open_hands"})
+
+
+def _is_retired_connector_name(name: Any) -> bool:
+    return isinstance(name, str) and name.strip().lower() in _RETIRED_CONNECTOR_NAMES
+
+
+def _drop_retired_connector_settings(raw: dict[str, Any]) -> None:
+    """Until 1.1, accept old rosters and discard removed connector settings.
+
+    Only connector fields are touched (mirrors ``dropRetiredConnectorSettings``
+    and ``migrateObservabilityV8LegacyConnectors`` in Go): a skill, MCP server
+    or route that happens to share a removed connector's name is kept. A list
+    that named only removed connectors must not widen into "every connector"
+    when it empties, so its owner is disabled or dropped instead.
+    """
+
+    changed = False
+
+    def child(parent: Any, key: str) -> Any:
+        return parent.get(key) if isinstance(parent, dict) else None
+
+    def drop_keys(mapping: Any) -> None:
+        nonlocal changed
+        if not isinstance(mapping, dict):
+            return
+        for key in [key for key in mapping if _is_retired_connector_name(key)]:
+            del mapping[key]
+            changed = True
+
+    def drop_names(parent: Any, key: str, *, omit_empty: bool = False) -> bool:
+        """Strip removed names from parent[key]; True when only removed names were listed.
+
+        omit_empty removes a key left empty, for the sandbox lists that refuse
+        an empty list (an absent key means no constraint, so the caller keeps
+        the section restrictive where that would widen it).
+        """
+        nonlocal changed
+        names = child(parent, key)
+        if not isinstance(names, list) or not names:
+            return False
+        kept = [name for name in names if not _is_retired_connector_name(name)]
+        if len(kept) == len(names):
+            return False
+        if kept or not omit_empty:
+            parent[key] = kept
+        else:
+            del parent[key]
+        changed = True
+        return not kept
+
+    guardrail = child(raw, "guardrail")
+    application = child(raw, "application_protection")
+    observability = child(raw, "observability")
+    openshell = child(raw, "openshell")
+    admin = child(openshell, "admin")
+
+    for mapping in (
+        child(guardrail, "connectors"),
+        child(child(raw, "asset_policy"), "connectors"),
+        child(application, "connectors"),
+        child(observability, "connectors"),
+        child(raw, "connector_hooks"),
+        child(child(child(raw, "enterprise"), "machine_policy"), "connectors"),
+    ):
+        drop_keys(mapping)
+
+    drop_names(child(guardrail, "judge"), "hook_connectors")
+    drop_names(application, "exclude_connectors")
+    if drop_names(application, "include_connectors"):
+        application["enabled"] = False
+    if drop_names(openshell, "harnesses"):
+        openshell["enabled"] = False
+    drop_names(admin, "required_for", omit_empty=True)
+    if drop_names(admin, "allowed_harnesses", omit_empty=True):
+        admin["allowed"] = False
+
+    profiles = child(guardrail, "profiles")
+    if isinstance(profiles, dict):
+        for profile in profiles.values():
+            drop_keys(child(profile, "connectors"))
+            sandbox = child(profile, "sandbox")
+            drop_names(sandbox, "required_for", omit_empty=True)
+            if drop_names(sandbox, "allowed_harnesses", omit_empty=True):
+                sandbox["allowed"] = False
+
+    assignments = child(guardrail, "profile_assignments")
+    if isinstance(assignments, list):
+        # An assignment for only removed connectors would match every
+        # connector once its list empties, so it goes.
+        assignments[:] = [
+            assignment for assignment in assignments if not drop_names(child(assignment, "match"), "connectors")
+        ]
+
+    destinations = child(observability, "destinations")
+    if isinstance(destinations, list):
+        kept_destinations = []
+        for destination in destinations:
+            routes = child(destination, "routes")
+            if isinstance(routes, list) and routes:
+                # A route for only removed connectors would select every
+                # connector (and fails the v8 schema's minItems) once emptied.
+                routes[:] = [route for route in routes if not drop_names(child(route, "selector"), "connectors")]
+                if not routes:
+                    # Every route was for removed connectors: empty routes are
+                    # refused and no routes would send every signal, so the
+                    # destination goes (as in Go).
+                    continue
+            kept_destinations.append(destination)
+        destinations[:] = kept_destinations
+
+    if isinstance(guardrail, dict) and _is_retired_connector_name(guardrail.get("connector")):
+        remaining = guardrail.get("connectors")
+        guardrail["connector"] = sorted(remaining)[0] if isinstance(remaining, dict) and remaining else ""
+        changed = True
+    claw = child(raw, "claw")
+    if isinstance(claw, dict) and _is_retired_connector_name(claw.get("mode")):
+        claw["mode"] = ""
+        changed = True
+    if changed:
+        logging.warning(
+            "until 1.1: removed OpenHands/OmniGent connector settings from loaded config; "
+            "run defenseclaw migrate"
+        )
+
+
 def load(
     *,
     data_dir: str | os.PathLike[str] | None = None,
@@ -7240,8 +7400,13 @@ def load(
     cfg_file = str(config_path_for_data_dir(data_dir))
 
     raw: dict[str, Any] = {}
+    loaded_text: str | None = None
     try:
-        raw = parsed_source if parsed_source is not None else parse_config_yaml(read_config_text(cfg_file)) or {}
+        if parsed_source is not None:
+            raw = parsed_source
+        else:
+            loaded_text = read_config_text(cfg_file)
+            raw = parse_config_yaml(loaded_text) or {}
     except (FileNotFoundError, NotADirectoryError):
         pass
     except OSError as exc:
@@ -7253,6 +7418,7 @@ def load(
     # is normalized or checked for duplicates. The Go loader applies the same
     # rule; `defenseclaw migrate` persists it (see migrations.py).
     legacy_connector.migrate_raw_config(raw, cfg_file)
+    _drop_retired_connector_settings(raw)
     if without_guardrail_profiles:
         raw = _without_guardrail_profiles(raw)
 
@@ -7368,7 +7534,9 @@ def load(
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
     cfg._loaded_owned_nested_values = _snapshot_owned_nested_values(raw)
     cfg._source_config_version = source_config_version
+    cfg._loaded_generation = _generation_of_loaded_text(cfg_file, loaded_text)
     _apply_secure_client_hook_fail_default(cfg, raw)
+    _mark_openclaw_not_installed(cfg)
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
     # Fail loud on invalid guardrail value invariants, mirroring the Go
@@ -7389,6 +7557,23 @@ def load(
     if is_current_schema(source_config_version):
         cfg._loaded_v8_modeled_snapshot = copy.deepcopy(_config_to_dict(cfg))
     return cfg
+
+
+def _generation_of_loaded_text(cfg_file: str, text: str | None) -> int:
+    """config_generation of the config.yaml text load() read: the one
+    config.generation.json records when it records these bytes, -1 when a
+    writer changed the file since, nothing recorded it, or the record is
+    malformed (``"generation": null`` must not stop config.yaml loading)."""
+    if text is None:
+        return -1
+    from defenseclaw import config_writer
+
+    try:
+        state = config_writer.read_generation_state(cfg_file)
+    except (OSError, ValueError, TypeError, OverflowError):
+        return -1
+    recorded = state.config_sha256.strip().lower().removeprefix("sha256:")
+    return state.generation if recorded == hashlib.sha256(text.encode("utf-8")).hexdigest() else -1
 
 
 _GUARDRAIL_PROFILE_KEYS = ("profiles", "profile_assignments", "default_profile")
@@ -7560,6 +7745,10 @@ def _merge_application_protection_guardrail(raw: Any) -> PerConnectorGuardrailCo
         hilt=_merge_hilt(hilt_entry) if hilt_entry is not None else None,
         hook_fail_mode=str(raw.get("hook_fail_mode", "") or ""),
         block_message=str(raw.get("block_message", "") or ""),
+        # The pack the gateway loads for connectors it protects automatically
+        # (EffectiveRulePackRefForConnector); the CLI needs it to know which
+        # scopes select a custom_packs pin.
+        rule_pack=str(raw.get("rule_pack", "") or ""),
         enabled=enabled_raw if isinstance(enabled_raw, bool) else None,
         block_at=normalize_guardrail_level(raw.get("block_at")),
         alert_at=normalize_guardrail_level(raw.get("alert_at")),

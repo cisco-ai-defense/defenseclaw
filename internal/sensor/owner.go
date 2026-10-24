@@ -17,6 +17,7 @@
 package sensor
 
 import (
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -83,6 +84,10 @@ type procRef struct {
 	// User and SID are the account the finding's own event named for the
 	// process, empty when it named none.
 	User, SID string
+	// Descendant marks a process of an agent session other than its root.
+	// It may run as another account (a setuid or runas child), so the owner
+	// the probe read for it never names the session (GAP-1401).
+	Descendant bool
 }
 
 // processInstance is what the polls recorded about one process instance.
@@ -116,6 +121,20 @@ type pidEvent struct {
 	// Instance is the lineage tracker's instance the event concerned, zero
 	// when the tracker had no record of the pid.
 	Instance uint64
+	// User and SID are the account a creation event named, empty when it
+	// named none.
+	User, SID string
+}
+
+// keepsOwner reports that a creation at the pid names, by name, the account
+// recorded for instance, on a platform whose events and probes carry no SID
+// (POSIX). A POSIX exec replaces the image of the same process, and even a
+// new process on the pid would be that account's, so the recorded owner is
+// still the one to report (GAP-1465). A creation that carries a SID (a
+// Windows 4688), or names no account or another one, still hands the pid on.
+func (event pidEvent) keepsOwner(instance *processInstance) bool {
+	return !event.Exit && event.SID == "" && instance.sid == "" &&
+		event.User != "" && instance.user != "" && strings.EqualFold(event.User, instance.user)
 }
 
 // pidEvents are the creations and exits the host plane saw since the owner
@@ -298,6 +317,7 @@ func (b *ownerBook) heard(events pidEvents) {
 				case !event.At.After(instance.lastSeen):
 				case event.Exit:
 					markFirst(&instance.exitedAt, event.At)
+				case event.keepsOwner(instance):
 				default:
 					markFirst(&instance.replacedAt, event.At)
 				}
@@ -559,10 +579,14 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 		return r.named(user, sid, AttributionProcessOwner)
 	}
 	var matched []*processInstance
-	reused := false
+	reused, descendants := false, false
 	for _, ref := range processes {
 		instance, recycled := r.book.instance(ref)
-		if instance != nil {
+		switch {
+		case instance == nil:
+		case ref.Descendant:
+			descendants = true
+		default:
 			matched = append(matched, instance)
 		}
 		reused = reused || recycled
@@ -580,9 +604,12 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 	if found, ok := r.profileOwner(configPaths); ok {
 		return found
 	}
-	reason := "the process owner could not be read (process token, Win32_Process owner and session user) " +
+	reason := "the process owner could not be read (" + ownerSourcesFor(ownerGOOS) + ") " +
 		"and no enrolled profile holds the agent's configuration"
 	switch {
+	case len(matched) == 0 && descendants:
+		reason = "the agent's own process is no longer in the process table, the owner of a process it " +
+			"started is not the session's, and no enrolled profile holds the agent's configuration"
 	case len(matched) == 0 && reused:
 		reason = "the finding's processes have exited and their pids now belong to other processes, " +
 			"whose owners are not the finding's; no enrolled profile holds the agent's configuration"
@@ -593,14 +620,29 @@ func (r *ownerResolver) resolve(processes []procRef, configPaths []string) owner
 	return owner{Attribution: AttributionUnattributed, Reason: reason}
 }
 
+// ownerGOOS is the system the owner sources are named for; tests replace it.
+var ownerGOOS = runtime.GOOS
+
+// ownerSourcesFor names the sources an unattributed finding's owner was
+// looked up in on goos, so a Linux or macOS diagnostic does not name Windows
+// mechanisms (GAP-0092).
+func ownerSourcesFor(goos string) string {
+	if goos == "windows" {
+		return "process token, Win32_Process owner and session user"
+	}
+	return "the process's owning uid in the process table"
+}
+
 // eventOwner is the one account the events of processes named, and mixed
 // reports that they named more than one. The account an event names is that
 // of the process instance that produced it, so unlike an owner looked up by
-// pid it is never a later holder's.
+// pid it is never a later holder's. Only the session's root says who owns
+// it: a descendant's event can name the account a runas or setuid child
+// runs as, so it is left out (GAP-1401).
 func eventOwner(processes []procRef) (user, sid string, mixed bool) {
 	for _, process := range processes {
 		switch {
-		case process.SID == "":
+		case process.Descendant, process.SID == "":
 		case sid == "":
 			user, sid = process.User, process.SID
 		case !strings.EqualFold(sid, process.SID):

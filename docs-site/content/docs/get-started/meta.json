@@ -1,4 +1,13 @@
 {
   "title": "Get started",
-  "pages": ["what-is-defenseclaw", "download", "install", "quickstart", "first-run", "first-guardrail", "upgrade", "windows"]
+  "defaultOpen": true,
+  "pages": [
+    "what-is-defenseclaw",
+    "install",
+    "quickstart",
+    "support-matrix",
+    "windows",
+    "upgrade",
+    "uninstall"
+  ]
 }

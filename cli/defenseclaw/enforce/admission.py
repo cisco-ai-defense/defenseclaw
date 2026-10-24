@@ -20,6 +20,7 @@ admission.rego and internal/policy), reading only config.yaml:
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import unicodedata
@@ -28,6 +29,7 @@ from typing import Any
 
 from defenseclaw import connector_paths
 from defenseclaw.config import SeverityAction
+from defenseclaw.enforce._asset_name_fold import FOLD_RUNS
 
 
 @dataclass(frozen=True)
@@ -437,9 +439,11 @@ def evaluate_admission(
         return asset_decision
 
     def _done(decision: AdmissionDecision) -> AdmissionDecision:
-        # GAP-2390: keep an observe-mode would-block on whatever decision the
-        # rest of admission reaches, so install paths can warn and audit it.
-        if not asset_decision.source.endswith("-observe"):
+        # GAP-2390: keep an observe-mode would-block, and the warning of an
+        # empty required registry under registry_empty_action warn, on
+        # whatever decision the rest of admission reaches, so install paths
+        # can warn and audit it.
+        if not asset_decision.source.endswith(("-observe", "-empty-warn")):
             return decision
         return replace(
             decision,
@@ -640,17 +644,25 @@ def evaluate_asset_policy(
                 "asset-policy-registry-required",
             )
         # Registry required but empty → governed by registry_empty_action.
-        # Only "deny" blocks; "warn"/"allow" fall through to the default check
-        # below. The Go gateway now resolves "warn" the same way (warn → allow),
-        # so this matches the runtime (see _normalize_registry_empty_action).
-        if _normalize_registry_empty_action(
+        # Only "deny" blocks. "warn" lets the asset through to the default
+        # check but says why (p0 GAP-0941), as the Go gateway does; "allow"
+        # falls through silently (see _normalize_registry_empty_action).
+        empty_action = _normalize_registry_empty_action(
             getattr(policy, "registry_empty_action", "deny")
-        ) == "deny":
+        )
+        if empty_action == "deny":
             return _asset_policy_block_or_observe(
                 mode,
                 f"{target_type} {name!r} is blocked because asset policy "
                 f"requires a registry but none is configured",
                 "asset-policy-registry-required-empty",
+            )
+        if empty_action == "warn" and str(getattr(policy, "default", "allow")).strip().lower() not in {"deny", "block"}:
+            return AdmissionDecision(
+                "allowed",
+                f"{target_type} {name!r} is allowed with a warning: asset policy "
+                f"requires a registry but none is configured (registry_empty_action: warn)",
+                source="asset-policy-registry-required-empty-warn",
             )
 
     if str(getattr(policy, "default", "allow")).strip().lower() in {"deny", "block"}:
@@ -685,15 +697,11 @@ def _normalize_registry_empty_action(value: Any) -> str:
 
     Returns one of ``"deny"`` / ``"warn"`` / ``"allow"`` (the three values
     documented on ``config.AssetTypePolicy.registry_empty_action``). Only
-    ``"deny"`` blocks; both ``"warn"`` and ``"allow"`` fall through to the
-    default check. ``"deny"``/``"block"``/``""`` and any unrecognised value
-    stay fail-closed as ``"deny"``.
-
-    Python↔Go parity: the Go gateway's ``normalizeRegistryEmptyAction``
-    (internal/config/asset_policy.go) now also treats ``"warn"`` as
-    fall-through (warn → allow), so both sides agree that ``"warn"`` is
-    "log-but-don't-block at the empty-registry gate". The earlier divergence
-    (Go collapsing ``"warn"`` into ``"deny"``) is closed.
+    ``"deny"`` blocks; ``"warn"`` and ``"allow"`` fall through to the
+    default check, ``"warn"`` with a decision that names the empty registry.
+    ``"deny"``/``"block"``/``""`` and any unrecognised value stay fail-closed
+    as ``"deny"``. The Go gateway's ``normalizeRegistryEmptyAction``
+    (internal/config/asset_policy.go) resolves the same three values.
     """
     v = str(value).strip().lower()
     if v == "allow":
@@ -776,10 +784,27 @@ def _canonical_mcp_transport(transport: Any, url: str = "", command: str = "") -
 
 def asset_name_key(name: Any) -> str:
     """The form asset_policy compares skill, MCP and plugin names in: trimmed,
-    Unicode NFC and lower-cased (Go ``config.SameAssetName``). A rule written
-    in the composed spelling of a name like "café" matches the decomposed
-    spelling another tool wrote (GAP-0432)."""
-    return unicodedata.normalize("NFC", str(name or "").strip()).lower()
+    Unicode NFC and case-folded the way Go ``config.SameAssetName``
+    (``strings.EqualFold``) folds. A rule written in the composed spelling of
+    a name like "café" matches the decomposed spelling another tool wrote
+    (GAP-0432), and final sigma, capital sigma and sigma are one letter on
+    both sides (p0 GAP-1305). The folding is Go's own table
+    (_asset_name_fold.py), not ``str.casefold``/``str.lower``, which fold
+    differently and follow the interpreter's Unicode version."""
+    fold = _name_fold()
+    return "".join(fold.get(ch, ch) for ch in unicodedata.normalize("NFC", str(name or "").strip()))
+
+
+@functools.cache
+def _name_fold() -> dict[str, str]:
+    fold: dict[str, str] = {}
+    for run in FOLD_RUNS.split():
+        start, count, stride, delta = run.split(":")
+        first, step, shift = int(start, 16), int(stride), int(delta)
+        for i in range(int(count)):
+            code = first + i * step
+            fold[chr(code)] = chr(code + shift)
+    return fold
 
 
 def _asset_rule_matches(
@@ -803,8 +828,8 @@ def _asset_rule_matches(
         constrained = True
         # Compare connector-name-insensitively (case + hyphen/underscore
         # aliases) so an asset rule keyed on a documented alias such as
-        # "open-hands" still matches the registry-canonical active connector
-        # "openhands". A literal lower-case compare silently failed to fire
+        # "claude-code" still matches the registry-canonical active connector
+        # "claudecode". A literal lower-case compare silently failed to fire
         # the rule, letting a server through that policy meant to block.
         if connector_paths.normalize(str(rule.connector)) != connector_paths.normalize(connector):
             return False

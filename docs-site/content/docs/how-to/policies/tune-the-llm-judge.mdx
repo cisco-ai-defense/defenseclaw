@@ -1,0 +1,81 @@
+---
+title: Tune the LLM judge
+description: Stop the LLM judge from flagging known-safe text with pre-judge strips, finding suppressions and tool suppressions.
+keywords:
+  - suppressions
+  - pre_judge_strips
+  - finding_suppressions
+  - tool_suppressions
+---
+
+Suppressions tune the optional LLM judge. They never silence a regex or CEL rule finding (such as `SEC-AWS-KEY`), and they never redact the request sent to the model. To quiet a rule, use `defenseclaw guardrail rule disable` or `rule severity` ([rules reference](/docs/reference/policy/rules#command-line-wrappers)).
+
+Every rule pack has three lists in `suppressions.yaml`:
+
+| List | What it does | Use it when |
+| --- | --- | --- |
+| `pre_judge_strips` | Removes text from the judge's input before it reads it | Sender labels or bridge banners keep tripping the PII judge |
+| `finding_suppressions` | Drops one judge finding when its ID and the matched text both match | A finding fires on safe values, such as Unix timestamps or chat IDs |
+| `tool_suppressions` | Drops listed PII-judge findings for tools whose name matches | A status tool returns account metadata the judge calls a user name |
+
+## Drop a finding without copying a pack
+
+1. Add a finding suppression to `config.yaml`.
+
+   ```bash
+   defenseclaw guardrail suppress add ACME-SUPP-BUILD-EMAIL \
+     --finding JUDGE-PII-EMAIL --entity '@build[.]acme[.]example$' \
+     --reason "Build bot addresses are not personal data"
+   ```
+
+   ```text
+     OK Suppression ACME-SUPP-BUILD-EMAIL added for every connector. Saved (config generation 11). The gateway isn't running; it loads this when it starts.
+   ```
+
+   `--finding` is matched against the whole finding ID, so `JUDGE-PII-.*` matches every PII finding. `--entity` is matched against the text the judge reported; leave it out to match every value. `--reason` is required. Add `--connector X` or `--profile P` to narrow the scope.
+
+2. Check it worked.
+
+   ```bash
+   defenseclaw config get guardrail.rules.suppressions
+   ```
+
+   ```text
+   - entity_pattern: '@build[.]acme[.]example$'
+     finding_pattern: JUDGE-PII-EMAIL
+     id: ACME-SUPP-BUILD-EMAIL
+     reason: Build bot addresses are not personal data
+   ```
+
+3. Remove it later.
+
+   ```bash
+   defenseclaw guardrail suppress remove ACME-SUPP-BUILD-EMAIL
+   ```
+
+The `id` must be new. The command takes no `condition`; use a pack-level suppression for `is_epoch` or `is_platform_id`.
+
+## Strips and tool suppressions live in a pack
+
+Copy a pack ([write a custom rule](/docs/how-to/policies/write-a-custom-rule)), edit `suppressions.yaml`, then validate and pin it. These entries ship in the default pack:
+
+```yaml title="policies/guardrail/default/suppressions.yaml (excerpt)"
+pre_judge_strips:
+  - id: STRIP-SYSTEM-SENDER
+    pattern: '\b(cli|system|bot|admin)\b'
+    context: "System sender metadata injected by agent framework"
+    applies_to: [pii]
+
+tool_suppressions:
+  - tool_pattern: '^(graph_auth_status|session_status|get_status)$'
+    suppress_findings: [JUDGE-PII-USER]
+    reason: "Status check tools return expected system metadata"
+```
+
+- A strip removes every match from the input of each judge in `applies_to` (all judges when empty). It does not hide a secret: the `SEC-*` rules still match it.
+- Scope `tool_pattern` to exact tool names. `^.*$` drops the listed findings for every tool.
+- Never use `.*`, `.+` or `^.*$` as a suppression pattern. It silences everything the list would report.
+
+All shipped entries are in the [recipe catalog](/docs/reference/policy/rule-recipes).
+
+Next: [give a group its own policy](/docs/how-to/policies/give-a-group-its-own-policy), [what the judge does](/docs/reference/policy/detection#llm-judge).

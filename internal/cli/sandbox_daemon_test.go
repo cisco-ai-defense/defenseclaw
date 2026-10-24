@@ -287,10 +287,17 @@ func TestPlanSandboxOpenShellExec(t *testing.T) {
 		return sandboxrelay.EnterpriseOpenShell{Install: install, E2fsprogsDir: adminE2fs}
 	}
 	openShellExecTrustedDir = func(string, string) error { return nil }
+	// The account's own XDG_STATE_HOME does not reach its gateway, which
+	// keeps its state in ~/.local/state (openshell.DefaultStateHome): the
+	// daemon looks for the gateway's files there.
+	t.Setenv("XDG_STATE_HOME", filepath.Join(root, "xdg-state"))
 
 	plan, err := planSandboxOpenShellExec(context.Background(), "linux", []string{"--log-level", "info"})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if v := envValue(plan.env, "XDG_STATE_HOME"); v != "" {
+		t.Fatalf("the gateway was given XDG_STATE_HOME=%s, where the daemon does not look for its state", v)
 	}
 	config := filepath.Join(configDir, "openshell", "gateway.toml")
 	if plan.binary != binary || !slices.Equal(plan.argv, []string{binary, "--config", config, "--log-level", "info"}) {

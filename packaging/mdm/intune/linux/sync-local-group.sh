@@ -11,9 +11,16 @@ STATE_DIR=/var/lib/defenseclaw-intune/local-groups
 [[ $GROUP_NAME =~ ^[a-z_][a-z0-9_-]*$ && $GROUP_NAME != replace-with-local-group ]] || {
   echo 'error: set GROUP_NAME to a local group name before upload' >&2; exit 2;
 }
+# A member is an existing local account. Its name may hold the dots and capitals
+# useradd accepts (john.doe); it never starts with a dot or a dash, is never all
+# digits (getent would take it for a uid), and holds no comma or colon, which
+# gpasswd and /etc/group use as separators.
 for user in "${MEMBERS[@]}"; do
-  [[ $user =~ ^[a-z_][a-z0-9_-]*$ ]] || { echo "error: invalid user name: $user" >&2; exit 2; }
-  getent -s files passwd "$user" > /dev/null || { echo "error: no local account: $user" >&2; exit 1; }
+  [[ ${#user} -le 32 && $user =~ ^[A-Za-z0-9_][A-Za-z0-9._-]*[$]?$ && ! $user =~ ^[0-9]+$ ]] || {
+    echo "error: invalid user name: $user" >&2; exit 2;
+  }
+  entry=$(getent -s files passwd "$user") || { echo "error: no local account: $user" >&2; exit 1; }
+  [[ ${entry%%:*} == "$user" ]] || { echo "error: no local account: $user" >&2; exit 1; }
 done
 # Only manage groups created by this script. An arbitrary existing local group
 # may grant sudo, file, or service privileges even when its name looks harmless.

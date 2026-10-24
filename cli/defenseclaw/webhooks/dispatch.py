@@ -36,7 +36,6 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-import re
 import socket
 import time
 import urllib.error
@@ -69,6 +68,7 @@ class SyntheticEvent:
     severity: str
     run_id: str = ""
     trace_id: str = ""
+    host: str = field(default_factory=lambda: socket.gethostname())
 
     def to_go_json_dict(self) -> dict[str, Any]:
         return {
@@ -81,6 +81,7 @@ class SyntheticEvent:
             "severity": self.severity,
             "run_id": self.run_id,
             "trace_id": self.trace_id,
+            "host": self.host,
         }
 
 
@@ -244,17 +245,7 @@ def format_webex_payload(event: SyntheticEvent, room_id: str) -> bytes:
 
 
 def format_generic_payload(event: SyntheticEvent) -> bytes:
-    event_data: dict[str, Any] = {
-        "id": event.id,
-        "timestamp": event.timestamp,
-        "action": event.action,
-        "target": event.target,
-        "actor": event.actor,
-        "details": event.details,
-        "severity": event.severity,
-        "run_id": event.run_id,
-        "trace_id": event.trace_id,
-    }
+    event_data = event.to_go_json_dict()
     if "block" in event.action.lower():
         event_data["defenseclaw_blocked"] = True
         event_data["defenseclaw_reason"] = event.details
@@ -447,35 +438,39 @@ def _redact_headers(headers: dict[str, str]) -> dict[str, str]:
 
 
 # Known JSON keys that carry secrets in the supported webhook payloads.
-# Order matters: we scrub the JSON form ("\"routing_key\":") so the
-# preview shows ``"routing_key": "<redacted>"`` rather than the raw key.
 _SECRET_PAYLOAD_FIELDS = ("routing_key", "token", "api_key", "access_token")
+
+_REDACTED = "<redacted>"
+
+
+def _redact_secret_values(value: Any, secret: str) -> Any:
+    """*value* with every secret field, and the secret wherever it appears, replaced."""
+
+    if isinstance(value, dict):
+        return {
+            key: _REDACTED if key in _SECRET_PAYLOAD_FIELDS else _redact_secret_values(item, secret)
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_secret_values(item, secret) for item in value]
+    if isinstance(value, str) and secret and secret in value:
+        return value.replace(secret, _REDACTED)
+    return value
 
 
 def _redact_payload_preview(payload: bytes, webhook_type: str, secret: str) -> str:
     """Return a 200-char preview with known secret fields scrubbed.
 
-    ("PagerDuty routing key is exposed in webhook
-    payload previews"). The preview is a debugging aid, not a fidelity
-    re-rendering, so we don't try to round-trip JSON; a regex sweep
-    over the prefix is sufficient and avoids the cost of parsing the
-    body. The literal ``secret`` value is also redacted defensively in
-    case future formats embed it elsewhere in the payload.
+    ("PagerDuty routing key is exposed in webhook payload previews"). The
+    payload is decoded, redacted and encoded again, so the whole secret is
+    replaced whatever characters it holds: a regex over the encoded text
+    stopped at the first escaped quote in the key and printed the rest
+    (rel-1-0-4 GAP-0579). Redaction runs before truncation, so an overlong
+    key is not cut out of the match either (F-0443). A payload that is not
+    JSON is not previewed at all.
     """
-    # Redact the *full* payload before truncating. Slicing first can cut a
-    # long secret value (e.g. an overlong PagerDuty ``routing_key``) so its
-    # closing quote falls outside the window, the regex no longer matches,
-    # and the leading bytes of the secret leak into the preview (F-0443).
-    raw = payload.decode("utf-8", errors="replace")
-    scrubbed = raw
-    for field_name in _SECRET_PAYLOAD_FIELDS:
-        scrubbed = re.sub(
-            rf'"{field_name}"\s*:\s*"[^"]*"',
-            f'"{field_name}": "<redacted>"',
-            scrubbed,
-        )
-    if secret and secret in scrubbed:
-        scrubbed = scrubbed.replace(secret, "<redacted>")
-    # Truncate only after redaction so the preview stays short.
-    return scrubbed[:200]
-
+    try:
+        document = json.loads(payload.decode("utf-8"))
+    except ValueError:
+        return f"<{webhook_type} payload is not JSON; preview withheld>"
+    return _json_bytes(_redact_secret_values(document, secret)).decode("utf-8")[:200]

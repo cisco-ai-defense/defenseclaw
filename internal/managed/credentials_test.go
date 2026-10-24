@@ -88,7 +88,7 @@ func TestReadBoundedCredential(t *testing.T) {
 // verify and apply, so a required reference refuses; only a failed
 // operating-system call (the caller cannot read the store) is unchecked.
 // The error text of the failed check is kept (review of GAP-0009).
-func TestStoredCredentialPresence(t *testing.T) {
+func TestStoredCredentialValue(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name string, data []byte) string {
 		path := filepath.Join(dir, name)
@@ -128,9 +128,9 @@ func TestStoredCredentialPresence(t *testing.T) {
 	}
 	for _, c := range cases {
 		value, readErr := readStoredCredential("llm-key", c.path, c.checks...)
-		present, err := ServiceCredentialPresence(readErr)
-		if present != c.present || (err != nil) != c.unchecked {
-			t.Errorf("%s: present %v, err %v (read %v)", c.name, present, err, readErr)
+		value, err := ServiceCredentialValue(value, readErr)
+		if (value != nil) != c.present || (err != nil) != c.unchecked {
+			t.Errorf("%s: value %v, err %v (read %v)", c.name, value != nil, err, readErr)
 		}
 		if c.present && string(value) != "key-123" {
 			t.Errorf("%s: value %q", c.name, value)
@@ -150,12 +150,13 @@ func TestStoredCredentialPresence(t *testing.T) {
 		"not stored":       ErrNoServiceCredential,
 		"wrapped unusable": fmt.Errorf("credential llm-key: %w", ErrUnusableServiceCredential),
 	} {
-		if present, err := ServiceCredentialPresence(err); present || err != nil {
-			t.Errorf("%s: present %v, err %v; want missing", name, present, err)
+		value := []byte("key-123")
+		if got, err := ServiceCredentialValue(value, err); got != nil || err != nil || string(value) == "key-123" {
+			t.Errorf("%s: value %q, err %v, input %q; want missing and the input cleared", name, got, err, value)
 		}
 	}
-	if present, err := ServiceCredentialPresence(fmt.Errorf("inspect credential llm-key: %w", &fs.PathError{Op: "lstat", Err: syscall.EACCES})); present || !errors.Is(err, fs.ErrPermission) {
-		t.Errorf("unreadable store: present %v, err %v; want unchecked", present, err)
+	if got, err := ServiceCredentialValue(nil, fmt.Errorf("inspect credential llm-key: %w", &fs.PathError{Op: "lstat", Err: syscall.EACCES})); got != nil || !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("unreadable store: value %q, err %v; want unchecked", got, err)
 	}
 }
 

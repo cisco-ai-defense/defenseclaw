@@ -69,7 +69,10 @@ var windowsKiroMCPSpoolSource = windowsMCPSpoolSource{
 // longer enrolled are removed. A user whose state is unreadable or malformed
 // gets a record that says so, without servers: an old definition is never
 // presented as the current state, and the gateway fails closed for that
-// user's Claude Code MCP servers (GAP-0829).
+// user's Claude Code MCP servers (GAP-0829). A record that cannot be
+// updated is withdrawn for the same reason, and the error names it
+// (GAP-1405): each such record is an *MCPSpoolRecordError
+// (MCPSpoolRecordFailures), any other error is the folder's.
 func WriteWindowsClaudeMCPSpool(dir string, manifest Manifest, setOwnership func(string) error, logf func(string, ...any)) error {
 	return writeWindowsMCPSpool(dir, manifest, windowsClaudeMCPSpoolSource, setOwnership, logf)
 }
@@ -96,6 +99,7 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 		}
 	}
 	keep := map[string]bool{}
+	var failed error
 	for _, target := range manifest.Targets {
 		if !strings.EqualFold(strings.TrimSpace(target.Connector), source.connector) || (target.Enabled != nil && !*target.Enabled) {
 			continue
@@ -117,6 +121,7 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			}
 			data, err = MarshalClaudeMCPSpoolUnreadable(key, ClaudeStateUnreadable{
 				User: strings.TrimSpace(target.User), Home: home, Path: unreadablePath, Reason: err.Error(),
+				SignedOut: IsWindowsTargetSessionUnavailable(err),
 			})
 		} else {
 			data, err = MarshalClaudeMCPSpoolRecord(key, servers)
@@ -132,15 +137,21 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			}
 		}
 		if err != nil {
+			failed = errors.Join(failed, &MCPSpoolRecordError{
+				Connector: source.connector, SID: key, Home: home, Err: withdrawMCPSpoolRecord(dir, name, err),
+			})
 			continue
 		}
 		if current, readErr := os.ReadFile(filepath.Join(dir, name)); readErr == nil && bytes.Equal(current, data) {
 			continue
 		}
-		if err := writeSpoolBytes(dir, name, source.tmpPattern, data, setOwnership); err != nil {
+		if err := windowsMCPSpoolWrite(dir, name, source.tmpPattern, data, setOwnership); err != nil {
 			if logf != nil {
 				logf("[hook-enumerator] WARN publish %s MCP servers for %s: %v", source.label, key, err)
 			}
+			failed = errors.Join(failed, &MCPSpoolRecordError{
+				Connector: source.connector, SID: key, Home: home, Err: withdrawMCPSpoolRecord(dir, name, err),
+			})
 		} else if logf != nil {
 			// What the gateway admits for the user, so a server that never
 			// reached admission can be traced to the record (GAP-0219).
@@ -154,7 +165,28 @@ func writeWindowsMCPSpool(dir string, manifest Manifest, source windowsMCPSpoolS
 			}
 		}
 	}
-	return nil
+	return failed
+}
+
+// windowsMCPSpoolWrite is writeSpoolBytes; tests replace it.
+var windowsMCPSpoolWrite = writeSpoolBytes
+
+// withdrawMCPSpoolRecord takes back the record name after its update failed
+// with cause. Left in place it would present the user's old servers as
+// current; the gateway reads a missing or unparsable record as unreadable
+// state and admits none of that user's servers. A record that cannot be
+// removed (the gateway holds it open) is emptied in place.
+func withdrawMCPSpoolRecord(dir, name string, cause error) error {
+	path := filepath.Join(dir, name)
+	removeErr := os.Remove(path)
+	if removeErr == nil || errors.Is(removeErr, os.ErrNotExist) {
+		return fmt.Errorf("%s not updated, previous record withdrawn: %w", name, cause)
+	}
+	if truncateErr := os.Truncate(path, 0); truncateErr != nil {
+		return fmt.Errorf("%s not updated and its previous record could not be withdrawn (%v): %w",
+			name, errors.Join(removeErr, truncateErr), cause)
+	}
+	return fmt.Errorf("%s not updated, previous record emptied: %w", name, cause)
 }
 
 // windowsClaudeStateServers reads the Claude Code MCP servers of the user
@@ -199,7 +231,12 @@ func windowsClaudeStateServers(sid, home string, logf func(string, ...any)) ([]c
 		return nil
 	})
 	if err != nil {
-		// Token and profile failures must never look like a missing .claude.json.
+		// Token and profile failures must never look like a missing
+		// .claude.json; only a signed-out account stays recognizable.
+		var signedOut *WindowsTargetSessionUnavailableError
+		if errors.As(err, &signedOut) {
+			return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %w", signedOut)
+		}
 		return nil, statePath, fmt.Errorf("read Claude Code projects as enrolled user: %v", err)
 	}
 	if parseErr != nil {

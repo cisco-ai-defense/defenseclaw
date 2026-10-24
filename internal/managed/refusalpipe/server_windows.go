@@ -45,6 +45,14 @@ func serve(ctx context.Context, pipeName string, handle func(sid string, report 
 		return err
 	}
 	slots := make(chan struct{}, serverInstances)
+	// Return only once every accepted client has been handled, so a stop
+	// that drains the audit afterwards sees its report (GAP-1253). A
+	// handler holds its slot for at most serverReadTimeout plus handle.
+	defer func() {
+		for range serverInstances {
+			slots <- struct{}{}
+		}
+	}()
 	first := true
 	for {
 		select {

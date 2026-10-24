@@ -1,0 +1,69 @@
+---
+title: Sandbox disk and telemetry problems
+description: Fix low disk space and red telemetry rows in sandbox doctor.
+keywords:
+  - sandbox disk
+  - sandbox telemetry
+---
+
+These are the disk, telemetry and MicroVM resource checks of `defenseclaw sandbox doctor`. The MicroVM entries apply to a Mac.
+
+## Low disk space
+
+**You see:** builds or starts fail for lack of space.
+
+**Cause:** harness images and, on a Mac, a prepared MicroVM disk of about 5 GB per started image.
+
+**Fix:** `defenseclaw sandbox image prune` removes superseded harness images and their MicroVM disks. `defenseclaw sandbox image rm <harness>` removes every image of a harness you no longer run. Avoid `docker system prune` on a shared machine: it also removes other users' stopped containers, networks and build cache. If space does not return on a Mac, an app that backs up or indexes your files may hold a removed disk open (`lsof +L1` lists such files).
+
+**Check:** the **Disk space** check shows free space.
+
+## Telemetry rows are red
+
+**You see:** `defenseclaw sandbox status` ends with a red **Telemetry** row, or the integration's health reads `openshell_telemetry_failed`. Or the health reads `openshell_egress_auth_failed`, with ``the sandbox egress proxy refused N request(s) with an invalid proxy credential`` in the daemon log.
+
+**Cause:** the recorder refused sandbox records (for example the telemetry runtime was down), counted and logged. For the egress case, something presented the proxy a malformed, unknown or revoked credential: a sandbox that kept an environment from before a restart, or another program on the machine.
+
+**Fix:** run `defenseclaw doctor` and `defenseclaw observability plan` ([sandbox telemetry](/docs/reference/sandboxes/telemetry/#health)). The egress case ends by itself after a minute without a refusal; if it repeats, run `defenseclaw sandbox doctor`.
+
+**Check:** the row turns green.
+
+## Not enough free disk for the first start
+
+**You see:** ``not enough free disk space for this sandbox's first start: the MicroVM driver prepares a disk of about … from its image in …``.
+
+**Cause:** the volume of `~/.local/state/openshell/vm-driver` lacks the space, and the run is refused before anything is copied.
+
+**Fix:** free space there. `defenseclaw sandbox image prune` removes superseded harness images and the MicroVM disks prepared from them.
+
+**Check:** the run starts.
+
+## A MicroVM's own disk is full
+
+**You see:** ``the sandbox's own disk is full (no space left on device): a MicroVM writes to an overlay disk …``, ``<name> cannot start: its own disk is full``, or `sandbox status` shows `Phase error: its own disk is full …`.
+
+**Cause:** a MicroVM stopped with its overlay disk full cannot start again, and its unpulled work cannot be read.
+
+**Fix:** while it runs, `defenseclaw sandbox exec NAME -- df -h /` shows the space. Free space, or pull the work, before it stops. A session whose end hits this leaves the MicroVM running: free space (`defenseclaw sandbox connect NAME --shell`), then `defenseclaw sandbox pull NAME`. Once stopped full, only `defenseclaw sandbox delete NAME` is left. Raise `overlay_disk_mib` under `[openshell.drivers.vm]` for new sandboxes (the doctor shows the value and where it is set).
+
+**Check:** `sandbox status NAME` shows no disk warning.
+
+## A MicroVM went down without a flush
+
+**You see:** ``<name>'s MicroVM went down without DefenseClaw stopping it …``, or a pull's review flags a file that ``ends in N zero bytes`` or ``is empty, which a MicroVM stopped without a flush can leave``.
+
+**Cause:** the OpenShell gateway restarted under the MicroVM (`brew services restart`, an upgrade, a crash), which stops it without flushing its disk.
+
+**Fix:** check those files and have the agent write them again before you bring the work back. For a future running MicroVM, `defenseclaw sandbox stop` requests a disk sync first; a stop after the VM went down cannot recover unsynced changes. If a disk sync fails, changes after the last successful disk sync may be lost.
+
+**Check:** the next pull shows the files complete.
+
+## MicroVM resources warn
+
+**You see:** **MicroVM resources** warns that an agent that builds code may need more.
+
+**Cause:** `vcpus`, `mem_mib` or `overlay_disk_mib` are low.
+
+**Fix:** raise them under `[openshell.drivers.vm]` in the gateway's `gateway.toml` (`/opt/homebrew/var/openshell/gateway.toml` for the Homebrew service, unless `~/.config/openshell/gateway.toml` exists), then run `brew services restart nvidia/openshell/openshell` after stopping running sandboxes.
+
+**Check:** the **MicroVM resources** row shows the new values.

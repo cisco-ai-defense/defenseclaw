@@ -45,7 +45,7 @@ var toolChainDomains = []string{
 // security-control tampering, credential abuse, sensitive data leaving
 // (data-egress), or host execution, persistence and privilege (host). Notes
 // use the "Runtime posture" column of
-// docs-site/content/docs/policies/deterministic-detection.mdx; a chain that can
+// docs-site/content/docs/reference/policy/detection.mdx; a chain that can
 // block gets toolChainNoteCanBlock unless the gateway gates it further.
 var toolChainDisplay = map[string]struct{ domain, note string }{
 	ToolChainGuardrailsOffThenEgress:               {"security-controls", toolChainNoteAlertOnly},

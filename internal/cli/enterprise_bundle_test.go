@@ -53,6 +53,7 @@ ai_discovery:
 type bundleCLIEnv struct {
 	dir, in, anchors string
 	edKey            ed25519.PrivateKey
+	secretFiles      []string
 }
 
 func newBundleCLIEnv(t *testing.T) *bundleCLIEnv {

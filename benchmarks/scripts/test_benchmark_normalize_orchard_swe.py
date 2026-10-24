@@ -128,7 +128,7 @@ class OrchardSweAdapterTests(unittest.TestCase):
 
     def test_missing_per_call_return_code_is_preserved_as_unknown(self) -> None:
         row = orchard_row(commands=(("git diff", 0), ("git status", 0)))
-        row["messages"][2]["content"] = "plain OpenHands observation without status metadata"
+        row["messages"][2]["content"] = "plain tool observation without status metadata"
         cases, manifest = adapter.normalize([row])
         window = [case for case in cases if case["surface"] == "stateful"][0]
         self.assertEqual(window["payload"]["events"][0]["outcome"], "unknown")

@@ -121,6 +121,11 @@ type Change struct {
 
 // Options describe who writes and why.
 type Options struct {
+	// GenerationFloor is a proven prior counter recovered by the lifecycle.
+	GenerationFloor uint64
+	// RecordSHA256 binds a metadata-only generation repair to approved
+	// bytes after install returns. Empty retains the ordinary writer path.
+	RecordSHA256 string
 	// Actor is ActorMigration, ActorLifecycle or a prefixed actor such as
 	// "cli:alice".
 	Actor string
@@ -155,7 +160,7 @@ type BundleRef struct {
 }
 
 func (o Options) writer() cfgtxn.Writer {
-	return cfgtxn.Writer{Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
+	return cfgtxn.Writer{GenerationFloor: o.GenerationFloor, Actor: o.Actor, LocalActor: o.LocalActor, Reason: o.Reason,
 		BundleID: o.Bundle.ID, BundleVersion: o.Bundle.Version, SignerKeyID: o.Bundle.SignerKeyID,
 		TransactionActor: o.TransactionActor, TransactionBundleID: o.TransactionBundle.ID,
 		TransactionBundleVersion: o.TransactionBundle.Version,
@@ -199,6 +204,15 @@ func ReplaceDocument(ctx context.Context, path string, raw []byte, opt Options) 
 	})
 }
 
+// PublicationOccurred reports whether a failed write replaced config.yaml
+// before it returned. A gateway may have loaded those bytes even if the
+// writer restored the file itself; a prepublication error needs no undo.
+func PublicationOccurred(err error) bool { return cfgtxn.PublicationOccurred(err) }
+
+// AfterPublication preserves the phase of a failure after a caller-owned
+// config publication. ReplaceDocument marks its own postpublication errors.
+func AfterPublication(err error) error { return cfgtxn.AfterPublication(err) }
+
 // Locked runs install with config.yaml.lock held and then records the
 // bytes now at path in config.generation.json. It is for writers that
 // install the file themselves under their own transaction, such as the
@@ -213,6 +227,10 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		return Result{}, err
 	}
 	defer txn.Close()
+	before, _, beforeExists, err := txn.Read()
+	if err != nil {
+		return Result{}, err
+	}
 	changed, err := install()
 	if err != nil {
 		return Result{}, err
@@ -222,9 +240,19 @@ func Locked(ctx context.Context, path string, opt Options, install func() (bool,
 		return Result{}, err
 	}
 	sum := cfgtxn.SHA256Hex(raw)
+	if opt.RecordSHA256 != "" && !strings.EqualFold(strings.TrimPrefix(opt.RecordSHA256, "sha256:"), sum) {
+		return Result{}, ErrConflict
+	}
 	if !changed {
 		state, _ := cfgtxn.ReadGenerationState(txn.Path())
 		return Result{Generation: state.Generation, SHA256: sum}, nil
+	}
+	// Recording bytes that were already in place binds them to the bundle
+	// through the record alone, as an equal-byte ReplaceDocument does.
+	if beforeExists && bytes.Equal(before, raw) {
+		if err := refuseUnprovenBundleBinding(txn.Path(), opt); err != nil {
+			return Result{}, err
+		}
 	}
 	state, err := txn.RecordGeneration(sum, opt.writer())
 	if err != nil {
@@ -285,6 +313,21 @@ func SHA256Hex(raw []byte) string { return cfgtxn.SHA256Hex(raw) }
 func WriteFileDurable(path string, data []byte, mode os.FileMode) error {
 	return cfgtxn.WriteFileDurable(path, data, mode)
 }
+
+// WriteFileDurablePublished is WriteFileDurable with publish run on the
+// temp file before the rename (its final owner and access), so path never
+// exists with the temp file's. A publish error leaves path as it was.
+func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publish func(tmp string) error) error {
+	return cfgtxn.WriteFileDurablePublished(path, data, mode, publish)
+}
+
+// SyncDir flushes dir so a file created or removed in it is durable (fsync
+// on POSIX; a no-op on Windows, where NTFS journals the directory).
+func SyncDir(dir string) error { return cfgtxn.SyncDir(dir) }
+
+// SyncFile flushes path, its owner and access included, after they were
+// changed on a file already written.
+func SyncFile(path string) error { return cfgtxn.SyncFile(path) }
 
 // CurrentActor returns prefix + the OS user name ("cli:alice").
 func CurrentActor(prefix string) string {
@@ -441,6 +484,49 @@ func managedRefuses(current []byte, opt Options) bool {
 	return config.StandaloneManagedSource(current)
 }
 
+// ErrUnprovenBundleBinding is returned when a bundle would be bound to
+// config bytes already in place while config.generation.json is there but
+// cannot be read: the record is the only proof of what installed those
+// bytes, and recording the bundle would replace it.
+var ErrUnprovenBundleBinding = errors.New("configwrite: cannot bind a bundle to an unreadable generation record")
+
+// RefuseUnprovenBundleBinding returns ErrUnprovenBundleBinding (wrapped,
+// with the next step) when opt binds a bundle and something is at the
+// generation record's path next to configPath that is not a readable regular
+// record: a corrupt or unreadable file, a directory, or a link or other
+// reparse point, dangling or not. Only a path that is not there at all is no
+// evidence to lose; the path is inspected without following links, since a
+// read through a dangling link reports it missing and recording the bundle
+// would then replace the link. Callers that bind installed bytes outside
+// this package (the Windows lifecycle's config step) check it before they
+// change anything.
+func RefuseUnprovenBundleBinding(configPath string, opt Options) error {
+	return refuseUnprovenBundleBinding(configPath, opt)
+}
+
+func refuseUnprovenBundleBinding(configPath string, opt Options) error {
+	if opt.Bundle.ID == "" {
+		return nil
+	}
+	path := cfgtxn.GenerationPath(configPath)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err == nil && !info.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a regular file (%s)", path, info.Mode().Type())
+	}
+	if err == nil {
+		// Read after the check: a record that vanishes in between is not
+		// proven absent either.
+		_, err = cfgtxn.ReadGenerationState(configPath)
+	}
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%w: %w; it was left as it was. Run `enterprise bundle status --json` and restore the protected generation record before retrying", ErrUnprovenBundleBinding, err)
+}
+
 type mutateFunc func(current []byte) (candidate []byte, changed []string, err error)
 
 func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) (Result, error) {
@@ -481,8 +567,21 @@ func transact(ctx context.Context, path string, opt Options, mutate mutateFunc) 
 		return Result{}, err
 	}
 	if exists && bytes.Equal(candidate, current) {
-		state, _ := cfgtxn.ReadGenerationState(txn.Path())
-		return Result{Generation: state.Generation, SHA256: sum}, nil
+		if err := refuseUnprovenBundleBinding(txn.Path(), opt); err != nil {
+			return Result{}, err
+		}
+		state, stateErr := cfgtxn.ReadGenerationState(txn.Path())
+		// A first bundle (or another bundle with equal config bytes) still
+		// changes the policy's provenance and digest scope. The lifecycle
+		// must also clear that identity when undoing to the equal-byte base.
+		// Other writers retain the ordinary unchanged-document behavior.
+		bundleTransition := (opt.Lifecycle || opt.Actor == ActorLifecycle) &&
+			(opt.Bundle.ID != "" || state.BundleID != "") &&
+			(stateErr != nil || state.ConfigSHA256 != sum || state.BundleID != opt.Bundle.ID ||
+				state.BundleVersion != opt.Bundle.Version || state.SignerKeyID != opt.Bundle.SignerKeyID)
+		if !bundleTransition {
+			return Result{Generation: state.Generation, SHA256: sum}, nil
+		}
 	}
 	if err := config.ValidateCandidate(txn.Path(), candidate); err != nil {
 		return Result{}, fmt.Errorf("configwrite: the change does not validate: %w", err)

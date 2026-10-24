@@ -157,7 +157,7 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	for _, sig := range sigs {
 		seen[sig.ID] = true
 	}
-	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "ai-sdks", "lemonade"} {
+	for _, id := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "ai-sdks", "lemonade"} {
 		if !seen[id] {
 			t.Fatalf("signature %q missing", id)
 		}
@@ -292,26 +292,6 @@ func TestHermesSignatureIncludesNativeWindowsPaths(t *testing.T) {
 	}
 }
 
-func TestOmnigentSignatureIncludesExplicitServerConfig(t *testing.T) {
-	sigs, err := LoadAISignatures()
-	if err != nil {
-		t.Fatalf("LoadAISignatures: %v", err)
-	}
-	for _, signature := range sigs {
-		if signature.ID != "omnigent" {
-			continue
-		}
-		if !stringSliceContains(signature.ConfigPaths, "$OMNIGENT_CONFIG") {
-			t.Errorf("OmniGent config paths omit OMNIGENT_CONFIG: %v", signature.ConfigPaths)
-		}
-		if !stringSliceContains(signature.EnvVarNames, "OMNIGENT_CONFIG") {
-			t.Errorf("OmniGent environment variables omit OMNIGENT_CONFIG: %v", signature.EnvVarNames)
-		}
-		return
-	}
-	t.Fatal("OmniGent signature missing")
-}
-
 func stringSliceContains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -319,37 +299,6 @@ func stringSliceContains(values []string, want string) bool {
 		}
 	}
 	return false
-}
-
-func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
-	root := t.TempDir()
-	t.Setenv("OMNIGENT_CONFIG_HOME", root)
-	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
-
-	got := service.expandCandidatePath("$OMNIGENT_CONFIG_HOME/config.yaml")
-	want := filepath.Join(root, "config.yaml")
-	if len(got) != 1 || got[0] != want {
-		t.Fatalf("expanded paths = %v, want [%s]", got, want)
-	}
-}
-
-func TestExpandCandidatePath_SkipsUnsetEnvironment(t *testing.T) {
-	previous, wasSet := os.LookupEnv("OMNIGENT_CONFIG_HOME")
-	if err := os.Unsetenv("OMNIGENT_CONFIG_HOME"); err != nil {
-		t.Fatalf("unset OMNIGENT_CONFIG_HOME: %v", err)
-	}
-	t.Cleanup(func() {
-		if wasSet {
-			_ = os.Setenv("OMNIGENT_CONFIG_HOME", previous)
-		} else {
-			_ = os.Unsetenv("OMNIGENT_CONFIG_HOME")
-		}
-	})
-	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
-
-	if got := service.expandCandidatePath("$OMNIGENT_CONFIG_HOME/config.yaml"); got != nil {
-		t.Fatalf("expanded paths = %v, want nil for unset environment", got)
-	}
 }
 
 func TestAmpSignatureIncludesNativeConfigAndAssetPaths(t *testing.T) {
@@ -3269,5 +3218,36 @@ func TestSecureClientPackageManifestFollowsSymlink(t *testing.T) {
 	}
 	if scan(false) {
 		t.Fatal("standalone scan followed a package manifest symlink")
+	}
+}
+
+func TestExpandCandidatePath_ExpandsConfiguredEnvironment(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("CODEX_HOME", root)
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
+
+	got := service.expandCandidatePath("$CODEX_HOME/config.toml")
+	want := filepath.Join(root, "config.toml")
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("expanded paths = %v, want [%s]", got, want)
+	}
+}
+
+func TestExpandCandidatePath_SkipsUnsetEnvironment(t *testing.T) {
+	previous, wasSet := os.LookupEnv("CODEX_HOME")
+	if err := os.Unsetenv("CODEX_HOME"); err != nil {
+		t.Fatalf("unset CODEX_HOME: %v", err)
+	}
+	t.Cleanup(func() {
+		if wasSet {
+			_ = os.Setenv("CODEX_HOME", previous)
+		} else {
+			_ = os.Unsetenv("CODEX_HOME")
+		}
+	})
+	service := &ContinuousDiscoveryService{opts: AIDiscoveryOptions{HomeDir: t.TempDir()}}
+
+	if got := service.expandCandidatePath("$CODEX_HOME/config.toml"); got != nil {
+		t.Fatalf("expanded paths = %v, want nil for unset environment", got)
 	}
 }

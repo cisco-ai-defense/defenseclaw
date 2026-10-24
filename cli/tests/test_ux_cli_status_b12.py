@@ -112,3 +112,79 @@ def test_registry_wizard_asks_for_a_file_path_and_hints_sync_only_when_declined(
     assert result.output.index("Sync now?") < result.output.index("defenseclaw registry sync local-mcp")
     source = next(s for s in registry_app.cfg.registries.sources if s.id == "local-mcp")
     assert source.url == os.path.expanduser("~/registry.yaml")
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_status_names_a_gateway_that_answers_health_but_not_this_account(tmp_path, monkeypatch, platform) -> None:
+    # GAP-0150: a gateway that answers /health is not hung because this
+    # account cannot read its .env.
+    import requests
+    from defenseclaw.commands import cmd_doctor
+
+    client = MagicMock()
+    public = MagicMock()
+    public.health.return_value = {"status": "ok"}
+    cfg = SimpleNamespace(data_dir=str(tmp_path), gateway=SimpleNamespace(resolved_token=lambda: ""))
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("X=1\n", encoding="utf-8")
+
+    def refuse(path, *_args, **_kwargs):
+        raise PermissionError(13, "Permission denied", path)
+
+    monkeypatch.setattr(cmd_status, "open", refuse, raising=False)
+    monkeypatch.setattr(cmd_status, "sys", SimpleNamespace(platform=platform), raising=False)
+    detail = cmd_status._status_refused_detail(cfg, client, public)
+    assert f"cannot read {dotenv}" in detail
+    if platform == "win32":
+        assert "defenseclaw doctor" in detail and "chmod" not in detail
+    else:
+        assert "chmod 600" in detail
+    client.status.assert_not_called()
+    monkeypatch.undo()
+
+    cfg.gateway = SimpleNamespace(resolved_token=lambda: "test-token")
+    monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", lambda _cfg: SimpleNamespace(trusted=True))
+    response = requests.Response()
+    response.status_code = 401
+    client.status.side_effect = requests.HTTPError(response=response)
+    assert "refused this account's gateway token (HTTP 401)" in cmd_status._status_refused_detail(cfg, client, public)
+
+    # No /health answer either: starting or hung, as before.
+    public.health.side_effect = requests.ConnectionError("refused")
+    assert cmd_status._status_refused_detail(cfg, client, public) == ""
+    client.health.assert_not_called()
+
+    roster = MagicMock()
+    roster.active_connectors.return_value = ["codex", "claudecode"]
+    roster.guardrail.effective_mode.return_value = "action"
+    roster.guardrail.effective_enabled.return_value = True
+    roster.application_protection = ApplicationProtectionConfig()
+    roster.ai_discovery = AIDiscoveryConfig()
+    roster.data_dir = ""
+    out = _capture(cmd_status._print_agents, roster, sidecar_down=True, sidecar_hung=True, sidecar_unread=True)
+    assert "2 configured; live hook state not readable by this account" in out
+    assert "not answering" not in out and "fall back" not in out
+
+
+def test_status_never_sends_the_gateway_token_to_an_unverified_listener(monkeypatch) -> None:
+    # Review fix: /health goes out without the token, and the authenticated
+    # /status only after the listener is proven to be this account's gateway.
+    from defenseclaw.commands import cmd_doctor
+    from defenseclaw.gateway import OrchestratorClient
+
+    assert not {"Authorization", "X-DC-Auth"} & set(OrchestratorClient(host="127.0.0.1", port=1)._session.headers)
+    client = MagicMock()
+    public = MagicMock()
+    public.health.return_value = {"status": "ok"}
+    cfg = SimpleNamespace(data_dir="", gateway=SimpleNamespace(resolved_token=lambda: "test-token"))
+
+    def unproven(_cfg):
+        raise OSError("listener ownership cannot be inspected")
+
+    for trust in (lambda _cfg: SimpleNamespace(trusted=False), unproven):
+        monkeypatch.setattr(cmd_doctor, "_trusted_gateway_listener", trust)
+        detail = cmd_status._status_refused_detail(cfg, client, public)
+        assert "could not verify that the listener is its gateway" in detail
+        assert "did not send the gateway token" in detail
+    client.status.assert_not_called()
+    client.health.assert_not_called()

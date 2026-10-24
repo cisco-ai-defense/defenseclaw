@@ -1,0 +1,501 @@
+---
+title: MDM kit reference
+description: Wrapper options, Setup properties, execution requirements, exit and error codes, detection, logs, upgrades, uninstall and how to simulate an MDM for the DefenseClaw MDM kit.
+keywords:
+  - DefenseClaw MDM reference
+  - ensure
+  - detection rule
+  - lifecycle exit codes
+  - mdm_ error codes
+---
+
+Reference for the [MDM contract](/docs/enterprise/mdm): the options and codes every recipe shares.
+
+## Windows staging and Setup-only runs
+
+On Windows, run PowerShell 7 as SYSTEM. The staging folder must be writable only
+by SYSTEM and Administrators, or the wrapper and Setup refuse the config. On
+client editions a new folder under `C:\` can carry write access for Authenticated
+Users and read access for Users as entries of their own, which `/inheritance:r`
+does not remove. Remove them by name; `icacls C:\Staging /T` then lists only
+`NT AUTHORITY\SYSTEM` and `BUILTIN\Administrators`:
+
+```powershell
+icacls C:\Staging /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+icacls C:\Staging /remove:g "*S-1-5-11" "*S-1-5-32-545" /T /C
+$pin = '<SHA-256 of the Setup from checksums.txt>'
+& 'C:\Program Files\PowerShell\7\pwsh.exe' -NoProfile -NonInteractive -File .\Invoke-DefenseClawEnterprise.ps1 `
+  -SetupPath C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe `
+  -Sha256 $pin `
+  -ConfigPath C:\Staging\config.yaml
+```
+
+If your MDM can run a native executable as SYSTEM but not PowerShell 7, run Setup
+directly. Setup has no pin of its own, so check its SHA-256 first, in the in-box
+Windows PowerShell 5.1:
+
+```powershell
+$pin = '<SHA-256 of the Setup from checksums.txt>'
+$setup = 'C:\Staging\DefenseClawSetup-Enterprise-Standalone-x64.exe'
+if ((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash -ne $pin) { exit 1603 }
+& $setup /ensure JSON=1 CONFIG=C:\Staging\config.yaml
+exit $LASTEXITCODE
+```
+
+## Wrapper options
+
+| Linux and macOS | Windows | Meaning |
+| --- | --- | --- |
+| `--action ensure\|status\|verify` | `-Action Ensure\|Status\|Verify` | Default `ensure`. `status` and `verify` are read-only and take no config or key. The Linux and macOS wrapper also refuses a source with them; the Windows wrapper accepts `-SetupPath`. Use the uninstall script to remove. |
+| `--source FILE` or `--source-url https://...` | `-SetupPath FILE` | The artifact. Without it, the wrapper re-applies the installed deployment. A `--source-url` must serve the file itself: the wrapper downloads with `curl` and does not follow redirects, so a GitHub release link fails (the wrapper reports HTTP 302). Host the artifact on your own HTTPS server. |
+| `--sha256 HEX` | `-Sha256 HEX` | The pin. Required with hash-pinned trust. |
+| `--trust-mode hash_pinned\|signed` | `-TrustMode HashPinned\|Authenticode` | Default hash-pinned. |
+| `--allowed-team-id ID` (macOS), `--gpg-keyring FILE` with `--signature FILE` or `--signature-url URL` (Linux) | `-AllowedSigners THUMBPRINT[,...]` | Signer pins for signed trust. |
+| `--config-file`, `--config-stdin` | `-ConfigPath`, `-ConfigFromStdin` | The config. |
+| `--secret-name` with `--secret-file` or `--secret-stdin` | `-SecretName` with `-SecretPath` or `-SecretFromStdin` | The optional key. |
+| `--format json\|jamf` | — | `jamf` wraps the result document in `<result>` for Jamf Pro. |
+| `--product-version X.Y.Z` | `-ProductVersion X.Y.Z` | Linux and macOS: refuse an artifact of any other version (`mdm_version_mismatch`) before anything is installed. Windows: only without `-SetupPath`, where it sets the version the installed CLI's `ensure` records; with `-SetupPath` it is refused (`mdm_invalid_arguments`, `1639`), because the `-Sha256` pin already ties the Setup to one release. |
+| `--https-proxy URL` | — | Proxy for the download only. The services' own proxy is set in the config ([Network proxy](/docs/enterprise/configure/configuration#network-proxy)). |
+| `--log FILE` | — | Wrapper log path. |
+| `--staging-dir DIR` | — | The root-only folder the wrapper stages the artifact and the config in. Default `/var/lib/defenseclaw-mdm` on Linux (created `root`, `0700`) and `/var/tmp` on macOS. A payload source runs its `defenseclaw-gateway` from there, so the folder must allow execution; CIS hosts mount `/tmp` and `/var/tmp` `noexec`. It must be owned by root and not writable by others (`mdm_staging_untrusted`). |
+
+Script-only MDMs that cannot pass arguments set the same values in the settings
+block at the top of `defenseclaw-enterprise.sh`: `DC_ACTION`, `DC_SOURCE`,
+`DC_SOURCE_URL`, `DC_SOURCE_SHA256`, `DC_TRUST_MODE`, `DC_ALLOWED_TEAM_IDS`,
+`DC_GPG_KEYRING`, `DC_SIGNATURE`, `DC_SIGNATURE_URL`, `DC_PRODUCT_VERSION`,
+`DC_CONFIG_FILE`, `DC_SECRET_NAME`, `DC_SECRET_FILE`, `DC_FORMAT`,
+`DC_HTTPS_PROXY`, `DC_LOG`, `DC_STAGING_DIR`. Flags override the settings block.
+The wrapper refuses any argument it does not know, including positional
+arguments, with exit `2` (`mdm_invalid_arguments`); an MDM that appends its own
+arguments needs the line its recipe gives.
+
+For Linux signed trust, `gpgv` needs a binary keyring. Convert the release key
+once and deploy the result as a root-owned file:
+
+```bash
+gpg --dearmor < defenseclaw-enterprise-release-key.asc > defenseclaw-enterprise-release-key.gpg
+```
+
+## Execution requirements
+
+- **SYSTEM or root.** On Windows an elevated administrator session also works.
+  The wrappers refuse anything else (`mdm_not_root`, `mdm_not_elevated`), and so
+  does Setup.
+- **No terminal and no inherited environment.** The Linux and macOS scripts set
+  their own `PATH` and locale and work under `env -i` with no TTY. They read
+  standard input only for `--config-stdin` or `--secret-stdin`.
+- **Windows: native x64 only.** The lifecycle refuses ARM64 and 32-bit Windows.
+  The wrapper also refuses a 32-bit or emulated PowerShell, Constrained Language
+  Mode, and .NET loader-injection variables such as `DOTNET_STARTUP_HOOKS`. A
+  32-bit agent that starts Windows PowerShell must use
+  `%SystemRoot%\Sysnative\WindowsPowerShell\v1.0\powershell.exe`.
+- **Windows: PowerShell 7**, installed from Microsoft's x64 MSI into
+  `C:\Program Files\PowerShell\7`. The lifecycle refuses a preview build or any
+  PowerShell 7 the MSI did not register. The kit's PowerShell 7 scripts
+  (`Invoke-DefenseClawEnterprise.ps1` and `New-DefenseClawIntunePackage.ps1`)
+  need 7.4 or later. Setup, `detect.ps1`, `uninstall.ps1` and the Intune scripts
+  do not need it to start.
+- **Time.** Setup gives the lifecycle 30 minutes by default (`TIMEOUTSECONDS=60`
+  to `7200`). Allow at least that long in your MDM.
+- **One run at a time.** A second run while one holds the lifecycle lock, or
+  while dpkg, rpm or the macOS installer is busy, exits `1618` (Windows) or `75`
+  (Linux, macOS). Retry later.
+- **Leftovers of an unmanaged install (Linux, macOS).** If DefenseClaw machine
+  files exist that no committed deployment owns, `ensure` refuses with
+  `unmanaged_layout_present`. Take them over once by running
+  `enterprise linux ensure` or `enterprise macos ensure` as root with
+  `--adopt-existing` and `--from-package` (or `--payload <dir>`). It backs the old
+  files up first. The wrapper does not pass `--adopt-existing`. See
+  [Troubleshooting](/docs/troubleshooting/enterprise#lifecycle-error-codes).
+
+## Setup properties
+
+`DefenseClawSetup-Enterprise-Standalone-x64.exe` takes one action and
+`NAME=value` properties. Names are case-insensitive and ignore dashes. `/quiet`
+and `/norestart` are accepted and ignored.
+
+| Action or property | Meaning |
+| --- | --- |
+| `/ensure` | Install, upgrade, repair or no-op. Use this from an MDM. |
+| `/install`, `/upgrade`, `/repair`, `/reconcile`, `/status`, `/verify`, `/uninstall` | The individual actions. `/install` also needs `MANIFEST=`, so use `/ensure` instead. |
+| `CONFIG=` | Absolute path of the config. Required for the first install. |
+| `MANIFEST=` | Optional administrator target manifest (`targets.yaml`). A first install with `enterprise.enrollment.mode: manifest` needs it. |
+| `ALLOWEDSIGNERS=` | Comma-separated SHA-256 thumbprints of accepted Authenticode signers. |
+| `JSON=1` | Print the result document on standard output. Always set it from an MDM. |
+| `NOSTART=1` | Install with the services stopped (mutating actions only). |
+| `PURGE=1` | With `/uninstall`, also remove each enrolled account's DefenseClaw data and per-user binaries. |
+| `FORCE=1` | With `/uninstall`, last resort: remove the deployment without recovering a pending transaction. |
+| `TIMEOUTSECONDS=` | Lifecycle timeout, 60 to 7200 seconds. Default 1800. |
+| `ATTESTCLAUDEEFFECTIVEPOLICY=1` | With `/repair`: record the administrator's attestation that Claude Code runs DefenseClaw's managed hooks. See [Claude Code on Windows](#claude-code-on-windows). |
+
+## Exit codes
+
+The wrappers, the removal scripts and every lifecycle action print exactly one
+**result document** on standard output and exit with a code from one of two
+families. The lifecycle prints it with `--json` or `JSON=1`; the kit's scripts
+always ask for it. The detection and Remediations scripts print one line instead.
+The document's `exit_code` field matches the process exit code. Its format is
+[`packaging/mdm/contract/lifecycle-result.schema.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/packaging/mdm/contract/lifecycle-result.schema.json)
+(schema version 2).
+
+| Result | Windows | Linux, macOS | MDM action |
+| --- | --- | --- | --- |
+| Success, or nothing to do (`"noop": true`) | `0` | `0` | Success |
+| Failed. A mutating action has already rolled back. | `1603` | `1` | Failure; read `errors[].code` |
+| Another run holds the lock, the package manager is busy | `1618` | `75` | Retry later |
+| Invalid arguments, for example a first Windows install without a config. Retrying does not help. | `1639` | `2` | Failure; fix the assignment |
+| Reboot required (reserved; nothing returns it) | `3010` | — | Soft reboot |
+
+An invalid config is `config_invalid` and exit `1` on Linux and macOS. On
+standalone Windows, Setup reports a config that is malformed, not UTF-8 or does not
+validate as `invalid_arguments` and exit `1639`, because the administrator has to fix
+the file. The installed config stays as it was.
+
+The Windows codes are Windows Installer codes, so MDMs classify them with their
+default tables. Intune's default Win32 return codes (`0`, `1707`, `3010`, `1641`,
+`1618`) already treat `1603` and `1639` as failures and retry `1618`.
+
+The standalone Setup can also refuse before the lifecycle starts. It exits `1639`
+(`invalid_arguments`) for a malformed command line: an unknown property, a `CONFIG=`
+or `MANIFEST=` path that is missing, relative or environment-expanded, `/install`
+without `CONFIG=` and `MANIFEST=`, or `TIMEOUTSECONDS` out of range. It also exits
+`1639` for a `CONFIG=` or `MANIFEST=` file that a non-administrator owns or can
+change, and names the account and the `icacls` fix. A token that is not elevated
+exits `1603`. The wrappers' own `mdm_untrusted_input` stays `1603`. With `JSON=1`,
+Setup prints the same schema-version-2 document as the lifecycle, with `errors[]`
+and `exit_code`, and the wrappers keep it. Setup scans every argument for `JSON=1`,
+so `/ensure BOGUS=1 JSON=1` still returns the JSON refusal, whatever the order.
+The Secure Client Setup returns only `0` and `1603`, with a schema-version-1
+document (an `error` field) under `JSON=1`.
+
+Codes that start with `mdm_` come from the kit's scripts. Most mean the wrapper
+stopped before the lifecycle ran; `mdm_not_installed` after an apply, and
+`mdm_secret_failed` on Windows, come after the lifecycle succeeded. In an `mdm_`
+document, `"installed": false` means "not evaluated". The Windows wrapper's
+parameters are checked by PowerShell: an unknown parameter, or starting the
+wrapper in Windows PowerShell 5.1, stops it with exit `1` before it prints a
+document. Run the `status` action to inspect the host. Every other code comes
+from the lifecycle; see [Troubleshooting](/docs/troubleshooting/enterprise#lifecycle-error-codes).
+
+| Code | Exit (Windows / Linux, macOS) | Meaning |
+| --- | --- | --- |
+| `mdm_invalid_arguments` | `1639` / `2` | A flag or setting is missing, malformed, contradictory or unknown. |
+| `mdm_wrong_platform` | — / `2` | The Linux copy ran on macOS, or the reverse. |
+| `mdm_not_root`, `mdm_not_elevated` | `1603` / `1` | Not running as root, SYSTEM or an elevated administrator. |
+| `mdm_hash_mismatch` | `1603` / `1` | The staged artifact does not match the pinned SHA-256. |
+| `mdm_signature_invalid`, `mdm_signer_not_allowed`, `mdm_signature_unsupported` | `1603` / `1` | The signature is invalid, the signer is not allowed, or signed trust does not apply to this artifact type. |
+| `mdm_untrusted_input` | `1603` / `1` | A config, key or keyring file can be changed by a non-administrator, or (`uninstall.sh`) the installed gateway is not root-owned. |
+| `mdm_untrusted_install` | `1603` / — | `uninstall.ps1` only: the installed CLI or one of its folders is not administrator-only. The wrapper reports the same condition as `mdm_lifecycle_launch_failed`, and `detect.ps1` as not detected. |
+| `mdm_input_too_large` | `1639` / `2` | Config over 1 MiB or key over 16 KiB. |
+| `mdm_staging_full` | — / `1` | The staging filesystem filled while extracting a payload. Choose a folder with more space. |
+| `mdm_cancelled` | — / `1` | The MDM stopped a Unix wrapper and its lifecycle child. Inspect the deployment before a fresh run. |
+| `mdm_payload_invalid`, `mdm_package_invalid`, `mdm_wrong_package`, `mdm_wrong_architecture`, `mdm_version_mismatch` | — / `1` | The archive or package is not a DefenseClaw enterprise artifact for this host, or not the version you pinned. |
+| `mdm_package_manager_busy` | — / `75` | dpkg, rpm or the macOS installer held its lock. Retry. |
+| `mdm_package_install_failed`, `mdm_package_remove_failed`, `mdm_package_manager_missing` | — / `1` | The package manager failed or is absent. |
+| `mdm_package_result_empty` | — / `1` | macOS: the Installer failed, the postinstall left an empty result, and no lifecycle run holds the lock. When one does, the wrapper reports `lifecycle_busy` and exits `75`. |
+| `mdm_disk_full` | — / `1` | The volume of the install root has too little free space for the package, or the installer ran out. Nothing was installed. |
+| `mdm_download_failed`, `mdm_download_unavailable` | — / `1` | The HTTPS download failed, or neither curl nor wget is installed. |
+| `mdm_not_installed` | `1603` / `1` | A read-only action, or `ensure` without an artifact, found no installed deployment. |
+| `mdm_binaries_damaged` | — / `1` | `ensure` without an artifact found an installed DefenseClaw binary missing, not executable or different from its deployment record. Run the wrapper with the package as the source. |
+| `mdm_lifecycle_no_result`, `mdm_lifecycle_launch_failed` | Setup's code or `1603` / the lifecycle's code or `1` | The lifecycle did not start or printed no result document. |
+| `mdm_secret_failed` | `1603` / `1`, `2` or `75` | Storing the key failed. On Windows the deployment applied; on Linux and macOS the config was not applied, and the exit code is the one `secret set` returned. |
+| `mdm_staging_untrusted`, `mdm_package_incomplete` | `1603` / `1` | The private staging folder, or the Intune Win32 app content (Windows), is not as expected. |
+| `mdm_staging_noexec` | — / `1` | Linux: the payload's `defenseclaw-gateway` cannot run from the staging folder because its filesystem is `noexec`; the message names the mount. Pass `--staging-dir` with a root-only folder that allows execution, or use the deb or rpm. |
+| `unsupported_architecture`, `powershell_constrained_language`, `loader_environment_present`, `powershell7_untrusted` | `1603` / — | The PowerShell 7 wrapper refused its host. The lifecycle applies the same checks. |
+
+## Stage a custom macOS rule pack
+
+If your config selects a custom pack, deliver it **before** the pkg and config
+are applied. Add a root MDM script that copies a trusted pack directory from your
+MDM payload into the administrator policy folder. Replace `PACK_SOURCE` with the
+staged payload path:
+
+```sh
+set -eu
+PACK_SOURCE=/path/to/mdm-payload/acme
+PACK_DEST=/opt/cisco/defenseclaw/etc/policies/guardrail/acme
+test -d "$PACK_SOURCE" || exit 1
+PACK_PARENT=$(dirname "$PACK_DEST")
+PACK_NAME=$(basename "$PACK_DEST")
+install -d -o root -g wheel -m 0755 "$PACK_PARENT"
+STAGE=$(mktemp -d "$PACK_PARENT/.$PACK_NAME.stage.XXXXXXXX")
+BACKUP=
+PUBLISHED=0
+cleanup() {
+  result=$?
+  trap - 0
+  if [ "$PUBLISHED" -eq 0 ] && [ -n "$BACKUP" ] &&
+     [ -e "$BACKUP/$PACK_NAME" ]; then
+    if [ -e "$PACK_DEST" ] || ! mv "$BACKUP/$PACK_NAME" "$PACK_DEST"; then
+      echo "Pack publish failed; previous pack is in $BACKUP" >&2
+      exit 1
+    fi
+  fi
+  rm -rf "$STAGE"
+  [ -z "$BACKUP" ] || rm -rf "$BACKUP"
+  exit "$result"
+}
+trap cleanup 0
+trap 'exit 1' HUP INT TERM
+cp -R "$PACK_SOURCE/." "$STAGE/"
+chown -R root:wheel "$STAGE"
+find "$STAGE" -type d -exec chmod 0755 {} +
+find "$STAGE" -type f -exec chmod 0644 {} +
+BACKUP=$(mktemp -d "$PACK_PARENT/.$PACK_NAME.backup.XXXXXXXX")
+if [ -e "$PACK_DEST" ]; then
+  mv "$PACK_DEST" "$BACKUP/$PACK_NAME"
+fi
+mv "$STAGE" "$PACK_DEST"
+PUBLISHED=1
+```
+
+Validate the pack on a reference Mac with
+`/opt/cisco/defenseclaw/bin/defenseclaw-gateway rulepack validate --dir "$PACK_DEST"`
+after that binary is installed, and put its `custom_packs pin` value in the
+config. For the first installation, validate an identical copy on a reference Mac
+before assigning the new device. The pin covers the pack's own files.
+
+```yaml
+guardrail:
+  rule_pack: acme
+  custom_packs:
+    acme: {path: /opt/cisco/defenseclaw/etc/policies/guardrail/acme, digest: "sha256:<digest>"}
+```
+
+Re-run the stage script and update the pin before applying an edited pack. The
+script stages a complete replacement before publishing it; a failed copy leaves
+the previous pack in place and returns a nonzero exit. An uninstall removes the
+policy folder, so stage the pack again before a reinstall.
+
+## Detection
+
+MDMs ask two questions. Answer each with the mechanism that fits.
+
+1. **Inventory: is the version I assigned installed?** Install rules,
+   supersedence and upgrade detection need a cheap, stable answer: the registry
+   marker, the package database or the pkg receipt.
+2. **Health: is it installed, intact and enforcing?** Compliance scripts and
+   remediations need the lifecycle's own verdict: the detection script with its
+   health option, or the `verify` action.
+
+The Windows marker is written only after a successful lifecycle run. The Linux
+package database records the package even when its post-install `ensure` failed,
+so use `detect.sh` or `verify` for the real state. A macOS pkg whose post-install
+`ensure` failed records no receipt, and finishing with `ensure --from-package`
+adds none, so install the pkg again after you fix the cause. Standard users
+cannot write any marker. Only `verify` proves that the services, protected files,
+hooks and machine policy are intact.
+
+| OS | Inventory | Health |
+| --- | --- | --- |
+| Windows | Registry value `HKLM\SOFTWARE\Cisco\DefenseClaw\Enterprise` `ProductVersion` in the 64-bit view, compared as a **version, greater than or equal to** the assigned version. Or `detect.ps1 -MinimumVersion X.Y.Z`. | `detect.ps1 -RequireHealthy`, or the installed CLI's `enterprise windows verify --profile standalone --json` exits `0`. |
+| Linux | `dpkg-query -W -f='${Status} ${Version}' defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise` (package channel only). Or `detect.sh --min-version X.Y.Z`, which covers every channel. | `detect.sh --require-healthy`, or the wrapper's `--action verify` exits `0`. |
+| macOS | `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` reports `version: X.Y.Z` (pkg channel). Or `detect.sh --min-version X.Y.Z`. | `detect.sh --require-healthy`, or the wrapper's `--action verify` exits `0`. |
+
+On Linux, DefenseClaw leaves host kernel settings as found. `status` and
+`verify` report open user namespace and ptrace routes as observed warnings,
+with incomplete security. `detect.sh --require-healthy` reports `unhealthy`
+while either route remains open. An administrator may apply optional host
+hardening with their own tools after testing affected workloads. No
+DefenseClaw lifecycle step schedules or waits for a reboot.
+
+`detect.ps1 [-MinimumVersion X.Y.Z] [-RequireHealthy] [-RequireSessionsProtected]`
+follows Intune's custom-detection rules: "detected" is exit `0` with one line on
+standard output (`DefenseClaw Enterprise <version>`) and nothing on standard
+error; "not detected" is exit `1` with the reason on standard error. It reads the
+marker through the 64-bit registry view, so it works in 32-bit Windows
+PowerShell.
+
+`detect.sh [--min-version X.Y.Z] [--require-healthy] [--require-tetragon MODE] [--require-sessions-protected] [--format exit|value|jamf]`
+asks the installed, root-owned gateway for its status instead of trusting files,
+so run it as root. A standard user gets `unknown` in `value` and `jamf` format.
+
+| Format | Exit code | Output |
+| --- | --- | --- |
+| `exit` (default) | `0` when detected, `1` otherwise | `DefenseClaw Enterprise <version>` on standard output, or the reason on standard error |
+| `value` | Always `0` (except for a failed session check) | The installed version, or `not-installed`, `outdated` (with `--min-version`), `unhealthy` (with `--require-healthy`), `unknown` (not run as root) or `busy` (a lifecycle run holds its lock; transient). For inventory attributes. |
+| `jamf` | Always `0` (same exception) | The same values inside `<result>...</result>`, for Jamf Pro extension attributes |
+
+- `--min-version` takes a dotted release such as `X.Y.Z`; a bad value exits `2`.
+  A leading `v` and build metadata (`+...`) are ignored, and a prerelease sorts
+  before its release.
+- Lock contention is `busy` (exit `75` in exit format) with or without
+  `--require-healthy`, and in `exit` format the `verify` call can report it too. It is
+  transient: retry after the apply finishes, and keep a device that reports it in the
+  group it was in. On Linux it also reports `unhealthy`
+  while dpkg lists the package half-configured or rpm lists two versions of it
+  (an install cut short by a power loss), so the MDM runs the deployment again.
+- `--require-tetragon consume|observe|enforce` (Linux only) also runs
+  `enterprise linux tetragon verify --ready-for MODE --json`; a failing check is
+  `tetragon-not-ready:<first failing check>` in `value` and `jamf` format. The
+  macOS copy refuses it with "Linux only". See
+  [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon#check-the-fleet).
+- `--require-sessions-protected` (`-RequireSessionsProtected`) fails while a
+  running agent session predates its managed hooks.
+- An unknown argument or a bad `--format` exits `2` and prints nothing on
+  standard output.
+
+When an installed agent runs without DefenseClaw hooks for one account
+(`agent_unprotected`, `hook_contract_unverified`), `verify`, and so the health
+checks above, reports a warning for that account and passes, with
+`security_complete: false`. To collect `security_complete` across a fleet, read it
+from the last lifecycle result (`%WINDIR%\Logs\DefenseClaw\last-result.json` on
+Windows; the `--json` output of `status` on Linux and macOS) with a custom
+compliance script or inventory attribute.
+
+Windows also keeps an Add/Remove Programs entry,
+`HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\CiscoDefenseClawEnterprise`
+(`DisplayName` "Cisco DefenseClaw Enterprise", `DisplayVersion`), and the
+marker's other values: `Profile`, `InstallRoot`, `StateRoot`, `TrustMode`,
+`UpdatedAt` and `DisableSelfUpdate`.
+
+### Claude Code on Windows
+
+With Claude Code enabled, a Windows host reports `security_complete: false` until
+an administrator attests that Claude Code runs DefenseClaw's managed hooks. In an
+enrolled user's own session, have Claude Code make a tool call, then from an
+elevated prompt export the gateway's record with
+`defenseclaw audit export --connector claudecode -o <file>`. Once the record shows
+that call, run Setup `/repair JSON=1 ATTESTCLAUDEEFFECTIVEPOLICY=1` (see
+[Verify the install](/docs/enterprise/install/windows#verify-the-install)). The record is
+bound to the hashes of the installed Claude Code policy and hook binary, so every
+upgrade makes it stale. Computers on the same release and Claude Code hook
+contract share the binding: check one reference computer, then push the `/repair`
+command to the others from your MDM after each upgrade.
+
+## Logs
+
+| OS | Where | What |
+| --- | --- | --- |
+| Windows | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log` | One JSON result per lifecycle run, five generations of 5 MiB |
+| Windows | `last-result.json`, `mdm-wrapper.log`, same folder | The latest full result; the wrapper's steps |
+| Windows | `DefenseClaw` event log, source "DefenseClaw Lifecycle" | `100` installed, `101` upgraded, `102` repaired, `110` uninstalled (Application log only), `111` ensure no-op, `112` ensure applied, `120` unhealthy, `130` failed, `140` busy, `150` refused |
+| Windows | Application log, source "DefenseClaw Enterprise" | A copy of each event |
+| Linux | `/var/log/defenseclaw-enterprise-mdm.log` (root, `0600`) | Install and ensure results; uninstall removes this log, so use the MDM policy log for its result |
+| Linux | `/var/lib/defenseclaw-enterprise/last-package-result.json` and `last-package-result.log` | The package's own `ensure` |
+| Linux | `journalctl -u defenseclaw-enterprise-apply.service` and `-u defenseclaw-enterprise-verify.service` | Config-change runs and the daily verify |
+| macOS | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, `0600`) | The wrapper's steps and results |
+| macOS | `lifecycle.log` and `verify.log`, same folder | Config-change runs and the daily verify |
+| macOS | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The pkg's own `ensure` |
+
+On Windows, only Administrators and members of Event Log Readers can read the
+files, because the results name other accounts; users can read both event logs,
+whose entries carry only codes. Only SYSTEM and Administrators can write the files
+and the `DefenseClaw` log. Any account can write Application-log entries under any
+source name, so detect from the `DefenseClaw` log. The services' own logs are in
+[Operations](/docs/enterprise/operate/operations#logs-and-events).
+
+## Upgrades, rollback and config changes
+
+**Upgrade.** Deliver the new artifact and its pin, and run `ensure`. It upgrades
+in place and keeps the config, key and state. In an MDM that models upgrades as
+supersedence, make the new version supersede the old one *without* uninstalling
+it first. On Linux,
+a package-manager upgrade also works: the package's post-install step runs
+`ensure`. Keep each host on one channel: a host installed from the deb or rpm
+refuses a payload-archive upgrade (`package_owned_binaries`). The first `ensure`
+of a new release migrates a `config_version: 8` config to 9 and, on Linux and
+macOS, reports the applied policy in the result's `policy` object
+([Effective policy digest](/docs/enterprise/operate/operations#effective-policy-digest-and-config-generation)).
+
+**Roll back.** Every lifecycle refuses an older release than the installed one
+unless you ask for the rollback (`downgrade_refused`; exit `1603` on Windows). The
+wrappers do not ask for it: `rpm -U` refuses an older rpm, and on Linux the
+lifecycle refuses an older deb after dpkg installs it. On macOS, create the
+root-owned marker `/opt/cisco/defenseclaw/lifecycle/allow-downgrade` before you
+deliver the older pkg; the package consumes it. See
+[Roll back](/docs/enterprise/operate/lifecycle#roll-back).
+
+**Change the config.**
+
+| OS | How |
+| --- | --- |
+| Linux, macOS | Run the wrapper again with the new config and no artifact. The lifecycle validates the new file before it replaces the installed one, then applies it. With a script-only MDM, edit the config in the script and let the MDM run it again. Replacing the installed file directly also works: the apply job (`defenseclaw-enterprise-apply.path` on Linux, `com.cisco.defenseclaw.apply` on macOS) runs `ensure` when the file changes. |
+| Windows | Run Setup again with the new file: `/ensure JSON=1 CONFIG=<new file>`, or the wrapper with `-SetupPath` and `-ConfigPath`. Use a Setup of the installed version or newer. The installed CLI cannot apply a new config on its own: its `enterprise windows ensure --config` (and the wrapper without `-SetupPath`) exits `1639`, because it has no payload to re-apply. |
+
+On a device in bundle mode (bundle trust anchors installed), both routes refuse a
+config that is not the current bundle's with `bundle_required`, and on Linux and
+macOS an edit of the installed file is reverted. Deliver a new signed bundle
+instead. On a refusal the config is not applied, but on Linux and macOS the
+wrapper runs its earlier steps first: a deb, rpm or pkg package (`--source`) is
+installed and a credential (`--secret-name`) is stored, and both stay.
+
+An MDM that detects the Windows deployment by version does not re-run it for a
+config-only change.
+[Intune on Windows](/docs/enterprise/mdm/intune/windows#6-change-the-config-upgrade-and-roll-back)
+shows a detection rule that also checks the config. More in
+[Change the config](/docs/enterprise/operate/lifecycle#change-the-config).
+
+## Uninstall
+
+The removal scripts are idempotent: on a host with nothing installed they print a
+no-op result and exit `0`.
+
+| OS | Command | Removes |
+| --- | --- | --- |
+| Linux | `uninstall.sh [--purge] [--keep-package] [--log FILE]`, or `DC_PURGE=1` and `DC_KEEP_PACKAGE=1` in its settings block | The services, DefenseClaw's hooks and machine-policy entries (administrator entries stay), config, credentials, most state and logs, and the `defenseclaw` service account, then the deb or rpm unless `--keep-package`. Your policies in `/etc/defenseclaw/policies` stay; `--purge` removes them. `--purge` also removes each enrolled account's `~/.defenseclaw` and per-user binaries (an account's own earlier install is moved to `~/.defenseclaw-backup-<UTC time>` first), the kept sandbox store and key, and the wrapper's staging folder `/var/lib/defenseclaw-mdm` once it is empty. |
+| macOS | `uninstall.sh [--purge] [--log FILE]`, or `DC_PURGE=1` in its settings block | The same, with the `_defenseclaw` account; the lifecycle forgets the pkg receipt. |
+| Windows | `uninstall.ps1 [-Purge]`, or `DefenseClawSetup-Enterprise-Standalone-x64.exe /uninstall JSON=1` with optional `PURGE=1` | The services, hooks and machine-policy entries, the machine state (config, key and state), the Add/Remove Programs entry and the marker. Purge also removes each enrolled account's `%USERPROFILE%\.defenseclaw` and per-user binaries. |
+
+Without `--purge`, if an account keeps sandboxes, the gateway's sandbox store and
+`redaction-correlation.key` stay root-owned until the next `ensure` adopts them.
+Use `--purge` for a clean image, in the first removal: the scripts run the
+lifecycle only while the DefenseClaw binaries are installed, so a purge after a
+plain removal finds nothing to run and exits `0` with that state still there.
+Install the package again and purge, or delete it by hand. To keep the machine
+state for a reinstall, run the lifecycle's own `uninstall --keep-state`; see
+[Uninstall](/docs/enterprise/operate/lifecycle#uninstall).
+
+## Simulate your MDM
+
+You can validate a recipe without a tenant by reproducing the context the MDM
+agent runs in, then checking the exit code, standard output (one result document,
+or the detection line), standard error, and the result document against the
+schema.
+
+**Linux and macOS.** MDM agents run scripts as root with a minimal environment,
+no terminal and nothing on standard input:
+
+```bash
+sudo env -i /bin/sh ./defenseclaw-enterprise.sh --action status < /dev/null > result.json 2> stderr.txt
+echo "exit=$?"
+sudo env -i /bin/sh ./detect.sh --format value < /dev/null
+```
+
+For a script-only MDM, run your edited copy of the wrapper the same way with no
+arguments.
+
+**Windows.** Intune and most Windows MDMs run as SYSTEM, often from a 32-bit
+process. Reproduce that with a scheduled task that runs the 32-bit Windows
+PowerShell (`SysWOW64`), then again with the 64-bit one (`System32`). Run this
+from an elevated PowerShell; `C:\DcSim` holds your copy of the script:
+
+```powershell
+$sim = 'C:\DcSim'
+$engine = Join-Path $env:WINDIR 'SysWOW64\WindowsPowerShell\v1.0\powershell.exe'
+$command = "/c `"`"$engine`" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $sim\detect.ps1 -MinimumVersion X.Y.Z 1>$sim\stdout.txt 2>$sim\stderr.txt`""
+$action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\cmd.exe') -Argument $command
+$principal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+Register-ScheduledTask -TaskName 'DefenseClaw MDM simulation' -Action $action -Principal $principal -Force | Out-Null
+Start-ScheduledTask -TaskName 'DefenseClaw MDM simulation'
+Start-Sleep -Seconds 3
+while ((Get-ScheduledTask -TaskName 'DefenseClaw MDM simulation').State -eq 'Running') { Start-Sleep -Seconds 2 }
+"exit=$((Get-ScheduledTaskInfo -TaskName 'DefenseClaw MDM simulation').LastTaskResult)"
+Get-Content "$sim\stdout.txt", "$sim\stderr.txt"
+Unregister-ScheduledTask -TaskName 'DefenseClaw MDM simulation' -Confirm:$false
+```
+
+Also try the failure paths your MDM must handle: a wrong pin, a config that other
+users can write, two runs at once (expect `1618` or `75` from one), and a run with
+no user signed in.
+
+The project's CI installs every standalone package this way on each pull request:
+the `.deb` on Ubuntu 24.04, the `.rpm` in RHEL 9 and RHEL 8 containers that boot
+systemd, the macOS `.pkg`, and the unsigned Windows Setup. Each lane runs install,
+a second `ensure` that must change nothing, `verify`, `status`, the detection
+script and uninstall. The scripts it uses, `scripts/test-enterprise-unix-install.sh`,
+`scripts/test-enterprise-linux-container.sh`,
+`scripts/test-enterprise-windows-install.ps1` and
+`scripts/check_enterprise_lifecycle_result.py`, also work on a disposable host of
+your own; see
+[`docs/TESTING.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/TESTING.md#enterprise-install-lanes).

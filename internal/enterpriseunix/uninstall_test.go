@@ -446,6 +446,42 @@ func TestUninstallKeepsTheBinariesWhileMachinePolicyRemains(t *testing.T) {
 	}
 }
 
+// r102 GAP-0473: an uninstall that could not remove the Claude Code drop-in
+// (a read-only folder here, an immutable file on a host) had already
+// removed the Codex requirements. The deployment stays, so the Codex entries
+// go back before its services start again.
+func TestUninstallStoppedByMachinePolicyRestoresTheRemovedPolicy(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores the read-only folder")
+	}
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "codex", "claudecode")}))
+	hook := enterprisepolicy.HookBinaryPath(h.env.Layout)
+	dropIns := h.env.P(filepath.Dir(claudeDropIn))
+	if err := os.Chmod(dropIns, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dropIns, 0o755) })
+	failed := h.run(Options{Action: ActionUninstall})
+	requireError(t, failed, codeUninstallIncomplete)
+	if !strings.Contains(h.read(claudeDropIn), hook) {
+		t.Fatal("test setup: the Claude Code drop-in was removed")
+	}
+	if !exists(h.env.P(codexRequirements)) || !strings.Contains(h.read(codexRequirements), hook) {
+		t.Fatal("the stopped uninstall left the Codex machine policy removed")
+	}
+	if _, ok := failed.MachinePolicy["codex"]; ok {
+		t.Fatalf("the result reports the restored Codex policy as removed: %+v", failed.MachinePolicy)
+	}
+	if err := os.Chmod(dropIns, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionUninstall}))
+	if exists(h.env.P(codexRequirements)) && strings.Contains(h.read(codexRequirements), hook) {
+		t.Fatal("the rerun did not remove the Codex machine policy")
+	}
+}
+
 // GAP-1444: uninstall --purge said every enrolled account lost per-user
 // binaries and a per-user gateway, also an account that never had a
 // per-user install. Each account's line now names only what was removed.

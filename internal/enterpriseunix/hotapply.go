@@ -92,6 +92,12 @@ func (l *lifecycle) hotConfigApply(ctx context.Context, record *Deployment, p *p
 	if env.selinuxModuleStale() {
 		return false
 	}
+	// A hot change keeps the sensor helper running; one that runs another
+	// Tetragon mode than the config renders must restart.
+	if l.helperModeDrift(ctx, p) {
+		l.helperModeRestart = true
+		return false
+	}
 	gateway, ok := gatewayUnitOf(env.Services.Units())
 	if !ok || !env.Services.Active(ctx, gateway) {
 		return false
@@ -183,6 +189,6 @@ func (l *lifecycle) bundlePolicyWant(ctx context.Context, receipt *enterprisebun
 			}
 		}
 	}
-	digest, _, ok := l.computePolicy(ctx)
-	return digest, ok
+	digest, _, err := l.computePolicy(ctx)
+	return digest, err == nil
 }

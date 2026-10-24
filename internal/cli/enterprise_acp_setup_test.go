@@ -17,11 +17,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/jsonc"
 )
 
-// A managed user runs the setup the enrollment reports, on a host with no
-// Python CLI: it writes the guarded editor entry into the user settings file
-// (JSONC, other entries and the leading comment kept) and a contract lock the
-// guard accepts, and a second entry of the same editor re-pins the first
-// lock, whose settings digest it changed (GAP-0254).
 // A program of that name in the current folder is refused in words, not as
 // "not found" (GAP-0734).
 func TestResolveACPExecutableNamesTheCurrentFolder(t *testing.T) {
@@ -39,6 +34,207 @@ func TestResolveACPExecutableNamesTheCurrentFolder(t *testing.T) {
 	}
 }
 
+// A changed editor command cannot be reported as a completed managed setup.
+func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	settings := filepath.Join(home, ".config", "zed", "settings.json")
+	lockPath := acpContractLockPath(dataDir, "zed", "kiro")
+	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, "zed", "kiro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	guard := filepath.Join(home, "defenseclaw-acp")
+	writeEntry := func(command string) {
+		t.Helper()
+		document := map[string]any{"agent_servers": map[string]any{
+			acpManagedEntryName("kiro"): map[string]any{
+				"command": command,
+				"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath},
+			},
+		}}
+		body, err := json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settings, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeEntry(guard)
+	digest, err := acp.ClientEntrySHA256(settings, "zed", "kiro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock := acp.RuntimeContractLock{}
+	lock.Client.ConfigPath = settings
+	lock.Client.ConfigSHA256 = acp.EntryDigestPrefix + digest
+	lock.Guard.Path = guard
+	lock.Profile, lock.Mode = "locked", "action"
+	body, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
+		t.Fatalf("unmodified setup is stale: %s", note)
+	}
+	// The reserved entry remains valid, but the editor may launch the same
+	// agent directly through another entry with its own environment.
+	foreign := map[string]any{"agent_servers": map[string]any{
+		acpManagedEntryName("kiro"): map[string]any{
+			"command": guard,
+			"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath},
+		},
+		"Kiro without guard": map[string]any{
+			"command": "kiro-cli", "args": []string{"acp"},
+			"env": map[string]string{"LD_PRELOAD": "/tmp/operator-library.so"},
+		},
+	}}
+	body, err = json.Marshal(foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
+		!strings.Contains(note, "Kiro without guard") || !strings.Contains(note, "directly") {
+		t.Fatalf("direct same-agent entry reported as setup done: done=%v note=%q", done, note)
+	}
+	for _, entry := range []map[string]any{
+		{"command": "/usr/bin/env", "args": []string{"-S", "kiro-cli", "acp", "--verbose"}},
+		{"command": "/bin/sh", "args": []string{"-c", "LD_PRELOAD=/tmp/library.so kiro-cli acp"}},
+	} {
+		foreign["agent_servers"].(map[string]any)["Kiro without guard"] = entry
+		body, err = json.Marshal(foreign)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(settings, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done ||
+			!strings.Contains(note, "Kiro without guard") {
+			t.Fatalf("wrapped same-agent entry reported as setup done: done=%v note=%q", done, note)
+		}
+	}
+	writeEntry(filepath.Join(home, "another-command"))
+	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done || note == "" {
+		t.Fatalf("changed command reported as setup done: done=%v note=%q", done, note)
+	}
+}
+
+// The setup command of an enrollment a newer one replaced is refused and
+// changes nothing: it overwrote the working entry and lock (GAP-0733).
+func TestEnterpriseACPUserSetupRefusesAReplacedEnrollment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows editor settings path is covered by the live managed run")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	stubEnterpriseACPGuardCustody(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	credential, err := acp.EnsureEnterpriseCredential(t.TempDir(), "uid:1001", "zed", "kiro", "act")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath, err := acp.PublishEnterpriseUserToken(dataDir, "zed", "kiro", credential.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEnterpriseACPUserEnrollment(tokenPath, "act", "action"); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := filepath.Join(home, "kiro-cli")
+	if err := os.WriteFile(agent, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	setup := func(profile string) error {
+		_, err := setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
+			client: "zed", agent: "kiro", profile: profile, mode: acp.ModeObserve, dataDir: dataDir, guard: guard,
+			agentBinary: agent, gatewayURL: "http://127.0.0.1:18970/api/v1/acp/evaluate",
+			rerun: func(profile string, mode acp.Mode) string {
+				return "setup --profile " + profile + " --mode " + string(mode)
+			},
+		})
+		return err
+	}
+	if err := setup("obs"); err == nil || !strings.Contains(err.Error(), "enrolled you for zed/kiro in profile act") ||
+		!strings.Contains(err.Error(), "Run: setup --profile act --mode action") {
+		t.Fatalf("the setup of a replaced enrollment: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".config", "zed", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf("a refused setup wrote the editor settings: %v", err)
+	}
+	if err := setup("act"); err != nil {
+		t.Fatalf("the setup of the current enrollment: %v", err)
+	}
+}
+
+// stubEnterpriseACPGuardCustody accepts the test binary as the guard: it is
+// not in an administrator-owned directory.
+func stubEnterpriseACPGuardCustody(t *testing.T) {
+	t.Helper()
+	old := enterpriseACPGuardCustody
+	enterpriseACPGuardCustody = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseACPGuardCustody = old })
+}
+
+// A managed setup pins only the administrator-owned guard: a copy in the home
+// is refused and nothing is written (GAP-0426).
+func TestEnterpriseACPUserSetupRefusesAGuardTheUserOwns(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows custody check is covered by the live managed run")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	dataDir := filepath.Join(home, ".defenseclaw")
+	credential, err := acp.EnsureEnterpriseCredential(t.TempDir(), "uid:1001", "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := acp.PublishEnterpriseUserToken(dataDir, "zed", "kiro", credential.Token); err != nil {
+		t.Fatal(err)
+	}
+	guard := filepath.Join(home, "my-acp-guard")
+	agent := filepath.Join(home, "kiro-cli")
+	for _, path := range []string{guard, agent} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err = setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
+		client: "zed", agent: "kiro", profile: "locked", mode: acp.ModeObserve, dataDir: dataDir, guard: guard,
+		agentBinary: agent, gatewayURL: "http://127.0.0.1:18970/api/v1/acp/evaluate",
+	})
+	if err == nil || !strings.Contains(err.Error(), "not the administrator-owned DefenseClaw ACP guard") {
+		t.Fatalf("a guard in the home was accepted: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(home, ".config", "zed", "settings.json")); !os.IsNotExist(statErr) {
+		t.Fatalf("a refused setup wrote the editor settings: %v", statErr)
+	}
+}
+
+// A managed user runs the setup the enrollment reports, on a host with no
+// Python CLI: it writes the guarded editor entry into the user settings file
+// (JSONC, other entries and the leading comment kept) and a contract lock the
+// guard accepts, and a second entry of the same editor re-pins the first
+// lock, whose settings digest it changed (GAP-0254).
 func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the Windows editor settings path is covered by the live managed run")
@@ -87,7 +283,7 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 		})
 	}
 
-	if _, err := setup("kiro", filepath.Join(t.TempDir(), "openhands")); err == nil ||
+	if _, err := setup("kiro", filepath.Join(t.TempDir(), "other-agent")); err == nil ||
 		!strings.Contains(err.Error(), "is not the Kiro executable") {
 		// A user enrolled for one agent ran another under it (GAP-0398).
 		t.Fatalf("setup accepted another program as the enrolled agent: %v", err)
@@ -206,158 +402,39 @@ func TestEnterpriseACPUserSetupWritesAnEntryAndALockTheGuardAccepts(t *testing.T
 	validate("kiro", kiroBinary, result.contractLock)
 }
 
-// A changed editor command cannot be reported as a completed managed setup.
-func TestEnterpriseACPSetupStateRejectsChangedEditorCommand(t *testing.T) {
+// A managed revoke leaves the editor entry and the contract lock, and the
+// per-user `defenseclaw acp remove` is refused on a managed computer: the
+// page names the files setup wrote, so the user can remove them (GAP-0657).
+func TestManagedACPPageNamesWhatRevokeLeaves(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the page gives the Unix paths with ~")
+	}
 	home := t.TempDir()
-	dataDir := filepath.Join(home, ".defenseclaw")
-	settings := filepath.Join(home, ".config", "zed", "settings.json")
-	lockPath := acpContractLockPath(dataDir, "zed", "kiro")
-	tokenPath, err := acp.EnterpriseUserTokenPath(dataDir, "zed", "kiro")
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+	data, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "apis", "acp-guard.mdx"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(filepath.Dir(settings), 0o700); err != nil {
-		t.Fatal(err)
+	page := strings.Join(strings.Fields(string(data)), " ")
+	tilde := func(path string) string {
+		return "`~/" + filepath.ToSlash(strings.TrimPrefix(path, home+string(filepath.Separator))) + "`"
 	}
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	guard := filepath.Join(home, "defenseclaw-acp")
-	writeEntry := func(command string) {
-		t.Helper()
-		document := map[string]any{"agent_servers": map[string]any{
-			acpManagedEntryName("kiro"): map[string]any{
-				"command": command,
-				"args":    []string{"--token-file", tokenPath, "--contract-lock", lockPath},
-			},
-		}}
-		body, err := json.Marshal(document)
+	var want []string
+	for _, client := range []string{"zed", "jetbrains"} {
+		path, err := acpClientConfigPath(client)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(settings, body, 0o600); err != nil {
-			t.Fatal(err)
+		want = append(want, tilde(path))
+	}
+	lock := acpContractLockPath(filepath.Join(home, ".defenseclaw"), "zed", "kiro")
+	want = append(want, "`"+acp.ManagedEntryName("kiro")+"`", "`"+filepath.Base(lock)+"`",
+		tilde(filepath.Join(filepath.Dir(lock), "<client>-<agent>.contract-lock.json")),
+		"but not the editor entry or the contract lock", "`defenseclaw acp remove` is a per-user command and is refused on a managed computer")
+	for _, w := range want {
+		if !strings.Contains(page, w) {
+			t.Errorf("reference/apis/acp-guard.mdx does not name %s", w)
 		}
-	}
-	writeEntry(guard)
-	digest, err := acp.ClientEntrySHA256(settings, "zed", "kiro")
-	if err != nil {
-		t.Fatal(err)
-	}
-	lock := acp.RuntimeContractLock{}
-	lock.Client.ConfigPath = settings
-	lock.Client.ConfigSHA256 = acp.EntryDigestPrefix + digest
-	lock.Guard.Path = guard
-	lock.Profile, lock.Mode = "locked", "action"
-	body, err := json.Marshal(lock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(lockPath, body, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); !done {
-		t.Fatalf("unmodified setup is stale: %s", note)
-	}
-	writeEntry(filepath.Join(home, "another-command"))
-	if done, note := enterpriseACPSetupState(dataDir, home, "zed", "kiro", "locked", "action"); done || note == "" {
-		t.Fatalf("changed command reported as setup done: done=%v note=%q", done, note)
-	}
-}
-
-// The setup command of an enrollment a newer one replaced is refused and
-// changes nothing: it overwrote the working entry and lock (GAP-0733).
-func TestEnterpriseACPUserSetupRefusesAReplacedEnrollment(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the Windows editor settings path is covered by the live managed run")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	stubEnterpriseACPGuardCustody(t)
-	dataDir := filepath.Join(home, ".defenseclaw")
-	credential, err := acp.EnsureEnterpriseCredential(t.TempDir(), "uid:1001", "zed", "kiro", "act")
-	if err != nil {
-		t.Fatal(err)
-	}
-	tokenPath, err := acp.PublishEnterpriseUserToken(dataDir, "zed", "kiro", credential.Token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := writeEnterpriseACPUserEnrollment(tokenPath, "act", "action"); err != nil {
-		t.Fatal(err)
-	}
-	guard, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
-	agent := filepath.Join(home, "kiro-cli")
-	if err := os.WriteFile(agent, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	setup := func(profile string) error {
-		_, err := setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
-			client: "zed", agent: "kiro", profile: profile, mode: acp.ModeObserve, dataDir: dataDir, guard: guard,
-			agentBinary: agent, gatewayURL: "http://127.0.0.1:18970/api/v1/acp/evaluate",
-			rerun: func(profile string, mode acp.Mode) string {
-				return "setup --profile " + profile + " --mode " + string(mode)
-			},
-		})
-		return err
-	}
-	if err := setup("obs"); err == nil || !strings.Contains(err.Error(), "enrolled you for zed/kiro in profile act") ||
-		!strings.Contains(err.Error(), "Run: setup --profile act --mode action") {
-		t.Fatalf("the setup of a replaced enrollment: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(home, ".config", "zed", "settings.json")); !os.IsNotExist(err) {
-		t.Fatalf("a refused setup wrote the editor settings: %v", err)
-	}
-	if err := setup("act"); err != nil {
-		t.Fatalf("the setup of the current enrollment: %v", err)
-	}
-}
-
-// stubEnterpriseACPGuardCustody accepts the test binary as the guard: it is
-// not in an administrator-owned directory.
-func stubEnterpriseACPGuardCustody(t *testing.T) {
-	t.Helper()
-	old := enterpriseACPGuardCustody
-	enterpriseACPGuardCustody = func(string) error { return nil }
-	t.Cleanup(func() { enterpriseACPGuardCustody = old })
-}
-
-// A managed setup pins only the administrator-owned guard: a copy in the home
-// is refused and nothing is written (GAP-0426).
-func TestEnterpriseACPUserSetupRefusesAGuardTheUserOwns(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("the Windows custody check is covered by the live managed run")
-	}
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", "")
-	dataDir := filepath.Join(home, ".defenseclaw")
-	credential, err := acp.EnsureEnterpriseCredential(t.TempDir(), "uid:1001", "zed", "kiro", "locked")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := acp.PublishEnterpriseUserToken(dataDir, "zed", "kiro", credential.Token); err != nil {
-		t.Fatal(err)
-	}
-	guard := filepath.Join(home, "my-acp-guard")
-	agent := filepath.Join(home, "kiro-cli")
-	for _, path := range []string{guard, agent} {
-		if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	_, err = setupEnterpriseACPUserFiles(enterpriseACPUserSetup{
-		client: "zed", agent: "kiro", profile: "locked", mode: acp.ModeObserve, dataDir: dataDir, guard: guard,
-		agentBinary: agent, gatewayURL: "http://127.0.0.1:18970/api/v1/acp/evaluate",
-	})
-	if err == nil || !strings.Contains(err.Error(), "not the administrator-owned DefenseClaw ACP guard") {
-		t.Fatalf("a guard in the home was accepted: %v", err)
-	}
-	if _, statErr := os.Stat(filepath.Join(home, ".config", "zed", "settings.json")); !os.IsNotExist(statErr) {
-		t.Fatalf("a refused setup wrote the editor settings: %v", statErr)
 	}
 }

@@ -232,6 +232,16 @@ type ObservabilityV8DestinationSource struct {
 	Batch               ObservabilityV8BatchSource                                   `json:"batch,omitempty" mapstructure:"batch" yaml:"batch,omitempty"`
 	NetworkSafety       ObservabilityV8NetworkSafetySource                           `json:"network_safety,omitempty" mapstructure:"network_safety" yaml:"network_safety,omitempty"`
 	SignalOverrides     map[observability.Signal]ObservabilityV8SignalOverrideSource `json:"signal_overrides,omitempty" mapstructure:"signal_overrides" yaml:"signal_overrides,omitempty"`
+	LocalStack          *ObservabilityV8LocalStackSource                             `json:"local_stack,omitempty" mapstructure:"local_stack" yaml:"local_stack,omitempty"`
+}
+
+// ObservabilityV8LocalStackSource is the record DefenseClaw's local Splunk
+// setup stores in the sink it creates: the ID of the container it started and
+// DefenseClaw's own marker. The CLI tells that sink from every other (remote)
+// Splunk destination by this record alone. Delivery never depends on it.
+type ObservabilityV8LocalStackSource struct {
+	Marker      string `json:"marker" mapstructure:"marker" yaml:"marker"`
+	ContainerID string `json:"container_id" mapstructure:"container_id" yaml:"container_id"`
 }
 
 // ObservabilityV8SecretRef is source-declared secret identity only. Resolution

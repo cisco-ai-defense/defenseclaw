@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -48,7 +49,16 @@ func TestMain(m *testing.M) {
 		serveCodexPolicyFixture()
 		os.Exit(0)
 	}
-	os.Exit(m.Run())
+	cleanupHermes, err := hermespath.IsolateHostForTests()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)
+		os.Exit(1)
+	}
+	restore := isolateTestHost()
+	code := m.Run()
+	restore()
+	cleanupHermes()
+	os.Exit(code)
 }
 
 // serveCodexPolicyFixture makes a copied native Go test image behave like the
@@ -311,7 +321,6 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 	origDir := connectorFlagDataDir
 	origConfigHome := connectorFlagConfigHome
 	origExit := connectorExit
-	origLaunchOpenHands := connectorLaunchOpenHands
 	origCheckPlatformSupport := connectorCheckPlatformSupportOnHost
 
 	cfg = &config.Config{
@@ -333,7 +342,6 @@ func withConnectorState(t *testing.T, dataDir string, conn string) func() {
 		connectorFlagDataDir = origDir
 		connectorFlagConfigHome = origConfigHome
 		connectorExit = origExit
-		connectorLaunchOpenHands = origLaunchOpenHands
 		connectorCheckPlatformSupportOnHost = origCheckPlatformSupport
 	}
 }
@@ -393,15 +401,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorPruneOrphans(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
-	case "launch":
-		launchArgs := []string{}
-		for index, value := range tail {
-			if value == "--" {
-				launchArgs = append(launchArgs, tail[index+1:]...)
-				break
-			}
-		}
-		err = runConnectorLaunch(cmd, launchArgs)
+	case "check-agent-settings":
+		err = runConnectorCheckAgentSettings(cmd, nil)
 	default:
 		t.Fatalf("unknown subcommand for harness: %s", sub)
 	}
@@ -409,69 +410,6 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		fmt.Fprintln(&errb, err.Error())
 	}
 	return out.String(), errb.String(), exitCode
-}
-
-func TestConnectorLaunchForwardsOpenHandsArgumentsWithoutControlOutput(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
-	defer withConnectorState(t, dataDir, "openhands")()
-	connectorFlagName = "openhands"
-	connectorCheckPlatformSupportOnHost = func(name string) (string, error) {
-		if name != "openhands" {
-			t.Fatalf("platform check connector = %q", name)
-		}
-		return "", nil
-	}
-	var gotArgs []string
-	connectorLaunchOpenHands = func(
-		_ context.Context,
-		opts connector.SetupOpts,
-		args []string,
-		_ io.Reader,
-		stdout io.Writer,
-		stderr io.Writer,
-	) error {
-		if opts.DataDir != dataDir || opts.APIAddr != "127.0.0.1:18970" {
-			t.Fatalf("launch opts = %+v", opts)
-		}
-		gotArgs = append([]string(nil), args...)
-		_, _ = io.WriteString(stdout, "child stdout\n")
-		_, _ = io.WriteString(stderr, "child stderr\n")
-		return nil
-	}
-
-	stdout, stderr, exitCode := runConnectorCmd(
-		t,
-		"launch",
-		"--connector",
-		"openhands",
-		"--",
-		"--headless",
-		"-t",
-		"inspect this workspace",
-	)
-	if exitCode != 0 || stdout != "child stdout\n" || stderr != "child stderr\n" {
-		t.Fatalf("launch result = code:%d stdout:%q stderr:%q", exitCode, stdout, stderr)
-	}
-	wantArgs := []string{"--headless", "-t", "inspect this workspace"}
-	if !reflect.DeepEqual(gotArgs, wantArgs) {
-		t.Fatalf("OpenHands args = %v, want %v", gotArgs, wantArgs)
-	}
-	if connectorLaunchCmd.PersistentPreRunE == nil || connectorLaunchCmd.PersistentPostRun == nil {
-		t.Fatal("connector launch must use the co-resident config-only lifecycle")
-	}
-}
-
-func TestConnectorLaunchRejectsJSONAndNonOpenHands(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
-	defer withConnectorState(t, dataDir, "codex")()
-	connectorFlagJSON = true
-	if _, stderr, _ := runConnectorCmd(t, "launch", "--connector", "codex", "--json", "--"); !strings.Contains(stderr, "does not support --json") {
-		t.Fatalf("JSON rejection stderr = %q", stderr)
-	}
-	connectorFlagJSON = false
-	if _, stderr, _ := runConnectorCmd(t, "launch", "--connector", "codex", "--"); !strings.Contains(stderr, "supports only") {
-		t.Fatalf("connector rejection stderr = %q", stderr)
-	}
 }
 
 func assertConnectorReconcileStderr(t *testing.T, name, stderr string) {
@@ -606,16 +544,12 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	if err := toml.Unmarshal(codexRegistration, &codexConfig); err != nil {
 		t.Fatalf("parse reconciled Codex config: %v", err)
 	}
-	otel, ok := codexConfig["otel"].(map[string]interface{})
-	if !ok || otel["environment"] != cfg.Environment {
-		t.Fatalf("reconciled Codex OTel environment = %#v; want %q", otel["environment"], cfg.Environment)
+	if otel, present := codexConfig["otel"]; present {
+		t.Fatalf("reconciled Codex config retains an unverified native OTLP exporter: %#v", otel)
 	}
 	otlpToken, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeCodex)
-	if err != nil || otlpToken == "" {
-		t.Fatalf("load connector-scoped OTLP token = %q, %v", otlpToken, err)
-	}
-	if !bytes.Contains(codexRegistration, []byte(otlpToken)) {
-		t.Fatal("selected registration does not contain the connector-scoped OTLP path token")
+	if err != nil || otlpToken != "" {
+		t.Fatalf("obsolete connector-scoped OTLP token = %q, %v; want revoked", otlpToken, err)
 	}
 	claudeAfter, err := os.ReadFile(claudePath)
 	if err != nil {
@@ -783,8 +717,17 @@ func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh
 			t.Fatalf("%s parse Claude settings: %v", stage, err)
 		}
 		env, ok := settings["env"].(map[string]interface{})
-		if !ok || env["OPERATOR_SENTINEL"] != "preserve" || env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
-			t.Fatalf("%s lost Claude operator or managed environment state", stage)
+		if !ok || env["OPERATOR_SENTINEL"] != "preserve" {
+			t.Fatalf("%s lost Claude operator environment state", stage)
+		}
+		if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "0" ||
+			env["OTEL_LOGS_EXPORTER"] != "none" ||
+			env["OTEL_METRICS_EXPORTER"] != "none" ||
+			env["OTEL_TRACES_EXPORTER"] != "none" {
+			t.Fatalf("%s enabled an unverified Claude native OTLP exporter: %#v", stage, env)
+		}
+		if _, endpoint := env["OTEL_EXPORTER_OTLP_ENDPOINT"]; endpoint {
+			t.Fatalf("%s restored a per-user Claude OTLP endpoint", stage)
 		}
 		if hooks, ok := settings["hooks"].(map[string]interface{}); !ok || len(hooks) == 0 {
 			t.Fatalf("%s lost Claude hook registration", stage)
@@ -802,8 +745,8 @@ func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh
 			t.Fatalf("%s parse shared runtime state: %v", stage, err)
 		}
 		if runtimeState.Version != 2 ||
-			runtimeState.FailModes["claudecode"] != "open" ||
-			runtimeState.FailModes["codex"] != "open" {
+			runtimeState.FailModes["claudecode"] != "closed" ||
+			runtimeState.FailModes["codex"] != "closed" {
 			t.Fatalf("%s lost Claude runtime state: %+v", stage, runtimeState)
 		}
 		assertMixedHookContractsCurrent(t, dataDir, home)
@@ -1170,7 +1113,7 @@ func TestConnectorReconcileCopilotSupportsOrdinaryPath(t *testing.T) {
 	}
 }
 
-func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
+func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
 	home := testenv.PrivateTempDir(t)
@@ -1227,8 +1170,8 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	closed := assertMixedHookContractsCurrent(t, dataDir, home)
-	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "open" {
-		t.Fatalf("mixed lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
+	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "closed" {
+		t.Fatalf("per-user lock modes must remain closed: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
 	}
 	codexAfter, err := os.ReadFile(codexPath)
 	if err != nil {
@@ -1276,8 +1219,8 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	assertMixedHookContractsCurrent(t, dataDir, home)
 
-	// Reverse the mixed state and repeatedly switch one connector.  Every
-	// intermediate lock must validate both registrations simultaneously.
+	// Repeatedly edit legacy open values on one connector. Every resulting
+	// lock must still validate both registrations with effective closed mode.
 	claudeMode = cfg.Guardrail.Connectors["claudecode"]
 	claudeMode.HookFailMode = "open"
 	cfg.Guardrail.Connectors["claudecode"] = claudeMode
@@ -1289,8 +1232,8 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
 	assertConnectorReconcileStderr(t, "codex", stderr)
 	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
-	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "closed" {
-		t.Fatalf("reverse mixed modes are wrong: %+v", reverse.Connectors)
+	if reverse.Connectors["claudecode"].HookFailMode != "closed" || reverse.Connectors["codex"].HookFailMode != "closed" {
+		t.Fatalf("per-user lock modes must remain closed: %+v", reverse.Connectors)
 	}
 	for _, mode := range []string{"closed", "open", "closed", "open"} {
 		claudeMode = cfg.Guardrail.Connectors["claudecode"]

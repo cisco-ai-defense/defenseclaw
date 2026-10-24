@@ -422,6 +422,9 @@ func (a *APIServer) renderSandboxVerdict(
 	switch profile.Name {
 	case "claudecode":
 		decoded := decodeClaudeCodeRequestForContext(ctx, rawBody, payload)
+		// A caller without the request body (a recovered synthetic hook)
+		// still renders the native output of the event it answers.
+		decoded.HookEventName = firstNonEmpty(decoded.HookEventName, req.HookEventName)
 		cc = &decoded
 		resp.AdditionalContext = claudeCodeAdditionalContext(
 			resp.RawAction, resp.Severity, plain, resp.WouldBlock && claudeCodeCanEnforce(decoded),

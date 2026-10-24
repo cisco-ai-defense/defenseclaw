@@ -367,6 +367,81 @@ func TestSecretWrittenDuringATransactionIsApplied(t *testing.T) {
 	}
 }
 
+// I-1317: a stop signal (systemd stopping the apply trigger) killed the run
+// mid-step with no result. The run now finishes the step it is in, rolls
+// back at the next safe point and returns its result; the previous
+// deployment runs.
+func TestInterruptedTransactionRollsBackAndReports(t *testing.T) {
+	for _, moment := range []string{"before", "while-stopping"} {
+		t.Run(moment, func(t *testing.T) {
+			h := newTestHost(t, "linux")
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			interrupt := make(chan struct{})
+			if moment == "before" {
+				close(interrupt)
+			} else {
+				once := false
+				h.env.Services = &hookedServices{fakeServices: h.services, onStop: func(name string) {
+					if name == unitGateway && !once {
+						once = true
+						close(interrupt)
+					}
+				}}
+			}
+			r := h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.1"), Interrupted: interrupt})
+			requireError(t, r, codeInterrupted)
+			// A signal before the run started changed nothing to roll back.
+			if moment != "before" && !hasWarning(r, codeRolledBack) {
+				t.Fatalf("the result does not say it rolled back: %+v", r.Warnings)
+			}
+			record, _ := h.env.loadDeployment()
+			if record == nil || record.ProductVersion != "1.0.0" {
+				t.Fatalf("the interrupted upgrade did not keep the previous deployment: %+v", record)
+			}
+			if !h.services.isActive(unitGateway) {
+				t.Fatal("the previous gateway is not running after the rollback")
+			}
+			if pending, _ := h.env.loadPending(); pending != nil {
+				t.Fatalf("the rollback left a pending transaction: %+v", pending)
+			}
+		})
+	}
+}
+
+// A SIGTERM to an uninstall that waits for the lifecycle lock (an MDM
+// timeout behind a running ensure) ends the wait: the uninstall used to take
+// the lock later and remove the deployment after it was told to stop. An
+// uninstall or reconcile that got the signal before it started changes
+// nothing either.
+func TestStopSignalEndsTheWaitForTheLockAndChangesNothing(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	held, err := h.env.acquireLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.env.LockTimeout = time.Minute
+	interrupt := make(chan struct{})
+	time.AfterFunc(100*time.Millisecond, func() { close(interrupt) })
+	started := time.Now()
+	r := h.run(Options{Action: ActionUninstall, Interrupted: interrupt})
+	held.release()
+	requireError(t, r, codeInterrupted)
+	if waited := time.Since(started); waited > 30*time.Second {
+		t.Fatalf("the uninstall waited %s for the lock after the stop signal", waited)
+	}
+	for _, action := range []string{ActionUninstall, ActionReconcile} {
+		r := h.run(Options{Action: action, Interrupted: interrupt})
+		requireError(t, r, codeInterrupted)
+	}
+	if record, _ := h.env.loadDeployment(); record == nil || record.ProductVersion != "1.0.0" {
+		t.Fatalf("an interrupted run changed the deployment: %+v", record)
+	}
+	if !h.services.isActive(unitGateway) {
+		t.Fatal("an interrupted run stopped the gateway")
+	}
+}
+
 // After a failed transaction the change is neither reverted by the rollback
 // nor lost: the apply trigger is started so it runs ensure once this run
 // ends.
@@ -394,6 +469,33 @@ func TestConfigWrittenDuringAFailedTransactionRetriggersApply(t *testing.T) {
 			}
 			if !found || !hasWarning(failed, "input_changed") {
 				t.Fatalf("the apply trigger was not started (%v): %+v", found, failed.Warnings)
+			}
+		})
+	}
+}
+
+// Configuration management pushes config.yaml while a first install starts
+// the gateway, and the install fails. The rollback removes the config.yaml
+// the install wrote; the push is the administrator's file and stays, with
+// the managed mode, for the next install (p0 GAP-1410).
+func TestConfigPushedDuringAFailedFirstInstallIsKept(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			pushed := []byte(strings.Replace(string(DefaultConfig(h.env.Layout)), "mode: observe", "mode: action", 1))
+			h.env.Services = &hookedServices{fakeServices: h.services, onStart: writeOnce(t, h, unitOf(goos, "gateway"), h.env.Layout.ConfigPath, pushed)}
+			h.healthy = false
+			failed := h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")})
+			requireError(t, failed, codeActivate)
+			if record, _ := h.env.loadDeployment(); record != nil {
+				t.Fatal("the failed first install committed a deployment")
+			}
+			data, err := os.ReadFile(h.env.P(h.env.Layout.ConfigPath))
+			if err != nil || string(data) != string(pushed) {
+				t.Fatalf("the rollback dropped the config.yaml pushed during the install (err %v)", err)
+			}
+			if mode := h.mode(h.env.Layout.ConfigPath); mode != 0o640 {
+				t.Fatalf("the kept config.yaml has mode %o", mode)
 			}
 		})
 	}

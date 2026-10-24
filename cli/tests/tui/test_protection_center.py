@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 import string
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -313,7 +314,69 @@ def test_global_changes_name_the_connectors_that_keep_their_own_setting() -> Non
     model = protection_model()
     global_row = model.scope_row("")
     assert any("codex" in line for line in mode_change_modal(model, global_row, "action").details)
-    assert any("claudecode" in line for line in hilt_change_modal(model, global_row, "HIGH+").details)
+    modal = hilt_change_modal(model, global_row, "HIGH+")
+    assert any("claudecode" in line for line in modal.details)
+    assert "global default" not in modal.title
+    assert all(not line.startswith("The global default asks") for line in modal.details)
+    assert any("global default stays" in line.lower() for line in modal.details)
+    model.postures = tuple(replace(row, hilt="MEDIUM+") if model.connector_of(row) else row
+                           for row in model.postures)
+    assert hilt_change_modal(model, model.scope_row(""), "HIGH+").actions[0].danger is True
+
+
+def test_approval_modal_names_observe_mode_and_alert_only_connectors() -> None:
+    """W4 review: a broad HILT change keeps the observe warning and says who has no prompt."""
+    model = protection_model()  # codex: action, no native prompt; claudecode: observe, native prompt
+    modal = hilt_change_modal(model, model.scope_row(""), "HIGH+")
+    details = " ".join(modal.details)
+    assert modal.title.startswith("Set human approval to HIGH+"), modal.title
+    assert "claudecode is in observe mode, so nothing waits" in details, details
+    assert "codex has no native approval prompt" in details and "raise alerts" in details, details
+    assert "own approval prompt: claudecode." in details, details
+
+    codex = hilt_change_modal(model, model.scope_row("codex"), "HIGH+")
+    assert codex.title.startswith("Set human approval") and "codex has no native approval prompt" in " ".join(
+        codex.details
+    )
+    model.postures = tuple(replace(row, mode="action") if row.scope == "claudecode" else row for row in model.postures)
+    claude = hilt_change_modal(model, model.scope_row("claudecode"), "HIGH+")
+    assert claude.title.startswith("Ask a human for HIGH+"), claude.title
+    assert not any("native approval" in line or "observe mode" in line for line in claude.details)
+    everyone = hilt_change_modal(model, model.scope_row(""), "HIGH+")
+    assert not any("observe mode" in line for line in everyone.details), everyone.details
+    off = hilt_change_modal(model, model.scope_row(""), "off")
+    assert off.title.startswith("Turn off human approval")
+    assert not any("native approval" in line for line in off.details)
+
+
+def test_copilot_approval_modal_names_delivered_action() -> None:
+    model = protection_model()
+    model.postures = (Posture("global"), Posture("copilot", mode="action"))
+    row = model.scope_row("copilot")
+
+    action = hilt_change_modal(model, row, "HIGH+")
+    action_details = " ".join(action.details)
+    assert "confirm verdicts are denied" in action_details
+    assert "raise alerts" not in action_details
+    assert action.title.startswith("Set human approval")
+
+    observe = hilt_change_modal(model, replace(row, mode="observe"), "HIGH+")
+    assert "logs only; in action mode it would" in " ".join(observe.details)
+    assert "observe mode" in " ".join(observe.details)
+    assert "confirm verdicts are denied" not in " ".join(observe.details)
+
+    secure_client = hilt_change_modal(model, row, "HIGH+", secure_client=True)
+    assert "own approval prompt: copilot" in " ".join(secure_client.details)
+    assert "confirm verdicts are denied" not in " ".join(secure_client.details)
+
+
+def test_native_approval_prompt_set_is_shared_with_the_cli() -> None:
+    from defenseclaw.commands.cmd_guardrail import _hilt_enable_notice
+    from defenseclaw.connector_contracts import has_native_approval_prompt
+
+    assert has_native_approval_prompt("Claude-Code") and not has_native_approval_prompt("codex")
+    assert "no implemented native approval prompt" in _hilt_enable_notice("codex", "HIGH")
+    assert "will prompt for approval" in _hilt_enable_notice("claude", "HIGH")
 
 
 # ---- opt-in packs -------------------------------------------------------------

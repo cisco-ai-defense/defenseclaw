@@ -604,7 +604,7 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	meta.ToolName = codexToolName(req)
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
-	meta = a.applyHookChildThreadLineage(a.claimCodexPendingThread(meta))
+	meta = a.applyHookChildThreadLineage(meta)
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
 	meta = a.beginHookExecution(meta)
 	meta = a.restoreHookSessionLifecycle(ctx, meta)
@@ -652,7 +652,6 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		a.emitToolInvocationEventV8(ctx, meta, "call", codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), "", nil)
 		a.rememberHookSessionState(ctx, meta)
 		a.rememberHookSpawnIntent(meta, codexToolName(req), hookSpawnIntentRequested, stringFromJSONRaw(codexToolArgs(req)))
-		a.noteCodexThreadCall(meta, codexToolName(req))
 		invocationID := a.rememberHookToolInvocation(meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)))
 		captureHookToolCall(ctx, meta, codexToolName(req), stringFromJSONRaw(codexToolArgs(req)), invocationID)
 	case "PostToolUse":
@@ -678,9 +677,9 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 	}
 }
 
-// emitAgentHookLLMEvent is the LLM-event emitter for the six
-// hook-only connectors (hermes, cursor,
-// copilot, openhands). It mirrors emitClaudeCodeHookLLMEvent /
+// emitAgentHookLLMEvent is the LLM-event emitter for the generic
+// hook-only connectors (hermes, cursor, copilot, ...). It mirrors
+// emitClaudeCodeHookLLMEvent /
 // emitCodexHookLLMEvent so a "give me every prompt and tool call"
 // query against the gateway log returns the same shape regardless
 // of which framework the operator is running.
@@ -714,7 +713,7 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 	meta = applyHookEventMeta(meta, req.HookEventName, req.Payload)
 	meta = a.applyCursorToolEventOutcome(meta, req.HookEventName, req.Payload)
 	meta = a.applyHookSpawnIntentLineage(meta, req.Payload)
-	meta = a.applyCopilotSubagentLineage(meta, req.Payload)
+	meta = a.applyCopilotSubagentLineage(ctx, meta, req.Payload)
 	meta.FinishReasons = append([]string(nil), codexNotifyFinishReasons(req.Payload)...)
 	meta = a.beginHookExecution(meta)
 	meta = a.restoreHookSessionLifecycle(ctx, meta)
@@ -2134,7 +2133,7 @@ func (a *APIServer) emitInferredDelegatedAgentTransitions(
 
 func connectorNeedsInferredDelegation(source string) bool {
 	switch strings.ToLower(strings.TrimSpace(source)) {
-	case "antigravity", "devin", "openhands":
+	case "antigravity", "devin":
 		return true
 	default:
 		return false

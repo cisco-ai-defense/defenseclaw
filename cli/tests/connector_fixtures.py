@@ -35,11 +35,9 @@ CONNECTORS = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
 )
 
 

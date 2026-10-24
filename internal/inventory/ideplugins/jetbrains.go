@@ -279,16 +279,14 @@ func (s *scanner) readJetBrainsPluginDir(dir string) (jetbrainsPluginXML, bool) 
 // readJetBrainsJar reads META-INF/plugin.xml from a jar. Only the central
 // directory and that one entry are read, both bounded.
 func (s *scanner) readJetBrainsJar(path string) (jetbrainsPluginXML, bool) {
-	if !s.isFile(path) {
-		return jetbrainsPluginXML{}, false
-	}
-	f, err := openNonblocking(path, s.limits.FollowSymlinks)
-	if err != nil {
+	f, ok := s.openFile(path)
+	if !ok {
 		return jetbrainsPluginXML{}, false
 	}
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > jetbrainsMaxJarBytes {
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > jetbrainsMaxJarBytes ||
+		!s.openedInPlace(f, path) {
 		return jetbrainsPluginXML{}, false
 	}
 	if !s.charge(info.Size()) || !jetbrainsJarDirectoryBounded(f, info.Size()) {

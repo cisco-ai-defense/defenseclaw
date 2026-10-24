@@ -44,10 +44,7 @@ func TestVerifyPublishedFileChecksEffectiveLinuxACL(t *testing.T) {
 	if err != nil || record == nil {
 		t.Fatalf("published record: %v %v", record, err)
 	}
-	acl, err := posixacl.ParseGetfacl("user::rw-\nuser:54321:---\ngroup::---\nmask::r--\nother::r--\n")
-	if err != nil {
-		t.Fatal(err)
-	}
+	acl := posixacl.View{Present: true, Owner: 6, Users: []posixacl.Entry{{Kind: "user", ID: 54321}}, Mask: 4, Other: 4}
 	previous := publishedACLReader
 	t.Cleanup(func() { publishedACLReader = previous })
 	publishedACLReader = fakePublishedACLReader(func(path string, mode os.FileMode) (posixacl.View, error) {
@@ -150,6 +147,59 @@ func TestVerifyRequiresThePublishedModeOfOwnedPolicyFiles(t *testing.T) {
 				if state.Connector == name && (!state.Covered || strings.Contains(strings.Join(state.Conflicts, "\n"), "mode 0")) {
 					t.Fatalf("after the repair verify passes: %v", state.Conflicts)
 				}
+			}
+		})
+	}
+}
+
+// A mode-only drift on a recorded, administrator-owned policy file is safe
+// for publication to repair. The same recovery must never adopt bytes that
+// an unprivileged writer could have changed while the file was writable.
+func TestPublishRepairsOnlyUnchangedWritablePolicyFiles(t *testing.T) {
+	withHigherSources(t)
+	for _, tc := range []struct{ goos, connector string }{
+		{"linux", "claudecode"},
+		{"linux", "codex"},
+		{"darwin", "claudecode"},
+		{"darwin", "codex"},
+	} {
+		t.Run(tc.goos+"/"+tc.connector, func(t *testing.T) {
+			opts := publishTestOptions(t)
+			opts.GOOS = tc.goos
+			if _, err := Publish(opts, []string{tc.connector}); err != nil {
+				t.Fatal(err)
+			}
+			record, err := loadRecord(opts, tc.connector)
+			if err != nil || record == nil {
+				t.Fatalf("ownership record: %v", err)
+			}
+			previous := trustedOwner
+			trustedOwner = func(uid uint32) bool { return uid == uint32(os.Getuid()) }
+			t.Cleanup(func() { trustedOwner = previous })
+			opts.SkipTrustChecks = false
+			if err := os.Chmod(record.Path, 0o666); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Publish(opts, []string{tc.connector}); err != nil {
+				t.Fatalf("publish did not repair the unchanged file: %v", err)
+			}
+			if info, err := os.Lstat(record.Path); err != nil || info.Mode().Perm() != 0o644 {
+				t.Fatalf("repair left policy mode %v: %v", info, err)
+			}
+			if result, err := VerifyAll(opts, []string{tc.connector}); err != nil || !containsString(result.MachinePolicyConnectors, tc.connector) {
+				t.Fatalf("verify after repair: %+v, %v", result, err)
+			}
+			if err := os.WriteFile(record.Path, []byte("untrusted edit"), 0o666); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(record.Path, 0o666); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Publish(opts, []string{tc.connector}); err == nil {
+				t.Fatal("publication adopted a writable file with changed bytes")
+			}
+			if info, err := os.Lstat(record.Path); err != nil || info.Mode().Perm() != 0o666 {
+				t.Fatalf("changed policy mode was altered: %v, %v", info, err)
 			}
 		})
 	}

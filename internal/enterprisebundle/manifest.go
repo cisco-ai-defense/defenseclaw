@@ -8,6 +8,7 @@ package enterprisebundle
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -77,14 +78,27 @@ type FileEntry struct {
 	Size   int64  `json:"size"`
 }
 
-// SecretRef names an enterprise credential the device must hold.
+// SecretRef names an enterprise credential the device must hold, and binds
+// its value: ValueSHA256 is CredentialValueSHA256 of the value the signer
+// gave. A device refuses a stored value with another digest
+// (secret_ref_mismatch) and an entry without one (secret_ref_unbound).
 type SecretRef struct {
-	Ref      string `json:"ref"`
-	Required bool   `json:"required"`
+	Ref         string `json:"ref"`
+	Required    bool   `json:"required"`
+	ValueSHA256 string `json:"value_sha256,omitempty"`
 }
 
 // Name is the credential name of a secret://<name> reference.
 func (r SecretRef) Name() string { return strings.TrimPrefix(r.Ref, SecretRefScheme) }
+
+// Binds reports whether the reference signs value as the credential of a
+// bundle for tenant. An entry without a digest binds no value.
+func (r SecretRef) Binds(tenant string, value []byte) bool {
+	if r.ValueSHA256 == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(r.ValueSHA256), []byte(CredentialValueSHA256(tenant, r.Name(), value))) == 1
+}
 
 // EffectivePolicy is the per-platform effective policy digest bundle sign
 // computed, with the product version that computed it (the digest covers
@@ -323,7 +337,7 @@ func (m *Manifest) Validate() error {
 	if err := checkDisplayText(m.ChangeSummary, MaxChangeSummary); err != nil {
 		return bad("change_summary", "%s", err)
 	}
-	if m.MinProductVersion != "" && !productVersionRegex.MatchString(m.MinProductVersion) {
+	if m.MinProductVersion != "" && !IsReleaseVersion(m.MinProductVersion) {
 		return bad("min_product_version", "want a version such as 1.2.3")
 	}
 	if err := m.validateFiles(); err != nil {
@@ -332,7 +346,7 @@ func (m *Manifest) Validate() error {
 	if err := m.validateSecretRefs(); err != nil {
 		return err
 	}
-	if !productVersionRegex.MatchString(m.EffectivePolicy.ProductVersion) {
+	if !IsReleaseVersion(m.EffectivePolicy.ProductVersion) {
 		return bad("effective_policy.product_version", "want a version such as 1.2.3")
 	}
 	if !knownPlatform(m.EffectivePolicy.ComputedOn) {
@@ -438,6 +452,9 @@ func (m *Manifest) validateSecretRefs() error {
 			return refuse(CodeManifestInvalid, field, "%s is listed twice", name)
 		}
 		seen[name] = true
+		if ref.ValueSHA256 != "" && !validSHA256Hex(ref.ValueSHA256) {
+			return refuse(CodeManifestInvalid, fmt.Sprintf("secret_refs[%d].value_sha256", i), "want 64 lower-case hex characters")
+		}
 	}
 	return nil
 }

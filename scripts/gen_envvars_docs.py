@@ -377,7 +377,7 @@ _DEFAULT_MDX_TEMPLATE = textwrap.dedent(
     - [`cli/defenseclaw/envvars.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/envvars.py) — Python loader.
     - [`internal/envvars/registry.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/envvars/registry.go) — Go loader.
     - [Reference → Keys](/docs/reference/keys) — credential resolution order.
-    - [Observability → Redaction](/docs/observability/redaction) — v8 profiles and display-only `DEFENSECLAW_REVEAL_PII`.
+    - [Reference → Redaction](/docs/reference/redaction) — v8 profiles and display-only `DEFENSECLAW_REVEAL_PII`.
     - [Reference → Fail modes](/docs/reference/fail-modes) — `DEFENSECLAW_FAIL_MODE` / `DEFENSECLAW_STRICT_AVAILABILITY`.
     """
 )
@@ -408,7 +408,7 @@ def update_file(path: Path, payload: str, sentinel_begin: str, sentinel_end: str
     return render_mdx()
 
 
-_TARGET_MDX = _REPO_ROOT / "docs-site" / "content" / "docs" / "reference" / "env-vars.mdx"
+_TARGET_MDX = _REPO_ROOT / "docs-site" / "content" / "docs" / "reference" / "configuration" / "env-vars.mdx"
 
 
 def write_bundled_registry() -> bool:

@@ -11,6 +11,15 @@ import (
 	"strings"
 )
 
+// platformDiscoveryResolvedPath follows every link in path.
+func platformDiscoveryResolvedPath(path string) (string, bool) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Clean(resolved), true
+}
+
 // discoveryPathThroughLink reports whether path, at or below root, resolves
 // outside root through a symbolic link, the rule a per-user scan applies to
 // its own home: a link that stays inside root is the owner's own content. A

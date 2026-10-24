@@ -1,0 +1,106 @@
+---
+title: Support matrix
+description: Which AI coding agents and DefenseClaw features work on Linux, macOS and Windows, in the open-source and enterprise editions, and what live tests verified.
+keywords:
+  - DefenseClaw support matrix
+  - DefenseClaw supported platforms
+  - DefenseClaw Windows support
+  - DefenseClaw enterprise vs open source
+  - AI coding agent support
+---
+
+import {
+  ConnectorOsMatrix,
+  EditionMatrix,
+  PlatformTable,
+  StatusLegend,
+} from '@/components/support-matrix';
+
+This page shows whether DefenseClaw protects your agent on your operating system, which features each edition has, and how the enterprise edition attaches to each agent. Every **Supported** cell was verified by a live test. Everything else is labeled.
+
+<StatusLegend />
+
+- **Open source** is the per-user install: one command, and each user runs
+  their own DefenseClaw. Start with [Install](/docs/get-started/install).
+- **Enterprise** is the managed standalone profile an administrator deploys
+  with a package or an MDM. Users can't turn it off. Start with
+  [Deploy to a fleet](/docs/enterprise/get-started). The Secure Client
+  profile is covered in
+  [Secure Client managed deployment](/docs/enterprise/install/secure-client).
+
+## Agents
+
+**Supported** means a live test on that OS verified the agent's hooks and a
+block before the tool call ran. A cell says so when the agent's telemetry to
+Grafana and Galileo wasn't verified there. Switch to **Enterprise** for the
+managed edition. Select an agent for its setup page.
+
+<ConnectorOsMatrix />
+
+The connector contract behind each row (block events, native ask, fail
+closed, sandbox tier) is on the [capability matrix](/docs/reference/apis/capability-matrix).
+Exact version ranges are on [Hook contracts](/docs/reference/apis/hook-contracts).
+
+## Features
+
+<EditionMatrix />
+
+**Not offered** in the enterprise columns means the feature is a per-user
+command. The enterprise packages don't install the per-user `defenseclaw`
+CLI, and a managed computer refuses per-user commands. The administrator
+configures the managed gateway through its
+[config](/docs/enterprise/configure/configuration) instead.
+
+## Enterprise
+
+In the enterprise edition DefenseClaw attaches to each agent in one of two
+ways:
+
+- **Machine policy.** DefenseClaw's hooks sit in the agent vendor's
+  administrator-owned policy files, which apply to every user of the
+  computer. See [Machine policy](/docs/enterprise/configure/machine-policy).
+- **Per-user.** The guardian writes DefenseClaw's hook or plugin into each
+  enrolled user's own agent config and repairs it if it changes. See
+  [Enrollment](/docs/enterprise/configure/enrollment).
+
+Enterprise managed mode supports ACP editors through enrollment: an administrator runs `defenseclaw-gateway enterprise acp enroll` for each user, editor and agent, and the user runs the setup command it reports ([ACP guard](/docs/features/acp-guard#managed-computers)). It is built and unit-tested but has not passed a live round in this release, so it is marked preview.
+
+<ConnectorOsMatrix edition="enterprise" />
+
+## Kernel sensor (Tetragon)
+
+On managed Linux, the enterprise sensor helper can use the
+[Tetragon](https://tetragon.io) that the computer already runs. **Verified**
+means the live round passed on that platform with the release build.
+**Expected, not verified** means the feature is built for it and has not yet
+passed a live round with the release build there. No platform is verified yet:
+lab rounds ran on RHEL 9 with Tetragon 1.7.1 in all three modes, and the
+verification of the release build is still open.
+
+| Platform | Tetragon 1.7.x | Tetragon 1.6.x |
+| --- | --- | --- |
+| RHEL 9, x86_64 | Consume, observe and enforce. Expected, not verified yet: the lab rounds ran with Tetragon 1.7.1, but the release build is not verified | Consume only. Expected, not verified |
+| Ubuntu 22.04 and 24.04 | Consume only. Expected, not verified | Consume only. Expected, not verified |
+| arm64 | Consume only. Expected, not verified | Consume only. Expected, not verified |
+| RHEL 8 (kernel 4.18) | Not supported. Plane C uses `cn_proc` and `fanotify` | Not supported |
+| macOS, Windows | Not available: Tetragon has no agent for either. The setting is accepted and ignored | Not available |
+
+The open-source per-user install and the Secure Client profile never connect
+to Tetragon. See [Agent segmentation, visibility and enforcement](/docs/appendix/coverage-by-layer)
+for what the kernel controls add and do not add, and
+[Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon)
+for the setup.
+
+## Platforms
+
+<PlatformTable />
+
+Intel Macs aren't supported, and Windows is x64 only. The
+full requirements are on [Install](/docs/get-started/install) and, for the
+enterprise packages, under **Requirements** on the
+[Windows](/docs/enterprise/install/windows#requirements),
+[Linux](/docs/enterprise/install/linux#requirements) and
+[macOS](/docs/enterprise/install/macos#requirements) pages.
+
+Agents that connect through the guardrail proxy aren't part of this matrix.
+Their pages are listed under [Connectors](/docs/connectors).

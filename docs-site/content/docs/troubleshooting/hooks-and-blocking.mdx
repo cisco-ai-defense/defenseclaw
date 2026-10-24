@@ -1,0 +1,92 @@
+---
+title: Agent hook and blocking problems
+description: Fix agents that are not guarded, stale or missing hooks, nothing blocked, everything blocked, rejected rule packs and approvals that never ask.
+keywords:
+  - DefenseClaw hooks not working
+  - agent not guarded
+  - guardrail not blocking
+---
+
+Fixes for hooks that do not load and for blocking that is too little or too much.
+
+## The agent is not guarded: no events, no blocks
+
+**Cause.** The agent was open when you ran `init`, so it never loaded the hooks. Or setup did not run for it.
+
+**Fix.** Quit and reopen the agent. Then `defenseclaw status` and `defenseclaw doctor`. Run `defenseclaw setup <connector>` if the agent is not listed.
+
+**Check.** Ask the agent to use a tool; a new event shows in `defenseclaw tui` within a second or two.
+
+## Doctor: `Claude Code hooks - ... settings.json not found`
+
+**Cause.** The hooks were never written, or the settings file moved.
+
+**Fix.** `defenseclaw setup claude-code --yes`, then restart Claude Code.
+
+**Check.** `defenseclaw doctor` shows the hooks row as `[PASS]`.
+
+## Doctor: stale generated script
+
+**Cause.** A hook script was rendered by an older build, or bakes a different fail mode than `config.yaml`.
+
+**Fix.** Run the command the row names, for example `defenseclaw setup codex --yes --restart` or `defenseclaw-gateway restart`.
+
+**Check.** The freshness row clears.
+
+## The gateway refuses to start because an agent changed
+
+The message reads `<connector>'s agent changed`.
+
+**Cause.** The agent's version changed after DefenseClaw recorded its hook contract.
+
+**Fix.** `defenseclaw setup <connector>`, then `defenseclaw-gateway restart`.
+
+**Check.** `defenseclaw-gateway status` shows running.
+
+## A connector was switched to observe with a warning
+
+**Cause.** `init` could not read its installed version (not probed, or the binary is outside a trusted install prefix), and action mode needs a verified version. A version with no hook contract (below the tested floor or known broken) is not switched to observe: setup, `init` and `quickstart` refuse it in both modes ([Hook contracts](/docs/reference/apis/hook-contracts#setup-time-checks)).
+
+**Fix.** Run the command the warning names: `defenseclaw setup trusted-paths add <dir>` for a binary outside a trusted prefix, or the `setup` command it prints to choose action mode again. For a version with no contract, update the agent to a supported version, then run `defenseclaw setup <connector>`. `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` overrides the check for exploratory testing only.
+
+**Check.** `defenseclaw doctor` shows `Connector compatibility` as `[PASS]`.
+
+## `Hook failed: hook exited with code 1` after uninstall
+
+**Cause.** An agent session stayed open while DefenseClaw was removed.
+
+**Fix.** Restart the session.
+
+**Check.** The message no longer appears.
+
+## Nothing is blocked
+
+**Cause.** The agent is in observe mode, or the finding is below the block level. The default blocks CRITICAL and only alerts on HIGH and MEDIUM.
+
+**Fix.** `defenseclaw guardrail status`. To enforce: `defenseclaw guardrail mode action --connector <agent>`. To change the level: `defenseclaw guardrail block-at HIGH`.
+
+**Check.** `defenseclaw alerts --limit 5` shows `decision=blocked`.
+
+## Every tool call is blocked while the gateway is down
+
+**Cause.** The hook fail mode is `closed`, the default for a new install.
+
+**Fix.** Start the gateway. If you want calls to run unchecked during an outage, `defenseclaw guardrail fail-mode open` (your decision; the audit log still records the gap).
+
+**Check.** `defenseclaw guardrail status` shows the fail mode.
+
+## A custom rule pack is rejected: `digest ... does not match`
+
+**Cause.** The pack's files changed after you pinned its digest.
+
+**Fix.** `defenseclaw guardrail validate-pack <dir>`; if the change was intended, pin the digest it prints: `defenseclaw config set guardrail.custom_packs.<name>.digest sha256:<digest>`.
+
+**Check.** `defenseclaw doctor` shows `Policy` as `[PASS]`.
+
+## Human approval never asks
+
+**Cause.** The agent has no native approval prompt. The call takes the connector's fallback right away, and the audit log records that approval was asked for.
+
+**Fix.** None needed. See which agents can ask on the [capability matrix](/docs/reference/apis/capability-matrix).
+
+**Check.** The matrix lists the agent's ask support.

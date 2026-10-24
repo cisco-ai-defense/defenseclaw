@@ -30,7 +30,7 @@ machine-policy entries are intact.
 
 The marker records the installed version, not the config. An MDM that detects
 by version does not re-run the deployment for a config-only change; see the
-Intune guide (<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune-windows/>) for a detection script that also
+Intune guide (<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/intune/windows/>) for a detection script that also
 checks the installed config's SHA-256.
 
 ## Linux
@@ -39,7 +39,7 @@ checks the installed config's SHA-256.
 | --- | --- |
 | Package database | `dpkg-query -W -f='${Status} ${Version}' defenseclaw-enterprise` or `rpm -q defenseclaw-enterprise`. This works only for the deb/rpm channel. |
 | Script | `linux/detect.sh [--min-version X.Y.Z] [--require-healthy] [--format exit\|value\|jamf]`. It asks the installed gateway (`/opt/defenseclaw/bin/defenseclaw-gateway`, which must be root-owned) for `enterprise linux status --json`, so it also covers the payload channel. Run it as root; otherwise it reports `not-installed`. |
-| Health | `detect.sh --require-healthy`, or `defenseclaw-enterprise.sh --action verify` exits 0. `--require-healthy` also reports `unhealthy` while dpkg lists the package half-configured or half-installed, or rpm lists two versions of it (an interrupted install or upgrade). |
+| Health | `detect.sh --require-healthy` requires both `verify.ok` and `verify.security_complete`, so a default host with open user namespace or ptrace routes reports `unhealthy` even when verify exits 0 with warnings. It also reports `unhealthy` while dpkg lists the package half-configured or half-installed, or rpm lists two versions of it (an interrupted install or upgrade). |
 | Last package result | `/var/lib/defenseclaw-enterprise/last-package-result.json`: the result of the package's own `ensure --from-package`. |
 | Wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` (root, 0600). |
 
@@ -49,7 +49,7 @@ checks the installed config's SHA-256.
 | --- | --- |
 | pkg receipt | `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` reports `version: X.Y.Z`. The lifecycle forgets the receipt when you uninstall. A pkg whose postinstall failed records no receipt, and `ensure --from-package` adds none: after you fix the cause, install the pkg again. |
 | Script | `macos/detect.sh`, the same options as on Linux. For Intune custom attributes use `--format value` (String), and for Jamf Pro extension attributes use `--format jamf`. |
-| Health | `detect.sh --require-healthy`, or `defenseclaw-enterprise.sh --action verify` exits 0. |
+| Health | `detect.sh --require-healthy` requires both `verify.ok` and `verify.security_complete`; a verify exit of 0 with incomplete security is unhealthy. |
 | Last package result | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json`. |
 | Wrapper log | `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` (root, 0600). |
 

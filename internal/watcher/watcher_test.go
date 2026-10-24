@@ -19,11 +19,14 @@ package watcher
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1402,6 +1405,144 @@ func TestLinkedOrUnmovableSkillReportsWhatHappened(t *testing.T) {
 	})
 }
 
+// GAP-0133: a skill on asset_policy.skill.denied whose quarantine folder the
+// gateway cannot enter stays in place and blocked. skill info said
+// quarantined: a pending quarantine record stayed and the journal did not
+// say the quarantine failed.
+func TestDeniedSkillWhoseQuarantineFailsSaysSo(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions as a non-root user")
+	}
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.AssetPolicy = config.DefaultAssetPolicy()
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "denied-skill"}}
+	capture := &watcherTestRuntime{}
+	logger.SetRuntimeV8Emitter(capture)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	path := filepath.Join(skillDir, "denied-skill")
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(path, "SKILL.md"), []byte("---\nname: denied-skill\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cfg.QuarantineDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(cfg.QuarantineDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(cfg.QuarantineDir, 0o700) })
+
+	res := w.runAdmission(context.Background(), InstallEvent{Type: InstallSkill, Name: "denied-skill", Path: path, Connector: "claudecode", Timestamp: time.Now()})
+	if res.Verdict != VerdictBlocked {
+		t.Fatalf("verdict = %q, want blocked", res.Verdict)
+	}
+	if _, err := os.Lstat(path); err != nil {
+		t.Fatalf("expected the skill to stay in place: %v", err)
+	}
+	records, err := store.ListQuarantineRecordsForConnector(context.Background(), "skill", "denied-skill", "claudecode")
+	if err != nil || len(records) != 0 {
+		t.Fatalf("quarantine records = %+v (err %v), want none for files that never moved", records, err)
+	}
+	entry, err := store.GetActionForConnector("skill", "denied-skill", "claudecode")
+	if err != nil || entry == nil || entry.Actions.Install != "block" || !strings.HasPrefix(entry.Reason, "quarantine failed: ") {
+		t.Fatalf("journal = %+v (err %v), want install block with quarantine failed", entry, err)
+	}
+	logs, _ := capture.snapshot()
+	for _, record := range logs {
+		if string(record.EventName()) == "subsystem.degraded" {
+			body, present := record.Body()
+			if !present {
+				t.Fatal("quarantine alert has no diagnostic")
+			}
+			fields, err := body.Object()
+			if err != nil || !strings.Contains(fmt.Sprint(fields["defenseclaw.health.error_summary"]), "permission denied") ||
+				record.Correlation().ConnectorID != "claudecode" {
+				t.Fatalf("quarantine alert lost its reason or connector: %v, %v", fields, err)
+			}
+			return
+		}
+	}
+	t.Fatal("quarantine failure emitted no runtime alert")
+}
+
+// A quarantine that published its copy and then failed to remove the
+// source keeps its pending record when the destination cannot be inspected
+// afterwards: the copy may still be there and the record restores it. Only
+// the record this attempt opened, for a move that failed before publishing,
+// is rolled back on an uncertain destination.
+func TestPublishedQuarantineFailureAuditDoesNotClaimSourceRemains(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	capture := &watcherTestRuntime{}
+	logger.SetRuntimeV8Emitter(capture)
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	evt := InstallEvent{Type: InstallSkill, Name: "blocked", Path: filepath.Join(skillDir, "blocked"), Connector: "claudecode"}
+	w.emitQuarantineFailure(context.Background(), evt, fmt.Errorf("%w: source cleanup failed", enforce.ErrQuarantinePublished))
+	logs, _ := capture.snapshot()
+	for _, record := range logs {
+		if record.EventName() != "legacy.audit.watcher.block" {
+			continue
+		}
+		body, ok := record.Body()
+		if !ok {
+			t.Fatal("watcher block audit has no body")
+		}
+		fields, err := body.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		message := fmt.Sprint(fields)
+		if strings.Contains(message, "stays in place") || !strings.Contains(message, "source") || !strings.Contains(message, "quarantine copy") {
+			t.Fatalf("quarantine failure audit = %q, want instructions to inspect both locations without asserting the source exists", message)
+		}
+		return
+	}
+	t.Fatal("missing watcher block audit event")
+}
+
+func TestUncertainQuarantineCopyKeepsItsRecord(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs POSIX permissions as a non-root user")
+	}
+	root := t.TempDir()
+	skillsRoot := filepath.Join(root, "skills")
+	quarantineRoot := filepath.Join(root, "quarantine")
+	source := filepath.Join(skillsRoot, "risky")
+	if err := os.MkdirAll(skillsRoot, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(source, []byte("marker\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := enforce.NewAssetQuarantinePlan(quarantineRoot, []string{skillsRoot}, "skill", "risky", "claudecode", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(skillsRoot, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(skillsRoot, 0o755) })
+	moveErr := enforce.ExecuteAssetQuarantine(plan, "rec-published")
+	if !errors.Is(moveErr, enforce.ErrQuarantinePublished) {
+		t.Fatalf("source removal failure = %v, want it marked published", moveErr)
+	}
+	if err := os.Chmod(quarantineRoot, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(quarantineRoot, 0o700) })
+	if quarantineUnmaterialized(plan, moveErr, true) {
+		t.Fatal("rolled back the record of a published copy whose destination cannot be inspected")
+	}
+	early := errors.New("enforce: copy quarantine stage: denied")
+	if quarantineUnmaterialized(plan, early, false) {
+		t.Fatal("rolled back the record of an earlier attempt whose copy may remain")
+	}
+	if !quarantineUnmaterialized(plan, early, true) {
+		t.Fatal("kept the record this attempt opened for a move that published nothing")
+	}
+}
+
 // blockingScanner waits until its scan context ends and reports that.
 type blockingScanner struct{ countingScanner }
 
@@ -1566,6 +1707,54 @@ func TestFailedQuarantineIsRecordedAndRetried(t *testing.T) {
 	}
 	if issues, err := ReadAdmissionIssues(cfg.DataDir); err != nil || len(issues) != 0 {
 		t.Fatalf("issues after the quarantine completed: %+v (err %v)", issues, err)
+	}
+}
+
+// GAP-0574: a 1.0.2 watcher that watched ~/.openhands/cache/.../skills
+// recorded the skills there it could not quarantine. After an upgrade (or a
+// setup change) that no longer watches that folder, the retry refused each
+// one as outside the watched folders and raised a HIGH alert on every
+// cycle. An issue under a folder this watcher does not watch is kept but
+// not admitted again; one under a watched folder still is.
+func TestDueIssueOutsideTheWatchedFoldersIsNotRetried(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	gone := filepath.Join(cfg.DataDir, "home", ".openhands", "cache", "skills", "public-skills", "skills", "ssh")
+	watched := filepath.Join(skillDir, "crit-k")
+	for _, dir := range []string{gone, watched, filepath.Join(skillDir, "crit-p")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	doc := admissionStateFile{Updated: time.Now().UTC(), Issues: []AdmissionIssue{
+		{Type: "skill", Name: "ssh", Path: gone, Connector: "openhands", Kind: AdmissionNotQuarantined, Since: time.Now().UTC()},
+		{Type: "skill", Name: "crit-k", Path: watched, Kind: AdmissionNotQuarantined, Since: time.Now().UTC()},
+		// A skill folder is not a plugin folder: the plugin issue is not retried.
+		{Type: "plugin", Name: "crit-p", Path: filepath.Join(skillDir, "crit-p"), Kind: AdmissionUnscanned, Since: time.Now().UTC()},
+	}}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, AdmissionStateFile), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
+	w.queueDueIssues(time.Now().Add(admissionRetryFirst))
+	w.mu.Lock()
+	pending := maps.Clone(w.pending)
+	w.mu.Unlock()
+	if _, ok := pending[gone]; ok {
+		t.Fatalf("the skill outside the watched folders was admitted again: %v", pending)
+	}
+	if _, ok := pending[watched]; !ok || len(pending) != 1 {
+		t.Fatalf("pending %v, want only the skill in the watched folder", pending)
+	}
+	issues, err := ReadAdmissionIssues(cfg.DataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(issues, func(issue AdmissionIssue) bool { return issue.Path == gone }) {
+		t.Fatalf("issues %+v: the unwatched skill's issue was dropped, want it kept", issues)
 	}
 }
 

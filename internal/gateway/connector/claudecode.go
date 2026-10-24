@@ -36,10 +36,12 @@ import (
 
 // ClaudeCodeConnector is the hook-only security surface for Claude
 // Code. It does not interpose on chat traffic; the CLI talks directly
-// to api.anthropic.com. The connector wires two telemetry/inspection
-// channels into ~/.claude/settings.json:
+// to api.anthropic.com. The connector wires hooks into
+// ~/.claude/settings.json:
 //   - claude-code-hook.sh under hooks for tool-call inspection
-//   - OTel env block for native OTLP telemetry to the gateway
+//
+// Isolated sandboxes install an OTel env block for native telemetry. Host
+// installs omit it because the exporter cannot verify a loopback port's owner.
 //
 // Implements ComponentScanner, StopScanner.
 type ClaudeCodeConnector struct {
@@ -58,8 +60,80 @@ func (c *ClaudeCodeConnector) HookAPIPath() string { return "/api/v1/claude-code
 // HookScriptNames implements HookScriptOwner (plan C2 / S2.5).
 // claudecode-only template; the generic inspect-* scripts are
 // added by WriteHookScriptsForConnector unconditionally.
-func (c *ClaudeCodeConnector) HookScriptNames(SetupOpts) []string {
+func (c *ClaudeCodeConnector) HookScriptNames(opts SetupOpts) []string {
 	return []string{"claude-code-hook.sh"}
+}
+
+// Earlier per-user versions installed an otelHeadersHelper. Keep the name and
+// ownership parser so upgrades can remove only the helper we installed.
+const (
+	claudeCodeOTLPHeadersHelperScript = "claude-code-otel-headers.sh"
+	claudeCodeOTLPHeadersHelperKey    = "otelHeadersHelper"
+)
+
+// claudeCodeOTLPHeadersHelperDataDir is the data directory of a DefenseClaw
+// otelHeadersHelper command, or false for any other command.
+func claudeCodeOTLPHeadersHelperDataDir(command string) (string, bool) {
+	path := command
+	if len(path) >= 2 && strings.HasPrefix(path, "'") && strings.HasSuffix(path, "'") {
+		path = path[1 : len(path)-1]
+		if strings.Contains(path, "'") {
+			return "", false
+		}
+	} else if path == "" || strings.IndexFunc(path, posixShellUnsafeRune) >= 0 {
+		return "", false
+	}
+	path = filepath.FromSlash(path)
+	hooks := filepath.Dir(path)
+	if !filepath.IsAbs(path) || filepath.Base(path) != claudeCodeOTLPHeadersHelperScript || filepath.Base(hooks) != "hooks" {
+		return "", false
+	}
+	return filepath.Dir(hooks), true
+}
+
+// claudeCodeOTLPHeadersHelperOwned reports that value is the helper Setup
+// wrote: the exact recorded value, or a DefenseClaw helper command when no
+// record survives.
+func claudeCodeOTLPHeadersHelperOwned(value interface{}, recorded string) bool {
+	command, ok := value.(string)
+	if !ok || command == "" {
+		return false
+	}
+	if recorded != "" && command == recorded {
+		return true
+	}
+	_, ours := claudeCodeOTLPHeadersHelperDataDir(command)
+	return ours
+}
+
+// removeClaudeCodeOTLPHeadersHelper takes back an earlier per-user helper and
+// restores the operator's original value when the backup proves ownership.
+func removeClaudeCodeOTLPHeadersHelper(settings map[string]interface{}, backup *claudeCodeBackup) {
+	if current, present := settings[claudeCodeOTLPHeadersHelperKey]; present &&
+		claudeCodeOTLPHeadersHelperOwned(current, backup.ManagedOTLPHeadersHelper) {
+		restoreClaudeCodeOTLPHeadersHelperValue(settings, *backup)
+	}
+	backup.ManagedOTLPHeadersHelper = ""
+}
+
+// restoreClaudeCodeOTLPHeadersHelper takes the helper out of settings at
+// teardown, putting back the operator's earlier value, and keeps a value the
+// operator set after Setup.
+func restoreClaudeCodeOTLPHeadersHelper(settings map[string]interface{}, backup claudeCodeBackup) {
+	if current, present := settings[claudeCodeOTLPHeadersHelperKey]; present &&
+		claudeCodeOTLPHeadersHelperOwned(current, backup.ManagedOTLPHeadersHelper) {
+		restoreClaudeCodeOTLPHeadersHelperValue(settings, backup)
+	}
+}
+
+func restoreClaudeCodeOTLPHeadersHelperValue(settings map[string]interface{}, backup claudeCodeBackup) {
+	var original interface{}
+	if backup.HadOTLPHeadersHelper && json.Unmarshal(backup.OriginalOTLPHeadersHelper, &original) == nil &&
+		!claudeCodeOTLPHeadersHelperOwned(original, "") {
+		settings[claudeCodeOTLPHeadersHelperKey] = original
+		return
+	}
+	delete(settings, claudeCodeOTLPHeadersHelperKey)
 }
 func (c *ClaudeCodeConnector) Description() string {
 	return "env var + settings.json hooks (20+ events, component scanning)"
@@ -68,16 +142,15 @@ func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
-	if err != nil {
-		return fmt.Errorf("claudecode scoped OTLP token: %w", err)
+	if err := c.checkAgentSettings(opts); err != nil {
+		return err
 	}
-	opts.OTLPPathToken = otlpToken
-	if !opts.ManagedEnterprise {
-		// Managed installs, Secure Client included, keep their setup path.
-		if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
-			return setupRefusedUnchanged{err: err}
+	if opts.sandboxNativeOTLP {
+		otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
+		if err != nil {
+			return fmt.Errorf("claudecode scoped OTLP token: %w", err)
 		}
+		opts.OTLPPathToken = otlpToken
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -101,15 +174,16 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("claudecode settings hooks: %w", err)
 	}
 
-	// patchClaudeCodeOtelEnv writes Claude Code's native OpenTelemetry
-	// env vars into ~/.claude/settings.json's env block (Claude reads
-	// these at process startup, exporting structured logs + metrics
-	// directly to the gateway's OTLP-HTTP receiver). This is the
-	// second independent observability channel after hooks: hooks
-	// give us per-tool-call structured events, OTel gives us raw
-	// model/token/timing telemetry that doesn't fit the hook bus.
+	// Host installs disable native exporters and remove endpoints that an
+	// earlier setup wrote. Native exporters cannot verify who owns a replaced
+	// loopback listener. Hook events remain available.
 	if err := c.patchClaudeCodeOtelEnv(opts); err != nil {
 		return fmt.Errorf("claudecode otel env: %w", err)
+	}
+	if !opts.sandboxNativeOTLP {
+		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeClaude); err != nil {
+			return fmt.Errorf("revoke obsolete Claude Code native OTLP credential: %w", err)
+		}
 	}
 
 	if opts.InstallCodeGuard {
@@ -118,6 +192,40 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 	}
 
+	return nil
+}
+
+// checkAgentSettings refuses, before Setup changes anything, user
+// settings Setup must not rewrite: a settings link the gateway cannot
+// inspect (GAP-1062), a settings file that does not parse, or a
+// disableAllHooks=true that switches every hook off (the user's choice,
+// GAP-1066). The registration verifier rejects the last after Setup, and
+// rolling back then removed the hooks an earlier setup installed. A gateway
+// start keeps the other connectors (GAP-0578), and `defenseclaw setup`
+// refuses before it restarts the gateway: a link out of the home left the
+// gateway stopped after the rollback (GAP-0634). Managed installs, Secure
+// Client included, keep their setup path.
+func (c *ClaudeCodeConnector) checkAgentSettings(opts SetupOpts) error {
+	if opts.ManagedEnterprise {
+		return nil
+	}
+	settingsPath := claudeCodeSettingsPath()
+	if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("Claude Code user settings %s: %w; then run: defenseclaw-gateway restart", settingsPath, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	if err := claudeCodeSettingsParseable(settingsPath); err != nil {
+		return refuseForAgentConfig(err)
+	}
+	sources, err := inspectClaudeCodeUserSources(opts)
+	if err != nil {
+		return refuseForAgentConfig(err)
+	}
+	if disabled, source, err := effectiveClaudeCodeUserHooksDisabled(sources); err == nil && disabled {
+		return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			"Claude Code %s sets disableAllHooks=true, so Claude Code runs none of its hooks and DefenseClaw is not guarding its tool calls; remove disableAllHooks (or set it to false), then run: defenseclaw-gateway restart",
+			source.label(),
+		))
+	}
 	return nil
 }
 
@@ -130,7 +238,7 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 func claudeCodeSettingsParseable(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil || len(bytes.TrimSpace(data)) == 0 {
-		return nil // a missing or unreadable file is reported by the patch
+		return nil // inspectClaudeCodeUserSources handles unreadable files
 	}
 	var settings map[string]interface{}
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -181,6 +289,11 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		}
 	}
 	if len(errs) == 0 {
+		if err := revokePerUserHookAPIToken(opts, c.Name()); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) == 0 {
 		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeClaude); err != nil {
 			errs = append(errs, fmt.Sprintf("revoke scoped OTLP token: %v", err))
 		}
@@ -200,8 +313,12 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 	var residual []string
 
-	// Check for owned hooks still present in settings.json
+	// Check for owned hooks still present in settings.json. A file that does
+	// not parse cannot show they are gone.
 	settingsPath := claudeCodeSettingsPath()
+	if err := claudeCodeSettingsParseable(settingsPath); err != nil {
+		return fmt.Errorf("verify claudecode cleanup: %w", err)
+	}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		var settings map[string]interface{}
 		if json.Unmarshal(data, &settings) == nil {
@@ -217,10 +334,20 @@ func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 					}
 				}
 			}
+			if helper, present := settings[claudeCodeOTLPHeadersHelperKey]; present {
+				recorded := ""
+				if backup, err := c.loadBackup(opts.DataDir); err == nil {
+					recorded = backup.ManagedOTLPHeadersHelper
+				}
+				if claudeCodeOTLPHeadersHelperOwned(helper, recorded) {
+					residual = append(residual, "settings.json otelHeadersHelper still runs the defenseclaw helper")
+				}
+			}
 			// Environment ownership is independent of hook shape. A missing or
 			// malformed hooks subtree must not hide uninstall residue.
 			if envMap, ok := settings["env"].(map[string]interface{}); ok {
 				managedEnv := buildClaudeCodeOtelEnv(opts)
+				legacyNativeEnv := claudeCodeNativeOtelReferenceEnv(opts)
 				exactOwnership := false
 				originalEnv := map[string]interface{}{}
 				if backup, err := c.loadBackup(opts.DataDir); err == nil && len(backup.ManagedEnv) > 0 {
@@ -235,9 +362,11 @@ func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 					if !present {
 						continue
 					}
-					owned := claudeCodeOtelValueLooksManaged(key, value, managedEnv[key])
+					owned := claudeCodeOtelValueLooksManaged(key, value, managedEnv[key]) ||
+						claudeCodeOtelValueLooksManaged(key, value, legacyNativeEnv[key])
 					if exactOwnership {
-						owned = claudeCodeOtelValueIsManaged(value, managedEnv[key])
+						owned = claudeCodeOtelValueIsManaged(value, managedEnv[key]) ||
+							claudeCodeOtelValueLooksManaged(key, value, legacyNativeEnv[key])
 						if original, existed := originalEnv[key]; existed {
 							originalString, originalIsString := original.(string)
 							valueString, valueIsString := value.(string)
@@ -246,7 +375,8 @@ func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 								// env block as pristine. Do not let that stale snapshot exempt
 								// an explicit DefenseClaw endpoint or resource marker from the
 								// teardown contract; generic operator OTel values remain exempt.
-								owned = claudeCodeOtelValueLooksManaged(key, value, managedEnv[key])
+								owned = claudeCodeOtelValueLooksManaged(key, value, managedEnv[key]) ||
+									claudeCodeOtelValueLooksManaged(key, value, legacyNativeEnv[key])
 							}
 						}
 					}
@@ -339,7 +469,7 @@ func (c *ClaudeCodeConnector) HookScripts(opts SetupOpts) []string {
 func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 	return []EnvRequirement{{
 		Scope:       EnvScopeNone,
-		Description: "Hooks and native OpenTelemetry are written to Claude Code settings; no shell environment variables are required.",
+		Description: "Hooks are written to Claude Code settings; native OpenTelemetry is configured only for isolated OpenShell images.",
 	}}
 }
 
@@ -357,8 +487,8 @@ func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 // hook returns confirm, which Claude Code surfaces as a native HITL
 // prompt.
 //
-// SupportsFailClosed=true: claude-code-hook.sh honours
-// DEFENSECLAW_FAIL_MODE=closed at the shell layer.
+// SupportsFailClosed=true: claude-code-hook.sh blocks a failed call when
+// its installed fail mode is closed.
 func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 	return HookCapability{
 		CanBlock:     true,
@@ -402,6 +532,16 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 	telemetryEndpoint := ""
 	if profile.NativeOTLP != nil {
 		telemetryEndpoint = profile.NativeOTLP.Endpoint
+	}
+	nativeSignals := []string(nil)
+	sourceModes := []string{"hook"}
+	telemetryAuth := ""
+	telemetryNote := "Host Claude Code telemetry uses hooks; native export to an unverified loopback listener is disabled."
+	if profile.NativeOTLP != nil {
+		nativeSignals = []string{"logs", "metrics"}
+		sourceModes = []string{"native", "hook"}
+		telemetryAuth = "header-token"
+		telemetryNote = "Isolated sandbox Claude Code native logs and metrics use a connector-scoped Authorization header; native traces and content capture stay disabled."
 	}
 
 	return ConnectorCapabilities{
@@ -471,21 +611,19 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 		},
 		Telemetry: TelemetryCapability{
 			NativeOTLP:       profile.NativeOTLP != nil,
-			NativeSignals:    []string{"logs", "metrics"},
+			NativeSignals:    nativeSignals,
 			HookSignals:      []string{"logs", "metrics", "traces"},
 			ConfigPaths:      []string{claudeCodeSettingsPath()},
-			AuthMode:         "header-token",
+			AuthMode:         telemetryAuth,
 			EndpointTemplate: telemetryEndpoint,
-			SourceModes:      []string{"native", "hook"},
-			Notes: []string{
-				"Claude Code exports native logs and metrics to the loopback gateway with a connector-scoped Authorization header; native traces and all documented content-bearing telemetry gates remain disabled.",
-			},
+			SourceModes:      sourceModes,
+			Notes:            []string{telemetryNote},
 		},
 	}
 }
 
-// HookProfile implements HookProfileProvider. The returned
-// NativeOTLPSpec is the declarative form of buildClaudeCodeOtelEnv:
+// HookProfile implements HookProfileProvider. Only isolated sandbox artifact
+// rendering uses NativeOTLPSpec for the env block:
 // an env-block targeting the gateway's loopback OTLP-HTTP receiver. Claude
 // Code supports standard OTLP headers, so its connector-scoped credential is
 // carried as an Authorization bearer rather than appearing in the endpoint
@@ -497,19 +635,22 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 // emit. Content capture remains explicitly disabled: downstream redaction is
 // not informed consent to collect prompts or responses at the source.
 func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
-	otlpToken := strings.TrimSpace(opts.OTLPPathToken)
-	if otlpToken == "" && opts.DataDir != "" {
-		otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeClaude)
+	var headers map[string]string
+	if opts.sandboxNativeOTLP {
+		otlpToken := strings.TrimSpace(opts.OTLPPathToken)
+		if otlpToken == "" && opts.DataDir != "" {
+			otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeClaude)
+		}
+		headers = map[string]string{
+			"x-defenseclaw-source": "claudecode",
+			"x-defenseclaw-client": "claudecode-otel/1.0",
+		}
+		if otlpToken != "" {
+			headers["authorization"] = "Bearer " + otlpToken
+		}
 	}
-	headers := map[string]string{
-		"x-defenseclaw-source": "claudecode",
-		"x-defenseclaw-client": "claudecode-otel/1.0",
-	}
-	if otlpToken != "" {
-		headers["authorization"] = "Bearer " + otlpToken
-	}
-	failMode := "open"
-	if strings.TrimSpace(opts.HookFailMode) != "" {
+	failMode := defaultHookFailMode
+	if opts.ManagedEnterprise && strings.TrimSpace(opts.HookFailMode) != "" {
 		failMode = normalizeHookFailMode(opts.HookFailMode)
 	}
 	extra := map[string]string{
@@ -533,11 +674,9 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 		"OTEL_LOG_TOOL_CONTENT":   "0",
 		"OTEL_LOG_RAW_API_BODIES": "0",
 	}
-	profile := HookProfile{
-		Name:                "claudecode",
-		Capabilities:        c.HookCapabilities(opts),
-		SupportsTraceparent: true,
-		NativeOTLP: &NativeOTLPSpec{
+	var nativeOTLP *NativeOTLPSpec
+	if opts.sandboxNativeOTLP {
+		nativeOTLP = &NativeOTLPSpec{
 			Kind:               NativeOTLPEnvBlock,
 			Endpoint:           "http://" + opts.APIAddr,
 			Protocol:           "http/json",
@@ -548,7 +687,13 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			ResourceAttributes: map[string]string{"service.name": "claudecode", "defenseclaw.connector": "claudecode"},
 			ExtraEnv:           extra,
 			LogUserPrompts:     false,
-		},
+		}
+	}
+	profile := HookProfile{
+		Name:                "claudecode",
+		Capabilities:        c.HookCapabilities(opts),
+		SupportsTraceparent: true,
+		NativeOTLP:          nativeOTLP,
 		// Profile-driven callbacks are the canonical shape for
 		// claudecode hook decode / verdict mapping / response. The
 		// gateway profile-runtime registry uses these pure callbacks
@@ -655,6 +800,14 @@ type claudeCodeBackup struct {
 	// restores their pristine values only while they remain absent; an operator
 	// value added after Setup takes ownership and is preserved.
 	ManagedAbsentEnv []string `json:"managed_absent_env,omitempty"`
+
+	// The otelHeadersHelper Setup writes on a per-user Linux or macOS
+	// install (GAP-1421): the operator's earlier value, captured once, and
+	// the exact value written.
+	OTLPHeadersHelperCaptured bool            `json:"otlp_headers_helper_captured,omitempty"`
+	HadOTLPHeadersHelper      bool            `json:"had_otlp_headers_helper,omitempty"`
+	OriginalOTLPHeadersHelper json.RawMessage `json:"original_otlp_headers_helper,omitempty"`
+	ManagedOTLPHeadersHelper  string          `json:"managed_otlp_headers_helper,omitempty"`
 }
 
 func (c *ClaudeCodeConnector) saveBackup(dataDir string, backup claudeCodeBackup) error {
@@ -1376,14 +1529,6 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// spaces. Older shell-form commands are still recognized during migration.
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
-	if !opts.ManagedEnterprise {
-		// Refuse a link the gateway cannot inspect before any hook is
-		// written, so a refusal never leaves fail-closed hooks behind (GAP-1062).
-		if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
-			return fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-		}
-	}
-
 	return withFileLock(settingsPath, func() error {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
 			return fmt.Errorf("capture claude settings backup: %w", err)
@@ -1580,6 +1725,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 // list in sync with the CLAUDE_CODE_* / OTEL_* vars Claude reads.
 var claudeCodeOtelEnvKeys = []string{
 	"CLAUDE_CODE_ENABLE_TELEMETRY",
+	"CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS",
 	"DEFENSECLAW_FAIL_MODE",
 	"OTEL_METRICS_EXPORTER",
 	"OTEL_LOGS_EXPORTER",
@@ -1618,6 +1764,24 @@ var claudeCodeOtelEnvKeys = []string{
 // the source. Teardown restores unchanged managed values and preserves operator
 // edits made afterward.
 func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
+	if !opts.sandboxNativeOTLP {
+		failMode := defaultHookFailMode
+		if opts.ManagedEnterprise && strings.TrimSpace(opts.HookFailMode) != "" {
+			failMode = normalizeHookFailMode(opts.HookFailMode)
+		}
+		return map[string]string{
+			"CLAUDE_CODE_ENABLE_TELEMETRY": "0",
+			"DEFENSECLAW_FAIL_MODE":        failMode,
+			"OTEL_LOGS_EXPORTER":           "none",
+			"OTEL_METRICS_EXPORTER":        "none",
+			"OTEL_TRACES_EXPORTER":         "none",
+			"OTEL_LOG_USER_PROMPTS":        "0",
+			"OTEL_LOG_ASSISTANT_RESPONSES": "0",
+			"OTEL_LOG_TOOL_DETAILS":        "0",
+			"OTEL_LOG_TOOL_CONTENT":        "0",
+			"OTEL_LOG_RAW_API_BODIES":      "0",
+		}
+	}
 	// Spec-driven: render from the connector's declarative
 	// NativeOTLPSpec via spec.EnvBlock(). Returning an empty map on
 	// validation error is the safest fail-closed behaviour for
@@ -1636,113 +1800,18 @@ func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	return env
 }
 
+// Prior host profiles wrote native OTLP settings. Only cleanup and residue
+// checks use this reference; host setup never renders it to disk.
+func claudeCodeNativeOtelReferenceEnv(opts SetupOpts) map[string]string {
+	opts.ManagedEnterprise = true
+	opts.sandboxNativeOTLP = true
+	return buildClaudeCodeOtelEnv(opts)
+}
+
 func applyClaudeCodeManagedOtelEnv(existing map[string]interface{}, managed map[string]string) {
 	for key, value := range managed {
 		existing[key] = value
 	}
-}
-
-// ClaudeCodeNativeOTLPProbe is one persisted exporter signal exactly as a new
-// Claude Code process will consume it from settings.json. Headers remain in
-// memory and callers must never include them in errors or logs.
-type ClaudeCodeNativeOTLPProbe struct {
-	Signal   NativeOTLPSignal
-	Endpoint string
-	Headers  http.Header
-}
-
-// LoadClaudeCodeNativeOTLPProbes reads the persisted Claude Code logs and
-// metrics exporter contract without URI-decoding header components. Token
-// rotation uses these values for side-effect-free authenticated probes, which
-// prevents a synthetic token-file request from masking a broken managed
-// settings credential.
-func LoadClaudeCodeNativeOTLPProbes() ([]ClaudeCodeNativeOTLPProbe, error) {
-	settingsPath, err := claudeCodeUserSettingsReadPath(claudeCodeSettingsPath())
-	if err != nil {
-		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
-	}
-	data, exists, err := readStableClaudeCodeSettingsFile(settingsPath)
-	if err != nil {
-		return nil, fmt.Errorf("inspect Claude Code native OTLP settings: %w", err)
-	}
-	if !exists {
-		return nil, fmt.Errorf("Claude Code native OTLP settings are missing") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-	}
-	settings, err := decodeClaudeCodeSettings(data, "native OTLP settings")
-	if err != nil {
-		return nil, err
-	}
-	env, ok := settings["env"].(map[string]interface{})
-	if !ok {
-		return nil, fmt.Errorf("Claude Code native OTLP env is missing or invalid") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-	}
-	if claudeCodeOTLPEnvString(env, "CLAUDE_CODE_ENABLE_TELEMETRY") != "1" {
-		return nil, fmt.Errorf("Claude Code native telemetry is not enabled") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-	}
-
-	probes := make([]ClaudeCodeNativeOTLPProbe, 0, 2)
-	for _, signal := range []NativeOTLPSignal{NativeOTLPSignalLogs, NativeOTLPSignalMetrics} {
-		upperSignal := strings.ToUpper(string(signal))
-		if claudeCodeOTLPEnvString(env, "OTEL_"+upperSignal+"_EXPORTER") != "otlp" {
-			return nil, fmt.Errorf("Claude Code native %s exporter is not configured for OTLP", signal) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-		}
-		prefix := "OTEL_EXPORTER_OTLP_" + upperSignal
-		if claudeCodeOTLPEnvString(env, prefix+"_PROTOCOL") != "http/json" {
-			return nil, fmt.Errorf("Claude Code native %s OTLP protocol is not http/json", signal) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-		}
-		endpoint := claudeCodeOTLPEnvString(env, prefix+"_ENDPOINT")
-		if endpoint == "" {
-			return nil, fmt.Errorf("Claude Code native %s OTLP endpoint is missing", signal) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-		}
-		headers, parseErr := parseClaudeCodeLiteralOTLPHeaders(claudeCodeOTLPEnvString(env, prefix+"_HEADERS"))
-		if parseErr != nil {
-			return nil, fmt.Errorf("Claude Code native %s OTLP headers are invalid: %w", signal, parseErr) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-		}
-		probes = append(probes, ClaudeCodeNativeOTLPProbe{
-			Signal:   signal,
-			Endpoint: endpoint,
-			Headers:  headers,
-		})
-	}
-	return probes, nil
-}
-
-func claudeCodeOTLPEnvString(env map[string]interface{}, key string) string {
-	value, _ := env[key].(string)
-	return strings.TrimSpace(value)
-}
-
-func parseClaudeCodeLiteralOTLPHeaders(raw string) (http.Header, error) {
-	if raw == "" {
-		return nil, fmt.Errorf("managed header block is missing")
-	}
-	headers := make(http.Header)
-	for _, part := range strings.Split(raw, ",") {
-		name, value, ok := strings.Cut(strings.TrimSpace(part), "=")
-		name = strings.ToLower(strings.TrimSpace(name))
-		if !ok || !validLiteralOTLPHeaderName(name) || value == "" || strings.ContainsAny(value, "\r\n") {
-			return nil, fmt.Errorf("managed header block contains an invalid entry")
-		}
-		if headers.Get(name) != "" {
-			return nil, fmt.Errorf("managed header block contains a duplicate entry")
-		}
-		switch name {
-		case "authorization", "x-defenseclaw-client", "x-defenseclaw-source":
-		default:
-			return nil, fmt.Errorf("managed header block contains an unexpected entry")
-		}
-		headers.Set(name, value)
-	}
-	if headers.Get("Authorization") == "" {
-		return nil, fmt.Errorf("managed Authorization is missing")
-	}
-	if headers.Get("X-DefenseClaw-Source") != "claudecode" {
-		return nil, fmt.Errorf("managed source does not identify claudecode")
-	}
-	if headers.Get("X-DefenseClaw-Client") != "claudecode-otel/1.0" {
-		return nil, fmt.Errorf("managed client does not identify the Claude Code exporter")
-	}
-	return headers, nil
 }
 
 // patchClaudeCodeOtelEnv merges OpenTelemetry env vars into
@@ -1878,6 +1947,7 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 				backup.ManagedAbsentEnv = append(backup.ManagedAbsentEnv, key)
 			}
 			applyClaudeCodeManagedOtelEnv(existing, managedEnv)
+			removeClaudeCodeOTLPHeadersHelper(settings, &backup)
 			backupNeedsSave = true
 			backupToSave = backup
 			settings["env"] = existing
@@ -2013,7 +2083,8 @@ func claudeCodeOtelValueLooksManaged(key string, value interface{}, managed stri
 // wrote and the current profile renders differently. 0.8.x turned prompt
 // capture on at the source.
 var claudeCodeEarlierReleaseEnv = map[string]string{
-	"OTEL_LOG_USER_PROMPTS": "1",
+	"CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+	"OTEL_LOG_USER_PROMPTS":        "1",
 }
 
 // claudeCodeEnvValueIsOrphanedEarlierRelease reports whether snapshot holds an
@@ -2231,7 +2302,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 	err = withFileLock(settingsPath, func() error {
 		if err := atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(data []byte, exists bool) (atomicTransformResult, error) {
 			var restorePerm os.FileMode
-			var exactData []byte
+			exactRestore := false
 			if exact, ok := managedFileBackupTransform(managedBackup, data, exists); ok {
 				if exact.Remove {
 					return exact, nil
@@ -2240,10 +2311,10 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				// its "pristine" snapshot during an upgrade. Passing restored
 				// bytes through the same ownership-aware cleanup keeps that stale
 				// snapshot from resurrecting every DefenseClaw hook and OTel key.
+				exactRestore = true
 				data = exact.Data
 				exists = true
 				restorePerm = exact.Perm
-				exactData = exact.Data
 			}
 			if !exists {
 				return atomicTransformResult{Remove: true}, nil
@@ -2252,12 +2323,9 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 			if err := json.Unmarshal(data, &settings); err != nil {
 				return atomicTransformResult{}, fmt.Errorf("parse claude settings for restore: %w", err)
 			}
-			var exactCanonical []byte
-			if exactData != nil {
-				exactCanonical, err = json.Marshal(settings)
-				if err != nil {
-					return atomicTransformResult{}, fmt.Errorf("canonicalize exact Claude settings snapshot: %w", err)
-				}
+			originalCanonical, err := json.Marshal(settings)
+			if err != nil {
+				return atomicTransformResult{}, fmt.Errorf("canonicalize Claude settings snapshot: %w", err)
 			}
 
 			if rawHooks, present := settings["hooks"]; present {
@@ -2306,6 +2374,7 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					}
 				}
 				managedEnv := backup.ManagedEnv
+				legacyNativeEnv := claudeCodeNativeOtelReferenceEnv(opts)
 				exactManagedEnv := len(managedEnv) > 0
 				if !exactManagedEnv {
 					// Compatibility for backups created before exact managed values
@@ -2315,7 +2384,8 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				// A snapshot that carries DefenseClaw-only values was taken from an
 				// earlier release's env block, so the values DefenseClaw writes in it
 				// are not the operator's either.
-				predecessorSnapshot := claudeCodeEnvSnapshotIsDefenseClawWritten(originalEnv, managedEnv)
+				predecessorSnapshot := claudeCodeEnvSnapshotIsDefenseClawWritten(originalEnv, managedEnv) ||
+					claudeCodeEnvSnapshotIsDefenseClawWritten(originalEnv, legacyNativeEnv)
 				// A snapshot whose telemetry keys are only what an earlier
 				// teardown left of a DefenseClaw block is not the operator's
 				// either: its keys go instead of coming back (GAP-1107).
@@ -2325,12 +2395,13 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				// while the env backup keeps the operator's real env. The restored
 				// env then starts as that snapshot's env.
 				var exactSnapshotEnv map[string]interface{}
-				if exactData != nil {
+				if exactRestore {
 					candidate := make(map[string]interface{}, len(envMap))
 					for key, value := range envMap {
 						candidate[key] = value
 					}
-					if claudeCodeEnvSnapshotIsDefenseClawWritten(candidate, managedEnv) {
+					if claudeCodeEnvSnapshotIsDefenseClawWritten(candidate, managedEnv) ||
+						claudeCodeEnvSnapshotIsDefenseClawWritten(candidate, legacyNativeEnv) {
 						exactSnapshotEnv = candidate
 					}
 				}
@@ -2349,6 +2420,10 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 					}
 					if currentString, _ := current.(string); present && currentString != "" &&
 						claudeCodeEarlierReleaseEnv[key] == currentString {
+						if predecessorSnapshot && claudeCodeEnvValueUnchanged(originalEnv, key, current) {
+							delete(envMap, key)
+							continue
+						}
 						// The value is one an earlier release wrote. When the operator's
 						// env did not have it, or has only an orphan of an earlier
 						// release's block, a stale DefenseClaw block was put back (by a
@@ -2359,24 +2434,28 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 							continue
 						}
 					}
-					if !managed || !present {
+					if !present {
 						continue
 					}
-					owned := claudeCodeOtelValueIsManaged(current, written) ||
-						claudeCodeOtelValueLooksManaged(key, current, written)
+					owned := (managed && claudeCodeOtelValueIsManaged(current, written)) ||
+						claudeCodeOtelValueLooksManaged(key, current, written) ||
+						claudeCodeOtelValueLooksManaged(key, current, legacyNativeEnv[key])
 					if !owned && (predecessorSnapshot || exactSnapshotEnv != nil) {
 						// The snapshot restore can already have put the earlier
 						// release's value back; it is still not the operator's.
 						owned = ((predecessorSnapshot && claudeCodeEnvValueUnchanged(originalEnv, key, current)) ||
 							(exactSnapshotEnv != nil && claudeCodeEnvValueUnchanged(exactSnapshotEnv, key, current))) &&
-							claudeCodeOtelValueWrittenByDefenseClaw(key, current, written)
+							(claudeCodeOtelValueWrittenByDefenseClaw(key, current, written) ||
+								claudeCodeOtelValueWrittenByDefenseClaw(key, current, legacyNativeEnv[key]))
 					}
 					if !owned {
 						continue
 					}
 					if original, existed := originalEnv[key]; existed && !orphanBlock &&
 						!claudeCodeOtelValueLooksManaged(key, original, written) &&
-						(!(predecessorSnapshot) || !(claudeCodeOtelValueWrittenByDefenseClaw(key, original, written))) &&
+						!claudeCodeOtelValueLooksManaged(key, original, legacyNativeEnv[key]) &&
+						(!predecessorSnapshot || (!claudeCodeOtelValueWrittenByDefenseClaw(key, original, written) &&
+							!claudeCodeOtelValueWrittenByDefenseClaw(key, original, legacyNativeEnv[key]))) &&
 						!claudeCodeEnvValueIsOrphanedEarlierRelease(originalEnv, key) {
 						envMap[key] = original
 					} else {
@@ -2392,6 +2471,10 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 						continue
 					}
 					if original, existed := originalEnv[key]; existed && !orphanBlock {
+						if predecessorSnapshot && (claudeCodeOtelValueLooksManaged(key, original, legacyNativeEnv[key]) ||
+							claudeCodeOtelValueWrittenByDefenseClaw(key, original, legacyNativeEnv[key])) {
+							continue
+						}
 						envMap[key] = original
 					}
 				}
@@ -2407,12 +2490,22 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				}
 			}
 
+			restoreClaudeCodeOTLPHeadersHelper(settings, backup)
+
 			canonical, err := json.Marshal(settings)
 			if err != nil {
 				return atomicTransformResult{}, fmt.Errorf("canonicalize restored settings: %w", err)
 			}
-			if exactData != nil && bytes.Equal(canonical, exactCanonical) {
-				return atomicTransformResult{Data: exactData, Perm: restorePerm}, nil
+			if bytes.Equal(canonical, originalCanonical) {
+				if !exactRestore {
+					// Nothing of DefenseClaw's was in the file: leave its bytes
+					// and mode as the user has them (GAP-0650).
+					return atomicTransformResult{Data: data, Keep: true}, nil
+				}
+				// Reconciliation may tear down an already-clean connector after
+				// uninstall restored and discarded its backup. Keep those bytes
+				// as well as a pristine backup's original formatting.
+				return atomicTransformResult{Data: data, Perm: restorePerm}, nil
 			}
 			out, err := json.MarshalIndent(settings, "", "  ")
 			if err != nil {

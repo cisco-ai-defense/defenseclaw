@@ -32,13 +32,12 @@ $script:LocalExpectedFingerprintNames = @(
     'install_state', 'active_connector', 'hook_contract_lock', 'config',
     'watchdog_state', 'claude_settings', 'codex_config',
     'codex_managed_config', 'codex_hooks', 'cursor_hooks',
-    'omnigent_config', 'copilot_hook', 'maintenance_setup'
+    'copilot_hook', 'maintenance_setup'
 )
 $script:LocalExpectedRoster = @(
     'claudecode|action|closed|True|manual',
     'codex|observe|open|True|manual',
-    'cursor|action|closed|True|manual',
-    'omnigent|observe|open|True|manual'
+    'cursor|action|closed|True|manual'
 )
 $script:LocalCapability = ''
 $script:LocalCapabilitySHA256 = ''
@@ -560,14 +559,14 @@ function Assert-LocalBaselineManifestDocument(
     if ($ManifestSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
         (Get-LocalSHA256 $ManifestPath) -cne $ManifestSHA256 -or
         [int]$Manifest.schema_version -ne 1 -or
-        [string]$Manifest.kind -cne 'copilot-four-connector-sealed-current' -or
+        [string]$Manifest.kind -cne 'copilot-three-connector-sealed-current' -or
         [string]$Manifest.package_source_commit -cne $ExpectedPackageSourceCommit -or
         [bool]$Manifest.hitl_claimed -or [bool]$Manifest.opencode_active) {
         throw 'sealed baseline identity, source, HITL, or OpenCode gate is invalid'
     }
     $roster = @($Manifest.roster | ForEach-Object { [string]$_ })
     if (($roster -join "`n") -cne ($script:LocalExpectedRoster -join "`n")) {
-        throw 'sealed baseline does not contain the exact four-connector roster/modes'
+        throw 'sealed baseline does not contain the exact three-connector roster/modes'
     }
     if ([int]$Manifest.doctor.pass -ne 70 -or [int]$Manifest.doctor.fail -ne 0) {
         throw 'sealed baseline Doctor gate is not 70 pass / 0 fail'
@@ -633,7 +632,7 @@ function Assert-LocalStatusDocument(
     $roster = Get-LocalRoster $Status
     if (($roster -join "`n") -cne ($script:LocalExpectedRoster -join "`n") -or
         @($Status.connectors | Where-Object { [string]$_.name -ceq 'opencode' }).Count -ne 0) {
-        throw "$Context changed the exact four-connector roster or exposed OpenCode"
+        throw "$Context changed the exact three-connector roster or exposed OpenCode"
     }
 }
 

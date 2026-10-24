@@ -8,8 +8,8 @@ behaviours the code is built around. The code is the authority; each section
 names the package to read.
 
 The operator guide for the sandbox commands is the
-[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/)
-(`docs-site/content/docs/sandboxes/guide.mdx`): setup, running a harness, the
+[published sandbox page](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/sandboxes/run-an-agent/)
+(`docs-site/content/docs/how-to/sandboxes/run-an-agent.mdx`): setup, running a harness, the
 session, the end-of-session review and undo, the run variations, MCP
 servers, the shell wrapper, troubleshooting, and removing what a retired 0.0.x standalone install left.
 Telemetry details are in
@@ -35,7 +35,7 @@ Overview and a Sandboxes panel. Still to come:
   managed configuration (see
   [per-sandbox managed configuration](#per-sandbox-managed-configuration)).
 - **Harnesses.** `claudecode`, `codex`, `opencode`, `copilot`, `kiro`,
-  `hermes`, `openhands`, `omnigent`, `antigravity`, `amp`, `cursor` and
+  `hermes`, `antigravity`, `amp`, `cursor` and
   `devin` have harness specs and sandbox artifacts. The `amp`, `cursor` and
   `devin` images stay unverified until a probe runs with a vendor account
   (see [Sandboxed connectors](#sandboxed-connectors)).
@@ -731,8 +731,8 @@ Hook handlers then treat a sandbox request differently from a host request
   ```
 
   The audit row's `extra.sandbox_egress_refused` lists what was told
-  (`webhook.site:webhook_catcher`, `httpbin.org:large_upload`). Hermes, Kiro, OpenCode, OpenHands, Amp,
-  Antigravity and OmniGent have no model-facing post-tool context field, so
+  (`webhook.site:webhook_catcher`, `httpbin.org:large_upload`). Hermes, Kiro, OpenCode, Amp and
+  Antigravity have no model-facing post-tool context field, so
   their agents are not told; the terminal's live notice still tells the
   user.
 
@@ -1126,7 +1126,7 @@ ahead of time):
 | `defenseclaw-amp` | `AMP_API_KEY` | bearer | `ampcode.com:443` |
 | `defenseclaw-cursor` | `CURSOR_API_KEY` | bearer | `api2.cursor.sh:443`, `api3.cursor.sh:443`, `repo42.cursor.sh:443` |
 | `defenseclaw-kiro` | `KIRO_API_KEY` | bearer | `q.us-east-1.amazonaws.com:443`, `runtime.us-east-1.kiro.dev:443`, `management.us-east-1.kiro.dev:443`, `prod.us-east-1.auth.desktop.kiro.dev:443` |
-| `defenseclaw-bedrock-mantle-openai-<region>` | `BEDROCK_MANTLE_API_KEY` | bearer | `bedrock-mantle.<region>.api.aws:443` (Hermes, OpenHands and OmniGent) |
+| `defenseclaw-bedrock-mantle-openai-<region>` | `BEDROCK_MANTLE_API_KEY` | bearer | `bedrock-mantle.<region>.api.aws:443` (Hermes) |
 | `defenseclaw-gemini` | `GEMINI_API_KEY` | `x-goog-api-key` | `generativelanguage.googleapis.com:443` (Antigravity) |
 | `dc-cred-<hash>` | the `--credential` variable | bearer | the host and port it is bound to |
 
@@ -1773,10 +1773,7 @@ modes and owners are set in the tar headers) and streams it to
    other version fails before the build starts. Claude Code 2.1.156 is
    relocated from the digest-pinned base image, and no other Claude Code
    version is pinned. Codex 0.146.0 replaces the base image's 0.117, which is
-   outside every reviewed contract. OmniGent's sandbox range starts at 0.13.0,
-   above its host contract's 0.7.0: before 0.13.0 its server never evaluates
-   the response phase (`AfterAgentResponse`) for the sandbox agent, whose
-   runner it relays, so a 0.12.0 image failed the hook-fire probe. An npm-installed harness (Codex,
+   outside every reviewed contract. An npm-installed harness (Codex,
    OpenCode, Copilot CLI, Amp) is downloaded once with `npm pack`, installed
    from that tarball only after its SHA-512 matches the pinned registry
    integrity, and its native executable must match a pinned sha256 per
@@ -1906,10 +1903,10 @@ Each connector publishes a tamper tier (`SandboxArtifacts.TamperTier`):
 
 - **managed:** the hook registration lives in the harness's system policy,
   root-owned in the image, and user or project settings cannot switch it off.
-  `claudecode`, `codex`, `copilot`, `cursor` and `omnigent` are managed.
+  `claudecode`, `codex`, `copilot` and `cursor` are managed.
 - **user:** the registration lives in a file the agent can edit, or code the
   agent or a repository adds runs beside the hooks. `opencode`, `amp`, `kiro`,
-  `devin`, `hermes`, `openhands` and `antigravity` are in this tier; the
+  `devin`, `hermes` and `antigravity` are in this tier; the
   hook-silence finding is the backstop.
   [Sandboxed connectors](#sandboxed-connectors) has the details.
 
@@ -1969,7 +1966,7 @@ compromised hook shows:
   | Kiro CLI | `preToolUse` | `postToolUse` | | session, tool name and tool input |
   | Copilot CLI | `preToolUse` | `postToolUse` | `postToolUseFailure` | session, tool name and tool input |
   | Devin CLI | `PreToolUse` | `PostToolUse` | | session, tool name and tool input |
-  | Hermes, OpenHands, Antigravity, OmniGent | not paired | | | |
+  | Hermes, Antigravity | not paired | | | |
 
   A failure event closes a call but never proves tamper: Claude Code can
   report a failure before `PreToolUse` ran. Claude Code's `Agent` tool is
@@ -2008,7 +2005,7 @@ compromised hook shows:
   user edits at Devin's permission prompt gets a new `PreToolUse` with the
   edited input. 3000.11.3 also sends an undocumented `tool_use_id`, the same
   in both events, which the gateway does not read as the call's ID. For
-  Hermes, OpenHands, Antigravity and OmniGent hook silence is the backstop
+  Hermes and Antigravity hook silence is the backstop
   until their hook payloads are measured. Every harness's pre-tool events
   count in the session summary's tool calls and blocks.
 
@@ -2321,7 +2318,7 @@ dynamic loader's variables (every `LD_*`, `LD_PRELOAD`, `LD_AUDIT` and
 `LD_LIBRARY_PATH` among them) and `GCONV_PATH` before it starts any
 program, so a shared object named in a start-up file is never loaded into
 its helpers, the harness or the hooks the harness runs. The Python
-harnesses' launchers (Hermes, OpenHands, OmniGent) also drop every `PYTHON*`
+harnesses' launchers (Hermes) also drop every `PYTHON*`
 variable: their uv entry points run the interpreter without `-I`, so a
 `PYTHONPATH` exported from a start-up file would import a planted
 `sitecustomize` module into the harness. Harnesses run
@@ -2356,9 +2353,7 @@ images stay unverified, so they are never selected for a sandbox.
 | Kiro CLI | 2.24.1 (release archive, vendor sha256) | Root-owned agent `/usr/local/lib/defenseclaw/kiro/defenseclaw.json`, alone in the directory the launcher forces `KIRO_AGENT_CONFIG_DIR` to | user | `--trust-all-tools` | Kiro Pro API key (endpoints unverified), or `kiro-launch login --use-device-flow` inside the sandbox (the token is readable by the workload) | verified (hooks and blocking; no real model) |
 | Devin CLI | 3000.4.25 (release archive, vendor sha256) | User-owned `~/.config/devin/config.json`, hooks restored from a root-owned template on every start; workspace trust skipped | user | `--permission-mode dangerous` | `devin-launch auth login` inside the sandbox (the credential is readable by the workload) | unverified |
 | Hermes Agent | 0.19.0 (PyPI, root-owned uv tool on a private CPython) | Managed layer `/etc/hermes/config.yaml` and `/etc/hermes/.env`; the launcher refuses a `.env`, plugin or `secrets` section in the Hermes home that would switch the hooks off, move the managed layer or load code beside them | user | `--yolo` | OpenAI API key, Anthropic API key, Bedrock Mantle (default model `openai.gpt-oss-20b`; the curated profiles carried no real model in a sandbox) | verified (mock model) |
-| OpenHands CLI | 1.16.0 (PyPI, root-owned uv tool on a private CPython) | User-owned `~/.openhands/hooks.json`, restored from a root-owned copy on every start; a project hooks file or a non-file hooks path is refused | user | `--always-approve` | OpenAI API key, Anthropic API key, Bedrock Mantle (the curated profiles carried no real model in a sandbox) | verified (mock model) |
 | Antigravity CLI (agy) | 1.2.12 (release tarball, SHA-512 pinned) | User-owned `~/.gemini/config/hooks.json`, restored from a root-owned copy on every start; a non-file hooks path is refused | user | `--dangerously-skip-permissions` | Gemini API key (unverified with a real key) | verified (mock model) |
-| OmniGent | 0.13.0 (PyPI, root-owned uv tool on a private CPython) | Server configuration `/etc/omnigent/config.yaml` through `OMNIGENT_CONFIG_HOME`; the launcher stops and stops reusing any recorded server or daemon started without it | managed | none (its policies decide) | Bedrock Mantle (default model `openai.gpt-oss-20b`), OpenAI API key (`--model` required), Anthropic API key (unverified) | verified (mock model) |
 
 OpenCode and Copilot CLI ran end to end in OpenShell 0.1.1 sandboxes
 (`TestLiveSandboxHookOnlyHarness` in `internal/gateway`, on branch
@@ -2418,19 +2413,17 @@ Cursor Agent and Devin CLI images build and pass the static probe (pinned
 version, binary realpaths and digests) but stay unverified: both CLIs need a
 vendor account before any agent turn and fire no hook without one.
 
-Hermes, OpenHands, Antigravity and OmniGent ran end to end through the
+Hermes and Antigravity ran end to end through the
 DefenseClaw daemon (`TestSandboxHookOnlyHarness` in `test/e2e/openshell`, on
 branch `test/openshell-live`)
 against the E2E mock model behind a `--credential` binding on
-`host.openshell.internal`: hooks (OmniGent: policy events) reached the
+`host.openshell.internal`: hooks reached the
 ingress with the model key substituted, the marker command a test rule
 blocks was denied with the rule's reason, and egress went through the proxy
 with the blocklist and a sandbox unblock. Command rules also judge text these
-harnesses send to a running process (OpenHands terminal input, agy
-`send_command_input`, Hermes' `process` write and submit) as shell input;
+harnesses send to a running process (agy `send_command_input` and Hermes' `process` write and submit) as shell input;
 Hermes' `execute_code` tool, whose Python command rules cannot read, is
-turned off in the image. In an OmniGent sandbox a confirm verdict denies:
-OmniGent's approval routes answer any process in the sandbox.
+turned off in the image.
 
 ### Harness facts
 
@@ -2866,8 +2859,8 @@ OpenClaw gateway (18789 by default).
 A standalone enterprise install (rpm, deb, pkg; Linux and macOS) runs sandboxes
 for standard users, with the policy chosen by the same identity rules as the
 guardrail profile. The user documentation is
-[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/sandboxes/)
-(`docs-site/content/docs/enterprise/sandboxes.mdx`). This section is the
+[Sandboxes on managed computers](https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/runtime/sandboxes/)
+(`docs-site/content/docs/enterprise/runtime/sandboxes.mdx`). This section is the
 contributor view.
 
 ### Processes and trust
@@ -3199,7 +3192,7 @@ service) in September 2026, with Claude Code 2.1.156 and Codex 0.146.0.
 | Codex's own sandbox cannot run inside OpenShell; `codex exec` authenticates with `CODEX_API_KEY`. | Launch flags turn it off; the launcher exports `CODEX_API_KEY`. |
 | Claude Code and OpenCode handle Ctrl-Z by restoring the terminal, signalling their process group to stop, and redrawing only on `SIGCONT`. In a sandbox that signal fails: the seccomp filter refuses any `kill()` aimed at a process group (EPERM), and `sandbox exec --tty` starts the command as the leader of a new session under the sandbox supervisor, so its process group is orphaned and the kernel would discard `SIGTSTP` anyway. Nothing stops, and the TUI waited for a `SIGCONT` that never came, with the terminal in cooked mode. Codex carries on once the signal returns. | In a terminal session whose foreground process group is the launcher's, also as a foreground job at a `sandbox connect --shell` prompt (whose `fg` resumes with `killpg`, which the filter refuses too), the launcher execs `dc_supervisor.py` (Python 3, root-owned), which forks the harness into its own process group, makes it the terminal's foreground group and resumes it with `SIGCONT` whenever it stops, sending the signal to each process in the group individually (`kill(pid, SIGCONT)` per `/proc/*/stat`, never `killpg`, because the sandbox's seccomp filter blocks `kill()` aimed at a process group). Because the harness's own suspend fails in the sandbox, the supervisor also watches the terminal (`tcgetattr` on fd 0, every 0.2 s): when the harness, as the terminal's foreground group, switched it from raw to canonical mode and leaves it there for half a second, it is treated as suspended and sent `SIGCONT`; it arms again only once the terminal is raw again. When such a harness takes the terminal back, the supervisor says at once, in the terminal's title (OSC 2, the previous title kept and restored when the harness exits) and as an OSC 9 notification with a bell, that Ctrl-Z cannot suspend it, and after the harness exits prints the same on the screen, answering the harness's own "suspended, use `fg`" line. The supervisor forwards `SIGHUP` and `SIGTERM` and exits with the harness's status; `SIGINT` and `SIGWINCH` reach the harness as usual. Ctrl-Z returns straight to the TUI. Headless and detached runs, a harness started in the background of a `sandbox connect --shell` prompt (the supervisor would take the terminal from that shell), and an image whose base lacks `/usr/bin/python3` (the supervisor's interpreter) keep the plain `exec`. The image build refuses a `/usr/bin/python3` whose realpath the workload could replace. |
 | The same filter refuses a harness that ends a cancelled tool command through the command's process group. Measured with Kiro CLI 2.24.1 (on the vm driver): Ctrl-C during a shell tool call shows `● Cancelled …`, but the command runs to its end and Kiro's `postToolUse` still arrives when it finishes. Kiro's binary puts commands in process groups of their own and signals groups (it calls `setpgid` and `killpg`); a host run of the same release was not compared. | No launcher setting changes how the harness signals, and the supervisor never learns of the cancel. DefenseClaw judged the command before it started; to stop one that keeps running, end it by pid from another terminal (`defenseclaw sandbox connect <name> --shell`, then `pkill -f '<command>'`, which signals each process on its own). |
-| A harness that quits in the middle of a tool call leaves the tool's command running: OpenCode 1.18.31 starts its shell tool in a session of its own and does not end it when Ctrl-C quits it, so the command kept writing to the sandbox while DefenseClaw pulled the copy, until the sandbox stopped (macOS certification). | The terminal-session supervisor is a child subreaper (`prctl(PR_SET_CHILD_SUBREAPER)`), so what the harness leaves behind is re-parented to it rather than to the sandbox's init. Once the harness exits, what still runs below the supervisor gets two seconds to end on its own (a hook's last event and its retry), then `SIGTERM`, and `SIGKILL` two seconds later, pid by pid, and the terminal names it, before the exec ends, so before the pull or the review in both workdir modes. Where `prctl` is refused, the supervisor ends what its once-a-second scan saw below the harness (pid and start time). Nothing outside the harness's tree is signalled. OmniGent's launcher and the `sandbox exec` wrapper pass `--keep-leftovers` (OmniGent's host daemon and server serve the next session); headless and detached runs keep the plain `exec`. |
+| A harness that quits in the middle of a tool call leaves the tool's command running: OpenCode 1.18.31 starts its shell tool in a session of its own and does not end it when Ctrl-C quits it, so the command kept writing to the sandbox while DefenseClaw pulled the copy, until the sandbox stopped (macOS certification). | The terminal-session supervisor is a child subreaper (`prctl(PR_SET_CHILD_SUBREAPER)`), so what the harness leaves behind is re-parented to it rather than to the sandbox's init. Once the harness exits, what still runs below the supervisor gets two seconds to end on its own (a hook's last event and its retry), then `SIGTERM`, and `SIGKILL` two seconds later, pid by pid, and the terminal names it, before the exec ends, so before the pull or the review in both workdir modes. Where `prctl` is refused, the supervisor ends what its once-a-second scan saw below the harness (pid and start time). Nothing outside the harness's tree is signalled. Headless and detached runs keep the plain `exec`. |
 
 ### Not measured
 
@@ -3243,16 +3236,20 @@ nothing of the vm driver, but the names of its caches carry the release
 
 ## Supported platforms and versions
 
-- OpenShell `>=0.1.1 <0.2.0`, checked against the CLI and the gateway. The
+- OpenShell `>=0.1.5 <0.2.0` (`SupportedMin`, `SupportedBelow`), checked
+  against the CLI and the gateway; DefenseClaw still connects to the legacy
+  `>=0.1.1 <0.1.5` (`LegacyMin`, `CheckConnects`, prereleases of 0.1.5
+  included) only to move the host off it. The
   installer code (`openshell.Installer`) runs the upstream installer from the
-  v0.1.3 tag (`InstallerVersion`) only after checking it against a pinned
+  v0.1.5 tag (`InstallerVersion`) only after checking it against a pinned
   SHA-256 for that tag; the release comes from `OPENSHELL_VERSION`.
   Releases before 0.0.37 must be cleaned up
   with the old CLI first; later ones upgrade in place. A supported release
-  older than `InstallerVersion` (0.1.3) still works: the doctor's
-  `openshell-cli` check warns, and setup upgrades it in place only with
-  consent (`Installer.Upgrade`: `--install-openshell`, or yes to its
-  question, whose default is no). NVIDIA's script restarts the gateway only
+  older than `SupportedMin` (0.1.5) is still driven (list, stop, delete,
+  pull) but runs no sandbox: the doctor's `openshell-cli` check warns, its
+  **Gateway** check fails, `Installer.Install` upgrades it in place as
+  `Installer.Upgrade` does, and setup takes that upgrade by default (yes to
+  its question, `--yes`, `--install-openshell`). NVIDIA's script restarts the gateway only
   after its downloads and the package's (formula's) install, so
   `PrepareUpgrade` runs right before the script, after consent. The docker
   driver keeps its running sandboxes (their connections drop), and the
@@ -3391,5 +3388,5 @@ watchdog, status, the Python CLI's `api_bind_host`) dials it there; the
 migration record lists the removed keys. Running it again changes nothing.
 The root systemd units, launchers, network namespace, NAT rules and `sandbox`
 user are removed by hand, as the
-[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/sandboxes/guide/#remove-a-retired-standalone-sandbox)
+[published sandbox guide](https://cisco-ai-defense.github.io/defenseclaw/docs/troubleshooting/sandboxes/#remove-a-retired-standalone-sandbox)
 lists.

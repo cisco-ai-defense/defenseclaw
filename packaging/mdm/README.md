@@ -15,7 +15,7 @@ The user documentation, including the generic MDM contract and step-by-step
 recipes, is published at
 <https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/mdm/>. What goes
 in the config, including which agents to protect, is in
-<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/configuration/>.
+<https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/configure/configuration/>.
 
 ## What is here
 

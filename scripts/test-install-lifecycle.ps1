@@ -648,8 +648,10 @@ function Test-Shim {
     Check ((Get-Content -LiteralPath (Join-Path $DcHome "previous\VERSION") -ErrorAction SilentlyContinue) -eq $from) "previous\VERSION is not $from"
 }
 
-# Upgrade while DefenseClaw programs hold files: running .exe files are renamed
-# aside, and a program running from the venv stops the install before any change.
+# A continuously mapped hook image cannot be replaced on Windows. The first
+# attempt keeps its old bytes and proves the restored state; after that call exits, the
+# same install completes. A program running from the venv also stops the
+# install before any change.
 function Test-FilesInUse {
     Enter-Lane files-in-use
     Check ((Install-Candidate $Seed) -eq 0) "install of $(Get-AssetVersion $Seed) failed"
@@ -668,18 +670,26 @@ function Test-FilesInUse {
     # beside it: without the lane's there, it would find no install and exit.
     $state = Get-Content -Raw -LiteralPath (Join-Path $Bin "defenseclaw-hook-state.json") -ErrorAction SilentlyContinue | ConvertFrom-Json
     Check ($state -and [IO.Path]::GetFullPath($state.data_root) -eq [IO.Path]::GetFullPath($DcHome)) "defenseclaw-hook-state.json does not bind the hook to $DcHome"
+    $oldHookSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash
     $hook = Start-Held (Join-Path $Bin "defenseclaw-hook.exe") @("hook", "--connector", "codex")
     Start-Sleep -Seconds 2
     if ($hook.HasExited) {
         Fail "defenseclaw-hook.exe did not stay running (exit $($hook.ExitCode)): $($hook.StandardError.ReadToEnd()) $($hook.StandardOutput.ReadToEnd())"
     }
-    Write-Log "install $Target while defenseclaw-hook.exe runs"
-    Check ((Install-Candidate $next) -eq 0) "an install with a running hook failed"
+    Write-Log "refuse safely while defenseclaw-hook.exe remains mapped"
+    Check ((Install-Candidate $next) -eq 1) "the installer claimed it replaced a continuously mapped hook"
+    Check (-not $hook.HasExited) "the running hook was stopped"
+    Check ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash -eq $oldHookSha) "the old canonical hook changed after a refused swap"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".lifecycle-txn.json"))) "the refused swap left a lifecycle record for an unchanged install"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".install.lock"))) "the refused swap left the unchanged install locked"
+    Stop-Held
+    Write-Log "retry the same install after the held hook exits"
+    Check ((Install-Candidate $next) -eq 0) "the installer did not recover and finish after the held hook exited"
     Assert-Versions $Target
     Assert-Healthy
-    Check (-not $hook.HasExited) "the running hook was stopped"
-    Check (@(Get-ChildItem -LiteralPath $Bin -Filter "defenseclaw-hook.exe.old-*").Count -eq 1) "the running defenseclaw-hook.exe was not renamed aside"
-    Stop-Held
+    Check ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $Bin "defenseclaw-hook.exe")).Hash -ne $oldHookSha) "the retry did not publish the new hook at its canonical path"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".lifecycle-txn.json"))) "the retry left its lifecycle record"
+    Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".install.lock"))) "the retry left its install lock"
 
     Write-Log "re-run while the CLI runs from the venv (must stop, nothing changed)"
     $holder = Start-Held (Join-Path $DcHome ".venv\Scripts\python.exe") @("-c", "import time; time.sleep(900)")
@@ -703,11 +713,10 @@ function Test-FilesInUse {
     Check (-not @(Get-ChildItem -LiteralPath $Bin -Filter "*.old-*").Count) "stale .old-* files were not removed"
 }
 
-# A release whose gateway reports its version but does not start: the
-# install is undone. A start that exits 3 (a connector needs attention)
-# keeps the new version and exits 3. The drill gateway hands every other
-# command to the real one, so the staged check, which runs the staged
-# gateway's config validator (GAP-0158), passes and the swap happens.
+# A release whose gateway reports its version but does not start must be
+# undone. Exit 3 alone does not prove that a connector is guarded: a gateway
+# that reports 3 without running must also be undone. The drill gateway
+# hands every other command to the real one, so the staged config check passes.
 function Test-FailureDrill {
     Enter-Lane failure-drill
     Check ((Install-Candidate $Assets) -eq 0) "install of $Target failed"
@@ -745,17 +754,23 @@ public static class DrillGateway {
     Check ((Install-Candidate $drill) -eq 1) "an install whose gateway does not start must exit 1"
     Check ((Get-Sha256 $gateway) -eq $goodGateway) "the working gateway was not put back"
     Assert-Versions $Target
-    Assert-Healthy
+    Check (-not (Get-GatewayImage)) "the refused start should keep the restored gateway stopped"
     Assert-DataKept
     Check ((Get-Sha256 (Join-Path $DcHome "config.yaml")) -eq $config) "the failed install changed config.yaml"
     Check (@(Get-ChildItem -LiteralPath $DcHome -Directory -Force -Filter ".failed-*").Count -eq 1) "the failed install was not kept in .failed-*"
     Check (-not (Test-Path -LiteralPath (Join-Path $DcHome ".repair"))) "the repair slot was left behind"
+    Check ((Invoke-Exe $gateway @("start")) -eq 0) "the restored gateway did not start for the next upgrade"
+    Assert-Healthy
 
-    Write-Log "a gateway start that exits 3 keeps the new version and exits 3"
+    Write-Log "exit 3 without a running gateway cannot certify the new version"
     $env:DC_DRILL_START_EXIT = "3"
-    try { Check ((Install-Candidate $drill) -eq 3) "an install whose gateway start exits 3 must exit 3" } finally { Remove-Item Env:DC_DRILL_START_EXIT }
-    Check ((Get-Sha256 $gateway) -ne $goodGateway) "exit 3 must keep the new version"
+    try { Check ((Install-Candidate $drill) -eq 1) "an install whose gateway is down must refuse exit 3" } finally { Remove-Item Env:DC_DRILL_START_EXIT }
+    Check ((Get-Sha256 $gateway) -eq $goodGateway) "an unproven exit 3 changed the working gateway"
     Assert-DataKept
+    Check ((Invoke-Exe $gateway @("start")) -eq 0) "the restored gateway did not restart after exit 3"
+    Assert-Healthy
+    Check ((Install-Candidate $Assets) -eq 0) "a refused upgrade prevented the next valid upgrade"
+    Assert-Healthy
 }
 
 # HKLM\SOFTWARE\Policies\Cisco\DefenseClaw\DisableSelfUpdate stops install,

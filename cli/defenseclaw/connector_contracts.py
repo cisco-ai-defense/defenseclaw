@@ -106,9 +106,17 @@ def normalize_connector(name: str | None) -> str:
     value = (name or "").strip().lower()
     if value in {"claude", "claude-code", "claude_code"}:
         return "claudecode"
-    if value in {"open-hands", "open_hands"}:
-        return "openhands"
     return value
+
+
+# Connectors whose ordinary hook answers a confirm verdict with the agent's
+# own approval prompt. Other connectors use their own fallback; Copilot CLI
+# blocks an action-mode confirm because its hook cannot prove prompt availability.
+NATIVE_APPROVAL_CONNECTORS = frozenset({"claudecode", "openclaw", "antigravity", "amp"})
+
+
+def has_native_approval_prompt(name: str | None) -> bool:
+    return normalize_connector(name) in NATIVE_APPROVAL_CONNECTORS
 
 
 def hook_contract_manifest() -> dict[str, Any]:

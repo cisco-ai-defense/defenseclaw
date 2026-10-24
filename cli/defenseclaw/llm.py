@@ -782,6 +782,24 @@ def ping(llm_config: Any, *, timeout: int = 5) -> tuple[bool, str]:
     return (True, f"ok ({model})")
 
 
+_PR_SET_PDEATHSIG = 1
+
+
+def _exit_with_parent() -> None:
+    """On Linux, ask the kernel to kill this helper with the scanner that
+    started it. The gateway kills its scanner with itself, and the helper
+    outlived both (p0 GAP-1156)."""
+    if not sys.platform.startswith("linux"):
+        return
+    import ctypes
+    import signal
+
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_PDEATHSIG, int(signal.SIGKILL), 0, 0, 0)
+    except (OSError, AttributeError):
+        return
+
+
 def main() -> None:
     """Entry point for ``python -m defenseclaw.llm``.
 
@@ -791,6 +809,7 @@ def main() -> None:
     transport failures (subprocess died) from model failures (rate
     limit, auth, bad model id).
     """
+    _exit_with_parent()
     raw = sys.stdin.read().strip()
     if not raw:
         json.dump(

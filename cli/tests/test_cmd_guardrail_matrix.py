@@ -48,10 +48,8 @@ _CONNECTORS = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
-    "omnigent",
 )
 _CONNECTOR_LABELS = {
     "openclaw": "OpenClaw",
@@ -62,10 +60,8 @@ _CONNECTOR_LABELS = {
     "cursor": "Cursor",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
-    "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
-    "omnigent": "OmniGent",
 }
 
 

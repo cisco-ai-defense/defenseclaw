@@ -686,6 +686,12 @@ type ContinuousDiscoveryService struct {
 	// account, when set, is the account a per-user install belongs to: the
 	// owner of every signal its scans find (perUserAccount).
 	account ideOwner
+	// ownHomeRoots, set during a scan of a per-user install with more than
+	// one folder, is the account's own home (and its resolved path). The
+	// detectors keep raw evidence paths for that scan, so a finding in the
+	// own home keeps its owner beside findings in the other folders, which
+	// get none; the paths are dropped again unless they are to be stored.
+	ownHomeRoots []string
 
 	// lastIDE is the last full scan's IDE inventory (guarded by mu);
 	// ideBaseline is its plugin set for lifecycle classification (guarded
@@ -1601,6 +1607,8 @@ func (s *ContinuousDiscoveryService) scanSignals(
 	stats := scanStats{DetectorErrors: map[string]string{}, DetectorDurations: map[string]int{}}
 	var signals []AISignal
 	seen := map[string]bool{}
+	s.ownHomeRoots = s.perUserOwnHomeRoots()
+	defer func() { s.ownHomeRoots = nil }()
 
 	add := func(in []AISignal) {
 		for _, sig := range in {
@@ -1613,8 +1621,11 @@ func (s *ContinuousDiscoveryService) scanSignals(
 			}
 			seen[sig.Fingerprint] = true
 			if sig.UserID == "" && s.account.id != "" &&
-				(len(s.homesToScan()) == 1 || sig.Detector == "process") {
+				(len(s.homesToScan()) == 1 || sig.Detector == "process" || s.evidenceInOwnHome(sig.Evidence)) {
 				sig.UserID, sig.UserName = s.account.id, s.account.name
+			}
+			if s.ownHomeRoots != nil && !s.opts.StoreRawLocalPaths {
+				sig.Evidence = evidenceWithoutRawPaths(sig.Evidence)
 			}
 			signals = append(signals, sig)
 		}
@@ -1752,7 +1763,7 @@ var sharedSurfaceDetectors = map[string]bool{"config": true, "skill": true, "rul
 // ~/.agents/skills, where DefenseClaw's own CodeGuard skill goes, or
 // ~/.claude/skills) when that product has no evidence of its own. A shell
 // history mention is not such evidence. Without this, one CodeGuard install
-// made Cursor, Devin, Amp, Antigravity, Copilot and OpenHands "seen" for a
+// made Cursor, Devin, Amp, Antigravity and Copilot "seen" for a
 // user who has none of them (GAP-1378).
 func (s *ContinuousDiscoveryService) dropUnbackedSharedSurfaceSignals(signals []AISignal) []AISignal {
 	owners := map[string]map[string]bool{}
@@ -2306,7 +2317,7 @@ func declaresMCPServer(signal AISignal) bool {
 // MCP configured" signal itself.
 func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, path string) AISignal {
 	base := AIEvidence{Type: "mcp", Basename: filepath.Base(path), PathHash: hashPath(path)}
-	if s.opts.StoreRawLocalPaths {
+	if s.keepEvidencePath() {
 		base.RawPath = path
 	}
 	evidence := []AIEvidence{base}
@@ -2550,7 +2561,7 @@ func (s *ContinuousDiscoveryService) detectPlugins() []AISignal {
 // directory with thousands of children cannot blow up payload size.
 func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature, category, detector, path string) AISignal {
 	base := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(path)}
-	if s.opts.StoreRawLocalPaths {
+	if s.keepEvidencePath() {
 		base.RawPath = path
 	}
 	evidence := []AIEvidence{base}
@@ -2635,7 +2646,7 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 					// (latter must fail-safe).
 					ev.Origin = "user"
 				}
-				if s.opts.StoreRawLocalPaths {
+				if s.keepEvidencePath() {
 					ev.RawPath = child
 				}
 				evidence = append(evidence, ev)
@@ -2692,7 +2703,7 @@ func (s *ContinuousDiscoveryService) appendHermesSkillChildren(evidence *[]AIEvi
 			Origin:   origin,
 			Bundled:  entry.Bundled,
 		}
-		if s.opts.StoreRawLocalPaths {
+		if s.keepEvidencePath() {
 			ev.RawPath = entry.Path
 		}
 		*evidence = append(*evidence, ev)
@@ -2778,7 +2789,7 @@ func (s *ContinuousDiscoveryService) appendSystemSkillChildren(evidence *[]AIEvi
 			Origin:   origin,
 			Bundled:  bundled,
 		}
-		if s.opts.StoreRawLocalPaths {
+		if s.keepEvidencePath() {
 			ev.RawPath = child
 		}
 		*evidence = append(*evidence, ev)
@@ -2886,8 +2897,9 @@ func (s *ContinuousDiscoveryService) detectProcesses() ([]AISignal, error) {
 	windowsSnapshot := procs[0].Windows
 	if windowsSnapshot {
 		classifyWindowsProcesses(procs, s.catalog)
-		s.attributeProcessOwners(procs)
-		procs = s.withoutExcludedAccounts(procs)
+		brokered := processAccountsOnce()
+		s.attributeProcessOwners(procs, brokered)
+		procs = s.withoutExcludedAccounts(procs, brokered)
 	}
 	now := time.Now().UTC()
 	var out []AISignal
@@ -3917,7 +3929,7 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 
 func (s *ContinuousDiscoveryService) signalFromPath(sig AISignature, category, detector, path string) AISignal {
 	ev := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(path)}
-	if s.opts.StoreRawLocalPaths {
+	if s.keepEvidencePath() {
 		ev.RawPath = path
 	}
 	out := s.signalFromEvidence(sig, category, detector, []AIEvidence{ev})
@@ -4023,6 +4035,9 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 	for _, root := range s.opts.ScanRoots {
 		for _, expanded := range s.expandCandidatePath(root) {
 			if _, ok := seen[expanded]; ok {
+				continue
+			}
+			if s.macOSPrivacyPathSkipped(expanded) {
 				continue
 			}
 			if st, err := os.Stat(expanded); err == nil && st.IsDir() {

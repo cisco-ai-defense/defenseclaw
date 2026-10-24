@@ -38,7 +38,7 @@ Public surface
   a matching dispatch arm in each ``*_for_connector`` function below
   and a Go-side ``connector.NewDefaultRegistry`` registration.
 * :func:`normalize` — canonicalize an operator-supplied connector name
-  (trim, lowercase, default to ``"openclaw"``). Mirrors
+  (trim, lowercase, empty when unset). Mirrors
   ``Config.activeConnector`` semantics in claw.go.
 * :func:`is_known` — connector-name allow-list check.
 * :func:`skill_dirs` / :func:`plugin_dirs` / :func:`agent_dirs` /
@@ -106,11 +106,9 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "cursor",
     "devin",
     "copilot",
-    "openhands",
     "antigravity",
     "opencode",
     "amp",
-    "omnigent",
     "kiro",
 )
 """Allow-list of recognized agent-framework connector names.
@@ -409,18 +407,15 @@ def _flag_claude_unloadable(
 def normalize(connector: str | None) -> str:
     """Return the canonical lowercase connector name.
 
-    Empty / whitespace-only / None values default to ``"openclaw"`` for
-    backward compatibility with pre-S1.x deployments. Matches the
+    Empty / whitespace-only / None values select no connector. Matches the
     precedence rule in ``Config.activeConnector`` (Go).
     """
     if not connector:
-        return "openclaw"
+        return ""
     name = connector.strip().lower()
-    if name in {"open-hands", "open_hands"}:
-        return "openhands"
     if name in {"claude-code", "claude_code"}:
         return "claudecode"
-    return name or "openclaw"
+    return name
 
 
 def is_known(connector: str | None) -> bool:
@@ -614,11 +609,6 @@ def _discovery_path(
     return os.path.join(root, *parts)
 
 
-def _omnigent_config_home() -> str:
-    config_home = (os.environ.get("OMNIGENT_CONFIG_HOME") or "").strip()
-    if config_home:
-        return os.path.abspath(_expand(config_home))
-    return os.path.join(str(Path.home()), ".omnigent")
 
 
 def _connector_env_home(variable: str, default_dir: str) -> str:
@@ -1245,11 +1235,6 @@ def connector_hook_config_paths(connector: str, workspace_dir: str | None = None
     if name == "copilot":
         root = _workspace_path(workspace, ".github") if workspace else copilot_home()
         return [os.path.join(root, "hooks", "defenseclaw.json")]
-    if name == "openhands":
-        paths = [os.path.join(connector_home("openhands"), "hooks.json")]
-        if workspace:
-            paths.insert(0, _workspace_path(workspace, ".openhands", "hooks.json"))
-        return paths
     if name == "kiro":
         paths = [os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")]
         if workspace:
@@ -1270,6 +1255,22 @@ def amp_policy_plugin_path() -> str:
     """Return the single global DefenseClaw policy-plugin path Amp loads."""
 
     return os.path.join(amp_config_home(), "plugins", "defenseclaw.ts")
+
+
+def managed_plugin_path(connector: str | None) -> str:
+    """Return the in-agent plugin DefenseClaw installs for *connector*.
+
+    Only Amp and OpenCode load a DefenseClaw plugin. Their setup receipt
+    (``connector_backups/<connector>/config.json``) records this file and
+    nothing else, so integrity checks compare the receipt only to it, never
+    to the agent's own settings files. Returns "" for other connectors.
+    """
+    name = normalize(connector)
+    if name == "amp":
+        return amp_policy_plugin_path()
+    if name == "opencode":
+        return os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js")
+    return ""
 
 
 def _resolve_amp_managed_settings_path(
@@ -1541,19 +1542,6 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     return ""
 
 
-def omnigent_config_path() -> str:
-    """Return OmniGent's effective user-level ``config.yaml`` path.
-
-    OmniGent's hosted server entrypoints resolve an explicit
-    ``OMNIGENT_CONFIG`` file before ``OMNIGENT_CONFIG_HOME/config.yaml`` and
-    the ``~/.omnigent/config.yaml`` default. The CLI server still needs that
-    selected path passed with ``--config``; Doctor verifies that separately
-    from this setup-time resolver.
-    """
-    explicit = (os.environ.get("OMNIGENT_CONFIG") or "").strip()
-    if explicit:
-        return os.path.abspath(_expand(explicit))
-    return os.path.join(_omnigent_config_home(), "config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -1589,11 +1577,6 @@ def connector_home(
         return os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
     if name == "copilot":
         return copilot_home()
-    if name == "openhands":
-        root = _workspace_dir(workspace_dir)
-        if root:
-            return os.path.join(root, ".openhands")
-        return os.path.join(home, ".openhands")
     if name == "antigravity":
         # Google documents one global customization root at ~/.gemini/config
         # and publishes no config-home environment override. workspace_dir is
@@ -1611,8 +1594,6 @@ def connector_home(
         # Surfaced so inventory/doctor render a truthful home label rather
         # than an empty string or — worse — OpenClaw's path.
         return _opencode_config_dir() or os.path.join(home, ".config", "opencode")
-    if name == "omnigent":
-        return _omnigent_config_home()
     if name == "kiro":
         # Kiro IDE and Kiro CLI share ~/.kiro; neither documents a config-home
         # environment override.
@@ -1666,7 +1647,7 @@ def connector_config_files(
             _workspace_path(workspace_dir, ".amp", "settings.json"),
             _workspace_path(workspace_dir, ".amp", "settings.jsonc"),
             amp_managed_settings_path(),
-            amp_policy_plugin_path(),
+            managed_plugin_path("amp"),
         ]
     elif name == "zeptoclaw":
         zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
@@ -1680,12 +1661,6 @@ def connector_config_files(
             *copilot_settings_paths(workspace_dir)[1:],
             os.path.join(copilot_root, "hooks", "defenseclaw.json"),
             _workspace_path(workspace_dir, ".github", "hooks", "defenseclaw.json"),
-        ]
-    elif name == "openhands":
-        paths = [
-            os.path.join(home, ".openhands", "hooks.json"),
-            os.path.join(home, ".openhands", "mcp.json"),
-            _workspace_path(workspace_dir, ".openhands", "hooks.json"),
         ]
     elif name == "antigravity":
         # Google's global Hooks and MCP contract is pinned to
@@ -1701,10 +1676,8 @@ def connector_config_files(
         # DefenseClaw owns only this exact bridge. Operator JSON/JSONC remains
         # outside lifecycle snapshots and rollback custody.
         paths = [
-            os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
+            managed_plugin_path("opencode"),
         ]
-    elif name == "omnigent":
-        paths = [omnigent_config_path()]
     elif name == "kiro":
         kiro_root = connector_home("kiro")
         paths = [
@@ -1887,14 +1860,12 @@ def skill_dirs(
     at every repository directory from the active workspace to the project
     root, then ``$HOME/.agents/skills``. Its own managed installer and bundled
     system cache live under ``$CODEX_HOME/skills``; the Unix admin directory is
-    ``/etc/codex/skills``. For OpenClaw — and any unknown
-    name — we walk ``openclaw.json`` to honor any ``skills.load.extraDirs``
-    overrides, then add the home_dir/skills fallback.
+    ``/etc/codex/skills``. For OpenClaw we walk ``openclaw.json`` to honor
+    any ``skills.load.extraDirs`` overrides, then add the home_dir/skills
+    fallback. Empty and unknown names return no paths.
 
     *openclaw_home* and *openclaw_config* are only consulted on the
-    OpenClaw branch. Callers that pass ``None`` get the documented
-    OpenClaw defaults (``~/.openclaw`` and
-    ``~/.openclaw/openclaw.json``).
+    OpenClaw branch, which uses the documented ``~/.openclaw`` defaults.
     """
     name = normalize(connector)
     if name == "claudecode":
@@ -1913,20 +1884,18 @@ def skill_dirs(
         return _devin_skill_dirs(workspace_dir)
     if name == "copilot":
         return _copilot_skill_dirs(workspace_dir)
-    if name == "openhands":
-        return _openhands_skill_dirs(workspace_dir)
     if name == "antigravity":
         return _antigravity_skill_dirs(workspace_dir)
     if name == "opencode":
         return _opencode_skill_dirs(workspace_dir)
-    if name == "omnigent":
-        return []
     if name == "kiro":
         # Kiro's reusable context lives in steering docs and specs, not a
         # skills root. Returning [] keeps doctor from pointing an operator at
         # OpenClaw's directories.
         return []
-    return _openclaw_skill_dirs(openclaw_home, openclaw_config)
+    if name == "openclaw":
+        return _openclaw_skill_dirs(openclaw_home, openclaw_config)
+    return []
 
 
 def skill_write_dirs(
@@ -2002,17 +1971,15 @@ def plugin_dirs(
         return []
     if name == "copilot":
         return []
-    if name == "openhands":
-        return []
     if name == "antigravity":
         return _antigravity_plugin_dirs(workspace_dir)
     if name == "opencode":
         return []
-    if name == "omnigent":
-        return []
     if name == "kiro":
         return []
-    return _openclaw_plugin_dirs(openclaw_home)
+    if name == "openclaw":
+        return _openclaw_plugin_dirs(openclaw_home)
+    return []
 
 
 def plugin_inventory_dirs(
@@ -2210,8 +2177,6 @@ def mcp_servers(
             infer_from_cwd=infer,
             diagnostic_sink=diagnostic_sink,
         )
-    if name == "openhands":
-        return _openhands_mcp_servers(diagnostic_sink=diagnostic_sink)
     if name == "antigravity":
         return _antigravity_mcp_servers(
             workspace_dir,
@@ -2228,19 +2193,19 @@ def mcp_servers(
             infer_from_cwd=infer,
             diagnostic_sink=diagnostic_sink,
         )
-    if name == "omnigent":
-        return []
     if name == "kiro":
         return _kiro_mcp_servers(
             workspace_dir,
             infer_from_cwd=infer,
             diagnostic_sink=diagnostic_sink,
         )
-    return _openclaw_mcp_servers(
-        openclaw_config,
-        openclaw_bin_resolver=openclaw_bin_resolver,
-        diagnostic_sink=diagnostic_sink,
-    )
+    if name == "openclaw":
+        return _openclaw_mcp_servers(
+            openclaw_config,
+            openclaw_bin_resolver=openclaw_bin_resolver,
+            diagnostic_sink=diagnostic_sink,
+        )
+    return []
 
 
 def mcp_source_locations(
@@ -2263,8 +2228,8 @@ def mcp_source_locations(
     with a precise falsehood.
 
     Locations are mostly file paths. OpenClaw's preferred source is a
-    command, and omnigent has no MCP registry at all; both are rendered as
-    a parenthesised phrase so a caller can still print and count them. An
+    command, rendered as a parenthesised phrase so a caller can still print
+    and count it. An
     empty list therefore means one thing only — *we do not know where to
     look for this connector* — which is the condition worth an error.
 
@@ -2324,8 +2289,6 @@ def mcp_source_locations(
         return _dedup(_devin_mcp_read_paths(workspace))
     if name == "copilot":
         return _dedup(copilot_mcp_config_files(workspace))
-    if name == "openhands":
-        return _dedup([os.path.join(home, ".openhands", "mcp.json")])
     if name == "antigravity":
         return _dedup(
             [
@@ -2335,8 +2298,6 @@ def mcp_source_locations(
         )
     if name == "opencode":
         return _dedup(_opencode_config_paths(workspace_dir, infer_from_cwd=infer))
-    if name == "omnigent":
-        return ["(omnigent exposes no MCP registry)"]
     if name == "kiro":
         return _dedup(_kiro_mcp_read_paths(workspace_dir, infer_from_cwd=infer))
     if name == "openclaw":
@@ -2347,15 +2308,8 @@ def mcp_source_locations(
             ]
         )
 
-    # Deliberately NOT mirroring mcp_servers here. That function ends in an
-    # unconditional `return _openclaw_mcp_servers(...)`, so an unrecognised
-    # --connector reads OpenClaw's config and reports "no servers for
-    # <name>" — a silent read of the wrong file, which is the failure this
-    # whole change is about. Returning [] lets the caller say so.
-    #
-    # It also catches the realistic regression: a connector added to
-    # KNOWN_CONNECTORS and to mcp_servers but not here shows up as zero
-    # locations on its first run, rather than after months of clean reports.
+    # An unknown connector has no known MCP source. A new connector must add
+    # its reader and its source locations together.
     return []
 
 
@@ -3399,20 +3353,6 @@ def _copilot_custom_skill_dirs(workspace_dir: str) -> list[str]:
     return _dedup(out)
 
 
-def _openhands_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    home = str(Path.home())
-    return _dedup(
-        [
-            _workspace_path(workspace_dir, ".agents", "skills"),
-            _workspace_path(workspace_dir, ".openhands", "skills"),
-            _workspace_path(workspace_dir, ".openhands", "microagents"),
-            os.path.join(home, ".agents", "skills"),
-            os.path.join(home, ".openhands", "skills"),
-            os.path.join(home, ".openhands", "microagents"),
-            os.path.join(home, ".openhands", "skills", "installed"),
-            os.path.join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
-        ]
-    )
 
 
 def _openclaw_skill_dirs(
@@ -4084,14 +4024,6 @@ def _copilot_mcp_servers(
     return _dedup_mcp_entries(entries)
 
 
-def _openhands_mcp_servers(
-    *,
-    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
-) -> list[MCPServerEntry]:
-    return _read_dotmcp_json(
-        os.path.join(str(Path.home()), ".openhands", "mcp.json"),
-        diagnostic_sink=diagnostic_sink,
-    )
 
 
 def _antigravity_global_mcp_path() -> str:
@@ -4984,8 +4916,7 @@ def set_mcp_server(
     * Devin        — user ``<config-root>/mcp_config.json`` by default, or
                      ``<workspace>/.devin/mcp_config.json`` when scoped.
     * ZeptoClaw    — :class:`MCPWriteUnsupportedError`.
-    * Hook-backed  — connector-owned JSON/YAML config when documented
-                     (for example OpenHands writes ``~/.openhands/mcp.json``).
+    * Hook-backed  — connector-owned JSON/YAML config when documented.
     """
     name_n = normalize(connector)
     if name_n == "openclaw":
@@ -5058,21 +4989,12 @@ def set_mcp_server(
         )
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
-    if name_n == "openhands":
-        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
-        _atomic_json_merge(path, ("mcpServers", name), entry)
-        return
     if name_n == "antigravity":
         _set_antigravity_mcp_server(name, entry, workspace_dir=workspace_dir)
         return
     if name_n == "opencode":
         _set_opencode_mcp_server(name, entry, workspace_dir=workspace_dir)
         return
-    if name_n == "omnigent":
-        raise MCPWriteUnsupportedError(
-            "omnigent MCP configuration is unsupported and unverified by the "
-            "DefenseClaw connector; only the custom policy bridge is installed.",
-        )
     if name_n == "kiro":
         raise MCPWriteUnsupportedError(
             "kiro MCP configuration is discovery-only in DefenseClaw. Configure MCP servers "
@@ -5230,21 +5152,12 @@ def unset_mcp_server(
         )
         _atomic_json_delete(path, ("mcpServers", name))
         return
-    if name_n == "openhands":
-        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
-        _atomic_json_delete(path, ("mcpServers", name))
-        return
     if name_n == "antigravity":
         _unset_antigravity_mcp_server(name, workspace_dir=workspace_dir)
         return
     if name_n == "opencode":
         _unset_opencode_mcp_server(name, workspace_dir=workspace_dir)
         return
-    if name_n == "omnigent":
-        raise MCPWriteUnsupportedError(
-            "omnigent MCP configuration is unsupported and unverified by the "
-            "DefenseClaw connector; only the custom policy bridge is installed.",
-        )
     if name_n == "kiro":
         raise MCPWriteUnsupportedError(
             "kiro MCP configuration is discovery-only in DefenseClaw. Remove MCP servers "

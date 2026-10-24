@@ -70,68 +70,88 @@ func TestWindowsStandaloneStatusAndVerifyReportUnprotectedAgents(t *testing.T) {
 		t.Fatalf("verify = %+v, want a warning for the unprotected agent", verify)
 	}
 
-	// No record, or a record this token cannot read, reports nothing.
+	// No record, or a record this token cannot read, leaves install
+	// coverage unknown even when the other services are ready.
 	for _, err := range []error{os.ErrNotExist, os.ErrPermission} {
 		stubWindowsUnprotectedAgents(t, nil, err)
 		quiet := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
-		quiet.SecurityComplete = true
+		quiet.CoverageComplete, quiet.SecurityComplete = true, true
 		applyWindowsEnterpriseUnprotectedAgents(quiet)
-		if !quiet.SecurityComplete || len(quiet.Warnings) != 0 {
+		if quiet.CoverageComplete || quiet.SecurityComplete || len(quiet.Warnings) != 1 ||
+			quiet.Warnings[0].Code != enterprisehooks.UnprotectedCodeInstallScanIncomplete {
 			t.Fatalf("%v: %+v", err, quiet)
 		}
 	}
 	// A record that is present but untrusted or malformed is itself a gap.
 	stubWindowsUnprotectedAgents(t, nil, errors.New("noncanonical owner"))
 	broken := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.0")
-	broken.SecurityComplete = true
+	broken.CoverageComplete, broken.SecurityComplete = true, true
 	applyWindowsEnterpriseUnprotectedAgents(broken)
-	if broken.SecurityComplete || len(broken.Warnings) != 1 || !strings.Contains(broken.Warnings[0].Message, "record is unreadable") {
+	if broken.CoverageComplete || broken.SecurityComplete || len(broken.Warnings) != 1 || !strings.Contains(broken.Warnings[0].Message, "record is missing or unreadable") {
 		t.Fatalf("broken record: %+v", broken)
 	}
 }
 
-func TestWindowsEnrolledKiroCLIBelowHookFloorIsUncovered(t *testing.T) {
-	stubWindowsUnprotectedAgents(t, []enterprisehooks.UnprotectedAgent{{
-		User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "kiro", Version: "2.24.1",
-		Code:   "kiro_cli_below_hook_floor",
-		Reason: "kiro-cli 2.24.1 is below 2.27.1: non-interactive runs do not load hooks; the earlier enrollment remains installed",
-	}}, nil)
+func TestWindowsPrivateClaudeInstallReportsAndAuditsEachCopy(t *testing.T) {
+	const sid = "S-1-5-21-1-2-3-1001"
+	agents := []enterprisehooks.UnprotectedAgent{
+		{User: "alice", SID: sid, Connector: "claudecode", Version: "2.0.77", InstallPath: `C:\Users\alice\old-a\node_modules\@anthropic-ai\claude-code`, Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "unsupported version"},
+		{User: "alice", SID: sid, Connector: "claudecode", Version: "1.0.128", InstallPath: `C:\Users\alice\old-b\node_modules\@anthropic-ai\claude-code`, Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "unsupported version"},
+	}
+	stubWindowsUnprotectedAgents(t, agents, nil)
+	previous := windowsManagedInstallAudit
+	t.Cleanup(func() { windowsManagedInstallAudit = previous })
+	var audited []string
+	windowsManagedInstallAudit = func(agent enterprisehooks.UnprotectedAgent) error {
+		audited = append(audited, agent.InstallPath+":"+agent.Version)
+		return nil
+	}
 	for _, action := range []string{"status", "verify"} {
-		r := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
-		r.CoverageComplete, r.SecurityComplete = true, true
-		applyWindowsEnterpriseUnprotectedAgents(r)
-		r.Finish("windows", 0)
-		messages := r.Warnings
-		if action == "verify" {
-			messages = r.Errors
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.CoverageComplete, result.SecurityComplete = true, true
+		applyWindowsEnterpriseUnprotectedAgents(result)
+		if result.CoverageComplete || result.SecurityComplete || len(result.Warnings) != 2 ||
+			!strings.Contains(result.Warnings[0].Message, "old-a") || !strings.Contains(result.Warnings[1].Message, "old-b") {
+			t.Fatalf("%s private installs: %+v", action, result)
 		}
-		if r.CoverageComplete || r.SecurityComplete || len(messages) != 1 ||
-			messages[0].Code != "kiro_cli_below_hook_floor" ||
-			!strings.Contains(messages[0].Message, "kiro 2.24.1 for user alice") ||
-			(action == "verify" && (r.OK || r.ExitCode == 0)) ||
-			(action == "status" && (!r.OK || r.ExitCode != 0)) {
-			t.Fatalf("%s counted an unhooked Kiro CLI as covered: %+v", action, r)
+	}
+	if len(audited) != 4 || !strings.Contains(audited[0], "old-a") || !strings.Contains(audited[3], "old-b") {
+		t.Fatalf("Windows install audits = %+v", audited)
+	}
+}
+
+func TestWindowsMissingUnprotectedRecordMakesCoverageUnknown(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
+	for _, action := range []string{"status", "verify"} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.CoverageComplete, result.SecurityComplete = true, true
+		applyWindowsEnterpriseUnprotectedAgents(result)
+		messages := result.Warnings
+		if action == "verify" {
+			messages = result.Errors
+		}
+		if result.CoverageComplete || result.SecurityComplete ||
+			!strings.Contains(fmt.Sprint(messages), "unprotected-agents record") {
+			t.Fatalf("%s hid missing install evidence: %+v", action, result)
 		}
 	}
 }
 
-func TestWindowsKiroIDEBelowGlobalHookFloorFailsVerify(t *testing.T) {
-	stubWindowsUnprotectedAgents(t, []enterprisehooks.UnprotectedAgent{{
-		User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "kiro", Version: "1.0.181",
-		Code:   enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
-		Reason: "Kiro IDE 1.0.181 cannot read the global hooks file",
-	}}, nil)
-	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.4")
-	status.CoverageComplete, status.SecurityComplete = true, true
-	applyWindowsEnterpriseUnprotectedAgents(status)
-	status.Finish("windows", 0)
-	verify := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
-	verify.CoverageComplete, verify.SecurityComplete = true, true
-	applyWindowsEnterpriseUnprotectedAgents(verify)
-	verify.Finish("windows", 0)
-	if status.CoverageComplete || !status.OK || verify.CoverageComplete || verify.OK || verify.ExitCode == 0 ||
-		len(verify.Errors) != 1 || verify.Errors[0].Code != enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
-		t.Fatalf("old IDE appears covered: status=%+v verify=%+v", status, verify)
+func TestWindowsUnreadableProtectedRecordExplainsElevation(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, nil, os.ErrPermission)
+	for _, action := range []string{"status", "verify"} {
+		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		result.CoverageComplete, result.SecurityComplete = true, true
+		applyWindowsEnterpriseUnprotectedAgents(result)
+		messages := result.Warnings
+		if action == "verify" {
+			messages = result.Errors
+		}
+		if result.CoverageComplete || result.SecurityComplete || len(messages) != 1 ||
+			messages[0].Code != enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
+			!strings.Contains(messages[0].Message, "elevated") || strings.Contains(messages[0].Message, "missing") {
+			t.Fatalf("%s permission result = %+v", action, result)
+		}
 	}
 }
 
@@ -500,5 +520,50 @@ func TestWindowsStandaloneEnsureNamesPerUserInstallLeftovers(t *testing.T) {
 	// A managed gateway runs as its service identity and is not per-user.
 	if windowsEnterprisePerUserGatewayHolder(`C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`, `NT SERVICE\DefenseClawGateway`) {
 		t.Fatal("the managed gateway service was named a per-user gateway")
+	}
+}
+
+func TestWindowsEnrolledKiroCLIBelowHookFloorIsUncovered(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, []enterprisehooks.UnprotectedAgent{{
+		User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "kiro", Version: "2.24.1",
+		Code:   "kiro_cli_below_hook_floor",
+		Reason: "kiro-cli 2.24.1 is below 2.27.1: non-interactive runs do not load hooks; the earlier enrollment remains installed",
+	}}, nil)
+	for _, action := range []string{"status", "verify"} {
+		r := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+		r.CoverageComplete, r.SecurityComplete = true, true
+		applyWindowsEnterpriseUnprotectedAgents(r)
+		r.Finish("windows", 0)
+		messages := r.Warnings
+		if action == "verify" {
+			messages = r.Errors
+		}
+		if r.CoverageComplete || r.SecurityComplete || len(messages) != 1 ||
+			messages[0].Code != "kiro_cli_below_hook_floor" ||
+			!strings.Contains(messages[0].Message, "kiro 2.24.1 for user alice") ||
+			(action == "verify" && (r.OK || r.ExitCode == 0)) ||
+			(action == "status" && (!r.OK || r.ExitCode != 0)) {
+			t.Fatalf("%s counted an unhooked Kiro CLI as covered: %+v", action, r)
+		}
+	}
+}
+
+func TestWindowsKiroIDEBelowGlobalHookFloorFailsVerify(t *testing.T) {
+	stubWindowsUnprotectedAgents(t, []enterprisehooks.UnprotectedAgent{{
+		User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "kiro", Version: "1.0.181",
+		Code:   enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
+		Reason: "Kiro IDE 1.0.181 cannot read the global hooks file",
+	}}, nil)
+	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.4")
+	status.CoverageComplete, status.SecurityComplete = true, true
+	applyWindowsEnterpriseUnprotectedAgents(status)
+	status.Finish("windows", 0)
+	verify := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
+	verify.CoverageComplete, verify.SecurityComplete = true, true
+	applyWindowsEnterpriseUnprotectedAgents(verify)
+	verify.Finish("windows", 0)
+	if status.CoverageComplete || !status.OK || verify.CoverageComplete || verify.OK || verify.ExitCode == 0 ||
+		len(verify.Errors) != 1 || verify.Errors[0].Code != enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+		t.Fatalf("old IDE appears covered: status=%+v verify=%+v", status, verify)
 	}
 }

@@ -26,12 +26,6 @@ type nativeWriteCall struct {
 	args            func(path string) map[string]any
 }
 
-// nativeWriteBenignGaps names the open gap of a benign row that is still
-// blocked, by connector/tool.
-var nativeWriteBenignGaps = map[string]string{"copilot/apply_patch": "GAP-0668"}
-
-func (c nativeWriteCall) benignGap() string { return nativeWriteBenignGaps[c.connector+"/"+c.tool] }
-
 func nativeWriteCalls() []nativeWriteCall {
 	patch := func(path string) string {
 		return "*** Begin Patch\n*** Update File: " + path + "\n@@\n # base\n+# k\n*** End Patch\n"
@@ -139,9 +133,6 @@ func TestNativeWriteToolsOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) {
 	for i, call := range nativeWriteTableCalls() {
 		for target, want := range map[string]bool{keys: true, filepath.Join(project, "notes.txt"): false} {
 			t.Run(fmt.Sprintf("%s/block=%t", call.name(i), want), func(t *testing.T) {
-				if !want && call.benignGap() != "" {
-					t.Skip(call.benignGap())
-				}
 				body := call.body(t, project, target)
 				cfg := &config.Config{}
 				cfg.Guardrail.Mode = "action"
@@ -149,7 +140,7 @@ func TestNativeWriteToolsOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) {
 				api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/"+call.connector+"/hook", strings.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set(hookpaths.Header, hookpaths.Resolve([]byte(body)))
+				req.Header.Set(hookpaths.Header, hookpaths.ResolveConnector(call.connector, "", "preToolUse", []byte(body)))
 				switch call.connector {
 				case "codex":
 					setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)

@@ -16,6 +16,7 @@
 
 """Tests for the guardrail integration — config, utilities, and CLI command."""
 
+import copy
 import hashlib
 import json
 import os
@@ -1026,14 +1027,16 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         # Simulate scripts/install.sh --connector codex having recorded
         # the operator's choice. The CLI should pick it up without
         # requiring --connector / --agent on every subsequent setup call.
+        # The hint counts only for an installed agent (GAP-0568).
         atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex\n")
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.claw.home_dir = self.tmp_dir
-        result = self.runner.invoke(
-            setup,
-            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
-            obj=self.app,
-        )
+        with patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["codex"]):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector: Codex (codex)", result.output)
 
@@ -1086,10 +1089,11 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
         self.assertEqual(self.app.cfg.guardrail.mode, "action")
 
-    def test_non_interactive_missing_action_connector_downgrades_to_observe(self):
+    def test_non_interactive_missing_action_connector_refuses_without_saving(self):
         from defenseclaw.commands.cmd_setup import setup
 
         self.app.cfg.claw.home_dir = self.tmp_dir
+        before = copy.deepcopy(self.app.cfg.guardrail)
         signal = SimpleNamespace(version="", installed=False, error="", binary_path="")
         disc = SimpleNamespace(agents={"claudecode": signal})
 
@@ -1117,11 +1121,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 obj=self.app,
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("Claude Code: connector was not detected locally", result.output)
-        self.assertIn("Claude Code: requested action mode was refused", result.output)
-        self.assertEqual(self.app.cfg.guardrail.connector, "claudecode")
-        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+        self.assertIn("defenseclaw setup guardrail", result.output)
+        self.assertEqual(self.app.cfg.guardrail, before)
 
     def test_non_interactive_codex_observe_flag_enables_enforcement(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -1749,9 +1752,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         checked = {call.args[0] for call in version_check.call_args_list}
         self.assertEqual(checked, {"codex", "claudecode"})
 
-    def test_interactive_multi_connector_downgrades_refused_action_mode(self):
-        """Action connectors refused by setup guardrail validation fall back
-        to observe so status reflects effective posture after the run."""
+    def test_interactive_multi_connector_refuses_unverified_action_mode(self):
         from defenseclaw.commands.cmd_setup import setup
         from defenseclaw.config import PerConnectorGuardrailConfig
 
@@ -1763,6 +1764,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             "cursor": PerConnectorGuardrailConfig(mode="action"),
             "claudecode": PerConnectorGuardrailConfig(mode="action"),
         }
+        before = copy.deepcopy(gc)
 
         def version_gate(connector, *, mode="observe", **_kwargs):
             return not (connector == "cursor" and mode == "action")
@@ -1784,14 +1786,10 @@ class TestSetupGuardrailCommand(unittest.TestCase):
                 input="\n" * 15,
             )
 
-        self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn(
-            "Cursor: requested action mode was refused; configuring observe mode instead.",
-            result.output,
-        )
-        execute_setup.assert_called_once()
-        self.assertEqual(gc.connectors["cursor"].mode, "observe")
-        self.assertEqual(gc.connectors["claudecode"].mode, "action")
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("did not pass connector preflight", result.output)
+        execute_setup.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail, before)
 
     def test_interactive_multi_connector_offers_hilt_when_any_action(self):
         """In multi-connector mode HILT is gated on whether ANY connector
@@ -2108,39 +2106,34 @@ class TestRestartDefenseGateway(unittest.TestCase):
 class TestWaitForDefenseGatewayAPI(unittest.TestCase):
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
-    def test_accepts_only_running_api_health(self, connection_cls, mock_load, _mock_host):
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
+    def test_accepts_only_running_api_health(self, health_probe, mock_load, _mock_host):
         from defenseclaw.commands.cmd_setup import _wait_for_defense_gateway_api
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        connection = connection_cls.return_value
-        response = connection.getresponse.return_value
-        response.status = 200
-        response.read.return_value = b'{"api":{"state":"running"}}'
+        health_probe.return_value = (200, '{"api":{"state":"running"}}')
 
         self.assertTrue(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.1))
-        connection_cls.assert_called_once()
-        args, kwargs = connection_cls.call_args
-        self.assertEqual(args, ("127.0.0.1", 19001))
+        # Health is read only through the probe bound to the verified
+        # gateway process, never with a raw connection to the port.
+        health_probe.assert_called_once()
+        args, kwargs = health_probe.call_args
+        self.assertIs(args[0], mock_load.return_value)
         self.assertGreater(kwargs["timeout"], 0)
         self.assertLessEqual(kwargs["timeout"], 0.1)
-        connection.request.assert_called_once_with("GET", "/health")
-        connection.close.assert_called_once()
+        self.assertIs(kwargs["bypass_proxy"], True)
 
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
-    def test_rejects_health_while_api_is_still_starting(self, connection_cls, mock_load, _mock_host):
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
+    def test_rejects_health_while_api_is_still_starting(self, health_probe, mock_load, _mock_host):
         from defenseclaw.commands.cmd_setup import _wait_for_defense_gateway_api
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        connection = connection_cls.return_value
-        response = connection.getresponse.return_value
-        response.status = 200
-        response.read.return_value = b'{"api":{"state":"starting"}}'
+        health_probe.return_value = (200, '{"api":{"state":"starting"}}')
 
         self.assertFalse(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.01))
-        self.assertGreaterEqual(connection.request.call_count, 1)
+        self.assertGreaterEqual(health_probe.call_count, 1)
 
     @patch("defenseclaw.commands.cmd_setup.time.sleep")
     @patch(
@@ -2153,10 +2146,10 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
     )
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
     def test_rejects_retiring_api_after_replacement_markers_are_published(
         self,
-        connection_cls,
+        health_probe,
         mock_load,
         _mock_host,
         _mock_pid_marker,
@@ -2169,23 +2162,21 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
         )
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        retiring = MagicMock(status=200)
-        retiring.read.return_value = json.dumps(
+        retiring = json.dumps(
             {
                 "started_at": "2026-08-11T04:00:00Z",
                 "api": {"state": "running"},
                 "connectors": [{"name": "claudecode", "state": "running"}],
             }
-        ).encode()
-        replacement = MagicMock(status=200)
-        replacement.read.return_value = json.dumps(
+        )
+        replacement = json.dumps(
             {
                 "started_at": "2026-08-11T04:00:01Z",
                 "api": {"state": "running"},
                 "connectors": [{"name": "claudecode", "state": "running"}],
             }
-        ).encode()
-        connection_cls.return_value.getresponse.side_effect = [retiring, replacement]
+        )
+        health_probe.side_effect = [(200, retiring), (200, replacement)]
         previous = _GatewayRuntimeGeneration(
             b"retiring-pid-record",
             "2026-08-11T04:00:00Z",
@@ -2200,7 +2191,7 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
                 expected_connectors=["claudecode"],
             )
         )
-        self.assertEqual(connection_cls.return_value.getresponse.call_count, 2)
+        self.assertEqual(health_probe.call_count, 2)
 
     @patch("defenseclaw.commands.cmd_setup.time.sleep")
     @patch(
@@ -2213,10 +2204,10 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
     )
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
     def test_rejects_health_started_before_the_replacement_boundary(
         self,
-        connection_cls,
+        health_probe,
         mock_load,
         _mock_host,
         _mock_pid_marker,
@@ -2229,14 +2220,15 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
         )
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        response = connection_cls.return_value.getresponse.return_value
-        response.status = 200
-        response.read.return_value = json.dumps(
-            {
-                "started_at": "2026-08-11T04:00:00Z",
-                "api": {"state": "running"},
-            }
-        ).encode()
+        health_probe.return_value = (
+            200,
+            json.dumps(
+                {
+                    "started_at": "2026-08-11T04:00:00Z",
+                    "api": {"state": "running"},
+                }
+            ),
+        )
         boundary = datetime.fromisoformat("2026-08-11T04:00:01+00:00").timestamp()
         previous = _GatewayRuntimeGeneration(b"retiring-pid-record", None, boundary)
 
@@ -2260,10 +2252,10 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
     )
     @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
     @patch("defenseclaw.commands.cmd_setup.load_config")
-    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    @patch("defenseclaw.commands.cmd_doctor._gateway_health_probe")
     def test_rejects_naive_started_at_for_the_replacement_boundary(
         self,
-        connection_cls,
+        health_probe,
         mock_load,
         _mock_host,
         _mock_pid_marker,
@@ -2276,14 +2268,15 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
         )
 
         mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
-        response = connection_cls.return_value.getresponse.return_value
-        response.status = 200
-        response.read.return_value = json.dumps(
-            {
-                "started_at": "2099-08-11T04:00:00",
-                "api": {"state": "running"},
-            }
-        ).encode()
+        health_probe.return_value = (
+            200,
+            json.dumps(
+                {
+                    "started_at": "2099-08-11T04:00:00",
+                    "api": {"state": "running"},
+                }
+            ),
+        )
         previous = _GatewayRuntimeGeneration(b"retiring-pid-record", None, 1.0)
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2347,69 +2340,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 ["openclaw", "gateway", "restart"],
                 f"must not restart openclaw when a different connector is selected; got {commands}",
             )
-
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
-    @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_multi_connector_omnigent_hint_reports_gateway_ready_policy_unverified(
-        self,
-        _mock_restart,
-        _mock_wait,
-        _mock_api,
-        mock_subhead,
-    ):
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(
-                tmpdir,
-                connector=None,
-                connectors=["codex", "omnigent"],
-                wait_for_connector_ready=True,
-            )
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(any("DefenseClaw gateway registration is ready" in message for message in messages))
-        self.assertTrue(any("loaded policy generation" in message for message in messages))
-        self.assertTrue(any("unverified pending reload/restart" in message for message in messages))
-        self.assertTrue(all("enforcement via" not in message for message in messages))
-
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_multi_connector_restart_without_readiness_gate_names_only_omnigent(
-        self,
-        _mock_restart,
-        mock_subhead,
-    ):
-        # GAP-2630: `agent discovery enable` restarts without a readiness
-        # wait; the roster must not read "registration is not verified".
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(tmpdir, connector="codex", connectors=["codex", "claudecode", "omnigent"])
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(all("not verified" not in message for message in messages))
-        self.assertTrue(any("enforcement via" in message for message in messages))
-        self.assertTrue(any(m.startswith("OmniGent:") and "defenseclaw doctor" in m for m in messages))
-
-    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
-    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_omnigent_hint_without_readiness_gate_does_not_claim_gateway_ready(
-        self,
-        _mock_restart,
-        mock_subhead,
-    ):
-        from defenseclaw.commands.cmd_setup import _restart_services
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _restart_services(tmpdir, connector="omnigent")
-
-        messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(any("gateway registration is not verified" in message for message in messages))
-        self.assertTrue(all("gateway registration is ready" not in message for message in messages))
-        self.assertTrue(all("enforcement via" not in message for message in messages))
 
     @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
@@ -2533,8 +2463,8 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 return value
 
             for requested in (
-                ["claudecode", "codex", "cursor", "omnigent"],
-                ["claudecode", "codex", "cursor", "omnigent", "opencode"],
+                ["claudecode", "codex", "cursor", ],
+                ["claudecode", "codex", "cursor",  "opencode"],
             ):
                 with self.subTest(requested=requested):
                     clock = Clock()
@@ -2686,7 +2616,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             def sleep(self, _seconds):
                 self.now += 10.0
 
-        expected = ["claudecode", "codex", "cursor", "omnigent", "opencode"]
+        expected = ["claudecode", "codex", "cursor",  "opencode"]
         baseline = {name: f"old-{name}" for name in expected}
         clock = Clock()
 
@@ -2769,7 +2699,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             "codex",
             "copilot",
             "devin",
-            "omnigent",
             "opencode",
         ]
         clock = SimpleNamespace(now=0.0)
@@ -2823,7 +2752,6 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             "codex",
             "copilot",
             "devin",
-            "omnigent",
             "opencode",
         ]
         clock = SimpleNamespace(now=0.0)
@@ -3103,7 +3031,10 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_name = "cursor-hook.ps1" if os.name == "nt" else "cursor-hook.sh"
-            runtime_path = os.path.join(tmpdir, runtime_name)
+            # Setup's own path: a copy anywhere else is not DefenseClaw's
+            # current hook (rel-1-0-4 GAP-0600).
+            runtime_path = os.path.join(tmpdir, "hooks", runtime_name)
+            os.mkdir(os.path.dirname(runtime_path), 0o700)
             if os.name == "nt":
                 runtime_body = (
                     "# defenseclaw-managed-hook v9\ndefenseclaw-hook.exe\n"

@@ -60,5 +60,25 @@ class LLMBridgeTests(unittest.TestCase):
         self.assertEqual(out.get("error_code"), ERR_LLM_BRIDGE_ERROR)
 
 
+class LLMHelperExitsWithParentTests(unittest.TestCase):
+    # p0 GAP-1156: the helper a scanner starts dies with the scanner.
+    def test_linux_helper_asks_for_the_parent_death_signal(self):
+        import signal
+
+        from defenseclaw import llm
+
+        libc = MagicMock()
+        with patch.object(sys, "platform", "linux"), patch("ctypes.CDLL", return_value=libc):
+            llm._exit_with_parent()
+        libc.prctl.assert_called_once_with(1, int(signal.SIGKILL), 0, 0, 0)
+
+    def test_other_platforms_leave_the_helper_as_is(self):
+        from defenseclaw import llm
+
+        with patch.object(sys, "platform", "darwin"), patch("ctypes.CDLL") as cdll:
+            llm._exit_with_parent()
+        cdll.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -62,7 +62,7 @@ is given in the second column so reviewers can compare the two platforms.
 3. `defenseclaw-hook` sends no request byte until the kernel proves the
    listener is root (PID 1 holding an activated socket) or the gateway's
    service uid. DefenseClaw's in-agent plugins (OpenCode, Amp) and the
-   OmniGent and Codex notify bridges use the same socket and check; there is
+   Codex notify bridges use the same socket and check; there is
    no TCP fallback. The agents' own telemetry exporters do not verify the
    listener (residual 3).
 4. The gateway authorizes each hook caller by kernel uid against the
@@ -82,8 +82,7 @@ is given in the second column so reviewers can compare the two platforms.
 8. A normal user cannot disable DefenseClaw's hooks through vendor settings,
    and a foreign hook cannot rewrite a tool call DefenseClaw inspected for a
    connector with a vendor lock or the foreign-hook guard, within the bounds
-   of enterprise residuals R3, R4, R13 and R14. Antigravity, OpenHands and
-   OmniGent have neither, and the guard covers Hermes shell hooks with the
+   of enterprise residuals R3, R4, R13 and R14. Antigravity has neither, and the guard covers Hermes shell hooks with the
    gaps listed in R24.
 9. Every lifecycle action is a transaction that commits fully or rolls back.
 10. Only the root sensor helper talks to a Tetragon API, only over a Unix
@@ -105,7 +104,7 @@ is given in the second column so reviewers can compare the two platforms.
 | Z1 | `defenseclaw-hook-enumerator.service` | root; `CAP_CHOWN CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID`, the last two also ambient; `ProtectHome=read-only` | Writes only `/etc/defenseclaw/hook-guardian` and `refused-surfaces.json` (root:defenseclaw 0640) in `/var/lib/defenseclaw-hook-guardian` |
 | Z1 | Per-user `enterprise hooks apply-target` worker | the target user's uid and primary gid | New session, parent-death signal, non-dumpable, rlimits, timeout, minimal environment |
 | Z1 | `defenseclaw-sensor-helper.service` | root with acquisition capabilities (`CAP_SYS_ADMIN`, `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_DAC_READ_SEARCH`, `CAP_SYS_PTRACE`, `CAP_CHOWN`, `CAP_FOWNER`) | Own `RuntimeDirectory=defenseclaw-sensor` and `StateDirectory=defenseclaw-sensor` (`0700`); fixed fieldless request protocol; homes from the manifest. Ordered after `tetragon.service`. When the computer runs Tetragon it is the only client of that root-equivalent API (L-42), limited to the calls each `enterprise.tetragon.mode` allows |
-| Z2 | `defenseclaw-gateway.service` (`Type=notify`, watchdog) | `defenseclaw:defenseclaw`, `CapabilityBoundingSet=` (empty) | `ProtectSystem=strict`, `ProtectHome=true`, `PrivateDevices`, `PrivateTmp`, `ProtectProc=invisible` (systemd 247 or later; see [Review scope](#review-scope)), `@system-service` syscall filter, `RestrictNamespaces` (no `MemoryDenyWriteExecute`: the sonic JSON library maps executable memory on x86_64); read-only `/etc/defenseclaw`, `/opt/defenseclaw` and the ledger |
+| Z2 | `defenseclaw-gateway.service` (`Type=notify`, watchdog) | `defenseclaw:defenseclaw`, `CapabilityBoundingSet=` (empty) | `ProtectSystem=strict`, `ProtectHome=true`, `PrivateDevices`, `PrivateTmp`, `ProtectProc=invisible` (systemd 247 or later; see [Review scope](#review-scope)), `@system-service` syscall filter, `RestrictNamespaces=user pid` (only the user and PID namespaces the Hermes Verify probe runs the registered hook in, so nothing it starts outlives the probe; the hook guardian units allow the same two) (no `MemoryDenyWriteExecute`: the sonic JSON library maps executable memory on x86_64); read-only `/etc/defenseclaw`, `/opt/defenseclaw` and the ledger |
 | Z2 endpoints | `defenseclaw-gateway-api.socket` (`127.0.0.1:18970`) and `defenseclaw-gateway-hook.socket` (`/run/defenseclaw-hook/hook.sock`) | bound by PID 1 | Held across gateway restarts. `/run/defenseclaw-hook` is created `0755 defenseclaw:defenseclaw` by systemd-tmpfiles at boot (`packaging/systemd/defenseclaw.conf`) and by the lifecycle; only root and the service account can create entries in it. The socket is `0666 defenseclaw:defenseclaw` (`SocketUser`, `SocketGroup`, `SocketMode`) so every local user can connect; the gateway authorizes each caller by kernel uid (L-08) |
 | Z3 | `/opt/defenseclaw` (binaries), `/etc/defenseclaw` (config, `policies/`, `secrets/`, `hook-guardian/targets.yaml`, `managed-runtime.json`, `machine-policy.json`), `/var/lib/defenseclaw-hook-guardian` (ledger), `/var/lib/defenseclaw-enterprise` (lifecycle), `/etc/{codex,claude-code,cursor,github-copilot,opencode}` | root | Administrator-only write; secrets root-only with systemd 247 or later, otherwise `root:defenseclaw 0640` |
 | Z4 | The AI agent and `/opt/defenseclaw/bin/defenseclaw-hook` running as the user; the user's vendor config | the user | Peer verification, guardian repair, foreign-hook guard |
@@ -161,12 +160,11 @@ access. Status shows presence, modification time and a digest prefix only.
    Only then does it send the request. There is no TCP fallback: a
    descriptor that names no socket fails closed
    (`enterprise_managed_hook_socket_missing`). Per-user shell hooks, in-agent
-   plugins, the OmniGent bridge and the Codex notify bridge use the same
+   plugins, the Codex notify bridge use the same
    socket, and the guardian refuses to render them without it.
 4. The gateway reads the caller's uid from the socket and checks the
    authorization ledger (L-08).
-5. The remaining TCP consumers (the Codex, Claude Code, OpenHands and
-   OmniGent telemetry exporters) present credentials bound to
+5. The remaining TCP consumers (the Codex and Claude Code telemetry exporters) present credentials bound to
    the user's uid. The guardian derives them from a per-machine key kept in
    the gateway's data directory (`hooks/.user-scoped-token.key`) and renders
    them into the user's own hook directory and agent configuration. The
@@ -226,17 +224,16 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-22 | W-13 | A removed user or connector stays authorized | The ledger is rebuilt from the current manifest; removed or disabled rows are revoked | Enumerator and guardian tests |
 | L-23 | — | SELinux, fapolicyd or AppArmor silently blocks a service | Relabel after install; lifecycle warnings | Host certification record |
 | L-24 | W-21 | The gateway hangs without exiting | `WatchdogSec=60s` with `Type=notify`; systemd restarts it | SIGSTOP drill |
-| L-25 | W-27 | An old, copied or self-built agent client (for example Codex built from source, or an older Codex or Claude Code under `~/.local`) ignores `/etc/codex/requirements.toml` or the managed-settings drop-in | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`, and fapolicyd (or another application-control tool) allowing only approved client binaries at or above the floors closes it (enterprise R15). Claude Code releases that do not read `/etc/claude-code/managed-settings.d` (for example 1.0.128 and 2.0.77) ignore both DefenseClaw drop-ins, including the version floor, run with no DefenseClaw hook and no audit row, and are not reported by `status` or `verify` ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). GitHub Copilot CLI 1.0.15, below its 1.0.18 floor, installed with `npm install --prefix` and run with `--no-auto-update`, does not load `/etc/github-copilot/policy.d` either. Per-user connectors below their contract minimum are the same class: OpenHands 1.11.0 (the minimum is 1.12.0), started with `uvx --from openhands==1.11.0 openhands`, starts without loading `~/.openhands/hooks.json`, and nothing refuses it or reports it, because it runs from the uv cache, where discovery does not look | Application-control profile on a host; an old client started from a user's home |
-| L-26 | — | A standard user creates a private user and mount namespace and starts an agent with its own view of the machine policy, runtime descriptor or hook socket directory | `enterprise linux verify` warns (`unprivileged_user_namespaces`) unless the kernel refuses unprivileged user namespaces; the host sysctl closes it (residual 11, enterprise R20) | `internal/enterpriseunix/userns_test.go` |
+| L-25 | W-27 | An old, copied or self-built agent client (for example Codex built from source, or an older Codex or Claude Code under `~/.local`) ignores `/etc/codex/requirements.toml` or the managed-settings drop-in; user-controlled loader or runtime preloads (`LD_PRELOAD`, `LD_AUDIT`, `NODE_OPTIONS=--require` and similar) can intercept policy reads in an approved client | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`. Application control such as fapolicyd must restrict executable, shared-library and untrusted language-file loading, and launch policy must sanitize loader and runtime preload variables. `status` and `verify` cannot attest that control. Claude Code releases that do not read `/etc/claude-code/managed-settings.d` (for example 1.0.128 and 2.0.77) ignore both DefenseClaw drop-ins, including the version floor, run with no DefenseClaw hook and no audit row, and are not reported by `status` or `verify` ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). GitHub Copilot CLI 1.0.15, below its 1.0.18 floor, installed with `npm install --prefix` and run with `--no-auto-update`, does not load `/etc/github-copilot/policy.d` either. Per-user connectors below their contract minimum are the same class. | Application-control profile on a host; an old or preloaded client started from a user's home |
+| L-26 | — | A standard user gives an agent a private view of machine policy before it loads the managed hook | Every invoked machine-policy hook compares the policy content it sees with digests pinned in the trusted runtime descriptor and refuses a mismatch. Linux also detects observable private namespaces and tracers; lack of `/proc/1` access falls back to the digest. `status` and `verify` report only current kernel facts and warn when unprivileged namespaces or ptrace are open. DefenseClaw never changes host kernel settings. A client that omits the hook remains outside this invocation check; administrators may apply optional host hardening with their own tools (residual 11, enterprise R20) | `internal/enterpriseunix/userns_test.go`, `internal/cli/hook_trusted_state_unix_test.go`, `internal/enterprisepolicy/policy_view_digest_test.go` |
 | L-27 | W-57 | A user has an agent only as a desktop app or editor extension and is never enrolled | Not in this release: machine-policy hook calls are inspected under the default contract or refused (`unenrolled_users`), and per-user connectors get no hooks ([R25](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#912](https://github.com/cisco-ai-defense/defenseclaw/issues/912)) | Tracked in #912 |
 | L-28 | W-58 | A Copilot agent chat in VS Code's Local harness runs without DefenseClaw policy or audit | Partly covered: `ChatHooks` and `ChatEditorPreferCopilotHarness` through `/etc/vscode/policy.json` send new editor chats to the SDK harness. A per-user Local hook file governs a Local chat. Under `managed_hooks_only: enforce`, a per-user plugin is also placed, and `allowManagedHooksOnly` is set in `/etc/github-copilot/managed-settings.json` once every enrolled user has the plugin and every VS Code found is 1.139.x ([R26](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913)) | Tracked in #913 |
 | L-29 | W-59 | The standalone profile is installed inside a WSL 2 distribution, where the Windows user is root | Not a supported deployment: the user controls the distribution. The lifecycle refuses a new install inside WSL and warns on an existing one (`wsl_distribution`) ([R27](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#914](https://github.com/cisco-ai-defense/defenseclaw/issues/914)) | Govern WSL from the Windows side |
 | L-30 | W-60 | Devin Desktop runs without DefenseClaw hooks for a user without the `devin` CLI | Enrolled at the bundled Devin CLI version when it is 3000.4.25 or later and not known broken, otherwise reported in `unprotected-agents.json`; Cascade is refused through the machine-level Cascade hooks file ([R28](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#915](https://github.com/cisco-ai-defense/defenseclaw/issues/915)) | Tracked in #915 |
 | L-31 | W-61 | The Kiro IDE's reading of the global `~/.kiro/hooks` file is not live-verified | Partly covered: the IDE is discovered from its `product.json`, an IDE-only user is enrolled, and an IDE before 1.0.182 is reported as `kiro_ide_below_global_hooks_floor` ([R29](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#916](https://github.com/cisco-ai-defense/defenseclaw/issues/916)) | Tracked in #916 |
-| L-32 | — | A user kills, stops or starves their own `defenseclaw-hook` (or `openhands-hook.sh`, `hermes-hook.sh`) while an agent waits for it | Not closable from user space: the hook is a user process. Claude Code, Codex, OpenHands, Devin and Hermes then run the call with no DefenseClaw decision before it runs (Hermes' later `post_tool_call` hook can still record it); Copilot, OpenCode, Amp and Antigravity stay closed (residual 12, enterprise R5 and R18). Application control or EDR process protection closes it | Kill and stop drill on the user's hook processes |
-| L-33 | — | A project's `.openhands/hooks.json` replaces the user-level registration, so none of DefenseClaw's OpenHands hooks run in that project | Not closable by DefenseClaw: OpenHands uses the first `hooks.json` it finds, the project's before the user's, so any project file (a cloned repository can carry one) removes every DefenseClaw hook; the guardian does not restore or remove project files, the foreign-hook guard does not cover OpenHands, and policy verify does not look for it ([R30](ENTERPRISE-THREAT-MODEL.md#residual-risks)) | A project `.openhands/hooks.json` drill |
-| L-34 | — | A user starts a per-user agent with another config root or a mode that skips user configuration (Amp or Devin with `XDG_CONFIG_HOME` or `HOME`, `devin --config <file>`, Antigravity or OpenHands with `HOME`, Hermes with `--safe-mode` or `HERMES_HOME`), so DefenseClaw's registration is never loaded | Not closable by DefenseClaw: the guardian repairs only the default location and cannot see a process's environment or command line, so the session is not inspected, logged or repaired, and status and verify keep the user's target ready (residual 7, enterprise R1). Application control over how users launch these agents closes it | Alternate config root and launch flag drill per connector |
-| L-35 | — | A user, or an API caller, changes policy through a local config writer (`defenseclaw config set`, `skill`/`mcp`/`plugin`/`tool` `block` or `allow`, `guardrail block-at`, `policy activate`, `setup`, the TUI config editor, `POST /enforce/block`, `POST /enforce/allow`) | One config writer under `config.yaml.lock` refuses every actor except `lifecycle` and `migration` on a managed standalone host, also for root: the CLI exits `3` with "This device is managed", the gateway answers `403` `managed_device`, nothing is written and the attempt is audited (`outcome=refused reason=managed_device`). `/etc/defenseclaw/config.yaml` is root-owned in addition, so a standard user cannot write it at all | `internal/config/configwrite/configwrite_test.go`, `cli/tests/test_config_writer.py`, `internal/gateway/enforce_config_test.go`; enterprise B15 |
+| L-32 | — | A user kills, stops or starves their own `defenseclaw-hook` (or `hermes-hook.sh`) while an agent waits for it | Codex and Claude Code run a call after a killed hook or 30-second PreToolUse timeout; the gateway cannot log a request that never arrived. Devin can run after a killed hook. Hermes 0.19/0.20 can run after hook failure; reviewed 0.21 now gets `fail_closed: true` on `pre_tool_call` after setup and agent restart, closing timeout and spawn failure but not a killed hook. Copilot timeout can fail open at `preToolUse`, though a later permission hook may deny. OpenCode and Amp block in the reviewed paths; Kiro CLI 2.x timeout and Antigravity without a documented on-timeout deny setting remain at risk (enterprise R5, R6 and R18). Status and verify warn `hook_process_fail_open` and report `security_complete: false` for the affected enabled connectors. Application control or EDR process protection is the remaining prevention for Codex and Claude Code | Kill and stop drill on the user hook processes after upgrade and agent restart |
+| L-34 | — | A user starts a per-user agent with another config root or a mode that skips user configuration (Amp or Devin with `XDG_CONFIG_HOME` or `HOME`, `devin --config <file>`, Antigravity with `HOME`, Hermes with `--safe-mode` or `HERMES_HOME`), so DefenseClaw's registration is never loaded | Not closable by DefenseClaw: the guardian repairs only the default location and cannot see a process's environment or command line, so the session is not inspected, logged or repaired, and status and verify keep the user's target ready (residual 7, enterprise R1). Application control over how users launch these agents closes it | Alternate config root and launch flag drill per connector |
+| L-35 | — | A user, or an API caller, changes policy through a local config writer (`defenseclaw config set`, `skill`/`mcp`/`plugin`/`tool` `block` or `allow`, `guardrail block-at`, `policy activate`, `setup`, the TUI config editor, `POST /enforce/block`, `POST /enforce/allow`) | One config writer under `config.yaml.lock` refuses every actor except `lifecycle` and `migration` on a managed standalone host, also for root: the per-user CLI exits `3` with "This device is managed" (on packaged Linux and macOS, `defenseclaw` is a launcher that offers only `sandbox` and exits `2` with "This computer is managed; only `defenseclaw sandbox` commands are available here."), the gateway answers `403` `managed_device`, nothing is written and the attempt is audited (`outcome=refused reason=managed_device`). `/etc/defenseclaw/config.yaml` is root-owned in addition, so a standard user cannot write it at all | `internal/config/configwrite/configwrite_test.go`, `cli/tests/test_config_writer.py`, `internal/gateway/enforce_config_test.go`; enterprise B15 |
 | L-36 | — | `config.yaml`, a unit file, a machine-policy entry or a hook script is edited in place | A standard user has no write access. An administrator's edit of `config.yaml` is validated by the apply trigger's `ensure --reason path` and recorded as the next config generation (`config.generation.json`, actor `lifecycle`), or reverted to `/var/lib/defenseclaw-enterprise/committed-config.yaml` with the edit kept as `rejected-config.yaml` (`config_rejected` in `status`, `verify` fails). Derived files are regenerated from the config and never read back; `verify` fails on drift | `internal/enterpriseunix/committed_config_test.go`, `internal/enterpriseunix/lifecycle_test.go`; enterprise B16 |
 | L-37 | — | A user environment variable or `.env` entry weakens a check (`DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS`, `DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN`, and the other security opt-outs) | The registry's `managed` setting: `ignore` variables read as unset from the environment and from `.env` on a managed standalone host; `DEFENSECLAW_FAIL_MODE`, `DEFENSECLAW_STRICT_AVAILABILITY` and `DEFENSECLAW_HOOK_MAX_BODY` are `tighten_only`. Doctor names the ignored variables, never their values | `internal/envvars/registry_test.go`, `cli/tests/test_envvars.py`; enterprise B17 |
 | L-38 | — | `DEFENSECLAW_DEPLOYMENT_MODE` or `DEFENSECLAW_ENTERPRISE_PROFILE` is forged so the host looks unmanaged | The managed test reads `deployment_mode` and `enterprise.profile` from `config.yaml` as well as the environment, so the environment can only add managed status. Both variables are `ignore` on a managed host, the gateway, guardian, enumerator and sensor-helper units pin the profile, and a `.env` file cannot set it | `internal/config/validate_candidate.go`, `cli/defenseclaw/config_writer.py`; enterprise B18 |
@@ -272,8 +269,7 @@ access. Status shows presence, modification time and a digest prefix only.
    target fail repair; the lifecycle always writes it.
 3. A user can hold the TCP port while an administrator has stopped the
    gateway's socket unit (socket activation keeps it bound otherwise). Hooks
-   and plugins use the socket and are unaffected. The Codex, Claude Code,
-   OpenHands and OmniGent telemetry exporters do not verify the
+   and plugins use the socket and are unaffected. The Codex and Claude Code telemetry exporters do not verify the
    listener, so while the port is held their telemetry, which can include
    prompt text, goes to the holder together with the sending user's
    per-user telemetry credential. The holder can replay a captured
@@ -297,7 +293,7 @@ access. Status shows presence, modification time and a digest prefix only.
    with another config root or a mode that skips user configuration (R1):
    Amp with `HOME`, Devin with `XDG_CONFIG_HOME` or `devin --config <file>`
    naming a copy without hooks, Antigravity with `HOME`, Hermes with
-   `--safe-mode` or `HERMES_HOME`, and OpenHands with `HOME` run tool calls
+   `--safe-mode` or `HERMES_HOME`, run tool calls
    with no DefenseClaw audit row, and the guardian never repairs such a
    session.
    `status` and `verify` keep reporting the user's target ready, because
@@ -336,34 +332,35 @@ access. Status shows presence, modification time and a digest prefix only.
     not installed for such users, and their per-user hook calls fail closed;
     machine-policy connectors treat them as unenrolled users, which are
     inspected unless `enrollment.unenrolled_users` is `deny`.
-11. Where standard users can create a private user and mount namespace, an
-    agent started inside one can be given its own view of
-    `/etc/codex/requirements.toml`, the other machine-policy files, the
-    runtime descriptor and `/run/defenseclaw-hook`, outside the
-    administrator's enforcement. `enterprise linux verify` warns with
-    `unprivileged_user_namespaces` unless `user.max_user_namespaces=0`,
-    `kernel.unprivileged_userns_clone=0`, or both
-    `kernel.apparmor_restrict_unprivileged_userns=1` and
-    `kernel.apparmor_restrict_unprivileged_unconfined=1` (the Ubuntu 24.04
-    default leaves the second at `0`). DefenseClaw cannot close this from
-    user space; the host sysctl can (R20). Both settings also restrict the
-    agents' bubblewrap command sandboxes: `user.max_user_namespaces=0` stops
-    Codex's and Claude Code's sandboxes, and on stock Ubuntu 24.04 the
-    AppArmor userns restriction already stops Codex's bundled bubblewrap
-    (`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`), so
-    its shell calls fail until the user runs without its sandbox.
+11. A private namespace or ptrace path translation can hide machine policy
+    before an agent registers its hook. An invoked machine-policy hook compares
+    the policy content it sees with digests pinned in an administrator-owned
+    runtime descriptor and refuses a mismatch. Linux also checks observable
+    namespaces and tracers; when `/proc/1` is inaccessible, the digest is its
+    proof. `enterprise linux status` and `verify` report current kernel facts:
+    they warn when unprivileged namespaces or ptrace are open. DefenseClaw
+    never changes host-wide kernel or sysctl settings. An administrator can
+    apply optional hardening with their own tools after testing affected
+    workloads. An agent that never loaded the hook makes no call to check.
+    Loader and runtime preload interception remains an application-control
+    residual under L-25.
 12. `defenseclaw-hook` and the per-user hook scripts run as the user, who
     can terminate, suspend or starve them; agents that block only on an
     explicit deny then run the call, with no DefenseClaw decision or audit
     row before it runs (R18, L-32). With the user's own hook processes
     killed or stopped, Claude Code and Codex run the tool call (a killed hook
-    is a non-2 exit; a stopped one times out after 30 s), and so do OpenHands
-    (`Exit Code: -9`), Devin and Hermes for a killed hook. For Hermes no
-    `pre_tool_call` row reaches the gateway, while its later `post_tool_call`
-    and model hooks do, so the audit shows the call only after it ran (R5).
-    Copilot, OpenCode, Amp and Antigravity stay closed. Closing it needs
-    the vendor to treat a failed or timed-out hook as a deny, or
-    application control or EDR that stops users from signalling the hook.
+    is a non-2 exit; a stopped one times out after 30 s). Devin can also
+    run after a killed hook. Hermes 0.19/0.20 can do so, but the reviewed
+    Hermes 0.21 contract blocks a timed-out `pre_tool_call` once setup
+    has written `fail_closed: true` and the agent has restarted; a killed
+    hook can still fail open on its non-2 exit (R5). A later
+    `post_tool_call` can record an older-version call only after it ran.
+    Copilot `preToolUse` timeout is non-blocking, though a later permission
+    hook may deny. OpenCode and Amp block in the reviewed paths; Kiro CLI
+    2.x timeout and Antigravity without a documented on-timeout deny
+    setting remain at risk.
+    Application control or EDR that stops user signals remains the Codex
+    and Claude Code prevention; `status` and `verify` expose the risk.
 13. The root sensor helper reaches Tetragon's API, which lets its caller load
     kernel programs. Only the helper connects, over a verified Unix socket, but
     a compromise of the helper is also a kernel-policy compromise. It is

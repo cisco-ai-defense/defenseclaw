@@ -183,6 +183,21 @@ func TestStandaloneUnenrolledAccountGetsEnrollmentDecision(t *testing.T) {
 	}
 }
 
+// GAP-0556: root's call under enrollment.root: deny said "the DefenseClaw
+// gateway returned an answer DefenseClaw could not use". It names the policy
+// and the code.
+func TestStandaloneRootDeniedSaysRootIsNotAllowed(t *testing.T) {
+	socket := filepath.Join(shortSocketDir(t), "hook.sock")
+	startStandaloneHookServer(t, socket, `{"error":"forbidden","reason":"enterprise_managed_root_denied"}`, http.StatusForbidden)
+	result := standaloneRun(t, socket, os.Getuid())
+	if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
+		!strings.Contains(result.stdout, "does not allow agents to run as root") ||
+		!strings.Contains(result.stdout, managedRootDeniedReason) ||
+		strings.Contains(result.stdout+result.stderr, "could not use") {
+		t.Fatalf("root refusal: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
 func TestStandaloneHookSocketTrustedListenerGetsRequestWithoutToken(t *testing.T) {
 	dir := shortSocketDir(t)
 	socket := filepath.Join(dir, "hook.sock")
@@ -237,6 +252,49 @@ func TestStandaloneHookSocketMissingSaysGatewayStopped(t *testing.T) {
 		!strings.Contains(out, "gateway service is not running") ||
 		strings.Count(out, managedGatewayNotRunningReason) != 1 || strings.Contains(out, "not owned") {
 		t.Fatalf("stopped gateway: exit %d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
+func TestStandaloneOpenDistinguishesVerifiedAbsenceFromUntrustedSocket(t *testing.T) {
+	dir := shortSocketDir(t)
+	socket := filepath.Join(dir, "hook.sock")
+	assertClass := func(wantStopped bool) {
+		t.Helper()
+		_, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid())
+		if err == nil || errors.Is(err, errManagedGatewayNotRunning) != wantStopped {
+			t.Fatalf("socket error = %v, want stopped=%t", err, wantStopped)
+		}
+		wantMode := "closed"
+		if wantStopped {
+			wantMode = "open"
+		}
+		if got := managedPeerFailMode(Options{ManagedEnterprise: true, ManagedStandalone: true}, "open", err); got != wantMode {
+			t.Fatalf("socket error %v selected %s, want %s", err, got, wantMode)
+		}
+	}
+	assertClass(true)
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	assertClass(false)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	client, err := managedStandaloneHTTPClient(time.Second, socket, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Get("http://unix/api/v1/claude-code/hook")
+	if err == nil || errors.Is(err, errManagedGatewayNotRunning) {
+		t.Fatalf("stale socket error = %v, want unverified peer", err)
 	}
 }
 

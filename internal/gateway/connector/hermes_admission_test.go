@@ -20,8 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -137,4 +139,22 @@ func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts 
 	opts.AgentVersion = hermesAdmissionTestRawVersion
 	opts.HookContractID = "hermes-hooks-v1"
 	return opts
+}
+
+// os/exec copies a command stream with io.Copy, which prefers the
+// destination's ReadFrom. The bound must hold on that path too.
+func TestHermesBoundedCommandBufferHoldsThroughIOCopy(t *testing.T) {
+	const limit = 16
+	buffer := &hermesBoundedCommandBuffer{limit: limit}
+	source := strings.NewReader(strings.Repeat("x", 8<<20))
+	copied, err := io.Copy(buffer, source)
+	if err == nil {
+		t.Fatalf("io.Copy of 8 MiB into a %d-byte bound succeeded (%d bytes)", limit, copied)
+	}
+	if got := len(buffer.String()); got != limit {
+		t.Fatalf("buffer kept %d bytes; want %d", got, limit)
+	}
+	if _, isReaderFrom := any(buffer).(io.ReaderFrom); isReaderFrom {
+		t.Fatal("bounded buffer exposes ReadFrom, which bypasses its Write bound")
+	}
 }

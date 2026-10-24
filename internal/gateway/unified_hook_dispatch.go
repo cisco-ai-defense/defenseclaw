@@ -92,12 +92,15 @@ func (a *APIServer) hookProfileForConnector(name string) connector.HookProfile {
 	if contractID == "" {
 		contractID = connector.ResolveHookContract(name, agentVersion).Contract.ContractID
 	}
+	live := a.liveConfig()
+	secureClient := live != nil && live.SecureClientIntegration()
 	return provider.HookProfile(connector.SetupOpts{
-		DataDir:        a.configDataDir(),
-		APIAddr:        a.apiAddrForCapabilities(),
-		WorkspaceDir:   a.connectorWorkspaceDir(),
-		AgentVersion:   agentVersion,
-		HookContractID: contractID,
+		DataDir:                  a.configDataDir(),
+		APIAddr:                  a.apiAddrForCapabilities(),
+		WorkspaceDir:             a.connectorWorkspaceDir(),
+		AgentVersion:             agentVersion,
+		HookContractID:           contractID,
+		SecureClientHookDelivery: secureClient,
 	})
 }
 
@@ -149,8 +152,8 @@ func (a *APIServer) hookProfileProvider(name string) (connector.HookProfileProvi
 // sandboxSetupOpts is the profile input for a sandbox binding. The
 // workspace directory stays empty: the sandbox's project is not a host
 // workspace the connector may configure. The contract resolves for Linux,
-// which every sandbox runs, so host-OS contract adjustments (such as the
-// macOS-only OpenHands native OTLP lane) never apply to a sandboxed harness.
+// which every sandbox runs, so host-OS contract adjustments never apply to
+// a sandboxed harness.
 func sandboxSetupOpts(a *APIServer, binding sandboxauth.Binding) connector.SetupOpts {
 	return connector.SetupOpts{
 		DataDir:        a.configDataDir(),

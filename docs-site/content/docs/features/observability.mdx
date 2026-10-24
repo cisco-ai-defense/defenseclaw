@@ -1,0 +1,84 @@
+---
+title: Observability
+description: DefenseClaw records every event once, keeps a local history of its logs, and sends redacted copies to the destinations you choose.
+keywords:
+  - DefenseClaw observability
+  - OTLP
+  - Splunk HEC
+  - Galileo
+  - Grafana
+---
+
+DefenseClaw collects each event once and builds one record from it. Log records are stored in local history. Every record, logs, traces and metrics, goes to the destinations you add: an OpenTelemetry (OTLP) collector, Splunk, Galileo, a file, or a webhook. Each destination picks the buckets it wants and applies its own redaction.
+
+<Flow
+  direction="TB"
+  compact
+  caption="Each event becomes one record. Local SQLite keeps every collected log; traces and metrics go only to destinations. Each destination selects and redacts its own copy, limited to the signals its kind supports."
+>
+  <Node id="src" kind="agent">{`Event sources\nagent · guardrail · scan\npolicy · platform`}</Node>
+  <Node id="collect" kind="gateway">{`Bucket collection\nlogs · traces · metrics`}</Node>
+  <Node id="rec" kind="generic">Record</Node>
+  <Node id="sqlite" kind="datastore">{`Local SQLite\nevery log`}</Node>
+  <Node id="dest" kind="generic">{`Your destinations\nOTLP · Splunk HEC · Galileo\nfile · webhook`}</Node>
+  <Edge from="src" to="collect" />
+  <Edge from="collect" to="rec" label="collected buckets" />
+  <Edge from="rec" to="sqlite" label="logs only" />
+  <Edge from="rec" to="dest" label="redacted copy" />
+</Flow>
+
+## How it works
+
+- **Buckets.** Every record belongs to one of 14 buckets, such as `security.finding`, `enforcement.action` or `model.io`. You can turn off collection per bucket. The full list is in the [reference](/docs/reference/observability#buckets).
+- **Local history.** A SQLite database in the DefenseClaw data directory keeps every collected log, 7 days by default. It cannot be turned off or filtered. A small set of content-free compliance events is always written, even when you turn off collection for their bucket.
+- **Destinations.** With no destination configured, nothing leaves the computer. An enabled destination with no filter receives every bucket and every signal its kind supports. Adding a second destination adds a second copy. It is not a failover.
+- **Independent delivery.** Each destination has its own bounded queue, retry and health. A slow or failing destination does not block agents or other destinations.
+- **Redaction.** DefenseClaw redacts a record once, per destination, before it is sent. Four built-in profiles run from `none` (the default) to `strict`. See [Redaction](/docs/reference/observability/redaction).
+
+<Callout type="warn" title="The default sends full content">
+With no redaction profile, an enabled destination receives prompts, responses, tool arguments, file paths and identifiers as recorded. Choose a profile before you send to anything outside your trust boundary.
+</Callout>
+
+## What it does not do
+
+- It does not keep traces or metrics locally. Local history holds logs; traces and metrics exist only at the destinations you send them to.
+- It does not replace the audit log. For logs, local history is the durable record; destinations are copies.
+- It does not backfill. Records that a destination missed while it was down or while the gateway restarted are not resent. Export the local history if you need them.
+- Dashboards add no redaction of their own. They show what the destination received.
+- Webhook alerts to Slack, PagerDuty or Webex are a separate feature. They notify; they do not export telemetry.
+
+## Check your setup
+
+```bash
+defenseclaw setup observability list
+```
+
+```text
+  Observability destinations
+  --------------------------
+  NAME                     KIND         STATE     SIGNALS                BUCKETS  POLICY               REDACTION
+  local-sqlite             sqlite       enabled   logs                   14       implicit_local       unredacted (none)
+  engineering              otlp         enabled   logs,traces,metrics    14       capability_default   unredacted (none)
+  Retention: 7 days
+  Plan digest: 9cf948dc…
+```
+
+`defenseclaw observability plan` shows the same policy per bucket and signal.
+
+## How-tos
+
+<Cards>
+  <Card title="Run Grafana locally" href="/docs/how-to/observability/run-grafana-locally" description="Start the bundled Grafana, Prometheus, Loki and Tempo stack." />
+  <Card title="Send to an OTLP collector" href="/docs/how-to/observability/send-to-an-otlp-collector" description="Add a destination, narrow it, check delivery." />
+  <Card title="Send to Splunk" href="/docs/how-to/observability/send-to-splunk" description="Local Splunk, Splunk Enterprise HEC, or Splunk Observability Cloud." />
+  <Card title="Send to Galileo" href="/docs/how-to/observability/send-to-galileo" description="Send traces to Galileo Cloud or a self-hosted deployment." />
+  <Card title="Set up webhook alerts" href="/docs/how-to/observability/set-up-webhook-alerts" description="Slack, PagerDuty, Webex or a signed generic webhook." />
+  <Card title="Redact before export" href="/docs/how-to/observability/redact-before-export" description="Pick a redaction profile for each destination." />
+</Cards>
+
+## Reference
+
+- All guides: [How-to > Observability](/docs/how-to/observability).
+- [Observability reference](/docs/reference/observability): buckets, routes, delivery limits, failure circuits, alert runbooks.
+- [Redaction](/docs/reference/observability/redaction) and [Dashboards](/docs/reference/observability/dashboards).
+- [Sandbox telemetry](/docs/reference/sandboxes/telemetry) and [Telemetry identity](/docs/reference/observability/telemetry-identity).

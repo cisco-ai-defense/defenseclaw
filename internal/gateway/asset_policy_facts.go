@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -172,7 +173,9 @@ const maxDeclaredNameScan = 4096
 // whose SKILL.md declares name. Codex selects a skill ($name, or by plain
 // words) by the name its SKILL.md declares, while admission blocks and
 // disables it under its folder name, so a skill whose quarantine failed in
-// a folder of another name still ran (GAP-1101).
+// a folder of another name still ran (GAP-1101). Past maxDeclaredNameScan
+// folders it reads no more SKILL.md files and lists every other folder: one
+// of them may declare name, so each answers for it (fail closed).
 func foldersDeclaringSkill(root, name string) []string {
 	if gatewaySkillPathCheck(root) != nil {
 		return nil
@@ -187,11 +190,12 @@ func foldersDeclaringSkill(root, name string) []string {
 		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || config.SameAssetName(entry.Name(), name) {
 			continue
 		}
-		if scanned++; scanned > maxDeclaredNameScan {
-			break
-		}
 		dir := filepath.Join(root, entry.Name())
 		if gatewaySkillPathCheck(dir) != nil {
+			continue
+		}
+		if scanned++; scanned > maxDeclaredNameScan {
+			folders = append(folders, dir)
 			continue
 		}
 		if config.SameAssetName(assetfacts.DeclaredSkillName(dir), name) {
@@ -220,13 +224,14 @@ func (a *APIServer) installedSkillFolders(ctx context.Context, connector, cwd, n
 	// profiles, so skillSourcePaths leaves those folders out and a user or
 	// project skill on asset_policy.skill.denied typed as /name ran
 	// (GAP-0665). Such a folder is one it may not check, as a 0700 home is
-	// on Linux and macOS: it counts when the hook reported it, and when the
-	// hook reported no folder it is unseen.
+	// on Linux and macOS: it counts when the hook reported it, and otherwise
+	// it is unseen. A hook that reported the folder under another spelling
+	// of the home (a redirected or aliased profile path) left it neither,
+	// and the denied skill expanded (r102 GAP-0676).
 	for _, dir := range a.profileSkillFolders(ctx, connector, cwd, name) {
-		switch {
-		case reported(dir):
+		if reported(dir) {
 			folders = append(folders, dir)
-		case len(facts.SkillDirs) == 0:
+		} else {
 			unseen = append(unseen, dir)
 		}
 	}
@@ -299,7 +304,16 @@ func (a *APIServer) skillFolderAccessDecision(
 		return config.AssetPolicyDecision{}, false
 	}
 	facts := claimedAssetFactsFromContext(ctx)
-	for _, ref := range assetfacts.SkillFolderRefs(toolInput, hookActiveHome(ctx), cwd) {
+	home := hookActiveHome(ctx)
+	refs := assetfacts.SkillFolderRefs(toolInput, home, cwd)
+	if len(refs) == 0 {
+		return config.AssetPolicyDecision{}, false
+	}
+	roots := assetfacts.SkillRoots(connector, home, cwd)
+	for _, ref := range refs {
+		if !skillFolderRefIsSkill(ref, roots, len(facts.DeclaredFor(ref.Name)) > 0) {
+			continue
+		}
 		// A skill admission blocked and disabled (one whose quarantine
 		// failed stays in its folder) is refused when a tool reaches into
 		// its folder, as a denied one is (GAP-1101).
@@ -351,6 +365,31 @@ func (a *APIServer) skillFolderAccessDecision(
 		return decision, true
 	}
 	return config.AssetPolicyDecision{}, false
+}
+
+// skillFolderRefIsSkill reports whether ref, a skills/<name> path a tool
+// call names, can be the folder of the skill <name>: the call names its
+// SKILL.md, it is in a skill root of the connector, the hook reported a
+// SKILL.md name for it, or it holds a SKILL.md. A folder this gateway cannot
+// look into counts too (fail closed). Any other path with a skills/<name>
+// pair in it, such as tests/skills/blocked/notes.txt, is not that skill
+// (GAP-1302).
+func skillFolderRefIsSkill(ref assetfacts.FolderRef, roots []string, claimed bool) bool {
+	if ref.Manifest || claimed {
+		return true
+	}
+	parent := filepath.Clean(filepath.Dir(ref.Dir))
+	for _, root := range roots {
+		root = filepath.Clean(root)
+		if parent == root || (runtime.GOOS != "linux" && strings.EqualFold(parent, root)) {
+			return true
+		}
+	}
+	if gatewaySkillPathCheck(ref.Dir) != nil {
+		return true
+	}
+	_, err := os.Lstat(filepath.Join(ref.Dir, "SKILL.md"))
+	return !errors.Is(err, fs.ErrNotExist)
 }
 
 // skillManifestUnreadable reports whether this gateway cannot read the

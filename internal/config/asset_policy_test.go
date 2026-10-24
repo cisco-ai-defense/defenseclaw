@@ -24,9 +24,9 @@ asset_policy:
   skill:
     default: deny
   connectors:
-    open-hands:
+    claude-code:
       mode: action
-    open_hands:
+    claude_code:
       mode: observe
 `)
 	_, err := LoadRuntimeV8InspectionCandidateFromBytes(filepath.Join(t.TempDir(), "config.yaml"), raw)
@@ -293,10 +293,10 @@ func TestNormalizeRegistryEmptyActionDefaultsToDeny(t *testing.T) {
 		{"block", registryEmptyActionDeny},
 		{"allow", registryEmptyActionAllow},
 		{"ALLOW", registryEmptyActionAllow},
-		// warn resolves to allow (fall-through-to-default) for Python↔Go
-		// parity — the prior warn→deny collapse is closed.
-		{"warn", registryEmptyActionAllow},
-		{"WARN", registryEmptyActionAllow},
+		// warn does not block at the empty-registry gate (Python parity)
+		// but is kept apart from allow: it leaves a would-block decision.
+		{"warn", registryEmptyActionWarn},
+		{"WARN", registryEmptyActionWarn},
 		{"unsupported-value", registryEmptyActionDeny},
 	} {
 		if got := normalizeRegistryEmptyAction(tc.input); got != tc.want {
@@ -305,11 +305,11 @@ func TestNormalizeRegistryEmptyActionDefaultsToDeny(t *testing.T) {
 	}
 }
 
-// TestEvaluateAssetPolicyRegistryRequiredEmptyWarnFallsThrough proves the
-// warn-Go ruling end to end: an empty-but-required registry with
-// registry_empty_action="warn" no longer blocks at the empty-registry gate;
-// it falls through to the (allow) default, matching the Python admission
-// preview.
+// TestEvaluateAssetPolicyRegistryRequiredEmptyWarnFallsThrough: an
+// empty-but-required registry with registry_empty_action="warn" does not
+// block, even in action mode, but the decision is a would-block that names
+// the empty registry, so the runtime and the watcher record it (p0
+// GAP-0941). A default deny still blocks; allow falls through silently.
 func TestEvaluateAssetPolicyRegistryRequiredEmptyWarnFallsThrough(t *testing.T) {
 	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
 	cfg.AssetPolicy.Enabled = true
@@ -322,41 +322,96 @@ func TestEvaluateAssetPolicyRegistryRequiredEmptyWarnFallsThrough(t *testing.T) 
 		Name:       "rogue",
 	})
 
-	if decision.Action != "allow" || decision.RawAction != "allow" {
-		t.Fatalf("decision action=%q raw=%q, want allow/allow", decision.Action, decision.RawAction)
+	if decision.Action != "allow" || decision.RawAction != "block" || !decision.WouldBlock {
+		t.Fatalf("decision action=%q raw=%q would_block=%v, want an allowed would-block", decision.Action, decision.RawAction, decision.WouldBlock)
 	}
-	if decision.Source != "default-allow" {
-		t.Fatalf("source=%q, want default-allow", decision.Source)
+	if decision.Source != "registry-required-empty-warn" || !strings.Contains(decision.Reason, "requires a registry but none is configured") {
+		t.Fatalf("source=%q reason=%q, want the empty-registry warning", decision.Source, decision.Reason)
+	}
+
+	cfg.AssetPolicy.MCP.Default = "deny"
+	if d := cfg.EvaluateAssetPolicy(AssetPolicyInput{TargetType: "mcp", Name: "rogue"}); d.Action != "block" || d.Source != "default-deny" {
+		t.Fatalf("warn with default deny = %q %q, want default-deny block", d.Action, d.Source)
+	}
+	cfg.AssetPolicy.MCP.Default = "allow"
+	cfg.AssetPolicy.MCP.RegistryEmptyAction = "allow"
+	if d := cfg.EvaluateAssetPolicy(AssetPolicyInput{TargetType: "mcp", Name: "rogue"}); d.RawAction != "allow" || d.WouldBlock || d.Source != "default-allow" {
+		t.Fatalf("allow = %q would_block=%v %q, want a silent default-allow", d.RawAction, d.WouldBlock, d.Source)
+	}
+}
+
+// p0 GAP-0940: a required registry left empty with registry_empty_action
+// deny refuses every asset of the type; the lifecycle views say so. warn,
+// a filled registry and a type nothing enforces (UnenforcedAssetPolicyRules
+// covers it) do not.
+func TestEmptyRequiredAssetRegistriesWarns(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeAction
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	got := cfg.EmptyRequiredAssetRegistries(nil)
+	if len(got) != 1 || !strings.Contains(got[0], "asset_policy.mcp.registry is empty") || !strings.Contains(got[0], "every mcp is refused until") {
+		t.Fatalf("EmptyRequiredAssetRegistries = %q, want the MCP empty-registry warning", got)
+	}
+	cfg.AssetPolicy.Skill.RegistryRequired = true
+	if got := cfg.EmptyRequiredAssetRegistries(nil); len(got) != 1 {
+		t.Fatalf("skill with runtime detection off and no watcher = %q, want only the MCP warning", got)
+	}
+	if got := cfg.EmptyRequiredAssetRegistries(func(t string) bool { return t == "skill" }); len(got) != 2 {
+		t.Fatalf("watched skill folders = %q, want the skill and MCP warnings", got)
+	}
+	cfg.AssetPolicy.Skill.RegistryRequired = false
+	cfg.AssetPolicy.MCP.RegistryEmptyAction = "warn"
+	if got := cfg.EmptyRequiredAssetRegistries(nil); len(got) != 0 {
+		t.Fatalf("warn = %q, want no warning", got)
+	}
+	cfg.AssetPolicy.MCP.RegistryEmptyAction = ""
+	cfg.AssetPolicy.MCP.Registry = []AssetPolicyRule{{Name: "acme-notes"}}
+	if got := cfg.EmptyRequiredAssetRegistries(nil); len(got) != 0 {
+		t.Fatalf("filled registry = %q, want no warning", got)
+	}
+	cfg.AssetPolicy.MCP.Registry = nil
+	cfg.AssetPolicy.MCP.RegistryRequired = false
+	cfg.AssetPolicy.Connectors = map[string]PerConnectorAssetPolicy{"codex": {MCP: &PerConnectorAssetTypePolicy{RegistryRequired: boolPtr(true)}}}
+	if got := cfg.EmptyRequiredAssetRegistries(nil); len(got) != 1 || !strings.Contains(got[0], "refused for connector codex") {
+		t.Fatalf("per-connector requirement = %q, want it named", got)
+	}
+}
+
+// The empty-registry warning states the effect the policy has: observe mode
+// admits each asset and logs a would-block, and the allowed list still
+// admits what it names.
+func TestEmptyRequiredAssetRegistriesStatesTheEffect(t *testing.T) {
+	cfg := &Config{AssetPolicy: DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = AssetPolicyModeObserve
+	cfg.AssetPolicy.MCP.RegistryRequired = true
+	got := cfg.EmptyRequiredAssetRegistries(nil)
+	if len(got) != 1 || strings.Contains(got[0], "refused") || !strings.Contains(got[0], "every mcp is admitted but logged as a would-block (observe mode)") {
+		t.Fatalf("observe mode = %q, want admitted with a would-block, not refused", got)
+	}
+	cfg.AssetPolicy.Mode = AssetPolicyModeAction
+	cfg.AssetPolicy.MCP.Allowed = []AssetPolicyRule{{Name: "acme-notes"}}
+	got = cfg.EmptyRequiredAssetRegistries(nil)
+	if len(got) != 1 || !strings.Contains(got[0], "every mcp not on asset_policy.mcp.allowed is refused until") {
+		t.Fatalf("allow rule = %q, want the allowed list named as the exception", got)
+	}
+	if d := cfg.EvaluateAssetPolicy(AssetPolicyInput{TargetType: "mcp", Name: "acme-notes"}); d.Action != "allow" {
+		t.Fatalf("acme-notes = %+v, want the allowed list to admit it", d)
+	}
+	cfg.AssetPolicy.MCP.Allowed = nil
+	cfg.AssetPolicy.Connectors = map[string]PerConnectorAssetPolicy{
+		"codex":    {Mode: AssetPolicyModeObserve},
+		"opencode": {MCP: &PerConnectorAssetTypePolicy{RegistryRequired: boolPtr(false)}},
+	}
+	got = cfg.EmptyRequiredAssetRegistries(nil)
+	if len(got) != 2 || !strings.Contains(got[0], "is refused (connector codex, opencode aside) until") ||
+		!strings.Contains(got[1], "admitted but logged as a would-block (observe mode) for connector codex until") {
+		t.Fatalf("mixed modes = %q, want the action scope and the observe connector apart", got)
 	}
 }
 
 func boolPtr(b bool) *bool { return &b }
-
-// TestEffectiveModePerConnector covers inherit-on-empty + override +
-// alias-insensitive resolution for the per-connector mode (OTHER-7).
-func TestEffectiveModePerConnector(t *testing.T) {
-	ap := &AssetPolicyConfig{
-		Mode: AssetPolicyModeObserve,
-		Connectors: map[string]PerConnectorAssetPolicy{
-			"codex":      {Mode: AssetPolicyModeAction},
-			"open-hands": {Mode: AssetPolicyModeAction},
-		},
-	}
-	if got := ap.EffectiveMode("codex"); got != AssetPolicyModeAction {
-		t.Errorf("EffectiveMode(codex) = %q, want action", got)
-	}
-	if got := ap.EffectiveMode("hermes"); got != AssetPolicyModeObserve {
-		t.Errorf("EffectiveMode(hermes) = %q, want observe (inherit)", got)
-	}
-	if got := ap.EffectiveMode(""); got != AssetPolicyModeObserve {
-		t.Errorf("EffectiveMode(\"\") = %q, want observe (global)", got)
-	}
-	// Alias-insensitive: override keyed on "open-hands" applies to canonical
-	// "openhands" (normalizeConnectorKey parity with Python).
-	if got := ap.EffectiveMode("openhands"); got != AssetPolicyModeAction {
-		t.Errorf("EffectiveMode(openhands) = %q, want action via alias", got)
-	}
-}
 
 // TestAssetPolicyForOverlaysPerConnectorScalars proves the per-type scalar
 // overlay: a connector with registry_required=true blocks (empty registry +
@@ -566,5 +621,31 @@ func TestMCPAllowBindsCompleteCommandLine(t *testing.T) {
 		if verdict != tc.want {
 			t.Fatalf("%q %v: verdict = %q, want %q", tc.command, tc.args, verdict, tc.want)
 		}
+	}
+}
+
+// TestEffectiveModePerConnector covers inherit-on-empty + override +
+// alias-insensitive resolution for the per-connector mode (OTHER-7).
+func TestEffectiveModePerConnector(t *testing.T) {
+	ap := &AssetPolicyConfig{
+		Mode: AssetPolicyModeObserve,
+		Connectors: map[string]PerConnectorAssetPolicy{
+			"codex":       {Mode: AssetPolicyModeAction},
+			"claude_code": {Mode: AssetPolicyModeAction},
+		},
+	}
+	if got := ap.EffectiveMode("codex"); got != AssetPolicyModeAction {
+		t.Errorf("EffectiveMode(codex) = %q, want action", got)
+	}
+	if got := ap.EffectiveMode("hermes"); got != AssetPolicyModeObserve {
+		t.Errorf("EffectiveMode(hermes) = %q, want observe (inherit)", got)
+	}
+	if got := ap.EffectiveMode(""); got != AssetPolicyModeObserve {
+		t.Errorf("EffectiveMode(\"\") = %q, want observe (global)", got)
+	}
+	// Alias-insensitive: override keyed on "claude_code" applies to canonical
+	// "claudecode" (normalizeConnectorKey parity with Python).
+	if got := ap.EffectiveMode("claudecode"); got != AssetPolicyModeAction {
+		t.Errorf("EffectiveMode(claudecode) = %q, want action via alias", got)
 	}
 }

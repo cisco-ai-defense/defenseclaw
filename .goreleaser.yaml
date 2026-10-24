@@ -191,6 +191,10 @@ archives:
       - README*
       - CHANGELOG.md
       - packaging/**/*
+      # Inert Fleet compiler: install.sh and install.ps1 activate it only
+      # when fleet.enabled is true (a Fleet-on install fails without it).
+      # Managed archives and packages never carry it.
+      - edge-connector/tools/policy_compiler.py
 
   # Standalone managed-enterprise payload for Linux and macOS: extract as
   # root and run `sudo ./defenseclaw-gateway enterprise <linux|macos> install
@@ -239,6 +243,10 @@ archives:
       - README*
       - CHANGELOG.md
       - packaging/**/*
+      # Inert Fleet compiler: install.sh and install.ps1 activate it only
+      # when fleet.enabled is true (a Fleet-on install fails without it).
+      # Managed archives and packages never carry it.
+      - edge-connector/tools/policy_compiler.py
 
 # Standalone managed-enterprise Linux packages. The maintainer scripts call
 # the lifecycle (`enterprise linux ensure --from-package`), which renders the

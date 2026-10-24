@@ -1,11 +1,11 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
-"""A fail-mode change reaches the rendered hooks even with the gateway stopped.
+"""Legacy per-user open config never reopens or unnecessarily rewrites hooks.
 
-GAP-0009 / GAP-0006: config unset guardrail.hook_fail_mode said closed while
-the hooks kept failing open until the next gateway start, doctor reported
-that hook as PASS, and config set printed nothing about it.
+The runtime and rendered hooks are closed even if an older config persists
+``hook_fail_mode: open``. The managed administrator's outage setting is
+installed by the managed hook guardian.
 """
 
 from __future__ import annotations
@@ -51,16 +51,17 @@ def _run(tmp_path: Path, monkeypatch, args: list[str], *, gateway_running: bool,
 
 
 @pytest.mark.parametrize("args", [["unset", "guardrail.hook_fail_mode"], ["set", "guardrail.hook_fail_mode", "closed"]])
-def test_fail_mode_change_with_gateway_stopped_re_renders_hooks(tmp_path: Path, monkeypatch, args) -> None:
+def test_legacy_per_user_open_edit_leaves_closed_hooks_intact(tmp_path: Path, monkeypatch, args) -> None:
     reconcile = MagicMock()
     result = _run(tmp_path, monkeypatch, args, gateway_running=False, reconcile=reconcile)
     assert result.exit_code == 0, result.output
-    assert [call.args[1] for call in reconcile.call_args_list] == ["codex"]
-    assert "re-rendered the hooks now (codex fail-closed)" in result.output
+    reconcile.assert_not_called()
+    assert "re-rendered the hooks now" not in result.output
 
 
-def test_upstream_fail_open_connectors_are_not_re_rendered(tmp_path: Path, monkeypatch) -> None:
-    # GAP-0027: their hooks fail open upstream whatever the config says.
+def test_native_deny_connectors_stay_closed_on_legacy_open_edit(tmp_path: Path, monkeypatch) -> None:
+    # Per-user Antigravity, Copilot and Hermes are already closed regardless
+    # of the persisted legacy fail mode (GAP-0027).
     reconcile = MagicMock()
     config = _CONFIG + "".join(f"    {name}: {{mode: action}}\n" for name in ("antigravity", "copilot", "hermes"))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
@@ -73,7 +74,7 @@ def test_upstream_fail_open_connectors_are_not_re_rendered(tmp_path: Path, monke
     ):
         result = CliRunner().invoke(cmd_config.config_cmd, ["unset", "guardrail.hook_fail_mode"])
     assert result.exit_code == 0, result.output
-    assert [call.args[1] for call in reconcile.call_args_list] == ["codex"]
+    reconcile.assert_not_called()
     assert "could not be re-rendered" not in result.output
     assert "keep their previous fail mode" not in result.output
 
@@ -91,14 +92,14 @@ def test_running_gateway_and_unrelated_keys_leave_hooks_to_the_gateway(tmp_path:
     reconcile.assert_not_called()
 
 
-def test_failed_re_render_warns_that_hooks_keep_the_old_mode(tmp_path: Path, monkeypatch) -> None:
+def test_legacy_per_user_open_edit_does_not_attempt_re_render(tmp_path: Path, monkeypatch) -> None:
     reconcile = MagicMock(side_effect=OSError("native defenseclaw-gateway executable not found"))
     result = _run(
         tmp_path, monkeypatch, ["unset", "guardrail.hook_fail_mode"], gateway_running=False, reconcile=reconcile
     )
     assert result.exit_code == 0, result.output
-    assert "codex hooks could not be re-rendered" in result.output
-    assert "until defenseclaw-gateway start (wanted fail-closed)" in result.output
+    reconcile.assert_not_called()
+    assert "could not be re-rendered" not in result.output
 
 
 @pytest.mark.parametrize(

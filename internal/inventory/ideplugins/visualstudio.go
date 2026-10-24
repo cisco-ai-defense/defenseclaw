@@ -15,6 +15,10 @@ import (
 const (
 	visualStudioMaxInstances  = 32
 	visualStudioMaxExtensions = 2048
+	// visualStudioMaxEnabledNames bounds the EnabledExtensions value names
+	// read from one hive. The key also keeps names of extensions removed
+	// since, so it can list more names than there are manifests.
+	visualStudioMaxEnabledNames = 8 * visualStudioMaxExtensions
 )
 
 // visualStudioInstanceDir matches %LOCALAPPDATA%\Microsoft\VisualStudio
@@ -30,11 +34,15 @@ var visualStudioEnabledLookup = func(_ *scanner, instanceDir, instanceName strin
 	return nil, false
 }
 
-// visualStudioEnabledNames accepts io.EOF from ReadValueNames when fewer
-// than the requested maximum are present.
+// visualStudioEnabledNames reads every EnabledExtensions value name. It asks
+// for one name more than it keeps: ReadValueNames returns a full page
+// without an error when more names follow, so a page that reaches the cap
+// cannot prove the list complete, and an extension past it would be marked
+// disabled (GAP-1137). Such a list leaves the state unknown. io.EOF marks
+// the end of a shorter list.
 func visualStudioEnabledNames(read func(int) ([]string, error)) (map[string]bool, bool) {
-	names, err := read(visualStudioMaxExtensions)
-	if err != nil && err != io.EOF || len(names) > visualStudioMaxExtensions {
+	names, err := read(visualStudioMaxEnabledNames + 1)
+	if err != nil && err != io.EOF || len(names) > visualStudioMaxEnabledNames {
 		return nil, false
 	}
 	out := make(map[string]bool, len(names))

@@ -27,6 +27,7 @@ func TestWindowsCursorInactiveRestoreLeavesAnUntouchedAdministratorFile(t *testi
 	originalTrust := windowsManagedPolicyFileTrustCheck
 	originalRoot := windowsCursorManagedRootResolver
 	originalWriter := windowsManagedPolicyWriter
+	originalSwap := windowsCursorManagedFileSwap
 	originalStandalone := windowsEnterpriseStandaloneProcess
 	windowsEnterpriseStandaloneProcess = func() bool { return true }
 	root := t.TempDir() + `\Cursor`
@@ -49,10 +50,16 @@ func TestWindowsCursorInactiveRestoreLeavesAnUntouchedAdministratorFile(t *testi
 		writes = append(writes, path)
 		return originalWriter(path, data, userReadable)
 	}
+	// hooks.json is restored through a compare-and-swap.
+	windowsCursorManagedFileSwap = func(request windowsCursorManagedSwap) (windowsCursorManagedSwapResult, error) {
+		writes = append(writes, request.path)
+		return originalSwap(request)
+	}
 	t.Cleanup(func() {
 		windowsManagedPolicyFileTrustCheck = originalTrust
 		windowsCursorManagedRootResolver = originalRoot
 		windowsManagedPolicyWriter = originalWriter
+		windowsCursorManagedFileSwap = originalSwap
 		windowsEnterpriseStandaloneProcess = originalStandalone
 	})
 

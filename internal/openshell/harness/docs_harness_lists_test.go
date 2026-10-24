@@ -29,7 +29,10 @@ import (
 
 var (
 	docsCodeSpanRE      = regexp.MustCompile("`([^`]+)`")
-	docsConnectorLinkRE = regexp.MustCompile(`\(/docs/connectors/([a-z0-9-]+)#`)
+	docsConnectorLinkRE = regexp.MustCompile(`\(/docs/reference/connectors/([a-z0-9-]+)#`)
+	// retiredHarnesses are still registered but have no public pages (#1182);
+	// the connectors overview leaves them out.
+	retiredHarnesses = map[string]bool{"openhands": true, "omnigent": true}
 )
 
 // TestDocsListEveryHarness keeps the prose harness lists in step with the
@@ -66,7 +69,7 @@ func TestDocsListEveryHarness(t *testing.T) {
 
 	// The CLI reference: "named by the command you type (`a`, `b`, ...)",
 	// and a sentence naming the unverified harnesses by display name.
-	bullet = docsBullet(t, docsFile(t, "docs-site", "content", "docs", "reference", "sandbox-cli.mdx"), "- **Harness names.**")
+	bullet = docsBullet(t, docsFile(t, "docs-site", "content", "docs", "reference", "sandboxes", "cli.mdx"), "- **Harness names.**")
 	_, afterOpen, ok := strings.Cut(bullet, "the command you type (")
 	typed, _, ok2 := strings.Cut(afterOpen, ")")
 	if !ok || !ok2 {
@@ -89,8 +92,18 @@ func TestDocsListEveryHarness(t *testing.T) {
 	// The connectors overview links each harness's sandbox section, in
 	// "Run today" or "Cannot run yet".
 	index := docsFile(t, "docs-site", "content", "docs", "connectors", "index.mdx")
-	docsSameSet(t, "connectors overview: run today", docsLinkedConnectors(docsBullet(t, index, "- **Run today:**")), verified)
-	docsSameSet(t, "connectors overview: cannot run yet", docsLinkedConnectors(docsBullet(t, index, "- **Cannot run yet:**")), unverified)
+	docsSameSet(t, "connectors overview: run today", docsLinkedConnectors(docsBullet(t, index, "- **Run today:**")), withoutRetired(verified))
+	docsSameSet(t, "connectors overview: cannot run yet", docsLinkedConnectors(docsBullet(t, index, "- **Cannot run yet:**")), withoutRetired(unverified))
+}
+
+func withoutRetired(names []string) []string {
+	var out []string
+	for _, name := range names {
+		if !retiredHarnesses[name] {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 // docsFile reads a file by its path from the repository root.

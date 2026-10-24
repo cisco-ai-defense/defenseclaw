@@ -237,7 +237,8 @@ def recommended_settings_issue(cfg: Any) -> str:
     llm = cfg.resolve_llm("scanners.skill")
     model = litellm_model(llm)
     if not getattr(sc, "use_llm", False) or not model or not llm_analyzer_ready(llm, model=model):
-        return f"the LLM judge is off; {ADD_JUDGE_HINT}"
+        # The skill scanner's own judge, not the guardrail judge (GAP-0981).
+        return f"the skill-scanner LLM judge is off; {ADD_JUDGE_HINT}"
     if effective_policy(sc) != POLICY_QUIET:
         return f"policy {effective_policy(sc)}; recommended: quiet + judge"
     return ""

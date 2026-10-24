@@ -89,7 +89,8 @@ def test_overview_observability_header_wraps_under_its_text() -> None:
 
 
 def test_overview_runtime_notice_keeps_its_key_hint_at_80x24(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # GAP-2551: the full action and key hint must survive wrapping at 80x24.
+    # GAP-2551: the full action and key hint must survive at 80x24. Only the
+    # first notice line is above the fold there, so the notice is one line.
     app = snapshot_app(tmp_path)
     app.overview_model.runtime = _standard_account_runtime().overview()
     size = SimpleNamespace(width=80, height=24)
@@ -97,13 +98,12 @@ def test_overview_runtime_notice_keeps_its_key_hint_at_80x24(tmp_path, monkeypat
     console = Console(file=io.StringIO(), width=80, color_system=None)
     console.print(app._overview_renderable())  # noqa: SLF001
     lines = console.file.getvalue().splitlines()
-    start = next(i for i, line in enumerate(lines) if "[>] Runtime is" in line)
+    start = next(i for i, line in enumerate(lines) if "[>] Runtime " in line)
     end = next((i for i in range(start + 1, len(lines)) if not lines[i].strip()), len(lines))
     notice_lines = lines[start:end]
-    assert len(notice_lines) > 1, notice_lines
-    message = " ".join(line.strip() for line in notice_lines).removeprefix("[>] ")
-    expected = next(n.message for n in app.overview_model.build_notices() if n.message.startswith("Runtime is"))
+    assert len(notice_lines) == 1, notice_lines
+    message = notice_lines[0].strip().removeprefix("[>] ")
+    expected = next(n.message for n in app.overview_model.build_notices() if n.message.startswith("Runtime "))
     assert message == expected
-    assert message.endswith("no findings; N for details")
-    assert all(len(line) <= 80 for line in notice_lines)
-    assert all(line.startswith(" " * 5) and line[5:6] != " " for line in notice_lines[1:]), notice_lines
+    assert message == "Runtime DEGRADED · N for details: shadow egress partially covered"
+    assert len(notice_lines[0]) <= 80

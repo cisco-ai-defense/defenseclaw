@@ -1,0 +1,156 @@
+---
+title: Upgrade from 0.8.x
+description: What changes when you upgrade from DefenseClaw 0.8.x to 1.x, which command to run for each starting point, migrations, shipped policy files, update settings, renamed connectors and rollback.
+keywords:
+  - upgrade from 0.8
+  - config_version 9 migration
+  - DefenseClaw 0.8.10 bridge
+  - DefenseClaw Windows Setup import
+---
+
+1.x replaces the 0.x upgrade system. Every path below keeps your configuration and data. The 0.8.10 release is the supported bridge: a 0.8.8, 0.8.9 or 0.8.10 install finds the 1.x release through its own `defenseclaw upgrade`.
+
+## Which command to run
+
+| Installed | Run |
+| --- | --- |
+| 0.8.8, 0.8.9 or 0.8.10 on macOS or Linux | `defenseclaw upgrade --yes` |
+| 0.8.7 or older on macOS or Linux | The `install.sh` command on [Install](/docs/get-started/install) |
+| Any 0.x version on Windows | The `install.ps1` command on [Install](/docs/get-started/install) |
+| The 0.8.x macOS app | Download `DefenseClawMac-<version>-macos-arm64.dmg` from the latest release once; later updates use the app's Update button |
+
+`defenseclaw upgrade` on 0.8.7 or older, and on Windows, stops with a message such as `missing release-provenance.json; refusing before services are stopped`. Nothing was changed; use the install command.
+
+## What changes
+
+- **`config.yaml` becomes the only place your policy lives** (`config_version: 9`). Under the derived admission gate, LOW and INFO skill findings now allow. With a judge, the skill scanner defaults to `quiet`; `warn` findings enter the review queue.
+- **Audit retention** (`observability.local.retention_days`) defaults to 7 days; 0.8.x used 90. Restore it with `defenseclaw config set observability.local.retention_days 90`.
+- **A new audit history starts.** The first time 1.x opens the audit database it deletes the audit events, scan results and findings 0.x recorded (a one-time privacy cutover: 0.x history can hold unredacted content). The installer says so before it upgrades. Configuration, inventory and connector setup are kept. The 0.x database stays in `~/.defenseclaw/previous/data/audit.db`, and `defenseclaw rollback` brings it back. The next upgrade moves it to `~/.defenseclaw/backups/audit-history-<version>-<time>`; remove that folder when you no longer need it.
+- **A damaged 0.8.x audit database** (SQLite "Rowid N out of order") is rebuilt in place. One that cannot be rebuilt is kept as `audit.db.corrupt-<time>`, and `defenseclaw doctor` lists it. Work on a copy of the main file with its `-wal`, `-shm` and `-journal` files; never repair the archive itself.
+- **Existing MCP servers keep running.** At its first start the gateway records a baseline for each one (one scan; findings raise alerts) instead of admitting it again. A server the scanner cannot start shows `scan failed` in `defenseclaw mcp list` and is not blocked. A server on a block list stays blocked. See [MCP servers that can no longer be scanned](/docs/appendix/migrate-v9#mcp-servers-that-can-no-longer-be-scanned).
+- **Installs older than 0.8.5** get the schema-v8 observability conversion first, and an installed local observability bundle is refreshed.
+- **Shared hosts:** `defenseclaw-gateway start` and `restart` in 0.8.4 and older stop every gateway process the account may signal. Do not run them with `sudo` on a shared host. 0.8.5 and later stop only their own.
+
+## Migrations
+
+`defenseclaw migrate` brings configuration and data to the current schema. The installer runs it after every swap; running it again is safe. `--check` lists the pending steps without changing anything.
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Done, or nothing to do |
+| `1` | A step failed; the installer restores the previous install |
+| `2` | The configuration was written by a newer DefenseClaw than this one |
+
+### Config migration
+
+The step from `config_version: 8` to `9` moves the decisions 0.8.x kept outside `config.yaml` into it: admission and thresholds from `policies/rego/data.json`, the `skill_actions`, `mcp_actions` and `plugin_actions` keys, `rule_pack_dir`, the scanner switches, and your skill, MCP server and plugin block and allow entries from `audit.db`. It keeps `config.yaml.v8.bak`, renames `data.json` to `data.json.migrated-v9`, and writes `migration-v9.json` with every value it moved and every conflict it settled. An unmodified install moves one value. `defenseclaw doctor` shows a **Config migration** row until you run `defenseclaw config migrate --ack`. Preview with `defenseclaw config migrate --dry-run`. Until the file is migrated, the gateway reads a version 8 file as if it were migrated, in memory only.
+
+[Migrate config.yaml from v8 to v9](/docs/appendix/migrate-v9) shows before and after for every key and covers going back. On a managed standalone host, the [lifecycle](/docs/enterprise/operate/lifecycle) migrates the administrator config.
+
+### Shipped policy files
+
+Every upgrade brings the Rego modules in `~/.defenseclaw/policies/rego` (`admission.rego`, `guardrail.rego`) to the new release. The previous copies go to `~/.defenseclaw/backups/rego-<time>/`. A module you edited is replaced too, and the upgrade names it; re-apply your change from the backup, or keep your own rules in a file of another name. An unmodified module the release no longer ships, such as the 0.8 `sandbox.rego`, moves to the same backup. Unedited guardrail rule packs in `~/.defenseclaw/policies/guardrail` are updated the same way; an edited pack is kept.
+
+`defenseclaw init` writes a missing module, updates an unedited one and keeps an edited one. A `policy_dir` outside `~/.defenseclaw` is left alone; the upgrade lists the modules there that differ. A `policy_dir` written as `~/<folder>` is saved as an absolute path.
+
+## Windows: moving from the Setup package
+
+Run the `install.ps1` command. The installer imports a 0.8.x `DefenseClawSetup-x64.exe` installation: it stops its gateway, removes its program folder, sign-in entry, Add/Remove Programs entry and `PATH` entry, keeps your configuration and data in `%USERPROFILE%\.defenseclaw`, and keeps the old program files in `%USERPROFILE%\.defenseclaw\previous\legacy-setup`. Connector hooks are rewritten to the new paths when the gateway starts. The `/repair`, `/uninstall` and `DELETEUSERDATA=1` options of the old Setup do not apply.
+
+The installer's summary says the audit history 0.8.10 recorded is not carried over and names the copy under `previous\data\audit.db`.
+
+To check an old `DefenseClawSetup-x64.exe`, compare its SHA-256 (`Get-FileHash -Algorithm SHA256`) with its entry in that release's `checksums.txt`, after verifying the signature of `checksums.txt`. The 0.8.x Setup files are not Authenticode-signed, so their own `/verify` always fails; that does not mean the file changed.
+
+## Roll back to 0.8.x
+
+`defenseclaw rollback` restores the version 8 `config.yaml` saved when the upgrade started, with `data.json` and the block and allow entries in `audit.db`. Policy edits you made after the upgrade stay in `~/.defenseclaw/previous` and return when you roll forward. 0.8.x has no rollback command. To return to 1.x, run the command the rollback prints, or run the install command again:
+
+```bash
+bash ~/.defenseclaw/previous/installer/install.sh --rollback
+```
+
+A 0.8.x release you install yourself, without `defenseclaw rollback`, refuses a version 9 file (`Configuration schema v8 is required`); [Going back to 0.8.x](/docs/appendix/migrate-v9#going-back-to-08x) lists the manual steps.
+
+A Windows 0.8.7-0.8.10 Setup install cannot be restored by `defenseclaw rollback`; it refuses and changes nothing. Run `defenseclaw uninstall`, download that release's `DefenseClawSetup-x64.exe` and run it in your desktop session. Your data from before the upgrade is in `%USERPROFILE%\.defenseclaw\previous`.
+
+Agent hook entries live in each agent's own settings, so the swap does not restore them. Before it restores the older install, the rollback has the current gateway rewrite every hook entry the older release would not recognise, so that release's `defenseclaw uninstall` still removes it. The settings file from before the change is kept in `~/.defenseclaw/previous/data/backups/claudecode-settings.before-rollback.json`. If the rewrite fails, the rollback still completes and warns; remove those entries from the agent's settings by hand.
+
+## Update settings and mirrors
+
+| Key | Default | What it does |
+| --- | --- | --- |
+| `update.check` | `true` | Show the update notice. Also off with `DEFENSECLAW_NO_UPDATE_CHECK=1`. |
+| `update.channel` | `stable` | The release channel. `stable` is the only one. |
+| `update.source` | `https://github.com/cisco-ai-defense/defenseclaw` | Where release files come from. Set an `https://` base URL for a mirror. |
+
+```bash
+defenseclaw config set update.check false
+```
+
+On Windows the `DisableSelfUpdate` enterprise policy also turns the notice off. A managed device does not self-update; the [lifecycle](/docs/enterprise/operate/lifecycle) applies updates.
+
+### Install from a mirror
+
+```bash
+defenseclaw config set update.source https://mirror.example.com/defenseclaw
+```
+
+The mirror must serve the paths GitHub serves: `releases/latest` (a redirect to the newest tag) and `releases/download/<tag>/` with the installer, the release files, `checksums.txt` and `checksums.txt.bundle`.
+
+`update.source` changes only where files come from. The certificate identity that signed the official releases is built into DefenseClaw, so a mirror must serve the official signed `checksums.txt` and its bundle, and the machine needs `cosign` 2.0 or later. Without it, the upgrade stops before it runs anything. `DEFENSECLAW_REPO` is the deprecated alias; `update.source` wins when both are set. A first install has no `config.yaml`, so use `DEFENSECLAW_REPO` for the installer there ([Installer](/docs/reference/commands/installer#mirror)).
+
+## Renamed and removed connectors
+
+This applies if you used Windsurf, Gemini CLI, OpenHands or OmniGent before 1.0.4.
+
+- **Windsurf is now Devin.** The upgrade moves your `windsurf` settings to the [`devin` connector](/docs/connectors/devin) and replaces the old hooks. You do nothing.
+- **Gemini CLI was removed.** Use [Antigravity](/docs/connectors/antigravity). Remove DefenseClaw's hooks from Gemini CLI's settings once.
+- **OpenHands and OmniGent were removed in 1.0.4.** The `config_version` 9 migration drops their entries from `config.yaml`, including a telemetry destination whose every route selected only these connectors (`defenseclaw migrate` saves that), and records them in `migration-v9.json`; the upgrade accepts a `config.yaml` that still lists them. The first gateway start after the upgrade (and `defenseclaw uninstall`, and Windows Setup) does two things for each of them, and nothing else: it replaces the hook script an older DefenseClaw wrote (OpenHands' `~/.defenseclaw/hooks/openhands-hook.sh`, OmniGent's policy module `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`) with a stub that blocks every call and says that support was removed in 1.0.4 and how to remove the hook, and it revokes DefenseClaw's tokens for them once only the stub is left at that path. Only a file with DefenseClaw's marker is replaced, including a stub an older teardown left that allowed every call. DefenseClaw writes the stub into the file itself, so every other name of the file (a hard link) blocks too, and then renames a copy over the path. On Windows, an OpenHands hook that runs `defenseclaw-hook` blocks the same way. If you edited OmniGent's policy module after setup, its bytes are saved first, to `~/.defenseclaw/connector_backups/omnigent/defenseclaw_omnigent_policy.py.edited-<hash>`, and the stub replaces it only once they are saved. The OpenHands hook token is kept: an old OpenHands hook, or a copy of it under another name in `~/.defenseclaw/hooks`, that finds no token lets every call run in fail mode open, and with it the hook reaches the gateway, which blocks the call. Nothing in 1.0.4 accepts that token. Delete `~/.defenseclaw/hooks/.hook-openhands.token` only once no `hooks.json` runs `openhands-hook.sh` or a copy of it. If that path holds a link, a file without DefenseClaw's marker in its first lines, or a script with a second name (a hard link) that the stub can't be written into (on Windows, or a file another account owns), DefenseClaw changes nothing there and keeps the tokens, so an old hook still reaches the gateway, which blocks the call. The gateway start, `doctor` and `status` name the file with the step: copy back any needed bytes from `connector_backups` before deleting a linked name there; delete its other names (`find / -xdev -samefile <file>` lists them; `fsutil hardlink list <file>` on Windows), or delete the file or move it out of `~/.defenseclaw/hooks` if it is not DefenseClaw's. Then run `defenseclaw-gateway connector teardown --connector openhands` (or `omnigent`). The gateway still answers the old hook routes (`/api/v1/openhands/hook`, `/api/v1/omnigent/hook`) on its API, its hook socket and its sandbox ingress, and they block every call, with or without a token. An OmniGent process that loaded the old policy module before the upgrade is blocked until you restart it. It doesn't change your agent's config files (`~/.openhands/hooks.json`, a workspace `.openhands/hooks.json`, `~/.omnigent/config.yaml`, the file `OMNIGENT_CONFIG` or `OMNIGENT_CONFIG_HOME` selects), OmniGent's `defenseclaw_omnigent.pth` file, the backups DefenseClaw saved before its setup, or any other connector's files. `defenseclaw status`, `defenseclaw doctor`, `defenseclaw uninstall`, `defenseclaw-gateway connector teardown --connector openhands` (or `omnigent`) and Windows Setup list what is left, each with the step to remove it. A 1.0.3 OpenHands upgrade leaves its entries in `hooks.json` for manual removal, even when that file still has the bytes setup wrote. The cleanup does not edit agent config files that may also hold your hooks. The deny stub and retired gateway route block calls through those entries. Running teardown again does not remove the entries or clear the Cleanup row while they remain. OpenHands: remove every hook whose command runs `openhands-hook.sh` (or `defenseclaw-hook --connector openhands`) from `hooks.json`, then restart OpenHands. OmniGent: remove `defenseclaw_omnigent_policy` from `policy_modules` and the `defenseclaw_guardrail` policy from `config.yaml`. Then remove DefenseClaw's line (its hook folder, `~/.defenseclaw/hooks`) from `defenseclaw_omnigent.pth` and keep the other lines; delete the file only if that was its only line. Restart OmniGent. Then delete the stub, `.hookcfg.openhands` and `~/.defenseclaw/connector_backups/<connector>` (the backups hold the files as they were before DefenseClaw's setup, `pristine_bytes` in base64, if you want them back). `defenseclaw uninstall --all` and Windows Setup `/uninstall DELETEUSERDATA=1` keep them: before they remove the data folder, they move that folder to `~/.defenseclaw-removed-connector-backups/<connector>` and list it there. Until you do these steps, OpenHands and OmniGent are blocked. Your other connectors start either way. The upgrade accepts a `config.yaml` that still lists them next to another connector. If OpenHands or OmniGent is the only connector it lists, the upgrade stops before it changes anything, because the new gateway would have no connector to start: with the DefenseClaw you have now, run `defenseclaw setup remove openhands --yes --force` (or `omnigent`), or set up another connector, then upgrade again.
+
+
+<Accordions type="multiple">
+
+<Accordion title="Windsurf is now Devin: what the upgrade changes" id="windsurf-is-now-devin">
+
+Windsurf was renamed Devin Desktop (Cognition). The [`devin` connector](/docs/connectors/devin) covers Devin CLI and Devin Desktop's default Devin Local agent; both read the same hook config. The move runs during `defenseclaw upgrade`, on the next `defenseclaw-gateway restart`, or when you run `defenseclaw setup devin`:
+
+- In `~/.defenseclaw/config.yaml`, `guardrail.connector`, `claw.mode` and every per-connector `windsurf` block become `devin`, keeping their settings. If a `devin` block already exists, it wins and the `windsurf` block is dropped; the upgrade output names the dropped key. Connector name lists, `asset_policy` rule connectors and observability route selectors are renamed the same way.
+- The gateway removes only the hook entries DefenseClaw wrote into `~/.codeium/windsurf/hooks.json`. Hooks from other tools stay.
+- It deletes `~/.defenseclaw/hooks/windsurf-hook.sh` (and `windsurf-hook.ps1`) and `~/.defenseclaw/connector_backups/windsurf/`.
+- It installs the Devin hooks in `~/.config/devin/config.json` (Windows: `%APPDATA%\devin\config.json`).
+
+Devin Desktop builds before 3.9.19 still run the legacy Cascade agent without DefenseClaw hooks. To confirm, run `defenseclaw doctor`, check that the Devin hook row passes, then open a new Devin tab or session.
+
+</Accordion>
+
+<Accordion title="Gemini CLI was removed: cleanup steps" id="gemini-cli-was-removed">
+
+If another connector is configured, the upgrade removes `geminicli` from `guardrail.connectors` and moves `guardrail.connector` and `claw.mode` to the first remaining connector. If Gemini CLI was your only connector, the upgrade stops before it changes anything; `defenseclaw migrate --check` names the connector. On its next start, the gateway deletes `~/.defenseclaw/hooks/geminicli-hook.sh` (and `.ps1`) and the connector's OTLP token. It never edits `~/.gemini`.
+
+Do this once, before you set up Antigravity:
+
+1. If Gemini CLI was your only connector, remove it on the release you still have. This refuses to remove the last connector without `--force`; DefenseClaw then enforces nothing until step 5.
+
+   ```bash
+   defenseclaw setup remove geminicli --yes --force
+   ```
+
+2. Open `~/.gemini/settings.json` (or `$GEMINI_CLI_HOME/.gemini/settings.json`; on Windows `%USERPROFILE%\.gemini\settings.json`). Under `hooks`, delete every group whose `hooks` list contains `"name": "defenseclaw"`, then delete any event key left empty.
+3. If `telemetry.otlpEndpoint` in the same file contains `/otlp/geminicli/`, delete the `telemetry` object or restore your own values.
+4. Do not touch `~/.gemini/config/`. That directory belongs to Antigravity.
+5. Restart the gateway and set up Antigravity:
+
+   ```bash
+   defenseclaw-gateway restart
+   defenseclaw setup antigravity
+   ```
+
+<Callout type="warn" title="Gemini CLI can be blocked until the gateway restarts">
+Until the gateway restarts after `geminicli` leaves `config.yaml`, the old hook script still calls a gateway endpoint that no longer exists. With `guardrail.hook_fail_mode: closed`, the default for new installs, that blocks every Gemini CLI action.
+</Callout>
+
+If `config.yaml` still names `geminicli`, the gateway refuses to start and its error points here; step 1 fixes it.
+
+</Accordion>
+
+</Accordions>

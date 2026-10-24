@@ -15,26 +15,29 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Package hookexec runs DefenseClaw agent hooks natively in Go instead of via
-// the bundled Bash hook scripts. It is the execution path used on Windows,
-// where agents invoke the DefenseClaw binary directly (no Git Bash, no .cmd
-// wrapper, no jq, and no PATH lockdown — because Go never shells out).
+// the bundled Bash hook scripts. It is used on Windows and by managed native
+// hooks on Unix; Windows agents invoke the binary directly without Git Bash,
+// a .cmd wrapper, or jq.
 //
 // The behavior here mirrors the .sh hooks under internal/gateway/connector/hooks:
 // the same gateway endpoint, per-connector stdout shape and exit code, and the
-// same fail-open-on-outage / fail-closed-on-misconfig policy. Native transport
-// deadlines may follow the agent's registered event budget. Unix keeps using
-// the .sh hooks unchanged; golden tests pin the shared decision contract.
+// same configured outage behavior and closed misconfiguration policy. Native
+// transport deadlines may follow the agent's registered event budget. Golden
+// tests pin the shared decision contract.
 package hookexec
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -42,9 +45,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/assetfacts"
+	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/managed/refusalpipe"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
@@ -138,13 +143,32 @@ const AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
 // ClientRefusalHeader carries, on the standalone hook socket, a refusal the
 // hook made itself before it could send the event: the gateway records it
 // (audit row and log line) and answers 403. Only
-// ManagedUserNamespaceReason is accepted.
+// IsManagedProcessContextReason limits the accepted values.
 const ClientRefusalHeader = "X-DefenseClaw-Client-Refusal"
 
 // ManagedUserNamespaceReason is the refusal of a hook that runs in a private
 // user namespace (unshare -U, a sandbox tool): from there it cannot check the
 // root-owned runtime state, whose owners read as the overflow uid.
 const ManagedUserNamespaceReason = "enterprise_managed_user_namespace"
+
+const (
+	ManagedMountNamespaceReason        = "enterprise_managed_mount_namespace"
+	ManagedTracedProcessReason         = "enterprise_managed_traced_process"
+	ManagedProcessContextUnknownReason = "enterprise_managed_process_context_unverified"
+	ManagedPolicyViewReason            = "enterprise_managed_policy_view_unverified"
+)
+
+// IsManagedProcessContextReason accepts only the hook's fixed context and policy-view diagnostics,
+// never caller-supplied text, for the managed socket refusal audit.
+func IsManagedProcessContextReason(reason string) bool {
+	switch reason {
+	case ManagedUserNamespaceReason, ManagedMountNamespaceReason,
+		ManagedTracedProcessReason, ManagedProcessContextUnknownReason, ManagedPolicyViewReason:
+		return true
+	default:
+		return false
+	}
+}
 
 // AgentSurfaceHeaderValue returns surface when it is cli, desktop or
 // extension, else "".
@@ -200,7 +224,7 @@ var hookDialects = map[string][]string{
 }
 
 // copilotVSCodeLocalSurface is connector.CopilotHookSurfaceVSCodeLocal.
-const copilotVSCodeLocalSurface = "vscode-local"
+const copilotVSCodeLocalSurface = copilotargs.SurfaceVSCodeLocal
 
 // copilotVSCodeLocal reports a hook command registered for the VS Code Local
 // harness rather than the Copilot CLI.
@@ -244,6 +268,9 @@ type Options struct {
 	// gateway request with less than hookGatewayAnswerFloor of the answer
 	// budget left: a missing answer then fails closed (failNoAnswer).
 	answerSpentLocally bool
+	// answeredErrorStatus records an HTTP refusal seen before a retry. A
+	// failed retry cannot turn that answered error into an outage allow.
+	answeredErrorStatus int
 	// managedOutageOpen is set on a standalone hook outside Secure Client
 	// for a failure that ManagedOutageFailsOpen lets through (the gateway is
 	// not running, was still restarting, or gave no answer). Only such a
@@ -284,6 +311,14 @@ type Options struct {
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
 	// or contains a .disabled file the hook is a no-op (exit 0).
 	Home string
+	// FailureLogHome resolves the invoking user's diagnostic directory for
+	// the failure rows of a managed hook. It is never on the answer path:
+	// a tool call's answer watchdog runs it once in the background from the
+	// moment it is armed (cacheFailureLogHome), so the watchdog's own row
+	// does not wait on it; any other call runs it only when it writes a row.
+	// Enforcement still uses the administrator-owned Home, and a managed row
+	// never goes there: with no resolver, or an empty answer, there is no row.
+	FailureLogHome func() string
 	// HookDir holds connector-scoped and legacy token sidecars (default Home/hooks).
 	HookDir string
 	// Token, when set, is the resolved gateway token (e.g. from the
@@ -416,12 +451,24 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 	opts = withDefaults(opts)
 	opts.StartedAt = startedAt
+	closeDuringInstall(&opts, "")
 
 	sp, ok := specFor(opts.Connector)
 	if ok && copilotVSCodeLocal(opts) {
 		sp = copilotVSCodeLocalSpec
 	}
 	if !ok {
+		if reason, removed := removedConnectorReason(opts.Connector); removed {
+			// until 1.1: a Windows hook an older release registered for a
+			// removed connector runs this launcher, not a script; it
+			// blocks the way the script's stub does.
+			if strings.EqualFold(strings.TrimSpace(opts.Connector), "openhands") {
+				body, _ := json.Marshal(map[string]string{"decision": "deny", "reason": reason})
+				fmt.Fprintln(opts.Stdout, string(body))
+			}
+			fmt.Fprintln(opts.Stderr, reason)
+			return blockExit
+		}
 		// Unknown connector is a wiring bug, not a policy decision. Fail loud
 		// so it surfaces in tests / setup rather than silently disabling the
 		// guardrail. The CLI validates --connector against the registry, so
@@ -429,11 +476,30 @@ func runHook(ctx context.Context, opts Options) int {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
+	if sp.connector == "copilot" && perUserInstallWindow(opts) {
+		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+			return code
+		}
+	}
 	// A managed hook's FailMode comes from administrator-owned runtime state
 	// only (internal/cli: the Windows runtime generation or the Unix runtime
 	// descriptor), never from a connector or the caller's environment.
 	failMode := normalizeFailMode(opts.FailMode)
+	if opts.StrictAvailability && !opts.ManagedEnterprise && (sp.connector == "copilot" || sp.connector == "antigravity") {
+		// Strict availability closes a per-user Copilot CLI or Antigravity
+		// hook whatever mode it was rendered with, as copilot-hook.sh and
+		// antigravity-hook.sh do: the answer checks (decide) and every
+		// failure path read the closed mode, so a Windows sidecar rendered
+		// open cannot let a block without its native deny through. Other
+		// connectors keep strict availability's transport and missing-token
+		// scope.
+		failMode = "closed"
+		opts.FailMode = "closed"
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
+		if code, handled := refuseClosedUnboundHook(&opts, sp, "closed"); handled {
+			return code
+		}
 		reason := strings.TrimSpace(opts.ManagedRuntimeFailure)
 		if strings.HasPrefix(reason, ForeignHookBlockedReasonPrefix) {
 			return failForeignHookBlocked(opts, sp, reason)
@@ -441,7 +507,7 @@ func runHook(ctx context.Context, opts Options) int {
 		resolveManagedStandaloneFailureEvent(&opts, sp)
 		if opts.ExplainUnenrolledAccount && !sp.failOpenOnly &&
 			(reason == managedSIDUnregisteredReason || reason == managedEnrollmentPendingReason) {
-			return failUnenrolled(opts, sp, reason)
+			return failEnrollmentRefusal(opts, sp, reason)
 		}
 		return failUnreachable(
 			opts,
@@ -449,6 +515,13 @@ func runHook(ctx context.Context, opts Options) int {
 			"closed",
 			reason,
 		)
+	}
+
+	// A registration that lost its event is refused before an early exit
+	// (an unavailable home, oversized input) answers it as an event that
+	// cannot block.
+	if code, handled := refuseClosedUnboundHook(&opts, sp, failMode); handled {
+		return code
 	}
 
 	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
@@ -481,6 +554,9 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
+	// The agent may take its time writing the payload: an install that
+	// started meanwhile closes this call.
+	failMode = closeDuringInstall(&opts, failMode)
 	if err != nil {
 		// stdin read error is treated like an oversized/unusable payload.
 		overflow = true
@@ -497,6 +573,9 @@ func runHook(ctx context.Context, opts Options) int {
 		)
 		opts.Event = strings.TrimSpace(opts.Event)
 		if bindingErr != nil {
+			if managedNativeDecision(opts) {
+				return failManagedCodexBinding(opts, sp, bindingErr.Error())
+			}
 			return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), bindingErr.Error())
 		}
 		opts.Event = event
@@ -519,13 +598,11 @@ func runHook(ctx context.Context, opts Options) int {
 		// Copilot's official camelCase stdin bodies do not identify the
 		// event. Setup supplies the reviewed event through an exact --event
 		// binding; never infer it from a body field or forward an untrusted
-		// registration. Per-user and Secure Client hooks give Copilot its
-		// documented fail-open result for this local integration failure; a
-		// standalone hook refuses (failInvalidManagedCopilotBinding).
-		if managedNativeDecision(opts) {
-			return failInvalidManagedCopilotBinding(opts, sp)
-		}
-		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), "missing or unsupported Copilot hook event binding")
+		// registration. A hook that fails closed was refused above
+		// (refuseClosedUnboundHook); a Secure Client hook and a per-user hook
+		// in fail mode open give Copilot its documented fail-open result for
+		// this local integration failure.
+		return failResponse(opts, sp, failMode, "missing or unsupported Copilot hook event binding")
 	}
 	deadline := answerDeadline(opts, startedAt)
 	// The work before the gateway request (the foreign-hook scan and
@@ -540,7 +617,7 @@ func runHook(ctx context.Context, opts Options) int {
 		// tool call after all: it stands down.
 		opts.answerWatch.answered()
 	case opts.answerWatch != nil:
-		opts.answerWatch.adopt(opts, sp, failMode)
+		opts.answerWatch.adopt(&opts, sp, failMode)
 	case !deadline.IsZero():
 		// A tool call is answered by its answer deadline even when this
 		// process runs late (GAP-0155, GAP-0167).
@@ -559,7 +636,12 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 	}
 	var cancel context.CancelFunc
 	ctx, cancel = context.WithTimeout(ctx, requestTimeout)
-	defer cancel()
+	requestHandedOff := false
+	defer func() {
+		if !requestHandedOff {
+			cancel()
+		}
+	}()
 	if opts.ManagedEnterprise && opts.ManagedStandalone && strings.TrimSpace(opts.ManagedUnixSocket) == "" {
 		// The standalone profile has exactly one hook transport, the
 		// peer-authorized unix socket. Without it there is nothing this
@@ -578,7 +660,11 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 				return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 			}
 		} else {
-			opts.HTTPClient = defaultHTTPClient(requestTimeout)
+			var err error
+			opts.HTTPClient, err = newPerUserHookHTTPClient(requestTimeout, opts.APIAddr)
+			if err != nil {
+				return failUnreachable(opts, sp, "closed", "per-user gateway listener ownership could not be verified: "+err.Error())
+			}
 		}
 	}
 
@@ -598,7 +684,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 		// The standalone hook socket authenticates this process by its
 		// kernel-verified uid. No bearer is read or sent, so there is no
 		// user-readable credential to steal or replay.
-		return doRequest(ctx, opts, sp, failMode, payload, "")
+		return doRequest(ctx, opts, sp, failMode, payload, "", cancel, &requestHandedOff)
 	}
 	if opts.ManagedEnterprise && opts.AuthenticatedManagedToken != nil {
 		// The resolver authenticated this token as part of one immutable
@@ -648,7 +734,7 @@ func sendToGateway(ctx context.Context, opts Options, sp spec, failMode string, 
 		}
 	}
 
-	return doRequest(ctx, opts, sp, failMode, payload, token)
+	return doRequest(ctx, opts, sp, failMode, payload, token, cancel, &requestHandedOff)
 }
 
 // RunCodexNotify forwards the JSON payload Codex appends to its configured
@@ -726,7 +812,11 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 				return 0
 			}
 		} else {
-			opts.HTTPClient = defaultHTTPClient(defaultHookRequestTimeout)
+			var err error
+			opts.HTTPClient, err = newPerUserHookHTTPClient(defaultHookRequestTimeout, opts.APIAddr)
+			if err != nil {
+				return 0
+			}
 		}
 	}
 
@@ -745,7 +835,7 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 // doRequest performs the gateway POST and dispatches the response through the
 // connector-specific decision logic, applying the transport vs response
 // failure split exactly like the .sh hooks.
-func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string) int {
+func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string, requestCancel context.CancelFunc, requestHandedOff *bool) int {
 	if pid := perUserForeignListener(opts); pid > 0 {
 		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
 	}
@@ -754,19 +844,25 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	// dials, a gateway that accepted the call but does not answer, and the
 	// resends below (hookAnswerBudget).
 	opts.answerBy = answerDeadline(opts, opts.StartedAt)
-	ctx, stopAnswer, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
-	defer releaseAnswer()
+	ctx, stopAnswer, stopResponseDeadline, releaseAnswer := awaitAnswerBy(ctx, opts.answerBy, progressCeiling(opts, opts.StartedAt), opts.answerWatch)
 	ctx, stopWatch, releaseWatch := watchManagedGatewayStarts(ctx, opts, restartDeadline)
-	defer releaseWatch()
 	// The account, its session, the asset facts and the resolved write
 	// paths are computed once, for every try of this call.
 	opts.requestFacts = &hookRequestFacts{}
 	// A try that must have its connection within the restart budget
 	// (connectBy); the response is read under its context.
 	var releases []func()
-	defer func() {
+	cleanup := func() {
 		for _, release := range releases {
 			release()
+		}
+		releaseWatch()
+		releaseAnswer()
+	}
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			cleanup()
 		}
 	}()
 	// A per-user hook's first try always gets a moment to connect
@@ -820,7 +916,6 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			break
 		}
 	}
-	stopWatch()
 	if errors.Is(err, errInvalidHookRequest) {
 		return failResponse(opts, sp, failMode, err.Error())
 	}
@@ -838,6 +933,25 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			return failUnreachable(opts, sp, failMode, coldStartFailedReason)
 		}
 	}
+	// A response status is evidence that the gateway answered. An incomplete
+	// 2xx body is an unusable answer, not an outage that may fail open.
+	// Error statuses retain their existing retry and refusal handling.
+	knownStatus := 0
+	// markManagedAnsweredError (w8-mgmt) records the status on opts too, so
+	// ManagedOutageFailsOpen, noAnswerFailMode and the watchdog's rendered
+	// answer treat every later failure of the call as an answered error.
+	noteStatus := func() {
+		if err != nil {
+			return
+		}
+		markManagedAnsweredError(&opts, sp, resp.StatusCode)
+		if resp != nil && !opts.SecureClient &&
+			(resp.StatusCode >= 200 && resp.StatusCode < 300 || managedNativeDecision(opts)) {
+			knownStatus = resp.StatusCode
+			opts.answerWatch.gatewayAnsweredError(opts, sp)
+		}
+	}
+	noteStatus()
 	// A gateway that has taken all it can answer in time (or an account over
 	// its own budget) answers 429 with Retry-After at once. The call has not
 	// been evaluated, so it is sent again a few times within the hook's own
@@ -849,19 +963,20 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if !retryFitsAnswer(opts.answerBy, delay) {
 			// A resend could not be answered within the tool call's
 			// answer budget: the gateway is too busy for it now.
-			return failNoAnswer(opts, sp, failMode)
+			return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 		}
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			if gatewayNoAnswer(ctx) {
-				return failNoAnswer(opts, sp, failMode)
+				return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 			}
 			return failUnreachable(opts, sp, failMode, "gateway busy")
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+		noteStatus()
 	}
 	// A newly enrolled Windows standalone account holds its runtime (and the
 	// credential in it) a moment before the guardian's authorization ledger,
@@ -880,23 +995,39 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		case <-timer.C:
 		}
 		resp, err = sendHookRequest(ctx, opts, sp, payload, token)
+		noteStatus()
 	}
+	delivery := (*hookDeliveryRequest)(nil)
+	if err == nil && resp != nil {
+		delivery = hookDeliveryResponse(resp.Body)
+	}
+	stopWatch()
+	if delivery != nil && !delivery.capabilityReceived() {
+		// A server that asks for a receipt without advertising full duplex
+		// cannot accept one: its proposal is not an enforceable answer.
+		delivery.close()
+		_ = resp.Body.Close()
+		return failResponse(opts, sp, "closed", "gateway delivery confirmation unavailable")
+	}
+	// Every check of the answer below, and every failure answer, uses the
+	// install state of now: an install that started while the gateway had
+	// not answered closes this call.
+	failMode = closeDuringInstall(&opts, failMode)
 	if err != nil {
+		if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
+			return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
+		}
 		reason := "gateway unreachable"
 		switch cause := context.Cause(ctx); {
 		case errors.Is(cause, errGatewayNoAnswer):
-			// No decision in time: the hook's fail mode decides.
-			return failNoAnswer(opts, sp, failMode)
+			// No decision in time: the hook's fail mode decides, unless
+			// the gateway already answered with an error status.
+			return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 		case errors.Is(cause, errGatewayStartFailing):
 			reason = errGatewayStartFailing.Error()
 		case errors.Is(cause, errGatewayRestarting):
-			// Closed, except for a standalone hook whose administrator chose
-			// open (owner decision 2026-10-20). Secure Client keeps closed.
-			restartMode := "closed"
-			if managedNativeDecision(opts) {
-				restartMode = failMode
-			}
-			return failUnreachable(withManagedOutage(opts, errGatewayRestarting), sp, restartMode, managedGatewayRestartingReason)
+			// A restart does not prove that the gateway service is stopped.
+			return failUnreachable(opts, sp, "closed", managedGatewayRestartingReason)
 		}
 		if errors.Is(err, errManagedGatewayPeerUnverified) {
 			// Managed peer-verification failure fails closed on the transport
@@ -907,29 +1038,57 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// managedPeerFailMode).
 			return failUnreachable(withManagedOutage(opts, err), sp, managedPeerFailMode(opts, failMode, err), managedPeerFailureReason(opts, err))
 		}
+		if reason == "gateway unreachable" && !opts.SecureClient && !secureClientHook(opts) && errors.Is(err, errGatewayTookCallNoAnswer) {
+			// Same fail mode; the record says the gateway stalled, not that
+			// it could not be reached. Secure Client keeps its reason.
+			reason = noAnswerReason(opts)
+		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
-	defer resp.Body.Close()
-	// The decision is in only when its whole body is: the answer budget
-	// holds while it is read. A gateway that sent its headers and part of a
-	// body, then stalled or dropped the connection, has not answered, and
-	// the bytes it sent are never taken as its decision.
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
-	stopAnswer()
+	defer func() {
+		if !handedOff {
+			_ = resp.Body.Close()
+		}
+	}()
+	// A successful verdict is in only when its whole body is: the answer
+	// budget holds while it is read. A gateway that sent its headers and part
+	// of a body, then stalled or dropped the connection, has not answered, and
+	// the bytes it sent are never taken as its decision. An error status is
+	// already an answered refusal even if its body stalls or the connection
+	// drops.
+	var body []byte
+	var readErr error
+	if delivery != nil || resp.Header.Get(HookDeliveryRequiredHeader) == "1" {
+		// A released request's answer is the same one line, ahead of the
+		// gateway's audit write.
+		body, readErr = bufio.NewReader(io.LimitReader(resp.Body, defaultMaxBody+1)).ReadBytes('\n')
+	} else {
+		body, readErr = io.ReadAll(io.LimitReader(resp.Body, defaultMaxBody+1))
+	}
+	if delivery == nil {
+		stopAnswer()
+	} else if readErr == nil && int64(len(body)) <= defaultMaxBody {
+		// The complete proposal arrived in time. Its deadline no longer
+		// governs the receipt, but the watchdog still owns the agent output
+		// until finish commits it.
+		stopResponseDeadline()
+	}
 	if (readErr != nil || int64(len(body)) > defaultMaxBody) && managedNativeDecision(opts) &&
-		(resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
-		// The status line already says the gateway refused the call's
-		// credential: an integrity failure, closed on a standalone host in
-		// every fail mode, whatever happens to the body after it. Before,
-		// a truncated or oversized 401/403 body took the no-answer or
-		// unusable-answer path, which an open fail mode allows.
+		(resp.StatusCode < 200 || resp.StatusCode >= 300) {
+		// The status line already answered with an error. A truncated or
+		// oversized body cannot turn that error into an outage allow.
 		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 	if readErr != nil {
-		return failNoAnswer(opts, sp, failMode)
+		// HTTP 2xx plus an incomplete body is a malformed answer. The
+		// gateway was reached, so outage-open mode cannot apply.
+		return failAfterErrorStatus(opts, sp, failMode, knownStatus)
 	}
 	if int64(len(body)) > defaultMaxBody {
-		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "gateway response too large")
+		if opts.SecureClient {
+			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "gateway response too large")
+		}
+		return failResponse(opts, sp, "closed", "gateway response too large")
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -937,7 +1096,16 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 	}
 	switch {
 	case resp.StatusCode >= 500 && resp.StatusCode < 600:
+		if managedNativeDecision(opts) {
+			return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+		}
 		return failUnreachable(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
+	case (resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusRequestEntityTooLarge) &&
+		refusalReason(body) == MalformedHookPayloadReason && !opts.SecureClient:
+		// A malformed event is a local check failure, never a gateway
+		// outage. An explicit per-user open setting cannot turn it into
+		// a tool call whose pre-tool fields DefenseClaw never parsed.
+		return failResponse(opts, sp, "closed", "gateway refused malformed hook payload")
 	case resp.StatusCode == http.StatusForbidden && refusalReason(body) == SurfaceUnverifiedReason:
 		// A policy decision, not a failure: block in every fail mode (a stop
 		// event keeps its neutral allow).
@@ -953,7 +1121,15 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if strings.TrimSpace(opts.Event) == "" {
 			opts.Event = resolveHookEvent("", payload)
 		}
-		return failUnenrolled(opts, sp, managedUIDUnregisteredReason)
+		return failEnrollmentRefusal(opts, sp, managedUIDUnregisteredReason)
+	case resp.StatusCode == http.StatusForbidden && managedStandaloneHook(opts) &&
+		refusalReason(body) == managedRootDeniedReason:
+		// enrollment.root: deny refuses root: say so, not "an answer
+		// DefenseClaw could not use" (GAP-0556).
+		if strings.TrimSpace(opts.Event) == "" {
+			opts.Event = resolveHookEvent("", payload)
+		}
+		return failEnrollmentRefusal(opts, sp, managedRootDeniedReason)
 	case resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden:
 		// An authentication refusal is integrity, not an outage.
 		return failResponse(opts, sp, managedIntegrityFailMode(opts, failMode), fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
@@ -961,7 +1137,57 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		return failResponse(opts, sp, failMode, fmt.Sprintf("gateway returned HTTP %d", resp.StatusCode))
 	}
 
-	return sp.decide(opts, body)
+	code := sp.decide(opts, body)
+	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
+		opts.answerWatch.setDeliveryReceipt(func(answered, localBlock bool) {
+			// finish calls this only after it writes the answer to the agent.
+			// Keep the request alive for the receipt, using its request/HTTP
+			// deadline rather than the already-met answer deadline.
+			stopAnswer()
+			if answered {
+				receiptTimer := time.AfterFunc(hookDeliveryReceiptTimeout, requestCancel)
+				defer receiptTimer.Stop()
+				if delivery.acknowledge(localBlock) == nil {
+					// Keep the request alive until HTTP has carried the receipt
+					// to the gateway. A successful Pipe.Write alone only proves
+					// that the transport read it into its own buffer.
+					var confirmed [len(HookDeliveryConfirmed)]byte
+					_, _ = io.ReadFull(resp.Body, confirmed[:])
+				}
+			} else {
+				delivery.close()
+			}
+			_ = resp.Body.Close()
+			cleanup()
+			requestCancel()
+		})
+		handedOff = true
+		*requestHandedOff = true
+	}
+	return code
+}
+
+// failAfterErrorStatus fails a call the gateway answered with the error
+// status status (0: none) and then left without a decision. On a standalone
+// hook that is no outage, so it is blocked in every fail mode: a busy gateway
+// (429) with the no-answer reason a closed hook gives it, any other status
+// with that status, as when its whole body is in. Per-user and Secure Client
+// hooks, and a call with no error status, keep failNoAnswer.
+func failAfterErrorStatus(opts Options, sp spec, failMode string, status int) int {
+	if status >= 200 && status < 300 && !opts.SecureClient {
+		return failResponse(opts, sp, "closed", "incomplete gateway response")
+	}
+	if status == 0 || !managedNativeDecision(opts) {
+		return failNoAnswer(opts, sp, failMode)
+	}
+	if status == http.StatusTooManyRequests {
+		return failUnreachable(opts, sp, "closed", managedGatewayNoAnswerReason)
+	}
+	reason := fmt.Sprintf("gateway returned HTTP %d", status)
+	if status >= 500 && status < 600 {
+		return failUnreachable(opts, sp, "closed", reason)
+	}
+	return failResponse(opts, sp, "closed", reason)
 }
 
 // perUserRefusalText is what a per-user hook shows in the agent when the
@@ -1110,8 +1336,32 @@ func sendHookRequest(
 		req.Header.Set("tracestate", v)
 	}
 	opts.requestFacts.set(req.Header, opts, payload)
+	var delivery *hookDeliveryRequest
+	if wantsHookDeliveryReceipt(opts) {
+		req, delivery = prepareHookDeliveryRequest(req, payload, hookDeliveryWait(opts))
+	}
 
-	return opts.HTTPClient.Do(req)
+	var connected atomic.Bool
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	}))
+	resp, err := opts.HTTPClient.Do(req)
+	if err != nil {
+		if delivery != nil {
+			delivery.close()
+		}
+		return nil, markConnectedTimeout(err, connected.Load())
+	}
+	if delivery != nil {
+		// A 103 after the capability wait still asks for a receipt; the
+		// gateway reads the released marker instead and takes none.
+		if resp.Header.Get(HookDeliveryRequiredHeader) == "1" && !delivery.wasReleased() {
+			resp.Body = &hookDeliveryResponseBody{ReadCloser: resp.Body, delivery: delivery}
+		} else {
+			delivery.close()
+		}
+	}
+	return resp, nil
 }
 
 // hookRequestFacts are the headers of a hook call that cost work to
@@ -1144,7 +1394,10 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 
 func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
 	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
-		if resolved := hookpaths.Resolve(payload); resolved != "" {
+		// The surface and bound event are the ones this call sends the
+		// gateway (HookDialectHeader, X-DefenseClaw-Copilot-Event), so the
+		// evidence reads the body in the dialect the gateway judges.
+		if resolved := hookpaths.ResolveConnector(opts.Connector, hookDialect(opts), opts.Event, payload); resolved != "" {
 			header.Set(hookpaths.Header, resolved)
 		}
 	}
@@ -1273,6 +1526,19 @@ func validCopilotEvent(event string) bool {
 // decide shapes the connector-native stdout + exit code from a 2xx gateway
 // response body, returning a fail_response result if the body is not JSON.
 func (sp spec) decide(opts Options, body []byte) int {
+	// The answer is checked with the install state of now: an install that
+	// started while the gateway's body was read closes this call, so an
+	// answer whose native output contradicts its action is refused, not
+	// forwarded (GAP-0916).
+	closeDuringInstall(&opts, "")
+	if sp.connector == "copilot" && perUserInstallWindow(opts) {
+		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+			return code
+		}
+	}
+	if !opts.SecureClient && !validUniqueGatewayResponse(body) {
+		return failResponse(opts, sp, "closed", "invalid or ambiguous JSON response")
+	}
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(body, &fields); err != nil {
 		return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid JSON response")
@@ -1288,7 +1554,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
 		}
 		if !opts.SecureClient && !lifecycle {
-			return failNativeDecision(opts, sp, "invalid or missing action in gateway response")
+			return failResponse(opts, sp, "closed", "invalid or missing action in gateway response")
 		}
 		action = "allow"
 		if lifecycle && sp.style == stylePluginBridge {
@@ -1299,6 +1565,18 @@ func (sp spec) decide(opts Options, body []byte) int {
 	output := compactField(fields, sp.outputField)
 	if sp.style == stylePluginBridge {
 		output = compactField(fields, "hook_output")
+	}
+	if sp.connector == "claudecode" && action == "block" && claudeTerminalStopEvent(opts.Event) &&
+		output != "" && !nativeOutputAgrees(sp, opts.Event, action, output) {
+		// A contradictory Stop directive cannot turn a gateway block into a
+		// neutral allow or a retrying decision. A block without a directive
+		// is a policy denial: exit 2 gives Claude Code its feedback below.
+		logHookFailure(opts, sp, "gateway block without a matching Claude Stop answer", "response", "closed", true)
+		if reason == "" {
+			reason = "DefenseClaw hook failed closed."
+		}
+		fmt.Fprintln(opts.Stdout, `{"continue":false,"stopReason":`+mustJSONString(reason)+`}`)
+		return 0
 	}
 	if managedNativeDecision(opts) && managedNativeBlockableEvent(sp.connector, opts.Event) && output == "" &&
 		(action == "block" || action == "confirm" || (sp.connector == "cursor" && action == "allow")) &&
@@ -1447,6 +1725,21 @@ func managedNativeDecision(opts Options) bool {
 	return opts.ManagedEnterprise && !opts.SecureClient
 }
 
+// markManagedAnsweredError makes the first HTTP error decisive for the
+// watchdog and every later failure path. A later valid verdict can still
+// decide the call; a failed retry cannot become a gateway outage.
+func markManagedAnsweredError(opts *Options, sp spec, status int) {
+	if !managedNativeDecision(*opts) || status >= 200 && status < 300 || opts.answeredErrorStatus == status {
+		return
+	}
+	opts.answeredErrorStatus = status
+	opts.answerWatch.closeForAnsweredError(*opts, sp)
+}
+
+func answeredErrorReason(opts Options) string {
+	return fmt.Sprintf("gateway returned HTTP %d", opts.answeredErrorStatus)
+}
+
 // managedIntegrityFailMode is the fail mode of an integrity failure (an
 // authentication refusal, a local event binding or hook contract mismatch):
 // closed on a managed host outside Secure Client whatever the administrator
@@ -1509,12 +1802,20 @@ func managedNativeBlockableEvent(connector, event string) bool {
 		}
 	case "copilot":
 		return event == "preToolUse" || event == "permissionRequest"
-	case "devin":
+	case "antigravity", "devin":
 		return event == "PreToolUse"
 	case "kiro":
 		return event == "PreToolUse" || event == "UserPromptSubmit"
 	case "opencode":
 		return event == "tool.execute.before"
+	}
+	return false
+}
+
+func claudeTerminalStopEvent(event string) bool {
+	switch event {
+	case "Stop", "SubagentStop", "TeammateIdle":
+		return true
 	}
 	return false
 }
@@ -1546,6 +1847,15 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 	}
 	switch sp.connector {
 	case "claudecode", "codex":
+		if sp.style == styleClaudeCode && action == "block" && claudeTerminalStopEvent(event) {
+			// A recovered gateway panic ends the turn without another
+			// Stop callback. This universal field takes precedence over
+			// the event's retrying decision:block response.
+			if raw, present := fields["continue"]; present {
+				return bytes.Equal(bytes.TrimSpace(raw), []byte("false")) &&
+					rawStringOr(fields, "stopReason", "") != ""
+			}
+		}
 		var nested map[string]json.RawMessage
 		if json.Unmarshal(fields["hookSpecificOutput"], &nested) == nil && nested != nil {
 			if outputEvent := rawStringOr(nested, "hookEventName", ""); outputEvent != "" && outputEvent != event {
@@ -1572,6 +1882,11 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 		}
 		if action == "confirm" {
 			return rawStringOr(fields, "decision", "") == "ask"
+		}
+		if event == "PreCompact" && sp.style == styleClaudeCode {
+			// Claude Code stops a compaction on decision block, the shape
+			// the gateway renders for it (GAP-0326).
+			return rawStringOr(fields, "decision", "") == "block"
 		}
 		if event == "SessionStart" || event == "PreCompact" || event == "PostCompact" {
 			var continued bool
@@ -1600,6 +1915,14 @@ func nativeOutputAgrees(sp spec, event, action, output string) bool {
 			return rawStringOr(fields, "behavior", "") == want
 		}
 		return rawStringOr(fields, "permissionDecision", "") == want
+	case "antigravity":
+		// Antigravity reads only its documented decision values. A
+		// confirmation must be force_ask: its plain ask honors a cached
+		// Always Allow grant and can run the call unasked (GAP-0405).
+		if action == "confirm" {
+			want = "force_ask"
+		}
+		return rawStringOr(fields, "decision", "") == want
 	case "devin", "kiro", "opencode":
 		decision := rawStringOr(fields, "decision", "")
 		if action == "confirm" {
@@ -1692,6 +2015,7 @@ func exactJSONKeys(fields map[string]json.RawMessage, keys ...string) bool {
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 	reason := "missing gateway token: " + tokenFile + " not found"
+	failMode = closeDuringInstall(&opts, failMode)
 	closes := opts.ManagedEnterprise || (!sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed"))
 	if opts.ManagedEnterprise {
 		// A managed hook's token is installer state: a missing one is a
@@ -1704,7 +2028,7 @@ func handleMissingToken(opts Options, sp spec, failMode, tokenFile string) int {
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
 	logHookFailure(opts, sp, reason, "transport", failMode, closes)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+	if code, handled := copilotFailClosed(opts, sp, "transport", reason); handled {
 		return code
 	}
 	if closes {
@@ -1757,9 +2081,14 @@ func handleUnavailableHome(opts Options, sp spec, failMode, reason string) int {
 // handleOversized mirrors the per-connector oversized-payload branch. prefix
 // is the start of the payload the hook read before it stopped at its cap.
 func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int {
-	// Oversized input is not an outage: closed on a standalone host in every
-	// fail mode (bounded review P1).
+	failMode = closeDuringInstall(&opts, failMode)
+	// An input the hook cannot fully read is a local parse failure, never
+	// an outage. Outside Secure Client it closes even if a per-user hook
+	// had an explicit open outage preference.
 	failMode = managedNonOutageMode(&opts, failMode)
+	if !opts.SecureClient {
+		failMode, opts.FailMode = "closed", "closed"
+	}
 	if !sp.failOpenOnly && failMode == "closed" && failClosedStopEvent(opts, sp) {
 		return allowFailClosedStop(opts, sp, "stdin body exceeded cap", "transport")
 	}
@@ -1782,7 +2111,7 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 	if code, handled := hermesFailClosed(opts, sp, "oversized", "stdin body exceeded cap"); handled {
 		return code
 	}
-	if code, handled := managedCopilotFailClosed(opts, sp, "stdin body exceeded cap"); handled {
+	if code, handled := copilotFailClosed(opts, sp, "oversized", "stdin body exceeded cap"); handled {
 		return code
 	}
 	if closes {
@@ -1802,6 +2131,13 @@ func handleOversized(opts Options, sp spec, failMode string, prefix []byte) int 
 // host the explicit allow is given only for an outage withManagedOutage
 // marked; any other path gets the empty answer, which the plugin blocks.
 func emitFailOpenAllow(opts Options, sp spec, reason string) int {
+	// The installer may acquire the lock while the gateway call is in flight.
+	// Recheck at the last shared fail-open exit as well as at hook entry.
+	if sp.connector == "copilot" && perUserInstallWindow(opts) {
+		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+			return code
+		}
+	}
 	if sp.connector == "opencode" && opts.ManagedEnterprise && (!managedNativeDecision(opts) || opts.managedOutageOpen) {
 		fmt.Fprintln(opts.Stdout, openCodeFailOpenBody(openCodeFailOpenNotice(reason)))
 		return 0
@@ -1810,7 +2146,20 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 }
 
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
+	failMode = closeDuringInstall(&opts, failMode)
 	failMode = managedNonOutageMode(&opts, failMode)
+	if perUserInstallWindow(opts) {
+		// An install or upgrade stops this account's gateway and starts it
+		// again when it is done. That window is not an outage, so an open
+		// fail mode does not let the call through unchecked (GAP-0649).
+		if sp.connector == "copilot" {
+			if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+				return code
+			}
+		}
+		failMode = "closed"
+		opts.FailMode = "closed"
+	}
 	if failMode == "closed" {
 		// A refusal passed in closed (a peer DefenseClaw cannot verify, an
 		// invalid runtime) stays closed for the connectors whose helpers read
@@ -1823,7 +2172,7 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	blocked := !sp.failOpenOnly && (opts.StrictAvailability || failMode == "closed")
 	logHookFailure(opts, sp, reason, "transport", failMode, blocked)
 	if !managedCopilotOpen(opts, sp, failMode) {
-		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		if code, handled := copilotFailClosed(opts, sp, "transport", reason); handled {
 			return code
 		}
 	}
@@ -1848,6 +2197,58 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		return 0
 	}
 	return emitFailOpenAllow(opts, sp, reason)
+}
+
+// installLockName is the folder install.sh and install.ps1 hold in the data
+// directory while they install or upgrade this account's DefenseClaw
+// (internal/cli installLockName).
+const installLockName = ".install.lock"
+
+// perUserInstallWindow reports a per-user hook (not managed, not Secure
+// Client) running while an install or upgrade of this account's DefenseClaw
+// holds installLockName.
+func perUserInstallWindow(opts Options) bool {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || strings.TrimSpace(opts.Home) == "" {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(opts.Home, installLockName))
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// Copilot ignores a failed hook process. During a per-user install it needs
+// the native deny for each actionable event before any launcher or gateway
+// failure can turn into an unchecked call. Lifecycle events have no blocking
+// response and remain neutral so an agent can stop.
+func blockPerUserCopilotInstall(opts Options, sp spec) (int, bool) {
+	if NeutralLifecycleEvent(sp.connector, opts.Event) {
+		return 0, false
+	}
+	message := perUserGatewayDownText(opts, "gateway unreachable")
+	quoted := mustJSONString(message)
+	var body string
+	if sp.dialect == copilotVSCodeLocalSurface {
+		body = copilotVSCodeLocalOutput(opts.Event, "block", message)
+	} else {
+		switch opts.Event {
+		case "preToolUse":
+			body = `{"permissionDecision":"deny","permissionDecisionReason":` + quoted + `}`
+		case "permissionRequest":
+			body = `{"behavior":"deny","message":` + quoted + `}`
+		default:
+			// An unreviewed event binding must not open a tool call while
+			// the installer holds the lock. Copilot ignores fields it cannot
+			// use on lifecycle events.
+			body = `{"permissionDecision":"deny","permissionDecisionReason":` + quoted +
+				`,"behavior":"deny","message":` + quoted + `}`
+		}
+	}
+	if body == "" {
+		return 0, false
+	}
+	logHookFailure(opts, sp, "per-user install or upgrade in progress", "transport", "closed", true)
+	fmt.Fprintln(opts.Stderr, "defenseclaw: blocking Copilot call while DefenseClaw is being installed or upgraded")
+	fmt.Fprintln(opts.Stdout, body)
+	return 0, true
 }
 
 const coldStartFailedReason = "gateway cold start failed"
@@ -1891,10 +2292,10 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	switch {
 	case reason == "gateway unreachable":
 		text = "DefenseClaw is not checking this session: this account's gateway is not running. " +
-			"Run `defenseclaw-gateway start` to resume protection."
+			"Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
 	case reason == perUserGatewayRestartingReason:
 		text = "DefenseClaw is not checking this session: this account's gateway is restarting or not running " +
-			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection."
+			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
 	case reason == perUserGatewayNoAnswerReason:
 		text = "DefenseClaw is not checking this session: this account's gateway did not answer in time " +
 			"(it may be restarting or busy). Check it with `defenseclaw-gateway status`."
@@ -1907,6 +2308,10 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	}
 	return `{"systemMessage":` + mustJSONString(text) + `}`
 }
+
+// perUserGatewayStatusHint ends a per-user gateway-down notice: the command
+// that shows the gateway's state (GAP-0093), as the Unix hooks say it.
+const perUserGatewayStatusHint = " `defenseclaw-gateway status` shows its state."
 
 // unreachableLead starts the unreachable line. Another account's process on
 // the gateway port answers, so the gateway is not "unreachable" there; the
@@ -1957,6 +2362,11 @@ func perUserGatewayDownText(opts Options, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
 		return ""
 	}
+	if perUserInstallWindow(opts) {
+		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": DefenseClaw is being installed or " +
+			"upgraded for this account, and its gateway starts again when that is done. Try again in a moment; " +
+			"if the installer has stopped, run the installer again to finish or undo the interrupted install."
+	}
 	if reason == perUserGatewayRestartingReason {
 		return "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": this account's DefenseClaw gateway is " +
 			"restarting or not running and did not answer within 3 seconds (fail mode closed). Try again in a " +
@@ -1977,7 +2387,7 @@ func perUserGatewayDownText(opts Options, reason string) string {
 		// The hook does not start a gateway the user stopped (GAP-0486:
 		// the agent showed only the cold-start error).
 		return lead + "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
-			"Start it with `defenseclaw-gateway start`, then try again."
+			"Start it with `defenseclaw-gateway start`, then try again." + perUserGatewayStatusHint
 	case strings.HasPrefix(reason, coldStartFailedReason):
 		return lead + "the DefenseClaw gateway is not running and could not be started (fail mode closed). " +
 			"Run `defenseclaw-gateway start` to see why, then try again."
@@ -2027,6 +2437,15 @@ const managedSIDUnregisteredReason = "enterprise_managed_sid_unregistered"
 // account, but it has not signed in since, so it has no runtime yet.
 const managedEnrollmentPendingReason = "enterprise_managed_enrollment_pending"
 
+// managedRootDeniedReason is the Unix standalone gateway refusal of uid 0
+// under enrollment.root: deny (internal/gateway managedHookReasonRootDenied).
+const managedRootDeniedReason = "enterprise_managed_root_denied"
+
+// rootDeniedExplanation is why root's call is blocked while the
+// administrator's policy refuses root.
+const rootDeniedExplanation = "your organization does not allow agents to run as root on this computer. " +
+	"Run the agent from your own account (" + managedRootDeniedReason + ")"
+
 // managedUIDUnregisteredReason is the Unix standalone gateway refusal of an
 // account that is not enrolled (internal/gateway managedHookReasonUIDUnregistered).
 const managedUIDUnregisteredReason = "enterprise_managed_uid_unregistered"
@@ -2045,32 +2464,37 @@ const unixUnenrolledAccountExplanation = "this account is not enrolled in Defens
 // Claude Code, its first start, which records the build the enumerator
 // verifies; the next cycle (within five minutes) then enrolls the account.
 const unenrolledAccountExplanation = "this account is not enrolled yet; restart the agent in 5 minutes. " +
-	"DefenseClaw enrolls an account within 5 minutes of its desktop sign-in (console or Remote Desktop; " +
-	"not SSH, a scheduled task or runas) and, for Claude Code, of its first start. " +
+	"DefenseClaw enrolls an account within 5 minutes once you have signed in and the agent is installed " +
+	"(console or Remote Desktop; not SSH, a scheduled task or runas). " +
+	"For Claude Code, the wait starts at its first start if that is later. " +
 	"If this continues, the policy may exclude this account: ask your administrator"
 
-// failUnenrolled blocks, like failUnreachable in closed mode, a tool call of
-// an account the administrator has not enrolled (yet) or excludes, and says
-// so: the gateway is up, and the refusal is the enrollment policy. An agent
+// failEnrollmentRefusal blocks, like failUnreachable in closed mode, a tool
+// call of an account the administrator has not enrolled (yet) or excludes, or
+// of root under enrollment.root: deny, and says so: the gateway is up, and
+// the refusal is the enrollment policy. An agent
 // that shows its structured denial rather than stderr (Codex, Cursor and
 // the JSON-bodied hooks) gets the same explanation instead of the generic
 // failed-closed text.
-func failUnenrolled(opts Options, sp spec, reason string) int {
+func failEnrollmentRefusal(opts Options, sp spec, reason string) int {
 	if !sp.failOpenOnly && failClosedStopEvent(opts, sp) {
 		// Nothing is refused, so no refusal is reported.
 		return allowFailClosedStop(opts, sp, reason, "transport")
 	}
 	reportUnenrolledRefusal(opts, sp, reason)
 	logHookFailure(opts, sp, reason, "transport", "closed", true)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+	if code, handled := copilotFailClosed(opts, sp, "transport", reason); handled {
 		return code
 	}
 	why := unenrolledAccountExplanation
-	if reason == managedUIDUnregisteredReason {
+	switch reason {
+	case managedUIDUnregisteredReason:
 		why = unixUnenrolledAccountExplanation
+	case managedRootDeniedReason:
+		why = rootDeniedExplanation
 	}
 	explanation := "DefenseClaw: " + why
-	if managedStandaloneHook(opts) && reason == managedUIDUnregisteredReason {
+	if managedStandaloneHook(opts) && (reason == managedUIDUnregisteredReason || reason == managedRootDeniedReason) {
 		explanation = "DefenseClaw blocked this " + hookEventSubject(opts.Event) + ": " + why + "."
 	}
 	// Claude Code shows a structured block without its hook-command prefix
@@ -2164,6 +2588,12 @@ func rawString(fields map[string]json.RawMessage, key string) (string, bool) {
 
 // failResponse mirrors the response-layer failure path: honor FAIL_MODE.
 func failResponse(opts Options, sp spec, failMode, reason string) int {
+	failMode = closeDuringInstall(&opts, failMode)
+	if sp.connector == "copilot" && perUserInstallWindow(opts) {
+		if code, blocked := blockPerUserCopilotInstall(opts, sp); blocked {
+			return code
+		}
+	}
 	// The gateway answered, or a local check failed: never an outage.
 	failMode = managedNonOutageMode(&opts, failMode)
 	if failMode == "closed" {
@@ -2190,7 +2620,7 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 		return code
 	}
 	if !managedCopilotOpen(opts, sp, failMode) {
-		if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+		if code, handled := copilotFailClosed(opts, sp, "response", reason); handled {
 			return code
 		}
 	}
@@ -2203,11 +2633,76 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 	return emitHookResult(opts, sp, sp.responseClosed)
 }
 
+// closeDuringInstall is the one install check of a native hook call: Run
+// reads it when the call starts, after the agent's payload is in and when
+// the gateway has answered (or failed to); decide reads it once the whole
+// body is in, and every failure answer reads it again when it answers.
+// While the installer holds the per-user data directory
+// (perUserInstallInProgress) the call is closed, with strict availability,
+// so an install or upgrade that starts during a call closes it as well
+// (GAP-0893, GAP-0894, GAP-0916). It returns the fail mode to answer with.
+func closeDuringInstall(opts *Options, failMode string) string {
+	if !perUserInstallInProgress(*opts) {
+		return failMode
+	}
+	opts.FailMode = "closed"
+	opts.StrictAvailability = true
+	return "closed"
+}
+
+// perUserInstallInProgress forces closed while the account's installer owns
+// its data directory (installLockHeld).
+func perUserInstallInProgress(opts Options) bool {
+	if opts.ManagedEnterprise || opts.SecureClient || opts.Home == "" {
+		return false
+	}
+	return installLockHeld(opts.Home)
+}
+
+// installLockLstat reads the install lock; a variable for tests.
+var installLockLstat = os.Lstat
+
+// installLockHeld reports whether the installer holds the per-user data
+// directory home: its .install.lock exists, as any file type (a symlink
+// marker too, so changing its type cannot open a hook during install or
+// upgrade), or it cannot be read for any reason but its absence. A lock
+// whose state cannot be verified is held (GAP-0862).
+func installLockHeld(home string) bool {
+	return installLockHeldBy(installLockLstat, home)
+}
+
+func installLockHeldBy(lstat func(string) (fs.FileInfo, error), home string) bool {
+	_, err := lstat(filepath.Join(home, ".install.lock"))
+	return err == nil || !errors.Is(err, fs.ErrNotExist)
+}
+
+// InstallLockHeld is installLockHeld for the hook command, which answers
+// some failures before Run (hookPreRunFailsClosed).
+func InstallLockHeld(home string) bool {
+	return strings.TrimSpace(home) != "" && installLockHeld(home)
+}
+
 func responseFailureReason(reason string) string {
 	if strings.Contains(reason, "HTTP 401") || strings.Contains(reason, "HTTP 403") {
 		return reason + " (gateway auth failed; possible token drift. Run `defenseclaw doctor --fix` or `defenseclaw-gateway restart`.)"
 	}
 	return reason
+}
+
+// failManagedCodexBinding keeps the shell hook's binding-error wording in
+// Codex's native denial body. A mismatched registered event is an integrity
+// refusal, including when the administrator allows outages to fail open.
+// A registered Stop event still gets the neutral Stop rule, as in
+// failResponse: blocking Stop keeps Codex running and repeats the failing
+// hook (#1140).
+func failManagedCodexBinding(opts Options, sp spec, reason string) int {
+	reason = "codex hook binding error: " + reason
+	if failClosedStopEvent(opts, sp) {
+		return allowFailClosedStop(opts, sp, reason, "response")
+	}
+	logHookFailure(opts, sp, reason, "response", "closed", true)
+	fmt.Fprintln(opts.Stderr, "defenseclaw: "+reason)
+	return emitCodexBlock(opts, "DefenseClaw blocked this "+hookEventSubject(opts.Event)+": "+reason)
 }
 
 // invalidManagedCopilotBindingReason is the hook-failure reason of a managed
@@ -2226,37 +2721,134 @@ const invalidManagedCopilotBindingReason = "enterprise_managed_copilot_event_bin
 // postToolUse, errorOccurred and the rest) cannot block in Copilot's
 // contract and ignores them. The answer is never an allow decision.
 func failInvalidManagedCopilotBinding(opts Options, sp spec) int {
-	opts.FailMode = "closed"
 	reason := invalidManagedCopilotBindingReason
-	// The call is refused, so it is logged closed: loggedFailMode counts a
-	// Copilot event it does not know as one that cannot block.
+	return refuseInvalidCopilotBinding(opts, sp, "managed "+sp.subject, reason,
+		"DefenseClaw blocked this Copilot call: its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. "+
+			"Ask your administrator to run ensure, which rewrites the DefenseClaw policy hook. ("+reason+")")
+}
+
+// failInvalidPerUserCopilotBinding answers a per-user Copilot CLI hook in fail
+// mode closed whose command binds no reviewed Copilot event like
+// failInvalidManagedCopilotBinding, with the per-user next step, as
+// copilot-hook.sh does on Linux and macOS.
+func failInvalidPerUserCopilotBinding(opts Options, sp spec) int {
+	return refuseInvalidCopilotBinding(opts, sp, sp.subject, "missing or unsupported Copilot hook event binding",
+		"DefenseClaw blocked this tool call: its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. "+
+			"Run `defenseclaw setup copilot` to register it again.")
+}
+
+// unboundAntigravityBindingReason is the hook-failure reason of an Antigravity
+// hook whose registered command binds no reviewed event.
+const unboundAntigravityBindingReason = "missing or unsupported Antigravity hook event binding"
+
+// refuseClosedUnboundHook refuses a Copilot CLI or Antigravity hook that
+// fails closed (a standalone managed hook, or a per-user hook in fail mode
+// closed or strict availability) when its registered command binds no
+// reviewed event. Neither agent names the event in its hook input, so such a
+// hook would otherwise answer every failure as an event that cannot block.
+// Copilot gets both of its denies (refuseInvalidCopilotBinding). Antigravity
+// reads the same decision field on Stop, so it gets PreToolUse's deny for
+// any input that may be a tool call; only an input that is clearly another
+// event (antigravityNonToolInput) keeps the neutral answer. Secure Client
+// hooks and hooks in fail mode open are not handled here.
+func refuseClosedUnboundHook(opts *Options, sp spec, failMode string) (int, bool) {
+	closed := managedNativeDecision(*opts) ||
+		(!opts.ManagedEnterprise && (opts.StrictAvailability || failMode == "closed"))
+	if !closed {
+		return 0, false
+	}
+	switch {
+	case sp.connector == "copilot" && !validCopilotEventForOptions(*opts):
+		if managedNativeDecision(*opts) {
+			return failInvalidManagedCopilotBinding(*opts, sp), true
+		}
+		if perUserCopilotFailsClosed(*opts, sp) {
+			return failInvalidPerUserCopilotBinding(*opts, sp), true
+		}
+	case sp.connector == "antigravity" && !validAntigravityEvent(opts.Event):
+		// Read the input here, then hand the same bytes to the rest of Run.
+		data, err := io.ReadAll(io.LimitReader(opts.Stdin, opts.MaxBody+1))
+		opts.Stdin = io.MultiReader(bytes.NewReader(data), opts.Stdin)
+		if err == nil && antigravityNonToolInput(data, int64(len(data)) > opts.MaxBody) {
+			return 0, false
+		}
+		text := "DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. " +
+			"Run `defenseclaw setup antigravity` to register it again."
+		if opts.ManagedEnterprise {
+			text = "DefenseClaw blocked this tool call: its DefenseClaw hook is registered without an Antigravity event DefenseClaw reviewed. " +
+				"Ask your administrator to run ensure, which rewrites the DefenseClaw hooks."
+		}
+		opts.FailMode = "closed"
+		logHookFailure(*opts, sp, unboundAntigravityBindingReason, "response", "closed", true)
+		fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s (fail mode closed): %s (event %q)\n",
+			sp.subject, unboundAntigravityBindingReason, strings.TrimSpace(opts.Event))
+		fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+mustJSONString(text)+`}`)
+		return 0, true
+	}
+	return 0, false
+}
+
+// antigravityNonToolInput reports an Antigravity hook input that is clearly
+// not a tool call: a JSON object with a field of PreInvocation,
+// PostInvocation or Stop and no tool field (toolCall, tool_call, stepIdx).
+// Anything else (a missing or malformed toolCall, input that is not JSON or
+// over the cap) may be a tool call. Antigravity's other events carry
+// counters and short text only.
+func antigravityNonToolInput(data []byte, overflow bool) bool {
+	if overflow {
+		return false
+	}
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(data, &fields) != nil {
+		return false
+	}
+	for _, key := range []string{"toolCall", "tool_call", "stepIdx"} {
+		if _, ok := fields[key]; ok {
+			return false
+		}
+	}
+	for _, key := range []string{"invocationNum", "initialNumSteps", "executionNum", "terminationReason", "fullyIdle"} {
+		if _, ok := fields[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// refuseInvalidCopilotBinding writes both of Copilot's denies with text and
+// logs the refusal closed: loggedFailMode counts a Copilot event it does not
+// know as one that cannot block.
+func refuseInvalidCopilotBinding(opts Options, sp spec, subject, reason, text string) int {
+	opts.FailMode = "closed"
 	logged := sp
 	logged.failOpenOnly = false
 	logHookFailure(opts, logged, reason, "response", "closed", true)
-	text := "DefenseClaw blocked this Copilot call: its DefenseClaw hook is registered without a Copilot event DefenseClaw reviewed. " +
-		"Ask your administrator to run ensure, which rewrites the DefenseClaw policy hook. (" + reason + ")"
 	message := mustJSONString(text)
-	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s (event %q)\n", sp.subject, reason, strings.TrimSpace(opts.Event))
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s (fail mode closed): %s (event %q)\n", subject, reason, strings.TrimSpace(opts.Event))
 	fmt.Fprintln(opts.Stdout, `{"permissionDecision":"deny","permissionDecisionReason":`+message+`,"behavior":"deny","message":`+message+`}`)
 	return 0
 }
 
-// managedCopilotFailClosed denies an administrator-managed Copilot tool call
-// when DefenseClaw itself cannot decide. Copilot has no fail-closed hook
-// contract (its own timeouts and non-JSON errors allow), so per-user Copilot
-// hooks fail open; a managed hook still owns Copilot's native structured
-// deny for preToolUse and permissionRequest and uses it. Other events cannot
-// block and keep the fail-open result.
+// copilotFailClosed denies a Copilot tool call when DefenseClaw itself cannot
+// decide. Copilot has no fail-closed hook contract (its own timeouts and
+// non-JSON errors allow), but it honors its native structured deny for
+// preToolUse and permissionRequest, so a managed hook and a per-user hook in
+// fail mode closed (perUserCopilotFailClosed) use it. layer is the failure
+// layer (transport, response, oversized, policy) the per-user text names.
+// Other events cannot block and keep the fail-open result.
 //
 // The same transport failure paths give a Hermes tool call that fails closed
 // its block (hermesFailClosed): Hermes too has no fail-closed hook contract
 // and blocks only through its native directive.
-func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) {
+func copilotFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
 	if sp.connector == "hermes" {
 		return hermesFailClosed(opts, sp, "transport", reason)
 	}
-	if !opts.ManagedEnterprise || sp.connector != "copilot" {
+	if sp.connector != "copilot" {
 		return 0, false
+	}
+	if !opts.ManagedEnterprise {
+		return perUserCopilotFailClosed(opts, sp, layer, reason)
 	}
 	text := managedCopilotDenyMessage(reason)
 	if reason == managedUIDUnregisteredReason {
@@ -2287,6 +2879,38 @@ func managedCopilotFailClosed(opts Options, sp spec, reason string) (int, bool) 
 		}
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking managed %s (fail mode closed): %s\n", sp.subject, reason)
+	fmt.Fprintln(opts.Stdout, body)
+	return 0, true
+}
+
+// perUserCopilotFailsClosed reports a per-user Copilot CLI hook that fails
+// closed: its fail mode is not explicitly open, or strict availability is on.
+// The VS Code Local surface has a fail-closed contract of its own.
+func perUserCopilotFailsClosed(opts Options, sp spec) bool {
+	return sp.connector == "copilot" && !opts.ManagedEnterprise && sp.dialect != copilotVSCodeLocalSurface &&
+		(opts.StrictAvailability || normalizeFailMode(opts.FailMode) == "closed")
+}
+
+// perUserCopilotFailClosed denies a per-user Copilot CLI tool call or
+// permission request that DefenseClaw could not check, in fail mode closed,
+// with Copilot's native deny and a text that says why and what to do
+// (perUserFailClosedText), as copilot-hook.sh does on Linux and macOS.
+// handled is false for every other invocation.
+func perUserCopilotFailClosed(opts Options, sp spec, layer, reason string) (int, bool) {
+	if !perUserCopilotFailsClosed(opts, sp) {
+		return 0, false
+	}
+	message := mustJSONString(perUserFailClosedText(opts, layer, reason))
+	var body string
+	switch opts.Event {
+	case "preToolUse":
+		body = `{"permissionDecision":"deny","permissionDecisionReason":` + message + `}`
+	case "permissionRequest":
+		body = `{"behavior":"deny","message":` + message + `}`
+	default:
+		return 0, false
+	}
+	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s (fail mode closed): %s\n", sp.subject, reason)
 	fmt.Fprintln(opts.Stdout, body)
 	return 0, true
 }
@@ -2336,7 +2960,7 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		return emitHookResult(opts, sp, sp.openAllow)
 	}
 	logHookFailure(opts, sp, reason, "policy", "closed", true)
-	if code, handled := managedCopilotFailClosed(opts, sp, reason); handled {
+	if code, handled := copilotFailClosed(opts, sp, "policy", reason); handled {
 		return code
 	}
 	fmt.Fprintf(opts.Stderr, "defenseclaw: blocking %s: %s\n", sp.subject, reason)
@@ -2354,9 +2978,6 @@ func failForeignHookBlocked(opts Options, sp spec, reason string) int {
 		}
 	case "devin":
 		fmt.Fprintln(opts.Stdout, devinBlockText(reason))
-		return sp.unreachableStrict.exit
-	case "openhands":
-		fmt.Fprintln(opts.Stdout, `{"decision":"deny","reason":`+message+`}`)
 		return sp.unreachableStrict.exit
 	case "opencode":
 		fmt.Fprintln(opts.Stdout, openCodeDenyBody(reason))
@@ -2444,11 +3065,9 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 }
 
 // managedPeerFailMode is the fail mode of a managed peer-verification
-// failure. A hook whose gateway service is simply not running (stopped,
-// crashed, or held stopped while Setup services the deployment) follows its
-// own fail mode, as a refused connection already does on macOS: the hook
-// contacted no peer, so nothing unverified can answer it, and only an
-// administrator can stop the service. That is an authenticated Secure Client
+// failure. A hook whose gateway service is proven not running follows its
+// own fail mode. A refused connection to an existing socket remains an
+// unverified peer failure. That is an authenticated Secure Client
 // hook (opts.SecureClient, set only on a host the strict Secure Client
 // classifier verified, and secureClientHook, #1163) or a standalone hook,
 // whose fail mode is the administrator's (owner decision 2026-10-20). Every
@@ -2467,30 +3086,27 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // through (GAP-0346). It holds only for a standalone hook outside Secure
 // Client (managedNativeDecision) whose administrator chose open for the
 // connector (opts.FailMode, which the managed runtime sets), without strict
-// availability or a runtime failure, and only when err says the gateway
-// service is not running, was still restarting at the end of the restart
-// budget, or gave no answer in time. The hook request that follows then
-// meets the same outage and gives the open result, with its notice and its
-// failure log line, as for every other connector. Every other error (a peer
+// availability or a runtime failure, and only when err proves the gateway
+// service is not running. Every other error (a peer
 // DefenseClaw cannot verify, another program on the gateway port, an
-// unusable answer) and every closed or unset mode keep the refusal.
+// unusable answer), any failure after an HTTP error reply
+// (Options.answeredErrorStatus) and every
+// closed or unset mode keep the refusal.
 func ManagedOutageFailsOpen(opts Options, err error) bool {
-	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability ||
+	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability || opts.answeredErrorStatus != 0 ||
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}
-	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errAnswerBudgetSpentLocally) {
+	if errors.Is(err, errManagedGatewayPortHeld) {
 		return false
 	}
-	return errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayRestarting) ||
-		errors.Is(err, errGatewayNoAnswer)
+	return errors.Is(err, errManagedGatewayNotRunning)
 }
 
 // managedCopilotOpen reports a managed GitHub Copilot hook whose delivery
 // mode is open: an authenticated Secure Client hook (#1163), or a standalone
-// hook whose administrator chose open (owner decision 2026-10-20). A gateway
-// it cannot reach and a response it cannot read allow the call, as they do
-// for every other connector in fail mode open, instead of the managed deny.
+// hook whose administrator chose open. A proven stopped service may allow
+// the call under open; an unanswered or unverified gateway stays closed.
 // A closed mode (configured, strict availability, or another program on the
 // gateway port) and the enrollment and policy refusals still deny.
 func managedCopilotOpen(opts Options, sp spec, failMode string) bool {
@@ -2500,8 +3116,8 @@ func managedCopilotOpen(opts Options, sp spec, failMode string) bool {
 
 // managedPeerFailureReason is the hook-failure reason of a managed
 // peer-verification failure: every managed hook says when the gateway
-// service is simply not running (a stopped Windows service, or a Unix
-// standalone socket that is missing or refuses the connection); any other
+// service is proven not running (a stopped Windows service, or a Unix
+// standalone socket missing in a trusted directory); any other
 // Secure Client peer failure keeps managedGatewayPeerUnverifiedReason.
 func managedPeerFailureReason(opts Options, err error) string {
 	if errors.Is(err, errManagedGatewayNotRunning) {
@@ -2671,6 +3287,18 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		// The setup is fine; the agent's process is the problem (GAP-0923).
 		cause, advice = "this agent runs in a private user namespace (for example one started with unshare or a sandbox tool), where DefenseClaw cannot check it or reach its hook socket",
 			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == ManagedMountNamespaceReason:
+		cause, advice = "this agent runs in a private mount namespace, where its view of managed machine policy may differ from the host's",
+			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == ManagedTracedProcessReason:
+		cause, advice = "this agent's hook is being traced, so another process may change the policy paths it reads",
+			"Start the agent without a tracer; if this continues, contact your administrator."
+	case reason == ManagedProcessContextUnknownReason:
+		cause, advice = "DefenseClaw cannot verify this agent's Linux process context and managed policy view",
+			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == ManagedPolicyViewReason:
+		cause, advice = "DefenseClaw cannot prove that this agent sees the administrator's effective managed policy",
+			"Ask your administrator to check the managed policy files and run enterprise verify."
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."
@@ -3285,8 +3913,22 @@ func compactField(m map[string]json.RawMessage, field string) string {
 	return buf.String()
 }
 
+// removedConnectorReason is the block reason of a hook for a connector 1.0.4
+// removed (until 1.1), or false.
+func removedConnectorReason(connector string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(connector)) {
+	case "openhands":
+		return "DefenseClaw blocked this call: OpenHands support was removed in DefenseClaw 1.0.4. " +
+			"To use OpenHands without DefenseClaw, remove every DefenseClaw hook from your OpenHands hooks.json, then restart OpenHands.", true
+	case "omnigent":
+		return "DefenseClaw blocked this call: OmniGent support was removed in DefenseClaw 1.0.4. " +
+			"To use OmniGent without DefenseClaw, remove DefenseClaw's policy from your OmniGent config.yaml, then restart OmniGent.", true
+	}
+	return "", false
+}
+
 // decodeDecision pulls the `decision` string from an already-compact JSON
-// object (the connector's hook_output) for the OpenHands deny/block path.
+// object (the connector's hook_output) for the Devin deny/block path.
 func decodeDecision(output string) string {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal([]byte(output), &m); err != nil {

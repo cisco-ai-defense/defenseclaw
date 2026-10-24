@@ -104,6 +104,19 @@ func TestWindowsReadOnlyExtraACE(t *testing.T) {
 		"Administrators": "S-1-5-32-544",
 		"OWNER RIGHTS":   "S-1-3-4",
 		"CREATOR OWNER":  "S-1-3-0",
+		// Broad groups: a sandbox grants its own group, never these.
+		"Everyone":      "S-1-1-0",
+		"Dialup":        "S-1-5-1",
+		"Batch":         "S-1-5-3",
+		"Service":       "S-1-5-6",
+		"Local account": "S-1-5-113",
+		"Local account and member of Administrators": "S-1-5-114",
+		"Authenticated Users":                        "S-1-5-11",
+		"Users":                                      "S-1-5-32-545",
+		"Remote Desktop Users":                       "S-1-5-32-555",
+		"ALL APPLICATION PACKAGES":                   "S-1-15-2-1",
+		"Domain Users":                               "S-1-5-21-1004336348-1177238915-682003330-513",
+		"Domain Guests":                              "s-1-5-21-1004336348-1177238915-682003330-514",
 	} {
 		entry := codex
 		entry.sid = sid
@@ -241,6 +254,24 @@ func TestMatchWindowsCanonicalDACL(t *testing.T) {
 	for name, tc := range cases {
 		if got := matchWindowsCanonicalDACL(tc.entries, expected, readOnlyTestTarget, true); got.failure != tc.want {
 			t.Errorf("%s: failure %d, want %d", name, got.failure, tc.want)
+		}
+	}
+}
+
+// A domain group is matched on the full S-1-5-21-<a>-<b>-<c>-<rid> shape, so a
+// local group (the Codex sandbox group, RID 1000) or a longer SID ending in 513
+// is not taken for Domain Users.
+func TestWindowsReadOnlyExtraBroadSID(t *testing.T) {
+	for sid, want := range map[string]bool{
+		"S-1-1-0":              true,
+		"S-1-5-21-1-2-3-513":   true,
+		"S-1-5-21-1-2-3-514":   true,
+		readOnlyTestCodex:      false,
+		"S-1-5-21-1-2-3-4-513": false,
+		"S-1-5-32-544":         false,
+	} {
+		if got := windowsReadOnlyExtraBroadSID(sid); got != want {
+			t.Errorf("windowsReadOnlyExtraBroadSID(%s)=%v want %v", sid, got, want)
 		}
 	}
 }

@@ -1,15 +1,14 @@
 {
   "title": "Reference",
   "pages": [
-    "cli",
-    "setup-commands",
-    "sandbox-cli",
-    "source-of-truth",
+    "commands",
     "configuration",
-    "migrate-v9",
-    "env-vars",
-    "keys",
-    "fail-modes",
-    "gateway-api"
+    "policy",
+    "scanning",
+    "connectors",
+    "apis",
+    "sandboxes",
+    "observability",
+    "edge-connector"
   ]
 }

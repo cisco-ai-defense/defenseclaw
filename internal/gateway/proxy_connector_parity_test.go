@@ -24,32 +24,21 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
-// applyHermeticConnectorHomes redirects built-in connector
-// home/path overrides at a tmpdir so a parallel parity test does not
-// race against the developer's real ~/.openclaw, ~/.claude,
-// ~/.codex, ~/.zeptoclaw, or hook-first connector configs on disk.
+// TestApplyHermeticConnectorHomes_RedirectsHOME guards the
+// belt-and-suspenders defense added to applyHermeticConnectorHomes:
+// dropping testenv.SetHome(t, tmpHome) would silently re-open the
+// regression where ~/.claude/settings.json was getting polluted by
+// test-temp hook paths (e.g. "/var/folders/.../T/Test.../001/hooks/
+// claude-code-hook.sh"). Claude Code's hook bus reads those paths
+// at every session start, so a leaked entry produces a "No such
+// file or directory" error on every UserPromptSubmit until the
+// developer manually edits settings.json.
 //
-// The package-level *PathOverride globals are not mutex-protected, so
-// every parallel subtest in this file MUST snapshot and restore
-// them. We deliberately use t.Cleanup over defer so the previous
-// override (when one is already in flight from another suite) is
-// restored even if the subtest fails.
-//
-// Belt-and-suspenders: we ALSO call testenv.SetHome(t, tmpHome). Every
-// connector's *Path() helper falls back to “os.Getenv("HOME")“
-// when its override is empty, so if a future refactor (or a fresh
-// test added here without the override goroutine) ever leaves a
-// global at "" mid-test, the fallback path lands inside tmpHome
-// instead of the developer's real home. Without this we have
-// already seen ~/.claude/settings.json get polluted with hook
-// commands pointing at long-deleted “/var/folders/.../T/Test...“
-// dirs — Claude Code then logs "hook script: No such file or
-// directory" on every session start.
-//
-// t.Setenv automatically restores HOME at test cleanup time and is
-// disallowed in parallel tests (which is desirable here — both
-// callers of applyHermeticConnectorHomes deliberately serialize
-// their subtests).
+// We assert the post-conditions of the helper directly rather than
+// running a full Setup → settings.json round-trip, because the
+// failure mode we are guarding against — fallback to
+// `os.Getenv("HOME")` — surfaces in the resolved path, not in the
+// connector's serialization logic.
 func applyHermeticConnectorHomes(t *testing.T) {
 	t.Helper()
 	tmpHome := t.TempDir()
@@ -76,22 +65,9 @@ func applyHermeticConnectorHomes(t *testing.T) {
 	connector.CodexConfigPathOverride = filepath.Join(tmpHome, ".codex", "config.toml")
 	t.Cleanup(func() { connector.CodexConfigPathOverride = prevCodex })
 
-	prevOpenHands := connector.OpenHandsHooksPathOverride
-	connector.OpenHandsHooksPathOverride = filepath.Join(tmpHome, "workspace", ".openhands", "hooks.json")
-	t.Cleanup(func() { connector.OpenHandsHooksPathOverride = prevOpenHands })
-
 	prevAntigravity := connector.AntigravityHooksPathOverride
 	connector.AntigravityHooksPathOverride = filepath.Join(tmpHome, ".gemini", "config", "hooks.json")
 	t.Cleanup(func() { connector.AntigravityHooksPathOverride = prevAntigravity })
-
-	prevOmnigentConfig := connector.OmnigentConfigPathOverride
-	prevOmnigentSite := connector.OmnigentSitePackagesPathOverride
-	connector.OmnigentConfigPathOverride = filepath.Join(tmpHome, ".omnigent", "config.yaml")
-	connector.OmnigentSitePackagesPathOverride = filepath.Join(tmpHome, "site-packages")
-	t.Cleanup(func() {
-		connector.OmnigentConfigPathOverride = prevOmnigentConfig
-		connector.OmnigentSitePackagesPathOverride = prevOmnigentSite
-	})
 
 	prevAMP := connector.AMPPluginPathOverride
 	connector.AMPPluginPathOverride = filepath.Join(tmpHome, ".config", "amp", "plugins", "defenseclaw.ts")
@@ -148,14 +124,6 @@ func TestApplyHermeticConnectorHomes_RedirectsHOME(t *testing.T) {
 	if !strings.HasPrefix(connector.CodexConfigPathOverride, got) {
 		t.Errorf("CodexConfigPathOverride = %q does not live under tmp HOME %q",
 			connector.CodexConfigPathOverride, got)
-	}
-	if !strings.HasPrefix(connector.OmnigentConfigPathOverride, got) {
-		t.Errorf("OmnigentConfigPathOverride = %q does not live under tmp HOME %q",
-			connector.OmnigentConfigPathOverride, got)
-	}
-	if !strings.HasPrefix(connector.OmnigentSitePackagesPathOverride, got) {
-		t.Errorf("OmnigentSitePackagesPathOverride = %q does not live under tmp HOME %q",
-			connector.OmnigentSitePackagesPathOverride, got)
 	}
 }
 
@@ -219,7 +187,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			if target == "hermes" && runtime.GOOS == "windows" {
@@ -330,7 +298,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp"} {
 		t.Run(target, func(t *testing.T) {
 			if target == "hermes" && runtime.GOOS == "windows" {
 				t.Skip("native Windows Hermes setup requires a fresh protected executable-selection receipt; dedicated admission tests cover that authority path")

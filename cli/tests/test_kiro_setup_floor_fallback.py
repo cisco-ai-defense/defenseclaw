@@ -78,7 +78,7 @@ def test_setup_kiro_action_does_not_fall_back_to_observe_for_an_old_cli():
             patch.object(app.cfg, "save") as save,
         ):
             ok = cmd_setup._apply_hook_connector_setup(
-                app, connector="kiro", mode="action", restart=False, _downgrade_refused_action=True,
+                app, connector="kiro", mode="action", restart=False,
             )
         assert ok is False
         save.assert_not_called()
@@ -144,7 +144,9 @@ def test_first_run_refuses_an_old_kiro_cli_in_every_profile(tmp_path, profile):
         )
 
     assert report.status == "needs_attention"
-    row = next(step for step in report.setup if step.name == "Connector version")
+    # The train's hook-contract step refuses it first (GAP-0554); the Kiro
+    # floor check is the later row.
+    row = next(step for step in report.setup if step.name in {"Hook contract", "Connector version"})
     assert row.status == "fail" and "below 2.27.1" in row.detail
     assert not (home / "config.yaml").exists()
 

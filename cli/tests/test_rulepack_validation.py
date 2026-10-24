@@ -531,3 +531,88 @@ def test_validate_pack_prefers_local_directory_over_discovered_name(tmp_path, mo
         result = CliRunner().invoke(cmd_guardrail.validate_pack_cmd, ["strict"])
     assert result.exit_code == 0, result.output
     validator.assert_called_once_with("strict")
+
+
+def test_valid_pack_warnings_are_decoded_and_printed() -> None:
+    warning = (
+        "customer rule CUSTOMER-MARKER uses tool_call_only without an expression; its tool-call "
+        "pattern matches use the regex fallback, which is detection-only and cannot block"
+    )
+    payload = {
+        "wire_version": 1,
+        "kind": "validation",
+        "valid": True,
+        "summary": _summary(),
+        "warnings": [warning],
+    }
+    with (
+        patch.object(
+            rulepack_validation,
+            "resolve_trusted_gateway_binary",
+            return_value="gateway",
+        ),
+        patch.object(
+            rulepack_validation.subprocess,
+            "run",
+            return_value=_completed(payload),
+        ),
+    ):
+        result = rulepack_validation.validate_rule_pack("/tmp/pack")
+    assert result.warnings == (warning,)
+    assert result.to_wire_dict()["warnings"] == [warning]
+
+    with patch.object(rulepack_validation, "validate_rule_pack", return_value=result):
+        cli_result = CliRunner().invoke(cmd_guardrail.validate_pack_cmd, ["/tmp/pack"])
+    assert cli_result.exit_code == 0
+    assert "Rule pack valid" in cli_result.output
+    assert "warning: " + warning in cli_result.output
+
+
+@pytest.mark.parametrize("warnings", ["one", [1], ["bad\x1bwarning"], [""]])
+def test_malformed_warnings_are_a_protocol_error(warnings: object) -> None:
+    payload = {
+        "wire_version": 1,
+        "kind": "validation",
+        "valid": True,
+        "summary": _summary(),
+        "warnings": warnings,
+    }
+    with (
+        patch.object(
+            rulepack_validation,
+            "resolve_trusted_gateway_binary",
+            return_value="gateway",
+        ),
+        patch.object(
+            rulepack_validation.subprocess,
+            "run",
+            return_value=_completed(payload),
+        ),
+        pytest.raises(rulepack_validation.RulePackValidationBridgeError),
+    ):
+        rulepack_validation.validate_rule_pack("/tmp/pack")
+
+
+def test_warnings_up_to_the_gateway_bound_are_accepted() -> None:
+    warnings = [f"customer rule R-{index} uses tool_call_only without an expression" for index in range(256)]
+    payload = {
+        "wire_version": 1,
+        "kind": "validation",
+        "valid": True,
+        "summary": _summary(),
+        "warnings": warnings,
+    }
+    with (
+        patch.object(
+            rulepack_validation,
+            "resolve_trusted_gateway_binary",
+            return_value="gateway",
+        ),
+        patch.object(
+            rulepack_validation.subprocess,
+            "run",
+            return_value=_completed(payload),
+        ),
+    ):
+        result = rulepack_validation.validate_rule_pack("/tmp/pack")
+    assert result.valid and len(result.warnings) == 256

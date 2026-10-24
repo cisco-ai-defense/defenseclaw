@@ -29,7 +29,7 @@ func TestDockerGroupMembersAdvisory(t *testing.T) {
 	h.ops.groups["alice"] = []string{"alice", "docker"}
 	h.ops.groups["bob"] = []string{"bob"}
 	h.ops.groups["carol"] = []string{"carol", "docker"}
-	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3"})))
+	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"})))
 	h.registerSandboxUser(t, h.alice)
 	for _, action := range []string{ActionStatus, ActionVerify} {
 		r := h.run(Options{Action: action})

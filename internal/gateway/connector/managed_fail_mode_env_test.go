@@ -14,7 +14,8 @@ import (
 // GAP-0016: every managed shell hook bakes the installer-owned fail mode. An
 // inherited DEFENSECLAW_FAIL_MODE=open must not open a closed managed hook
 // (codex, claude-code and cursor already did; these five honoured the env).
-// Per-user hooks keep the environment override.
+// Per-user hooks read no fail mode from the environment either (1.0.4 lead
+// directive).
 func TestManagedShellHooksIgnoreInheritedFailMode(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
@@ -28,7 +29,6 @@ func TestManagedShellHooksIgnoreInheritedFailMode(t *testing.T) {
 		{NewDevinConnector(), "devin-hook.sh"},
 		{NewHermesConnector(), "hermes-hook.sh"},
 		{NewAntigravityConnector(), "antigravity-hook.sh"},
-		{NewOpenHandsConnector(), "openhands-hook.sh"},
 		{NewCodexConnector(), "codex-hook.sh"},
 	} {
 		for _, managed := range []bool{true, false} {
@@ -60,8 +60,8 @@ func TestManagedShellHooksIgnoreInheritedFailMode(t *testing.T) {
 				if managed && !strings.Contains(script, "\nFAIL_MODE=\"") {
 					t.Fatalf("managed %s bakes no FAIL_MODE", tc.script)
 				}
-				if !managed && !strings.Contains(script, override) {
-					t.Fatalf("per-user %s lost its DEFENSECLAW_FAIL_MODE override", tc.script)
+				if !managed && strings.Contains(script, override) {
+					t.Fatalf("per-user %s reads DEFENSECLAW_FAIL_MODE from the environment", tc.script)
 				}
 			})
 		}

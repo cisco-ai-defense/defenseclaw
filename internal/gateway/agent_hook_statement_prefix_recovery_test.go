@@ -71,6 +71,10 @@ func TestR103B07GAP0651ProtectedCommandGroups(t *testing.T) {
 		{"colon_and", ": && cat ~/.ssh/id_ed25519"},
 		{"preceding_newline", ":\ncat ~/.ssh/id_ed25519"},
 		{"trailing_colon_redirect", "cat ~/.ssh/id_ed25519; : >marker"},
+		// GAP-0701: sed reads the key as cat does.
+		{"sed_read", "sed -n 1p ~/.ssh/id_ed25519"},
+		{"colon_then_sed", ": ; sed -n 1p ~/.ssh/id_ed25519"},
+
 		{"colon_root_delete", ":; rm -rf /"},
 		{"brace_root_delete", "{ :; }; rm -rf /"},
 		{"subshell_root_delete", "(:); rm -rf /"},

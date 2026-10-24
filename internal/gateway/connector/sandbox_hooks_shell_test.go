@@ -126,6 +126,7 @@ func newSandboxHookHarnessFiles(t *testing.T, files []SandboxFile, systemPATH st
 		data := file.Data
 		switch filepath.Base(file.Path) {
 		case "_hardening.sh":
+			data = bytes.ReplaceAll(data, []byte(SandboxHookLogDir), []byte(h.path(SandboxHookLogDir)))
 			data = bytes.Replace(data, []byte(`DEFENSECLAW_BAKED_HOOK_PATH="`+SandboxHookPATH+`"`),
 				[]byte(`DEFENSECLAW_BAKED_HOOK_PATH="`+stubPath+`"`), 1)
 		case codexSandboxNotifyScript:
@@ -244,7 +245,6 @@ const (
 	kiroPreToolUse        = `{"hook_event_name":"preToolUse","cwd":"/work/proj","session_id":"s1","tool_name":"shell","tool_input":{"command":"ls"}}`
 	devinPreToolUse       = `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/work/proj","tool_name":"exec","tool_input":{"command":"ls"}}`
 	hermesPreToolCall     = `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"ls"},"session_id":"s1","cwd":"/work/p","extra":{}}`
-	openHandsPreToolUse   = `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"ls"},"session_id":"s1","working_dir":"/work/p","metadata":{}}`
 	antigravityPreToolUse = `{"toolName":"run_command","toolInput":{"CommandLine":"ls"}}`
 	allowResponse         = `200|{"action":"allow"}`
 )
@@ -315,7 +315,6 @@ func sandboxHookCases() []sandboxHookCase {
 				d := lastJSON(run)
 				return d["action"] == "block" || d["decision"] == "block"
 			}},
-		{"openhands", NewOpenHandsConnector(), "1.16.0", "openhands-hook.sh", nil, openHandsPreToolUse, "/api/v1/openhands/hook", nil, false, true, exit2},
 		{"antigravity", NewAntigravityConnector(), "1.2.12", "antigravity-hook.sh", []string{"PreToolUse"}, antigravityPreToolUse, "/api/v1/antigravity/hook",
 			map[string]string{"x-defenseclaw-antigravity-event": "PreToolUse"}, false, true,
 			func(run sandboxHookRun) bool { return run.exitCode == 0 && lastJSON(run)["decision"] == "deny" }},
@@ -643,8 +642,6 @@ func TestSandboxHooksRenderVerdicts(t *testing.T) {
 		{"devin context", "devin", `{"hook_event_name":"PostToolUse","tool_name":"exec"}`, nil, `{"action":"alert","hook_output":` + devinContext + `}`, 0, devinContext, ""},
 		{"hermes block verdict", "hermes", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"block","reason":"rule X"}}`, -1, any, "rule X"},
 		{"hermes bare block", "hermes", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
-		{"openhands block verdict", "openhands", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"deny","reason":"rule X"}}`, -1, any, "rule X"},
-		{"openhands bare block", "openhands", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
 		{"antigravity block verdict", "antigravity", "", nil, `{"action":"block","reason":"rule X","hook_output":{"decision":"deny","reason":"rule X"}}`, -1, any, "rule X"},
 		{"antigravity bare block", "antigravity", "", nil, `{"action":"block","reason":"rule Y"}`, -1, any, "rule Y"},
 		{"claude alert", "claudecode", "", nil, alertVerdict, 0, alertNotice, ""},

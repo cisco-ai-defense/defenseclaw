@@ -41,9 +41,8 @@ import (
 //     of the profile the sandbox was created under, so a re-match never
 //     loosens a running sandbox (sandboxRegistrationFloor, GAP-0242).
 //   - Facts that have not resolved (a slow or failed lookup) never change
-//     the match and never refuse anything: the registration keeps its
-//     profile, and only the floor of that profile under the new
-//     configuration applies.
+//     the registration's match: it keeps its last proven profile. Calls
+//     whose assignments need those facts refuse until they are confirmed.
 //   - After a verified match, a create-time field the sandbox now violates
 //     (sandboxes no longer allowed, its harness no longer allowed, a fatal
 //     violation of its run) revokes the registration at once, so it admits
@@ -68,8 +67,9 @@ const (
 
 // sandboxRematchIfDue re-matches reg when it is due and returns the
 // registration as stored afterwards (revoked when it outlived its stop).
-// A failure keeps reg as it was and never refuses the call, except that a
-// stop it could not store still refuses it (GAP-0657).
+// A failure keeps reg as it was; callers check the current identity decision
+// and refuse when it needs missing facts. A stop it could not store still
+// refuses the call (GAP-0657).
 func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthority, peer managedHookPeer, reg sandboxreg.Registration) sandboxreg.Registration {
 	if reg.State == sandboxreg.StateRevoked {
 		return reg
@@ -104,8 +104,13 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 	if match.resolved {
 		next.Profile, next.ProfileMatch, next.MatchedGroup = match.decision.Name, match.decision.Match, match.decision.MatchedGroup
 		next.ProfileDigest, next.Provisional, next.FactsDigest = match.decision.Digest, match.provisional, factsDigest
-	} else if digest, ok := a.sandboxProfileDigest(ctx, reg.Profile); ok {
-		next.ProfileDigest = digest
+	} else {
+		// The policy key moves on below without a match under it: the
+		// next resolved facts must re-match, whatever their digest.
+		next.FactsDigest = ""
+		if digest, ok := a.sandboxProfileDigest(ctx, reg.Profile); ok {
+			next.ProfileDigest = digest
+		}
 	}
 	if next.CreateProfile == nil && match.resolved && !next.Provisional {
 		// Created under a provisional match: the first verified match is
@@ -210,6 +215,11 @@ func (a *APIServer) sandboxRematchDue(ctx context.Context, auth *sandboxAuthorit
 	state := sandboxRematchState{run: run, hasRun: hasRun, cfg: a.liveBaseConfig(ctx)}
 	state.key = a.sandboxPolicyKey(ctx, state.cfg)
 	state.match = a.sandboxMatchPeer(ctx, peer, reg.Connector, 0)
+	if state.match.decision.Refused != "" {
+		// No candidate profile is proven to be this caller's policy. Keep
+		// the registration's last bound profile while relay calls refuse.
+		state.match.resolved = false
+	}
 	state.factsDigest = sandboxFactsDigest(auth.key, state.match.facts, state.match.resolved)
 	state.current = hasRun && state.key != "" && state.key == run.PolicyKey &&
 		(!state.match.resolved || state.factsDigest == reg.FactsDigest)
@@ -227,7 +237,7 @@ func (a *APIServer) sandboxProfileDigest(ctx context.Context, profile string) (s
 	if set == nil || profile == "" {
 		return "", false
 	}
-	derived, ok := set.profiles[profile]
+	derived, ok := set.derivedProfile(profile)
 	return derived.Digest, ok
 }
 

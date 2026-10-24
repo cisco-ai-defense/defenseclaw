@@ -428,10 +428,8 @@ func TestProxyShouldBindForConnector(t *testing.T) {
 		{"cursor_observability", &stubConnector{name: "cursor"}, false},
 		{"devin_observability", &stubConnector{name: "devin"}, false},
 		{"copilot_observability", &stubConnector{name: "copilot"}, false},
-		{"openhands_observability", &stubConnector{name: "openhands"}, false},
 		{"antigravity_observability", &stubConnector{name: "antigravity"}, false},
 		{"opencode_observability", &stubConnector{name: "opencode"}, false},
-		{"omnigent_observability", &stubConnector{name: "omnigent"}, false},
 		// Unknown connectors default to bind=true (conservative
 		// fail-closed for the proxy data path).
 		{"unknown_connector", &stubConnector{name: "frobozz"}, true},
@@ -465,9 +463,7 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 		{"cursor", "cursor", false},
 		{"devin", "devin", false},
 		{"copilot", "copilot", false},
-		{"openhands", "openhands", false},
 		{"opencode", "opencode", false},
-		{"omnigent", "omnigent", false},
 		{"unknown", "frobozz", true},
 	}
 	for _, tc := range cases {
@@ -482,8 +478,11 @@ func TestProxyShouldBindForConfiguredConnector(t *testing.T) {
 			}
 		})
 	}
-	if got := proxyShouldBindForConfiguredConnector(nil); !got {
-		t.Errorf("proxyShouldBindForConfiguredConnector(nil) = %v, want true", got)
+	if got := proxyShouldBindForConfiguredConnector(nil); got {
+		t.Errorf("proxyShouldBindForConfiguredConnector(nil) = %v, want false", got)
+	}
+	if got := proxyShouldBindForConfiguredConnector(&config.Config{}); got {
+		t.Errorf("proxyShouldBindForConfiguredConnector(zero config) = %v, want false", got)
 	}
 }
 
@@ -592,8 +591,6 @@ func TestGatewayShouldConnectForConfiguredConnector(t *testing.T) {
 		{"devin_remote", "devin", "192.168.1.10", "", false},
 		{"copilot_loopback", "copilot", "127.0.0.1", "", false},
 		{"copilot_remote", "copilot", "10.0.0.5", "", false},
-		{"openhands_loopback", "openhands", "127.0.0.1", "", false},
-		{"openhands_remote", "openhands", "gw.example.com", "", false},
 
 		// Empty / unknown connector with no override → DISABLED.
 		// Reconnect spam against an unconfigured upstream is the
@@ -2904,20 +2901,6 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantIntercept:    false,
 			wantTelemetryAll: []string{"hooks"},
 		},
-		{
-			name:             "openhands_observability_hooks",
-			connector:        "openhands",
-			wantMode:         "observability",
-			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks"},
-		},
-		{
-			name:             "omnigent_direct_policy_api_until_optional_otel_is_configured",
-			connector:        "omnigent",
-			wantMode:         "observability",
-			wantIntercept:    false,
-			wantTelemetryAll: []string{"policy-api"},
-		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -2949,9 +2932,6 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			}
 			if cm["policy_mode"] != "observe" {
 				t.Errorf("policy_mode = %v, want observe", cm["policy_mode"])
-			}
-			if c.connector == "omnigent" && cm["enforcement_surface"] != "omnigent_policy_api" {
-				t.Errorf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
 			}
 			if cm["proxy_intercept"] != c.wantIntercept {
 				t.Errorf("proxy_intercept = %v, want %v", cm["proxy_intercept"], c.wantIntercept)
@@ -2992,29 +2972,6 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 				t.Errorf("connector_modes[0].enforcement_surface = %v, want %v", first["enforcement_surface"], cm["enforcement_surface"])
 			}
 		})
-	}
-}
-
-func TestAPIStatusOmnigentActionPolicyMode(t *testing.T) {
-	cfg := &config.Config{}
-	cfg.Guardrail.Connector = "omnigent"
-	cfg.Guardrail.Mode = "action"
-	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
-	req := httptest.NewRequest(http.MethodGet, "/status", nil)
-	w := httptest.NewRecorder()
-
-	api.handleStatus(w, req)
-
-	var result map[string]interface{}
-	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	cm, _ := result["connector_mode"].(map[string]interface{})
-	if cm["policy_mode"] != "action" {
-		t.Fatalf("policy_mode = %v, want action", cm["policy_mode"])
-	}
-	if cm["enforcement_surface"] != "omnigent_policy_api" {
-		t.Fatalf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
 	}
 }
 
@@ -3918,7 +3875,7 @@ func TestAPIPolicyDirHotReloadUsesLiveGeneration(t *testing.T) {
 	}
 }
 
-func TestAPIPolicyReloadWithoutPolicyDirAppliesManagedConfig(t *testing.T) {
+func TestAPIPolicyReloadWithoutPolicyDirRefusesManagedConfig(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	logger := audit.NewLogger(capture.store)
 	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: runtime})
@@ -3930,14 +3887,14 @@ func TestAPIPolicyReloadWithoutPolicyDirAppliesManagedConfig(t *testing.T) {
 	api.SetPolicyReloader(func() error { called++; return nil })
 	w := httptest.NewRecorder()
 	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
-	if w.Code != http.StatusOK || called != 1 {
-		t.Fatalf("reload = %d %s, calls = %d; want successful synchronous reload", w.Code, w.Body.String(), called)
+	if w.Code != http.StatusForbidden || called != 0 || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) {
+		t.Fatalf("reload = %d %s, calls = %d; want signed-bundle refusal without reload", w.Code, w.Body.String(), called)
 	}
 	api.SetPolicyReloader(func() error { return errors.New("guardrail generation rejected") })
 	w = httptest.NewRecorder()
 	api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
-	if w.Code != http.StatusInternalServerError || !strings.Contains(w.Body.String(), "guardrail generation rejected") {
-		t.Fatalf("rejected reload = %d %s; want failure", w.Code, w.Body.String())
+	if w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) {
+		t.Fatalf("rejected reload = %d %s; want signed-bundle refusal", w.Code, w.Body.String())
 	}
 }
 
@@ -4383,6 +4340,9 @@ func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 	cfg.Guardrail.HILT.Enabled = true
 	cfg.Guardrail.HILT.MinSeverity = "HIGH"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	// This test exercises approval delivery, not the generic endpoint's
+	// 200 ms scan deadline. Keep the scan alive under race/CI load.
+	api.inspectToolScanTimeout = 5 * time.Second
 
 	_, verdict := postInspect(t, api,
 		`{"tool":"shell","args":{"command":"systemctl enable backdoor.service"},"session_id":"sess-1"}`)
@@ -5950,68 +5910,6 @@ func TestTokenAuth_AcceptCustomHeader(t *testing.T) {
 	}
 }
 
-func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
-	api, called := tokenAuthTestServer(t, "secret-token-123")
-	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
-	req.RemoteAddr = "127.0.0.1:54321"
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("loopback OTLP path token: status = %d, want %d", rr.Code, http.StatusOK)
-	}
-	if !*called {
-		t.Error("loopback OTLP path token: next handler was not called")
-	}
-}
-
-func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
-	api, called := tokenAuthTestServer(t, "secret-token-123")
-	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeOmnigent: "scoped-token-abc",
-	})
-	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*called = true
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
-	req.RemoteAddr = "127.0.0.1:54321"
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("master token on scoped OTLP path: status=%d want 401", rr.Code)
-	}
-	if *called {
-		t.Fatal("next handler called for master token despite scoped token existing")
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/otlp/omnigent/scoped-token-abc/v1/logs", nil)
-	req.RemoteAddr = "127.0.0.1:54321"
-	req.Header.Set("Authorization", "Bearer secret-token-123")
-	rr = httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("master bearer on scoped OTLP path: status=%d want 401", rr.Code)
-	}
-	if *called {
-		t.Fatal("next handler called for master bearer despite scoped token existing")
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/otlp/omnigent/scoped-token-abc/v1/logs", nil)
-	req.RemoteAddr = "127.0.0.1:54321"
-	rr = httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Fatalf("scoped token: status=%d want 200", rr.Code)
-	}
-}
-
 func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) {
 	api, called := tokenAuthTestServer(t, "master-token")
 	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
@@ -6040,52 +5938,16 @@ func TestTokenAuth_OTLPScopedTokensCannotCrossConnectorNamespaces(t *testing.T) 
 	}
 }
 
-func TestTokenAuth_AcceptLoopbackOTLPScopedAuthorizationHeader(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		scope  connector.OTLPPathTokenScope
-		token  string
-		signal string
-	}{
-		{name: "codex logs", scope: connector.OTLPScopeCodex, token: "codex-scoped-token", signal: "logs"},
-		{name: "openhands traces", scope: connector.OTLPScopeOpenHands, token: "openhands-scoped-token", signal: "traces"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			api, called := tokenAuthTestServer(t, "master-token")
-			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{tc.scope: tc.token})
-			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				*called = true
-				if got := r.Header.Get(otelSourceHeader); got != string(tc.scope) {
-					t.Errorf("authenticated OTLP source = %q, want %q", got, tc.scope)
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-
-			req := httptest.NewRequest(http.MethodPost, "/v1/"+tc.signal, nil)
-			req.RemoteAddr = "127.0.0.1:54321"
-			req.Header.Set("Authorization", "Bearer "+tc.token)
-			req.Header.Set(otelSourceHeader, string(tc.scope))
-			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, req)
-			if rr.Code != http.StatusOK || !*called {
-				t.Fatalf("%s scoped Authorization rejected: status=%d called=%v", tc.scope, rr.Code, *called)
-			}
-		})
-	}
-}
-
 func TestTokenAuth_AcceptsClaudeRenderedOTLPAuthorization(t *testing.T) {
 	const scopedToken = "claude-scoped-token"
-	profile := connector.NewClaudeCodeConnector().HookProfile(connector.SetupOpts{
-		APIAddr:       "127.0.0.1:18970",
-		OTLPPathToken: scopedToken,
-	})
-	if profile.NativeOTLP == nil {
-		t.Fatal("Claude profile has no native OTLP configuration")
-	}
-	env, err := profile.NativeOTLP.EnvBlock()
-	if err != nil {
-		t.Fatalf("render Claude OTLP environment: %v", err)
+	// Host setup no longer renders a native exporter (it cannot verify the
+	// loopback listener), but a Claude Code process started under 0.8.10 to
+	// 1.0.3 keeps exporting with its persisted literal header block until it
+	// restarts. That released shape must still authenticate while its scoped
+	// credential exists.
+	env := map[string]string{
+		"OTEL_EXPORTER_OTLP_HEADERS": "authorization=Bearer " + scopedToken +
+			",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode",
 	}
 
 	// Claude Code consumes its persisted OTEL_EXPORTER_OTLP_HEADERS value as
@@ -6164,69 +6026,6 @@ func TestTokenAuth_OTLPScopedAuthorizationCannotEscapeScope(t *testing.T) {
 				t.Fatalf("scoped credential escaped: status=%d called=%v", rr.Code, *called)
 			}
 		})
-	}
-}
-
-// TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType pins the
-// H-2 follow-up: the path-token branch of apiCSRFProtect skips the
-// X-DefenseClaw-Client header (OTLP exporters can't set arbitrary
-// headers) but MUST still enforce an OTLP-compatible Content-Type so a
-// browser-initiated CSRF POST with the default text/plain or
-// application/x-www-form-urlencoded cannot smuggle a malicious payload
-// in even if it somehow learned the path token.
-func TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType(t *testing.T) {
-	api, _ := tokenAuthTestServer(t, "secret-token-123")
-	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	cases := []struct {
-		name       string
-		ct         string
-		wantStatus int
-	}{
-		{"missing content-type rejected", "", http.StatusUnsupportedMediaType},
-		{"text/plain rejected", "text/plain", http.StatusUnsupportedMediaType},
-		{"form-urlencoded rejected", "application/x-www-form-urlencoded", http.StatusUnsupportedMediaType},
-		{"application/json accepted", "application/json", http.StatusOK},
-		{"application/json with charset accepted", "application/json; charset=utf-8", http.StatusOK},
-		{"application/x-protobuf accepted", "application/x-protobuf", http.StatusOK},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
-			req.RemoteAddr = "127.0.0.1:54321"
-			if tc.ct != "" {
-				req.Header.Set("Content-Type", tc.ct)
-			}
-			rr := httptest.NewRecorder()
-			handler.ServeHTTP(rr, req)
-			if rr.Code != tc.wantStatus {
-				t.Errorf("Content-Type=%q: status = %d, want %d", tc.ct, rr.Code, tc.wantStatus)
-			}
-		})
-	}
-}
-
-// TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected pins
-// the existing Origin gate stays active inside the path-token branch
-// (a browser tab on http://evil.example.com cannot bypass CSRF by
-// crafting an OTLP path-token URL — even if it somehow learned the
-// token).
-func TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected(t *testing.T) {
-	api, _ := tokenAuthTestServer(t, "secret-token-123")
-	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-
-	req := httptest.NewRequest(http.MethodPost, "/otlp/omnigent/secret-token-123/v1/logs", nil)
-	req.RemoteAddr = "127.0.0.1:54321"
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", "https://evil.example.com")
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-	if rr.Code != http.StatusForbidden {
-		t.Errorf("non-localhost Origin: status = %d, want %d", rr.Code, http.StatusForbidden)
 	}
 }
 
@@ -6939,7 +6738,7 @@ func TestHookScopedTokenRevalidatesDeletionAndRotation(t *testing.T) {
 	}
 }
 
-func TestOrphanHookScopedTokenRotationInvalidatesOldValueAndRollbackRestoresIt(t *testing.T) {
+func TestOrphanHookScopedTokenRevocationInvalidatesOldValueAndRollbackRestoresIt(t *testing.T) {
 	dataDir := t.TempDir()
 	oldToken, err := connector.EnsureHookAPIToken(dataDir, "opencode")
 	if err != nil {
@@ -6955,25 +6754,15 @@ func TestOrphanHookScopedTokenRotationInvalidatesOldValueAndRollbackRestoresIt(t
 	if err != nil {
 		t.Fatalf("HookAPITokenFilePath(opencode): %v", err)
 	}
-	newToken := strings.Repeat("b", 64)
-	if newToken == oldToken {
-		t.Fatal("rotation fixture unexpectedly reused the old token")
-	}
-	if err := os.WriteFile(tokenPath, []byte(newToken+"\n"), 0o600); err != nil {
-		t.Fatalf("publish replacement orphan hook token: %v", err)
+	if err := os.Remove(tokenPath); err != nil {
+		t.Fatalf("revoke orphan hook token: %v", err)
 	}
 	if api.hookAPITokenMatches("opencode", oldToken) {
-		t.Fatal("old orphan hook token remained valid after successful rotation")
-	}
-	if !api.hookAPITokenMatches("opencode", newToken) {
-		t.Fatal("replacement orphan hook token was rejected")
+		t.Fatal("old orphan hook token remained valid after successful revocation")
 	}
 
 	if err := os.WriteFile(tokenPath, []byte(oldToken+"\n"), 0o600); err != nil {
 		t.Fatalf("restore prior orphan hook token: %v", err)
-	}
-	if api.hookAPITokenMatches("opencode", newToken) {
-		t.Fatal("replacement orphan hook token remained valid after rollback")
 	}
 	if !api.hookAPITokenMatches("opencode", oldToken) {
 		t.Fatal("exact prior orphan hook token was not accepted after rollback")
@@ -7020,5 +6809,210 @@ func TestHookScopedTokenLegacyFallbackUsesBuiltinHookRosterOnly(t *testing.T) {
 	allowed.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("unknown wildcard hook scope status = %d, want %d", rec.Code, http.StatusUnauthorized)
+	}
+}
+
+// TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected pins
+// the existing Origin gate stays active inside the path-token branch
+// (a browser tab on http://evil.example.com cannot bypass CSRF by
+// crafting an OTLP path-token URL — even if it somehow learned the
+// token).
+func TestAPICSRFProtect_PathTokenLoopback_NonLocalhostOriginRejected(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/codex/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://evil.example.com")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("non-localhost Origin: status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+}
+
+// TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType pins the
+// H-2 follow-up: the path-token branch of apiCSRFProtect skips the
+// X-DefenseClaw-Client header (OTLP exporters can't set arbitrary
+// headers) but MUST still enforce an OTLP-compatible Content-Type so a
+// browser-initiated CSRF POST with the default text/plain or
+// application/x-www-form-urlencoded cannot smuggle a malicious payload
+// in even if it somehow learned the path token.
+func TestAPICSRFProtect_PathTokenLoopback_RequiresOTLPContentType(t *testing.T) {
+	api, _ := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	cases := []struct {
+		name       string
+		ct         string
+		wantStatus int
+	}{
+		{"missing content-type rejected", "", http.StatusUnsupportedMediaType},
+		{"text/plain rejected", "text/plain", http.StatusUnsupportedMediaType},
+		{"form-urlencoded rejected", "application/x-www-form-urlencoded", http.StatusUnsupportedMediaType},
+		{"application/json accepted", "application/json", http.StatusOK},
+		{"application/json with charset accepted", "application/json; charset=utf-8", http.StatusOK},
+		{"application/x-protobuf accepted", "application/x-protobuf", http.StatusOK},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/otlp/codex/secret-token-123/v1/logs", nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			if tc.ct != "" {
+				req.Header.Set("Content-Type", tc.ct)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tc.wantStatus {
+				t.Errorf("Content-Type=%q: status = %d, want %d", tc.ct, rr.Code, tc.wantStatus)
+			}
+		})
+	}
+}
+
+func TestTokenAuth_AcceptLoopbackOTLPPathToken(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/codex/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Errorf("loopback OTLP path token: status = %d, want %d", rr.Code, http.StatusOK)
+	}
+	if !*called {
+		t.Error("loopback OTLP path token: next handler was not called")
+	}
+}
+
+func TestTokenAuth_AcceptLoopbackOTLPScopedAuthorizationHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		scope  connector.OTLPPathTokenScope
+		token  string
+		signal string
+	}{
+		{name: "codex logs", scope: connector.OTLPScopeCodex, token: "codex-scoped-token", signal: "logs"},
+		{name: "claudecode traces", scope: connector.OTLPScopeClaude, token: "claude-scoped-token", signal: "traces"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api, called := tokenAuthTestServer(t, "master-token")
+			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{tc.scope: tc.token})
+			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				*called = true
+				if got := r.Header.Get(otelSourceHeader); got != string(tc.scope) {
+					t.Errorf("authenticated OTLP source = %q, want %q", got, tc.scope)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/"+tc.signal, nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			req.Header.Set("Authorization", "Bearer "+tc.token)
+			req.Header.Set(otelSourceHeader, string(tc.scope))
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusOK || !*called {
+				t.Fatalf("%s scoped Authorization rejected: status=%d called=%v", tc.scope, rr.Code, *called)
+			}
+		})
+	}
+}
+
+func TestTokenAuth_OTLPScopedTokenRejectsMasterBearer(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "secret-token-123")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeCodex: "scoped-token-abc",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otlp/codex/secret-token-123/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master token on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master token despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/codex/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer secret-token-123")
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("master bearer on scoped OTLP path: status=%d want 401", rr.Code)
+	}
+	if *called {
+		t.Fatal("next handler called for master bearer despite scoped token existing")
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/otlp/codex/scoped-token-abc/v1/logs", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	rr = httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("scoped token: status=%d want 200", rr.Code)
+	}
+}
+
+func TestTokenAuthScopedOTLPHeaderIsBoundToItsSource(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		source string
+		token  string
+		want   int
+	}{
+		{name: "correct", source: "claudecode", token: "claude-scoped-token", want: http.StatusOK},
+		{name: "missing", source: "claudecode", want: http.StatusUnauthorized},
+		{name: "wrong", source: "claudecode", token: "wrong-token", want: http.StatusUnauthorized},
+		{name: "master rejected", source: "claudecode", token: "master-token", want: http.StatusUnauthorized},
+		{name: "cross connector rejected", source: "codex", token: "claude-scoped-token", want: http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Gateway.Token = "master-token"
+			api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil, cfg)
+			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+				connector.OTLPScopeClaude: "claude-scoped-token",
+				connector.OTLPScopeCodex:  "codex-scoped-token",
+			})
+			called := false
+			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				w.WriteHeader(http.StatusOK)
+			}))
+			req := httptest.NewRequest(http.MethodPost, "/v1/traces", nil)
+			req.RemoteAddr = "127.0.0.1:54321"
+			if tc.source != "" {
+				req.Header.Set(otelSourceHeader, tc.source)
+			}
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+			if recorder.Code != tc.want {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.want)
+			}
+			if got := called; got != (tc.want == http.StatusOK) {
+				t.Fatalf("next handler called = %v, want %v", got, tc.want == http.StatusOK)
+			}
+		})
 	}
 }

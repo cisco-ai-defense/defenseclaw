@@ -1245,6 +1245,11 @@ def _declared_action(keyword: str, error: Any) -> str:
         return _pattern_action(error.validator_value)
     if keyword == "oneOf":
         return _one_of_action(error.validator_value)
+    if keyword == "maxLength":
+        limit = error.validator_value
+        if isinstance(limit, int) and not isinstance(limit, bool):
+            return f"use a string of at most {limit} characters"
+        return ""
     if keyword == "type":
         types = error.validator_value if isinstance(error.validator_value, list) else [error.validator_value]
         if not types:

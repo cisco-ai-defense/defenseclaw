@@ -134,19 +134,19 @@ func (s *userScopedCredentialStore) lookup(kind, scope, presented string) (strin
 	return credential.identity, true
 }
 
-// hookCredentialForKeyID returns the per-user hook credential for scope
-// whose key ID (connector.UserScopedCredentialKeyID) is keyID, re-derived
-// from the key, for answering a listener proof. The index is keyed by that
-// same digest, so the credential is found without the caller presenting it.
-func (s *userScopedCredentialStore) hookCredentialForKeyID(scope, keyID string) (string, bool) {
+// hookCredentialForKeyID returns the per-user hook credential and its OS
+// identity for scope whose key ID (connector.UserScopedCredentialKeyID) is
+// keyID, re-derived from the key for answering a listener proof. The index
+// is keyed by that digest, so the credential is found without presenting it.
+func (s *userScopedCredentialStore) hookCredentialForKeyID(scope, keyID string) (string, string, bool) {
 	scope = strings.ToLower(strings.TrimSpace(scope))
 	keyID = strings.TrimSpace(keyID)
 	if s == nil || scope == "" || len(keyID) != 2*sha256.Size || strings.ToLower(keyID) != keyID {
-		return "", false
+		return "", "", false
 	}
 	raw, err := hex.DecodeString(keyID)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	var digest [sha256.Size]byte
 	copy(digest[:], raw)
@@ -155,16 +155,16 @@ func (s *userScopedCredentialStore) hookCredentialForKeyID(scope, keyID string) 
 	s.refreshLocked()
 	credential, ok := s.index[digest]
 	if !ok || credential.kind != connector.UserScopedHookCredential || credential.scope != scope {
-		return "", false
+		return "", "", false
 	}
 	if credential.key < 0 || credential.key >= len(s.keys) {
-		return "", false
+		return "", "", false
 	}
 	token, err := connector.UserScopedHookAPIToken(s.keys[credential.key], scope, credential.identity)
 	if err != nil || sha256.Sum256([]byte(token)) != digest {
-		return "", false
+		return "", "", false
 	}
-	return token, true
+	return token, credential.identity, true
 }
 
 func (s *userScopedCredentialStore) refreshLocked() {

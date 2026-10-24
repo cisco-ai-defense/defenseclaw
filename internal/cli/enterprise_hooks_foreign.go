@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/agentprocess"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
@@ -29,8 +30,9 @@ import (
 // the user through RunAsTarget. The reconcile loop calls it after a
 // per-user row verifies; the enumerator must call it for machine-policy
 // connectors (which have no per-user manifest rows) once per eligible
-// user. Secure Client and unmanaged configs return immediately.
-// Replaceable in tests.
+// user. Each removal holds the machine's cleanup fence through its removal
+// ledger commit, which this records. Secure Client and unmanaged configs
+// return immediately. Replaceable in tests.
 var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials, connectorName, dataDir string) (enterprisepolicy.CleanupResult, error) {
 	if cfg == nil || !cfg.StandaloneEnterprise() {
 		return enterprisepolicy.CleanupResult{}, nil
@@ -57,7 +59,23 @@ var enterpriseForeignHookCleanup = func(target enterprisehooks.TargetCredentials
 		Policy:        policy,
 		OwnedCommands: perUserOwnedHookCommandsForBinary(name, target.UserHome, dataDir, opts.HookBinary),
 	}
-	return cleanEnterpriseForeignHooksAsTarget(target, request, time.Now())
+	return cleanEnterpriseForeignHooksFenced(target, request, time.Now())
+}
+
+// cleanEnterpriseForeignHooksFenced is cleanEnterpriseForeignHooksAsTarget
+// with each removal under the machine's foreign-hook cleanup fence through
+// its ledger commit (enterpriseForeignHookRemovalGuard): a scan, and a
+// cleanup that removes nothing, never holds it. A removal no commit
+// recorded is recorded once the cleanup ends.
+func cleanEnterpriseForeignHooksFenced(target enterprisehooks.TargetCredentials, request enterprisepolicy.GuardRequest, now time.Time) (enterprisepolicy.CleanupResult, error) {
+	account := enterpriseForeignHookAccountID(target.SID, target.UID)
+	fence := newEnterpriseForeignHookInProcessFence(account, target.UserHome)
+	request.GuardRemoval = enterpriseForeignHookRemovalGuard(request.Connector, fence)
+	result, err := cleanEnterpriseForeignHooksAsTarget(target, request, now)
+	mark := agentprocess.Now()
+	fence.release()
+	recordEnterpriseForeignHookRemovalsAt(os.Stderr, mark, account, target.UserHome, request.Connector, fence.uncommitted(removedForeignHookPaths(result)))
+	return result, err
 }
 
 // enterpriseForeignHookRunAsTarget runs fn as the user. Replaceable in tests
@@ -142,7 +160,9 @@ func foreignGuardLogField(value string, limit int) string {
 
 // reconcileEnterpriseForeignHooks is the reconcile loop's call site. Cleanup
 // is best effort: the admin-owned hook still denies tool calls while an
-// unapproved hook remains, so a failure here never fails the row.
+// unapproved hook remains, so a failure here never fails the row. The
+// cleanup takes the cleanup fence only for each removal and commits it to
+// the removal ledger itself (enterpriseForeignHookCleanup).
 func reconcileEnterpriseForeignHooks(opts enterprisehooks.InstallOptions) {
 	result, err := enterpriseForeignHookCleanup(enterprisehooks.TargetCredentials{
 		UserHome: opts.UserHome,
@@ -154,7 +174,6 @@ func reconcileEnterpriseForeignHooks(opts enterprisehooks.InstallOptions) {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise foreign-hook guard: removed %s %s hook from %s (sha256:%s); backup in %s\n",
 			finding.Connector, dashIfEmpty(finding.Event), finding.Path, finding.Digest, result.BackupDir)
 	}
-	recordEnterpriseForeignHookRemovals(os.Stderr, enterpriseForeignHookAccountID(opts.OwnerSID, opts.OwnerUID), opts.UserHome, opts.ConnectorName, removedForeignHookPaths(result))
 	for _, finding := range result.Reported {
 		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise foreign-hook guard: %s hook in %s left in place (%s)\n", finding.Connector, finding.Path, finding.Reason)
 	}

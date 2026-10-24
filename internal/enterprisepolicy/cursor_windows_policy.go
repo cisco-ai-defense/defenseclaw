@@ -23,13 +23,6 @@ import (
 // functions the Secure Client profile certifies, unchanged.
 const cursorAdapterRecord = "cursor-adapter"
 
-// windowsCursorUnpublishedReason explains an absent Windows Cursor enterprise
-// hooks file: the standalone guardian publishes it only while at least one
-// user is enrolled for Cursor, and a user is enrolled once the enumerator
-// finds their Cursor Desktop or Cursor Agent CLI at a version with a verified
-// hook contract.
-const windowsCursorUnpublishedReason = "the guardian publishes it only while at least one user is enrolled for Cursor, which needs a Cursor Desktop or Cursor Agent CLI install at a version with a verified hook contract; 'defenseclaw enterprise windows status' names the Cursor installs it could not enroll"
-
 func windowsCursorPaths(opts Options) (hooks, adapter string, err error) {
 	hooks, err = CursorEnterpriseHooksPath(opts)
 	if err != nil {
@@ -114,21 +107,18 @@ func windowsCursorVerify(opts Options) (State, error) {
 		return State{}, err
 	}
 	state := newCursorState(policy, []string{hooksPath, adapterPath})
-	if policy.Ownership == config.MachinePolicyOwnershipOff {
-		state.Route = RouteUnsupported
-		return state, nil
-	}
 	current, exists, err := readPolicyFile(opts, hooksPath)
 	if err != nil {
 		return state, err
 	}
 	if !exists {
-		// The standalone guardian publishes the file only while a user is
-		// enrolled for Cursor, so say why it can be absent.
-		state.conflict("%s does not exist: %s", hooksPath, windowsCursorUnpublishedReason)
+		// The configured machine hook must stay published with zero enrolled
+		// users; its absence is a protection failure that needs repair.
+		state.conflict("%s does not exist: %s", hooksPath, windowsMissingMachineHookDiagnostic("Cursor"))
 	} else {
 		windowsCursorInspect(opts, current, adapterPath, &state)
 	}
+	verifyWindowsHookExecutable(opts, "Cursor", &state)
 	state.finish()
 	return state, nil
 }

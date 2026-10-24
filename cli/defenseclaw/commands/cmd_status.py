@@ -21,9 +21,12 @@ Mirrors internal/cli/status.go.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import shutil
+import socket
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -205,21 +208,6 @@ def _opencode_runtime_truth(
     return raw_state, f"managed bridge authenticated load heartbeat is fresh (received at {heartbeat_raw.strip()})"
 
 
-def _omnigent_effective_runtime_state(cfg, state: str) -> tuple[str, str]:
-    """Project adapter liveness through passive OmniGent policy readiness."""
-
-    raw_state = str(state or "")
-    if raw_state.strip().lower() not in {"running", "active", "ready", "up"}:
-        return raw_state, ""
-    try:
-        from defenseclaw.commands.cmd_doctor import _omnigent_runtime_readiness
-
-        readiness, detail = _omnigent_runtime_readiness(cfg)
-    except Exception as exc:  # noqa: BLE001 - presentation must remain available.
-        readiness, detail = "warn", f"policy readiness unavailable: {exc}"
-    if readiness not in {"pass", "bound"}:
-        return "degraded", detail
-    return raw_state, detail
 
 
 # GAP-1149: counting alerts reads every audit row, which took minutes on a
@@ -400,6 +388,7 @@ def status(app: AppContext, as_json: bool) -> None:
         )
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
+    _print_removed_connector_cleanup(cfg)
     ux.echo()
 
     if _host_is_windows():
@@ -509,7 +498,7 @@ def status(app: AppContext, as_json: bool) -> None:
             "Sidecar",
             ux._style("not checked while config.yaml is invalid; run defenseclaw config validate", fg="yellow"),
         )
-        _print_agents(cfg, sidecar_down=True)
+        _print_agents(cfg, sidecar_down=True, sidecar_unchecked=True)
     elif health is not None:
         from defenseclaw.commands.cmd_doctor import _gateway_runs_replaced_binary
 
@@ -539,20 +528,37 @@ def status(app: AppContext, as_json: bool) -> None:
             "Subsystems:    defenseclaw-gateway status",
         )
     else:
+        holder_failed = False
         try:
             from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder, _free_api_port_hint
 
             holder = _foreign_gateway_port_holder(cfg)
         except Exception:  # noqa: BLE001 - status stays best effort
             holder = ""
+            holder_failed = True
         # GAP-2081: a live gateway.pid with no /health answer is a gateway
         # that is still starting or hung, as defenseclaw-gateway status says;
         # "start it" was a dead end (start says it is already running).
         hung_pid = 0 if holder else _live_gateway_pid(cfg)
+        # A gateway that answers the public /health while its authenticated
+        # /status refuses this account is not hung (GAP-0150).
+        unread = (
+            _status_refused_detail(cfg, client, OrchestratorClient(host=bind, port=cfg.gateway.api_port))
+            if hung_pid
+            else ""
+        )
+        listener_state, listener_reason = (None, "API listener inspection failed") if holder_failed else (None, "")
+        if not holder_failed and not holder and not hung_pid:
+            listener_state, listener_reason = _sidecar_listener_state(cfg.gateway.api_port, bind)
         if holder:
             _status_row(
                 "Sidecar",
                 ux._style(f"not running; port {cfg.gateway.api_port} is held by {holder}", fg="yellow"),
+            )
+        elif unread:
+            _status_row(
+                "Sidecar",
+                ux._style(f"running (PID {hung_pid}) and answering /health, but {unread}", fg="yellow"),
             )
         elif hung_pid:
             _status_row(
@@ -562,15 +568,24 @@ def status(app: AppContext, as_json: bool) -> None:
                     fg="yellow",
                 ),
             )
-        else:
+        elif listener_state is False:
             _status_row(
                 "Sidecar",
                 ux._style("not running; start it: defenseclaw-gateway start", fg="yellow"),
             )
+        else:
+            _status_row("Sidecar", ux._style(listener_reason, fg="yellow"))
         _print_audit_log_health(cfg, None)
         # Even when the sidecar is down, show the *configured* agents
         # so operators know what `start` will spin up.
-        _print_agents(cfg, sidecar_down=True, sidecar_hung=bool(hung_pid))
+        unconfirmed = not holder and not hung_pid and listener_state is not False
+        _print_agents(
+            cfg,
+            sidecar_down=not unconfirmed,
+            sidecar_hung=bool(hung_pid),
+            sidecar_unread=bool(unread),
+            sidecar_unconfirmed=unconfirmed,
+        )
         _print_application_protection(cfg)
         _print_semantic_routing(cfg)
         _print_hook_guardian(cfg)
@@ -580,13 +595,129 @@ def status(app: AppContext, as_json: bool) -> None:
                 "Free the port:  stop that process, or run: defenseclaw setup gateway --api-port "
                 f"{_free_api_port_hint(cfg)} --non-interactive"
             )
+        elif unread:
+            first_hint = "Check access:   defenseclaw doctor"
         elif hung_pid:
             first_hint = "Check sidecar:  defenseclaw-gateway status (restart it if it stays this way)"
+        elif unconfirmed:
+            first_hint = "Check sidecar:  defenseclaw doctor"
         else:
             first_hint = "Start sidecar:  defenseclaw-gateway start"
         hint(first_hint, "Subsystems:    defenseclaw-gateway status")
     if config_problems:
         raise SystemExit(1)
+
+
+def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
+    """Confirm a stopped API only when listener evidence covers other accounts."""
+    from defenseclaw.commands.cmd_doctor import _managed_gateway_listener_evidence
+
+    try:
+        listener = _managed_gateway_listener_evidence(port, host=host)
+    except Exception:  # noqa: BLE001 - a failed probe cannot prove absence
+        return None, "API listener inspection failed"
+    if listener.status != "missing":
+        reason = listener.reason or (
+            f"API listener PID {listener.pid} has no live gateway PID file"
+            if listener.status == "ok"
+            else "API listener state is unconfirmed"
+        )
+        return None, reason
+
+    stopped_reason = "no gateway process or API listener; start it: defenseclaw-gateway start"
+    if sys.platform.startswith("linux") or sys.platform == "win32":
+        return False, stopped_reason
+
+    target = host.strip("[]")
+    try:
+        loopback = target.casefold() == "localhost" or ipaddress.ip_address(target).is_loopback
+    except ValueError:
+        loopback = False
+    if not loopback:
+        return None, "API listener state is unconfirmed at a non-loopback host"
+    try:
+        with socket.create_connection((target, port), timeout=0.25):
+            pass
+    except ConnectionRefusedError:
+        return False, stopped_reason
+    except OSError:
+        return None, "API listener state is unconfirmed; loopback connection could not be checked"
+    return None, (
+        f"the API port answers at {port} and is held by another account; "
+        "its owner is not visible to this account"
+    )
+
+
+def _status_refused_detail(cfg, client, public) -> str:
+    """Why /status gave this account nothing while /health answers, else "".
+
+    *public* is a client without the gateway token, for the public /health.
+    *client* carries the token and is used only once the listener is proven to
+    be this account's gateway. "" when /health does not answer either: that
+    gateway is starting or hung.
+    """
+    import requests
+
+    try:
+        public.health()
+    except Exception:  # noqa: BLE001 - no answer at all: starting or hung.
+        return ""
+    if not cfg.gateway.resolved_token():
+        dotenv = os.path.join(str(getattr(cfg, "data_dir", "") or ""), ".env")
+        try:
+            with open(dotenv, "rb"):
+                pass
+        except PermissionError:
+            repair = (
+                "run defenseclaw doctor for Windows file-access repair guidance"
+                if sys.platform == "win32"
+                else f"restore read access (chmod 600 {dotenv})"
+            )
+            return (
+                f"this account cannot read {dotenv}, so status has no gateway token to read the live "
+                f"state; {repair}"
+            )
+        except OSError:
+            pass
+        return (
+            "status has no gateway token (DEFENSECLAW_GATEWAY_TOKEN) to read the live state; "
+            "run defenseclaw doctor"
+        )
+    try:
+        from defenseclaw.commands.cmd_doctor import _trusted_gateway_listener
+
+        trusted = _trusted_gateway_listener(cfg).trusted
+    except Exception:  # noqa: BLE001 - unproven is not trusted.
+        trusted = False
+    if not trusted:
+        # Never send the gateway token to a listener not proven to be ours.
+        return (
+            "this account could not verify that the listener is its gateway, so status did not send "
+            "the gateway token; run defenseclaw doctor"
+        )
+    try:
+        client.status()
+    except requests.HTTPError as exc:
+        code = getattr(exc.response, "status_code", 0)
+        if code in (401, 403):
+            return f"it refused this account's gateway token (HTTP {code}); run defenseclaw doctor"
+        return f"its authenticated /status failed (HTTP {code})"
+    except Exception:  # noqa: BLE001 - the same as no answer.
+        return ""
+    return "its /status answer does not match this data directory; run defenseclaw doctor"
+
+
+def _print_removed_connector_cleanup(cfg) -> None:
+    """until 1.1: name a removed connector that left things to remove by hand."""
+    from defenseclaw.removed_connectors import leftovers
+
+    workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
+    for left in leftovers(str(getattr(cfg, "data_dir", "") or ""), workspace=workspace):
+        _status_row(
+            "Cleanup",
+            ux._style(f"{left.label} was removed in 1.0.4; {len(left.items)} item(s) to remove by hand", fg="yellow")
+            + ux.dim(" (steps: defenseclaw doctor)"),
+        )
 
 
 def _live_gateway_pid(cfg) -> int:
@@ -640,11 +771,9 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "cursor": "Cursor",
     "devin": "Devin",
     "copilot": "GitHub Copilot CLI",
-    "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
     "amp": "Amp",
-    "omnigent": "OmniGent",
     "kiro": "Kiro",
 }
 # Plain words, as on the TUI Overview (GAP-2561).
@@ -709,6 +838,9 @@ def _print_agents(
     health: dict | None = None,
     sidecar_down: bool = False,
     sidecar_hung: bool = False,
+    sidecar_unread: bool = False,
+    sidecar_unchecked: bool = False,
+    sidecar_unconfirmed: bool = False,
 ) -> None:
     """Render the "Agents" roster as one section, for ANY connector count.
 
@@ -730,6 +862,7 @@ def _print_agents(
         manual_actives = []
     health_map = _fetch_health_connectors(health=health)
     not_started = _connectors_not_started(health)
+    refused_by_agent_settings = _connectors_refused_by_agent_settings(health)
     state = _application_protection_status(cfg, health=health)
 
     roster: dict[str, dict] = {}
@@ -755,8 +888,10 @@ def _print_agents(
         _status_row("Agents", ux.dim("(no active connector)"))
         return
 
+    refused_credentials = _refused_scoped_hook_credentials(cfg, health)
+
     gc = getattr(cfg, "guardrail", None)
-    agent_missing = {c for c in actives if _agent_missing(cfg, c)}
+    agent_missing = {c for c in actives if _agent_missing(cfg, c, health_map.get(c))}
     # ``guardrail.enabled: false`` (``setup guardrail --disable``, or the
     # default ``uninstall``) makes the gateway tear every hook connector
     # down, so none of them enforces (GAP-1312). The OpenClaw row reports the
@@ -783,8 +918,7 @@ def _print_agents(
     # enforced; count it the way `defenseclaw-gateway status` does.
     not_running_count = sum(
         1 for c in actives if _is_enabled(c) and (
-            c == "claudecode" and not shutil.which("claude")
-            or c in agent_missing
+            c in agent_missing
             or c not in health_map and c in not_started
         )
     )
@@ -806,10 +940,21 @@ def _print_agents(
         if disabled_count:
             header += f" ({disabled_count} disabled)"
         header = ux._style(header, fg="yellow")
+    if sidecar_unread and enabled_count:
+        # The gateway answers hooks; only this command cannot read its state.
+        header = ux._style(f"{enabled_count} configured; live hook state not readable by this account", fg="yellow")
+    if sidecar_unchecked and enabled_count:
+        # Invalid local config prevented a runtime check. It says nothing
+        # about whether the gateway currently answers hook requests.
+        header = ux._style(
+            f"{enabled_count} configured; live hook state not checked while config.yaml is invalid", fg="yellow"
+        )
+    if sidecar_unconfirmed and enabled_count:
+        header = ux._style(f"{enabled_count} configured; live hook state is unconfirmed", fg="yellow")
     _status_row("Agents", header)
     if guardrail_off:
         ux.echo(" " * 16 + ux.dim("Turn protection back on: defenseclaw setup guardrail"))
-    if sidecar_down and enabled_count:
+    if sidecar_down and enabled_count and not sidecar_unread and not sidecar_unchecked:
         _echo_wrapped(
             " " * 16
             + ux.dim(
@@ -852,18 +997,17 @@ def _print_agents(
                     gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
                     gateway_available=isinstance(health, dict),
                 )
-            elif conn == "omnigent":
-                runtime_state, runtime_detail = _omnigent_effective_runtime_state(cfg, runtime_state)
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 # The gateway does not dial an OpenClaw gateway that is only
                 # the claw.mode default and is not installed (#958).
                 runtime_state, runtime_detail = "off", "OpenClaw is not installed"
-            elif conn == "claudecode" and not shutil.which("claude"):
-                runtime_state, runtime_detail = "off", "Claude Code is not detected on PATH"
             suffix = _connector_state_verb(runtime_state)
             if runtime_detail:
                 suffix += ux.dim(f" ({runtime_detail})")
-            suffix += _hook_runtime_degraded_suffix(cfg, conn)
+            if conn in refused_credentials:
+                suffix += _hook_runtime_degraded_suffix(cfg, conn, credential_refused=True)
+            else:
+                suffix += _hook_runtime_degraded_suffix(cfg, conn)
             _echo_wrapped(
                 f"                {friendly} ({conn}) — mode={mode or '?'}"
                 f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}",
@@ -891,8 +1035,11 @@ def _print_agents(
             elif conn == "openclaw" and openclaw_implied_but_not_installed(cfg):
                 suffix = _connector_state_verb("off") + ux.dim(" (OpenClaw is not installed)")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
-            elif conn == "claudecode" and not shutil.which("claude"):
-                suffix = _connector_state_verb("off") + ux.dim(" (Claude Code is not detected on PATH)")
+            elif conn.strip().lower() in refused_by_agent_settings:
+                # Rerunning setup cannot help: the agent's own settings refuse
+                # the hooks, and the reason names their fix (GAP-0578).
+                reason = refused_by_agent_settings[conn.strip().lower()]
+                suffix = _connector_state_verb("not running") + ux.dim(f" (not enforced: {reason})")
                 _echo_wrapped(f"                {dim_text}{suffix}", 18)
             elif conn.strip().lower() in not_started:
                 # Setup failed when the gateway started (GAP-1714).
@@ -904,7 +1051,15 @@ def _print_agents(
             else:
                 # A drifted or removed hook registration shows with the
                 # gateway stopped too (GAP-1230).
-                _echo_wrapped(f"                {dim_text}{_hook_runtime_degraded_suffix(cfg, conn)}", 18)
+                degraded = (
+                    _hook_runtime_degraded_suffix(cfg, conn, credential_refused=True)
+                    if conn in refused_credentials
+                    else _hook_runtime_degraded_suffix(cfg, conn)
+                )
+                _echo_wrapped(
+                    f"                {dim_text}{degraded}",
+                    18,
+                )
 
 
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
@@ -976,9 +1131,12 @@ def _print_policy(health: dict | None) -> None:
     policy = _policy_status(health)
     if policy is None:
         return
+    from defenseclaw.gateway import applied_config_generation
+
     digest = str(policy["effective_digest"])
     short = digest[: len("sha256:") + 12] if digest.startswith("sha256:") else digest
-    value = f"generation {policy['generation']}, {short}"
+    generation = applied_config_generation(policy)
+    value = f"config generation {generation}, {short}" if generation else short
     if policy["last_reload_error"]:
         _status_row("Policy", ux._style(f"{value}; the last change was rejected (see defenseclaw doctor)", fg="yellow"))
         return
@@ -1065,12 +1223,48 @@ def _effective_status_fail_mode(cfg, connector: str) -> dict:
         }
 
 
-def _hook_runtime_degraded_suffix(cfg, connector: str) -> str:
+_HOOK_CREDENTIAL_REFUSED_DETAIL = (
+    "the scoped hook credential is refused by the gateway (HTTP 401), "
+    "so hook calls cannot obtain policy decisions"
+)
+
+
+def _refused_scoped_hook_credentials(cfg, health: dict | None) -> set[str]:
+    """Ask the verified gateway whether installed scoped credentials authenticate.
+
+    Local token shape checks cannot catch a mode, owner, ACL or directory trust
+    fault, or a valid-looking token the gateway no longer recognizes. Doctor's
+    read-only hook-route probe covers the same refusal the native hook sees.
+    """
+    if not isinstance(health, dict) or not _fetch_health_connectors(health=health):
+        return set()
+    try:
+        from defenseclaw.commands.cmd_doctor import _connector_hook_credential_problems
+
+        return set(_connector_hook_credential_problems(cfg, None))
+    except Exception:  # noqa: BLE001 - retain status if the read-only probe is unavailable.
+        return set()
+
+
+def _hook_runtime_degraded_suffix(cfg, connector: str, *, credential_refused: bool = False) -> str:
     """`` — DEGRADED (...)`` when a hook script, token or registration drifted (GAP-1141, GAP-1138, GAP-1230)."""
     try:
-        from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
+        from defenseclaw.hook_integrity import (
+            HookProblem,
+            hook_registration_problems,
+            hook_runtime_problems,
+            repair_command,
+        )
 
-        problems = hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+        problems = (
+            [HookProblem(
+                _HOOK_CREDENTIAL_REFUSED_DETAIL,
+                "run `defenseclaw doctor --passive` to diagnose the scoped hook credential",
+                blocking=True,
+            )]
+            if credential_refused
+            else hook_runtime_problems(cfg, connector) or hook_registration_problems(cfg, connector)
+        )
     except Exception:  # noqa: BLE001 - status must survive incomplete runtime state.
         return ""
     if not problems:
@@ -1091,28 +1285,82 @@ def _connectors_not_started(health: dict | None) -> set[str]:
     return {name.strip().lower() for name in names if isinstance(name, str) and name.strip()}
 
 
-def _agent_missing(cfg, connector: str) -> bool:
+def _connectors_refused_by_agent_settings(health: dict | None) -> dict[str, str]:
+    """Connectors the gateway left unguarded because their agent's own settings
+    turn its hooks off or do not parse, each with the gateway's reason, which
+    names the fix (GAP-0578)."""
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    refused = details.get("connectors_refused_by_agent_settings") if isinstance(details, dict) else None
+    if not isinstance(refused, dict):
+        return {}
+    return {
+        name.strip().lower(): reason.strip()
+        for name, reason in refused.items()
+        if isinstance(name, str) and name.strip() and isinstance(reason, str) and reason.strip()
+    }
+
+
+def _connectors_not_started_reasons(health: dict | None) -> dict[str, str]:
+    """Each configured connector the gateway did not start, with the reason its
+    setup gave (GAP-0620)."""
+    guardrail = health.get("guardrail") if isinstance(health, dict) else None
+    details = guardrail.get("details") if isinstance(guardrail, dict) else None
+    reasons = details.get("connectors_not_started_reasons") if isinstance(details, dict) else None
+    if not isinstance(reasons, dict):
+        return {}
+    return {
+        name.strip().lower(): reason.strip()
+        for name, reason in reasons.items()
+        if isinstance(name, str) and name.strip() and isinstance(reason, str) and reason.strip()
+    }
+
+
+def _agent_missing(cfg, connector: str, live: dict | None = None) -> bool:
     """Whether the connector's agent is not installed (GAP-0513).
 
     The rule of doctor's Connector compatibility row
     (``doctor_health.connector_agent_missing``), so a connector setup staged
     for an agent that is not installed is not shown RUNNING or counted
-    active while doctor fails it. Claude Code and OpenClaw keep their own
-    checks (the ``claude`` executable on PATH, the OpenClaw install).
+    active while doctor fails it. Claude Code uses the same proof: a
+    ``claude`` missing from the PATH of the shell that runs status is no
+    evidence, because Claude Code often runs from an absolute path or an IDE
+    (GAP-1331, GAP-1333), and one on that PATH is no proof that it runs the
+    hooks (1.0.4 review, loop round 4). ``live`` is the gateway's health row for the
+    connector: a hook call it took after the scan outranks the scan.
+    OpenClaw keeps its own install check.
     """
-    if connector in ("claudecode", "openclaw"):
+    if connector == "openclaw":
         return False
     try:
         from defenseclaw.doctor_health import connector_agent_missing
 
-        return connector_agent_missing(str(getattr(cfg, "data_dir", "") or ""), connector)
+        return connector_agent_missing(
+            str(getattr(cfg, "data_dir", "") or ""),
+            connector,
+            last_activity_at=(live or {}).get("last_activity_at") if isinstance(live, dict) else None,
+        )
     except Exception:  # noqa: BLE001 - status must survive incomplete evidence.
         return False
 
 
 def _agent_missing_detail(connector: str) -> str:
+    name = _friendly_connector_name(connector)
+    try:
+        from defenseclaw.inventory import agent_discovery
+
+        on_path = agent_discovery.binary_on_path(connector)
+    except Exception:  # noqa: BLE001 - the hint is optional.
+        on_path = ""
+    if on_path:
+        # This shell's PATH is a hint, not proof that the agent runs the
+        # hooks (1.0.4 review, loop round 4): name it, keep the row off.
+        return (
+            f"the last agent discovery found no {name}; {on_path} on this shell's PATH is unverified, "
+            "so nothing shows it runs the hooks setup staged; run: defenseclaw agent discover --refresh"
+        )
     return (
-        f"{_friendly_connector_name(connector)} is not installed, so nothing runs the hooks setup staged; "
+        f"{name} is not installed, so nothing runs the hooks setup staged; "
         "install it, then run: defenseclaw agent discover --refresh"
     )
 
@@ -1750,6 +1998,8 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             },
         )
     health_map = _fetch_health_connectors(health=health)
+    not_started = _connectors_not_started(health)
+    refused_credentials = _refused_scoped_hook_credentials(cfg, health)
     for name, row in rows.items():
         # The text roster already uses this authenticated runtime state. Keep
         # the JSON projection in agreement, including manual hook connectors.
@@ -1757,10 +2007,16 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             row["state"] = health_map[name]["state"]
         elif not row.get("enabled"):
             row["state"] = "disabled"
-        if row.get("enabled") and _agent_missing(cfg, name):
+        if row.get("enabled") and _agent_missing(cfg, name, health_map.get(name)):
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"
             row["runtime_detail"] = _agent_missing_detail(name)
+        if row.get("enabled") and name in not_started:
+            row["state"] = "not running"
+            row["runtime_detail"] = (
+                "setup failed when the gateway started, so it is not enforced; "
+                f"run defenseclaw setup {'claude-code' if name == 'claudecode' else name}"
+            )
     if "opencode" in rows and rows["opencode"].get("enabled") and "runtime_detail" not in rows["opencode"]:
         runtime_state, runtime_detail = _opencode_runtime_truth(
             health_map.get("opencode"),
@@ -1769,18 +2025,10 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
         )
         rows["opencode"]["state"] = runtime_state
         rows["opencode"]["runtime_detail"] = runtime_detail
-    if (
-        "omnigent" in rows
-        and rows["omnigent"].get("enabled")
-        and (omnigent_health := health_map.get("omnigent")) is not None
-    ):
-        runtime_state, readiness_detail = _omnigent_effective_runtime_state(
-            cfg,
-            str(omnigent_health.get("state") or ""),
-        )
-        rows["omnigent"]["state"] = runtime_state
-        if readiness_detail:
-            rows["omnigent"]["readiness_detail"] = readiness_detail
+    for name in refused_credentials & rows.keys() & health_map.keys():
+        if rows[name].get("enabled"):
+            rows[name]["state"] = "degraded"
+            rows[name]["runtime_detail"] = _HOOK_CREDENTIAL_REFUSED_DETAIL
     cursor = rows.get("cursor")
     if cursor is not None:
         if cursor.get("enabled") and cursor.get("state") == "running":
@@ -1832,6 +2080,12 @@ def _status_payload(app) -> dict:
             "scanners": _scanner_status_map(cfg),
         }
     )
+    from defenseclaw.removed_connectors import leftovers
+
+    workspace = cfg.connector_workspace_dir() if hasattr(cfg, "connector_workspace_dir") else ""
+    if left := [item.as_json() for item in leftovers(str(cfg.data_dir or ""), workspace=workspace)]:
+        # until 1.1: what the removed OpenHands/OmniGent teardown left.
+        payload["removed_connector_cleanup"] = left
 
     if app.store:
         try:
@@ -1874,8 +2128,29 @@ def _status_payload(app) -> dict:
             health = None
     if skip_live_health:
         payload["sidecar"] = {"running": None, "reason": "not checked while config.yaml is invalid"}
+    elif health is not None:
+        payload["sidecar"] = {"running": True}
     else:
-        payload["sidecar"] = {"running": health is not None}
+        from defenseclaw.commands.cmd_doctor import _foreign_gateway_port_holder
+
+        try:
+            holder = _foreign_gateway_port_holder(cfg)
+        except Exception:  # noqa: BLE001 - a failed probe cannot prove the gateway stopped
+            payload["sidecar"] = {"running": None, "reason": "API listener inspection failed"}
+        else:
+            pid = 0 if holder else _live_gateway_pid(cfg)
+            if holder:
+                reason = f"port {cfg.gateway.api_port} is held by {holder}; this gateway's state is unconfirmed"
+                payload["sidecar"] = {"running": None, "reason": reason}
+            elif pid:
+                reason = (
+                    _status_refused_detail(cfg, client, OrchestratorClient(host=bind, port=cfg.gateway.api_port))
+                    or f"PID file names a live process ({pid}), but authenticated gateway status is unreadable"
+                )
+                payload["sidecar"] = {"running": None, "reason": reason}
+            else:
+                running, reason = _sidecar_listener_state(cfg.gateway.api_port, bind)
+                payload["sidecar"] = {"running": running, "reason": reason}
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

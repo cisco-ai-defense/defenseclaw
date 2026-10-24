@@ -13,12 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
+	"mvdan.cc/sh/v3/syntax"
 )
 
 const (
@@ -52,7 +54,11 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 				req.HookEventName,
 				"experimental artifact promotion",
 			)
-			resp = original
+			if original.Action == guardrailActionBlock {
+				resp = original
+			} else {
+				resp = a.hookPanicResponse(ctx, req.ConnectorName, req, nil, req.Payload)
+			}
 		}
 	}()
 	if a == nil || ManagedEnterpriseActive() || req.toolChain == nil ||
@@ -151,15 +157,17 @@ func promotedArtifactFindings(
 			DialectHint:                              dialect,
 		}
 		artifactFacts := actionfacts.Analyze(input)
+		bodyFacts := promotedArtifactBodyEnforcementFacts(input, artifactFacts)
 		outerCandidateEnforceable := preExecutionBoundary &&
 			promotedArtifactCandidateEnforcementEligible(facts, candidate)
 		enforcementCapable := outerCandidateEnforceable &&
-			artifactFacts.Authoritative() &&
-			artifactFacts.EnforcementEligible() &&
-			promotedArtifactSequentialReachabilityEligible(artifactFacts)
+			bodyFacts.Authoritative() &&
+			bodyFacts.EnforcementEligible() &&
+			promotedArtifactSequentialReachabilityEligible(bodyFacts)
 		matched := dispatchTrustedAction(ctx, trustedActionRequest{
 			Input:              input,
 			LegacyText:         string(body),
+			ArtifactBody:       true,
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
 			recordTelemetry:    recordTelemetry,
@@ -181,6 +189,23 @@ func promotedArtifactFindings(
 		}
 	}
 	return findings
+}
+
+// promotedArtifactBodyEnforcementFacts returns the facts that decide whether
+// a match in a script may block: its analysis, or for a script whose simple
+// commands sit in && or || lists or other compound commands, those commands
+// read as if each runs, as the same commands in the tool call would be.
+func promotedArtifactBodyEnforcementFacts(
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) actionfacts.Facts {
+	if view, ok := actionfacts.ShortCircuitListReduction(input, facts); ok {
+		return view
+	}
+	if view, ok := actionfacts.CompoundCommandReduction(input, facts); ok {
+		return view
+	}
+	return facts
 }
 
 // promotedArtifactSequentialReachabilityEligible masks a narrow POSIX case
@@ -269,7 +294,107 @@ func promotedArtifactCandidates(facts actionfacts.Facts) []promotedArtifactCandi
 	return result
 }
 
+// promotedArtifactCandidateEnforcementEligible reports whether a match in the
+// candidate script may block. The executed script call is judged with its
+// own static argv even when a shell assignment, redirect or compound command
+// surrounds it. A block stops the whole tool call before any of it runs.
 func promotedArtifactCandidateEnforcementEligible(
+	facts actionfacts.Facts,
+	candidate promotedArtifactCandidate,
+) bool {
+	if promotedArtifactActionEnforcementEligible(facts, candidate) {
+		return true
+	}
+	alone, ok := promotedArtifactCandidateAlone(facts, candidate)
+	if !ok {
+		return false
+	}
+	for _, executing := range promotedArtifactCandidates(alone) {
+		if promotedArtifactCandidateKey(executing) ==
+			promotedArtifactCandidateKey(candidate) {
+			return promotedArtifactActionEnforcementEligible(alone, executing)
+		}
+	}
+	return false
+}
+
+// promotedArtifactCandidateAlone returns the analysis of the candidate's own
+// simple command with the action's context, as if the tool call were only that
+// command. It is unavailable for a relative script path after a command of
+// the action that may have changed the directory that path resolves against.
+func promotedArtifactCandidateAlone(
+	facts actionfacts.Facts,
+	candidate promotedArtifactCandidate,
+) (actionfacts.Facts, bool) {
+	// Only uncertainty that the other commands of a compound command, or
+	// the script itself, may explain. The candidate's own is found again
+	// when it is analysed alone. An incomparable raw command and argv source
+	// has its own issue and cannot be repaired by this standalone analysis.
+	if facts.Parse.Status != actionfacts.StatusPartial ||
+		slices.ContainsFunc(facts.Parse.Issues, func(issue actionfacts.IssueCode) bool {
+			return !promotedArtifactCompoundIssues[issue]
+		}) {
+		return actionfacts.Facts{}, false
+	}
+	index := slices.IndexFunc(facts.Commands, func(command actionfacts.CommandFact) bool {
+		return command.ID == candidate.commandID
+	})
+	if index < 0 {
+		return actionfacts.Facts{}, false
+	}
+	command := facts.Commands[index]
+	if command.ParentCommandID != 0 || len(command.Argv) == 0 ||
+		len(command.Argv) != len(command.Arguments) ||
+		len(command.Wrappers) != 0 ||
+		slices.ContainsFunc(command.Arguments, func(argument actionfacts.ArgumentFact) bool {
+			return argument.Expands
+		}) {
+		return actionfacts.Facts{}, false
+	}
+	relative := slices.ContainsFunc(facts.Paths, func(path actionfacts.PathFact) bool {
+		return path.CommandID == command.ID && !path.Absolute
+	})
+	if relative && slices.ContainsFunc(facts.Commands, func(earlier actionfacts.CommandFact) bool {
+		return earlier.ID < command.ID && actionfacts.ChangesShellDirectory(earlier)
+	}) {
+		return actionfacts.Facts{}, false
+	}
+	input := actionfacts.Input{
+		Tool:                                     facts.Tool,
+		CWD:                                      facts.CWD,
+		ActiveHome:                               facts.ActiveHome,
+		ActiveAgentFiles:                         append([]string(nil), facts.ActiveAgentFiles...),
+		ActiveAgentFilesCaseInsensitive:          append([]string(nil), facts.ActiveAgentFilesCaseInsensitive...),
+		ActiveAgentFilesCaseInsensitiveUncertain: facts.ActiveAgentFilesCaseInsensitiveUncertain,
+		ActiveAgentFilesUncertain:                facts.ActiveAgentFilesUncertain,
+		DialectHint:                              command.Dialect,
+	}
+	if command.Dialect == actionfacts.DialectPOSIX {
+		// The POSIX argv form of an action is not read as a shell command,
+		// so the command is quoted back into shell text.
+		words := make([]string, 0, len(command.Argv))
+		for _, word := range command.Argv {
+			quoted, err := syntax.Quote(word, syntax.LangBash)
+			if err != nil {
+				return actionfacts.Facts{}, false
+			}
+			words = append(words, quoted)
+		}
+		input.Command = strings.Join(words, " ")
+	} else {
+		input.Argv = append([]string(nil), command.Argv...)
+	}
+	return actionfacts.Analyze(input), true
+}
+
+var promotedArtifactCompoundIssues = map[actionfacts.IssueCode]bool{
+	actionfacts.IssueOpaqueArtifact:        true,
+	actionfacts.IssueUnsupportedConstruct:  true,
+	actionfacts.IssueDynamicWord:           true,
+	actionfacts.IssueUnknownOperandGrammar: true,
+}
+
+func promotedArtifactActionEnforcementEligible(
 	facts actionfacts.Facts,
 	candidate promotedArtifactCandidate,
 ) bool {

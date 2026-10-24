@@ -138,7 +138,7 @@ func deleteRecord(opts Options, connector string) error {
 
 // reservedDropIn reports whether the record names a drop-in whose file
 // name DefenseClaw reserves for itself: 90-defenseclaw.json for the Claude
-// Code hooks and the Copilot policy. Once the record says DefenseClaw
+// Code hooks. Once the record says DefenseClaw
 // published it, the file is DefenseClaw's whatever bytes it holds. A copy
 // someone edited (hook paths pointed at another folder or binary name) is
 // tamper that the next publish repairs, never the administrator's preimage,
@@ -146,9 +146,10 @@ func deleteRecord(opts Options, connector string) error {
 // commands inside, which an edit can change: an edited copy recorded as
 // administrator content was restored by uninstall --purge, so every Claude
 // Code call ran a missing hook (GAP-1099). Administrator settings belong in
-// another drop-in, which DefenseClaw never touches.
+// another drop-in, which DefenseClaw never touches. Copilot can share its
+// drop-in with independent handlers, which its surgical strip preserves.
 func reservedDropIn(connector string) bool {
-	return connector == ConnectorClaudeCode || connector == ConnectorCopilot
+	return connector == ConnectorClaudeCode
 }
 
 // publishedByRecord reports whether record says DefenseClaw published path.
@@ -233,6 +234,11 @@ func flapConflict(state *State, connector, path string, count int) {
 	}
 }
 
+// errPublishedDirExposes is the error of a directory above a published file
+// that restorePublishedDirs (Unix) leaves as it is: the access users need to reach
+// DefenseClaw's file would also reach an administrator's other files there.
+var errPublishedDirExposes = errors.New("cannot restore user access to machine policy")
+
 // publishWithRecord writes rendered when it differs from current and keeps
 // the ownership record in sync. It returns whether the file changed.
 // alsoCreated names directories the caller created for this file (a
@@ -295,6 +301,12 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 	dirsRestored := false
 	if problem := publishedDirProblem(opts, path); problem != "" {
 		restored, err := restorePublishedDirs(opts, path)
+		if errors.Is(err, errPublishedDirExposes) {
+			// The administrator restricts or moves those files; the
+			// connector is not covered until then.
+			state.conflict("%v", err)
+			err = nil
+		}
 		if err != nil {
 			return changed, err
 		}
@@ -366,8 +378,8 @@ func verifyPublishedFiles(opts Options, connector string, state *State) {
 }
 
 // RestorePublishedPolicyDirs gives the directories above every policy file
-// DefenseClaw publishes (ownership: merge) back the mode 0755 users need to
-// read it. The hook guardian runs it on each pass, so an administrator's
+// DefenseClaw publishes (ownership: merge) back the access users need to
+// read it (restorePublishedDirs). The hook guardian runs it on each pass, so an administrator's
 // chmod 0700 of /etc/claude-code/managed-settings.d does not leave Claude
 // Code without managed settings until the next repair (GAP-0913). It returns
 // the directories it changed.

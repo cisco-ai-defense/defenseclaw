@@ -163,12 +163,10 @@ type CopilotVSCodeUserRequest struct {
 }
 
 // EnsureCopilotVSCodeUser writes or removes DefenseClaw's Local hook file
-// and plugin under Home. The Local hook file's name is DefenseClaw's own,
-// so on a managed computer the guardian owns it outright: whatever a user
-// leaves at that name (deleted, emptied or edited, or a link, directory or
-// other entry in its place) is rewritten, and removed on uninstall. A plugin file that holds anything DefenseClaw did not render
-// is left alone and reported in Kept: it is the user's, and the
-// foreign-hook guard judges it.
+// and plugin under Home. Regular hook documents can contain independent
+// handlers even at DefenseClaw's file name; those handlers are preserved on
+// removal and prevent a setup from claiming the file as its own render.
+// Non-file entries at the dedicated Local hook path are replaced as before.
 func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserResult, error) {
 	var result CopilotVSCodeUserResult
 	home := strings.TrimSpace(req.Home)
@@ -183,8 +181,6 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 	if err != nil {
 		return result, err
 	}
-	owned := GuardRequest{GOOS: goos, HookBinary: req.HookBinary}
-	ownedHooks := func(data []byte) bool { return owned.ownedHooksDocument(data) || inertHooksDocument(data) }
 	manifest, err := renderCopilotPluginManifest()
 	if err != nil {
 		return result, err
@@ -201,18 +197,21 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 		}
 	}
 	var errs []error
-	if ok, err := ensureOwnedUserFile(&result, result.HookFile, hooks, true, nil, req.HookFile, req.DryRun); err != nil {
+	if ok, err := ensureCopilotHookDocument(&result, result.HookFile, hooks, goos, req.HookBinary, true, req.HookFile, req.DryRun); err != nil {
 		errs = append(errs, err)
 	} else {
 		result.HookFileOK = ok
 	}
-	hooksOK, err := ensureOwnedUserFile(&result, pluginHooks, hooks, false, ownedHooks, req.Plugin, req.DryRun)
+	hooksOK, err := ensureCopilotHookDocument(&result, pluginHooks, hooks, goos, req.HookBinary, false, req.Plugin, req.DryRun)
 	if err != nil {
 		errs = append(errs, err)
 	}
-	manifestOK, err := ensureOwnedUserFile(&result, pluginManifest, manifest, false, nil, req.Plugin, req.DryRun)
-	if err != nil {
-		errs = append(errs, err)
+	manifestOK := false
+	if !slices.Contains(result.Kept, pluginHooks) {
+		manifestOK, err = ensureOwnedUserFile(&result, pluginManifest, manifest, false, nil, req.Plugin, req.DryRun)
+		if err != nil {
+			errs = append(errs, err)
+		}
 	}
 	result.PluginOK = req.Plugin && hooksOK && manifestOK
 	if !req.Plugin && !req.DryRun {
@@ -230,6 +229,144 @@ func EnsureCopilotVSCodeUser(req CopilotVSCodeUserRequest) (CopilotVSCodeUserRes
 		removeEmptyDirsBelow(home, req.RemoveDirs)
 	}
 	return result, errors.Join(errs...)
+}
+
+// stripCopilotVSCodeOwnedHooks removes only the commands rendered for this
+// binary by the current or the released 1.0.0 Local hook contract.
+func stripCopilotVSCodeOwnedHooks(data []byte, goos, hookBinary string) ([]byte, bool, bool, error) {
+	doc, err := decodeOrderedObject(data)
+	if err != nil {
+		return nil, false, false, err
+	}
+	foreignTopLevel := false
+	for _, key := range doc.keys {
+		if key != "hooks" && key != "version" {
+			foreignTopLevel = true
+		}
+	}
+	value, present := doc.get("hooks")
+	if !present || value == nil {
+		if !foreignTopLevel {
+			return nil, true, false, nil
+		}
+		return data, false, foreignTopLevel, nil
+	}
+	hooks, ok := value.(*object)
+	if !ok {
+		return nil, false, false, errors.New("hooks is not an object")
+	}
+	owned, foreign := false, foreignTopLevel
+	for _, event := range append([]string(nil), hooks.keys...) {
+		value, _ := hooks.get(event)
+		list, ok := value.([]any)
+		if !ok {
+			return nil, false, false, fmt.Errorf("event %s is not a handler list", event)
+		}
+		remaining := make([]any, 0, len(list))
+		for _, handler := range list {
+			entry, ok := handler.(*object)
+			if !ok || stringField(entry, "type") != "command" ||
+				!copilotVSCodeLocalCommandOwned(goos, hookBinary, stringField(entry, "command")) {
+				foreign = true
+				remaining = append(remaining, handler)
+				continue
+			}
+			independentField := false
+			for _, key := range entry.keys {
+				if key != "type" && key != "command" && key != "timeout" && key != "timeoutSec" {
+					independentField = true
+				}
+			}
+			if independentField {
+				foreign = true
+				remaining = append(remaining, handler)
+				continue
+			}
+			owned = true
+		}
+		if len(remaining) == 0 && len(list) > 0 {
+			hooks.delete(event)
+		} else if len(remaining) != len(list) {
+			hooks.set(event, remaining)
+		}
+	}
+	if !owned {
+		if !foreign {
+			// An empty copy at DefenseClaw's own plugin path is a
+			// truncated or cleared hook document, not an independent hook.
+			return nil, true, false, nil
+		}
+		return data, false, foreign, nil
+	}
+	if hooks.len() == 0 {
+		doc.delete("hooks")
+	}
+	if doc.len() == 0 || (doc.len() == 1 && doc.keys[0] == "version") {
+		return nil, true, false, nil
+	}
+	remaining, err := encodeOrdered(doc)
+	return remaining, true, true, err
+}
+
+func ensureCopilotHookDocument(result *CopilotVSCodeUserResult, path string, want []byte, goos, hookBinary string, outright, keep, dryRun bool) (bool, error) {
+	current, exists, regular, err := readUserFile(path, int64(policyFileLimit))
+	if err != nil {
+		return false, err
+	}
+	if exists && !regular {
+		if outright {
+			return ensureOwnedUserFile(result, path, want, true, nil, keep, dryRun)
+		}
+		result.Kept = append(result.Kept, path)
+		return false, fmt.Errorf("%s is not a regular file", path)
+	}
+	if !exists {
+		if !keep {
+			return false, nil
+		}
+		return ensureOwnedUserFile(result, path, want, outright, nil, true, dryRun)
+	}
+	if len(bytes.TrimSpace(current)) == 0 {
+		if keep {
+			return ensureOwnedUserFile(result, path, want, outright, nil, true, dryRun)
+		}
+		return ensureOwnedUserFile(result, path, want, outright, func([]byte) bool { return true }, false, dryRun)
+	}
+	admin, owned, foreign, err := stripCopilotVSCodeOwnedHooks(current, goos, hookBinary)
+	if err != nil {
+		result.Kept = append(result.Kept, path)
+		return false, nil
+	}
+	if keep {
+		if foreign {
+			result.Kept = append(result.Kept, path)
+			return false, nil
+		}
+		return ensureOwnedUserFile(result, path, want, outright, func([]byte) bool { return owned }, true, dryRun)
+	}
+	if !owned {
+		if foreign {
+			result.Kept = append(result.Kept, path)
+		}
+		return false, nil
+	}
+	if len(bytes.TrimSpace(admin)) != 0 {
+		// The plugin still needs its manifest for the independent hooks.
+		result.Kept = append(result.Kept, path)
+	}
+	if dryRun {
+		result.Removed = append(result.Removed, path)
+		return false, nil
+	}
+	if len(bytes.TrimSpace(admin)) == 0 {
+		if err := os.Remove(path); err != nil {
+			return false, err
+		}
+	} else if err := writePrivateUserFile(path, admin); err != nil {
+		return false, err
+	}
+	result.Removed = append(result.Removed, path)
+	return false, nil
 }
 
 // missingDirsBelow returns the missing folders between home and path,
@@ -404,40 +541,6 @@ func (r GuardRequest) ownedHooksDocument(data []byte) bool {
 	return handlers > 0
 }
 
-// inertHooksDocument reports a hook document that registers no handler at
-// all: an empty file, {}, or hooks whose every event list is empty. At
-// DefenseClaw's own path it is a tampered or truncated copy, not the user's
-// configuration, so it is repaired (or removed) instead of kept.
-func inertHooksDocument(data []byte) bool {
-	if len(bytes.TrimSpace(data)) == 0 {
-		return true
-	}
-	doc, _, err := decodeGuardDocument(data)
-	if err != nil {
-		return false
-	}
-	for _, key := range doc.keys {
-		if key != "hooks" && key != "version" {
-			return false
-		}
-	}
-	value, present := doc.get("hooks")
-	if !present || value == nil {
-		return true
-	}
-	hooks, ok := value.(*object)
-	if !ok {
-		return false
-	}
-	for _, event := range hooks.keys {
-		value, _ := hooks.get(event)
-		if list, ok := value.([]any); !ok || len(list) > 0 {
-			return false
-		}
-	}
-	return true
-}
-
 // CopilotVSCodeUserFilesLeft reports, read-only, whether home still holds
 // DefenseClaw's Local hook file or plugin: what removing the user's Copilot
 // row takes out. Their hook command is an encoded PowerShell bridge on
@@ -463,9 +566,9 @@ func CopilotVSCodeUserState(home, goos, hookBinary string) (hookFile, plugin boo
 		same(CopilotPluginHooksPath(home), hooks) && same(filepath.Join(CopilotPluginDir(home), "plugin.json"), manifest)
 }
 
-// copilotVSCodeUserKept reports, read-only, the plugin files under home
-// that the guardian leaves in place because they hold hooks DefenseClaw did
-// not write (an earlier DefenseClaw render is replaced, not kept).
+// copilotVSCodeUserKept reports, read-only, the Local hook and plugin files
+// that the guardian leaves in place because they hold independent content
+// (an earlier DefenseClaw render is replaced, not kept).
 func copilotVSCodeUserKept(home, goos, hookBinary string) []string {
 	result, _ := EnsureCopilotVSCodeUser(CopilotVSCodeUserRequest{Home: home, GOOS: goos, HookBinary: hookBinary, HookFile: true, Plugin: true, DryRun: true})
 	return result.Kept

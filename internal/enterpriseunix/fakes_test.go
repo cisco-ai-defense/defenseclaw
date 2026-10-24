@@ -47,6 +47,11 @@ type fakeServices struct {
 	failStart map[string]error
 	// failed units report systemd's failed state.
 	failed map[string]bool
+	// keepActiveOnStop models a systemd stop that returns while a helper is
+	// still active; a later start is then a successful no-op.
+	keepActiveOnStop map[string]bool
+	afterStart       func(Unit)
+	afterRestart     func(Unit)
 	// restarting units are in systemd's restart delay after a run with this
 	// Result ("success" for a planned restart, "exit-code" for a crash).
 	// PlannedRestart reads it once, and the unit is active again after that.
@@ -129,6 +134,9 @@ func (f *fakeServices) Start(_ context.Context, u Unit) error {
 	f.mu.Lock()
 	f.active[u.Name] = true
 	f.mu.Unlock()
+	if f.afterStart != nil {
+		f.afterStart(u)
+	}
 	return nil
 }
 
@@ -140,13 +148,18 @@ func (f *fakeServices) Restart(_ context.Context, u Unit) error {
 	f.mu.Lock()
 	f.active[u.Name] = true
 	f.mu.Unlock()
+	if f.afterRestart != nil {
+		f.afterRestart(u)
+	}
 	return nil
 }
 
 func (f *fakeServices) Stop(_ context.Context, u Unit) error {
 	f.record("stop " + u.Name)
 	f.mu.Lock()
-	f.active[u.Name] = false
+	if !f.keepActiveOnStop[u.Name] {
+		f.active[u.Name] = false
+	}
 	f.mu.Unlock()
 	return nil
 }
@@ -479,6 +492,22 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	env.DockerEngine = func(context.Context, string) error { return nil }
 	env.fillDefaults()
 	h.env = env
+	if goos == "linux" {
+		// An empty fake process table still has a boot-time record. Tests
+		// that need an unavailable process scan remove this file explicitly.
+		stat := env.P("/proc/stat")
+		if err := os.MkdirAll(filepath.Dir(stat), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(stat, []byte(fmt.Sprintf("btime %d\n", time.Now().Unix())), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Tests of unrelated lifecycle behavior need explicit, readable
+		// kernel facts before status can claim complete security. Tests for
+		// open or unavailable controls replace or remove these fake values.
+		writeHostFile(t, h, sysctlMaxUserNamespaces, "0\n")
+		writeHostFile(t, h, sysctlPtraceScope, "2\n")
+	}
 	return h
 }
 
@@ -503,7 +532,25 @@ func (h *testHost) payload(version string) string {
 
 func (h *testHost) run(opts Options) *enterprisestatus.Result {
 	h.t.Helper()
-	return Run(context.Background(), h.env, opts)
+	result := Run(context.Background(), h.env, opts)
+	if (opts.Action == ActionInstall || opts.Action == ActionEnsure) && result.OK && result.Installed {
+		// The fake enumerator never publishes its first empty record. Real
+		// status must wait for that record before claiming complete coverage.
+		path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+		if _, err := os.Stat(path); err == nil {
+			return result
+		} else if !os.IsNotExist(err) {
+			h.t.Fatal(err)
+		}
+		data, err := enterprisehooks.MarshalUnprotectedAgents(nil)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			h.t.Fatal(err)
+		}
+	}
+	return result
 }
 
 func (h *testHost) read(canonical string) string {

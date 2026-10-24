@@ -35,6 +35,29 @@ def _dashboard(name: str) -> dict:
 def _panel(dashboard: dict, title: str) -> dict:
     return next(panel for panel in dashboard["panels"] if panel.get("title") == title)
 
+def test_ide_plugins_per_user_table_keeps_hosts_apart() -> None:
+    # GAP-1282: user IDs are host-local, so two hosts' alice (uid 1000) with
+    # the same plugin must stay two rows, with the host shown.
+    panel = _panel(_dashboard("defenseclaw-ai-discovery.json"), "IDE plugins per user (records in range)")
+    expr = panel["targets"][0]["expr"]
+    grouping = re.search(r"sum by \(([^)]*)\)", expr)
+    assert grouping is not None and "host_name" in [label.strip() for label in grouping.group(1).split(",")]
+    organize = next(step for step in panel["transformations"] if step["id"] == "organize")["options"]
+    assert organize["indexByName"]["host_name"] == 0
+    assert organize["renameByName"]["host_name"] == "Host"
+
+
+@pytest.mark.parametrize(
+    "name", ["defenseclaw-identity.json", "defenseclaw-agent-identity.json", "defenseclaw-hitl.json"]
+)
+def test_static_connector_pickers_offer_kiro(name: str) -> None:
+    # GAP-1148: Kiro is a supported connector, so every static Connector
+    # picker offers it in both its query and its option list.
+    variable = next(v for v in _dashboard(name)["templating"]["list"] if v["name"] == "connector")
+    assert "kiro" in [value.strip() for value in variable["query"].split(",")]
+    assert "kiro" in [option["value"] for option in variable["options"]]
+
+
 
 def test_kernel_denials_table_shows_verified_name_with_uid_fallback() -> None:
     dashboard = _dashboard("defenseclaw-blocked-events.json")
@@ -1269,12 +1292,18 @@ def test_sandboxes_board_scopes_to_one_computer() -> None:
     # which cannot follow the Sandbox box, says so in its title; the active
     # count adds hosts up instead of taking one maximum per connector; and
     # Health degraded no longer counts gateway-wide records as the sandbox's.
+    # The managed sandbox counters carry no host label (the collector drops
+    # it), so their panel cannot follow Host either and says so.
     board = _dashboard("defenseclaw-sandboxes.json")
     assert [variable["name"] for variable in board["templating"]["list"]][:2] == ["environment", "host"]
     for panel in board["panels"]:
         for target in panel.get("targets", []):
             expr = target["expr"]
-            assert 'deployment_environment_name=~"$environment"' in expr and 'host_name=~"$host"' in expr, panel["title"]
+            assert 'deployment_environment_name=~"$environment"' in expr, panel["title"]
+            if target["datasource"]["type"] == "prometheus" and "defenseclaw_sandbox_managed_" in expr:
+                assert "host_name" not in expr and "all hosts" in panel["title"], panel["title"]
+            else:
+                assert 'host_name=~"$host"' in expr, panel["title"]
             if target["datasource"]["type"] == "prometheus":
                 assert "all names)" in panel["title"], panel["title"]
     active = _panel(board, "Active (all names)")["targets"][0]["expr"]
@@ -3300,6 +3329,60 @@ def test_static_audit_rejects_short_rate_windows_and_mislabelled_series(
     assert any("is labelled [50] but queries p95" in error for error in errors)
     assert any("filters on unknown labels: result" in error for error in errors)
     assert any("uses unknown exact le value '2500.0'" in error for error in errors)
+
+
+def test_managed_sandbox_counters_are_never_filtered_by_host(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """The bundled collector drops the host and account resource labels
+    from the managed sandbox counters, so a host_name filter on one is an
+    error, and the shipped Sandboxes dashboard has none."""
+    shipped = json.dumps(_dashboard("defenseclaw-sandboxes.json"))
+    for name in ("refusals", "asks", "foreign_items", "provisional", "drift"):
+        metric = f"defenseclaw_sandbox_managed_{name}_total"
+        assert metric in shipped
+        for selector in re.findall(rf"{metric}\{{([^}}]*)\}}", shipped):
+            assert "host_name" not in selector
+            assert "os_type" in selector
+
+    audit = _load_audit_module()
+    dashboard_dir = tmp_path / "dashboards"
+    dashboard_dir.mkdir()
+    dashboard = {
+        "uid": "managed-sandbox-fixture",
+        "title": "Managed sandbox fixture",
+        "description": "A managed counter filtered by host.",
+        "panels": [
+            {
+                "type": "timeseries",
+                "title": "Refusals by host",
+                "datasource": {"type": "prometheus", "uid": "defenseclaw-prometheus"},
+                "targets": [
+                    {
+                        "expr": (
+                            'sum(increase(defenseclaw_sandbox_managed_refusals_total{host_name=~"$host", '
+                            'os_type=~"$os"}[$__rate_interval]))'
+                        ),
+                        "refId": "A",
+                    },
+                ],
+            },
+        ],
+    }
+    (dashboard_dir / "fixture.json").write_text(json.dumps(dashboard), encoding="utf-8")
+    datasource = tmp_path / "datasources.yml"
+    datasource.write_text("jsonData:\n  timeInterval: 15s\n", encoding="utf-8")
+    monkeypatch.setattr(audit, "SOURCE_DIR", dashboard_dir)
+    monkeypatch.setattr(audit, "PACKAGED_DIR", tmp_path / "missing-dashboards")
+    monkeypatch.setattr(audit, "SOURCE_DATASOURCES", datasource)
+    monkeypatch.setattr(audit, "PACKAGED_DATASOURCES", tmp_path / "missing-datasources.yml")
+
+    _dashboards, errors = audit.static_audit()
+
+    assert any(
+        "defenseclaw_sandbox_managed_refusals_total filters on unknown labels: host_name" in error for error in errors
+    )
 
 
 def test_connector_dashboard_queries_the_metric_named_by_each_panel() -> None:

@@ -138,10 +138,6 @@
       "agent_id": "copilot"
     },
     {
-      "connector_id": "openhands",
-      "acp_support": "none"
-    },
-    {
       "connector_id": "openclaw",
       "acp_support": "none"
     },
@@ -165,10 +161,6 @@
       "connector_id": "devin",
       "acp_support": "native",
       "agent_id": "devin"
-    },
-    {
-      "connector_id": "omnigent",
-      "acp_support": "none"
     },
     {
       "connector_id": "zeptoclaw",

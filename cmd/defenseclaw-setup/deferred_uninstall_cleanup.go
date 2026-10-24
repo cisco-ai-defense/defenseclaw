@@ -158,11 +158,12 @@ func validateDeferredUninstallCleanupRecord(
 	if record.RunValueName != runValueName || record.RunCommand != runCommand {
 		return errors.New("deferred uninstall cleanup does not match the owned startup command")
 	}
-	if len(record.VerifiedConnectors) > len(nativeLifecycleConnectorNames)+1 || !slices.IsSorted(record.VerifiedConnectors) {
+	// until 1.1: +1 for a removed connector (OmniGent) torn down at uninstall.
+	if len(record.VerifiedConnectors) > len(nativeLifecycleConnectorNames)+2 || !slices.IsSorted(record.VerifiedConnectors) {
 		return errors.New("deferred uninstall cleanup has an invalid verified connector set")
 	}
 	for index, connector := range record.VerifiedConnectors {
-		if connector == "none" || !validConnector(connector) {
+		if connector == "none" || !validPreviousConnector(connector) {
 			return fmt.Errorf("deferred uninstall cleanup has an invalid connector %q", connector)
 		}
 		if index > 0 && record.VerifiedConnectors[index-1] == connector {

@@ -526,59 +526,6 @@
       ]
     },
     {
-      "id": "openhands",
-      "name": "OpenHands",
-      "vendor": "All Hands AI",
-      "category": "supported_connector",
-      "confidence": 0.95,
-      "supported_connector": "openhands",
-      "binary_names": [
-        "openhands"
-      ],
-      "process_names": [
-        "openhands",
-        "OpenHands"
-      ],
-      "config_paths": [
-        ".openhands/hooks.json",
-        "~/.openhands/agent_settings.json",
-        "~/.openhands/cli_config.json",
-        "~/.openhands/mcp.json",
-        ".agents/skills",
-        ".openhands/skills",
-        ".openhands/microagents",
-        "~/.openhands/skills/installed",
-        "~/.openhands/cache/skills/public-skills/skills",
-        "AGENTS.md"
-      ],
-      "extension_ids": [],
-      "mcp_paths": [
-        "~/.openhands/mcp.json"
-      ],
-      "package_names": [
-        "openhands-ai",
-        "openhands"
-      ],
-      "env_var_names": [
-        "OPENHANDS_API_KEY",
-        "OPENHANDS_CONFIG_FILE"
-      ],
-      "domain_patterns": [
-        "openhands.dev"
-      ],
-      "history_patterns": [
-        "openhands",
-        "open hands"
-      ],
-      "application_names": [],
-      "local_endpoints": [],
-      "skill_paths": [
-        ".openhands/skills",
-        "~/.openhands/skills/installed",
-        ".agents/skills"
-      ]
-    },
-    {
       "id": "aider",
       "name": "Aider",
       "vendor": "Aider",
@@ -835,45 +782,6 @@
         "~/.config/amp/plugins",
         ".amp/plugins"
       ]
-    },
-    {
-      "id": "omnigent",
-      "name": "OmniGent",
-      "vendor": "OmniGent",
-      "category": "supported_connector",
-      "confidence": 0.95,
-      "supported_connector": "omnigent",
-      "binary_names": [
-        "omnigent",
-        "omni"
-      ],
-      "process_names": [
-        "omnigent",
-        "omni"
-      ],
-      "config_paths": [
-        "$OMNIGENT_CONFIG",
-        "$OMNIGENT_CONFIG_HOME/config.yaml",
-        "$OMNIGENT_CONFIG_HOME",
-        "~/.omnigent/config.yaml",
-        "~/.omnigent"
-      ],
-      "extension_ids": [],
-      "mcp_paths": [],
-      "package_names": [
-        "omnigent"
-      ],
-      "env_var_names": [
-        "OMNIGENT_CONFIG",
-        "OMNIGENT_CONFIG_HOME",
-        "OMNIGENT_DATA_DIR"
-      ],
-      "domain_patterns": [],
-      "history_patterns": [
-        "omnigent"
-      ],
-      "application_names": [],
-      "local_endpoints": []
     },
     {
       "id": "continue",

@@ -31,3 +31,13 @@ func TestEnterpriseJSONKeepsPowerShellCallOperator(t *testing.T) {
 		t.Fatalf("decoded %+v err %v", decoded, err)
 	}
 }
+
+func TestWindowsSandboxAdminHintNamesGateway(t *testing.T) {
+	message := windowsManagedStandardUserViewAnswer("the sandbox registrations",
+		"enterprise windows sandbox list --user 'r103 probe'")
+	for _, want := range []string{`\bin\defenseclaw-gateway.exe' enterprise windows sandbox list`, "--user 'r103 probe'"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("sandbox administrator hint omits %q: %s", want, message)
+		}
+	}
+}

@@ -12,8 +12,7 @@ import (
 )
 
 // A standalone managed host whose process carries the Secure Client profile
-// (not pinned standalone, so secureClientHookDelivery says Secure Client)
-// but that is no authenticated Secure Client deployment
+// (not pinned standalone) but that is no authenticated Secure Client deployment
 // (connector.SecureClientDeploymentVerified false) gets no Secure Client
 // default: an unset mode does not open (main-sync review finding 5), and
 // the standalone config resolves each connector to the administrator's
@@ -25,8 +24,8 @@ func TestStandaloneHostWithSecureClientProcessProfileStaysClosed(t *testing.T) {
 	connector.SecureClientDeploymentVerified = func() bool { return false }
 	t.Cleanup(func() { connector.SecureClientDeploymentVerified = saved })
 	t.Setenv(managed.EnterpriseProfileEnv, "")
-	if !secureClientHookDelivery() {
-		t.Fatal("test process does not carry the Secure Client profile")
+	if secureClientHookDelivery() {
+		t.Fatal("an unverified install selected Secure Client delivery")
 	}
 	if got := canonicalHookFailMode(""); got != "closed" {
 		t.Fatalf("unset fail mode on an unverified host = %q, want closed", got)

@@ -1,0 +1,237 @@
+---
+title: Windows security model
+description: Native Windows loopback authentication, local audit persistence, credential scope, signing, and operational security boundaries.
+keywords:
+  - DefenseClaw Windows telemetry
+  - DefenseClaw Windows OTLP
+  - DefenseClaw Windows audit
+  - DefenseClaw Windows security
+  - DefenseClaw token rotation
+---
+
+On Windows, an agent's hook or plugin waits for DefenseClaw's decision and
+can block. Isolated OpenShell agents may also export native OpenTelemetry
+(OTLP), which records activity but cannot block it. Host Codex and Claude Code
+use hooks because their native exporters cannot verify a local TCP listener.
+
+## Connector telemetry channels
+
+Each [connector page](/docs/connectors#platform-support) lists that agent's
+hook events, whether it exports OTLP, its configuration files, and its
+Windows-only quirks.
+
+The rule on Windows: only a hook or plugin that waits for DefenseClaw's answer
+can block. OTLP and other telemetry add detail to the audit log and
+dashboards, but cannot block an action after the fact.
+
+Host setup disables Codex and Claude Code native OTLP and revokes credentials
+from earlier releases because those exporters cannot verify who holds a
+stopped gateway's port. Hook and plugin
+credentials are also connector-scoped and remain distinct from the gateway
+master token. Connector pages identify which channels exist and where their
+managed settings live.
+
+Standalone OpenCode and Amp plugins use one TCP connection for the listener
+challenge and hook request. The gateway checks that the account opening the
+challenge owns the scoped credential before it returns a proof. Per-user
+plugins verify the connected listener's account through the native helper.
+
+A scoped credential is accepted only for its connector and route; it cannot
+authenticate the management API, another connector, or a non-loopback request.
+Hermes hook-derived audit records retain connector, session, event,
+and correlation attribution before entering generic alert, webhook, OTLP, or
+Splunk destinations.
+
+<Callout type="info" title="OTLP is observation-only">
+An agent's OTLP log, metric, or trace arrives during or after the activity it
+describes. It cannot block a prompt or tool call. In action mode, only the
+agent's hook or plugin can block.
+</Callout>
+
+## Local audit is always on
+
+The gateway always writes its audit log to
+`%USERPROFILE%\.defenseclaw\audit.db` (SQLite). It keeps writing when no
+remote destination is configured, and when a remote destination is
+unreachable.
+
+`gateway.jsonl` is **not** a default audit file. It exists only if an optional
+`kind: jsonl` destination is configured to write that path. The detached
+gateway's process log is a different file,
+`%USERPROFILE%\.defenseclaw\gateway.log`.
+
+## Privacy and redaction boundary
+
+Connectors capture prompt content so that each destination can apply its own
+redaction. A new install's redaction profile is `none`. Therefore:
+
+- the local audit database can hold prompts, tool calls, decisions, and
+  telemetry in full;
+- adding a remote destination does not make what it receives safe for
+  another audience until you set its redaction; and
+- redaction applies to what is sent from now on, not to records already
+  stored or sent.
+
+Treat the data directory and any audit export as sensitive user data. Configure
+and verify [redaction profiles](/docs/reference/observability/redaction) before routing
+records to another system. `defenseclaw config show` masks secret values and
+has no option to reveal them.
+
+The gateway records authentication and delivery failures without putting raw
+scoped credentials into route names or operational telemetry. That does not
+make a copied database, log, connector configuration, backup, or crash artifact
+safe to publish.
+
+## Credential model
+
+DefenseClaw uses distinct credentials for distinct jobs:
+
+| Credential class | Scope | Operator rule |
+| --- | --- | --- |
+| Gateway master token | Local gateway control/lifecycle authentication. Stored through the protected DefenseClaw environment file. | Rotate with the CLI; do not edit, print, or pass it on an argv. |
+| Connector hook/plugin credential | One connector's hook or plugin API route. | Managed by setup/teardown; never copy its sidecar or the credential-bearing Amp plugin. |
+| Connector native-OTLP credential | One connector's OTLP routes where configured: Codex or Claude Code. Hermes has no official native OTLP surface. | Stable across unrelated master-token rotation and revoked during connector teardown. |
+| Provider or destination credentials | Only the configured external provider/destination. | Reference protected environment names; do not place literal values in YAML or support output. |
+
+### Rotate safely
+
+Rotation always covers the gateway and every connector together:
+
+```powershell
+defenseclaw setup rotate-token --yes
+```
+
+`rotate-token` replaces the gateway token and every connector's hook
+credential, each with its own new value. It stops the gateway, saves the new
+values, updates each agent's hook or plugin, and starts the gateway again. If
+a step fails after the gateway stopped, it puts the previous values and
+gateway back. Rotation always includes the gateway restart, and it does not
+rewrite a token that you supply through your own environment variable.
+
+Each connector still gets its own credential, separate from the gateway
+token; rotation never prints them or lets one connector use another's. After
+a rotation, restart every agent you set up (fully exit and relaunch Amp) so it uses the new settings.
+
+Rotation refuses a hook credential file that is not private to your account,
+and names the file, the reason and the `icacls` command that makes it private.
+The upgrade from 0.8.x seals the credential files 0.8.x left with the
+permissions they inherited from the folder.
+
+Verify without reading any token:
+
+```powershell
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw doctor
+```
+
+## Loopback and network boundaries
+
+The supported connector topology uses the current user's native agent and
+gateway on loopback, normally
+`127.0.0.1:18970`. The loopback HTTP receiver is
+authenticated; it is not a claim that localhost is inherently trusted.
+
+- A connector-scoped token is restricted by connector, route, signal, and
+  loopback origin.
+- Management routes require their own authentication.
+- An agent on another computer sending hooks to this gateway is not tested
+  on Windows.
+- Outbound OTLP, Splunk, Galileo, webhooks, and provider calls are independent
+  client connections. Their availability does not expand hook coverage.
+- Native Windows runs no guardrail proxy, so OpenClaw and ZeptoClaw are
+  unsupported.
+
+Do not expose the local API to your network to make a remote agent work. That
+is not a tested setup, and it needs authentication, TLS, and firewall
+measures this guide does not cover.
+
+## Release and installer trust
+
+`install.ps1` checks every file it downloads against the release's
+`checksums.txt`. That catches a corrupted or mismatched download, but on its
+own it does not prove who published the release. The Release workflow signs
+`checksums.txt` with Sigstore; when `cosign` 2.0 or later is installed, the
+installer and `defenseclaw upgrade` verify that signature against the release
+workflow's identity before trusting any file, and stop if it fails. Install
+cosign first if you want that publisher check.
+
+Windows release executables are not Authenticode-signed, so Windows reports
+them as `NotSigned`. Their integrity comes from the checksum set, not from a
+`Cisco Systems, Inc.` Digital Signatures entry.
+
+The release workflow installs, upgrades, and rolls back the exact release
+files on a Windows x64 runner before it publishes them.
+
+Local and pull-request artifacts are not published releases. Passing their
+tests proves code and lifecycle behavior, not release provenance. See
+[Windows](/docs/get-started/windows).
+
+## Ownership and filesystem boundary
+
+The per-user package runs as the current user and changes only what it
+created or recorded. Its installer state, credentials, audit database, and
+process records are owned by the current user and readable only by that
+user, Administrators, and SYSTEM. The same applies to OpenCode's managed
+plugin. That keeps other standard users out, but it does not protect against
+the user themself or an administrator; `defenseclaw doctor` detects a changed
+plugin and setup puts it back. Files that agents own keep their own
+permissions.
+
+The installer and lifecycle commands:
+
+- refuse an existing folder that has no valid DefenseClaw installer state;
+- refuse a protected path, or a recorded agent folder, that goes through a
+  symbolic link or junction;
+- stop only the gateway or watchdog they started, checked by executable,
+  process start time, and data folder;
+- never replace a sign-in entry, `PATH` entry, Installed Apps entry, listener,
+  process, or agent file that DefenseClaw does not own; and
+- keep recovery files they are unsure about instead of deleting them.
+
+DefenseClaw's own programs support paths longer than the old `MAX_PATH`
+limit; third-party agents and plugins may not. Remote network folders are not
+supported for DefenseClaw's data. Avoid agent folders that differ only by
+letter case.
+
+## Transaction and fail-closed boundaries
+
+What happens when something fails depends on where it fails:
+
+| Where | What happens |
+| --- | --- |
+| Install and upgrade checks | `install.ps1` refuses an unsupported architecture, a download that does not match `checksums.txt` (or its signature, with `cosign`), an unsafe path, or a foreign install before it changes anything. |
+| Install and upgrade | A failure before the switch-over leaves the old install as it was; a later failure restores the previous install. After an interrupted run, the next run first restores the previous install, then carries on. |
+| Hook delivery | With fail mode `closed`, a hook that cannot reach the gateway, or gets a malformed or unauthorized answer, blocks the step, on events the agent lets a hook block. For OpenCode that is only `tool.execute.before`; other OpenCode events are best effort. Hermes blocks on DefenseClaw's valid block answer when gateway delivery or authentication fails in mode `closed`. Hermes itself still runs the call if the hook times out or cannot start. See [Fail modes](/docs/reference/configuration/fail-modes). |
+| Enterprise Claude Code hook | The machine-wide Claude Code hook of an [enterprise deployment](/docs/enterprise) blocks when its protected policy is invalid. |
+| Disabled skills | If DefenseClaw cannot read which skills are disabled, Codex and Claude Code skill selection is blocked. Hermes has no skill-selection event. Amp has no skill-load event; the tool calls a skill makes are still checked at `tool.call`. |
+| Amp plugin loading | Amp runs every plugin's top-level code while loading. DefenseClaw checks start once its plugin is loaded and receives `tool.call`; it does not control other plugins' loading or their order. |
+| Internal policy error | Fails open, with a warning and telemetry, because no decision was made. |
+| Remote destination outage | The local audit log and the gateway keep working; the destination is reported as degraded. |
+
+A malformed `config.yaml` stops the gateway from starting instead of loading
+part of it. A disabled connector is removed from what the gateway runs. A
+setting that needs a gateway restart, such as a port or a connector's hook
+fail mode, shows as a difference between saved and running settings until the
+gateway restarts. Other changes to `config.yaml` apply to the running gateway
+without a restart.
+
+## Machine-wide hooks are enterprise only
+
+The per-user install never installs a machine-wide service, guardian, or
+machine policy. Machine-wide deployment, including Claude Code managed hooks
+published through Claude Code's managed-settings policy, Codex and Cursor
+managed hooks, and GitHub Copilot machine policy (standalone profile only), is
+part of [enterprise deployment](/docs/enterprise): the
+[standalone profile](/docs/enterprise/install/windows) or the
+[Secure Client profile](/docs/enterprise/install/secure-client#native-windows-claude-code-managed-hooks).
+
+## Security operations links
+
+- [Configuration](/docs/reference/configuration)
+- [Environment variables](/docs/reference/configuration/env-vars)
+- [Fail modes](/docs/reference/configuration/fail-modes)
+- [Redaction](/docs/reference/observability/redaction)
+- [Observability](/docs/features/observability)
+- [Scan a skill](/docs/how-to/scanning/scan-a-skill)
+- [Scan an MCP server](/docs/how-to/scanning/scan-an-mcp-server)

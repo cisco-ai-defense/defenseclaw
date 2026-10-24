@@ -1,0 +1,121 @@
+---
+title: Set up sandboxes on macOS
+description: Run sandbox setup on an Apple-silicon Mac and check it with sandbox doctor.
+keywords:
+  - sandbox setup macOS
+  - OpenShell MicroVM
+  - Apple silicon
+  - Homebrew nvidia/openshell
+  - e2fsprogs
+---
+
+Install and configure OpenShell sandboxes on an Apple-silicon Mac. Each sandbox is a MicroVM with its own Linux kernel. The agent works on a copy of your project, and you bring its changes back when you are happy with them.
+
+## Before you start
+
+| You need | Details |
+| --- | --- |
+| Apple silicon | Intel Macs are refused. Under Rosetta, install the arm64 build of DefenseClaw. |
+| DefenseClaw | Installed, with the daemon running ([quickstart](/docs/get-started/quickstart)). Run as your own user. |
+| Homebrew | Your account must be able to write to Homebrew's folders. OpenShell installs from the `nvidia/openshell` formula, without `sudo`. |
+| Xcode or Command Line Tools | Current for your macOS release. Homebrew may build from source. |
+| `e2fsprogs` | Setup offers to install it with Homebrew. |
+| Docker Desktop, running | Start it once on your own account first. It asks for Rosetta, local-network access and an administrator password. |
+| Disk | At least 12 GiB free in the VM volume (22 GiB recommended). The first image build downloads about 3 GB. |
+
+OpenShell 0.1.5 or newer is required. Setup installs it, or upgrades an older one, after asking. If another account owns Homebrew, setup stops and names the owner and folder. Ask them for write access, or install a Homebrew of your own in your home directory ([below](#a-homebrew-that-belongs-to-another-account)). On a managed Mac an administrator provides OpenShell: [Sandboxes on managed computers](/docs/enterprise/runtime/sandboxes).
+
+## Steps
+
+<Steps>
+
+<Step>
+
+### Run setup
+
+```bash
+defenseclaw sandbox setup
+```
+
+```text
+DefenseClaw sandbox setup
+  Checking this machine…  ✓ darwin/arm64  ✓ Landlock (MicroVM)  ✓ Docker 29.1.5  ✗ OpenShell and its MicroVM driver not installed
+Install OpenShell … with NVIDIA's installer? (Homebrew; sha256 verified) [y/N] y
+Run sandboxes in OpenShell MicroVMs? macOS needs them: Docker Desktop's Linux kernel has no Landlock. [Y/n]
+  ✓ gateway configured and restarted: it runs sandboxes in OpenShell MicroVMs
+  every run works on a copy (the MicroVM driver mounts no host folders); `defenseclaw sandbox pull` brings the changes back
+
+  ✓ Done →  cd <project> && defenseclaw sandbox run claude
+```
+
+Setup installs OpenShell and `e2fsprogs`, switches the gateway to MicroVMs (a backed-up change to its `gateway.toml`, one restart), turns off OpenShell's usage telemetry, and builds the harness images. The MicroVM settings apply to every sandbox on the gateway. Flags are in the [sandbox CLI reference](/docs/reference/sandboxes/cli#sandbox-setup).
+
+You can also run setup from the TUI (`defenseclaw tui`, `0`, **Sandboxes (OpenShell)**) or the macOS app (**Setup**, **Sandbox**). The app never installs OpenShell: run `defenseclaw sandbox setup --install-openshell` in a terminal first.
+
+</Step>
+
+<Step>
+
+### Check the Mac
+
+```bash
+defenseclaw sandbox doctor
+```
+
+```text
+  ⚠ Platform                   darwin/arm64: macOS sandboxes run in OpenShell MicroVMs (the vm driver, experimental upstream)
+  ✓ Docker                     Docker 29.1.5 (Docker Desktop)
+  ✓ MicroVM driver             e2fsprogs in /opt/homebrew/opt/e2fsprogs/sbin; …openshell-driver-vm signed for Apple's Hypervisor
+  ✓ Gateway compute driver     vm (OpenShell MicroVM; experimental upstream)
+  - Project bind mounts        the OpenShell MicroVM (vm) driver mounts no host folders: every run works on a copy
+  ✓ Harness images             hook-verified: claudecode 2.1.156, codex 0.146.0
+  …
+
+  ✓ ready for sandboxes
+```
+
+The **Platform** warning is expected on every Mac. Checks marked `-` do not apply to MicroVMs. `defenseclaw sandbox doctor --fix` applies fixes that need only your user.
+
+</Step>
+
+<Step>
+
+### Run your first agent
+
+```bash
+cd ~/code/myapp
+defenseclaw sandbox run claude
+```
+
+The first start of each image takes about a minute while the driver prepares its MicroVM disk. Continue with [run an agent](/docs/how-to/sandboxes/run-an-agent) and [bring the changes back](/docs/how-to/sandboxes/review-undo-or-pull#pull-on-macos).
+
+</Step>
+
+</Steps>
+
+## What to know about MicroVMs
+
+- Every MicroVM gets the same 4 vCPUs, 4 GiB of memory and 16 GiB disk for changes, set in the gateway's `gateway.toml`. `--cpu` and `--memory` have no effect.
+- Each image the driver has started keeps about 5 GB in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` removes unused ones.
+- There is no live mount and no pre-session snapshot. `--context` is refused, and `sandbox undo` reverts the last `pull --apply`.
+
+## One OpenShell gateway per Mac
+
+The gateway listens on `127.0.0.1:17670` for the account that started it, so only that account can run sandboxes. To hand sandboxes to another account, run `brew services stop nvidia/openshell/openshell` in the first, then setup in the second.
+
+## A Homebrew that belongs to another account
+
+Setup stops before installing and names the owner and folder. Have the owner give you write access, or install a Homebrew of your own in your home directory, put it first on `PATH` with `eval "$(~/homebrew/bin/brew shellenv)"`, and run setup again. With your own Homebrew, `e2fsprogs` must still come from an administrator's Homebrew under `/opt/homebrew` or `/usr/local`.
+
+## Check it worked
+
+`defenseclaw sandbox doctor` ends with `ready for sandboxes`, and its **Gateway compute driver** row reads `vm`.
+
+## Undo
+
+`defenseclaw sandbox teardown` removes this install's sandboxes, images and MicroVM disks, restores the gateway configuration from before setup and turns `openshell.enabled` off. OpenShell stays installed.
+
+## Next
+
+- [Run an agent in a sandbox](/docs/how-to/sandboxes/run-an-agent)
+- [Troubleshooting](/docs/troubleshooting/sandboxes)

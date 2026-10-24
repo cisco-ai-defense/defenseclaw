@@ -1,0 +1,173 @@
+---
+title: Machine policy
+description: How the standalone profile protects each AI agent through machine-wide policy files on Windows, Linux and macOS, what it writes, and how to inspect, export and verify the result.
+keywords:
+  - DefenseClaw machine policy
+  - Codex requirements.toml
+  - Claude Code managed settings
+  - Copilot policy.d
+  - allowManagedHooksOnly
+---
+
+Some agents read a machine-wide policy file that standard users cannot change. For those agents, the standalone profile uses that file instead of each user's own config. On managed Windows, configured Claude Code, Codex and Cursor machine hooks stay installed before the first enrollment and after the last enrolled user is removed. Even with zero enrolled users, their hooks refuse an unenrolled account. The other agents are protected per user: the guardian writes DefenseClaw's hook into each enrolled user's agent config and repairs it. Terms are in [Concepts](/docs/enterprise/plan/concepts).
+
+Only agents you select in the config are protected; see [Choose the agents to protect](/docs/enterprise/configure/configuration#choose-the-agents-to-protect). DefenseClaw's entries are derived from the config (`guardrail.connectors` and `enterprise.machine_policy`) and never read back as policy. The next `ensure`, `repair` or `reconcile` rewrites a changed entry, and `verify` reports the drift until then. Change the config, not the vendor file.
+
+You may maintain your own settings in vendor policy files. After an administrator
+or MDM changes one, run `ensure` as root. A managed hook refuses calls while its
+current vendor policy differs from the digest in the trusted runtime descriptor;
+`status`, `verify` and `reconcile` report `machine_policy_incomplete` until a
+verified view is pinned. `reconcile` also re-pins a verified view when it runs,
+but vendor policy paths do not automatically trigger it.
+
+On macOS, Codex and Claude Code hooks check the shared policy and only the
+invoking account's managed preference. The root lifecycle attests each
+per-account preference in the protected runtime descriptor. A hook refuses
+when its relevant preference is unreadable, missing, changed or otherwise
+unverifiable. Another account's preference does not affect this hook.
+
+## Routes by connector
+
+What each route does during a gateway outage is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
+
+| Connector | Route |
+| --- | --- |
+| Codex, Claude Code | Machine policy, with the vendor lock |
+| Cursor, GitHub Copilot CLI | Machine policy, with the foreign-hook guard |
+| OpenCode | Machine policy through the [managed OpenCode plugin](#managed-opencode-plugin), with the foreign-hook guard |
+| Amp, Devin, Hermes, Antigravity, Kiro | Per user. Amp and Devin get the foreign-hook guard on every OS; Hermes gets it on Linux and macOS. Windows Amp keeps its guard session record locally, and its plugin blocks gateway outages. |
+| OpenClaw, ZeptoClaw | Not managed: they need the guardrail proxy, which a managed host does not run (route `unsupported`) |
+
+The per-OS differences (Windows registrations, Kiro paths, Cascade) are in [Machine policy detail](/docs/enterprise/configure/reference#routes-by-connector-by-os).
+
+- **Vendor lock.** A setting in the agent's machine policy that stops user and project hooks from running. Only Codex and Claude Code have one.
+- **[Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard).** For agents without a lock, DefenseClaw removes or blocks hooks it has not approved.
+- **OpenCode** stays on the per-user plugin route while the managed plugin is missing or untrusted, its `ownership` is `off`, or OpenCode's managed config does not name the plugin.
+- **Copilot and OpenCode on Windows.** The hook registration comes from the machine policy. The guardian writes only each enrolled user's protected DefenseClaw runtime, never the user's Copilot or OpenCode config.
+
+The registrations run the administrator-owned hook binary; the commands are in [Machine policy detail](/docs/enterprise/configure/reference#hook-commands-by-route).
+
+## Machine policy files
+
+<Tabs items={['Linux', 'macOS', 'Windows']}>
+  <Tab value="Linux">
+
+| Connector | File |
+| --- | --- |
+| Codex | `/etc/codex/requirements.toml` |
+| Claude Code | `/etc/claude-code/managed-settings.d/90-defenseclaw.json` |
+| Cursor | `/etc/cursor/hooks.json` |
+| Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
+| OpenCode | `/etc/opencode/opencode.json` |
+| Devin Desktop Cascade (`devincascade`) | `/etc/devin/hooks.json` |
+
+  </Tab>
+  <Tab value="macOS">
+
+| Connector | File |
+| --- | --- |
+| Codex | `/etc/codex/requirements.toml` |
+| Claude Code | `/Library/Application Support/ClaudeCode/managed-settings.d/90-defenseclaw.json` |
+| Cursor | `/Library/Application Support/Cursor/hooks.json` |
+| Copilot | `/etc/github-copilot/policy.d/90-defenseclaw.json` |
+| OpenCode | `/Library/Application Support/opencode/opencode.json` |
+| Devin Desktop Cascade (`devincascade`) | `/Library/Application Support/Devin/hooks.json` |
+
+  </Tab>
+  <Tab value="Windows">
+
+| Connector | File |
+| --- | --- |
+| Codex | `%ProgramData%\OpenAI\Codex\requirements.toml` |
+| Claude Code | `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` |
+| Cursor | `%ProgramData%\Cursor\hooks.json` |
+| Copilot | `%ProgramData%\GitHub\Copilot\policy.d\90-defenseclaw.json` |
+| OpenCode | `%ProgramData%\opencode\opencode.json` |
+| Devin Desktop Cascade (`devincascade`) | `%ProgramData%\Devin\hooks.json` |
+
+  </Tab>
+</Tabs>
+
+For OpenCode, DefenseClaw uses an existing `opencode.jsonc` instead of `opencode.json`, as long as it holds no comments. The Cascade refusal goes into the pre-rename Cascade hooks file when only that file exists; see [Cascade on older builds](/docs/reference/connectors/devin#cascade-on-older-builds). Cascade is published while `devin` is protected and is not a connector of its own: it enrolls no user.
+
+## Ownership modes
+
+```yaml title="config.yaml (Linux and macOS example)"
+enterprise:
+  machine_policy:
+    default:
+      ownership: merge          # write and repair DefenseClaw's entries
+    connectors:
+      codex:
+        ownership: verify_only  # your MDM writes the file; DefenseClaw only checks it
+      cursor:
+        ownership: "off"        # leave this agent's machine policy alone
+```
+
+| `ownership` | What DefenseClaw does |
+| --- | --- |
+| `merge` (default) | Writes its entries and repairs them |
+| `verify_only` | Only checks the file. When its entries are missing, it reports `missing_defenseclaw_hooks` and the export command to use. |
+| `off` | On Linux and macOS, leaves the machine policy alone. Codex, Claude Code, Cursor and Copilot then have no DefenseClaw hooks, and `policy show` lists them as `ownership off: machine policy not managed`; OpenCode keeps its per-user plugin. On Windows, configured Claude Code, Codex and Cursor machine hooks remain installed and are verified even with zero enrolled users. The setting applies to Copilot, OpenCode and the Claude Code version floor there. |
+
+Quote `"off"` so YAML 1.1 tools do not read a bare `off` as the boolean `false`. Use `verify_only` when an MDM already writes a policy file on Linux or macOS: export DefenseClaw's entries (below) and add them to the MDM's template. On Windows, the lifecycle writes the configured Claude Code, Codex and Cursor machine hooks regardless of `ownership`, and `enterprise policy verify` checks them even before the first user enrolls and after the last is removed.
+
+## Who writes machine policy
+
+On Linux and macOS the lifecycle (`ensure`, install, upgrade, repair) writes every machine-policy file; the guardian never does. On Windows the lifecycle writes Codex at install, upgrade and repair, and the guardian writes the rest and keeps repairing them. [Detail](/docs/enterprise/configure/reference#who-writes-machine-policy).
+
+## Managed OpenCode plugin
+
+The payload ships a plugin at `<InstallRoot>/share/opencode/defenseclaw.js`, and DefenseClaw adds it to OpenCode's managed config. It holds no credential and fails closed. OpenCode uses this route only while the file is administrator-owned and OpenCode's managed config names it; otherwise the per-user plugin stays and `policy show` says why. [Detail](/docs/enterprise/configure/reference#managed-opencode-plugin).
+
+## Locks on Linux and macOS
+
+With `managed_hooks_only: enforce` (default), Codex gets `allow_managed_hooks_only = true` and Claude Code gets `allowManagedHooksOnly: true`, so user and project hooks do not run. If your own policy sets a lock to `false`, DefenseClaw reports a conflict instead of rewriting it. Set `managed_hooks_only: preserve` to leave a lock off; the foreign-hook guard then covers that agent. [Detail](/docs/enterprise/configure/reference#locks-on-linux-and-macos).
+
+## Windows differences
+
+Codex, Claude Code and Cursor policy is written with Windows-specific code. A non-empty `HKLM\SOFTWARE\Policies\ClaudeCode\Settings` value stops DefenseClaw publishing its Claude Code drop-in; keep it empty on hosts where DefenseClaw manages Claude Code. [Detail](/docs/enterprise/configure/reference#windows-differences).
+
+## Claude Code version floor
+
+DefenseClaw normally sets Claude Code's `requiredMinimumVersion` to 2.1.154 in `00-defenseclaw-version-floor.json`; builds below 2.1.163 do not read that setting. On standalone Windows, when every enrolled account runs 2.1.219 or later, the machine hook contract raises the floor to 2.1.219. Claude Code builds from 2.1.163 through 2.1.218 then refuse to start. Use application control for older builds. Set `version_floor: enforce | report | "off"` under `connectors.claudecode`. [Detail](/docs/enterprise/configure/reference#claude-code-version-floor).
+
+## Higher-precedence sources
+
+Some sources outrank the files DefenseClaw writes: macOS managed preferences, the Claude Code HKLM value on Windows, and server-managed or cloud settings. `higher_precedence_sources: fail` (default) records a visible source without DefenseClaw's hooks as a conflict; `warn` reports it as a note. [Detail](/docs/enterprise/configure/reference#higher-precedence-sources).
+
+## Inspect, export and verify
+
+These commands read the managed config and machine policy and never write it. Run them as root (Linux and macOS) or from an elevated PowerShell 7 session (Windows).
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
+```
+
+```powershell title="Windows (elevated PowerShell 7)"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone --json
+```
+
+- `show` lists, per connector, the route, coverage, the lock, the foreign-hook mode, the files, conflicts and notes, and ends with `Result: complete` or `Result: INCOMPLETE`. `--user` also scans that user's own agent config for foreign hooks.
+- `export --connector <name>` prints DefenseClaw's entries to deploy through your own policy tool.
+- `verify` exits 1 when any machine-policy connector is not covered. `verify --live` runs the real Codex or Claude Code client to prove it loads the hooks.
+
+A missing hook executable makes Windows Claude Code, Codex, Cursor and Copilot policy
+verification fail even when their machine policy files remain installed and no
+users are enrolled. Stop the affected agent, repair the installation, and run
+`enterprise windows verify --profile standalone --json` from an elevated prompt.
+Require that full check to pass before allowing agent use.
+
+Export formats and the `--live` requirements are in [Detail](/docs/enterprise/configure/reference#inspect-export-and-verify).
+
+## Vendor limits
+
+Some gaps come from the agents themselves: Codex and Claude Code treat a killed or timed-out `PreToolUse` hook as non-blocking, Claude Code `--bare` skips the managed `SessionStart` hook, old Claude Code and Copilot CLI builds can skip machine policy, OpenCode pure mode loads no plugins, and Amp has no machine-wide plugin location. Standalone `status` and `verify` warn `hook_process_fail_open` and set `security_complete: false` for enabled agents with this hook process risk. [Detail](/docs/enterprise/configure/reference#vendor-limits) and [Residual risks](/docs/enterprise/plan/threat-model#residual-risks).
+
+For an enrolled account, the five-minute enumerator checks every place it can select an agent version from for separate Claude Code, Codex and Copilot CLI copies: the per-user npm roots and immediate child directories of the home, every installed Node of nvm, fnm, asdf, mise and pnpm (up to 64 per manager), Volta's per-package images, Claude Code's vendor local installer at `~/.claude/local` and native versions directory, and the machine npm prefixes (`/usr/local`, `/usr`, `/opt/homebrew` and `agent_prefixes`; Node's own folder on Windows). On macOS it also checks Homebrew cask releases, and on Windows WinGet installs. A Claude Code npm copy counts whether it runs `cli.js` or the native `bin/claude.exe` (2.1.113 and later). Each copy is identified by the real path it resolves to, so a copy reached through a link is listed once. A copy in a location another account can change is listed as unverified whatever version it claims. A folder the account's own discovery cannot read, such as a macOS privacy-protected folder, is not inspected; use application control there. A runnable copy below a verified hook contract, or one whose version cannot be read, is listed individually by path in `status` and `verify` as not protected. Both completeness fields become `false`; status and verify send each finding to the managed audit. An incomplete bounded scan also makes completeness false. **This is detection, not an execution block.** An old Claude Code such as 2.0.77 ignores the managed drop-in and version floor, so it can still run a tool call until the administrator removes it or application control blocks it.
+
+The enumerator publishes its protected `unprotected-agents.json` record even when it found no unsupported installs. If the record is missing, unreadable, or more than 16 minutes old, `status` and `verify` report `agent_install_scan_incomplete` and set both completeness fields to `false`; `verify` fails until a successful enumeration publishes the record. This includes the short interval after a fresh install or an upgrade from a release that did not publish the record. In `enterprise.enrollment.mode: manifest`, the enumerator scans the accounts of the enabled administrator-authored targets, including accounts outside the automatic uid, shell, group and home-root filters, and no one else; a target it cannot inspect (an unresolved account, an untrusted home) is reported `agent_install_scan_incomplete`. It refreshes this record while leaving the targets untouched. `exclude_users` and `exempt_users` still win. On Windows, a standard token cannot read the protected record: status and verify report the inspection as incomplete and ask for an elevated Administrator prompt.
+
+The scan cannot prove that every executable on the filesystem is approved. Deeper custom prefixes, links or junctions to unscanned locations, renamed or copied binaries, self-built clients, user-controlled version metadata and a launch between scans remain outside the static search. On Linux and macOS, `status` and `verify` identify each running Claude Code from the executable the kernel recorded, not from its process title. They read the release from the native installer's `versions` directory, a Homebrew cask's version directory, or the npm package of the native binary (`@anthropic-ai/claude-code/bin/claude.exe`, or the platform package the npm fallback wrapper starts). A release with a verified hook contract passes; an older release, a copied, renamed or self-built binary, and a build replaced on disk while it runs are reported until that session restarts. A Volta shim counts as a launcher while the build it started runs; that build is checked on its own. A Node-hosted Claude Code script is checked by its package version while the script path remains in the process arguments; no release at or above the hook contract floor runs as a Node script, so one whose title hides the script is reported. A process that exits before a running-process scan is not observed. To require complete enforcement, restrict agents to approved builds and install paths with endpoint application control (WDAC or AppLocker on Windows, fapolicyd on Linux, or Santa on macOS) and test the exact private-prefix launch. An allow rule for the Node executable alone does not prevent it from loading an unapproved `@anthropic-ai/claude-code/cli.js`; the control must also restrict that script or prohibit user-launched Node. Include package runners and user-writable prefixes in the test. DefenseClaw does not install or configure those controls.

@@ -19,14 +19,13 @@ import Foundation
 @main
 enum RuntimeContractSurfaceTests {
     static func main() {
-        precondition(CommandRegistry.sourceCount == 223, "unexpected upstream command count")
         precondition(CommandRegistry.all.count == CommandRegistry.sourceCount, "registry count mismatch")
+        precondition(Set(CommandRegistry.all.map(\.id)).count == CommandRegistry.all.count, "command IDs must be unique")
 
         let titles = CommandRegistry.all.map(\.title)
         precondition(Set(titles).count == titles.count, "command titles must be unique")
         precondition(titles.contains("setup amp"), "Amp setup command is missing")
         precondition(titles.contains("setup kiro"), "Kiro setup command is missing")
-        precondition(titles.contains("setup omnigent"), "OmniGent setup command is missing")
         precondition(titles.contains("setup galileo"), "Galileo setup command is missing")
         precondition(titles.contains("config show effective observability"), "effective observability command is missing")
         precondition(titles.contains("observability plan"), "observability plan command is missing")
@@ -57,10 +56,9 @@ enum RuntimeContractSurfaceTests {
         Commands:
           amp          Configure Amp.
           kiro         Configure Kiro.
-          omnigent     Configure OmniGent.
                        Wrapped description text must not become a command.
         """)
-        precondition(setupCommands == ["amp", "kiro", "omnigent"], "setup help capabilities must parse exactly")
+        precondition(setupCommands == ["amp", "kiro"], "setup help capabilities must parse exactly")
 
         let galileo = command(titled: "setup galileo")
         precondition(galileo.requiresTerminal, "interactive Galileo setup must be terminal-only")

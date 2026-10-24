@@ -18,10 +18,12 @@ package hookexec
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // readCapped reads up to max bytes from r. It returns overflow=true (and the
@@ -113,6 +115,15 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 	if sp.failOpenOnly {
 		blocked = loggedFailMode(opts, sp, failMode) == "closed"
 	}
+	if w := opts.answerWatch; w != nil {
+		// Before anything below can block: a closed failure keeps the
+		// watchdog's answer closed (claimFailureLog).
+		done, claimed := w.claimFailureLog(opts, sp, blocked)
+		if !claimed {
+			return
+		}
+		defer close(done)
+	}
 	outcome := "fail_closed"
 	if !blocked {
 		outcome = "fail_open"
@@ -120,32 +131,50 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		// Never include request/response bodies or authentication credentials.
 		fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
 	}
-	if opts.Home == "" {
+	home := opts.Home
+	if opts.ManagedEnterprise {
+		// A managed row goes only to the invoking user's diagnostic
+		// directory, never to the administrator-owned enforcement home: an
+		// account the lookup does not resolve writes no row.
+		home = ""
+		if opts.FailureLogHome != nil {
+			home = opts.FailureLogHome()
+		}
+	}
+	if home == "" {
 		return
 	}
-	// Never create the DefenseClaw folder itself for a log line: a managed
-	// hook whose folder was missing recreated it here, and the next event's
-	// hook found a folder and no longer said it was missing (GAP-0154).
-	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
+	// Never create the DefenseClaw folder for a log line: a managed hook whose
+	// protected folder was missing recreated it here, user-owned with the
+	// profile's inherited access control, and the next event's hook found a
+	// folder and no longer said it was missing (GAP-0154, rel-1-0-4
+	// GAP-0593). A managed account with no such folder writes no row.
+	// Mkdir creates only logs, so a purge that removes the folder while the
+	// call runs is not undone either (GAP-0654).
+	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		return
 	}
 	failMode = loggedFailMode(opts, sp, failMode)
-	logDir := filepath.Join(opts.Home, "logs")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
+	logDir := filepath.Join(home, "logs")
+	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return
 	}
 	entry := struct {
 		TS        string `json:"ts"`
 		Connector string `json:"connector"`
 		Hook      string `json:"hook"`
-		Reason    string `json:"reason"`
-		Category  string `json:"category"`
-		FailMode  string `json:"fail_mode"`
-		Outcome   string `json:"outcome"`
+		// Event names the hook event, so a neutral stop event's allow
+		// reads apart from a tool call's fail-open (GAP-0527).
+		Event    string `json:"event,omitempty"`
+		Reason   string `json:"reason"`
+		Category string `json:"category"`
+		FailMode string `json:"fail_mode"`
+		Outcome  string `json:"outcome"`
 	}{
 		TS:        opts.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		Connector: sp.connector,
 		Hook:      sp.hookName,
+		Event:     strings.TrimSpace(opts.Event),
 		Reason:    reason,
 		Category:  category,
 		FailMode:  failMode,

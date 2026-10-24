@@ -714,7 +714,7 @@ function Assert-AuthenticatedAntigravityExistingInstallState(
     }
     if ([string]$State.connector -cnotin @(
             'none', 'codex', 'claudecode', 'copilot', 'cursor', 'hermes', 'antigravity',
-            'devin', 'opencode', 'omnigent'
+            'devin', 'opencode'
         ) -or [string]$State.mode -cnotin @('observe', 'action')) {
         throw "$Context has an invalid preexisting connector/mode identity"
     }
@@ -7462,16 +7462,15 @@ function Assert-ProtectedCopilotLocalTransaction([switch]$CleanupContext) {
     $expectedRoster = @(
         'claudecode|action|closed|True|manual',
         'codex|observe|open|True|manual',
-        'cursor|action|closed|True|manual',
-        'omnigent|observe|open|True|manual'
+        'cursor|action|closed|True|manual'
     )
     if ([int]$baseline.schema_version -ne 1 -or
-        [string]$baseline.kind -cne 'copilot-four-connector-sealed-current' -or
+        [string]$baseline.kind -cne 'copilot-three-connector-sealed-current' -or
         [string]$baseline.package_source_commit -cne $ExpectedPackageSourceCommit -or
         [bool]$baseline.hitl_claimed -or [bool]$baseline.opencode_active -or
         (@($baseline.roster) -join "`n") -cne ($expectedRoster -join "`n") -or
         [int]$baseline.doctor.pass -ne 70 -or [int]$baseline.doctor.fail -ne 0) {
-        throw 'local protected Copilot baseline manifest four-roster/Doctor identity is invalid'
+        throw 'local protected Copilot baseline manifest three-roster/Doctor identity is invalid'
     }
     $prefix = ([string]$transaction.baseline_manifest_sha256).Substring(0, 12)
     $installRoot = Split-Path -Parent (Split-Path -Parent `
@@ -9995,8 +9994,8 @@ function Assert-AuthenticatedAntigravityInteractiveEvidence(
     $outcomes.Add([ordered]@{ name = 'allow'; action = 'allow'; native_decision = 'allow'; sentinel = 'present'; decision_line = $allow[0].line; record_id = $allow[0].record_id; request_id = $allow[0].request_id; tool_invocation_id = $allow[0].tool_id; post_tool_record_ids = @($allowPost.record_id) })
     $outcomes.Add([ordered]@{ name = 'deny'; action = 'block'; native_decision = 'deny'; severity = $deny[0].severity; rule_ids = @($deny[0].rule_ids); sentinel = 'absent'; decision_line = $deny[0].line; record_id = $deny[0].record_id; request_id = $deny[0].request_id; tool_invocation_id = $deny[0].tool_id; post_tool_record_ids = @() })
     if ($AntigravityCertificationScope -ceq 'full-hilt') {
-        $outcomes.Add([ordered]@{ name = 'ask_approve'; action = 'confirm'; native_decision = 'ask'; native_interaction = 'approved'; severity = $asks[0].severity; rule_ids = @($asks[0].rule_ids); sentinel = 'present'; post_tool = 'present'; decision_line = $asks[0].line; record_id = $asks[0].record_id; request_id = $asks[0].request_id; tool_invocation_id = $asks[0].tool_id; post_tool_record_ids = @($approvedPost.record_id) })
-        $outcomes.Add([ordered]@{ name = 'ask_decline'; action = 'confirm'; native_decision = 'ask'; native_interaction = 'declined'; severity = $asks[1].severity; rule_ids = @($asks[1].rule_ids); sentinel = 'absent'; post_tool = 'absent'; decision_line = $asks[1].line; record_id = $asks[1].record_id; request_id = $asks[1].request_id; tool_invocation_id = $asks[1].tool_id; post_tool_record_ids = @() })
+        $outcomes.Add([ordered]@{ name = 'ask_approve'; action = 'confirm'; native_decision = 'force_ask'; native_interaction = 'approved'; severity = $asks[0].severity; rule_ids = @($asks[0].rule_ids); sentinel = 'present'; post_tool = 'present'; decision_line = $asks[0].line; record_id = $asks[0].record_id; request_id = $asks[0].request_id; tool_invocation_id = $asks[0].tool_id; post_tool_record_ids = @($approvedPost.record_id) })
+        $outcomes.Add([ordered]@{ name = 'ask_decline'; action = 'confirm'; native_decision = 'force_ask'; native_interaction = 'declined'; severity = $asks[1].severity; rule_ids = @($asks[1].rule_ids); sentinel = 'absent'; post_tool = 'absent'; decision_line = $asks[1].line; record_id = $asks[1].record_id; request_id = $asks[1].request_id; tool_invocation_id = $asks[1].tool_id; post_tool_record_ids = @() })
     }
     $limitations = [Collections.Generic.List[string]]::new()
     $limitations.Add('raw protected-lane test output; not certification or validated_versions evidence')

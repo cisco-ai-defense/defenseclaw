@@ -1,9 +1,9 @@
 # Connector compatibility
 
 Current operator-facing support is maintained in the published
-[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/)
+[connector compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/hook-contracts/)
 and
-[capability matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/capability-matrix/).
+[capability matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/apis/capability-matrix/).
 Those pages distinguish supported, preview, unsupported, and platform-specific
 surfaces without duplicating the matrix here.
 

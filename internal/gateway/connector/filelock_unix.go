@@ -19,8 +19,10 @@
 package connector
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -50,7 +52,7 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 	}
 	defer lockFile.Close()
 
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	if err := lockFileExclusive(lockFile, lockPath); err != nil {
 		return fmt.Errorf("acquire lock %s: %w", lockPath, err)
 	}
 	defer func() {
@@ -59,6 +61,24 @@ func withFileLockMode(path string, _ bool, fn func() error) error {
 	}()
 
 	return fn()
+}
+
+// fileLockContendedHookForTest, when set, is told that a lock acquisition
+// found the lock held and is about to wait for it (as
+// windowsLockContendedHookForTest is on Windows).
+var fileLockContendedHookForTest atomic.Pointer[func(lockPath string)]
+
+// lockFileExclusive takes the exclusive flock on f, blocking until it is
+// free. A contended attempt is reported to the test hook before the wait.
+func lockFileExclusive(f *os.File, lockPath string) error {
+	err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+	if !errors.Is(err, syscall.EWOULDBLOCK) {
+		return err
+	}
+	if hook := fileLockContendedHookForTest.Load(); hook != nil {
+		(*hook)(lockPath)
+	}
+	return syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
 }
 
 // RemoveIdleFileLockSentinels does nothing here: withFileLockMode removes

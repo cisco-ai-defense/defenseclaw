@@ -110,7 +110,7 @@ func managedSetupFlags(gatewayURL, tokenFile string) string {
 			if runtime.GOOS == "windows" {
 				flags += " --data-dir '" + strings.ReplaceAll(dataDir, "'", "''") + "'"
 			} else {
-				flags += fmt.Sprintf(" --data-dir %q", dataDir)
+				flags += " --data-dir '" + strings.ReplaceAll(dataDir, "'", "'\\''") + "'"
 			}
 		}
 	}
@@ -441,13 +441,17 @@ func run(args []string) error {
 	if token == "" {
 		return failToken(errors.New("token file is empty"))
 	}
-	evaluator, err := acp.NewHTTPEvaluator(*gateway, token)
+	setup, managedEntry := setupCommand(*clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup)
+	evaluatorForDeployment := acp.NewHTTPEvaluator
+	if managedEntry {
+		evaluatorForDeployment = acp.NewManagedHTTPEvaluator
+	}
+	evaluator, err := evaluatorForDeployment(*gateway, token)
 	if err != nil {
 		return fail(err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	setup, managedEntry := setupCommand(*clientID, *agentID, *profile, *mode, *contractLock, flagsForSetup)
 	stdin := io.Reader(os.Stdin)
 	var editor *editorInput
 	if *clientID == "zed" && !guardKeepsMainBehaviour() {

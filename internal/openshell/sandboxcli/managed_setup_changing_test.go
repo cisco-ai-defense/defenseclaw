@@ -25,6 +25,19 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
 
+func TestManagedOperationalRefusalsHaveOnlyTheRemedy(t *testing.T) {
+	m := &sandboxapi.ManagedStatus{Profile: "contractors", RequestAccess: sandboxapi.RequestAccessFallback}
+	for _, code := range []string{sandboxapi.CodeAdminViolation, sandboxapi.CodeUnavailable} {
+		for _, reason := range []string{sandboxrelay.ReasonDaemonOutdated, sandboxrelay.DetailSetupChanging} {
+			message := "Stop your sandboxes with `defenseclaw sandbox stop NAME`, then retry."
+			text, ok := managedErrorText(&sandboxapi.Error{Code: code, Message: message, Detail: reason}, m)
+			if !ok || text != message {
+				t.Fatalf("%s/%s: %q, %t", code, reason, text, ok)
+			}
+		}
+	}
+}
+
 // #1203: while the organization's switch of the sandbox driver is under
 // way, `run` and `doctor` say so and send nobody to IT for an exception;
 // a setup that is really missing keeps the contact.
@@ -41,7 +54,7 @@ func TestManagedSetupSwitchIsANoticeWithoutTheContact(t *testing.T) {
 		t.Fatalf("missing setup = %q, %t", text, ok)
 	}
 	row := managedRuntimeCheck(&sandboxapi.ManagedStatus{Unavailable: sandboxrelay.UnavailableSetupChanging, RequestAccess: "it-help@example.com"})
-	if row.Status != openshell.StatusWarn || row.Fix == nil || strings.Contains(row.Fix.Summary, "it-help") {
+	if row.Status != openshell.StatusFail || row.Fix == nil || strings.Contains(row.Fix.Summary, "it-help") {
 		t.Fatalf("doctor row = %+v", row)
 	}
 	row = managedRuntimeCheck(&sandboxapi.ManagedStatus{Unavailable: "OpenShell is not set up on this computer", RequestAccess: "it-help@example.com"})

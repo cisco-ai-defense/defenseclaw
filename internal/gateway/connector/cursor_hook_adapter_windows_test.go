@@ -41,7 +41,9 @@ const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 const copilotAdapterHelperMode = "TEST_COPILOT_ADAPTER_MODE"
 const copilotAdapterPIDFileEnv = "TEST_COPILOT_ADAPTER_PID_FILE"
 
-func TestMain(m *testing.M) {
+// prepareConnectorTestProcess runs the adapter helper modes, which exit,
+// and otherwise installs the connector unit-test fixtures (TestMain).
+func prepareConnectorTestProcess() {
 	switch os.Getenv(copilotAdapterHelperMode) {
 	case "result":
 		payload, err := io.ReadAll(os.Stdin)
@@ -61,6 +63,11 @@ func TestMain(m *testing.M) {
 		// end inside the deadline on its own.
 		time.Sleep(2 * time.Duration(copilotWindowsHookContractTimeoutMS) * time.Millisecond)
 		os.Exit(0)
+	case "crash":
+		// A launcher that dies without an answer (a panic exits 2).
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		fmt.Fprintln(os.Stderr, "panic: copilot adapter probe")
+		os.Exit(2)
 	}
 	switch os.Getenv(cursorAdapterHelperMode) {
 	case "success":
@@ -92,7 +99,6 @@ func TestMain(m *testing.M) {
 		codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
 			return codexEffectivePolicy{Source: "connector unit-test policy fixture"}, nil
 		}
-		os.Exit(m.Run())
 	}
 }
 
@@ -132,20 +138,26 @@ func readAdapterLauncherRecord(t *testing.T, pidFile, stderr string) (uint32, ti
 	return uint32(pid), time.Unix(0, launchedNS)
 }
 
-func renderCopilotAdapterForTest(t *testing.T, hookPath string, timeoutMS int) string {
+func renderCopilotAdapterForTest(t *testing.T, hookPath string, timeoutMS int, failMode string) string {
 	t.Helper()
 	tmpl, err := hookFS.ReadFile("hooks/copilot-hook.ps1")
 	if err != nil {
 		t.Fatalf("read Copilot adapter: %v", err)
 	}
 	rendered, err := renderTemplate(string(tmpl), templateData{
+		FailMode:             failMode,
 		HookBinaryPS:         strings.ReplaceAll(hookPath, "'", "''"),
 		CopilotHookTimeoutMS: timeoutMS,
 	})
 	if err != nil {
 		t.Fatalf("render Copilot adapter: %v", err)
 	}
-	path := filepath.Join(t.TempDir(), "copilot-hook.ps1")
+	root := t.TempDir()
+	hooks := filepath.Join(root, "hooks")
+	if err := os.Mkdir(hooks, 0o700); err != nil {
+		t.Fatalf("make Copilot hook directory: %v", err)
+	}
+	path := filepath.Join(hooks, "copilot-hook.ps1")
 	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
 		t.Fatalf("write Copilot adapter: %v", err)
 	}
@@ -156,12 +168,17 @@ func runCopilotAdapterTest(
 	t *testing.T,
 	adapterPath string,
 	payload string,
+	events ...string,
 ) (stdout, stderr string, exitCode int) {
 	t.Helper()
+	event := "preToolUse"
+	if len(events) != 0 {
+		event = events[0]
+	}
 	quoted := strings.ReplaceAll(adapterPath, "'", "''")
 	cmd := exec.Command(
 		"powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
-		"& '"+quoted+"' -Event 'preToolUse'",
+		"& '"+quoted+"' -Event '"+event+"'",
 	)
 	cmd.Stdin = strings.NewReader(payload)
 	var out, errOut bytes.Buffer
@@ -184,7 +201,7 @@ func TestCopilotAdapterPreservesJSONInputAndDenyResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(copilotAdapterHelperMode, "result")
-	adapter := renderCopilotAdapterForTest(t, executable, 10_000)
+	adapter := renderCopilotAdapterForTest(t, executable, 10_000, "closed")
 	stdout, stderr, code := runCopilotAdapterTest(
 		t, adapter, `{"source":"copilot-adapter-probe"}`,
 	)
@@ -199,9 +216,41 @@ func TestCopilotAdapterPreservesJSONInputAndDenyResponse(t *testing.T) {
 	}
 }
 
-func TestCopilotAdapterFailureUsesDocumentedFailOpenContract(t *testing.T) {
+const copilotAdapterClosedDenial = `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}`
+
+// A closed fail mode (the per-user default) denies a tool call the adapter
+// could not get checked: Copilot ignores a failed hook process, so an empty
+// answer let the tool run.
+func TestCopilotAdapterFailureDeniesAToolCallWhenClosed(t *testing.T) {
 	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
-	adapter := renderCopilotAdapterForTest(t, missingHook, 10_000)
+	adapter := renderCopilotAdapterForTest(t, missingHook, 10_000, "closed")
+	stdout, stderr, code := runCopilotAdapterTest(t, adapter, `{"source":"copilot-adapter-probe"}`)
+	if code != 0 || strings.TrimSpace(stdout) != copilotAdapterClosedDenial {
+		t.Fatalf("exit %d stdout %q, want Copilot's denial; stderr=%q", code, stdout, stderr)
+	}
+	if !strings.Contains(stderr, "Copilot hook adapter failed closed") {
+		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
+	}
+}
+
+// A launcher that exits non-zero without an answer crashed; a closed mode
+// denies the call.
+func TestCopilotAdapterDeniesWhenTheLauncherCrashes(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(copilotAdapterHelperMode, "crash")
+	adapter := renderCopilotAdapterForTest(t, executable, 10_000, "closed")
+	stdout, stderr, code := runCopilotAdapterTest(t, adapter, `{"source":"copilot-adapter-probe"}`)
+	if code != 0 || strings.TrimSpace(stdout) != copilotAdapterClosedDenial {
+		t.Fatalf("exit %d stdout %q, want Copilot's denial; stderr=%q", code, stdout, stderr)
+	}
+}
+
+func TestCopilotAdapterFailureFailsOpenOnlyWhenConfigured(t *testing.T) {
+	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
+	adapter := renderCopilotAdapterForTest(t, missingHook, 10_000, "open")
 	stdout, stderr, code := runCopilotAdapterTest(
 		t, adapter, `{"source":"copilot-adapter-probe"}`,
 	)
@@ -214,9 +263,35 @@ func TestCopilotAdapterFailureUsesDocumentedFailOpenContract(t *testing.T) {
 	if !strings.Contains(stderr, "Copilot hook adapter failed open") {
 		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
 	}
+	if err := os.Mkdir(filepath.Join(filepath.Dir(filepath.Dir(adapter)), ".install.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code = runCopilotAdapterTest(t, adapter, `{"source":"copilot-adapter-probe"}`)
+	if code != 0 || !strings.Contains(stdout, `"permissionDecision":"deny"`) ||
+		!strings.Contains(stdout, "being installed or upgraded") {
+		t.Fatalf("adapter allowed an install call: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	stdout, stderr, code = runCopilotAdapterTest(t, adapter, `{"source":"copilot-adapter-probe"}`, "permissionRequest")
+	if code != 0 || !strings.Contains(stdout, `"behavior":"deny"`) ||
+		!strings.Contains(stdout, "being installed or upgraded") {
+		t.Fatalf("adapter allowed an install permission request: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(copilotAdapterHelperMode, "result")
+	workingAdapter := renderCopilotAdapterForTest(t, executable, 10_000, "open")
+	if err := os.Mkdir(filepath.Join(filepath.Dir(filepath.Dir(workingAdapter)), ".install.lock"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code = runCopilotAdapterTest(t, workingAdapter, `{"source":"copilot-adapter-probe"}`)
+	if code != 0 || !strings.Contains(stdout, "being installed or upgraded") {
+		t.Fatalf("adapter accepted a policy answer during install: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+	}
 }
 
-func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
+func TestCopilotAdapterProductionDeadlineKillsChildAndFailsClosed(t *testing.T) {
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +299,7 @@ func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	t.Setenv(copilotAdapterHelperMode, "timeout")
 	t.Setenv(copilotAdapterPIDFileEnv, pidFile)
-	adapter := renderCopilotAdapterForTest(t, executable, copilotWindowsHookAdapterTimeoutMS)
+	adapter := renderCopilotAdapterForTest(t, executable, copilotWindowsHookAdapterTimeoutMS, "closed")
 	startedAt := time.Now()
 	stdout, stderr, code := runCopilotAdapterTest(
 		t, adapter, `{"source":"copilot-adapter-probe"}`,
@@ -242,11 +317,8 @@ func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
 		t.Fatalf("adapter exceeded the Copilot command-hook deadline: %s after the launcher started (%s including PowerShell startup)", elapsed, finishedAt.Sub(startedAt))
 	}
 	t.Logf("adapter finished %s after the launcher started (%s including PowerShell startup)", elapsed, finishedAt.Sub(startedAt))
-	if code != 0 {
-		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
-	}
-	if stdout != "" {
-		t.Fatalf("stdout = %q, want empty fail-open response", stdout)
+	if code != 0 || strings.TrimSpace(stdout) != copilotAdapterClosedDenial {
+		t.Fatalf("exit %d stdout %q, want Copilot's denial; stderr=%q", code, stdout, stderr)
 	}
 	if !strings.Contains(stderr, fmt.Sprintf("timed out after %dms", copilotWindowsHookAdapterTimeoutMS)) {
 		t.Fatalf("stderr = %q, want production timeout diagnostic", stderr)
@@ -332,18 +404,22 @@ func TestCursorAdapterPreservesSuccessfulLauncherResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv(cursorAdapterHelperMode, "success")
-	// A cold Go test helper may take over a second to start on a loaded
-	// Windows runner. This checks the successful response, not a 1 s budget.
-	adapter := renderCursorAdapterForTest(t, executable, "closed", true, 5_000)
-	stdout, stderr, code := runCursorAdapterTest(
-		t, adapter, `{"source":"cursor-adapter-probe"}`,
-	)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
-	}
-	assertCursorAllowJSON(t, stdout)
-	if stderr != "" {
-		t.Fatalf("stderr = %q, want empty", stderr)
+	for _, mode := range []string{"closed", "open"} {
+		t.Run(mode, func(t *testing.T) {
+			// A cold Go test helper may take over a second to start on a
+			// loaded Windows runner. This checks the successful response.
+			adapter := renderCursorAdapterForTest(t, executable, mode, true, 5_000)
+			stdout, stderr, code := runCursorAdapterTest(
+				t, adapter, `{"source":"cursor-adapter-probe"}`,
+			)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0; stderr=%q", code, stderr)
+			}
+			assertCursorAllowJSON(t, stdout)
+			if stderr != "" {
+				t.Fatalf("stderr = %q, want empty", stderr)
+			}
+		})
 	}
 }
 
@@ -405,16 +481,15 @@ func TestCursorAdapterExceptionEmitsFailClosedJSON(t *testing.T) {
 	}
 }
 
-func TestCursorAdapterExceptionFailsOpenOnlyWhenConfigured(t *testing.T) {
+func TestCursorAdapterExceptionClosesWithOpenOutageMode(t *testing.T) {
 	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
 	adapter := renderCursorAdapterForTest(t, missingHook, "open", false, 1_000)
 	stdout, stderr, code := runCursorAdapterTest(
 		t, adapter, `{"source":"cursor-adapter-probe"}`,
 	)
-	if code != 0 {
-		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
+	if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
+		t.Fatalf("local failure allowed with open outage mode: code=%d stdout=%q stderr=%q", code, stdout, stderr)
 	}
-	assertCursorAllowJSON(t, stdout)
 	if !strings.Contains(stderr, "Cursor hook adapter failed") {
 		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
 	}
@@ -471,16 +546,62 @@ func TestCursorMappedAdapterUsesCurrentSIDNotPeerPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				stdout, stderr, code := runCursorAdapterTest(t, adapter, `{"source":"cursor-adapter-probe"}`)
-				if mode == "open" && failure != "block" {
-					if code != 0 {
-						t.Fatalf("open user blocked: code=%d stderr=%q", code, stderr)
+				if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
+					t.Fatalf("local adapter failure or valid denial allowed: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+				}
+				if failure != "block" {
+					loggedOpen := strings.Contains(stderr, "open gateway-outage mode does not apply")
+					if loggedOpen != (mode == "open") {
+						t.Fatalf("adapter used another SID's outage mode: mode=%s stderr=%q", mode, stderr)
 					}
-					assertCursorAllowJSON(t, stdout)
-					if !strings.Contains(stderr, "WARNING hook fail-open; inspection bypassed connector=cursor") {
-						t.Fatal("missing fail-open diagnostic")
+				}
+			})
+		}
+	}
+}
+
+// The released per-user adapters (testdata/released-hooks) let the call run
+// when the hook launcher is missing, as it is for a moment while an upgrade
+// swaps it. After the installer's refresh to closed they deny it.
+func TestRefreshedReleasedAdaptersDenyWhenTheLauncherIsMissing(t *testing.T) {
+	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
+		for _, adapter := range []string{"cursor-hook.ps1", "copilot-hook.ps1"} {
+			body, err := os.ReadFile(filepath.Join("testdata", "released-hooks", release, adapter))
+			if os.IsNotExist(err) {
+				continue // 0.8.10 had no Copilot adapter.
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Run(release+"/"+adapter, func(t *testing.T) {
+				hookDir := t.TempDir()
+				missing := filepath.Join(t.TempDir(), "defenseclaw-hook.exe")
+				body := strings.ReplaceAll(string(body), `C:\Users\dc-user\AppData\Local\DefenseClaw\bin\defenseclaw-hook.exe`, missing)
+				path := filepath.Join(hookDir, adapter)
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				run := func() (string, string, int) {
+					if adapter == "copilot-hook.ps1" {
+						return runCopilotAdapterTest(t, path, `{"source":"copilot-adapter-probe"}`)
 					}
-				} else if code != 2 || !strings.Contains(stdout, `"permission":"deny"`) {
-					t.Fatalf("closed/unenrolled user or valid denial allowed: code=%d stdout=%q stderr=%q", code, stdout, stderr)
+					return runCursorAdapterTest(t, path, `{"source":"cursor-adapter-probe"}`)
+				}
+				denied := func(stdout string, code int) bool {
+					if adapter == "copilot-hook.ps1" {
+						return code == 0 && strings.TrimSpace(stdout) == copilotAdapterClosedDenial
+					}
+					// powershell -Command reports an older adapter's exit 2 as 1.
+					return code != 0 && strings.Contains(stdout, `"permission":"deny"`)
+				}
+				if stdout, stderr, code := run(); denied(stdout, code) {
+					t.Fatalf("precondition: the %s adapter denies before the refresh: %q %q", release, stdout, stderr)
+				}
+				if _, err := RefreshHookFailModes(hookDir, func(string) string { return "closed" }); err != nil {
+					t.Fatal(err)
+				}
+				if stdout, stderr, code := run(); !denied(stdout, code) {
+					t.Fatalf("the refreshed %s adapter: exit %d stdout %q stderr %q, want a denial", release, code, stdout, stderr)
 				}
 			})
 		}

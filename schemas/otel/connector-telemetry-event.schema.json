@@ -12,15 +12,25 @@
     "attributes"
   ],
   "properties": {
-    "timeUnixNano": { "type": "string" },
-    "observedTimeUnixNano": { "type": "string" },
+    "timeUnixNano": {
+      "type": "string"
+    },
+    "observedTimeUnixNano": {
+      "type": "string"
+    },
     "severityText": {
       "type": "string",
-      "enum": ["INFO", "WARN"]
+      "enum": [
+        "INFO",
+        "WARN"
+      ]
     },
     "severityNumber": {
       "type": "integer",
-      "enum": [9, 13]
+      "enum": [
+        9,
+        13
+      ]
     },
     "body": {
       "type": "object",
@@ -34,20 +44,31 @@
           ]
         }
       },
-      "required": ["stringValue"]
+      "required": [
+        "stringValue"
+      ]
     },
     "attributes": {
       "type": "array",
-      "items": { "$ref": "#/$defs/attribute" }
+      "items": {
+        "$ref": "#/$defs/attribute"
+      }
     }
   },
   "$defs": {
     "attribute": {
       "type": "object",
-      "required": ["key", "value"],
+      "required": [
+        "key",
+        "value"
+      ],
       "properties": {
-        "key": { "type": "string" },
-        "value": { "type": "object" }
+        "key": {
+          "type": "string"
+        },
+        "value": {
+          "type": "object"
+        }
       }
     },
     "attributeDefinitions": {
@@ -77,11 +98,9 @@
             "cursor",
             "devin",
             "copilot",
-            "openhands",
             "antigravity",
             "opencode",
             "amp",
-            "omnigent",
             "kiro",
             "unknown"
           ],
@@ -89,15 +108,30 @@
         },
         "defenseclaw.connector.signal": {
           "type": "string",
-          "enum": ["logs", "metrics", "traces", "hook", "notify"]
+          "enum": [
+            "logs",
+            "metrics",
+            "traces",
+            "hook",
+            "notify"
+          ]
         },
         "defenseclaw.connector.result": {
           "type": "string",
-          "enum": ["ok", "malformed", "rejected"]
+          "enum": [
+            "ok",
+            "malformed",
+            "rejected"
+          ]
         },
         "defenseclaw.otel.ingest.signal": {
           "type": "string",
-          "enum": ["logs", "metrics", "traces", "hook"]
+          "enum": [
+            "logs",
+            "metrics",
+            "traces",
+            "hook"
+          ]
         },
         "defenseclaw.otel.ingest.source": {
           "type": "string",
@@ -105,7 +139,11 @@
         },
         "defenseclaw.otel.ingest.result": {
           "type": "string",
-          "enum": ["ok", "malformed", "rejected"]
+          "enum": [
+            "ok",
+            "malformed",
+            "rejected"
+          ]
         },
         "defenseclaw.otel.ingest.records": {
           "type": "integer",
@@ -127,7 +165,10 @@
         },
         "defenseclaw.codex.notify.result": {
           "type": "string",
-          "enum": ["ok", "malformed"]
+          "enum": [
+            "ok",
+            "malformed"
+          ]
         },
         "defenseclaw.codex.notify.turn_id": {
           "type": "string"

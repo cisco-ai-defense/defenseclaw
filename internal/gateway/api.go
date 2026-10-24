@@ -41,8 +41,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -51,11 +49,13 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/fleet"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinationtest"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
@@ -74,6 +74,13 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// Both API listeners start one background recovery of the hook delivery
+	// journal rows earlier gateway processes left (startPendingHookRecovery);
+	// neither waits for it.
+	pendingHookRecoveryOnce sync.Once
+	// hookDeliveryProcessID, when set, replaces this process's journal
+	// identity (deliveryProcessID): tests start a server as the next process.
+	hookDeliveryProcessID string
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
 
@@ -89,9 +96,9 @@ type APIServer struct {
 	// caller identity: each identity has its own session store, so callers
 	// never wait on each other's exchanges.
 	foreignHookSessionLocks keyedMutex
-	// foreignHookRemovals caches the hook guardian foreign-hook removal
-	// ledger the session exchanges check.
-	foreignHookRemovals foreignHookRemovalCache
+	// foreignHookRemovals reads the hook guardian foreign-hook removal
+	// ledger on every session exchange.
+	foreignHookRemovals foreignHookRemovalSource
 	// hookCallerLimits bounds each verified caller identity's requests on a
 	// standalone gateway (hook socket and per-user credentials).
 	hookCallerLimits hookCallerLimiter
@@ -103,6 +110,9 @@ type APIServer struct {
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
+	// preToolDecisions pairs audited Claude Code/Codex PreToolUse decisions
+	// with later post-tool observations, without a background worker.
+	preToolDecisions preToolDecisionTracker
 
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
@@ -295,10 +305,10 @@ type APIServer struct {
 	hookSpawnLineageMu                sync.Mutex
 	hookSpawnIntents                  map[string]hookSpawnIntent
 	hookSpawnIntentOrder              []string
+	hookSpawnTakenCalls               map[string]time.Time
 	hookChildThreads                  map[string]hookChildThread
 	hookChildThreadOrder              []string
 	copilotSubagents                  []copilotPendingSubagent
-	codexPendingThreads               []codexPendingThread
 	hookSessionStates                 map[string]hookSessionState
 	hookSessionStateOrder             []string
 	// hookLifecycleHistoryRead holds the session keys whose signed lifecycle
@@ -630,7 +640,10 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	presented = strings.TrimSpace(presented)
-	if name == "" || presented == "" {
+	// until 1.1: the hook token an upgraded host keeps for a connector 1.0.4
+	// removed (OpenHands) authenticates nothing; old hooks reach the route
+	// that blocks them whatever the token.
+	if name == "" || presented == "" || connector.IsRemovedConnector(name) {
 		return false
 	}
 
@@ -1152,6 +1165,7 @@ func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
 }
 
 func (a *APIServer) Run(ctx context.Context) error {
+	a.startPendingHookRecovery(ctx)
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)
@@ -1358,10 +1372,21 @@ func (a *APIServer) Run(ctx context.Context) error {
 
 	// The Windows standalone hook reports the calls it refuses for an
 	// unenrolled account here (GAP-1242); a no-op on every other profile.
-	// It stops with this run of the API server.
+	// It stops with this run of the API server, which waits, bounded, for
+	// its last rows (GAP-1253).
 	refusalCtx, stopRefusals := context.WithCancel(ctx)
-	defer stopRefusals()
-	go a.serveUnenrolledRefusals(refusalCtx)
+	refusalsDone := make(chan struct{})
+	defer func() {
+		stopRefusals()
+		select {
+		case <-refusalsDone:
+		case <-time.After(unenrolledRefusalStopTimeout):
+		}
+	}()
+	go func() {
+		defer close(refusalsDone)
+		a.serveUnenrolledRefusals(refusalCtx)
+	}()
 
 	errCh := make(chan error, 2)
 	if hookSrv != nil {
@@ -1615,7 +1640,7 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 			// nobody, and the whole team falls to the default profile:
 			// status and verify report it (GAP-0704). The last check is
 			// served; a stale one is refreshed in the background.
-			if warnings := liveGuardrailProfiles.Load().healthProfileWarnings(); len(warnings) > 0 {
+			if warnings := standaloneProfileWarnings(liveGuardrailProfiles.Load(), cfg); len(warnings) > 0 {
 				setHealthProfileWarnings(body, "profile_warnings", "profile_warning_count", warnings, rootPeer)
 			}
 			// Non-secret fingerprints of the per-user credential keys that
@@ -1800,15 +1825,16 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"connector_modes": a.connectorModesSummary(r.Context()),
 	}
 	if cfg := a.runtimeConfigSnapshot(); cfg != nil && !cfg.SecureClientIntegration() {
-		if set := a.guardrailProfileSet(); set != nil {
+		set := a.guardrailProfileSet()
+		if set != nil {
 			status["profile_assignment_warnings"] = set.assignmentWarnings(true)
-			// What /health lists only to root on the hook socket: Windows
-			// status and verify read it here with the gateway credential
-			// (GAP-1268).
-			if cfg.StandaloneEnterprise() {
-				if warnings := set.healthProfileWarnings(); len(warnings) > 0 {
-					status["profile_warnings"] = warnings
-				}
+		}
+		// What /health lists only to root on the hook socket: Windows
+		// status and verify read it here with the gateway credential
+		// (GAP-1268).
+		if cfg.StandaloneEnterprise() {
+			if warnings := standaloneProfileWarnings(set, cfg); len(warnings) > 0 {
+				status["profile_warnings"] = warnings
 			}
 		}
 	}
@@ -1843,6 +1869,12 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 	if !connector.IsLoopback(r) {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "shutdown is restricted to loopback clients"})
+		return
+	}
+	// A managed standalone gateway is a system service: its service manager
+	// starts and stops it, and the gateway token does not.
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil && cfg.StandaloneEnterprise() {
+		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": managedShutdownRefusal})
 		return
 	}
 	if a.shutdownRequester == nil {
@@ -1883,6 +1915,14 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// managedShutdownRefusal answers a shutdown request on a managed standalone
+// computer.
+const managedShutdownRefusal = "this gateway is managed by the computer's administrator and runs as a system service; it is not stopped over the API"
+
+// managedBundlePolicyReloadRefusal answers /policy/reload on a managed
+// standalone computer that takes its policy from signed bundles.
+const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles; deliver a new signed bundle instead of reloading the policy over the API"
+
 func sameRuntimeDataDir(left, right string) bool {
 	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
 		return false
@@ -1905,7 +1945,7 @@ func sameRuntimeDataDir(left, right string) bool {
 //	  "connector":  "codex" | "claudecode" | "openclaw" | "zeptoclaw",
 //	  "mode":       "guardrail" | "observability", // legacy data-path field
 //	  "policy_mode": "observe" | "action",
-//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks" | "omnigent_policy_api",
+//	  "enforcement_surface": "llm_proxy" | "agent_lifecycle_hooks",
 //	  "telemetry":  ["hooks", "otel", "notify"],   // active channels
 //	  "proxy_intercept": true | false,
 //	}
@@ -1981,8 +2021,8 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 	// connector, showed up in `defenseclaw-gateway status` as "Data path:
 	// DefenseClaw proxy" in the same output whose Guardrail subsystem said
 	// "proxy_port: closed" and "the local guardrail proxy is not in the LLM
-	// data path". The list below now contributes only the telemetry channels
-	// and OmniGent's policy-API surface, which are genuinely per-connector.
+	// data path". The list below now contributes only the telemetry
+	// channels, which are genuinely per-connector.
 	if !connectorProxyBindsByName(name) {
 		mode = "observability"
 		intercept = false
@@ -1998,14 +2038,9 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "copilot", "openhands",
+	case "hermes", "cursor", "devin", "copilot",
 		"antigravity", "opencode", "amp", "kiro":
 		telemetry = []string{"hooks"}
-	case "omnigent":
-		// OmniGent enforces through its own policy API rather than the
-		// shared lifecycle-hook bridge, so it keeps a distinct surface.
-		surface = "omnigent_policy_api"
-		telemetry = []string{"policy-api"}
 	default:
 		// openclaw / zeptoclaw / unknown: enforcement is the only
 		// supported mode today. Hooks are wired by the connector;
@@ -2353,6 +2388,11 @@ func (a *APIServer) handleScanResult(w http.ResponseWriter, r *http.Request) {
 
 	var result scanner.ScanResult
 	if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			a.writeJSON(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "request body too large"})
+			return
+		}
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return
 	}
@@ -2903,7 +2943,7 @@ func scanAPIResponseEnvelope(result *scanner.ScanResult) map[string]interface{} 
 		bySev[string(f.Severity)]++
 	}
 	return map[string]interface{}{
-		"scan_id":                    uuid.New().String(),
+		"scan_id":                    observability.NewTimeOrderedID(),
 		"verdict":                    string(result.MaxSeverity()),
 		"provenance":                 version.Current(),
 		"findings_count_by_severity": bySev,
@@ -3195,12 +3235,26 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/mcp/scan — run MCP scanner on a target (URL or local path)
+// POST /v1/mcp/scan — run MCP scanner on a URL or configured server name.
 // ---------------------------------------------------------------------------
 
 type mcpScanRequest struct {
 	Target string `json:"target"`
 	Name   string `json:"name"`
+}
+
+func mcpScanLocalPath(target string) bool {
+	lower := strings.ToLower(target)
+	windowsDrive := len(target) >= 2 && target[1] == ':' &&
+		(target[0] >= 'A' && target[0] <= 'Z' || target[0] >= 'a' && target[0] <= 'z')
+	if strings.HasPrefix(lower, "file:") || windowsDrive || filepath.IsAbs(target) {
+		return true
+	}
+	if strings.Contains(target, "://") {
+		return false
+	}
+	return target == "." || target == ".." || strings.ContainsAny(target, `/\`) ||
+		strings.HasPrefix(target, "~") || strings.HasSuffix(lower, ".json")
 }
 
 func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
@@ -3218,9 +3272,19 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if (filepath.IsAbs(req.Target) || strings.ContainsAny(req.Target, `/\`) ||
-		strings.HasSuffix(strings.ToLower(req.Target), ".json")) &&
-		!strings.Contains(req.Target, "://") && a.rejectWindowsGatewayPath(w, req.Target) {
+	if mcpScanLocalPath(req.Target) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "local path targets are not supported by the MCP scan API; use a configured MCP server name or an MCP URL",
+		})
+		return
+	}
+	lowerTarget := strings.ToLower(req.Target)
+	if strings.Contains(req.Target, "://") && !strings.HasPrefix(lowerTarget, "http://") &&
+		!strings.HasPrefix(lowerTarget, "https://") && !strings.HasPrefix(lowerTarget, "ws://") &&
+		!strings.HasPrefix(lowerTarget, "wss://") && !strings.HasPrefix(lowerTarget, "sse://") {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "unsupported MCP scan URL scheme; use http, https, ws, wss or sse",
+		})
 		return
 	}
 
@@ -3790,6 +3854,11 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the connection through the
+// metrics writer (read deadlines, full duplex, and the bounded write of
+// handleForeignHookSession).
+func (sw *statusWriter) Unwrap() http.ResponseWriter { return sw.ResponseWriter }
+
 type authenticatedInspectConnectorKey struct{}
 
 func withAuthenticatedInspectConnector(ctx context.Context, connectorName string) context.Context {
@@ -3831,6 +3900,12 @@ func requestGatewayToken(r *http.Request) string {
 // and never reaches next.
 func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// until 1.1: a removed connector's hook route blocks every call
+		// before any credential check (retired_connector_hook.go): with a
+		// valid token, a revoked one, none or a sandbox credential.
+		if serveRetiredConnectorHook(w, r) {
+			return
+		}
 		if r.URL.Path == "/health" && r.Method == http.MethodGet {
 			next.ServeHTTP(w, r)
 			return
@@ -4007,20 +4082,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
-			if authenticated, ok := a.authenticateACPToken(r, token); ok {
-				r = authenticated.WithContext(a.attachACPSubject(authenticated.Context()))
-				next.ServeHTTP(w, r)
-				return
-			}
-			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_scoped_token")
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
-			return
-		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))
 			registered := false
-			if a.connectorRegistry != nil {
+			if a.connectorRegistry != nil && !connector.IsRemovedConnector(hookScope) {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
 			if registered {
@@ -4268,7 +4333,11 @@ func maxBodyMiddleware(next http.Handler, maxBytes int64) http.Handler {
 func bodyLimitMiddleware(next http.Handler, maxBytes func(*http.Request) int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes(r))
+			limit := maxBytes(r)
+			if r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" {
+				limit += int64(len(hookexec.HookDeliveryReceiptBlock))
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -4478,6 +4547,16 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	recordFailure := func(reason string) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
+	}
+	// With signed bundles, a policy becomes active only through a verified
+	// bundle apply, which the lifecycle confirms against the running gateway.
+	if cfg := a.runtimeConfigSnapshot(); policyCfg.StandaloneEnterprise() || cfg != nil && cfg.StandaloneEnterprise() {
+		recordFailure(managedBundlePolicyReloadRefusal)
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error":  managedBundlePolicyReloadRefusal,
+			"status": "refused",
+		})
+		return
 	}
 
 	// Secure Client keeps the reload check of main (issue #1092): it fails

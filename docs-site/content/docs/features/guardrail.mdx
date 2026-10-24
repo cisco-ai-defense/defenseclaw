@@ -1,0 +1,97 @@
+---
+title: Guardrail
+description: How DefenseClaw checks an agent's prompts and tool calls, and decides to allow, alert, ask you, or block.
+keywords:
+  - DefenseClaw guardrail
+  - observe mode
+  - action mode
+  - human approval HITL
+  - block level
+---
+
+The guardrail checks what your agent is about to do (a prompt, a shell command, a tool call) against rules, and answers allow, alert, ask you, or block. It runs in the gateway. The agent's hook only carries the question and the answer.
+
+You choose how strict it is per agent with a mode:
+
+- **Observe** records policy findings without enforcing them. Start here.
+- **Action** applies the block and alert levels below.
+- **Human approval (HITL)** is an option in action mode. A risky call below the block level pauses and asks you first, on agents that can ask.
+
+## How a tool call is decided
+
+<Flow
+  direction="TB"
+  caption="How the gateway picks a verdict for a tool call in action mode, and whether that verdict can pause the agent. The levels shown are the default rule pack's. Observe mode records the verdict and lets the call run."
+>
+  <Node id="call" kind="gateway">{`Gateway rates the call\nby its worst finding`}</Node>
+  <Node id="block" kind="decision">{`At the block level?\nCRITICAL by default`}</Node>
+  <Node id="deny" kind="generic">{`Blocked\nno prompt`}</Node>
+  <Node id="hitl" kind="decision">{`Needs approval?\nHITL on · HIGH and up`}</Node>
+  <Node id="alert" kind="generic">{`Alert or allow\nalerts at MEDIUM and up`}</Node>
+  <Node id="native" kind="decision">{`Can this event ask?\nnative agent prompt`}</Node>
+  <Node id="ask" kind="agent">{`Agent asks the user\napprove runs · deny stops`}</Node>
+  <Node id="fallback" kind="connector">{`Alert, no pause\nconfirm kept in audit`}</Node>
+  <Edge from="call" to="block" />
+  <Edge from="block" to="deny" label="yes" />
+  <Edge from="block" to="hitl" label="no" />
+  <Edge from="hitl" to="alert" label="no" />
+  <Edge from="hitl" to="native" label="yes" />
+  <Edge from="native" to="ask" label="yes" />
+  <Edge from="native" to="fallback" label="no" />
+</Flow>
+
+## Block and alert levels
+
+Findings have a severity: CRITICAL, HIGH, MEDIUM or LOW. The rule pack sets the default levels.
+
+| Rule pack | Blocks at | Alerts at | Notes |
+| --- | --- | --- | --- |
+| `default` | CRITICAL | MEDIUM and up | Shipped baseline. |
+| `strict` | MEDIUM and up | LOW and up | Blocks more. |
+| `permissive` | CRITICAL | HIGH and up | Favors availability. |
+
+With the `default` pack in action mode:
+
+| Finding | HITL off | HITL on (minimum HIGH) |
+| --- | --- | --- |
+| CRITICAL | Block | Block |
+| HIGH | Alert | Ask (or alert where the agent cannot ask) |
+| MEDIUM | Alert | Alert |
+| LOW | Allow | Allow |
+
+Human approval is off by default. Its default minimum severity is HIGH. Change the levels with `defenseclaw guardrail block-at` and `alert-at`, or per rule pack, connector or profile ([Thresholds](/docs/reference/policy/thresholds) shows which scope wins).
+
+## Fail mode
+
+The hook fail mode decides what happens when the gateway cannot answer (unreachable, bad response, authentication failure). The default is `closed`: the agent blocks the call where the event can carry a block response. Per-user Cursor in observe mode still blocks a supported event during a gateway outage by default; its user hook registration has `failClosed: true` outside Secure Client. `open` allows the call and logs the failure.
+
+## Which agents can ask
+
+Only these agent events can pause for your approval. Every other agent applies an alert and keeps `raw_action: confirm` in the audit log.
+
+| Agent | Event that can ask |
+| --- | --- |
+| Claude Code | `PreToolUse`, in Manual mode only (any other permission mode blocks the call) |
+| GitHub Copilot CLI | `preToolUse` |
+| Antigravity | `PreToolUse` |
+| Amp | `tool.call` and `tool.result` in the active foreground thread |
+| OpenClaw | `before_tool_call` |
+
+Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw cannot ask. The [capability matrix](/docs/reference/apis/capability-matrix) lists block events and fail-closed support for every agent.
+
+## What it does not do
+
+- It cannot see what a child program writes after a command starts. For protected files, add a sandbox or file permissions.
+- Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply.
+- The TUI does not hold or resume a paused call. Approval happens in the agent.
+
+## Do it
+
+<Cards>
+  <Card title="Turn on blocking" href="/docs/how-to/guardrail/turn-on-blocking" description="Switch an agent from observe to action." />
+  <Card title="Ask before risky calls" href="/docs/how-to/guardrail/ask-before-risky-calls" description="Turn on human approval at HIGH." />
+  <Card title="Allow a blocked call" href="/docs/how-to/guardrail/allow-a-blocked-call" description="The safe ways to let one through." />
+  <Card title="Add or remove an agent" href="/docs/how-to/agents/add-or-remove-an-agent" description="Guard a second agent." />
+</Cards>
+
+All guides: [How-to > Guardrail](/docs/how-to/guardrail). Reference: [`setup guardrail` flags](/docs/reference/commands/guardrail-setup), [guardrail profiles](/docs/reference/policy/guardrail-profiles), [LLM providers](/docs/reference/configuration/llm-providers), [fail modes](/docs/reference/configuration/fail-modes).

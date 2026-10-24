@@ -149,57 +149,6 @@ func TestBindOpenCodeLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing
 	}
 }
 
-func TestBindOmnigentLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
-	root := t.TempDir()
-	ambient := filepath.Join(root, "ambient-omnigent")
-	bound := filepath.Join(root, "bound-omnigent")
-	t.Setenv("OMNIGENT_CONFIG_HOME", ambient)
-	connectorFlagConfigHome = bound
-	t.Cleanup(func() { connectorFlagConfigHome = "" })
-
-	restore, err := bindConnectorLifecycleConfigHome("omnigent")
-	if err != nil {
-		t.Fatalf("bind OmniGent config home: %v", err)
-	}
-	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != bound {
-		t.Fatalf("OMNIGENT_CONFIG_HOME = %q, want %q", got, bound)
-	}
-	if got := connector.NewOmnigentConnector().Capabilities(resolveConnectorOpts("")).Hooks.ConfigPath; !strings.HasPrefix(filepath.Clean(got), filepath.Clean(bound)+string(filepath.Separator)) {
-		t.Fatalf("OmniGent config path = %q, want beneath %q", got, bound)
-	}
-	restore()
-	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != ambient {
-		t.Fatalf("restored OMNIGENT_CONFIG_HOME = %q, want %q", got, ambient)
-	}
-}
-
-func TestOmnigentVerifyAcceptsExactHiddenConfigHomeAndRestoresAmbient(t *testing.T) {
-	root := t.TempDir()
-	dataDir := testenv.PrivateTempDir(t)
-	ambient := filepath.Join(root, "ambient-omnigent")
-	bound := filepath.Join(root, "bound-omnigent")
-	if err := os.MkdirAll(bound, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("OMNIGENT_CONFIG_HOME", ambient)
-	defer withConnectorState(t, dataDir, "omnigent")()
-
-	stdout, stderr, exitCode := runConnectorCmd(
-		t,
-		"verify",
-		"--connector", "omnigent",
-		"--data-dir", dataDir,
-		"--config-home", bound,
-		"--json",
-	)
-	if exitCode != 0 || stderr != "" || !strings.Contains(stdout, `"connector":"omnigent"`) || !strings.Contains(stdout, `"clean":true`) {
-		t.Fatalf("OmniGent explicit-home verify: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
-	}
-	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != ambient {
-		t.Fatalf("OMNIGENT_CONFIG_HOME after verify = %q, want %q", got, ambient)
-	}
-}
-
 func TestBindHermesLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
 	root := t.TempDir()
 	ambient := filepath.Join(root, "ambient-hermes")
@@ -430,7 +379,7 @@ func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
 		"--json",
 	)
 	if !strings.Contains(stdout, `"connector":"cursor"`) ||
-		!strings.Contains(stdout, `"fail_mode":"open"`) ||
+		!strings.Contains(stdout, `"fail_mode":"closed"`) ||
 		stderr != "" {
 		t.Fatalf("Cursor reconcile: stdout=%q stderr=%q", stdout, stderr)
 	}
@@ -439,12 +388,12 @@ func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(hooks, []byte(`"failClosed": false`)) ||
+	if !bytes.Contains(hooks, []byte(`"failClosed": true`)) ||
 		!bytes.Contains(hooks, []byte(`"preToolUse"`)) {
 		t.Fatalf("Cursor reconcile wrote an incomplete registration: %s", hooks)
 	}
-	if lock := connector.LoadHookContractLockEntry(dataDir, "cursor"); lock.HookFailMode != "open" {
-		t.Fatalf("Cursor observe lock fail mode = %q, want open", lock.HookFailMode)
+	if lock := connector.LoadHookContractLockEntry(dataDir, "cursor"); lock.HookFailMode != "closed" {
+		t.Fatalf("Cursor observe lock fail mode = %q, want closed", lock.HookFailMode)
 	}
 }
 

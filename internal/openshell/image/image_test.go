@@ -767,7 +767,6 @@ func replaceField(s, prefix string, field int, value string) string {
 // hold user-tier hook files are created, owned by the run-as user and
 // traversable, before the COPY that writes into them: BuildKit gives a
 // directory COPY creates the file's --chmod mode (0600 would lock the
-// workload out of its own ~/.openhands). Claude Code's only user-owned
 // artifact sits directly in HOME.
 func TestDockerfileCreatesUserDirs(t *testing.T) {
 	for _, tc := range []struct {
@@ -779,7 +778,6 @@ func TestDockerfileCreatesUserDirs(t *testing.T) {
 		{harness.Copilot, "/sandbox/.copilot"},
 		{harness.Amp, "/sandbox/.config /sandbox/.config/amp /sandbox/.config/amp/plugins"},
 		{harness.Hermes, "/sandbox/.hermes"},
-		{harness.OpenHands, "/sandbox/.openhands"},
 		{harness.Antigravity, "/sandbox/.gemini /sandbox/.gemini/antigravity-cli /sandbox/.gemini/antigravity-cli/cache /sandbox/.gemini/config"},
 	} {
 		c := mustContext(t, testSpec(tc.spec))

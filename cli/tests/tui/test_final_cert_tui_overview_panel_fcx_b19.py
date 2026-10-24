@@ -123,7 +123,7 @@ async def test_notice_keeps_full_action_after_a_height_only_resize_to_80x24(tmp_
         "Telemetry continues via hooks + local audit; point gateway.host at a real OpenClaw upstream "
         "and restart to enable fleet integration"
     )
-    app.overview_model.build_notices = lambda now=None: (OverviewNotice("info", message),)
+    app.overview_model.build_notices = lambda now=None, connector="": (OverviewNotice("info", message),)
     try:
         async with app.run_test(size=(80, 45)) as pilot:
             app.action_switch_panel("overview")

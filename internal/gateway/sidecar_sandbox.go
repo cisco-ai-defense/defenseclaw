@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -131,6 +132,49 @@ func (rt *sandboxRuntime) listenersReady() error {
 		return fmt.Errorf("the sandbox %s listener is not running in this process", strings.Join(missing, " and "))
 	}
 	return nil
+}
+
+// statusListenerAddresses reports only ports this process actually holds.
+// A configured address alone is not proof: another account may have bound it.
+// A managed daemon deliberately releases both ports while idle; its next
+// create binds them, so that release does not make its gateway unavailable.
+func (rt *sandboxRuntime) statusListenerAddresses(st *sandboxapi.Status) {
+	if st == nil {
+		return
+	}
+	rt.listenMu.Lock()
+	defer rt.listenMu.Unlock()
+	var missing, keys []string
+	if !rt.listening["ingress"] {
+		st.IngressAddr = ""
+		missing = append(missing, "ingress")
+		keys = append(keys, "openshell.ingress_port")
+	}
+	if !rt.listening["egress"] {
+		st.EgressAddr = ""
+		missing = append(missing, "egress")
+		keys = append(keys, "openshell.egress_port")
+	}
+	managedIdle := st.Managed != nil && st.Live != nil && *st.Live == 0
+	if st.Enabled && st.Available && len(missing) > 0 && !managedIdle {
+		st.Available = false
+		if st.Reason != "" {
+			st.Reason += "; "
+		}
+		st.Reason += "the sandbox " + strings.Join(missing, " and ") + " listener is not running in this process; check " +
+			strings.Join(keys, " and ") + " for a busy port, free or move it, then restart the DefenseClaw daemon"
+	}
+}
+
+type sandboxStatusController struct {
+	SandboxController
+	runtime *sandboxRuntime
+}
+
+func (c *sandboxStatusController) Status(ctx context.Context) (*sandboxapi.Status, error) {
+	st, err := c.SandboxController.Status(ctx)
+	c.runtime.statusListenerAddresses(st)
+	return st, err
 }
 
 // gatewayState reports the OpenShell gateway connection as the "openshell"
@@ -303,6 +347,8 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		DefenseClawVersion: manager.ImageVersion(),
 		GatewayResources:   manager.GatewayConfigResources(""),
 		VMDiskFree:         manager.GatewayVMDiskFree(""),
+		StartLock:          func() (func(), error) { return openshell.LockSandboxStart("") },
+		MigrateBootstrap:   dockerBootstrapMigrator(opts.Managed),
 		OnGateway:          rt.gatewayState,
 		Listeners:          rt.listenersReady,
 		DiscoveryRemoved:   discoveryRemoved,
@@ -371,7 +417,7 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		return nil, fmt.Errorf("egress proxy: %w", err)
 	}
 	mgr.AttachProxy(proxy)
-	api.SetSandboxController(mgr)
+	api.SetSandboxController(&sandboxStatusController{SandboxController: mgr, runtime: rt})
 	rt.manager, rt.proxy = mgr, proxy
 	feed := mgr.Feed()
 	rt.fleet = mgr
@@ -759,4 +805,64 @@ func (a *APIServer) appendSandboxConfigList(ctx context.Context, key, host strin
 		return err
 	}
 	return nil
+}
+
+// dockerBootstrapMigrator is the sandbox manager's MigrateBootstrap: the
+// account's OpenShell gateway keeps its Docker sandboxes' bootstrap in its
+// state folder, and the migration moves the sandbox's files in the first
+// folder that gateway may use (gatewayStateHomes, the gateway's own first)
+// that keeps it. Another folder is not read once one keeps the sandbox. A
+// folder that cannot be listed is not known to keep it and is passed over:
+// it never refuses a start, which then goes to OpenShell as before the
+// migration existed (a bootstrap it cannot read still fails there, and
+// legacyBootstrapRefusal says why). A file of the sandbox's own that cannot
+// be moved refuses it.
+func dockerBootstrapMigrator(managedAccount bool) func(string) ([]string, error) {
+	return func(sandboxID string) ([]string, error) {
+		homes, err := gatewayStateHomes(managedAccount)
+		if err != nil {
+			return nil, err
+		}
+		for _, stateHome := range homes {
+			moved, kept, err := openshell.MigrateDockerBootstrap(stateHome, sandboxID)
+			if errors.Is(err, openshell.ErrDockerStateUnreadable) {
+				continue
+			}
+			if err != nil || kept {
+				return moved, err
+			}
+		}
+		return nil, nil
+	}
+}
+
+// sandboxAccountHomeDir is the home of the account a managed daemon runs as,
+// the one its exec shim starts the gateway in; a seam for tests.
+var sandboxAccountHomeDir = func() string { return accountHome(os.Getuid()) }
+
+// gatewayStateHomes are the state folders the account's OpenShell gateway
+// may keep its state in, the one it runs with first. A managed daemon's
+// gateway is the exec shim's, which starts it with HOME and no
+// XDG_STATE_HOME: openshell.DefaultStateHome of the account's home,
+// whatever $XDG_STATE_HOME the daemon itself has.
+// The per-user gateway's OpenShell is one the person started: under
+// $XDG_STATE_HOME (openshell.UserStateHome, as the daemon's environment
+// says), or, as a fallback, ~/.local/state when it started without one.
+func gatewayStateHomes(managedAccount bool) ([]string, error) {
+	if managedAccount {
+		home := sandboxAccountHomeDir()
+		if home == "" {
+			return nil, errors.New("the account has no home directory for its OpenShell gateway's state")
+		}
+		return []string{openshell.DefaultStateHome(home)}, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, err
+	}
+	homes := []string{openshell.UserStateHome(os.Getenv, home)}
+	if def := openshell.DefaultStateHome(home); filepath.Clean(def) != filepath.Clean(homes[0]) {
+		homes = append(homes, def)
+	}
+	return homes, nil
 }

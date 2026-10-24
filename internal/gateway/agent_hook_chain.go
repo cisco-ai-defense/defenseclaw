@@ -910,9 +910,9 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 	var panicState toolChainHookPanicState
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			// The chain lane is additive. A local bug or sink panic must never
-			// replace an already-computed standalone block with the handler's
-			// recovered-error response.
+			// Preserve a committed chain denial or an earlier standalone block.
+			// Every other incomplete evaluation answers the configured panic
+			// fail mode instead of releasing the original allow.
 			a.handleHookPanic(
 				ctx,
 				req.ConnectorName,
@@ -923,7 +923,13 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 				resp = panicState.committedBlock
 				finalization = panicState.finalization
 			} else {
-				resp = original
+				// A raw block may be only an observed policy verdict; only
+				// Action proves the earlier response actually denies the call.
+				if original.Action == guardrailActionBlock {
+					resp = original
+				} else {
+					resp = a.hookPanicResponse(ctx, req.ConnectorName, req, rawBody, req.Payload)
+				}
 				finalization = toolChainHookFinalization{}
 			}
 		}
@@ -2379,7 +2385,7 @@ func committedAgentHookChainPanicBlock(
 	switch strings.ToLower(strings.TrimSpace(req.ConnectorName)) {
 	case "claudecode":
 		next.HookOutput = claudeCodeOutput(
-			claudeCodeHookRequest{HookEventName: req.HookEventName},
+			claudeCodeHookRequest{HookEventName: req.HookEventName, PermissionMode: payloadString(req.Payload, "permission_mode")},
 			next.Action,
 			next.RawAction,
 			next.Reason,

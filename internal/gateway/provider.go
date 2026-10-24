@@ -142,6 +142,10 @@ type ChatRequest struct {
 	TargetURL        string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
 	TargetPath       string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
 	TargetAPIKey     string          `json:"-"` // from Authorization header, forwarded to upstream
+
+	// providers is the provider registry of the generation the request
+	// pinned (requestProviderRegistry); nil uses the process-wide one.
+	providers *configs.ProvidersConfig
 }
 
 // ChatChoice is a single choice in an OpenAI chat completion response.

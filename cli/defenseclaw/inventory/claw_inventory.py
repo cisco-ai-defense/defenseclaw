@@ -190,6 +190,39 @@ def build_claw_aibom(
     """
     cats = _resolve_categories(categories)
     connector = connector or cfg.active_connector()
+    if not connector:
+        # Direct inventory callers may bypass the CLI's no-connector guard.
+        # An empty selection is an empty inventory, never an OpenClaw scan.
+        out: dict[str, Any] = {
+            "version": INVENTORY_VERSION,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "connector": "",
+            "claw_mode": "",
+            "live": False,
+            "claw_home": "",
+            "connector_home": "",
+            "connector_config_files": [],
+            "connector_skill_dirs": [],
+            "connector_plugin_dirs": [],
+            "connector_agent_dirs": [],
+            "connector_rule_dirs": [],
+            "connector_mcp_files": [],
+            "connector_rule_files": [],
+            "connector_policy_settings": {},
+            "skills": [],
+            "plugins": [],
+            "mcp": [],
+            "agents": [],
+            "rules": [],
+            "tools": [],
+            "model_providers": [],
+            "memory": [],
+            "errors": [],
+            "limitations": [],
+        }
+        out["summary"] = _build_summary(out)
+        _mark_collected_categories(out, frozenset())
+        return out
     if connector != "openclaw" and live:
         return _build_aibom_from_filesystem(cfg, connector, cats)
 
@@ -900,7 +933,7 @@ def aibom_display_config(inv: dict[str, Any]) -> str:
     ``plugins/defenseclaw.js``) are never presented as the agent's
     configuration (GAP-1358, GAP-2038). Returns "" when none is known.
     """
-    connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw").lower()
+    connector = str(inv.get("connector") or inv.get("claw_mode") or "").lower()
     config_files = inv.get("connector_config_files") or [inv.get("openclaw_config", "")]
     if connector == "opencode" and inv.get("connector_mcp_files"):
         # The inventory reads OpenCode's opencode.json (GAP-1358).
@@ -926,8 +959,8 @@ def format_claw_aibom_human(
     console = Console(stderr=False)
     mode = "live" if inv.get("live") else "disk"
 
-    connector = str(inv.get("connector") or inv.get("claw_mode") or "openclaw")
-    title = "OpenClaw AIBOM" if connector.lower() == "openclaw" else f"{connector} AIBOM"
+    connector = str(inv.get("connector") or inv.get("claw_mode") or "")
+    title = f"{connector} AIBOM" if connector else "Agent AIBOM"
     home = inv.get("connector_home") or inv.get("claw_home", "")
     primary_config = aibom_display_config(inv)
     cats = _resolve_categories(categories)
@@ -4899,8 +4932,6 @@ def _enumerate_skills_filesystem(
             connector=resolved_connector,
         ):
             entry = discovered.name
-            if _is_openhands_installed_container(skill_dir, entry):
-                continue
             full = discovered.path
             row_id = entry
             nested_prefix = _claude_nested_skill_prefix(
@@ -4972,12 +5003,6 @@ def _claude_nested_skill_prefix(skill_dir: str, workspace_dir: str) -> str:
     return relative.replace(os.sep, "/")
 
 
-def _is_openhands_installed_container(skill_dir: str, entry: str) -> bool:
-    return (
-        entry == "installed"
-        and os.path.basename(skill_dir) == "skills"
-        and os.path.basename(os.path.dirname(skill_dir)) == ".openhands"
-    )
 
 
 def _skill_dir_is_eligible(path: str) -> bool:

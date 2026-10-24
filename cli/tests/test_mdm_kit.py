@@ -223,7 +223,7 @@ def test_same_version_package_reinstalls_when_a_required_binary_is_damaged(tmp_p
 
 def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     text = _text(MDM / "linux" / "defenseclaw-enterprise.sh")
-    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >' in text
+    assert 'enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json "$@" >' in text
     # The value reaches the lifecycle through a pipe, never a staged file
     # that a killed run would leave behind (GAP-0632).
     assert "printf '%s' \"$secret_data\" |" in text
@@ -233,6 +233,59 @@ def test_unix_wrapper_never_passes_credentials_on_the_command_line() -> None:
     # inline-secret setting.
     assert "DC_SECRET_VALUE" not in text
     assert "Never put credentials here" in text
+
+
+# GAP-0335: a signed bundle binds each credential value, and secret set
+# changes a credential the confirmed bundle signs only to a value a newer
+# signed bundle signs. The wrapper stores a credential it delivers with a
+# bundle together with that bundle (--bundle), and without one as before. A
+# gateway before 1.0.4 (no secret_set_bundle in --version-json) takes no
+# --bundle and stores the credential as before.
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("os_dir", ["linux", "macos"])
+@pytest.mark.parametrize("bundle", ["", "/stage/policy.dcbundle"])
+@pytest.mark.parametrize("binds", [True, False])
+def test_unix_wrapper_stores_a_credential_with_the_bundle_it_delivers(tmp_path: Path, os_dir: str, bundle: str, binds: bool) -> None:
+    wrapper = _text(MDM / os_dir / "defenseclaw-enterprise.sh")
+    functions = "\n".join(_shell_function(wrapper, name) for name in (
+        "dc_json_escape", "dc_print_result", "dc_log", "dc_fail_result",
+        "dc_secret_json_error", "dc_secret_set_bundle", "dc_store_secret",
+    ))
+    log = tmp_path / "calls.log"
+    gateway = tmp_path / "gateway"
+    member = ',"secret_set_bundle":true' if binds else ""
+    version = '{"schema_version":1,"name":"defenseclaw-gateway","version":"1.0.x","management_contract":1' + member + "}"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f"if [ \"$1\" = --version-json ]; then echo '{version}'; exit 0; fi\n"
+        f"cat >/dev/null\necho \"$*\" >>'{log}'\necho '{{\"ok\":true}}'\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = (
+        f'DC_ACTION=ensure DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"}\n'
+        f'DC_STAGE="{tmp_path}" DC_LOG="" DC_FORMAT=json DC_EXIT_FAILURE=1\n'
+        f"DC_SECRET_NAME=test-key secret_data=placeholder bundle='{bundle}'\n"
+        f'{functions}\ndc_store_secret "{gateway}"\n'
+    )
+    result = subprocess.run(["sh", "-c", script], env={"PATH": os.environ["PATH"]}, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    want = "enterprise secret set --name test-key --from-stdin --lock-wait 10m --json"
+    if bundle and binds:
+        want += f" --bundle {bundle}"
+    assert log.read_text(encoding="utf-8").splitlines() == [want]
+
+
+def test_windows_wrapper_stores_a_bundled_credential_before_the_apply() -> None:
+    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
+    first = text.index("Set-WrapperSecret -Extra @('--bundle', $bundle)")
+    guard = text.rindex("if ($secret -and $bundle -and -not $SetupPath", 0, first)
+    # Only a CLI that reports secret_set_bundle (1.0.4 and later) gets --bundle.
+    probe = text.rindex("(Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)", guard, first)
+    assert "$document.secret_set_bundle -eq $true" in text
+    lifecycle = text.index("$arguments = @('enterprise', 'windows', $normalizedAction")
+    after = text.index("if ($exitCode -eq 0 -and $secret -and -not $secretStored)")
+    assert guard < probe < first < lifecycle < after
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
@@ -898,7 +951,9 @@ def test_linux_wrapper_layout_reads_the_result_the_postinstall_writes(os_dir: st
     # back to mdm_binaries_damaged (GAP-0108).
     postinstall = _text(ROOT / "packaging" / "linux" / "postinstall.sh")
     state = re.findall(r"^state=(\S+)$", postinstall, re.MULTILINE)
-    written = set(re.findall(r'>"\$state/([^"]+\.json)"', postinstall))
+    # The result is written to a temporary file and renamed into place
+    # (w4-unix-obs: a full disk never erases the last result).
+    written = set(re.findall(r'(?:>|mv -fT "\$result_tmp" )"\$state/([^"]+\.json)"', postinstall))
     assert len(state) == 1 and len(written) == 1, (state, written)
     expected = f"{state[0]}/{written.pop()}"
     assert expected == "/var/lib/defenseclaw-enterprise/last-package-result.json"
@@ -965,6 +1020,36 @@ echo "version=$(dc_json_field "$doc" installed_version)"
             continue
         result = subprocess.run([shell, "-c", script], input=indented, capture_output=True, text=True, check=True)
         assert result.stdout.splitlines() == ["installed", "version=1.2.3"], (shell, result.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("platform", ["linux", "macos"])
+def test_unix_detect_requires_complete_security_for_health(tmp_path: Path, platform: str) -> None:
+    gateway = tmp_path / "gateway"
+    state = tmp_path / "verify.json"
+    gateway.write_text(
+        '#!/bin/sh\ncase "$*" in\n'
+        f'  "enterprise {platform} status --json") echo \'{{"installed":true,"installed_version":"9.9.9"}}\' ;;\n'
+        f'  "enterprise {platform} verify --json") cat "{state}" ;;\n'
+        '  *) exit 9 ;;\nesac\n',
+        encoding="ascii",
+    )
+    gateway.chmod(0o755)
+    source = _text(MDM / platform / "detect.sh")
+    source = source.replace('[ "$(dc_platform)" = "$DC_SCRIPT_OS" ]', '[ 1 = 1 ]', 1)
+    source = source.replace('[ "$(id -u)" = 0 ]', '[ 1 = 1 ]', 1)
+    source = source.replace('dc_trusted_path "$gateway" ||', '[ -f "$gateway" ] ||', 1)
+    original = ("gateway=/opt/defenseclaw/bin/defenseclaw-gateway group=linux" if platform == "linux"
+                else "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway group=macos")
+    assert original in source
+    source = source.replace(original, f'gateway="{gateway}" group={platform}', 1)
+    detect = tmp_path / "detect.sh"
+    detect.write_text(source, encoding="ascii")
+    for complete, expected in ((False, "unhealthy"), (True, "9.9.9")):
+        state.write_text(json.dumps({"ok": True, "security_complete": complete}), encoding="ascii")
+        result = subprocess.run(["sh", str(detect), "--require-healthy", "--format", "value"],
+                                capture_output=True, text=True)
+        assert (result.returncode, result.stdout) == (0, expected + "\n"), (platform, complete, result)
 
 
 _NOT_READY = json.dumps(
@@ -2059,7 +2144,7 @@ def test_intune_package_config_version_with_crlf(
 
 
 def test_intune_config_change_docs_explain_the_version_pin() -> None:
-    page = _text(ROOT / "docs-site/content/docs/enterprise/mdm/intune-windows.mdx")
+    page = _text(ROOT / "docs-site/content/docs/enterprise/mdm/intune/windows.mdx")
     section = page.split("**Change the config.**", 1)[1].split("**Roll back.**", 1)[0]
     assert "config_version: 9" in section
     assert "packager\nrefuses a missing or older version" in section

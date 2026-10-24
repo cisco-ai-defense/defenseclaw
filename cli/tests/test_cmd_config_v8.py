@@ -477,3 +477,82 @@ def test_config_path_uses_managed_vendor_policy_default(tmp_path: Path, monkeypa
     assert result.exit_code == 0, result.output
     assert "policy dir" in result.output and str(vendor_dir) in result.output
     assert str(data_dir / "policies") not in result.output
+
+
+def test_unreadable_config_writers_say_config_yaml_was_not_changed(tmp_path: Path) -> None:
+    # GAP-0056, GAP-0144: the refusal of an unreadable file names the
+    # unchanged config.yaml, as for a malformed one.
+    from defenseclaw import config as config_module
+
+    path = tmp_path / "config.yaml"
+    path.write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
+    refusal = config_module.ConfigVersionError(
+        config_module._unreadable_config_message(str(path), PermissionError(13, "Permission denied"))
+    )
+    with (
+        patch.object(cmd_config.config_module, "config_path", return_value=path),
+        patch.object(cmd_config, "_looks_like_v8_config", return_value=False),
+        patch.object(cmd_config.config_module, "source_config_version", side_effect=refusal),
+    ):
+        for args in (["set", "asset_policy.enabled", "true"], ["unset", "asset_policy.enabled"]):
+            result = CliRunner().invoke(cmd_config.config_cmd, args)
+            assert result.exit_code == 1, result.output
+            assert "Cannot read the DefenseClaw configuration" in result.output
+            assert "config.yaml was not changed." in result.output
+            assert "Traceback" not in result.output
+        shown = CliRunner().invoke(cmd_config.config_cmd, ["get", "asset_policy.enabled"])
+        assert shown.exit_code == 1 and "was not changed" not in shown.output
+
+
+def test_get_reads_one_lifecycle_field_of_an_admission_action(tmp_path: Path, monkeypatch) -> None:
+    # GAP-0103: a lifecycle field config.yaml sets, or one of a shorthand,
+    # is not "not set".
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\nobservability: {}\nadmission:\n  plugin:\n    actions:\n"
+        "      medium:\n        install: none\n        file: none\n        runtime: enable\n"
+        "      high: quarantine\n",
+        encoding="utf-8",
+    )
+
+    def run(*args: str):
+        with (
+            patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+            patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+        ):
+            return CliRunner().invoke(cmd_config.config_cmd, list(args))
+
+    medium = run("get", "admission.plugin.actions.medium.runtime")
+    assert medium.exit_code == 0, medium.output
+    assert medium.stdout.strip() == "enable"
+    high = run("get", "admission.plugin.actions.high.install")
+    assert high.exit_code == 0, high.output
+    assert high.stdout.strip() == "block" and "default:" not in high.output
+
+
+def test_effective_lifecycle_field_is_the_secure_client_action(tmp_path: Path, monkeypatch) -> None:
+    # Review fix (GAP-0103): on Secure Client data.json decides the action;
+    # --effective must not print the config.yaml field as the effective one.
+    from defenseclaw.enforce import admission
+
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "config_version: 9\nobservability: {}\nadmission:\n  skill:\n    actions:\n"
+        "      high:\n        install: none\n        file: none\n        runtime: enable\n",
+        encoding="utf-8",
+    )
+    enforced = admission.CompiledAdmission(
+        actions={"HIGH": admission._SHORTHANDS["block"]}, source="secure-client:data.json"
+    )
+    with (
+        patch("defenseclaw.gateway.local_policy_digest", return_value=None),
+        patch.object(cmd_config, "inspect_v8_config", return_value=_wire("effective", effective={})),
+        patch("defenseclaw.enforce.asset_lists.is_secure_client", return_value=True),
+        patch("defenseclaw.enforce.admission._secure_client_admission", return_value=enforced),
+    ):
+        got = CliRunner().invoke(
+            cmd_config.config_cmd, ["get", "admission.skill.actions.high.runtime", "--effective"]
+        )
+    assert got.exit_code == 0, got.output
+    assert got.stdout.strip() == "disable"
+    assert "(source: secure-client:data.json)" in got.output

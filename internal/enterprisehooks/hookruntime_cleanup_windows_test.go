@@ -66,6 +66,13 @@ func TestRemoveWindowsStandaloneHookRuntimeDirectoriesRemovesOnlyEmptiedDirector
 	writeHookRuntimeFile(t, filepath.Join(root, "devin", windowsPerUserManagedEnrollmentLockFile))
 	enrollment := filepath.Join(root, "devin", windowsPerUserManagedEnrollmentFile)
 	writeHookRuntimeFile(t, enrollment)
+	closure := filepath.Join(root, windowsStandaloneHookClosureFile)
+	if err := os.WriteFile(closure, windowsStandaloneHookClosureBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trust := windowsManagedPolicyFileTrustCheck
+	windowsManagedPolicyFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { windowsManagedPolicyFileTrustCheck = trust })
 
 	kept, err := RemoveWindowsStandaloneHookRuntimeDirectories()
 	if err != nil {
@@ -79,6 +86,9 @@ func TestRemoveWindowsStandaloneHookRuntimeDirectoriesRemovesOnlyEmptiedDirector
 	}
 	if len(kept) != 2 {
 		t.Fatalf("kept = %v, want the devin directory and the root", kept)
+	}
+	if held, err := readWindowsStandaloneHookClosure(closure); err != nil || !held {
+		t.Fatalf("incomplete teardown removed the hook closure: held=%t err=%v", held, err)
 	}
 
 	if err := os.Remove(enrollment); err != nil {
@@ -143,11 +153,7 @@ func TestRemoveWindowsStandaloneMachinePolicySelectorLocks(t *testing.T) {
 // its lock with it.
 func TestRemoveWindowsStandaloneDeletedAccountSelectorTargets(t *testing.T) {
 	stubWindowsHookRuntimeRoot(t)
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	owner := user.User.Sid
+	owner := currentWindowsTestSID(t)
 	const deleted = "S-1-5-21-1111111111-2222222222-3333333333-1021"
 	base := t.TempDir()
 	previousPath, previousOwner := windowsManagedRuntimeSelectorPathResolver, windowsManagedPolicyOwnerSID

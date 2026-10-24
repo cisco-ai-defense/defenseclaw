@@ -241,11 +241,15 @@ func runSidecarStatusJSON(w io.Writer) error {
 	addr := sidecarHealthURL(cfg)
 	doc := gatewayStatusDocument{Endpoint: addr}
 	var failure error
+	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
 	if problem := foreignGatewayListener(cfg); problem != "" {
 		doc.Error = problem
 		doc.Hint = foreignGatewayListenerFix(cfg)
 		failure = errors.New("the gateway port is held by another process")
-	} else if snap, err := fetchSidecarHealth(&http.Client{Timeout: 5 * time.Second}, addr); err != nil {
+	} else if clientErr != nil {
+		doc.Error = clientErr.Error()
+		failure = clientErr
+	} else if snap, err := fetchSidecarHealth(client, addr); err != nil {
 		doc.Error = err.Error()
 		doc.Hint = sidecarNotRunningHint(cfg)
 		failure = errors.New("sidecar unreachable")
@@ -439,9 +443,20 @@ func runSidecarStatus(_ *cobra.Command, _ []string) error {
 		return fmt.Errorf("the gateway port is held by another process")
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
+	client, clientErr := gatewayPeerClientForURL(cfg, addr, 5*time.Second)
+	if clientErr != nil {
+		return fmt.Errorf("sidecar status: %w", clientErr)
+	}
 	snap, err := fetchSidecarHealth(client, addr)
 	if err != nil {
+		if problem := foreignGatewayListener(cfg); problem != "" {
+			fmt.Println()
+			Warn("Sidecar Status: NOT THIS ACCOUNT'S GATEWAY")
+			printGatewayKV("Endpoint", addr)
+			Subhead(problem + ". Its status is not shown.")
+			Subhead(foreignGatewayListenerFix(cfg))
+			return fmt.Errorf("the gateway port is held by another process")
+		}
 		var requestErr *url.Error
 		if errors.As(err, &requestErr) {
 			if running, pid := gatewayManagedState(); running && cfg != nil && !cfg.StandaloneEnterprise() {
@@ -667,8 +682,15 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 		printConnectorBody(&c)
 	}
 	// A connector whose setup failed at start is not enforced (GAP-1714).
+	// When its agent's own settings refused the hooks, rerunning setup cannot
+	// help; the gateway's reason names the fix (GAP-0578).
+	refusedByAgentSettings := guardrailAgentSettingsRefusals(snap.Guardrail.Details)
 	for _, name := range notStarted {
 		fmt.Printf("             %s (%s)%s\n", friendlyConnectorName(name), name, styledConnectorStateVerb("NOT RUNNING"))
+		if reason := refusedByAgentSettings[name]; reason != "" {
+			fmt.Printf("               %s\n", Dim("not enforced: "+reason))
+			continue
+		}
 		fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced; "+
 			"see gateway.log, then run: defenseclaw setup "+name))
 	}
@@ -713,6 +735,26 @@ func guardrailConnectorsNotStarted(details map[string]interface{}) []string {
 		}
 	}
 	return names
+}
+
+// guardrailAgentSettingsRefusals reads the guardrail's
+// connectors_refused_by_agent_settings detail, a map[string]string in process
+// and a map[string]interface{} after a JSON round trip.
+func guardrailAgentSettingsRefusals(details map[string]interface{}) map[string]string {
+	refused := map[string]string{}
+	switch raw := details[gateway.GuardrailAgentSettingsRefused].(type) {
+	case map[string]string:
+		for name, reason := range raw {
+			refused[name] = reason
+		}
+	case map[string]interface{}:
+		for name, value := range raw {
+			if reason, ok := value.(string); ok && strings.TrimSpace(reason) != "" {
+				refused[name] = reason
+			}
+		}
+	}
+	return refused
 }
 
 // printConnectorBody renders the per-connector since/mode/counter lines
@@ -886,16 +928,12 @@ func friendlyConnectorName(name string) string {
 		return "Devin"
 	case "copilot":
 		return "GitHub Copilot CLI"
-	case "openhands":
-		return "OpenHands"
 	case "antigravity":
 		return "Antigravity"
 	case "opencode":
 		return "OpenCode"
 	case "amp":
 		return "Amp"
-	case "omnigent":
-		return "OmniGent"
 	case "kiro":
 		return "Kiro"
 	default:

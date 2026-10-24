@@ -74,8 +74,6 @@ import (
 
 const (
 	openShellGatewayUnit          = "defenseclaw-openshell-gateway.service"
-	openShellGatewayLabel         = "com.cisco.defenseclaw.openshell-gateway"
-	openShellGatewayPlist         = "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist"
 	openShellGatewayRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
 	daemonSystemctl               = "/usr/bin/systemctl"
 	daemonLaunchctl               = "/bin/launchctl"
@@ -88,6 +86,15 @@ const (
 	// `openshell gateway add --local` reads it.
 	openShellTLSDirRel = ".local/state/openshell/tls"
 )
+
+// openShellLaunchAgentsDir holds the LaunchAgent plists; a var for tests.
+var openShellLaunchAgentsDir = openshell.LaunchAgentsDir
+
+// openShellGatewayAgent is the installed OpenShell gateway job: its label
+// carries the gateway program's tag (openshell.LaunchAgentLabel).
+func openShellGatewayAgent() (label, plist string) {
+	return openshell.FindLaunchAgent(openShellLaunchAgentsDir, openshell.GatewayAgentBase)
+}
 
 // Waits for the OpenShell gateway; vars so tests run at speed.
 var (
@@ -576,7 +583,8 @@ func (o *accountOpenShell) ensureRunning(ctx context.Context, port int, cfg stri
 		if o.goos == "darwin" && !healChecked && !time.Now().Before(healAt) {
 			healChecked = true
 			domain := o.launchDomain(ctx)
-			target := domain + "/" + openShellGatewayLabel
+			label, _ := openShellGatewayAgent()
+			target := domain + "/" + label
 			out, printErr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
 			if printErr == nil && openshell.ParseLaunchAgentState([]byte(out)).Failure(false) != "" {
 				if err := o.reloadLaunchAgent(ctx, domain); err != nil {
@@ -712,7 +720,8 @@ func (o *accountOpenShell) managedUnitActive(ctx context.Context) bool {
 		out, err := o.run(ctx, daemonSystemctl, []string{"--user", "is-active", openShellGatewayUnit}, userManagerEnv(o.uid))
 		return err == nil && strings.TrimSpace(out) == "active"
 	case "darwin":
-		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + openShellGatewayLabel}, nil)
+		label, _ := openShellGatewayAgent()
+		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + label}, nil)
 		return err == nil && strings.Contains(out, "state = running")
 	}
 	return false
@@ -731,7 +740,8 @@ func (o *accountOpenShell) Stop(ctx context.Context, s sandboxrelay.DaemonSettin
 	case "linux":
 		out, err = o.run(ctx, daemonSystemctl, []string{"--user", "stop", openShellGatewayUnit}, userManagerEnv(o.uid))
 	case "darwin":
-		target := o.launchDomain(ctx) + "/" + openShellGatewayLabel
+		label, _ := openShellGatewayAgent()
+		target := o.launchDomain(ctx) + "/" + label
 		if _, perr := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil); perr != nil {
 			return false
 		}
@@ -755,10 +765,11 @@ func (o *accountOpenShell) startUnit(ctx context.Context) (bool, error) {
 		return false, commandError(daemonSystemctl+" --user start "+openShellGatewayUnit, out, err)
 	case "darwin":
 		domain := o.launchDomain(ctx)
-		target := domain + "/" + openShellGatewayLabel
+		label, plist := openShellGatewayAgent()
+		target := domain + "/" + label
 		printed, err := o.run(ctx, daemonLaunchctl, []string{"print", target}, nil)
 		if err != nil {
-			out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
+			out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, plist}, nil)
 			if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
 				return false, err
 			}
@@ -781,11 +792,12 @@ func (e *openShellLaunchAgentReloadError) Error() string {
 func (e *openShellLaunchAgentReloadError) Unwrap() error { return e.err }
 
 func (o *accountOpenShell) reloadLaunchAgent(ctx context.Context, domain string) error {
-	target := domain + "/" + openShellGatewayLabel
+	label, plist := openShellGatewayAgent()
+	target := domain + "/" + label
 	if out, err := o.run(ctx, daemonLaunchctl, []string{"bootout", target}, nil); err != nil {
 		o.logf("boot out your OpenShell gateway LaunchAgent: %v: %s", err, firstOutputLine(out))
 	}
-	out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, openShellGatewayPlist}, nil)
+	out, err := o.run(ctx, daemonLaunchctl, []string{"bootstrap", domain, plist}, nil)
 	if err := commandError(daemonLaunchctl+" bootstrap "+domain, out, err); err != nil {
 		return &openShellLaunchAgentReloadError{err: err}
 	}
@@ -797,14 +809,16 @@ func (o *accountOpenShell) kickstartLaunchAgent(ctx context.Context, target stri
 	return commandError(daemonLaunchctl+" kickstart "+target, out, err)
 }
 
-// launchDomain is the launchd domain of the account's agents: the graphical
-// session when there is one, else the background session of an ssh login.
+// launchDomain is the launchd domain of the account's OpenShell gateway
+// agent (openshell.LaunchDomain): the one its job is loaded in, else the
+// graphical session when there is one, else the background session of an
+// ssh login.
 func (o *accountOpenShell) launchDomain(ctx context.Context) string {
-	gui := "gui/" + strconv.Itoa(o.uid)
-	if _, err := o.run(ctx, daemonLaunchctl, []string{"print", gui}, nil); err == nil {
-		return gui
-	}
-	return "user/" + strconv.Itoa(o.uid)
+	label, _ := openShellGatewayAgent()
+	domain, _ := openshell.LaunchDomain(o.uid, openshell.GatewayAgentBase, label, func(domain string) (string, error) {
+		return o.run(ctx, daemonLaunchctl, []string{"print", domain}, nil)
+	})
+	return domain
 }
 
 var launchdLastExit = regexp.MustCompile(`last exit code = (\d+)`)
@@ -836,7 +850,8 @@ func (o *accountOpenShell) unitState(ctx context.Context) string {
 			return fmt.Sprintf("the unit is %s/%s, last exit status %s", fields["ActiveState"], fields["SubState"], firstNonEmptyString(status, "none"))
 		}
 	case "darwin":
-		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + openShellGatewayLabel}, nil)
+		label, _ := openShellGatewayAgent()
+		out, err := o.run(ctx, daemonLaunchctl, []string{"print", o.launchDomain(ctx) + "/" + label}, nil)
 		if err != nil {
 			return "its state is unknown"
 		}
@@ -1092,8 +1107,24 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context, handover bo
 		running, err := d.sweepForeign(sweep)
 		cancel()
 		switch {
+		case err != nil && !sandboxapi.IsCode(err, sandboxapi.CodeUnavailable):
+			// The gateway answered, but its sandboxes could not be read:
+			// nothing proves that none of the account's runs, so it is kept,
+			// and looked at again soon.
+			d.logf("check the OpenShell gateway for sandboxes before stopping it: %v; it keeps running", err)
+			d.scheduleCheck(foreignRecheckEvery)
+			return
 		case err != nil:
-			d.logf("check the OpenShell gateway for foreign sandboxes before stopping it: %v", err)
+			// DefenseClaw cannot connect to it (Unavailable), and its
+			// port is this account's (PortHolder): a gateway whose
+			// registration or certificates broke still runs its MicroVMs,
+			// which the stop would end with no flush. Only the account's
+			// processes tell that none runs.
+			if n, verr := d.microVMs(ctx); verr != nil || n > 0 {
+				d.logf("the OpenShell gateway does not answer (%v) and %s; it keeps running", err, microVMsHeld(n, verr))
+				d.scheduleCheck(foreignRecheckEvery)
+				return
+			}
 		case !running:
 		case handover:
 			// One the policy leaves running (alert) does not hold the one
@@ -1105,6 +1136,14 @@ func (d *SandboxDaemon) stopIdleOpenShellLocked(ctx context.Context, handover bo
 		default:
 			// Otherwise it keeps its gateway while it runs; look again soon,
 			// so the port is free shortly after it ends (GAP-0237).
+			d.scheduleCheck(foreignRecheckEvery)
+			return
+		}
+		// The sweep read the gateway's sandboxes afresh, right before the
+		// stop: one of the account's that OpenShell does not report stopped
+		// (started since the count, by another OpenShell client) keeps it
+		// (manager.HoldsCompute).
+		if n, err := d.runningSandboxes(ctx); err != nil || n > 0 {
 			d.scheduleCheck(foreignRecheckEvery)
 			return
 		}
@@ -1285,13 +1324,39 @@ func (d *SandboxDaemon) reportDrift(ctx context.Context, registration string, dr
 }
 
 // stopOpenShellIfIdle stops the account's managed gateway when the daemon
-// exits with no sandbox of the account running.
+// exits with no sandbox of the account that holds it (manager.HoldsCompute)
+// and no MicroVM running as the account (microVMs: one made with
+// OpenShell's own CLI, or one on a gateway DefenseClaw can no longer
+// read), which the stop would end with no flush. It counts them right
+// before the stop, holding the lifecycle, so no create or start of the
+// daemon's comes between; one it cannot take within the bound keeps the
+// gateway.
 func (d *SandboxDaemon) stopOpenShellIfIdle() {
 	s := d.currentSettings()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	if err := d.lockLifecycle(ctx); err != nil {
+		return
+	}
+	defer d.unlockLifecycle()
 	if n, err := d.runningSandboxes(ctx); err != nil || n > 0 {
 		return
 	}
+	if n, err := d.microVMs(ctx); err != nil || n > 0 {
+		d.logf("the OpenShell gateway keeps running: %s", microVMsHeld(n, err))
+		return
+	}
 	d.openShell.Stop(ctx, s)
+}
+
+// microVMsHeld says why the account's MicroVMs keep its gateway (microVMs
+// counted n, or failed with err).
+func microVMsHeld(n int, err error) string {
+	if err != nil {
+		return "the MicroVMs of this account could not be counted (" + err.Error() + ")"
+	}
+	if n == 1 {
+		return "1 MicroVM runs as this account, which the stop would end with no flush"
+	}
+	return strconv.Itoa(n) + " MicroVMs run as this account, which the stop would end with no flush"
 }

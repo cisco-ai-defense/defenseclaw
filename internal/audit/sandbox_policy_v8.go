@@ -390,7 +390,11 @@ func (recorder *SandboxRecorder) RecordSandboxPolicyResolved(ctx context.Context
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	var metrics []RuntimeV8GeneratedMetric
+	if result := sandboxProvisionalResolution(identity.Managed, input.Failed); result != "" {
+		metrics = newSandboxManagedProvisionalMetric(event, sandboxManagedLabelsFor(identity, fields), result)
+	}
+	return recorder.emit(ctx, log, metrics)
 }
 
 // SandboxPolicyRematchedEvent is one re-match of a live registration
@@ -478,7 +482,15 @@ func (recorder *SandboxRecorder) RecordSandboxPolicyRematched(ctx context.Contex
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	var metrics []RuntimeV8GeneratedMetric
+	if input.Reason == SandboxRematchLookupResolved {
+		result := SandboxProvisionalResolved
+		if input.Failed {
+			result = SandboxProvisionalFailed
+		}
+		metrics = newSandboxManagedProvisionalMetric(event, sandboxManagedLabelsFor(identity, fields), result)
+	}
+	return recorder.emit(ctx, log, metrics)
 }
 
 // SandboxPolicyForeignRuleEvent is one network rule found in a managed
@@ -563,7 +575,8 @@ func (recorder *SandboxRecorder) RecordSandboxPolicyForeignRule(ctx context.Cont
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedForeignMetric(event, sandboxManagedLabelsFor(identity, fields),
+		SandboxForeignKindRule, input.Action))
 }
 
 // SandboxAskDecidedEvent is the managed gateway's decision on a user's ask,
@@ -681,7 +694,7 @@ func (recorder *SandboxRecorder) RecordSandboxAskDecided(ctx context.Context, in
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedAskMetric(event, sandboxManagedLabelsFor(identity, fields), input.Result, reason))
 }
 
 // SandboxHostRunRefusedEvent is a hook of an agent running on the host
@@ -751,7 +764,8 @@ func (recorder *SandboxRecorder) RecordSandboxHostRunRefused(ctx context.Context
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedRefusalMetric(event, sandboxManagedLabelsFor(identity, fields),
+		observability.Present(input.Reason)))
 }
 
 // SandboxHostRunUnavailableEvent is a host agent run that needs a sandbox
@@ -828,7 +842,11 @@ func (recorder *SandboxRecorder) RecordSandboxHostRunUnavailable(ctx context.Con
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	var metrics []RuntimeV8GeneratedMetric
+	if enforced {
+		metrics = newSandboxManagedRefusalMetric(event, sandboxManagedLabelsFor(identity, fields), observability.Present(input.Reason))
+	}
+	return recorder.emit(ctx, log, metrics)
 }
 
 // SandboxAccessRefusedEvent is a destination the managed policy refused to
@@ -901,7 +919,7 @@ func (recorder *SandboxRecorder) RecordSandboxAccessRefused(ctx context.Context,
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedRefusalMetric(event, sandboxManagedLabelsFor(identity, fields), reason))
 }
 
 // SandboxForeignSandboxEvent is a sandbox on a managed user's OpenShell
@@ -979,7 +997,8 @@ func (recorder *SandboxRecorder) RecordSandboxForeignSandbox(ctx context.Context
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedForeignMetric(event, sandboxManagedLabelsFor(identity, fields),
+		SandboxForeignKindSandbox, input.Action))
 }
 
 // SandboxForeignContainerEvent is an agent container started outside
@@ -1059,7 +1078,8 @@ func (recorder *SandboxRecorder) RecordSandboxForeignContainer(ctx context.Conte
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedForeignMetric(event, sandboxManagedLabelsFor(identity, fields),
+		SandboxForeignKindContainer, SandboxManagedAlert))
 }
 
 // SandboxSettingsDriftEvent is an OpenShell setting that no longer matches
@@ -1125,7 +1145,7 @@ func (recorder *SandboxRecorder) RecordSandboxSettingsDrift(ctx context.Context,
 			})
 		},
 	}
-	return recorder.emit(ctx, log, nil)
+	return recorder.emit(ctx, log, newSandboxManagedDriftMetric(event, sandboxManagedLabelsFor(identity, fields), input.Field))
 }
 
 // SandboxRegistrationWithoutGuestEvent is a watched registration used or

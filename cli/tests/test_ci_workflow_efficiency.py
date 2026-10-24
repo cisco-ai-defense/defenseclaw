@@ -173,3 +173,17 @@ def test_windows_standalone_setup_jobs_install_uv_first() -> None:
             builds = [i for i, step in enumerate(steps) if "standalone/build-setup.sh" in step]
             uv = [i for i, step in enumerate(steps) if step.startswith("astral-sh/setup-uv@")]
             assert not builds or (uv and uv[0] < builds[0]), f"{name}:{job_id} runs build-setup.sh without setup-uv"
+
+
+def test_make_gateway_test_runs_the_gateway_race_suite_only_as_bounded_shards() -> None:
+    # Race-enabled, ./internal/gateway runs for well over an hour as one test
+    # binary, so a single-process run reaches any gate timeout while its
+    # tests are still running (r103 GAP-0267). The canonical local gate runs
+    # it only as timing-balanced shards, each with its own deadline.
+    makefile = (ROOT / "Makefile").read_text(encoding="utf-8")
+    target = makefile[makefile.index("\ngateway-test:"):]
+    target = target[: target.index("\n\n")]
+    gateway_runs = [line for line in target.splitlines() if "./internal/gateway" in line]
+    assert gateway_runs and all("-timeout $(GO_TEST_TIMEOUT)" in line for line in gateway_runs)
+    assert "$(GO_SHARD_RUN) --package-dir internal/gateway --" in target
+    assert "GO_SHARD_RUN = $(HOST_PYTHON) scripts/go_test_shards.py" in makefile

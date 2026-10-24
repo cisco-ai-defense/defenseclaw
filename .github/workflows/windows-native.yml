@@ -549,21 +549,38 @@ jobs:
             $tokens = $null
             $errors = $null
             [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
-            foreach ($error in @($errors)) { $failures.Add("$($_.FullName): $error") }
+            foreach ($parseError in @($errors)) { $failures.Add("$($_.FullName): $parseError") }
           }
           if ($failures.Count) { throw ($failures -join "`n") }
-      - name: Parser, mock timeout, redaction, isolation, and workflow contracts
-        run: ./scripts/live-connector-e2e/test-windows.ps1
-      - name: Native Setup bootstrap delegation and offline contract
-        run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
       - name: Committed uninstall finalized retry regression
+        if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-uninstall-finalized-retry-smoke.ps1
+      - name: Committed uninstall postcommit recovery regression
+        run: ./packaging/windows/tests/enterprise-uninstall-postcommit-recovery-smoke.ps1
       - name: Shared hook install scope preflight regression
+        if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-cross-scope-install-preflight-smoke.ps1
       - name: Managed path ACL verdict regression
+        if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-path-acl-verdict-smoke.ps1
+      - name: Exact ACL and shared vendor ACE regressions
+        if: ${{ !cancelled() }}
+        run: ./packaging/windows/tests/enterprise-exact-acl-smoke.ps1
       - name: Standalone forced uninstall restores the administrator Codex policy
+        if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-forced-uninstall-codex-policy-smoke.ps1
+      - name: Standalone uninstall, reinstall and lifecycle lock regressions
+        if: ${{ !cancelled() }}
+        run: ./packaging/windows/tests/enterprise-standalone-w2b-lifecycle-smoke.ps1
+      - name: Standalone pending-transaction gateway recovery
+        if: ${{ !cancelled() }}
+        run: ./packaging/windows/tests/enterprise-standalone-recovery-gateway-smoke.ps1
+      - name: Native Setup bootstrap delegation and offline contract
+        if: ${{ !cancelled() }}
+        run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q
+      - name: Parser, mock timeout, redaction, isolation, and workflow contracts
+        if: ${{ !cancelled() }}
+        run: ./scripts/live-connector-e2e/test-windows.ps1
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS

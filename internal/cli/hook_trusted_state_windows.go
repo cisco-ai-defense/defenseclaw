@@ -38,6 +38,7 @@ var (
 	nativeDelegatedHookRuntimeReader = hookruntime.ReadTrustedDelegatedForExecutable
 	enterpriseManagedRuntimeResolver = enterprisehooks.ResolveWindowsManagedHookRuntime
 	standaloneEnterpriseHookCheck    = standaloneEnterpriseHookExecutable
+	windowsStandaloneHooksHeldClosed = enterprisehooks.WindowsStandaloneHooksHeldClosed
 )
 
 // standaloneEnterpriseHookExecutable reports whether executable is the
@@ -273,6 +274,17 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 				connectorName,
 			)
 		}
+		if err == nil && standaloneEnterpriseHookCheck(executable) {
+			// The machine-wide closure is published and read back before a
+			// failed hot-config undo may stop the gateway. Even a valid open
+			// generation cannot decide a call while that undo is unproven.
+			held, holdErr := windowsStandaloneHooksHeldClosed()
+			if holdErr != nil {
+				err = fmt.Errorf("enterprise hooks: read standalone hook closure: %w", holdErr)
+			} else if held {
+				err = enterprisehooks.ErrWindowsStandaloneHooksClosed
+			}
+		}
 	}
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	nativeEnterpriseHookRuntimeSnapshot.prepared = true
@@ -399,6 +411,9 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 	}
 	if strings.Contains(err.Error(), enterprisehooks.WindowsManagedSIDUnregisteredReason) {
 		return enterprisehooks.WindowsManagedSIDUnregisteredReason
+	}
+	if errors.Is(err, enterprisehooks.ErrWindowsStandaloneHooksClosed) {
+		return enterprisehooks.ErrWindowsStandaloneHooksClosed.Error()
 	}
 	// A registered account with no runtime has not signed in since it was
 	// enrolled. Only the standalone hook says so; Secure Client keeps its

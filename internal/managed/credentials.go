@@ -33,7 +33,7 @@ var ErrNoServiceCredential = errors.New("service credential is not provisioned")
 // but fails a check the gateway's own read applies: the path trust, the
 // reader ACL, the size limit, an empty or a multi-line value. The gateway
 // cannot use it, so bundle verify and apply count it as missing
-// (ServiceCredentialPresence), never as unchecked.
+// (ServiceCredentialValue), never as unchecked.
 var ErrUnusableServiceCredential = errors.New("service credential is stored but unusable")
 
 // unusableCredentialError keeps the text and the chain of the failed check
@@ -58,21 +58,23 @@ func credentialVerdict(err error) error {
 	return &unusableCredentialError{err: err}
 }
 
-// ServiceCredentialPresence maps the result of a credential read to the
-// presence bundle verify and apply report. Stored and usable is present.
-// Not stored, or stored but unusable (ErrUnusableServiceCredential), is
-// missing with no error, so a required reference refuses with
-// secret_ref_missing as the gateway would fail to read it. Any other error
-// means the caller could not read the store and is returned, so verify warns
-// secret_presence_unchecked.
-func ServiceCredentialPresence(err error) (bool, error) {
-	switch {
-	case err == nil:
-		return true, nil
-	case errors.Is(err, ErrNoServiceCredential), errors.Is(err, ErrUnusableServiceCredential):
-		return false, nil
+// ServiceCredentialValue maps the result of a credential read to what
+// bundle verify and apply compare with the signed value. Stored and usable
+// is the value. Not stored, or stored but unusable
+// (ErrUnusableServiceCredential), is nil with no error, so a required
+// reference refuses with secret_ref_missing as the gateway would fail to
+// read it. Any other error means the caller could not read the store and is
+// returned, so verify warns secret_presence_unchecked. A value it does not
+// return is cleared.
+func ServiceCredentialValue(value []byte, err error) ([]byte, error) {
+	if err == nil {
+		return value, nil
 	}
-	return false, err
+	clear(value)
+	if errors.Is(err, ErrNoServiceCredential) || errors.Is(err, ErrUnusableServiceCredential) {
+		return nil, nil
+	}
+	return nil, err
 }
 
 var serviceCredentialNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
@@ -117,6 +119,14 @@ func readStoredCredential(name, path string, checks ...func(path string) error) 
 		return nil, credentialVerdict(fmt.Errorf("credential %s: %w", name, err))
 	}
 	return data, nil
+}
+
+// ReadCredentialSource reads a credential value from path as the gateway
+// reads a stored one: at most ServiceCredentialLimit bytes, surrounding
+// whitespace trimmed, one non-empty line. bundle sign --secret-file binds
+// the value the gateway will read.
+func ReadCredentialSource(path string) ([]byte, error) {
+	return readBoundedCredential(path)
 }
 
 // readBoundedCredential reads at most ServiceCredentialLimit bytes from an

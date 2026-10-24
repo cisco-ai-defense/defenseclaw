@@ -43,7 +43,7 @@ import (
 
 // sandboxOpenShellExecCmd is the exec shim the managed OpenShell gateway
 // unit runs in both install modes (D4): defenseclaw-openshell-gateway.service
-// on Linux, the com.cisco.defenseclaw.openshell-gateway LaunchAgent on macOS.
+// on Linux, the com.cisco.defenseclaw.openshell-gateway.<tag> LaunchAgent on macOS.
 // Unit files cannot expand $HOME on macOS and the upstream unit's umask
 // breaks every MicroVM (UMask 0077, GAP-0009), so the shim sets the umask,
 // the root-owned rendered gateway configuration, the account's MicroVM
@@ -224,7 +224,10 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 			path = append([]string{e2fs}, path...)
 		}
 	}
-	tlsDir := filepath.Join(home, ".local", "state", "openshell", "tls")
+	// The gateway's state folder is DefaultStateHome: the environment
+	// below has no XDG_STATE_HOME, and the daemon finds the gateway's
+	// files there.
+	tlsDir := filepath.Join(openshell.DefaultStateHome(home), "openshell", "tls")
 	env := []string{
 		"HOME=" + home,
 		"PATH=" + strings.Join(path, ":"),
@@ -399,7 +402,7 @@ func openShellExecBridgeFor(configPath, home string) string {
 	if rendered, err := openshell.ParseRenderedGateway(data, nil); err != nil || rendered.ComputeDriver != openshell.DriverDocker {
 		return configPath
 	}
-	stateHome := filepath.Join(home, ".local", "state")
+	stateHome := openshell.DefaultStateHome(home)
 	if !openshell.DockerNamespaceInUse(stateHome, openshell.DefaultDockerNamespace) ||
 		!openShellExecDefaultNamespaceSandboxKept(stateHome) {
 		return configPath
@@ -478,7 +481,8 @@ var openShellExecDefaultNamespaceSandboxIDs = func() (map[string]bool, error) {
 
 // sandboxOpenShellVMProbe is the account's MicroVM probe as the user: CPU
 // flags, /dev/kvm read-write, and openshell-driver-vm in the rendered
-// driver_dir, ~/.local/libexec/openshell or the system directories.
+// driver_dir when set, or in the user's and system directories otherwise.
+// The probe does not locate the running gateway's sibling fallback.
 func sandboxOpenShellVMProbe(home, configPath string) openshell.VMProbeResult {
 	dir := ""
 	if data, err := os.ReadFile(configPath); err == nil {

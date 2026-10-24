@@ -82,7 +82,7 @@ func relaxWindowsStandalonePerUserFootprintForSetup(target windowsGenericManaged
 		if err != nil {
 			return relaxed, fmt.Errorf("enterprise hooks: resolve connector-scoped token sidecar: %w", err)
 		}
-		changed, err := relaxWindowsStandalonePerUserTokenFile(target, tokenPath)
+		changed, err := relaxWindowsStandalonePerUserFile(target, tokenPath)
 		if changed {
 			relaxed = append(relaxed, tokenPath)
 		}
@@ -237,77 +237,75 @@ func windowsStandaloneSetupProtectsDataDir(name string) bool {
 	return strings.EqualFold(strings.TrimSpace(name), "hermes")
 }
 
-// relaxWindowsStandalonePerUserTokenFile returns a guardian-hardened
-// connector-scoped hook token to the owner-private shape and reports whether it
-// changed it. Token publication stages the replacement with the existing
-// file's exact protection and then needs WRITE_DAC on it, which the hardened
-// DACL (read-only OWNER RIGHTS) denies the owner, so every republication over a
-// token an earlier reconcile hardened failed with Access Denied. Only a
+// relaxWindowsStandalonePerUserFile returns a guardian-hardened file to the
+// owner-private shape and reports whether it changed it. Token publication
+// needs WRITE_DAC, and a completed teardown returns the agent's own config
+// files to its control (r103 GAP-0290). Only a
 // target-owned, single-link, non-reparse regular file carrying the guardian's
-// hardened OWNER RIGHTS entry is changed; anything else is left for the token
-// custody checks to report.
-func relaxWindowsStandalonePerUserTokenFile(target windowsGenericManagedTarget, path string) (bool, error) {
+// hardened OWNER RIGHTS entry is changed. Unknown custody refuses the write.
+func relaxWindowsStandalonePerUserFile(target windowsGenericManagedTarget, path string) (bool, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return false, fmt.Errorf("enterprise hooks: per-user token path is not absolute and clean: %s", path)
+		return false, fmt.Errorf("enterprise hooks: per-user file path is not absolute and clean: %s", path)
 	}
 	if !windowsPathWithin(target.home, path) {
-		return false, fmt.Errorf("enterprise hooks: per-user token path is outside the user home: %s", path)
+		return false, fmt.Errorf("enterprise hooks: per-user file path is outside the user home: %s", path)
 	}
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("enterprise hooks: inspect per-user token %s: %w", path, err)
+		return false, fmt.Errorf("enterprise hooks: inspect per-user file %s: %w", path, err)
 	}
 	if !info.Mode().IsRegular() {
-		return false, fmt.Errorf("enterprise hooks: per-user token path is not a regular file: %s", path)
+		return false, fmt.Errorf("enterprise hooks: per-user file path is not a regular file: %s", path)
 	}
-	if err := winpath.RejectReparseChain(path); err != nil {
-		return false, fmt.Errorf("enterprise hooks: per-user token %s: %w", path, err)
-	}
-	handle, err := openWindowsPerUserDirectoryForDACL(path)
-	if err != nil {
-		return false, fmt.Errorf("enterprise hooks: open per-user token %s: %w", path, err)
-	}
-	defer windows.CloseHandle(handle)
-	var handleInfo windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &handleInfo); err != nil {
-		return false, fmt.Errorf("enterprise hooks: inspect per-user token %s: %w", path, err)
-	}
-	if handleInfo.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY != 0 ||
-		handleInfo.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-		return false, fmt.Errorf("enterprise hooks: per-user token path is not a regular file: %s", path)
-	}
-	if handleInfo.NumberOfLinks != 1 {
-		return false, fmt.Errorf("enterprise hooks: refusing per-user token with %d hard links: %s", handleInfo.NumberOfLinks, path)
-	}
-	owner, err := windowsHandleOwner(handle)
-	if err != nil {
-		return false, fmt.Errorf("enterprise hooks: read owner of %s: %w", path, err)
-	}
-	if owner == nil || !owner.Equals(target.sid) {
-		return false, nil
-	}
-	current, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
-	if err != nil {
-		return false, fmt.Errorf("enterprise hooks: read DACL of %s: %w", path, err)
-	}
-	if !strings.Contains(current.String(), windowsGuardianHardenedOwnerRightsACE) {
-		return false, nil
-	}
-	private, err := windows.SecurityDescriptorFromString(windowsSetupRelaxedFileSDDL)
-	if err != nil {
-		return false, err
-	}
-	dacl, _, err := private.DACL()
-	if err != nil {
-		return false, err
-	}
-	if err := setWindowsObjectDACLNoPropagation(handle, dacl, false); err != nil {
-		return false, fmt.Errorf("enterprise hooks: prepare per-user token %s for setup: %w", path, err)
-	}
-	return true, nil
+	changed := false
+	err = withWindowsTargetOwnedDACLHandleNoFollow(target.home, path, target.sid, false, func(handle windows.Handle) error {
+		current, err := windows.GetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: read DACL of %s: %w", path, err)
+		}
+		if !strings.Contains(current.String(), windowsGuardianHardenedOwnerRightsACE) {
+			return nil
+		}
+		private, err := windows.SecurityDescriptorFromString(windowsSetupRelaxedFileSDDL)
+		if err != nil {
+			return err
+		}
+		dacl, _, err := private.DACL()
+		if err != nil {
+			return err
+		}
+		if err := setWindowsObjectDACLNoPropagation(handle, dacl, false); err != nil {
+			return fmt.Errorf("enterprise hooks: return per-user file %s to its owner: %w", path, err)
+		}
+		changed = true
+		return nil
+	})
+	return changed, err
+}
+
+// Run only after teardown verified that no owned registration remains. The
+// caller impersonates the user, so another OS thread uses the service token
+// to remove the guardian's WRITE_DAC restriction. Never change DefenseClaw's
+// own state, another owner's files, links, or arbitrary descendants.
+func returnWindowsStandalonePatchedFilesToOwner(target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths) error {
+	done := make(chan error, 1)
+	go func() {
+		paths := append(append([]string(nil), configPaths...), footprint.PatchedFiles...)
+		var errs []error
+		for _, path := range sortedUnique(paths) {
+			if sameWindowsEnterprisePath(target.dataDir, path) || windowsPathWithin(target.dataDir, path) {
+				continue
+			}
+			if _, err := relaxWindowsStandalonePerUserFile(target, path); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		done <- errors.Join(errs...)
+	}()
+	return <-done
 }
 
 // openWindowsPerUserDirectoryForDACL opens a directory (or a file) for a DACL

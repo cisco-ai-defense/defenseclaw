@@ -1143,6 +1143,44 @@ func TestCodexReadChecksEverySameNameSkillFolder(t *testing.T) {
 	}
 }
 
+// GAP-1302: a path with a skills/<name> pair that is neither in a skill
+// root nor holds a SKILL.md is not the skill <name>; the denied skill's own
+// folder, and a copy of it with its SKILL.md elsewhere, stay refused.
+func TestSkillFolderDenyIgnoresUnrelatedSkillsPaths(t *testing.T) {
+	home, other := t.TempDir(), t.TempDir()
+	unrelated := filepath.Join(other, "tests", "skills", "blocked")
+	copied := filepath.Join(other, "vendor", "skills", "blocked")
+	for _, dir := range []string{unrelated, copied} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(unrelated, "notes.txt"), []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copied, "SKILL.md"), []byte("---\nname: blocked\n---\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Skill.Denied = []config.AssetPolicyRule{{Name: "blocked"}}
+	api := &APIServer{scannerCfg: cfg}
+	ctx := withManagedHookPeer(context.Background(), managedHookPeer{UID: 1002, Home: home})
+	for command, want := range map[string]bool{
+		"cat " + filepath.Join(unrelated, "notes.txt"): false,
+		"ls " + unrelated:                          false,
+		"cat " + filepath.Join(copied, "SKILL.md"): true,
+		"cat " + filepath.Join(home, ".agents", "skills", "blocked", "SKILL.md"): true,
+	} {
+		decision, matched := api.codexSkillAssetDecision(ctx, codexHookRequest{
+			HookEventName: "PreToolUse", ToolName: "Bash", CWD: other,
+			ToolInput: map[string]interface{}{"command": command},
+		})
+		if blocked := matched && decision.Action == "block"; blocked != want {
+			t.Errorf("%s: blocked=%v (decision %+v), want %v", command, blocked, decision, want)
+		}
+	}
+}
+
 // GAP-1188: a deny for a short plugin name must not capture a separate
 // installed plugin whose name contains that prefix and an underscore.
 func TestClaudePluginMCPDenyUsesInstalledOwner(t *testing.T) {

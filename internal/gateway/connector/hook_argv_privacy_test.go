@@ -289,8 +289,6 @@ func hookArgvConnectorCase(t *testing.T, connector string) hookArgvCase {
 		return hookArgvCase{script: "devin-hook.sh", stdin: `{"hook_event_name":"PreToolUse","session_id":"s1","cwd":"/work/proj","tool_name":"exec","tool_input":{"command":"echo ` + m + `"}}`, route: "/api/v1/devin/hook"}
 	case "hermes":
 		return hookArgvCase{script: "hermes-hook.sh", stdin: `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo ` + m + `"},"session_id":"s1","cwd":"/work/p","extra":{}}`, route: "/api/v1/hermes/hook"}
-	case "openhands":
-		return hookArgvCase{script: "openhands-hook.sh", stdin: `{"event_type":"PreToolUse","tool_name":"terminal","tool_input":{"command":"echo ` + m + `"},"session_id":"s1","working_dir":"/work/p","metadata":{}}`, route: "/api/v1/openhands/hook"}
 	case "antigravity":
 		return hookArgvCase{script: "antigravity-hook.sh", args: []string{"PreToolUse"}, stdin: `{"toolName":"run_command","toolInput":{"CommandLine":"echo ` + m + `"}}`, route: "/api/v1/antigravity/hook"}
 	}
@@ -316,7 +314,7 @@ func hookArgvInspectCases() []hookArgvCase {
 // hookArgvShellConnectors are the connectors with a host shell hook.
 var hookArgvShellConnectors = []Connector{
 	NewClaudeCodeConnector(), NewCodexConnector(), NewCopilotConnector(), NewCursorConnector(), NewKiroConnector(),
-	NewDevinConnector(), NewHermesConnector(), NewOpenHandsConnector(), NewAntigravityConnector(),
+	NewDevinConnector(), NewHermesConnector(), NewAntigravityConnector(),
 }
 
 // TestHookArgvCasesCoverEveryShellHook keeps the runtime tests in this file
@@ -420,6 +418,7 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 				rec.reset(t)
 				gateway.take()
 				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home)
 				curlrcEnv, trace := hookArgvCurlrcEnv(t)
 				code, stdout, stderr := runHookArgvCase(t, hookDir, tc, append([]string{"HOME=" + home, "DEFENSECLAW_HOME=" + home}, curlrcEnv...))
 				requireNoCurlTrace(t, trace)
@@ -434,7 +433,6 @@ func TestShellHooksKeepTokenAndPayloadOffEveryCommandLine(t *testing.T) {
 				}
 				rec.requireNone(t, token, hookArgvPayloadMarker)
 				rec.requireNoneInEnvironment(t, token, hookArgvPayloadMarker)
-				rec.requireCurlUsesDescriptors(t, true)
 			}
 		})
 	}
@@ -454,6 +452,7 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 	for _, tc := range append([]hookArgvCase{hookArgvConnectorCase(t, "claudecode")}, hookArgvInspectCases()[0]) {
 		rec.reset(t)
 		home := t.TempDir()
+		installNativeGatewayForHookTest(t, home)
 		code, stdout, stderr := runHookArgvCase(t, hookDir, tc, []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home})
 		requests := gateway.take()
 		if code != 0 || len(requests) != 1 || requests[0].authorization != "Bearer "+token {
@@ -461,7 +460,6 @@ func TestLegacySharedTokenHooksKeepTokenOffEveryCommandLine(t *testing.T) {
 		}
 		rec.requireNone(t, token, hookArgvPayloadMarker)
 		rec.requireNoneInEnvironment(t, token, hookArgvPayloadMarker)
-		rec.requireCurlUsesDescriptors(t, true)
 	}
 }
 
@@ -552,6 +550,7 @@ func TestShellHooksRefuseAMalformedToken(t *testing.T) {
 			for _, tc := range l.cases {
 				for _, mode := range []string{"open", "closed"} {
 					home := t.TempDir()
+					installNativeGatewayForHookTest(t, home)
 					env := []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home, "DEFENSECLAW_FAIL_MODE=" + mode}
 					rec.reset(t)
 					gateway.take()
@@ -667,7 +666,9 @@ func TestPathShimsKeepTokenOffEveryCommandLine(t *testing.T) {
 			defer cancel()
 			cmd := exec.CommandContext(ctx, systemBashForTest(t), filepath.Join(shimDir, name), "--version", hookArgvPayloadMarker)
 			curlrcEnv, trace := hookArgvCurlrcEnv(t)
-			cmd.Env = append(append(hookArgvBaseEnv(), curlrcEnv...), "HOME="+t.TempDir(), "PATH="+shimDir+":"+rec.dir+":/usr/bin:/bin")
+			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
+			cmd.Env = append(append(hookArgvBaseEnv(), curlrcEnv...), "HOME="+home, "PATH="+shimDir+":"+rec.dir+":/usr/bin:/bin")
 			var out bytes.Buffer
 			cmd.Stdout, cmd.Stderr = &out, &out
 			_ = cmd.Run() // the real tool may be missing; the inspection request came first
@@ -684,7 +685,8 @@ func TestPathShimsKeepTokenOffEveryCommandLine(t *testing.T) {
 					t.Fatalf("shim %s put the tool arguments on the gateway request's command line:\n%s", name, call)
 				}
 			}
-			rec.requireCurlUsesDescriptors(t, true)
+			// The shim's inspection now runs through the native connected-peer
+			// transport, so no curl process carries a gateway request.
 		})
 	}
 }
@@ -754,7 +756,9 @@ func runShimForTest(t *testing.T, shimDir, name, binDir string, env ...string) (
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, systemBashForTest(t), filepath.Join(shimDir, name), "--version", hookArgvPayloadMarker)
-	cmd.Env = append(append(hookArgvBaseEnv(), env...), "HOME="+t.TempDir(),
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	cmd.Env = append(append(hookArgvBaseEnv(), env...), "HOME="+home,
 		"PATH="+strings.Join([]string{shimDir, binDir, filepath.Dir(jq), "/usr/bin", "/bin"}, ":"))
 	out, err := cmd.CombinedOutput()
 	code := 0
@@ -772,8 +776,8 @@ func runShimForTest(t *testing.T, shimDir, name, binDir string, env ...string) (
 // variable. Run from an agent environment that exports the names the shims
 // used for their own values (a user's API_TOKEN, ACTION, ...) and an empty
 // DEFENSECLAW_GATEWAY_TOKEN, so that the bearer comes from the .token file,
-// every shim must start the real tool, on the allow path and with the gateway
-// down, with the user's values unchanged and no copy of the bearer.
+// every shim must start the real tool on the allow path with the user's
+// values unchanged and no copy of the bearer. Gateway outage blocks the tool.
 func TestPathShimsLeaveTheRealToolsEnvironmentAlone(t *testing.T) {
 	const token = "dccert-fake-token-shim-env"
 	gateway, liveAddr := newHookArgvGateway(t)
@@ -818,8 +822,11 @@ func TestPathShimsLeaveTheRealToolsEnvironmentAlone(t *testing.T) {
 					}
 					ran = ran || strings.Contains(run.args, hookArgvPayloadMarker)
 				}
-				if code != 0 || !ran {
+				if state.name == "allow" && (code != 0 || !ran) {
 					t.Fatalf("shim exit %d, real tool started %v, want the real tool run\n%s", code, ran, out)
+				}
+				if state.name == "gateway-down" && (code == 0 || ran) {
+					t.Fatalf("shim exit %d, real tool started %v, want a closed outage\n%s", code, ran, out)
 				}
 			})
 		}

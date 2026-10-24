@@ -694,7 +694,7 @@ var builtinHookContracts = map[string][]HookContract{
 			ContentEnvelope:     hermesContentEnvelope(),
 			Notes: []string{
 				"Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. The payload shape is unchanged: the prompt, tool result and model response are under extra (verified on v0.21.5).",
-				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Exit code 2 now blocks pre_tool_call. Timeouts and spawn errors still fail open unless the hook spec sets fail_closed, so SupportsFailClosed stays false. Bounded to >=0.21.0,<0.22.0.",
+				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Setup sets fail_closed on the pre_tool_call entry, so a spawn error, timeout or unparseable nonempty stdout blocks in the reviewed >=0.21.0,<0.22.0 range. A killed hook can still fail open because Hermes treats its non-2 exit and empty stdout as no decision, so SupportsFailClosed remains false. Secure Client keeps its existing registration. Other events cannot block.",
 				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
 				"The v2 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
 			},
@@ -796,8 +796,7 @@ var builtinHookContracts = map[string][]HookContract{
 			AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
 			Capabilities: HookCapability{
 				CanBlock:     true,
-				CanAskNative: true,
-				AskEvents:    []string{"preToolUse"},
+				CanAskNative: false,
 				BlockEvents: []string{
 					"preToolUse",
 					"permissionRequest",
@@ -811,7 +810,7 @@ var builtinHookContracts = map[string][]HookContract{
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
 				"GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
-				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
 			},
 		},
@@ -827,8 +826,7 @@ var builtinHookContracts = map[string][]HookContract{
 			AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
 			Capabilities: HookCapability{
 				CanBlock:     true,
-				CanAskNative: true,
-				AskEvents:    []string{"preToolUse"},
+				CanAskNative: false,
 				BlockEvents: []string{
 					"preToolUse",
 					"permissionRequest",
@@ -843,7 +841,7 @@ var builtinHookContracts = map[string][]HookContract{
 			Notes: []string{
 				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Windows Secure Client profile replaces a prompt the guardrail blocks.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
-				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
 				"Copilot documents optional native OpenTelemetry metrics and traces on POSIX hosts. DefenseClaw records that upstream surface but does not configure, launch, or certify the exporter; every DefenseClaw contract remains hook-only.",
 			},
@@ -887,44 +885,6 @@ var builtinHookContracts = map[string][]HookContract{
 			"Hard blocking is claimed only for synchronous PreToolUse stdout {\"decision\":\"deny\"}. decision=ask provides native confirmation. Google does not document non-zero hook exit codes as an enforcement interface.",
 			"PostToolUse output is {}. PreInvocation and PostInvocation may return injectSteps; DefenseClaw uses ephemeralMessage only for context. Stop requires a decision, where continue re-enters the loop and any other value permits stopping; DefenseClaw returns allow and does not claim Stop blocking.",
 			"Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json.",
-		},
-	}},
-	"openhands": {{
-		Connector:               "openhands",
-		ContractID:              "openhands-hooks-v1",
-		MinAgentVersion:         "1.12.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
-		HookConfigPathTemplates: []string{"~/.openhands/hooks.json", "<workspace>/.openhands/hooks.json"},
-		ResponseFieldName:       "hook_output",
-		Events: []string{
-			"pre_tool_use",
-			"post_tool_use",
-			"user_prompt_submit",
-			"stop",
-			"session_start",
-			"session_end",
-		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
-		Capabilities: HookCapability{
-			CanBlock:     true,
-			CanAskNative: false,
-			BlockEvents: []string{
-				"pre_tool_use",
-				"user_prompt_submit",
-				"stop",
-			},
-			SupportsFailClosed: true,
-			Scope:              "user,workspace",
-		},
-		SupportsTraceparent: true,
-		NativeOTLP:          false,
-		ToolCallLifecycle:   openHandsToolCallLifecycle(),
-		Notes: []string{
-			"OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
-			"OpenHands CLI 1.12.0 is the POSIX minimum because it first loads user-global ~/.openhands/hooks.json; source-reviewed against CLI 1.16.0 with no maximum. Windows retains its established unversioned hook contract. macOS remains uncertified until a durable green latest-version live run is recorded.",
-			"OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask surface is documented. Confirm becomes additionalContext only for user_prompt_submit; pre_tool_use and stop downgrades are audit-only.",
-			"Standalone OpenHands SDK 1.39.1 preserves a trace-only process-environment OTLP exporter; DefenseClaw integrates it only through the protected connector launch command on the reviewed macOS lane and does not persist launch variables.",
 		},
 	}},
 	"opencode": {{
@@ -1006,45 +966,6 @@ var builtinHookContracts = map[string][]HookContract{
 			"0.0.1785334225 is DefenseClaw's certification floor pinned to the current @ampcode/cli package build used for this contract snapshot; it is not an upstream-declared minimum plugin version.",
 		},
 	}},
-	"omnigent": {{
-		Connector:               "omnigent",
-		ContractID:              "omnigent-custom-policy-v1",
-		MinAgentVersion:         "0.7.0",
-		MaxAgentVersion:         "0.14.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v1",
-		HookConfigPathTemplates: []string{"$OMNIGENT_CONFIG", "$OMNIGENT_CONFIG_HOME/config.yaml", "~/.omnigent/config.yaml"},
-		ResponseFieldName:       "",
-		Events: []string{
-			"UserPromptSubmit",
-			"PreToolUse",
-			"PostToolUse",
-			"AfterAgentResponse",
-			"BeforeModel",
-			"AfterModel",
-		},
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
-		Capabilities: HookCapability{
-			CanBlock:           true,
-			CanAskNative:       true,
-			AskEvents:          []string{"UserPromptSubmit", "PreToolUse", "BeforeModel"},
-			BlockEvents:        []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "AfterAgentResponse", "BeforeModel", "AfterModel"},
-			SupportsFailClosed: true,
-			Scope:              "user",
-		},
-		SupportsTraceparent: true,
-		NativeOTLP:          true,
-		ToolCallLifecycle:   omniGentToolCallLifecycle(),
-		Notes: []string{
-			"OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
-			"The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
-			"DENY is authoritative on all six phases. Pre-action DENY prevents the action; post-phase DENY uses OmniGent's denial/sentinel behavior to suppress or replace onward-visible content but cannot roll back completed tool or model work. The bridge does not return custom replacement data.",
-			"ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-phase confirm findings remain attributed audit and continue without an approval pause.",
-			"The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
-			"Optional native OTLP is inactive until the OmniGent launch process exports OMNIGENT_TELEMETRY_ENABLED=true and the standard OTLP variables; content capture remains disabled.",
-			"The v0.7-v0.13 PolicyEvent context exposes bounded usage, cost, model, harness, actor, and labels but no session identifier; v0.13 adds optional subtree_usage. The bridge marks that correlation gap and marks partial label projections.",
-		},
-	}},
 }
 
 func KnownHookContracts(connectorName string) []HookContract {
@@ -1062,25 +983,10 @@ func hookContractsForOS(connectorName, goos string) []HookContract {
 		contract.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
 		contract.Notes = append([]string(nil), contract.Notes...)
 
-		// OpenHands exposes a trace-only standard-OTEL process environment on
-		// the reviewed macOS lane. DefenseClaw supplies scoped header auth only
-		// through its protected connector launch boundary and does not persist
-		// the launch environment.
 		// Windows and macOS stay on the Devin build they were reviewed
 		// against; the extra pin covers Linux only.
 		if (goos == "windows" || goos == "darwin") && contract.ContractID == "devin-hooks-v1" {
 			contract.ExactAgentVersions = []string{"3000.4.25"}
-		}
-		if contract.Connector == "openhands" && contract.ContractID == "openhands-hooks-v1" {
-			switch goos {
-			case "darwin":
-				contract.NativeOTLP = true
-			case "windows":
-				// Windows preserves the pre-POSIX compatibility band and has no
-				// DefenseClaw-managed native exporter.
-				contract.MinAgentVersion = "0.0.0"
-				contract.NativeOTLP = false
-			}
 		}
 		out[i] = contract
 	}
@@ -1590,8 +1496,6 @@ func normalizeConnectorName(name string) string {
 	switch name {
 	case "claude", "claude-code", "claude_code":
 		return "claudecode"
-	case "open-hands", "open_hands":
-		return "openhands"
 	default:
 		return name
 	}

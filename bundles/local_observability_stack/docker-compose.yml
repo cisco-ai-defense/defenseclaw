@@ -19,7 +19,7 @@
 #
 # Ports (host, bound to 127.0.0.1 by default):
 #   4317 / 4318 — OTel Collector OTLP receivers
-#   3000        — Grafana UI (anonymous Admin for direct Compose)
+#   3000        — Grafana UI (anonymous read-only Viewer for direct Compose)
 #   3100        — Loki HTTP (scraped by Grafana)
 #   3200        — Tempo HTTP
 #   9090        — Prometheus UI
@@ -160,11 +160,14 @@ services:
       # intercept those private requests and turn healthy panels into 403s.
       NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,::1},prometheus,loki,tempo,otel-collector"
       no_proxy: "${NO_PROXY:-localhost,127.0.0.1,::1},prometheus,loki,tempo,otel-collector"
-      # Keep the historical direct-Compose experience compatible. The managed
-      # controller applies docker-compose.password.yml for new stacks unless
-      # --no-password is selected (or a legacy stack is grandfathered).
+      # Direct Compose and the managed --no-password mode show the
+      # provisioned dashboards to anonymous visitors read-only: never as
+      # Admin, which let every local account change datasources, users and
+      # dashboards. The managed controller applies docker-compose.password.yml
+      # for new stacks unless --no-password is selected (or a legacy stack is
+      # grandfathered).
       GF_AUTH_ANONYMOUS_ENABLED: "true"
-      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
       # Layered Node Graph layout keeps causal agent DAGs readable. The graph
       # falls back to Grafana's force layout above its supported node limit.

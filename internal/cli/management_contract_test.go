@@ -9,6 +9,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -139,6 +141,8 @@ func TestManagementContractBundleApplyRefusals(t *testing.T) {
 // checked in internal/enterprisebundle).
 func TestManagementContractBundleStatusDescribesEveryMember(t *testing.T) {
 	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/full", reflect.TypeOf(bundleStatusResult{}))
+	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/anchorsSummary", reflect.TypeOf(enterprisebundle.AnchorsSummary{}))
+	contracttest.RequireMembers(t, "bundle-status.schema.json#/$defs/anchorsSummary/properties/keys/items", reflect.TypeOf(enterprisebundle.AnchorKeySummary{}))
 	contracttest.RequireMembers(t, "bundle-verify.schema.json#/$defs/warning", reflect.TypeOf(enterprisebundle.Warning{}))
 	contracttest.RequireMembers(t, "bundle-refused.schema.json#/$defs/bundleError", reflect.TypeOf(bundleError{}))
 }
@@ -185,6 +189,19 @@ func TestManagementContractBundleStatus(t *testing.T) {
 	}
 	requireDeliveryIDs(t, doc, map[string]string{"current": "agent-7:d.7", "last_good": "agent-7:d.6",
 		"last_receipt": "agent-7:d.7", "bundle": "agent-7:d.7", "last_refusal": "agent-7:d.8"})
+	// anchors_summary is what the installed anchor file says, with the hash
+	// of its bytes and without the public keys (GitHub #1320).
+	anchorBytes, err := os.ReadFile(e.anchors)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchorSum := sha256.Sum256(anchorBytes)
+	summary, _ := doc["anchors_summary"].(map[string]any)
+	keys, _ := summary["keys"].([]any)
+	if summary["sha256"] != hex.EncodeToString(anchorSum[:]) || summary["tenant_id"] != "acme" || len(keys) != 1 ||
+		keys[0].(map[string]any)["key_id"] != "k1" || keys[0].(map[string]any)["public_key"] != nil {
+		t.Fatalf("anchors_summary = %v", doc["anchors_summary"])
+	}
 
 	events, err := filepath.Glob(filepath.Join(store.PublicReceiptEventsDir(), "*.json"))
 	if err != nil || len(events) != 3 {

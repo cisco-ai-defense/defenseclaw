@@ -35,7 +35,7 @@ func TestProfileResolveWithoutProfilesReportsHookExemption(t *testing.T) {
 	facts := useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
 		Source: useridentity.SourceSSSD, Assurance: useridentity.AssuranceVerified,
 		AccountDomain: "CORP", Domain: "corp.example", Principal: "carol@corp.example", ResolvedAt: time.Now()}
-	managedHookExemptFacts = func(uid int) (useridentity.DirectoryFacts, bool) {
+	managedHookExemptFacts = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) {
 		return facts, uid == 2203
 	}
 	profileExplainSubjectLookup = func(name string) (profileSubject, error) {

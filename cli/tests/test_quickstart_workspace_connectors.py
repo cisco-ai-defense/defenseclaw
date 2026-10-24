@@ -52,10 +52,9 @@ def _stage_workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, connector:
         None,
     )
     if case is None:
-        # OpenHands and Kiro read project hooks too; the Go golden only has
+        # Kiro reads project hooks too; the Go golden only has
         # their user-scope render because Setup's primary file is global.
         relative = {
-            "openhands": ".openhands/hooks.json",
             "kiro": ".kiro/hooks/defenseclaw.json",
         }[connector]
         path = workspace / relative
@@ -126,7 +125,7 @@ def test_devin_workspace_survives_real_first_run_and_agrees_with_status_doctor(
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the shared golden case is POSIX")
-@pytest.mark.parametrize("connector", ["copilot", "openhands", "kiro"])
+@pytest.mark.parametrize("connector", ["copilot",  "kiro"])
 def test_real_first_run_keeps_workspace_hook_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, connector: str
 ) -> None:
@@ -281,7 +280,6 @@ def test_failed_first_run_restores_the_pinned_workspace(tmp_path: Path, monkeypa
     [
         ("devin", r".devin\hooks.v1.json"),
         ("copilot", r".github\hooks\defenseclaw.json"),
-        ("openhands", r".openhands\hooks.json"),
         ("kiro", r".kiro\hooks\defenseclaw.json"),
     ],
 )

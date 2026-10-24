@@ -17,7 +17,7 @@ func TestUtmpHostWithoutAddressDoesNotVerifySSH(t *testing.T) {
 	oldSID := utmpSessionID
 	utmpSessionID = func(int) (int, error) { return 77, nil }
 	t.Cleanup(func() { utmpSessionID = oldSID })
-	facts, err := utmpSessionFactsFrom(path, "pts/1", "alice", 4201)
+	facts, err := utmpSessionFactsFrom(path, "pts/1", "alice", 4201, 1001)
 	if err != nil {
 		t.Fatal(err)
 	}

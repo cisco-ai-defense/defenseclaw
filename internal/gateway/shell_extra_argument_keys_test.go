@@ -106,12 +106,6 @@ func TestShellToolCallWithExtraArgumentKeys(t *testing.T) {
 			{"benign", `{"command":"ls","description":"x","timeout":5}`, "allow"},
 			{"benign-extra", `{"command":"ls","extra":"x"}`, "allow"},
 		} {
-			if shell.tool == "shell" && row.rule != unverifiedShellCommandRuleID && row.rule != "allow" {
-				// Kiro's shell alias does not reach the command rules even
-				// with the command alone (rel-1-0-2 GAP-0689, open): only the
-				// rows without a command to judge are pinned for it here.
-				continue
-			}
 			t.Run(shell.connector+"/"+shell.tool+"/"+row.name, func(t *testing.T) {
 				got := shellExtraKeyHook(t, shell.connector, shell.tool, json.RawMessage(row.args))
 				if row.rule == "allow" {

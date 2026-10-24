@@ -30,8 +30,8 @@
       "id": "admission-medium-mcp",
       "title": "MEDIUM MCP scan",
       "domain": "admission",
-      "description": "An MCP server scan found a MEDIUM finding. Default policy clears it; strict rejects.",
-      "expectedVerdict": "rejected",
+      "description": "An MCP server scan found a MEDIUM finding. Balanced warns and keeps it enabled; Strict rejects.",
+      "expectedVerdict": "warning",
       "input": {
         "target_type": "mcp",
         "target_name": "context-server",

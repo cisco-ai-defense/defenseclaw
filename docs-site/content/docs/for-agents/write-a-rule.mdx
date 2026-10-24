@@ -1,0 +1,110 @@
+---
+title: Write a rule
+description: A runbook for an AI agent to turn the user's sentence into one custom guardrail rule, validate it and apply it to one agent.
+keywords:
+  - DefenseClaw custom rule agent runbook
+  - validate-pack
+  - use-pack
+---
+
+{/* sources: how-to/policies/write-a-custom-rule, reference/rules, reference/cel/authoring, get-started/quickstart (demo rule), cmd_guardrail.py validate-pack and use-pack */}
+
+<Callout title="Hand this page to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/for-agents/write-a-rule/llms.md and follow it. Show me the rule before you apply it.
+```
+</Callout>
+
+You are an AI agent. Turn one sentence from the user into one rule in a custom rule pack, check it offline, and apply it to one agent only after the user agrees.
+
+## Hard rules
+
+1. Observe first. Do not switch an agent to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes. `use-pack` edits `config.yaml` through the CLI; ask first.
+2. Never put a real key, token or customer string in a rule or an example.
+3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`. There, the administrator delivers packs.
+4. Never edit the shipped `default`, `strict` or `permissive` packs. Copy one.
+
+## Steps
+
+1. Restate the rule. Write one line: what command or content, which agent, what severity (`CRITICAL` always blocks; lower severities follow the block level). Ask the user to confirm.
+
+2. Copy the default pack.
+
+   ```bash
+   PACK=~/.defenseclaw/policies/guardrail/my-rule
+   cp -R ~/.defenseclaw/policies/guardrail/default "$PACK"
+   ```
+
+   Expected: no output.
+   If the source folder is missing, run `defenseclaw init` first and tell the user.
+
+3. Write the rule file. Use this shape, which the quickstart demo also uses. Replace the id, expression, pattern and title.
+
+   ```yaml
+   version: 1
+   category: my-rule
+   rules:
+     - id: MY-RULE-1
+       tool_call_only: true
+       expression: >-
+         f.commands.exists(c, 'example-marker' in c.argv)
+       pattern: '\bexample-marker\b'
+       title: "Example marker"
+       severity: CRITICAL
+       confidence: 0.99
+       tags: [custom]
+   ```
+
+   Save it as `$PACK/rules/my-rule.yaml`. `expression` is a CEL check on the parsed command; `pattern` is the RE2 fallback ([CEL reference](/docs/reference/policy/cel/authoring), [Regex cookbook](/docs/reference/policy/regex-cookbook)).
+
+4. Validate offline.
+
+   ```bash
+   defenseclaw guardrail validate-pack "$PACK"
+   ```
+
+   Expected:
+
+   ```text
+   Rule pack valid: "/home/alice/.defenseclaw/policies/guardrail/my-rule"
+     rules: 240/244 enabled across 8 files
+     components: judges=4 judge_categories=23 local_patterns=11 suppressions=9 sensitive_tools=6
+     digest: b8f9…13e9e0
+     files digest: 4b04…8fa71b (the guardrail.custom_packs pin)
+   ```
+
+   If it prints `Rule pack invalid` and exits `1`: the next line is `<code> at <file>: <reason>`. Fix that file and repeat. Do not apply an invalid pack.
+
+5. Show the user the rule and the digest. Ask: "Apply this to `<agent>` only?"
+
+6. Apply to one agent, after the user says yes.
+
+   ```bash
+   defenseclaw guardrail use-pack my-rule --connector <agent>
+   ```
+
+   Expected: the pack is validated, its digest pinned in `guardrail.custom_packs.my-rule`, and the agent switched to it. The gateway reloads without a restart.
+   If it differs: quote the message. Do not edit `config.yaml` by hand.
+
+7. Check.
+
+   ```bash
+   defenseclaw guardrail list-packs
+   defenseclaw doctor
+   ```
+
+   Expected: `list-packs` shows `<agent>` using `my-rule`; doctor shows no new `[FAIL]`.
+   Optionally ask the user to run the matching command in the agent in observe mode and look at `defenseclaw alerts --limit 5`. The rule blocks only when that agent is in action mode; that switch is the user's decision.
+
+8. To undo: `defenseclaw guardrail use-pack --clear --connector <agent>`.
+
+## Report
+
+Reply with:
+
+- The user's sentence and the rule you wrote (the YAML).
+- The `validate-pack` result and digest.
+- The agent it applies to and whether that agent is in observe or action mode.
+- The undo command.

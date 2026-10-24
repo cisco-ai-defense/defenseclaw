@@ -2,7 +2,7 @@
 
 This directory contains the local-mode Splunk configuration bundle.
 Operator setup and integration behavior are maintained in the
-[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/).
+[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/how-to/observability/send-to-splunk/).
 
 Using this bundle to start local Splunk means the operator is representing that
 they have reviewed and accepted the then-current Splunk General Terms,

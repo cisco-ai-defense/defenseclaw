@@ -22,7 +22,6 @@ import (
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
-	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -415,7 +414,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			DefenseClawSandboxID:   aiDiscoveryV8Optional(signal.SandboxID),
 			DefenseClawSandboxName: aiDiscoveryV8Optional(signal.SandboxName),
 		}
-		identity := inventoryIdentity(signal.UserID)
+		identity := inventoryIdentityFor(signal.UserID, signal.UserName)
 		identity.applyTo(&base)
 		if signal.Category == inventory.SignalLocalModel && signal.Model != nil && signal.Model.Provenance != nil {
 			provenance := signal.Model.Provenance
@@ -610,7 +609,7 @@ func (adapter *aiDiscoveryV8Adapter) emitIDEPluginLog(
 			DefenseClawUserIDKind:        v8UserIDKind(discoveryUserIDKind(plugin.UserID)),
 			DefenseClawUserName:          v8UserName(plugin.UserName, ideV8UserName),
 		}
-		inventoryIdentity(plugin.UserID).applyTo(&base)
+		inventoryIdentityFor(plugin.UserID, plugin.UserName).applyTo(&base)
 		switch plugin.State {
 		case inventory.AIStateNew:
 			return builder.BuildLogIdePluginDiscovered(observability.LogIdePluginDiscoveredInput(base))
@@ -1102,7 +1101,7 @@ func aiDiscoveryV8EmitEnvelope(ctx context.Context, snapshot observabilityruntim
 }
 
 func aiDiscoveryV8Builder() (*observability.FamilyBuilder, error) {
-	return observability.NewFamilyBuilder(observability.ClockFunc(func() time.Time { return time.Now().UTC() }), observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }))
+	return observability.NewFamilyBuilder(observability.ClockFunc(func() time.Time { return time.Now().UTC() }), observability.TimeOrderedOccurrenceIDs)
 }
 
 func aiDiscoveryV8Optional(value string) observability.Optional[string] {

@@ -25,107 +25,14 @@ def test_codex_setup_rejects_versions_without_required_app_server_flag() -> None
     assert agent_selection.codex_setup_version_problem("codex-cli 0.136.0") == ""
 
 
-def test_openhands_protected_selection_roster_is_darwin_only(monkeypatch) -> None:
-    connectors = ("codex", "openhands", "amp")
-    monkeypatch.setattr(agent_selection.sys, "platform", "linux")
-    assert agent_selection.setup_agent_selection_connectors(connectors) == ("codex", "amp")
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-    assert agent_selection.setup_agent_selection_connectors(connectors) == (
-        "codex",
-        "openhands",
-        "amp",
-    )
 
 
-def test_darwin_setup_records_only_openhands_from_native_roster(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    selected = agent_selection.SetupAgentSelection(
-        connector="openhands",
-        executable="/usr/local/bin/openhands",
-        raw_version="OpenHands CLI 1.16.0",
-        normalized_version="1.16.0",
-        sha256="a" * 64,
-    )
-    captured: list[tuple[str, ...]] = []
-    monkeypatch.setattr(cmd_setup.platform_support, "host_os", lambda: "darwin")
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-
-    def record(_data_dir, connectors):
-        captured.append(tuple(connectors))
-        return {"openhands": selected}, {}
-
-    sentinel = object()
-    monkeypatch.setattr(agent_selection, "record_setup_agent_selections", record)
-    monkeypatch.setattr(cmd_setup, "_validate_setup_agent_selection_receipt", lambda *_args, **_kwargs: sentinel)
-
-    result = cmd_setup._record_windows_setup_agent_selections(
-        tmp_path,
-        ("codex", "openhands", "amp"),
-    )
-
-    assert result is sentinel
-    assert captured == [("openhands",)]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
-def test_darwin_openhands_selection_binds_stable_executable_and_full_chain(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    trusted = tmp_path / "trusted"
-    trusted.mkdir(mode=0o700)
-    executable = trusted / "openhands"
-    executable.write_text("#!/bin/sh\necho OpenHands CLI 1.16.0\n", encoding="utf-8")
-    executable.chmod(0o700)
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_ai_discovery_trust_config",
-        lambda _data_dir: (True, ()),
-    )
-    monkeypatch.setattr(agent_selection.agent_discovery, "_expand_bin_prefixes", lambda roots: tuple(roots))
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_binary_candidates_for_agent",
-        lambda *_args: (str(executable),),
-    )
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_version_for_agent_binary",
-        lambda *_args, **_kwargs: ("OpenHands CLI 1.16.0", ""),
-    )
-
-    selected = agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
-
-    assert selected.executable == str(executable)
-    assert selected.sha256 == hashlib.sha256(executable.read_bytes()).hexdigest()
-    trusted.chmod(0o777)
-    assert not agent_selection.is_setup_trusted_binary(
-        str(executable),
-        str(tmp_path / "state"),
-        connector="openhands",
-    )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
-def test_darwin_openhands_uv_tool_symlink_refusal_names_trusted_paths_add(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    tool_bin = tmp_path / "uv" / "tools" / "openhands" / "bin"
-    tool_bin.mkdir(parents=True, mode=0o700)
-    (tool_bin / "openhands").write_text("#!/bin/sh\n", encoding="utf-8")
-    link = tmp_path / "bin" / "openhands"
-    link.parent.mkdir()
-    link.symlink_to(tool_bin / "openhands")
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(link),))
-
-    with pytest.raises(OSError, match=r"trusted-paths add .*uv/tools/openhands/bin"):
-        agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
 
 
 def test_selection_probe_gets_load_tolerant_budget_and_plain_timeout(tmp_path: Path, monkeypatch) -> None:
@@ -178,32 +85,6 @@ def test_windows_cmd_shim_refusal_names_native_install_not_trusted_paths(tmp_pat
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Darwin POSIX executable custody")
-def test_darwin_openhands_selection_rejects_identity_change_during_hash(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    trusted = tmp_path / "trusted"
-    trusted.mkdir(mode=0o700)
-    executable = trusted / "openhands"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o700)
-    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
-    monkeypatch.setattr(agent_selection, "_setup_agent_candidates", lambda *_args: (str(executable),))
-    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_version_for_agent_binary",
-        lambda *_args, **_kwargs: ("OpenHands CLI 1.16.0", ""),
-    )
-
-    def replace_during_hash(path: str) -> str:
-        Path(path).write_text("#!/bin/sh\necho replaced\n", encoding="utf-8")
-        return "b" * 64
-
-    monkeypatch.setattr(agent_selection, "stable_executable_sha256", replace_during_hash)
-
-    with pytest.raises(OSError, match="changed while hashing"):
-        agent_selection._select_agent_executable(str(tmp_path / "state"), "openhands")
 
 
 def test_record_setup_agent_selection_writes_short_lived_protected_receipt(
@@ -243,29 +124,6 @@ def test_record_setup_agent_selection_writes_short_lived_protected_receipt(
     assert expires_at - selected_at == agent_selection.SELECTION_LIFETIME
 
 
-def test_record_setup_agent_selection_accepts_omnigent(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    executable = tmp_path / "trusted" / "omnigent.exe"
-    executable.parent.mkdir()
-    executable.write_bytes(b"omnigent")
-    selected = agent_selection.SetupAgentSelection(
-        connector="omnigent",
-        executable=str(executable),
-        raw_version="omnigent 0.7.0",
-        normalized_version="0.7.0",
-        sha256=hashlib.sha256(b"omnigent").hexdigest(),
-    )
-    monkeypatch.setattr(agent_selection, "_select_agent_executable", lambda *_args: selected)
-
-    selections, errors = agent_selection.record_setup_agent_selections(
-        tmp_path / "state",
-        ["omnigent"],
-    )
-
-    assert selections == {"omnigent": selected}
-    assert errors == {}
 
 
 def test_record_setup_agent_selection_accepts_opencode(
@@ -689,59 +547,6 @@ def test_missing_exact_windows_opencode_image_preserves_receipt_and_skips_discov
     assert selections == {}
     assert "opencode" in errors
     assert receipt.read_bytes() == prior
-
-
-@pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixture; Windows aliases are enumerated separately")
-@pytest.mark.parametrize("alias", ["omnigent.exe", "omni.exe"])
-def test_omnigent_official_alias_selection_records_real_version_and_digest(
-    tmp_path: Path,
-    monkeypatch,
-    alias: str,
-) -> None:
-    trusted = tmp_path / "trusted"
-    trusted.mkdir()
-    executable = trusted / alias
-    executable.write_text("#!/bin/sh\nprintf 'omnigent 0.7.0\\n'\n", encoding="utf-8")
-    executable.chmod(0o700)
-    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_binary_candidates_for_agent",
-        lambda *_args: (),
-    )
-
-    selected = agent_selection._select_agent_executable(str(tmp_path / "state"), "omnigent")
-
-    assert selected.executable == str(executable.resolve())
-    assert selected.raw_version == "omnigent 0.7.0"
-    assert selected.normalized_version == "0.7.0"
-    assert selected.sha256 == hashlib.sha256(executable.read_bytes()).hexdigest()
-
-
-def test_omnigent_candidate_aliases_do_not_raise_or_accept_unlisted_names(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    trusted = tmp_path / "trusted"
-    trusted.mkdir()
-    expected = {str(trusted / "omnigent.exe"), str(trusted / "omni.exe")}
-    for candidate in expected:
-        Path(candidate).write_bytes(b"MZ")
-    (trusted / "omnigent.cmd").write_text("@echo off\r\n", encoding="utf-8")
-    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(trusted),))
-    monkeypatch.setattr(
-        agent_selection.agent_discovery,
-        "_binary_candidates_for_agent",
-        lambda *_args: (),
-    )
-
-    candidates = agent_selection._setup_agent_candidates(
-        "omnigent",
-        agent_selection.agent_discovery._SPECS["omnigent"],
-        str(tmp_path / "state"),
-    )
-
-    assert set(candidates) == expected
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows updater-managed Hermes authority")

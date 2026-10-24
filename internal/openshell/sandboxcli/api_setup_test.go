@@ -18,10 +18,12 @@ package sandboxcli
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 )
 
 // GAP-1918: before the gateway is set up there is no gateway token. The
@@ -47,5 +49,29 @@ func TestAPIBeforeGatewaySetupNamesNextStep(t *testing.T) {
 	}
 	if strings.Contains(disabled.Message, "sandboxapi") || strings.Contains(disabled.Message, "daemon") {
 		t.Fatalf("message %q uses internal terms", disabled.Message)
+	}
+}
+
+// r103 GAP-0332: on a Linux computer without Docker or KVM, `sandbox run`
+// said only that sandboxes are off and to run setup; the doctor alone named
+// the missing Docker. The refusal names it too.
+func TestDisabledRefusalNamesAMissingSandboxRuntime(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the hint is for Linux computers")
+	}
+	prevManaged, prevRuntime := onManagedHost, hostHasSandboxRuntime
+	t.Cleanup(func() { onManagedHost, hostHasSandboxRuntime = prevManaged, prevRuntime })
+	onManagedHost = func() bool { return false }
+	off := &sandboxapi.Error{Code: sandboxapi.CodeDisabled, Message: sandboxapi.DisabledMessage}
+	for _, has := range []bool{false, true} {
+		hostHasSandboxRuntime = func() bool { return has }
+		var disabled *DisabledError
+		if err := apiError(off); !errors.As(err, &disabled) {
+			t.Fatalf("apiError = %v, want a DisabledError", err)
+		}
+		named := strings.Contains(disabled.Message, "lacks Docker") && strings.Contains(disabled.Message, "sandbox doctor")
+		if !strings.HasPrefix(disabled.Message, sandboxapi.DisabledMessage) || named == has {
+			t.Fatalf("runtime present %t: message %q", has, disabled.Message)
+		}
 	}
 }

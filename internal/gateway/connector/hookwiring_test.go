@@ -215,6 +215,133 @@ func TestHookConfigSidecarWriteRejectsMalformedPeerState(t *testing.T) {
 	}
 }
 
+func TestHookConfigSidecarWriteRepairsNullMapFromPeerRecords(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatalf("same-mode recovery: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repaired hookConfigSidecar
+	if err := json.Unmarshal(after, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"codex", "claudecode"} {
+		if repaired.FailModes[name] != "open" || repaired.FailModeSources[name] != HookFailModeSourceConfig {
+			t.Fatalf("repaired sidecar lost %s: %+v", name, repaired)
+		}
+	}
+}
+
+func TestHookConfigSidecarRefusesNullMapWithoutPeerProof(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, hookConfigSidecarName+".claudecode")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err == nil {
+		t.Fatal("unproven peer mode was silently discarded")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(broken, after) {
+		t.Fatalf("failed recovery changed shared state: %s", after)
+	}
+}
+
+func TestHookConfigSidecarNullMapDoesNotResurrectUncorroboratedOpenPeer(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookConfigSidecarName)
+	for _, name := range []string{"codex", "claudecode"} {
+		if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", name, "open", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var state map[string]any
+	if err := json.Unmarshal(before, &state); err != nil {
+		t.Fatal(err)
+	}
+	state["fail_modes"] = nil
+	broken, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, broken, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// This extra record has no corroborating source in the shared sidecar.
+	// It may be a stale connector that a previous setup removed.
+	if err := os.WriteFile(filepath.Join(dir, hookConfigSidecarName+".copilot"),
+		hookRuntimeFlatRecord("copilot", "open", HookFailModeSourceConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "codex", "open", false); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repaired hookConfigSidecar
+	if err := json.Unmarshal(after, &repaired); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := repaired.FailModes["copilot"]; exists {
+		t.Fatalf("uncorroborated open mode became an allow path: %+v", repaired.FailModes)
+	}
+}
+
 // The hooks directory is writable by the target user by design, so a managed
 // sidecar has to converge on modification and not only on deletion.
 func TestManagedHookConfigSidecarConvergesOnUnreadableState(t *testing.T) {
@@ -293,6 +420,7 @@ func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
 		"127.0.0.1:18970",
 		"claudecode",
 		"closed",
+		HookFailModeSourceConfig,
 		false,
 		failSecond,
 	); err == nil {
@@ -383,6 +511,7 @@ func TestManagedHookRuntimeWriteRejectsOversizedSparseSnapshotBeforeMutation(t *
 		"127.0.0.1:18970",
 		"codex",
 		"closed",
+		"",
 		true,
 		func(string, []byte, os.FileMode) error {
 			writes++
@@ -620,8 +749,10 @@ func TestUnmanagedHookRuntimeContractRetainsUnboundedLegacyReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A record the shared hooks read (KEY=value lines only, 1.0.4 loop
+	// round 3 of G-hooks-upg), padded past the enterprise limit.
 	flat = append(
-		[]byte("# "+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
+		[]byte("PAD="+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
 		flat...,
 	)
 	if err := os.WriteFile(flatPath, flat, 0o600); err != nil {
@@ -2543,16 +2674,22 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if runtimeState.GatewayAddr != "127.0.0.1:18970" {
 				t.Errorf("hook config sidecar API address = %q, want 127.0.0.1:18970", runtimeState.GatewayAddr)
 			}
-			// The native hook reads this value: it keeps closed for a
-			// connector whose hook blocks its own failures (the per-user
-			// Hermes hook, GAP-0269) and is open for the other connectors
-			// without a fail-closed contract.
-			wantFailMode := CapableHookFailMode(opts, tt.conn, resolveHookFailMode(opts, tt.conn))
-			if tt.conn.Name() == "hermes" && wantFailMode != "closed" {
-				t.Errorf("per-user Hermes resolves fail mode %q, want closed", wantFailMode)
+			// Every per-user hook records closed, including connectors that
+			// use their native deny response for a failure DefenseClaw sees.
+			outage := OutageHookFailMode(opts, tt.conn)
+			wantFailMode := renderedHookFailMode(opts, tt.conn)
+			if wantFailMode != "closed" {
+				t.Errorf("per-user %s resolves fail mode %q, want closed", tt.conn.Name(), wantFailMode)
 			}
 			if got := runtimeState.FailModes[connectorName]; got != wantFailMode {
 				t.Errorf("hook config sidecar fail mode for %s = %q, want %q", connectorName, got, wantFailMode)
+			}
+			wantSource := ""
+			if wantFailMode == outage {
+				wantSource = HookFailModeSourceConfig
+			}
+			if got := runtimeState.FailModeSources[connectorName]; got != wantSource {
+				t.Errorf("hook config sidecar fail mode source for %s = %q, want %q", connectorName, got, wantSource)
 			}
 
 			if err := tt.conn.Teardown(context.Background(), opts); err != nil {

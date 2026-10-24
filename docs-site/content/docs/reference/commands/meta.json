@@ -1,0 +1,10 @@
+{
+  "title": "Commands and TUI",
+  "pages": [
+    "cli",
+    "first-run",
+    "installer",
+    "guardrail-setup",
+    "tui"
+  ]
+}

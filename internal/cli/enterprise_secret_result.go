@@ -12,14 +12,12 @@ package cli
 
 import (
 	"encoding/json"
-	"errors"
 	"os"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -37,6 +35,10 @@ type secretFailureResult struct {
 	Errors           []enterprisestatus.Message `json:"errors"`
 	ExitCode         int                        `json:"exit_code"`
 }
+
+// codeSecretChangeFailed is the code of a write or removal that did not
+// happen, as the lifecycle reports a failed protected-state change.
+const codeSecretChangeFailed = "change_failed"
 
 // secretRefusal names the errors[].code of a secret failure.
 type secretRefusal struct {
@@ -66,19 +68,7 @@ func reportSecretFailure(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return err
 	}
 	exit := commandExitCode(err)
-	code := ""
-	var refusal *secretRefusal
-	var view *managedViewRefusal
-	switch {
-	case errors.As(err, &refusal):
-		code = refusal.code
-	case errors.As(err, &view):
-		code = view.code
-	case exit == invalidExit:
-		code = "invalid_arguments"
-	default:
-		code = string(enterprisebundle.CodeStateInvalid)
-	}
+	code := secretFailureCode(err, invalidExit)
 	result := secretFailureResult{SchemaVersion: 1, Action: action, Name: opts.name,
 		Errors: []enterprisestatus.Message{{Code: code, Message: err.Error()}}, ExitCode: exit}
 	if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(result); encodeErr != nil {

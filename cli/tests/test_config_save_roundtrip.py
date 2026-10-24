@@ -630,3 +630,20 @@ class TestMergeHelpers(unittest.TestCase):
 if __name__ == "__main__":
     logging.basicConfig(level=logging.WARNING)
     unittest.main()
+
+
+def test_stale_save_merges_a_mapping_another_writer_added(tmp_path, monkeypatch):
+    # GAP-1293: B loaded before A wrote update:, so B's baseline has no
+    # update mapping; B's save must merge into A's, not replace it.
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("config_version: 9\nobservability: {}\n", encoding="utf-8")
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    first = load()
+    second = load()
+    first.update.check = False
+    first.save()
+    second.update.source = "https://updates.example.test/releases"
+    second.save()
+    after = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert after["update"]["check"] is False
+    assert after["update"]["source"] == "https://updates.example.test/releases"

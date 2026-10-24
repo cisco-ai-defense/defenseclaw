@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
@@ -127,13 +128,17 @@ func TestUnixUnprotectedAgentsRecordRoundTrip(t *testing.T) {
 	if len(got) != 2 || got[0].User != "alice" || got[1].Code != UnprotectedCodeHookContractUnverified || strings.ContainsAny(got[0].Reason, "\n") {
 		t.Fatalf("round trip = %+v", got)
 	}
-	// An unchanged set leaves the file alone.
+	// An unchanged set keeps its inode but refreshes evidence that a scan ran.
 	before, _ := os.Stat(path)
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
 	if err := WriteUnixUnprotectedAgents(path, agents); err != nil {
 		t.Fatal(err)
 	}
-	if after, _ := os.Stat(path); !os.SameFile(before, after) {
-		t.Fatal("an identical record was rewritten")
+	if after, _ := os.Stat(path); !os.SameFile(before, after) || !after.ModTime().After(old) {
+		t.Fatal("an identical record was rewritten or its scan time was not refreshed")
 	}
 }
 

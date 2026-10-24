@@ -365,3 +365,108 @@ func TestWindowsEnterpriseDirectLifecycleRefusesConnectorlessConfig(t *testing.T
 		})
 	}
 }
+
+// GAP-0236 follow-up: ensure that recovered a damaged config generation
+// record from the approved config still runs the action the planner
+// selects. Candidate Setup over 1.0.2 (or 1.0.3) upgrades with its payload
+// and records its own version; a forced repair put the newer binaries in
+// place and recorded the older version. Drift is still reapplied, a planner
+// refusal changes nothing and fails, and only the same compliant release is
+// repaired, on the payload the planner found identical.
+func TestWindowsEnterpriseEnsureKeepsThePlanAfterRecoveringTheConfigGeneration(t *testing.T) {
+	argAfter := func(args []string, flag string) string {
+		for index := 0; index+1 < len(args); index++ {
+			if args[index] == flag {
+				return args[index+1]
+			}
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		name, installed, drift string
+		driftErr               error
+		action                 string // the installer action after Status; "" for a refusal
+		warning                string
+	}{
+		{name: "1.0.2 to 1.0.4 upgrades", installed: "1.0.2", action: "Upgrade", warning: "older_version:1.0.2"},
+		{name: "1.0.3 to 1.0.4 upgrades", installed: "1.0.3", action: "Upgrade", warning: "older_version:1.0.3"},
+		{name: "same release with manifest drift reapplies it", installed: "1.0.4", drift: "manifest", action: "Upgrade", warning: "drift:manifest"},
+		{name: "same compliant release repairs", installed: "1.0.4", action: "Repair", warning: windowsEnterpriseGenerationRecoveryDetail},
+		{name: "planner refusal changes nothing", installed: "1.0.4", driftErr: errors.New("read the supplied guardian manifest: access denied")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := installedStatus("status")
+			status["installed_version"] = tc.installed
+			replies := []map[string]any{status}
+			if tc.action != "" {
+				done := installedStatus(strings.ToLower(tc.action))
+				done["installed_version"] = "1.0.4"
+				replies = append(replies, done)
+			}
+			stub := &ensureStub{t: t, replies: replies}
+			stub.install(t)
+			windowsEnterpriseEnsureDriftDetector = func(*windowsEnterpriseLifecycleOptions, string) (string, error) {
+				return tc.drift, tc.driftErr
+			}
+			originalRecovery, originalInstalled := windowsEnterpriseConfigGenerationRepair, windowsEnterpriseInstalledProductVersion
+			t.Cleanup(func() {
+				windowsEnterpriseConfigGenerationRepair, windowsEnterpriseInstalledProductVersion = originalRecovery, originalInstalled
+			})
+			recovered := 0
+			windowsEnterpriseConfigGenerationRepair = func(context.Context, *windowsEnterpriseLifecycleOptions, *windowsEnterpriseInstallerReport) (bool, error) {
+				recovered++
+				return true, nil
+			}
+			windowsEnterpriseInstalledProductVersion = func(*windowsEnterpriseLifecycleOptions) (string, error) { return tc.installed, nil }
+
+			opts := ensureTestOptions()
+			opts.productVersion = "1.0.4"
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			err := runWindowsEnterpriseStandaloneEnsure(context.Background(), command, opts, `C:\stage\install-enterprise.ps1`)
+			if recovered != 1 {
+				t.Fatalf("generation recovery ran %d times, want once", recovered)
+			}
+			var result enterprisestatus.Result
+			if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+				t.Fatalf("decode %q: %v", stdout.String(), decodeErr)
+			}
+			if !containsString(result.Changes, "recovered config generation from the approved config and proven previous counter") {
+				t.Fatalf("changes %q do not report the recovery", result.Changes)
+			}
+			actions := []string{}
+			for _, call := range stub.calls {
+				actions = append(actions, argAfter(call, "-Action"))
+			}
+			if tc.action == "" {
+				if err == nil || commandExitCode(err) == 0 || result.OK || strings.Join(actions, ",") != "Status" ||
+					len(result.Errors) == 0 || !strings.Contains(result.Errors[0].Message, "access denied") {
+					t.Fatalf("refusal: err=%v ok=%v actions=%q errors=%+v", err, result.OK, actions, result.Errors)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ensure: %v\n%s", err, stdout.String())
+			}
+			if got := strings.Join(actions, ","); got != "Status,"+tc.action {
+				t.Fatalf("installer actions %s, want Status,%s", got, tc.action)
+			}
+			mutation := stub.calls[1]
+			if got := argAfter(mutation, "-ProductVersion"); got != "1.0.4" {
+				t.Fatalf("%s records version %q, want 1.0.4 for the 1.0.4 binaries it installs", tc.action, got)
+			}
+			if got := argAfter(mutation, "-GatewayBinary"); got != `C:\stage\defenseclaw-gateway.exe` {
+				t.Fatalf("%s gateway source %q, want this run's payload", tc.action, got)
+			}
+			named := false
+			for _, warning := range result.Warnings {
+				named = named || warning.Code == "ensure_"+strings.ToLower(tc.action) && strings.Contains(warning.Message, tc.warning)
+			}
+			if !result.OK || result.InstalledVersion != "1.0.4" || !named {
+				t.Fatalf("result ok=%v installed=%q warnings=%+v", result.OK, result.InstalledVersion, result.Warnings)
+			}
+		})
+	}
+}

@@ -17,7 +17,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-func TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates(t *testing.T) {
+// Host installs no longer export native Codex OTLP: Codex cannot prove who
+// owns a replaced loopback listener before it sends the scoped bearer. A
+// credential an earlier release minted must stop authorizing once host Setup
+// runs, Teardown must remove every token artifact, and a later credential must
+// never revive the revoked one.
+func TestCodexHostSetupAndTeardownRevokeCachedOTLPToken(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.toml")
 	if err := os.WriteFile(configPath, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
@@ -26,15 +31,10 @@ func TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates(t *testing.T) {
 	connector.CodexConfigPathOverride = configPath
 	defer func() { connector.CodexConfigPathOverride = "" }()
 
-	conn := connector.NewCodexConnector()
-	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token"}
-	prepareCodexSetupPolicyFixture(t, dir, &opts)
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("initial Setup: %v", err)
-	}
-	first, err := connector.LoadOTLPPathToken(dir, connector.OTLPScopeCodex)
+	// The credential an earlier (0.8.10 to 1.0.3) host install left behind.
+	first, err := connector.EnsureOTLPPathToken(dir, connector.OTLPScopeCodex)
 	if err != nil || first == "" {
-		t.Fatalf("load initial scoped token: present=%v err=%v", first != "", err)
+		t.Fatalf("seed earlier scoped token: present=%v err=%v", first != "", err)
 	}
 
 	api, called := tokenAuthTestServer(t, "gateway-master")
@@ -56,8 +56,35 @@ func TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates(t *testing.T) {
 		handler.ServeHTTP(response, req)
 		return response.Code
 	}
+	expireStatThrottle := func() {
+		// Expire the bounded stat throttle so the running gateway observes
+		// the on-disk change and drops its cached credential.
+		api.otlpPathTokenMu.Lock()
+		api.otlpPathTokenLastStatAt[connector.OTLPScopeCodex] = time.Now().Add(-2 * otlpPathTokenStatMinInterval)
+		api.otlpPathTokenMu.Unlock()
+	}
 	if got := request(first); got != http.StatusOK || !*called {
-		t.Fatal("initial scoped Codex token was not accepted")
+		t.Fatal("earlier scoped Codex token was not accepted before the upgrade")
+	}
+
+	conn := connector.NewCodexConnector()
+	opts := connector.SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-token", ManagedEnterprise: true}
+	prepareCodexSetupPolicyFixture(t, dir, &opts)
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("host Setup: %v", err)
+	}
+	if token, err := connector.LoadOTLPPathToken(dir, connector.OTLPScopeCodex); err != nil || token != "" {
+		t.Fatalf("host Setup kept a native Codex OTLP credential: present=%v err=%v", token != "", err)
+	}
+	expireStatThrottle()
+	if got := request(first); got != http.StatusUnauthorized || *called {
+		t.Fatal("obsolete Codex OTLP token remained authorized after host Setup")
+	}
+
+	// Teardown removes any token artifact, including a legacy staged file.
+	second, err := connector.EnsureOTLPPathToken(dir, connector.OTLPScopeCodex)
+	if err != nil || second == "" || second == first {
+		t.Fatalf("a new credential reused the revoked one: rotated=%v err=%v", second != "" && second != first, err)
 	}
 	tokenPath, err := connector.OTLPPathTokenFilePath(dir, connector.OTLPScopeCodex)
 	if err != nil {
@@ -67,7 +94,10 @@ func TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates(t *testing.T) {
 	if err := os.WriteFile(legacyTempPath, []byte("legacy-staged-token\n"), 0o600); err != nil {
 		t.Fatalf("seed legacy scoped-token temp file: %v", err)
 	}
-
+	expireStatThrottle()
+	if got := request(first); got != http.StatusUnauthorized || *called {
+		t.Fatal("revoked Codex token became valid again after a new credential")
+	}
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
 	}
@@ -76,33 +106,9 @@ func TestCodexTeardownRevokesCachedOTLPTokenAndReinstallRotates(t *testing.T) {
 			t.Fatalf("Teardown did not remove scoped Codex token artifact %s: %v", filepath.Base(path), err)
 		}
 	}
-	// Expire the bounded stat throttle so the running gateway observes the
-	// on-disk revocation and drops its cached credential.
-	api.otlpPathTokenMu.Lock()
-	api.otlpPathTokenLastStatAt[connector.OTLPScopeCodex] = time.Now().Add(-2 * otlpPathTokenStatMinInterval)
-	api.otlpPathTokenMu.Unlock()
-	if got := request(first); got != http.StatusUnauthorized || *called {
-		t.Fatal("revoked Codex OTLP token remained authorized after teardown")
-	}
-
-	if err := conn.Setup(context.Background(), opts); err != nil {
-		t.Fatalf("reinstall Setup: %v", err)
-	}
-	second, err := connector.LoadOTLPPathToken(dir, connector.OTLPScopeCodex)
-	if err != nil || second == "" || second == first {
-		t.Fatalf("reinstall did not rotate the scoped Codex credential: rotated=%v err=%v", second != "" && second != first, err)
-	}
-	api.otlpPathTokenMu.Lock()
-	api.otlpPathTokenLastStatAt[connector.OTLPScopeCodex] = time.Now().Add(-2 * otlpPathTokenStatMinInterval)
-	api.otlpPathTokenMu.Unlock()
-	if got := request(first); got != http.StatusUnauthorized || *called {
-		t.Fatal("pre-teardown Codex token became valid again after reinstall")
-	}
-	if got := request(second); got != http.StatusOK || !*called {
-		t.Fatal("rotated Codex OTLP token was not accepted after reinstall")
-	}
-	if err := conn.Teardown(context.Background(), opts); err != nil {
-		t.Fatalf("final Teardown: %v", err)
+	expireStatThrottle()
+	if got := request(second); got != http.StatusUnauthorized || *called {
+		t.Fatal("Codex OTLP token remained authorized after teardown")
 	}
 }
 
@@ -140,11 +146,20 @@ func TestTokenAuth_CodexScopedOTLPPathCoversEverySignal(t *testing.T) {
 	}
 }
 
+func TestSanitizeRouteForTelemetry_RedactsCodexOTLPPathToken(t *testing.T) {
+	t.Parallel()
+	token := strings.Repeat("c", 64)
+	got := sanitizeRouteForTelemetry("/otlp/codex/" + token + "/v1/traces")
+	if strings.Contains(got, token) || got != "/otlp/codex/_token_/v1/traces" {
+		t.Fatal("Codex OTLP route telemetry retained the scoped credential")
+	}
+}
+
 func TestTokenAuth_CodexOTLPTokenHasNoCrossRouteAuthority(t *testing.T) {
 	t.Parallel()
 	const gatewayToken = "gateway-master"
 	codexToken := strings.Repeat("c", 64)
-	geminiToken := strings.Repeat("d", 64)
+	claudeToken := strings.Repeat("d", 64)
 
 	tests := []struct {
 		name   string
@@ -153,7 +168,7 @@ func TestTokenAuth_CodexOTLPTokenHasNoCrossRouteAuthority(t *testing.T) {
 		wantOK bool
 	}{
 		{name: "codex scope", path: "/otlp/codex/" + codexToken + "/v1/logs", wantOK: true},
-		{name: "cross connector", path: "/otlp/omnigent/" + codexToken + "/v1/logs"},
+		{name: "cross connector", path: "/otlp/claudecode/" + codexToken + "/v1/logs"},
 		{name: "shared receiver", path: "/v1/logs", header: codexToken},
 		{name: "header rejected on scoped path", path: "/otlp/codex/" + codexToken + "/v1/logs", header: gatewayToken},
 	}
@@ -163,8 +178,8 @@ func TestTokenAuth_CodexOTLPTokenHasNoCrossRouteAuthority(t *testing.T) {
 			t.Parallel()
 			api, called := tokenAuthTestServer(t, gatewayToken)
 			api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
-				connector.OTLPScopeCodex:    codexToken,
-				connector.OTLPScopeOmnigent: geminiToken,
+				connector.OTLPScopeCodex:  codexToken,
+				connector.OTLPScopeClaude: claudeToken,
 			})
 			handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				*called = true
@@ -188,14 +203,5 @@ func TestTokenAuth_CodexOTLPTokenHasNoCrossRouteAuthority(t *testing.T) {
 				t.Fatal("Codex OTLP credential escaped its connector-scoped route")
 			}
 		})
-	}
-}
-
-func TestSanitizeRouteForTelemetry_RedactsCodexOTLPPathToken(t *testing.T) {
-	t.Parallel()
-	token := strings.Repeat("c", 64)
-	got := sanitizeRouteForTelemetry("/otlp/codex/" + token + "/v1/traces")
-	if strings.Contains(got, token) || got != "/otlp/codex/_token_/v1/traces" {
-		t.Fatal("Codex OTLP route telemetry retained the scoped credential")
 	}
 }

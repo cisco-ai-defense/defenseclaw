@@ -83,6 +83,22 @@ func writeEnterpriseHookProtectedFile(path string, data []byte) error {
 	return nil
 }
 
+// writeEnterpriseHookGatewayRecord publishes a guardian record the gateway
+// service reads, such as the foreign-hook removal ledger.
+// writeEnterpriseHookProtectedFile gives the new file the record's ACL
+// before it replaces the old one, which keeps its own, so the gateway can
+// read the record at every moment; the ACL is then set again on the
+// published record.
+func writeEnterpriseHookGatewayRecord(path string, data []byte) error {
+	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
+		return err
+	}
+	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
+		return err
+	}
+	return enterpriseHookAuthorizationFileTrustCheck(path)
+}
+
 // writeEnterpriseHookAdminOnlyFile publishes an installer-only machine file
 // whose readers are always elevated (never a running service). It stamps the
 // exact two-ACE AdminFile SDDL — Administrators owner+group, protected DACL

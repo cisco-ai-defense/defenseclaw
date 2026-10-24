@@ -54,6 +54,24 @@ type fakeSandboxOps struct {
 	stopSandboxesErr error
 	// onTeardown does to the account's home what the real teardown does.
 	onTeardown func(SandboxAccount)
+	// onDrain answers the account's drain (Drain): nil lets it hold the
+	// gateway. order is every drain, its release and every Stop, in the
+	// order they ran.
+	onDrain func(SandboxAccount) error
+	order   []string
+	// onOp sees every Stop (as "stop <units>"), the drain before its check
+	// ("drain") and once it holds ("drained"), and every release, as each
+	// begins.
+	onOp func(a SandboxAccount, op string)
+}
+
+func (f *fakeSandboxOps) op(a SandboxAccount, op string) {
+	f.mu.Lock()
+	hook := f.onOp
+	f.mu.Unlock()
+	if hook != nil {
+		hook(a, op)
+	}
 }
 
 func (f *fakeSandboxOps) Accounts(context.Context) []SandboxAccount { return f.accounts }
@@ -65,20 +83,48 @@ func (f *fakeSandboxOps) Status(_ context.Context, a SandboxAccount) (SandboxSta
 }
 
 func (f *fakeSandboxOps) Stop(_ context.Context, a SandboxAccount, scope StopScope) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	var parts []string
 	for _, item := range []struct {
 		scope StopScope
 		name  string
-	}{{StopDaemon, "daemon"}, {StopGateway, "gateway"}, {StopSocket, "socket"}} {
+	}{{StopKill, "kill"}, {StopDaemon, "daemon"}, {StopGateway, "gateway"}, {StopSocket, "socket"}} {
 		if scope&item.scope != 0 {
 			parts = append(parts, item.name)
 		}
 	}
+	f.op(a, "stop "+strings.Join(parts, "+"))
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.stops = append(f.stops, a.Name+":"+strings.Join(parts, "+"))
 	f.events = append(f.events, "stop "+a.Name)
+	f.order = append(f.order, "stop "+a.Name+":"+strings.Join(parts, "+"))
 	return f.stopErr
+}
+
+func (f *fakeSandboxOps) Drain(_ context.Context, a SandboxAccount) (func() error, error) {
+	f.op(a, "drain")
+	f.mu.Lock()
+	onDrain := f.onDrain
+	f.mu.Unlock()
+	if onDrain != nil {
+		if err := onDrain(a); err != nil {
+			f.mu.Lock()
+			f.order = append(f.order, "drain refused "+a.Name)
+			f.mu.Unlock()
+			return nil, err
+		}
+	}
+	f.op(a, "drained")
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.order = append(f.order, "drain "+a.Name)
+	return func() error {
+		f.op(a, "release")
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.order = append(f.order, "release "+a.Name)
+		return nil
+	}, nil
 }
 
 func (f *fakeSandboxOps) Reload(_ context.Context, a SandboxAccount) error {
@@ -180,6 +226,73 @@ func (h *osHost) ensure(cfg []byte) *enterprisestatus.Result {
 	return h.run(Options{Action: ActionEnsure, PayloadDir: h.payloadOnce(), ConfigFile: writeTempConfig(h.t, cfg)})
 }
 
+// GAP-0754: a rejected candidate cannot publish its own prerequisite result.
+// Users continue under the previously applied sandbox settings.
+func TestRefusedOpenShellSetupPinKeepsAppliedPrerequisites(t *testing.T) {
+	h := newOSHost(t, "darwin")
+	h.writeExecutables(t, openshell.PackageE2fsprogsDir+"/sbin/mke2fs", openshell.PackageE2fsprogsDir+"/sbin/debugfs", "/usr/local/bin/docker")
+	h.env.Trust = func(string, TrustKind) error { return nil }
+	valid := sandboxConfig(t, "darwin", true, map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5"})
+	requireOK(t, h.ensure(valid))
+	before := h.read(h.env.prerequisitesPath())
+	var record openshell.PrerequisitesRecord
+	if err := json.Unmarshal([]byte(before), &record); err != nil || !record.Ready {
+		t.Fatalf("applied prerequisites = %+v, %v", record, err)
+	}
+	r := h.ensure(sandboxConfig(t, "darwin", true, map[string]any{"install": "setup", "driver": "vm"}))
+	if r.OK || !strings.Contains(fmt.Sprint(r.Errors), "enterprise.openshell.version") {
+		t.Fatalf("missing pin was accepted: %+v", r)
+	}
+	if after := h.read(h.env.prerequisitesPath()); after != before {
+		t.Errorf("refused ensure changed prerequisites.json:\nbefore: %s\nafter: %s", before, after)
+	}
+}
+
+// Releases through 1.0.3 refused an enabled unpinned setup config, so no
+// genuine deployment record can authorize one. Even a manually altered
+// record must not make the missing install pin acceptable.
+func TestUnpinnedSetupCannotUseMatchingDeploymentRecord(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newOSHost(t, goos)
+			pinned := sandboxConfig(t, goos, true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"})
+			requireOK(t, h.ensure(pinned))
+			beforePrerequisites := h.read(h.env.prerequisitesPath())
+			beforeApplied := h.env.loadOpenShellState().Applied
+			if beforeApplied == nil || beforeApplied.Version != "0.1.5" {
+				t.Fatalf("initial setup state = %+v", beforeApplied)
+			}
+
+			unpinned := sandboxConfig(t, goos, true, map[string]any{"install": "setup", "driver": "docker"})
+			if err := os.WriteFile(h.env.P(h.env.Layout.ConfigPath), unpinned, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			record, err := h.env.loadDeployment()
+			if err != nil {
+				t.Fatal(err)
+			}
+			record.ConfigSHA256 = sha256Bytes(unpinned)
+			if err := h.env.saveDeployment(record); err != nil {
+				t.Fatal(err)
+			}
+
+			r := h.run(Options{Action: ActionEnsure, PayloadDir: h.payloadOnce()})
+			if r.OK || !strings.Contains(fmt.Sprint(r.Errors), "enterprise.openshell.version") {
+				t.Fatalf("matched record bypassed setup pin refusal: errors %+v, warnings %+v", r.Errors, r.Warnings)
+			}
+			if got := h.read(h.env.Layout.ConfigPath); got != string(unpinned) {
+				t.Errorf("refusal changed installed config")
+			}
+			if got := h.env.loadOpenShellState().Applied; got == nil || got.Version != beforeApplied.Version {
+				t.Errorf("refusal changed applied setup: %+v", got)
+			}
+			if got := h.read(h.env.prerequisitesPath()); got != beforePrerequisites {
+				t.Errorf("refusal changed prerequisites")
+			}
+		})
+	}
+}
+
 // payloadOnce stages one payload per host, so repeated ensures see the same
 // binaries.
 func (h *osHost) payloadOnce() string {
@@ -230,10 +343,10 @@ func TestSandboxFilesForEachModeAndDriver(t *testing.T) {
 	}{
 		{"linux prerequisite docker", "linux", map[string]any{"install": "prerequisite", "driver": "docker"}, "docker", false},
 		{"linux prerequisite vm", "linux", map[string]any{"install": "prerequisite", "driver": "vm"}, "vm", true},
-		{"linux setup vm", "linux", map[string]any{"install": "setup", "driver": "vm", "version": "0.1.3", "gateway_port": 17700}, "vm", true},
-		{"linux setup docker", "linux", map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3"}, "docker", false},
+		{"linux setup vm", "linux", map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5", "gateway_port": 17700}, "vm", true},
+		{"linux setup docker", "linux", map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"}, "docker", false},
 		{"macos prerequisite vm", "darwin", map[string]any{"install": "prerequisite"}, "vm", true},
-		{"macos setup vm", "darwin", map[string]any{"install": "setup", "version": "0.1.3"}, "vm", true},
+		{"macos setup vm", "darwin", map[string]any{"install": "setup", "version": "0.1.5"}, "vm", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -320,7 +433,7 @@ func TestSandboxOffInstallsNothingAndOffRemovesEverything(t *testing.T) {
 			t.Errorf("%s stays after sandboxes were turned off", path)
 		}
 	}
-	if got := h.ops.stopped(); len(got) != 1 || got[0] != "alice:daemon+gateway+socket" {
+	if got := strings.Join(h.ops.stopped(), ","); got != "alice:daemon+socket,alice:daemon+gateway+socket" {
 		t.Errorf("accounts were stopped as %v", got)
 	}
 }
@@ -558,6 +671,18 @@ func TestSandboxDeferredRestartAndPending(t *testing.T) {
 	if st, ok := rowState(r, "sandbox pending alice"); !ok || !strings.Contains(st, "2 sandboxes run") {
 		t.Errorf("pending row = %q %v", st, ok)
 	}
+	// status and verify only read that record: the user's own command may
+	// have restarted the idle daemon since, so they do not say a sandbox
+	// runs now (GAP-0679).
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		got := h.run(Options{Action: action})
+		st, ok := rowState(got, "sandbox pending alice")
+		warning := messagesOf(got.Warnings, codeSandboxPending)
+		if !ok || strings.Contains(st, "sandboxes run") || !strings.Contains(st, "2 sandboxes ran when it was last tried") ||
+			strings.Contains(warning, "sandboxes run") || !strings.Contains(warning, "until the next ensure") {
+			t.Errorf("%s pending row = %q, warning = %q", action, st, warning)
+		}
+	}
 
 	// Still busy: a run that applies nothing keeps waiting, and says so.
 	r = h.ensure(allowed)
@@ -632,7 +757,7 @@ func TestSandboxUnknownStatusDefers(t *testing.T) {
 // a sandbox.
 func TestSandboxTransitions(t *testing.T) {
 	prerequisiteDocker := map[string]any{"install": "prerequisite", "driver": "docker"}
-	setupVM := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.3"}
+	setupVM := map[string]any{"install": "setup", "driver": "vm", "version": "0.1.5"}
 
 	t.Run("driver switch waits, then switches without deleting sandboxes", func(t *testing.T) {
 		h := newOSHost(t, "linux")
@@ -650,7 +775,7 @@ func TestSandboxTransitions(t *testing.T) {
 		h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Running: 0}
 		r = h.ensure(sandboxConfig(t, "linux", true, vm))
 		requireOK(t, r)
-		if got := h.ops.stopped(); len(got) != 1 || got[0] != "alice:daemon+gateway" {
+		if got := strings.Join(h.ops.stopped(), ","); got != "alice:daemon+socket,alice:daemon+gateway" {
 			t.Fatalf("stops = %v", got)
 		}
 		if len(h.ops.teardowns) != 0 {
@@ -672,7 +797,7 @@ func TestSandboxTransitions(t *testing.T) {
 	t.Run("leaving setup mode removes the OpenShell DefenseClaw installed", func(t *testing.T) {
 		h := newOSHost(t, "linux")
 		requireOK(t, h.ensure(sandboxConfig(t, "linux", true, setupVM)))
-		kept := h.installTarballFiles(t, h.alice, "0.1.3")
+		kept := h.installTarballFiles(t, h.alice, "0.1.5")
 		// The user changed the gateway after the install.
 		if err := os.WriteFile(h.env.P(filepath.Join(h.alice.Home, ".local/bin/openshell-gateway")), []byte("mine"), 0o755); err != nil {
 			t.Fatal(err)
@@ -818,8 +943,8 @@ func (h *osHost) installTarballFiles(t *testing.T, a SandboxAccount, version str
 func TestSandboxUninstallAndPurge(t *testing.T) {
 	populate := func(t *testing.T, h *osHost) {
 		t.Helper()
-		h.installTarballFiles(t, h.alice, "0.1.3")
-		for _, rel := range []string{h.env.daemonStateRel(), openshellVMStateRel, openshellStateRel + "/tls", openshellShareRel + "/vm-runtime/0.1.3"} {
+		h.installTarballFiles(t, h.alice, "0.1.5")
+		for _, rel := range []string{h.env.daemonStateRel(), openshellVMStateRel, openshellStateRel + "/tls", openshellShareRel + "/vm-runtime/0.1.5"} {
 			dir := filepath.Join(h.env.P(h.alice.Home), rel)
 			if err := os.MkdirAll(dir, 0o700); err != nil {
 				t.Fatal(err)
@@ -853,7 +978,7 @@ func TestSandboxUninstallAndPurge(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos+" purge", func(t *testing.T) {
 			h := newOSHost(t, goos)
-			setup := map[string]any{"install": "setup", "version": "0.1.3", "driver": "vm"}
+			setup := map[string]any{"install": "setup", "version": "0.1.5", "driver": "vm"}
 			requireOK(t, h.ensure(sandboxConfig(t, goos, true, setup)))
 			populate(t, h)
 			r := h.run(Options{Action: ActionUninstall, Purge: true})
@@ -912,7 +1037,7 @@ func TestSandboxUninstallAndPurge(t *testing.T) {
 	})
 	t.Run("uninstall without purge keeps the account's state", func(t *testing.T) {
 		h := newOSHost(t, "linux")
-		requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "version": "0.1.3", "driver": "vm"})))
+		requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "version": "0.1.5", "driver": "vm"})))
 		populate(t, h)
 		requireOK(t, h.run(Options{Action: ActionUninstall}))
 		if got := h.ops.teardowns; len(got) != 0 {
@@ -1001,11 +1126,11 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.3")}},
-			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.3")}}}
+		h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.5")}},
+			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.5")}}}
 		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker", "version": ">=0.1.1 <0.2.0"}))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox openshell cli"); !strings.HasPrefix(state, "ok: 0.1.3") {
+		if state, _ := rowState(r, "sandbox openshell cli"); !strings.HasPrefix(state, "ok: 0.1.5") {
 			t.Errorf("cli row = %q", state)
 		}
 		if hasWarning(r, codeOpenShellPrerequisite) {
@@ -1018,19 +1143,85 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 			t.Errorf("cli row = %q", state)
 		}
 	})
+	// OpenShell before 0.1.5 runs no sandbox (its network broker could let a
+	// sandbox's connections bypass the policy, NVIDIA/OpenShell#4494),
+	// whatever the pin allows: the administrator's install is named, with
+	// the pin to set.
+	t.Run("a prerequisite OpenShell older than the release sandboxes need", func(t *testing.T) {
+		h := newOSHost(t, "linux")
+		for _, p := range []string{"/usr/bin/openshell", "/usr/bin/openshell-gateway", "/usr/bin/docker", "/usr/sbin/mke2fs"} {
+			if err := os.MkdirAll(filepath.Dir(h.env.P(p)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(p), []byte("x"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		h.runner.replies = map[string]fakeReply{"rpm -q --qf %{VERSION} openshell": {result: CommandResult{Stdout: []byte("0.1.3")}},
+			"rpm -q --qf %{VERSION} openshell-gateway": {result: CommandResult{Stdout: []byte("0.1.3")}}}
+		for pin, fix := range map[string]string{
+			">=0.1.1 <0.2.0": "install a release that satisfies enterprise.openshell.version version=>=0.1.1 <0.2.0",
+			"0.1.3":          "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SupportedMin + ") and install that release",
+		} {
+			r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "prerequisite", "driver": "docker", "version": pin}))
+			requireOK(t, r)
+			if state, _ := rowState(r, "sandbox openshell cli"); !strings.Contains(state, "OpenShell 0.1.3 runs no DefenseClaw sandbox") || strings.HasPrefix(state, "ok") {
+				t.Errorf("%s: cli row = %q", pin, state)
+			}
+			if !strings.Contains(fmt.Sprint(r.Warnings), fix) {
+				t.Errorf("%s: warnings = %+v", pin, r.Warnings)
+			}
+		}
+	})
+	// The hosts DefenseClaw 1.0.3 set up pin "0.1.3", which runs no sandbox:
+	// setup mode installs 0.1.5 for it, and each account switches once none
+	// of its sandboxes runs (the in-place migration).
+	t.Run("the 1.0.3 setup pin moves to the release sandboxes need", func(t *testing.T) {
+		h := newOSHost(t, "linux")
+		old := map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3"}
+		r := h.ensure(sandboxConfig(t, "linux", true, old))
+		requireOK(t, r)
+		// status and verify describe what ensure applied, raised pin
+		// included (GAP-0621).
+		for _, r := range []*enterprisestatus.Result{r, h.run(Options{Action: ActionStatus}), h.run(Options{Action: ActionVerify})} {
+			if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: "+openshell.InstallerVersion) ||
+				!strings.Contains(state, "enterprise.openshell.version pins 0.1.3, which runs no sandbox") || !strings.HasSuffix(state, "set the pin to "+openshell.InstallerVersion) {
+				t.Errorf("%s: pin row = %q", r.Action, state)
+			}
+		}
+		if v := h.env.loadOpenShellState().Applied.Version; v != openshell.InstallerVersion {
+			t.Fatalf("applied version = %q", v)
+		}
+		// As 1.0.3 left it: its record names 0.1.3, which alice runs.
+		st := h.env.loadOpenShellState()
+		st.Applied.Version = "0.1.3"
+		if err := h.env.saveOpenShellState(st); err != nil {
+			t.Fatal(err)
+		}
+		h.installTarballFiles(t, h.alice, "0.1.3")
+		// The upgrade to this build: its ensure on the new payload.
+		r = h.run(Options{Action: ActionEnsure, PayloadDir: h.payload("1.0.4"), ConfigFile: writeTempConfig(t, sandboxConfig(t, "linux", true, old))})
+		requireOK(t, r)
+		if !containsLine(r.Changes, `switched the sandbox setup of alice (version "0.1.3" -> "`+openshell.InstallerVersion+`")`) {
+			t.Errorf("changes = %v", r.Changes)
+		}
+		if v := h.env.loadOpenShellState().Applied.Version; v != openshell.InstallerVersion {
+			t.Errorf("applied version after the migration = %q", v)
+		}
+	})
 	t.Run("setup mode checks the pin, not the host's OpenShell", func(t *testing.T) {
 		h := newOSHost(t, "linux")
-		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3"}))
+		r := h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"}))
 		requireOK(t, r)
-		if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: 0.1.3") {
+		if state, _ := rowState(r, "sandbox openshell pin"); !strings.HasPrefix(state, "ok: 0.1.5") {
 			t.Errorf("pin row = %q", state)
 		}
 		if _, ok := rowState(r, "sandbox openshell cli"); ok {
 			t.Error("setup mode checks the host's OpenShell")
 		}
-		h.installTarballFiles(t, h.alice, "0.1.3")
+		h.installTarballFiles(t, h.alice, "0.1.5")
 		r = h.run(Options{Action: ActionStatus})
-		if state, ok := rowState(r, "sandbox user-installed"); !ok || !strings.Contains(state, "alice: OpenShell 0.1.3 (user-installed, unmanaged)") {
+		if state, ok := rowState(r, "sandbox user-installed"); !ok || !strings.Contains(state, "alice: OpenShell 0.1.5 (user-installed, unmanaged)") {
 			t.Errorf("user-installed row = %q %v", state, ok)
 		}
 		// GAP-0236: ensure refuses a release this build has no digests for,
@@ -1040,7 +1231,7 @@ func TestSandboxPrerequisiteRows(t *testing.T) {
 		if r.OK || !strings.Contains(fmt.Sprint(r.Errors, r.Warnings), `"9.9.9" is not a release this DefenseClaw build can install`) {
 			t.Errorf("an unpinned release is accepted: %+v", r)
 		}
-		if h.read(h.env.renderedTOMLPath()) != before || h.env.loadOpenShellState().Applied.Version != "0.1.3" {
+		if h.read(h.env.renderedTOMLPath()) != before || h.env.loadOpenShellState().Applied.Version != "0.1.5" {
 			t.Error("a refused pin changed the applied sandbox configuration")
 		}
 	})
@@ -1096,7 +1287,7 @@ func TestSandboxGroupsRow(t *testing.T) {
 	h.ops.groups["alice"] = []string{"alice", "docker"}
 	h.ops.groups["bob"] = []string{"bob"}
 	h.ops.groups["admin"] = []string{"admin", "wheel"}
-	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.3"})))
+	requireOK(t, h.ensure(sandboxConfig(t, "linux", true, map[string]any{"install": "setup", "driver": "docker", "version": "0.1.5"})))
 	for _, a := range []SandboxAccount{h.alice, bob} {
 		h.registerSandboxUser(t, a)
 	}

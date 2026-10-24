@@ -19,6 +19,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -491,6 +492,87 @@ func aclConnectors(p *plan, record *Deployment) []string {
 		connectors = append(connectors, record.MachinePolicyConnectors...)
 	}
 	return connectors
+}
+
+// darwinServiceACLDenial returns the first rooted path, of paths, whose
+// macOS ACL denies the gateway service account one of the rights its entry
+// in rights lists, with the denying entry. The owner and mode checks pass
+// such a path, and the gateway failed only when it started (GAP-1414,
+// GAP-1442). macOS reads the entries in order and the first applicable
+// entry that names a right decides it, so an earlier allow wins over a
+// later deny. An entry applies to the service account when it names the
+// account, its group or everyone, or a principal ls could not name; the
+// service account has no other groups. Inherit-only entries do not apply to
+// the path itself. Every path must exist: an ls error, or a path ls did not
+// list, is an error, never a pass. It does nothing off macOS.
+func (e *Env) darwinServiceACLDenial(ctx context.Context, paths []string, rights map[string][]string) (string, string, error) {
+	if e.GOOS != "darwin" || len(paths) == 0 {
+		return "", "", nil
+	}
+	for start := 0; start < len(paths); start += aclListBatch {
+		batch := paths[start:min(start+aclListBatch, len(paths))]
+		result, err := e.Runner.Run(ctx, "ls", append([]string{"-lde", "--"}, batch...)...)
+		if err != nil {
+			return "", "", err
+		}
+		listed, err := managed.ParseDarwinACLListing(string(result.Stdout), batch)
+		if err != nil {
+			return "", "", err
+		}
+		for _, path := range batch {
+			entries, ok := listed[path]
+			if !ok {
+				return "", "", fmt.Errorf("ls did not list the ACL of %s", e.canonical(path))
+			}
+			if entry, denied := e.darwinACLDeniesService(entries, rights[path]); denied {
+				return path, entry, nil
+			}
+		}
+	}
+	return "", "", nil
+}
+
+// darwinACLDeniesService reports the entry, of entries in ACL order, that
+// denies the gateway service account one of rights: for each right the
+// first applicable entry naming it decides.
+func (e *Env) darwinACLDeniesService(entries []managed.DarwinACLEntry, rights []string) (string, bool) {
+	for _, right := range rights {
+		for _, entry := range entries {
+			if !e.darwinACLAppliesToService(entry) || !slices.Contains(entry.Rights, right) {
+				continue
+			}
+			if !entry.Allow {
+				return entry.Text, true
+			}
+			break
+		}
+	}
+	return "", false
+}
+
+// darwinACLAppliesToService reports an entry that governs the path itself
+// for the gateway service account.
+func (e *Env) darwinACLAppliesToService(entry managed.DarwinACLEntry) bool {
+	if slices.Contains(entry.Rights, "only_inherit") {
+		return false
+	}
+	principal := ""
+	if fields := strings.Fields(strings.ToLower(entry.Text)); len(fields) > 0 {
+		principal = fields[0]
+	}
+	// A principal ls printed as a number (it could not name it) applies:
+	// fail closed.
+	kind, name, _ := strings.Cut(principal, ":")
+	if strings.Trim(name, "0123456789") == "" {
+		return true
+	}
+	switch kind {
+	case "user":
+		return name == strings.ToLower(e.Layout.ServiceUser)
+	case "group":
+		return name == strings.ToLower(e.Layout.ServiceGroup) || name == "everyone"
+	}
+	return true
 }
 
 // jsonlACLProblem checks a custom output file, which is outside the

@@ -509,9 +509,18 @@ func runWindowsManagedHooksTeardown(
 	if !exists {
 		return fail(errors.New("managed-hook teardown requires protected deployment metadata"))
 	}
-	activation, err := validateWindowsManagedHooksTeardownDeployment(
+	validationAction, committedStandalone, err := windowsManagedHooksTeardownValidationAction(
 		metadata,
 		action,
+		enterprisehooks.WindowsStandaloneProcess(),
+		filepath.Join(installDir, "pending.json"),
+	)
+	if err != nil {
+		return fail(err)
+	}
+	activation, err := validateWindowsManagedHooksTeardownDeployment(
+		metadata,
+		validationAction,
 		manifestSHA256,
 		len(targets),
 	)
@@ -558,10 +567,16 @@ func runWindowsManagedHooksTeardown(
 		identity.CodexTargets,
 		identity.CursorTargets = windowsManagedHooksTeardownExpectedEnrollment(
 		activation.State,
+		opts.CodexTargetEnabled,
 		claudeTargets,
 		codexTargets,
 		cursorTargets,
 	)
+	if action == "prepare" {
+		if err := captureWindowsManagedHooksTeardownCodexPolicy(&identity); err != nil {
+			return fail(err)
+		}
+	}
 	var cleanupReceiptPath string
 	if strings.TrimSpace(contractCleanupReceipt) != "" ||
 		strings.TrimSpace(contractCleanupScope) != "" {
@@ -622,6 +637,7 @@ func runWindowsManagedHooksTeardown(
 			windowsManagedHooksCursorOptions(opts, identity.CursorTargets),
 			identity,
 			report.JournalPath,
+			committedStandalone,
 		)
 		report.SurvivingOwnedPathReferences = surviving
 		if rollbackCompleted {
@@ -774,12 +790,65 @@ func runWindowsManagedHooksTeardown(
 	return report, nil
 }
 
+// windowsManagedHooksTeardownCodexRegistryReader reads the protected Codex
+// registry for a prepare; tests replace it.
+var windowsManagedHooksTeardownCodexRegistryReader = connector.ResolveWindowsCodexManagedRuntimeRegistry
+
+// captureWindowsManagedHooksTeardownCodexPolicy journals the Codex policy bit
+// a zero-target prepare finds. Configuration expects a configured connector's
+// guard to be active, but a 1.0.2 or 1.0.3 deployment with no enrolled account
+// has no Codex requirements. Prepare records the authenticated registry's
+// actual bit, so that preimage does not block teardown and rollback restores
+// what was installed; a 1.0.4 empty guard stays active. Enrolled targets, or a
+// connector that is not configured, keep the expected bit.
+func captureWindowsManagedHooksTeardownCodexPolicy(identity *windowsManagedHooksTeardownJournal) error {
+	if !identity.CodexPolicyActive || len(identity.CodexTargets) != 0 {
+		return nil
+	}
+	registry, err := windowsManagedHooksTeardownCodexRegistryReader(identity.HookBinary)
+	if err != nil {
+		return err
+	}
+	if len(registry.Targets) != 0 {
+		return errors.New("codex machine enrollment does not match the protected manifest")
+	}
+	identity.CodexPolicyActive = registry.Active
+	return nil
+}
+
+// A standalone uninstall keeps its hooks installed until pending.json is
+// retired. Only its inactive tombstone, in the same protected state tree,
+// can authorize the subsequent hook removal. Secure Client keeps its
+// existing precommit teardown contract.
+func windowsManagedHooksTeardownValidationAction(
+	metadata windowsCodexDeploymentMetadata,
+	action string,
+	standalone bool,
+	pendingPath string,
+) (string, bool, error) {
+	if metadata.Installed == nil || *metadata.Installed ||
+		(action != "prepare" && action != "verify") {
+		return action, false, nil
+	}
+	if !standalone {
+		return "", false, errors.New("committed managed-hook teardown preparation requires standalone profile")
+	}
+	if _, err := os.Lstat(pendingPath); !errors.Is(err, os.ErrNotExist) {
+		if err == nil {
+			return "", false, errors.New("committed managed-hook teardown preparation requires transaction retirement")
+		}
+		return "", false, fmt.Errorf("inspect pending managed-hook transaction: %w", err)
+	}
+	return "finalize", true, nil
+}
+
 func prepareWindowsManagedHooksTeardown(
 	opts connector.WindowsCodexMachineRequirementsOptions,
 	claudeOpts enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions,
 	cursorOpts enterprisehooks.WindowsCursorManagedPolicyTeardownOptions,
 	identity windowsManagedHooksTeardownJournal,
 	journalPath string,
+	committedStandalone bool,
 ) (bool, int, error) {
 	if existing, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil {
 		if validateErr := validateWindowsManagedHooksTeardownJournal(existing, identity); validateErr != nil {
@@ -802,9 +871,23 @@ func prepareWindowsManagedHooksTeardown(
 			// Partial or mismatched enrollment still fails the installed-state
 			// verification before any mutation.
 		case "captured":
-			return false, 0, errors.New(
-				"managed-hook teardown has an incomplete captured transaction; rollback is required",
-			)
+			if !committedStandalone {
+				return false, 0, errors.New(
+					"managed-hook teardown has an incomplete captured transaction; rollback is required",
+				)
+			}
+			// A process-tree kill or reboot after the uninstall commit can
+			// interrupt post-commit removal. Restore the captured preimage
+			// first, then start a fresh, authenticated removal attempt.
+			if err := rollbackWindowsManagedHooksTeardown(
+				opts,
+				claudeOpts,
+				cursorOpts,
+				existing,
+				journalPath,
+			); err != nil {
+				return false, 0, fmt.Errorf("restore interrupted committed hook teardown: %w", err)
+			}
 		case "rolled_back", "finalized":
 			// A subsequent lifecycle attempt may safely replace a completed
 			// journal after the active set is verified below.
@@ -1662,7 +1745,7 @@ func validateWindowsManagedHooksTeardownEnrollment(
 	currentCursor []enterprisehooks.WindowsCursorManagedRuntimeTarget,
 	cursorActive bool,
 ) error {
-	if claudeActive != (len(identity.ClaudeTargetSIDs) != 0) ||
+	if (len(identity.ClaudeTargetSIDs) != 0 && !claudeActive) ||
 		!equalWindowsEnterpriseStringSet(currentClaude, identity.ClaudeTargetSIDs) {
 		return errors.New("Claude machine enrollment does not match the authenticated activation state")
 	}
@@ -1686,7 +1769,7 @@ func validateWindowsManagedHooksTeardownEnrollment(
 			return errors.New("Codex machine enrollment does not match the authenticated activation state")
 		}
 	}
-	if cursorActive != (len(identity.CursorTargets) != 0) ||
+	if (len(identity.CursorTargets) != 0 && !cursorActive) ||
 		len(currentCursor) != len(identity.CursorTargets) {
 		return errors.New("Cursor machine enrollment does not match the authenticated activation state")
 	}
@@ -1771,6 +1854,7 @@ func validateWindowsManagedHooksTeardownDeployment(
 
 func windowsManagedHooksTeardownExpectedEnrollment(
 	activationState string,
+	codexConfigured bool,
 	claudeTargets []string,
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
 	cursorTargets []enterprisehooks.WindowsCursorManagedRuntimeTarget,
@@ -1780,7 +1864,7 @@ func windowsManagedHooksTeardownExpectedEnrollment(
 	[]connector.WindowsCodexManagedRuntimeTarget,
 	[]enterprisehooks.WindowsCursorManagedRuntimeTarget,
 ) {
-	codexPolicyActive := len(codexTargets) != 0
+	codexPolicyActive := codexConfigured || len(codexTargets) != 0
 	if activationState == windowsManagedHooksNeverActivated {
 		return []string{}, codexPolicyActive,
 			[]connector.WindowsCodexManagedRuntimeTarget{},
@@ -1944,7 +2028,8 @@ func validateWindowsManagedHooksTeardownJournal(
 		journal.HookBinary != identity.HookBinary ||
 		journal.GatewayAddr != identity.GatewayAddr ||
 		journal.GatewayServiceName != identity.GatewayServiceName ||
-		journal.CodexPolicyActive != identity.CodexPolicyActive ||
+		(journal.CodexPolicyActive != identity.CodexPolicyActive &&
+			(len(journal.CodexTargets) != 0 || len(identity.CodexTargets) != 0)) ||
 		len(journal.Targets) != len(identity.Targets) ||
 		len(journal.PendingTargets) != len(identity.PendingTargets) ||
 		len(journal.ClaudeTargetSIDs) != len(identity.ClaudeTargetSIDs) ||
@@ -2039,17 +2124,17 @@ func validateWindowsManagedHooksTeardownJournal(
 	if journal.ActivationState == windowsManagedHooksActivated {
 		if !equalWindowsEnterpriseStringSet(allowedClaudeTargets, identity.ClaudeTargetSIDs) ||
 			!equalWindowsManagedHooksCodexTargets(allowedCodexTargets, identity.CodexTargets) ||
-			identity.CodexPolicyActive != (len(allowedCodexTargets) != 0) {
+			(len(allowedCodexTargets) != 0 && !identity.CodexPolicyActive) {
 			return errors.New("activated teardown journal does not contain the exact manifest enrollment")
 		}
 	} else if len(identity.ClaudeTargetSIDs) != 0 || len(identity.CodexTargets) != 0 ||
-		identity.CodexPolicyActive != (len(allowedCodexTargets) != 0) {
+		(len(allowedCodexTargets) != 0 && !identity.CodexPolicyActive) {
 		return errors.New("never-activated teardown journal contains an invalid machine enrollment")
 	}
 	if journal.Claude.PolicyExisted != journal.Claude.StateExisted ||
 		len(journal.Claude.Policy) > windowsManagedHooksTeardownJournalMax ||
 		len(journal.Claude.State) > windowsManagedHooksTeardownJournalMax ||
-		(journal.Claude.PolicyExisted != (len(journal.ClaudeTargetSIDs) != 0)) {
+		(len(journal.ClaudeTargetSIDs) != 0 && !journal.Claude.PolicyExisted) {
 		return errors.New("managed-hook teardown journal contains an invalid Claude snapshot")
 	}
 	allowedCursorTargets := make([]enterprisehooks.WindowsCursorManagedRuntimeTarget, 0, len(identity.Targets))
@@ -2079,7 +2164,7 @@ func validateWindowsManagedHooksTeardownJournal(
 		(journal.Cursor.AdapterExisted != (journal.Cursor.AdapterSecurityDescriptor != "" && journal.Cursor.AdapterAttributes != 0)) ||
 		(journal.Cursor.StateExisted != (journal.Cursor.StateSecurityDescriptor != "" && journal.Cursor.StateAttributes != 0)) ||
 		(journal.Cursor.ReceiptExisted != (journal.Cursor.ReceiptSecurityDescriptor != "" && journal.Cursor.ReceiptAttributes != 0)) ||
-		(cursorSnapshotActive != (len(journal.CursorTargets) != 0)) {
+		(len(journal.CursorTargets) != 0 && !cursorSnapshotActive) {
 		return errors.New("managed-hook teardown journal contains an invalid Cursor snapshot")
 	}
 	return nil

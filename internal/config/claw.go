@@ -19,8 +19,10 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -134,66 +136,79 @@ func readOpenclawConfig(configFile string) (*openclawConfig, error) {
 }
 
 // activeConnector returns the resolved connector name for this config.
-// Precedence: explicit guardrail.connector → claw.mode → "openclaw".
+// Precedence: explicit guardrail.connector → roster (favoring claw.mode when
+// present) → claw.mode without a roster.
+// An unconfigured install has no active connector.
 //
 // This is the single decision point for "which agent framework is this
 // sidecar running against?" — every polymorphic reader (SkillDirs,
 // PluginDirs, ReadMCPServers) goes through it so a future connector
 // is wired in by adding one switch arm, not by editing N call sites.
 func (c *Config) activeConnector() string {
-	if c == nil {
-		return "openclaw"
+	if c == nil || !c.HasConnectorConfigured() {
+		return ""
 	}
 	if name := strings.TrimSpace(c.Guardrail.Connector); name != "" {
 		return normalizeConnectorKey(name)
 	}
+	if roster := c.rosterConnectorNames(); len(roster) > 0 {
+		mode := normalizeConnectorKey(string(c.Claw.Mode))
+		for _, name := range roster {
+			if name == mode {
+				return mode
+			}
+		}
+		return roster[0]
+	}
 	if mode := strings.TrimSpace(string(c.Claw.Mode)); mode != "" {
 		return normalizeConnectorKey(mode)
 	}
-	return "openclaw"
+	return ""
 }
 
 // activeConnectors returns the configured connector roster for this config, in
 // deterministic (sorted) order. Unlike activeConnector(), this plural list is
-// a roster surface: an unconfigured install returns an empty slice instead of
-// fabricating the legacy "openclaw" floor. The singular activeConnector()
-// keeps that default for path-resolution/back-compat callers that explicitly
-// need it.
+// a roster surface: an unconfigured install returns an empty slice.
 func (c *Config) activeConnectors() []string {
 	if c == nil || !c.HasConnectorConfigured() {
 		return nil
 	}
-	if len(c.Guardrail.Connectors) > 0 {
-		names := make([]string, 0, len(c.Guardrail.Connectors))
-		seen := make(map[string]struct{}, len(c.Guardrail.Connectors))
-		for name := range c.Guardrail.Connectors {
-			if normalized := normalizeConnectorKey(name); normalized != "" {
-				if _, ok := seen[normalized]; ok {
-					continue
-				}
-				seen[normalized] = struct{}{}
-				names = append(names, normalized)
-			}
-		}
-		if len(names) > 0 {
-			sort.Strings(names)
-			return names
-		}
+	if names := c.rosterConnectorNames(); len(names) > 0 {
+		return names
 	}
 	return []string{c.activeConnector()}
 }
 
-// HasConnectorConfigured reports whether this config explicitly selects at
-// least one connector — i.e. the operator has actually run setup. It is the
-// Go mirror of Python's Config.has_connector_configured() (mcp.md M1, the
-// phantom-openclaw root) and lets callers distinguish a genuinely
-// unconfigured install from an explicit openclaw one.
+func (c *Config) rosterConnectorNames() []string {
+	if c == nil {
+		return nil
+	}
+	names := make([]string, 0, len(c.Guardrail.Connectors))
+	seen := make(map[string]struct{}, len(c.Guardrail.Connectors))
+	for name := range c.Guardrail.Connectors {
+		if normalized := normalizeConnectorKey(name); normalized != "" {
+			if _, ok := seen[normalized]; ok {
+				continue
+			}
+			seen[normalized] = struct{}{}
+			names = append(names, normalized)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// HasConnectorConfigured reports whether this config selects at least one
+// connector. It is the Go mirror of Python's Config.has_connector_configured()
+// (mcp.md M1, the phantom-openclaw root) and distinguishes an unconfigured
+// install from a configured connector or a legacy remote OpenClaw fleet.
 //
-// activeConnectors() is wired to this helper so Go roster/status/runtime
-// callers mirror Python list semantics on a zero-config install. The singular
-// activeConnector() deliberately keeps flooring to "openclaw" for legacy path
-// dispatchers; callers using that API to touch connector state must check this
-// helper first when zero-config behavior matters.
+// Both connector resolvers use this helper so a zero-config install selects
+// neither an agent nor its on-disk paths.
+//
+// A claw.mode that only implies OpenClaw, loaded with a loopback gateway
+// and no local OpenClaw (openClawNotInstalled), counts as unconfigured, as
+// init --connector none does. A remote fleet host keeps the legacy connector.
 func (c *Config) HasConnectorConfigured() bool {
 	if c == nil {
 		return false
@@ -208,10 +223,10 @@ func (c *Config) HasConnectorConfigured() bool {
 	if strings.TrimSpace(c.Guardrail.Connector) != "" {
 		return true
 	}
-	if strings.TrimSpace(string(c.Claw.Mode)) != "" {
-		return true
-	}
-	return false
+	// A claw.mode that only implies an OpenClaw the machine does not have
+	// configures nothing (GAP-0568): watching its folders would create
+	// ~/.openclaw, and status would name an agent that is not there.
+	return strings.TrimSpace(string(c.Claw.Mode)) != "" && (!c.openClawNotInstalled || !c.OpenClawOnlyImplied())
 }
 
 // ActiveConnectors returns the full resolved set of connector names
@@ -224,7 +239,7 @@ func (c *Config) ActiveConnectors() []string {
 
 // ReadMCPServers returns the MCP servers for the active connector.
 // When guardrail.connector is set, it dispatches to the connector-specific
-// reader. Falls back to the OpenClaw path for backward compatibility.
+// reader. An unconfigured install reads no agent state.
 func (c *Config) ReadMCPServers() ([]MCPServerEntry, error) {
 	return c.ReadMCPServersForConnector(c.activeConnector())
 }
@@ -418,6 +433,8 @@ func lookupMCPToolServer(connector string, entries []MCPServerEntry, name string
 
 func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([]MCPServerEntry, error) {
 	switch normalizeConnectorKey(connector) {
+	case "":
+		return nil, nil
 	case "claudecode":
 		return readMCPServersClaudeCode(workspaceDir)
 	case "codex":
@@ -434,21 +451,19 @@ func (c *Config) readMCPServersForConnectorIn(connector, workspaceDir string) ([
 		return readMCPServersDevin(workspaceDir)
 	case "copilot":
 		return readMCPServersCopilot(workspaceDir)
-	case "openhands":
-		return readMCPServersOpenHands()
 	case "opencode":
 		return readMCPServersOpenCode(workspaceDir)
 	case "amp":
 		return readMCPServersAMP(workspaceDir)
 	case "antigravity":
 		return readMCPServersAntigravity(workspaceDir)
-	case "omnigent":
-		return nil, nil
-	default:
+	case "openclaw":
 		if c == nil {
 			return nil, nil
 		}
 		return readMCPServersOpenClaw(c.Claw.ConfigFile)
+	default:
+		return nil, nil
 	}
 }
 
@@ -919,21 +934,16 @@ func (c *Config) pluginDirsOpenClaw() []string {
 
 // SkillDirs returns the skill directories for the active connector.
 //
-// Dispatches via activeConnector() — when guardrail.connector is set
-// (claudecode, codex, zeptoclaw), the connector-specific paths are
-// returned. With no connector configured, falls back to the OpenClaw
-// layout (workspace/skills → extraDirs from openclaw.json → home_dir/skills),
-// preserving backward compatibility for pre-S1.x deployments.
+// Dispatches via activeConnector(); with no connector configured, it returns
+// no agent paths.
 func (c *Config) SkillDirs() []string {
 	return c.SkillDirsForConnector(c.activeConnector())
 }
 
 // PluginDirs returns the plugin directories for the active connector.
 //
-// Dispatches via activeConnector() — when guardrail.connector is set,
-// the connector-specific layout is returned. With no connector configured,
-// falls back to the OpenClaw
-// extensions directory (claw_home/extensions).
+// Dispatches via activeConnector(); with no connector configured, it returns
+// no agent paths.
 func (c *Config) PluginDirs() []string {
 	return c.PluginDirsForConnector(c.activeConnector())
 }
@@ -990,6 +1000,78 @@ func (c *Config) OpenClawConfigCandidates() []string {
 		out = append(out, candidate)
 	}
 	return out
+}
+
+// OpenClawOnlyImplied reports whether only claw.mode names OpenClaw:
+// guardrail.connector and the connector roster are empty, so "openclaw"
+// comes from the claw.mode default (the loader default
+// when config.yaml has no claw block, and what init wrote before 1.0.4) or a
+// leftover of it. setup openclaw pins guardrail.connector. Mirrors
+// openclaw_presence.openclaw_only_implied in the Python CLI.
+func (c *Config) OpenClawOnlyImplied() bool {
+	if c == nil || strings.TrimSpace(c.Guardrail.Connector) != "" || len(c.Guardrail.Connectors) > 0 {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(string(c.Claw.Mode)), "openclaw")
+}
+
+// OpenClawImpliedButNotInstalled reports when the loader and fleet gateway
+// should treat a defaulted OpenClaw connector as absent. An explicit fleet
+// mode keeps the connector, including for a loopback host without OpenClaw
+// installed locally. Mirrors openclaw_implied_but_not_installed in the CLI.
+func (c *Config) OpenClawImpliedButNotInstalled() bool {
+	if c == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Gateway.FleetMode)) {
+	case "", "auto":
+	default:
+		return false
+	}
+	if host := strings.TrimSpace(c.Gateway.Host); host != "" && !isLoopbackListenerHost(host) {
+		return false
+	}
+	return c.OpenClawOnlyImplied() && !c.OpenClawInstalled()
+}
+
+// OpenClawInstalled reports whether an openclaw.json candidate exists or an
+// openclaw binary is found. A stat error other than "does not exist" (for
+// example a permission error) counts as present. Mirrors
+// openclaw_presence.openclaw_installed in the Python CLI.
+func (c *Config) OpenClawInstalled() bool {
+	for _, path := range c.OpenClawConfigCandidates() {
+		if _, err := os.Stat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	return OpenClawBinaryInstalled()
+}
+
+// OpenClawBinaryInstalled reports whether an openclaw executable is on PATH or
+// in one of the npm/Homebrew locations a daemon started without the login
+// shell's PATH would miss. Mirrors openclaw_presence.openclaw_binary_installed
+// in the Python CLI. A variable so tests do not depend on the host's PATH.
+var OpenClawBinaryInstalled = func() bool {
+	if _, err := exec.LookPath("openclaw"); err == nil {
+		return true
+	}
+	for _, path := range openClawBinaryFallbacks() {
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			return true
+		}
+	}
+	return false
+}
+
+func openClawBinaryFallbacks() []string {
+	paths := []string{"/usr/local/bin/openclaw", "/opt/homebrew/bin/openclaw"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		paths = append(paths,
+			filepath.Join(home, ".npm-global", "bin", "openclaw"),
+			filepath.Join(home, ".local", "bin", "openclaw"),
+		)
+	}
+	return paths
 }
 
 func connectorEnvHome(variable, defaultDir string) string {
@@ -1052,11 +1134,6 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		return configHome
 	case "copilot":
 		return filepath.Join(home, ".copilot")
-	case "openhands":
-		if workspace := c.ConnectorWorkspaceDir(); workspace != "" {
-			return filepath.Join(workspace, ".openhands")
-		}
-		return filepath.Join(home, ".openhands")
 	case "antigravity":
 		// agy's marketing-facing install dir; matches
 		// connector_paths.connector_home("antigravity") on the Python
@@ -1073,22 +1150,19 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		// Amp uses this same config home on macOS, Linux, and native
 		// Windows (%USERPROFILE%\.config\amp).
 		return filepath.Join(home, ".config", "amp")
-	case "omnigent":
-		if configHome := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); configHome != "" {
-			return expandPath(configHome)
-		}
-		return filepath.Join(home, ".omnigent")
 	case "kiro":
 		// Kiro IDE and Kiro CLI share ~/.kiro; matches
 		// connector_paths.connector_home("kiro") on the Python side. It used to
 		// fall through to OpenClaw's home_dir, so Kiro's agent identity was
 		// keyed on ~/.openclaw.
 		return filepath.Join(home, ".kiro")
-	default:
+	case "openclaw":
 		if c == nil {
 			return expandPath("~/.openclaw")
 		}
 		return expandPath(c.Claw.HomeDir)
+	default:
+		return ""
 	}
 }
 
@@ -1165,8 +1239,7 @@ func SkillDirsForOpenClaw(homeDir string) []string {
 //
 // Used by callers that need to enumerate paths for a connector other than
 // the running one (e.g. multi-connector audits, doctor). Unknown connector
-// names — including "" and "openclaw" — fall through to the OpenClaw
-// layout via skillDirsOpenClaw().
+// names return no paths. OpenClaw has its own explicit branch.
 func (c *Config) SkillDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 	cwd := c.ConnectorWorkspaceDir()
@@ -1219,7 +1292,7 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".devin", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		}, legacyconnector.DesktopLegacySkillPaths(home, cwd)...))
-	case "opencode", "omnigent", "kiro":
+	case "opencode", "kiro":
 		// These connectors have no documented local skills surface (Kiro's
 		// reusable context is steering docs and specs). Keep them isolated
 		// from OpenClaw's skill directories: the install watcher creates the
@@ -1240,25 +1313,16 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".github", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
-	case "openhands":
-		return dedupNonEmpty([]string{
-			workspaceJoin(cwd, ".agents", "skills"),
-			workspaceJoin(cwd, ".openhands", "skills"),
-			workspaceJoin(cwd, ".openhands", "microagents"),
-			filepath.Join(home, ".agents", "skills"),
-			filepath.Join(home, ".openhands", "skills"),
-			filepath.Join(home, ".openhands", "microagents"),
-			filepath.Join(home, ".openhands", "skills", "installed"),
-			filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
-		})
-	default:
+	case "openclaw":
 		return c.skillDirsOpenClaw()
+	default:
+		return nil
 	}
 }
 
 // PluginDirsForConnector returns plugin directories for a specific connector,
-// independent of the config's active connector. Unknown / empty / "openclaw"
-// fall through to the OpenClaw extensions layout.
+// independent of the config's active connector. Unknown and empty names
+// return no paths.
 func (c *Config) PluginDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 	cwd := c.ConnectorWorkspaceDir()
@@ -1305,10 +1369,12 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			filepath.Join(home, ".config", "amp", "plugins"),
 			workspaceJoin(cwd, ".amp", "plugins"),
 		})
-	case "cursor", "devin", "copilot", "openhands", "opencode", "omnigent", "kiro":
+	case "cursor", "devin", "copilot", "opencode", "kiro":
 		return nil
-	default:
+	case "openclaw":
 		return c.pluginDirsOpenClaw()
+	default:
+		return nil
 	}
 }
 
@@ -1871,11 +1937,6 @@ func readMCPServersCopilot(workspaceDir string) ([]MCPServerEntry, error) {
 		}
 	}
 	return dedupMCPEntries(entries), nil
-}
-
-func readMCPServersOpenHands() ([]MCPServerEntry, error) {
-	home, _ := os.UserHomeDir()
-	return readMCPFromDotMCPJSON(filepath.Join(home, ".openhands", "mcp.json"))
 }
 
 // readMCPServersAntigravity reads Antigravity-native MCP config. agy

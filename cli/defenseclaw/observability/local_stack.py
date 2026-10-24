@@ -58,6 +58,8 @@ GRAFANA_PASSWORD_ENV_NAME = "GRAFANA_ADMIN_PASSWORD"
 GRAFANA_ACCESS_MODE_FILE_NAME = ".grafana-access-mode"
 GRAFANA_ACCESS_PASSWORD = "password"
 GRAFANA_ACCESS_NO_PASSWORD = "no-password"
+# The only Grafana role an anonymous visitor ever gets: read-only.
+GRAFANA_ANONYMOUS_ROLE = "Viewer"
 GRAFANA_ACCESS_MODES = frozenset({GRAFANA_ACCESS_PASSWORD, GRAFANA_ACCESS_NO_PASSWORD})
 MAX_GRAFANA_ACCESS_MODE_BYTES = 64
 MAX_GRAFANA_PASSWORD_BYTES = 512
@@ -636,7 +638,7 @@ def _validate_windows_docker_certification(
         )
 
 
-def _docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
+def docker_daemon_unreachable_message(detail: str, os_name: str) -> str:
     """Say why ``docker info`` failed and what to do on this OS (GAP-1335)."""
 
     if os_name.startswith("win") or os_name == "darwin":
@@ -673,7 +675,7 @@ def validate_native_docker_preflight(
     if info_result.returncode != 0:
         detail = (info_result.stderr or info_result.stdout).strip()
         suffix = f" ({detail.splitlines()[0]})" if detail else ""
-        raise LocalStackError(_docker_daemon_unreachable_message(detail, os_name) + suffix)
+        raise LocalStackError(docker_daemon_unreachable_message(detail, os_name) + suffix)
     info = _parse_json_object(info_result.stdout.strip(), description="info")
     if str(info.get("OSType", "")).lower() != "linux":
         raise LocalStackError("Docker is using Windows containers. Switch Docker Desktop to Linux containers.")
@@ -958,9 +960,10 @@ class LocalStackController:
         if persisted is not None:
             return persisted
 
-        # Releases before the access-mode marker always ran Grafana as an
-        # anonymous Admin. Preserve that behavior when an owned container or
-        # named data volume proves the stack has run before. A genuinely new
+        # Releases before the access-mode marker always ran Grafana with
+        # anonymous access. Keep anonymous access (now read-only Viewer, never
+        # Admin) when an owned container or named data volume proves the
+        # stack has run before. A genuinely new
         # managed stack has neither and receives the secure password default.
         if "defenseclaw-grafana" in owned_containers or f"{COMPOSE_PROJECT}_grafana-data" in existing_volumes:
             return GRAFANA_ACCESS_NO_PASSWORD
@@ -1051,7 +1054,9 @@ class LocalStackController:
         else:
             required_environment = {
                 "GF_AUTH_ANONYMOUS_ENABLED": "true",
-                "GF_AUTH_ANONYMOUS_ORG_ROLE": "Admin",
+                # Read-only: an effective anonymous Admin or Editor (a stack
+                # file from an earlier release, a local override) is refused.
+                "GF_AUTH_ANONYMOUS_ORG_ROLE": GRAFANA_ANONYMOUS_ROLE,
                 "GF_AUTH_DISABLE_LOGIN_FORM": "true",
             }
         for key, expected in required_environment.items():
@@ -1142,7 +1147,7 @@ class LocalStackController:
             raise LocalStackError("Grafana authenticated access check failed") from exc
 
     def _verify_grafana_no_password(self) -> None:
-        """Prove the explicitly selected anonymous Admin path is reachable."""
+        """Prove the explicitly selected anonymous read-only path is reachable."""
 
         url = "http://127.0.0.1:3000/api/search?type=dash-db"
         request = urllib.request.Request(url, method="GET")
@@ -1420,7 +1425,7 @@ def _text_urls(
 ) -> str:
     grafana = "Grafana:    http://localhost:3000"
     if grafana_access_mode == GRAFANA_ACCESS_NO_PASSWORD:
-        grafana += "  (anonymous Admin; no password)"
+        grafana += f"  (anonymous {GRAFANA_ANONYMOUS_ROLE}, read-only; no password)"
     elif grafana_password_file is not None:
         grafana += f"  (user: {GRAFANA_ADMIN_USER}; password file: {grafana_password_file})"
     return "\n".join(
@@ -1461,7 +1466,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         dest="grafana_access_mode",
         action="store_const",
         const=GRAFANA_ACCESS_NO_PASSWORD,
-        help="Allow anonymous Grafana Admin access on managed loopback only.",
+        help="Allow anonymous read-only (Viewer) Grafana access on managed loopback only.",
     )
     parser.add_argument("--service", choices=sorted(SERVICES))
     parser.add_argument("--follow", action="store_true")
@@ -1477,7 +1482,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if result.grafana_access_mode == GRAFANA_ACCESS_NO_PASSWORD:
                 print(
-                    "warning: Grafana is running as anonymous Admin; every local "
+                    "warning: Grafana allows anonymous read-only Viewer access; every local "
                     "process can access it without a password",
                     file=sys.stderr,
                 )

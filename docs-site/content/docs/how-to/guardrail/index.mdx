@@ -1,0 +1,16 @@
+---
+title: "Guardrail how-to guides"
+description: "Turn on blocking, ask before risky calls and handle a call the guardrail stopped."
+---
+
+Short tasks for turning the guardrail on, choosing what it stops, and handling a call it blocked.
+
+<Cards>
+  <Card title="Turn on blocking" href="/docs/how-to/guardrail/turn-on-blocking" description="Switch one agent, or all agents, from observe mode to action mode so the guardrail blocks, and switch back." />
+  <Card title="Ask before risky calls" href="/docs/how-to/guardrail/ask-before-risky-calls" description="Turn on human approval (HITL) so a confirmable HIGH-severity tool call pauses in the agent and waits for your yes or no." />
+  <Card title="Allow a blocked call" href="/docs/how-to/guardrail/allow-a-blocked-call" description="The safe ways to let through something a guardrail rule blocks or alerts on, from a one-off approval to a scoped rule change." />
+  <Card title="Block a destructive command" href="/docs/how-to/guardrail/block-a-destructive-command" description="Watch Claude Code in observe mode, then block rm -rf against a protected path with the bundled CMD-RM-RF rule." />
+  <Card title="Catch a prompt injection" href="/docs/how-to/guardrail/catch-prompt-injection" description="Block a prompt injection in Codex with the bundled TRUST-IGNORE-PREVIOUS rule, then add the LLM judge for subtler cases." />
+  <Card title="Stop a secret upload" href="/docs/how-to/guardrail/stop-a-secret-upload" description="Block a command that pipes a key file into curl, using Cursor's beforeShellExecution hook and a fake key." />
+  <Card title="Turn off the guardrail" href="/docs/how-to/guardrail/turn-off-the-guardrail" description="Turn DefenseClaw off for every agent, check the agent files were restored, and turn it back on." />
+</Cards>

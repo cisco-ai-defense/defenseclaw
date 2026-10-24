@@ -33,7 +33,7 @@ func TestParseEgressProxyURL(t *testing.T) {
 	}
 }
 
-func TestParseEgressProxyURLUsesPlainSchemeHint(t *testing.T) {
+func TestParseEgressProxyURLNamesTheProblemOnly(t *testing.T) {
 	for _, input := range []string{
 		"proxy.example.com:3128",
 		"proxy.example.com",
@@ -48,10 +48,12 @@ func TestParseEgressProxyURLUsesPlainSchemeHint(t *testing.T) {
 			continue
 		}
 		message := err.Error()
-		if !strings.Contains(message, "http://host:port") || !strings.Contains(message, "https://host:port") ||
+		// The advice is the caller's (ProxyURLAdvice), so a refusal that
+		// adds it does not say it twice.
+		if strings.Contains(message, "host:port") ||
 			strings.Contains(message, "first path segment") || strings.Contains(message, "parse ") ||
 			strings.Contains(message, "pw") || strings.Contains(message, input) {
-			t.Errorf("ParseEgressProxyURL(%q) error = %q, want a plain scheme hint without the input", input, message)
+			t.Errorf("ParseEgressProxyURL(%q) error = %q, want what is wrong, without the input or the advice", input, message)
 		}
 	}
 	for _, input := range []string{"http://proxy.example.com:3128", "https://proxy.example.com:3128"} {

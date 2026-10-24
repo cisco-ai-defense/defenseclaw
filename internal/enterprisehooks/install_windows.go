@@ -50,6 +50,13 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		return InstallResult{}, true, err
 	}
 	defer unlockRuntime()
+	if opts.WindowsTargetLogon != WindowsTargetLogonActive {
+		sid, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		if err != nil {
+			return InstallResult{}, true, err
+		}
+		defer useWindowsEnterpriseInstallLogon(sid.String(), opts.WindowsTargetLogon)()
+	}
 	var result InstallResult
 	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
 	case "claudecode":
@@ -370,6 +377,9 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 
 	lock, err := verifyWindowsClaudeUserRuntimeReadOnly(home, dataDir, policyPath, targetSID, setupOpts, conn)
 	if err != nil {
+		return InstallResult{}, err
+	}
+	if err := windowsManagedUserNativeOTLPAbsent(conn.Name(), home, dataDir, targetSID); err != nil {
 		return InstallResult{}, err
 	}
 	lockUpdatedAt, entryUpdatedAt, err := connector.ManagedHookContractTimestamps(
@@ -724,7 +734,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err))
 			}
 			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", target.conn.Name()))
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup)))
 			}
 			lockEntry, err := connector.NewHookContractLockEntryForMode(
 				target.setup,
@@ -747,7 +757,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := hardenWindowsGenericFootprint(target, configPaths, footprint); err != nil {
 				return rollback(err)
 			}
-			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
+			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, false); err != nil {
 				return rollback(err)
 			}
 			generation, generationUsed, err = prepareWindowsPerUserManagedGeneration(target, lockEntry.ContractID)
@@ -812,7 +822,7 @@ func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions)
 		if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 			return err
 		}
-		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
+		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, true); err != nil {
 			return err
 		}
 		lock, err := connector.LoadHookContractLockEntryForMode(
@@ -1247,7 +1257,7 @@ func publishWindowsPluginScopedHookToken(target windowsGenericManagedTarget) err
 	return nil
 }
 
-func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths) error {
+func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths, attestSession bool) error {
 	if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 		return err
 	}
@@ -1256,7 +1266,7 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", target.conn.Name(), err)
 	}
 	if !present {
-		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent", target.conn.Name())
+		return fmt.Errorf("enterprise hooks: connector %s hook verification failed: canonical hook matrix is absent: %s", target.conn.Name(), ownedHookAbsentDetail(target.conn, target.setup))
 	}
 	if err := verifyWindowsStandalonePluginRender(target); err != nil {
 		return err
@@ -1316,6 +1326,11 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	}
 	if strings.TrimSpace(lock.HookFailMode) != strings.TrimSpace(current.HookFailMode) {
 		return fmt.Errorf("enterprise hooks: connector %s fail mode %q does not match configured mode %q", target.conn.Name(), lock.HookFailMode, current.HookFailMode)
+	}
+	if attestSession {
+		if err := ManagedHermesSessionHomeAttestation("windows", target.conn.Name(), target.setup.ManagedEnterprise, target.setup.SecureClientHookDelivery); err != nil {
+			return fmt.Errorf("enterprise hooks: connector %s cannot be verified: %w", target.conn.Name(), err)
+		}
 	}
 	return nil
 }
@@ -1767,7 +1782,7 @@ func teardownWindowsGenericManagedTarget(
 	if len(remaining) != 0 {
 		return fmt.Errorf("enterprise hooks: connector %s teardown left DefenseClaw's registration in %s", name, strings.Join(remaining, ", "))
 	}
-	return nil
+	return returnWindowsStandalonePatchedFilesToOwner(target, configPaths, footprint)
 }
 
 // windowsRelaxedPathsToRestoreAfterTeardown returns the paths relaxed for a
@@ -2484,7 +2499,11 @@ func inspectWindowsUserPathProtectionACL(
 		}
 		entry := windowsDACLEntry{aceType: ace.Header.AceType, flags: ace.Header.AceFlags, mask: uint32(ace.Mask)}
 		var sid *windows.SID
-		if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE {
+		switch ace.Header.AceType {
+		case windows.ACCESS_ALLOWED_ACE_TYPE, windows.ACCESS_DENIED_ACE_TYPE:
+			// Both share the ACE_HEADER, Mask, SidStart layout, so a rejected
+			// deny entry is named like an allow entry. Extended (object,
+			// callback) types keep no SID here.
 			sid = (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 			entry.sid = sid.String()
 		}
@@ -2502,7 +2521,13 @@ func inspectWindowsUserPathProtectionACL(
 			required,
 		)
 	case windowsDACLNonAllowedType:
-		return nil, fmt.Errorf("enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type at index %d", path, result.index)
+		return nil, fmt.Errorf(
+			"enterprise hooks: managed Windows DACL on %s contains non-canonical ACE type %d at index %d (principal %s)",
+			path,
+			entries[result.index].aceType,
+			result.index,
+			windowsSIDString(sids[result.index]),
+		)
 	case windowsDACLUnexpectedEntry:
 		entry := entries[result.index]
 		return nil, fmt.Errorf(

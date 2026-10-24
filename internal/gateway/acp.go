@@ -27,7 +27,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
-	"github.com/google/uuid"
 )
 
 func (a *APIServer) handleACPCatalog(w http.ResponseWriter, r *http.Request) {
@@ -201,10 +200,18 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	// lazily, the request had no connector, so a connectors assignment never
 	// selected ACP traffic (GAP-0311).
 	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
-	if slices.Contains(profile.DeniedMethods, req.Method) {
-		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: "method denied by ACP profile",
+	// Identity uncertainty refuses in every mode; an ACP method denial
+	// continues to use the mode's normal observe/action behavior.
+	blockReason, refused := "", profileRefusal(ctx)
+	if refused != "" {
+		blockReason = refused
+	} else if slices.Contains(profile.DeniedMethods, req.Method) {
+		blockReason = "method denied by ACP profile"
+	}
+	if blockReason != "" {
+		verdict := acp.Verdict{Action: "block", RawAction: "block", Severity: "HIGH", Reason: blockReason,
 			FailMode: acpProfileFailMode(profile, mode)}
-		if mode != string(acp.ModeAction) {
+		if mode != string(acp.ModeAction) && refused == "" {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
 		a.traceACPDecisionV8(ctx, agent.ConnectorID, req, &ToolInspectVerdict{
@@ -581,7 +588,7 @@ func (a *APIServer) recordACPEvaluationV8(
 		severity = "NONE"
 	}
 	facts, err := newAPIGuardrailEventV8Facts(ctx, connector, guardrailEventRequest{
-		EvaluationID: uuid.NewString(), Direction: direction, Action: action,
+		EvaluationID: observability.NewTimeOrderedID(), Direction: direction, Action: action,
 		RawAction: verdict.RawAction, WouldBlock: verdict.WouldBlock, Severity: severity,
 		Reason: verdict.Reason, Findings: findings,
 		ElapsedMs: float64(elapsed) / float64(time.Millisecond),
@@ -647,10 +654,6 @@ func acpBindingAllowed(allow []string, value string) bool {
 	return len(allow) == 0 || slices.Contains(allow, value)
 }
 
-func isACPAPIPath(path string) bool {
-	return path == "/api/v1/acp/challenge" || path == "/api/v1/acp/evaluate" || strings.HasPrefix(path, "/v1/acp/")
-}
-
 type acpEnterpriseCredentialContextKey struct{}
 
 func withACPEnterpriseCredential(ctx context.Context, credential acp.EnterpriseCredential) context.Context {
@@ -711,24 +714,6 @@ func acpPrincipalIdentity(principal string) string {
 		return ""
 	}
 	return identity
-}
-
-// authenticateACPToken applies different custody models without widening the
-// bearer onto any non-ACP route. Unmanaged mode uses the single local sidecar;
-// managed enterprise mode requires one administrator-owned, per-principal and
-// per-binding credential record and carries its scope into evaluation.
-func (a *APIServer) authenticateACPToken(r *http.Request, candidate string) (*http.Request, bool) {
-	if a == nil || a.scannerCfg == nil || r == nil {
-		return r, false
-	}
-	if !managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
-		return r, a.acpAPITokenMatches(candidate)
-	}
-	credential, ok := acp.MatchEnterpriseCredential(a.scannerCfg.DataDir, candidate)
-	if !ok {
-		return r, false
-	}
-	return r.WithContext(withACPEnterpriseCredential(r.Context(), credential)), true
 }
 
 func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request, string, string, bool) {
@@ -845,17 +830,9 @@ func serveACPSignedResponse(w http.ResponseWriter, r *http.Request, next http.Ha
 	_, _ = w.Write(capture.body.Bytes())
 }
 
-// acpAPITokenMatches authenticates the guard with a credential that has no
-// authority outside ACP routes. The token stays in a mode-0600 sidecar rather
-// than IDE JSON or config.yaml.
-func (a *APIServer) acpAPITokenMatches(candidate string) bool {
-	if a == nil || a.scannerCfg == nil || candidate == "" {
-		return false
-	}
-	expected, ok := a.loadACPAPIToken()
-	return ok && constantTimeStringMatch(expected, candidate)
-}
-
+// loadACPAPIToken reads the per-user guard key. It signs the two guard
+// routes only and has no authority on any other route. It stays in a
+// mode-0600 sidecar rather than IDE JSON or config.yaml.
 func (a *APIServer) loadACPAPIToken() (string, bool) {
 	if a == nil || a.scannerCfg == nil {
 		return "", false

@@ -63,6 +63,16 @@ func TestUserScopedListenerProofAnswersOnlyAProtectedUsersHookCredential(t *test
 	alice := userScopedTestToken(t, connector.UserScopedHookCredential, "opencode", listenerProofTestAlice)
 	bob := userScopedTestToken(t, connector.UserScopedHookCredential, "opencode", listenerProofTestBob)
 	aliceKeyID := connector.UserScopedCredentialKeyID(alice)
+	setListenerProofTestCaller(t, func(r *http.Request) string {
+		switch r.Header.Get(connector.UserScopedListenerKeyIDHeader) {
+		case aliceKeyID:
+			return listenerProofTestAlice
+		case connector.UserScopedCredentialKeyID(bob):
+			return listenerProofTestBob
+		default:
+			return ""
+		}
+	})
 
 	got := requestUserScopedListenerProof(handler, observed, http.MethodGet, "127.0.0.1:50000", "opencode", aliceKeyID, listenerProofTestNonce)
 	want, err := connector.UserScopedListenerProof(alice, "opencode", listenerProofTestNonce)

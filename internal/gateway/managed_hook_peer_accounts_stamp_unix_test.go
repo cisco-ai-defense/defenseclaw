@@ -238,7 +238,7 @@ func TestL1ListedStampDropsRemovedNamesakeAtOnce(t *testing.T) {
 	delete(resolver.accounts, oldUID)
 	resolver.accounts[liveUID] = live
 	listing.set(byUID(map[string]int{"alice": liveUID}))
-	if twins := sameNameProfileAccounts(context.Background(), resolver, "alice", live); len(twins) != 0 {
+	if twins, _ := sameNameProfileAccounts(context.Background(), resolver, "alice", live); len(twins) != 0 {
 		t.Fatalf("bare name alice names the removed uid too: %+v", twins)
 	}
 	if uid, _, ok := managedHookPeerHomes.cachedHolder("alice"); ok {

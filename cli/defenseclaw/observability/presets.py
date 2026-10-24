@@ -95,7 +95,7 @@ class Preset:
 
 # ---------------------------------------------------------------------------
 # Built-in presets (small set; see the published observability reference:
-# https://cisco-ai-defense.github.io/defenseclaw/docs/observability/)
+# https://cisco-ai-defense.github.io/defenseclaw/docs/features/observability/)
 # ---------------------------------------------------------------------------
 
 SPLUNK_O11Y = Preset(

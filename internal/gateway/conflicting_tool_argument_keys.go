@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 
@@ -111,57 +112,13 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 	if !ok {
 		return conflictingToolArguments{}, false
 	}
-	shared := make(map[string]json.RawMessage, len(members))
-	var conflicting []*toolArgumentGroup
-	for _, group := range groupToolArguments(members) {
-		if len(group.members) == 1 {
-			shared[group.keys[0]] = group.values[0]
-			continue
-		}
-		conflicting = append(conflicting, group)
-	}
-	if len(conflicting) == 0 {
+	// A wrapper object names the call's own fields only where ActionFacts
+	// reads it so for this tool; a closed shell contract reads it as an
+	// unknown key.
+	foldsWrappers := actionfacts.Analyze(project(json.RawMessage(`{"input":{"command":"true"}}`))).Authoritative()
+	choices, conflicted, repeated := toolArgumentChoices(members, 0, foldsWrappers)
+	if !conflicted && !repeated {
 		return conflictingToolArguments{}, false
-	}
-
-	// Each field is named by each of its keys with each of its values, so a
-	// value is judged under the key the reviewed contract reads.
-	choices := []map[string]json.RawMessage{shared}
-	total := 1
-	for _, group := range conflicting {
-		total *= len(group.keys) * len(group.values)
-		if total > maxConflictingToolArgumentCandidates {
-			break
-		}
-	}
-	if total <= maxConflictingToolArgumentCandidates {
-		for _, group := range conflicting {
-			next := make([]map[string]json.RawMessage, 0, len(choices)*len(group.keys)*len(group.values))
-			for _, choice := range choices {
-				for _, key := range group.keys {
-					for _, value := range group.values {
-						next = append(next, withArgument(choice, key, value))
-					}
-				}
-			}
-			choices = next
-		}
-	} else {
-		// Too many fields to try every pairing: each key keeps its own value.
-		widest := 0
-		for _, group := range conflicting {
-			widest = max(widest, len(group.members))
-		}
-		next := make([]map[string]json.RawMessage, 0, widest)
-		for index := range widest {
-			choice := shared
-			for _, group := range conflicting {
-				member := group.members[min(index, len(group.members)-1)]
-				choice = withArgument(choice, member.key, member.value)
-			}
-			next = append(next, choice)
-		}
-		choices = next
 	}
 
 	var result conflictingToolArguments
@@ -184,13 +141,291 @@ func conflictingToolArgumentKeys(request trustedActionRequest, facts actionfacts
 		}
 		complete = true
 		// A complete analysis of a command argument is an execution tool:
-		// ActionFacts reads command text only for one.
-		if (len(analysis.Commands) > 0 && hasCommandArgument(candidate.input.Args)) ||
-			slices.ContainsFunc(analysis.Paths, writeClassPathFact) {
+		// ActionFacts reads command text only for one. Only keys or values
+		// that disagree leave the call unverifiable; a key repeated with
+		// the value it already has, or an unreviewed key given twice, is
+		// judged as the one call it is.
+		if conflicted && ((len(analysis.Commands) > 0 && hasCommandArgument(candidate.input.Args)) ||
+			slices.ContainsFunc(analysis.Paths, writeClassPathFact)) {
 			result.shellOrWrite = true
 		}
 	}
 	return result, complete
+}
+
+// maxNestedToolArgumentDepth bounds the wrapper objects (input, parameters,
+// request) inside one another that the conflict check expands.
+const maxNestedToolArgumentDepth = 4
+
+// toolArgumentChoices is every way to name each field of an argument object
+// once: each key of a field with each of its values. A wrapper object
+// ActionFacts reads the fields of (input, parameters, request) is expanded
+// the same way, so a field named twice inside it is judged as each of its
+// candidates too. conflicted reports a field that more than one key or
+// value names; repeated reports a member the object (or a wrapper in it)
+// gives more than once, which ActionFacts reads as a duplicate JSON key. A
+// field named both by the object's own keys and inside a wrapper in it, or
+// in two wrappers, is a conflict too (splitWrappedFieldConflicts) when
+// foldsWrappers says ActionFacts reads wrappers as the call's own fields.
+func toolArgumentChoices(members []toolArgument, depth int, foldsWrappers bool) (choices []map[string]json.RawMessage, conflicted, repeated bool) {
+	expanded := make([]toolArgument, 0, len(members))
+	for _, member := range members {
+		field, _ := conflictingToolArgumentField(member.key)
+		if field != "nested" || depth >= maxNestedToolArgumentDepth || len(member.value) == 0 || member.value[0] != '{' {
+			expanded = append(expanded, member)
+			continue
+		}
+		nested, ok := topLevelToolArguments(member.value)
+		if !ok {
+			expanded = append(expanded, member)
+			continue
+		}
+		inner, innerConflicted, innerRepeated := toolArgumentChoices(nested, depth+1, foldsWrappers)
+		if !innerConflicted && !innerRepeated {
+			expanded = append(expanded, member)
+			continue
+		}
+		conflicted = conflicted || innerConflicted
+		repeated = repeated || innerRepeated
+		for _, choice := range inner {
+			value, ok := encodeToolArguments(choice)
+			if !ok {
+				continue
+			}
+			expanded = append(expanded, toolArgument{key: member.key, value: value})
+		}
+	}
+
+	groups := groupToolArguments(expanded)
+	shared := make(map[string]json.RawMessage, len(expanded))
+	var conflicting []*toolArgumentGroup
+	kept := 0
+	for _, group := range groups {
+		kept += len(group.members)
+		if len(group.members) == 1 {
+			shared[group.keys[0]] = group.values[0]
+			continue
+		}
+		conflicting = append(conflicting, group)
+	}
+	repeated = repeated || kept < len(expanded)
+	conflicted = conflicted || len(conflicting) > 0
+
+	// Each field is named by each of its keys with each of its values, so a
+	// value is judged under the key the reviewed contract reads.
+	choices = []map[string]json.RawMessage{shared}
+	total := 1
+	for _, group := range conflicting {
+		total *= len(group.keys) * len(group.values)
+		if total > maxConflictingToolArgumentCandidates {
+			break
+		}
+	}
+	if total <= maxConflictingToolArgumentCandidates {
+		for _, group := range conflicting {
+			next := make([]map[string]json.RawMessage, 0, len(choices)*len(group.keys)*len(group.values))
+			for _, choice := range choices {
+				for _, key := range group.keys {
+					for _, value := range group.values {
+						next = append(next, withArgument(choice, key, value))
+					}
+				}
+			}
+			choices = next
+		}
+		if !foldsWrappers {
+			return choices, conflicted, repeated
+		}
+		choices, crossed := splitWrappedFieldConflicts(choices)
+		return choices, conflicted || crossed, repeated
+	}
+	// Too many fields to try every pairing: each key keeps its own value.
+	widest := 0
+	for _, group := range conflicting {
+		widest = max(widest, len(group.members))
+	}
+	next := make([]map[string]json.RawMessage, 0, widest)
+	for index := range widest {
+		choice := shared
+		for _, group := range conflicting {
+			member := group.members[min(index, len(group.members)-1)]
+			choice = withArgument(choice, member.key, member.value)
+		}
+		next = append(next, choice)
+	}
+	if !foldsWrappers {
+		return next, conflicted, repeated
+	}
+	next, crossed := splitWrappedFieldConflicts(next)
+	return next, conflicted || crossed, repeated
+}
+
+// toolArgumentWrapper reports a member whose object value ActionFacts reads
+// the fields of as the call's own (input, parameters, request, or an args
+// object).
+func toolArgumentWrapper(key string, value json.RawMessage) bool {
+	field, _ := conflictingToolArgumentField(key)
+	return (field == "nested" || field == "args") && len(value) > 0 && value[0] == '{'
+}
+
+// splitWrappedFieldConflicts judges a field a choice names in more than one
+// place, with its own keys and inside a wrapper object
+// ({"command":a,"input":{"command":b}}) or in two wrappers, which ActionFacts
+// folds onto one field, as each of them: one choice per place, with the
+// field taken out everywhere else. crossed reports such a field.
+func splitWrappedFieldConflicts(choices []map[string]json.RawMessage) (out []map[string]json.RawMessage, crossed bool) {
+	out = make([]map[string]json.RawMessage, 0, len(choices))
+	for _, choice := range choices {
+		sources := wrappedFieldSources(choice)
+		var fields []string
+		total := 1
+		for _, field := range slices.Sorted(maps.Keys(sources)) {
+			if len(sources[field]) > 1 {
+				fields = append(fields, field)
+				total *= len(sources[field])
+			}
+		}
+		if len(fields) == 0 {
+			out = append(out, choice)
+			continue
+		}
+		crossed = true
+		variants := []map[string]json.RawMessage{choice}
+		if len(choices)*total <= maxConflictingToolArgumentCandidates {
+			for _, field := range fields {
+				next := make([]map[string]json.RawMessage, 0, len(variants)*len(sources[field]))
+				for _, variant := range variants {
+					for _, source := range sources[field] {
+						next = append(next, keepToolArgumentFieldSource(variant, field, source))
+					}
+				}
+				variants = next
+			}
+		} else {
+			// Too many places to try every pairing: the n-th choice keeps
+			// each field's n-th place.
+			widest := 0
+			for _, field := range fields {
+				widest = max(widest, len(sources[field]))
+			}
+			variants = make([]map[string]json.RawMessage, 0, widest)
+			for index := range widest {
+				variant := choice
+				for _, field := range fields {
+					places := sources[field]
+					variant = keepToolArgumentFieldSource(variant, field, places[min(index, len(places)-1)])
+				}
+				variants = append(variants, variant)
+			}
+		}
+		out = append(out, variants...)
+	}
+	return out, crossed
+}
+
+// wrappedFieldSources maps each reviewed field a choice names to the places
+// that name it: "" for its own keys, else each wrapper key whose object (or
+// a wrapper inside it) names it.
+func wrappedFieldSources(choice map[string]json.RawMessage) map[string][]string {
+	sources := map[string][]string{}
+	add := func(field, source string) {
+		if !slices.Contains(sources[field], source) {
+			sources[field] = append(sources[field], source)
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(choice)) {
+		value := choice[key]
+		if toolArgumentWrapper(key, value) {
+			for _, field := range slices.Sorted(maps.Keys(wrappedToolArgumentFields(value, 0))) {
+				add(field, key)
+			}
+			continue
+		}
+		if field, reviewed := conflictingToolArgumentField(key); reviewed && field != "nested" {
+			add(field, "")
+		}
+	}
+	return sources
+}
+
+// wrappedToolArgumentFields is the reviewed fields a wrapper object names,
+// directly or in the wrappers inside it.
+func wrappedToolArgumentFields(value json.RawMessage, depth int) map[string]struct{} {
+	fields := map[string]struct{}{}
+	members, ok := topLevelToolArguments(value)
+	if !ok {
+		return fields
+	}
+	for _, member := range members {
+		if toolArgumentWrapper(member.key, member.value) {
+			if depth < maxNestedToolArgumentDepth {
+				maps.Copy(fields, wrappedToolArgumentFields(member.value, depth+1))
+			}
+			continue
+		}
+		if field, reviewed := conflictingToolArgumentField(member.key); reviewed && field != "nested" {
+			fields[field] = struct{}{}
+		}
+	}
+	return fields
+}
+
+// keepToolArgumentFieldSource is choice with field named only at source
+// (wrappedFieldSources): taken out of the choice's own keys unless source
+// is "", and out of every wrapper but source. A wrapper left empty goes.
+func keepToolArgumentFieldSource(choice map[string]json.RawMessage, field, source string) map[string]json.RawMessage {
+	out := make(map[string]json.RawMessage, len(choice))
+	for key, value := range choice {
+		if toolArgumentWrapper(key, value) {
+			if key != source {
+				stripped, ok := withoutWrappedToolArgumentField(value, field, 0)
+				if ok && stripped == nil {
+					continue
+				}
+				if ok {
+					value = stripped
+				}
+			}
+			out[key] = value
+			continue
+		}
+		if name, reviewed := conflictingToolArgumentField(key); reviewed && name == field && source != "" {
+			continue
+		}
+		out[key] = value
+	}
+	return out
+}
+
+// withoutWrappedToolArgumentField is a wrapper object without the keys that
+// name field, in it and in the wrappers inside it; nil when nothing is
+// left, and false when it cannot be read.
+func withoutWrappedToolArgumentField(value json.RawMessage, field string, depth int) (json.RawMessage, bool) {
+	members, ok := topLevelToolArguments(value)
+	if !ok {
+		return nil, false
+	}
+	object := make(map[string]json.RawMessage, len(members))
+	for _, member := range members {
+		if toolArgumentWrapper(member.key, member.value) && depth < maxNestedToolArgumentDepth {
+			stripped, ok := withoutWrappedToolArgumentField(member.value, field, depth+1)
+			switch {
+			case !ok:
+				object[member.key] = member.value
+			case stripped != nil:
+				object[member.key] = stripped
+			}
+			continue
+		}
+		if name, reviewed := conflictingToolArgumentField(member.key); reviewed && name == field {
+			continue
+		}
+		object[member.key] = member.value
+	}
+	if len(object) == 0 {
+		return nil, true
+	}
+	return encodeToolArguments(object)
 }
 
 // conflictingToolArgumentStatus is the analysis a second key for a field
@@ -273,15 +508,25 @@ func groupToolArguments(members []toolArgument) []*toolArgumentGroup {
 }
 
 // hasCommandArgument reports an argument object with a key ActionFacts
-// reads as a command (command and its aliases, or argv).
+// reads as a command (command and its aliases, or argv), directly or in a
+// wrapper object it reads the fields of (input, parameters, request).
 func hasCommandArgument(args json.RawMessage) bool {
+	return hasCommandArgumentAt(args, 0)
+}
+
+func hasCommandArgumentAt(args json.RawMessage, depth int) bool {
 	members, ok := topLevelToolArguments(args)
 	if !ok {
 		return false
 	}
 	for _, member := range members {
-		switch field, _ := conflictingToolArgumentField(member.key); field {
-		case "command", "argv":
+		if toolArgumentWrapper(member.key, member.value) {
+			if depth < maxNestedToolArgumentDepth && hasCommandArgumentAt(member.value, depth+1) {
+				return true
+			}
+			continue
+		}
+		if field, _ := conflictingToolArgumentField(member.key); field == "command" || field == "argv" {
 			return true
 		}
 	}

@@ -21,7 +21,7 @@ Python: cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS
   +- cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT <-> Go platform_support.go
        checked by test_platform_support.py (regex against Go, plus hard-coded sets) and
        test_windows_release_claims.py test_windows_release_metadata_is_exact (hard-coded sets)
-       +- docs-site/content/docs/connectors/meta.json pages (minus index, compatibility)
+       +- docs-site/content/docs/connectors/(hook-connectors|proxy-connectors)/meta.json pages
        |    must equal the WINDOWS_CONNECTOR_SUPPORT keys
        +- each <id>.mdx "## Platform support" rows + connectors/index.mdx platform table
        |    checked by test_connector_pages_are_the_canonical_cross_platform_support_source
@@ -34,7 +34,7 @@ Python: cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS
 ### Connector page: `docs-site/content/docs/connectors/<id>.mdx`
 
 - **Frontmatter.** `title`, `description` and a `keywords:` list. The schema is in `docs-site/source.config.ts`.
-- **Navigation.** The sidebar comes from `meta.json` files. `docs-site/content/docs/meta.json` already lists the `connectors` folder, so a new page needs only its id in `connectors/meta.json` (§2).
+- **Navigation.** The sidebar comes from `meta.json` files. `docs-site/content/docs/meta.json` already lists the `connectors` folder, so a new page needs only a `../<id>` entry in the group folder that fits it: `connectors/(hook-connectors)/meta.json` or `connectors/(proxy-connectors)/meta.json`, and the same under `reference/connectors/` (§2). A group folder holds only its `meta.json`; the pages stay in `connectors/`, so URLs do not change.
 - **Section order.** Follow `copilot.mdx`, `claudecode.mdx`, `codex.mdx` or `hermes.mdx`:
   1. `## Platform support`
   2. `## Setup`, with `<Tabs items={['macOS / Linux', 'Windows']}>`
@@ -55,13 +55,13 @@ Python: cli/defenseclaw/connector_paths.py KNOWN_CONNECTORS
 
 | File | What to add | Checked by |
 |---|---|---|
-| `docs-site/content/docs/connectors/meta.json` | the page id in `pages` | `test_windows_release_claims._active_connector_docs` (must equal the Windows taxonomy) |
+| `docs-site/content/docs/connectors/(hook-connectors)/meta.json` (or `(proxy-connectors)`) | `../<id>` in `pages` | `test_windows_release_claims._active_connector_docs` (must equal the Windows taxonomy) |
 | `docs-site/data/capability-matrix.json` | a row with `id`, `label`, `windowsSupport`, `windowsNote`, `summary`, `family`, `toolInspection`, `subprocessPolicy`, `hooks{canBlock,canAskNative,askEvents,blockEvents,supportsFailClosed,scope}`, `hilt`, `notes`; bump `_lastVerified` | Go test: `family` (from `LLMTrafficModeForConnector`), `toolInspection` (`ToolModeBoth` is spelled `"pre-execution + response-scan"`), `subprocessPolicy`, and the exact `HookCapabilities()`. `docs-site/scripts/test-feature-demos.ts` checks that `windowsSupport` is present. **Nothing** cross-checks `windowsSupport` against `platform_support.go`. |
 | `docs-site/data/connector-icons.ts` | LobeHub source, target and accent | `docs-site/scripts/sync-connector-icons.ts` runs at `postinstall`; commit `docs-site/public/connector-icons/<id>.svg` |
 | `docs-site/components/connector-brand.tsx` `FALLBACKS` | initials and color when there is no LobeHub icon (zeptoclaw, omnigent) | nothing |
 | `docs-site/lib/hero-connectors.ts` `TERMINAL_CONNECTORS` | id, label, setup command, modeId | nothing |
 | `docs-site/content/docs/connectors/index.mdx` | frontmatter count and keywords, the Integration families card, a Platform support row (`\| [Label](/docs/connectors/<id>) \| **Supported** \| **<win>** \| ... \|`), a Capability summary row | the platform row is regex-pinned; the rest isn't |
-| `docs-site/content/docs/connectors/compatibility.mdx` | a row per contract band: `\| <ConnectorLabel id="<id>" /> \| gate \| range \| contract / script gen \| AID surfaces \|` | only the codex and claude rows are pinned; add a pin |
+| `docs-site/content/docs/reference/apis/hook-contracts.mdx` | a row per contract band: `\| <ConnectorLabel id="<id>" /> \| gate \| range \| contract / script gen \| AID surfaces \|` | only the codex and claude rows are pinned; add a pin |
 | `docs/CONNECTOR-MATRIX.md` | **nothing.** It only points to the website (`test_connector_matrix_delegates_current_support_to_the_website`) | |
 
 ## 3. Pages that list every connector
@@ -72,7 +72,7 @@ No test checks these. Review each one. They are the pages that name most connect
 |---|---|
 | Connectors | `connectors/index.mdx`, `connectors/compatibility.mdx`, `capability-matrix.mdx`, `command-generator.mdx`, `index.mdx` |
 | Setup and guardrails | `get-started/quickstart.mdx`, `setup/index.mdx`, `setup/guardrail/index.mdx`, `setup/guardrail/disabling.mdx`, `setup/guardrail/aliases.mdx`, `setup/unified-llm-key.mdx`, `setup/semantic-routing.mdx` |
-| Reference | `reference/cli.mdx`, `reference/configuration.mdx`, `reference/gateway-api.mdx`, `reference/env-vars.mdx` (generated) |
+| Reference | `reference/commands/cli.mdx`, `reference/configuration/index.mdx`, `reference/apis/gateway-api.mdx`, `reference/configuration/env-vars.mdx` (generated) |
 | Features | `ai-discovery.mdx`, `hitl.mdx`, `stories/hitl-approvals.mdx`, `llm-judge-benchmark.mdx`, `policies/cel/tool-call-state.mdx` |
 | Windows | `get-started/windows/telemetry-security.mdx`, `get-started/windows/paths-troubleshooting.mdx` |
 | Enterprise | `enterprise/index.mdx`, `concepts.mdx`, `machine-policy.mdx`, `foreign-hook-guard.mdx`, `threat-model.mdx`, `windows.mdx`, `rollout.mdx`, `enrollment.mdx`, `operations.mdx`, `troubleshooting.mdx` |

@@ -14,6 +14,23 @@ import (
 	"testing"
 )
 
+func TestValidateTrustedInstallMarkerDirRejectsUserPathAndSymlink(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("this test needs an unprivileged owner")
+	}
+	marker := t.TempDir()
+	if err := ValidateTrustedInstallMarkerDir(marker, "Secure Client install marker"); err == nil {
+		t.Fatal("user-owned directory selected Secure Client delivery")
+	}
+	link := filepath.Join(t.TempDir(), "marker")
+	if err := os.Symlink(marker, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateTrustedInstallMarkerDir(link, "Secure Client install marker"); err == nil || !strings.Contains(err.Error(), "symlinks") {
+		t.Fatalf("symlink marker = %v, want refusal", err)
+	}
+}
+
 func TestValidateTrustedRuntimeDirRejectsStandardUserOwnedPath(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root-owned temp dirs are valid managed runtime dirs")

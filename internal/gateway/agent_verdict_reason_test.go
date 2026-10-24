@@ -283,18 +283,17 @@ func TestHookResponsesCarryTheDefenseClawPolicyWording(t *testing.T) {
 	}
 }
 
-// On Hermes and OpenHands a confirmation became an alert and the tool call
-// ran with nothing on screen, since neither hook can ask or show a notice.
+// On Hermes a confirmation became an alert and the tool call ran with
+// nothing on screen, since its hook can neither ask nor show a notice.
 // The standalone enterprise profile blocks it and says the rule wanted the
 // user's confirmation; per-user installs keep the alert.
-func TestStandaloneBlocksAConfirmationHermesAndOpenHandsCannotAsk(t *testing.T) {
+func TestStandaloneBlocksAConfirmationHermesCannotAsk(t *testing.T) {
 	opts := connector.SetupOpts{APIAddr: "127.0.0.1:18970"}
 	for _, c := range []struct {
 		profile      connector.HookProfile
 		event, agent string
 	}{
 		{connector.NewHermesConnector().HookProfile(opts), "pre_tool_call", "Hermes"},
-		{connector.NewOpenHandsConnector().HookProfile(opts), "PreToolUse", "OpenHands"},
 	} {
 		useAgentVerdictProfile(t, false, false)
 		if action, _ := mapHookActionForProfile("confirm", "action", c.event, c.profile.Capabilities, c.profile, nil); action != "alert" {

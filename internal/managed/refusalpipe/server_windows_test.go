@@ -9,6 +9,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,5 +78,64 @@ func TestRefusalPipeIdentifiesTheClientToken(t *testing.T) {
 	case r := <-got:
 		t.Fatalf("server received %+v from a client that should have refused to write", r)
 	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// GAP-1253: serve returns only after the reports it accepted were handled,
+// so the stop's drain that follows it sees them.
+func TestRefusalPipeServeWaitsForItsHandlers(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !AccountSID(user.User.Sid.String()) {
+		t.Skipf("test account %s is not a user account SID", user.User.Sid)
+	}
+	name := fmt.Sprintf(`\\.\pipe\defenseclaw-refusal-join-%d-%d`, os.Getpid(), time.Now().UnixNano())
+	restoreName, restorePID := clientPipeName, gatewayServerPID
+	t.Cleanup(func() { clientPipeName, gatewayServerPID = restoreName, restorePID })
+	clientPipeName = name
+	gatewayServerPID = func() (uint32, error) { return uint32(os.Getpid()), nil }
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	served := make(chan error, 1)
+	go func() {
+		served <- serve(ctx, name, func(string, Report) {
+			once.Do(func() { close(entered) })
+			<-release
+		})
+	}()
+	report := Report{Connector: "claudecode", Reason: ReasonSIDUnregistered, Event: "PreToolUse", Tool: "Bash"}
+	var sendErr error
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		sendCtx, stop := context.WithTimeout(context.Background(), time.Second)
+		sendErr = Send(sendCtx, report)
+		stop()
+		if sendErr == nil {
+			break
+		}
+	}
+	if sendErr != nil {
+		t.Fatalf("send: %v", sendErr)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no report handled")
+	}
+	cancel()
+	select {
+	case <-served:
+		t.Fatal("serve returned while a handler was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-served:
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after its handler")
 	}
 }

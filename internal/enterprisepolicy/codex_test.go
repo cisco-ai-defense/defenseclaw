@@ -40,7 +40,7 @@ func TestCodexReconcileFreshIsCoveredAndIdempotent(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustNoConflicts(t, state)
-	if !state.Covered || !state.Changed || state.OwnedEntries != 10 || state.EffectiveLock != config.ManagedHooksOnlyEnforce {
+	if !state.Covered || !state.Changed || state.OwnedEntries != 11 || state.EffectiveLock != config.ManagedHooksOnlyEnforce {
 		t.Fatalf("fresh reconcile: %+v", state)
 	}
 	first := readFile(t, codexPath(t, opts))
@@ -161,7 +161,7 @@ func TestCodexReconcilePreservesAdministratorBytes(t *testing.T) {
 	if len(pre) != 2 {
 		t.Fatalf("administrator PreToolUse group must survive beside DefenseClaw's: %v", pre)
 	}
-	if state.ForeignEntries != 1 || state.OwnedEntries != 10 {
+	if state.ForeignEntries != 1 || state.OwnedEntries != 11 {
 		t.Fatalf("entry counts: owned=%d foreign=%d", state.OwnedEntries, state.ForeignEntries)
 	}
 	again, err := codexTarget{}.Reconcile(opts)

@@ -6,6 +6,8 @@
 package connector
 
 import (
+	"errors"
+	"fmt"
 	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -27,6 +29,14 @@ func atomicFileCreateTemp(dir string, _ os.FileMode) (*os.File, string, error) {
 
 func atomicFilePublish(source, destination string, _ os.FileInfo, _ os.FileMode) error {
 	return safefile.ReplaceFile(source, destination)
+}
+
+func atomicFilePublishNoReplace(source, destination string, _ os.FileInfo, _ os.FileMode) error {
+	err := moveAtomicTransformPathNoReplace(source, destination)
+	if errors.Is(err, errAtomicTransformConflict) {
+		return fmt.Errorf("destination %s exists: %w", destination, os.ErrExist)
+	}
+	return err
 }
 
 func atomicFilePublishHookAPIToken(source, destination string, info os.FileInfo, perm os.FileMode) error {

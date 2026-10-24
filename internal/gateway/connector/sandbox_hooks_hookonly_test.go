@@ -28,13 +28,13 @@ import (
 )
 
 // The sandbox variants of the hook-only connectors that run in OpenShell
-// images (Hermes, OpenHands, Antigravity). Their hooks run in the shared
+// images (Hermes, Antigravity). Their hooks run in the shared
 // tables of sandbox_hooks_shell_test.go against each harness's own block
 // signal.
 
 // TestHookOnlySandboxArtifacts: the root-owned Hermes managed .env pins the
 // switches Hermes would otherwise take from the workload-writable
-// ~/.hermes/.env, and the OpenHands and agy hooks seeded in HOME are byte for
+// ~/.hermes/.env, and the agy hooks seeded in HOME are byte for
 // byte the root-owned copies their launchers restore them from.
 func TestHookOnlySandboxArtifacts(t *testing.T) {
 	env := sandboxFile(t, sandboxArtifactsFor(t, NewHermesConnector(), "0.19.0"), HermesSandboxManagedEnvPath)
@@ -48,7 +48,6 @@ func TestHookOnlySandboxArtifacts(t *testing.T) {
 		version         string
 		canonical, user string
 	}{
-		{NewOpenHandsConnector(), "1.16.0", OpenHandsSandboxCanonicalHooksPath, OpenHandsSandboxHooksPath},
 		{NewAntigravityConnector(), "1.2.12", AntigravitySandboxCanonicalHooksPath, AntigravitySandboxHooksPath},
 	} {
 		a := sandboxArtifactsFor(t, tc.provider, tc.version)

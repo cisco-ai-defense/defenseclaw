@@ -175,3 +175,143 @@ console.log(cancelled ? "cancelled:" + notice + "|" + JSON.stringify(result) : "
 		t.Fatalf("Amp must let the turn start when the guard allows: %q", got)
 	}
 }
+
+// outageDenyOnceGuard is a stand-in for the administrator-owned hook binary
+// whose foreign-hook check answers the guard's outage denial the first time
+// (the gateway could not answer for the agent session when the agent
+// started) and allows afterwards (the gateway is back).
+const outageDenyOnceGuard = `#!/bin/sh
+cat >/dev/null
+case " $* " in
+  *" --foreign-hook-check "*) ;;
+  *) exit 1 ;;
+esac
+if [ ! -f "$0.ran" ]; then
+  : > "$0.ran"
+  printf '%s\n' '{"deny":true,"reason":"DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running (enterprise_gateway_not_running)."}'
+  exit 0
+fi
+printf '{"deny":false}\n'
+`
+
+// G-hooks-upg loop round 2: the gateway outage table says which plugins keep
+// a guard block they got at load for the life of the agent process
+// (HookOutage.GuardCheckedAtLoad). An Amp or OpenCode agent that starts
+// while the gateway cannot answer for its session keeps blocking its tool
+// calls after the gateway is back, with a gateway that allows them; a
+// restarted agent checks again. Only those plugins run the check at load.
+func TestPluginGuardOutageDenialAtLoadHoldsForTheProcess(t *testing.T) {
+	registry := NewDefaultRegistry()
+	checking := map[string]bool{}
+	entries, err := hookFS.ReadDir("hooks")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.Contains(name, "-plugin") || strings.Contains(name, "secure-client") {
+			continue // Secure Client has no standalone summary: its guard is a no-op
+		}
+		body, err := hookFS.ReadFile("hooks/" + name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), "--foreign-hook-check") {
+			checking[strings.SplitN(name, "-plugin", 2)[0]] = true
+		}
+	}
+	for _, name := range registry.Names() {
+		conn, _ := registry.Get(name)
+		if got := ConnectorHookOutage(conn).GuardCheckedAtLoad; got != checking[name] {
+			t.Errorf("%s: GuardCheckedAtLoad = %v, but its plugin runs the foreign-hook check: %v", name, got, checking[name])
+		}
+	}
+
+	gateway := openCodeStubGateway(t)
+	root := testenv.PrivateTempDir(t)
+	data := openCodePluginTestData(t, gateway)
+	guard := filepath.Join(root, "defenseclaw-hook")
+	if err := os.WriteFile(guard, []byte(outageDenyOnceGuard), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	data.ForeignHookGuardJS = javaScriptStringContent(guard)
+	data.Managed = true
+	lines := runNodeHarness(t, `
+import { pathToFileURL } from "node:url";
+const href = pathToFileURL(process.argv[1]).href;
+const loaded = await import(href);
+const call = async (plugin, id) => {
+  try {
+    await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: id }, { args: { command: "echo marker" } });
+    return "allow";
+  } catch (error) {
+    return "block:" + String(error && error.message || error);
+  }
+};
+const first = await loaded.DefenseClaw({ directory: "", client: {} });
+await first.config({ plugin_origins: [{ spec: href }], mcp: {} });
+console.log(await call(first, "C1"));
+console.log(await call(first, "C2"));
+const restarted = await loaded.DefenseClaw({ directory: "", client: {} });
+await restarted.config({ plugin_origins: [{ spec: href }], mcp: {} });
+console.log(await call(restarted, "C3"));
+`, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data))
+	if len(lines) != 3 || lines[2] != "allow" {
+		t.Fatalf("OpenCode verdicts = %q, want two blocks, then an allow after the restart", lines)
+	}
+	for _, line := range lines[:2] {
+		if !strings.HasPrefix(line, "block:") || !strings.Contains(line, "enterprise_gateway_not_running") {
+			t.Fatalf("OpenCode: the outage denial at load must hold for the process: %q", line)
+		}
+	}
+
+	ampRoot := testenv.PrivateTempDir(t)
+	ampToken := filepath.Join(ampRoot, ".hook-amp.token")
+	if err := os.WriteFile(ampToken, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ampGuard := filepath.Join(ampRoot, "defenseclaw-hook")
+	if err := os.WriteFile(ampGuard, []byte(outageDenyOnceGuard), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lines = runNodeHarness(t, `
+import { readFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+globalThis.Bun = { file: (path) => ({ slice: () => ({ text: async () => readFileSync(path, "utf8") }) }) };
+const loaded = await import(pathToFileURL(process.argv[1]).href);
+const start = () => {
+  const handlers = {};
+  loaded.default({
+    system: { workspaceRoot: "", executor: { kind: "" }, user: {} },
+    helpers: { filePathFromURI: (uri) => uri, isPluginUINotAvailableError: () => true },
+    on: (event, handler) => { handlers[event] = handler; },
+    activeThread: { current: null },
+    ui: { notify: async () => {} },
+  });
+  return handlers;
+};
+const call = async (handlers, id) => {
+  const result = await handlers["tool.call"]({ thread: { id: "T" }, toolUseID: id, tool: "Bash", input: {} }, {});
+  return result.action + ":" + (result.message || "");
+};
+const first = start();
+console.log(await call(first, "U1"));
+console.log(await call(first, "U2"));
+const restarted = start();
+console.log(await call(restarted, "U3"));
+`, writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", templateData{
+		APIAddr:            strings.TrimPrefix(gateway.URL, "http://"),
+		TokenFileJS:        javaScriptStringContent(ampToken),
+		ForeignHookGuardJS: javaScriptStringContent(ampGuard),
+		FailMode:           "closed",
+		Managed:            true,
+	}))
+	if len(lines) != 3 || !strings.HasPrefix(lines[2], "allow:") {
+		t.Fatalf("Amp verdicts = %q, want two blocks, then an allow after the restart", lines)
+	}
+	for _, line := range lines[:2] {
+		if !strings.HasPrefix(line, "reject-and-continue:") || !strings.Contains(line, "enterprise_gateway_not_running") {
+			t.Fatalf("Amp: the outage denial at load must hold for the process: %q", line)
+		}
+	}
+}

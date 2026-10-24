@@ -1,0 +1,148 @@
+---
+title: Paths
+description: Where DefenseClaw keeps its programs, data and agent files on macOS, Linux and Windows, and the supported path overrides.
+keywords:
+  - DefenseClaw paths
+  - DEFENSECLAW_HOME
+  - DefenseClaw Windows paths
+  - CLAUDE_CONFIG_DIR CODEX_HOME
+---
+
+DefenseClaw keeps programs, data and each agent's own configuration in separate places. Change things with `defenseclaw` commands rather than by editing or deleting files.
+
+## What the install creates
+
+The trees below describe the per-user shell installers, including native Windows `install.ps1`, which manages a private `.venv` and generated hook scripts. The Windows Setup package uses an embedded runtime and `defenseclaw-hook.exe` instead; it creates no `.venv`. See [Windows installation](/docs/get-started/windows) for the package layout.
+
+<Files>
+  <Folder name="~/.defenseclaw" defaultOpen>
+    <Folder name=".venv">
+      <File name="… (the CLI's Python environment)" />
+    </Folder>
+    <File name="config.yaml" />
+    <File name="config.generation.json" />
+    <File name="audit.db" />
+    <File name="device.key" />
+    <Folder name="hooks" defaultOpen>
+      <File name="claude-code-hook.sh" />
+      <File name="codex-hook.sh" />
+      <File name="… (one script per agent you set up)" />
+    </Folder>
+    <Folder name="policies" defaultOpen>
+      <Folder name="guardrail" defaultOpen>
+        <Folder name="default" />
+        <Folder name="strict" />
+        <Folder name="permissive" />
+      </Folder>
+      <Folder name="rego" />
+    </Folder>
+    <Folder name="installer" />
+    <Folder name="logs" />
+    <Folder name="previous" />
+  </Folder>
+  <Folder name="~/.local/bin" defaultOpen>
+    <File name="defenseclaw" />
+    <File name="defenseclaw-gateway" />
+    <File name="defenseclaw-acp" />
+    <File name="skill-scanner" />
+    <File name="mcp-scanner" />
+  </Folder>
+</Files>
+
+`config.yaml`, `config.generation.json`, `audit.db` and `device.key` are created by `defenseclaw init` or `quickstart`, and the hook scripts by setting up an agent. Only `config.yaml` is policy; the hook scripts are derived from it. `installer/` is the installer that performed the current install (`defenseclaw rollback` uses it); its `binaries.sha256` lists the SHA-256 of each installed binary as it runs (`cd ~/.local/bin && shasum -a 256 -c ~/.defenseclaw/installer/binaries.sha256`). On macOS these differ from the binaries in the release archive, which the installer checks against `checksums.txt` and then signs ad hoc for this Mac. `previous/` is the install the last upgrade replaced. On Linux, `~/.local/bin` also holds `defenseclaw-sensor-helper` for the opt-in sandbox kernel feed. When the installer installs `uv` for you, `uv` and `uvx` are in `~/.local/bin` too.
+
+On macOS and Linux the installer does not change `PATH`. If `~/.local/bin` is not on it, the installer prints the line to add to your shell profile.
+
+## Programs
+
+| Windows file in `%USERPROFILE%\.local\bin` | What it is |
+| --- | --- |
+| `defenseclaw.exe` | The CLI and TUI launcher. |
+| `defenseclaw.cmd` | The same launcher as a batch file, for scripts that name it. |
+| `defenseclaw` | The same launcher for Git Bash. cmd.exe and PowerShell ignore it. |
+| `defenseclaw-gateway.exe` | The gateway and its lifecycle commands. |
+| `defenseclaw-hook.exe` | The hook runner agents call. It opens no console window. |
+| `defenseclaw-acp.exe` | The [ACP guard](/docs/features/acp-guard). |
+
+Do not replace or wrap these. Run the install command again to repair them. The installer adds `%USERPROFILE%\.local\bin` to your user `PATH`.
+
+## Data
+
+In `~/.defenseclaw`, `%USERPROFILE%\.defenseclaw` on Windows, or `DEFENSECLAW_HOME` when set.
+
+| Path | What it is | Edit it? |
+| --- | --- | --- |
+| `config.yaml` | Your configuration. | Use `defenseclaw config set` or the setup commands. The gateway applies a valid edit and keeps the previous policy if an edit is invalid; run `defenseclaw config validate` first when you edit by hand. |
+| `config.generation.json` | Generation, SHA-256, actor and time of each write to `config.yaml`. | No. |
+| `custom-providers.json` | Custom LLM providers, derived from `llm_providers`. | No. `defenseclaw doctor --fix` regenerates it. |
+| `config.yaml.v8.bak`, `migration-v9.json` | Kept by the `config_version` 9 migration. | Read them. `defenseclaw config migrate --ack` marks the record read. |
+| `.env` | Protected tokens and API keys. | No. Never print it. Use `defenseclaw keys`. |
+| `audit.db` | The local audit database (SQLite). | No. Do not open it with a second writer or attach it to a ticket. |
+| `gateway.log` | The gateway's output. | Read it locally; check excerpts before sharing. |
+| `logs/install-*.log` | One log per install, upgrade or rollback. | Read it. |
+| `logs/hook-failures.jsonl` | Hook delivery failures. | Read it locally; it can hold sensitive details. |
+| `.venv/` | The Python environment the installer manages. | No. |
+| `previous/` | The install the last upgrade replaced. | No. `defenseclaw rollback` swaps it back. |
+| `hooks/` | Generated hook files and per-connector credentials. | No. Never print or copy them. |
+| `backups/`, `connector_backups/` | Copies needed to restore agent files and earlier settings, including `config.yaml.before-redaction-*`. | No. They can contain credentials. |
+| `quarantine/` | Quarantined skills and plugins. | No. Use `defenseclaw skill restore` or `plugin restore`. |
+| `gateway.pid`, `watchdog.pid` | Records of the running gateway and watchdog. | No. |
+| `gateway.jsonl` | Exists only if you configured a JSONL destination with that path. | Manage it through [observability](/docs/features/observability). |
+
+Full tree and key reference: [Configuration](/docs/reference/configuration).
+
+## Agent files DefenseClaw changes
+
+Setup adds DefenseClaw's own marked entries to each agent's configuration and leaves your other settings alone. Change them only with `defenseclaw setup <connector>` and `defenseclaw setup remove <connector>`. Windows defaults:
+
+| Agent | Default file |
+| --- | --- |
+| Claude Code | `%USERPROFILE%\.claude\settings.json` (or `%CLAUDE_CONFIG_DIR%`) |
+| Codex | `%USERPROFILE%\.codex\config.toml` (or `%CODEX_HOME%`) |
+| Amp | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` |
+| Antigravity | `%USERPROFILE%\.gemini\config\hooks.json` |
+| GitHub Copilot CLI | `%USERPROFILE%\.copilot\hooks\defenseclaw.json` (or `%COPILOT_HOME%`); with `--workspace`, `<workspace>\.github\hooks\defenseclaw.json` |
+| Cursor | `%USERPROFILE%\.cursor\hooks.json` |
+| Devin | `%APPDATA%\devin\config.json`; with a workspace, `<workspace>\.devin\hooks.v1.json` |
+| Hermes | `%LOCALAPPDATA%\hermes\config.yaml` (or `%HERMES_HOME%`) |
+| Kiro | `<project>\.kiro\hooks\defenseclaw.json` |
+| OpenCode | `%USERPROFILE%\.config\opencode\plugins\defenseclaw.js` (or `%OPENCODE_CONFIG_DIR%`) |
+
+The Amp and OpenCode plugin files carry a connector credential: never print or copy them. macOS and Linux paths are on each [connector page](/docs/connectors).
+
+## Overrides
+
+Claude Code, Codex, GitHub Copilot CLI, Hermes and OpenCode let you move their configuration folder with `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `COPILOT_HOME`, `HERMES_HOME` and `OPENCODE_CONFIG_DIR`. Set them to absolute native paths before you install DefenseClaw or set up the connector. Setup checks and remembers them and refuses a path through a symbolic link or junction. Amp, Antigravity, Cursor and Devin have no such variable.
+
+<Tabs items={['PowerShell', 'cmd']}>
+  <Tab value="PowerShell">
+
+```powershell
+$env:CODEX_HOME = "D:\Agent Profiles\Codex"
+$env:CLAUDE_CONFIG_DIR = "D:\Agent Profiles\Claude"
+```
+
+  </Tab>
+  <Tab value="cmd">
+
+```cmd
+set "CODEX_HOME=D:\Agent Profiles\Codex"
+set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
+```
+
+  </Tab>
+</Tabs>
+
+Changing a variable later does not move DefenseClaw's entries. To move an agent's folder, run its setup again. The default data root is the current profile's `.defenseclaw`; `DEFENSECLAW_HOME` overrides it. Use the same value for every command, including `defenseclaw upgrade`. `DEFENSECLAW_FAIL_MODE` is not a path setting and no 1.0.4 hook reads it. Set the fail mode with `defenseclaw guardrail fail-mode open|closed`; setup writes it into the hooks and the OpenCode plugin, and `defenseclaw status` and `defenseclaw doctor` report it.
+
+DefenseClaw restricts its private files to the current user, Administrators and SYSTEM on Windows ([security model](/docs/appendix/windows-security-model#ownership-and-filesystem-boundary)).
+
+## Quoting and case
+
+Quote every path that can contain spaces. In PowerShell use the call operator:
+
+```powershell
+& "$env:USERPROFILE\.local\bin\defenseclaw-gateway.exe" status
+```
+
+In cmd, quote the executable: `"%USERPROFILE%\.local\bin\defenseclaw-gateway.exe" status`. The hook command setup writes into Hermes `config.yaml` is a quoted absolute path to `defenseclaw-hook.exe` with forward slashes and plain arguments. Hermes runs it without a shell, so add no `&`, `.ps1` or wrapper. Windows compares variable names and paths without regard to case: do not use two agent folders or variables that differ only by case.

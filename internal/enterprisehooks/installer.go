@@ -96,7 +96,25 @@ type InstallOptions struct {
 	// WindowsStandaloneClaudeMachinePolicyContract). Empty, and every
 	// Secure Client process, render the row's own contract.
 	MachinePolicyContractID string
+
+	// WindowsTargetLogon selects the logon a Windows install acts under for
+	// the target's user. The zero value is the user's active session.
+	WindowsTargetLogon WindowsTargetLogon
 }
+
+// WindowsTargetLogon is the logon whose token a Windows install impersonates.
+type WindowsTargetLogon int
+
+const (
+	// WindowsTargetLogonActive is the user's active session only.
+	WindowsTargetLogonActive WindowsTargetLogon = iota
+	// WindowsTargetLogonAnyWithS4U is the user's active session, else a
+	// disconnected one (the user is still signed in), else an S4U logon for
+	// a signed-out user. Without any of them the install fails with
+	// ErrEnrolledUserSignedOut before it acts as the user. Only a change
+	// that closes the hook fail mode uses it (rel-1-0-4 GAP-0585).
+	WindowsTargetLogonAnyWithS4U
+)
 
 var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
 
@@ -223,6 +241,9 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
+	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
+		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
+	}
 	if standalonePerUserRepair(uid) {
 		// Install renders some hooks for the guardrail mode (Cursor's action
 		// command differs from its observe command). Without the mode here
@@ -263,12 +284,26 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			return err
 		}
 		return withOwnerCredentials(uid, gid, func() error {
-			present, err := connector.OwnedHooksPresent(conn, setupOpts)
-			if err != nil {
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
+			verifyOwnedHooks := func() error {
+				present, err := connector.OwnedHooksPresent(conn, setupOpts)
+				if err != nil {
+					return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
+				}
+				if !present {
+					return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts))
+				}
+				return nil
 			}
-			if !present {
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
+			if !standalonePerUserRepair(uid) {
+				// Preserve the Secure Client check order.
+				if err := verifyOwnedHooks(); err != nil {
+					return err
+				}
+			}
+			if path, driftErr := connector.ManagedPluginArtifactDrift(conn, setupOpts); driftErr != nil {
+				return fmt.Errorf("enterprise hooks: inspect connector %s plugin %s: %w", conn.Name(), path, driftErr)
+			} else if path != "" {
+				return fmt.Errorf("enterprise hooks: connector %s plugin differs from the current template: %s", conn.Name(), path)
 			}
 			// Match validateHookContract's mode selection so Verify does not
 			// load and re-hash the lock in bounded/managed mode on Unix
@@ -336,6 +371,15 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			// and guardrail modes the hooks were rendered for.
 			if err := verifyStandaloneHookRuntime(conn, setupOpts, opts.GuardrailMode, lock, uid); err != nil {
 				return err
+			}
+			// The standalone runtime check above names a missing or changed
+			// script directly. OwnedHooksPresent also treats that condition as
+			// an absent registration, which obscures the file the guardian
+			// must repair. Keep the registration check after runtime integrity.
+			if standalonePerUserRepair(uid) {
+				if err := verifyOwnedHooks(); err != nil {
+					return err
+				}
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),
@@ -454,6 +498,9 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		ForeignHookGuardBinary: strings.TrimSpace(opts.ForeignHookGuardBinary),
 		ManagedHookBinary:      strings.TrimSpace(opts.ManagedHookBinary),
 	}
+	if runtime.GOOS == "darwin" && secureClientHookDelivery() {
+		setupOpts.HookExecutable = "/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"
+	}
 	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
 	if requiresScopedHookToken {
 		if !validEnterpriseScopedHookToken(setupOpts.APIToken) {
@@ -562,6 +609,14 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		}
 
 		return withOwnerCredentials(uid, gid, func() error {
+			// Held until the hook contract lock names this connector: a
+			// removal of the account's last other connector would take the
+			// shared scripts Setup writes (lockSharedHookRuntime).
+			unlock, err := lockSharedHookRuntime(ctx, home)
+			if err != nil {
+				return err
+			}
+			defer unlock()
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
 			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
 			lockWriteAttempted := false
@@ -596,11 +651,6 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 					}
 				}
 				return errors.Join(failures...)
-			}
-			// OpenHands on macOS admits only a protected, setup-selected
-			// executable: record the user's own image before setup.
-			if err := selectManagedAgentExecutable(home, dataDir, conn.Name(), &setupOpts); err != nil {
-				return err
 			}
 			// A rollback removes what Setup adds below the data directory
 			// (GAP-0509).
@@ -640,7 +690,12 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
 			}
 			if !present {
-				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %s", conn.Name(), ownedHookAbsentDetail(conn, setupOpts)))
+			}
+			if path, driftErr := connector.ManagedPluginArtifactDrift(conn, setupOpts); driftErr != nil {
+				return rollback(fmt.Errorf("enterprise hooks: inspect connector %s plugin %s: %w", conn.Name(), path, driftErr))
+			} else if path != "" {
+				return rollback(fmt.Errorf("enterprise hooks: connector %s plugin differs from the current template: %s", conn.Name(), path))
 			}
 			// See Verify for the rationale: keep Install's persistence
 			// mode consistent with validateHookContract's drift check.
@@ -1472,7 +1527,7 @@ func standaloneAcceptsAgentVersionChange(resolution connector.HookContractResolu
 // the standalone profile; standalone keeps fail-closed delivery, its version
 // gates and its refusals.
 func secureClientHookDelivery() bool {
-	return secureClientHookDeliveryHost && !standaloneProfileProcess()
+	return secureClientHookDeliveryHost && !standaloneProfileProcess() && connector.SecureClientDeploymentVerified()
 }
 
 // secureClientHookDeliveryHost reports whether this OS has a Secure Client
@@ -1500,7 +1555,7 @@ func hookContractsIncompatible(previous, current connector.HookContractLockEntry
 	}
 	previousID := strings.TrimSpace(previous.ContractID)
 	currentID := strings.TrimSpace(current.ContractID)
-	// A connector whose hooks are not version-gated (Kiro, OpenHands) has no
+	// A connector whose hooks are not version-gated (Kiro) has no
 	// contract to verify; it stays compatible while it keeps the not-gated
 	// status and contract it was installed with. Without this every install
 	// after the first, and every verify, would select open delivery and
@@ -1579,4 +1634,16 @@ func agentVersionStatus(connectorName, agentVersion string) string {
 		return connector.UntestedNewerVersionReasonPrefix
 	}
 	return ""
+}
+
+// ownedHookAbsentDetail is the reason an owned-hook check found no accepted
+// registration, for verify and install errors. The guardian's watch log and
+// status show it, so an agent rewriting its own config is diagnosable without
+// rerunning the check by hand.
+func ownedHookAbsentDetail(conn connector.Connector, opts connector.SetupOpts) string {
+	reason := strings.TrimSpace(connector.OwnedHooksAbsentReason(conn, opts))
+	if reason == "" {
+		return "owned hook command not present"
+	}
+	return "owned hook command not present: " + reason
 }

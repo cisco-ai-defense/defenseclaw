@@ -52,6 +52,30 @@ type hookFailureLine struct {
 	Reason    string `json:"reason"`
 	Category  string `json:"category"`
 	FailMode  string `json:"fail_mode"`
+	// Outcome is what the call got: fail_open (it ran unchecked),
+	// fail_closed (it was blocked) or diagnostic (a record that is no
+	// delivery decision, such as a rejected traceparent: the call still went
+	// to the gateway). A call that strict availability or an event contract
+	// blocked is logged with the connector's fail mode open and outcome
+	// fail_closed: it did not run.
+	Outcome string `json:"outcome"`
+}
+
+// ranUnchecked reports whether the logged call went ahead without a check.
+// The 1.0.4 hooks write the outcome they applied on every line. A line
+// without one (the OpenCode plugin, which logs only the calls it lets
+// through, and hooks before 1.0.3) or with outcome unknown (the 1.0.3 shell
+// hooks' Hermes, Devin, Kiro, Antigravity, Copilot and inspect-* branches,
+// read by the first start after an upgrade) keeps the fail-mode rule: open
+// counts, so an upgrade never hides a call that ran unchecked.
+func (l hookFailureLine) ranUnchecked() bool {
+	switch strings.TrimSpace(l.Outcome) {
+	case "fail_open":
+		return true
+	case "fail_closed", "diagnostic":
+		return false
+	}
+	return strings.TrimSpace(l.FailMode) == "open"
 }
 
 // hookFailOpenSummary is the fail-open calls of one connector.
@@ -177,7 +201,7 @@ func readHookFailOpenCalls(logDir string, now time.Time) ([]hookFailOpenSummary,
 		}
 		next += int64(len(line))
 		var entry hookFailureLine
-		if json.Unmarshal(line, &entry) != nil || strings.TrimSpace(entry.FailMode) != "open" {
+		if json.Unmarshal(line, &entry) != nil || !entry.ranUnchecked() {
 			continue
 		}
 		at, perr := time.Parse(time.RFC3339, strings.TrimSpace(entry.TS))

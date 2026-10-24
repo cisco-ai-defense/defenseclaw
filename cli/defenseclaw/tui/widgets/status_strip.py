@@ -49,10 +49,13 @@ class StatusSegment:
     def from_service(cls, service: ServiceStatus) -> StatusSegment:
         return cls(label=service.label, state=service.state, detail=service.detail)
 
-    def render(self, tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
+    def plain(self) -> str:
         label = self.label if not self.detail else f"{self.label} ({self.detail})"
+        return f"{state_dot(self.state)} {label}"
+
+    def render(self, tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
         color = state_color(self.state, tokens)
-        return f"[{color}]{state_dot(self.state)} {label}[/]"
+        return f"[{color}]{self.plain()}[/]"
 
 
 def status_segments(model: StatusModel) -> list[StatusSegment]:
@@ -122,10 +125,72 @@ def status_segments(model: StatusModel) -> list[StatusSegment]:
     return segments
 
 
-def render_status_strip(model: StatusModel, tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
-    """Render status-strip markup suitable for a Textual Static widget."""
+_SEPARATOR = "  [#444444]│[/]  "
+_SEPARATOR_CELLS = 5
+_MORE = "…"
 
-    return "  [#444444]│[/]  ".join(segment.render(tokens) for segment in status_segments(model))
+
+def fit_status_segments(segments: list[StatusSegment], width: int) -> tuple[list[StatusSegment], bool]:
+    """The leading segments that fit ``width`` cells whole, and whether any were left out.
+
+    The strip is one line, cut at the terminal edge: at 80 columns it ended
+    mid-word ("● Guar…", GAP-0112). Whole segments are kept in priority
+    order, leaving room for a trailing "…" when some do not fit.
+    """
+
+    from rich.cells import cell_len
+
+    widths = [cell_len(segment.plain()) for segment in segments]
+    total = sum(widths) + _SEPARATOR_CELLS * max(0, len(widths) - 1)
+    if total <= width:
+        return list(segments), False
+    room = width - _SEPARATOR_CELLS - cell_len(_MORE)
+    kept: list[StatusSegment] = []
+    used = 0
+    for segment, cells in zip(segments, widths):
+        need = cells + (_SEPARATOR_CELLS if kept else 0)
+        if used + need > room:
+            break
+        kept.append(segment)
+        used += need
+    return kept, True
+
+
+def render_status_strip(
+    model: StatusModel, tokens: ThemeTokens = DEFAULT_TOKENS, *, width: int | None = None
+) -> str:
+    """Render status-strip markup suitable for a Textual Static widget.
+
+    With ``width``, only whole segments that fit are shown, then "…".
+    """
+
+    segments = status_segments(model)
+    cut = False
+    if width is not None:
+        segments, cut = fit_status_segments(segments, max(0, width))
+    parts = [segment.render(tokens) for segment in segments]
+    if cut:
+        color = tokens.text_muted
+        parts.append(f"[{color}]{_MORE}[/]")
+    return _SEPARATOR.join(parts)
+
+
+def render_status_with_hint(model: StatusModel, hint: str, width: int) -> str:
+    """Reserve the narrow footer for health before fitting a transient hint."""
+    from rich.text import Text
+
+    primary = status_segments(model)[: 4 if model.applied_policy else 3]
+    # Details remain in Overview. The footer keeps each subsystem's label
+    # and state, including the applied policy, even when the hint is long.
+    primary = [StatusSegment(segment.label, segment.state) for segment in primary]
+    health = _SEPARATOR.join(segment.render() for segment in primary)
+    remaining = max(0, width - Text.from_markup(health).cell_len - _SEPARATOR_CELLS)
+    try:
+        text = Text.from_markup(hint)
+    except Exception:  # malformed operator text remains literal
+        text = Text(hint)
+    text.truncate(remaining, overflow="ellipsis")
+    return health + (_SEPARATOR + text.markup if remaining and text.plain else "")
 
 
 class StatusStrip(_Static):

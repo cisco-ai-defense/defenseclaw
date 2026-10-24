@@ -266,21 +266,6 @@ class BootstrapEnvTests(unittest.TestCase):
 
         self.assertEqual(result.next_command, f"chmod go-w {os.path.realpath(plugin_dir)}")
 
-    def test_omnigent_readiness_honors_config_home(self):
-        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        config_home = os.path.join(self._tmp.name, "omnigent-config")
-        os.makedirs(config_home)
-        with open(os.path.join(config_home, "config.yaml"), "w", encoding="utf-8") as fh:
-            fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
-            result = _connector_readiness(cfg, "omnigent")
-
-        self.assertEqual(result.status, "warn")
-        self.assertIn("custom policy configured", result.detail)
-        self.assertIn("live action/fail-closed enforcement is unverified", result.detail)
-        self.assertIn(config_home, result.detail)
-        # The text named a fixed OmniGent release as if it were the installed one.
-        self.assertNotIn("0.7.0", result.detail)
 
     def test_kiro_readiness_finds_global_hooks(self):
         # Quickstart readiness said "unknown connector 'kiro'" while doctor passed.
@@ -298,27 +283,7 @@ class BootstrapEnvTests(unittest.TestCase):
         self.assertIn("Kiro hooks found", found.detail)
         self.assertEqual((missing.status, missing.next_command), ("warn", "defenseclaw setup kiro"))
 
-    def test_omnigent_readiness_rejects_partial_registration(self):
-        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        config_home = os.path.join(self._tmp.name, "partial-omnigent-config")
-        os.makedirs(config_home)
-        with open(os.path.join(config_home, "config.yaml"), "w", encoding="utf-8") as fh:
-            fh.write("policy_modules: [defenseclaw_omnigent_policy]\n")
-        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
-            result = _connector_readiness(cfg, "omnigent")
 
-        self.assertEqual(result.status, "warn")
-
-    def test_omnigent_readiness_treats_malformed_utf8_as_unconfigured(self):
-        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
-        config_home = os.path.join(self._tmp.name, "malformed-omnigent-config")
-        os.makedirs(config_home)
-        with open(os.path.join(config_home, "config.yaml"), "wb") as fh:
-            fh.write(b"\xff\xfe\x00")
-        with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
-            result = _connector_readiness(cfg, "omnigent")
-
-        self.assertEqual(result.status, "warn")
 
     def test_amp_readiness_uses_global_plugin_with_or_without_workspace(self):
         plugin = Path(self._tmp.name) / "amp-home" / "plugins" / "defenseclaw.ts"
@@ -430,6 +395,21 @@ class FreshMigrationCursorTests(unittest.TestCase):
                     start_gateway=False,
                     verify=False,
                 )
+            )
+            cfg = load()
+
+        self.assertNotEqual(report.status, "needs_attention")
+        self.assertFalse(cfg.has_connector_configured())
+        self.assertEqual(cfg.active_connectors(), [])
+
+    def test_default_first_run_options_persist_no_absent_agent(self):
+        from defenseclaw.bootstrap import FirstRunOptions, run_first_run
+        from defenseclaw.config import load
+
+        data_dir = os.path.join(self._tmp_root, "default-no-agent")
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
+            report = run_first_run(
+                FirstRunOptions(skip_install=True, start_gateway=False, verify=False)
             )
             cfg = load()
 

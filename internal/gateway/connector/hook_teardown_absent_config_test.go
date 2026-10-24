@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -22,12 +23,10 @@ import (
 // create an agent's hooks file for a user who never had one. The JSON and
 // YAML readers read a missing file as an empty document, and teardown
 // wrote that document back, so an uninstall left "{}" in ~/.cursor/hooks.json,
-// ~/.openhands/hooks.json and ~/.copilot/hooks/defenseclaw.json for every
 // user.
 func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 	overrides := map[string]*string{
 		"cursor":      &CursorHooksPathOverride,
-		"openhands":   &OpenHandsHooksPathOverride,
 		"antigravity": &AntigravityHooksPathOverride,
 		"devin":       &DevinHooksPathOverride,
 		"copilot":     &CopilotHooksPathOverride,
@@ -44,7 +43,6 @@ func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 	}
 	for _, conn := range []*hookOnlyConnector{
 		NewCursorConnector(),
-		NewOpenHandsConnector(),
 		NewAntigravityConnector(),
 		NewDevinConnector(),
 		NewCopilotConnector(),
@@ -107,4 +105,55 @@ func TestHookTeardownDoesNotCreateAMissingAgentConfig(t *testing.T) {
 		}
 		absent(t, path)
 	})
+}
+
+// GAP-0650: a teardown that finds nothing of DefenseClaw's in a user's agent
+// config leaves the file as the user has it, bytes and mode. Claude Code and
+// Codex rewrote such a file 0644 -> 0600 (Claude Code also reformatted it),
+// and the JSON hook connectors dropped an empty hooks object the user had.
+func TestTeardownLeavesAConfigWithoutDefenseClawEntriesAsItIs(t *testing.T) {
+	cases := []struct {
+		conn  func() Connector
+		point *string
+		name  string
+		body  string
+	}{
+		{func() Connector { return NewClaudeCodeConnector() }, &ClaudeCodeSettingsPathOverride, "settings.json", "{\"env\":{\"EDITOR\":\"vi\"}}\n"},
+		{func() Connector { return NewCodexConnector() }, &CodexConfigPathOverride, "config.toml", "model = \"gpt-5\"\n"},
+		{func() Connector { return NewCursorConnector() }, &CursorHooksPathOverride, "hooks.json", "{\"version\":1,\"hooks\":{}}\n"},
+		{func() Connector { return NewAntigravityConnector() }, &AntigravityHooksPathOverride, "hooks.json", "{\"hooks\":{}}\n"},
+	}
+	for _, tc := range cases {
+		conn := tc.conn()
+		t.Run(conn.Name(), func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), tc.name)
+			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			prev := *tc.point
+			*tc.point = path
+			t.Cleanup(func() { *tc.point = prev })
+			opts := SetupOpts{DataDir: filepath.Join(t.TempDir(), ".defenseclaw"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
+			if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("teardown: %v", err)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil || string(after) != tc.body {
+				t.Fatalf("teardown rewrote %s: %q (%v), want %q", tc.name, after, err, tc.body)
+			}
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if runtime.GOOS != "windows" && info.Mode().Perm() != 0o644 {
+				t.Fatalf("teardown changed the mode of %s to %v, want 0644", tc.name, info.Mode().Perm())
+			}
+		})
+	}
 }

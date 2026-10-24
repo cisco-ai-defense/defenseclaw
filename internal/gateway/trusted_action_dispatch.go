@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
@@ -54,6 +55,11 @@ type trustedActionRequest struct {
 	LegacyText         string
 	Connector          string
 	EnforcementCapable bool
+	// ArtifactBody is set when LegacyText and Input.Command are the whole
+	// body of a script the call runs (the artifact lane): its comments and
+	// data are not tool-call text, so a migrated literal rule must match a
+	// word the parse took from an executed command (GAP-1513).
+	ArtifactBody bool
 	// conflictSource is the tool call's argument object before a connector
 	// projection took arguments out of Input.Args, for the conflicting-keys
 	// check (conflictingToolArgumentKeys); nil when Input.Args is the object
@@ -72,8 +78,17 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
-	record               func(actionfacts.Facts, []RuleFinding)
-	recordTelemetry      func(trustedActionTelemetry)
+	// Hermes' native patch parser can reinterpret a symlink target containing
+	// a line break as another file directive. Its write views require the
+	// narrower patch-target proof, including in guest-directory views.
+	patchTarget bool
+	// Sandbox absolute targets are guest names; their host-directory views
+	// carry the filesystem proof.
+	patchHostView   bool
+	record          func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry func(trustedActionTelemetry)
+	// Prevent recursive standalone evaluation of an already flattened command.
+	simpleCommandPass bool
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
 	// the authorized-keys proofs read it, and only to add a match.
@@ -154,6 +169,74 @@ func dispatchTrustedAction(
 	defer func() {
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
+	if !request.simpleCommandPass {
+		defer func() {
+			checkedWholeWrite := false
+			wholeWriteSafe := false
+			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
+			for _, simple := range actionfacts.SimpleCommands(request.Input, facts) {
+				if simple.EvaluationFailure != "" {
+					if simple.EvaluationFailure != "limit" {
+						// A parser gap is already represented by the whole-action
+						// evaluation. It is not itself an enforcement finding.
+						continue
+					}
+					const ruleID = "ACTION-COMPOUND-LIMIT"
+					failure := RuleFinding{
+						RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
+						Severity: "CRITICAL", Confidence: 1,
+						enforcement: findingEnforcementAllowed,
+					}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
+					findings = withSimpleCommandFindings(findings,
+						applyTrustedActionProofBoundary([]RuleFinding{failure}, request.EnforcementCapable))
+					break
+				}
+				child := request
+				child.Input.Command = simple.Text
+				child.Input.CWD = simple.CWD
+				// The managed hook has already walked a static cd. Its write
+				// targets are keyed in that physical directory, which may
+				// differ from the shell's logical PWD through a symlink.
+				// Judge the standalone child in the same directory as the
+				// hook's target evidence.
+				if request.ProtectedHomeHook {
+					if physical := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+simple.CWD]; filepath.IsAbs(physical) {
+						child.Input.CWD = physical
+					}
+				}
+				child.Input.Args, child.Input.Argv = nil, nil
+				child.LegacyText = simple.Text
+				child.conflictSource = nil
+				child.record, child.recordTelemetry = nil, nil
+				child.simpleCommandPass = true
+				childFindings := dispatchTrustedAction(parent, child)
+				if simple.ZshHistoryBuiltin {
+					// Zsh's history builtin lists events (fc -l). The Bash-only
+					// history -c clear rule does not apply inside that shell.
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "integrity.history_tamper"
+					})
+				}
+				if simple.UnresolvedBoundVariable {
+					if !checkedWholeWrite {
+						checkedWholeWrite = true
+						wholeWriteSafe = wholeCommandKnown &&
+							hookpaths.ActionCommandDecision(wholeCommand,
+								request.Input.CWD, request.Input.ActiveHome) == ""
+					}
+					if wholeWriteSafe {
+						// A child with a missing action-local value cannot prove a
+						// protected write by itself. The full action's class resolver
+						// has already judged that binding; retain every other rule.
+						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+							return f.RuleID == "persistence.ssh_authorized_keys_command"
+						})
+					}
+				}
+				findings = withSimpleCommandFindings(findings, childFindings)
+			}
+		}()
+	}
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
@@ -224,6 +307,14 @@ func dispatchTrustedAction(
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else if view, ok := actionfacts.CompoundCommandReduction(request.Input, facts); ok {
+			// A simple command in a subshell, group, if, loop or case body,
+			// or a negated or background statement, is judged as if it ran
+			// alone: `(rm -rf /)` as `rm -rf /`. The view has every command
+			// of the action, as a list read as a sequence does, but not the
+			// scope of a subshell or the count of a loop, so only a match
+			// counts.
+			semanticFacts, viewCandidate, subsetView = view, listReductionCandidate, true
 		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
 			// pwsh -Command "<body>" without -NoProfile, alone or first in a
 			// list: a profile only runs more commands before the body, so a
@@ -480,8 +571,11 @@ func dispatchTrustedAction(
 		legacyFindings = withSequenceProvenFindings(legacyFindings, viewFindings)
 	}
 	findings = append(semanticFindings, legacyFindings...)
-	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized := finalizeTrustedActionFindings(
+		generation, request, contextFacts, findings,
+	)
 	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
+	finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -575,11 +669,24 @@ func withMigratedLiteralRuleFindings(
 // the parse of its commands took from it, with its path values and network
 // hosts.
 func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) []string {
-	texts := []string{request.LegacyText, request.Input.Command, string(request.Input.Args)}
-	texts = append(texts, request.Input.Argv...)
-	texts = appendJSONStrings(texts, request.Input.Args)
+	var texts []string
+	if !request.ArtifactBody {
+		texts = append(texts, request.LegacyText, request.Input.Command, string(request.Input.Args))
+		texts = append(texts, request.Input.Argv...)
+		texts = appendJSONStrings(texts, request.Input.Args)
+	}
 	for _, command := range facts.Commands {
 		texts = append(texts, command.Argv...)
+		// The quoted heredoc fed to a command (cat > file <<'EOF') is data
+		// the command may act on, so a migrated literal in it counts in a
+		// script body too, whatever the command's name. No name proves that
+		// stdin goes unread: the shell that runs the script may bind any
+		// name, true, cat or /bin/cat alike, to a function that reads it
+		// (exported to the shell, or defined by BASH_ENV or a profile), and
+		// the gateway sees none of that shell's state.
+		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
+			texts = append(texts, command.LiteralStdin)
+		}
 		for _, argument := range command.Arguments {
 			texts = append(texts, argument.Value)
 		}
@@ -636,6 +743,37 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 			findings = append(findings, proven)
 		case !findings[index].contributesToEnforcement():
 			findings[index] = proven
+		}
+	}
+	return findings
+}
+
+// withSimpleCommandFindings adds each command's ordinary standalone result
+// beside the whole action's result. An enforcing or alert-only proof replaces
+// a weaker finding for the same rule; a sibling removes nothing.
+func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
+	rank := func(finding RuleFinding) int {
+		switch {
+		case finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID):
+			return 3
+		case finding.contributesToAlertOnly():
+			return 2
+		default:
+			return 1
+		}
+	}
+	for _, finding := range alone {
+		key := trustedActionFindingKey(finding.RuleID)
+		index := slices.IndexFunc(findings, func(existing RuleFinding) bool {
+			return trustedActionFindingKey(existing.RuleID) == key
+		})
+		if index < 0 {
+			findings = append(findings, finding)
+		} else if rank(finding) > rank(findings[index]) ||
+			(rank(finding) == rank(findings[index]) &&
+				canonicalTrustedRuleID(finding.RuleID) == key &&
+				canonicalTrustedRuleID(findings[index].RuleID) != key) {
+			findings[index] = finding
 		}
 	}
 	return findings
@@ -2148,7 +2286,8 @@ func dispatchTrustedFallback(
 		findings = withSequenceProvenFindings(findings, viewFindings)
 	}
 	findings = finalizeTrustedActionFindings(generation, request, contextFacts, findings)
-	return appendTrustedWriteTargetFindings(findings, generation, request, facts), fallbackTelemetry
+	findings = appendTrustedWriteTargetFindings(findings, generation, request, facts)
+	return appendTrustedPrivateKeyReaderFinding(findings, generation, request, facts), fallbackTelemetry
 }
 
 // trustedFallbackLanes runs the recovery lanes over findings, the legacy scan
@@ -2392,11 +2531,7 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(
-		generation,
-		facts,
-		findings,
-	)
+	findings = applyTrustedActionContextDisposition(generation, facts, findings)
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 

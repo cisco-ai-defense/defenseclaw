@@ -782,10 +782,8 @@ func TestHookSinkDeniesThePreToolMarker(t *testing.T) {
 		{"kiro", "", cmd, `"hook_output":{"decision":"block"`, nil},
 		{"devin", "", cmd, `"hook_output":{"decision":"block"`, nil},
 		{"hermes", "", cmd, `"hook_output":{"decision":"block"`, []string{"PreToolUse", cmd}},
-		{"openhands", "", cmd, `"hook_output":{"decision":"deny"`, []string{"PreToolUse", `"message":"BLOCKME"`}},
 		{"antigravity", "X-DefenseClaw-Antigravity-Event", `"toolInput":{"CommandLine":"echo BLOCKME"}`, `"hook_output":{"decision":"deny"`,
 			[]string{"PostToolUse", `"toolInput":{"CommandLine":"echo BLOCKME"}`}},
-		{"omnigent", "", cmd, `"action":"block"`, nil},
 	} {
 		t.Run(tc.harness, func(t *testing.T) {
 			adapter := hookSinkAdapters[tc.harness]
@@ -830,7 +828,7 @@ func TestHookSinkDeniesThePreToolMarker(t *testing.T) {
 	}
 	// The hook-only harnesses the Chat Completions, Gemini and Responses
 	// mocks drive.
-	for _, name := range []string{"antigravity", "hermes", "omnigent", "openhands"} {
+	for _, name := range []string{"antigravity", "hermes"} {
 		if _, ok := builtinMockLaunch[name]; !ok {
 			t.Errorf("%s has no built-in mock wiring", name)
 		}

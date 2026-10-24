@@ -69,7 +69,7 @@ class EnterpriseGuideDocsTest(unittest.TestCase):
             self.assertFalse((dest / "partial.yaml").exists())
 
     def test_windows_allow_rule_uses_site_specific_placeholders(self):
-        guide = (DOCS / "windows.mdx").read_text()
+        guide = (DOCS / "install/windows.mdx").read_text()
         section = guide.split("### Release a blocked or quarantined skill", 1)[1]
         example = section.split('```yaml title="Admin config"\n', 1)[1].split("```", 1)[0]
         self.assertNotRegex(example, r"dcw-[a-z0-9]+|epa-high")

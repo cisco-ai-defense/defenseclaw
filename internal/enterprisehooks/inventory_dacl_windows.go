@@ -38,7 +38,6 @@ var inventoryDACLDotdirs = append([]string{
 	// Antigravity hook path, so it is granted even where the guardian owns
 	// .gemini (GAP-1863).
 	`.gemini\antigravity-cli`,
-	".openhands",
 	".openclaw",
 	".hermes",
 	".amp",
@@ -163,17 +162,9 @@ func GrantGatewayInventoryReadForManifest(manifest Manifest, gatewayServiceName 
 	guardianOwned := inventoryDACLGuardianOwnedByHome(manifest)
 	enrolled := inventoryDACLEnrolledByHome(manifest)
 	ownHome, _ := os.UserHomeDir()
-	seenHome := map[string]struct{}{}
-	for _, target := range manifest.Targets {
+	for _, target := range inventoryDACLGrantTargets(manifest) {
 		home := filepath.Clean(strings.TrimSpace(target.UserHome))
-		if home == "" {
-			continue
-		}
 		key := strings.ToLower(home)
-		if _, dup := seenHome[key]; dup {
-			continue
-		}
-		seenHome[key] = struct{}{}
 		// The standalone profile (ideInventory) refuses links on the agent
 		// folders as it does on the IDE folders; the Secure Client profile
 		// keeps the grants it always made.

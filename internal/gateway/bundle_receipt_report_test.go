@@ -40,6 +40,18 @@ type fakeBundleReceiptSink struct {
 	bundles    []audit.PolicyBundle
 	principals []string
 	versions   []uint64
+	changes    []audit.ConfigChange
+	changeErr  error
+}
+
+func (f *fakeBundleReceiptSink) LogConfigChange(
+	change audit.ConfigChange, _ *observability.RemoteDelivery, _ *audit.ConfigChangePins,
+) error {
+	if f.changeErr != nil {
+		return f.changeErr
+	}
+	f.changes = append(f.changes, change)
+	return nil
 }
 
 func (f *fakeBundleReceiptSink) LogPolicyBundleReceipt(principal string, b audit.PolicyBundle, r audit.PolicyBundleReceipt) error {
@@ -80,14 +92,16 @@ func TestBundleReceiptReporterReportsEachTerminalReceiptOnce(t *testing.T) {
 	reporter := newReporter()
 	reporter.poll(context.Background()) // no receipt yet: only the gauge
 	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: testBundleID,
-		BundleID: testBundleID, Version: 4, Actor: "os:uid:0:root", Principal: "operator:manual-r4", State: enterprisestatus.BundleConfirmed, FinishedAt: "2026-10-12T10:00:00.000Z",
+		BundleID: testBundleID, Version: 4, Actor: "os:uid:0:root", Principal: "operator:manual-r4", DeliveryID: "agent-7:d.4",
+		State: enterprisestatus.BundleConfirmed, FinishedAt: "2026-10-12T10:00:00.000Z",
 		CurrentBundleID: testBundleID, CurrentVersion: 4, ChangeSummary: "first", Restart: true, RestartRequired: true})
 	reporter.poll(context.Background())
 	reporter.poll(context.Background())
 	newReporter().poll(context.Background()) // a restarted gateway does not report it again
 	if len(sink.receipts) != 1 || sink.receipts[0].State != "confirmed" || sink.bundles[0].ChangeSummary != "first" ||
 		sink.receipts[0].Actor != "os:uid:0:root" || sink.principals[0] != "operator:manual-r4" ||
-		sink.receipts[0].EnforcingVersion != 4 || !sink.receipts[0].Restart || !sink.receipts[0].RestartRequired {
+		sink.receipts[0].EnforcingVersion != 4 || !sink.receipts[0].Restart || !sink.receipts[0].RestartRequired ||
+		sink.receipts[0].DeliveryID != "agent-7:d.4" {
 		t.Fatalf("receipts = %+v", sink.receipts)
 	}
 	writeTestPublicReceipt(t, path, enterprisestatus.PublicReceipt{SchemaVersion: 1, ReceiptID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
@@ -117,7 +131,7 @@ func TestBundleReceiptReporterEmitsRefusalWithoutReplacingConfirmation(t *testin
 	r.poll(context.Background())
 	base.LastRefusal = &enterprisestatus.BundleRefusal{ReceiptID: "r-01JAZ3Y8Q2K7V4N6M5P0R9S8T8",
 		BundleID: "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T9", Version: 1,
-		ErrorCode: "capability_loss", Time: "2026-10-13T06:16:41Z",
+		ErrorCode: "capability_loss", Time: "2026-10-13T06:16:41Z", DeliveryID: "agent-7:d.1",
 		WarningCodes: []string{"capability_disabled"}, DisabledByBundle: []string{"sandbox"}}
 	writeTestPublicReceipt(t, path, base)
 	r.lastModTime = time.Time{}
@@ -127,7 +141,7 @@ func TestBundleReceiptReporterEmitsRefusalWithoutReplacingConfirmation(t *testin
 		sink.receipts[1].State != "failed" || sink.receipts[1].ErrorCode != "capability_loss" ||
 		len(sink.receipts[1].WarningCodes) != 1 || sink.receipts[1].WarningCodes[0] != "capability_disabled" ||
 		len(sink.receipts[1].DisabledByBundle) != 1 || sink.receipts[1].DisabledByBundle[0] != "sandbox" ||
-		sink.receipts[1].EnforcingVersion != 2 {
+		sink.receipts[1].EnforcingVersion != 2 || sink.receipts[1].DeliveryID != "agent-7:d.1" {
 		t.Fatalf("receipts = %+v", sink.receipts)
 	}
 }

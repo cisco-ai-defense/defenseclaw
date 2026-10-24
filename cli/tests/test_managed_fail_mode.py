@@ -1,13 +1,13 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""The customer chooses open or closed; the default is closed (owner, 2026-10-20).
+"""Per-user hooks close; managed administrators may choose outage-open.
 
 Mirrors internal/config/hook_fail_mode_matrix_test.go: for every connector,
 per-user, managed standalone and Secure Client, in observe and action mode,
-an explicit open or closed wins (on a managed computer the administrator's
-config sets it), and an unset fail mode is closed except under Secure Client,
-where it is open (#1163). Per-user Cursor follows its guardrail mode. On the
+an administrator's explicit open or closed wins on a managed computer, and
+an unset fail mode is closed except under Secure Client, where it is open
+(#1163). On the
 standalone profile no connector is lowered to an upstream fail-open: its
 managed hooks block through the native deny.
 """
@@ -30,7 +30,6 @@ CONNECTORS = (
     "hermes",
     "kiro",
     "opencode",
-    "openhands",
 )
 DEPLOYMENTS = {
     "per-user": ("", "", "closed"),
@@ -79,8 +78,8 @@ def test_hook_fail_mode_matrix(connector, deployment, mode, global_mode, connect
     cfg = _config(deployment, mode, global_mode, connector, connector_mode)
     if want is None:
         want = DEPLOYMENTS[deployment][2]
-    if connector == "cursor" and deployment == "per-user":
-        want = "closed" if mode == "action" else "open"
+    if deployment == "per-user":
+        want = "closed"
     assert cfg.guardrail.effective_hook_fail_mode(connector) == want
     assert cfg.managed_outside_secure_client() is (deployment == "standalone")
 
@@ -89,10 +88,10 @@ def test_hook_fail_mode_matrix(connector, deployment, mode, global_mode, connect
 def test_standalone_never_lowers_to_upstream_fail_open(connector):
     assert not upstream_fail_open(_config("standalone", "observe", "", connector, ""), connector)
     assert not upstream_fail_open(_config("standalone", "observe", "open", connector, ""), connector)
-    # Secure Client keeps the upstream fail-open; per-user Hermes blocks its
-    # own failures on every OS (GAP-0150, GAP-0269).
+    # Secure Client keeps the upstream fail-open; a per-user hook blocks its
+    # own failures with the agent's native deny on every OS.
     assert upstream_fail_open(_config("secure-client", "observe", "", connector, ""), connector)
-    assert upstream_fail_open(_config("per-user", "observe", "", connector, ""), connector) is (connector != "hermes")
+    assert not upstream_fail_open(_config("per-user", "observe", "", connector, ""), connector)
 
 
 def test_machine_marker_makes_any_managed_config_standalone(monkeypatch: pytest.MonkeyPatch) -> None:

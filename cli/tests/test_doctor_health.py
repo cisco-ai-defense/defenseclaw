@@ -225,14 +225,9 @@ def test_discovery_absence_is_unavailable_and_unregistered_names_are_bounded() -
 
 
 def test_connector_rows_name_the_connector_and_accept_untested_newer_versions() -> None:
-    discovery = SimpleNamespace(
-        agents={
-            "kiro": _signal(installed=True, version="kiro-cli 2.27.1"),
-            "omnigent": _signal(installed=True, version="omnigent 0.15.0"),
-        }
-    )
+    discovery = SimpleNamespace(agents={"kiro": _signal(installed=True, version="kiro-cli 2.27.1")})
 
-    kiro, omnigent, custom = assess_connector_health(("kiro", "omnigent", "customagent"), discovery)
+    kiro, custom = assess_connector_health(("kiro", "customagent"), discovery)
 
     assert (kiro.connector, kiro.status, kiro.reason_code) == (
         "kiro",
@@ -240,10 +235,6 @@ def test_connector_rows_name_the_connector_and_accept_untested_newer_versions() 
         "connector-not-version-gated",
     )
     assert "proxy" not in kiro.summary
-    assert omnigent.status is HealthStatus.SUPPORTED
-    assert omnigent.reason_code == "connector-version-untested-newer"
-    assert omnigent.contract_id == "omnigent-custom-policy-v1"
-    assert "untested newer version" in omnigent.summary
     assert (custom.connector, custom.reason_code) == ("customagent", "connector-contract-unregistered")
 
 

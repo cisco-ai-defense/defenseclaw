@@ -35,6 +35,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -637,16 +638,32 @@ func v8RegularFile(path string) bool {
 // pack keeps its original path and pin here; the runtime rebases the loaded
 // pack in memory after verifying that pin.
 func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) ([]byte, error) {
+	migrated, exportKey, err := MigrateV8InMemoryCandidate(configFile, raw, rulePackDigest)
+	if err != nil {
+		return migrated, err
+	}
+	exportKey()
+	return migrated, nil
+}
+
+// MigrateV8InMemoryCandidate is MigrateV8InMemory for a load that may still
+// be refused after it (a gateway reload): it does not touch the process
+// environment. exportKey places the inline scanner key the way
+// MigrateV8InMemory does; the caller runs it once the configuration is
+// accepted, so a refused one never changes the key the running scanners
+// read. exportKey is never nil.
+func MigrateV8InMemoryCandidate(configFile string, raw []byte, rulePackDigest func(dir string) (string, error)) (migrated []byte, exportKey func(), err error) {
+	noKey := func() {}
 	if !NeedsMigrationV9(raw) {
-		return raw, nil
+		return raw, noKey, nil
 	}
 	var doc yaml.Node
 	if yaml.Unmarshal(raw, &doc) != nil {
-		return raw, nil
+		return raw, noKey, nil
 	}
 	root := v8DocumentRoot(&doc)
 	if root == nil || root.Kind != yaml.MappingNode || v9SecureClientDocument(root) {
-		return raw, nil
+		return raw, noKey, nil
 	}
 	dataDir := migrationDataDir(configFile, root)
 	policyDir, dataJSON := V8PolicyDataJSON(yamlScalarValue(v8YAMLMapValue(root, "policy_dir")))
@@ -670,16 +687,38 @@ func MigrateV8InMemory(configFile string, raw []byte, rulePackDigest func(dir st
 	}
 	result, err := MigrateV9(context.Background(), in)
 	if err != nil {
-		return raw, err
+		return raw, noKey, err
 	}
 	// The v8 file still holds the inline key; the v9 document names its
 	// variable instead, so the variable carries the key for this process
 	// (the scanners inherit it) until the file is migrated. A value already
-	// in the environment or .env wins, as it does for any api_key_env.
-	if result.EnvKey != "" && os.Getenv(result.EnvKey) == "" {
-		_ = os.Setenv(result.EnvKey, result.EnvValue)
+	// in the environment or .env wins, as it does for any api_key_env; a
+	// value an earlier in-memory load set is replaced, so a rotated inline
+	// key applies on reload (GAP-0995).
+	key, value := result.EnvKey, result.EnvValue
+	return result.Migrated, func() { exportInMemoryKey(key, value) }, nil
+}
+
+// inMemoryExportedKeys holds the value each environment variable got from
+// an in-memory migration of this process (exportInMemoryKey).
+var inMemoryExportedKeys sync.Map // variable -> value
+
+// exportInMemoryKey sets key to value for this process unless the
+// environment holds a value this process did not set from an inline key.
+func exportInMemoryKey(key, value string) {
+	if key == "" {
+		return
 	}
-	return result.Migrated, nil
+	current := os.Getenv(key)
+	if current != "" {
+		exported, ok := inMemoryExportedKeys.Load(key)
+		if !ok || exported.(string) != current {
+			return
+		}
+	}
+	if err := os.Setenv(key, value); err == nil {
+		inMemoryExportedKeys.Store(key, value)
+	}
 }
 
 // InMemoryMigrationError is the load error for a config_version 8 file whose
@@ -718,6 +757,17 @@ func UnrebasedRulePacks(configPath string) []string {
 		return nil
 	}
 	return record.RulePackRebaseFailures
+}
+
+// ExpressedRulePackRules returns the ExpressedRules of the committed
+// migration recorded next to configPath, acknowledged or not: the rules of
+// a rebased 0.8.x custom pack that got an expression from their literal.
+func ExpressedRulePackRules(configPath string) []string {
+	record, ok := readMigrationRecord(configPath)
+	if !ok || record.Pending {
+		return nil
+	}
+	return record.ExpressedRules
 }
 
 // MigratedFromV8 returns the source digest of the committed config_version
@@ -777,6 +827,9 @@ type v9Migrator struct {
 	configPath string
 	root       *yaml.Node
 	record     MigrationRecord
+	// dataJSON is the data.json the migration planned from; the commit
+	// refuses one that changed since.
+	dataJSON *v9DataJSON
 	// rows are the audit.db rows moved into asset_policy, cleared after the
 	// config commit.
 	rows              []v9ActionRow
@@ -851,6 +904,7 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	m.dataJSON = data
 	m.migratePolicyDir(root)
 	if err := m.migrateRulePacks(root); err != nil {
 		return nil, false, err
@@ -908,19 +962,22 @@ func (m *v9Migrator) migrate(source []byte) ([]byte, bool, error) {
 	return out.Bytes(), false, nil
 }
 
-// normalizeCursorFailMode removes a v8 Cursor value that contradicts the
-// native hook contract. Other connectors keep their independent fail mode.
+// normalizeCursorFailMode closes a v8 Cursor open that action mode
+// contradicts: Cursor's action hooks are closed. It never writes open. An
+// observe-mode closed is the operator's outage choice, which this release's
+// per-user Cursor hooks follow (connector.OutageHookFailMode); 1.0.0 to
+// 1.0.3 rewrote it to open, which the hooks then followed while the gateway
+// was down (r104 W3 G3-upg). Other connectors keep their independent fail
+// mode.
 func (m *v9Migrator) normalizeCursorFailMode(root *yaml.Node) {
 	guardrail := v8YAMLMapValue(root, "guardrail")
 	if guardrail == nil || guardrail.Kind != yaml.MappingNode {
 		return
 	}
 	globalMode := yamlScalarValue(v8YAMLMapValue(guardrail, "mode"))
-	pinned := func(mode string) string {
-		if strings.EqualFold(strings.TrimSpace(mode), "action") {
-			return "closed"
-		}
-		return "open"
+	contradicted := func(mode string, stored *yaml.Node) bool {
+		return strings.EqualFold(strings.TrimSpace(mode), "action") &&
+			!strings.EqualFold(strings.TrimSpace(stored.Value), "closed")
 	}
 	connectors := v8YAMLMapValue(guardrail, "connectors")
 	if connectors != nil && connectors.Kind == yaml.MappingNode && len(connectors.Content) > 0 {
@@ -940,11 +997,10 @@ func (m *v9Migrator) normalizeCursorFailMode(root *yaml.Node) {
 			if strings.TrimSpace(mode) == "" {
 				mode = globalMode
 			}
-			want := pinned(mode)
-			if !strings.EqualFold(strings.TrimSpace(stored.Value), want) {
-				stored.Value = want
+			if contradicted(mode, stored) {
+				stored.Value = "closed"
 				m.moved("config", "guardrail.connectors.cursor.hook_fail_mode",
-					"guardrail.connectors.cursor.hook_fail_mode", want)
+					"guardrail.connectors.cursor.hook_fail_mode", "closed")
 			}
 		}
 		return
@@ -953,12 +1009,9 @@ func (m *v9Migrator) normalizeCursorFailMode(root *yaml.Node) {
 		return
 	}
 	stored := v8YAMLMapValue(guardrail, "hook_fail_mode")
-	if stored != nil {
-		want := pinned(globalMode)
-		if !strings.EqualFold(strings.TrimSpace(stored.Value), want) {
-			stored.Value = want
-			m.moved("config", "guardrail.hook_fail_mode", "guardrail.hook_fail_mode", want)
-		}
+	if stored != nil && contradicted(globalMode, stored) {
+		stored.Value = "closed"
+		m.moved("config", "guardrail.hook_fail_mode", "guardrail.hook_fail_mode", "closed")
 	}
 }
 
@@ -1043,6 +1096,10 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 	}
 	if !exists || !bytes.Equal(current, source) {
 		return nil, errors.New("config: config.yaml changed while the config_version 9 migration ran; run it again")
+	}
+	if m.dataJSON.dataJSONChanged(m.in.DataJSONPath) {
+		// Its edit would be neither in the v9 config nor read again.
+		return nil, fmt.Errorf("config: %s changed while the config_version 9 migration ran; run it again", m.in.DataJSONPath)
 	}
 	// Reserve audit.db before writing config so a changed operator decision
 	// cannot be committed from a stale snapshot.
@@ -1180,14 +1237,28 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 	// A file outside the data home stays too: the installer's rollback copy
 	// does not cover it, so renaming it would leave a rolled-back 1.0.0 gateway
 	// without its policy data (see leftOutsideRollbackCopy).
-	if dj := strings.TrimSpace(m.in.DataJSONPath); dj != "" && !m.in.Managed && !m.leftOutsideRollbackCopy(dj) {
+	dj := strings.TrimSpace(m.in.DataJSONPath)
+	// planned is where the data.json the migration planned from is now:
+	// renamed first, so the bytes checked below are the ones retired.
+	planned := dj
+	if dj != "" && !m.in.Managed && !m.leftOutsideRollbackCopy(dj) {
 		if _, statErr := os.Stat(dj); statErr == nil {
 			if err := os.Rename(dj, dj+DataJSONMigratedSuffix); err != nil {
 				m.note("could not rename %s: %v", dj, err)
 			} else {
-				written = append(written, dj+DataJSONMigratedSuffix)
+				planned = dj + DataJSONMigratedSuffix
 			}
 		}
+	}
+	if m.dataJSON.dataJSONChanged(planned) {
+		// An edit made while config.yaml was written is in neither the v9
+		// config nor anything a later run reads once config.yaml is v9: put
+		// the v8 config back so the next run migrates it (GAP-1148).
+		committed = false
+		return m.undoDataJSONDrift(txn, current, migrated, mode, dj, planned, written)
+	}
+	if planned != dj {
+		written = append(written, planned)
 	}
 	refreshErr := m.refreshRegoModules(&written)
 	if m.providersOverlay != "" && !m.leftOutsideRollbackCopy(m.providersOverlay) {
@@ -1217,6 +1288,29 @@ func (m *v9Migrator) commit(ctx context.Context, source, migrated []byte) (writt
 		return written, err
 	}
 	return written, refreshErr
+}
+
+// undoDataJSONDrift puts the config_version 8 config.yaml back after a
+// commit whose data.json (dj, now at planned) changed meanwhile, and
+// returns the commit's error. A data.json it renamed goes back unless one
+// was written at dj since. The caller's deferred undo then takes the moved
+// scanner key back out of .env and leaves audit.db as it was.
+func (m *v9Migrator) undoDataJSONDrift(txn *cfgtxn.Txn, source, migrated []byte, mode os.FileMode,
+	dj, planned string, written []string) ([]string, error) {
+	if planned != dj {
+		if _, err := os.Lstat(dj); !errors.Is(err, fs.ErrNotExist) {
+			m.note("%s was written again while the migration ran; the file it planned from is %s", dj, planned)
+			written = append(written, planned)
+		} else if err := os.Rename(planned, dj); err != nil {
+			m.note("could not put %s back to %s: %v", planned, dj, err)
+			written = append(written, planned)
+		}
+	}
+	if _, err := txn.Commit(migrated, source, true, mode, cfgtxn.Writer{Actor: m.record.Actor, Reason: "config_version 9 migration undone"}); err != nil {
+		return written, fmt.Errorf("config: %s changed while the config_version 9 migration ran, and config.yaml could not be put back to config_version 8 (%v): compare %s with config.yaml", dj, err, dj)
+	}
+	written = slices.DeleteFunc(written, func(path string) bool { return path == m.configPath })
+	return written, fmt.Errorf("config: %s changed while the config_version 9 migration ran, so config.yaml was left at config_version 8; run it again", dj)
 }
 
 // migrationStamp names the copies a migration keeps beside an earlier one's
@@ -1707,8 +1801,11 @@ type v9DataJSONAction struct {
 
 type v9DataJSON struct {
 	present bool
-	raw     map[string]json.RawMessage
-	Config  struct {
+	// sum is the sha256 of the bytes read, which the commit compares the
+	// file with (GAP-1148).
+	sum    [sha256.Size]byte
+	raw    map[string]json.RawMessage
+	Config struct {
 		AllowListBypassScan *bool `json:"allow_list_bypass_scan"`
 		ScanOnInstall       *bool `json:"scan_on_install"`
 	}
@@ -1745,8 +1842,21 @@ func readV9DataJSON(path string) (*v9DataJSON, error) {
 	if err := json.Unmarshal(raw, &data.raw); err != nil {
 		return nil, fmt.Errorf("config: decode %s: %w", path, err)
 	}
-	data.present = true
+	data.present, data.sum = true, sha256.Sum256(raw)
 	return data, nil
+}
+
+// dataJSONChanged reports whether the data.json at path is no longer the one
+// the migration planned from: changed, created or removed since.
+func (d *v9DataJSON) dataJSONChanged(path string) bool {
+	if d == nil || strings.TrimSpace(path) == "" {
+		return false
+	}
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return d.present
+	}
+	return err != nil || !d.present || sha256.Sum256(raw) != d.sum
 }
 
 var v9Severities = []string{"CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"}

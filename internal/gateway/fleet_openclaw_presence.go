@@ -16,16 +16,7 @@
 
 package gateway
 
-import (
-	"errors"
-	"io/fs"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/config"
-)
+import "github.com/defenseclaw/defenseclaw/internal/config"
 
 // The Gateway subsystem publishes these when the OpenClaw fleet uplink is off
 // because OpenClaw is not installed (see openClawImpliedButNotInstalled). The
@@ -43,8 +34,8 @@ const (
 //   - gateway.fleet_mode is unset ("" or the loader default "auto"; any other
 //     value, typos included, keeps the connector + host derivation),
 //   - gateway.host is loopback,
-//   - guardrail.connector is empty and guardrail.connectors has no openclaw
-//     entry, so "openclaw" comes only from claw.mode (init's default, and the
+//   - guardrail.connector and the connector roster are empty, so "openclaw"
+//     comes only from claw.mode (init's default, and the
 //     loader default when config.yaml has no claw block), and
 //   - no openclaw.json exists at claw.config_file or claw.home_dir, and no
 //     openclaw binary is found.
@@ -56,66 +47,5 @@ const (
 // the previous behaviour. The configuration checks run first so the
 // filesystem is only consulted in the narrow case.
 func openClawImpliedButNotInstalled(cfg *config.Config) bool {
-	if cfg == nil {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode)) {
-	case "", "auto":
-	default:
-		return false
-	}
-	if !isLoopbackGatewayHost(cfg.Gateway.Host) {
-		return false
-	}
-	if strings.TrimSpace(cfg.Guardrail.Connector) != "" {
-		return false
-	}
-	for name := range cfg.Guardrail.Connectors {
-		if strings.EqualFold(strings.TrimSpace(name), "openclaw") {
-			return false
-		}
-	}
-	if !strings.EqualFold(strings.TrimSpace(string(cfg.Claw.Mode)), "openclaw") {
-		return false
-	}
-	return !openClawConfigPresent(cfg) && !openClawBinaryInstalled()
-}
-
-// openClawConfigPresent reports whether any openclaw.json candidate exists.
-// A stat error other than "does not exist" (for example a permission error)
-// counts as present, so an unreadable OpenClaw home keeps the dial loop.
-func openClawConfigPresent(cfg *config.Config) bool {
-	for _, path := range cfg.OpenClawConfigCandidates() {
-		if _, err := os.Stat(path); err == nil || !errors.Is(err, fs.ErrNotExist) {
-			return true
-		}
-	}
-	return false
-}
-
-// openClawBinaryInstalled reports whether an openclaw executable is on PATH or
-// in one of the npm/Homebrew locations a daemon started without the login
-// shell's PATH would miss. Mirrors openclaw_presence.openclaw_binary_installed
-// in the Python CLI. A variable so tests do not depend on the host's PATH.
-var openClawBinaryInstalled = func() bool {
-	if _, err := exec.LookPath("openclaw"); err == nil {
-		return true
-	}
-	for _, path := range openClawBinaryFallbacks() {
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			return true
-		}
-	}
-	return false
-}
-
-func openClawBinaryFallbacks() []string {
-	paths := []string{"/usr/local/bin/openclaw", "/opt/homebrew/bin/openclaw"}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		paths = append(paths,
-			filepath.Join(home, ".npm-global", "bin", "openclaw"),
-			filepath.Join(home, ".local", "bin", "openclaw"),
-		)
-	}
-	return paths
+	return cfg.OpenClawImpliedButNotInstalled()
 }

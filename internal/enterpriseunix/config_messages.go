@@ -40,9 +40,6 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 	if where == "" {
 		where = e.Layout.ConfigPath
 	}
-	if strings.Contains(err.Error(), "enterprise.profile=") && strings.Contains(err.Error(), "conflicts with immutable") {
-		return fmt.Sprintf("%s: enterprise.profile is fixed to standalone on this host; change the profile by reinstalling the deployment", where), true
-	}
 	var yamlErr *config.V8YAMLError
 	if errors.As(err, &yamlErr) {
 		field := configField(yamlErr.Path)
@@ -107,6 +104,12 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 				if value, ok := yamlScalarAt(raw, schemaErr.Line, schemaErr.Column); ok {
 					reason = fmt.Sprintf("is %q; it must be %s", value, schemaErr.Expected)
 				}
+			case strings.HasSuffix(field, "openshell.trusted_ca_bundle"):
+				// The managed rule (config.validateManagedTrustedCABundle),
+				// not the per-user ~/ form the schema also allows (rel-1-0-4 GAP-0590).
+				reason = "must be an absolute path: a managed configuration needs an absolute path to an administrator-owned file"
+			case schemaErr.Expected != "" && schemaErr.Expected != "a value matching the schema-declared pattern":
+				reason = "must be " + schemaErr.Expected
 			default:
 				reason = "does not match the setting's required format"
 			}
@@ -156,6 +159,12 @@ func (e *Env) plainConfigProblem(err error, source string, raw []byte) (string, 
 		return fmt.Sprintf("%s%s: %s: %s. The settings reference: %s", where, lineSuffix(semanticErr.Line), configField(semanticErr.Path), reason, settingsReferenceURL), true
 	}
 	return "", false
+}
+
+// PlainConfigRefusal is plainConfigProblem for `config validate` on a
+// managed host, so it words a refusal the way ensure does (GAP-0087).
+func (e *Env) PlainConfigRefusal(err error, source string, raw []byte) (string, bool) {
+	return e.plainConfigProblem(err, source, raw)
 }
 
 var errManagedEnvReference = errors.New("an observability destination reads a secret from an environment variable")

@@ -22,8 +22,7 @@
 // sandbox creation, the credential profiles and the user customization paths
 // worth importing, plus the tamper tier of the hook registration and the
 // evidence the harness was verified with. It covers claudecode, codex,
-// opencode, copilot, amp, cursor, kiro, devin, hermes, openhands,
-// antigravity and omnigent.
+// opencode, copilot, amp, cursor, kiro, devin, hermes and antigravity.
 package harness
 
 import (
@@ -242,9 +241,8 @@ export NODE_DISABLE_COMPILE_CACHE
 // changing the sandbox while DefenseClaw pulls or reviews the session's
 // work. The supervisor is a child subreaper, so those commands are
 // re-parented to it; they get two seconds to end on their own, then SIGTERM
-// and SIGKILL, and the terminal names them. A launcher whose harness keeps
-// a server running between sessions (OmniGent), and the `sandbox exec`
-// wrapper, set dc_keep_leftovers=1 before dc_launch, which passes
+// and SIGKILL, and the terminal names them. The `sandbox exec` wrapper sets
+// dc_keep_leftovers=1 before dc_launch, which passes
 // --keep-leftovers; the wrapper also sets dc_say_kept=1 (--say-kept), and
 // the supervisor names what the command left running in the terminal's
 // session, which holds OpenShell's --tty exec open. The preamble unsets
@@ -723,7 +721,7 @@ func goBoolTrue(v string) bool {
 // --dangerously-skip-permissions, --allow-dangerously-skip-permissions and
 // --permission-mode bypassPermissions; Codex's
 // --dangerously-bypass-approvals-and-sandbox, --ask-for-approval never and
-// -c approval_policy="never"; for argparse harnesses (Hermes, OpenHands)
+// -c approval_policy="never"; for argparse harnesses (Hermes)
 // every prefix the parser resolves to a bypass flag, for agy (Go flags) the
 // single-dash and =true forms, and for Kiro (clap) -a in any short-flag
 // cluster. Arguments after "--" are never flags. The filter spares the user

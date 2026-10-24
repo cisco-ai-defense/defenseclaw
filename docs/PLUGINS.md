@@ -2,7 +2,7 @@
 
 This file documents repository ownership for the plugin scanner. Current
 operator commands are maintained in the
-[published CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/cli/).
+[published CLI reference](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/commands/cli/).
 
 | Area | Source |
 | --- | --- |

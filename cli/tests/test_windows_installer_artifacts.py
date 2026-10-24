@@ -931,11 +931,11 @@ def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:
     assert "$process.WaitForExit()" not in identity
 
 
-def test_binary_identity_accepts_the_gateway_management_contract_member() -> None:
-    # The gateway's --version-json names the management agent contract it
-    # implements; the build-time identity check must not refuse that member.
+def test_binary_identity_accepts_the_gateway_capability_members() -> None:
+    # The gateway's --version-json reports both capabilities in packaged
+    # 1.0.4 binaries. The build identity check must accept that shape.
     identity = BINARY_IDENTITY_PS1.read_text(encoding="utf-8")
-    assert "$allowed = @($required + 'built' + 'management_contract')" in identity
+    assert "$allowed = @($required + 'built' + 'management_contract' + 'secret_set_bundle')" in identity
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows process identity")
@@ -949,10 +949,13 @@ def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path
     source.write_text(
         "package main\n"
         'import ("encoding/json"; "os")\n'
-        "func main() { _ = json.NewEncoder(os.Stdout).Encode(map[string]any{"
+        "func main() { identity := map[string]any{"
         '"schema_version": 1, "name": os.Getenv("DC_IDENTITY_NAME"), '
         '"version": os.Getenv("DC_IDENTITY_VERSION"), '
-        '"commit": os.Getenv("DC_IDENTITY_COMMIT")}) }\n',
+        '"commit": os.Getenv("DC_IDENTITY_COMMIT")}; '
+        'if os.Getenv("DC_IDENTITY_SECRET_BUNDLE") == "1" { '
+        'identity["secret_set_bundle"] = true }; '
+        '_ = json.NewEncoder(os.Stdout).Encode(identity) }\n',
         encoding="utf-8",
     )
     executable = tmp_path / "distroot-binary.exe"
@@ -997,6 +1000,19 @@ def test_stale_or_off_commit_distroot_binary_identity_is_rejected(tmp_path: Path
         )
         assert result.returncode != 0
         assert diagnostic in (result.stdout + result.stderr)
+    accepted_env = base_env.copy()
+    accepted_env.update({
+        "DC_IDENTITY_VERSION": "1.2.3",
+        "DC_IDENTITY_COMMIT": expected_commit,
+        "DC_IDENTITY_SECRET_BUNDLE": "1",
+    })
+    accepted = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-Command", command],
+        capture_output=True,
+        text=True,
+        env=accepted_env,
+    )
+    assert accepted.returncode == 0, accepted.stdout + accepted.stderr
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows handle inheritance")

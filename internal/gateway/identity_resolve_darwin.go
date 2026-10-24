@@ -17,6 +17,12 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
+// managedHookPeerAccountIncarnation names nothing on macOS: the listed
+// record of a local account (managedHookPeerAccountRecord) tells one
+// incarnation from the next, and Open Directory answers a uid with one
+// account.
+var managedHookPeerAccountIncarnation = func(unixidentity.Account) (string, bool) { return "", false }
+
 // resolvePeerDirectoryFacts returns a verified uid's directory facts: the
 // account's own facts from the system account database, which on macOS
 // answers through Open Directory (groups; directory local for an account of the local node), with the root
@@ -44,6 +50,8 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 		Groups:     groups,
 		Assurance:  useridentity.AssuranceVerified,
 		ResolvedAt: now,
+		// Read before the record (forgetOnSpoolChange).
+		SpoolSeenAt: identitySpoolSeenAt(key, now),
 	}
 	// Open Directory answers a bound Mac's directory accounts too, so only an
 	// account of the local node is local. Calling every account local let no
@@ -52,7 +60,8 @@ func resolvePeerDirectoryFacts(key string) (useridentity.DirectoryFacts, error) 
 	if darwinLocalNodeAccount(account.Username, account.Uid) {
 		own.Directory = useridentity.DirectoryLocal
 	}
-	record, ok := readIdentitySpoolFactsForAccount(key, account.Username, now)
+	own.AccountRecord = accountRecordToken(managedHookPeerAccountRecord(account.Username))
+	record, ok, _ := readIdentitySpoolFactsForAccount(key, account.Username, "", now)
 	var spool *enterprisehooks.IdentitySpoolRecord
 	if ok {
 		spool = &record

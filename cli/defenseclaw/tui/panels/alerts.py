@@ -1189,6 +1189,7 @@ class AlertsPanelModel:
             details_cell = _alert_details_label(event)
             if self.show_connector_column:
                 connector_cell = _alert_connector(event) or "—"
+                target_cell = _target_without_connector(target_cell, connector_cell)
                 cells = (
                     marker,
                     severity_cell,
@@ -1961,6 +1962,23 @@ def _event_attr(event: object, *names: str) -> object:
 
 def _is_hook_event(event: AlertEvent) -> bool:
     return event.action == "connector-hook"
+
+
+def _target_without_connector(target: str, connector: str) -> str:
+    """``PreToolUse`` for ``claudecode:PreToolUse`` next to a Connector cell.
+
+    The Connector column already names it: at 80 columns the repeated prefix
+    cut the target to ``claudecode:PreTo`` (GAP-0112).
+    """
+
+    name = connector.strip()
+    if not name or name == "—":
+        return target
+    for separator in (":", " · "):
+        prefix = f"{name}{separator}"
+        if target.lower().startswith(prefix.lower()) and len(target) > len(prefix):
+            return target[len(prefix) :]
+    return target
 
 
 def _alert_target_label(event: AlertEvent) -> str:

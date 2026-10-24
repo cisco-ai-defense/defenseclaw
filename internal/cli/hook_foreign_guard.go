@@ -481,14 +481,10 @@ func evaluateHookForeignGuard(name, hookBinary string, policy enterprisepolicy.P
 var hookForeignGuardGOOS = runtime.GOOS
 
 // foreignHookSessionLocal reports a connector whose foreign-hook check cannot
-// reach the gateway's session store. On Windows the Amp plugin calls the
-// gateway with its own per-user token and has no hook-binary runtime
-// generation, so `hook --connector amp --foreign-hook-check` has no
-// credential for the exchange; every check failed closed and blocked each
-// Amp tool call. The plugin itself keeps the session.load
-// decision for the life of the Amp process.
+// reach the gateway's session store on this OS
+// (enterprisepolicy.ForeignHookSessionLocal).
 func foreignHookSessionLocal(name string) bool {
-	return hookForeignGuardGOOS == "windows" && strings.EqualFold(strings.TrimSpace(name), "amp")
+	return enterprisepolicy.ForeignHookSessionLocal(name, hookForeignGuardGOOS)
 }
 
 func exchangeForeignHookSession(name, event string, startedAt, scanDeadline time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {

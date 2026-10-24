@@ -130,6 +130,10 @@ type Options struct {
 	// environment). The VS Code managed-hooks lock is written only when
 	// every one of them holds DefenseClaw's current Copilot plugin.
 	CopilotUserHomes []string
+	// CopilotOutOfScopeHomes were in the eligible-accounts record but are
+	// excluded from the current Copilot enrollment. A current Local hook in
+	// one of these homes is drift until the guardian removes it.
+	CopilotOutOfScopeHomes []string
 	// CursorFailOpen reports that the administrator's config resolves
 	// Cursor's hook fail mode open (owner decision 2026-10-20): its
 	// machine-policy hooks are registered without failClosed, so Cursor lets
@@ -228,10 +232,8 @@ type State struct {
 	// guardian rewrites them as the user; until it has, verify fails.
 	UserFileDrift []string `json:"user_file_drift,omitempty"`
 	// UserFileForeign names files at DefenseClaw's own per-user paths (the
-	// Copilot plugin) that hold hooks DefenseClaw did not write. The
-	// guardian leaves them in place, and the foreign-hook guard denies that
-	// user's agent calls while they are there, so verify fails on them
-	// (GAP-1232).
+	// Copilot Local hook or plugin) that hold independent content. The
+	// guardian leaves them in place, so verify fails on them (GAP-1232).
 	UserFileForeign []string `json:"user_file_foreign,omitempty"`
 	LiveVerifiedAt  string   `json:"live_verified_at,omitempty"`
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode
@@ -333,11 +335,6 @@ func RouteFor(connector, goos string) string {
 		return RoutePerUser
 	case "openclaw", "zeptoclaw":
 		return RouteUnsupported
-	case "openhands", "omnigent":
-		if goos == "windows" {
-			return RouteUnsupported
-		}
-		return RoutePerUser
 	case "devin", "antigravity", "hermes", "opencode", "amp":
 		return RoutePerUser
 	default:

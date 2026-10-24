@@ -123,3 +123,17 @@ def test_windows_setup_signing_path_is_pinned_and_proven_in_the_dry_run() -> Non
     assert any("prove-signing-path.sh" in step.get("run", "") for step in proof["steps"])
     assert "enterprise-windows-signing-proof" in jobs["dry-run-assets"]["needs"]
     assert "enterprise-windows-signing-proof" not in str(jobs["sign"]["needs"])
+
+
+def test_upgrade_gate_steps_name_the_files_the_lanes_save() -> None:
+    # The gate upgrades from a 1.x release, whose lanes apply a version 9
+    # config and save config-before.yaml; the runbook described a v8 run.
+    runbook = _text("docs/RELEASE_RUNBOOK.md")
+    gate = runbook[runbook.index("## The enterprise upgrade gate"):runbook.index("## Dry run")]
+    unix = _text("scripts/test-enterprise-unix-install.sh")
+    windows = _text("scripts/test-enterprise-windows-install.ps1")
+    for saved in ("config-before.yaml", "config-upgraded.yaml"):
+        assert saved in gate and saved in unix and saved in windows
+    assert "config-v8.yaml" not in gate and "config-v8.yaml" not in unix + windows
+    assert "`config_version: 9`" in gate
+    assert "enterprise secret set" in gate and "enterprise secret set" in unix and "enterprise secret set" in windows

@@ -19,14 +19,30 @@
 package processutil
 
 import (
+	"errors"
 	"os/exec"
 	"syscall"
+
+	"golang.org/x/sys/unix"
 )
 
-// exitWithParent has the kernel kill cmd when this process dies.
+// exitWithParent asks the kernel to kill the child with its parent
+// (GAP-0418) and starts it in a process group of its own (startInOwnGroup).
+// The parent-death signal reaches the direct child only.
 func exitWithParent(cmd *exec.Cmd) {
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
+	startInOwnGroup(cmd)
 	cmd.SysProcAttr.Pdeathsig = syscall.SIGKILL
+}
+
+// waitExitedUnreaped blocks until child pid has exited and leaves it
+// unreaped (WNOWAIT). It reports false when the wait fails.
+func waitExitedUnreaped(pid int) bool {
+	var info unix.Siginfo
+	for {
+		err := unix.Waitid(unix.P_PID, pid, &info, unix.WEXITED|unix.WNOWAIT, nil)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		return err == nil
+	}
 }

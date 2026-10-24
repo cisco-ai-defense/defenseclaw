@@ -45,12 +45,12 @@ func TestWriteManagedFileBackup_DirIs0o700(t *testing.T) {
 }
 
 func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
-	home := t.TempDir()
+	home := testenv.PrivateTempDir(t)
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
-	oldRoot := filepath.Join(home, ".codex")
-	newRoot := filepath.Join(home, "dotfiles", "codex")
-	dataDir := filepath.Join(home, ".defenseclaw")
+	oldRoot := home
+	newRoot := testenv.PrivateTempDir(t)
+	dataDir := testenv.PrivateTempDir(t)
 	t.Setenv("CODEX_HOME", oldRoot)
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}
@@ -90,6 +90,32 @@ func TestCodexExplicitSetupMovesRememberedRoot(t *testing.T) {
 	}
 	if got := codexHomeDir(); got != newRoot {
 		t.Fatalf("gateway root = %q, want %q", got, newRoot)
+	}
+	// A failed batch after the forward move asks Setup to move this same
+	// registration back. The old backup must again name the enforcing root.
+	t.Setenv("CODEX_HOME", oldRoot)
+	t.Setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", oldRoot)
+	if err := c.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("restore previous Codex root: %v", err)
+	}
+	for _, root := range []struct {
+		path     string
+		wantHook bool
+	}{{oldRoot, true}, {newRoot, false}} {
+		raw, err := os.ReadFile(filepath.Join(root.path, "config.toml"))
+		if err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if got := bytes.Contains(raw, hookMarker); got != root.wantHook {
+			t.Fatalf("%s hook presence after rollback = %t, want %t", root.path, got, root.wantHook)
+		}
+	}
+	backup, err := loadManagedFileBackupPath(managedFileBackupPath(dataDir, "codex", "config.toml"))
+	if err != nil {
+		t.Fatalf("read restored Codex backup: %v", err)
+	}
+	if backup.Path != filepath.Join(oldRoot, "config.toml") {
+		t.Fatalf("rollback backup path = %q, want old root", backup.Path)
 	}
 }
 
@@ -180,36 +206,6 @@ func TestRestoreManagedFileBackupsPutsBackWhatSetupFound(t *testing.T) {
 	}
 	if _, err := os.Lstat(managedFileBackupPath(dataDir, "antigravity", "hooks.json")); !os.IsNotExist(err) {
 		t.Fatalf("a restored backup record must be consumed: %v", err)
-	}
-}
-
-// A restore the target's directory refuses names the target and the cause
-// once, not the rename twice with the staged temp file (#1032).
-func TestRestoreFailureNamesTheTargetAndCauseOnce(t *testing.T) {
-	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
-		t.Skip("needs a directory the test user cannot write")
-	}
-	dataDir, dir := t.TempDir(), t.TempDir()
-	target := filepath.Join(dir, "hooks.json")
-	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := captureManagedFileBackup(dataDir, "openhands", "config", target); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(target, []byte(`{"hooks":1}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := updateManagedFileBackupPostHash(dataDir, "openhands", "config", target); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
-	_, err := restoreManagedFileBackupIfUnchanged(dataDir, "openhands", "config", target)
-	if got, want := restoreBackupFailure(err), "could not restore "+target+": permission denied"; got != want {
-		t.Fatalf("restore failure = %q, want %q", got, want)
 	}
 }
 
@@ -339,5 +335,35 @@ func TestPinCodexConfigRootToSetup(t *testing.T) {
 	}
 	if got := codexConfigPath(); got != target {
 		t.Fatalf("Codex config after pin = %q, want %q", got, target)
+	}
+}
+
+// A restore the target's directory refuses names the target and the cause
+// once, not the rename twice with the staged temp file (#1032).
+func TestRestoreFailureNamesTheTargetAndCauseOnce(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a directory the test user cannot write")
+	}
+	dataDir, dir := t.TempDir(), t.TempDir()
+	target := filepath.Join(dir, "hooks.json")
+	if err := os.WriteFile(target, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := captureManagedFileBackup(dataDir, "copilot", "config", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte(`{"hooks":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateManagedFileBackupPostHash(dataDir, "copilot", "config", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	_, err := restoreManagedFileBackupIfUnchanged(dataDir, "copilot", "config", target)
+	if got, want := restoreBackupFailure(err), "could not restore "+target+": permission denied"; got != want {
+		t.Fatalf("restore failure = %q, want %q", got, want)
 	}
 }

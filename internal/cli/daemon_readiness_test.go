@@ -218,7 +218,7 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	mixed := expected
 	mixed.Connectors = append([]rotationConnectorPolicy(nil), expected.Connectors...)
 	mixed.Connectors[0].Mode = "observe"
-	mixed.Connectors[0].HookFailMode = "open"
+	mixed.Connectors[0].HookFailMode = "closed"
 	fallback.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Mode: "observe", HookFailMode: "open"}
 	if err := verifyRotationConfigState(fallback, mixed); err != nil {
 		t.Fatalf("exact mixed connector state rejected: %v", err)
@@ -668,17 +668,6 @@ func TestGatewaySnapshotReadyCollapsesUnsafeTelemetryFailureDetails(t *testing.T
 	}
 }
 
-func testClaudeRotationProbes(baseURL, credential string) []connector.ClaudeCodeNativeOTLPProbe {
-	headers := make(http.Header)
-	headers.Set("Authorization", "Bearer "+credential)
-	headers.Set("X-DefenseClaw-Client", "claudecode-otel/1.0")
-	headers.Set("X-DefenseClaw-Source", "claudecode")
-	return []connector.ClaudeCodeNativeOTLPProbe{
-		{Signal: connector.NativeOTLPSignalLogs, Endpoint: baseURL + "/v1/logs", Headers: headers.Clone()},
-		{Signal: connector.NativeOTLPSignalMetrics, Endpoint: baseURL + "/v1/metrics", Headers: headers.Clone()},
-	}
-}
-
 func TestVerifyRotationConnectorHookAuthenticationUsesExpectedScopedCredentials(t *testing.T) {
 	dataDir := t.TempDir()
 	tokens := make(map[string]string)
@@ -871,300 +860,6 @@ func TestVerifyRotationConnectorHookAuthenticationSupportsProxyAndRejectsUnregis
 	)
 	if err == nil || !strings.Contains(err.Error(), "inspect route") || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("unregistered connector error = %v, want fail-closed inspect rejection", err)
-	}
-}
-
-func TestVerifyRotationConnectorOTLPAuthenticationUsesScopedCredentials(t *testing.T) {
-	originalLoader := loadRotationOTLPPathToken
-	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
-	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
-	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
-	tokens := map[connector.OTLPPathTokenScope]string{
-		connector.OTLPScopeCodex:  strings.Repeat("c", 64),
-		connector.OTLPScopeClaude: strings.Repeat("d", 64),
-	}
-	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
-		return tokens[scope], nil
-	}
-
-	seen := map[string]int{}
-	var srv *httptest.Server
-	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
-		return testClaudeRotationProbes(srv.URL, tokens[connector.OTLPScopeClaude]), nil
-	}
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodGet {
-			t.Errorf("probe method = %s, want GET", r.Method)
-		}
-		source := r.Header.Get("X-DefenseClaw-Source")
-		switch {
-		case (r.URL.Path == "/v1/logs" || r.URL.Path == "/v1/metrics") && (source == "codex" || source == "claudecode"):
-			scope, _ := connector.OTLPPathTokenScopeForConnector(source)
-			if got, want := r.Header.Get("Authorization"), "Bearer "+tokens[scope]; got != want {
-				t.Errorf("%s authorization did not use its scoped credential", source)
-			}
-			seen[source]++
-		default:
-			t.Errorf("unexpected convergence probe path %q source %q", r.URL.Path, source)
-		}
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}))
-	defer srv.Close()
-
-	err := verifyRotationConnectorOTLPAuthentication(
-		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode", "codex"},
-	)
-	if err != nil {
-		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v", err)
-	}
-	for name, want := range map[string]int{"claudecode": 2, "codex": 1} {
-		if seen[name] != want {
-			t.Fatalf("%s auth probes = %d, want %d", name, seen[name], want)
-		}
-	}
-}
-
-func TestVerifyRotationConnectorOTLPAuthenticationSkipsOpenHandsWithoutExporter(t *testing.T) {
-	// GAP-1513: OpenHands has no native OTLP exporter off macOS, so setup
-	// mints no scoped credential and rotation must not require one.
-	originalLoader := loadRotationOTLPPathToken
-	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
-	codexToken := strings.Repeat("c", 64)
-	loadRotationOTLPPathToken = func(_ string, scope connector.OTLPPathTokenScope) (string, error) {
-		if scope == connector.OTLPScopeCodex {
-			return codexToken, nil
-		}
-		return "", nil
-	}
-	seen := map[string]int{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seen[r.Header.Get("X-DefenseClaw-Source")]++
-		w.WriteHeader(http.StatusMethodNotAllowed)
-	}))
-	defer srv.Close()
-
-	err := verifyRotationConnectorOTLPAuthentication(
-		srv.Client(), srv.URL+"/status", t.TempDir(), []string{"codex", "openhands"},
-	)
-	if err != nil {
-		t.Fatalf("verifyRotationConnectorOTLPAuthentication() error = %v, want OpenHands skipped", err)
-	}
-	if seen["codex"] != 1 || seen["openhands"] != 0 {
-		t.Fatalf("probes = %v, want one codex probe and none for openhands", seen)
-	}
-}
-
-func TestVerifyRotationConnectorOTLPAuthenticationFailsClosedWithoutLeakingCredential(t *testing.T) {
-	originalLoader := loadRotationOTLPPathToken
-	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
-	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
-	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
-	credential := strings.Repeat("f", 64)
-	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
-		return credential, nil
-	}
-	var srv *httptest.Server
-	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
-		return testClaudeRotationProbes(srv.URL, credential), nil
-	}
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	err := verifyRotationConnectorOTLPAuthentication(
-		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode"},
-	)
-	if err == nil || !strings.Contains(err.Error(), "claudecode") {
-		t.Fatalf("authentication error = %v, want connector-scoped failure", err)
-	}
-	if strings.Contains(err.Error(), credential) {
-		t.Fatal("authentication error leaked the connector-scoped credential")
-	}
-}
-
-func TestVerifyRotationConnectorOTLPAuthenticationUsesPersistedClaudeHeaderLiterally(t *testing.T) {
-	originalTokenLoader := loadRotationOTLPPathToken
-	t.Cleanup(func() { loadRotationOTLPPathToken = originalTokenLoader })
-	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
-	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
-
-	credential := strings.Repeat("a", 64)
-	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
-		t.Fatal("Claude convergence synthesized a credential from the token file")
-		return "", fmt.Errorf("unreachable")
-	}
-	var receivedAuthorization string
-	var srv *httptest.Server
-	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
-		probes := testClaudeRotationProbes(srv.URL, credential)
-		for index := range probes {
-			probes[index].Headers.Set("Authorization", "Bearer%20"+credential)
-		}
-		return probes, nil
-	}
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedAuthorization = r.Header.Get("Authorization")
-		w.WriteHeader(http.StatusUnauthorized)
-	}))
-	defer srv.Close()
-
-	err := verifyRotationConnectorOTLPAuthentication(
-		srv.Client(), srv.URL+"/status", "D:\\fixture-data", []string{"claudecode"},
-	)
-	if err == nil || !strings.Contains(err.Error(), "401") {
-		t.Fatalf("encoded persisted Claude auth error = %v, want HTTP 401 convergence failure", err)
-	}
-	if receivedAuthorization != "Bearer%20"+credential {
-		t.Fatal("Claude convergence did not send the persisted Authorization value literally")
-	}
-	if strings.Contains(err.Error(), credential) {
-		t.Fatal("Claude convergence error leaked the persisted credential")
-	}
-}
-
-func TestVerifyRotationConnectorOTLPAuthenticationLoadsExactPersistedClaudeCredentials(t *testing.T) {
-	originalSettingsOverride := connector.ClaudeCodeSettingsPathOverride
-	connector.ClaudeCodeSettingsPathOverride = ""
-	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = originalSettingsOverride })
-
-	logsCredential := strings.Repeat("l", 64)
-	metricsCredential := strings.Repeat("m", 64)
-
-	for _, tc := range []struct {
-		name           string
-		rejectedSignal connector.NativeOTLPSignal
-		wantError      bool
-	}{
-		{name: "both signals accepted"},
-		{name: "logs rejected", rejectedSignal: connector.NativeOTLPSignalLogs, wantError: true},
-		{name: "metrics rejected", rejectedSignal: connector.NativeOTLPSignalMetrics, wantError: true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			configDir := t.TempDir()
-			fallbackHome := t.TempDir()
-			t.Setenv("HOME", fallbackHome)
-			t.Setenv("USERPROFILE", fallbackHome)
-			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
-
-			var logsSeen atomic.Int32
-			var metricsSeen atomic.Int32
-			var requestMismatch atomic.Bool
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var signal connector.NativeOTLPSignal
-				var expectedAuthorization string
-				var seen *atomic.Int32
-				switch r.URL.Path {
-				case "/v1/logs":
-					signal = connector.NativeOTLPSignalLogs
-					expectedAuthorization = "Bearer " + logsCredential
-					seen = &logsSeen
-				case "/v1/metrics":
-					signal = connector.NativeOTLPSignalMetrics
-					expectedAuthorization = "Bearer " + metricsCredential
-					seen = &metricsSeen
-				default:
-					requestMismatch.Store(true)
-					w.WriteHeader(http.StatusNotFound)
-					return
-				}
-				seen.Add(1)
-				if r.Method != http.MethodGet ||
-					r.Header.Get("Authorization") != expectedAuthorization ||
-					r.Header.Get("X-DefenseClaw-Client") != "claudecode-otel/1.0" ||
-					r.Header.Get("X-DefenseClaw-Source") != "claudecode" {
-					requestMismatch.Store(true)
-					w.WriteHeader(http.StatusUnauthorized)
-					return
-				}
-				if tc.rejectedSignal == signal {
-					w.WriteHeader(http.StatusUnauthorized)
-					return
-				}
-				w.WriteHeader(http.StatusMethodNotAllowed)
-			}))
-			defer server.Close()
-
-			literalHeaders := func(credential string) string {
-				return "authorization=Bearer " + credential +
-					",x-defenseclaw-client=claudecode-otel/1.0,x-defenseclaw-source=claudecode"
-			}
-			settings := map[string]interface{}{
-				"env": map[string]interface{}{
-					"CLAUDE_CODE_ENABLE_TELEMETRY":        "1",
-					"OTEL_LOGS_EXPORTER":                  "otlp",
-					"OTEL_METRICS_EXPORTER":               "otlp",
-					"OTEL_EXPORTER_OTLP_LOGS_PROTOCOL":    "http/json",
-					"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/json",
-					"OTEL_EXPORTER_OTLP_LOGS_ENDPOINT":    server.URL + "/v1/logs",
-					"OTEL_EXPORTER_OTLP_METRICS_ENDPOINT": server.URL + "/v1/metrics",
-					"OTEL_EXPORTER_OTLP_LOGS_HEADERS":     literalHeaders(logsCredential),
-					"OTEL_EXPORTER_OTLP_METRICS_HEADERS":  literalHeaders(metricsCredential),
-				},
-			}
-			data, err := json.Marshal(settings)
-			if err != nil {
-				t.Fatalf("marshal Claude settings fixture: %v", err)
-			}
-			if err := os.WriteFile(filepath.Join(configDir, "settings.json"), data, 0o600); err != nil {
-				t.Fatalf("write Claude settings fixture: %v", err)
-			}
-
-			err = verifyRotationConnectorOTLPAuthentication(
-				server.Client(), server.URL+"/status", t.TempDir(), []string{"claudecode"},
-			)
-			if requestMismatch.Load() {
-				t.Fatal("Claude convergence probe did not preserve an exact persisted endpoint or header value")
-			}
-			if tc.wantError {
-				if err == nil || !strings.Contains(err.Error(), "claudecode") || !strings.Contains(err.Error(), "401") {
-					t.Fatalf("rejected Claude %s probe error = %v, want redacted HTTP 401 failure", tc.rejectedSignal, err)
-				}
-				for _, credential := range []string{logsCredential, metricsCredential} {
-					if strings.Contains(err.Error(), credential) {
-						t.Fatalf("rejected Claude %s probe error leaked a persisted credential", tc.rejectedSignal)
-					}
-				}
-				if tc.rejectedSignal == connector.NativeOTLPSignalLogs && logsSeen.Load() != 1 {
-					t.Fatal("rejected persisted Claude logs credential was not probed")
-				}
-				if tc.rejectedSignal == connector.NativeOTLPSignalMetrics && metricsSeen.Load() != 1 {
-					t.Fatal("rejected persisted Claude metrics credential was not probed")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("persisted Claude convergence probes failed: %v", err)
-			}
-			if logsSeen.Load() != 1 || metricsSeen.Load() != 1 {
-				t.Fatalf("persisted Claude probes: logs=%d metrics=%d, want one each", logsSeen.Load(), metricsSeen.Load())
-			}
-		})
-	}
-}
-
-func TestVerifyRotationConnectorOTLPAuthenticationRefusesNonLoopbackEndpoint(t *testing.T) {
-	err := verifyRotationConnectorOTLPAuthentication(
-		&http.Client{}, "http://collector.example.test/status", "D:\\fixture-data", []string{"claudecode"},
-	)
-	if err == nil || !strings.Contains(err.Error(), "non-loopback") {
-		t.Fatalf("non-loopback authentication probe error = %v, want fail-closed refusal", err)
-	}
-}
-
-func TestVerifyRotationConnectorOTLPAuthenticationRefusesMismatchedClaudeExporterEndpoint(t *testing.T) {
-	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
-	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
-	credential := strings.Repeat("a", 64)
-	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
-		return testClaudeRotationProbes("http://collector.example.test", credential), nil
-	}
-
-	err := verifyRotationConnectorOTLPAuthentication(
-		&http.Client{}, "http://127.0.0.1:18970/status", "D:\\fixture-data", []string{"claudecode"},
-	)
-	if err == nil || !strings.Contains(err.Error(), "does not match the gateway") {
-		t.Fatalf("mismatched Claude exporter endpoint error = %v, want fail-closed refusal", err)
 	}
 }
 
@@ -1637,54 +1332,6 @@ func TestWaitForStartedDaemonRotationRequiresExactConnectorPosture(t *testing.T)
 				t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
 			}
 		})
-	}
-}
-
-func TestWaitForStartedDaemonRotationStopsBWhenScopedAuthIsRejected(t *testing.T) {
-	originalLoader := loadRotationOTLPPathToken
-	t.Cleanup(func() { loadRotationOTLPPathToken = originalLoader })
-	originalClaudeLoader := loadRotationClaudeNativeOTLPProbes
-	t.Cleanup(func() { loadRotationClaudeNativeOTLPProbes = originalClaudeLoader })
-	credential := strings.Repeat("a", 64)
-	loadRotationOTLPPathToken = func(_ string, _ connector.OTLPPathTokenScope) (string, error) {
-		return credential, nil
-	}
-	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
-	snap.Connectors = []gateway.ConnectorHealth{{Name: "claudecode", State: gateway.StateRunning}}
-	var srv *httptest.Server
-	loadRotationClaudeNativeOTLPProbes = func() ([]connector.ClaudeCodeNativeOTLPProbe, error) {
-		return testClaudeRotationProbes(srv.URL, credential), nil
-	}
-	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/logs" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
-		_ = json.NewEncoder(w).Encode(snap)
-	}))
-	defer srv.Close()
-
-	base := &fakeReadinessProcess{running: true, pid: 42}
-	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
-	_, ready, err := waitForStartedDaemon(
-		process,
-		42,
-		srv.Client(),
-		srv.URL+"/status",
-		time.Second,
-		5*time.Millisecond,
-		daemonReadinessRequirements{
-			guardrailEnabled:    true,
-			requiredConnectors:  []string{"claudecode"},
-			verifyConnectorOTLP: true,
-			expectedDataDir:     "D:\\fixture-data",
-		},
-	)
-	if err == nil || !strings.Contains(err.Error(), "native OTLP authentication") || ready {
-		t.Fatalf("rejected scoped auth readiness = %v, error = %v, want convergence failure", ready, err)
-	}
-	if base.stopCalls != 1 || base.stoppedPID != 42 {
-		t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
 	}
 }
 
@@ -2259,5 +1906,131 @@ func TestFetchSidecarHealthRejectsOversizedDocument(t *testing.T) {
 	_, err := fetchSidecarHealth(srv.Client(), srv.URL)
 	if err == nil || !strings.Contains(err.Error(), "exceeds") {
 		t.Fatalf("error = %v, want bounded-document diagnostic", err)
+	}
+}
+
+// Review fix (G-deadcode loop round 2): an upgraded host keeps the hook token
+// of a connector 1.0.4 removed (OpenHands; connector/removed.go
+// keepHookToken), rotate-token replaces it like every persisted sidecar and
+// hands its fingerprint to the restart check. The 1.0.4 gateway refuses that
+// token on the inspect route (401), so requiring the 405 of an accepted token
+// rolled every such rotation back. A removed connector's retained token must
+// now match its fingerprint on disk and be refused; a shipped connector's
+// token must still be accepted. Delete the removed-connector half in 1.1.
+func TestVerifyRotationConnectorHookAuthenticationRequiresRemovedConnectorRefusal(t *testing.T) {
+	dataDir := t.TempDir()
+	tokens := map[string]string{}
+	expected := rotationHookTokenFingerprints{}
+	for _, name := range []string{"codex", "omnigent", "openhands"} {
+		token, err := connector.EnsureHookAPIToken(dataDir, name)
+		if err != nil || token == "" {
+			t.Fatalf("EnsureHookAPIToken(%s) = %q, %v", name, token, err)
+		}
+		tokens[name] = token
+		expected[name] = rotationHookTokenFingerprint(token)
+	}
+
+	// gateway answers like the 1.0.4 gateway: a codex token is accepted (405
+	// on the GET probe), a removed connector's token gets removedStatus, and
+	// codexStatus overrides codex's answer when it is not zero.
+	gateway := func(removedStatus, codexStatus int) (*httptest.Server, func() map[string]int) {
+		var mu sync.Mutex
+		seen := map[string]int{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			scope := r.Header.Get("X-DefenseClaw-Connector")
+			mu.Lock()
+			seen[r.URL.Path+":"+scope]++
+			mu.Unlock()
+			if r.Method != http.MethodGet || r.Header.Get("Authorization") != "Bearer "+tokens[scope] {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if connector.IsRemovedConnector(scope) {
+				w.WriteHeader(removedStatus)
+				return
+			}
+			if codexStatus != 0 {
+				w.WriteHeader(codexStatus)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		}))
+		return srv, func() map[string]int {
+			mu.Lock()
+			defer mu.Unlock()
+			out := make(map[string]int, len(seen))
+			for key, count := range seen {
+				out[key] = count
+			}
+			return out
+		}
+	}
+
+	for _, refusal := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		srv, seen := gateway(refusal, 0)
+		if err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir, expected); err != nil {
+			srv.Close()
+			t.Fatalf("retained removed-connector tokens refused with HTTP %d: rotation check error = %v, want success", refusal, err)
+		}
+		probes := seen()
+		srv.Close()
+		for _, name := range []string{"openhands", "omnigent"} {
+			if probes["/api/v1/inspect/tool:"+name] != 1 {
+				t.Fatalf("inspect probes for the retained %s token = %d, want 1 (%v)", name, probes["/api/v1/inspect/tool:"+name], probes)
+			}
+			if probes["/api/v1/"+name+"/hook:"+name] != 0 {
+				t.Fatalf("the retired %s hook route was probed: %v", name, probes)
+			}
+		}
+		for _, path := range []string{"/api/v1/inspect/tool:codex", "/api/v1/codex/hook:codex", "/api/v1/codex/notify:codex"} {
+			if probes[path] != 1 {
+				t.Fatalf("probes for %s = %d, want 1 (%v)", path, probes[path], probes)
+			}
+		}
+	}
+
+	// A retained token the gateway accepts again, or any answer that is not a
+	// refusal, fails the check closed.
+	for _, status := range []int{http.StatusMethodNotAllowed, http.StatusOK, http.StatusNoContent, http.StatusNotFound, http.StatusInternalServerError} {
+		srv, _ := gateway(status, 0)
+		err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir, expected)
+		srv.Close()
+		if err == nil || !strings.Contains(err.Error(), "removed in 1.0.4") || !strings.Contains(err.Error(), fmt.Sprint(status)) {
+			t.Fatalf("retained removed-connector token answered with HTTP %d: error = %v, want a fail-closed refusal requirement", status, err)
+		}
+		for _, token := range tokens {
+			if strings.Contains(err.Error(), token) {
+				t.Fatal("the rotation check error leaked a scoped hook token")
+			}
+		}
+	}
+
+	// A shipped connector next to the removed ones must still be accepted.
+	srv, _ := gateway(http.StatusUnauthorized, http.StatusUnauthorized)
+	err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir, expected)
+	srv.Close()
+	if err == nil || !strings.Contains(err.Error(), "connector codex") || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("refused codex token next to removed scopes: error = %v, want codex fail-closed", err)
+	}
+
+	// The retained token's file must still match its rotation fingerprint and
+	// exist; neither failure sends any probe.
+	srv, seen := gateway(http.StatusUnauthorized, 0)
+	defer srv.Close()
+	stale := rotationHookTokenFingerprints{"openhands": strings.Repeat("0", 64)}
+	if err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir, stale); err == nil ||
+		!strings.Contains(err.Error(), "openhands") || !strings.Contains(err.Error(), "rotation expectation") {
+		t.Fatalf("stale retained openhands token: error = %v, want a fingerprint mismatch", err)
+	}
+	if err := os.Remove(filepath.Join(dataDir, "hooks", ".hook-omnigent.token")); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRotationConnectorHookAuthentication(srv.Client(), srv.URL+"/status", dataDir,
+		rotationHookTokenFingerprints{"omnigent": expected["omnigent"]}); err == nil ||
+		!strings.Contains(err.Error(), "omnigent") || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("missing retained omnigent token: error = %v, want unavailable", err)
+	}
+	if probes := seen(); len(probes) != 0 {
+		t.Fatalf("probes after a fingerprint or file failure = %v, want none", probes)
 	}
 }

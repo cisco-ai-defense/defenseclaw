@@ -762,6 +762,8 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	}
 	if d.fake == nil {
 		d.fake = openshelltest.New(openshelltest.WithDriver(d.driver))
+		// A gateway DefenseClaw runs sandboxes on.
+		d.fake.SetRelease(openshell.SupportedMin)
 	}
 	e := &harnessEnv{t: t, fake: d.fake, dataDir: t.TempDir(), owner: orDefault(d.owner, testOwner),
 		ingressPort: orDefault(d.ingressPort, testIngressPort), egressPort: orDefault(d.egressPort, testEgressPort), apiPort: orDefault(d.apiPort, 18970)}
@@ -808,7 +810,7 @@ func newDaemonEnv(t *testing.T, d daemonOptions, edit func(*config.Config)) *har
 	// without one fails closed and mounts nothing.
 	driver, err := connectedDriver(t.Context(), e.client)
 	must(t, err)
-	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: "0.1.1", Driver: driver}
+	e.gw = &Gateway{Client: e.client, Name: "openshell", Endpoint: "https://127.0.0.1:17670", Port: 17670, Version: openshell.SupportedMin, Driver: driver}
 	e.m = e.newManager()
 	// Its sandboxes answer the workload check, which runs on every driver,
 	// as their records expect.

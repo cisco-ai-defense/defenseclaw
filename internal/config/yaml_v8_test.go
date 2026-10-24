@@ -19,6 +19,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -375,14 +376,18 @@ func TestSecureClientV9SourceRejected(t *testing.T) {
 	t.Setenv("DEFENSECLAW_DEPLOYMENT_MODE", "")
 	t.Setenv("DEFENSECLAW_ENTERPRISE_PROFILE", "")
 	raw := []byte("config_version: 9\ndeployment_mode: managed_enterprise\nenterprise: {profile: secure_client}\nadmission: {skill: {actions: {high: block}}}\n")
-	err := requireV8YAMLError(t, raw, V8YAMLErrorVersionUnsupported)
-	if err.Path != "$.config_version" {
-		t.Fatalf("error path = %q, want $.config_version", err.Path)
+	// Linux has no Secure Client profile: the profile is what is wrong there.
+	code, path := V8YAMLErrorVersionUnsupported, "$.config_version"
+	if runtime.GOOS == "linux" {
+		code, path = V8YAMLErrorProfileInvalid, "$.enterprise.profile"
+	}
+	err := requireV8YAMLError(t, raw, code)
+	if err.Path != path {
+		t.Fatalf("error path = %q, want %s", err.Path, path)
 	}
 	var schemaErr *V8YAMLError
-	if err := ValidateV8SchemaBytes("config.yaml", raw); !errors.As(err, &schemaErr) ||
-		schemaErr.Code != V8YAMLErrorVersionUnsupported {
-		t.Fatalf("schema preflight error = %v, want unsupported version", err)
+	if err := ValidateV8SchemaBytes("config.yaml", raw); !errors.As(err, &schemaErr) || schemaErr.Code != code {
+		t.Fatalf("schema preflight error = %v, want %s", err, code)
 	}
 	if err := checkRuntimeConfigVersion(9, true); err == nil {
 		t.Fatal("runtime version check accepted Secure Client v9")

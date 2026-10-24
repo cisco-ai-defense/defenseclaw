@@ -60,6 +60,23 @@ COMMON_PROMETHEUS_RESOURCE_LABELS = {
     "service_namespace",
     "service_version",
 }
+# The managed sandbox counters keep only these resource labels: the bundled
+# collector drops the host, account and device attributes from them
+# (transform/managed-sandbox-resource), so a host_name filter matches nothing.
+MANAGED_SANDBOX_RESOURCE_LABELS = {
+    "deployment_environment_name",
+    "instance",
+    "job",
+    "os_type",
+    "otel_scope_name",
+    "service_name",
+    "service_namespace",
+    "service_version",
+}
+PROMETHEUS_RESOURCE_LABELS_BY_METRIC = {
+    f"defenseclaw_sandbox_managed_{name}_total": MANAGED_SANDBOX_RESOURCE_LABELS
+    for name in ("refusals", "asks", "foreign_items", "provisional", "drift")
+}
 PROMETHEUS_METRIC_LABELS = {
     "defenseclaw_approval_count_total": {"result", "auto", "dangerous"},
     "defenseclaw_approval_lifecycle_total": {"connector", "result", "surface"},
@@ -84,6 +101,11 @@ PROMETHEUS_METRIC_LABELS = {
         "guardrail_scanner",
     },
     "defenseclaw_schema_violations_total": {"code", "event_type"},
+    "defenseclaw_sandbox_managed_refusals_total": {"reason", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_asks_total": {"result", "reason", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_foreign_items_total": {"kind", "action", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_provisional_total": {"result", "profile", "driver", "connector"},
+    "defenseclaw_sandbox_managed_drift_total": {"field", "profile", "driver", "connector"},
     "defenseclaw_stream_bytes_sent_bucket": {"le", "outcome"},
     "defenseclaw_stream_duration_ms_milliseconds_bucket": {"le", "outcome"},
     "defenseclaw_stream_lifecycle_total": {"outcome", "transition"},
@@ -698,7 +720,11 @@ def static_audit(
                             selector,
                         )
                         if metric_name in PROMETHEUS_METRIC_LABELS:
-                            allowed_labels = PROMETHEUS_METRIC_LABELS[metric_name] | COMMON_PROMETHEUS_RESOURCE_LABELS
+                            resource_labels = PROMETHEUS_RESOURCE_LABELS_BY_METRIC.get(
+                                metric_name,
+                                COMMON_PROMETHEUS_RESOURCE_LABELS,
+                            )
+                            allowed_labels = PROMETHEUS_METRIC_LABELS[metric_name] | resource_labels
                             unknown_labels = {label for label, _operator, _value in selector_pairs} - allowed_labels
                             if unknown_labels:
                                 errors.append(

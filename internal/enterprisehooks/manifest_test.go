@@ -71,17 +71,29 @@ func TestLoadManifestRejectsTrailingDocument(t *testing.T) {
 	}
 }
 
-func TestLoadManifestAcceptsEmptyDocument(t *testing.T) {
+func TestLoadManifestRejectsAnEmptyDocument(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
-	if err := os.WriteFile(path, []byte("# no managed targets yet\n"), 0o600); err != nil {
-		t.Fatalf("write manifest: %v", err)
+	for _, data := range []string{"", " \n", "# no managed targets yet\n", "---\n", "{}\n", "null\n", "targets:\n", "version: 1\n", "version: 1\ntargets:\n"} {
+		if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := LoadManifest(path); err == nil {
+			t.Fatalf("empty manifest %q loaded as a withdrawal", data)
+		}
+	}
+	if err := os.WriteFile(path, []byte("version: 1\ntargets: []\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 	manifest, err := LoadManifest(path)
-	if err != nil {
-		t.Fatalf("LoadManifest: %v", err)
+	if err != nil || manifest.Version != 1 || len(manifest.Targets) != 0 {
+		t.Fatalf("explicit empty target set = %+v, %v", manifest, err)
 	}
-	if manifest.Version != 1 || len(manifest.Targets) != 0 {
-		t.Fatalf("manifest = %+v, want version 1 with no targets", manifest)
+	if err := os.WriteFile(path, []byte("targets: []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err = LoadManifest(path)
+	if err != nil || manifest.Version != 1 || len(manifest.Targets) != 0 {
+		t.Fatalf("version-defaulted empty target set = %+v, %v", manifest, err)
 	}
 }
 

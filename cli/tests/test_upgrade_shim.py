@@ -223,6 +223,39 @@ def test_upgrade_runs_the_verified_release_installer(
     assert args == ["--yes", "--local", str(release)]
 
 
+@pytest.mark.parametrize("platform", ["posix", "nt"])
+def test_installer_handoff_keeps_relative_retired_config_paths_bound_to_the_caller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, shim_os: types.ModuleType, platform: str
+) -> None:
+    caller = tmp_path / "caller"
+    caller.mkdir()
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    monkeypatch.chdir(caller)
+    monkeypatch.setenv("OMNIGENT_CONFIG_HOME", "./policyhome")
+    monkeypatch.setenv("OMNIGENT_CONFIG", "./config/agent.yaml")
+    monkeypatch.setattr(upgrade_shim, "_configured_update_source", lambda: "")
+    monkeypatch.setattr(shim_os, "name", platform)
+    called: dict[str, object] = {}
+    monkeypatch.setattr(shim_os, "chdir", lambda path: called.setdefault("chdir", path))
+    monkeypatch.setattr(shim_os, "execv", lambda path, args: called.setdefault("env", dict(os.environ)))
+    monkeypatch.setattr(upgrade_shim, "_windows_terminal_without_desktop", lambda: False)
+    monkeypatch.setattr(
+        upgrade_shim.subprocess,
+        "Popen",
+        lambda *args, **kwargs: called.update({"env": kwargs["env"], "cwd": kwargs["cwd"]}),
+    )
+
+    assert upgrade_shim._run_installer(str(staged / "install.sh"), [], str(staged)) == 0
+    assert "chdir" not in called
+    if platform == "nt":
+        assert called["cwd"] == str(staged)
+    inherited = called["env"]
+    assert isinstance(inherited, dict)
+    assert inherited["OMNIGENT_CONFIG_HOME"] == str(caller / "policyhome")
+    assert inherited["OMNIGENT_CONFIG"] == str(caller / "config" / "agent.yaml")
+
+
 def test_upgrade_refuses_an_installer_that_does_not_match_checksums(
     home: Path, execs: list[list[str]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

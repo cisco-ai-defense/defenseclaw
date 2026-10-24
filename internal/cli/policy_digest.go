@@ -83,7 +83,11 @@ func gatewayReportedPolicy(c *config.Config) gateway.PolicyHealth {
 			req.Header.Set("X-DefenseClaw-Token", token)
 		}
 	}
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	client, err := gatewayPeerClientForURL(c, req.URL.String(), 5*time.Second)
+	if err != nil {
+		return gateway.PolicyHealth{}
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return gateway.PolicyHealth{}
 	}
@@ -133,7 +137,7 @@ func applyEnterprisePolicyReport(result *enterprisestatus.Result, out []byte, ch
 		LastReloadError:       reload,
 		// A hand edit the hook guardian recorded advances the generation but
 		// is still a config change outside the lifecycle (GAP-0617).
-		ConfigUnrecorded: report.ConfigGeneration > 0 && (!report.ConfigGenerationRecorded || report.ConfigRecordedAsHandEdit),
+		ConfigUnrecorded: (report.ConfigGeneration > 0 || result.Platform == "windows") && (!report.ConfigGenerationRecorded || report.ConfigRecordedAsHandEdit),
 	}
 	handEdit := report.ConfigGenerationRecorded && report.ConfigRecordedAsHandEdit
 	result.Policy = state

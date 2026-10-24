@@ -18,9 +18,143 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+// r102 GAP-0430: removing an account's last connector left the shared hook
+// scripts and the hook contract lock in a ~/.defenseclaw that existed
+// before; a remaining connector keeps them.
+func TestRemoveUserHooksRemovesTheSharedRuntimeWithTheLastConnector(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	facts := filepath.Join(dataDir, "session-facts.json")
+	if err := os.WriteFile(facts, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	options := func(name, version string) InstallOptions {
+		return InstallOptions{
+			ConnectorName: name, UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
+			APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000", APIToken: "test-token",
+			OTLPPathToken: strings.Repeat("d", 64), GuardrailMode: "action", HookFailMode: "closed",
+			AgentVersion: version, Registry: connector.NewDefaultRegistry(),
+		}
+	}
+	codex := options("codex", "codex-cli 0.142.0")
+	if _, err := Install(context.Background(), codex); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	shared := filepath.Join(dataDir, "hooks", "_hardening.sh")
+	lock := filepath.Join(dataDir, "hook_contract_lock.json")
+	for _, path := range []string{shared, lock} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("install wrote no %s: %v", path, err)
+		}
+	}
+	// Another connector's runtime record keeps the shared runtime.
+	peer := filepath.Join(dataDir, "hooks", ".hookcfg.hermes")
+	if err := os.WriteFile(peer, []byte("DEFENSECLAW_FAIL_MODE=closed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveUserHooks(context.Background(), codex); err != nil {
+		t.Fatalf("RemoveUserHooks: %v", err)
+	}
+	if _, err := os.Stat(shared); err != nil {
+		t.Fatalf("the shared scripts went while another connector's record remained: %v", err)
+	}
+	if err := os.Remove(peer); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveUserHooks(context.Background(), codex); err != nil {
+		t.Fatalf("RemoveUserHooks: %v", err)
+	}
+	for _, path := range []string{shared, filepath.Join(dataDir, "hooks", "inspect-tool.sh"), lock} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			t.Fatalf("%s was kept after the last connector was removed: %v", path, err)
+		}
+	}
+	if _, err := os.Stat(facts); err != nil {
+		t.Fatalf("the account's other DefenseClaw file went: %v", err)
+	}
+}
+
+// An install of one connector and the removal of the account's last other
+// one ran unserialized: the removal could read an empty hook contract lock
+// while the install had written the shared scripts and not recorded itself
+// yet, then remove the scripts and the lock, and leave the new connector's
+// hook without its runtime. Both hold the shared hook runtime lock, and the
+// removal checks again once it has it.
+func TestInstallAndLastConnectorRemovalSerializeOnTheSharedRuntime(t *testing.T) {
+	skipIfRoot(t)
+	home := newTestHome(t)
+	dataDir := filepath.Join(home, ".defenseclaw")
+	codex := InstallOptions{
+		ConnectorName: "codex", UserHome: home, OwnerUID: os.Getuid(), OwnerGID: os.Getgid(),
+		APIAddr: "127.0.0.1:18970", ProxyAddr: "127.0.0.1:4000", APIToken: "test-token",
+		OTLPPathToken: strings.Repeat("d", 64), GuardrailMode: "action", HookFailMode: "closed",
+		AgentVersion: "codex-cli 0.142.0", Registry: connector.NewDefaultRegistry(),
+	}
+	if _, err := Install(context.Background(), codex); err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	shared := filepath.Join(dataDir, "hooks", "_hardening.sh")
+	blocked := func(what string, done <-chan error) {
+		t.Helper()
+		select {
+		case err := <-done:
+			t.Fatalf("%s finished while another install held the shared hook runtime: %v", what, err)
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+
+	// Another connector's install is under way: it wrote the shared scripts
+	// and has not recorded itself in the hook contract lock yet.
+	unlock, err := lockSharedHookRuntime(context.Background(), home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed := make(chan error, 1)
+	go func() { removed <- RemoveUserHooks(context.Background(), codex) }()
+	blocked("the removal of the last connector", removed)
+	if _, err := os.Stat(shared); err != nil {
+		t.Fatalf("the removal took the shared scripts of the install under way: %v", err)
+	}
+	// The install records its connector, then lets go.
+	peer := filepath.Join(dataDir, "hooks", ".hookcfg.hermes")
+	if err := os.WriteFile(peer, []byte("DEFENSECLAW_FAIL_MODE=closed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	unlock()
+	if err := <-removed; err != nil {
+		t.Fatalf("RemoveUserHooks: %v", err)
+	}
+	if _, err := os.Stat(shared); err != nil {
+		t.Fatalf("the removal took the shared scripts the finished install uses: %v", err)
+	}
+
+	// An install waits for a removal under way the same way.
+	if unlock, err = lockSharedHookRuntime(context.Background(), home); err != nil {
+		t.Fatal(err)
+	}
+	installed := make(chan error, 1)
+	go func() {
+		_, err := Install(context.Background(), codex)
+		installed <- err
+	}()
+	blocked("the install", installed)
+	unlock()
+	if err := <-installed; err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if entry := connector.LoadHookContractLockEntry(dataDir, "codex"); entry.Connector != "codex" {
+		t.Fatalf("the install after the wait did not record codex: %+v", entry)
+	}
+}
 
 func TestRemoveUserHooksKeepsTheUsersOwnConfig(t *testing.T) {
 	skipIfRoot(t)

@@ -1,0 +1,62 @@
+---
+title: Build from source
+description: Build and install DefenseClaw from a source checkout on macOS, Linux and Windows, for development.
+keywords:
+  - build DefenseClaw from source
+  - defenseclaw make all
+  - DefenseClaw development install
+---
+
+Source builds are for developing DefenseClaw, not for upgrading a release install. To upgrade a release install, use `defenseclaw upgrade`, and never point `pip`, `uv` or an editable install at its Python environment.
+
+## Prerequisites
+
+| Requirement | Version |
+| --- | --- |
+| Python | 3.10-3.13 |
+| Go | 1.26.4 or newer |
+| Git | To clone and identify the checkout |
+| GNU Make and a POSIX shell | The documented workflow |
+| `uv` | Used by `make all` (the `pycli` target) |
+| Node.js and npm | Only when the build selects the OpenClaw plugin |
+| Docker | Optional, for local observability and Splunk bundles |
+
+The shell inspect hooks need `jq` or `python3`. If neither is installed, they block every checked call. Agent-specific dependencies are on the [connector pages](/docs/connectors).
+
+## Build and install
+
+```bash
+git clone https://github.com/cisco-ai-defense/defenseclaw.git
+cd defenseclaw
+make all CONNECTOR=none
+defenseclaw init
+```
+
+| Goal | Command |
+| --- | --- |
+| Normal same-checkout development | `make all` |
+| Build artifacts without installing | `make build` |
+| Developer workflow help | `make help` |
+| Release-shaped files for testing the installer with `--local dist` (unsigned) | `make dist` |
+
+`make all` installs the editable Python CLI, builds and installs the Go gateway, updates your PATH and normally runs quickstart. `CONNECTOR=none` skips that first-run setup. The OpenClaw plugin is installed when `CONNECTOR=openclaw`.
+
+A source build reports the checked-in source version; do not present it as a published artifact. Running `make all` again in the same checkout reinstalls over your earlier build. It refuses to replace an install from a different checkout, a newer source build or a release install. `make install` and `scripts/install-dev.sh` install only into a fresh or separate development home.
+
+## Build from source on Windows
+
+Run the same workflow in Git Bash (Git for Windows) with GNU Make, Go, `uv` and Python 3.10-3.13 from python.org.
+
+- Clone with `git -c core.autocrlf=false clone ...` so shell scripts keep LF line endings.
+- `make all` uses the first of `python3`, `python` and `py -3` that runs, which skips the Microsoft Store `python3` alias. When none runs, the build stops with "no working Python 3 interpreter".
+- Files go to `%USERPROFILE%\.defenseclaw` and `%USERPROFILE%\.local\bin`, the same places as a release install. `make all` refuses an account that already has a release install and prints how to remove its binaries first (`defenseclaw.cmd uninstall --binaries --yes`, which keeps your config and audit log). You can also build in a separate Windows account.
+
+## LLM backends in the base install
+
+| Backend | Status |
+| --- | --- |
+| OpenAI, Anthropic, generic OpenAI-compatible | Bundled. LiteLLM is a base dependency. |
+| AWS Bedrock | Bundled. `boto3` ships in the base dependencies, so SigV4, IAM credential modes and Anthropic-on-Bedrock bearer tokens work. |
+| Google Vertex AI | The gateway routes Vertex through its bundled Bifrost backend. The Python CLI scanner and judge paths need the `[vertex]` extra (about 286 MB of dependencies); in a source checkout, `uv sync --extra vertex`. Never modify a release-managed runtime. |
+| Azure OpenAI | Bundled, through LiteLLM's `azure_openai` adapter. |
+| Self-hosted or internal endpoints | Bundled. Add with `defenseclaw setup provider add` ([LLM providers](/docs/reference/configuration/llm-providers)). |

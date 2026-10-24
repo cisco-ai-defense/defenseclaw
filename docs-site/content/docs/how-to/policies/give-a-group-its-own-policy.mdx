@@ -1,0 +1,101 @@
+---
+title: Give a group its own policy
+description: Define two guardrail profiles, assign them by directory group, and check which profile a person gets.
+keywords:
+  - DefenseClaw guardrail profiles
+  - per-group guardrail policy
+  - profile_assignments
+  - guardrail profile explain
+---
+
+A guardrail profile is a named set of guardrail settings. You assign profiles to directory groups, users, agents or connectors. When several profiles are proven to match, the one that covers the others, or their strictest combination, applies; `default_profile` catches everyone else. A request whose assignment needs an identity fact the operating system has not confirmed is refused, and the refusal names that fact. Only identities the operating system vouches for can select a profile ([how DefenseClaw knows who a user is](/docs/enterprise/identity/sources)).
+
+## Before you start
+
+- The users are in a directory group or a local group on the host. Find the exact spelling: `id -Gn` on Linux, or `defenseclaw guardrail profile explain --user alice --json | jq .subject`.
+- On Windows, group profiles need the standalone enterprise install. Per-user installs have no group list.
+
+## Steps
+
+1. Add profiles and assignments to `~/.defenseclaw/config.yaml`. Contractors are enforced from day one; the ML team stays in observe mode.
+
+   ```yaml title="~/.defenseclaw/config.yaml"
+   guardrail:
+     mode: observe
+     profiles:
+       contractors:
+         description: Contractors are enforced from day one
+         mode: action
+         block_at: MEDIUM
+         alert_at: LOW
+       ml-team:
+         description: The ML team stays in observe mode
+         mode: observe
+     profile_assignments:
+       - profile: contractors
+         match: {groups: ["contractors@corp.example.com"]}
+       - profile: ml-team
+         match: {groups: ["ml-team@corp.example.com"]}
+     default_profile: ml-team
+   ```
+
+   A person in both groups gets `contractors`: it enforces at least what `ml-team` does. Order does not matter.
+
+2. Validate the file and list what the gateway sees.
+
+   ```bash
+   defenseclaw config validate
+   defenseclaw guardrail profile list
+   ```
+
+   ```text
+     Guardrail profiles
+     ------------------
+     * contractors  Contractors are enforced from day one (mode=action, block_at=MEDIUM, alert_at=LOW)
+     * ml-team  The ML team stays in observe mode (mode=observe)
+
+     * assignments (strictest applies):
+         1. contractors <- groups=contractors@corp.example.com
+         2. ml-team <- groups=ml-team@corp.example.com
+     * default: ml-team
+   ```
+
+   `config validate` rejects an unknown profile name, an empty `match`, a malformed agent id and a forbidden key.
+
+3. Ask which profile a person gets. With no `--user`, it explains the account that runs the command.
+
+   ```bash
+   defenseclaw guardrail profile explain --user alice@corp.example.com --connector claudecode
+   ```
+
+   ```text
+     Guardrail profile resolution
+     ----------------------------
+     user:    alice (7 group(s))
+     profile: contractors
+     match:   group (contractors@corp.example.com)
+     digest:  sha256:49ed…0c64
+     …
+     applies (claudecode): mode=action block_at=MEDIUM alert_at=LOW hilt=off rule_pack=…
+   ```
+
+   `match` says why: `agent`, `user`, `group`, `connector`, `default`, `default_unverified` or `default_lookup_failed` ([reference](/docs/reference/policy/guardrail-profiles#the-match-reason)). A warning line names a group the host does not know; fix the spelling.
+
+## Check it worked
+
+`profile explain` shows the expected profile and mode. The gateway applies config changes on its next reload. Each hook decision records `defenseclaw.guardrail.profile.name`, so the audit log shows which profile decided.
+
+## Good to know
+
+- Set a strict `default_profile` for accounts no assignment selects. While a directory lookup fails, a request whose assignment needs the missing fact is refused (`default_lookup_failed`) and names that fact.
+- On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config.
+
+## Undo
+
+Delete the `profiles`, `profile_assignments` and `default_profile` keys. Everyone follows the global `guardrail.*` settings again.
+
+## Next
+
+- [Build a policy in the browser](/docs/how-to/policies/build-a-policy-in-the-browser)
+- [Guardrail profiles reference](/docs/reference/policy/guardrail-profiles)
+- [Thresholds](/docs/reference/policy/thresholds)

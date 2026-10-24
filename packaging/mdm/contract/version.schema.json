@@ -32,6 +32,10 @@
     "management_contract": {
       "const": 1,
       "description": "The management agent contract version (management-agent.md). A breaking change to a verb, flag, schema or exit code of the contract bumps it; new optional members do not."
+    },
+    "secret_set_bundle": {
+      "const": true,
+      "description": "Optional, from 1.0.4: `enterprise secret set` takes --bundle (management-agent.md section 4.7). A build without the member refuses the flag; store the credential without it."
     }
   },
   "examples": [
@@ -49,6 +53,15 @@
       "commit": "0123456789",
       "built": "2026-10-30T18:00:00Z",
       "management_contract": 1
+    },
+    {
+      "schema_version": 1,
+      "name": "defenseclaw-gateway",
+      "version": "1.0.4",
+      "commit": "0123456789",
+      "built": "2026-11-06T18:00:00Z",
+      "management_contract": 1,
+      "secret_set_bundle": true
     }
   ]
 }

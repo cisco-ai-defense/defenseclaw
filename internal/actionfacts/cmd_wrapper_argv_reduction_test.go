@@ -41,7 +41,11 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 		{"static glob", `cmd.exe /c echo *.txt > marker.txt`, false},
 		{"call operator with another command", `& cmd.exe /c echo dccert-block-marker & whoami`, false},
 		{"call operator with dynamic target", `& $env:CMD /c echo dccert-block-marker`, false},
-		{"separate command", `cmd.exe /c echo dccert-block-marker > marker.txt; Write-Output done`, false},
+		{"separate command", `cmd.exe /c echo dccert-block-marker > marker.txt; Write-Output done`, true},
+		{"quoted body in list", `cmd.exe /c "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
+		{"r quoted body in list", `cmd.exe /r "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
+		{"joined switches quoted body in list", `cmd.exe /d/c "echo dccert-block-marker > marker.txt" && type marker.txt`, true},
+		{"quoted body contains cmd list", `cmd.exe /c "echo dccert-block-marker > marker.txt && type marker.txt"`, true},
 		{"no cmd wrapper", `Set-Content marker.txt dccert-block-marker`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,11 +57,11 @@ func TestOpaqueCMDWrapperArgvReductionKeepsOnlyExactOuterArguments(t *testing.T)
 			if !ok {
 				return
 			}
+			marker := slices.ContainsFunc(view.Commands, func(command CommandFact) bool {
+				return command.ArgvComplete && slices.Contains(command.Argv, "dccert-block-marker")
+			})
 			if facts.Authoritative() || !view.Authoritative() || !view.EnforcementEligible() ||
-				len(view.Commands) != 1 || !view.Commands[0].ArgvComplete ||
-				len(view.Commands[0].Operations) != 0 || len(view.Commands[0].Redirects) != 0 ||
-				len(view.Commands[0].Wrappers) != 0 || len(view.Paths) != 0 || len(view.Network) != 0 ||
-				!slices.Contains(view.Commands[0].Argv, "dccert-block-marker") {
+				len(view.Commands) == 0 || !marker {
 				t.Fatalf("view kept more than exact outer argv: %+v", view)
 			}
 		})

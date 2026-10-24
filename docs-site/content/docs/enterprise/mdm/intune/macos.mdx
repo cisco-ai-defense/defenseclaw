@@ -1,0 +1,206 @@
+---
+title: Intune on macOS
+description: Deploy the standalone DefenseClaw enterprise profile to Apple silicon Macs with a Microsoft Intune shell script, report its version with a custom attribute, deliver the AI Defense key and remove it.
+keywords:
+  - DefenseClaw Intune macOS
+  - Intune shell script
+  - macOS custom attribute
+  - macOS PKG app
+  - Apple silicon
+---
+
+<Callout title="Validation">Live script delivery was exercised with test package `9.9.9` (build `f9ed814b1`, PR #1304): install, an offline period and repeated uninstall. A cached install can still reinstall after removal; see [Remove DefenseClaw](#remove-defenseclaw). The earlier removal check used test package `1.0.902`. These test builds do not certify later releases or the PKG app route.</Callout>
+
+You upload one root shell script: your copy of
+`packaging/mdm/macos/defenseclaw-enterprise.sh` with its settings block and config
+filled in. Every day it downloads `defenseclaw-enterprise-<version>-darwin-arm64.pkg`
+from your HTTPS host, installs it when the version differs, and runs `ensure`. A
+custom attribute from `detect.sh` reports the installed version, `not-installed`,
+`outdated`, `unhealthy`, or `busy` while a lifecycle run holds its lock. Removal is a
+root shell script with `packaging/mdm/macos/uninstall.sh`.
+
+This recipe follows the [MDM contract](/docs/enterprise/mdm); read it first for exit
+codes, detection and logs.
+
+## Before you start
+
+- **Tenant:** the Apple push certificate, device groups and licences are in place and
+  the Macs are enrolled ([Prepare your Intune tenant](/docs/enterprise/mdm/intune/tenant)).
+- **Macs:** Apple silicon on macOS 13.0 or later.
+- **Intune:** Intune runs macOS shell scripts only over a direct internet connection,
+  not through a proxy, and stops a script after 60 minutes.
+- **Release:** verify `checksums.txt` and read the pkg's SHA-256 pin
+  ([What you deliver](/docs/enterprise/mdm#what-you-deliver)).
+- **Config:** write the config ([Settings](/docs/enterprise/configure/settings)),
+  without the AI Defense key.
+
+## Choose a route
+
+Use **Route A, the shell script**, unless you must use app assignments. Intune's
+**macOS app (PKG)** type reports success from the app bundles listed under **Included
+apps**. This package installs command-line binaries and no `.app` bundle, so Intune
+can report a working install as failed. Route B is at the end of this page.
+
+## Route A: one root shell script
+
+### 1. Host the package
+
+Put the pkg on an HTTPS location the Macs reach without a proxy. Use a
+direct HTTPS file URL: the wrapper does not follow redirects, so a GitHub release link fails with
+HTTP 302. If the download needs a proxy, set `DC_HTTPS_PROXY`; only the download uses it.
+
+### 2. Fill in the wrapper's settings block
+
+Copy `packaging/mdm/macos/defenseclaw-enterprise.sh` and edit the settings block at
+the top. Intune runs the script with no arguments, so every value goes here:
+
+```sh
+DC_ACTION=ensure
+DC_SOURCE_URL="https://downloads.example.com/defenseclaw/defenseclaw-enterprise-<version>-darwin-arm64.pkg"
+DC_SOURCE_SHA256="replace-with-the-64-hex-sha256-from-checksums.txt"
+DC_TRUST_MODE=hash_pinned
+DC_PRODUCT_VERSION="X.Y.Z"
+```
+
+Paste your config between the `DEFENSECLAW_CONFIG` markers in `dc_inline_config`.
+This minimal one protects Claude Code and Codex in observe mode
+([choose the agents](/docs/enterprise/configure/configuration#choose-the-agents-to-protect)):
+
+```sh
+dc_inline_config() {
+    cat <<'DEFENSECLAW_CONFIG'
+config_version: 9
+deployment_mode: managed_enterprise
+data_dir: /opt/cisco/defenseclaw/runtime
+policy_dir: /opt/cisco/defenseclaw/etc/policies
+enterprise:
+  profile: standalone
+gateway:
+  api_bind: 127.0.0.1
+  api_port: 18970
+guardrail:
+  enabled: true
+  mode: observe
+  connectors:
+    claudecode: {}
+    codex: {}
+ai_discovery:
+  enabled: true
+DEFENSECLAW_CONFIG
+}
+```
+
+An inline `data_dir` must be exactly `/opt/cisco/defenseclaw/runtime`. Never put the
+AI Defense key in the script: Intune scripts are not secret storage. For Developer ID
+trust on a signed and notarized pkg, set `DC_TRUST_MODE=signed` and
+`DC_ALLOWED_TEAM_IDS`.
+
+### 3. Add the script in Intune
+
+**Devices** > **By platform** > **macOS** > **Manage devices** > **Scripts** > **Add**:
+
+| Setting | Value |
+| --- | --- |
+| Upload script | Your edited copy; the wrapper is about 92 KB (1,799 lines) before you add the config |
+| Run script as signed-in user | **No** (runs as root) |
+| Hide script notifications on devices | **Yes** |
+| Script frequency | **Every 1 day**. With `DC_SOURCE_URL` set, every run downloads the pkg before it compares versions |
+| Max number of times to retry if script fails | **3**. Exit `75` means another run or the installer was busy; a later run succeeds |
+
+Assign it to device groups. The script's run status in Intune is Success for exit `0`
+and Failed otherwise.
+
+### 4. Report the version with a custom attribute
+
+Copy `packaging/mdm/macos/detect.sh` and set `DC_FORMAT="value"` in its settings
+block (optionally `DC_MIN_VERSION="X.Y.Z"` and `DC_REQUIRE_HEALTHY=1`). In
+**Devices** > **By platform** > **macOS** > **Organize devices** > **Custom attributes
+for macOS** > **Add**, set **Data type** to **String** and upload your copy. Intune
+runs it about every 8 hours, and it must run as root: without root it reports
+`unknown`. The pkg receipt is the other inventory signal:
+`pkgutil --pkg-info com.cisco.defenseclaw.enterprise`.
+
+## Route B: macOS app (PKG)
+
+Add the pkg in **Apps** > **All Apps** > **Create** > **macOS app (PKG)**. Its
+post-install step runs `enterprise macos ensure --from-package` and uses the config
+already at `/opt/cisco/defenseclaw/etc/config.yaml`, or the built-in default, which
+protects no agents. So set **Ignore app version** to **No**, deliver the config with
+the Route A script (with `DC_SOURCE_URL` empty), and track the result with the Route A
+custom attribute, not the app's install status.
+
+## Deliver the Cisco AI Defense key
+
+Intune scripts and custom attributes are not secret storage. After DefenseClaw is
+installed, deliver the key once through an administrator channel that runs as root,
+after the config turns the feature on ([Cisco AI Defense key](/docs/enterprise/configure/ai-defense-key)):
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret set \
+  --name ai-defense-api-key --from-file /var/root/ai-defense.key
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise secret status
+```
+
+Delete the source file afterwards. Storing the key re-runs `ensure`, which applies it.
+
+## Change the config, upgrade and roll back
+
+- **Change the config:** edit it in your script and save. Intune runs the new version
+  and `ensure` validates and applies it. An invalid config fails the run with
+  `config_invalid` and leaves the installed config unchanged.
+  In bundle mode (bundle trust anchors installed), a changed config is refused with
+  `bundle_required` and the installed one stays; deliver a new signed bundle instead.
+- **Upgrade:** host the new pkg, then update `DC_SOURCE_URL`, `DC_SOURCE_SHA256` and
+  `DC_PRODUCT_VERSION`.
+- **Roll back:** [Roll back](/docs/enterprise/operate/lifecycle#roll-back).
+
+## Deliver a custom macOS rule pack
+
+Before the first pkg install, add a root **stage-pack** script that copies the pack
+into `/opt/cisco/defenseclaw/etc/policies/guardrail/<name>` with `root:wheel`
+ownership. Use the [stage-pack script and pin example](/docs/enterprise/mdm/reference#stage-a-custom-macos-rule-pack),
+run it before the config and pkg steps, and set `guardrail.custom_packs.<name>` to
+that absolute path and its `sha256:<digest>` pin. Stage the pack again before
+reinstalling after a purge.
+
+## Remove DefenseClaw
+
+First remove the Macs from the install script's assignment. The Intune agent for
+macOS keeps running a cached recurring install script after its assignment is
+removed: in the test tenant, Graph confirmed the script had no assignments, yet the
+Mac ran it again 4 seconds and 16 minutes later. A cached install run after the
+uninstall reinstalls the pkg. Before you assign uninstall:
+
+1. Check the Intune agent log on each Mac (`/Library/Logs/Microsoft/Intune`) and wait
+   until each Mac has checked in and the install script's policy ID has stopped
+   appearing.
+2. Assign the uninstall script as a **new** script object. A run-once script that
+   already ran on a Mac does not run again when you reassign it.
+3. After the uninstall, check at the next check-ins that
+   `pkgutil --pkg-info com.cisco.defenseclaw.enterprise` finds no package. If a
+   cached install run reinstalled DefenseClaw, run the uninstall again with another
+   new script object.
+
+The uninstall is a root shell script set to run once, with
+`packaging/mdm/macos/uninstall.sh`; set `DC_PURGE=1` in its settings block for a
+purge ([what it removes](/docs/enterprise/mdm/reference#uninstall)).
+
+## Check it worked
+
+```bash
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+```
+
+`ok: true` and `installed: true` mean the script landed. Where to look otherwise:
+
+| Where | What |
+| --- | --- |
+| **Scripts** > your script > **Device status** | Intune's run status per Mac |
+| `/Library/Logs/Microsoft/Intune` | The Intune agent's logs |
+| `/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log` | Install and ensure results (root, `0600`); uninstall removes this log, so use the Intune script output for its result |
+| `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` | The pkg's own `ensure` result |
+
+For Entra users and groups on a Mac see
+[Identity through Intune](/docs/enterprise/mdm/intune/tenant#identity-through-intune);
+for privacy prompts see the
+[macOS reference](/docs/enterprise/install/reference/macos#privacy-prompts).

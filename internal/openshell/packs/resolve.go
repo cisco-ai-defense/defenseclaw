@@ -487,6 +487,10 @@ type resolver struct {
 	repoMount bool
 	// floorProfile is Flags.FloorProfile.
 	floorProfile string
+	// baseLocked is openshell.admin.locked, the organization's own lock
+	// list: a key the floor locks that it does not list is locked by the
+	// floor profile's sandbox section (lockConstraint).
+	baseLocked []string
 }
 
 // ConstraintManagedCopyOnly is the constraint of a managed computer's
@@ -540,6 +544,7 @@ func Resolve(cfg *config.Config, flags Flags) (*Effective, []Violation, error) {
 		explicit:     flags.Subject != nil,
 		firewallFile: cfg.Firewall.ConfigFile,
 		floorProfile: strings.TrimSpace(flags.FloorProfile),
+		baseLocked:   cfg.OpenShell.Admin.Locked,
 		eff: &Effective{
 			Admin:         adminStatusFor(cfg, floor),
 			admin:         floor,
@@ -1174,6 +1179,8 @@ var reviewFloor = []string{
 	"**/" + legacyconnector.InventoryDotDirs[0] + "/**", "." + legacyconnector.VendorToken + "rules",
 	"**/.kiro/**", "**/.amazonq/**", "**/.continue/**", "**/.roo/**", ".roomodes",
 	".clinerules", "**/.clinerules/**", "**/.opencode/**", "opencode.json", "opencode.jsonc", ".aider.conf.yml",
+	// OpenHands and OmniGent have no DefenseClaw connector any more, but an
+	// installed one still loads its project folder.
 	"**/.devin/**", "**/.openhands/**", "**/.omnigent/**",
 	".github/copilot-instructions.md", ".github/instructions/**", ".github/prompts/**", ".github/chatmodes/**",
 	".github/hooks/**", ".github/copilot/**",

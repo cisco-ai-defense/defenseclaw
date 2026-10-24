@@ -370,6 +370,51 @@ func TestLocalLogPipelineLocalFailureContracts(t *testing.T) {
 		}
 	})
 
+	// A trust anchor or credential change event is a spooled occurrence its
+	// sender offers until every sink has it; the local store is one sink.
+	// Its failed write, like any other, hands back the remote work
+	// (GAP-1536). Once the store holds it (observability.WithSkipLocalWrite)
+	// it is not written again and only its remote work comes back; an
+	// atomic batch, which writes every item, refuses it. Before, a change's
+	// failed write handed back no remote work, so a destination waited on
+	// the local row.
+	t.Run("record the store already holds", func(t *testing.T) {
+		build := func(admission router.Admission) (observability.Record, error) {
+			return buildClassifiedLog(test, admission, "stored-locally")
+		}
+		pipeline, appender := mustPipeline(t, source, mustEngine(t))
+		appender.err = errors.New("database or disk is full")
+		outcome, err := pipeline.Process(t.Context(), metadata, build)
+		assertPipelineError(t, err, ErrorLocalWrite)
+		if outcome.LocalPersisted() || len(outcome.OptionalWork()) != 2 {
+			t.Fatalf("failed write outcome: %+v", outcome)
+		}
+		appender.err = nil
+		appender.mu.Lock()
+		before := len(appender.calls)
+		appender.mu.Unlock()
+		stored := observability.WithSkipLocalWrite(t.Context())
+		outcome, err = pipeline.Process(stored, metadata, build)
+		appender.mu.Lock()
+		after := len(appender.calls)
+		appender.mu.Unlock()
+		if err != nil || !outcome.LocalPersisted() || len(outcome.OptionalWork()) != 2 || after != before {
+			t.Fatalf("stored occurrence: %+v %v, appends %d -> %d", outcome, err, before, after)
+		}
+		if _, err := pipeline.ProcessLocalOnly(stored, metadata, build); err == nil {
+			t.Fatal("a local-only write took an occurrence the store already holds")
+		}
+		plan, evaluator := mustPlanEvaluator(t, source)
+		batch := &batchAppender{recordingAppender: &recordingAppender{graphDigest: plan.Digest()}}
+		batchPipeline, buildErr := NewLocalLogPipeline(plan, evaluator, mustEngine(t), batch, mustFailureFactory(t))
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+		if _, err := batchPipeline.ProcessAtomicBatch(stored, []AtomicBatchItem{{Metadata: metadata, Builder: build}}); err == nil {
+			t.Fatal("an atomic batch took an occurrence the store already holds")
+		}
+	})
+
 	t.Run("cancel during write", func(t *testing.T) {
 		pipeline, appender := mustPipeline(t, source, mustEngine(t))
 		appender.err = context.Canceled

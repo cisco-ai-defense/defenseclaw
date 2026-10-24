@@ -421,11 +421,15 @@ func applyIdentityPosture(cfg *config.Config) {
 	// The gateway's service account cannot translate a sign-in UPN; the
 	// account name the SYSTEM enumerator recorded spells the account as
 	// the directory does (GAP-0382).
+	// A profile whose AppData is redirected out of it takes its IDE
+	// inventory from the enumerator's record (GAP-1249).
 	if spool != "" && runtime.GOOS == "windows" {
 		inventory.SetOwnerEmailLookup(identitySpoolConnectorEmail)
+		inventory.SetOwnerIDELookup(identitySpoolIDEInstalls)
 		useridentity.SetKnownAccountNameLookup(identitySpoolAccountName)
 	} else {
 		inventory.SetOwnerEmailLookup(nil)
+		inventory.SetOwnerIDELookup(nil)
 		useridentity.SetKnownAccountNameLookup(nil)
 	}
 	// A managed gateway keeps the last home of each uid across restarts, so

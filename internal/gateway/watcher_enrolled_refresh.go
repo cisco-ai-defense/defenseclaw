@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -87,8 +88,12 @@ func (s *Sidecar) newEnrolledMCPRefresher(reg *connector.Registry, wcfg config.G
 // within its own budget (enrolledMCPRefreshBudget), also while another
 // call's refresh runs. It returns why the refresh failed or did not finish
 // in time, and the caller refuses the call (fail closed): the gateway would
-// otherwise decide it on a definition it cannot tell is current. Other
-// gateways and connectors have nothing to refresh.
+// otherwise decide it on a definition it cannot tell is current. A refresh
+// that published only some records (*mcpasuser.RefreshIncomplete) still
+// has the published ones read, and refuses only a call whose own record it
+// did not confirm: the caller's connector and account, or any account of
+// the connector when the caller's home is not known. Other gateways and
+// connectors have nothing to refresh.
 func (s *Sidecar) refreshEnrolledMCPBeforeCall(ctx context.Context, connectorName string) error {
 	r := s.enrolledMCPRefresh.Load()
 	if r == nil || !mcpasuser.PublishedConnector(connectorName) {
@@ -97,12 +102,21 @@ func (s *Sidecar) refreshEnrolledMCPBeforeCall(ctx context.Context, connectorNam
 	ctx, cancel := context.WithDeadline(ctx, enrolledMCPRefreshDeadline(ctx, time.Now()))
 	defer cancel()
 	err := r.coalesce.Run(ctx, func() error {
-		if err := r.refresh(ctx); err != nil {
+		err := r.refresh(ctx)
+		var incomplete *mcpasuser.RefreshIncomplete
+		if err != nil && !errors.As(err, &incomplete) {
 			return err
 		}
 		r.reload()
-		return nil
+		return err
 	})
+	var incomplete *mcpasuser.RefreshIncomplete
+	if errors.As(err, &incomplete) {
+		home, _ := callerHomeForAssets(ctx)
+		if !incomplete.Refuses(connectorName, home) {
+			return nil
+		}
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "[watch] could not read the enrolled users' current %s MCP servers before a tool call: %v; the call is refused\n",
 			connectorName, err)

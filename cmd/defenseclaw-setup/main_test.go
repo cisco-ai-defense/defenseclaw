@@ -307,7 +307,7 @@ func TestParseArgsDeferredCleanupQuietRestartContract(t *testing.T) {
 }
 
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
-	for _, connector := range []string{"none", "amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"} {
+	for _, connector := range []string{"none", "amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode"} {
 		for _, mode := range []string{"observe", "action"} {
 			for _, start := range []string{"0", "1"} {
 				t.Run(connector+"/"+mode+"/start-"+start, func(t *testing.T) {
@@ -392,7 +392,7 @@ func TestNoRestartStillRestartsPreviouslyRunningOwnedServices(t *testing.T) {
 }
 
 func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
-	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "omnigent", "opencode"} {
+	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "opencode"} {
 		wanted := requestedServices(options{Connector: connectorName}, serviceState{})
 		if !wanted.Gateway {
 			t.Fatalf("connector %s did not require gateway startup", connectorName)
@@ -911,6 +911,7 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 		filepath.Join("connector_backups", "cursor", "hooks.json.json"),
 		filepath.Join("connector_backups", "devin", "config.json"),
 		filepath.Join("connector_backups", "opencode", "config.json"),
+		// until 1.1: a removed connector a 1.0.x install left behind.
 		filepath.Join("connector_backups", "omnigent", "config.json"),
 		filepath.Join("connector_backups", "hermes", "config.yaml.json"),
 	}
@@ -1669,6 +1670,7 @@ func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
 		"commit mismatch":  []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"1123456789abcdef0123456789abcdef01234567"}`),
 		"trailing":         append(append([]byte(nil), valid...), []byte(` {}`)...),
 		"unknown":          []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","surprise":true}`),
+		"bundle type":      []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","secret_set_bundle":"true"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateMachineVersion(body, "defenseclaw-gateway", "1.2.3-rc.1", commit); err == nil {
@@ -1680,6 +1682,10 @@ func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
 	contract := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now","management_contract":1}`)
 	if err := validateMachineVersion(contract, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
 		t.Fatalf("validateMachineVersion with management_contract: %v", err)
+	}
+	bundle := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now","management_contract":1,"secret_set_bundle":true}`)
+	if err := validateMachineVersion(bundle, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
+		t.Fatalf("validateMachineVersion with secret_set_bundle: %v", err)
 	}
 	cli := []byte(`{"schema_version":1,"name":"defenseclaw-cli","version":"1.2.3-rc.1"}`)
 	if err := validateMachineVersion(cli, "defenseclaw-cli", "1.2.3-rc.1", ""); err != nil {

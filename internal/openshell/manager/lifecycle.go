@@ -102,6 +102,15 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	if err := openshell.CheckHost(runtime.GOOS, runtime.GOARCH); err != nil {
 		st.Available, st.Reason = false, err.Error()
 	}
+	if m.opts.Listeners != nil {
+		if err := m.opts.Listeners(); err != nil {
+			// A gateway or host cause found above stays the primary reason.
+			st.Available = false
+			if st.Reason == "" {
+				st.Reason = err.Error()
+			}
+		}
+	}
 	if eff, err := m.baseEffective(cfg); err == nil {
 		st.Profile = eff.Profile
 		if eff.Pack != nil {
@@ -113,6 +122,7 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	live := 0
 	for _, b := range m.boxes {
 		if b.deleted || b.retained {
 			continue
@@ -121,7 +131,11 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if b.phase == audit.SandboxPhaseReady {
 			st.Running++
 		}
+		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
+			live++
+		}
 	}
+	st.Live = &live
 	for _, a := range m.approvals {
 		if a.status == sandboxapi.ApprovalPending {
 			st.PendingApprovals++
@@ -175,6 +189,21 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	m.sharedLimitsWarnings(out, shared)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// KnownComputeCount counts sandboxes that may hold compute from the
+// manager's saved phases, without contacting OpenShell. It is used while
+// managed sandboxes are off and their account gateway cannot start.
+func (m *Manager) KnownComputeCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, b := range m.boxes {
+		if !b.deleted && !b.retained && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
+			n++
+		}
+	}
+	return n
 }
 
 // Get returns one sandbox.
@@ -327,6 +356,14 @@ func (m *Manager) refuseRetained(b *box) error {
 		"sandbox %s was deleted; only its undo point is kept (undo, review or delete it)", name)
 }
 
+// stop stops the sandbox of b once its harness has exited and, on a driver
+// whose stop does not flush (the MicroVM driver), after sync(1) in the
+// guest. A flush that fails does not hold the stop back: once OpenShell
+// takes the stop, the feed says what it may have lost (flushFailed), never
+// for a stop that was refused or not made. One whose main process
+// completed or failed OpenShell returns as it is: it keeps its phase, and
+// with it the OpenShell gateway (HoldsCompute), until OpenShell reports
+// another.
 func (m *Manager) stop(ctx context.Context, b *box) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
@@ -335,7 +372,11 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
 	defer cancel()
 	m.mu.Lock()
-	name, mode, reason := b.rec.Name, b.rec.WorkdirMode, b.rec.PhaseReason
+	name, reason, driver := b.rec.Name, b.rec.PhaseReason, b.rec.Driver
+	// OpenShell stops nothing of a sandbox whose workload ended: its phase
+	// stays until OpenShell reports another.
+	ended := b.phase == audit.SandboxPhaseCompleted ||
+		b.phase == audit.SandboxPhaseError && !openshell.VMGone(reason) && !openshell.ProvisioningTimedOut(reason)
 	m.mu.Unlock()
 	if err := m.checkSandbox(ctx, gw, b); err != nil {
 		return err
@@ -344,10 +385,12 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
-	run := m.endHarness(ctx, gw, b)
-	m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
+	run, flushErr := m.endHarness(ctx, gw, b)
+	if !ended {
+		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
+	}
 	m.keepRunLog(ctx, gw, b, run)
-	_, err = gw.Client.StopSandbox(ctx, name)
+	stopped, err := gw.Client.StopSandbox(ctx, name)
 	if err != nil && transientGatewayError(err) {
 		// The connection closed under the call (the gateway restarted, or
 		// another call dropped the connection): the stop goes again on a fresh
@@ -364,7 +407,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	if err != nil {
 		m.dropGateway(gw, err)
 		m.stopFailed(ctx, gw, b)
-		if e := errorPhaseRefusal(name, mode, reason, err); e != nil {
+		if e := m.errorPhaseRefusal(name, reason, driver, err); e != nil {
 			return e
 		}
 		if e := m.errorPhaseNow(b); e != nil {
@@ -377,6 +420,27 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		}
 		return upstream("stop sandbox "+name, err)
 	}
+	if ph := stoppedAsIs(stopped); ph != "" {
+		// OpenShell returns a sandbox whose workload completed, or whose
+		// main process failed, as it is: it stops nothing, and flushes
+		// nothing, of its MicroVM, which may still run what its workload
+		// left running, so it still holds the gateway
+		// (openshell.HoldsGateway; the caller says how to stop it:
+		// openshell.StopWayOn).
+		var cond *audit.SandboxCondition
+		if ph == audit.SandboxPhaseError && reason != "" {
+			cond = &audit.SandboxCondition{Reason: reason}
+		}
+		m.mu.Lock()
+		b.sb = stopped
+		m.mu.Unlock()
+		m.lifecycle(ctx, b, ph, audit.SandboxTriggerStop, false, cond, stopped.Status.ExitCode)
+		return nil
+	}
+	// OpenShell took the stop: what the flush did not confirm is lost now.
+	if flushErr != nil {
+		m.flushFailed(name, flushErr)
+	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
 	if err != nil && transientGatewayError(err) {
 		if cur, ok := m.reconnect(ctx, gw, err); ok {
@@ -386,6 +450,13 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	}
 	if err != nil {
 		m.stopFailed(ctx, gw, b)
+		// OpenShell before 0.1.5 takes the stop of a MicroVM in its error
+		// state and then fails the wait ("sandbox is in error state"): the
+		// sandbox, why and the way on, not OpenShell's words alone
+		// (GAP-0871).
+		if e := m.errorPhaseNow(b); e != nil {
+			return e
+		}
 		return upstream("wait for sandbox "+name+" to stop", err)
 	}
 	m.mu.Lock()
@@ -393,6 +464,41 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
 	return nil
+}
+
+// lockStart takes the gateway's lifecycle lock for a create or a start
+// (Options.StartLock), which it holds over OpenShell's call only: while
+// DefenseClaw restarts or upgrades the gateway (doctor --fix, setup, the
+// OpenShell upgrade), whose check of the sandboxes would not see one
+// started after it, the call is refused.
+func (m *Manager) lockStart() (func(), error) {
+	if m.opts.StartLock == nil {
+		return func() {}, nil
+	}
+	unlock, err := m.opts.StartLock()
+	switch {
+	case errors.Is(err, openshell.ErrGatewayBusy):
+		return nil, &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Message: "DefenseClaw is restarting or upgrading the OpenShell gateway",
+			Detail: "start the sandbox again once `defenseclaw sandbox doctor --fix`, `defenseclaw sandbox setup` or the OpenShell upgrade has finished"}
+	case err != nil:
+		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "take the OpenShell gateway's lifecycle lock: %v", err)
+	}
+	return unlock, nil
+}
+
+// stoppedAsIs is the phase of a sandbox OpenShell's stop returned as it
+// was, as OpenShell (0.1.3 and 0.1.5) does for one whose workload completed
+// or whose main process failed (the error state with an exit code); ""
+// for one it stops.
+func stoppedAsIs(sb *openshell.Sandbox) audit.SandboxPhase {
+	if sb == nil {
+		return ""
+	}
+	switch ph := auditPhase(sb.Status.Phase); {
+	case ph == audit.SandboxPhaseCompleted, ph == audit.SandboxPhaseError && sb.Status.ExitCode != nil:
+		return ph
+	}
+	return ""
 }
 
 // transientGatewayError reports a call that failed because the connection to
@@ -633,7 +739,7 @@ func (e *sessionRulesError) Unwrap() error { return e.err }
 // stopErr is that stop's failure: the sandbox then still runs with the
 // rules, and the refusal says so and how to end it instead. The gateway's
 // own words stay in the log.
-func sessionRulesLeft(name string, err, stopErr error) error {
+func sessionRulesLeft(name string, err, stopErr error, stopFlushes bool) error {
 	rules, these := "the network rules", "the rules"
 	what := "the network rules approved for its last session"
 	var left *sessionRulesError
@@ -658,7 +764,7 @@ func sessionRulesLeft(name string, err, stopErr error) error {
 	}
 	return &sandboxapi.Error{Code: code,
 		Message: "sandbox " + name + " did not start: " + what + " could not be removed from its policy, " +
-			"so DefenseClaw stopped it again (its work is kept)",
+			"so " + stoppedUnverifiedOutcome(stopFlushes),
 		Detail: "a new session does not keep what was approved for the last one; start it again " +
 			"(the removal is tried first), and if this repeats, `defenseclaw sandbox doctor` checks the OpenShell gateway"}
 }
@@ -670,6 +776,10 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	// The record is judged against the driver the gateway runs now.
 	gw, err := m.driverGateway(ctx)
 	if err != nil {
+		return err
+	}
+	// A new session takes the supervisor of the gateway's release.
+	if err := m.sandboxReleaseRefusal(gw); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(ctx, defaultOpTimeout)
@@ -699,6 +809,30 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if !stoppedPhase(sb.Status.Phase) {
 		return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox %s is %s, not stopped; stop it before starting a new session",
 			rec.Name, strings.ToLower(string(sb.Status.Phase)))
+	}
+	// A MicroVM whose workload ended still runs its VM, which OpenShell's
+	// start ends with no flush: only one the user asked to end goes on.
+	if err := lingeringStartRefusal(rec.Name, gw.Driver, sb, rec.PhaseReason, req.EndVM); err != nil {
+		return err
+	}
+	// No new session while a legacy guest runs unprotected; this one's
+	// start ends it when it is an ended legacy MicroVM (--end-vm).
+	if err := m.legacyRunRefusal(rec.Name); err != nil {
+		return err
+	}
+	// Containment may have detached providers or removed rules before an
+	// OpenShell error prevented its final confirmation, and the legacy VM
+	// may have stopped since: the record said so before the first change
+	// (OldSupervisorNetworkRestore), so the create-time policy comes back
+	// even when the closed-network checkpoint was not reached. The closed
+	// and providers fields alone are what earlier 1.0.4 builds of this
+	// change recorded, until 1.0.4 ships.
+	restoreLegacyNetwork := rec.OldSupervisorNetworkRestore || rec.OldSupervisorNetworkClosed || len(rec.OldSupervisorProviders) > 0 ||
+		oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
+	// A sandbox an OpenShell before 0.1.5 created keeps a Docker bootstrap
+	// that 0.1.5 cannot read (GAP-0300): it moves to 0.1.5's format first.
+	if err := m.migrateBootstrap(gw, rec.Name, sb); err != nil {
+		return err
 	}
 	m.endSessionUnblocks(b)
 	eff, violations, err := m.resolveBoxViolations(b)
@@ -834,11 +968,21 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
+	// Not while DefenseClaw restarts or upgrades the gateway (lockStart).
+	unlockStart, err := m.lockStart()
+	if err != nil {
+		return err
+	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseStarting, audit.SandboxTriggerStart, false, nil, nil)
-	if _, err := gw.Client.StartSandbox(ctx, rec.Name); err != nil {
+	_, err = gw.Client.StartSandbox(ctx, rec.Name)
+	unlockStart()
+	if err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
-		if e := errorPhaseRefusal(rec.Name, rec.WorkdirMode, rec.PhaseReason, err); e != nil {
+		if e := legacyBootstrapRefusal(rec.Name, gw.Version, err); e != nil {
+			return e
+		}
+		if e := m.errorPhaseRefusal(rec.Name, rec.PhaseReason, rec.Driver, err); e != nil {
 			return e
 		}
 		return upstream("start sandbox "+rec.Name, err)
@@ -852,13 +996,29 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		}
 		return vmExitFailure(runtime.GOOS, m.managedMode(), gw.Driver, upstream("wait for sandbox "+rec.Name, err))
 	}
+	if restoreLegacyNetwork {
+		// The old VM is gone now. Restore only its create-time network policy,
+		// after the new supervisor is ready: never reopen a route while the
+		// legacy supervisor can still run background work. Session approvals
+		// removed above are not brought into the new session.
+		if err := m.restoreOldSupervisorNetwork(ctx, gw, b, sb, eff); err != nil {
+			stopErr := m.stopUnverified(ctx, gw, b)
+			detail := "DefenseClaw stopped the new session before it could run without its network policy"
+			if stopErr != nil {
+				detail += "; stopping it also failed: " + stopErr.Error()
+			}
+			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "sandbox " + rec.Name + " did not restore its network on the new OpenShell supervisor: " + err.Error(),
+				Detail:  detail}
+		}
+	}
 	if rulesLeft != nil {
 		if err := m.endSessionRules(ctx, gw, b, eff); err != nil {
 			// Fail closed: a sandbox must not run a new session with a rule
 			// approved for the last one.
 			m.logf("sandbox %s: the rules approved for its last session are still in its policy: %v (before the start: %v); stopping it again",
 				rec.Name, err, rulesLeft)
-			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b))
+			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b), gw.Driver.StopFlushes)
 		}
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
@@ -873,6 +1033,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	b.rulesAdded, b.autoApproved = 0, nil
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStart, false, nil, nil)
+	if restoreLegacyNetwork {
+		m.syncCredential(b, eff)
+	}
 	m.observeNow(b)
 	m.startWatch(b)
 	m.enforceApprovedRules(ctx, gw, b, eff)

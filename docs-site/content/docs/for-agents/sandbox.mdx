@@ -1,0 +1,93 @@
+---
+title: Sandbox an agent
+description: A runbook for an AI agent to set up OpenShell sandboxes, run an agent in one and read a block without unblocking anything.
+keywords:
+  - DefenseClaw sandbox agent runbook
+  - defenseclaw sandbox setup
+  - defenseclaw sandbox doctor
+---
+
+{/* sources: features/sandboxes, how-to/sandboxes/*, troubleshooting/sandboxes, cli/defenseclaw/commands/cmd_sandbox.py */}
+
+<Callout title="Hand this page to your agent">
+Paste this into your agent:
+
+```text
+Read https://cisco-ai-defense.github.io/defenseclaw/docs/for-agents/sandbox/llms.md and follow it. Ask me before unblocking anything.
+```
+</Callout>
+
+You are an AI agent. Set up OpenShell sandboxes for the user, run one agent in a sandbox and explain what you see. Sandboxes run on Linux and Apple-silicon Macs only.
+
+## Hard rules
+
+1. Observe first. Never unblock a site, switch to action mode, change a fail mode, disable a connector or edit `config.yaml` by hand without the user's yes to that exact change.
+2. Never print a key or token. Do not pass the user's secrets into a sandbox.
+3. Stop on a managed computer: exit code `3`, or `"deployment_mode": "managed_enterprise"` in `defenseclaw status --json`.
+4. Do not delete or undo a sandbox's work without the user's yes.
+
+## Steps
+
+1. Check the platform.
+
+   ```bash
+   uname -sm
+   ```
+
+   Expected: `Linux x86_64`, `Linux aarch64` or `Darwin arm64`.
+   If it differs (Windows, or an Intel Mac): stop. Sandboxes are unsupported there.
+
+2. Set up. This installs or checks Docker, OpenShell and the harness images and can take several minutes. Tell the user before you start.
+
+   ```bash
+   defenseclaw sandbox setup
+   ```
+
+   Expected: a list of checks ending without errors.
+   If a step fails, read its message and go to [Sandbox troubleshooting](/docs/troubleshooting/sandboxes). Do not retry in a loop.
+
+3. Check readiness.
+
+   ```bash
+   defenseclaw sandbox doctor
+   ```
+
+   Expected: a list of `✓` rows ending with `✓ ready for sandboxes`.
+   If it differs: report each row without `✓` and its message. Repeat step 3 after each fix the user approves, until the last line says `ready for sandboxes`.
+
+4. Start the agent in a sandbox, in the project folder the user names. `sandbox run` gives the agent your terminal, and your shell has none, so either ask the user to run `defenseclaw sandbox run claude` in their own terminal, or run one task in the background:
+
+   ```bash
+   defenseclaw sandbox run claude --prompt "<the task the user gave>" --detach
+   defenseclaw sandbox logs -f <name>
+   ```
+
+   Expected: a banner that names the sandbox, the project folder and the policy. A detached run returns after the banner; its `Asks` row names the sandbox (`defenseclaw sandbox approvals --watch --sandbox <name>`).
+   If it says `` `sandbox run` attaches Claude Code to your terminal, and there is none ``, you left out `--prompt`. If the command is refused for another reason, quote the message.
+
+5. Read a block. In a second terminal, list what the sandbox allowed and refused.
+
+   ```bash
+   defenseclaw sandbox activity --sandbox <name>
+   ```
+
+   Expected: timestamped lines; a refused site looks like `✗ pastebin.com (paste site)  → unblock: defenseclaw sandbox unblock pastebin.com --sandbox <name>`.
+   If it differs: quote the lines you see. Do not run the unblock command. Ask the user: "Allow `<destination>` once, for good, or keep it blocked?" Then run only what they choose ([Unblock a site](/docs/how-to/sandboxes/unblock-a-site)).
+
+6. At the end of the session, list sandboxes.
+
+   ```bash
+   defenseclaw sandbox list
+   ```
+
+   Expected: the session with its phase.
+   If the user wants to keep or drop the work, see [Review, undo or pull](/docs/how-to/sandboxes/review-undo-or-pull). Do not choose for them.
+
+## Report
+
+Reply with:
+
+- Platform and the last line of `sandbox doctor`.
+- The command you ran in the sandbox and the project folder.
+- Every block: what, why, and the user's decision.
+- What the user must still decide (keep, undo or pull the work).

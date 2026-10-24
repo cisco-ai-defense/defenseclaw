@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,13 +99,21 @@ func overLimitNotUnverified(t *testing.T, got string) {
 
 func overLimitHostHook(t *testing.T, connector, home, body string) string {
 	t.Helper()
+	return overLimitHostHookWithEvidence(t, connector, home, body,
+		hookpaths.ResolveConnector(connector, "", "preToolUse", []byte(body)))
+}
+
+// overLimitHostHookWithEvidence is overLimitHostHook with the hook client's
+// write evidence computed by the caller.
+func overLimitHostHookWithEvidence(t *testing.T, connector, home, body, evidence string) string {
+	t.Helper()
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = connector
 	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/"+connector+"/hook", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set(hookpaths.Header, hookpaths.Resolve([]byte(body)))
+	req.Header.Set(hookpaths.Header, evidence)
 	switch connector {
 	case "codex":
 		setTestCodexHookBinding(req, "PreToolUse", defaultTestCodexHookContract)
@@ -149,6 +158,75 @@ func TestOverLimitNativeWritesOfAuthorizedKeysAreBlockedOnTheHost(t *testing.T) 
 			t.Run(fmt.Sprintf("hermes-%s/block=%t", call.name, want), func(t *testing.T) {
 				got := hermesPatchHostHook(t, home, project, hermesPatchBody(t, project, call.tool, call.args(target)))
 				if blocked := hermesPatchVerdict(t, got); blocked != want {
+					t.Fatalf("blocked = %t, want %t: %.600s", blocked, want, got)
+				}
+				overLimitNotUnverified(t, got)
+			})
+		}
+	}
+}
+
+// overLimitProtectHomeRows are the rows of the ProtectHome table: the write
+// tools of each connector on the link, and two of them on a project file.
+var overLimitProtectHomeRows = map[string]bool{
+	"claudecode-Write-0": true, "claudecode-Edit-2": true, "opencode-write-4": true,
+	"codex-apply_patch-6": true, "copilot-create-7": true,
+}
+
+// TestOverLimitNativeWritesThroughAHomeSymlinkUnderProtectHome pins the
+// reduced call's write evidence on a managed gateway that cannot look into
+// the user's home (ProtectHome; the mode-zero parent stands in for it): a
+// native write tool call over the argument limit to a project symlink to
+// ~/.ssh/authorized_keys is blocked by the SSH persistence rule, and the
+// same call to an ordinary project file stays allowed. The hook client
+// listed no target of the reduced call and the gateway dropped the
+// truncation marker that said so, so the write through the link was
+// allowed with no rule.
+func TestOverLimitNativeWritesThroughAHomeSymlinkUnderProtectHome(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX gateway walk")
+	}
+	root := t.TempDir()
+	homes := filepath.Join(root, "homes")
+	home := filepath.Join(homes, "alice")
+	project := filepath.Join(home, "project")
+	for _, dir := range []string{filepath.Join(home, ".ssh"), project} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keys := filepath.Join(home, ".ssh", "authorized_keys")
+	notes := filepath.Join(project, "big.json")
+	for _, file := range []string{keys, notes} {
+		if err := os.WriteFile(file, []byte("# base\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(project, "deploy.cfg")
+	if err := os.Symlink(keys, link); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
+	for i, call := range overLimitNativeWriteCalls() {
+		if !overLimitProtectHomeRows[call.name(i)] {
+			continue
+		}
+		for target, want := range map[string]bool{link: true, notes: false} {
+			if !overLimitRow(overLimitHostBenign, call.name(i), want) {
+				continue
+			}
+			t.Run(fmt.Sprintf("%s/block=%t", call.name(i), want), func(t *testing.T) {
+				if err := os.Chmod(homes, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				body := call.body(t, project, target)
+				evidence := hookpaths.ResolveConnector(call.connector, "", "preToolUse", []byte(body))
+				if err := os.Chmod(homes, 0); err != nil {
+					t.Fatal(err)
+				}
+				got := overLimitHostHookWithEvidence(t, call.connector, home, body, evidence)
+				if blocked := nativeWriteBlocked(t, got); blocked != want {
 					t.Fatalf("blocked = %t, want %t: %.600s", blocked, want, got)
 				}
 				overLimitNotUnverified(t, got)

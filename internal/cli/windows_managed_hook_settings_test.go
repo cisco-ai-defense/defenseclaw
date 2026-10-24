@@ -94,3 +94,67 @@ func TestWindowsManagedHookCommandRequiresExactLauncherBoundary(t *testing.T) {
 		}
 	}
 }
+
+// windowsClaudeGuardFixture is the cmd.exe launcher guard that 1.0.0-1.0.3
+// per-user Setup wrote for a Claude Code hook, with its else branch.
+func windowsClaudeGuardFixture(launcher, connector, elseExit string) map[string]any {
+	args := []any{"/d", "/c", "if", "exist", launcher, "(", launcher, "hook", "--connector", connector, ")", "else", "(", "echo"}
+	for _, word := range strings.Fields("DefenseClaw blocked this: its Claude Code hook launcher is missing. Run the DefenseClaw installer again to repair it.") {
+		args = append(args, word)
+	}
+	args = append(args, "1>&2", "&", "exit", "/b", elseExit, ")")
+	return map[string]any{"type": "command", "command": `C:\Windows\System32\cmd.exe`, "args": args}
+}
+
+// GAP-0587: the upgrade from 1.0.0-1.0.3 removes the launcher guards their
+// per-user Setup wrote as well as the exec form 0.8.x wrote, and keeps an
+// edited guard, another user's guard and another connector's guard, which
+// are then reported as leftovers.
+func TestWindowsUninstallRemovesTheGeneratedClaudeLauncherGuard(t *testing.T) {
+	t.Setenv("SystemRoot", `C:\Windows`)
+	const launcher = `C:\Users\Alice Doe\.local\bin\defenseclaw-hook.exe`
+	guard := windowsClaudeGuardFixture(launcher, "claudecode", "2")
+	execForm := map[string]any{"type": "command", "command": launcher, "args": []any{"hook", "--connector", "claudecode"}}
+	edited := windowsClaudeGuardFixture(launcher, "claudecode", "0")
+	otherUser := windowsClaudeGuardFixture(`C:\Users\bob\.local\bin\defenseclaw-hook.exe`, "claudecode", "2")
+	otherConnector := windowsClaudeGuardFixture(launcher, "codex", "2")
+	lint := map[string]any{"type": "command", "command": `C:\Windows\System32\cmd.exe`, "args": []any{"/d", "/c", "lint.cmd"}}
+	raw, err := json.Marshal(map[string]any{"model": "sonnet", "hooks": map[string]any{
+		"PreToolUse":  []any{map[string]any{"matcher": "Bash", "hooks": []any{guard, lint}}},
+		"PostToolUse": []any{map[string]any{"hooks": []any{execForm}}},
+		"Stop":        []any{map[string]any{"hooks": []any{guard}}, map[string]any{"hooks": []any{edited, otherUser, otherConnector}}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, removed, err := removeWindowsManagedClaudeCommands(raw, launcher)
+	if err != nil || removed != 3 {
+		t.Fatalf("removed=%d error=%v: %s", removed, err, out)
+	}
+	var settings struct {
+		Model string `json:"model"`
+		Hooks map[string][]struct {
+			Hooks []map[string]any `json:"hooks"`
+		} `json:"hooks"`
+	}
+	if err := json.Unmarshal(out, &settings); err != nil || settings.Model != "sonnet" {
+		t.Fatalf("settings changed: %s (%v)", out, err)
+	}
+	if _, ok := settings.Hooks["PostToolUse"]; ok {
+		t.Fatalf("the exec form survived: %s", out)
+	}
+	if pre := settings.Hooks["PreToolUse"]; len(pre) != 1 || len(pre[0].Hooks) != 1 || pre[0].Hooks[0]["args"].([]any)[2] != "lint.cmd" {
+		t.Fatalf("the guard survived or the shared group's other hook was lost: %s", out)
+	}
+	if stop := settings.Hooks["Stop"]; len(stop) != 1 || len(stop[0].Hooks) != 3 {
+		t.Fatalf("an edited, another user's or another connector's guard was removed: %s", out)
+	}
+	left, err := windowsClaudeHooksNamingDefenseClaw(out)
+	if err != nil || len(left) != 3 || left[0] != "Stop: a hook command naming defenseclaw-hook (arguments not shown)" {
+		t.Fatalf("the kept guards must be reported as leftovers: %q (%v)", left, err)
+	}
+	again, count, err := removeWindowsManagedClaudeCommands(out, launcher)
+	if err != nil || count != 0 || string(again) != string(out) {
+		t.Fatalf("cleanup is not idempotent: %d %v", count, err)
+	}
+}

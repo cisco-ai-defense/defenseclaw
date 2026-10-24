@@ -344,6 +344,14 @@ func (g *GuardrailInspector) currentJudge() *LLMJudge {
 	return g.judge
 }
 
+// requestJudge is the judge a request decides with: the one of the
+// generation it pinned (judgeOf), so its verdict and its records' policy
+// stamp come from one generation (GAP-1006); the inspector's own judge
+// outside a gateway.
+func (g *GuardrailInspector) requestJudge(ctx context.Context) *LLMJudge {
+	return judgeOf(pinnedGeneration(ctx), g.currentJudge())
+}
+
 // SetCiscoInspector replaces the remote inspector after construction.
 // Used by NewGuardrailProxy in managed_enterprise mode to inject the
 // token-authenticated defense_claw client. Pass nil to disable the
@@ -1128,7 +1136,7 @@ func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, c
 	// signals as MEDIUM alerts so they appear in the audit log rather than
 	// being silently dropped.
 	var judgeVerdict *ScanVerdict
-	judge := g.currentJudge()
+	judge := g.requestJudge(ctx)
 	if len(review) > 0 {
 		if judge != nil {
 			judgeStart := time.Now()
@@ -1200,7 +1208,7 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 	// fall back to an error sentinel so the parent always proceeds
 	// (judge → regex fallback, triage → empty signal set) even under
 	// a pathological policy / scanner bug.
-	if judge := g.currentJudge(); judge != nil {
+	if judge := g.requestJudge(ctx); judge != nil {
 		go func() {
 			defer func() {
 				if rec := recover(); rec != nil {

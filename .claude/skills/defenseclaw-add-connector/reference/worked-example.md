@@ -163,7 +163,7 @@ Record these, with the source for each, in the contract `Notes` and in the corre
 ## 7. Docs
 
 1. `docs-site/content/docs/connectors/copilot.mdx`: title "GitHub Copilot CLI"; `## Platform support`, `## Setup`, `## Files DefenseClaw will modify`, `## Hook capabilities`, `## Disable`.
-2. `docs-site/content/docs/connectors/meta.json`, `connectors/index.mdx` and `connectors/compatibility.mdx` rows.
+2. `docs-site/content/docs/connectors/(hook-connectors)/meta.json` (`../copilot`), `connectors/index.mdx` and `connectors/compatibility.mdx` rows.
 3. `docs-site/data/capability-matrix.json`, `docs-site/data/connector-icons.ts`, and the committed `docs-site/public/connector-icons/copilot.svg`.
 4. The enterprise pages and the four threat models (enterprise.md §10).
 

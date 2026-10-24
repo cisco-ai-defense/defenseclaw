@@ -1792,8 +1792,6 @@ def mcp_unset_target_for_connector(connector: str) -> str:
             return os.path.join(connector_home("devin"), "mcp_config.json")
         case "copilot":
             return "./.github/mcp.json"
-        case "openhands":
-            return "~/.openhands/mcp.json"
         case "antigravity":
             return "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json"
         case "amp":
@@ -1801,8 +1799,6 @@ def mcp_unset_target_for_connector(connector: str) -> str:
         case "opencode":
             user_target = os.path.join(connector_home("opencode"), "opencode.json")
             return f"{user_target} / <workspace>/opencode.json"
-        case "omnigent":
-            return "unsupported/unverified by the OmniGent connector"
         case _:
             return "OpenClaw config" if normalized_connector(connector) == "openclaw" else "connector MCP config"
 
@@ -1843,16 +1839,12 @@ def friendly_connector_name(connector: str) -> str:
             return "Devin"
         case "copilot":
             return "GitHub Copilot CLI"
-        case "openhands":
-            return "OpenHands"
         case "antigravity":
             return "Antigravity"
         case "opencode":
             return "OpenCode"
         case "amp":
             return "Amp"
-        case "omnigent":
-            return "OmniGent"
         case "kiro":
             return "Kiro"
         case value:
@@ -1925,7 +1917,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.opencode/{skill,skills} and OPENCODE_CONFIG_DIR/{skill,skills}",
             "<project-or-user>/.claude/skills and .agents/skills",
         ),
-        ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): (
             f"{claude_mcp_state_path()} (mcpServers)",
@@ -1943,7 +1934,6 @@ def connector_source_label(connector: str, category: str) -> str:
         ("hermes", "mcps"): (f"{hermes_config} (mcp_servers)",),
         ("cursor", "mcps"): ("~/.cursor/mcp.json", "./.cursor/mcp.json"),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
-        ("openhands", "mcps"): ("~/.openhands/mcp.json",),
         ("devin", "mcps"): (
             os.path.join(devin_root, "mcp_config.json"),
             "./.devin/mcp_config.json",
@@ -1962,7 +1952,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "<skill>/mcp.json",
         ),
         ("opencode", "mcps"): tuple(opencode_mcp_sources),
-        ("omnigent", "mcps"): ("unsupported/unverified by the OmniGent connector",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("devin", "plugins"): ("unsupported; Devin plugins are closed beta",),
         ("codex", "plugins"): (
@@ -2002,7 +1991,6 @@ def connector_source_label(connector: str, category: str) -> str:
             "<global/project/custom>/.opencode/{command,commands}/**/*.md",
             "opencode.json/jsonc command map (tools permission map is not an asset)",
         ),
-        ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("devin", "config"): (
             "./.devin/hooks.v1.json",
             os.path.join(devin_root, "config.json"),
@@ -2011,7 +1999,6 @@ def connector_source_label(connector: str, category: str) -> str:
             f"{opencode_plugin} (managed bridge; lifecycle custody only)",
             "global/project/custom opencode.json and opencode.jsonc",
         ),
-        ("omnigent", "config"): ("$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",),
     }
     return ", ".join(sources.get((connector, category), ()))
 

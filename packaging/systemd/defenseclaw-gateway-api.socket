@@ -5,7 +5,7 @@
 
 [Unit]
 Description=DefenseClaw gateway loopback API socket
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/linux/
 
 [Socket]
 ListenStream=127.0.0.1:18970

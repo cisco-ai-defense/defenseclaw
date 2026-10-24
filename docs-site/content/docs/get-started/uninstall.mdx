@@ -1,0 +1,70 @@
+---
+title: Uninstall
+description: Remove DefenseClaw for your account, keep your data, or remove everything.
+keywords:
+  - defenseclaw uninstall
+  - remove DefenseClaw
+  - DefenseClaw uninstall --all
+---
+
+`defenseclaw uninstall` removes DefenseClaw for your account. It works the same on macOS, Linux and Windows.
+
+Close your agent sessions first. A session that stays open goes on without DefenseClaw: its hooks fail and nothing checks its tool calls. The plan says so before it asks to proceed.
+
+## Steps
+
+1. See what would be removed. Nothing changes.
+
+   ```bash
+   defenseclaw uninstall --dry-run
+   ```
+
+   ```text
+     ------------------------ Plan ------------------------
+
+     * active connector:    claudecode
+     * connector teardown:  claudecode
+         - an agent session that is open now goes on without DefenseClaw (its hooks fail and nothing checks its tool calls): close it first, or restart it once DefenseClaw is back
+     * sandbox teardown:    no (no OpenShell sandbox state)
+     * stop sidecar:        yes
+     * wipe ~/.defenseclaw: no
+     * remove binaries:     no
+
+     (dry-run - nothing modified)
+   ```
+
+2. Remove the connector hooks and stop the gateway. This keeps `~/.defenseclaw` and the programs, so a later `defenseclaw setup guardrail` picks up where you left off.
+
+   ```bash
+   defenseclaw uninstall
+   ```
+
+3. To remove everything, add `--all` (deletes `~/.defenseclaw`: audit log, config, secrets) and `--binaries` (removes the CLI, gateway and helper programs).
+
+   ```bash
+   defenseclaw uninstall --all --binaries --yes
+   ```
+
+   If you already ran `defenseclaw sandbox teardown`, add `--stop-sandboxes` to this command. Review or pull any remaining sandbox work first: `--stop-sandboxes` stops and deletes running sandboxes.
+
+An agent config file you have not changed since setup is restored from its checked backup. If you edited it, only DefenseClaw's entries are removed.
+
+<Callout type="warn">
+`--all` deletes the audit log. Export what you need first with `defenseclaw-gateway audit export`.
+</Callout>
+
+## Sandboxes
+
+If you set up sandboxes, uninstall also removes DefenseClaw's OpenShell sandboxes and images. A running sandbox stops the uninstall before any change: pull or review its work (`defenseclaw sandbox review NAME`, `defenseclaw sandbox undo NAME`), stop it, then retry. `--stop-sandboxes` stops and deletes running sandboxes; copy-mode work not yet pulled back is lost. If teardown fails, rerun without `--all` and `--binaries` and add `--skip-sandbox-teardown`, then run `defenseclaw-gateway sandbox teardown` once Docker and OpenShell work.
+
+## Windows
+
+On Windows the programs are in `%USERPROFILE%\.local\bin` and the data in `%USERPROFILE%\.defenseclaw`. The commands are the same, and `--binaries` removes the programs. There are no sandboxes to tear down.
+
+## Other ways to remove
+
+- A source build: `defenseclaw.cmd uninstall --binaries --yes` on Windows before building again; see [Build from source](/docs/appendix/build-from-source).
+- Turn the guardrail off without removing anything: [Turn off the guardrail](/docs/how-to/guardrail/turn-off-the-guardrail).
+- Managed computers: removal is an administrator task ([Enterprise lifecycle](/docs/enterprise/operate/lifecycle)).
+
+Every flag is in the [CLI reference](/docs/reference/commands/cli).

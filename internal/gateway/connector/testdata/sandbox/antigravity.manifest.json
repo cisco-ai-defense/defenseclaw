@@ -44,44 +44,44 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 83805,
-      "sha256": "e224a2f7c787c30b5a561a04c7c6e30608257dc9abd8fc9a5c9cbf8f578c5a07"
+      "size": 121886,
+      "sha256": "13656cf1cd8c9a7af7add65c4f90b125aaff541c7b2dd63a4ba6dd77ab852a65"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 12549,
-      "sha256": "0012d90e6c0a4c12a0d191b4a19ac0335ae6f3dd9f22aa5b7673eecb707326b5"
+      "size": 12561,
+      "sha256": "2c40147b2c6e3833c37722e73b7ee12ad1f6da5866622b811feb0ab22531cfc1"
     },
     "/usr/local/lib/defenseclaw/hooks/antigravity-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 9577,
-      "sha256": "7696405e70262d2e9112c966d1791c3f9ffb5683f1ba2f0823c61ec869d302f9"
+      "size": 12792,
+      "sha256": "33c796ac5c4e9818beab4f0cd0fe73f8a8d086ef5c86aca3e0373d79803c68ea"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6863,
-      "sha256": "58b87d0144eb9d1f9dffceaee9b5cb61586dacc361cbed925015368d8667519f"
+      "size": 6925,
+      "sha256": "bd72389be7045726f177b47c378e01622b5743e349830c0b65a3d2a2ffb8e791"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6054,
-      "sha256": "e98c09adafedab121738866ce62121bee91a3326144223e67eaf646cdb2a5616"
+      "size": 6116,
+      "sha256": "7ca83c22e652e6679c35b74a76e7a42618c8f6e2784ad15393747a9de520a7f6"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6482,
-      "sha256": "f86ab47c259ca97fcfe1c573a361c05c581bb5637adba37f7e4b0eb98287f385"
+      "size": 6544,
+      "sha256": "c960f71d737bbe881aba72fe1cb9417d9b1c84f7e44137d5a5ce33c849ee8fc2"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6831,
-      "sha256": "5558d5d731c3082f2412d186545d9fadb664b2b6e1f41d577d2d54215f1c6421"
+      "size": 6893,
+      "sha256": "868f716f078b5704b8df8262c470c0c532f2d59bf6c010ad8981f01fcb4b347c"
     }
   }
 }

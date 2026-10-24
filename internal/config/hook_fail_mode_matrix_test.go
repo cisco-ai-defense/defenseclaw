@@ -6,22 +6,20 @@ package config
 import "testing"
 
 // TestEveryConnectorHookFailModeMatrix pins the owner decisions of
-// 2026-10-14 and 2026-10-20 ("the customer can choose open or closed based
-// on policy, and the default is closed; it should not ignore stuff") for
+// 2026-10-23 (per-user always closed; managed administrators may choose an
+// outage open; Secure Client defaults open) for
 // every connector, per-user, managed standalone and Secure Client, in
 // observe and action mode, with the fail mode unset, explicit open or
 // explicit closed, set globally, per connector or through the automatic
 // protection overlay:
 //
-//   - per-user and managed standalone: unset closed, open open, closed
-//     closed (a managed computer's config is the administrator's);
+//   - per-user: closed regardless of an explicit old open;
+//   - managed standalone: unset closed, administrator open open;
 //   - Secure Client: unset open (#1163), open open, closed closed;
-//   - per-user Cursor follows its guardrail mode (observe open, action
-//     closed) whatever is configured.
 //
 // Anything but "open" (any case) is closed, a typo included.
 func TestEveryConnectorHookFailModeMatrix(t *testing.T) {
-	names := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode", "openhands"}
+	names := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "hermes", "kiro", "opencode"}
 	deployments := []struct {
 		name, mode, profile string
 		unset               string
@@ -73,13 +71,10 @@ func TestEveryConnectorHookFailModeMatrix(t *testing.T) {
 					if want == "" {
 						want = d.unset
 					}
-					action := want
-					if name == "cursor" && d.mode != "managed_enterprise" {
-						want, action = "open", "closed"
-						if mode == "action" {
-							want = "closed"
-						}
+					if d.mode != "managed_enterprise" {
+						want = "closed"
 					}
+					action := want
 					what := name + " " + d.name + " " + mode + " " + s.name
 					if got := cfg.EffectiveHookFailModeForConnector(name); got != want {
 						t.Errorf("%s: fail mode = %q, want %q", what, got, want)

@@ -144,7 +144,7 @@ func TestWindowsStandaloneHeldAPIPortFailsClosedNamingThePort(t *testing.T) {
 		var out, errb bytes.Buffer
 		Run(context.Background(), Options{
 			Connector: "codex", Event: "PreToolUse", HookContractID: "codex-hooks-v4", APIAddr: "127.0.0.1:1",
-			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "closed", ManagedEnterprise: true,
+			Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "closed", ManagedEnterprise: true, FailureLogHome: userLogHome(home),
 			ExplainUnenrolledAccount: explain, AuthenticatedManagedToken: &token,
 			Stdin:  strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"shell"}`),
 			Stdout: &out, Stderr: &errb, HTTPClient: &http.Client{Transport: portHeldRT{}},
@@ -180,6 +180,7 @@ func TestWindowsStandaloneStoppedGatewayFailsClosedWithAPlainReason(t *testing.T
 			HookContractID:            "codex-hooks-v4",
 			APIAddr:                   "127.0.0.1:1",
 			Home:                      home,
+			FailureLogHome:            userLogHome(home),
 			HookDir:                   filepath.Join(home, "hooks"),
 			FailMode:                  failMode,
 			ManagedEnterprise:         true,

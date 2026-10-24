@@ -1,0 +1,147 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package copilotargs
+
+import (
+	"encoding/json"
+	"regexp"
+	"strconv"
+	"strings"
+)
+
+// PermissionToolArgs projects the toolInput of Copilot CLI's native
+// PermissionRequest hook onto the arguments PreToolUse judges for the same
+// call. An edit carries a single-file diff instead of its call arguments
+// (PermissionEditArgs). Every other tool carries its call arguments as
+// PreToolUse's toolArgs does, the bash and powershell shells
+// {"command": ...} included, so it takes the CLI projection (CLIToolArgs).
+// A value neither reads has no arguments (nil), and the gateway refuses the
+// call as unverified (TOOL-ARGS-UNVERIFIED for a shell, an unproven write).
+func PermissionToolArgs(toolName string, value any) json.RawMessage {
+	if toolName == "edit" {
+		return PermissionEditArgs(toolName, value)
+	}
+	return CLIToolArgs(toolName, value)
+}
+
+var permissionEditHunk = regexp.MustCompile(`^@@ -[0-9]+(?:,([0-9]+))? \+[0-9]+(?:,([0-9]+))? @@(?: .*)?$`)
+
+// PermissionEditArgs projects Copilot CLI's native PermissionRequest edit
+// input onto the same reviewed edit call as PreToolUse. The diff must prove
+// that every hunk changes the one declared file. Unknown metadata, another
+// file, or an incomplete hunk leaves the call unproven.
+func PermissionEditArgs(toolName string, value any) json.RawMessage {
+	if toolName != "edit" {
+		return nil
+	}
+	input, ok := value.(map[string]any)
+	if !ok || !onlyKeys(input, "file_path", "diff") || len(input) != 2 {
+		return nil
+	}
+	path, pathOK := input["file_path"].(string)
+	diff, diffOK := input["diff"].(string)
+	if !pathOK || !diffOK || strings.TrimSpace(path) != path || path == "" ||
+		strings.ContainsAny(path, "\r\n\x00") || len(diff) > 1<<20 {
+		return nil
+	}
+	oldText, newText, ok := permissionEditDiff(path, diff)
+	if !ok {
+		return nil
+	}
+	args, err := json.Marshal(map[string]string{"path": path, "old_str": oldText, "new_str": newText})
+	if err != nil {
+		return nil
+	}
+	return args
+}
+
+func permissionEditDiff(path, diff string) (string, string, bool) {
+	diff = strings.ReplaceAll(diff, "\r\n", "\n")
+	if strings.ContainsRune(diff, '\r') {
+		return "", "", false
+	}
+	diff = strings.TrimLeft(diff, "\n")
+	diff = strings.TrimSuffix(diff, "\n")
+	lines := strings.Split(diff, "\n")
+	if len(lines) < 5 {
+		return "", "", false
+	}
+	gitPath := strings.ReplaceAll(path, "\\", "/")
+	if !strings.HasPrefix(gitPath, "/") {
+		gitPath = "/" + gitPath
+	}
+	aPath, bPath := "a"+gitPath, "b"+gitPath
+	if lines[0] != "diff --git "+aPath+" "+bPath {
+		return "", "", false
+	}
+	i := 1
+	if strings.HasPrefix(lines[i], "index ") {
+		i++
+	}
+	if i+2 >= len(lines) || lines[i] != "--- "+aPath || lines[i+1] != "+++ "+bPath {
+		return "", "", false
+	}
+	i += 2
+	var oldLines, newLines []string
+	var oldExpected, newExpected, oldSeen, newSeen int
+	seenHunk, changed := false, false
+	for ; i < len(lines); i++ {
+		line := lines[i]
+		if strings.HasPrefix(line, "@@ ") {
+			if seenHunk && (oldSeen != oldExpected || newSeen != newExpected) {
+				return "", "", false
+			}
+			counts := permissionEditHunk.FindStringSubmatch(line)
+			if counts == nil {
+				return "", "", false
+			}
+			var ok bool
+			oldExpected, ok = hunkCount(counts[1])
+			if !ok {
+				return "", "", false
+			}
+			newExpected, ok = hunkCount(counts[2])
+			if !ok {
+				return "", "", false
+			}
+			oldSeen, newSeen, seenHunk = 0, 0, true
+			continue
+		}
+		if !seenHunk {
+			return "", "", false
+		}
+		switch {
+		case strings.HasPrefix(line, "-"):
+			oldSeen++
+			oldLines = append(oldLines, line[1:])
+			changed = true
+		case strings.HasPrefix(line, "+"):
+			newSeen++
+			newLines = append(newLines, line[1:])
+			changed = true
+		case strings.HasPrefix(line, " "):
+			oldSeen++
+			newSeen++
+		case line == `\ No newline at end of file`:
+			// This marker describes the preceding line, not another mutation.
+		default:
+			return "", "", false
+		}
+		if oldSeen > oldExpected || newSeen > newExpected {
+			return "", "", false
+		}
+	}
+	if !seenHunk || !changed || oldSeen != oldExpected || newSeen != newExpected {
+		return "", "", false
+	}
+	return strings.Join(oldLines, "\n"), strings.Join(newLines, "\n"), true
+}
+
+func hunkCount(raw string) (int, bool) {
+	if raw == "" {
+		return 1, true
+	}
+	count, err := strconv.Atoi(raw)
+	return count, err == nil
+}

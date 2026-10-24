@@ -40,4 +40,9 @@ func TestWriteMachineVersion(t *testing.T) {
 	if members["management_contract"] != float64(1) || members["features"] != nil {
 		t.Fatalf("machine version report members = %v", members)
 	}
+	// GAP-0335: the MDM wrappers pass secret set --bundle only to a build
+	// that reports it.
+	if members["secret_set_bundle"] != true {
+		t.Fatalf("secret_set_bundle = %v, want true", members["secret_set_bundle"])
+	}
 }

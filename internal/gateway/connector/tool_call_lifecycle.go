@@ -255,23 +255,6 @@ func (contract ToolCallLifecycleContract) ClassifyTerminalOutcome(
 			return classifyCancellationOrFailure(errorValue)
 		}
 		return ToolLifecycleOutcomeSuccess
-	case "openhands":
-		response, ok := nestedMap(payload, "tool_response", "toolResponse")
-		if !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		isError, ok := firstPresent(response, "is_error", "isError")
-		if !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		flag, ok := isError.(bool)
-		if !ok {
-			return ToolLifecycleOutcomeUnknown
-		}
-		if flag {
-			return ToolLifecycleOutcomeFailure
-		}
-		return ToolLifecycleOutcomeSuccess
 	case "opencode":
 		response, ok := nestedMap(payload, "tool_response", "toolResponse")
 		if !ok {
@@ -763,13 +746,18 @@ func claudeCodeToolCallLifecycle() ToolCallLifecycleContract {
 
 func hermesToolCallLifecycle() ToolCallLifecycleContract {
 	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"pre_tool_call"},
-		AuthoritativeSuccessEvents:        []string{"post_tool_call"},
-		AuthoritativeFailureEvents:        []string{"post_tool_call"},
-		AuthoritativeDenialEvents:         []string{"post_tool_call"},
-		AuthoritativePendingDiscardEvents: []string{},
-		AuthoritativeTerminalEvents:       []string{"on_session_end", "on_session_finalize", "on_session_reset"},
+		Version:                    ToolCallLifecycleContractVersion,
+		PreProposalEvents:          []string{"pre_tool_call"},
+		AuthoritativeSuccessEvents: []string{"post_tool_call"},
+		AuthoritativeFailureEvents: []string{"post_tool_call"},
+		AuthoritativeDenialEvents:  []string{"post_tool_call"},
+		// Hermes sends on_session_end when each turn ends; the session goes on
+		// in the next prompt with no on_session_start. Like Claude Code's
+		// Stop it discards only unfinished proposals, so a reviewed chain can
+		// span turns (rel-1-0-4 GAP-0599). on_session_finalize and
+		// on_session_reset end the session.
+		AuthoritativePendingDiscardEvents: []string{"on_session_end"},
+		AuthoritativeTerminalEvents:       []string{"on_session_finalize", "on_session_reset"},
 		InvocationIDAuthority:             ToolInvocationIDPairedID,
 		OutcomeAuthority:                  ToolOutcomeResultPayload,
 		StatefulEnforcementLevel:          StatefulToolPairedOutcomes,
@@ -793,7 +781,7 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 		},
 		Limitations: []string{
 			"Only pre_tool_call can block, and hook subprocess errors, timeouts, or malformed output fail open upstream.",
-			"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
+			"A post_tool_call commits success only when its documented extra.status is ok; error and blocked statuses must not advance state.",
 		},
 	}
 }
@@ -805,8 +793,8 @@ func hermesToolCallLifecycleV2() ToolCallLifecycleContract {
 		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/hermes_cli/plugins.py",
 	}
 	contract.Limitations = []string{
-		"Only pre_tool_call can block. Exit code 2 now blocks pre_tool_call; other non-zero exits still parse stdout. Timeouts and spawn errors fail open unless the hook spec sets fail_closed.",
-		"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
+		"Only pre_tool_call can block. Exit code 2 blocks pre_tool_call; Setup sets fail_closed on its v2 pre_tool_call entry outside Secure Client, so timeouts and spawn errors block. A killed hook can still fail open with a non-2 exit and empty stdout. Other events cannot block.",
+		"A post_tool_call commits success only when its documented extra.status is ok; error and blocked statuses must not advance state.",
 	}
 	return contract
 }
@@ -954,40 +942,6 @@ func antigravityToolCallLifecycle() ToolCallLifecycleContract {
 	}
 }
 
-func openHandsToolCallLifecycle() ToolCallLifecycleContract {
-	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"pre_tool_use"},
-		AuthoritativeSuccessEvents:        []string{"post_tool_use"},
-		AuthoritativeFailureEvents:        []string{"post_tool_use"},
-		AuthoritativeDenialEvents:         []string{},
-		AuthoritativePendingDiscardEvents: []string{"stop"},
-		AuthoritativeTerminalEvents:       []string{"session_end"},
-		InvocationIDAuthority:             ToolInvocationIDNone,
-		OutcomeAuthority:                  ToolOutcomeResultPayload,
-		StatefulEnforcementLevel:          StatefulToolDetectionOnly,
-		Routing: ToolEventRouting{
-			StructuredActionEvents: []string{"pre_tool_use"},
-			ResultContentEvents:    []string{"post_tool_use"},
-			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"session_start", "stop", "session_end"},
-		},
-		CoveredToolSurfaces: []ToolSurface{
-			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
-			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
-			ToolSurfaceSkills,
-		},
-		OfficialSourceURLs: []string{
-			"https://github.com/OpenHands/software-agent-sdk/blob/6d597ff7d5d3c89ef8ba0c8e3b3c6a09169da07c/openhands-sdk/openhands/sdk/hooks/types.py",
-			"https://github.com/OpenHands/software-agent-sdk/blob/6d597ff7d5d3c89ef8ba0c8e3b3c6a09169da07c/openhands-sdk/openhands/sdk/hooks/conversation_hooks.py",
-		},
-		Limitations: []string{
-			"Shell hook input omits the SDK's internal action ID, so PreToolUse and PostToolUse cannot be joined by an authoritative per-call identifier.",
-			"Success requires tool_response.is_error=false; hook errors, timeouts, non-2 exits, and asynchronous PreToolUse hooks fail open.",
-		},
-	}
-}
-
 func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 	return ToolCallLifecycleContract{
 		Version:                           ToolCallLifecycleContractVersion,
@@ -1052,40 +1006,6 @@ func ampToolCallLifecycle() ToolCallLifecycleContract {
 			"toolUseID is Amp's stable per-invocation join; tool.result status must be exactly done, error, or cancelled, and missing, contradictory, or unknown statuses never prove success.",
 			"agent.end discards unfinished proposals for that turn but is not a documented session-end event; Amp exposes no terminal session or subagent-parent lifecycle boundary.",
 			"tool.result gating can withhold or replace model-bound content but cannot undo completed tool side effects; skill invocation and remote Orb execution do not have separately certified lifecycle coverage.",
-		},
-	}
-}
-
-func omniGentToolCallLifecycle() ToolCallLifecycleContract {
-	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"PreToolUse"},
-		AuthoritativeSuccessEvents:        []string{},
-		AuthoritativeFailureEvents:        []string{},
-		AuthoritativeDenialEvents:         []string{},
-		AuthoritativePendingDiscardEvents: []string{"AfterAgentResponse"},
-		AuthoritativeTerminalEvents:       []string{},
-		InvocationIDAuthority:             ToolInvocationIDNone,
-		OutcomeAuthority:                  ToolOutcomeNone,
-		StatefulEnforcementLevel:          StatefulToolDirectOnly,
-		Routing: ToolEventRouting{
-			StructuredActionEvents: []string{"PreToolUse"},
-			ResultContentEvents:    []string{"PostToolUse"},
-			StateTransitionEvents:  []string{},
-			AuditOnlyEvents:        []string{"AfterAgentResponse"},
-		},
-		CoveredToolSurfaces: []ToolSurface{
-			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
-			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
-			ToolSurfaceSkills,
-		},
-		OfficialSourceURLs: []string{
-			"https://github.com/omnigent-ai/omnigent/blob/eebef804e1fe4beddc61ea232b951cddddd7f890/omnigent/policies/schema.py",
-			"https://omnigent.ai/docs/policies/custom",
-		},
-		Limitations: []string{
-			"PolicyEvent exposes no call, session, conversation, or parent identifier; tool_result repeats request data but does not report authoritative success or failure.",
-			"PostToolUse policy decisions can suppress or transform returned content but cannot undo side effects, so only direct pre-tool enforcement is enabled.",
 		},
 	}
 }

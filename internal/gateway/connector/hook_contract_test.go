@@ -91,7 +91,6 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 			{"hermes-hooks-v2", "0.21.0", "0.22.0", true, "v6", 23},
 		},
 		"antigravity": {{"antigravity-hooks-v2", "1.1.8", "", true, "v8", 5}},
-		"openhands":   {{"openhands-hooks-v1", "1.12.0", "", true, "v6", 6}},
 		"opencode":    {{"opencode-hooks-v1", "1.18.10", "1.19.0", false, "v7", 10}},
 		"amp":         {{"amp-plugin-v1", "0.0.1785334225", "", true, "v2", 5}},
 	}
@@ -105,9 +104,6 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 				}
 				for i, contract := range contracts {
 					wantBand := wantBands[i]
-					if goos == "windows" && connectorName == "openhands" {
-						wantBand.min = "0.0.0"
-					}
 					got := contractBand{
 						id:             contract.ContractID,
 						min:            contract.MinAgentVersion,
@@ -134,20 +130,6 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 		}
 	}
 
-	for _, goos := range []string{"darwin", "linux", "windows"} {
-		openHands := hookContractsForOS("openhands", goos)[0]
-		wantNativeOTLP := goos == "darwin"
-		if openHands.NativeOTLP != wantNativeOTLP {
-			t.Errorf("OpenHands %s native OTLP=%v want %v", goos, openHands.NativeOTLP, wantNativeOTLP)
-		}
-		wantMinimum := "1.12.0"
-		if goos == "windows" {
-			wantMinimum = "0.0.0"
-		}
-		if openHands.MinAgentVersion != wantMinimum {
-			t.Errorf("OpenHands %s minimum=%q want %q", goos, openHands.MinAgentVersion, wantMinimum)
-		}
-	}
 }
 
 func sharedHookBytes(t *testing.T, hookDir string) map[string][]byte {
@@ -189,7 +171,6 @@ func TestHookContractResolution(t *testing.T) {
 		{"claude_v1_upper_boundary", "claude-code", "Claude Code v2.1.218", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.218"},
 		{"claude_directory_added_minimum", "claude-code", "Claude Code v2.1.219", HookCompatibilityKnown, "claudecode-hooks-v2", "2.1.219"},
 		{"claude_directory_added_current", "claude-code", "Claude Code v2.1.220", HookCompatibilityKnown, "claudecode-hooks-v2", "2.1.220"},
-		{"openhands_alias_known", "open-hands", "OpenHands 1.12.0", HookCompatibilityKnown, "openhands-hooks-v1", "1.12.0"},
 		{"cursor_exact_agent_preview_pin", "cursor", "2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
 		{"cursor_exact_agent_preview_command_prefix", "cursor", "agent v2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
 		{"cursor_other_agent_build_unknown", "cursor", "cursor-agent 2026.07.23-deadbee", HookCompatibilityUnknown, "", "2026.7.23"},
@@ -198,12 +179,6 @@ func TestHookContractResolution(t *testing.T) {
 		{"cursor_desktop_current", "cursor", "3.19.13", HookCompatibilityKnown, "cursor-hooks-v1", "3.19.13"},
 		{"cursor_desktop_before_floor", "cursor", "cursor 2.3.99", HookCompatibilityUnknown, "", "2.3.99"},
 		{"cursor_desktop_at_ceiling_untested", "cursor", "cursor 4.0.0", HookCompatibilityKnown, "cursor-hooks-v1", "4.0.0"},
-		{"omnigent_before_proven_floor", "omnigent", "omnigent 0.6.99", HookCompatibilityUnknown, "", "0.6.99"},
-		{"omnigent_proven_floor", "omnigent", "omnigent 0.7.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.7.0"},
-		{"omnigent_reviewed_mid_range", "omnigent", "omnigent 0.8.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.8.0"},
-		{"omnigent_current_pin", "omnigent", "omnigent 0.13.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.13.0"},
-		{"omnigent_after_reviewed_range_untested", "omnigent", "omnigent 0.15.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.15.0"},
-		{"omnigent_unversioned_requires_override", "omnigent", "", HookCompatibilityUnversioned, "omnigent-custom-policy-v1", ""},
 		{"opencode_reviewed_pin", "opencode", "opencode 1.18.10", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.10"},
 		{"opencode_previous_pin", "opencode", "opencode 1.18.11", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.11"},
 		{"opencode_previous_pin_11819", "opencode", "opencode 1.18.19", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.19"},
@@ -278,111 +253,6 @@ func TestHermesHookContractResolvesReleasesAndReleaseDates(t *testing.T) {
 		if tc.untested && (strict.Status != HookCompatibilityUnknown || strict.Contract.ContractID != "") {
 			t.Errorf("strict %q = %s %q, want no contract", tc.version, strict.Status, strict.Contract.ContractID)
 		}
-	}
-}
-
-func TestUntestedNewerVersionPolicy(t *testing.T) {
-	got := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
-	if got.Status != HookCompatibilityKnown || !got.UntestedVersion || got.Contract.ContractID != "hermes-hooks-v2" ||
-		got.NewestTestedVersion != "<0.22.0" || !strings.HasPrefix(got.Reason, UntestedNewerVersionReasonPrefix) {
-		t.Fatalf("hermes 0.30.1 = %+v", got)
-	}
-	if strict := ResolveHookContractStrict("hermes", "Hermes Agent v0.30.1"); strict.Status != HookCompatibilityUnknown || strict.Contract.ContractID != "" {
-		t.Fatalf("strict hermes 0.30.1 = %+v", strict)
-	}
-
-	saved := knownBrokenAgentVersions
-	t.Cleanup(func() { knownBrokenAgentVersions = saved })
-	knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{
-		"hermes": {{Min: "0.30.0", Max: "0.31.0", Reason: "pre_tool_call payload renamed", Issue: "https://example.invalid/1"}},
-	}
-	broken := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
-	if broken.Status != HookCompatibilityUnknown || !strings.Contains(broken.Reason, "known broken") {
-		t.Fatalf("known-broken hermes 0.30.1 = %+v", broken)
-	}
-	knownBrokenAgentVersions = saved
-
-	previous := HookContractLockEntry{Connector: "hermes", RawAgentVersion: "Hermes Agent v0.21.0", NormalizedAgentVersion: "0.21.0", ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}
-	current := HookContractLockEntry{Connector: "hermes", RawAgentVersion: "Hermes Agent v0.30.1", NormalizedAgentVersion: "0.30.1", ContractID: "hermes-hooks-v2", CompatibilityStatus: got.Status}
-	if !HookContractCompatibilityDrifted(previous, current) || !HookContractAgentUpdateAdmitted(previous, current) {
-		t.Fatal("a compatible agent update must drift and be admitted")
-	}
-	sameAgent := previous
-	sameAgent.ContractID = "hermes-hooks-retired"
-	if HookContractAgentUpdateAdmitted(sameAgent, HookContractLockEntry{Connector: "hermes", RawAgentVersion: previous.RawAgentVersion, NormalizedAgentVersion: previous.NormalizedAgentVersion, ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}) {
-		t.Fatal("a contract change without an agent update must not be admitted as one")
-	}
-	current.CompatibilityStatus, current.ContractID = HookCompatibilityUnknown, ""
-	if HookContractAgentUpdateAdmitted(previous, current) {
-		t.Fatal("an update to an unknown version must not be admitted")
-	}
-	SetStrictHookContractResolution(true)
-	t.Cleanup(func() { SetStrictHookContractResolution(false) })
-	current.CompatibilityStatus, current.ContractID = HookCompatibilityKnown, "hermes-hooks-v2"
-	if HookContractAgentUpdateAdmitted(previous, current) {
-		t.Fatal("strict mode must refuse agent updates as before")
-	}
-	if strict := ResolveHookContract("omnigent", "omnigent 0.15.0"); strict.Status != HookCompatibilityUnknown {
-		t.Fatalf("strict-mode omnigent 0.15.0 = %+v", strict)
-	}
-}
-
-func TestOpenHandsPOSIXContractFloorAndWindowsCompatibilityOverride(t *testing.T) {
-	for _, goos := range []string{"darwin", "linux"} {
-		before := resolveHookContractForOS("openhands", "OpenHands 1.11.99", goos)
-		if before.Status != HookCompatibilityUnknown {
-			t.Fatalf("OpenHands %s before-floor status=%q want %q", goos, before.Status, HookCompatibilityUnknown)
-		}
-		floor := resolveHookContractForOS("openhands", "OpenHands 1.12.0", goos)
-		if floor.Status != HookCompatibilityKnown || floor.Contract.ContractID != "openhands-hooks-v1" {
-			t.Fatalf("OpenHands %s floor resolution=%+v", goos, floor)
-		}
-	}
-	windows := resolveHookContractForOS("openhands", "OpenHands 1.11.99", "windows")
-	if windows.Status != HookCompatibilityKnown || windows.Contract.MinAgentVersion != "0.0.0" || windows.Contract.NativeOTLP {
-		t.Fatalf("OpenHands Windows compatibility override=%+v", windows)
-	}
-}
-
-// TestHookProfileResolvesForSetupOptsGOOS pins SetupOpts.GOOS: a profile for
-// an agent that runs on another OS (an OpenShell sandbox is always linux)
-// takes that OS's contract adjustments, whatever this host runs.
-func TestHookProfileResolvesForSetupOptsGOOS(t *testing.T) {
-	conn := NewOpenHandsConnector()
-	for _, tc := range []struct {
-		goos       string
-		version    string
-		wantStatus string
-		wantOTLP   bool
-	}{
-		{"linux", "OpenHands 1.12.0", HookCompatibilityKnown, false},
-		{"darwin", "OpenHands 1.12.0", HookCompatibilityKnown, true},
-		{"linux", "OpenHands 1.11.99", HookCompatibilityUnknown, false},
-		{"windows", "OpenHands 1.11.99", HookCompatibilityKnown, false},
-		{"Linux", "OpenHands 1.12.0", HookCompatibilityKnown, false},
-	} {
-		opts := SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: tc.version, GOOS: tc.goos}
-		profile := conn.HookProfile(opts)
-		if profile.CompatibilityStatus != tc.wantStatus {
-			t.Errorf("%s %s: status = %q, want %q", tc.goos, tc.version, profile.CompatibilityStatus, tc.wantStatus)
-		}
-		if (profile.NativeOTLP != nil) != tc.wantOTLP {
-			t.Errorf("%s %s: native OTLP = %v, want %v", tc.goos, tc.version, profile.NativeOTLP != nil, tc.wantOTLP)
-		}
-		if spec := correlationSpecForOptions("openhands", opts); tc.wantStatus == HookCompatibilityKnown &&
-			spec.CompatibilityStatus == HookCompatibilityUnknown {
-			t.Errorf("%s %s: correlation spec fell back: %+v", tc.goos, tc.version, spec)
-		}
-	}
-	// A pinned contract is looked up for the target OS too.
-	pinned := conn.HookProfile(SetupOpts{AgentVersion: "OpenHands 1.11.99", HookContractID: "openhands-hooks-v1", GOOS: "linux"})
-	if pinned.ContractID != "openhands-hooks-v1" || pinned.CompatibilityStatus != HookCompatibilityUnknown {
-		t.Fatalf("pinned linux profile = %q/%q", pinned.ContractID, pinned.CompatibilityStatus)
-	}
-	// Empty GOOS keeps the host behaviour.
-	host := conn.HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: "OpenHands 1.12.0"})
-	if want := runtime.GOOS == "darwin"; (host.NativeOTLP != nil) != want {
-		t.Fatalf("host profile native OTLP = %v, want %v", host.NativeOTLP != nil, want)
 	}
 }
 
@@ -615,44 +485,6 @@ func TestBestEffortHookContractUsesDefaultUnionWithoutClaimingCompatibility(t *t
 	}
 }
 
-func TestHookContractsCoverHookEndpoints(t *testing.T) {
-	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
-		conn, ok := reg.Get(name)
-		if !ok {
-			t.Fatalf("registry missing %s", name)
-		}
-		if _, ok := conn.(HookEndpoint); !ok {
-			t.Fatalf("%s must expose HookEndpoint", name)
-		}
-		contracts := KnownHookContracts(name)
-		if len(contracts) == 0 {
-			t.Fatalf("%s has no hook contracts", name)
-		}
-		for _, contract := range contracts {
-			if contract.ContractID == "" {
-				t.Fatalf("%s contract missing id", name)
-			}
-			if len(contract.Events) == 0 {
-				t.Fatalf("%s contract %s missing events", name, contract.ContractID)
-			}
-			if len(contract.AIDSurfaces) == 0 {
-				t.Fatalf("%s contract %s missing AID surfaces", name, contract.ContractID)
-			}
-			directResponse := name == "omnigent" || name == "amp"
-			if contract.ResponseFieldName == "" && !directResponse {
-				t.Fatalf("%s contract %s missing response field", name, contract.ContractID)
-			}
-			if directResponse && contract.ResponseFieldName != "" {
-				t.Fatalf("%s contract %s must return its policy verdict directly, not through %q", name, contract.ContractID, contract.ResponseFieldName)
-			}
-			if err := ValidateToolCallLifecycleContract(contract.ToolCallLifecycle, contract.Events); err != nil {
-				t.Fatalf("%s contract %s has invalid tool-call lifecycle: %v", name, contract.ContractID, err)
-			}
-		}
-	}
-}
-
 func TestHermesHookContractV019V020ClassifiesAllValidEventsWithoutInventingBlockSurfaces(t *testing.T) {
 	if got := ResolveHookContract("hermes", "0.18.99").Status; got != HookCompatibilityUnknown {
 		t.Fatalf("Hermes 0.18 compatibility = %q, want unknown for the v0.19 event contract", got)
@@ -701,70 +533,6 @@ func TestHermesHookContractV019V020ClassifiesAllValidEventsWithoutInventingBlock
 	}
 	if contract.Capabilities.CanAskNative || contract.Capabilities.SupportsFailClosed {
 		t.Fatalf("Hermes contract invented ask/fail-closed support: %+v", contract.Capabilities)
-	}
-}
-
-func TestOmniGentV070ContractPreservesPostPhaseDenyWithoutPostPhaseAsk(t *testing.T) {
-	resolution := ResolveHookContract("omnigent", "omnigent 0.7.0")
-	if resolution.Status != HookCompatibilityKnown {
-		t.Fatalf("OmniGent v0.7.0 compatibility = %q, want known", resolution.Status)
-	}
-	contract := resolution.Contract
-	if contract.MinAgentVersion != "0.7.0" {
-		t.Fatalf("OmniGent minimum version = %q, want 0.7.0", contract.MinAgentVersion)
-	}
-	if contract.MaxAgentVersion != "0.14.0" {
-		t.Fatalf("OmniGent maximum version = %q, want exclusive 0.14.0", contract.MaxAgentVersion)
-	}
-	if got, want := contract.Events, []string{
-		"UserPromptSubmit", "PreToolUse", "PostToolUse",
-		"AfterAgentResponse", "BeforeModel", "AfterModel",
-	}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("OmniGent events = %v, want %v", got, want)
-	}
-	wantPre := []string{"UserPromptSubmit", "PreToolUse", "BeforeModel"}
-	if !reflect.DeepEqual(contract.Capabilities.AskEvents, wantPre) {
-		t.Fatalf("OmniGent ASK events = %v, want %v", contract.Capabilities.AskEvents, wantPre)
-	}
-	if !reflect.DeepEqual(contract.Capabilities.BlockEvents, contract.Events) {
-		t.Fatalf("OmniGent DENY events = %v, want all six %v", contract.Capabilities.BlockEvents, contract.Events)
-	}
-}
-
-// TestOmniGentSandboxStartsAt0130: OmniGent 0.12.0, inside the host
-// contract, built an image that failed the hook-fire probe ("hook
-// AfterAgentResponse never fired", RT-A-2): before 0.13.0 the server never
-// evaluates the response phase for the runner-relayed sandbox agent. A
-// sandbox refuses it before the build, saying why; the host contract keeps
-// its range.
-func TestOmniGentSandboxStartsAt0130(t *testing.T) {
-	for _, version := range []string{"0.7.0", "0.12.0", "0.12.9"} {
-		got := ResolveSandboxHookContract("omnigent", version)
-		if got.Status != HookCompatibilityUnknown || !strings.Contains(got.Reason, "OmniGent before 0.13.0 never runs the response policy phase (AfterAgentResponse)") ||
-			!strings.Contains(got.Reason, "sandbox images accept >=0.13.0,<0.14.0") {
-			t.Fatalf("sandbox %s = %q (%s), want refused with the reason", version, got.Status, got.Reason)
-		}
-		if host := resolveHookContractForOS("omnigent", "omnigent "+version, "linux"); host.Status != HookCompatibilityKnown {
-			t.Fatalf("host %s = %q, want the host contract unchanged", version, host.Status)
-		}
-	}
-	for _, version := range []string{"0.13.0", "0.13.4"} {
-		got := ResolveSandboxHookContract("omnigent", version)
-		if got.Status != HookCompatibilityKnown || got.Contract.ContractID != "omnigent-custom-policy-v1" || got.Contract.MinAgentVersion != OmnigentSandboxMinVersion {
-			t.Fatalf("sandbox %s = %q %+v, want omnigent-custom-policy-v1 from %s", version, got.Status, got.Contract, OmnigentSandboxMinVersion)
-		}
-		host := ResolveHookContract("omnigent", "omnigent "+version).Contract
-		if !reflect.DeepEqual(got.Contract.Events, host.Events) || !reflect.DeepEqual(got.Contract.Capabilities, host.Capabilities) {
-			t.Fatalf("sandbox contract %+v differs from the host's %+v beyond its floor", got.Contract, host)
-		}
-	}
-	// Past the reviewed range both refuse, with the generic reason.
-	if got := ResolveSandboxHookContract("omnigent", "0.14.0"); got.Status != HookCompatibilityUnknown || strings.Contains(got.Reason, "response policy phase") {
-		t.Fatalf("sandbox 0.14.0 = %q (%s)", got.Status, got.Reason)
-	}
-	// A binding that pins the contract ID still resolves on the host side.
-	if c, ok := hookContractByIDForOS("omnigent", "omnigent-custom-policy-v1", "linux"); !ok || c.MinAgentVersion != "0.7.0" {
-		t.Fatalf("contract by ID = %+v, %v", c, ok)
 	}
 }
 
@@ -1189,12 +957,6 @@ func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
 			want:    ToolLifecycleOutcomeDenied,
 		},
 		{
-			name:      "openhands_explicit_success",
-			connector: "openhands", event: "post_tool_use",
-			payload: map[string]interface{}{"tool_response": map[string]interface{}{"is_error": false}},
-			want:    ToolLifecycleOutcomeSuccess,
-		},
-		{
 			name:      "antigravity_requires_step",
 			connector: "antigravity", event: "PostToolUse",
 			payload: map[string]interface{}{},
@@ -1423,7 +1185,7 @@ func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
 		})
 	}
 
-	for _, connectorName := range []string{"copilot", "openhands", "omnigent"} {
+	for _, connectorName := range []string{"copilot"} {
 		contract := ResolveHookContract(connectorName, "").Contract.ToolCallLifecycle
 		if contract.SupportsExactInvocationJoin() {
 			t.Fatalf("%s must not claim exact invocation joins", connectorName)
@@ -1456,7 +1218,9 @@ func TestToolCallLifecycleTerminalResetEventsAreSessionScoped(t *testing.T) {
 		{connector: "claudecode", version: "2.1.154", event: "StopFailure", discardPending: true},
 		{connector: "claudecode", version: "2.1.154", event: "SessionEnd", terminal: true},
 		{connector: "hermes", event: "subagent_stop"},
-		{connector: "hermes", event: "on_session_end", terminal: true},
+		{connector: "hermes", event: "on_session_end", discardPending: true},
+		{connector: "hermes", version: "0.21.5", event: "on_session_end", discardPending: true},
+		{connector: "hermes", version: "0.21.5", event: "on_session_finalize", terminal: true},
 		{connector: "hermes", event: "on_session_finalize", terminal: true},
 		{connector: "hermes", event: "on_session_reset", terminal: true},
 		{connector: "cursor", event: "stop", discardPending: true},
@@ -1465,14 +1229,11 @@ func TestToolCallLifecycleTerminalResetEventsAreSessionScoped(t *testing.T) {
 		{connector: "devin", version: "3000.4.25", event: "SessionEnd", terminal: true},
 		{connector: "copilot", event: "agentStop", discardPending: true},
 		{connector: "copilot", event: "sessionEnd", terminal: true},
-		{connector: "openhands", event: "stop", discardPending: true},
-		{connector: "openhands", event: "session_end", terminal: true},
 		{connector: "antigravity", version: "1.1.9", event: "Stop", discardPending: true},
 		{connector: "opencode", event: "session.idle", discardPending: true},
 		{connector: "opencode", event: "session.deleted", terminal: true},
 		{connector: "amp", event: "session.start"},
 		{connector: "amp", event: "agent.end", discardPending: true},
-		{connector: "omnigent", event: "AfterAgentResponse", discardPending: true},
 	} {
 		t.Run(tc.connector+"/"+tc.event, func(t *testing.T) {
 			contract := ResolveHookContract(tc.connector, tc.version).Contract
@@ -2567,50 +2328,6 @@ func TestHookContractChangedByDefenseClawReleaseOnlyForContractIDChanges(t *test
 	})
 }
 
-func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
-	dir := t.TempDir()
-	home := filepath.Join(dir, "home")
-	workspace := filepath.Join(dir, "repo")
-	testenv.SetHome(t, home)
-	conn := NewOpenHandsConnector()
-	opts := SetupOpts{
-		DataDir:      filepath.Join(dir, "dc"),
-		APIAddr:      "127.0.0.1:18970",
-		WorkspaceDir: workspace,
-	}
-
-	entry := NewHookContractLockEntry(opts, conn, "test-build")
-	if entry.Locations.WorkspaceDir != workspace {
-		t.Fatalf("WorkspaceDir=%q want %q", entry.Locations.WorkspaceDir, workspace)
-	}
-	if !sameStrings(entry.Locations.HookConfigPaths, []string{filepath.Join(workspace, ".openhands", "hooks.json")}) {
-		t.Fatalf("HookConfigPaths=%v", entry.Locations.HookConfigPaths)
-	}
-	if !stringInSlice(entry.Locations.HookScriptPaths, filepath.Join(opts.DataDir, "hooks", "openhands-hook.sh")) {
-		t.Fatalf("HookScriptPaths=%v", entry.Locations.HookScriptPaths)
-	}
-	if got := entry.Locations.Surfaces["mcp"].ConfigPaths; !sameStrings(got, []string{filepath.Join(home, ".openhands", "mcp.json")}) {
-		t.Fatalf("mcp config paths=%v", got)
-	}
-	if got := entry.Locations.Surfaces["skills"].WritePaths; !sameStrings(got, []string{filepath.Join(workspace, ".agents", "skills")}) {
-		t.Fatalf("skill write paths=%v", got)
-	}
-	skillReads := entry.Locations.Surfaces["skills"].ReadPaths
-	for _, want := range []string{
-		filepath.Join(workspace, ".agents", "skills"),
-		filepath.Join(home, ".agents", "skills"),
-		filepath.Join(home, ".openhands", "skills", "installed"),
-		filepath.Join(home, ".openhands", "cache", "skills", "public-skills", "skills"),
-	} {
-		if !stringInSlice(skillReads, want) {
-			t.Fatalf("skill read paths=%v missing %q", skillReads, want)
-		}
-	}
-	if entry.Locations.Surfaces["plugins"].Supported {
-		t.Fatalf("OpenHands plugins should be recorded as unsupported: %+v", entry.Locations.Surfaces["plugins"])
-	}
-}
-
 func TestHookContractLockEntryUsesPinnedContractMetadata(t *testing.T) {
 	dir := t.TempDir()
 	conn := NewCodexConnector()
@@ -3535,5 +3252,168 @@ func TestBestEffortHookContractExcludesNewerGatedContracts(t *testing.T) {
 	groups, err := claudeCodeHookGroupsForSetup(SetupOpts{})
 	if err != nil || len(groups) != len(hookGroups) {
 		t.Fatalf("unversioned setup groups=%d err=%v, want %d", len(groups), err, len(hookGroups))
+	}
+}
+
+func TestUntestedNewerVersionPolicy(t *testing.T) {
+	got := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
+	if got.Status != HookCompatibilityKnown || !got.UntestedVersion || got.Contract.ContractID != "hermes-hooks-v2" ||
+		got.NewestTestedVersion != "<0.22.0" || !strings.HasPrefix(got.Reason, UntestedNewerVersionReasonPrefix) {
+		t.Fatalf("hermes 0.30.1 = %+v", got)
+	}
+	if strict := ResolveHookContractStrict("hermes", "Hermes Agent v0.30.1"); strict.Status != HookCompatibilityUnknown || strict.Contract.ContractID != "" {
+		t.Fatalf("strict hermes 0.30.1 = %+v", strict)
+	}
+
+	saved := knownBrokenAgentVersions
+	t.Cleanup(func() { knownBrokenAgentVersions = saved })
+	knownBrokenAgentVersions = map[string][]KnownBrokenAgentVersion{
+		"hermes": {{Min: "0.30.0", Max: "0.31.0", Reason: "pre_tool_call payload renamed", Issue: "https://example.invalid/1"}},
+	}
+	broken := ResolveHookContract("hermes", "Hermes Agent v0.30.1")
+	if broken.Status != HookCompatibilityUnknown || !strings.Contains(broken.Reason, "known broken") {
+		t.Fatalf("known-broken hermes 0.30.1 = %+v", broken)
+	}
+	knownBrokenAgentVersions = saved
+
+	previous := HookContractLockEntry{Connector: "hermes", RawAgentVersion: "Hermes Agent v0.21.0", NormalizedAgentVersion: "0.21.0", ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}
+	current := HookContractLockEntry{Connector: "hermes", RawAgentVersion: "Hermes Agent v0.30.1", NormalizedAgentVersion: "0.30.1", ContractID: "hermes-hooks-v2", CompatibilityStatus: got.Status}
+	if !HookContractCompatibilityDrifted(previous, current) || !HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("a compatible agent update must drift and be admitted")
+	}
+	sameAgent := previous
+	sameAgent.ContractID = "hermes-hooks-retired"
+	if HookContractAgentUpdateAdmitted(sameAgent, HookContractLockEntry{Connector: "hermes", RawAgentVersion: previous.RawAgentVersion, NormalizedAgentVersion: previous.NormalizedAgentVersion, ContractID: "hermes-hooks-v2", CompatibilityStatus: HookCompatibilityKnown}) {
+		t.Fatal("a contract change without an agent update must not be admitted as one")
+	}
+	current.CompatibilityStatus, current.ContractID = HookCompatibilityUnknown, ""
+	if HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("an update to an unknown version must not be admitted")
+	}
+	SetStrictHookContractResolution(true)
+	t.Cleanup(func() { SetStrictHookContractResolution(false) })
+	current.CompatibilityStatus, current.ContractID = HookCompatibilityKnown, "hermes-hooks-v2"
+	if HookContractAgentUpdateAdmitted(previous, current) {
+		t.Fatal("strict mode must refuse agent updates as before")
+	}
+	if strict := ResolveHookContract("hermes", "Hermes Agent v0.30.1"); strict.Status != HookCompatibilityUnknown {
+		t.Fatalf("strict-mode hermes 0.30.1 = %+v", strict)
+	}
+}
+
+// TestHookProfileResolvesForSetupOptsGOOS pins SetupOpts.GOOS: a profile for
+// an agent that runs on another OS (an OpenShell sandbox is always linux)
+// takes that OS's contract adjustments, whatever this host runs. Devin is
+// pinned to its reviewed 3000.4.25 build on Windows and macOS only; strict
+// resolution keeps a version outside that pin unknown there instead of
+// admitting it as an untested newer one.
+func TestHookProfileResolvesForSetupOptsGOOS(t *testing.T) {
+	SetStrictHookContractResolution(true)
+	t.Cleanup(func() { SetStrictHookContractResolution(false) })
+	conn := NewDevinConnector()
+	for _, tc := range []struct {
+		goos       string
+		version    string
+		wantStatus string
+	}{
+		{"linux", "3000.11.3", HookCompatibilityKnown},
+		{"darwin", "3000.11.3", HookCompatibilityUnknown},
+		{"windows", "3000.11.3", HookCompatibilityUnknown},
+		{"windows", "3000.4.25", HookCompatibilityKnown},
+		{"Linux", "3000.11.3", HookCompatibilityKnown},
+	} {
+		opts := SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: tc.version, GOOS: tc.goos}
+		profile := conn.HookProfile(opts)
+		if profile.CompatibilityStatus != tc.wantStatus {
+			t.Errorf("%s %s: status = %q, want %q", tc.goos, tc.version, profile.CompatibilityStatus, tc.wantStatus)
+		}
+		if spec := correlationSpecForOptions("devin", opts); tc.wantStatus == HookCompatibilityKnown &&
+			spec.CompatibilityStatus == HookCompatibilityUnknown {
+			t.Errorf("%s %s: correlation spec fell back: %+v", tc.goos, tc.version, spec)
+		}
+	}
+	// A pinned contract is looked up for the target OS too.
+	pinned := conn.HookProfile(SetupOpts{AgentVersion: "3000.11.3", HookContractID: "devin-hooks-v1", GOOS: "windows"})
+	if pinned.ContractID != "devin-hooks-v1" || pinned.CompatibilityStatus != HookCompatibilityUnknown {
+		t.Fatalf("pinned windows profile = %q/%q", pinned.ContractID, pinned.CompatibilityStatus)
+	}
+	// Empty GOOS keeps the host behaviour.
+	host := conn.HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970", AgentVersion: "3000.11.3"})
+	if want := runtime.GOOS != "windows" && runtime.GOOS != "darwin"; (host.CompatibilityStatus == HookCompatibilityKnown) != want {
+		t.Fatalf("host profile status = %q on %s", host.CompatibilityStatus, runtime.GOOS)
+	}
+}
+
+func TestHookContractsCoverHookEndpoints(t *testing.T) {
+	reg := NewDefaultRegistry()
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "devin", "copilot", "antigravity", "opencode", "amp"} {
+		conn, ok := reg.Get(name)
+		if !ok {
+			t.Fatalf("registry missing %s", name)
+		}
+		if _, ok := conn.(HookEndpoint); !ok {
+			t.Fatalf("%s must expose HookEndpoint", name)
+		}
+		contracts := KnownHookContracts(name)
+		if len(contracts) == 0 {
+			t.Fatalf("%s has no hook contracts", name)
+		}
+		for _, contract := range contracts {
+			if contract.ContractID == "" {
+				t.Fatalf("%s contract missing id", name)
+			}
+			if len(contract.Events) == 0 {
+				t.Fatalf("%s contract %s missing events", name, contract.ContractID)
+			}
+			if len(contract.AIDSurfaces) == 0 {
+				t.Fatalf("%s contract %s missing AID surfaces", name, contract.ContractID)
+			}
+			directResponse := name == "amp"
+			if contract.ResponseFieldName == "" && !directResponse {
+				t.Fatalf("%s contract %s missing response field", name, contract.ContractID)
+			}
+			if directResponse && contract.ResponseFieldName != "" {
+				t.Fatalf("%s contract %s must return its policy verdict directly, not through %q", name, contract.ContractID, contract.ResponseFieldName)
+			}
+			if err := ValidateToolCallLifecycleContract(contract.ToolCallLifecycle, contract.Events); err != nil {
+				t.Fatalf("%s contract %s has invalid tool-call lifecycle: %v", name, contract.ContractID, err)
+			}
+		}
+	}
+}
+
+// The lock entry records the locations the connector resolved for this
+// setup: its hook config, its hook script and each surface's paths.
+func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	testenv.SetHome(t, home)
+	conn := NewCursorConnector()
+	opts := SetupOpts{
+		DataDir: filepath.Join(dir, "dc"),
+		APIAddr: "127.0.0.1:18970",
+	}
+
+	entry := NewHookContractLockEntry(opts, conn, "test-build")
+	caps := conn.Capabilities(opts)
+	if want := conn.HookCapabilities(opts).ConfigPath; want == "" || !stringInSlice(entry.Locations.HookConfigPaths, want) {
+		t.Fatalf("HookConfigPaths=%v want %q", entry.Locations.HookConfigPaths, want)
+	}
+	if !stringInSlice(entry.Locations.HookScriptPaths, filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")) {
+		t.Fatalf("HookScriptPaths=%v", entry.Locations.HookScriptPaths)
+	}
+	if got := entry.Locations.Surfaces["mcp"].ConfigPaths; len(got) == 0 || !sameStrings(got, uniqueNonEmptyStrings(caps.MCP.ConfigPaths)) {
+		t.Fatalf("mcp config paths=%v want %v", got, caps.MCP.ConfigPaths)
+	}
+	if got := entry.Locations.Surfaces["skills"].ReadPaths; len(got) == 0 || !sameStrings(got, uniqueNonEmptyStrings(caps.Skills.ReadPaths)) {
+		t.Fatalf("skill read paths=%v want %v", got, caps.Skills.ReadPaths)
+	}
+	for _, path := range entry.Locations.Surfaces["mcp"].ConfigPaths {
+		if !strings.HasPrefix(path, home) {
+			t.Fatalf("mcp path %q is not under the bound home %q", path, home)
+		}
+	}
+	if entry.Locations.Surfaces["plugins"].Supported != caps.Plugins.Supported {
+		t.Fatalf("plugins surface = %+v, capability %+v", entry.Locations.Surfaces["plugins"], caps.Plugins)
 	}
 }

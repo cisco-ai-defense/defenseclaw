@@ -55,7 +55,16 @@ func runEnterpriseBundleApply(cmd *cobra.Command, opts *bundleApplyOptions) erro
 		env.LockTimeout = opts.lockWait
 	}
 	env.RefuseCapabilityLoss = opts.refuseCapabilityLoss
-	result := enterpriseunix.Run(cmd.Context(), env, unixBundleApplyOptions(opts, bundle))
+	env.DeferRestart = opts.deferRestart
+	platform := "linux"
+	if runtime.GOOS == "darwin" {
+		platform = "macos"
+	}
+	applyOptions := unixBundleApplyOptions(opts, bundle)
+	var stop func()
+	applyOptions.Interrupted, stop = settleInterruptedLifecycle(cmd.ErrOrStderr(), "enterprise bundle apply", platform)
+	defer stop()
+	result := enterpriseunix.Run(cmd.Context(), env, applyOptions)
 	if err := printLifecycleResult(cmd.OutOrStdout(), result, opts.json); err != nil {
 		return err
 	}

@@ -28,14 +28,43 @@ import (
 )
 
 // guardOutageConnectors are the guarded connectors whose foreign-hook check
-// exchanges the session with the gateway: Copilot and OpenCode on every OS,
-// Hermes on Linux and macOS.
+// exchanges the session with the gateway.
 func guardOutageConnectors() map[string]string {
-	connectors := map[string]string{"opencode": "tool.execute.before", "copilot": "preToolUse"}
+	connectors := map[string]string{
+		"opencode": "tool.execute.before", "copilot": "preToolUse",
+		"cursor": "beforeShellExecution", "devin": "PreToolUse",
+	}
 	if runtime.GOOS != "windows" {
 		connectors["hermes"] = "pre_tool_call"
+		connectors["amp"] = "tool.call"
 	}
 	return connectors
+}
+
+// An online allow is only the answer to that call. When the next guarded
+// call cannot reach the gateway, the 1.0.3 outage limit blocks it, even
+// under administrator open and even with a clean earlier session (GAP-0352).
+func TestForeignHookGuardOnlineAllowDoesNotApproveAnOpenOutage(t *testing.T) {
+	for connector, event := range guardOutageConnectors() {
+		t.Run(connector, func(t *testing.T) {
+			fixture := newPortableForeignGuardFixture(t, config.ForeignHooksRemove)
+			fixture.guard(connector)
+			fixture.process = "agent-process"
+			hookForeignGuardExchange = func(_ string, _ string, _, _ time.Time, update enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+				return update.Decision, nil
+			}
+			if got := runGuardEvent(t, fixture, connector, event, "s-1"); got.ManagedRuntimeFailure != "" {
+				t.Fatalf("online clean call blocked: %q", got.ManagedRuntimeFailure)
+			}
+			notRunning := fmt.Errorf("dial hook socket: %w", hookexec.ErrManagedGatewayNotRunning)
+			hookForeignGuardExchange = func(string, string, time.Time, time.Time, enterprisepolicy.SessionExchange) (enterprisepolicy.GuardDecision, error) {
+				return enterprisepolicy.GuardDecision{}, notRunning
+			}
+			if got := runGuardEvent(t, fixture, connector, event, "s-1"); got.ManagedRuntimeFailure != hookexec.ManagedGatewayNotRunningReason {
+				t.Fatalf("earlier allow approved an outage call: %q", got.ManagedRuntimeFailure)
+			}
+		})
+	}
 }
 
 func runGuardEvent(t *testing.T, fixture *foreignGuardFixture, connector, event, session string) hookexec.Options {

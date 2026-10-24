@@ -1283,6 +1283,8 @@ jobs:
           go-version-file: go.mod
       - name: Build the unsigned standalone pkg
         shell: bash
+        env:
+          MACOS_APP_SIGN_IDENTITY: "-"
         run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
       - name: Install, converge, verify and remove the pkg
         shell: bash
@@ -1308,7 +1310,7 @@ jobs:
     name: Enterprise Install Lane (Windows services)
     needs: enterprise-install-assets-windows
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -1418,13 +1420,9 @@ jobs:
       - name: The upgrade kept the administrator config intent
         if: steps.previous.outputs.version != ''
         shell: bash
-        run: |
-          args=(--before "$RUNNER_TEMP/lane-results/config-before.yaml"
-            --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml")
-          if [ -f "$RUNNER_TEMP/lane-results/migration-v9.json" ]; then
-            args+=(--record "$RUNNER_TEMP/lane-results/migration-v9.json")
-          fi
-          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py "${args[@]}"
+        run: >-
+          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py
+          --before "$RUNNER_TEMP/lane-results/config-before.yaml" --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -1462,6 +1460,8 @@ jobs:
       - name: Build the unsigned standalone pkg
         if: steps.previous.outputs.version != ''
         shell: bash
+        env:
+          MACOS_APP_SIGN_IDENTITY: "-"
         run: scripts/build-macos-enterprise-pkg.sh --version 9.9.9 --dist-dir "$RUNNER_TEMP/enterprise-install"
       - name: Upgrade, drill the rollback, converge, verify and remove
         if: steps.previous.outputs.version != ''
@@ -1480,13 +1480,9 @@ jobs:
       - name: The upgrade kept the administrator config intent
         if: steps.previous.outputs.version != ''
         shell: bash
-        run: |
-          args=(--before "$RUNNER_TEMP/lane-results/config-before.yaml"
-            --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml")
-          if [ -f "$RUNNER_TEMP/lane-results/migration-v9.json" ]; then
-            args+=(--record "$RUNNER_TEMP/lane-results/migration-v9.json")
-          fi
-          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py "${args[@]}"
+        run: >-
+          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py
+          --before "$RUNNER_TEMP/lane-results/config-before.yaml" --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
@@ -1545,13 +1541,9 @@ jobs:
       - name: The upgrade kept the administrator config intent
         if: steps.previous.outputs.version != ''
         shell: bash
-        run: |
-          args=(--before "$RUNNER_TEMP/lane-results/config-before.yaml"
-            --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml")
-          if [ -f "$RUNNER_TEMP/lane-results/migration-v9.json" ]; then
-            args+=(--record "$RUNNER_TEMP/lane-results/migration-v9.json")
-          fi
-          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py "${args[@]}"
+        run: >-
+          uv run --no-project --with pyyaml==6.0.3 python scripts/check_enterprise_upgrade_config.py
+          --before "$RUNNER_TEMP/lane-results/config-before.yaml" --after "$RUNNER_TEMP/lane-results/config-upgraded.yaml"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

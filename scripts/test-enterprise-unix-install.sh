@@ -26,13 +26,16 @@
 #      installing this package fails after the services start and rolls back,
 #      and the config and the deployment record stay the previous release's
 #   b. ensure --from-package upgrades to this package: verify passes, the
-#      result reports the applied policy from a newer config generation,
-#      migration-v9.json and config.yaml.v8.bak are written for v8 sources,
-#      and the secrets and guardian ledger are unchanged
+#      result reports the applied policy, the version 9 config keeps its
+#      bytes, and the secrets and guardian ledger are unchanged; the lane
+#      stores a protected credential on the previous release (enterprise
+#      secret set) first, so the secrets check compares real bytes, not an
+#      empty store
 #
-# and then runs steps 3-6 on the upgraded deployment. It keeps the source
-# config, upgraded config and (for v8 sources) migration record in --results for
-# scripts/check_enterprise_upgrade_config.py.
+# and then runs steps 3-6 on the upgraded deployment. It keeps the source and
+# upgraded config in --results for scripts/check_enterprise_upgrade_config.py.
+# The previous release must be 1.x: no 0.x release ships a standalone
+# enterprise package.
 #
 # Every lifecycle result is saved under --results and checked with
 # scripts/check_enterprise_lifecycle_result.py. For the lifecycle commands the
@@ -55,7 +58,7 @@
 #                      the previous release's package of the same kind, already
 #                      verified against its signed checksums.txt
 #   --previous-version VERSION
-#                      the product version of --upgrade-from
+#                      the product version of --upgrade-from (1.x or later)
 
 set -euo pipefail
 
@@ -74,7 +77,7 @@ while [ "$#" -gt 0 ]; do
         --results) results=${2:?--results needs a value}; shift 2 ;;
         --upgrade-from) upgrade_from=${2:?--upgrade-from needs a value}; shift 2 ;;
         --previous-version) previous_version=${2:?--previous-version needs a value}; shift 2 ;;
-        -h | --help) sed -n '4,58p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h | --help) sed -n '4,61p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
@@ -86,6 +89,10 @@ done
     echo "--upgrade-from needs --previous-version" >&2
     exit 2
 }
+if [ -n "$upgrade_from" ] && [[ "$previous_version" =~ ^v?0[.] ]]; then
+    echo "--previous-version $previous_version: no 0.x release ships a standalone enterprise package; upgrade from 1.x" >&2
+    exit 2
+fi
 
 die() {
     echo "FAIL: $*" >&2
@@ -156,8 +163,9 @@ else
     detect="$repo/packaging/mdm/macos/detect.sh"
     launcher=/usr/local/bin/defenseclaw
     launcher_target=$install_root/bin/defenseclaw-gateway
-    sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist
-        /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist)
+    # Each label carries the first 12 digits of the gateway's SHA-256
+    # (macos_agent_files).
+    sandbox_files=()
     openshell_config_dir=$config_dir/openshell
 fi
 gateway=$install_root/bin/defenseclaw-gateway
@@ -267,6 +275,24 @@ retry_busy() { # step-name verb
         sleep 2
         lifecycle "$1" "$2"
     done
+}
+
+# The lifecycle starts the enumerator but does not claim install coverage
+# until its first bounded scan publishes a fresh protected record. A package
+# ensure can therefore truthfully report agent_install_scan_incomplete. Wait
+# for that separate cycle before the lane's healthy verify and MDM checks.
+wait_for_install_scan() {
+    local deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        lifecycle 03-install-scan status
+        retry_busy 03-install-scan status
+        if "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if r.get("coverage_complete") is True and not any(w.get("code") == "agent_install_scan_incomplete" for w in r.get("warnings", [])) else 1)' "$results/03-install-scan.json"; then
+            check "$results/03-install-scan.json" install-scan --action status --installed --ready --coverage-complete
+            return
+        fi
+        sleep 2
+    done
+    die "the enumerator did not publish a complete install scan within 180 seconds"
 }
 
 services_running() {
@@ -396,6 +422,7 @@ as_standard_user() {
 # Linux, the directory of the rendered OpenShell gateway.toml.
 sandbox_files_present() {
     local file root_group
+    [ "$platform" = linux ] || macos_agent_files
     root_group=0 # root:root, root:wheel
     [ -L "$launcher" ] || die "$launcher is not a symbolic link"
     [ "$(readlink "$launcher")" = "$launcher_target" ] || die "$launcher points at '$(readlink "$launcher")', want $launcher_target"
@@ -416,9 +443,23 @@ sandbox_files_present() {
     echo "sandbox launcher $launcher -> $launcher_target and ${#sandbox_files[@]} user service definitions are in place"
 }
 
-# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent.
+# macos_agent_files: the launch agents of the installed gateway, whose labels
+# carry the first 12 digits of its SHA-256 (openshell.LaunchAgentLabel).
+macos_agent_files() {
+    local tag
+    tag=$(shasum -a 256 "$gateway" | cut -c1-12) || die "cannot hash $gateway"
+    sandbox_files=("/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.$tag.plist"
+        "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.$tag.plist")
+}
+
+# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent
+# (on macOS, of any label).
 sandbox_files_gone() {
     local file
+    if [ "$platform" != linux ]; then
+        sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox*.plist
+            /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway*.plist)
+    fi
     for file in "$launcher" "${sandbox_files[@]}"; do
         { [ ! -e "$file" ] && [ ! -L "$file" ]; } || die "$file remains after uninstall"
     done
@@ -505,14 +546,39 @@ print(json.dumps(ledger, sort_keys=True))
 PY
 }
 
-write_admin_config() {
-    local config_version=9 rule_pack='  rule_pack: default'
-    if [ -n "$upgrade_from" ] && [[ "$previous_version" =~ ^v?0[.] ]]; then
-        config_version=8
-        rule_pack='  rule_pack_dir: ""'
+# The protected credential the upgrade lane stores on the previous release.
+# Its value is random, so only the credential this run stored can match.
+upgrade_secret_name=ci-upgrade-lane
+upgrade_secret_value=""
+
+# seed_upgrade_secret <result-name>: store upgrade_secret_value with the
+# installed gateway's `enterprise secret set` and check its bytes landed.
+seed_upgrade_secret() {
+    local rc=0
+    upgrade_secret_value="ci-upgrade-lane-$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+    printf '%s\n' "$upgrade_secret_value" |
+        "$gateway" enterprise secret set --name "$upgrade_secret_name" --from-stdin --lock-wait 2m --json \
+            >"$results/$1.json" 2>"$results/$1.log" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        tail -n 20 "$results/$1.log" >&2 || true
+        die "enterprise secret set exited $rc"
     fi
+    upgrade_secret_kept || die "enterprise secret set did not store $secrets_dir/$upgrade_secret_name"
+}
+
+# upgrade_secret_kept: the stored credential holds exactly upgrade_secret_value.
+# python3 compares the bytes: cmp (diffutils) is absent from the minimal
+# UBI 9 init image the rpm-el9 lane boots (GAP-0886).
+upgrade_secret_kept() {
+    [ -n "$upgrade_secret_value" ] && [ -f "$secrets_dir/$upgrade_secret_name" ] &&
+        DC_LANE_SECRET=$upgrade_secret_value "${python:-python3}" -c \
+            'import os, sys; sys.exit(open(sys.argv[1], "rb").read() != os.environ["DC_LANE_SECRET"].encode())' \
+            "$secrets_dir/$upgrade_secret_name"
+}
+
+write_admin_config() {
     cat >"$stage/config.yaml" <<EOF
-config_version: $config_version
+config_version: 9
 deployment_mode: managed_enterprise
 data_dir: $data_dir
 policy_dir: $vendor_policy_dir
@@ -524,7 +590,7 @@ gateway:
 guardrail:
   enabled: true
   mode: observe
-$rule_pack
+  rule_pack: default
   connectors:
     claudecode: {enabled: true}
     codex: {enabled: true}
@@ -542,12 +608,17 @@ case "$kind" in
     pkg) ! pkgutil --pkg-info "$macos_package_id" >/dev/null 2>&1 || die "$macos_package_id is already installed" ;;
 esac
 [ -z "$(policy_entries)" ] || die "DefenseClaw machine-policy entries already exist: $(policy_entries)"
+if [ "$platform" = linux ]; then
+    found_userns=$(cat /proc/sys/user/max_user_namespaces)
+    found_ptrace=$(cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null || echo absent)
+    echo "kernel as found: user.max_user_namespaces=$found_userns kernel.yama.ptrace_scope=$found_ptrace"
+fi
 echo "package: $package"
 echo "version: $version"
 
 # ---- upgrade lane: previous release ------------------------------------------
 upgrade_lane() {
-    local previous_config_sha previous_secrets_sha previous_ledger previous_generation generation_floor recorded
+    local previous_config_sha previous_secrets_sha previous_ledger previous_generation recorded
     step "install the previous release's $kind ($previous_version)"
     install_rc=0
     install_package "$upgrade_from" || install_rc=$?
@@ -561,11 +632,12 @@ upgrade_lane() {
 
     step "apply the administrator config on the previous release"
     write_admin_config
-    config_version=$(sed -n 's/^config_version: //p' "$stage/config.yaml")
     lifecycle 02-previous-config ensure --from-package --config "$stage/config.yaml" --reason ci-upgrade-lane
     check "$results/02-previous-config.json" previous-config --action ensure --installed --version "$previous_version" --ready \
         --allow-warning unprivileged_user_namespaces "${policy_checks[@]}"
     cp "$stage/config.yaml" "$results/config-before.yaml"
+    step "store a protected credential on the previous release"
+    seed_upgrade_secret 02-previous-secret
     lifecycle 03-previous-verify verify
     retry_busy 03-previous-verify verify
     check "$results/03-previous-verify.json" previous-verify --action verify --installed --version "$previous_version" --ready \
@@ -609,22 +681,14 @@ upgrade_lane() {
 
     step "upgrade to $version (ensure --from-package)"
     lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
-    # A v8 config is migrated, so the upgrade applies a new config generation;
-    # a v9 one keeps its bytes and its generation.
-    generation_floor=$previous_generation
-    [ "$config_version" = 8 ] || generation_floor=$((previous_generation - 1))
-    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready --complete \
-        "${policy_checks[@]}" --policy-applied --config-generation-above "$generation_floor"
+    # The version 9 config keeps its bytes, so its generation does not drop.
+    check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready \
+        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" --policy-applied --config-generation-above "$((previous_generation - 1))"
     sandbox_files_present
     launcher_offers_only_sandbox
-    if [ "$config_version" = 8 ]; then
-        [ -f "$config_dir/migration-v9.json" ] || die "the upgrade wrote no $config_dir/migration-v9.json"
-        [ -f "$config.v8.bak" ] || die "the upgrade kept no $config.v8.bak"
-        [ "$(sha256_of "$config.v8.bak")" = "$previous_config_sha" ] || die "$config.v8.bak is not the previous config"
-        cp "$config_dir/migration-v9.json" "$results/migration-v9.json"
-    fi
     cp "$config" "$results/config-upgraded.yaml"
     [ "$(tree_sha "$secrets_dir")" = "$previous_secrets_sha" ] || die "the upgrade changed the secrets under $secrets_dir"
+    upgrade_secret_kept || die "the upgrade did not keep the bytes of the protected credential $upgrade_secret_name"
     [ "$(ledger_targets)" = "$previous_ledger" ] ||
         die "the upgrade changed the protected targets in the guardian ledger $guardian_ledger"
     services_running
@@ -650,7 +714,7 @@ else
     # host with eligible users is honestly security-incomplete (GAP-0266); the
     # step after this one applies the config and requires --complete.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-        --coverage-complete --allow-warning no_connectors_enabled
+        --allow-warning no_connectors_enabled --allow-warning agent_install_scan_incomplete
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
     [ -x "$gateway" ] || die "$gateway was not installed"
     [ -f "$config" ] || die "the lifecycle did not write $config"
@@ -677,7 +741,7 @@ else
     write_admin_config
     lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
-        --complete "${policy_checks[@]}"
+        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}"
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
@@ -693,7 +757,9 @@ fi
 step "ensure again (must be a no-op)"
 lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
 check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
-    --complete
+    --allow-warning agent_install_scan_incomplete
+
+wait_for_install_scan
 
 step "verify"
 lifecycle 04-verify verify
@@ -701,13 +767,14 @@ retry_busy 04-verify verify
 # verify reports whether unprivileged user namespaces are open, a setting of
 # the host's kernel (the runner's, or the container host's), not of the package.
 check "$results/04-verify.json" verify --action verify --installed --version "$version" --ready \
-    --complete "${policy_checks[@]}" --allow-warning unprivileged_user_namespaces
+    --coverage-complete --security-incomplete "${policy_checks[@]}" \
+    --allow-warning unprivileged_user_namespaces --allow-warning hook_process_fail_open
 
 step "status"
 lifecycle 05-status status
 retry_busy 05-status status
 check "$results/05-status.json" status --action status --installed --version "$version" \
-    --complete "${policy_checks[@]}"
+    --coverage-complete --security-incomplete "${policy_checks[@]}" --allow-warning hook_process_fail_open
 services_running
 
 step "MDM detection (detect.sh --require-healthy)"

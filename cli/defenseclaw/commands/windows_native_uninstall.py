@@ -93,7 +93,7 @@ _INSTALL_STATE_OPTIONAL_FIELDS = frozenset(
         "devin_executable",
         "antigravity_config_dir",
         "opencode_config_dir",
-        "omnigent_config_home",
+        "omnigent_config_home",  # until 1.1: older native installs that selected OmniGent recorded it.
         "hermes_home",
         "transaction_id",
     }
@@ -479,6 +479,9 @@ def _validate_install_state(
             "devin",
             "hermes",
             "kiro",
+            # until 1.1: OmniGent was removed in 1.0.4 (#1182). An older native
+            # install that selected it must still reach Setup /uninstall, which
+            # tears its policy files down; Setup never offers it again.
             "omnigent",
             "opencode",
             "none",

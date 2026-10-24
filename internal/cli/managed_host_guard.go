@@ -379,14 +379,18 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 
 // managedWindowsSetupRefusal is the answer to `defenseclaw setup <args>` on a
 // Windows standalone managed computer. The guardian enrolls Kiro there for
-// each listed user through hooks, so `setup kiro` says so.
+// each listed user through hooks, so `setup kiro` says so. Only `setup
+// rotate-token` gets the credential-rotation sentence: every other subcommand
+// printed it too (GAP-0551).
 func managedWindowsSetupRefusal(where string, args []string) error {
-	detail := "Rotating the credentials of a managed Windows deployment is not available yet. "
+	detail := ""
 	sub := ""
 	if len(args) > 0 {
 		sub = strings.ToLower(strings.TrimSpace(args[0]))
 	}
 	switch sub {
+	case "rotate-token":
+		detail = "Rotating the credentials of a managed Windows deployment is not available yet. "
 	case "kiro":
 		detail = "On a managed Windows computer the guardian enrolls Kiro for each user when your administrator " +
 			"lists it in the deployment (guardrail.connectors.kiro); the ACP guard stays available for editors that start Kiro over ACP. "

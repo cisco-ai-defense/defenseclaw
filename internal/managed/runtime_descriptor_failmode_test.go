@@ -4,6 +4,7 @@
 package managed
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -54,5 +55,66 @@ func TestRuntimeDescriptorOpenHookConnectors(t *testing.T) {
 		if err := d.Validate(); err == nil {
 			t.Errorf("open connectors %q validated", bad)
 		}
+	}
+}
+
+func TestRuntimeDescriptorPolicyViewPinsAreBoundToListedConnectors(t *testing.T) {
+	d := failModeTestDescriptor()
+	d.PolicyViewDigests = map[string]string{"codex": strings.Repeat("a", 64)}
+	data, err := MarshalRuntimeDescriptor(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseRuntimeDescriptor(data)
+	if err != nil || parsed.PolicyViewDigests["codex"] != d.PolicyViewDigests["codex"] {
+		t.Fatalf("policy-view pin did not round-trip: %v, %+v", err, parsed)
+	}
+	for _, bad := range []map[string]string{
+		{"codex": "not-a-digest"},
+		{"codex": strings.Repeat("A", 64)},
+		{"claudecode": strings.Repeat("a", 64)},
+	} {
+		d := failModeTestDescriptor()
+		d.PolicyViewDigests = bad
+		if err := d.Validate(); err == nil {
+			t.Errorf("invalid policy-view pins %v validated", bad)
+		}
+	}
+}
+
+func TestRuntimeDescriptorPerAccountPinsRejectInvalidSources(t *testing.T) {
+	good := PolicyViewFilePin{SHA256: strings.Repeat("a", 64), Size: 5, Mode: 0o600, Device: 1, Inode: 2, MTime: 3, CTime: 4}
+	d := failModeTestDescriptor()
+	d.PolicyViewUserSources = map[string]map[string]PolicyViewFilePin{"codex": {"alice": good}}
+	data, err := MarshalRuntimeDescriptor(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseRuntimeDescriptor(data)
+	if err != nil || parsed.PolicyViewUserSources["codex"]["alice"] != good {
+		t.Fatalf("per-account pin did not round-trip: %v, %+v", err, parsed)
+	}
+	for _, bad := range []map[string]map[string]PolicyViewFilePin{
+		{"codex": {"../alice": good}},
+		{"codex": {"alice": {SHA256: strings.Repeat("a", 64)}}},
+		{"claudecode": {"alice": good}},
+		{"copilot": {"alice": good}},
+	} {
+		d := failModeTestDescriptor()
+		d.PolicyViewUserSources = bad
+		if err := d.Validate(); err == nil {
+			t.Errorf("invalid per-account sources %+v validated", bad)
+		}
+	}
+	large := failModeTestDescriptor()
+	large.MachinePolicyConnectors = []string{"codex", "claudecode"}
+	large.PolicyViewUserSources = map[string]map[string]PolicyViewFilePin{"codex": {}, "claudecode": {}}
+	for i := range 128 {
+		name := strings.Repeat("u", 200) + strconv.Itoa(i)
+		large.PolicyViewUserSources["codex"][name] = good
+		large.PolicyViewUserSources["claudecode"][name] = good
+	}
+	if _, err := MarshalRuntimeDescriptor(large); err == nil {
+		t.Fatal("oversize per-account attestation descriptor was published")
 	}
 }

@@ -14,6 +14,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -54,7 +56,10 @@ var enterpriseHookAIDiscoveryState struct {
 // ceiling or crashed), so one home that cannot be scanned does not cost a
 // worker on every pass (GAP-0694). The pause starts at an hour and doubles
 // up to a day; the pass after a pause tries once, and a good scan closes the
-// breaker. The account keeps its last record meanwhile.
+// breaker. The account keeps its last record meanwhile, kept current and
+// marked partial so the gateway does not age it out as removed (GAP-1224).
+// The state belongs to the account that failed, not to its uid: an account
+// that is given the uid later starts with none (GAP-1074).
 var enterpriseHookAIDiscoveryBreaker = newEnterpriseHookScanBreaker(3, time.Hour, 24*time.Hour)
 
 type enterpriseHookScanBreaker struct {
@@ -65,6 +70,8 @@ type enterpriseHookScanBreaker struct {
 }
 
 type enterpriseHookScanBreakerState struct {
+	// holder is the account the failures are of (enterpriseHookScanHolder).
+	holder   string
 	failures int
 	pause    time.Duration
 	until    time.Time
@@ -74,16 +81,47 @@ func newEnterpriseHookScanBreaker(threshold int, base, max time.Duration) *enter
 	return &enterpriseHookScanBreaker{threshold: threshold, base: base, max: max, accounts: map[int]*enterpriseHookScanBreakerState{}}
 }
 
-// allow reports whether uid's home may be scanned at now.
-func (b *enterpriseHookScanBreaker) allow(uid int, now time.Time) bool {
+// enterpriseHookScanHolder names the account that holds a row's uid: its
+// name, home and home inode. A removed account's uid handed to a new one
+// gives another holder.
+func enterpriseHookScanHolder(row enterpriseHookReconcileRow) string {
+	return fmt.Sprintf("%s\x00%s\x00%d", row.User, filepath.Clean(row.UserHome), row.HomeInode)
+}
+
+// enterpriseHookAIDiscoveryHolder is the holder a spool record names: a
+// digest of the row's account name, as qualified as the host gives it, and
+// home, then the home's inode. The record carries no path.
+func enterpriseHookAIDiscoveryHolder(row enterpriseHookReconcileRow) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(row.User)) + "\x00" + filepath.Clean(row.UserHome)))
+	return hex.EncodeToString(sum[:16]) + ":" + strconv.FormatUint(row.HomeInode, 10)
+}
+
+// enterpriseHookAIDiscoveryHolderMatches reports whether a record made for
+// recorded is current's: the same name and home, and the same home inode
+// unless one side could not read it (0).
+func enterpriseHookAIDiscoveryHolderMatches(recorded, current string) bool {
+	recordedID, recordedInode, ok := strings.Cut(recorded, ":")
+	currentID, currentInode, currentOK := strings.Cut(current, ":")
+	return ok && currentOK && recordedID == currentID &&
+		(recordedInode == currentInode || recordedInode == "0" || currentInode == "0")
+}
+
+// allow reports whether the home of uid, held by holder, may be scanned at
+// now. Another holder's pause is dropped.
+func (b *enterpriseHookScanBreaker) allow(uid int, holder string, now time.Time) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	state := b.accounts[uid]
+	if state != nil && state.holder != holder {
+		delete(b.accounts, uid)
+		return true
+	}
 	return state == nil || !now.Before(state.until)
 }
 
-// record notes one scan of uid and returns the pause a failure opened, or 0.
-func (b *enterpriseHookScanBreaker) record(uid int, now time.Time, failed bool) time.Duration {
+// record notes one scan of uid, held by holder, and returns the pause a
+// failure opened, or 0.
+func (b *enterpriseHookScanBreaker) record(uid int, holder string, now time.Time, failed bool) time.Duration {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !failed {
@@ -91,8 +129,8 @@ func (b *enterpriseHookScanBreaker) record(uid int, now time.Time, failed bool) 
 		return 0
 	}
 	state := b.accounts[uid]
-	if state == nil {
-		state = &enterpriseHookScanBreakerState{}
+	if state == nil || state.holder != holder {
+		state = &enterpriseHookScanBreakerState{holder: holder}
 		b.accounts[uid] = state
 	}
 	if state.failures++; state.failures < b.threshold {
@@ -103,12 +141,13 @@ func (b *enterpriseHookScanBreaker) record(uid int, now time.Time, failed bool) 
 	return state.pause
 }
 
-// keep forgets the accounts that are no longer enrolled.
-func (b *enterpriseHookScanBreaker) keep(enrolled map[int]bool) {
+// keep forgets the accounts that are no longer enrolled, keyed by uid with
+// the holder each uid is enrolled for now.
+func (b *enterpriseHookScanBreaker) keep(enrolled map[int]string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for uid := range b.accounts {
-		if !enrolled[uid] {
+	for uid, state := range b.accounts {
+		if holder, ok := enrolled[uid]; !ok || holder != state.holder {
 			delete(b.accounts, uid)
 		}
 	}
@@ -116,7 +155,7 @@ func (b *enterpriseHookScanBreaker) keep(enrolled map[int]bool) {
 
 func init() {
 	enterpriseHookAfterWatchReconcile = func(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) {
-		run.Rows = enterpriseHookEnrolledAccountRows(stderr, run)
+		run.Rows = enterpriseHookEnrolledAccountRows(ctx, stderr, run)
 		restoreEnterprisePolicyDirs(stderr)
 		startEnterpriseHookAIDiscovery(ctx, stderr, run)
 		startEnterpriseHookIdentitySpool(ctx, stderr, run)
@@ -141,7 +180,7 @@ func restoreEnterprisePolicyDirs(stderr io.Writer) {
 	}
 	restored, err := enterprisepolicy.RestorePublishedPolicyDirs(opts)
 	if len(restored) > 0 {
-		fmt.Fprintf(stderr, "[hook-guardian] restored %s to mode 0755: users could not read DefenseClaw's machine policy there\n", strings.Join(restored, ", "))
+		fmt.Fprintf(stderr, "[hook-guardian] gave users access through %s again: they could not read DefenseClaw's machine policy there\n", strings.Join(restored, ", "))
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "[hook-guardian] machine policy directories: %v\n", err)
@@ -163,7 +202,10 @@ func enterpriseHookManifestEnrollment() bool {
 // for per-user hook connectors: a deployment that selects only the
 // machine-policy connectors (Claude Code, Codex) has none, and its enrolled
 // accounts still need their identity records and per-user scans (GAP-0021).
-func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookReconcileRun) []enterpriseHookReconcileRow {
+// An eligible account the current exclude_users or exempt_users name gets
+// none: eligible-accounts.json can be older than the settings and the
+// manifest, when its write failed after the manifest's.
+func enterpriseHookEnrolledAccountRows(ctx context.Context, stderr io.Writer, run enterpriseHookReconcileRun) []enterpriseHookReconcileRow {
 	rows := append([]enterpriseHookReconcileRow(nil), run.Rows...)
 	manifest := strings.TrimSpace(run.Manifest)
 	if manifest == "" || enterpriseHookManifestEnrollment() {
@@ -178,8 +220,9 @@ func enterpriseHookEnrolledAccountRows(stderr io.Writer, run enterpriseHookRecon
 	for _, row := range rows {
 		seen[row.UID] = true
 	}
+	leftOut := enterpriseHookEnrollmentLeftOut(ctx, enterpriseHookIdentitySpoolDirForConfig())
 	for _, account := range accounts {
-		if account.UID <= 0 || seen[account.UID] {
+		if account.UID <= 0 || seen[account.UID] || leftOut.has(account.UID, account.User) {
 			continue
 		}
 		seen[account.UID] = true
@@ -251,7 +294,8 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 		return
 	}
 	enrolled := map[string]bool{inventory.UserScanPassName: true}
-	enrolledUIDs := map[int]bool{}
+	enrolledUIDs := map[int]string{}
+	recordHolders := map[int]string{}
 	accounts := []enterpriseHookWorkerAccount{}
 	resolver := enterprisehooks.StandaloneResolver()
 	breaker := enterpriseHookAIDiscoveryBreaker
@@ -261,16 +305,22 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 			continue
 		}
 		enrolled[uid+".json"] = true
-		enrolledUIDs[row.UID] = true
-		if row.Pending || !breaker.allow(row.UID, time.Now()) {
+		holder := enterpriseHookScanHolder(row)
+		enrolledUIDs[row.UID] = holder
+		recordHolders[row.UID] = enterpriseHookAIDiscoveryHolder(row)
+		if row.Pending {
+			keepEnterpriseHookAIDiscoveryRecord(stderr, dir, row.UID, row.User, recordHolders[row.UID], false, time.Now())
+			continue
+		}
+		if !breaker.allow(row.UID, holder, time.Now()) {
+			keepEnterpriseHookAIDiscoveryRecord(stderr, dir, row.UID, row.User, recordHolders[row.UID], true, time.Now())
 			continue
 		}
 		account, err := resolver.LookupUID(row.UID)
 		home := filepath.Clean(row.UserHome)
-		if err != nil || account.UID != row.UID || (strings.TrimSpace(account.Home) != "" && filepath.Clean(account.Home) != home) {
-			continue
-		}
-		if enterpriseHookCheckHome(home, row.UID).State != enterprisehooks.HomeAvailable {
+		if err != nil || account.UID != row.UID || (strings.TrimSpace(account.Home) != "" && filepath.Clean(account.Home) != home) ||
+			enterpriseHookCheckHome(home, row.UID).State != enterprisehooks.HomeAvailable {
+			keepEnterpriseHookAIDiscoveryRecord(stderr, dir, row.UID, row.User, recordHolders[row.UID], false, time.Now())
 			continue
 		}
 		accounts = append(accounts, enterpriseHookWorkerAccount{UID: account.UID, GID: account.GID, User: account.Name, Home: home})
@@ -326,14 +376,21 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 		if err == nil && outcome.Response.AIDiscovery == nil {
 			err = errors.New("the worker returned no report")
 		}
-		if pause := breaker.record(outcome.Job.Account.UID, time.Now(), err != nil); pause > 0 {
+		holder := enrolledUIDs[outcome.Job.Account.UID]
+		if pause := breaker.record(outcome.Job.Account.UID, holder, time.Now(), err != nil); pause > 0 {
 			fmt.Fprintf(stderr, "[hook-guardian] ai discovery for %s: the scan failed %d times in a row; the next scan of this home is in %s\n",
 				outcome.Job.Account.User, breaker.threshold, pause)
+		}
+		recordHolder := recordHolders[outcome.Job.Account.UID]
+		if err != nil {
+			// A failed scan keeps the account's last record current, as a
+			// pause does, so a failing home is not reported as emptied.
+			keepEnterpriseHookAIDiscoveryRecord(stderr, dir, outcome.Job.Account.UID, outcome.Job.Account.User, recordHolder, true, time.Now())
 		}
 		if err == nil {
 			report := *outcome.Response.AIDiscovery
 			if err = inventory.SanitizeUserScanReport(&report, catalog, options.StoreRawLocalPaths, options.IncludeUserEmail); err == nil {
-				err = writeEnterpriseHookAIDiscoveryRecord(dir, outcome.Job.Account, report, time.Now())
+				err = writeEnterpriseHookAIDiscoveryRecord(dir, outcome.Job.Account, recordHolder, report, time.Now())
 			}
 			// A connector account file the scan could not use is named,
 			// not silently left out (GAP-0961).
@@ -347,14 +404,65 @@ func runEnterpriseHookAIDiscoveryPass(ctx context.Context, stderr io.Writer, dir
 	}
 }
 
+// enterpriseHookAIDiscoveryRecordReader reads a spool record with the
+// gateway's checks; tests replace it.
+var enterpriseHookAIDiscoveryRecordReader = inventory.ReadUserScanRecord
+
+// enterpriseHookAIDiscoveryRetainedNote is the detector error a retained
+// record carries: the inventory shown is the last good scan's.
+const enterpriseHookAIDiscoveryRetainedNote = "the last scans of this home failed; showing the last complete scan until a scan succeeds"
+
+// keepEnterpriseHookAIDiscoveryRecord checks the last record of uid, an
+// enrolled account held by holder that this pass does not scan, or whose
+// scan failed. A record that does not name holder goes: it was made for an
+// account that held the uid before (a namesake from another domain
+// included) or by a build that named none, and must not show that
+// account's inventory as this one's. With refresh, the account's own
+// record is kept current for the gateway, which otherwise drops it after
+// three scan intervals and reports every item in it as removed while a
+// pause lasts (GAP-1224): it keeps its report and is marked partial, naming
+// why. An account with no record yet has nothing to keep.
+func keepEnterpriseHookAIDiscoveryRecord(stderr io.Writer, dir string, uid int, user, holder string, refresh bool, now time.Time) {
+	name := strconv.Itoa(uid) + ".json"
+	path := filepath.Join(dir, name)
+	record, err := enterpriseHookAIDiscoveryRecordReader(path)
+	if errors.Is(err, os.ErrNotExist) || (err != nil && !refresh) {
+		return
+	}
+	if err == nil && (record.UID != uid || !enterpriseHookAIDiscoveryHolderMatches(record.Holder, holder)) {
+		if err = os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+			return
+		}
+	}
+	if err == nil && !refresh {
+		return
+	}
+	if err == nil {
+		record.UpdatedAt = now.UTC()
+		record.Report.Summary.Result = "partial"
+		if record.Report.Summary.DetectorErrors == nil {
+			record.Report.Summary.DetectorErrors = map[string]string{}
+		}
+		record.Report.Summary.DetectorErrors["user_scan"] = enterpriseHookAIDiscoveryRetainedNote
+		var data []byte
+		if data, err = json.Marshal(record); err == nil {
+			err = writeEnterpriseHookAIDiscoverySpoolFile(dir, name, data)
+		}
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "[hook-guardian] ai discovery for %s: could not update the last record: %s\n", user, boundedString(err.Error(), 512))
+	}
+}
+
 // writeEnterpriseHookAIDiscoveryRecord replaces <uid>.json atomically, with
 // its final mode and group set before the rename so the gateway never sees
 // a partial or unreadable record.
-func writeEnterpriseHookAIDiscoveryRecord(dir string, account enterpriseHookWorkerAccount, report inventory.AIDiscoveryReport, now time.Time) error {
+func writeEnterpriseHookAIDiscoveryRecord(dir string, account enterpriseHookWorkerAccount, holder string, report inventory.AIDiscoveryReport, now time.Time) error {
 	data, err := json.Marshal(inventory.UserScanRecord{
 		Version:   inventory.UserScanRecordVersion,
 		UID:       account.UID,
 		User:      account.User,
+		Holder:    holder,
 		UpdatedAt: now.UTC(),
 		Report:    report,
 	})

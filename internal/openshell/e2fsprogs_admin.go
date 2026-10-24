@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // AdminE2fsprogsTools are the e2fsprogs tools the macOS MicroVM driver
@@ -81,6 +82,9 @@ func managedE2fsprogsToolDir(adminDir, packageDir, home string, uid int, trusted
 	if adminDir != "" {
 		tools := AdminE2fsprogsToolDir(adminDir, RegularFile)
 		if tools == "" {
+			if problem := inaccessibleE2fsprogsProblem(adminDir); problem != "" {
+				return "", problem
+			}
 			return "", fmt.Sprintf("the administrator's e2fsprogs %s holds no mke2fs and debugfs side by side; set enterprise.openshell.e2fsprogs_dir to the install prefix or the folder that holds both tools", adminDir)
 		}
 		if trustedAdmin == nil {
@@ -123,7 +127,28 @@ func managedE2fsprogsToolDir(adminDir, packageDir, home string, uid int, trusted
 		}
 		return tools, ""
 	}
+	if problem := inaccessibleE2fsprogsProblem(packageDir); problem != "" {
+		return "", problem
+	}
 	return "", "MicroVM sandboxes need mke2fs and debugfs in the administrator's enterprise.openshell.e2fsprogs_dir, your own ~/.local/opt/e2fsprogs/sbin, or the managed package; a Homebrew keg is not used on a managed computer"
+}
+
+// inaccessibleE2fsprogsProblem is used only after no complete pair could be
+// inspected. An unused private sbin must not hide a usable bin. If several
+// candidates are inaccessible, name them without claiming which holds tools.
+func inaccessibleE2fsprogsProblem(prefix string) string {
+	var inaccessible []string
+	for _, candidate := range []string{filepath.Join(prefix, "sbin"), filepath.Join(prefix, "bin"), prefix} {
+		info, err := os.Stat(candidate)
+		if os.IsPermission(err) || (err == nil && info.IsDir() && info.Mode().Perm()&0o001 == 0) {
+			inaccessible = append(inaccessible, candidate)
+		}
+	}
+	if len(inaccessible) == 0 {
+		return ""
+	}
+	return "the e2fsprogs tool folders cannot be traversed by every account: " + strings.Join(inaccessible, ", ") +
+		"; ask your administrator to make the selected folder and its ancestors traversable (chmod o+x), then retry"
 }
 
 // E2fsprogsAccessProblem is the account-access check shared by ensure,
@@ -139,7 +164,7 @@ func E2fsprogsAccessProblem(tools string, stat func(string) (os.FileInfo, error)
 		path := filepath.Join(tools, name)
 		info, err := stat(path)
 		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o001 == 0 {
-			return path + " cannot be executed by every account"
+			return path + " cannot be executed by every account; ask your administrator to grant execute access (chmod o+x), then retry"
 		}
 	}
 	return ""
@@ -149,7 +174,7 @@ func e2fsprogsDirectoryAccessProblem(tools string, stat func(string) (os.FileInf
 	for dir := tools; dir != "/" && dir != "."; dir = filepath.Dir(dir) {
 		info, err := stat(dir)
 		if err != nil || !info.IsDir() || info.Mode().Perm()&0o001 == 0 {
-			return dir + " cannot be traversed by every account"
+			return dir + " cannot be traversed by every account; ask your administrator to grant directory traversal (chmod o+x), then retry"
 		}
 	}
 	return ""

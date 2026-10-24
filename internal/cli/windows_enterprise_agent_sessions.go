@@ -543,17 +543,13 @@ func windowsServiceIdentity(user string) bool {
 	return false
 }
 
-// windowsServiceSID reports built-in and virtual service identities that may
-// have no account name in a process snapshot.
+// windowsServiceSID reports a process owner SID that names no interactive
+// user account: a built-in, virtual or IIS application pool service
+// identity, which may have no account name in a process snapshot. It
+// classifies owners as the enumerator does (GAP-0673).
 func windowsServiceSID(sid string) bool {
-	sid = strings.ToUpper(strings.TrimSpace(sid))
-	switch sid {
-	case "S-1-5-18", "S-1-5-19", "S-1-5-20":
-		return true
-	}
-	return strings.HasPrefix(sid, "S-1-5-80-") ||
-		strings.HasPrefix(sid, "S-1-5-90-") ||
-		strings.HasPrefix(sid, "S-1-5-96-")
+	sid = strings.TrimSpace(sid)
+	return sid != "" && !enterprisehooks.WindowsInteractiveUserSID(sid)
 }
 
 // windowsEnterpriseSessionNamed reports whether a restart-status verdict of

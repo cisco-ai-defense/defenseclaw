@@ -80,7 +80,6 @@ def _install_state(local_app_data: Path, profile: Path) -> dict[str, object]:
         "release_signing_required": True,
         "toolchain": {"go": "go1.25.0"},
         "installed_at_utc": "2026-07-28T12:00:00Z",
-        "omnigent_config_home": str(profile / ".omnigent"),
         "hermes_home": str(local_app_data / "hermes"),
         "devin_config_dir": str(profile / "AppData" / "Roaming" / "devin"),
         "devin_executable": str(local_app_data / "devin" / "cli" / "bin" / "devin.exe"),
@@ -691,18 +690,39 @@ def test_prepare_accepts_explicitly_absent_legacy_transaction_identity(
     assert _prepare_from_tree(local_app_data, profile) is not None
 
 
-@pytest.mark.parametrize("connector", ["hermes", "omnigent"])
-def test_prepare_accepts_current_native_connector_identities(
-    tmp_path: Path,
-    connector: str,
-) -> None:
+def test_prepare_accepts_current_native_connector_identity(tmp_path: Path) -> None:
     local_app_data, profile = _native_tree(tmp_path)
     state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
     state = _install_state(local_app_data, profile)
-    state["connector"] = connector
+    state["connector"] = "hermes"
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
     assert _prepare_from_tree(local_app_data, profile) is not None
+
+
+def test_prepare_accepts_removed_omnigent_native_install_state(tmp_path: Path) -> None:
+    # until 1.1: an install an older release made with CONNECTOR=omnigent must
+    # still reach Setup /uninstall, which tears OmniGent's policy files down.
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["connector"] = "omnigent"
+    state["omnigent_config_home"] = str(profile / ".omnigent")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert _prepare_from_tree(local_app_data, profile) is not None
+
+
+def test_prepare_still_refuses_removed_openhands_native_install_state(tmp_path: Path) -> None:
+    # Native Windows Setup never offered OpenHands, so no signed state names it.
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["connector"] = "openhands"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(native.NativeWindowsUninstallRefusal, match="signed user installation"):
+        _prepare_from_tree(local_app_data, profile)
 
 
 @pytest.mark.parametrize(
@@ -1066,3 +1086,85 @@ def test_command_without_native_state_uses_existing_generic_path() -> None:
     assert result.exit_code == 0
     generic_plan.assert_called_once()
     execute.assert_called_once_with(plan)
+
+
+# Review fixes (G-deadcode loop round 2): native Setup's removed-connector
+# leftovers reach the user on success and on a restart-required exit, and the
+# agent configs outside a data folder Setup deletes are read before it runs.
+_SETUP_NOTES = (
+    "OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:\r\n"
+    "  - C:\\Users\\u\\corp\\omnigent.yaml: OmniGent still imports DefenseClaw's policy module from here; "
+    "it denies every request. To remove: remove defenseclaw_omnigent_policy from policy_modules.\r\n"
+    "  - {stub}: the stub that blocks every OmniGent call. "
+    "To remove: delete it once nothing above runs it.\r\n"
+)
+
+
+@pytest.mark.parametrize("returncode", [0, 3010])
+@pytest.mark.parametrize("wipe_data", [False, True])
+def test_native_setup_removed_connector_leftovers_are_shown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], returncode: int, wipe_data: bool
+) -> None:
+    data = tmp_path / ".defenseclaw"
+    (data / "hooks").mkdir(parents=True)
+    config = tmp_path / "custom" / "config.yaml"
+    config.parent.mkdir()
+    config.write_text("policy_modules: [defenseclaw_omnigent_policy]\n", encoding="utf-8")
+    backups = data / "connector_backups" / "omnigent"
+    backups.mkdir(parents=True)
+    (backups / "config.json").write_text(
+        json.dumps({"version": 1, "connector": "omnigent", "logical_name": "config", "path": str(config)}),
+        encoding="utf-8",
+    )
+    request = _request(tmp_path, wipe_data=wipe_data)
+    stub = str(data / "hooks" / "defenseclaw_omnigent_policy.py")
+
+    def run_setup(_request):
+        if wipe_data:
+            # DELETEUSERDATA=1: Setup deletes the data folder, records and all.
+            import shutil
+
+            shutil.rmtree(data)
+        return native.NativeWindowsUninstallOutcome(returncode, stdout=_SETUP_NOTES.replace("{stub}", stub))
+
+    with (
+        patch.object(native, "prepare_native_windows_uninstall", return_value=request),
+        patch.object(native, "execute_native_windows_uninstall", side_effect=run_setup),
+        patch.object(cmd_uninstall.config_module, "default_data_path", return_value=data),
+        patch.dict(os.environ, {"OMNIGENT_CONFIG": "", "OMNIGENT_CONFIG_HOME": "", "HOME": str(tmp_path / "home")}),
+    ):
+        if returncode == 0:
+            assert cmd_uninstall._dispatch_native_windows_uninstall(wipe_data=wipe_data, dry_run=False, yes=True)
+        else:
+            with pytest.raises(SystemExit) as raised:
+                cmd_uninstall._dispatch_native_windows_uninstall(wipe_data=wipe_data, dry_run=False, yes=True)
+            assert raised.value.code == returncode
+    out = capsys.readouterr().out
+    assert out.count("OmniGent support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:") == 1
+    assert "C:\\Users\\u\\corp\\omnigent.yaml: OmniGent still imports" in out
+    # The config the deleted backup record named, read before Setup ran.
+    assert f"  - {config}: OmniGent still imports" in out
+    stub_line = f"  - {stub}: the stub"
+    if wipe_data:
+        assert stub_line not in out
+        assert "DefenseClaw's data folder is removed by this uninstall" in out
+    else:
+        assert stub_line in out
+
+
+def test_native_setup_without_leftovers_prints_none(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    data = tmp_path / ".defenseclaw"
+    data.mkdir()
+    request = _request(tmp_path, wipe_data=True)
+    with (
+        patch.object(native, "prepare_native_windows_uninstall", return_value=request),
+        patch.object(
+            native,
+            "execute_native_windows_uninstall",
+            return_value=native.NativeWindowsUninstallOutcome(0, stdout="done\r\n"),
+        ),
+        patch.object(cmd_uninstall.config_module, "default_data_path", return_value=data),
+        patch.dict(os.environ, {"OMNIGENT_CONFIG": "", "OMNIGENT_CONFIG_HOME": "", "HOME": str(tmp_path / "home")}),
+    ):
+        assert cmd_uninstall._dispatch_native_windows_uninstall(wipe_data=True, dry_run=False, yes=True)
+    assert "support was removed" not in capsys.readouterr().out

@@ -193,6 +193,33 @@ func TestWindowsPublicDirDenyReadIsDrift(t *testing.T) {
 	}
 }
 
+// GAP-1327: a conditional (callback) allow that grants Modify makes the
+// public folder writable for the tokens its condition matches. It is drift,
+// and repair removes it.
+func TestWindowsPublicDirCallbackAllowIsDrift(t *testing.T) {
+	dir := filepath.Join(windowsTestOptions(t).WindowsProgramData, "public-summary-callback")
+	if err := createProtectedDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := applySDDL(dir, "D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x1200a9;;;BU)(XA;;0x1301bf;;;BU;(Member_of {SID(BU)}))"); err != nil {
+		t.Fatal(err)
+	}
+	drift, err := InspectWindowsPublicDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if drift.Extra[usersSIDStr]&0x2 == 0 || !drift.Drifted() {
+		t.Fatalf("a conditional Users Modify allow must report drift: %+v", drift)
+	}
+	if err := RepairWindowsPublicDir(dir); err != nil {
+		t.Fatal(err)
+	}
+	drift, err = InspectWindowsPublicDir(dir)
+	if err != nil || drift.Drifted() {
+		t.Fatalf("repair must remove the conditional allow: %+v, %v", drift, err)
+	}
+}
+
 // Missing vendor directories are created with DefenseClaw's owner and
 // protected DACL in one call; an object that is already there when a
 // missing component is created is refused, never adopted.

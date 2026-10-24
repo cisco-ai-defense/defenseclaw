@@ -1456,6 +1456,55 @@ func TestEnumerateUnixKeepsRefusedSurfacesWhenDiscoveryFails(t *testing.T) {
 	}
 }
 
+func TestEnumerateUnixReportsIncompletePrivateScanOnPerUserDiscoveryFailure(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "homes")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := makeHome(t, homes, "alice")
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := &fakeResolver{accounts: map[string]unixidentity.Account{
+		"alice": {Name: "alice", UID: uid, GID: gid, Home: home, Shell: "/bin/bash"},
+	}, listed: []string{"alice"}}
+	for _, useSurfaces := range []bool{false, true} {
+		name := "versions"
+		if useSurfaces {
+			name = "surfaces"
+		}
+		t.Run(name, func(t *testing.T) {
+			opts := UnixEnumerateOptions{
+				Resolver: resolver, HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+			}
+			if useSurfaces {
+				opts.DiscoverSurfaces = func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+					return UnixDiscovery{}, errors.New("worker failed")
+				}
+			} else {
+				opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					return nil, nil, errors.New("worker failed")
+				}
+			}
+			cfg := enumeratorConfig("claudecode", "codex", "copilot")
+			_, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen := map[string]bool{}
+			for _, agent := range report.Unprotected {
+				if agent.Code == UnprotectedCodeInstallScanIncomplete {
+					seen[agent.Connector] = true
+				}
+			}
+			for _, name := range []string{"claudecode", "codex", "copilot"} {
+				if !seen[name] {
+					t.Fatalf("failed %s discovery hid %s private scan: %+v", name, name, report.Unprotected)
+				}
+			}
+		})
+	}
+}
+
 // A kiro-cli installed without a readable version is not known to be at its
 // hook floor. A supported Kiro IDE next to it gets the row, but must not hide
 // the CLI from status and verify: it is reported for a new row, a kept CLI

@@ -81,7 +81,10 @@ type Driver struct {
 	// MicroVM's stop does not flush the guest's page cache: a file written
 	// and not synced before it comes back empty at the next start (OpenShell
 	// 0.1.1), so without it DefenseClaw runs sync in the sandbox before
-	// every stop, and a copy's unpulled work survives the stop.
+	// every stop, and a copy's unpulled work survives the stop. 0.1.5
+	// flushes the guest before a planned stop (NVIDIA/OpenShell#4195); keep
+	// the sync until LegacyMin is 0.1.5: a legacy gateway's stop, which the
+	// move off it needs, still loses what was not synced.
 	StopFlushes bool
 	// ImageCache is where the driver keeps what it prepares from each image
 	// it boots, relative to the home of the user the gateway runs as; empty
@@ -100,7 +103,10 @@ type Driver struct {
 	// answers it with nss-myhostname, which a program that reads /etc/hosts
 	// itself (Go's own resolver, a static musl binary) never asks. Without
 	// it a sandbox boots only an image that passed the hook-fire probe's
-	// MicroVM scenario (image.Record.MicroVMVerified).
+	// MicroVM scenario (image.Record.MicroVMVerified). NVIDIA/OpenShell#3934
+	// is fixed by #4182, which ships after 0.1.5 (in 0.1.6): set it for vm
+	// from that release, and drop the nss-myhostname step once it is
+	// SupportedMin.
 	HostsFile bool
 }
 

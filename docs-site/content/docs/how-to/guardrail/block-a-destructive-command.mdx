@@ -1,0 +1,90 @@
+---
+title: Block a destructive command
+description: Watch Claude Code in observe mode, then block rm -rf against a protected path with the bundled CMD-RM-RF rule.
+keywords:
+  - block rm -rf claude code
+  - DefenseClaw block destructive command
+  - CMD-RM-RF
+---
+
+Run Claude Code under observe mode first, then switch to action mode so the bundled `CMD-RM-RF` rule (CRITICAL) blocks a recursive force delete of `/` or a top-level directory such as `/etc`, `/var`, `/home`, `/usr` or `/opt`. The rule does not flag every `rm -rf`: a path below those directories (`/var/tmp/build`), a relative path or a home subdirectory is not matched.
+
+## Before you start
+
+- Claude Code is installed.
+- DefenseClaw is installed ([Install](/docs/get-started/install)).
+
+## Steps
+
+1. Wire Claude Code. It starts in observe mode.
+
+   ```bash
+   defenseclaw setup claude-code
+   ```
+
+   DefenseClaw registers the hook events for your Claude Code version (28 events, or 29 from 2.1.219 where `DirectoryAdded` is observation only) and receives its native OpenTelemetry logs and metrics. See the [Claude Code connector](/docs/connectors/claudecode).
+
+2. Use Claude Code normally for a while, then read what was recorded.
+
+   ```bash
+   defenseclaw alerts --limit 10
+   defenseclaw tui
+   ```
+
+3. Look at the rule.
+
+   ```bash
+   grep -n -A10 'id: CMD-RM-RF' ~/.defenseclaw/policies/guardrail/default/rules/commands.yaml
+   ```
+
+   ```text
+   114:  - id: CMD-RM-RF
+   …
+   121-    title: "Recursive force delete from critical root path"
+   122-    severity: CRITICAL
+   ```
+
+4. Turn on blocking for Claude Code ([Turn on blocking](/docs/how-to/guardrail/turn-on-blocking) has the detail).
+
+   ```bash
+   defenseclaw guardrail mode action --connector claudecode
+   ```
+
+5. Ask Claude Code to run `rm -rf /proc`. `/proc` is a kernel pseudo-filesystem, so the exercise stays safe even if blocking were off. The hook sends the command to the gateway, the gateway matches `CMD-RM-RF`, and Claude Code gets a deny before the shell starts:
+
+   ```text
+   DefenseClaw policy blocked this action (rule CMD-RM-RF: Recursive force delete from critical root path). Do not retry it in another form.
+   ```
+
+   Many models refuse this command themselves. Then no tool call is made and there is nothing to block; use the test rule in the [quickstart](/docs/get-started/quickstart) instead.
+
+## Check it worked
+
+```bash
+defenseclaw alerts --limit 5
+defenseclaw-gateway audit export --connector claudecode --since 30m \
+  | jq -c 'select(.action == "connector-hook") | {timestamp, action: .structured.action, rule_ids: .structured.rule_ids}'
+```
+
+```text
+{"timestamp":"2026-10-21T06:59:40.323651948Z","action":"block","rule_ids":["CMD-RM-RF"]}
+```
+
+Each hook call writes one `connector-hook` row. `action` is the answer Claude Code received.
+
+## If the gateway is unreachable
+
+The hook follows the fail mode: `closed` (the default) blocks the events that can carry a block, `open` allows and logs. Check it with `defenseclaw guardrail status` ([fail modes](/docs/reference/configuration/fail-modes)).
+
+## Undo
+
+```bash
+defenseclaw guardrail mode observe --connector claudecode
+```
+
+To allow a path the rule blocks, see [Allow a blocked call](/docs/how-to/guardrail/allow-a-blocked-call).
+
+## Next
+
+- [Catch a prompt injection](/docs/how-to/guardrail/catch-prompt-injection)
+- [Allow a blocked call](/docs/how-to/guardrail/allow-a-blocked-call)

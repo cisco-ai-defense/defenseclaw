@@ -112,11 +112,9 @@ from defenseclaw import ux
             "cursor",
             "devin",
             "copilot",
-            "openhands",
             "antigravity",
             "opencode",
             "amp",
-            "omnigent",
             "kiro",
         ],
         case_sensitive=False,
@@ -124,8 +122,7 @@ from defenseclaw import ux
     default=None,
     help="Agent framework connector (alias: --agent). "
     "Quickstart configures one connector: an explicit value wins, otherwise "
-    "the single configured/detected connector is used. A picked_connector hint "
-    "is used only when no configured/detected connector exists. Bare quickstart "
+    "the single configured/detected connector is used. Bare quickstart "
     "errors when the connector choice is ambiguous.",
 )
 @click.option(
@@ -157,21 +154,17 @@ def quickstart_cmd(
     from defenseclaw import platform_support
     from defenseclaw.bootstrap import FirstRunOptions, run_first_run
     from defenseclaw.commands.cmd_init import _render_first_run_report, refuse_first_run_when_managed
-    from defenseclaw.commands.cmd_setup import (
-        _detect_installed_connectors,
-        _read_picked_connector,
-    )
+    from defenseclaw.commands.cmd_setup import _detect_installed_connectors
     from defenseclaw.ux import CLIRenderer
 
     refuse_first_run_when_managed()
-    connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name
         _refuse_roster_narrowing(cfg_mod, connector, mode)
     else:
-        data_dir = str(cfg_mod.default_data_path())
-        picked_path = os.path.join(data_dir, "picked_connector")
-        picked = _read_picked_connector(data_dir)
+        # The installer's picked_connector hint is not read: an installed
+        # agent it names is detected, and one the machine does not have is
+        # never set up (GAP-0568).
         detected = _detect_installed_connectors()
         configured = _configured_quickstart_connectors(cfg_mod)
         candidates = sorted({name for name in [*configured, *detected] if name})
@@ -221,21 +214,6 @@ def quickstart_cmd(
             sys.exit(2)
         if len(candidates) == 1:
             connector = candidates[0]
-            if picked and picked != connector:
-                ux.echo(
-                    "  ✗ Connector choice is ambiguous.\n"
-                    f"    picked_connector says {picked}, but the active/detected connector is {connector}.\n"
-                    "    Re-run with --connector <name>.",
-                    err=True,
-                )
-                sys.exit(2)
-        elif picked:
-            connector = picked
-            connector_source = {
-                "type": "picked_connector",
-                "connector": connector,
-                "path": picked_path,
-            }
         else:
             ux.echo(
                 "  ✗ Could not detect an agent framework on this host.\n"
@@ -280,6 +258,7 @@ def quickstart_cmd(
             rerun_command=f"defenseclaw quickstart --connector {connector}",
             connector_settings=[{"connector": connector}],
             profile=profile,
+            keep_modes=bool(kept_mode),
             scanner_mode=scanner_mode,
             with_judge=with_judge,
             start_gateway=not skip_gateway,
@@ -308,15 +287,8 @@ def quickstart_cmd(
         gateway_requested=not skip_gateway,
     )
     if json_summary:
-        payload = report.to_dict()
-        if connector_source:
-            payload["connector_source"] = connector_source
-        click.echo(json.dumps(payload, indent=2))
+        click.echo(json.dumps(report.to_dict(), indent=2))
     else:
-        if connector_source:
-            click.echo(
-                f"  Using picked connector hint: {connector} from {connector_source['path']}"
-            )
         _render_first_run_report(report, CLIRenderer())
     if report.status == "needs_attention":
         sys.exit(1)
@@ -451,6 +423,8 @@ def _configured_quickstart_connectors(cfg_mod) -> list[str]:
             return list(cfg.active_connectors())
         active = cfg.active_connector()
     except Exception:
+        return []
+    if not active:
         return []
     if active == "openclaw" and not (
         getattr(cfg.guardrail, "enabled", False) and (cfg.guardrail.connector or "").strip()

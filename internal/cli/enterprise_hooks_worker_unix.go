@@ -79,8 +79,9 @@ const (
 	// ownership: "off" before it kept Claude Code off every route). It
 	// changes nothing unless the user's hook contract lock records such a
 	// registration.
-	enterpriseHookWorkerModeRemoveLeftover      = "remove_leftover"
-	enterpriseHookWorkerModeBlockPersonalClaude = "block_personal_claude"
+	enterpriseHookWorkerModeRemoveLeftover            = "remove_leftover"
+	enterpriseHookWorkerModeBlockPersonalClaude       = "block_personal_claude"
+	enterpriseHookWorkerModeRepairManagedCodexFeature = "repair_managed_codex_feature"
 	// enterpriseHookWorkerModePurge removes the user's DefenseClaw per-user
 	// state (standalone uninstall --purge). It runs after the request's
 	// removals and only when every one of them succeeded: the state holds
@@ -169,6 +170,13 @@ type enterpriseHookWorkerRequest struct {
 	// TimeoutSeconds replaces enterpriseHookWorkerTimeout for this worker
 	// (remove-all's retry of a worker that timed out).
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// CleanupFence tells a foreign_cleanup worker that the guardian passed
+	// the cleanup fence pipes (enterprise_hooks_worker_fence_unix.go). The
+	// guardian sets it from cleanupFence.
+	CleanupFence bool `json:"cleanup_fence,omitempty"`
+	// cleanupFence is the guardian's side of those pipes; it never leaves
+	// the guardian.
+	cleanupFence *enterpriseForeignHookFenceSession
 }
 
 // enterpriseHookWorkerCopilotVSCode is what the user's home should hold
@@ -262,8 +270,9 @@ type enterpriseHookWorkerResponse struct {
 	Reasons  map[string]string                  `json:"reasons,omitempty"`
 	// Surfaces are the discovered app and extension installs per connector
 	// (user-influenced; the parent validates them).
-	Surfaces map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
-	Cleanup  map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
+	Surfaces        map[string][]connector.AgentSurface          `json:"surfaces,omitempty"`
+	PrivateInstalls []enterprisehooks.PrivateAgentInstall        `json:"private_installs,omitempty"`
+	Cleanup         map[string]enterpriseHookWorkerCleanupReport `json:"cleanup,omitempty"`
 	// Blocks are the foreign-hook blocks the user's hooks recorded since
 	// the last cleanup (user-influenced; only logged).
 	Blocks        []enterprisepolicy.BlockSummary `json:"blocks,omitempty"`
@@ -428,15 +437,24 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 				enterprisehooks.PutUnixKiroIDEForms(enterpriseHookWorkerDiscoverKiroIDE(request.Home), versions, reasons)
 			}
 		}
-		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces}, 0)
+		installs := enterprisehooks.DiscoverUnixPrivateAgentInstalls(request.Home, request.Connectors)
+		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: installs}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
 			if target.Mode != enterpriseHookWorkerModeRemoveLeftover && target.Mode != enterpriseHookWorkerModeBlockPersonalClaude {
 				return respond(enterpriseHookWorkerResponse{Error: fmt.Sprintf("the foreign cleanup does not take mode %q", target.Mode)}, 3)
 			}
 		}
+		var fence enterpriseForeignHookCleanupFence
+		if request.CleanupFence {
+			pipe, err := openEnterpriseHookWorkerFencePipe()
+			if err != nil {
+				return respond(enterpriseHookWorkerResponse{Error: err.Error()}, 3)
+			}
+			fence = pipe
+		}
 		now := time.Now()
-		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now)}
+		response := enterpriseHookWorkerResponse{Cleanup: runEnterpriseHookWorkerForeignCleanup(request, now, fence)}
 		if request.CopilotVSCode != nil {
 			response.CopilotVSCode = runEnterpriseHookWorkerCopilotVSCode(request)
 		}
@@ -642,6 +660,13 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		case enterpriseHookWorkerModeBlockPersonalClaude:
 			err = blockPersonalClaudeHook(opts)
 			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
+		case enterpriseHookWorkerModeRepairManagedCodexFeature:
+			if !request.Standalone {
+				err = errors.New("managed Codex feature repair requires the standalone guardian")
+			} else {
+				err = repairManagedCodexUserFeature(opts)
+			}
+			result = enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}
 		case enterpriseHookWorkerModePurge:
 			if purgeBlocked != "" {
 				err = errors.New("kept the per-user state for its backups: " + purgeBlocked)
@@ -679,6 +704,62 @@ func runEnterpriseHookWorkerApply(ctx context.Context, request enterpriseHookWor
 		results = append(results, outcome)
 	}
 	return enterpriseHookWorkerResponse{Targets: results}
+}
+
+// repairManagedCodexUserFeature runs with the target user's uid. The machine
+// requirements already pin hooks=true; this removes only the conflicting user
+// key that makes Codex refuse an unrelated project trust write.
+func repairManagedCodexUserFeature(opts enterprisehooks.InstallOptions) error {
+	if !strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "codex") {
+		return errors.New("managed Codex feature repair requires the Codex connector")
+	}
+	path := filepath.Join(opts.UserHome, ".codex", "config.toml")
+	if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect Codex user config %s: %w", path, err)
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve Codex user config %s: %w", path, err)
+	}
+	resolvedHome, err := filepath.EvalSymlinks(opts.UserHome)
+	if err != nil {
+		return fmt.Errorf("resolve enrolled home %s for Codex user config: %w", opts.UserHome, err)
+	}
+	if !enterpriseHookWorkerPathWithin(resolvedHome, resolved) {
+		return fmt.Errorf("codex user config %s resolves outside the enrolled home; move it into the home before managed feature repair", path)
+	}
+	file, err := os.OpenFile(resolved, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return fmt.Errorf("open Codex user config %s: %w", path, err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat Codex user config %s: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
+		return fmt.Errorf("codex user config %s is not a regular file of at most 4 MiB", path)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, 4<<20+1))
+	if err != nil {
+		return fmt.Errorf("read bounded Codex user config %s: %w", path, err)
+	}
+	if len(raw) > 4<<20 {
+		return fmt.Errorf("codex user config %s exceeded the 4 MiB read limit", path)
+	}
+	repaired, err := connector.RemoveCodexManagedHookFeature(raw)
+	if err != nil {
+		return fmt.Errorf("repair Codex user config %s: %w", path, err)
+	}
+	if bytes.Equal(raw, repaired) {
+		return nil
+	}
+	if err := configwrite.WriteFileDurable(resolved, repaired, info.Mode().Perm()); err != nil {
+		return fmt.Errorf("publish repaired Codex user config %s: %w", path, err)
+	}
+	return nil
 }
 
 // blockPersonalClaudeHook replaces only an existing DefenseClaw-owned
@@ -954,7 +1035,7 @@ func enterpriseHookWorkerConfigReferenceLine(data []byte, customDataDir string) 
 		"defenseclaw-managed-hook", "x-defenseclaw-source", "x-defenseclaw-client",
 		"x-defenseclaw-token", "defenseclaw-hook", "defenseclaw-gateway",
 		"defenseclaw.js", "defenseclaw.ts", "defenseclaw.json",
-		"defenseclaw_omnigent_policy", "defenseclaw.listener-proof.v1",
+		"defenseclaw.listener-proof.v1",
 	}
 	for index, raw := range bytes.Split(data, []byte{'\n'}) {
 		line := strings.TrimSpace(string(raw))
@@ -1157,6 +1238,7 @@ func runEnterpriseHookWorker(
 	request.Version = enterpriseHookWorkerProtocolVersion
 	request.UID, request.GID = account.UID, account.GID
 	request.User, request.Home = account.User, account.Home
+	request.CleanupFence = request.cleanupFence != nil
 	payload, err := json.Marshal(request)
 	if err != nil {
 		return enterpriseHookWorkerResponse{}, err
@@ -1192,7 +1274,12 @@ func runEnterpriseHookWorker(
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	cmd.WaitDelay = 2 * time.Second
+	stopFence, err := attachEnterpriseHookWorkerFence(ctx, cmd, request)
+	if err != nil {
+		return enterpriseHookWorkerResponse{}, err
+	}
 	runErr := cmd.Run()
+	stopFence()
 	forwardEnterpriseHookWorkerStderr(account, stderr)
 	if ctx.Err() != nil {
 		return enterpriseHookWorkerResponse{}, fmt.Errorf("worker for uid %d timed out: %w", account.UID, ctx.Err())
@@ -1259,8 +1346,7 @@ func enterpriseHookWorkerCredential(account enterpriseHookWorkerAccount, supplem
 }
 
 // enterpriseHookWorkerPath lets connector setup find an agent where
-// discovery found it (OmniGent locates itself on PATH), after the system
-// directories so they always win. The worker runs as the user, so the
+// discovery found it, after the system directories so they always win. The worker runs as the user, so the
 // user-owned entries grant nothing the user does not already have; a
 // standalone worker leaves out machine directories another account could
 // change (enterprisehooks.UnixAgentSearchDirsFor).
@@ -1351,8 +1437,10 @@ func runEnterpriseHookWorkerPoolReporting(ctx context.Context, jobs []enterprise
 		go func(i int) {
 			defer wg.Done()
 			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
 			response, err := enterpriseHookWorkerRunner(ctx, jobs[i].Account, jobs[i].Request)
+			// The slot is free before done runs: a removal record that waits
+			// for its account's lock never holds off another account's worker.
+			<-semaphore
 			outcomes[i] = enterpriseHookWorkerOutcome{Job: jobs[i], Response: response, Err: err}
 			if done != nil {
 				done(outcomes[i])

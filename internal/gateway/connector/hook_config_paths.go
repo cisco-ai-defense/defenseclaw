@@ -15,7 +15,6 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -167,8 +166,9 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 // (heal needed) when any watched config file is missing entirely or no longer
 // references our hook command.
 //
-// Connectors with no hook config paths or no owned hook command (proxy/plugin
-// connectors) are reported as present so the guard never tries to heal them.
+// Connectors that own no hook runtime (proxy/plugin connectors) are reported
+// as present so the guard never tries to heal them; a hook owner whose config
+// path or owned command does not resolve is an error (not verified).
 type ownedHookContractInspector interface {
 	ownedHookContractPresent(SetupOpts) (bool, error)
 }
@@ -220,9 +220,34 @@ func ownedHookRegistrationPresent(ctx context.Context, conn Connector, opts Setu
 	return ownedHooksPresentInConfig(conn, opts)
 }
 
+// ownedHookContractReasoner is implemented by connectors whose owned-hook check
+// can say why it found no accepted hook registration.
+type ownedHookContractReasoner interface {
+	ownedHookContractAbsentReason(opts SetupOpts) string
+}
+
+// OwnedHooksAbsentReason explains a (false, nil) result from OwnedHooksPresent,
+// for the messages that report it; "" when the connector cannot say. It does
+// not change OwnedHooksPresent, which hook guards read as "absent, heal by
+// Setup".
+func OwnedHooksAbsentReason(conn Connector, opts SetupOpts) string {
+	if reasoner, ok := conn.(ownedHookContractReasoner); ok {
+		return reasoner.ownedHookContractAbsentReason(opts)
+	}
+	return ""
+}
+
+// ownedHooksPresentInConfig reads the hook registrations in conn's agent
+// config files. A connector that owns no hook runtime (a proxy or plugin
+// connector) has none to read and is reported present, so the guard never
+// tries to heal it. A hook owner whose config path or owned command does
+// not resolve is not verified: nothing was read, so nothing was proved.
 func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 	paths := HookConfigPathsForConnector(conn, opts)
 	if len(paths) == 0 {
+		if OwnsManagedHookRuntime(conn) {
+			return false, fmt.Errorf("%s hooks not verified: no hook config path resolved", conn.Name())
+		}
 		return true, nil
 	}
 	if hookOnly, ok := conn.(*hookOnlyConnector); ok && hookOnly.rendersExactHookEntries() {
@@ -240,7 +265,7 @@ func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 	}
 	needles := ownedHookCommandNeedles(opts, conn)
 	if len(needles) == 0 {
-		return true, nil
+		return false, fmt.Errorf("%s hooks not verified: no owned hook command resolved", conn.Name())
 	}
 	for _, path := range paths {
 		present, err := configFileReferencesHook(path, needles)
@@ -307,9 +332,19 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	// A plugin rendered before the listener proof existed would still send
 	// its credential to whoever holds the TCP port; it is repaired.
 	if managedPluginListenerProof(opts) {
+		proofCall := []byte("if (DC_LISTENER_PROOF) return defenseclawProvenTCPRequest(path, init, token);")
+		if pluginSecureClientProfile(opts) {
+			proofCall = []byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);")
+		}
 		markers = append(markers,
 			[]byte("const DC_LISTENER_PROOF = \"1\";\n"),
-			[]byte("if (DC_LISTENER_PROOF) await defenseclawProveListener(token, init.signal);"),
+			proofCall,
+		)
+	}
+	if !opts.ManagedEnterprise {
+		markers = append(markers,
+			[]byte(`const DC_PER_USER_NATIVE_POST = "1";`),
+			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
 		)
 	}
 	for _, marker := range markers {
@@ -462,8 +497,9 @@ func (c *hookOnlyConnector) rendersExactHookEntries() bool {
 // functions Setup writes with, and no other entry that Setup's reconcile
 // claims as DefenseClaw's (an edited script path or name, a misplaced or
 // duplicate entry). Entries Setup does not claim, the user's own hooks, are
-// ignored. Every entry that fails the check is one Setup replaces, so a heal
-// always converges.
+// ignored, except in Copilot's defenseclaw.json: a bound event must hold only
+// DefenseClaw's current handler. Setup refuses an independent handler in that
+// event and tells the operator to move it to another hook file.
 func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document map[string]interface{}) bool {
 	if document == nil {
 		return false
@@ -476,7 +512,7 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		recognized := hermesRecognizedHookCommands(command)
 		want := make(map[string]interface{}, len(hermesRequiredHooks))
 		for _, spec := range hermesRequiredHooks {
-			want[spec.event] = hermesHookEntry(command, spec.matcher)
+			want[spec.event] = hermesHookEntry(command, spec.event, spec.matcher, opts)
 		}
 		return hookEventEntriesMatch(hooks, want, func(_ string, entry interface{}) bool {
 			command, _ := hermesHookEntryCommand(entry)
@@ -488,13 +524,13 @@ func (c *hookOnlyConnector) renderedHookEntriesPresent(opts SetupOpts, document 
 		for _, event := range events {
 			want[event] = copilotHookRegistration(runtime.GOOS, event, hookCommand)
 		}
-		edited := hookScriptBaseName(hookCommand)
 		return hookEventEntriesMatch(hooks, want, func(event string, entry interface{}) bool {
 			if _, registered := want[event]; registered {
-				return managedHookCommandEntry(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited)
+				// defenseclaw.json is DefenseClaw's file; Setup leaves only
+				// its render on a bound event (patchCopilotHooksForOS).
+				return true
 			}
-			return slices.Contains(copilotCurrentHookEvents, event) &&
-				(containsHookScript(entry, hookCommand) || editedDefenseClawHookEntry(entry, edited))
+			return copilotUnexpectedEventOwnsHook(entry, hookCommand)
 		})
 	case "antigravity":
 		// Setup rewrites each DefenseClaw-owned outer key whole.
@@ -585,6 +621,12 @@ func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
 			continue
 		}
 		for _, name := range owner.HookScriptNames(opts) {
+			// Claude's OTEL headers helper is generated by DefenseClaw but is
+			// not a registered hook. Scanning it as a hook script mistakes the
+			// current Claude hook for an edited copy of this other script.
+			if conn.Name() == "claudecode" && name == claudeCodeOTLPHeadersHelperScript {
+				continue
+			}
 			if hookDocumentHoldsEditedEntry(decoded, opts.DataDir, name) {
 				return true
 			}
@@ -597,9 +639,10 @@ func ownedHookConfigHoldsEditedEntry(conn Connector, opts SetupOpts) bool {
 // applies (cli/defenseclaw/hook_integrity.py; both read
 // testdata/hook_edited_entries.json): a command or bash string whose script
 // word has DefenseClaw's hook shape for scriptName
-// (editedDefenseClawHookCommand), lies under the data directory's parent and
-// is not the script Setup registers. Claude Code's missing-script guard is
-// unwrapped first.
+// (editedDefenseClawHookCommand), lies under the data directory's parent or
+// runs a copy of a DefenseClaw hook script in any folder
+// (copiedDefenseClawHookCommand, rel-1-0-4 GAP-0600), and is not the script
+// Setup registers. Claude Code's missing-script guard is unwrapped first.
 func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName string) bool {
 	dataDir = filepath.ToSlash(filepath.Clean(dataDir))
 	current := path.Join(dataDir, "hooks", scriptName)
@@ -609,7 +652,8 @@ func hookDocumentHoldsEditedEntry(document interface{}, dataDir, scriptName stri
 		if !editedDefenseClawHookCommand(command, scriptName) {
 			continue
 		}
-		if word, _, ok := posixHookCommandSplit(command); ok && word != current && strings.HasPrefix(word, home) {
+		if word, _, ok := posixHookCommandSplit(command); ok && word != current &&
+			(strings.HasPrefix(word, home) || copiedDefenseClawHookCommand(command, scriptName)) {
 			return true
 		}
 	}

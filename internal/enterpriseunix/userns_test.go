@@ -1,11 +1,4 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
 // SPDX-License-Identifier: Apache-2.0
 
 //go:build !windows
@@ -13,84 +6,112 @@
 package enterpriseunix
 
 import (
-	"encoding/json"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
-func TestUnprivilegedUserNamespaceWarning(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		settings map[string]string
-		warn     bool
-		// names is a setting the warning must name besides the limit.
-		names string
-	}{
-		{name: "disabled by limit", settings: map[string]string{sysctlMaxUserNamespaces: "0"}},
-		{name: "rhel default", settings: map[string]string{sysctlMaxUserNamespaces: "63229"}, warn: true},
-		{name: "apparmor userns and unconfined restrictions", settings: map[string]string{sysctlMaxUserNamespaces: "63229", sysctlAppArmorRestrictUserns: "1", sysctlAppArmorRestrictUnconfined: "1"}},
-		{
-			name:     "ubuntu 24.04 default: apparmor userns restriction, unconfined profile changes allowed",
-			settings: map[string]string{sysctlMaxUserNamespaces: "63229", sysctlAppArmorRestrictUserns: "1", sysctlAppArmorRestrictUnconfined: "0"},
-			warn:     true,
-			names:    "kernel.apparmor_restrict_unprivileged_unconfined=0",
-		},
-	} {
-		message := unprivilegedUserNamespaceWarning(func(path string) (string, bool) {
-			value, ok := test.settings[path]
-			return value, ok
-		})
-		if (message != "") != test.warn {
-			t.Fatalf("%s: warning %q, want warning=%v", test.name, message, test.warn)
-		}
-		if test.warn && !strings.Contains(message, "user.max_user_namespaces="+test.settings[sysctlMaxUserNamespaces]) {
-			t.Fatalf("%s: warning does not name the setting: %q", test.name, message)
-		}
-		if test.names != "" && !strings.Contains(message, test.names) {
-			t.Fatalf("%s: warning does not name %s: %q", test.name, test.names, message)
+const (
+	retiredSysctlFile      = "/etc/sysctl.d/99-zz-defenseclaw-userns.conf"
+	retiredUsernsMarker    = "/etc/sysctl.d/.defenseclaw-userns-restricted-boot-id"
+	retiredPtraceMarker    = "/etc/sysctl.d/.defenseclaw-ptrace-restricted-boot-id"
+	retiredUninstallMarker = "/etc/sysctl.d/.defenseclaw-userns-uninstalled-boot-id"
+)
+
+func setKernelValue(t *testing.T, h *testHost, path, value string) {
+	t.Helper()
+	writeHostFile(t, h, path, value)
+}
+
+func assertKernelUntouched(t *testing.T, h *testHost) {
+	t.Helper()
+	if got := h.read(sysctlMaxUserNamespaces); got != "63229\n" {
+		t.Fatalf("DefenseClaw changed user.max_user_namespaces: %q", got)
+	}
+	if got := h.read(sysctlPtraceScope); got != "0\n" {
+		t.Fatalf("DefenseClaw changed kernel.yama.ptrace_scope: %q", got)
+	}
+	for _, path := range []string{retiredSysctlFile, retiredUsernsMarker, retiredPtraceMarker, retiredUninstallMarker} {
+		if _, err := os.Lstat(h.env.P(path)); !os.IsNotExist(err) {
+			t.Fatalf("DefenseClaw created retired host control %s: %v", path, err)
 		}
 	}
 }
 
-// TestVerifyWarnsAboutUnprivilegedUserNamespaces: `enterprise linux verify`
-// reports a host where standard users can create user namespaces as a
-// warning (never an error), and status stays unchanged.
-func TestVerifyWarnsAboutUnprivilegedUserNamespaces(t *testing.T) {
+func TestLinuxLifecycleNeverChangesHostKernel(t *testing.T) {
 	h := newTestHost(t, "linux")
-	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-	data, _ := json.Marshal(map[string]any{"version": 1, "updated_at": h.env.Now().UTC().Format("2006-01-02T15:04:05Z"), "ok": true, "target_count": 1, "success_count": 1})
-	h.publishLedger(data)
-	hasWarning := func(r *enterprisestatus.Result) bool {
-		for _, warning := range r.Warnings {
-			if warning.Code == codeUserNamespaces {
-				return true
-			}
+	setKernelValue(t, h, sysctlMaxUserNamespaces, "63229\n")
+	setKernelValue(t, h, sysctlPtraceScope, "0\n")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	assertKernelUntouched(t, h)
+	for _, action := range []string{ActionEnsure, ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if hasMessageCode(result.Errors, codeUserNamespaces) || hasMessageCode(result.Errors, codeUnprivilegedPtrace) {
+			t.Fatalf("%s turned observed kernel settings into errors: %+v", action, result.Errors)
 		}
-		return false
+		if action == ActionEnsure && !result.OK {
+			t.Fatalf("ensure failed with observed open kernel settings: %+v", result.Errors)
+		}
+		assertKernelUntouched(t, h)
 	}
-	sysctl := h.env.P(sysctlMaxUserNamespaces)
-	if err := os.MkdirAll(filepath.Dir(sysctl), 0o755); err != nil {
-		t.Fatal(err)
+	status := h.run(Options{Action: ActionStatus})
+	if status.SecurityComplete || !hasWarning(status, codeUserNamespaces) || !hasWarning(status, codeUnprivilegedPtrace) {
+		t.Fatalf("status did not report the observed open settings: %+v", status)
 	}
-	if err := os.WriteFile(sysctl, []byte("63229\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for _, warning := range status.Warnings {
+		if (warning.Code == codeUserNamespaces || warning.Code == codeUnprivilegedPtrace) && strings.Contains(warning.Message, "namespaces_and_ptrace") {
+			t.Fatalf("status still offers retired host-setting key: %q", warning.Message)
+		}
 	}
-	verify := h.run(Options{Action: ActionVerify})
-	requireOK(t, verify)
-	if !hasWarning(verify) {
-		t.Fatalf("verify did not warn about unprivileged user namespaces: %+v", verify.Warnings)
+	requireOK(t, h.run(Options{Action: ActionUninstall, Purge: true}))
+	assertKernelUntouched(t, h)
+}
+
+func TestLinuxStatusUsesCurrentKernelFactsWithoutBootMarkers(t *testing.T) {
+	h := newTestHost(t, "linux")
+	setKernelValue(t, h, sysctlMaxUserNamespaces, "0\n")
+	setKernelValue(t, h, sysctlPtraceScope, "3\n")
+	setKernelValue(t, h, "/proc/sys/kernel/random/boot_id", "current-boot\n")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	// Artifacts left by an unreleased opt-in build cannot substitute for
+	// what the kernel reports now or make this deployment ask for a reboot.
+	for _, path := range []string{retiredUsernsMarker, retiredPtraceMarker} {
+		setKernelValue(t, h, path, "current-boot\n")
 	}
-	if status := h.run(Options{Action: ActionStatus}); hasWarning(status) {
-		t.Fatalf("status changed: %+v", status.Warnings)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if hasWarning(result, codeUserNamespaces) || hasWarning(result, codeUnprivilegedPtrace) ||
+			hasMessageCode(result.Errors, codeUserNamespaces) || hasMessageCode(result.Errors, codeUnprivilegedPtrace) {
+			t.Fatalf("%s treated retired markers as current kernel facts: %+v", action, result)
+		}
 	}
-	if err := os.WriteFile(sysctl, []byte("0\n"), 0o644); err != nil {
-		t.Fatal(err)
+}
+
+func TestLinuxStatusReportsUnreadableKernelFacts(t *testing.T) {
+	h := newTestHost(t, "linux")
+	setKernelValue(t, h, sysctlMaxUserNamespaces, "63229\n")
+	setKernelValue(t, h, sysctlPtraceScope, "0\n")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	for _, path := range []string{sysctlMaxUserNamespaces, sysctlPtraceScope} {
+		if err := os.Remove(h.env.P(path)); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if verify := h.run(Options{Action: ActionVerify}); hasWarning(verify) {
-		t.Fatalf("verify warned with user.max_user_namespaces=0: %+v", verify.Warnings)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if result.SecurityComplete || !hasWarning(result, codeUserNamespaces) || !hasWarning(result, codeUnprivilegedPtrace) {
+			t.Fatalf("%s did not report missing kernel facts: %+v", action, result)
+		}
+	}
+}
+
+func TestMacOSLifecycleHasNoLinuxHostControls(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4")}))
+	requireOK(t, h.run(Options{Action: ActionEnsure}))
+	for _, path := range []string{retiredSysctlFile, retiredUsernsMarker, retiredPtraceMarker, retiredUninstallMarker} {
+		if _, err := os.Stat(h.env.P(path)); !os.IsNotExist(err) {
+			t.Fatalf("macOS lifecycle created Linux host control %s: %v", path, err)
+		}
 	}
 }

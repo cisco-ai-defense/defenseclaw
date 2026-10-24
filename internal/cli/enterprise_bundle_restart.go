@@ -7,6 +7,9 @@
 package cli
 
 import (
+	"bytes"
+	"errors"
+	"io/fs"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -40,6 +43,19 @@ var bundleInstalledConfig = func(platform string) ([]byte, error) {
 		return nil, err
 	}
 	return safefile.ReadRegularFileBounded(layout.ConfigPath, bundleInstalledConfigMaxBytes)
+}
+
+// bundleCurrentConfig is the config.yaml of the confirmed bundle rendered
+// from the bundle store against its version directory: the bytes the apply
+// of a repeat (already_applied) installs again over a drifted config.yaml;
+// nil when no bundle is confirmed. A seam for tests.
+var bundleCurrentConfig = func() ([]byte, error) {
+	store, err := bundleStore()
+	if err != nil {
+		return nil, err
+	}
+	raw, _, err := (&enterprisebundle.Driver{Store: store}).CurrentConfig()
+	return raw, err
 }
 
 // bundleManagedDefaults are the omitted-setting values of this device's
@@ -141,12 +157,63 @@ func windowsEnterpriseHotTargetsPath(path string) bool {
 }
 
 // bundleVerifyRestartPrediction is the prediction for a verified bundle on
-// this device: the repeat of the confirmed bundle changes nothing, any
-// other bundle is classified against the installed config.
-func bundleVerifyRestartPrediction(platform string, out *enterprisebundle.VerifyResult) *bundleRestartPrediction {
-	if out.AlreadyApplied {
-		return &bundleRestartPrediction{GatewayRestart: bundleRestartNotRequired, ReasonCodes: []string{restartReasonAlreadyApplied}}
-	}
+// this device, classified against the installed config. For a repeat of the
+// confirmed bundle (already_applied) it also returns config_drift: whether
+// the installed config.yaml is not the confirmed bundle's config, which the
+// apply then installs again (nil when that could not be checked). The
+// prediction of a repeat compares the installed config with exactly those
+// bytes: no drift is not_required, reason already_applied; drift is
+// classified like any change, so a drift in hot settings is not_required
+// with no reason code and still needs the apply.
+func bundleVerifyRestartPrediction(platform string, out *enterprisebundle.VerifyResult) (*bundleRestartPrediction, *bool) {
 	installed, err := bundleInstalledConfig(platform)
-	return predictBundleRestart(platform, bundleManagedDefaults(platform), installed, err, out.Rendered)
+	next := out.Rendered
+	var drift *bool
+	if out.AlreadyApplied {
+		if current, currentErr := bundleCurrentConfig(); currentErr == nil && current != nil {
+			next = current
+			switch {
+			case err == nil:
+				drifted := !bytes.Equal(installed, current)
+				drift = &drifted
+			case errors.Is(err, fs.ErrNotExist):
+				// The apply restores a deleted config.yaml too (GAP-0114).
+				drifted := true
+				drift = &drifted
+			}
+		}
+	}
+	if drift != nil && !*drift {
+		return &bundleRestartPrediction{GatewayRestart: bundleRestartNotRequired, ReasonCodes: []string{restartReasonAlreadyApplied}}, drift
+	}
+	return predictBundleRestart(platform, bundleManagedDefaults(platform), installed, err, next), drift
+}
+
+// windowsBundleRestartDeferral is the Driver.RefuseRestart of a Windows
+// apply --defer-restart: the reason the verify restart prediction gives for
+// a bundle that restarts the gateway or whose restart cannot be told.
+func windowsBundleRestartDeferral(enforced, rendered []byte) string {
+	return bundleRestartDeferral(predictBundleRestart("windows", bundleManagedDefaults("windows"), enforced, nil, rendered))
+}
+
+// bundleRestartDeferral is the restart_deferred detail of a prediction; ""
+// when the bundle applies without a restart.
+func bundleRestartDeferral(p *bundleRestartPrediction) string {
+	switch p.GatewayRestart {
+	case bundleRestartNotRequired:
+		return ""
+	case bundleRestartRequired:
+		settings := p.Settings
+		if len(settings) == 0 {
+			settings = p.ReasonCodes
+		}
+		return enterprisebundle.RestartDeferralReason(settings, false)
+	}
+	return enterprisebundle.RestartDeferralReason(nil, true)
+}
+
+// windowsBundleConfigChange includes a signed delivery that must restore
+// drift in the currently confirmed config.
+func windowsBundleConfigChange(p *enterprisebundle.Prepared) bool {
+	return p != nil && (p.Receipt != nil || p.AlreadyApplied)
 }

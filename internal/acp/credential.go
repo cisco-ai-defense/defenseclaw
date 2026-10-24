@@ -6,7 +6,6 @@ package acp
 import (
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -247,36 +246,6 @@ func PublishEnterpriseUserToken(dataDir, clientID, agentID, token string) (strin
 		return "", fmt.Errorf("publish ACP enterprise user token: %w", err)
 	}
 	return path, nil
-}
-
-// MatchEnterpriseCredential performs a constant-work lookup through a
-// SHA-256(token) index and returns the exact scope for a matching bearer. The
-// token is random 256-bit material and is still compared in constant time.
-func MatchEnterpriseCredential(dataDir, candidate string) (EnterpriseCredential, bool) {
-	if !validCredentialToken(candidate) {
-		return EnterpriseCredential{}, false
-	}
-	if err := validateEnterpriseCredentialDirectory(enterpriseCredentialDir(dataDir)); err != nil {
-		return EnterpriseCredential{}, false
-	}
-	if err := validateEnterpriseCredentialDirectory(enterpriseCredentialIndexDir(dataDir)); err != nil {
-		return EnterpriseCredential{}, false
-	}
-	indexPath, err := EnterpriseCredentialIndexPath(dataDir, candidate)
-	if err != nil {
-		return EnterpriseCredential{}, false
-	}
-	index, err := loadEnterpriseCredentialIndex(indexPath, candidate)
-	if err != nil {
-		return EnterpriseCredential{}, false
-	}
-	credential, err := loadEnterpriseCredentialFile(filepath.Join(enterpriseCredentialDir(dataDir), index.Record))
-	if err != nil {
-		return EnterpriseCredential{}, false
-	}
-	candidateHash := sha256.Sum256([]byte(candidate))
-	expectedHash := sha256.Sum256([]byte(credential.Token))
-	return credential, subtle.ConstantTimeCompare(expectedHash[:], candidateHash[:]) == 1
 }
 
 // MatchEnterpriseCredentialKeyID resolves a non-secret SHA-256 token key ID

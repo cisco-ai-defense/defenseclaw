@@ -1,0 +1,12 @@
+{
+  "title": "Appendix",
+  "pages": [
+    "upgrade-from-0-8",
+    "migrate-v9",
+    "benchmarks",
+    "llm-judge-benchmark",
+    "coverage-by-layer",
+    "windows-security-model",
+    "build-from-source"
+  ]
+}

@@ -49,7 +49,7 @@ type bundleAnchorsResult struct {
 
 // platformBundleVerbs are the bundle verbs only Linux and macOS have.
 func platformBundleVerbs() []*cobra.Command {
-	return []*cobra.Command{newEnterpriseBundleAnchorsCommand()}
+	return []*cobra.Command{newEnterpriseBundleAnchorsCommand(), newEnterpriseBundleFloorCheckCommand()}
 }
 
 func newEnterpriseBundleAnchorsCommand() *cobra.Command {
@@ -74,10 +74,12 @@ lock, root-owned with mode 0644. A byte-identical file writes nothing. When the
 installed file fails its check after the write, the previous file is put back.
 key_unknown and key_revoked warn when the new anchors no longer trust the
 signer of the confirmed bundle; that bundle keeps enforcing, and the next
-bundle must be signed by an active key. Nothing records the change in the
-audit log: the result carries sha256, previous_sha256 and key_ids for the
-agent to report. Exit codes: 0, 1 (errors[].code names the refusal), 2 usage,
-75 busy. On Windows, use enterprise windows ensure --profile standalone
+bundle must be signed by an active key. Every install that changes the
+file, is refused or fails is recorded as a config.trust_anchors.changed audit
+event (hashes and key ids only), reported by the gateway when it runs; an
+install that cannot be recorded is refused (state_invalid) before the file is
+written. The result also carries sha256, previous_sha256 and key_ids. Exit codes: 0, 1
+(errors[].code names the refusal), 2 usage, 75 busy. On Windows, use enterprise windows ensure --profile standalone
 --trust-anchors <file>.`,
 		Example:      `  defenseclaw-gateway enterprise bundle anchors install --file /var/lib/acme-agent/trust/bundle-anchors.json --lock-wait 10m --json`,
 		Args:         bundleNoArgs,
@@ -151,6 +153,12 @@ func bundleAnchorsInstall(ctx context.Context, cmd *cobra.Command, opts *bundleA
 	out, err := env.InstallBundleAnchors(ctx, src)
 	if out != nil {
 		res.Anchors, res.SHA256 = out.Path, out.SHA256
+		if out.Unrecorded != nil {
+			res.Warnings = append(res.Warnings, changeUnrecordedWarning(out.Unrecorded))
+		}
+		if out.ReleaseUnflushed != nil {
+			res.Warnings = append(res.Warnings, changeReleaseUnflushedWarning(out.ReleaseUnflushed))
+		}
 	}
 	if err != nil {
 		return err

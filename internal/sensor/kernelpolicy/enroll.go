@@ -390,8 +390,6 @@ var cliConnectors = map[string]cliProbe{
 	"amp":        {binaries: []string{"amp"}},
 	"devin":      {binaries: []string{"devin"}},
 	"hermes":     {binaries: []string{"hermes"}},
-	"openhands":  {binaries: []string{"openhands"}},
-	"omnigent":   {binaries: []string{"omnigent"}},
 	"kiro":       {binaries: []string{"kiro-cli"}},
 }
 

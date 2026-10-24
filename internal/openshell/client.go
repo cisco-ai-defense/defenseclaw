@@ -201,13 +201,14 @@ type GatewayHealth struct {
 	RawVersion string
 }
 
-// CheckVersion reports whether the gateway release is inside the
-// supported window.
+// CheckVersion reports whether DefenseClaw talks to a gateway of this
+// release (CheckConnects): a legacy one passes, for the move off it only,
+// and runs no sandbox work (CheckSandboxRelease).
 func (h *GatewayHealth) CheckVersion() error {
 	if h.Version == (Version{}) {
 		return fmt.Errorf("openshell: gateway reported an unrecognized version %q", h.RawVersion)
 	}
-	return CheckSupported(h.Version)
+	return CheckConnects(h.Version)
 }
 
 // ConfigurationRejectedError reports a sandbox whose configuration the
@@ -603,16 +604,16 @@ func (c *client) withFailureReason(ctx context.Context, name string, err error) 
 	if gerr != nil || sb == nil || sb.Status.Phase != PhaseError {
 		return err
 	}
-	if reason := failureReason(sb); reason != "" {
+	if reason := FailureReason(sb); reason != "" {
 		return fmt.Errorf("%w; OpenShell says: %s", err, reason)
 	}
 	return err
 }
 
-// failureReason is what a sandbox's conditions that do not hold say
+// FailureReason is what a sandbox's conditions that do not hold say
 // ("reason: message" each, "; " between), on one line and without control
 // characters, or "" when none says anything.
-func failureReason(sb *Sandbox) string {
+func FailureReason(sb *Sandbox) string {
 	var parts []string
 	for _, cond := range sb.Status.Conditions {
 		if strings.EqualFold(cond.Status, "True") {

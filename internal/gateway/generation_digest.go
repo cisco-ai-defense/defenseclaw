@@ -408,7 +408,9 @@ func kernelPolicyComponent(cfg *config.Config, goos string) string {
 // signaturePackDigests digests each ai_discovery.signature_packs entry, keyed
 // "signature_pack:<entry>". An entry that is a directory or a glob is digested
 // over the pack files it names now, so adding, removing or editing one changes
-// the digest.
+// the digest. A glob with wildcards in its folders is digested over the
+// folders they match as well: a new matching folder makes a new generation,
+// whose watch includes it, so a pack created there is seen (GAP-0858).
 func signaturePackDigests(cfg *config.Config, scope digestScope) map[string]string {
 	out := map[string]string{}
 	for _, entry := range cfg.AIDiscovery.SignaturePacks {
@@ -419,11 +421,15 @@ func signaturePackDigests(cfg *config.Config, scope digestScope) map[string]stri
 			continue
 		}
 		files, _ := inventory.SignaturePackEntry(entry)
+		dirs := inventory.SignaturePackWildcardDirs(entry)
 		digest := "missing"
-		if len(files) > 0 {
-			parts := make([]string, 0, len(files))
+		if len(files) > 0 || len(dirs) > 0 {
+			parts := make([]string, 0, len(files)+len(dirs))
 			for _, file := range files {
 				parts = append(parts, scope.rewrite(file)+"="+fileDigest(file))
+			}
+			for _, dir := range dirs {
+				parts = append(parts, "dir:"+scope.rewrite(dir))
 			}
 			sort.Strings(parts)
 			digest = sha256Digest([]byte(strings.Join(parts, "\n")))

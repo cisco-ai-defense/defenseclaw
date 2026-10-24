@@ -238,6 +238,9 @@ type enterprisePolicyReport struct {
 	// (Windows). Each runs without DefenseClaw hooks for that account only,
 	// so it does not change machine-policy coverage.
 	Unprotected []enterprisehooks.UnprotectedAgent `json:"unprotected_agents,omitempty"`
+	// UnprotectedScanError prevents a stale or unreadable protected record
+	// from making policy show look as if no private installs were found.
+	UnprotectedScanError string `json:"unprotected_agents_scan_error,omitempty"`
 	// Errors carries the failure (an unknown --user, an unreadable policy
 	// source) for a --json caller, which gets no "Error:" line (GAP-2456).
 	Errors []string `json:"errors,omitempty"`
@@ -294,7 +297,12 @@ func buildEnterprisePolicyReport(ctx enterprisePolicyContext, connectors []strin
 		Guard:      summary.Connectors,
 		goos:       ctx.opts.GOOS,
 	}
-	for _, agent := range enterprisePolicyUnprotectedAgents(ctx.layout.ManifestPath) {
+	agents, installScanErr := enterprisePolicyUnprotectedAgents(ctx.layout.ManifestPath)
+	if installScanErr != nil {
+		report.Complete = false
+		report.UnprotectedScanError = enterprisehooks.UnprotectedCodeInstallScanIncomplete + ": " + installScanErr.Error()
+	}
+	for _, agent := range agents {
 		for _, name := range connectors {
 			if agent.Connector == name {
 				report.Unprotected = append(report.Unprotected, agent)
@@ -512,8 +520,8 @@ func enterprisePolicyAuditDBPath() string {
 }
 
 // enterprisePolicyRowUnguarded reports whether state is a per-user agent
-// that no foreign-hook guard covers (OpenHands, Antigravity, OmniGent, Kiro,
-// Hermes on Windows): its foreign_hooks setting is not enforced and its
+// that no foreign-hook guard covers (Antigravity, Kiro, and Hermes on
+// Windows): its foreign_hooks setting is not enforced and its
 // foreign entries are not counted.
 func enterprisePolicyRowUnguarded(report enterprisePolicyReport, state enterprisepolicy.State) bool {
 	if state.Route != enterprisepolicy.RoutePerUser || state.ForeignHooks == config.ForeignHooksAllow {
@@ -611,6 +619,9 @@ func writeEnterprisePolicyReport(out io.Writer, report enterprisePolicyReport) e
 		for _, agent := range report.Unprotected {
 			fmt.Fprintf(out, "    %s: %s\n", agent.Code, agent.Message())
 		}
+	}
+	if report.UnprotectedScanError != "" {
+		fmt.Fprintf(out, "\nUnprotected agent install scan: %s\n", report.UnprotectedScanError)
 	}
 	if report.User != nil {
 		fmt.Fprintf(out, "\nUser %s (%s)\n", report.User.User, dashIfEmpty(report.User.Home))

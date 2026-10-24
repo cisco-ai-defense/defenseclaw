@@ -175,7 +175,6 @@
   "cli/tests/test_enterprise_packaging.py": 3.23,
   "cli/tests/test_enterprise_preremove_tetragon.py": 0.31,
   "cli/tests/test_enterprise_sandbox_packaging.py": 0.73,
-  "cli/tests/test_enterprise_upgrade_moved.py": 0.06,
   "cli/tests/test_enterprise_upgrade_v9.py": 0.11,
   "cli/tests/test_envvars.py": 0.29,
   "cli/tests/test_envvars_codebase_coverage.py": 8.57,

@@ -1,0 +1,355 @@
+---
+title: Verify and monitor
+description: Check the health of a standalone DefenseClaw enterprise deployment on Windows, Linux and macOS, read the lifecycle result, and find the logs, events and audit records to alert on.
+keywords:
+  - DefenseClaw enterprise monitoring
+  - enterprise verify
+  - coverage_complete
+  - security_complete
+  - DefenseClaw logs
+---
+
+This page is for administrators who run a standalone deployment day to day.
+Everything on it is read-only except
+[rotating per-user credentials](#rotate-per-user-credentials). To upgrade, change
+the config, repair or remove a deployment, see
+[Upgrade, repair and remove](/docs/enterprise/operate/lifecycle). For a failed check, look
+up the code in [Troubleshooting](/docs/troubleshooting/enterprise). Terms such as
+*guardian*, *enumerator* and *machine policy* are in
+[Concepts](/docs/enterprise/plan/concepts).
+
+## Status and verify
+
+Two lifecycle actions report on a deployment. Neither changes the host.
+
+| Action | What it does | Use it for |
+| --- | --- | --- |
+| `status` | Reports the recorded state: installed version, services, readiness, machine policy and enrollment counts. On Linux and macOS it also runs the basic checks (files, services, gateway health); each problem is an error and the command exits non-zero | Inventory and dashboards |
+| `verify` | Runs every check. Linux and macOS: file digests, owners and modes, the config and credentials against what was last applied, the runtime descriptor, the service account, required services, gateway health and the guardian's authorization ledger. Windows: files, DACLs, service settings, the mode pin and readiness. Each problem is an error and the command exits non-zero | Compliance and alerting |
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify --json
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos status --json
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json
+```
+
+```powershell title="Windows (elevated PowerShell)"
+$DefenseClaw = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
+& $DefenseClaw enterprise windows status --profile standalone --json
+& $DefenseClaw enterprise windows verify --profile standalone --json
+```
+
+Run these as root on Linux and macOS, and from an elevated prompt on Windows, so
+every check can read the protected files. On Windows the lifecycle runs on
+PowerShell 7, which must be installed; you can start `defenseclaw.exe` from any
+shell.
+
+| Result of `verify` | Linux and macOS | Windows |
+| --- | --- | --- |
+| Healthy | `0` | `0` |
+| A check failed | `1` | `1603` |
+| Invalid arguments | `2` | `1639` |
+
+On Linux and macOS, `verify` skips its checks and exits `75` with `lifecycle_busy` while another lifecycle run is in progress; run it again. On Windows it fails (`1603`) while another run's transaction is pending. `verify` also runs on a schedule: daily on Linux (`defenseclaw-enterprise-verify.timer`) and macOS (`com.cisco.defenseclaw.verify`), and from your MDM on Windows (for example `detect.ps1 -RequireHealthy`). Detail: [Operate reference](/docs/enterprise/operate/reference#verify-waits-and-schedules).
+
+## Review activity from the CLI (Linux and macOS)
+
+The lifecycle's `status` and `verify` report the deployment. To see the gateway,
+who is enrolled and what the gateway decided, run these as root. No extra
+environment variables are needed: on a standalone host, `status`, `audit` and
+`enterprise hooks` read the managed config, data directory, target manifest and
+guardian state instead of `~/.defenseclaw`, and `audit` opens the gateway's audit
+database read-only.
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway status
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise hooks status
+sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --connector claudecode --output /root/claudecode-audit.jsonl
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway status
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise hooks status
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway audit export --since 2h --connector claudecode --output /var/root/claudecode-audit.jsonl
+```
+
+| Command | What it shows |
+| --- | --- |
+| `status` | The gateway's health, its subsystems, and its connectors and their modes |
+| `enterprise hooks status` | The guardian's summary, then an Enrollment section: one line per account with each connector's state from the last reconcile (enrolled, pending or failed). `--json` adds the same list as `enrollment`. When every connector uses machine policy the section can be absent while eligible users remain protected; check `status` and `verify` for coverage |
+| `audit export` | The audit records as JSONL, oldest first. `--since` and `--until` take an RFC3339 time or a duration ago (`30m`, `2h`). `--limit N` keeps the first N matching rows, or with `--newest` the N most recent. `--connector` keeps one agent's rows, and `--output` writes a file (it refuses to replace one unless you pass `--force`). An administrator can use `--db <copied-audit.db>` to read a retained database copy read-only after decommission; keep its WAL and SHM companions with it. |
+| `audit findings` | The distinct current scan findings: skill, MCP, plugin, code, AIBOM and inventory scans. Guardrail decisions are not tracked here; use `alerts` or `audit export` |
+
+On managed Windows, use `defenseclaw enterprise windows status --profile standalone --json`
+from an elevated administrator prompt. The `enrollment.accounts` field lists each
+account's connectors and their enrolled, pending or failed state.
+`enterprise hooks status` is the Linux and macOS guardian view.
+
+On managed Windows, read `enrollment.accounts` in `defenseclaw enterprise windows status --profile standalone --json` from an elevated prompt. Audit-record fields are in [Operate reference](/docs/enterprise/operate/reference#audit-fields-on-a-standalone-host); the per-user machine-policy view is in [Machine policy status](#machine-policy-status).
+
+## Health fields
+
+With `--json`, every lifecycle action prints one result document, defined by
+[`packaging/mdm/contract/lifecycle-result.schema.json`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/packaging/mdm/contract/lifecycle-result.schema.json).
+The MDM wrapper scripts print the same document.
+
+| Field | Meaning |
+| --- | --- |
+| `ok` | `true` only when `errors` is empty |
+| `exit_code` | The process exit code |
+| `installed`, `installed_version` | Whether a deployment is recorded, and its version |
+| `transaction_pending` | An earlier run was interrupted. The next `ensure` or `repair` recovers it first by rolling back to the last committed deployment; to apply the config the interrupted run was applying, run `ensure --config <file>` again. On Linux and macOS, `status` and `verify` name the interrupted action, its start time and phase. On Windows, see [Recover a pending transaction](/docs/enterprise/install/windows#recover-a-pending-transaction) |
+| `services[]` | Each managed service or unit, with its state |
+| `readiness` | `gateway`, `guardian`, `enumerator`, `sensor_helper`: each `true` when that component is ready |
+| `coverage_complete` | The core services are ready (definition per OS below) |
+| `security_complete` | Everything `coverage_complete` needs, plus the extra conditions below |
+| `machine_policy.<connector>` | `ownership`, `lock`, `effective_lock`, `owned_entries`, `foreign_entries`, and any `higher_precedence` sources or `conflicts` |
+| `enrollment` | `targets`, `pending`, `failed`, `exempt` (see the note below the next table); on Windows standalone also `accounts`: each enrolled account (`account`, `sid`) with each connector's state from the guardian's last reconcile |
+| `inspection` | `local` and `ai_defense` (see the note below the next table) |
+| `policy` | The effective policy the host runs. `effective_digest` and `config_generation` say which config, `applied` says whether the running gateway reports it. Omitted when the lifecycle cannot compute it. See [Effective policy digest](#effective-policy-digest-and-config-generation) |
+| `errors[]`, `warnings[]` | Each has a stable `code` and a human `message`. See [Troubleshooting](/docs/troubleshooting/enterprise) |
+| `api_port_holders[]` | Windows, with error `api_port_held`: each process other than the gateway that listens where the gateway API binds, with its `address` and `pid`, and its `image` and `account` when the caller can identify it |
+| `destinations[]` | `status` only: each observability destination the installed config compiles to, with `name`, `kind`, `enabled`, `preset`, `signals` and `redaction_profiles` (the same compiler as `defenseclaw observability plan`) |
+
+A healthy `status` from a Linux host, trimmed to two of its `services` entries and
+two of its `machine_policy` connectors:
+
+```json title="enterprise linux status --json (healthy, trimmed)"
+{
+  "schema_version": 2,
+  "ok": true,
+  "action": "status",
+  "profile": "standalone",
+  "platform": "linux",
+  "installed_version": "1.0.23",
+  "installed": true,
+  "transaction_pending": false,
+  "services": [
+    { "name": "defenseclaw-gateway.service", "kind": "gateway", "state": "active/running", "start_mode": "enabled", "pid": 422027, "required": true },
+    { "name": "defenseclaw-hook-guardian.service", "kind": "guardian", "state": "active/running", "start_mode": "enabled", "pid": 422080, "required": true }
+  ],
+  "readiness": { "gateway": true, "guardian": true, "enumerator": true, "sensor_helper": true },
+  "inspection": { "local": "active", "ai_defense": "disabled" },
+  "machine_policy": {
+    "claudecode": { "ownership": "merge", "lock": "enforce", "effective_lock": "enforce", "owned_entries": 28, "foreign_entries": 0 },
+    "copilot": { "ownership": "merge", "owned_entries": 14, "foreign_entries": 0 }
+  },
+  "enrollment": { "targets": 16, "pending": 0, "failed": 0, "exempt": 0 },
+  "coverage_complete": true,
+  "security_complete": true,
+  "errors": [],
+  "policy": {
+    "effective_digest": "sha256:7b38f1df3862914135b0f9e70f9e679793a35e53018b115784002d9c55b8fce2",
+    "config_generation": 3,
+    "applied": true,
+    "gateway_reported_digest": "sha256:7b38f1df3862914135b0f9e70f9e679793a35e53018b115784002d9c55b8fce2"
+  },
+  "exit_code": 0
+}
+```
+
+A failed run sets `ok` to `false` and names each problem in `errors[]`. How `coverage_complete` and `security_complete` are computed on each OS, enrollment counts and the inspection field are in [Operate reference](/docs/enterprise/operate/reference#coverage-and-security-complete).
+
+### What to alert on
+
+| Signal | Alert when |
+| --- | --- |
+| `verify` exit code | Not `0` |
+| `coverage_complete` | `false` |
+| `security_complete` | `false` for longer than one enumerator cycle. On Windows with Claude Code enabled it stays `false` until the Claude Code attestation is recorded, so every such host alerts until then |
+| `warnings[].code` | `machine_policy_incomplete` (Linux, macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected`, `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux, macOS): the config you pushed is not the one running. `policy_not_applied` (changing actions only): the gateway reports another effective policy than the installed config computes to. `policy_reload_rejected`: the gateway rejected its last policy reload and keeps the previous policy. On Windows also `policy_not_buildable` and `config_edited_outside_lifecycle`. These policy warnings leave the `verify` exit code at `0`, so alert on `warnings[].code` directly. |
+| `policy.applied` | `false` for more than one reload (Linux, macOS). `status` and `verify` report it but do not fail on it |
+| `policy.effective_digest` | Differs between hosts of one OS that received the same config |
+| `machine_policy.<connector>.conflicts` or `.higher_precedence` | Not empty |
+| `enrollment.failed` | Greater than `0` (Linux, macOS) |
+| `transaction_pending` | `true` on two runs in a row |
+| Kernel controls (Linux with Tetragon) | Five Prometheus rules over `defenseclaw_kernel_*`: `DefenseClawKernelDenials`, `DefenseClawKernelAckStale`, `DefenseClawKernelPausedLong`, `DefenseClawTetragonFallback` and `DefenseClawCustomerPolicyBlocksAgents`. The rules ship in the local observability stack; see [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon#check-the-fleet) |
+
+**Claude Code attestation (Windows).** With Claude Code enabled, `security_complete` stays `false` until an administrator confirms a real session runs the managed hooks and records it with `repair --attest-claude-effective-policy`.
+
+## Effective policy digest and config generation
+
+A host enforces only the administrator config and the policy assets it names. To prove a host runs the config you pushed, compare two numbers: the **config generation** (counts writes to `config.yaml`, recorded in `config.generation.json`) and the **effective policy digest** (`sha256:` of the canonical config and its assets). Every lifecycle result carries both in the `policy` object, and `applied: true` means the running gateway reports the same digest:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux status --json | jq .policy
+```
+
+`status` and `verify` report `applied: false` but do not fail on it; alert on the field. Fields, warnings, the `/health` form, `policy digest` output and how to compare a fleet are in [Operate reference](/docs/enterprise/operate/reference#policy-digest-detail).
+
+## Machine policy status
+
+*Machine policy* is the vendor policy file (Codex requirements, Claude Code managed
+settings, Cursor enterprise hooks, Copilot `policy.d`, OpenCode's managed config)
+where the lifecycle places DefenseClaw's hooks for the connectors that support it;
+see [Machine policy](/docs/enterprise/configure/machine-policy). The `machine_policy` block of
+the result summarizes it. The `enterprise policy` commands show each connector's
+route, lock and coverage in detail. They never write, and need no environment
+variables. Run them as root on Linux and macOS, or from an elevated prompt on
+Windows.
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise policy verify --json
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise policy show --json
+```
+
+```powershell title="Windows (elevated PowerShell)"
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise policy show --json
+```
+
+`policy show` prints the effective policy line and the per-connector route, lock and coverage; `policy verify` exits `1` when coverage is incomplete, and `--connector` or `--user` narrow it. `policy verify --live` proves a real client loads the hooks. Options: [Operate reference](/docs/enterprise/operate/reference#machine-policy-status-options).
+
+## Per-user connector state
+
+Connectors without a machine policy file, such as Devin, Antigravity, Hermes, Amp and
+Kiro (and OpenCode while its
+[managed plugin](/docs/enterprise/configure/machine-policy#managed-opencode-plugin) is not in
+force), are wired into each user's own agent config by the *guardian*. The
+*enumerator* decides which users to protect.
+
+1. The enumerator runs every 5 minutes on every OS and writes the target manifest
+   (`targets.yaml`), one row per user and connector. A new user or newly enabled
+   connector first appears on its next cycle, so allow up to 5 minutes.
+2. The guardian then installs or repairs the hooks for each row. It reacts to file
+   changes and also reconciles every minute.
+3. On Linux and macOS, the guardian records each protected user in its authorization
+   ledger. The gateway accepts per-user hook calls only from users in that ledger.
+
+To reconcile now instead of waiting for the next minute, run the `reconcile` action
+(`sudo … enterprise linux reconcile --json`, or the macOS or Windows equivalent). It
+does not wait for the enumerator.
+
+| OS | Target manifest | Notes |
+| --- | --- | --- |
+| Linux | `/etc/defenseclaw/hook-guardian/targets.yaml` | A deleted user is removed at the third enumerator cycle in a row that reports "no such user" (10 to 15 minutes), or at once by `repair`. A directory outage does not remove anyone |
+| macOS | `/opt/cisco/defenseclaw/etc/hook-guardian/targets.yaml` | Same as Linux |
+| Windows | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml` | The guardian writes a user's hooks only while that user has an active (connected) session. Rows for a signed-out or disconnected user wait |
+
+If a user you expect is missing, see
+[A user is not enrolled](/docs/troubleshooting/enterprise#symptoms) and
+[Enrollment](/docs/enterprise/configure/enrollment).
+
+### When a user breaks their own setup (Linux and macOS)
+
+A user can break files DefenseClaw needs in their own account, for example by replacing an agent's config folder with a link. That account is then unprotected for the affected per-user agents; everyone else stays protected. The guardian reports `guardian_target_user_path` (a path in the user's home refused it; does not fail `verify`) or `guardian_target_failed` (sets `security_complete: false`). Read `warnings[]` in `status --json` to find the account. What the guardian repairs and what it leaves: [Operate reference](/docs/enterprise/operate/reference#what-the-guardian-repairs-in-a-user-account).
+
+## Rotate per-user credentials
+
+The guardian gives each enrolled user credentials that it derives from one
+per-machine key and binds to that user's uid or SID. Native agent telemetry,
+where enabled, uses them on every OS, as do hooks and in-agent plugins on Windows. On Linux and macOS,
+hooks and in-agent plugins reach the gateway over the hook socket and hold no
+credential. Rotate the key when a user's credentials may have been copied, or on your
+own schedule.
+
+```bash title="Linux"
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux rotate-credentials --json
+```
+
+```bash title="macOS"
+sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos rotate-credentials --json
+```
+
+If no enrolled user holds a credential yet, the command exits `0` with
+`"noop": true` and `"noop_reason": "no_credentials"` and changes nothing. That is the
+normal state on Linux and macOS while users run only hook-based agents and the config
+enables no agent telemetry.
+
+The rotation checks, stages the new key beside the current one, moves every user, then commits; any failure before the commit rolls every user back and exits `1` with `rotation_failed`. Ask users to restart their agents afterwards, because running agents lose telemetry once the old key is refused. On Windows `rotate-credentials` exits `1639`; to cut off one user, remove them from enrollment ([Contain an incident](/docs/enterprise/operate/lifecycle#contain-an-incident)). The steps: [Operate reference](/docs/enterprise/operate/reference#rotation-steps).
+
+## Golden images and VM templates
+
+A host cloned from a template that already runs the deployment shares its device key and per-machine key. Capture the template before you install DefenseClaw, or run `uninstall --purge --json` on it first. See [Operate reference](/docs/enterprise/operate/reference#golden-images-and-vm-templates-detail).
+
+## Logs and events
+
+### Windows
+
+| What | Where |
+| --- | --- |
+| Lifecycle log | `%WINDIR%\Logs\DefenseClaw\enterprise-lifecycle.log`: one JSON result per line, 5 files of up to 5 MiB each |
+| Last result | `%WINDIR%\Logs\DefenseClaw\last-result.json` |
+| MDM wrapper log | `%WINDIR%\Logs\DefenseClaw\mdm-wrapper.log` |
+| Event log | The `DefenseClaw` event log, source **DefenseClaw Lifecycle** (table below). Only SYSTEM and Administrators can write it. A copy of each event goes to the Application log, source **DefenseClaw Enterprise**, where any account can write under any source name; see [Windows](/docs/enterprise/install/windows#verify-the-install) |
+| Gateway log | `C:\ProgramData\Cisco\DefenseClaw\logs\gateway\gateway.log` |
+| Guardian and enumerator log | `C:\ProgramData\Cisco\DefenseClaw\logs\guardian\hook-guardian.log`. The hook enumerator writes here too, each line prefixed `[hook-enumerator]`; its warnings about one account name the account's SID |
+| Sensor helper log | `C:\ProgramData\Cisco\DefenseClaw\logs\sensor-helper\sensor-helper.log` |
+
+Administrators and Event Log Readers can read the files in `%WINDIR%\Logs\DefenseClaw`. The gateway, guardian and sensor helper logs under `C:\ProgramData\Cisco\DefenseClaw\logs` are for SYSTEM and Administrators only; the gateway service can also read and write `logs\gateway`. The event IDs (`100` installed through `150` refused) are in [Operate reference](/docs/enterprise/operate/reference#windows-event-ids).
+
+To check that the event log entries are DefenseClaw's, compare them with the
+lifecycle log from an elevated PowerShell (as an Administrator or a member of
+Event Log Readers, the accounts that can read the lifecycle log):
+
+```powershell
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events
+& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows events --application --json
+```
+
+An entry is DefenseClaw's only when its message ends with `record <id>`, the
+lifecycle log holds that record with the same event ID and the SHA-256 of the
+exact message, it was written within two minutes of that lifecycle line, and no
+earlier entry carried the same record. Entries older than the lifecycle log's
+first record are listed as unverifiable. The command exits `1` when an entry
+was not written by DefenseClaw (a forged entry) or when the newest lifecycle
+record written to the checked log has no entry there (a missing record).
+`--application` checks the copies in the Application log instead, `--max N`
+shows the newest `N` entries (default `20`, `0` for all) while every entry is
+checked, and `--json` prints every entry.
+
+### Linux
+
+| What | Where |
+| --- | --- |
+| Service output | The journal: `journalctl -u defenseclaw-gateway.service`, and likewise for `defenseclaw-hook-guardian.service`, `defenseclaw-hook-enumerator.service` and `defenseclaw-sensor-helper.service` |
+| Config changes applied | `journalctl -u defenseclaw-enterprise-apply.service` |
+| Daily verify | `journalctl -u defenseclaw-enterprise-verify.service` |
+| `/var/log/defenseclaw` | Empty by default: the services write to the journal. The gateway may write only there and in `/var/lib/defenseclaw`, so it is the place for a `jsonl` file destination (see [Audit records and SIEM forwarding](#audit-records-and-siem-forwarding)) |
+| Package install result | `/var/lib/defenseclaw-enterprise/last-package-result.json`, and `last-package-result.log` beside it |
+| MDM wrapper log | `/var/log/defenseclaw-enterprise-mdm.log` |
+| Kernel sensor records | With Tetragon and Plane C, the sensor helper's records reach your destinations as `ai.runtime.plane_health`, `ai.runtime.kernel_policy`, `ai.runtime.kernel_event` and `enforcement.block.applied` with the initiator `kernel`. See [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon) |
+
+```bash
+journalctl -u defenseclaw-enterprise-verify.service -n 50 --no-pager
+systemctl list-timers defenseclaw-enterprise-verify.timer
+```
+
+### macOS
+
+All logs are in `/Library/Logs/Cisco/DefenseClaw`.
+
+| What | File |
+| --- | --- |
+| Gateway | `gateway/gateway.out.log`, `gateway/gateway.err.log` |
+| Guardian, enumerator, sensor helper | `hook-guardian.*.log`, `hook-enumerator.*.log`, `sensor-helper.*.log` |
+| Config changes applied | `lifecycle.log` |
+| Daily verify | `verify.log` |
+| MDM wrapper | `mdm-wrapper.log` |
+| Package install result | `/opt/cisco/defenseclaw/lifecycle/last-package-result.json` |
+
+### Audit records and SIEM forwarding
+
+The gateway records every hook decision in its local audit store, the SQLite database
+set by `observability.local.path`. By default it is `audit.db` in the data directory:
+`/var/lib/defenseclaw` on Linux, `/opt/cisco/defenseclaw/runtime` on macOS, and
+`C:\ProgramData\Cisco\DefenseClaw\runtime` on Windows.
+
+To forward records to a SIEM, add `observability.destinations` to the managed config
+you deploy. Destination kinds include OTLP, Splunk HEC, HTTP JSONL and JSONL files;
+see [Observability](/docs/features/observability). `enterprise <os> status` and `verify` warn
+when an optional destination is failing. For the destination name, circuit state, last
+failure code and rejected count, run `defenseclaw-gateway status` on the managed host
+or read its loopback `/health` `telemetry.details.destinations` object. A failed
+optional destination does not stop the local audit store or sibling destinations.
+`no_space` means a JSONL file destination's volume is full; free space there and let
+its retry resume.
+
+On a managed host, destination credentials come from protected storage (`token_credential`, `bearer_credential`, `{credential: NAME}`), and a `jsonl` file destination must use a path under `/var/lib/defenseclaw` or `/var/log/defenseclaw` on Linux. See [Observability credentials](/docs/enterprise/configure/reference#observability-credentials) and [Operate reference](/docs/enterprise/operate/reference#rules-for-siem-forwarding-on-a-managed-host).

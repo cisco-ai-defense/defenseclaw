@@ -660,6 +660,39 @@ def _bundle_parity_errors() -> list[str]:
     return errors
 
 
+MANAGED_SANDBOX_METRIC_CONDITION = 'IsMatch(metric.name, "^defenseclaw[.]sandbox[.]managed[.]")'
+EXPECTED_MANAGED_SANDBOX_OUT_FILTER = {
+    "error_mode": "ignore",
+    "metric_conditions": [MANAGED_SANDBOX_METRIC_CONDITION],
+}
+EXPECTED_MANAGED_SANDBOX_ONLY_FILTER = {
+    "error_mode": "ignore",
+    "metric_conditions": ["not " + MANAGED_SANDBOX_METRIC_CONDITION],
+}
+# The resource attributes the managed sandbox counters keep in Prometheus.
+MANAGED_SANDBOX_RESOURCE_ATTRIBUTES = (
+    "service.name",
+    "service.namespace",
+    "service.version",
+    "service.instance.id",
+    "deployment.environment.name",
+    "os.type",
+)
+EXPECTED_MANAGED_SANDBOX_RESOURCE_PROCESSOR = {
+    "error_mode": "ignore",
+    "metric_statements": [
+        {
+            "context": "resource",
+            "statements": [
+                "keep_keys(resource.attributes, ["
+                + ", ".join(f'"{key}"' for key in MANAGED_SANDBOX_RESOURCE_ATTRIBUTES)
+                + "])",
+            ],
+        },
+    ],
+}
+
+
 def _collector_errors() -> list[str]:
     errors: list[str] = []
     collector = _load_yaml(COLLECTOR)
@@ -677,7 +710,18 @@ def _collector_errors() -> list[str]:
         },
         "metrics": {
             "receivers": ["otlp", "spanmetrics/agent360"],
-            "processors": ["resource", "deltatocumulative", "batch"],
+            "processors": ["resource", "filter/managed-sandbox-out", "deltatocumulative", "batch"],
+            "exporters": ["prometheusremotewrite/prometheus", "debug"],
+        },
+        "metrics/managed-sandbox": {
+            "receivers": ["otlp"],
+            "processors": [
+                "resource",
+                "filter/managed-sandbox-only",
+                "transform/managed-sandbox-resource",
+                "deltatocumulative",
+                "batch",
+            ],
             "exporters": ["prometheusremotewrite/prometheus", "debug"],
         },
         "logs": {
@@ -714,6 +758,19 @@ def _collector_errors() -> list[str]:
     if collector.get("processors", {}).get("groupbyattrs/sandbox-identity") != EXPECTED_SANDBOX_GROUPING_PROCESSOR:
         errors.append(
             "groupbyattrs/sandbox-identity must move only defenseclaw.sandbox.name onto the log resource",
+        )
+    processors = collector.get("processors", {})
+    if (
+        processors.get("filter/managed-sandbox-out") != EXPECTED_MANAGED_SANDBOX_OUT_FILTER
+        or processors.get("filter/managed-sandbox-only") != EXPECTED_MANAGED_SANDBOX_ONLY_FILTER
+    ):
+        errors.append(
+            "the managed sandbox counters must leave the metrics pipeline and take metrics/managed-sandbox only",
+        )
+    if processors.get("transform/managed-sandbox-resource") != EXPECTED_MANAGED_SANDBOX_RESOURCE_PROCESSOR:
+        errors.append(
+            "transform/managed-sandbox-resource must keep only the service, environment and OS resource "
+            "attributes: the managed sandbox counters carry no host or account label",
         )
     resource_actions = collector.get("processors", {}).get("resource", {}).get("attributes")
     if resource_actions != EXPECTED_RESOURCE_ATTRIBUTE_ACTIONS:

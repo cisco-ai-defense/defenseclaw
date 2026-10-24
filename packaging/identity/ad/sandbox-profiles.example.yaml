@@ -60,7 +60,7 @@ enterprise:
     install: setup
     driver: docker            # docker, vm or auto; the default is vm on macOS, docker on Linux
     # driver_fallback: docker # Linux, driver vm or auto: docker (default) or none where KVM is not available
-    version: "0.1.3"
+    version: "0.1.5"
     gateway_port: 17670
     # macOS only, for the vm driver: a directory whose whole chain is owned by root, the
     # e2fsprogs install prefix (mke2fs and debugfs in its sbin or bin) or the folder that

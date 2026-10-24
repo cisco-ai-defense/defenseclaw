@@ -99,19 +99,19 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # explaining source ownership.
     "scripts/gen_envvars_docs.py",
     "docs/ENV-VARS.md",
-    "docs-site/content/docs/reference/env-vars.mdx",
+    "docs-site/content/docs/reference/configuration/env-vars.mdx",
     # Configuration docs that explicitly mention env vars users SOMETIMES
     # try to set (DEFENSECLAW_DATA_DIR, DEFENSECLAW_LOG_LEVEL, ...) but
     # which DefenseClaw does NOT honor. These pages tell users to use
     # config.yaml instead — they reference the names solely to clarify
     # "this is not an env var". Not real consumers.
     "docs/CONFIG_FILES.md",
-    "docs-site/content/docs/reference/configuration.mdx",
+    "docs-site/content/docs/reference/configuration/index.mdx",
     # Fail-modes diagram embeds env-var names in JSX strings that span
     # lines (e.g. `DEFENSECLAW_STRICT\n_AVAILABILITY=1?`); the line-
     # splitting trips the regex. The values are explained in the
     # registry-backed env-vars page.
-    "docs-site/content/docs/reference/fail-modes.mdx",
+    "docs-site/content/docs/reference/configuration/fail-modes.mdx",
     # The 1.0.0 release notes, and the test that checks them, name the 0.8.x
     # environment variable 1.0 removed (DEFENSECLAW_JUDGE_PERSIST_QUEUE_SIZE)
     # to tell operators what replaces it. They document a removal; nothing
@@ -123,6 +123,10 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # configuration, not env vars DefenseClaw itself reads.
     "cli/tests/test_cmd_registry.py",
     "cli/tests/test_cmd_keys.py",
+    # hooks/.hookcfg bodies the native hook and the status reader share as
+    # test vectors; the 0.8.x sidecar keys in them are file content, not
+    # environment variables.
+    "internal/cli/testdata/windows_hook_sidecar_vectors.json",
     # End-to-end harness scripts (developer-run, not shipped). They define
     # DEFENSECLAW_E2E_* knobs to drive throwaway stacks against real
     # providers; none are consumed by the gateway or CLI at runtime.
@@ -218,7 +222,9 @@ _NON_ENVVAR_TOKENS = frozenset(
 # exemption.
 _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_CLAWHUB_ARG_": frozenset({"cli/defenseclaw/commands/cmd_skill.py"}),
-    "DEFENSECLAW_FAIL_MODE_": frozenset({"internal/cli/hook.go"}),
+    # The status reader still recognizes connector-scoped keys in older
+    # 0.8.x hooks/.hookcfg records. Native hooks no longer read this family.
+    "DEFENSECLAW_FAIL_MODE_": frozenset({"cli/defenseclaw/fail_mode.py"}),
     "DEFENSECLAW_MIGRATED_": frozenset(
         {
             "cli/defenseclaw/observability/v8_migration.py",
@@ -228,7 +234,7 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
     "DEFENSECLAW_OTEL_": frozenset(
         {
             "cli/defenseclaw/observability/v8_migration.py",
-            "docs-site/content/docs/observability/index.mdx",
+            "docs-site/content/docs/reference/observability/index.mdx",
         }
     ),
     # The sandbox wrappers' DEFENSECLAW_SANDBOX_* family: the test asserts

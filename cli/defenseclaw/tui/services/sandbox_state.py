@@ -41,7 +41,7 @@ _MATCH_TEXT = {
     "connector": "this agent is assigned to it",
     "default": "the default for everyone",
     "default_unverified": "the default (your identity could not be verified)",
-    "default_lookup_failed": "the default (your directory couldn't be reached)",
+    "default_lookup_failed": "the default (your directory couldn't be reached; no assignment needs the missing facts)",
     "none": "no profile applies; your organization's floor does",
 }
 
@@ -155,7 +155,7 @@ NO_ASKS_TEXT = (
     "No asks are waiting. An ask appears when a program connects around DefenseClaw's proxy: "
     "to a private-network address with any pack, to a host off the allowlist with balanced, "
     "and to every new destination with strict. A port on this machine asks only if the run named it "
-    "with --host-port PORT."
+    "with --host-port PORT; approve that ask to open the port."
 )
 
 # sandboxapi.reasonTexts (internal/openshell/sandboxapi/reasons.go), word for
@@ -316,9 +316,7 @@ SANDBOX_HARNESS_SPECS: tuple[tuple[str, str, str], ...] = (
     ("devin", "Devin CLI", "devin"),
     ("hermes", "Hermes Agent", "hermes"),
     ("kiro", "Kiro CLI", "kiro-cli-chat"),
-    ("omnigent", "OmniGent", "omnigent"),
     ("opencode", "OpenCode", "opencode"),
-    ("openhands", "OpenHands", "openhands"),
 )
 # sandboxcli.defaultHarnesses: the harnesses when openshell.harnesses is empty.
 DEFAULT_SANDBOX_HARNESSES: tuple[str, ...] = ("claudecode", "codex")
@@ -336,7 +334,6 @@ def resolve_harness(name: str) -> str:
     """
     text = name.strip().lower()
     canonical = {"claude-code": "claudecode", "claude_code": "claudecode"}.get(text, text)
-    canonical = {"open-hands": "openhands", "open_hands": "openhands"}.get(canonical, canonical)
     if canonical in HARNESSES:
         return canonical
     for harness, (command, display) in HARNESSES.items():

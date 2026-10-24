@@ -31,7 +31,8 @@
 #
 # Signing is optional and off by default:
 #   MACOS_APP_SIGN_IDENTITY        "Developer ID Application: ..." codesigns
-#                                  the binaries with the hardened runtime.
+#                                  the binaries with the hardened runtime;
+#                                  "-" uses an ad hoc identity for CI.
 #   MACOS_INSTALLER_SIGN_IDENTITY  "Developer ID Installer: ..." signs the
 #                                  product archive.
 #   MACOS_SIGN_KEYCHAIN            keychain holding both identities.
@@ -127,7 +128,13 @@ ln -s "/$INSTALL_BIN/defenseclaw-gateway" "$ROOT/$LAUNCHER_DIR/defenseclaw"
 # decision after an upgrade. The lifecycle renders the same path from the
 # installed gateway's SHA-256.
 if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
-    sign_args=(--force --timestamp --options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
+    sign_args=(--force)
+    # Ad hoc signing lets the disposable macOS CI install lane exercise the
+    # same signed-program copy and label path without a release certificate.
+    if [ "$MACOS_APP_SIGN_IDENTITY" != - ]; then
+        sign_args+=(--timestamp)
+    fi
+    sign_args+=(--options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
     [ -n "${MACOS_SIGN_KEYCHAIN:-}" ] && sign_args+=(--keychain "$MACOS_SIGN_KEYCHAIN")
     for binary in "$ROOT/$INSTALL_BIN"/* "$e2fs_root/sbin"/*; do
         codesign "${sign_args[@]}" --identifier "com.cisco.defenseclaw.$(basename "$binary")" "$binary"
@@ -142,19 +149,26 @@ cp -p "$ROOT/$INSTALL_BIN/defenseclaw-gateway" "$ROOT$agent_program"
 # only when root:wheel owns it and nobody else can write it, which pkgbuild
 # --ownership recommended gives (mode 0644 here). The agents load at each
 # account's next sign-in; the launcher bootstraps them on demand for an
-# account that is already signed in.
+# account that is already signed in. Each label carries the first 12 digits
+# of the gateway's SHA-256 too: macOS keeps the code-signing decision it made
+# for a job label, and killed the job of an upgraded program under its old
+# label (GAP-0206). The lifecycle names the same label and removes the
+# plists of earlier labels (openshell.LaunchAgentLabel).
 mkdir -p "$ROOT/$LAUNCH_AGENTS_DIR"
+agent_tag=$(printf '%s' "$gateway_digest" | cut -c1-12)
 for label in com.cisco.defenseclaw.sandbox com.cisco.defenseclaw.openshell-gateway; do
     agent="$REPO_ROOT/packaging/launchd-standalone/agents/$label.plist"
     [ -f "$agent" ] || { echo "missing $agent" >&2; exit 1; }
-    sed "s|/$INSTALL_BIN/defenseclaw-gateway|$agent_program|" "$agent" >"$ROOT/$LAUNCH_AGENTS_DIR/$label.plist"
-    chmod 0644 "$ROOT/$LAUNCH_AGENTS_DIR/$label.plist"
+    sed -e "s|/$INSTALL_BIN/defenseclaw-gateway|$agent_program|" -e "s|<string>$label</string>|<string>$label.$agent_tag</string>|" \
+        "$agent" >"$ROOT/$LAUNCH_AGENTS_DIR/$label.$agent_tag.plist"
+    chmod 0644 "$ROOT/$LAUNCH_AGENTS_DIR/$label.$agent_tag.plist"
 done
 
 # preinstall refuses before any file lands on a Secure Client host: the two
 # deployments share the gateway port and the lifecycle would refuse anyway.
-# It also refuses a downgrade before the older binaries replace the installed
-# ones, unless the administrator created the root-owned rollback marker
+# It also refuses a release below the confirmed signed bundle's floor, and a
+# downgrade before the older binaries replace the installed ones unless the
+# administrator created the root-owned rollback marker
 # /opt/cisco/defenseclaw/lifecycle/allow-downgrade (postinstall consumes it).
 cat >"$SCRIPTS/preinstall" <<'EOF'
 #!/bin/sh
@@ -166,59 +180,215 @@ fi
 state=/opt/cisco/defenseclaw/lifecycle
 package_version="@DC_PKG_VERSION@"
 record="$state/deployment.json"
-if [ -f "$record" ] && [ ! -L "$record" ] && [ "$(stat -f %u "$record")" = 0 ]; then
-    installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" | head -n 1)
-    marker="$state/allow-downgrade"
-    if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v b="$installed" '
-        function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
-        BEGIN {
-            a = norm(a); b = norm(b); pa = ""; pb = ""
-            if (index(a, "-")) { pa = substr(a, index(a, "-") + 1); a = substr(a, 1, index(a, "-") - 1) }
-            if (index(b, "-")) { pb = substr(b, index(b, "-") + 1); b = substr(b, 1, index(b, "-") - 1) }
-            na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
-            for (i = 1; i <= n; i++) {
-                xi = (i <= na) ? x[i] + 0 : 0; yi = (i <= nb) ? y[i] + 0 : 0
-                if (xi > yi) exit 0
-                if (xi < yi) exit 1
-            }
-            if (pa == pb || pa == "") exit 0
-            if (pb == "") exit 1
-            np = split(pa, u, "."); nq = split(pb, w, "."); m = np > nq ? np : nq
-            for (i = 1; i <= m; i++) {
-                if (u[i] == w[i]) continue
-                if (u[i] ~ /^[0-9]+$/ && w[i] ~ /^[0-9]+$/) exit (u[i] + 0 > w[i] + 0) ? 0 : 1
-                exit (u[i] > w[i]) ? 0 : 1
-            }
-            exit 0
-        }'; then
-        message="DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
-        echo "$message" >&2
-        # The Installer shows only a generic error, so leave the reason in
-        # the package result an MDM detection or an administrator reads.
-        # The refusal changed nothing, so the result reports the running
-        # deployment as its own status sees it (GAP-1428: a fixed document
-        # said every service was down). The fixed document stays the
-        # fallback for an installed gateway that cannot answer.
-        umask 077
-        result="$state/last-package-result.json"
-        error="{\"code\":\"downgrade_refused\",\"message\":\"$message\"}"
-        gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
-        if ! { [ -x "$gateway" ] && "$gateway" enterprise macos status --json 2>/dev/null | sed \
-            -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
-            -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
-            -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
-            -e '/^  "noop_reason": /d' \
-            -e "s|^  \"product_version\": \"[^\"]*\",\$|  \"product_version\": \"$package_version\",|" \
-            -e "s|^  \"errors\": \[\],\$|  \"errors\": [$error],|" \
-            -e "s|^  \"errors\": \[\$|  \"errors\": [$error,|" \
-            -e 's/^  "exit_code": [0-9]*$/  "exit_code": 1/' >"$result.tmp" &&
-            grep -q '"downgrade_refused"' "$result.tmp" && grep -q '^  "exit_code": 1$' "$result.tmp"; }; then
-            printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":true,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[%s],"exit_code":1}\n' \
-                "$package_version" "$installed" "$error" >"$result.tmp"
+marker="$state/allow-downgrade"
+gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway
+# owner_mode PATH: the owner's uid and the permission bits (octal) of PATH
+# itself, not of a symlink's target.
+owner_mode() { stat -f '%u %Lp' "$1" 2>/dev/null; }
+root_owned() {
+    [ -f "$1" ] && [ ! -L "$1" ] && ro_info=$(owner_mode "$1") && [ "${ro_info%% *}" = 0 ]
+}
+# acl_closed PATH: no access control entry on PATH itself lets another
+# account change it. A list that cannot be read is not closed.
+acl_closed() {
+    t_acl=$(ls -lde "$1" 2>/dev/null) || return 1
+    ! printf '%s\n' "$t_acl" | sed 1d | grep -Eq ' allow .*(write|append|add_|delete|chown)'
+}
+# root_only PATH: PATH itself, not a symlink's target, belongs to root, and
+# neither its mode nor an access control entry lets another account write
+# it. An owner, mode or access control list that cannot be read is not
+# root's.
+root_only() {
+    t_info=$(owner_mode "$1") || return 1
+    case $t_info in
+        "0 "[0-7]*) t_mode=${t_info#0 } ;;
+        *) return 1 ;;
+    esac
+    case $t_mode in *[!0-7]*) return 1 ;; esac
+    [ $((0$t_mode & 022)) -eq 0 ] || return 1
+    acl_closed "$1"
+}
+# trusted PATH: PATH is a regular file, not a symlink, and only root can
+# change what it names. PATH is looked up one entry at a time, as the kernel
+# looks it up, following every symlink on the way (its target from / or from
+# the folder that holds it): every folder an entry is found in, and the
+# file, are root_only, and every symlink belongs to root and no access
+# control entry lets another account change it. A check of only the
+# folders the path ends in missed the folder that holds a symlink and the
+# folders a symlink's target passes through: an account that could write
+# one could swap the symlink between the check and the run. t_real is
+# then the file PATH names, reached through folders only, and the caller
+# runs that file. A symlink that cannot be read, or more than 32 of them,
+# is not trusted.
+trusted() {
+    t_real=
+    [ -f "$1" ] && [ ! -L "$1" ] || return 1
+    case $1 in /*) ;; *) return 1 ;; esac
+    root_only / || return 1
+    t_dir=/
+    t_rest=$1
+    t_hops=0
+    while :; do
+        case $t_rest in
+            /*) t_rest=${t_rest#/}; continue ;;
+            "") return 1 ;;
+            */*)
+                t_name=${t_rest%%/*}
+                t_rest=${t_rest#*/}
+                t_more=/
+                ;;
+            *)
+                t_name=$t_rest
+                t_rest=
+                t_more=
+                ;;
+        esac
+        case $t_name in
+            .) continue ;;
+            ..)
+                t_dir=${t_dir%/*}
+                t_dir=${t_dir:-/}
+                continue
+                ;;
+        esac
+        t_path=${t_dir%/}/$t_name
+        if [ -L "$t_path" ]; then
+            t_hops=$((t_hops + 1))
+            [ "$t_hops" -le 32 ] || return 1
+            t_info=$(owner_mode "$t_path") || return 1
+            [ "${t_info%% *}" = 0 ] || return 1
+            acl_closed "$t_path" || return 1
+            t_link=$(readlink "$t_path") || return 1
+            case $t_link in
+                "") return 1 ;;
+                /*) t_dir=/ ;;
+            esac
+            t_rest=$t_link$t_more$t_rest
+            continue
         fi
-        mv -f "$result.tmp" "$result" && echo "See $result." >&2
-        exit 1
+        root_only "$t_path" || return 1
+        if [ -z "$t_more" ] && [ -f "$t_path" ]; then
+            t_real=$t_path
+            return 0
+        fi
+        [ -d "$t_path" ] || return 1
+        t_dir=$t_path
+    done
+}
+installed=
+if root_owned "$record"; then
+    installed=$(sed -n 's/.*"product_version": *"\([^"]*\)".*/\1/p' "$record" | head -n 1)
+fi
+# refuse CODE MESSAGE: nothing was changed. The Installer shows only a
+# generic error, so leave the reason in the package result an MDM detection
+# or an administrator reads. The result reports the running deployment as
+# its own status sees it (GAP-1428: a fixed document said every service was
+# down). The fixed document stays the fallback for an installed gateway that
+# cannot answer, or is not a root-owned file only root can change (trusted;
+# it is not run).
+refuse() {
+    code=$1 message=$2
+    echo "$message" >&2
+    umask 077
+    result="$state/last-package-result.json"
+    error="{\"code\":\"$code\",\"message\":\"$message\"}"
+    present=true
+    [ -n "$installed" ] || present=false
+    if ! { [ -x "$gateway" ] && trusted "$gateway" && "$t_real" enterprise macos status --json 2>/dev/null | sed \
+        -e 's/^  "ok": [a-z]*,$/  "ok": false,/' \
+        -e 's/^  "action": "[a-z-]*",$/  "action": "ensure",/' \
+        -e 's/^  "noop": [a-z]*,$/  "noop": false,/' \
+        -e '/^  "noop_reason": /d' \
+        -e "s|^  \"product_version\": \"[^\"]*\",\$|  \"product_version\": \"$package_version\",|" \
+        -e "s|^  \"errors\": \[\],\$|  \"errors\": [$error],|" \
+        -e "s|^  \"errors\": \[\$|  \"errors\": [$error,|" \
+        -e 's/^  "exit_code": [0-9]*$/  "exit_code": 1/' >"$result.tmp" &&
+        grep -q "\"$code\"" "$result.tmp" && grep -q '^  "exit_code": 1$' "$result.tmp"; }; then
+        printf '{"schema_version":2,"ok":false,"action":"ensure","noop":false,"profile":"standalone","platform":"darwin","product_version":"%s","installed_version":"%s","installed":%s,"transaction_pending":false,"services":[],"readiness":{"gateway":false,"guardian":false,"enumerator":false,"sensor_helper":false},"inspection":{"local":"unknown","ai_defense":"unknown"},"machine_policy":{},"enrollment":{"targets":0,"pending":0,"failed":0,"exempt":0},"coverage_complete":false,"security_complete":false,"errors":[%s],"exit_code":1}\n' \
+            "$package_version" "$installed" "$present" "$error" >"$result.tmp"
     fi
+    mv -f "$result.tmp" "$result" && echo "See $result." >&2
+    exit 1
+}
+# A Mac that takes signed policy bundles must not run a release below the one
+# its confirmed bundle requires (min_product_version), even for a deliberate
+# rollback or a reinstall after uninstall --keep-state: a bundle signed with
+# a lower floor lifts it. A gateway from 1.0.4 on reads the floor before any
+# file is replaced, and its binary carries floor_check_marker: looking for
+# it, without running the gateway, tells a gateway that cannot run from one
+# before 1.0.4, which has no check and is not asked. When the installed
+# gateway is gone or older (uninstall --keep-state, or an uninstall that
+# failed after removing the binaries), the root-only copy that uninstall kept
+# in the lifecycle folder answers. Only a gateway that was read and has no
+# marker is an older one: a gateway that cannot be read, and a gateway with
+# the marker or a kept copy that is not a root-owned file only root can
+# change (trusted: another account cannot change it, a folder above it, or
+# a symlink on the way to it, by mode or access control entry), or whose
+# owner or mode cannot be read, leave the floor unchecked unless the other
+# one answers, and the install is refused; a trusted checker is run by the
+# path it resolves to. Only exit 0 lets the install go on: exit 3
+# is the refusal, and any other result (execution denied, killed, crashed)
+# leaves the floor unchecked, so the install is refused too.
+floor_check_marker=defenseclaw-package-floor-check/1
+kept="$state/floor-check"
+checker=
+unchecked=
+if [ -e "$gateway" ] || [ -L "$gateway" ]; then
+    grep -qaF "$floor_check_marker" "$gateway" 2>/dev/null
+    case $? in
+    0)
+        if trusted "$gateway"; then
+            checker=$t_real
+        else
+            unchecked="$gateway has the floor check, but it is not a root-owned file that only root can change (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
+        fi
+        ;;
+    1) ;; # a gateway before 1.0.4: it has no floor check
+    *) unchecked="$gateway could not be read to tell whether it has the floor check" ;;
+    esac
+fi
+if [ -z "$checker" ]; then
+    if [ ! -L "$kept" ] && trusted "$kept/defenseclaw-gateway"; then
+        checker=$t_real
+        unchecked=
+    elif [ -L "$kept" ] || [ -e "$kept/defenseclaw-gateway" ] || [ -L "$kept/defenseclaw-gateway" ]; then
+        unchecked="$kept/defenseclaw-gateway, the gateway an uninstall kept for the floor check, is not a root-owned file that only root can change, in a folder that is not a symlink (another account can change it, a folder above it, or a symlink on the way to it), or its owner or mode could not be read"
+    fi
+fi
+if [ -n "$checker" ]; then
+    floor_msg=$("$checker" enterprise bundle floor-check --product-version "$package_version" 2>&1 >/dev/null)
+    floor_rc=$?
+    if [ "$floor_rc" -ne 0 ]; then
+        [ "$floor_rc" -eq 3 ] || floor_msg="The release floor of the confirmed signed policy bundle could not be checked: $checker exited $floor_rc${floor_msg:+ ($floor_msg)}. Let it run (for example, trust it in the application control policy) and install again."
+        floor_msg=$(printf '%s' "${floor_msg#Error: }" | tr '\n' ' ' | tr -d '"\\|&')
+        refuse product_floor_refused "Refusing to install DefenseClaw $package_version: $floor_msg Nothing was changed."
+    fi
+elif [ -n "$unchecked" ]; then
+    refuse product_floor_refused "Refusing to install DefenseClaw $package_version: The release floor of the confirmed signed policy bundle could not be checked: $unchecked. Restore it as a readable, root-owned file that only root can write, in folders only root can write, and install again. Nothing was changed."
+fi
+if [ -n "$installed" ] && ! [ -f "$marker" ] && ! awk -v a="$package_version" -v b="$installed" '
+    function norm(v) { sub(/^v/, "", v); sub(/\+.*/, "", v); return v }
+    BEGIN {
+        a = norm(a); b = norm(b); pa = ""; pb = ""
+        if (index(a, "-")) { pa = substr(a, index(a, "-") + 1); a = substr(a, 1, index(a, "-") - 1) }
+        if (index(b, "-")) { pb = substr(b, index(b, "-") + 1); b = substr(b, 1, index(b, "-") - 1) }
+        na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+        for (i = 1; i <= n; i++) {
+            xi = (i <= na) ? x[i] + 0 : 0; yi = (i <= nb) ? y[i] + 0 : 0
+            if (xi > yi) exit 0
+            if (xi < yi) exit 1
+        }
+        if (pa == pb || pa == "") exit 0
+        if (pb == "") exit 1
+        np = split(pa, u, "."); nq = split(pb, w, "."); m = np > nq ? np : nq
+        for (i = 1; i <= m; i++) {
+            if (u[i] == w[i]) continue
+            if (u[i] ~ /^[0-9]+$/ && w[i] ~ /^[0-9]+$/) exit (u[i] + 0 > w[i] + 0) ? 0 : 1
+            exit (u[i] > w[i]) ? 0 : 1
+        }
+        exit 0
+    }'; then
+    refuse downgrade_refused "DefenseClaw $installed is installed; refusing to downgrade to $package_version, so nothing was changed. For a deliberate rollback, create $marker as root first."
 fi
 exit 0
 EOF

@@ -49,7 +49,7 @@ func TestUnverifiedSecureClientHostManagedHookIsStandalone(t *testing.T) {
 		home := t.TempDir()
 		var stdout, stderr bytes.Buffer
 		o := Options{Connector: "copilot", Event: "preToolUse", ManagedEnterprise: true, SecureClient: false,
-			Home: home, Stdout: &stdout, Stderr: &stderr, Now: time.Now}
+			Home: home, FailureLogHome: userLogHome(home), Stdout: &stdout, Stderr: &stderr, Now: time.Now}
 		if code := fail(o); code != 0 || !strings.Contains(stdout.String(), `"permissionDecision":"deny"`) {
 			t.Fatalf("unverified host Copilot: code=%d stdout=%q, want the managed deny", code, stdout.String())
 		}

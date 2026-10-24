@@ -177,7 +177,7 @@ func TestConcurrentClaudeHookDecisionsLinkToTheirOwnOperations(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT action, structured_json FROM audit_events WHERE session_id=? AND action IN ('connector-hook','tool_invocation')`, session)
+	rows, err := db.Query(`SELECT action, `+audit.StructuredJSONReadSQL("", true, true)+` FROM audit_events WHERE session_id=? AND action IN ('connector-hook','tool_invocation')`, session)
 	if err != nil {
 		t.Fatal(err)
 	}

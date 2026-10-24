@@ -1,0 +1,129 @@
+---
+title: Join a Linux host to AD
+description: Join a RHEL 9 or Ubuntu 24.04 host to Active Directory with SSSD, turn on InfoPipe, sign in with a Kerberos ticket, and see what DefenseClaw records about the user.
+keywords:
+  - SSSD Active Directory join
+  - realm join
+  - InfoPipe userPrincipalName
+  - Kerberos GSSAPI SSH
+  - DefenseClaw identity
+---
+
+This guide joins a Linux host to Active Directory and shows what DefenseClaw records for an AD user. It uses RHEL 9 or Ubuntu 24.04, the domain `CORP.EXAMPLE.COM` and the user `alice`. DefenseClaw needs nothing from AD beyond what a normal domain join gives the host. What it reads, and how far each fact can be trusted, is in [How DefenseClaw knows who a user is](/docs/enterprise/identity/sources).
+
+<Steps>
+
+<Step>
+
+### Join the host with SSSD
+
+```bash title="RHEL 9"
+sudo dnf install realmd sssd sssd-tools sssd-dbus sssd-kcm adcli samba-common-tools krb5-workstation oddjob oddjob-mkhomedir
+```
+
+```bash title="Ubuntu 24.04"
+sudo apt-get install realmd sssd-ad sssd-tools sssd-dbus sssd-kcm libnss-sss libpam-sss adcli krb5-user
+sudo pam-auth-update --enable mkhomedir
+sudo hostnamectl set-hostname host.corp.example.com
+sudo grep -qxF 'includedir /etc/krb5.conf.d/' /etc/krb5.conf || sudo sed -i '1i includedir /etc/krb5.conf.d/' /etc/krb5.conf
+```
+
+On Ubuntu, `krb5-user` asks for the default Kerberos realm during installation; enter `CORP.EXAMPLE.COM`. Set the host's FQDN before `realm join` so its keytab contains `host/host.corp.example.com`. Enabling `mkhomedir` creates an AD user's home at first sign-in.
+
+```bash
+sudo realm discover corp.example.com
+sudo realm join --membership-software=adcli --client-software=sssd -U administrator corp.example.com
+sudo realm permit alice@corp.example.com
+```
+
+On Ubuntu, the `includedir` line loads SSSD's `localauth` plugin. Without it a GSSAPI sign-in maps the ticket to `alice` instead of `alice@corp.example.com` and SSH denies the login. Also enable GSSAPI in OpenSSH before testing the sign-in:
+
+```bash title="Ubuntu 24.04"
+printf 'GSSAPIAuthentication yes\n' | sudo tee /etc/ssh/sshd_config.d/50-gssapi.conf
+sudo sshd -t
+sudo systemctl reload ssh
+```
+
+</Step>
+
+<Step>
+
+### Turn on InfoPipe
+
+The standalone enterprise guardian reads the UPN through SSSD's InfoPipe D-Bus service, as root. Enable the attribute in `/etc/sssd/sssd.conf`:
+
+```ini
+[sssd]
+services = ifp
+
+[ifp]
+user_attributes = +userPrincipalName
+```
+
+On Ubuntu 24.04 the NSS and PAM responders are socket activated; listing them in `services` makes their sockets fail, so list only `ifp`. On RHEL 9, use `services = nss, pam, ifp`.
+
+If InfoPipe returns no `userPrincipalName`, also add `ldap_user_extra_attrs = userPrincipalName` to the `[domain/...]` section. `realm join` sets `use_fully_qualified_names = True`, which the examples in these docs assume.
+
+</Step>
+
+<Step>
+
+### Restart SSSD and check it answers
+
+```bash
+sudo sss_cache -E
+sudo systemctl restart sssd
+systemctl is-system-running
+getent passwd alice@corp.example.com
+id alice@corp.example.com
+realm list
+sudo dbus-send --system --print-reply --dest=org.freedesktop.sssd.infopipe /org/freedesktop/sssd/infopipe org.freedesktop.sssd.infopipe.GetUserAttr string:alice@corp.example.com array:string:userPrincipalName
+```
+
+On Ubuntu, `systemctl is-system-running` should say `running`; if it says `degraded`, inspect `systemctl --failed` first. `getent` and `id` must show the user and the groups. `realm list` must show the domain with `server-software: active-directory`: the directory type comes from it, on per-user installs too. The `dbus-send` call must return the UPN. Run it as root: InfoPipe answers root only, and a standard user gets `AuthFailed: Permission denied`. Do not loosen InfoPipe's permissions; the guardian reads it as root. Note the group spelling `id -Gn` prints (`ml-team@corp.example.com`): it is the name a `groups` assignment uses.
+
+</Step>
+
+<Step>
+
+### Sign in with a Kerberos ticket and run an agent
+
+From a client with a ticket, sign in with GSSAPI. `ssh -K` delegates the ticket, which needs a forwardable one, so use `kinit -f`:
+
+```bash
+kinit -f alice@CORP.EXAMPLE.COM
+ssh -K alice@corp.example.com@host.corp.example.com
+```
+
+On the host, install DefenseClaw for that user (or deploy the enterprise package), run an agent such as Claude Code or Codex for one prompt, and read what DefenseClaw recorded:
+
+```bash
+defenseclaw audit export --since 10m \
+  | jq -c 'select(.action=="hook_decision") | .structured
+      | {user: ."defenseclaw.user.name", domain: ."defenseclaw.user.domain",
+         directory: ."defenseclaw.user.directory", source: ."defenseclaw.user.identity.source",
+         principal: ."defenseclaw.user.principal",
+         kerberos_principal: ."defenseclaw.session.kerberos_principal",
+         assurance: ."defenseclaw.user.principal.assurance", session: ."defenseclaw.session.kind",
+         agent: ."defenseclaw.agent.identity.id"}' | sort -u
+```
+
+On a managed Linux host, export through the installed gateway as root and pipe its JSONL output to `jq`:
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway audit export --since 10m \
+  | jq -c 'select(.action=="hook_decision") | .structured'
+```
+
+A per-user install shows `domain` `corp.example.com`, `directory` `active_directory`, `source` `sssd`, `assurance` `verified` and `session` `ssh`. The standalone enterprise profile reports `source` `sssd_infopipe`. The projected `principal` and `kerberos_principal` values are null until you turn on `ai_discovery.include_user_principal`; see [Turn off the principal or the IDE inventory](/docs/enterprise/identity/authentication#turn-off-the-principal-or-the-ide-inventory).
+
+</Step>
+
+</Steps>
+
+## Next
+
+<Cards>
+  <Card title="Identity and authentication" href="/docs/enterprise/identity/authentication" description="Assign a profile to a group and check what DefenseClaw knows." />
+  <Card title="How DefenseClaw knows who a user is" href="/docs/enterprise/identity/sources" description="What each OS tells us, and the identity troubleshooting table." />
+</Cards>

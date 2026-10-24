@@ -321,6 +321,25 @@ func TestConflictingToolArgumentKeysProxyRawArguments(t *testing.T) {
 			proxyCase{tool + "/script-value", tool, `{"command":"true","script":` + wipe + `}`, true, blocked, false},
 			proxyCase{tool + "/benign-twice-same", tool, `{"command":"ls","command":"ls"}`, false, nil, true},
 		)
+		if tool == "bash" {
+			// Its closed contract reads a wrapper as an unknown key, not as
+			// a second command, so a wrapper is no conflict there.
+			cases = append(cases,
+				proxyCase{tool + "/benign-wrapped-same", tool, `{"command":"ls","input":{"command":"ls"}}`, false, nil, true},
+				proxyCase{tool + "/benign-wrapped-other", tool, `{"command":"ls","input":{"command":"true"}}`, false, nil, true},
+			)
+			continue
+		}
+		cases = append(cases,
+			// A top-level key and the same field inside a wrapper object,
+			// which ActionFacts folds onto one field.
+			proxyCase{tool + "/wrapped-input-true", tool, `{"command":` + wipe + `,"input":{"command":"true"}}`, true, blocked, false},
+			proxyCase{tool + "/wrapped-input-value", tool, `{"command":"true","input":{"command":` + wipe + `}}`, true, blocked, false},
+			proxyCase{tool + "/wrapped-parameters-cmd", tool, `{"command":"true","parameters":{"cmd":` + wipe + `}}`, true, blocked, false},
+			proxyCase{tool + "/wrapped-twice-deep", tool, `{"command":"true","request":{"input":{"command":` + wipe + `}}}`, true, blocked, false},
+			proxyCase{tool + "/wrapped-args-object", tool, `{"command":"true","args":{"command":` + wipe + `}}`, true, blocked, false},
+			proxyCase{tool + "/benign-wrapped-same", tool, `{"command":"ls","input":{"command":"ls"}}`, false, nil, true},
+		)
 	}
 	keys := []string{"persistence.ssh_authorized_keys_command", conflictingToolArgumentsRuleID}
 	cases = append(cases,
@@ -378,6 +397,8 @@ func TestConflictingToolArgumentKeysInspectToolProjection(t *testing.T) {
 		{"alone", `{"command":"rm -rf /","timeout":5}`, false},
 		{"timeout+Timeout", `{"command":"rm -rf /","timeout":5,"Timeout":5}`, true},
 		{"workdir+Workdir", `{"command":"rm -rf /","workdir":"/srv","Workdir":"/tmp"}`, true},
+		{"command+input.command", `{"command":"rm -rf /","input":{"command":"true"}}`, true},
+		{"input.command+command", `{"command":"true","input":{"command":"rm -rf /"}}`, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			verdict := api.inspectToolPolicy(&ToolInspectRequest{

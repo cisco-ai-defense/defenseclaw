@@ -8,11 +8,11 @@ import (
 	"unicode"
 )
 
-// OpaqueCMDWrapperArgvReduction keeps the exact outer argv of a PowerShell
-// call to cmd.exe /c whose unquoted body cannot be parsed as a complete child
-// command. CMD AutoRun may execute before the body, so the full action stays
-// partial. A caller may use only a positive, monotone match on this argv;
-// absence of a match proves nothing about the child or AutoRun.
+// OpaqueCMDWrapperArgvReduction keeps the static argv of cmd.exe calls inside
+// a PowerShell list. A single quoted /c or /r body is also parsed recursively
+// as CMD, so a rule on the child's argv can match it. CMD AutoRun and later
+// PowerShell statements may do more; only a positive monotone match on this
+// view can authorize enforcement.
 func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 	// PowerShell permits a call operator before a bare executable, but the
 	// general parser treats that form as an opaque expression. Reparse only
@@ -25,7 +25,8 @@ func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 			commandText = extracted.command
 		}
 	}
-	if callOperatorCMD(commandText, facts) && len(input.Argv) == 0 {
+	callOperator := callOperatorCMD(commandText, facts) && len(input.Argv) == 0
+	if callOperator {
 		trimmed := strings.TrimLeftFunc(commandText, unicode.IsSpace)
 		input.Command = strings.TrimLeftFunc(trimmed[1:], unicode.IsSpace)
 		// The tool may have supplied its working directory inside Args.
@@ -37,43 +38,108 @@ func OpaqueCMDWrapperArgvReduction(input Input, facts Facts) (Facts, bool) {
 	}
 	if facts.Parse.Status != StatusPartial || facts.Parse.Dialect != DialectPowerShell ||
 		len(facts.Parse.Issues) != 1 || facts.Parse.Issues[0] != IssueUnsupportedConstruct ||
-		len(facts.Commands) != 1 {
+		len(facts.Commands) == 0 || callOperator && len(facts.Commands) != 1 {
 		return Facts{}, false
 	}
-	command := facts.Commands[0]
-	if command.ParentCommandID != 0 || command.Program != "cmd" ||
-		(command.Executable != "cmd" && command.Executable != "cmd.exe") ||
-		command.Dialect != DialectPowerShell || command.Background || command.ControlFlowUncertain ||
-		!command.ArgvComplete || len(command.Argv) < 3 || len(command.Arguments) != len(command.Argv) {
-		return Facts{}, false
+	view := Facts{
+		Tool: facts.Tool, CWD: facts.CWD, ActiveHome: facts.ActiveHome,
+		Parse: ParseResult{Status: StatusComplete, Dialect: DialectPowerShell},
 	}
-	commandSwitch := 1
-	for commandSwitch < len(command.Argv) && staticCMDOption(command.Argv[commandSwitch]) {
-		commandSwitch++
-	}
-	if commandSwitch+1 >= len(command.Argv) || !strings.EqualFold(command.Argv[commandSwitch], "/c") {
-		return Facts{}, false
-	}
-	// A sole quoted /c body already has a complete argument boundary. The
-	// ordinary wrapper analysis handles it, as before this reduction.
-	if commandSwitch+2 == len(command.Argv) && command.Arguments[commandSwitch+1].Quote != QuoteNone {
-		return Facts{}, false
-	}
-	for _, argument := range command.Arguments {
-		if argument.Expands || argument.StaticGlob != "" {
+	wrapped := false
+	for _, command := range facts.Commands {
+		if command.ParentCommandID != 0 || command.Dialect != DialectPowerShell ||
+			command.Background || command.ControlFlowUncertain || !command.ArgvComplete ||
+			len(command.Arguments) != len(command.Argv) || len(command.Argv) == 0 {
 			return Facts{}, false
 		}
+		for _, argument := range command.Arguments {
+			if argument.Expands || argument.StaticGlob != "" {
+				return Facts{}, false
+			}
+		}
+		if command.Program != "cmd" ||
+			(command.Executable != "cmd" && command.Executable != "cmd.exe") {
+			command.Operations, command.Redirects, command.Wrappers = nil, nil, nil
+			command.ID = int64(len(view.Commands) + 1)
+			view.Commands = append(view.Commands, command)
+			continue
+		}
+		bodyIndex, ok := cmdWrapperBodyIndex(command.Argv)
+		if !ok || bodyIndex >= len(command.Argv) {
+			return Facts{}, false
+		}
+		quotedBody := bodyIndex+1 == len(command.Argv) &&
+			command.Arguments[bodyIndex].Quote != QuoteNone
+		var inner Facts
+		if quotedBody {
+			// Parse the body in cmd.exe's dialect. A complete sole quoted
+			// command has its ordinary projection; this view is for lists.
+			innerInput := Input{
+				Tool: "cmd", Command: command.Argv[bodyIndex],
+				CWD: facts.CWD, ActiveHome: facts.ActiveHome, DialectHint: DialectCMD,
+			}
+			inner = Analyze(innerInput)
+			if len(facts.Commands) == 1 && inner.EnforcementEligible() {
+				return Facts{}, false
+			}
+		}
+		wrapped = true
+		command.Operations, command.Redirects, command.Wrappers = nil, nil, nil
+		command.ID = int64(len(view.Commands) + 1)
+		view.Commands = append(view.Commands, command)
+		if !quotedBody {
+			// The outer argv is still a positive monotone projection for
+			// unquoted and cmd.exe double-quote spellings.
+			continue
+		}
+		listPartial := inner.Parse.Status == StatusPartial &&
+			len(inner.Parse.Issues) == 1 && inner.Parse.Issues[0] == IssueUnsupportedConstruct
+		if (!inner.EnforcementEligible() && !listPartial) || len(inner.Commands) == 0 ||
+			len(view.Commands)+len(inner.Commands) > maxCommands ||
+			len(view.Paths)+len(inner.Paths) > maxPathFacts {
+			return Facts{}, false
+		}
+		for _, child := range inner.Commands {
+			if child.ParentCommandID != 0 || child.Dialect != DialectCMD ||
+				child.Background || !child.ArgvComplete {
+				return Facts{}, false
+			}
+			oldID := child.ID
+			child.ID = int64(len(view.Commands) + 1)
+			child.ParentCommandID = command.ID
+			child.ControlFlowUncertain = false
+			child.ControlFlowOperator = ControlFlowOperatorNone
+			view.Commands = append(view.Commands, child)
+			for _, path := range inner.Paths {
+				if path.CommandID == oldID {
+					path.CommandID = child.ID
+					view.Paths = append(view.Paths, path)
+				}
+			}
+		}
 	}
-	// Only the outer process and its argv are certain. Derived operations,
-	// redirects and paths, and everything cmd.exe or AutoRun may run, are omitted.
-	command.Operations = nil
-	command.Redirects = nil
-	command.Wrappers = nil
-	return Facts{
-		Tool: facts.Tool, CWD: facts.CWD, ActiveHome: facts.ActiveHome,
-		Parse:    ParseResult{Status: StatusComplete, Dialect: DialectPowerShell},
-		Commands: []CommandFact{command},
-	}, true
+	return view, wrapped
+}
+
+func cmdWrapperBodyIndex(argv []string) (int, bool) {
+	for i := 1; i < len(argv); i++ {
+		parts := strings.Split(strings.ToLower(argv[i]), "/")
+		if len(parts) < 2 || parts[0] != "" {
+			return 0, false
+		}
+		for partIndex, part := range parts[1:] {
+			if part == "c" || part == "r" {
+				if partIndex != len(parts)-2 {
+					return 0, false
+				}
+				return i + 1, true
+			}
+			if !staticCMDOption("/" + part) {
+				return 0, false
+			}
+		}
+	}
+	return 0, false
 }
 
 func staticCMDOption(value string) bool {
@@ -112,8 +178,19 @@ func callOperatorCMD(command string, facts Facts) bool {
 		return false
 	}
 	trimmed := strings.TrimLeftFunc(command, unicode.IsSpace)
-	if !strings.HasPrefix(trimmed, "&") || len(trimmed) < 2 || !unicode.IsSpace(rune(trimmed[1])) {
+	if !strings.HasPrefix(trimmed, "&") || len(trimmed) < 2 {
 		return false
 	}
-	return true
+	if unicode.IsSpace(rune(trimmed[1])) {
+		return true
+	}
+	// PowerShell also accepts the call operator adjacent to a fixed cmd
+	// executable. Only that exact executable is eligible for this argv view;
+	// a computed program word still has no monotone projection.
+	space := strings.IndexFunc(trimmed[1:], unicode.IsSpace)
+	if space <= 0 {
+		return false
+	}
+	name := trimmed[1 : space+1]
+	return strings.EqualFold(name, "cmd") || strings.EqualFold(name, "cmd.exe")
 }

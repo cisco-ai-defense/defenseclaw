@@ -221,14 +221,6 @@ func (b *box) reloadedLocked(now time.Time) bool {
 	return !at.IsZero() && now.Sub(at) < reloadMappingWindow
 }
 
-// reloadedRecently is reloadedLocked at the manager's clock.
-func (m *Manager) reloadedRecently(b *box) bool {
-	now := m.now()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return b.reloadedLocked(now)
-}
-
 // confirmMappingDenialLocked turns an ingress mapping denial nothing
 // answered within hookAttemptGrace into a refusal. Callers hold
 // Manager.mu.

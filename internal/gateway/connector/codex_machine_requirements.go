@@ -14,6 +14,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -289,12 +290,52 @@ func windowsCodexMachineHandler(command string, timeout int) map[string]interfac
 	}
 }
 
+// windowsCodexMachineGroups is the matrix a Windows machine requirements
+// file publishes for commands bound to hookContractID: the ten events every
+// supported Codex release accepts, with the compact SessionStart source on
+// the contracts that certify it, as per-user setup registers it. The older
+// matcher left a compact-source SessionStart unhooked, so it never reached a
+// block on managed Windows.
+func windowsCodexMachineGroups(hookContractID string) []codexHookGroup {
+	groups := append([]codexHookGroup(nil), codexHookGroups...)
+	if codexContractCertifiesCompactSessionStart(strings.TrimSpace(hookContractID)) {
+		for index := range groups {
+			if groups[index].eventType == "SessionStart" {
+				groups[index].matcher = codexCompactSessionStartMatcher
+			}
+		}
+	}
+	return groups
+}
+
+// windowsCodexMachineProfileGroups is the matrix opts publishes. Secure
+// Client keeps its earlier matrix (out of scope for this release).
+func windowsCodexMachineProfileGroups(opts WindowsCodexMachineRequirementsOptions) []codexHookGroup {
+	if opts.SecureClient {
+		return codexHookGroups
+	}
+	return windowsCodexMachineGroups(opts.HookContractID)
+}
+
+// windowsCodexMachineRemovableGroups is every group shape opts may find from
+// this or the previous release: the current matrix and the legacy one, so
+// removal also takes the groups an install before the compact matcher wrote.
+func windowsCodexMachineRemovableGroups(opts WindowsCodexMachineRequirementsOptions) []codexHookGroup {
+	groups := append([]codexHookGroup(nil), windowsCodexMachineProfileGroups(opts)...)
+	for _, legacy := range codexHookGroups {
+		if !slices.Contains(groups, legacy) {
+			groups = append(groups, legacy)
+		}
+	}
+	return groups
+}
+
 func windowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptions) codexMachineRequirementsLayout {
 	layout := codexMachineRequirementsLayout{
 		managedDirKey:          "windows_managed_dir",
 		managedDir:             opts.ManagedDir,
 		samePath:               sameWindowsCodexMachinePath,
-		groups:                 codexHookGroups,
+		groups:                 windowsCodexMachineProfileGroups(opts),
 		reclaimStaleManagedDir: opts.SecureClient,
 		handler: func(group codexHookGroup) map[string]interface{} {
 			return windowsCodexMachineHandler(windowsCodexManagedHookCommandFor(opts, group.eventType), group.timeout)
@@ -645,7 +686,7 @@ func windowsCodexRequirementsContainExactManagedHook(
 	if !ok {
 		return false, nil
 	}
-	for _, expected := range codexHookGroups {
+	for _, expected := range windowsCodexMachineRemovableGroups(opts) {
 		groups, _ := hooks[expected.eventType].([]interface{})
 		for _, candidate := range groups {
 			if windowsCodexMachineGroupMatches(candidate, expected, opts) {
@@ -673,7 +714,7 @@ func removeWindowsCodexRequirementsOwnedChanges(
 	hooks, cfgHooks := cfg["hooks"].(map[string]interface{})
 	baseHooks, baseHadHooks := base["hooks"].(map[string]interface{})
 	if cfgHooks {
-		for _, expected := range codexHookGroups {
+		for _, expected := range windowsCodexMachineRemovableGroups(opts) {
 			groups, _ := hooks[expected.eventType].([]interface{})
 			baselineGroups, _ := baseHooks[expected.eventType].([]interface{})
 			baselineCount := 0

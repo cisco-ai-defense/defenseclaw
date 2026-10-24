@@ -162,6 +162,11 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 			}
 		}
 	}
+	if _, custom := cfg.Guardrail.CustomPacks[s.ref.Name]; custom && s.ref.Name != "" {
+		// A custom pack the 0.8.x upgrade of 1.0.0 to 1.0.3 rebased carries
+		// no migrated_literal marks: its migration record names the rules.
+		base = guardrail.MarkMigratedLiteralRules(base, config.ExpressedRulePackRules(migrationConfigPath(cfg)))
+	}
 	notePackPosture(s.dir, guardrail.ReadPackPosture(s.dir))
 	if len(s.layers) == 0 {
 		return base, nil
@@ -179,14 +184,39 @@ func loadScopedRulePack(cache *guardrail.RulePackCache, cfg *config.Config, s ru
 // (GAP-1358). It repeats at each start until the record is acknowledged.
 func (s *Sidecar) reportUnrebasedRulePacks(ctx context.Context) {
 	cfg := s.currentConfig()
-	if cfg == nil || s.logger == nil || strings.TrimSpace(cfg.DataDir) == "" {
+	if cfg == nil || s.logger == nil {
 		return
 	}
-	for _, failure := range config.UnrebasedRulePacks(filepath.Join(cfg.DataDir, config.DefaultConfigName)) {
+	for _, failure := range unrebasedRulePacks(cfg) {
 		fmt.Fprintln(os.Stderr, "[guardrail] WARNING: "+failure)
 		_ = s.logger.LogActionCtxSeverity(ctx, string(audit.ActionUpgrade), "rule-pack",
 			"rule_pack_rebase=failed "+failure, "HIGH")
 	}
+}
+
+// unrebasedRulePacks is config.UnrebasedRulePacks of cfg's migration record.
+func unrebasedRulePacks(cfg *config.Config) []string {
+	path := migrationConfigPath(cfg)
+	if path == "" {
+		return nil
+	}
+	return config.UnrebasedRulePacks(path)
+}
+
+// migrationConfigPath is the config file whose migration-v9.json describes
+// cfg: the file it was loaded from, which may be outside data_dir
+// (DEFENSECLAW_CONFIG), else config.yaml in data_dir (GAP-1383).
+func migrationConfigPath(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	if path := strings.TrimSpace(cfg.ConfigFilePath); path != "" {
+		return path
+	}
+	if dir := strings.TrimSpace(cfg.DataDir); dir != "" {
+		return filepath.Join(dir, config.DefaultConfigName)
+	}
+	return ""
 }
 
 func guardrailCustomizations(layers []config.GuardrailRulesConfig) []guardrail.Customization {

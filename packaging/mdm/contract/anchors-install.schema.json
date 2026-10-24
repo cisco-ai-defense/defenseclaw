@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/anchors-install-v1.json",
   "title": "enterprise bundle anchors install --json (Linux, macOS)",
-  "description": "`enterprise bundle anchors install --file F [--lock-wait D] --json` on Linux and macOS. The verb is not registered on Windows, where the call is `enterprise windows ensure --profile standalone --trust-anchors F [--bundle B] --json` and prints lifecycle result v2. Source trust: the verb reads F once, as LoadAnchors(F, TrustAnchorFile) does (internal/enterprisebundle/anchors.go): Lstat, regular file, the file and every folder above it root-owned, not group or other writable, without an ACL write entry and without links; open; SameFile against the Lstat; bounded read; strict decode. A source that fails is refused (anchor_insecure, anchor_missing or anchor_invalid) and nothing is written. The bytes written are exactly the bytes validated in that one read. Then, under the lifecycle lock: a file byte-identical to a trusted installed file is result unchanged and writes nothing; otherwise <etc>/trust/bundle-anchors.json is written atomically (root:root 0644 in a root 0755 folder) and re-checked with TrustAnchorFile, and the previous file is put back when that check fails. No audit event, OTel record or receipt records the change: the agent reports it from sha256, previous_sha256 and key_ids. Exit codes: 0; 1 refused (errors[0].code); 2 invalid arguments; 75 lifecycle_busy.",
+  "description": "`enterprise bundle anchors install --file F [--lock-wait D] --json` on Linux and macOS. The verb is not registered on Windows, where the call is `enterprise windows ensure --profile standalone --trust-anchors F [--bundle B] --json` and prints lifecycle result v2. Source trust: the verb reads F once, as LoadAnchors(F, TrustAnchorFile) does (internal/enterprisebundle/anchors.go): Lstat, regular file, the file and every folder above it root-owned, not group or other writable, without an ACL write entry and without links; open; SameFile against the Lstat; bounded read; strict decode. A source that fails is refused (anchor_insecure, anchor_missing or anchor_invalid) and nothing is written. The bytes written are exactly the bytes validated in that one read. Then, under the lifecycle lock: a file byte-identical to a trusted installed file is result unchanged and writes nothing; otherwise <etc>/trust/bundle-anchors.json is written atomically (root:root 0644 in a root 0755 folder) and re-checked with TrustAnchorFile, and the previous file is put back when that check fails. From 1.0.4 every install that changes the file, is refused or fails leaves a change event that the gateway reports, when it runs, as one config.trust_anchors.changed audit and OTel event (hashes and key ids only); builds before 1.0.4 record none. An install whose change event cannot be recorded is refused (state_invalid) before the file is written. The result still carries sha256, previous_sha256 and key_ids for the agent's own report. Exit codes: 0; 1 refused (errors[0].code); 2 invalid arguments; 75 lifecycle_busy.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -70,14 +70,16 @@
                 "enum": [
                   "key_unknown",
                   "key_revoked",
-                  "anchor_unreadable"
+                  "anchor_unreadable",
+                  "change_unrecorded",
+                  "change_release_unflushed"
                 ]
               }
             }
           }
         ]
       },
-      "description": "The codes bundleCurrentSignerWarning emits (internal/cli/enterprise_bundle_status.go), checked against the new file: key_unknown (the confirmed bundle's signer is not in it), key_revoked (it is revoked there), anchor_unreadable. The current bundle keeps enforcing; the next bundle must be signed by an active key."
+      "description": "The codes bundleCurrentSignerWarning emits (internal/cli/enterprise_bundle_status.go), checked against the new file: key_unknown (the confirmed bundle's signer is not in it), key_revoked (it is revoked there), anchor_unreadable. The current bundle keeps enforcing; the next bundle must be signed by an active key. change_unrecorded: the change event of this run could not be written, so the gateway will not report it. change_release_unflushed: the run changed nothing, but the room it reserved for its change event could not be removed durably, so after a power loss the gateway may report it as an interrupted change."
     },
     "errors": {
       "type": "array",

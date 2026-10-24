@@ -9,7 +9,7 @@
 
 [Unit]
 Description=DefenseClaw hook guardian (managed enterprise)
-Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/linux/
+Documentation=https://cisco-ai-defense.github.io/defenseclaw/docs/enterprise/install/linux/
 After=defenseclaw-gateway.service
 StartLimitIntervalSec=0
 
@@ -51,7 +51,11 @@ ReadWritePaths=-/var/lib/sss/db -/var/lib/sss/mc
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID
 AmbientCapabilities=CAP_SETGID CAP_SETUID
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=true
+# The Hermes Verify probe runs the registered hook as PID 1's child in a PID
+# namespace of its own, owned by a user namespace (processutil.RunContained):
+# a hook could kill the process that ended its tree and leave a child running
+# (r104 W5b review). No other namespace type may be created.
+RestrictNamespaces=user pid
 RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true

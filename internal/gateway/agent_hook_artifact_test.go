@@ -9,8 +9,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -41,8 +43,23 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 		{name: "destructive", body: "#!/bin/sh\nrm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true},
 		{name: "benign", body: "#!/bin/sh\nprintf '%s\\n' build-complete\n"},
 		{
-			name: "control flow remains detection only",
-			body: "#!/bin/sh\nfalse && rm -rf /\n", wantRule: "CMD-RM-RF",
+			// A list or subshell in the script is judged as the same
+			// commands in the tool call would be.
+			name: "list is enforced",
+			body: "#!/bin/sh\nfalse && rm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
+			name: "subshell is enforced",
+			body: "#!/bin/sh\n(rm -rf /)\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
+			name: "redirected group is enforced",
+			body: "#!/bin/sh\n{ rm -rf /; } 2>/dev/null\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
+			// An exit in a subshell ends only the subshell.
+			name: "exit in a subshell leaves later command reachable",
+			body: "#!/bin/sh\n(exit 0)\nrm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true,
 		},
 		{
 			name: "exit makes later command unreachable",
@@ -113,6 +130,206 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 			t.Fatalf("artifact parser uncertainty telemetry = %+v", telemetry)
 		}
 	})
+}
+
+// GAP-1513: a migrated 0.8.x literal rule blocks a script the call runs only
+// when an executed command of the script carries the literal; the literal in
+// a comment of the script does not block it.
+// installMigratedLiteralConnector gives connectorName a rule pack with one
+// migrated 0.8.x literal rule, ACME-OWN-MARKER (acme.own-7f3c).
+func installMigratedLiteralConnector(t *testing.T, connectorName string) {
+	t.Helper()
+	old := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := "version: 1\ncategory: acme-markers\nrules:\n" +
+		"  - id: ACME-OWN-MARKER\n    pattern: 'acme\\.own-7f3c'\n    title: \"Own marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"
+	if err := os.WriteFile(filepath.Join(old, "rules", "acme.yaml"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := guardrail.PlanRulePackRebase(old)
+	if err != nil || plan == nil || len(plan.Expressed) != 1 {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	rebased := t.TempDir()
+	for rel, data := range plan.Files {
+		target := filepath.Join(rebased, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack, err := guardrail.LoadRulePack(rebased)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyConnectorRulePackOverrides(connectorName, pack); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
+}
+
+func TestPromotedArtifactMigratedLiteralNeedsAnExecutedCommand(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-migrated-literal"
+	installMigratedLiteralConnector(t, connectorName)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/stdin", filepath.Join(dir, "stdin-alias")); err != nil {
+		t.Fatal(err)
+	}
+	for i, tc := range []struct {
+		body string
+		want bool
+	}{
+		{"#!/bin/sh\n# see acme.own-7f3c in the runbook\nprintf '%s\\n' done\n", false},
+		{"#!/bin/sh\necho acme.own-7f3c > /tmp/acme-marker.txt\n", true},
+		// A quoted heredoc is data the command that reads it acts on.
+		{"#!/bin/sh\ncat > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ntee /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat -n -- - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		// The command a heredoc is fed to may read it whatever its name: the
+		// shell that runs the script may bind true, mkdir, cat or /bin/cat to a
+		// function that reads stdin (TestInheritedShellFunctionReadsAHeredoc).
+		// So the literal counts beside any command, file operands or not.
+		{"#!/bin/sh\ntrue <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", true},
+		{"#!/bin/sh\nmkdir -p /tmp/acme <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\ncat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\ngrep -n -e acme /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\nhead -n 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\ngrep -e - /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		// A program the parse does not model (cut) leaves the script
+		// detection-only, heredoc or not.
+		{"#!/bin/sh\ncut -d - -f 1 /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", false},
+		{"#!/bin/sh\ngrep -f - /dev/null > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep -e - /dev/null - > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat /dev/stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\nhead -n 1 > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat /dev/./stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat /dev//stdin > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme stdin-alias > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncp notes.txt copy.txt\ncat notes.txt > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ncat missing.txt > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n", true},
+		{"#!/bin/sh\ngrep acme notes.txt <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\n/bin/cat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		{"#!/bin/sh\necho done <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n", true},
+		// A ':' heredoc comment block leaves the parse partial: never enforced.
+		{"#!/bin/sh\n: <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\nprintf '%s\\n' done\n", false},
+	} {
+		body, want := tc.body, tc.want
+		path := filepath.Join(dir, fmt.Sprintf("script-%d.sh", i))
+		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir})
+		findings := promotedArtifactFindings(t.Context(), agentHookRequest{ConnectorName: connectorName}, facts, true, nil)
+		enforced := false
+		for _, finding := range findings {
+			if finding.RuleID == "ACME-OWN-MARKER" && finding.contributesToEnforcement() {
+				enforced = true
+			}
+		}
+		if enforced != want {
+			t.Errorf("%q: enforced=%t, want %t (%v)", body, enforced, want, FindingStrings(findings))
+		}
+	}
+}
+
+// Bash binds a command name to a function before it looks for a builtin or a
+// file, for any name, an absolute path included: a function the shell
+// inherits (export -f) or one BASH_ENV defines. That function reads the
+// heredoc a script feeds true, grep with a file operand or /bin/cat
+// /dev/null, so the migrated literal in it counts: the gateway does not see
+// the shell that will run the script.
+func TestInheritedShellFunctionReadsAHeredoc(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-inherited-function"
+	installMigratedLiteralConnector(t, connectorName)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "notes.txt"), []byte("notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	consumed := filepath.Join(dir, "consumed.txt")
+	bashEnv := filepath.Join(dir, "bash_env")
+	if err := os.WriteFile(bashEnv, []byte("function /bin/cat { command cat > '"+consumed+"'; }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bash, bashErr := exec.LookPath("bash")
+	for i, tc := range []struct {
+		name, body string
+		run        []string // how bash runs the script (SCRIPT is its path)
+	}{
+		{"exported true", "#!/bin/sh\ntrue <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n",
+			[]string{"-c", "true() { command cat > '" + consumed + "'; }; export -f true; exec bash \"$1\"", "_", "SCRIPT"}},
+		{"exported grep", "#!/bin/sh\ngrep acme notes.txt <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n",
+			[]string{"-c", "grep() { command cat > '" + consumed + "'; }; export -f grep; exec bash \"$1\"", "_", "SCRIPT"}},
+		{"BASH_ENV absolute path", "#!/bin/sh\n/bin/cat /dev/null <<'EOF'\nsee acme.own-7f3c in the runbook\nEOF\n",
+			[]string{"-c", `BASH_ENV="$1" exec bash "$2"`, "_", bashEnv, "SCRIPT"}},
+	} {
+		path := filepath.Join(dir, fmt.Sprintf("inherited-%d.sh", i))
+		if err := os.WriteFile(path, []byte(tc.body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if bashErr == nil {
+			_ = os.Remove(consumed)
+			args := slices.Clone(tc.run)
+			args[len(args)-1] = path
+			cmd := exec.Command(bash, args...)
+			cmd.Dir = dir
+			out, err := cmd.CombinedOutput()
+			data, _ := os.ReadFile(consumed)
+			if err != nil || !strings.Contains(string(data), "acme.own-7f3c") {
+				// The premise: the function read the heredoc. Linux CI runs bash 5.
+				if runtime.GOOS == "linux" {
+					t.Errorf("%s: bash did not feed the heredoc to the function: %v %s (read %q)", tc.name, err, out, data)
+				} else {
+					t.Logf("%s: bash here did not run the function: %v %s", tc.name, err, out)
+				}
+			}
+		}
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir})
+		findings := promotedArtifactFindings(t.Context(), agentHookRequest{ConnectorName: connectorName}, facts, true, nil)
+		enforced := false
+		for _, finding := range findings {
+			if finding.RuleID == "ACME-OWN-MARKER" && finding.contributesToEnforcement() {
+				enforced = true
+			}
+		}
+		if !enforced {
+			t.Errorf("%s: the heredoc literal did not enforce (%v)", tc.name, FindingStrings(findings))
+		}
+	}
+}
+
+func TestR104GAP0463HeredocDecisionDoesNotDependOnLaterCommand(t *testing.T) {
+	const connectorName = "r104-heredoc-migrated-literal"
+	installMigratedLiteralConnector(t, connectorName)
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "notes.txt"), []byte("ordinary notes\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := "cat notes.txt <<'EOF'\nacme.own-7f3c\nEOF\n"
+	for _, command := range []string{base, base + "date\n"} {
+		input := actionfacts.Input{Tool: "Bash", Command: command, CWD: cwd,
+			ActiveHome: t.TempDir(), DialectHint: actionfacts.DialectPOSIX}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, Connector: connectorName, EnforcementCapable: true,
+		})
+		finding := findingWithID(findings, "ACME-OWN-MARKER")
+		if finding == nil || !finding.contributesToEnforcement() {
+			t.Fatalf("heredoc with later command %v was not conservatively blocked: %v",
+				command != base, FindingStrings(findings))
+		}
+	}
 }
 
 func TestPromotedArtifactPreservesActiveAgentInstructionContext(t *testing.T) {
@@ -350,6 +567,11 @@ func TestPromotedArtifactRevokesNoExecPreviewAfterConflictingSources(t *testing.
 			command: fmt.Sprintf("bash -n %q", script),
 			argv:    []string{"bash", script},
 		},
+		{
+			name:    "raw noexec redirect structured executes",
+			command: fmt.Sprintf("bash -n %q > /dev/null", script),
+			argv:    []string{"bash", script},
+		},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -373,7 +595,7 @@ func TestPromotedArtifactRevokesNoExecPreviewAfterConflictingSources(t *testing.
 				t.Fatalf("source conflict lost tamper finding: %v facts=%+v", FindingStrings(findings), facts)
 			}
 			if matched.contributesToEnforcement() {
-				t.Fatalf("source-conflict artifact unexpectedly enforceable: %+v", *matched)
+				t.Fatalf("source-conflict artifact unexpectedly enforceable: %+v parse=%+v commands=%+v", *matched, facts.Parse, facts.Commands)
 			}
 		})
 	}
@@ -689,34 +911,155 @@ func TestExperimentalArtifactPromotionRequiresReviewedStructuredRoute(t *testing
 	}
 }
 
-func TestPromotedArtifactOuterControlFlowIsDetectionOnly(t *testing.T) {
-	requireNativePOSIXArtifactHost(t)
-	const connectorName = "artifact-outer-control-test"
-	installDefaultProfileConnector(t, connectorName)
-	path := filepath.Join(t.TempDir(), "destructive.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nrm -rf /\n"), 0o700); err != nil {
+func TestExperimentalArtifactPromotionPanicUsesFailMode(t *testing.T) {
+	installDefaultProfileConnector(t, "claudecode")
+	dir := t.TempDir()
+	name, body := "assembled.sh", "#!/bin/sh\nrm -rf /\n"
+	if runtime.GOOS == "windows" {
+		name, body = "assembled.ps1", "Remove-Item -Recurse -Force C:\\\r\n"
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{
-		fmt.Sprintf("false && bash %q", path),
-		fmt.Sprintf("true || bash %q", path),
+	input := actionfacts.Input{
+		Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: filepath.Dir(path),
+	}
+	if runtime.GOOS == "windows" {
+		quotedPath := strings.ReplaceAll(path, "'", "''")
+		input = actionfacts.Input{
+			Tool: "powershell", Command: "powershell -NoProfile -File '" + quotedPath + "'",
+			CWD: dir, DialectHint: actionfacts.DialectPowerShell,
+		}
+	}
+	facts := actionfacts.Analyze(input)
+	capture := &toolChainHookCapture{}
+	capture.recordTrustedAction(facts, nil)
+	req := agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", toolChain: capture,
+	}
+	original := agentHookResponse{Action: "allow", RawAction: "allow", Severity: "NONE", Mode: "action"}
+	for _, tc := range []struct {
+		name, failMode, wantAction string
+		wantWouldBlock             bool
+		perUser                    bool
+	}{
+		{name: "closed", failMode: "closed", wantAction: "block"},
+		// A per-user install is always closed (sa-port-peer).
+		{name: "per-user explicit open", failMode: "open", perUser: true, wantAction: "block"},
+		{name: "explicit open", failMode: "open", wantAction: "allow", wantWouldBlock: true},
 	} {
-		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: command})
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			if !tc.perUser {
+				// An administrator's explicit open covers a panic on a managed host.
+				cfg.DeploymentMode = "managed_enterprise"
+			}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Guardrail.HookFailMode = tc.failMode
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+			api := &APIServer{scannerCfg: cfg}
+			profile := api.hookProfileForConnector("claudecode")
+			panicked := false
+			profile.Respond = func(connector.HookRespondInput) connector.HookRespondOutput {
+				panicked = true
+				panic("artifact response shaper panic")
+			}
+			got := api.safeApplyExperimentalArtifactPromotion(t.Context(), profile, req, original, 0)
+			if !panicked || got.Action != tc.wantAction || got.Mode != "action" || got.WouldBlock != tc.wantWouldBlock {
+				t.Fatalf("panicked=%t response=%+v, want %s", panicked, got, tc.wantAction)
+			}
+		})
+	}
+}
+
+// GAP-0616: a script call inside a compound command is judged as if it ran
+// alone, so a migrated 0.8.x literal rule that blocks `bash heredoc.sh` also
+// blocks it in a list, a sequence, a pipeline, a subshell or the background.
+func TestPromotedArtifactInCompoundCommandIsEnforced(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	old := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := "version: 1\ncategory: acme-markers\nrules:\n" +
+		"  - id: ACME-OWN-MARKER\n    pattern: 'acme\\.own-7f3c'\n    title: \"Own marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"
+	if err := os.WriteFile(filepath.Join(old, "rules", "acme.yaml"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := guardrail.PlanRulePackRebase(old)
+	if err != nil || plan == nil || len(plan.Expressed) != 1 {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	rebased := t.TempDir()
+	for rel, data := range plan.Files {
+		target := filepath.Join(rebased, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack, err := guardrail.LoadRulePack(rebased)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const connectorName = "artifact-compound-command-test"
+	if err := ApplyConnectorRulePackOverrides(connectorName, pack); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "heredoc.sh")
+	body := "#!/bin/sh\ncat > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		{"bash heredoc.sh", true},
+		{"bash heredoc.sh && cat /tmp/acme-marker.txt", true},
+		{"bash heredoc.sh; echo done", true},
+		{"bash heredoc.sh || echo failed", true},
+		{"bash heredoc.sh | cat", true},
+		{"bash heredoc.sh > /dev/null", true},
+		{"bash heredoc.sh 2>&1 | tail -5", true},
+		{"X=1 bash heredoc.sh", true},
+		{"X=1 bash heredoc.sh > /dev/null", true},
+		{"(X=1 bash heredoc.sh) 2>&1", true},
+		{"(bash heredoc.sh)", true},
+		{"{ bash heredoc.sh; }", true},
+		{"{ bash heredoc.sh; } > /dev/null", true},
+		{"(bash heredoc.sh) 2>&1", true},
+		{"if true; then bash heredoc.sh; fi", true},
+		{"case x in x) bash heredoc.sh;; esac", true},
+		{"while true; do bash heredoc.sh; done", true},
+		{"for i in 1; do bash heredoc.sh; done", true},
+		{"! bash heredoc.sh", true},
+		{"bash heredoc.sh; echo $HOME", true},
+		{"bash heredoc.sh &", true},
+		{"echo start; bash heredoc.sh", true},
+		{fmt.Sprintf("false && bash %q", path), true},
+		{fmt.Sprintf("true || bash %q", path), true},
+		{fmt.Sprintf("cd /tmp && bash %q", path), true},
+		// After a cd the relative name may be another file.
+		{"cd /tmp && bash heredoc.sh", false},
+	} {
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: test.command, CWD: dir})
 		findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 			ConnectorName: connectorName,
 		}, facts, true, nil)
-		var matched *RuleFinding
-		for index := range findings {
-			if findings[index].RuleID == "CMD-RM-RF" {
-				matched = &findings[index]
-				break
-			}
-		}
+		matched := findingWithID(findings, "ACME-OWN-MARKER")
 		if matched == nil {
-			t.Fatalf("outer control flow lost detection for %q", command)
+			t.Errorf("%q lost detection: %v", test.command, FindingStrings(findings))
+			continue
 		}
-		if matched.contributesToEnforcement() {
-			t.Fatalf("outer control flow became enforceable for %q: %+v", command, *matched)
+		if got := matched.contributesToEnforcement(); got != test.want {
+			t.Errorf("%q: enforced=%t, want %t", test.command, got, test.want)
 		}
 	}
 }

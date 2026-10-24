@@ -44,7 +44,6 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_hook_health,
     _check_llm_api_key,
-    _check_openhands_hooks,
     _check_proxy_interception,
     _check_scanners,
     _check_security_overrides,
@@ -163,7 +162,7 @@ class DoctorPolicyStateTests(unittest.TestCase):
         from defenseclaw.commands import cmd_doctor
 
         cases = [
-            (2, 4, "it has not applied the change saved as config generation 4 (it enforces generation 2)"),
+            (2, 4, "it has not applied the change saved as config generation 4 (it enforces config generation 2)"),
             (None, 4, "it has not applied the change saved as config generation 4"),
             (2, 2, "it has not applied the current config.yaml and policy assets"),
         ]
@@ -177,6 +176,27 @@ class DoctorPolicyStateTests(unittest.TestCase):
                 cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
             self.assertIn(want, result.checks[0]["detail"], config_generation)
             self.assertIn("defenseclaw-gateway restart", result.checks[0]["detail"])
+
+
+    def test_policy_row_names_the_config_generation_that_survives_a_restart(self):
+        # GAP-0642: the row named policy.generation, which counts the rebuilds of
+        # the running gateway and starts again at 1 after a restart, while
+        # config.generation.json kept counting.
+        from defenseclaw.commands import cmd_doctor
+
+        applied = "sha256:" + "a" * 64
+        for policy, want in (
+            ({"effective_digest": applied, "generation": 1, "config_generation": 18,
+              "config_generation_recorded": True}, "config generation 18, digest sha256:aaaaaaaaaaaa"),
+            ({"effective_digest": applied, "generation": 4}, "digest sha256:aaaaaaaaaaaa (applied"),
+        ):
+            result = _DoctorResult()
+            with patch.object(cmd_doctor, "_local_policy_digest", return_value={"effective_digest": applied}):
+                cmd_doctor._check_policy_state(SimpleNamespace(), result, live_health={"policy": policy})
+            detail = result.checks[0]["detail"]
+            self.assertEqual(result.checks[0]["status"], "pass", result.checks)
+            self.assertTrue(detail.startswith(want), detail)
+            self.assertNotIn(f"generation {policy['generation']},", detail)
 
 
 class DoctorRetiredPolicyDataTests(unittest.TestCase):
@@ -334,8 +354,18 @@ class DoctorHermesPathTests(unittest.TestCase):
             self.assertIn("live=false", result.checks[0]["detail"])
 
 class DoctorGuardrailTests(unittest.TestCase):
+    def setUp(self):
+        from defenseclaw.commands import cmd_doctor
+
+        trusted = patch.object(
+            cmd_doctor, "_trusted_gateway_listener",
+            return_value=cmd_doctor._GatewayTrust("trusted", "verified fixture gateway", 4321),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_empty_guardrail_model_is_not_a_warning(self, _mock_probe):
+    def test_empty_guardrail_model_is_not_a_warning(self, mock_probe):
         cfg = Config(
             data_dir="/tmp/defenseclaw",
             audit_db="/tmp/defenseclaw/audit.db",
@@ -356,6 +386,35 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.warned, 0)
         self.assertEqual(result.passed, 1)
         self.assertNotIn("guardrail.model", " ".join(c["detail"] for c in result.checks))
+        self.assertTrue(mock_probe.call_args.kwargs["bound_peer"].trusted)
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
+    def test_proxy_health_refuses_foreign_listener_decision(self, mock_probe):
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="", port=4000),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        with patch.object(
+            cmd_doctor,
+            "_trusted_gateway_listener",
+            return_value=cmd_doctor._GatewayTrust(
+                "foreign_listener", "the gateway listener belongs to another account", 4321
+            ),
+        ):
+            _check_guardrail_proxy(cfg, result)
+
+        self.assertEqual(result.failed, 1)
+        self.assertIn("another account", result.checks[0]["detail"])
+        mock_probe.assert_not_called()
 
     def test_proxy_interception_fails_when_self_test_misses(self):
         cfg = Config(
@@ -858,6 +917,17 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("held by PID 4343 (python3), not by this account's gateway", result.checks[0]["detail"])
         self.assertEqual(result.gateway_down, "foreign")
 
+        # A probe refused to connect can still be caused by a port held by
+        # another account; the holder is stronger evidence than probe text.
+        result = _DoctorResult()
+        with (
+            patch.object(cmd_doctor, "_http_probe", return_value=(0, "connection refused")),
+            patch.object(cmd_doctor, "_foreign_gateway_port_holder", return_value="PID 4343 (python3)"),
+        ):
+            _check_sidecar(self._sidecar_alignment_cfg(), result)
+        self.assertIn("held by PID 4343 (python3)", result.checks[0]["detail"])
+        self.assertEqual(result.gateway_down, "foreign")
+
     def test_foreign_port_fix_does_not_ask_to_stop_another_accounts_process(self):
         # GAP-1706: the same command form as defenseclaw-gateway status/start,
         # and another account's process is not this account's to stop.
@@ -1079,69 +1149,6 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("mode=action via PreToolUse deny", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
-    @patch("defenseclaw.commands.cmd_doctor._http_probe")
-    def test_omnigent_action_reports_configured_unverified_policy_without_proxy_probe(self, mock_probe):
-        from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
-
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(
-                enabled=True,
-                mode="action",
-                port=4000,
-                connector="omnigent",
-            ),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.claw.mode = "omnigent"
-        result = _DoctorResult()
-
-        _check_guardrail_proxy(cfg, result)
-
-        mock_probe.assert_not_called()
-        self.assertEqual(len(result.checks), 1, result.checks)
-        self.assertEqual(result.checks[0]["status"], "pass")
-        self.assertEqual(result.failed, 0, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertEqual(result.passed, 1, result.checks)
-        detail = result.checks[0]["detail"]
-        self.assertIn("policy path configured for omnigent", detail)
-        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
-        self.assertIn("live policy generation unverified", detail)
-
-    def test_omnigent_without_judge_skips_llm_key_requirement(self):
-        from defenseclaw.commands.cmd_doctor import _check_llm_api_key
-
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(
-                enabled=True,
-                mode="action",
-                connector="omnigent",
-            ),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.claw.mode = "omnigent"
-        result = _DoctorResult()
-
-        _check_llm_api_key(cfg, result)
-
-        self.assertEqual(len(result.checks), 1, result.checks)
-        self.assertEqual(result.failed, 0, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertEqual(result.checks[0]["status"], "skip")
-        self.assertIn("not required by hook/policy enforcement", result.checks[0]["detail"])
-
     def test_hilt_uses_resolved_identity_profile_for_connector(self):
         from defenseclaw.config import GuardrailProfile
 
@@ -1260,11 +1267,11 @@ class DoctorGuardrailTests(unittest.TestCase):
             quarantine_dir="/tmp/defenseclaw/quarantine",
             plugin_dir="/tmp/defenseclaw/plugins",
             policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="amp"),
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
         )
-        cfg.claw.mode = "omnigent"
+        cfg.claw.mode = "amp"
         cfg.llm.model = "ollama/qwen2.5:0.5b"
         result = _DoctorResult()
         with patch("defenseclaw.llm.ping", side_effect=AssertionError("probed an unused LLM")):
@@ -1288,8 +1295,18 @@ class DoctorGuardrailTests(unittest.TestCase):
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "copilot", result)
+        self.assertEqual(result.warned, 1)
+        self.assertIn("confirmations block", result.checks[0]["detail"])
+        self.assertIn("VS Code Local", result.checks[0]["detail"])
+        from defenseclaw.commands.cmd_setup import _hilt_support_note
+
+        self.assertIn("confirmations block", _hilt_support_note("copilot"))
+
+        result = _DoctorResult()
+        with patch("defenseclaw.commands.cmd_doctor._doctor_secure_client", return_value=True):
+            _check_hilt_support(cfg, "copilot", result)
         self.assertEqual(result.passed, 1)
-        self.assertIn("preToolUse ask supported", result.checks[0]["detail"])
+        self.assertIn("Secure Client preToolUse ask", result.checks[0]["detail"])
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "cursor", result)
@@ -1299,10 +1316,6 @@ class DoctorGuardrailTests(unittest.TestCase):
             result.checks[0]["detail"],
         )
 
-        result = _DoctorResult()
-        _check_hilt_support(cfg, "openhands", result)
-        self.assertEqual(result.warned, 1)
-        self.assertIn("no native human approval surface", result.checks[0]["detail"])
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "opencode", result)
@@ -1319,26 +1332,6 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("PreToolUse ask", result.checks[0]["detail"])
         self.assertIn("no override", result.checks[0]["detail"])
 
-    def test_hilt_omnigent_preserves_native_degraded_pre_action_ask_scope(self):
-        cfg = Config(
-            data_dir="/tmp/defenseclaw",
-            audit_db="/tmp/defenseclaw/audit.db",
-            quarantine_dir="/tmp/defenseclaw/quarantine",
-            plugin_dir="/tmp/defenseclaw/plugins",
-            policy_dir="/tmp/defenseclaw/policies",
-            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
-            gateway=GatewayConfig(),
-            openshell=OpenShellConfig(),
-        )
-        cfg.guardrail.hilt.enabled = True
-
-        result = _DoctorResult()
-        _check_hilt_support(cfg, "omnigent", result)
-
-        self.assertEqual(result.passed, 1, result.checks)
-        self.assertEqual(result.warned, 0, result.checks)
-        self.assertIn("native-degraded support", result.checks[0]["detail"])
-        self.assertIn("request, tool_call, and llm_request", result.checks[0]["detail"])
 
 
 class DoctorHookReachabilityTests(unittest.TestCase):
@@ -1354,38 +1347,6 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             openshell=OpenShellConfig(),
         )
 
-    def test_openhands_hooks_accept_sdk_home_fallback(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home = os.path.join(tmp, "home")
-            workspace = os.path.join(tmp, "repo")
-            hook_path = os.path.join(home, ".openhands", "hooks.json")
-            os.makedirs(os.path.dirname(hook_path), exist_ok=True)
-            os.makedirs(workspace, exist_ok=True)
-            with open(hook_path, "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "pre_tool_use": [
-                            {
-                                "matcher": "*",
-                                "hooks": [
-                                    {
-                                        "type": "command",
-                                        "command": os.path.join(tmp, ".defenseclaw", "hooks", "openhands-hook.sh"),
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                    fh,
-                )
-            cfg = self._cfg(tmp, "openhands")
-            cfg.claw.workspace_dir = workspace
-            with patch.dict(os.environ, isolated_home_env(home), clear=False):
-                result = _DoctorResult()
-                _check_openhands_hooks(cfg, result)
-            self.assertEqual(result.failed, 0, result.checks)
-            self.assertEqual(result.passed, 1)
-            self.assertIn("reachable", result.checks[0]["detail"])
 
     # ------------------------------------------------------------------
     # Antigravity (`agy`) hook reachability
@@ -1410,7 +1371,9 @@ class DoctorHookReachabilityTests(unittest.TestCase):
         ]
         cfg: dict = {}
         for event in events:
-            handler = {"type": "command", "command": hook_script_path, "timeout": 30}
+            # Setup binds each event as the hook's argument (Antigravity's
+            # input names no event).
+            handler = {"type": "command", "command": f"{hook_script_path} {event}", "timeout": 30}
             entries = (
                 [{"matcher": "*", "hooks": [handler]}]
                 if event in {"PreToolUse", "PostToolUse"}
@@ -1585,12 +1548,15 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                     {
                         "version": 1,
                         "hooks": {
-                            "PreToolUse": [
+                            event: [
                                 {
                                     "type": "command",
-                                    "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh"),
+                                    "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh")
+                                    + f" --event {event}",
+                                    "timeoutSec": 30,
                                 }
                             ]
+                            for event in ("preToolUse", "permissionRequest")
                         },
                     },
                     fh,
@@ -2441,6 +2407,9 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
     def test_codex_hook_check_warns_when_notify_is_not_defenseclaw(self):
         # GAP-1248: a renamed notify program left Codex launching a missing
         # program on every turn while doctor said the hooks were healthy.
+        # Secure Client is the one profile that registers the notifier.
+        from unittest import mock
+
         from defenseclaw.commands import cmd_doctor
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -2465,12 +2434,51 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
                 cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
                 return [c for c in result.checks if c["label"] == "Codex notify"]
 
-            renamed = notify_rows(f'notify = ["bash", "{bridge[:-3]}-TAMPERED.sh"]\n')
-            healthy = notify_rows(f'notify = ["bash", "{bridge}"]\n')
+            with mock.patch.object(cmd_doctor, "_doctor_secure_client", return_value=True):
+                renamed = notify_rows(f'notify = ["bash", "{bridge[:-3]}-TAMPERED.sh"]\n')
+                healthy = notify_rows(f'notify = ["bash", "{bridge}"]\n')
 
         self.assertEqual([c["status"] for c in renamed], ["warn"], renamed)
         self.assertIn("-TAMPERED.sh", renamed[0]["detail"])
         self.assertEqual(healthy, [])
+
+    @unittest.skipIf(os.name == "nt", "POSIX hook paths in a TOML basic string")
+    def test_codex_hook_check_warns_when_an_old_defenseclaw_notifier_is_left(self):
+        # Outside Secure Client setup registers no Codex notifier: Codex puts
+        # the turn record on the notifier's command line. One left by an older
+        # setup is reported; the account's own notifier, or none, is fine.
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, ".defenseclaw")
+            cfg = self._make_cfg(home)
+            self._write_hook(home, "codex-hook.sh", "#!/bin/sh\n# defenseclaw-managed-hook v6\n")
+            bridge = os.path.join(home, "notify-bridge.sh")
+            own = os.path.join(home, "hooks", "codex-hook.sh")
+            config_toml = os.path.join(tmp, "codex", "config.toml")
+            os.makedirs(os.path.dirname(config_toml))
+            hooks = (
+                "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+                f'type = "command"\ncommand = "{own} --event PreToolUse"\n'
+            )
+
+            def notify_rows(notify: str) -> list[dict]:
+                with open(config_toml, "w", encoding="utf-8") as fh:
+                    fh.write(notify + hooks)
+                result = _DoctorResult()
+                cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix", config_path=config_toml)
+                return [c for c in result.checks if c["label"] == "Codex notify"]
+
+            stale = notify_rows(f'notify = ["bash", "{bridge}"]\n')
+            native = notify_rows('notify = ["/opt/defenseclaw/bin/defenseclaw-hook", "notify"]\n')
+            users = notify_rows('notify = ["/usr/local/bin/my-notifier"]\n')
+            none = notify_rows("")
+
+        self.assertEqual([c["status"] for c in stale], ["warn"], stale)
+        self.assertIn("still runs the DefenseClaw notifier", stale[0]["detail"])
+        self.assertEqual([c["status"] for c in native], ["warn"], native)
+        self.assertEqual(users, [])
+        self.assertEqual(none, [])
 
     def test_unreadable_foreign_codex_hook_script_counts_as_broken(self):
         # GAP-1854: another account's unreadable home raised PermissionError
@@ -2672,6 +2680,307 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
         self.assertEqual(len(rows), 1, result.checks)
         self.assertEqual(rows[0]["status"], "pass")
 
+    def test_listener_second_owner_fails_at_once_and_names_the_owners(self):
+        # GAP-0535: the brief second holder was the gateway's own fork, which
+        # the listener evidence now recognizes. A second owner that remains
+        # is reported at once, with its PIDs, without a settle wait.
+        from defenseclaw.commands import cmd_doctor
+
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        ambiguous = cmd_doctor.ListenerEvidence(
+            "ambiguous", reason="multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            result = _DoctorResult()
+            with (
+                patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ambiguous) as listener,
+                patch.object(cmd_doctor.time, "sleep") as sleep,
+            ):
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
+
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual([row["status"] for row in rows], ["fail"], result.checks)
+        self.assertIn("PIDs 4321, 9001", rows[0]["detail"])
+        listener.assert_called_once()
+        sleep.assert_not_called()
+
+    @staticmethod
+    def _hold_start_lock(data_dir: str):
+        """Hold the gateway start lock the way a start or restart does."""
+        import fcntl
+
+        handle = open(os.path.join(data_dir, "gateway.start.lock"), "w")  # noqa: SIM115
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_listener_is_checked_after_a_restart_in_progress_finishes(self):
+        # GAP-0535: during a start or restart the listener can be mid-handover.
+        # Doctor waits for the restart that holds the start lock, then checks
+        # ownership once, instead of reporting the handover as a second owner.
+        import threading
+
+        from defenseclaw.commands import cmd_doctor
+
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        mid_restart = {
+            "ambiguous": cmd_doctor.ListenerEvidence(
+                "ambiguous", reason="multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001"
+            ),
+            "missing": cmd_doctor.ListenerEvidence("missing", reason="no TCP listener on the configured API endpoint"),
+            "foreign": cmd_doctor.ListenerEvidence("ok", pid=9001),
+        }
+        for name, during in mid_restart.items():
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                cfg = self._make_cfg(tmp)
+                result = _DoctorResult()
+                lock = self._hold_start_lock(tmp)
+                released = threading.Event()
+
+                def release(lock=lock, released=released):
+                    released.set()
+                    lock.close()
+
+                timer = threading.Timer(0.3, release)
+                timer.start()
+                try:
+                    with (
+                        patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                        patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                        patch.object(
+                            cmd_doctor,
+                            "_managed_gateway_listener_evidence",
+                            side_effect=lambda *_a, during=during, released=released, **_k: (
+                                cmd_doctor.ListenerEvidence("ok", pid=4321) if released.is_set() else during
+                            ),
+                        ) as listener,
+                    ):
+                        cmd_doctor._check_gateway_home_mismatch(cfg, result)
+                finally:
+                    timer.join()
+                rows = [c for c in result.checks if c["label"] == "Gateway home"]
+                self.assertEqual([row["status"] for row in rows], ["pass"], result.checks)
+                # Once mid-restart, once after the wait, and once more as the
+                # /health read binds to the verified listener.
+                self.assertEqual(listener.call_count, 3)
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_restart_still_in_progress_is_reported_as_such_not_as_a_second_owner(self):
+        from defenseclaw.commands import cmd_doctor
+
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        ambiguous = cmd_doctor.ListenerEvidence(
+            "ambiguous", reason="multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._make_cfg(tmp)
+            result = _DoctorResult()
+            lock = self._hold_start_lock(tmp)
+            try:
+                with (
+                    patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
+                    patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                    patch.object(cmd_doctor, "_managed_gateway_listener_evidence", return_value=ambiguous) as listener,
+                    patch.object(cmd_doctor, "_GATEWAY_RESTART_WAIT_SECONDS", 0.3),
+                ):
+                    cmd_doctor._check_gateway_home_mismatch(cfg, result)
+            finally:
+                lock.close()
+
+        rows = [c for c in result.checks if c["label"] == "Gateway home"]
+        self.assertEqual([row["status"] for row in rows], ["warn"], result.checks)
+        detail = rows[0]["detail"]
+        self.assertIn("gateway start, restart or stop", detail)
+        self.assertIn("still in progress", detail)
+        self.assertIn("listener ownership was not checked", detail)
+        self.assertNotIn("multiple processes", detail)
+        if sys.platform.startswith("linux"):
+            # /proc/locks names the holder: this test process.
+            self.assertIn(f"(PID {os.getpid()})", detail)
+        listener.assert_called_once()
+
+    def _run_gateway_rows_during_restart(self, tmp: str, during, *, release_after: float | None, probe=None):
+        """Run Sidecar API, Gateway authentication and Gateway home while a
+        start, restart or stop holds the start lock; release it after
+        ``release_after`` seconds, or never. ``probe(released)`` answers each
+        /health request; by default the same document every time."""
+        import threading
+
+        from defenseclaw.commands import cmd_doctor
+
+        cfg = self._make_cfg(tmp)
+        result = _DoctorResult()
+        process = cmd_doctor._GatewayTrust("trusted", "verified", 4321, home_bound=True)
+        health = {sub: {"state": "disabled"} for sub in ("gateway", "watcher", "guardrail", "sandbox")}
+        health.update(api={"state": "running"}, telemetry={"state": "running"})
+        lock = self._hold_start_lock(tmp)
+        released = threading.Event()
+
+        def release():
+            released.set()
+            lock.close()
+
+        timer = threading.Timer(release_after, release) if release_after is not None else None
+        if timer:
+            timer.start()
+        try:
+            with (
+                patch.object(
+                    cmd_doctor,
+                    "_http_probe",
+                    side_effect=lambda *_a, **_k: probe(released.is_set()) if probe else (200, json.dumps(health)),
+                ),
+                patch.object(cmd_doctor, "_daemon_effective_gateway_token", return_value=("t", "", "")),
+                patch.object(cmd_doctor, "_authenticated_runtime_matches", return_value=(True, "")),
+                patch.object(cmd_doctor, "_gateway_cli_token_mismatch_detail", return_value=""),
+                patch.object(cmd_doctor, "_linux_foreign_listener_accounts", return_value=""),
+                patch.object(cmd_doctor, "_managed_gateway_process_trust", return_value=process),
+                patch.object(
+                    cmd_doctor,
+                    "_managed_gateway_listener_evidence",
+                    side_effect=lambda *_a, **_k: (
+                        cmd_doctor.ListenerEvidence("ok", pid=4321) if released.is_set() else during
+                    ),
+                ),
+                patch.object(cmd_doctor, "_GATEWAY_RESTART_WAIT_SECONDS", 0.3 if release_after is None else 5.0),
+                patch.object(
+                    cmd_doctor, "_wait_for_gateway_start_lock", wraps=cmd_doctor._wait_for_gateway_start_lock
+                ) as wait,
+            ):
+                sidecar_health = cmd_doctor._check_sidecar(cfg, result)
+                cmd_doctor._check_gateway_auth(cfg, result)
+                cmd_doctor._check_gateway_home_mismatch(cfg, result)
+        finally:
+            if timer:
+                timer.join()
+            lock.close()
+        rows = {
+            c["label"]: c for c in result.checks if c["label"] in {"Sidecar API", "Gateway authentication", "Gateway home"}
+        }
+        return result, rows, wait, sidecar_health
+
+    _MID_RESTART_LISTENERS = {
+        "ambiguous": ("ambiguous", "multiple processes own listeners for the configured API endpoint: PIDs 4321, 9001", 0),
+        "missing": ("missing", "no TCP listener on the configured API endpoint", 0),
+        "foreign": ("ok", "", 9001),
+    }
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_every_gateway_row_is_checked_after_a_restart_in_progress_finishes(self):
+        # GAP-0535: Sidecar API and Gateway authentication read the listener
+        # too; a handover in progress failed them while Gateway home waited.
+        from defenseclaw.commands import cmd_doctor
+
+        for name, (status, reason, pid) in self._MID_RESTART_LISTENERS.items():
+            during = cmd_doctor.ListenerEvidence(status, reason=reason, pid=pid)
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                result, rows, wait, _ = self._run_gateway_rows_during_restart(tmp, during, release_after=0.3)
+                self.assertEqual(
+                    {label: row["status"] for label, row in rows.items()},
+                    {"Sidecar API": "pass", "Gateway authentication": "pass", "Gateway home": "pass"},
+                    result.checks,
+                )
+                self.assertEqual(result.failed, 0, result.checks)
+                self.assertEqual(result.gateway_down, "")
+                wait.assert_called_once()
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_sidecar_api_reads_health_again_after_a_restart_in_progress_finishes(self):
+        # The /health read before the wait came from a listener that was never
+        # verified (here another process's); only the document read once this
+        # account's gateway holds the port describes it.
+        from defenseclaw.commands import cmd_doctor
+
+        foreign = {sub: {"state": "running"} for sub in ("gateway", "watcher", "guardrail", "api", "telemetry")}
+        foreign["policy"] = {"digest": "FOREIGN-DIGEST"}
+        ours = {sub: {"state": "disabled"} for sub in ("gateway", "watcher", "guardrail", "sandbox")}
+        ours.update(api={"state": "running"}, telemetry={"state": "running"}, policy={"digest": "OURS"})
+        during = cmd_doctor.ListenerEvidence("ok", pid=9001)
+        with tempfile.TemporaryDirectory() as tmp:
+            result, rows, wait, health = self._run_gateway_rows_during_restart(
+                tmp,
+                during,
+                release_after=0.3,
+                probe=lambda released: (200, json.dumps(ours if released else foreign)),
+            )
+        self.assertEqual(rows["Sidecar API"]["status"], "pass", result.checks)
+        self.assertEqual(health, ours)
+        subsystems = {c["label"].strip(" └─"): c["status"] for c in result.checks if "└─" in c["label"]}
+        self.assertEqual(subsystems["guardrail"], "skip", result.checks)
+        self.assertEqual(subsystems["sandbox"], "skip", result.checks)
+        self.assertFalse(result.sidecar_unverified)
+        wait.assert_called_once()
+
+        # The gateway stopped while the lock was held: the earlier 200 is not
+        # reported as a running sidecar.
+        with tempfile.TemporaryDirectory() as tmp:
+            result, rows, wait, health = self._run_gateway_rows_during_restart(
+                tmp,
+                during,
+                release_after=0.3,
+                probe=lambda released: (0, "connection refused") if released else (200, json.dumps(foreign)),
+            )
+        self.assertEqual(rows["Sidecar API"]["status"], "fail", result.checks)
+        self.assertIn("the gateway is not running", rows["Sidecar API"]["detail"])
+        self.assertEqual(result.gateway_down, "stopped")
+        self.assertIsNone(health)
+        self.assertFalse([c for c in result.checks if "└─" in c["label"]], result.checks)
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_restart_never_finishing_warns_on_every_gateway_row_after_one_wait(self):
+        from defenseclaw.commands import cmd_doctor
+
+        for name, (status, reason, pid) in self._MID_RESTART_LISTENERS.items():
+            during = cmd_doctor.ListenerEvidence(status, reason=reason, pid=pid)
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                result, rows, wait, _ = self._run_gateway_rows_during_restart(tmp, during, release_after=None)
+                self.assertEqual(
+                    {label: row["status"] for label, row in rows.items()},
+                    {"Sidecar API": "warn", "Gateway authentication": "warn", "Gateway home": "warn"},
+                    result.checks,
+                )
+                self.assertEqual(result.failed, 0, result.checks)
+                self.assertEqual(result.gateway_down, "")
+                for row in rows.values():
+                    self.assertIn("gateway start, restart or stop", row["detail"])
+                    self.assertIn("listener ownership was not checked", row["detail"])
+                    self.assertNotIn("multiple processes", row["detail"])
+                self.assertIn("after 0.3 s", rows["Gateway home"]["detail"])
+                self.assertIn("the gateway token was not sent", rows["Gateway authentication"]["detail"])
+                # One doctor run waits for the lock once, not once per row.
+                wait.assert_called_once()
+
+    @unittest.skipIf(os.name == "nt", "the gateway start lock is a POSIX flock here")
+    def test_gateway_start_lock_holder_reads_the_lock_without_taking_it(self):
+        from defenseclaw.commands import cmd_doctor
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # No lock file, or a free one: no start or restart in progress.
+            self.assertIsNone(cmd_doctor._gateway_start_lock_holder(tmp))
+            open(os.path.join(tmp, "gateway.start.lock"), "w").close()
+            self.assertIsNone(cmd_doctor._gateway_start_lock_holder(tmp))
+            lock = self._hold_start_lock(tmp)
+            try:
+                expected = os.getpid() if sys.platform.startswith("linux") else 0
+                self.assertEqual(cmd_doctor._gateway_start_lock_holder(tmp), expected)
+                # Without /proc/locks the shared probe still sees the holder.
+                missing = os.path.join(tmp, "no-proc-locks")
+                self.assertEqual(cmd_doctor._gateway_start_lock_holder(tmp, proc_locks=missing), 0)
+                if sys.platform.startswith("linux"):
+                    # A waiter row is not a holder.
+                    info = os.stat(os.path.join(tmp, "gateway.start.lock"))
+                    device = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+                    waiter = os.path.join(tmp, "locks")
+                    with open(waiter, "w") as rows:
+                        rows.write(f"1: -> FLOCK  ADVISORY  WRITE 77 {device} 0 EOF\n")
+                    self.assertIsNone(cmd_doctor._gateway_start_lock_holder(tmp, proc_locks=waiter))
+            finally:
+                lock.close()
+            self.assertIsNone(cmd_doctor._gateway_start_lock_holder(tmp))
+
     def test_silent_when_api_not_reachable(self):
         from defenseclaw.commands import cmd_doctor
 
@@ -2682,7 +2991,8 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
         rows = [c for c in result.checks if c["label"] == "Gateway home"]
-        self.assertEqual(rows, [], result.checks)
+        self.assertEqual([row["status"] for row in rows], ["skip"], result.checks)
+        self.assertIn("ownership was not inferred", rows[0]["detail"])
 
 
 class DoctorFixDryRunTests(unittest.TestCase):
@@ -3061,6 +3371,21 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         import http.server
         import threading
 
+        from defenseclaw.commands import cmd_doctor
+
+        trusted = patch.object(
+            cmd_doctor, "_trusted_gateway_listener",
+            return_value=cmd_doctor._GatewayTrust("trusted", "verified fixture gateway", 4321),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
+        peer_request = patch.object(
+            cmd_doctor, "_gateway_peer_bound_request",
+            side_effect=lambda url, _trust, **kwargs: cmd_doctor._http_probe_once(url, **kwargs),
+        )
+        peer_request.start()
+        self.addCleanup(peer_request.stop)
+
         # The in-process server stands in for this account's gateway, so it
         # is not reported as a foreign process holding the port.
         holder = patch("defenseclaw.commands.cmd_doctor._gateway_port_holder", return_value="")
@@ -3231,7 +3556,7 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         self.assertGreater(len(self.health_body), 2_000)
         cfg = SimpleNamespace(
             openshell=None,
-            gateway=SimpleNamespace(api_port=self.port),
+            gateway=SimpleNamespace(api_port=self.port, fleet_mode="enabled"),
         )
         result = _DoctorResult()
 
@@ -3349,35 +3674,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
         self.assertIn("mode=action via PreToolUse deny", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
-    def test_multi_hook_action_mode_preserves_omnigent_policy_semantics(self):
-        from defenseclaw.commands.cmd_doctor import (
-            _guardrail_proxy_intentionally_closed,
-        )
 
-        detail = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "omnigent"], mode="action"))
-
-        self.assertTrue(detail.startswith("configured for"), detail)
-        self.assertIn("codex (mode=action via PreToolUse deny)", detail)
-        self.assertIn(
-            "omnigent (native-degraded; mode=action via ALLOW/ASK/DENY; live policy generation unverified)",
-            detail,
-        )
-        self.assertIn("proxy port intentionally closed", detail)
-
-    def test_single_omnigent_status_preserves_native_degraded_posture(self):
-        from defenseclaw.commands.cmd_doctor import (
-            _guardrail_proxy_intentionally_closed,
-        )
-
-        detail = _guardrail_proxy_intentionally_closed(
-            self._cfg(["omnigent"], mode="action")
-        )
-
-        self.assertIn("native-degraded", detail)
-        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
-        self.assertIn("live policy generation unverified", detail)
-        self.assertNotIn("policy-enforced", detail)
-        self.assertIn("proxy port intentionally closed", detail)
 
     def test_proxy_peer_forces_real_probe(self):
         """hermes (hook) + openclaw (proxy): openclaw needs port 4000, so the
@@ -3469,6 +3766,16 @@ class DoctorFixHelpTextTests(unittest.TestCase):
 
 class TestSandboxSubsystemDoctor(unittest.TestCase):
     """The gateway's sandbox subsystem as doctor reads it."""
+
+    def setUp(self):
+        from defenseclaw.commands import cmd_doctor
+
+        trusted = patch.object(
+            cmd_doctor, "_trusted_gateway_listener",
+            return_value=cmd_doctor._GatewayTrust("trusted", "verified fixture gateway", 4321),
+        )
+        trusted.start()
+        self.addCleanup(trusted.stop)
 
     def _cfg(self, data_dir: str) -> Config:
         cfg = Config(
@@ -3719,3 +4026,60 @@ def test_policy_digest_probe_unavailable_does_not_pass():
     row = result.checks[-1]
     assert row["status"] == "warn"
     assert "comparison" in row["detail"]
+
+
+def _hilt_profile_cfg(profile):
+    from defenseclaw.config import GuardrailProfile
+
+    cfg = Config(
+        data_dir="/tmp/defenseclaw",
+        audit_db="/tmp/defenseclaw/audit.db",
+        quarantine_dir="/tmp/defenseclaw/quarantine",
+        plugin_dir="/tmp/defenseclaw/plugins",
+        policy_dir="/tmp/defenseclaw/policies",
+        guardrail=GuardrailConfig(enabled=True, mode="action", connector="codex"),
+        gateway=GatewayConfig(),
+        openshell=OpenShellConfig(),
+    )
+    cfg.guardrail.hilt.enabled = True
+    cfg.guardrail.profiles = {"read_only": profile or GuardrailProfile()}
+    cfg.guardrail.default_profile = "read_only"
+    return cfg
+
+
+def test_hilt_observe_under_a_profile_names_the_profile_setting():
+    # GAP-1269: 'guardrail mode' does not change the mode a profile sets.
+    from defenseclaw.commands.cmd_doctor import _check_hilt_support, _emit_hilt_observe_summary
+    from defenseclaw.config import GuardrailProfile
+
+    resolved = {
+        "profile": "read_only",
+        "effective": {"mode": "observe", "hilt": {"enabled": True, "min_severity": "HIGH"}},
+    }
+    for profile, pinned in ((GuardrailProfile(mode="observe"), True), (GuardrailProfile(), False)):
+        cfg = _hilt_profile_cfg(profile)
+        result = _DoctorResult()
+        observe_only: list = []
+        with patch("defenseclaw.gateway.current_user_guardrail_profile", return_value=resolved):
+            for connector in ("codex", "claudecode"):
+                _check_hilt_support(cfg, connector, result, observe_only=observe_only)
+        _emit_hilt_observe_summary(observe_only, result, tagged=True)
+        remediation = result.checks[-1]["remediation"]
+        if pinned:
+            assert "guardrail.profiles.read_only.mode" in remediation
+            assert "guardrail mode action" not in remediation
+        else:
+            # A profile that inherits the mode: the base command does change it.
+            assert "guardrail mode action --connector <name>" in remediation
+
+
+def test_scanner_settings_names_the_skill_scanner_judge():
+    # GAP-0981: the guardrail judge can be on while the skill scanner's is off.
+    from defenseclaw.config import default_config
+    from defenseclaw.scanner import settings as scanner_settings
+
+    cfg = default_config()
+    cfg.guardrail.judge.enabled = True
+    cfg.scanners.skill_scanner.use_llm = False
+    issue = scanner_settings.recommended_settings_issue(cfg)
+    assert issue.startswith("the skill-scanner LLM judge is off")

@@ -38,10 +38,22 @@ func TestStandaloneEnterpriseHookExecutableMatchesOnlyTheStandaloneBinary(t *tes
 	}
 }
 
+func TestManagedHermesHookIgnoresTargetWritableTombstone(t *testing.T) {
+	original := standaloneEnterpriseHookCheck
+	standaloneEnterpriseHookCheck = func(string) bool { return true }
+	t.Cleanup(func() { standaloneEnterpriseHookCheck = original })
+	if !implicitEnterpriseManagedHook() {
+		t.Fatal("standalone administrator binary did not select the managed runtime")
+	}
+	if NativeConnectorHookNoop([]string{"hook", "--connector", "hermes"}) {
+		t.Fatal("a managed Hermes hook honored the per-user disable tombstone")
+	}
+}
+
 // A plugin-only connector never executes the hook binary, so a managed hook
 // call naming one resolves no runtime and is closed.
 func TestManagedHookOfAPluginOnlyConnectorIsClosed(t *testing.T) {
-	for _, name := range []string{"amp", "openhands"} {
+	for _, name := range []string{"amp"} {
 		nativeEnterpriseHookRuntimeSnapshot.Lock()
 		nativeEnterpriseHookRuntimeSnapshot.prepared = false
 		nativeEnterpriseHookRuntimeSnapshot.Unlock()
@@ -56,16 +68,4 @@ func TestManagedHookOfAPluginOnlyConnectorIsClosed(t *testing.T) {
 	nativeEnterpriseHookRuntimeSnapshot.prepared = false
 	nativeEnterpriseHookRuntimeSnapshot.err = nil
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
-}
-
-func TestManagedHermesHookIgnoresTargetWritableTombstone(t *testing.T) {
-	original := standaloneEnterpriseHookCheck
-	standaloneEnterpriseHookCheck = func(string) bool { return true }
-	t.Cleanup(func() { standaloneEnterpriseHookCheck = original })
-	if !implicitEnterpriseManagedHook() {
-		t.Fatal("standalone administrator binary did not select the managed runtime")
-	}
-	if NativeConnectorHookNoop([]string{"hook", "--connector", "hermes"}) {
-		t.Fatal("a managed Hermes hook honored the per-user disable tombstone")
-	}
 }

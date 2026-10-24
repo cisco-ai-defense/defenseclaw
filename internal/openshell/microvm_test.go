@@ -124,6 +124,7 @@ func TestMicroVMFirstStartDiskFloor(t *testing.T) {
 func TestDoctorOnAMacRunningMicroVMs(t *testing.T) {
 	f := newDoctorFixture(t)
 	f.onMicroVMs()
+	f.atRelease(openshell.InstallerVersion)
 	r := f.run()
 	var got []string
 	for _, c := range r.Checks {
@@ -468,7 +469,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		wantUnmanagedFix(t, c, restartYourself)
 		expectCheck(t, r, openshell.CheckIDTelemetry, openshell.StatusSkip,
 			"the gateway reads OPENSHELL_TELEMETRY_ENABLED from the environment it was started with, which DefenseClaw does not change")
-		if !r.OK() || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
+		if !okButTheRelease(r) || !r.MicroVM.DriverRunning || r.MicroVM.DriverBinary != driver || len(r.MicroVM.Problems()) != 0 {
 			t.Fatalf("report:\n%s\nmicrovm %+v", r, r.MicroVM)
 		}
 		if !f.runner.Called(codesign + " " + driver) {
@@ -483,7 +484,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		c := expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
 			" runs under launchd (com.example.openshell-gateway), not Homebrew's nvidia/openshell/openshell service, so DefenseClaw cannot restart it")
 		wantUnmanagedFix(t, c, restartYourself)
-		if !r.OK() || !r.OpenShellOutsideFormula() {
+		if !okButTheRelease(r) || !r.OpenShellOutsideFormula() {
 			t.Fatalf("outside the formula %v\n%s", r.OpenShellOutsideFormula(), r)
 		}
 	})
@@ -542,7 +543,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		f, _ := release(t)
 		r := f.run()
 		c := expectCheck(t, r, openshell.CheckIDVMDriver, pass, "; the gateway runs openshell-driver-vm (DefenseClaw did not find where, to check its signature)")
-		if c.Fix != nil || !r.OK() {
+		if c.Fix != nil || !okButTheRelease(r) {
 			t.Fatalf("fix %+v\n%s", c.Fix, r)
 		}
 	})

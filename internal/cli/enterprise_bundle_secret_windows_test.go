@@ -28,8 +28,8 @@ import (
 // missing, so a required reference refuses; only a store the caller cannot
 // read is unchecked. Each reference is classified on its own. The
 // classification of the real check errors is pinned on every OS by
-// managed.TestStoredCredentialPresence.
-func TestManagedBundleSecretPresentWindows(t *testing.T) {
+// managed.TestStoredCredentialValue.
+func TestManagedBundleSecretValueWindows(t *testing.T) {
 	layout, err := managed.StandaloneWindowsLayout()
 	if err != nil {
 		t.Fatal(err)
@@ -76,20 +76,20 @@ func TestManagedBundleSecretPresentWindows(t *testing.T) {
 		{"unreadable-store", false, true},
 		{"descriptor", false, true},
 	} {
-		present, err := managedBundleSecretPresent(tc.name)
-		if present != tc.present || (err != nil) != tc.unchecked {
-			t.Errorf("%s: present %v err %v", tc.name, present, err)
+		value, err := managedBundleSecretValue(tc.name)
+		if (value != nil) != tc.present || (err != nil) != tc.unchecked {
+			t.Errorf("%s: value %v err %v", tc.name, value != nil, err)
 		}
 	}
 	// Two references, one unusable and one fine: each keeps its own result.
 	for _, pair := range [][2]string{{"extra-reader", "sv2-llm-key"}, {"sv2-llm-key", "empty"}} {
 		got := map[string]bool{}
 		for _, name := range pair {
-			present, err := managedBundleSecretPresent(name)
+			value, err := managedBundleSecretValue(name)
 			if err != nil {
 				t.Fatalf("%v: %s unchecked: %v", pair, name, err)
 			}
-			got[name] = present
+			got[name] = value != nil
 		}
 		if !got["sv2-llm-key"] || got[pair[0]] == got[pair[1]] {
 			t.Errorf("%v: presence %v", pair, got)

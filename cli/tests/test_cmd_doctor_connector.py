@@ -55,7 +55,6 @@ from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw import doctor_gateway
 from defenseclaw.commands.cmd_doctor import (
     _CURSOR_NATIVE_HOOK_TIMEOUT_SECONDS,
     _CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS,
@@ -71,7 +70,6 @@ from defenseclaw.commands.cmd_doctor import (
     _check_cursor_configured_runtime,
     _check_hook_contract_lock,
     _check_hook_health,
-    _check_omnigent_policy_health,
     _check_plugin_registry_required,
     _check_scan_coverage,
     _connector_enabled,
@@ -79,22 +77,10 @@ from defenseclaw.commands.cmd_doctor import (
     _doctor_label_suffix,
     _DoctorResult,
     _fix_plugin_registry_required,
-    _hook_health_paths_from_lock,
-    _omnigent_custody_read,
-    _omnigent_live_config_evidence,
-    _omnigent_local_server_pid,
-    _omnigent_managed_artifact_drift,
-    _omnigent_runtime_readiness,
-    _omnigent_setup_repair_command,
     _opencode_load_heartbeat_status,
     _plugin_registry_required_offenders,
     _probe_cursor_windows_runtime,
     _run_cursor_windows_runtime_process,
-)
-from defenseclaw.file_permissions import (
-    UNSAFE_PATH_CHANGED,
-    UNSAFE_PATH_SYMLINK_OR_REPARSE,
-    UnsafePathError,
 )
 
 
@@ -261,11 +247,11 @@ class TestActiveConnectorResolver(unittest.TestCase):
         cfg.guardrail.connector = "claudecode"
         self.assertEqual(_active_connector(cfg), "claudecode")
 
-    def test_active_connector_defaults_to_openclaw_when_unset(self) -> None:
+    def test_active_connector_names_no_agent_when_unset(self) -> None:
         cfg = MagicMock(spec=["guardrail"])
         cfg.guardrail = MagicMock()
         cfg.guardrail.connector = ""
-        self.assertEqual(_active_connector(cfg), "openclaw")
+        self.assertEqual(_active_connector(cfg), "")
 
     def test_active_connector_lowercases_method_result(self) -> None:
         """ZeptoClaw, OpenClaw, etc. — display casing varies, but the
@@ -431,7 +417,9 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         cfg = self._cfg()
         cfg.guardrail.effective_mode.return_value = "action"
         r = _DoctorResult()
-        _check_connector_inventory(cfg, "codex", r)
+        # A rendered closed hook; a hook with no readable mode fails the row.
+        with patch("defenseclaw.fail_mode.rendered_fail_mode", return_value="closed"):
+            _check_connector_inventory(cfg, "codex", r)
         labels = {c["label"]: c for c in r.checks}
         self.assertIn("Mode", labels)
         self.assertEqual(
@@ -444,7 +432,7 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         "defenseclaw.fail_mode.connector_fail_mode_report",
         return_value={
             "effective": "open",
-            "provenance": "process-env",
+            "provenance": "hook-script",
             "note": "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode",
         },
     )
@@ -460,7 +448,7 @@ class TestConnectorInventoryUniformLabel(unittest.TestCase):
         self.assertEqual(
             mode_rows[0]["detail"],
             "action; fail-mode=open (observe mode keeps hooks fail-open; "
-            "guardrail.hook_fail_mode=closed applies in action mode); provenance=process-env",
+            "guardrail.hook_fail_mode=closed applies in action mode); provenance=hook-script",
         )
         self.assertFalse(any(c["label"] == "Fail mode" for c in r.checks))
 
@@ -470,6 +458,15 @@ class TestCheckConnectorHooks(unittest.TestCase):
     matching the connector, and combines with ``_doctor_label_suffix`` to
     attribute each connector's row on multi-connector installs.
     """
+
+    @staticmethod
+    def _probe_trusted_cursor_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
+        # These transport tests supply a health response from a verified gateway.
+        with patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=True, detail="verified"),
+        ):
+            return _probe_cursor_windows_runtime(cfg, adapter_path)
 
     def test_codex_emits_codex_hooks_row(self) -> None:
         cfg = MagicMock()
@@ -841,7 +838,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertTrue(ok)
         self.assertIn("requests 4->5", detail)
@@ -914,7 +911,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertTrue(ok)
         self.assertIn("requests 4->5", detail)
@@ -949,7 +946,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertEqual(detail, "Cursor runtime probe timed out")
@@ -977,7 +974,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("tree did not terminate", detail)
@@ -1106,7 +1103,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("invalid sessionStart fields: continue", detail)
@@ -1139,7 +1136,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg = MagicMock()
         cfg.gateway.api_port = 18970
 
-        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+        ok, detail = self._probe_trusted_cursor_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
 
         self.assertFalse(ok)
         self.assertIn("did not advance", detail)
@@ -1955,24 +1952,6 @@ class TestCheckHookHealth(unittest.TestCase):
     format-agnostic (YAML for hermes, flat ``.js`` for opencode).
     """
 
-    def setUp(self) -> None:
-        # D:-rooted Windows CI workspaces commonly inherit an Authenticated
-        # Users write ACE above TemporaryDirectory. Existing connector tests
-        # isolate content behavior; custody-specific cases below override this
-        # seam explicitly with safe, denied, unavailable, and Darwin verdicts.
-        custody = patch(
-            "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-            return_value=("ok", ""),
-        )
-        custody.start()
-        self.addCleanup(custody.stop)
-        private_custody = patch(
-            "defenseclaw.commands.cmd_doctor.windows_acl_confidentiality_error",
-            return_value=None,
-        )
-        private_custody.start()
-        self.addCleanup(private_custody.stop)
-
     def _cfg(self, data_dir: str, connector: str, paths: list[str]) -> MagicMock:
         cfg = MagicMock()
         cfg.data_dir = data_dir
@@ -2000,26 +1979,8 @@ class TestCheckHookHealth(unittest.TestCase):
             }
         )
 
-    def _write_omnigent_backup(self, data_dir: str, logical: str, path: str) -> None:
-        backup_dir = os.path.join(data_dir, "connector_backups", "omnigent")
-        os.makedirs(backup_dir, exist_ok=True)
-        with open(path, "rb") as fh:
-            digest = hashlib.sha256(fh.read()).hexdigest()
-        backup_path = os.path.join(backup_dir, f"{logical}.json")
-        with open(backup_path, "w", encoding="utf-8") as fh:
-            json.dump(
-                {
-                    "version": 1,
-                    "connector": "omnigent",
-                    "logical_name": logical,
-                    "path": path,
-                    "post_sha256": digest,
-                },
-                fh,
-            )
-        os.chmod(backup_path, 0o600)
 
-    def test_lock_path_with_marker_requires_hermes_reload(self) -> None:
+    def test_marker_only_never_proves_hermes_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hook = os.path.join(tmp, "config.yaml")
             with open(hook, "w", encoding="utf-8") as fh:
@@ -2027,14 +1988,38 @@ class TestCheckHookHealth(unittest.TestCase):
             results = {}
             for running in (True, False):
                 r = _DoctorResult()
-                with patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running):
+                with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook), patch(
+                    "defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running
+                ):
                     _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
                 results[running] = r.checks[-1]
         self.assertEqual(results[True]["status"], "fail")
         self.assertEqual(results[True]["label"], _HERMES_HOOKS_LABEL)
-        self.assertIn(hook, results[True]["detail"])
+        self.assertIn("sealed hook script", results[True]["detail"])
+        # An idle host cannot make an unproven on-disk registration healthy.
+        self.assertEqual(results[False]["status"], "fail", results[False])
+
+    def test_proven_hermes_registration_with_a_running_host_names_the_close_step(self) -> None:
+        # The registration is proven (execution probe passes): a running host
+        # may still hold the old hooks, so doctor cannot verify them and says
+        # to close every host; with no host running the check passes.
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "config.yaml")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("hooks:\n  - command: /x/hooks/hermes-hook.sh\n")
+            results = {}
+            for running in (True, False):
+                r = _DoctorResult()
+                with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook), patch(
+                    "defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running
+                ), patch("defenseclaw.commands.cmd_doctor._hermes_registered_execution_problem", return_value=""):
+                    _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+                results[running] = r.checks[-1]
+        self.assertEqual(results[True]["status"], "fail", results[True])
+        self.assertIn("cannot verify", results[True]["detail"])
         self.assertIn("live=false", results[True]["detail"])
-        # With no Hermes host running there is nothing to reload.
+        self.assertIn("close", results[True]["remediation"].lower())
+        self.assertIn("defenseclaw doctor", results[True]["remediation"])
         self.assertEqual(results[False]["status"], "pass", results[False])
 
     def test_hermes_host_running_treats_wrapped_hosts_as_unknown(self) -> None:
@@ -2087,20 +2072,20 @@ class TestCheckHookHealth(unittest.TestCase):
             with open(hook, "w", encoding="utf-8") as fh:
                 fh.write("hooks: []\n")
             r = _DoctorResult()
-            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+            with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook):
+                _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("does not reference", r.checks[-1]["detail"])
+        self.assertIn("sealed hook script", r.checks[-1]["detail"])
 
     def test_missing_hook_file_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
-            _check_hook_health(
-                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]),
-                "hermes",
-                r,
-            )
+            missing = os.path.join(tmp, "nope.yaml")
+            with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=missing):
+                _check_hook_health(self._cfg(tmp, "hermes", [missing]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("not found", r.checks[-1]["detail"])
+        self.assertIn("active hook registration is missing", r.checks[-1]["detail"])
+        self.assertIn("setup hermes --yes --restart", r.checks[-1]["remediation"])
 
     @patch("defenseclaw.commands.cmd_doctor._check_cursor_configured_runtime")
     def test_passive_cursor_health_disables_runtime_probe(self, configured_runtime) -> None:
@@ -2228,6 +2213,19 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertIn("no load heartbeat yet", r.checks[-1]["detail"])
         for internal in ("--pure", "DACL", "tamper-proof", "authenticated"):
             self.assertNotIn(internal, r.checks[-1]["detail"])
+
+    def test_opencode_runtime_health_does_not_trust_ambiguous_ownership(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = self._cfg(tmp, "opencode", [])
+            ambiguous = MagicMock(trusted=False, code="ambiguous_listener", detail="multiple listener owners")
+            with (
+                patch("defenseclaw.commands.cmd_doctor._trusted_gateway_listener", return_value=ambiguous),
+                patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
+            ):
+                outcome, detail = _opencode_load_heartbeat_status(cfg)
+            self.assertEqual(outcome, "warn")
+            self.assertIn("multiple listener owners", detail)
+            probe.assert_not_called()
 
     def test_opencode_runtime_status_rejects_stale_and_malformed_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2528,962 +2526,42 @@ class TestCheckHookHealth(unittest.TestCase):
         _check_hook_health(MagicMock(), "totallymadeupclaw", r)
         self.assertEqual(r.checks, [])
 
-    def test_omnigent_custody_reader_accepts_safe_chain_and_same_object(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = os.path.join(tmp, "evidence.json")
-            Path(evidence).write_bytes(b'{"safe":true}')
-            with patch(
-                "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                return_value=("ok", ""),
-            ) as custody:
-                status, body, detail = _omnigent_custody_read(
-                    evidence,
-                    role="omnigent-test-evidence",
-                    max_bytes=64,
-                    root=tmp,
-                )
-            current_stat = os.stat(evidence)
-
-        self.assertEqual((status, body, detail), ("ok", b'{"safe":true}', ""))
-        inspected_path, inspected_stat = custody.call_args.args
-        self.assertEqual(inspected_path, evidence)
-        self.assertTrue(os.path.samestat(inspected_stat, current_stat))
-
-    def test_omnigent_custody_reader_refuses_unsafe_windows_ancestor(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = os.path.join(tmp, "private-evidence.json")
-            Path(evidence).write_bytes(b"{}")
-            with patch(
-                "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                return_value=(
-                    "denied",
-                    "PID file ancestor directory has unsafe ACLs (ACL grants write access to untrusted SID S-1-5-11)",
-                ),
-            ):
-                status, body, detail = _omnigent_custody_read(
-                    evidence,
-                    role="omnigent-lock",
-                    max_bytes=64,
-                    root=tmp,
-                )
-
-        self.assertEqual(status, "unsafe")
-        self.assertIsNone(body)
-        self.assertIn("custody is unsafe", detail)
-        self.assertIn("path-sha256=", detail)
-        self.assertNotIn("private-evidence", detail)
-        self.assertNotIn("S-1-5-11", detail)
-
-    def test_omnigent_windows_acl_query_error_is_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = os.path.join(tmp, "private-query-error.json")
-            Path(evidence).write_bytes(b"must not be returned")
-            with (
-                patch("defenseclaw.commands.cmd_doctor.os.name", "nt"),
-                patch(
-                    "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                    side_effect=doctor_gateway._pid_record_integrity_error,
-                ),
-                patch(
-                    "defenseclaw.file_permissions._windows_acl_snapshot",
-                    side_effect=OSError("synthetic ACL query failure"),
-                ),
-            ):
-                status, body, detail = _omnigent_custody_read(
-                    evidence,
-                    role="omnigent-windows-record",
-                    max_bytes=64,
-                )
-
-        self.assertEqual(status, "unavailable")
-        self.assertIsNone(body)
-        self.assertIn("path-sha256=", detail)
-        self.assertNotIn("private-query-error", detail)
-        self.assertNotIn("synthetic ACL query failure", detail)
-
-    def test_omnigent_windows_unresolved_current_sid_is_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = os.path.join(tmp, "private-sid-error.json")
-            Path(evidence).write_bytes(b"must not be returned")
-            with (
-                patch("defenseclaw.commands.cmd_doctor.os.name", "nt"),
-                patch(
-                    "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                    side_effect=doctor_gateway._pid_record_integrity_error,
-                ),
-                patch(
-                    "defenseclaw.file_permissions._windows_acl_snapshot",
-                    return_value=("S-1-5-21-current", False, []),
-                ),
-                patch(
-                    "defenseclaw.file_permissions._windows_current_user_sid",
-                    return_value="",
-                ),
-            ):
-                status, body, detail = _omnigent_custody_read(
-                    evidence,
-                    role="omnigent-windows-record",
-                    max_bytes=64,
-                )
-
-        self.assertEqual(status, "unavailable")
-        self.assertIsNone(body)
-        self.assertIn("path-sha256=", detail)
-        self.assertNotIn("private-sid-error", detail)
-        self.assertNotIn("SID", detail)
-
-    def test_omnigent_windows_wrapped_acl_inspection_failures_are_unavailable(self) -> None:
-        problems = (
-            "PID file ancestor directory has unsafe ACLs (cannot read Windows ACL (synthetic ancestor query failure))",
-            "PID file ancestor directory has unsafe ACLs (current user SID could not be resolved)",
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = os.path.join(tmp, "private-ancestor-error.json")
-            Path(evidence).write_bytes(b"must not be returned")
-            for problem in problems:
-                with (
-                    self.subTest(problem=problem),
-                    patch("defenseclaw.commands.cmd_doctor.os.name", "nt"),
-                    patch(
-                        "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                        return_value=("denied", problem),
-                    ),
-                ):
-                    status, body, detail = _omnigent_custody_read(
-                        evidence,
-                        role="omnigent-windows-record",
-                        max_bytes=64,
-                    )
-
-                self.assertEqual(status, "unavailable")
-                self.assertIsNone(body)
-                self.assertIn("path-sha256=", detail)
-                self.assertNotIn("private-ancestor-error", detail)
-                self.assertNotIn("SID", detail)
-                self.assertNotIn("synthetic ancestor", detail)
-
-    def test_omnigent_custody_reader_keeps_unavailable_ancestor_distinct(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = os.path.join(tmp, "evidence.json")
-            Path(evidence).write_bytes(b"{}")
-            with patch(
-                "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                return_value=("unavailable", "synthetic UID-mapped ancestor"),
-            ):
-                status, body, detail = _omnigent_custody_read(
-                    evidence,
-                    role="omnigent-posix-evidence",
-                    max_bytes=64,
-                    root=tmp,
-                )
-
-        self.assertEqual(status, "unavailable")
-        self.assertIsNone(body)
-        self.assertIn("custody is unavailable", detail)
-        self.assertNotIn("malformed", detail)
-
-    def test_omnigent_backup_requires_private_windows_acl_but_artifact_is_integrity_only(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = os.path.join(tmp, "data")
-            os.makedirs(data_dir)
-            module = os.path.join(data_dir, "defenseclaw_omnigent_policy.py")
-            Path(module).write_bytes(b"POLICY_REGISTRY = []\ndefenseclaw_policy = None\n")
-            self._write_omnigent_backup(data_dir, "module", module)
-            backup_path = os.path.join(data_dir, "connector_backups", "omnigent", "module.json")
-            record = json.loads(Path(backup_path).read_text(encoding="utf-8"))
-            record["pristine_bytes"] = "private backup fixture bytes"
-            Path(backup_path).write_text(json.dumps(record), encoding="utf-8")
-            os.chmod(backup_path, 0o600)
-            read_only_ace = "ACL grants read access to untrusted SID S-1-5-11"
-            windows_os = MagicMock(wraps=os)
-            windows_os.name = "nt"
-
-            with (
-                patch("defenseclaw.commands.cmd_doctor.os", windows_os),
-                patch(
-                    "defenseclaw.commands.cmd_doctor.windows_acl_confidentiality_error",
-                    return_value=read_only_ace,
-                ) as private_acl,
-            ):
-                backup_detail = _omnigent_managed_artifact_drift(
-                    MagicMock(data_dir=data_dir),
-                    "module",
-                    module,
-                )
-                artifact_status, artifact_body, artifact_detail = _omnigent_custody_read(
-                    module,
-                    role="managed-module-artifact",
-                    max_bytes=1024,
-                    root=data_dir,
-                )
-
-        self.assertIn("private custody is unsafe", backup_detail)
-        self.assertIn("path-sha256=", backup_detail)
-        self.assertNotIn("module.json", backup_detail)
-        self.assertEqual(artifact_status, "ok")
-        self.assertEqual(artifact_body, b"POLICY_REGISTRY = []\ndefenseclaw_policy = None\n")
-        self.assertEqual(artifact_detail, "")
-        private_acl.assert_called_once_with(backup_path)
-
-    def test_omnigent_darwin_acl_clean_write_grant_and_inspection_unavailable(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = os.path.join(tmp, "private-darwin-evidence.json")
-            Path(evidence).write_bytes(b"safe")
-            cases = (
-                (("ok", ""), "ok", b"safe"),
-                (("denied", "extended ACL grants additional write access"), "unsafe", None),
-                (("denied", "extended ACL could not be inspected"), "unavailable", None),
-                (
-                    (
-                        "denied",
-                        "PID file ancestor directory has unsafe ACLs (extended ACL could not be interpreted)",
-                    ),
-                    "unavailable",
-                    None,
-                ),
-            )
-            for custody_result, expected_status, expected_body in cases:
-                with (
-                    self.subTest(custody_result=custody_result),
-                    patch("defenseclaw.commands.cmd_doctor.sys.platform", "darwin"),
-                    patch(
-                        "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                        return_value=custody_result,
-                    ),
-                ):
-                    status, body, detail = _omnigent_custody_read(
-                        evidence,
-                        role="omnigent-darwin-record",
-                        max_bytes=64,
-                    )
-
-                self.assertEqual(status, expected_status)
-                self.assertEqual(body, expected_body)
-                if expected_status != "ok":
-                    self.assertIn(f"custody is {expected_status}", detail)
-                    self.assertNotIn("private-darwin", detail)
-
-    def test_omnigent_custody_reader_rejects_darwin_acl_on_leaf_and_ancestor(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            evidence = os.path.join(tmp, "evidence.json")
-            Path(evidence).write_bytes(b"safe")
-            actual_info = os.lstat(evidence)
-            leaf_info = SimpleNamespace(
-                st_mode=stat.S_IFREG | 0o600,
-                st_uid=getattr(actual_info, "st_uid", 0),
-            )
-            directory_info = SimpleNamespace(
-                st_mode=stat.S_IFDIR | 0o700,
-                st_uid=leaf_info.st_uid,
-            )
-
-            def fake_lstat(path, *args, **kwargs):
-                del args, kwargs
-                return (
-                    leaf_info
-                    if os.path.normcase(os.path.abspath(path)) == os.path.normcase(evidence)
-                    else directory_info
-                )
-
-            for unsafe_index in (0, 1):
-                checked: list[str] = []
-
-                def acl_problem(path):
-                    checked.append(os.fspath(path))
-                    return "extended ACL grants write access" if len(checked) - 1 == unsafe_index else None
-
-                with (
-                    self.subTest(unsafe_index=unsafe_index),
-                    patch(
-                        "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                        side_effect=doctor_gateway._pid_record_integrity_error,
-                    ),
-                    patch.object(doctor_gateway.os, "name", "posix"),
-                    patch.object(doctor_gateway.sys, "platform", "darwin"),
-                    patch.object(doctor_gateway.os, "lstat", side_effect=fake_lstat),
-                    patch("defenseclaw.file_permissions.darwin_acl_write_error", side_effect=acl_problem),
-                ):
-                    status, body, detail = _omnigent_custody_read(
-                        evidence,
-                        role="omnigent-darwin-evidence",
-                        max_bytes=64,
-                    )
-
-                self.assertEqual(status, "unsafe")
-                self.assertIsNone(body)
-                self.assertIn("custody is unsafe", detail)
-                self.assertEqual(len(checked), unsafe_index + 1)
-
-    def test_omnigent_custody_reader_rejects_reparse_race_oversize_and_escape(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            root = os.path.join(tmp, "trusted")
-            os.makedirs(root)
-            evidence = os.path.join(root, "private-evidence.json")
-            Path(evidence).write_bytes(b"12345")
-            outside = os.path.join(tmp, "private-outside.json")
-            Path(outside).write_bytes(b"{}")
-
-            with patch("defenseclaw.commands.cmd_doctor.is_link_or_reparse", return_value=True):
-                leaf_reparse, _, _ = _omnigent_custody_read(
-                    evidence,
-                    role="omnigent-evidence",
-                    max_bytes=64,
-                    root=root,
-                )
-            with (
-                patch(
-                    "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                    return_value=("ok", ""),
-                ),
-                patch(
-                    "defenseclaw.commands.cmd_doctor.read_regular_file_no_follow",
-                    side_effect=UnsafePathError(
-                        "synthetic ancestor reparse",
-                        code=UNSAFE_PATH_SYMLINK_OR_REPARSE,
-                    ),
-                ),
-            ):
-                ancestor_reparse, _, ancestor_detail = _omnigent_custody_read(
-                    evidence,
-                    role="omnigent-evidence",
-                    max_bytes=64,
-                    root=root,
-                )
-            with patch(
-                "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                return_value=("ok", ""),
-            ):
-                oversized, _, oversized_detail = _omnigent_custody_read(
-                    evidence,
-                    role="omnigent-evidence",
-                    max_bytes=4,
-                    root=root,
-                )
-                with patch(
-                    "defenseclaw.commands.cmd_doctor.read_regular_file_no_follow",
-                    side_effect=UnsafePathError(
-                        "synthetic read-time replacement",
-                        code=UNSAFE_PATH_CHANGED,
-                    ),
-                ):
-                    replaced, _, replaced_detail = _omnigent_custody_read(
-                        evidence,
-                        role="omnigent-evidence",
-                        max_bytes=64,
-                        root=root,
-                    )
-            escaped, _, escaped_detail = _omnigent_custody_read(
-                outside,
-                role="omnigent-evidence",
-                max_bytes=64,
-                root=root,
-            )
-
-        self.assertEqual(
-            (leaf_reparse, ancestor_reparse, oversized, replaced, escaped),
-            ("unsafe", "unsafe", "invalid", "unavailable", "unsafe"),
-        )
-        self.assertIn("stable regular file", ancestor_detail)
-        self.assertIn("byte limit", oversized_detail)
-        self.assertIn("changed while", replaced_detail)
-        self.assertIn("trusted root", escaped_detail)
-        for detail in (ancestor_detail, oversized_detail, replaced_detail, escaped_detail):
-            self.assertNotIn("private-", detail)
-
-    def test_omnigent_local_server_pid_uses_custody_reader(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "local_server.pid").write_text("4242\n18970\n", encoding="utf-8")
-            with (
-                patch.dict(os.environ, {"OMNIGENT_DATA_DIR": tmp}),
-                patch("defenseclaw.process_liveness.pid_alive", return_value=True),
-            ):
-                pid, detail = _omnigent_local_server_pid()
-
-        self.assertEqual(pid, 4242)
-        self.assertIn("port=18970", detail)
-
-    def test_omnigent_unsafe_lock_does_not_fall_back(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = self._cfg(tmp, "omnigent", [])
-            with patch(
-                "defenseclaw.commands.cmd_doctor._pid_record_integrity_error",
-                return_value=("denied", "synthetic unsafe lock DACL"),
-            ):
-                r = _DoctorResult()
-                _check_omnigent_policy_health(cfg, r)
-
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("omnigent-lock[path-sha256=", r.checks[-1]["detail"])
-        self.assertIn("custody is unsafe", r.checks[-1]["detail"])
-
-    def test_omnigent_target_escapes_are_redacted(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            data_dir = os.path.join(tmp, "data")
-            os.makedirs(data_dir)
-            outside = os.path.join(tmp, "private-outside-module.py")
-            Path(outside).write_text("POLICY_REGISTRY = []\ndefenseclaw_policy = None\n", encoding="utf-8")
-            self._write_omnigent_backup(data_dir, "module", outside)
-            detail = _omnigent_managed_artifact_drift(MagicMock(data_dir=data_dir), "module", outside)
-
-        self.assertIn("escapes DefenseClaw data custody", detail)
-        self.assertIn("path-sha256=", detail)
-        self.assertNotIn("private-outside-module", detail)
-
-    def test_omnigent_pth_import_escape_is_redacted(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = os.path.join(tmp, "config.yaml")
-            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
-            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
-            Path(config).write_text(
-                "policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n",
-                encoding="utf-8",
-            )
-            Path(module).write_text("POLICY_REGISTRY = []\ndefenseclaw_policy = None\n", encoding="utf-8")
-            Path(pth).write_text(os.path.join(tmp, "private-import-target") + "\n", encoding="utf-8")
-            for logical, path in (("config", config), ("module", module), ("pth", pth)):
-                self._write_omnigent_backup(tmp, logical, path)
-            cfg = self._cfg(tmp, "omnigent", [config])
-            Path(tmp, "hook_contract_lock.json").write_text(
-                json.dumps(
-                    {
-                        "connectors": {
-                            "omnigent": {
-                                "locations": {
-                                    "hook_config_paths": [config],
-                                    "hook_script_paths": [module, pth],
-                                }
-                            }
-                        }
-                    }
-                ),
-                encoding="utf-8",
-            )
-            r = _DoctorResult()
-
-            _check_omnigent_policy_health(cfg, r)
-
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("points outside the managed module", r.checks[-1]["detail"])
-        self.assertNotIn("private-import-target", r.checks[-1]["detail"])
-
-    def test_non_omnigent_lock_reader_is_preserved(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            hook = os.path.join(tmp, "config.yaml")
-            Path(hook).write_text("hooks: []\n", encoding="utf-8")
-            cfg = self._cfg(tmp, "hermes", [hook])
-            with patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_lock_locations",
-                side_effect=AssertionError("OmniGent reader must stay connector-scoped"),
-            ):
-                paths = _hook_health_paths_from_lock(cfg, "hermes")
-
-        self.assertEqual(paths, [hook])
-
-    def test_omnigent_requires_config_module_and_import_shim(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = os.path.join(tmp, "config.yaml")
-            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
-            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
-            with open(config, "w", encoding="utf-8") as fh:
-                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-            with open(module, "w", encoding="utf-8") as fh:
-                fh.write("def defenseclaw_policy(event): return {'result': 'ALLOW'}\nPOLICY_REGISTRY = []\n")
-            with open(pth, "w", encoding="utf-8") as fh:
-                fh.write(tmp + "\n")
-            for logical, path in (("config", config), ("module", module), ("pth", pth)):
-                self._write_omnigent_backup(tmp, logical, path)
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "connectors": {
-                            "omnigent": {
-                                "locations": {
-                                    "hook_config_paths": [config],
-                                    "hook_script_paths": [module, pth],
-                                }
-                            }
-                        }
-                    },
-                    fh,
-                )
-            r = _DoctorResult()
-            with patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_live_config_evidence",
-                return_value=("pass", f"live effective config verified through --config={config}"),
-            ):
-                _check_omnigent_policy_health(cfg, r)
-            self.assertEqual(r.checks[-1]["status"], "pass")
-            with (
-                patch(
-                    "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
-                    return_value=("fail", "live server policy does not match"),
-                ),
-                patch(
-                    "defenseclaw.commands.cmd_doctor._omnigent_tmux_requirement",
-                    return_value="; managed terminals require tmux 3.3 or newer",
-                ),
-            ):
-                _check_omnigent_policy_health(cfg, r)
-            self.assertEqual(r.checks[-1]["status"], "fail")
-            self.assertIn("tmux 3.3", r.checks[-1]["detail"])
-
-    def test_omnigent_repair_command_preserves_action_closed_hilt_posture(self) -> None:
-        cfg = MagicMock()
-        cfg.guardrail.effective_mode.return_value = "action"
-        cfg.guardrail.effective_hook_fail_mode.return_value = "closed"
-        cfg.guardrail.effective_hilt.return_value = MagicMock(enabled=True, min_severity="LOW")
-
-        command = _omnigent_setup_repair_command(cfg)
-
-        self.assertEqual(
-            command,
-            "defenseclaw setup omnigent --mode action --fail-mode closed "
-            "--human-approval --hilt-min-severity LOW --yes --restart",
-        )
-
-    def test_omnigent_repair_command_preserves_observe_open_without_hilt(self) -> None:
-        cfg = MagicMock()
-        cfg.guardrail.effective_mode.return_value = "observe"
-        cfg.guardrail.effective_hook_fail_mode.return_value = "open"
-        cfg.guardrail.effective_hilt.return_value = MagicMock(enabled=False, min_severity="HIGH")
-
-        command = _omnigent_setup_repair_command(cfg)
-
-        self.assertEqual(
-            command,
-            "defenseclaw setup omnigent --mode observe --fail-mode open "
-            "--no-human-approval --yes --restart",
-        )
-
-    def test_omnigent_repair_command_does_not_weaken_unresolved_posture(self) -> None:
-        cfg = MagicMock()
-        cfg.guardrail.effective_mode.return_value = "malformed"
-        cfg.guardrail.effective_hook_fail_mode.side_effect = ValueError("invalid fail mode")
-        cfg.guardrail.effective_hilt.side_effect = ValueError("invalid HILT")
-
-        command = _omnigent_setup_repair_command(cfg)
-
-        self.assertEqual(
-            command,
-            "defenseclaw setup omnigent --mode action --fail-mode closed --yes --restart",
-        )
-
-    def test_omnigent_drift_remediation_uses_posture_preserving_command(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            artifact = os.path.join(tmp, "config.yaml")
-            with open(artifact, "w", encoding="utf-8") as fh:
-                fh.write("original\n")
-            self._write_omnigent_backup(tmp, "config", artifact)
-            with open(artifact, "w", encoding="utf-8") as fh:
-                fh.write("drifted\n")
-
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            cfg.guardrail.effective_mode.return_value = "action"
-            cfg.guardrail.effective_hook_fail_mode.return_value = "closed"
-            cfg.guardrail.effective_hilt.return_value = MagicMock(enabled=True, min_severity="HIGH")
-
-            detail = _omnigent_managed_artifact_drift(cfg, "config", artifact)
-
-        self.assertIn(
-            "`defenseclaw setup omnigent --mode action --fail-mode closed "
-            "--human-approval --hilt-min-severity HIGH --yes --restart`",
-            detail,
-        )
-        self.assertIn("without changing enforcement posture", detail)
-
-    def test_omnigent_config_rewritten_by_omnigent_is_not_drift(self) -> None:
-        managed = (
-            "policy_modules: [defenseclaw_omnigent_policy]\n"
-            "policies:\n"
-            "  defenseclaw_guardrail: {type: function, handler: defenseclaw_omnigent_policy.defenseclaw_policy}\n"
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            artifact = os.path.join(tmp, "config.yaml")
-            with open(artifact, "w", encoding="utf-8") as fh:
-                fh.write(managed)
-            self._write_omnigent_backup(tmp, "config", artifact)
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with open(artifact, "w", encoding="utf-8") as fh:
-                fh.write("hosts: {local: {port: 62998}}\n" + managed)
-            self.assertEqual(_omnigent_managed_artifact_drift(cfg, "config", artifact), "")
-            with open(artifact, "w", encoding="utf-8") as fh:
-                fh.write(managed.replace("defenseclaw_policy}", "other}"))
-            self.assertIn("drift detected", _omnigent_managed_artifact_drift(cfg, "config", artifact))
-
-    def test_omnigent_missing_import_shim_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = os.path.join(tmp, "config.yaml")
-            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
-            with open(config, "w", encoding="utf-8") as fh:
-                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-            with open(module, "w", encoding="utf-8") as fh:
-                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "connectors": {
-                            "omnigent": {
-                                "locations": {
-                                    "hook_config_paths": [config],
-                                    "hook_script_paths": [module],
-                                }
-                            }
-                        }
-                    },
-                    fh,
-                )
-            r = _DoctorResult()
-            _check_omnigent_policy_health(cfg, r)
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn(".pth", r.checks[-1]["detail"])
-
-    def test_omnigent_missing_policy_entry_fails(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = os.path.join(tmp, "config.yaml")
-            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
-            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
-            with open(config, "w", encoding="utf-8") as fh:
-                fh.write("policy_modules: [defenseclaw_omnigent_policy]\n")
-            with open(module, "w", encoding="utf-8") as fh:
-                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
-            with open(pth, "w", encoding="utf-8") as fh:
-                fh.write(tmp + "\n")
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "connectors": {
-                            "omnigent": {
-                                "locations": {
-                                    "hook_config_paths": [config],
-                                    "hook_script_paths": [module, pth],
-                                }
-                            }
-                        }
-                    },
-                    fh,
-                )
-            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
-                r = _DoctorResult()
-                _check_omnigent_policy_health(cfg, r)
-
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("policy registration", r.checks[-1]["detail"])
-
-    def test_omnigent_uses_managed_backups_when_lock_is_missing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config_home = os.path.join(tmp, "omnigent-config")
-            os.makedirs(config_home)
-            config = os.path.join(config_home, "config.yaml")
-            module_dir = os.path.join(tmp, "hooks")
-            os.makedirs(module_dir)
-            module = os.path.join(module_dir, "defenseclaw_omnigent_policy.py")
-            site_packages = os.path.join(tmp, "site-packages")
-            os.makedirs(site_packages)
-            pth = os.path.join(site_packages, "defenseclaw_omnigent.pth")
-            with open(config, "w", encoding="utf-8") as fh:
-                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-            with open(module, "w", encoding="utf-8") as fh:
-                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
-            with open(pth, "w", encoding="utf-8") as fh:
-                fh.write(module_dir + "\n")
-            backup_dir = os.path.join(tmp, "connector_backups", "omnigent")
-            os.makedirs(backup_dir)
-            for logical, path in (("config", config), ("module", module), ("pth", pth)):
-                self._write_omnigent_backup(tmp, logical, path)
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
-                r = _DoctorResult()
-                with patch(
-                    "defenseclaw.commands.cmd_doctor._omnigent_live_config_evidence",
-                    return_value=("pass", f"live effective config verified through --config={config}"),
-                ):
-                    _check_omnigent_policy_health(cfg, r)
-
-        self.assertEqual(r.checks[-1]["status"], "pass")
-
-    def test_omnigent_valid_artifacts_without_live_server_warn(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = os.path.join(tmp, "config.yaml")
-            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
-            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
-            with open(config, "w", encoding="utf-8") as fh:
-                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-            with open(module, "w", encoding="utf-8") as fh:
-                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
-            with open(pth, "w", encoding="utf-8") as fh:
-                fh.write(tmp + "\n")
-            for logical, path in (("config", config), ("module", module), ("pth", pth)):
-                self._write_omnigent_backup(tmp, logical, path)
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
-                json.dump({"connectors": {"omnigent": {"locations": {
-                    "hook_config_paths": [config],
-                    "hook_script_paths": [module, pth],
-                }}}}, fh)
-            r = _DoctorResult()
-            with patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                return_value=(0, "no recorded server"),
-            ):
-                _check_omnigent_policy_health(cfg, r)
-
-        self.assertEqual(r.checks[-1]["status"], "warn")
-        self.assertIn("unverified", r.checks[-1]["detail"])
-
-    def test_omnigent_live_config_evidence_matches_explicit_argument(self) -> None:
-        config = os.path.abspath("managed-omnigent-config.yaml")
-        with (
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                return_value=(4242, "recorded live OmniGent server"),
-            ),
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                # ``omnigent run`` starts its server through the module CLI.
-                return_value=("/usr/bin/python3", "-P", "-m", "omnigent.cli", "server", "--config", config),
-            ),
-        ):
-            status, detail = _omnigent_live_config_evidence(config)
-
-        self.assertEqual(status, "bound")
-        self.assertIn("--config", detail)
-        self.assertIn("loaded policy generation/module/config identity", detail)
-        self.assertIn("action/fail-closed enforcement is unverified", detail)
-
-    def test_omnigent_live_config_evidence_fails_on_mismatch(self) -> None:
-        managed = os.path.abspath("managed-omnigent-config.yaml")
-        other = os.path.abspath("other-omnigent-config.yaml")
-        with (
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                return_value=(4242, "recorded live OmniGent server"),
-            ),
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=("omnigent.exe", "server", "--config", other),
-            ),
-        ):
-            status, detail = _omnigent_live_config_evidence(managed)
-
-        self.assertEqual(status, "fail")
-        self.assertIn("not managed", detail)
-
-    def test_omnigent_live_config_evidence_expands_user_path(self) -> None:
-        managed = os.path.join(os.path.expanduser("~"), "managed-omnigent-config.yaml")
-        with (
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                return_value=(4242, "recorded live OmniGent server"),
-            ),
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=("omnigent.exe", "server", "--config", "~/managed-omnigent-config.yaml"),
-            ),
-        ):
-            status, detail = _omnigent_live_config_evidence(managed)
-
-        self.assertEqual(status, "bound")
-        self.assertIn("--config", detail)
-        self.assertIn("pending reload/restart", detail)
-
-    def test_omnigent_live_config_evidence_warns_without_source(self) -> None:
-        managed = os.path.abspath("managed-omnigent-config.yaml")
-        with (
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                return_value=(4242, "recorded live OmniGent server"),
-            ),
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=("omnigent.exe", "server", "--host", "127.0.0.1"),
-            ),
-            patch("defenseclaw.commands.cmd_doctor._read_process_env_var", return_value=""),
-        ):
-            status, detail = _omnigent_live_config_evidence(managed)
-
-        self.assertEqual(status, "warn")
-        self.assertIn("empty/default configuration", detail)
-
-    def test_omnigent_live_config_evidence_warns_when_command_line_is_unreadable(self) -> None:
-        managed = os.path.abspath("managed-omnigent-config.yaml")
-        with (
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                return_value=(4242, "recorded live OmniGent server"),
-            ),
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=None,
-            ),
-        ):
-            status, detail = _omnigent_live_config_evidence(managed)
-
-        self.assertEqual(status, "warn")
-        self.assertIn("command line is unreadable", detail)
-        self.assertIn("effective policy config is unverified", detail)
-
-    def test_omnigent_runtime_readiness_preserves_stale_record_warning(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = os.path.join(tmp, "config.yaml")
-            with open(config, "w", encoding="utf-8") as fh:
-                fh.write("policies: {}\n")
-            cfg = MagicMock()
-            with (
-                patch(
-                    "defenseclaw.commands.cmd_doctor._omnigent_lock_locations",
-                    return_value=({"hook_config_paths": [config]}, ""),
-                ),
-                patch(
-                    "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                    return_value=(0, "OmniGent server record is stale: synthetic-local_server.pid"),
-                ),
-            ):
-                status, detail = _omnigent_runtime_readiness(cfg)
-
-        self.assertEqual(status, "warn")
-        self.assertIn("server record is stale", detail)
-        self.assertIn("effective policy config is unverified", detail)
-
-    def test_omnigent_live_config_evidence_accepts_process_environment(self) -> None:
-        managed = os.path.abspath("managed-omnigent-config.yaml")
-        with (
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                return_value=(4242, "recorded live OmniGent server"),
-            ),
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=("python", "-m", "omnigent", "server"),
-            ),
-            patch("defenseclaw.commands.cmd_doctor.sys.platform", "linux"),
-            patch("defenseclaw.commands.cmd_doctor._read_process_env_var", return_value=managed),
-        ):
-            status, detail = _omnigent_live_config_evidence(managed)
-
-        self.assertEqual(status, "bound")
-        self.assertIn("OMNIGENT_CONFIG", detail)
-        self.assertIn("loaded policy generation/module/config identity", detail)
-
-    def test_omnigent_live_config_evidence_warns_for_relative_source(self) -> None:
-        managed = os.path.abspath("managed-omnigent-config.yaml")
-        with (
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_local_server_pid",
-                return_value=(4242, "recorded live OmniGent server"),
-            ),
-            patch(
-                "defenseclaw.commands.cmd_doctor._omnigent_process_argv",
-                return_value=("omnigent.exe", "server", "--config", "relative-config.yaml"),
-            ),
-        ):
-            status, detail = _omnigent_live_config_evidence(managed)
-
-        self.assertEqual(status, "warn")
-        self.assertIn("working directory", detail)
-
-    def test_omnigent_policy_module_tamper_fails_digest_check(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = os.path.join(tmp, "config.yaml")
-            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
-            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
-            with open(config, "w", encoding="utf-8") as fh:
-                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-            with open(module, "w", encoding="utf-8") as fh:
-                fh.write("def defenseclaw_policy(event): return {'result': 'ALLOW'}\nPOLICY_REGISTRY = []\n")
-            with open(pth, "w", encoding="utf-8") as fh:
-                fh.write(tmp + "\n")
-            for logical, path in (("config", config), ("module", module), ("pth", pth)):
-                self._write_omnigent_backup(tmp, logical, path)
-            with open(module, "a", encoding="utf-8") as fh:
-                fh.write("# tampered\n")
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
-                json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module, pth],
-                    }}}},
-                    fh,
-                )
-            r = _DoctorResult()
-            _check_omnigent_policy_health(cfg, r)
-
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("module drift detected", r.checks[-1]["detail"])
-
-    def test_omnigent_malformed_utf8_metadata_fails_cleanly(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            with open(os.path.join(tmp, "config.yaml"), "w", encoding="utf-8") as fh:
-                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-            with open(os.path.join(tmp, "hook_contract_lock.json"), "wb") as fh:
-                fh.write(b"\xff\xfe\x00")
-            backup_dir = os.path.join(tmp, "connector_backups", "omnigent")
-            os.makedirs(backup_dir)
-            with open(os.path.join(backup_dir, "module.json"), "wb") as fh:
-                fh.write(b"\xff\xfe\x00")
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
-                r = _DoctorResult()
-                _check_omnigent_policy_health(cfg, r)
-
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("policy module and .pth", r.checks[-1]["detail"])
-
-    def test_omnigent_malformed_utf8_import_shim_fails_cleanly(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            config = os.path.join(tmp, "config.yaml")
-            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
-            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
-            with open(config, "w", encoding="utf-8") as fh:
-                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
-            with open(module, "w", encoding="utf-8") as fh:
-                fh.write("defenseclaw_policy = None\nPOLICY_REGISTRY = []\n")
-            with open(pth, "wb") as fh:
-                fh.write(b"\xff\xfe\x00")
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
-                json.dump(
-                    {
-                        "connectors": {
-                            "omnigent": {
-                                "locations": {
-                                    "hook_config_paths": [config],
-                                    "hook_script_paths": [module, pth],
-                                }
-                            }
-                        }
-                    },
-                    fh,
-                )
-            r = _DoctorResult()
-            _check_omnigent_policy_health(cfg, r)
-
-        self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn(".pth import shim", r.checks[-1]["detail"])
-
-    def test_dispatch_routes_omnigent_policy_health(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            cfg = MagicMock()
-            cfg.data_dir = tmp
-            with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
-                r = _DoctorResult()
-                _check_connector_hooks(cfg, "omnigent", r)
-
-        self.assertTrue(r.checks)
-        self.assertEqual(r.checks[-1]["label"], "OmniGent policy")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def test_dispatch_routes_all_active_generic_connectors(self) -> None:
         """``_check_connector_hooks`` must dispatch each generic connector
@@ -3897,23 +2975,12 @@ class TestConnectorSkippedAtStart(unittest.TestCase):
     def test_skipped_connector_warns_with_setup_command(self):
         from defenseclaw.commands.cmd_doctor import _check_connector_skipped_at_start
 
-        health = {"guardrail": {"state": "running", "details": {"connectors_not_started": ["openhands"]}}}
+        health = {"guardrail": {"state": "running", "details": {"connectors_not_started": ["cursor"]}}}
         r = _DoctorResult()
-        _check_connector_skipped_at_start("openhands", health, r)
+        _check_connector_skipped_at_start("cursor", health, r)
         _check_connector_skipped_at_start("codex", health, r)
         self.assertEqual(len(r.checks), 1)
         row = r.checks[0]
         self.assertEqual((row["status"], row["label"]), ("warn", "Connector setup"))
-        self.assertIn("OpenHands was skipped", row["detail"])
-        self.assertEqual(row["remediation"], "defenseclaw setup openhands")
-
-
-
-def test_omnigent_tmux_requirement_reports_old_managed_terminal_runtime() -> None:
-    from defenseclaw.commands import cmd_doctor
-    with (
-        patch.object(cmd_doctor.os, "name", "posix"),
-        patch.object(cmd_doctor.shutil, "which", return_value="/usr/bin/tmux"),
-        patch.object(cmd_doctor.subprocess, "run", return_value=SimpleNamespace(stdout="tmux 3.2a")),
-    ):
-        assert "tmux 3.3" in cmd_doctor._omnigent_tmux_requirement()
+        self.assertIn("Cursor was skipped", row["detail"])
+        self.assertEqual(row["remediation"], "defenseclaw setup cursor")

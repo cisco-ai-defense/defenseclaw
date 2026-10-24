@@ -1,0 +1,10 @@
+{
+  "title": "Install",
+  "pages": [
+    "windows",
+    "linux",
+    "macos",
+    "secure-client",
+    "reference"
+  ]
+}

@@ -22,38 +22,20 @@ func (a *APIServer) serveUnenrolledRefusals(ctx context.Context) {
 	if _, ok := standaloneManagedServiceAccount(); !ok {
 		return
 	}
-	// Rows are written off the pipe goroutines: naming a domain account can
-	// wait on a domain controller, and a pipe instance must not wait with it.
-	rows := make(chan unenrolledRefusalRow, unenrolledRefusalMaxEntries)
-	go func() {
-		for {
+	runUnenrolledRefusalAudit(ctx, func(ctx context.Context, auditor *unenrolledRefusalAuditor) {
+		logged := false
+		for ctx.Err() == nil {
+			err := refusalpipe.Serve(ctx, auditor.record)
+			if err != nil && !logged {
+				// Another process holding the name, or the previous API run
+				// still closing its instances: retry without repeating the line.
+				fmt.Fprintf(os.Stderr, "[sidecar-api] unenrolled-account refusal pipe unavailable, retrying: %v\n", err)
+				logged = true
+			}
 			select {
 			case <-ctx.Done():
-				return
-			case row := <-rows:
-				a.auditUnenrolledRefusal(ctx, row)
+			case <-time.After(5 * time.Second):
 			}
 		}
-	}()
-	auditor := newUnenrolledRefusalAuditor(func(row unenrolledRefusalRow) {
-		select {
-		case rows <- row:
-		default:
-		}
-	})
-	go auditor.run(ctx)
-	logged := false
-	for ctx.Err() == nil {
-		err := refusalpipe.Serve(ctx, auditor.record)
-		if err != nil && !logged {
-			// Another process holding the name, or the previous API run
-			// still closing its instances: retry without repeating the line.
-			fmt.Fprintf(os.Stderr, "[sidecar-api] unenrolled-account refusal pipe unavailable, retrying: %v\n", err)
-			logged = true
-		}
-		select {
-		case <-ctx.Done():
-		case <-time.After(5 * time.Second):
-		}
-	}
+	}, a.auditUnenrolledRefusal)
 }

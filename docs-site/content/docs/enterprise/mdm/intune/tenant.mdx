@@ -1,0 +1,150 @@
+---
+title: Prepare your Intune tenant
+description: What to set up in Microsoft Intune and Microsoft Entra ID before you deploy DefenseClaw with the Intune pages, and how identity-based guardrail profiles work on Intune-managed devices.
+keywords:
+  - DefenseClaw Intune tenant
+  - Intune prerequisites
+  - Intune automatic enrollment
+  - Apple MDM push certificate
+  - Microsoft Graph Intune
+---
+
+This page covers what has to be true in the tenant before the Intune recipes work,
+and a helper that checks it and does the repeatable parts with Microsoft Graph.
+DefenseClaw never calls Intune or Graph; the helper is for you, the administrator.
+
+<Callout type="warn" title="Validation status">
+Run on a test tenant in the PR #1304 pass: licences, users and groups, automatic
+enrollment, the Apple push certificate, enrolled Windows 11, Ubuntu 24.04 Desktop and
+macOS devices, every helper command with throwaway objects, and delivery of
+DefenseClaw to all three OSes.
+</Callout>
+
+## What to prepare
+
+| Step | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| [Licences](#1-licences) | Intune, Entra ID P1 or P2, Windows Enterprise for Remediations | Intune | Intune |
+| [Admin center settings](#2-admin-center-settings-that-need-a-person) | MDM user scope, Windows Hello default | Apple push certificate | None |
+| [Enroll devices](#3-enroll-devices) | Join to Entra ID | Company Portal | Intune app and Microsoft Edge on a desktop |
+| [Device groups](#4-device-groups) | One group | One group | One group |
+| [Assign DefenseClaw](#5-assign-the-package-and-the-health-check) | Win32 app, Remediations | Shell script | Platform script |
+| [Identity](#identity-through-intune) | Entra accounts | Local accounts | Local accounts |
+
+## 1. Licences
+
+- **Intune** for each user who enrolls a device.
+- **Entra ID P1 or P2**, which Microsoft documents for automatic MDM enrollment.
+- **Windows Enterprise E3 or E5, Education A3 or A5, or Windows VDA** for Remediations
+  ([Intune on Windows](/docs/enterprise/mdm/intune/windows#before-you-start)).
+- A usage location on each user before you can assign a licence.
+
+`intune_tenant.py check` reports which of these the tenant has.
+
+## 2. Admin center settings that need a person
+
+Set these as an Intune administrator. Microsoft Graph refuses an app-only token for
+the first two.
+
+1. **MDM user scope.** **Devices** > **Windows** > **Enrollment** > **Automatic
+   Enrollment**: set **Microsoft Intune MDM user scope** to **All**, or **Some** and a
+   group.
+2. **Windows Hello for Business default.** Decide it in **Devices** > **Windows** >
+   **Enrollment**. **Disabled** stops new devices from asking for a PIN.
+3. **Apple push certificate (macOS only).** In **Devices** > **macOS** > **Enrollment**
+   > **Apple MDM Push certificate**, download the signing request, create the
+   certificate at `identity.apple.com/pushcert`, and upload the `.pem`. It lasts a
+   year; renew it with the same Apple ID or every Mac must enroll again.
+
+## 3. Enroll devices
+
+- **Windows 10 or 11.** **Settings** > **Accounts** > **Access work or school** >
+  **Join this device to Microsoft Entra ID**. Intune cannot enroll Windows Server.
+- **Linux.** On Ubuntu 24.04 Desktop (GNOME), install Microsoft Edge and the Intune
+  app from `packages.microsoft.com`, then register the device. It needs the desktop
+  session; accounts stay local.
+- **macOS.** Enroll with Company Portal after the push certificate exists, and
+  approve the MDM profile in System Settings.
+
+## 4. Device groups
+
+Assign apps and scripts to one group per OS. Every helper command that changes the
+tenant prints a plan until you add `--apply`.
+
+```bash
+python3 intune_tenant.py groups --name defenseclaw-windows --name defenseclaw-macos --name defenseclaw-linux
+python3 intune_tenant.py groups --name defenseclaw-windows --name defenseclaw-macos --name defenseclaw-linux --apply
+python3 intune_tenant.py groups --add-device PC-0042:defenseclaw-windows --apply
+```
+
+```text
+[plan] group defenseclaw-windows: would create a static security group
+[plan] group defenseclaw-macos: would create a static security group
+[plan] group defenseclaw-linux: would create a static security group
+Nothing was changed. Run again with --apply to make these changes.
+```
+
+## 5. Assign the package and the health check
+
+The helper does not upload packages: build and upload the Win32 app as
+[Intune on Windows](/docs/enterprise/mdm/intune/windows) describes. Then assign it and
+add the Remediations package. Run these from `packaging/mdm/intune/tenant`:
+
+```bash
+python3 intune_tenant.py assign-app --app "DefenseClaw Enterprise" --group defenseclaw-windows --apply
+python3 intune_tenant.py remediation --group defenseclaw-windows --daily-at 02:00 --apply
+python3 intune_tenant.py macos-script --name "DefenseClaw Enterprise" --file ../../macos/defenseclaw-enterprise.sh --group defenseclaw-macos --apply
+```
+
+`assign-app` assigns an uploaded app by its exact display name (intent `required` by
+default). `remove-assignment` removes it. `remediation` creates the Remediations
+package and a daily schedule. `macos-script` creates the macOS shell script; fill in
+the wrapper's settings block first ([Intune on macOS](/docs/enterprise/mdm/intune/macos)).
+If the helper reports `detection only: the tenant stored runRemediationScript=false`,
+enable remediation on the assignment in the admin center. The Linux platform script is
+created in the admin center ([Intune on Linux](/docs/enterprise/mdm/intune/linux)).
+
+## 6. Check the result
+
+```bash
+python3 intune_tenant.py check --platform windows --group defenseclaw-windows
+```
+
+`check` exits 1 when a check fails. A trimmed run against the test tenant:
+
+```text
+INFO  tenant                              Contoso
+PASS  MDM authority                       intune
+PASS  Intune licence                      found
+PASS  Entra ID P1 or P2                   AAD_PREMIUM, AAD_PREMIUM_P2
+PASS  Windows Enterprise (Remediations)   found
+WARN  MDM user scope                      cannot be read with this token (401 AccessDenied: Unsupported app-only call.). ...
+PASS  group defenseclaw-windows           1 member(s)
+```
+
+`devices --noncompliant` and `status --app ... --remediation ...` read device and
+install state. Credentials, Graph permissions, every command and a troubleshooting
+table are in the [tenant reference](/docs/enterprise/mdm/intune/tenant-reference).
+
+## Identity through Intune
+
+DefenseClaw reads the account on the device, so what it sees depends on how users
+sign in, not on Intune. Guardrail profiles (`guardrail.profiles`,
+`profile_assignments`) ship in the config you deliver and apply to the standalone
+profile only.
+
+| Device | Accounts | What DefenseClaw records | Groups for a profile |
+| --- | --- | --- | --- |
+| Windows, Entra-joined | Entra accounts | The same as any Entra-joined computer: directory `entra_id`, the SID, the UPN and the tenant ([the Entra guide](/docs/enterprise/identity/entra-id)) | An Entra group only after a built-in local group lists it |
+| Linux, enrolled with the Intune app | Local accounts. The Entra user is only the device's primary user | Directory `local`, source `nss_files`, verified assurance and no principal (observed live) | Local groups and accounts; no Entra groups. A root Intune script maintained a local group and its profile assignment matched live |
+| macOS, enrolled with Company Portal | Local accounts; with Platform SSO, local accounts linked to Entra users | Directory `local`; with Platform SSO and standalone enterprise, `entra_id` and the UPN for a registered account (observed live) | macOS groups only: Platform SSO gives no Entra groups (observed live; [Entra on macOS](/docs/enterprise/identity/entra-id#4-macos-platform-sso)) |
+
+For that Linux pattern, edit and upload `packaging/mdm/intune/linux/sync-local-group.sh`
+as a separate root platform script. Its `MEMBERS` setting is the complete local group
+membership list; the script refuses an existing group it did not create or a root
+administrator did not explicitly claim ([Linux setup](/docs/enterprise/mdm/intune/linux)).
+Intune enrollment alone does not synchronize Entra group membership to Linux. Example
+profiles, the Entra group mapping on Windows and a config-only change are in the
+[tenant reference](/docs/enterprise/mdm/intune/tenant-reference#guardrail-profiles-and-entra-groups).
+A device in bundle mode takes config changes only as signed bundles and refuses a
+plain config with `bundle_required`.

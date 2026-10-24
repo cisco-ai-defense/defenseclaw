@@ -1,0 +1,11 @@
+{
+  "title": "Observability",
+  "pages": [
+    "run-grafana-locally",
+    "send-to-an-otlp-collector",
+    "send-to-splunk",
+    "send-to-galileo",
+    "set-up-webhook-alerts",
+    "redact-before-export"
+  ]
+}

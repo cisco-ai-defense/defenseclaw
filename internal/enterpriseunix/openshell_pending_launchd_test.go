@@ -6,6 +6,7 @@
 package enterpriseunix
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -14,10 +15,11 @@ import (
 )
 
 func TestMacOSPendingLaunchAgentAdvice(t *testing.T) {
-	h := newOSHost(t, "darwin")
+	h, _, _ := newLaunchdTestHost(t)
+	setConsoleOwner(h, h.alice.UID)
 	entry := pending{Kind: "launchd", User: "sample-user", UID: h.alice.UID, Since: "2026-10-14T12:00:00Z", Reason: "the signed gateway binary changed", Sandboxes: 2}
 	r := &enterprisestatus.Result{}
-	(&lifecycle{env: h.env, result: r}).describePending(entry)
+	(&lifecycle{env: h.env, result: r}).describePending(context.Background(), entry)
 	message := messagesOf(r.Warnings, codeSandboxPending)
 	for _, want := range []string{"sudo " + h.env.lifecycleCommand(ActionRepair), "root ensure, repair or reconcile", "first sandbox started after the running ones stop", "reloads the job itself", "If that reload fails, the start reports it"} {
 		if !strings.Contains(message, want) {
@@ -30,8 +32,8 @@ func TestMacOSPendingLaunchAgentAdvice(t *testing.T) {
 
 	entry.Kind = "restart"
 	r = &enterprisestatus.Result{}
-	(&lifecycle{env: h.env, result: r}).describePending(entry)
-	want := fmt.Sprintf("pending restart for user sample-user since %s (the signed gateway binary changed): 2 sandboxes run; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running\n",
+	(&lifecycle{env: h.env, result: r}).describePending(context.Background(), entry)
+	want := fmt.Sprintf("pending restart for user sample-user since %s (the signed gateway binary changed): 2 sandboxes run (or are starting, stopping, or a MicroVM that OpenShell does not report stopped); it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. The user's `defenseclaw sandbox stop NAME` flushes and stops a running one; a MicroVM whose workload completed or that is in OpenShell's error state, which OpenShell does not stop and whose VM may still run, holds the change until OpenShell reports it stopped (the user's `defenseclaw sandbox stop NAME` says how) or the user deletes it (`defenseclaw sandbox delete NAME`)\n",
 		entry.Since, h.env.lifecycleCommand(ActionEnsure))
 	if got := messagesOf(r.Warnings, codeSandboxPending); got != want {
 		t.Fatalf("restart advice changed: got %q, want %q", got, want)

@@ -5,7 +5,9 @@ package inventory
 
 import (
 	"os/user"
+	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // CurrentProcessOwner names the account (user name and uid) whose processes
@@ -62,4 +64,42 @@ func perUserProcessOwners(opts AIDiscoveryOptions) map[string]bool {
 		return nil
 	}
 	return owners
+}
+
+// keepEvidencePath reports whether a detector records an evidence row's raw
+// path: when raw paths are stored, and for the scan that attributes by them
+// (ownHomeRoots).
+func (s *ContinuousDiscoveryService) keepEvidencePath() bool {
+	return s.opts.StoreRawLocalPaths || s.ownHomeRoots != nil
+}
+
+// perUserOwnHomeRoots is the own home of a per-user install that also scans
+// other folders (ai_discovery.home_dirs), or nil when every finding belongs
+// to the account anyway (one folder) or to no single account.
+func (s *ContinuousDiscoveryService) perUserOwnHomeRoots() []string {
+	home := strings.TrimSpace(s.opts.HomeDir)
+	if s.account.id == "" || home == "" || len(s.homesToScan()) <= 1 {
+		return nil
+	}
+	home = filepath.Clean(home)
+	roots := []string{home}
+	if resolved, err := filepath.EvalSymlinks(home); err == nil && filepath.Clean(resolved) != home {
+		roots = append(roots, filepath.Clean(resolved))
+	}
+	return roots
+}
+
+// evidenceInOwnHome reports a finding whose every evidence path lies in the
+// per-user account's own home (GAP-1278). A finding without raw paths
+// proves nothing.
+func (s *ContinuousDiscoveryService) evidenceInOwnHome(evidence []AIEvidence) bool {
+	if s.ownHomeRoots == nil || len(evidence) == 0 {
+		return false
+	}
+	for _, ev := range evidence {
+		if ev.RawPath == "" || !evidenceInsideHome([]AIEvidence{ev}, s.ownHomeRoots) {
+			return false
+		}
+	}
+	return true
 }

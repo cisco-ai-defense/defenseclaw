@@ -66,6 +66,55 @@ func TestManagedE2fsprogsPackageFallback(t *testing.T) {
 	}
 }
 
+// rel-1-0-3 GAP-0197: an unprivileged process cannot stat tools below a
+// private directory. An unused inaccessible sbin must not hide a usable
+// bin; once bin also becomes inaccessible, the refusal names it and repair.
+func TestManagedE2fsprogsInaccessibleCandidatesNameTheRepair(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires an unprivileged POSIX process")
+	}
+	root, err := os.MkdirTemp("", "e2fs-inaccessible-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sbin, bin := filepath.Join(root, "sbin"), filepath.Join(root, "bin")
+	for _, dir := range []string{sbin, bin} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	}
+	for _, tool := range AdminE2fsprogsTools {
+		if err := os.WriteFile(filepath.Join(bin, tool), []byte("tool"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chmod(sbin, 0); err != nil {
+		t.Fatal(err)
+	}
+	trust := func(string, bool) error { return nil }
+	if dir, problem := ManagedE2fsprogsToolDir(root, "", os.Getuid(), trust); dir != bin || problem != "" {
+		t.Fatalf("unused private sbin hid bin: %q, %q", dir, problem)
+	}
+	if err := os.Chmod(bin, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, configured := range []string{root, bin} {
+		dir, problem := ManagedE2fsprogsToolDir(configured, "", os.Getuid(), trust)
+		if dir != "" || !strings.Contains(problem, bin) || !strings.Contains(problem, "chmod o+x") {
+			t.Fatalf("inaccessible %s: %q, %q", configured, dir, problem)
+		}
+	}
+	if dir, problem := managedE2fsprogsToolDir("", root, "", os.Getuid(), trust); dir != "" ||
+		!strings.Contains(problem, bin) || !strings.Contains(problem, "chmod o+x") {
+		t.Fatalf("inaccessible package tools: %q, %q", dir, problem)
+	}
+}
+
 // The administrator's e2fsprogs_dir may be the install prefix (tools in its
 // sbin or bin) or the folder that holds the tools; the folder returned holds
 // both, and nothing else is accepted (GAP-0506).

@@ -1,0 +1,669 @@
+---
+title: Detection
+description: Reference for how DefenseClaw detects - ActionFacts, CEL, regex, exact semantic rules, bounded chains, YARA, protection packs, the LLM judge, suppressions, the session correlator and OPA.
+keywords:
+  - DefenseClaw deterministic detection
+  - ActionFacts
+  - CEL rules
+  - YARA
+  - guardrail regex
+  - bounded tool-call chains
+---
+
+DefenseClaw separates **detection evidence** from **blocking authority**. A
+regex, CEL expression, YARA signature, or correlated sequence can create a
+finding, but an authenticated tool call can be denied only when a complete,
+same-rule deterministic proof reaches an enforcement-capable connector surface
+and the active profile, or a [`guardrail.block_at`](#profile-posture) level,
+maps its severity to `block`.
+
+This page inventories the detectors currently shipped in the repository and
+explains which layer owns each decision. Benchmark scores for these layers are
+published in [Deterministic Detection Benchmarks](/docs/appendix/benchmarks).
+
+The balanced/default enabled rule catalog contains 239 local rules across seven families. The repository also contains 26 fixed bounded chains, eleven MCP-description YARA signatures, two post-event correlator patterns, five selectable high-assurance packs and one staged SSH integrity policy contract. The YAML and Go files in [Source of truth](#source-of-truth-and-validation) are authoritative if these counts change.
+
+## Decision architecture
+
+<Flow
+  direction="TB"
+  caption="How a tool call earns the right to be blocked. CEL and regex only pick candidates. A block needs a code-owned proof for the same rule ID (and, for chain rules, the earlier steps of a fixed chain in the same session), complete parsing, and a connector that can block before the tool runs. Without that, the finding is still recorded, but it stays detection-only (never changes the action) or alert-only (at most an alert). For proven findings, the active profile or guardrail.block_at maps severity to the action."
+>
+  <Node id="facts" kind="policy">{`Parse the tool call\ninto ActionFacts`}</Node>
+  <Node id="select" kind="policy">{`Rules flag candidates\nCEL and RE2 regex`}</Node>
+  <Node id="semantic" kind="policy">{`Code checks the effect\nvalidator for the same rule`}</Node>
+  <Node id="chain" kind="policy">{`Check earlier steps\nfixed chains, same session`}</Node>
+  <Node id="gate" kind="decision">{`Proven, and can block?\nconnector blocks before run`}</Node>
+  <Node id="record" kind="generic">{`Recorded, not blocked\ndetection-only or alert-only`}</Node>
+  <Node id="profile" kind="policy">{`Profile picks the action\nallow · alert · confirm · block`}</Node>
+  <Edge from="facts" to="select" label="facts" />
+  <Edge from="select" to="semantic" label="candidate" />
+  <Edge from="semantic" to="gate" label="single call" />
+  <Edge from="semantic" to="chain" label="chain rule" />
+  <Edge from="chain" to="gate" label="chain complete" />
+  <Edge from="gate" to="record" label="no" />
+  <Edge from="gate" to="profile" label="yes" />
+</Flow>
+
+YARA description scanning and the legacy session correlator are parallel
+detection lanes. They create findings for audit and operator workflows; they do
+not bypass the same-rule proof gate or retroactively stop an action.
+
+## Current rule inventory
+
+The bundled profiles share a common schema but intentionally differ in enabled
+rules and lexical fallback posture:
+
+| Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Balanced/default | 243 | 239 | 134 | 122 | 65 |
+| Permissive | 243 | 235 | 134 | 122 | 65 |
+| Strict | 255 | 255 | 147 | 140 | 66 |
+
+`a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
+text fallback would add noise or could not safely prove the same semantic
+effect. In balanced and permissive, ten CEL declarations are explicit `false`
+placeholders for rules that remain lexical-only in those profiles; strict
+enables tighter variants of those candidates.
+
+The 239 enabled balanced/default rules are generated from
+`policies/guardrail/default/rules/*.yaml`:
+
+| Family | Rules | What it detects |
+| --- | ---: | --- |
+| `command` | 128 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
+| `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
+| `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
+| `trust-exploit` | 22 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, and obfuscation signals |
+| `c2` | 18 | Known exfiltration endpoints, cloud metadata SSRF forms, DNS tunneling, and DNS exfiltration indicators |
+| `enterprise-data` | 13 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
+| `cognitive-file` | 9 | Agent instruction, memory, configuration, gateway, and detector-state modification |
+
+The generated Go catalog is checked against the YAML in CI. Edit the YAML
+sources, not `internal/gateway/rules_catalog_generated.go`.
+
+### Download piped into a shell
+
+`CMD-PIPE-CURL` is off in the default and permissive profiles, so a command such
+as `curl ... | bash` is not recorded as a finding there. Many legitimate
+installers use that pattern. The strict profile enables the rule at `CRITICAL`.
+`wget ... | sh` (`CMD-PIPE-WGET`) and PowerShell `iwr ... | iex`
+(`CMD-WIN-IWR-IEX`) are still reported in every profile.
+
+To get the finding for `curl` pipelines, switch to the strict pack with
+`defenseclaw guardrail use-pack strict`, or add your own rule in a pack of your
+own. [Authoring CEL rules](/docs/reference/policy/cel/authoring) shows the rule format,
+and [Rules and custom packs](/docs/reference/policy/rules#custom-packs) shows how to
+activate it.
+
+## ActionFacts
+
+ActionFacts is the typed, bounded representation of one tool action. It parses
+POSIX shell, PowerShell, Windows CMD, argv-style calls, and closed structured
+tool schemas without trusting free-form descriptions. Unsupported, dynamic,
+conditional, truncated, ambiguous, or over-budget input records a parse status
+and cannot gain blocking authority.
+
+### Public CEL projection
+
+| Fact | Important fields | Purpose |
+| --- | --- | --- |
+| `f.commands` | program, argv completeness, parent/pipeline IDs, operation enums, redirects, dialect, execution effect | Distinguish a literal effect from a mention, preview, wrapper, or conditional branch |
+| `f.paths` | command ID, read/write/delete/execute access, path flavor, normalized/resolved path | Bind an operation to an exact local resource |
+| `f.network` | command ID, connect/listen/download/upload action, scheme, host, port, scope, target kind | Separate loopback/private use from public or unresolved egress |
+| `f.data_flows` | source and destination command IDs, typed source/sink classes | Prove bounded source-to-sink relationships inside one action |
+| `f.artifacts`, `f.archive_lineages` | archive files a command produces or consumes, path digest identity, produce-then-consume joins | Tie an archive written by one command to the command that later reads it |
+| `f.parse` | status, dialect, bounded issue codes | Fail closed to detection-only when projection is not authoritative |
+| `f.tool`, `f.cwd`, `f.active_home` | trusted connector identity and execution context | Resolve tool-specific schemas and local paths without trusting payload claims |
+
+The parser caps one command input at 64 KiB and retains at most 128 command
+facts, 256 path facts, 128 network facts, 256 data-flow facts, and eight issue
+codes. Exceeding a bound downgrades the projection instead of silently dropping
+evidence and continuing as authoritative.
+
+### Private value-minimized proof facts
+
+Some exact proofs need identities that must not be exposed to operator CEL or
+persisted as raw values. Code-owned ActionFacts therefore derives only closed
+operation classes and domain-separated SHA-256 identity digests for:
+
+- structured text replacement deltas and newly added literal IPv4 addresses;
+- sensitive-egress artifact writes;
+- SQL Server `xp_cmdshell` operations by connection;
+- PostgreSQL `COPY ... PROGRAM` connection identity;
+- command-capable SQL UDF create/invoke operations by engine, connection, and function;
+- privileged Kubernetes manifest, pod, and CronJob identities;
+- wireless capture/deauthentication BSSID identity;
+- cloud IAM user or role identity;
+- credential-extraction/remote-execution target and principal identity; and
+- staged payload write, mutation, and persistence-install path identity.
+
+Raw SQL, commands, passwords, connection strings, manifests, principal names,
+packet filters, payload bytes, and persistence content are discarded before
+these facts reach durable chain state.
+
+### Detection and enforcement projections
+
+The full ActionFacts projection is used for detection. A separate monotonic
+enforcement projection retains only effects statically proven to execute.
+Previewed commands, unresolved branches, incomplete argv, dynamic identities,
+and parser-limit failures can still produce a useful alert through a fallback,
+but cannot be upgraded into a deny.
+
+See [CEL authoring](/docs/reference/policy/cel/authoring) for the complete public field
+and enum reference.
+
+## CEL selectors
+
+Balanced/default and permissive each declare 134 CEL expressions; strict
+declares 147. CEL is deliberately limited
+to Boolean logic, field access, fixed enum constants, membership, bounded
+`exists` comprehensions, and literal RE2 matching. It cannot perform arbitrary
+history scans, dynamic regex construction, reflection, network access, file
+access, or unbounded iteration.
+
+A successful CEL match is a **candidate**, not automatic block authority. The
+engine evaluates the expression against both full facts and the execute-only
+projection, then requires a code-owned proof pinned to the same rule ID. CEL
+errors, budget exhaustion, unsupported connector fields, and partial parsing
+fall back to that rule's regex lane and remain detection-only unless an exact
+fallback validator independently proves the same rule.
+
+The admitted syntax, 50 ms dispatch budget, aggregate cost ceiling, and regex
+limits are documented in [CEL engine boundaries](/docs/reference/policy/cel/engine).
+
+## Regex detection and fallback
+
+All local patterns compile with Go's RE2-based `regexp` engine. The catalog
+uses regex in three distinct ways:
+
+| Use | Enforcement meaning |
+| --- | --- |
+| Content detector | Creates findings for secrets, trust exploitation, C2, PII, and unstructured prompts/results |
+| Tool-call candidate selector | Narrows calls before an exact ActionFacts/code-owned validator runs |
+| Owner-local fallback | Preserves visibility when a semantic projection is unsupported or over budget |
+
+On an authenticated tool action, a raw or custom regex match is not trusted
+blocking proof. The finding remains detection-only unless a complete exact
+validator for that same rule accepts the action. Sixty-five balanced/default
+rules intentionally use `a^` so there is no lexical fallback at all.
+
+Pattern-writing guidance and counterexamples are in the
+[Regex cookbook](/docs/reference/policy/regex-cookbook).
+
+## Exact atomic semantic rules
+
+Thirty-four rule IDs use exact semantic proofs. Twenty-eight combine CEL and
+regex candidate selection, four use CEL with
+lexical fallback disabled, and two use a code-owned exact proof selected by a
+narrow regex. Neither selector alone can authorize a block.
+
+| Security effect | Exact rule IDs |
+| --- | --- |
+| Execution | `exec.remote_ip_download_execute_same_artifact`, `exec.postgresql_copy_program`, `exec.sql_command_udf_create` |
+| Persistence | `persistence.global_ld_preload_install`, `persistence.windows_accessibility_feature_hijack` |
+| Privilege | `privilege.cloud_iam_administrator_attachment`, `privilege.kubernetes_cronjob_privileged_patch`, `privilege.sudoers_unrestricted_nopasswd`, `privilege.windows_uac_autoelevation_hijack` |
+| Credential access | `credential.macos_fake_update_prompt`, `credential.macos_login_keychain_dump`, `credential.pam_password_capture`, `credential.windows_lsass_memory_dump`, `credential.windows_registry_hive_dump` |
+| Impact | `impact.linux_magic_sysrq_destruction`, `impact.posix_host_halt`, `impact.windows_delete_all_shadow_copies`, `impact.windows_recovery_disable_pair`, `impact.windows_recovery_store_destruction` |
+| Security-control tampering | `tamper.cloud_audit_control_destruction`, `tamper.complete_firewall_relaxation`, `tamper.endpoint_security_product_disable`, `tamper.linux_security_control_disable`, `tamper.macos_unified_log_erase`, `tamper.posix_logging_hardening_disable`, `tamper.posix_system_log_destruction`, `tamper.windows_amsi_disable`, `tamper.windows_audit_policy_wipe`, `tamper.windows_credential_protection_weaken`, `tamper.windows_defender_component_disable`, `tamper.windows_defender_multi_control_disable`, `tamper.windows_registry_security_control_disable`, `tamper.windows_telemetry_disable`, `tamper.windows_usn_journal_delete` |
+
+These rules accept closed literal grammars and reject near-miss executables,
+help/version invocations, dynamic operands, preview modes, conditional or
+augmented commands, unresolved paths, mismatched identities, and incomplete
+structured arguments.
+
+## Bounded tool-call chains
+
+The fixed chain catalog contains 26 ordered behaviors. A chain examines only
+the current authenticated event plus at most eight predecessors from the same
+canonical connector/session, never more than 30 minutes. Required steps must
+be ordered, successful where specified, and joined by exact value-minimized
+identity. Failed, denied, cancelled, replayed, cross-session, mismatched, or
+mutated sequences cannot complete an enforcement proof.
+
+| Chain | Deterministic join | Runtime posture |
+| --- | --- | --- |
+| Guardrails disabled → external egress | Same session, bounded order | Alert-only |
+| Permission denied → runtime bypass | Same session, five-minute window | Alert-only |
+| Privilege discovery → elevation | Same session, system/root semantics | Alert-only |
+| Secret-manager read → external egress | Same session, bounded result | Alert-only |
+| Secret read → external egress | Exact artifact identity and mutation barrier | Alert-only |
+| Workload identity read → lateral execution | Same workload identity context | Alert-only |
+| Download → decode → execute | Exact derived artifact identity and mutation barrier | Alert-only |
+| Download → execute | Exact artifact identity and mutation barrier | Alert-only |
+| Sensitive-egress artifact write → execute | Exact artifact identity and mutation barrier | Alert-only |
+| Firewall trust expansion → destination use | Exact canonical IP identity | Alert-only until protected-firewall/approved-destination policy exists |
+| SQL Server `xp_cmdshell` enable → invoke | Exact connection identity and successful terminal step | Alert-only until protected-database policy exists |
+| Privileged host-root manifest write → apply → pod exec | Exact manifest and pod identities, successful terminal step | Alert-only until protected-cluster policy exists |
+| Wireless capture → deauthentication | Exact BSSID and successful terminal step | Alert-only because authorization is deployment-specific |
+| Credential extraction → remote execution | Exact target/principal and successful terminal step | Alert-only until protected-target policy exists |
+| Cloud IAM principal create → AdministratorAccess attach | Exact principal and successful terminal step | Alert-only until protected-account policy exists |
+| Privileged CronJob patch → job creation | Exact CronJob identity and successful terminal step | Alert-only until protected-cluster policy exists |
+| Command-capable SQL UDF create → invoke | Exact engine, connection, and function; successful terminal step | Alert-only until protected-database policy exists |
+| Reverse-shell payload write → persistence install | Exact path, closed payload grammar, success, and mutation barrier | Enforcement-capable proof |
+| Endpoint-security mutation request → completed process | Exact process identity and result-backed completion | Alert-only |
+| Sensitive read value → literal external transmission | Value-minimized result identity and literal external sink | Alert-only |
+| Sensitive SQL value → cross-resource persistence | Exact value identity and distinct destination resource | Alert-only |
+| Compromised credential → successful authentication | Exact credential identity and result-backed authentication | Alert-only |
+| AD CS certificate request → PFX authentication | Exact certificate/PFX identity and successful authentication | Enforcement-capable proof |
+| S4U ticket → Kerberos secrets dump | Exact result-backed ticket-cache identity | Enforcement-capable proof |
+| Sensitive SQLite read → unbounded delete | Exact database/table identity and ordered destructive mutation | Enforcement-capable proof |
+| File read → email transfer | Exact artifact identity and addressed transfer | Alert-only |
+
+“Enforcement-capable” means the chain can set the enforcement-safe result bit;
+the connector must still be synchronous and block-capable, the same-rule proof
+gate must accept it, and the active profile (or the connector's
+[block level](#profile-posture)) must map the severity to `block`.
+
+## Profile posture
+
+Profiles change the disposition of accepted findings; they do not make an
+incomplete proof complete.
+
+| Severity | Permissive | Balanced/default | Strict |
+| --- | --- | --- | --- |
+| CRITICAL | Block | Block | Block |
+| HIGH | Alert | Alert or confirm when HITL is enabled | Block |
+| MEDIUM | Allow | Alert | Block |
+| LOW | Allow | Allow | Alert |
+
+Connector capability still controls whether `block` can become a
+native deny; unsupported surfaces retain the finding and audit action without
+claiming prevention. See [Defaults](/docs/reference/policy/defaults) for the complete operator
+configuration.
+
+Strict accepts more interruption risk. Connector capability still controls whether `block` becomes a native deny; unsupported surfaces keep the finding and audit action without claiming prevention. Change the levels without switching packs with `defenseclaw guardrail block-at` and `alert-at` ([change block and alert levels](/docs/how-to/policies/change-block-and-alert-levels), [thresholds](/docs/reference/policy/thresholds)). Human approval applies only below the block level.
+
+### Low-noise rollout
+
+Start with the balanced/default pack and measure **findings** separately from
+**blocked actions** on representative benign tool traffic. A finding is not
+necessarily an interruption: detection-only regex, unsupported or partial
+ActionFacts, and alert-only chains remain observable without gaining deny
+authority. Move to strict only when the additional alert and interruption risk
+fits the protected environment.
+
+When extending a pack, prefer the narrowest typed ActionFacts operation and a
+bounded CEL selector. Keep ambiguous or dynamic inputs detection-only, and add
+hard negatives for previews, help/version commands, loopback traffic, failed
+results, mismatched identities, and incomplete chains. Evaluate attack recall
+on attack-positive data and evaluate finding FPR plus benign block rate on
+separate benign or mixed data; an attack-only corpus cannot establish FPR.
+
+## YARA MCP-description scanning
+
+The MCP scanner adds eleven YARA signatures from
+`policies/yara/mcp-tools/description_injection.yara`:
+
+| Signature | Requires |
+| --- | --- |
+| Addressed sensitive-data transfer | A send/share verb, sensitive object, user-directed language, and an addressed email-like sink |
+| Concrete financial action | An account action, literal amount, and owned-account language |
+| Exact destructive user-data action | A narrow delete/move/remove operation and an owned data object |
+| Security-control downgrade | A request to disable MFA/2FA on the user's account |
+| Multi-attribute profile change | One request changing email, location, and birthday together |
+| Addressed edit-access grant | A concrete edit permission granted to an addressed principal |
+| Sensitive health-data change | A genetic-data mutation or addressed health-application share |
+| Traffic-control override | A bounded emergency-priority or individual signal override |
+| Physical-access change | A concrete smart-lock guest grant or owned-door unlock request |
+| Network-security policy change | A concrete allowlist or business-service denylist change |
+| Hidden credential exfiltration | A home credential-file path with an instruction to read and send it, or to override earlier instructions and send or hide the access |
+
+These signatures are high-precision description-injection signals, not proof of
+authorization or tool execution. They remain alert-only. The scanner loads the
+pack in addition to its existing native rules and preserves the matching YARA
+rule name in the finding.
+
+## Protection packs and policy-provided context
+
+Some actions are dual-use globally but deterministically forbidden inside a
+customer-declared boundary. High-assurance packs supply that missing policy
+fact and use closed CEL/ActionFacts proofs instead of resource-name guesses.
+
+| Pack | Status | Deterministic coverage |
+| --- | --- | --- |
+| `privacy-high-assurance` | Selectable | 13 structured PII rules for SSNs, payment cards, IBANs, labeled email/phone, medical IDs, dates of birth, and structured CSV/JSON records |
+| `cloud-production-protection` | Selectable | Bulk cloud-data deletion, cloud resource/service deletion, and audit-control destruction for production-scoped connectors |
+| `database-destruction-protection` | Selectable | Literal SQL `DELETE` without `WHERE`, schema/table-wide destructive statements, and same-table sensitive SQLite read/delete proof |
+| `infrastructure-destruction-protection` | Selectable | Device format/wipe, protected access-control weakening, kernel-control bind override, and unscoped Terraform/OpenTofu/Pulumi destruction |
+| `kubernetes-production-protection` | Selectable | Exact named Secret content reads, named namespace deletion, and closed `delete --all` workload forms for protected clusters |
+| `ssh-authorized-keys-protection` | Staged contract; not activatable yet | Exact active-home `authorized_keys` write, OpenSSH fingerprint derivation, and comparison with trusted approved fingerprints |
+
+The SSH contract intentionally abstains today because the public CEL activation
+does not expose file content or a trusted fingerprint allowlist parameter. It
+must not be selected as a rule pack (`guardrail.rule_pack`) until that binding exists. Dynamic paths,
+malformed keys, missing policy, failed writes, and unresolved homes already
+fail closed to abstention in its ActionFacts helper.
+
+“Selectable” means the pack can be turned on for the global rule pack or one
+connector with `defenseclaw guardrail protection enable NAME [--connector X]`,
+layered into a custom pack in Policy Creator, or copied into an
+operator-owned policy directory. `guardrail protection enable` adds the pack's
+name to `guardrail.rules.protections` for the scope (global, one connector, or a
+profile with `--profile`). The gateway layers the pack's rules on the scope's
+rule pack in memory, replacing base rules with the same ID, and writes no
+directory to disk. `guardrail protection disable NAME` takes it out of that
+scope. If a wider scope enables the pack, disable it there; a narrower scope
+cannot turn it off. `guardrail protection list` shows which scope has which pack on. The staged SSH
+contract is refused. None of this adds another value to `defenseclaw setup guardrail
+--rule-pack`, which accepts only `default`, `permissive`, and `strict`. For a
+Policy Creator export, validate the pack, review the declared trust boundary,
+then switch to it with `defenseclaw guardrail use-pack`. Either way, assigning
+a production-protection pack asserts that the selected connector context is
+actually protected. See [Opt-in protection packs](/docs/reference/commands/cli#opt-in-protection-packs),
+[Authoring custom rule packs](/docs/how-to/policies/write-a-custom-rule), and [Rules and custom packs](/docs/reference/policy/rules) for the `guardrail.rules` scopes.
+
+## Rule files
+
+Each bundled pack is a directory:
+
+```text
+policies/guardrail/<pack>/
+  rules/
+    local-patterns.yaml       # triage phrases, PII regexes, secrets, exfil
+    commands.yaml             # shell and execution rules
+    sensitive-paths.yaml      # credential and config paths
+    c2.yaml                   # command-and-control indicators
+    cognitive.yaml            # cognitive tampering
+    enterprise-data.yaml      # enterprise data exposure
+    secrets.yaml              # credential signatures
+    trust-exploit.yaml        # prompt and trust exploitation
+  judge/
+    injection.yaml
+    pii.yaml
+    tool-injection.yaml       # the exfil judge's config is compiled in
+  sensitive-tools.yaml
+  suppressions.yaml
+```
+
+### Rule shape
+
+Rules are YAML for portability and review:
+
+```yaml title="policies/guardrail/default/rules/local-patterns.yaml (excerpt)"
+version: 1
+
+# Literal substring matches (case-folded against the normalized
+# triage view, so "/ etc / passwd" still matches "/etc/passwd").
+injection:
+  - "ignore previous"
+  - "ignore all instructions"
+  - "jailbreak"
+
+# Regex matches. Compiled during candidate validation; any invalid
+# expression rejects the complete candidate.
+injection_regexes:
+  - 'ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)'
+
+# Per-family pattern sets the gateway scans on every request.
+# Omitting any key keeps the compiled-in default for that family.
+# Setting `field: []` explicitly clears it (rare, used in testbed
+# profiles that want a family disabled).
+secrets:
+  - "sk-"
+  - "ghp_"
+  - "-----begin rsa"
+
+pii_requests:
+  - "social security number"
+  - "credit card number"
+
+pii_data_regexes:
+  - '\b\d{3}-\d{2}-\d{4}\b'
+
+exfiltration:
+  - "/etc/passwd"
+  - "exfiltrate"
+```
+
+Regexes compile during [rule-pack validation](/docs/how-to/policies/validate-a-rule-pack). Any invalid expression rejects the complete candidate; DefenseClaw does not log-and-drop a bad pattern while applying the rest of the file.
+
+Three-state semantics for each top-level key:
+
+- **Omit the key entirely** — keep the compiled-in default for that family. Useful when you only want to tweak one thing without copying the whole baseline.
+- **`field: [...]`** — operator override; replaces the default wholesale.
+- **`field: []`** — operator explicitly cleared the family. Mostly used in testbed profiles; rarely useful in production.
+
+The bundled `default`, `strict`, and `permissive` `local-patterns.yaml` files each carry the full baseline 1:1 with what the gateway ships compiled-in. The Go test `TestLocalPatternsDefaultsParity` fails CI if the bundled YAML drifts from the Go source, so editing one without the other can't silently downgrade posture.
+
+
+## LLM judge
+
+The LLM judge is an *optional* second opinion, and it is off until you enable
+`guardrail.judge.enabled`. It runs four judges:
+
+| Judge | Reads | Asks |
+| --- | --- | --- |
+| **injection** | prompts | Is this trying to override the agent's instructions? |
+| **PII** | prompts and completions | Does this contain personal data? |
+| **exfil** | prompts | Is this trying to read or ship out sensitive files, credentials or secrets? Reports `JUDGE-EXFIL-FILE` and `JUDGE-EXFIL-CHANNEL`, both HIGH. |
+| **tool-injection** | tool calls | Does the call's stated purpose disagree with its effect? Data exfiltration is one of its categories. |
+
+Each judge has its own switch under `guardrail.judge`: `injection`, `pii`
+(with `pii_prompt` and `pii_completion`), `exfil` (on by default) and
+`tool_injection`.
+
+The bundled packs ship `judge/injection.yaml`, `judge/pii.yaml` and
+`judge/tool-injection.yaml`. The exfil judge's prompt and categories are
+compiled in; a pack can override them with its own `judge/exfil.yaml`, which is
+why `validate-pack` reports `judges=4` for a bundled pack.
+
+The judges are particularly useful for:
+
+- Subtle prompt injection that doesn't match a regex.
+- Tool calls whose stated purpose disagrees with their effects (most common in MCP).
+- Categorical content checks — "does this prompt try to extract proprietary code?"
+
+### Shared severity rubric
+
+All judges evaluate against the same severity rubric. The rubric is embedded directly in each judge's system prompt so verdicts stay consistent across categories.
+
+| Tier | Meaning |
+| --- | --- |
+| **CRITICAL** | Direct unambiguous harm, provable from the content alone. Credential exfil, destructive shell, jailbreak succeeded, SSN/passport disclosed. |
+| **HIGH** | Clear adversarial intent or high-impact sensitive data. Prompt injection with explicit override, `/etc/passwd` probe, phone number in completion. |
+| **MEDIUM** | Suspicious but ambiguous. Benign readings are plausible. |
+| **LOW** | Weak indicator; context-dependent (e.g. user self-disclosing their own email). |
+| **NONE** | No concern. |
+
+### Signal-strength scoring
+
+For each category a judge flags, it also emits a `signal_strength` label derived from two booleans: *unambiguous* (no plausible benign reading) and *high_impact* (hard-to-reverse damage possible).
+
+| `unambiguous` | `high_impact` | `signal_strength` |
+| --- | --- | --- |
+| ✓ | ✓ | `strong_signal` |
+| ✓ | ✗ | `signal` |
+| ✗ | ✓ | `needs_review` |
+| ✗ | ✗ | `weak_signal` |
+
+The Go-side tool-judge aggregation ignores `weak_signal`. A `needs_review`
+finding can alert but cannot block by itself. Blocking requires an actionable
+corroborated category or strong structural exfiltration/destruction evidence;
+ordinary authorized coding context therefore does not become a block merely
+because one ambiguous category fired. Read the
+[contextual judge benchmark](/docs/appendix/llm-judge-benchmark) for the production-path
+F1, false-positive, benign-block, latency, token, and cost results.
+
+Judge configuration is split by detector under `judge/`. For example, the
+injection judge declares its categories and severity mapping in
+`judge/injection.yaml`:
+
+```yaml title="policies/guardrail/default/judge/injection.yaml (excerpt)"
+version: 1
+name: injection
+enabled: true
+categories:
+  "Instruction Manipulation":
+    finding_id: JUDGE-INJ-INSTRUCT
+    severity: HIGH
+  "Obfuscation":
+    finding_id: JUDGE-INJ-OBFUSC
+    severity: CRITICAL
+min_categories_for_high: 1
+single_category_max_severity: HIGH
+min_categories_for_critical: 2
+```
+
+The judge call goes through the same Bifrost pipeline as everything else and uses the [unified LLM key](/docs/reference/configuration/llm-providers). Each judge call is emitted as a `judge` gateway event, and its token usage is reported on the judge trace and the GenAI token-usage metric, so you can monitor cost from your dashboards.
+
+You can target a different model than the rest of the stack by setting `guardrail.judge.llm` in `config.yaml`:
+
+```yaml
+guardrail:
+  judge:
+    enabled: true
+    llm:
+      model: anthropic/claude-haiku-4-5
+      api_key_env: DEFENSECLAW_LLM_KEY
+```
+
+## Suppressions
+
+Suppressions tune the LLM judge. Every rule pack carries three suppression
+lists in `suppressions.yaml`. They change only judge input and judge findings:
+a regex or CEL rule finding is never suppressed, and the request itself is
+never redacted.
+
+| List | Where it runs | Use it for |
+| --- | --- | --- |
+| `pre_judge_strips` | Before a judge reads the content | Removing known-benign metadata, such as the sender labels `cli`, `system` or `bot` (`STRIP-SYSTEM-SENDER`), from the input of the judges listed in `applies_to` |
+| `finding_suppressions` | After the PII judge reports an entity | Dropping one entity when its finding ID (for example `JUDGE-PII-EMAIL`) and the entity text both match, with a required `reason` |
+| `tool_suppressions` | After the PII judge, for one tool | Dropping only the listed PII-judge finding IDs for tool names that match `tool_pattern` |
+
+```yaml title="policies/guardrail/default/suppressions.yaml (excerpt)"
+finding_suppressions:
+  - id: SUPP-EMAIL-CHATID
+    finding_pattern: JUDGE-PII-EMAIL
+    entity_pattern: '^19:[a-f0-9\-]+@unq\.gbl\.spaces$'
+    reason: "Teams chatId format, not email address"
+```
+
+Strips don't protect secrets: a credential in a prompt is still caught by the
+`SEC-*` rules and still reaches the upstream model. To keep values out of logs
+and telemetry, see [Redaction](/docs/reference/observability/redaction).
+
+[Tune the LLM judge](/docs/how-to/policies/tune-the-llm-judge) shows how to add them.
+To add a finding suppression without copying a pack, put it in
+`guardrail.rules.suppressions` in `config.yaml` or run
+`defenseclaw guardrail suppress add`; see
+[Rules and custom packs](/docs/reference/policy/rules#customise-a-pack-with-guardrailrules).
+
+## Session correlator
+
+Rules, the judge and suppressions evaluate each event on its own. The **correlator** works across events: it watches the recent-finding stream for the same session and raises a synthetic `CORR-*` meta-finding when a pattern of individually-benign-looking events combines into something worse.
+
+This closes a class of attacks where no single event crosses the action threshold on its own, but the sequence across turns is an exfil path — for example, Simon Willison's **lethal trifecta** (untrusted content + sensitive data access + external egress in the same session).
+
+### How it runs
+
+<Flow direction="TB" caption="Each time a scan that carries session and agent IDs is saved, the correlator reads that agent's most recent findings in the session (up to the largest pattern window, 30 with the bundled patterns) and checks them against the patterns. A match saves one CORR-* finding per pattern per session, at the pattern's severity (CRITICAL for both bundled patterns), in the local audit database. It never changes the request that completed the pattern.">
+  <Node id="events" kind="generic">{`Scan saved\nwith session and agent IDs`}</Node>
+  <Node id="window" kind="policy">{`Read recent findings\nsame session and agent`}</Node>
+  <Node id="patterns" kind="policy">{`Check the patterns\ndata axes · order · fingerprints`}</Node>
+  <Node id="synth" kind="datastore">{`Save a CORR-* finding\nlocal audit database`}</Node>
+  <Edge from="events" to="window" label="triggers" />
+  <Edge from="window" to="patterns" label="feeds" />
+  <Edge from="patterns" to="synth" label="on match" />
+</Flow>
+
+Every finding DefenseClaw records is tagged with a **data axis** (one or more of `ingress_untrusted`, `sensitive_access`, `egress_external`) and — on the tool-call surface — a **tool capability class** (`read_fs`, `write_fs`, `exec_shell`, `network_fetch`, `send_message`, `none`). Regex rules and judge categories resolve through the canonical mapping in `internal/guardrail/axes.go`, so patterns can reason across detectors without hard-coding rule IDs.
+
+### Bundled patterns
+
+Two high-confidence patterns ship in `internal/guardrail/defaults/correlation-patterns.yaml`:
+
+| Pattern ID | Window | Match severity | Trigger |
+| --- | --- | --- | --- |
+| `LETHAL-TRIFECTA` | 30 events | CRITICAL | Ordered axes: untrusted ingress, then sensitive access, then external egress. |
+| `TRIFECTA-WITH-FINGERPRINT-MATCH` | 30 events | CRITICAL | Same content fingerprint seen in a `sensitive_access` finding and a later `egress_external` finding — direct exfil, not only temporal coincidence. |
+
+Broad severity-only and capability-only sequences are intentionally not bundled. The two patterns are compiled into the gateway and always run; a rule pack can't add, change or disable them (a `correlation-patterns.yaml` file in a pack fails validation as an unexpected component).
+
+### What the operator sees
+
+When a pattern matches, the correlator writes a synthetic row into `scan_findings`:
+
+```yaml
+scanner: "correlator"
+rule_id: "CORR-LETHAL-TRIFECTA"
+severity: CRITICAL
+tags: ["correlation", "LETHAL-TRIFECTA"]
+description: |
+  contributing findings:
+    - INJ-IGNORE-ALL   at 2026-05-12T14:03:11Z
+    - SENSITIVE-PATH-SSH-KEY at 2026-05-12T14:05:42Z
+    - SRC-FETCH        at 2026-05-12T14:06:18Z
+```
+
+The row is written only to the local audit database (`scan_findings`, with a
+`scan_results` summary from scanner `correlator`). It does not go through the
+audit logger, so Splunk, OTLP and webhook sinks do not receive it today; query
+the database to act on it.
+
+<Callout>
+The correlator is **post-event detection**, not an in-flight block of the request that completed the pattern. It writes a synthetic scan summary whose verdict is `block` and a CRITICAL `CORR-*` finding to the local audit database for operator workflows, but it does not retroactively stop the contributing action or automatically quarantine later requests.
+</Callout>
+
+### Why alert-only, not block
+
+Promoting a later request in the session to *deny* based on an earlier pattern match has two honest costs:
+
+- It inverts the existing "each request is evaluated on its own" contract.
+- It can cause spurious blocks on legitimate parallel/retry traffic in the same session.
+
+Ways to act on correlations without changing the gateway runtime:
+
+- Tail `scan_findings` for `rule_id LIKE 'CORR-%'` and invoke a custom script.
+- Feed that query into an external response workflow that disables a connector, revokes a credential, or opens an incident under your organization's policy.
+
+## OPA/Rego
+
+OPA/Rego owns admission and the final guardrail policy-domain decision. It does not replace ActionFacts and CEL parsing; it maps accepted findings and deployment context to outcomes. `config.yaml` is the only input: the gateway compiles it into each evaluation's `input.admission` and `input.thresholds`, and the bundled Rego modules read only their input. Each package returns its own result:
+
+| Rego package | Primary outputs |
+| --- | --- |
+| `defenseclaw.admission` | `verdict`, `reason` |
+| `defenseclaw.guardrail` | `action`, `severity`, `reason`, `scanner_sources` |
+
+<Sequence
+  caption="OPA is embedded in the gateway process, not a separate service. It prepares the .rego modules once per configuration generation (at start and on each reload) and receives the policy compiled from config.yaml as each query's input. If a query fails, admission denies by default and the guardrail falls back to the active profile's severity mapping."
+  participants={[
+    { id: 'gw',     label: 'Gateway',       kind: 'gateway' },
+    { id: 'engine', label: 'Policy engine', kind: 'policy' },
+    { id: 'files',  label: 'Policy files',  kind: 'datastore' },
+  ]}
+>
+  <Message from="engine" to="files"  label="prepares the .rego modules at start and reload" />
+  <Message from="gw"     to="engine" label="asks a package, with input compiled from config.yaml" />
+  <Message from="engine" to="gw"     kind="return" label="returns that package's result" />
+</Sequence>
+
+Guardrail events keep matching rule IDs, evaluation IDs, reasons and severity in their audit payloads. These power the per-rule breakdowns in [Splunk](/docs/how-to/observability/send-to-splunk) and [Grafana](/docs/how-to/observability/run-grafana-locally). An upgrade replaces the shipped `admission.rego` and `guardrail.rego` and saves your edited copy in `~/.defenseclaw/backups/rego-<time>/`; keep your own rules in a file of another name in `policies/rego` ([shipped policy files](/docs/get-started/upgrade/)).
+
+## Source of truth and validation
+
+| Concern | Repository source |
+| --- | --- |
+| Bundled local rules and CEL expressions | `policies/guardrail/{default,permissive,strict}/rules/*.yaml` |
+| ActionFacts types and parsers | `internal/actionfacts/` |
+| CEL compiler/evaluator and limits | `internal/guardrail/semantic/` |
+| Exact semantic ownership and final proof dispatch | `internal/gateway/semantic_owners*.go`, `internal/gateway/rule_match_validation.go` |
+| Fixed bounded chains | `internal/guardrail/tool_chain.go` |
+| YARA MCP-description signatures | `policies/yara/mcp-tools/description_injection.yara` |
+| Correlator patterns | `internal/guardrail/defaults/correlation-patterns.yaml` |
+| High-assurance packs | `policies/guardrail-use-cases/` |
+| Reproducible public scores | `benchmarks/` |
+
+Run the repository checks after changing a detector, using Go 1.26.4 (the CI toolchain). Run the gateway suite through the shard runner:
+
+```bash
+make check-guardrail-catalog
+go test -timeout 30m ./internal/actionfacts ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
+go test ./benchmarks/...
+```
+
+The catalog check prevents generated Go rules from drifting from YAML. Focused
+tests exercise parser hard negatives, same-rule proof ownership, bounded chain
+identity, profile action posture, and connector enforcement eligibility.

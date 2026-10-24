@@ -1,0 +1,9 @@
+{
+  "title": "Enterprise",
+  "pages": [
+    "install",
+    "hooks",
+    "identity",
+    "sandboxes"
+  ]
+}

@@ -238,6 +238,7 @@ class RegistryStructureTests(unittest.TestCase):
             / "content"
             / "docs"
             / "reference"
+            / "configuration"
             / "env-vars.mdx"
         )
         rows = _doc_rows_by_name(path)

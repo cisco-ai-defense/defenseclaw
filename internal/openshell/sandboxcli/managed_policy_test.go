@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -38,8 +40,151 @@ func managedExplainFixture() *sandboxapi.ManagedExplain {
 
 func managedStatusFixture() *sandboxapi.ManagedStatus {
 	return &sandboxapi.ManagedStatus{Profile: "contractors", Description: "Contractors. Coding agents only in a sandbox.",
+		Allowed:         true,
 		EffectiveDigest: "sha256:7f3a" + strings.Repeat("0", 60), UpdatedAt: time.Date(2026, 9, 27, 11, 58, 0, 0, time.UTC),
 		RequestAccess: "it-security@example.com", InstallMode: "setup", Driver: "docker", OpenShellVersion: "0.1.3"}
+}
+
+// An older managed daemon omits managed.allowed while it keeps an account's
+// running sandbox during an upgrade. The doctor asks its existing explain
+// endpoint about the harnesses this CLI is configured to run, or, with
+// none configured, about the harness the daemon's own managed
+// configuration runs (an explain that names none: the daemon's first
+// harness, else claudecode), never about the CLI's setup defaults; an
+// explicit denial of one of those still fails.
+func TestManagedDoctorUsesLegacyDaemonPolicyExplanation(t *testing.T) {
+	withManagedHost(t)
+	const daemonDefault = "(daemon)"
+	for _, tc := range []struct {
+		name string
+		// configured is this CLI's openshell.harnesses; daemon the first
+		// harness of the daemon's own managed configuration ("" = none).
+		configured []string
+		daemon     string
+		// permitted are the harnesses the organization's profiles allow
+		// (nil = every one); listed a profile's allowed_harnesses.
+		permitted []string
+		listed    []string
+		want      openshell.CheckStatus
+		asked     []string
+		named     string
+	}{
+		{name: "permitted", want: openshell.StatusPass, asked: []string{daemonDefault}},
+		{name: "daemon default denied", permitted: []string{"codex"}, want: openshell.StatusFail, asked: []string{daemonDefault},
+			named: "the agent your sandbox service is configured to run"},
+		{name: "codex only, daemon runs codex", daemon: "codex", permitted: []string{"codex"}, want: openshell.StatusPass,
+			asked: []string{daemonDefault}},
+		{name: "codex only, daemon runs claudecode", daemon: "claudecode", permitted: []string{"codex"}, want: openshell.StatusFail,
+			asked: []string{daemonDefault}, named: "the agent your sandbox service is configured to run"},
+		{name: "unconfigured harness denied", permitted: []string{"claudecode"}, want: openshell.StatusPass, asked: []string{daemonDefault}},
+		{name: "a profile listing codex", daemon: "codex", listed: []string{"codex"}, want: openshell.StatusPass, asked: []string{daemonDefault}},
+		{name: "codex only, CLI runs codex", configured: []string{"codex"}, permitted: []string{"codex"}, want: openshell.StatusPass,
+			asked: []string{"codex"}},
+		{name: "configured harness denied", configured: []string{"claudecode", "codex"}, permitted: []string{"claudecode"},
+			want: openshell.StatusFail, asked: []string{"claudecode", "codex"}, named: "codex"},
+		{name: "only a configured harness denied", configured: []string{"codex"}, permitted: []string{"claudecode"},
+			want: openshell.StatusFail, asked: []string{"codex"}, named: "codex"},
+		{name: "configured harness not listed", configured: []string{"claudecode"}, listed: []string{"codex"},
+			want: openshell.StatusFail, asked: []string{"claudecode"}, named: "claudecode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := newTestApp(t, "")
+			ta.Cfg.OpenShell.Harnesses = tc.configured
+			ta.daemon.status.Managed = managedStatusFixture()
+			ta.daemon.statusWithoutAllowed = true
+			var asked []string
+			ta.daemon.onExplain = func(req sandboxapi.ExplainRequest, ex *sandboxapi.Explain) {
+				who, judged := req.Harness, req.Harness
+				if who == "" {
+					// The older daemon judges its own configured harness.
+					who, judged = daemonDefault, tc.daemon
+					if judged == "" {
+						judged = "claudecode"
+					}
+				}
+				if !slices.Contains(asked, who) {
+					asked = append(asked, who)
+				}
+				ex.Managed = &sandboxapi.ManagedExplain{Allowed: tc.permitted == nil || slices.Contains(tc.permitted, judged),
+					AllowedHarnesses: tc.listed}
+			}
+			rep := ta.runDoctor(bg)
+			if !slices.Equal(asked, tc.asked) {
+				t.Fatalf("legacy daemon was asked about %v, want %v", asked, tc.asked)
+			}
+			row := rep.Get(CheckIDAdmin)
+			if row == nil || row.Status != tc.want {
+				t.Fatalf("organization policy for legacy daemon = %+v", row)
+			}
+			if tc.want == openshell.StatusPass && !rep.OK() {
+				t.Fatalf("permitted running account was reported unready: %+v", rep.Checks)
+			}
+			if tc.want == openshell.StatusFail && (rep.OK() || !strings.Contains(row.Detail, "doesn't allow sandboxes for "+tc.named)) {
+				t.Fatalf("denial did not name %s or left doctor ready: %+v", tc.named, row)
+			}
+		})
+	}
+}
+
+func TestManagedDoctorLegacyPolicyExplanationFailureIsNotReady(t *testing.T) {
+	withManagedHost(t)
+	ta := newTestApp(t, "")
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.statusWithoutAllowed = true
+	ta.daemon.explainErr = func(sandboxapi.ExplainRequest) *sandboxapi.Error {
+		return sandboxapi.Errorf(sandboxapi.CodeUnavailable, "policy service unavailable")
+	}
+	rep := ta.runDoctor(bg)
+	if row := rep.Get(CheckIDAdmin); row == nil || row.Status != openshell.StatusFail ||
+		!strings.Contains(row.Detail, "older sandbox service did not report authorization") || rep.OK() {
+		t.Fatalf("unconfirmed legacy authorization = %+v", row)
+	}
+}
+
+// GAP-0720: the optional running-sandbox note must not make a read-only
+// policy explain wait for a kept sandbox's unavailable account gateway.
+func TestPolicyExplainDoesNotWaitForManagedSandboxList(t *testing.T) {
+	ta := newTestApp(t, "")
+	ta.daemon.explain.Managed = managedExplainFixture()
+	ta.daemon.status.Enabled = false
+	var listed atomic.Bool
+	ta.daemon.onList = func(ctx context.Context) { listed.Store(true); <-ctx.Done() }
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	ta.ok(t, ta.PolicyExplain(ctx, PolicyOptions{}))
+	if elapsed := time.Since(start); elapsed >= 3*time.Second {
+		t.Fatalf("read-only policy explain waited %s for the sandbox list", elapsed)
+	}
+	has(t, ta.output(), "Your sandbox policy on this computer")
+	if listed.Load() {
+		t.Fatal("policy explain queried the disabled sandbox gateway")
+	}
+}
+
+func TestPolicyExplainIncludesSlowHealthyManagedList(t *testing.T) {
+	sb := sampleSandbox("kept")
+	sb.Phase = "ready"
+	ta := newTestApp(t, "", sb)
+	ta.daemon.explain.Managed = managedExplainFixture()
+	ta.daemon.onList = func(context.Context) { time.Sleep(400 * time.Millisecond) }
+	ta.ok(t, ta.PolicyExplain(context.Background(), PolicyOptions{}))
+	has(t, ta.output(), "running: kept")
+}
+
+func TestManagedDeleteWhenSandboxesOffNamesRecovery(t *testing.T) {
+	withManagedHost(t)
+	ta := newTestApp(t, "", sampleSandbox("kept"))
+	ta.daemon.status.Enabled = false
+	ta.daemon.status.Available = false
+	ta.daemon.status.Reason = "the administrator turned sandboxes off"
+	err := ta.Delete(context.Background(), DeleteOptions{Names: []string{"kept"}, Yes: true})
+	if err == nil || !strings.Contains(err.Error(), "openshell.enabled") || strings.Contains(err.Error(), "enterprise.openshell.enabled") || !strings.Contains(err.Error(), "sandbox delete kept") {
+		t.Fatalf("disabled managed delete = %v", err)
+	}
+	if got := len(ta.daemon.callsTo("DELETE", "kept")); got != 0 {
+		t.Fatalf("disabled delete reached the unavailable gateway %d times", got)
+	}
 }
 
 // withManagedHost makes the CLI treat this computer as a managed one.
@@ -122,7 +267,7 @@ func TestManagedExplainRowsOtherShapes(t *testing.T) {
 		return b.String()
 	}
 	has(t, join(&sandboxapi.ManagedExplain{Match: "default_lookup_failed", Provisional: true, Allowed: true, AllowMount: true, AllowHostPorts: true, AllowYolo: true, AllowUnblock: true, PolicyDigest: "sha256:abc"}),
-		"(your organization's floor)   matched: the default (your directory couldn't be reached); provisional until your directory answers",
+		"(your organization's floor)   matched: the default (your directory couldn't be reached; no assignment needs the missing facts); provisional until your directory answers",
 		"Required | no agent has to run in a sandbox", "your organization limits no hosts",
 		"you may approve asks for a session or for good", "access: contact your IT help desk")
 	has(t, join(&sandboxapi.ManagedExplain{Match: "none", Allowed: false}), "Sandboxes | your organization doesn't allow sandboxes for you")
@@ -606,8 +751,9 @@ func TestDoctorRowsOnAManagedComputer(t *testing.T) {
 	}
 	// GAP-0175: before the first sandbox no profile is known; the row
 	// names the policy, never "profile your organization's policy".
-	if c := ta.managedPolicyCheck(&sandboxapi.ManagedStatus{}); c.Detail != "your organization's policy" {
-		t.Errorf("unnamed policy row = %q", c.Detail)
+	if c := ta.managedPolicyCheck(bg, &sandboxapi.ManagedStatus{}); c.Status != openshell.StatusFail ||
+		!strings.HasPrefix(c.Detail, "your organization's policy: sandbox authorization could not be confirmed") {
+		t.Errorf("unnamed policy row = %+v", c)
 	}
 }
 
@@ -843,7 +989,10 @@ func TestManagedRunRefusalComesFromTheCreate(t *testing.T) {
 	refused(ta, "openshell.admin.allowed_harnesses", "claude is not an allowed harness")
 	err = ta.Run(bg, RunOptions{Harness: "claude"})
 	wantErr(t, err, "claude is not an allowed harness")
-	if ta.creates() != 1 || len(ta.copy.steps) != 0 || len(ta.daemon.calls) == 0 || !ta.deletedOne() {
+	// The delete forgets the CLI's state of the sandbox (its staged copy,
+	// which there is none of, included): nothing was staged.
+	if ta.creates() != 1 || slices.ContainsFunc(ta.copy.steps, func(s string) bool { return !strings.HasPrefix(s, "discard ") }) ||
+		len(ta.daemon.calls) == 0 || !ta.deletedOne() {
 		t.Fatalf("a create the gateway let through was kept: creates %d, copy steps %v", ta.creates(), ta.copy.steps)
 	}
 }
@@ -858,4 +1007,27 @@ func (ta *testApp) deletedOne() bool {
 		}
 	}
 	return false
+}
+
+// #1200: the MCP row counts the servers the project defines, and says
+// whether the pack lets them start.
+func TestManagedExplainRowCountsProjectMCPServers(t *testing.T) {
+	m := managedExplainFixture()
+	m.MCPIncluded, m.MCPBlocked = nil, nil
+	m.MCPProjectCount, m.MCPProjectBlocked = 1, true
+	row := func() string {
+		for _, r := range managedExplainRows(m, time.Now()) {
+			if r.label == "MCP" {
+				return r.text
+			}
+		}
+		return ""
+	}
+	if got := row(); got != "0 of your servers included; the project's 1 server doesn't start (the pack blocks project servers)" {
+		t.Fatalf("MCP row = %q", got)
+	}
+	m.MCPProjectCount, m.MCPProjectBlocked = 2, false
+	if got := row(); !strings.HasSuffix(got, "the project's 2 servers start (the pack allows project servers)") {
+		t.Fatalf("MCP row = %q", got)
+	}
 }

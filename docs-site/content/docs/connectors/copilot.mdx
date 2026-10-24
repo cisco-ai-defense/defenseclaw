@@ -1,517 +1,92 @@
 ---
 title: GitHub Copilot CLI
-description: Copilot CLI connector wires global ~/.copilot/hooks by default, with optional workspace .github/hooks. preToolUse supports native ask; four documented events can block.
+description: Guard GitHub Copilot CLI with DefenseClaw hooks that block before a tool runs.
 keywords:
-  - DefenseClaw GitHub Copilot CLI connector
-  - GitHub Copilot CLI hooks
-  - Copilot preToolUse
-  - Copilot guardrail
+  - GitHub Copilot CLI connector
+  - Copilot hooks
+  - preToolUse
 ---
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](https://docs.github.com/en/copilot/reference/hooks-reference) globally under `~/.copilot/hooks/` by default, with an optional workspace mode for `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI.
+DefenseClaw installs a hook file that Copilot CLI runs on its lifecycle events. This is a hook connector: Copilot talks to GitHub directly and no proxy is involved.
 
 ## Platform support
 
 <ConnectorSupport id="copilot" />
 
-| Platform | Status | Connector path |
-| --- | --- | --- |
-| macOS and Linux | **Supported** | Global or workspace command hooks using the portable DefenseClaw hook. |
-| Native Windows x64 | **Supported** | Copilot's official `powershell` hook field synchronously invokes the protected `defenseclaw-hook.exe`; `preToolUse` supports native ask. You still sign in to GitHub as usual. |
+## Set up
 
-## Setup
-
-<Tabs items={['macOS / Linux', 'Windows']}>
-  <Tab value="macOS / Linux">
+On a new install, run `defenseclaw init --connector copilot` first. Until DefenseClaw is initialized, `defenseclaw setup copilot` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
 
 ```bash
-defenseclaw setup copilot
+defenseclaw setup copilot  # first setup defaults to observe
 defenseclaw setup copilot --workspace /path/to/repo
 ```
 
-DefenseClaw writes the global hook by default. `--workspace` pins the workspace
-for the whole install. Setup refuses it once another connector is configured,
-because it would move that connector's hooks. To scope all connectors together,
-run `defenseclaw setup guardrail --workspace /path/to/repo`. Use
-`setup copilot --workspace` only on a Copilot-only install whose repository
-should carry `.github/hooks/defenseclaw.json`.
+A re-run without `--mode` keeps the current mode. On Windows, use PowerShell
+and a Windows path such as `'C:\path\to\repo'`. Hooks are global by default.
+`--workspace` writes them into one repository instead and pins the workspace
+for the whole install. Setup refuses it once another connector is configured.
+To scope every connector to a repository, run
+`defenseclaw setup guardrail --workspace /path/to/repo`.
 
-  </Tab>
-  <Tab value="Windows">
+Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
 
-```powershell
-defenseclaw setup copilot
-defenseclaw setup copilot --workspace 'C:\path\to\repo'
-```
-
-Copilot selects the registration's official `powershell` field. That field
-starts the stable `defenseclaw-hook.exe` synchronously with inherited
-stdin/stdout, waits for completion, and propagates its exit code. DefenseClaw
-does not require Bash or WSL. Normal GitHub provider login is still required;
-WSL, Git Bash, Cygwin, MSYS, Docker, and VM workarounds are outside the native
-connector path.
-
-  </Tab>
-</Tabs>
-
-By default this is **global/user-scoped**: DefenseClaw writes hook entries into `~/.copilot/hooks/defenseclaw.json`. Pass `--workspace /path/to/repo` only when you intentionally want repo-local `<workspace>/.github/hooks/defenseclaw.json` wiring. **There is no proxy-enforcement path** for Copilot CLI — blocking happens hook-side only through the documented `preToolUse`, `permissionRequest`, `agentStop`, and `subagentStop` responses. `postToolUseFailure` is advisory-only and can add recovery context after the tool has already failed. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI for that surface.
-
-If `COPILOT_HOME` is set, DefenseClaw uses that official Copilot configuration root instead of `~/.copilot` for hooks, MCP, skills, and agents.
-
-DefenseClaw also inventories, without changing them, Copilot's agents, skills, MCP servers and plugins; see [AI Discovery](/docs/ai-discovery) for how inventory works.
-
-<Accordions>
-<Accordion title="What DefenseClaw inventories for Copilot CLI">
-
-With an explicitly pinned workspace, inventory follows Copilot's documented
-precedence instead of the DefenseClaw daemon's current directory. It reads
-`.github/agents` and `.claude/agents` at each ancestor through the Git root;
-only `.md` and `.agent.md` files are agents, with the full suffix removed for
-identity. MCP inventory reads `.mcp.json` and `.github/mcp.json` at each
-ancestor, then the personal `mcp-config.json`, preserving name precedence.
-These are declarations, not proof of live activation: workspace MCP requires
-folder trust, or `GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP=true` in untrusted
-prompt mode;
-skills include immediate `.github`, `.agents`, and `.claude` locations,
-inherited parent `.github/skills`, personal `~/.agents/skills`, and additional
-`COPILOT_SKILLS_DIRS` entries. Plugin-contributed agents/skills and built-in or
-organization/remote agents/skills are not expanded from private or remote
-stores. Session, plugin-contributed, built-in, and remote runtime MCP servers
-also require official-client live inspection.
-
-The reviewed Copilot CLI 1.0.77 built-in agent IDs are inventoried as immutable
-versioned-contract rows. Local custom files cannot shadow those built-ins;
-plugin-contributed and remote organization/enterprise agents still require a
-live session.
-
-GitHub's current custom-agent command reference and plugin-reference loading
-diagram disagree about whether project or personal agents load first and how
-the project conventions are grouped. DefenseClaw follows the dedicated
-custom-agent reference (project/ancestor first, `.github` before `.claude` at
-each level); the effective order remains unverified pending official-client
-evidence.
-
-Read-only plugin inventory uses the official
-`copilot plugin list --json` command (older Copilot CLIs: `copilot plugins
-list --kind plugin --json`). DefenseClaw does not use
-that inventory path to install, enable, disable, or remove Copilot plugins.
-
-</Accordion>
-</Accordions>
-
-### What `setup copilot` actually does
-
-The table highlights convenience options rather than the complete alias
-surface. The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`,
-approval, block-message, and add/replace options. See the
-[quick-alias reference](/docs/guardrail/aliases); use
-[full guardrail setup](/docs/guardrail) for scanner, detection-strategy,
-and judge-provider configuration.
-
-| Flag | Default | What it does |
-| --- | --- | --- |
-| `--yes / -y` | off | Skip the confirmation prompt. |
-| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
-| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
-| `--workspace / --workspace-dir` | unset | Opt into repo-local `.github/hooks`; unset means global `~/.copilot/hooks`. |
-
-`setup copilot` is the dedicated Copilot setup alias. It uses the shared
-guardrail setup backend, defaults to observe mode, and can join an existing
-hook-connector roster when you choose **Add**. `claw.workspace_dir` is cleared
-for global setup and set only when `--workspace` is supplied.
-
-<Callout type="warning">
-Global setup is the default because DefenseClaw is intended to govern the operator environment, not one repo at a time. Use `--workspace` only for a repository that must carry its own hook file.
-</Callout>
-
-### Common variations — pick the recipe that fits your phase
-
-<Tabs items={['Standard', 'Local stack', 'Add scanning rigor', 'Hook-side enforcement']}>
-
-<Tab value="Standard">
+## Check it
 
 ```bash
-defenseclaw setup copilot
+defenseclaw status
 ```
 
-Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. It writes `~/.copilot/hooks/defenseclaw.json` and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. For scripted setup, pass `--yes --mode observe` (or `--mode action`).
+The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
 
-</Tab>
 
-<Tab value="Local stack">
+## What it can block or ask
 
-```bash
-defenseclaw setup copilot --yes --with-local-stack
-```
-
-Same as standard but also runs `setup local-observability up` so Prom/Loki/Tempo/Grafana come up locally for ad-hoc dashboards. That command writes the export destination after the alias has already restarted the gateway, so run its printed `defenseclaw-gateway restart` step before expecting exports. See [Local observability](/docs/observability/local-observability).
-
-</Tab>
-
-<Tab value="Add scanning rigor">
-
-```bash
-export DEFENSECLAW_LLM_KEY='replace-with-your-key'
-
-defenseclaw setup copilot                                 # global hooks first
-defenseclaw setup guardrail \
-  --connector copilot \
-  --rule-pack strict \
-  --scanner-mode local \
-  --detection-strategy regex_judge \
-  --judge-model anthropic/claude-sonnet-4-20250514 \
-  --judge-api-key-env DEFENSECLAW_LLM_KEY \
-  --judge-hook-connectors copilot \
-  --restart
-```
-
-The alias selects Copilot and writes the global hook; the follow-up `setup guardrail --connector copilot` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/guardrail), which validates its endpoint and API-key environment variable.
-
-</Tab>
-
-<Tab value="Hook-side enforcement">
-
-Copilot has no proxy enforcement, but its hooks can enforce directly:
-
-```bash
-defenseclaw setup copilot --mode action --human-approval
-```
-
-With `mode=action`, `preToolUse` surfaces a native ask when policy returns an
-eligible confirmation verdict. Confirmation findings on the other events use a
-non-pausing audit/alert fallback. `permissionRequest`, `agentStop`, and
-`subagentStop` can return their official deny/block responses; the
-post-action `postToolUseFailure` event can provide recovery
-`additionalContext` but cannot block or reverse the failed tool.
-Copilot does not expose a fail-closed hook transport surface; `--fail-mode
-closed`, inherited strict availability, missing auth, timeouts, and malformed
-responses cannot make an unavailable hook block the agent. Such a call is
-recorded in `~/.defenseclaw/logs/hook-failures.jsonl`, and the gateway reports
-it as a `guardrail-degraded` alert when it starts again. On a managed
-standalone host the administrator-owned hook is stricter: it denies
-`preToolUse` and `permissionRequest` while the gateway service is not
-running. The gateway also
-requires the exact trusted event-specific registration header and never
-infers Copilot event identity from stdin fields.
-
-</Tab>
-
-</Tabs>
-
-### Decision aids — should I turn this on?
-
-<Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Copilot supports native ask on preToolUse; other events use a non-pausing fallback." />
-  <Card href="/docs/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector copilot`." />
-  <Card href="/docs/policies/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
-  <Card href="/docs/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
-</Cards>
-
-<Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
-</Callout>
-
-## Files DefenseClaw will modify
-
-<Files>
-  <Folder name="~/.copilot" defaultOpen>
-    <Folder name="hooks">
-      <File name="defenseclaw.json" />
-    </Folder>
-  </Folder>
-  <Folder name="<workspace>/.github">
-    <Folder name="hooks">
-      <File name="defenseclaw.json (only with --workspace)" />
-    </Folder>
-  </Folder>
-  <Folder name="~/.defenseclaw" defaultOpen>
-    <Folder name="hooks">
-      <File name="copilot-hook.sh (Linux and macOS)" />
-    </Folder>
-  </Folder>
-  <Folder name="%LOCALAPPDATA%\DefenseClaw\HookRuntime (native Windows)">
-    <File name="defenseclaw-hook.exe" />
-  </Folder>
-</Files>
-
-## Hook capabilities
+What a gateway outage does to a GitHub Copilot CLI call, per install and fail mode, is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 
 <HookEventsList connector="copilot" />
 
-Copilot CLI has no hook that can stop a prompt, so a prompt rule doesn't block
-here: a matching prompt reaches the model, in observe and action mode alike, and its
-alert reads `detected in the prompt (cannot block)`. Tool-call rules still block
-([capability matrix](/docs/connectors/capability-matrix)).
+- `preToolUse` blocks an action-mode call that needs confirmation. Copilot CLI does not tell its hook whether it can show an approval prompt, so DefenseClaw records the delivered denial as a block.
+- `permissionRequest`, `agentStop` and `subagentStop` can return a deny or block.
+- `postToolUseFailure` is advisory. It can add recovery context after the tool failed.
+- Copilot CLI has no hook that can stop a prompt. A matching prompt reaches the model and the alert reads `detected in the prompt (cannot block)`. Tool-call rules still block.
 
-<Callout type="info">
-Copilot CLI supports native ask on documented `preToolUse` hooks. The approval prompt surfaces inside the agent UI, not the DefenseClaw TUI.
-</Callout>
+## Files it changes
 
-On native Windows, Copilot selects the hook's official `powershell` field.
-DefenseClaw's prepared contract invokes a managed `copilot-hook.ps1`
-byte-stream adapter. The adapter reads Copilot's JSON from console stdin,
-launches the stable `defenseclaw-hook.exe` runtime without a console and with
-explicitly redirected standard handles, waits for completion, and writes the
-runtime's decision back to Copilot unchanged. It normalizes Windows
-PowerShell 5.1's leading encoding marker and uses UTF-8 without a BOM for the
-child streams. It does not require Bash or WSL.
+| What | Where |
+| --- | --- |
+| Global hooks | `~/.copilot/hooks/defenseclaw.json` (or under `$COPILOT_HOME`) |
+| Workspace hooks (only with `--workspace`) | `<workspace>/.github/hooks/defenseclaw.json` |
+| Hook program, macOS and Linux | `~/.defenseclaw/hooks/copilot-hook.sh` |
+| Hook program, Windows | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 
-Copilot upstream now documents optional OpenTelemetry traces and metrics.
-DefenseClaw does **not** configure or certify that native exporter in this
-connector: no Copilot OTel environment variables or native-exporter
-credentials are written. Connector telemetry remains derived from
-authenticated hook events and then flows through the ordinary DefenseClaw v8
-audit, alert, webhook, and configured export destinations.
+Teardown restores the exact earlier file when DefenseClaw's copy is unchanged. Otherwise it removes only its own handlers.
 
-<Callout type="warn">
-GitHub's Copilot CLI 1.0.76 release notes state that per-path sandbox denials cannot be enforced on Windows. Hook enforcement remains event-specific; do not treat Copilot's Windows sandbox as per-path filesystem containment.
-</Callout>
+## Limits
 
-## GitHub Copilot in VS Code
+- Copilot runs a call when its hook times out or cannot start. Every other failure DefenseClaw sees (gateway down, unusable answer, missing token, oversized input) is denied in fail mode `closed`, the default, and the reason names the next step. With fail mode `open` the call runs, is recorded in `~/.defenseclaw/logs/hook-failures.jsonl` and is reported as a `guardrail-degraded` alert when the gateway starts again. Under Secure Client the hook stays open.
+- DefenseClaw does not configure Copilot's own OpenTelemetry exporter. Telemetry comes from hook events.
+- Copilot's Windows sandbox does not enforce per-path denials. Do not rely on it for filesystem containment.
+- The VS Code Local harness reads its own hook format. The enterprise profile covers it; see the reference.
 
-VS Code runs Copilot agent sessions on one of two harnesses. The Copilot SDK
-harness reads the same `policy.d` hooks as Copilot CLI, so the enterprise
-drop-in covers it. The default Local harness does not read `policy.d`. It
-reads hook files from `.github/hooks/*.json` and `~/.copilot/hooks/*.json` in
-its own format: PascalCase event names (`PreToolUse`, `UserPromptSubmit`,
-`Stop`, and others), snake_case stdin fields (`tool_name`, `tool_input`,
-`tool_use_id`), and a `hookSpecificOutput.permissionDecision` of `allow`,
-`deny` or `ask`. Sources:
-[Agent hooks](https://code.visualstudio.com/docs/copilot/customization/hooks),
-[Hooks reference](https://code.visualstudio.com/docs/agents/reference/hooks-reference),
-[Enterprise policies](https://code.visualstudio.com/docs/enterprise/policies).
+## Turn it off
 
-**Local harness dialect.** A hook command bound with
-`defenseclaw-hook hook --connector copilot --event PreToolUse --hook-surface vscode-local`
-speaks the Local format. The gateway rejects a body whose `hook_event_name`
-differs from the bound event. It maps the Local tool names DefenseClaw has
-reviewed (`run_in_terminal`, `read_file`, `list_dir`, `create_file`,
-`replace_string_in_file`, `insert_edit_into_file`, `fetch_webpage`) to
-canonical actions, and passes any other tool or argument through in its
-native form. A block on `PreToolUse` is a structured `deny`, a confirm is a
-native `ask`, and an allow prints nothing, because a Local `allow`
-auto-approves the call. A fail-closed `PreToolUse` or `UserPromptSubmit`
-denies with exit code 0; `Stop` never fails closed. Without the flag, a
-Copilot hook keeps the Copilot CLI contract.
-
-**Per-user hook file in the Local harness.** The Local harness also runs the
-per-user Copilot CLI hook file (`~/.copilot/hooks/defenseclaw.json`). It maps
-each CLI event to its own (`preToolUse` to `PreToolUse`, `userPromptSubmitted`
-to `UserPromptSubmit`, `agentStop` to `Stop`) and sends that command its Local
-payload (`hook_event_name`, `tool_name`, `tool_input`), not the CLI body. When
-the body's `hook_event_name` is the Local event of the bound CLI event, the
-gateway judges the call in the Local dialect: a per-user `run_in_terminal`
-call is judged as a shell command, and a `PreToolUse` deny comes back as the
-Local `hookSpecificOutput` that VS Code enforces.
-
-**Device policies (enterprise, standalone profile).** With
-`ownership: merge`, the Copilot machine policy also enables the VS Code
-policies `ChatHooks` (a user cannot turn hooks off with `chat.useHooks`) and
-`ChatEditorPreferCopilotHarness` (VS Code 1.134 and later open new editor
-chats on the SDK harness):
-
-| Platform | Where | How |
-| --- | --- | --- |
-| Windows | `HKLM\Software\Policies\Microsoft\VSCode` | `REG_DWORD` value `1` |
-| Linux | `/etc/vscode/policy.json` | JSON `true` (Devin Desktop reads the same file) |
-| macOS | Configuration profile | Not written; deploy both values through MDM |
-
-DefenseClaw adds a value only when it is absent, keeps any value the
-administrator set (and reports one that is not enabled), and records the
-values it added. Uninstall removes only those, and only while they still
-hold DefenseClaw's value. `ownership: verify_only` reports missing values
-without writing them.
-
-**Local hook file and plugin (enterprise, standalone profile).** While the
-Copilot machine policy is not `ownership: off` and `local_harness` is
-`govern`, DefenseClaw places `~/.copilot/hooks/defenseclaw-vscode.json` for
-every enrolled user. It binds `SessionStart`, `UserPromptSubmit`,
-`PreToolUse`, `PostToolUse` and `Stop` to the administrator's hook binary with
-`--hook-surface vscode-local`. With `managed_hooks_only: enforce` it also
-enables `ChatPluginsEnabled` and, only while every VS Code found on the host
-is 1.139.x (the version whose plugin store DefenseClaw writes), places the
-same hooks as a plugin under
-`~/.copilot/installed-plugins/defenseclaw/defenseclaw/` and adds
-`enabledPlugins["defenseclaw@defenseclaw"]` to Copilot's managed settings.
-Copilot CLI reads the same settings file, and from 1.0.92 it warns at every
-start and prompt about an enabled plugin whose marketplace it does not know
-(`Marketplace "defenseclaw" not found`), so a host without such a VS Code
-gets neither the key nor the plugin folder (status says why). The key is
-DefenseClaw's whenever it holds `true`, recorded or not (a build before
-1.0.0 wrote it without a record): the guardian removes it from a host where
-it is not wanted, and uninstall, with or without `PURGE=1`, removes it, then
-the settings file and the folder DefenseClaw created for it once nothing
-else is in them. On a computer that no longer has an enterprise deployment
-(one removed by a build before 1.0.0), nothing is left to remove the key:
-as an administrator, delete the `defenseclaw@defenseclaw` entry from
-`enabledPlugins` in that file, or the file when nothing else is in it.
-DefenseClaw writes the files as the user.
-The Local hook file is DefenseClaw's own: the hook guardian rewrites it when a
-user deletes or edits it (a directory or link at that name is replaced too),
-status and verify fail while it is missing or modified, and uninstall removes
-whatever is at that name. For the plugin files, DefenseClaw rewrites only
-files it rendered, including an earlier release's render, so an upgrade
-replaces them. It keeps any other file at those paths: the foreign-hook guard
-then denies that user's Copilot calls, so status and verify fail and name the
-file. Move it aside, and the guardian writes DefenseClaw's plugin on its next
-pass. Status and verify also fail while DefenseClaw's plugin is missing or
-out of date, and uninstall removes only DefenseClaw's copies.
-
-Copilot CLI also reads `~/.copilot/hooks` and runs the file's `command`, and
-VS Code runs both the file and the plugin. When the Copilot CLI runs the
-Local hook file while DefenseClaw's Copilot machine policy is in force, the
-command allows the event without asking the gateway: the machine policy hook
-already evaluates it. That includes VS Code's Copilot CLI agent host, whose
-engine is `copilot-runtime`. Otherwise the gateway
-answers a second delivery of the same tool call with the first verdict, so
-the call is evaluated and audited once. It matches deliveries by `tool_use_id`, or, for
-the two Copilot CLI formats, by the same session, event, tool and arguments
-within a few seconds.
-
-**Local harness lock.** Copilot's managed settings key
-`allowManagedHooksOnly` makes the Local harness run only managed hooks and
-plugins. DefenseClaw sets it only when all of these hold: Linux
-(`/etc/github-copilot/managed-settings.json`); `managed_hooks_only: enforce`;
-every enrolled user already has DefenseClaw's plugin; and every VS Code
-installation found is 1.139.x, the version whose plugin store DefenseClaw
-writes. Otherwise status explains why it is not set. Values the administrator
-set are kept, and uninstall removes only the keys DefenseClaw added. On macOS
-DefenseClaw reports the keys to deploy through device management and writes
-nothing. On Windows it does not write the lock.
-
-**Harness settings.** Two keys under `enterprise.machine_policy.connectors.copilot`:
-
-| Key | Values | Effect |
-| --- | --- | --- |
-| `harness_preference` | `sdk` (default), `unmanaged` | `sdk` enables `ChatEditorPreferCopilotHarness`; `unmanaged` leaves the editor's harness choice to the user |
-| `local_harness` | `govern` (default), `retire` | `govern` places the Local hook file (and the plugin under `managed_hooks_only: enforce`); `retire` places neither and sets `sandbox.enabled` in Copilot's managed settings |
-
-The Copilot status row lists both settings, the VS Code installations found
-with their versions, and how many enrolled users have the Local hook file and
-the plugin.
-
-**Foreign-hook guard.** In a Local harness request the guard also checks the
-Local harness's own hook sources:
-
-- `~/.claude/settings.json`;
-- `chat.hookFilesLocations` in VS Code user and workspace settings;
-- custom agents in `.github/agents/*.agent.md` whose frontmatter declares hooks;
-- installed Copilot plugins.
-
-All of these are report-only, and DefenseClaw never edits them. A linked plugin
-directory cannot be verified, so the guard treats it as an unreadable source.
-
-**Not covered yet.**
-
-- Under the lock, the guard still treats user-installed plugins and
-  custom-agent hooks as foreign. Whether `allowManagedHooksOnly` also stops
-  them in the Local harness is not yet confirmed live.
-- VS Code 1.140 and later keep plugin records in `~/.copilot/config.json`,
-  which DefenseClaw does not write yet, so the lock is not set for them.
-- `retire` does not yet pick the editor's harness for the user.
-- VS Code publishes no list of built-in tool names. The mapped names above
-  follow the current tool set and are confirmed live with an audit-only hook.
-
-## In an OpenShell sandbox
-
-`defenseclaw sandbox run copilot` runs GitHub Copilot CLI in an NVIDIA
-OpenShell sandbox on Linux, or on a Mac with Apple silicon in a MicroVM of its
-own that works on a copy of your folder ([macOS](/docs/sandboxes/guide#macos)):
-the agent sees only your project folder, and DefenseClaw hooks gate every tool
-call. The
-[sandbox guide](/docs/sandboxes/guide) covers setup, the session and every flag.
-The first run builds the Copilot CLI image;
-`defenseclaw sandbox image build copilot` builds it ahead of time.
-`defenseclaw sandbox setup` builds the images of the harnesses in
-`openshell.harnesses` (Claude Code and Codex by default), and its `--harness`
-replaces that list, so name every harness you want:
-`defenseclaw sandbox setup --harness claudecode --harness codex --harness copilot`.
-
-- **Managed tier.** The hooks are in the root-owned policy document
-  `/etc/github-copilot/policy.d/50-defenseclaw.json`, and the managed settings
-  admit only managed hooks, so a user `disableAllHooks` and user or repository
-  hooks change nothing. The hooks fail closed and authenticate with a
-  per-sandbox token. The image pre-extracts the pinned CLI into a root-owned
-  package cache that the launcher pins, so a newer package planted in the
-  agent's home cannot replace the running CLI.
-- **Skip-permissions.** On by default (the `open` and `balanced` packs):
-  Copilot CLI starts with `--yolo`. `--safe`, or the `strict` pack, keeps its
-  prompts and drops `--yolo`, `--allow-all` and `--allow-all-tools` from the
-  arguments you pass. A safe headless run (`--prompt`) still adds
-  `--allow-all-tools`, because Copilot's non-interactive mode refuses to run
-  without tool approval.
-- **Model sign-in.** `sandbox run` uses Copilot's bring-your-own-provider
-  mode. `--llm auto` (the default) shares `ANTHROPIC_API_KEY` from your shell
-  as Copilot's provider key for the Anthropic Messages API (pick a model with
-  `-- --model <model>`); `--llm bedrock`, and `auto` without it, shares a
-  short-term Amazon Bedrock API key from `AWS_BEARER_TOKEN_BEDROCK` for the
-  Bedrock Mantle Anthropic
-  endpoint (default model Claude Haiku 4.5). That endpoint serves the
-  Anthropic models only: an OpenAI model on Bedrock, such as
-  `openai.gpt-5.6-luna`, is refused with HTTP 400 ("does not support the
-  /anthropic/v1/messages API"). OpenShell holds the secret, and
-  the sandbox gets a placeholder that works only at that endpoint. Both run
-  Copilot in offline mode, which skips GitHub sign-in, telemetry, web tools,
-  the GitHub MCP server and updates. Copilot's own models through a
-  Copilot-entitled GitHub token (`COPILOT_GITHUB_TOKEN`) have no `--llm`
-  choice and were not tested live.
-- **MCP servers.** DefenseClaw brings your MCP servers along into Claude Code
-  and Codex sandboxes only.
-- **Ctrl-Z.** Copilot CLI suspends itself by signalling its process group,
-  which the OpenShell sandbox refuses, and no shell in the sandbox could
-  resume a stopped job either. DefenseClaw resumes Copilot at once, also at a
-  `sandbox connect --shell` prompt: Copilot shows its own `✗ Error: kill
-  EPERM` and keeps working, and the terminal's title (and a desktop
-  notification, where the terminal shows them) says at once `[defenseclaw]
-  Ctrl-Z cannot suspend a harness in an OpenShell sandbox: it keeps
-  running`. Once Copilot exits, the terminal shows Copilot's own "has been
-  suspended. Use `fg` to resume." line, which DefenseClaw cannot keep off
-  the screen, followed by `defenseclaw: Ctrl-Z cannot suspend a harness in
-  an OpenShell sandbox (the sandbox refuses the signal): it keeps running,
-  and there is nothing to bring back with fg.`
-- **Interactive hook latency.** The sandbox refuses `pidfd_open`
-  (ENOSYS), on Linux and in a Mac's MicroVM alike, and in the interactive
-  TUI Copilot CLI 1.0.88 then learns that a hook exited only when the
-  30-second hook timeout ends it. The image fixes this with a small
-  root-owned preload library that answers the refused call for the pinned
-  Copilot executable only, so hooks take milliseconds in the TUI as in
-  headless runs. Hooks, tools and every other process Copilot starts run
-  without it
-  ([#966](https://github.com/cisco-ai-defense/defenseclaw/issues/966)).
-- **Image and verification.** The image installs Copilot CLI 1.0.88,
-  replacing the base image's 1.0.16, which no hook contract covers. Verified
-  end to end: against a mock model
-  through Copilot's bring-your-own-provider mode, every hook reached
-  DefenseClaw and a blocked tool call was denied, also with hostile settings,
-  planted packages and shell start-up files. In a live sandbox run with the
-  DefenseClaw daemon, a blocked tool call got the gateway's verdict, the
-  egress proxy blocked an exfiltration destination, and a connection around
-  the proxy was refused.
-
-## Disable
-
-If Copilot CLI is the only connector DefenseClaw guards, turn the guardrail off:
+For a per-user, single-connector install:
 
 ```bash
 defenseclaw guardrail disable --yes
 ```
 
-If other connectors are configured too, turn off Copilot CLI alone and keep the
-rest running:
+With the default gateway restart, disabling removes DefenseClaw's hooks from
+Copilot's global or configured workspace file and preserves your other Copilot
+settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
+remove the connector, run `defenseclaw setup remove copilot --yes` (add
+`--force` if it is the last one).
 
-```bash
-defenseclaw guardrail disable --connector copilot --yes
-```
+On a multi-connector install, add `--connector copilot` to `guardrail disable` and `guardrail enable` to change only this agent.
 
-Both keep Copilot CLI's settings, so `defenseclaw guardrail enable` (with the same
-`--connector`) turns it back on. To drop Copilot CLI from the configured
-connectors instead, run `defenseclaw setup remove copilot --yes`; add `--force`
-when it is the last connector.
+## Details
 
-Teardown restores the exact pre-Setup hook document when its managed copy is
-unchanged. If an operator edits the file after Setup, DefenseClaw removes only
-its recognized handlers and preserves foreign entries, unknown events, and
-the rest of the file. The same custody rule applies to the pinned workspace
-hook file.
+Hook contracts, inventory, the VS Code harness and its device policies, and the OpenShell sandbox image are in the [Copilot reference](/docs/reference/connectors/copilot).

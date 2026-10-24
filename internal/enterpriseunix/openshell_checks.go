@@ -76,11 +76,11 @@ func (l *lifecycle) currentOpenShellSettings() (openshellSettings, bool) {
 		return l.osPlan.settings, l.osPlan.settings.Enabled
 	}
 	applied := l.env.loadOpenShellState().Applied
-	if applied == nil || !applied.Enabled {
+	if applied == nil {
 		return openshellSettings{}, false
 	}
-	return openshellSettings{Enabled: true, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
-		GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, true
+	return openshellSettings{Enabled: applied.Enabled, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
+		RaisedFrom: applied.RaisedFrom, GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, applied.Enabled
 }
 
 // describeOpenShell adds the sandbox rows to the result and warns for every
@@ -91,9 +91,12 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	settings, on := l.currentOpenShellSettings()
 	state := env.loadOpenShellState()
 	if !on {
+		if settings.Install == config.EnterpriseOpenShellInstallSetup && strings.TrimSpace(settings.Version) == "" {
+			r.AddWarning(codeOpenShellPrerequisite, "sandboxes remain off: enterprise.openshell.install: setup has no pin; set enterprise.openshell.version to an exact supported OpenShell release before enabling openshell.enabled")
+		}
 		for _, entry := range state.sortedPending() {
 			if entry.Kind == "stop" {
-				l.describePending(entry)
+				l.describePending(ctx, entry)
 			}
 		}
 		l.noteOpenShellCapability(ctx, settings, false, nil, nil)
@@ -161,14 +164,14 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 		}
 	}
 	for _, entry := range state.sortedPending() {
-		l.describePending(entry)
+		l.describePending(ctx, entry)
 	}
 	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
 	// required agent cannot move into a sandbox. status and verify only read.
-	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {
+	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify && (l.osPlan != nil || len(r.Errors) == 0) {
 		if err := env.publishPrerequisites(ctx, settings); err != nil {
-			r.AddWarning(codeState, "could not record "+openshell.PrerequisitesFile+": "+err.Error())
+			r.AddWarning(stateWriteCode(err, codeState), "could not record "+openshell.PrerequisitesFile+": "+err.Error())
 		}
 	}
 }
@@ -219,15 +222,41 @@ func versionNote(version string) string {
 }
 
 // describePending reports a change that waits for an account's sandboxes.
-func (l *lifecycle) describePending(entry pending) {
-	waiting := fmt.Sprintf("%d sandboxes run", entry.Sandboxes)
+func (l *lifecycle) describePending(ctx context.Context, entry pending) {
+	waiting := fmt.Sprintf("%d sandboxes run (or are starting, stopping, or a MicroVM that OpenShell does not report stopped)", entry.Sandboxes)
 	switch {
 	case entry.Sandboxes < 0:
 		waiting = "the lifecycle could not tell whether sandboxes run"
+		if entry.Hold != "" {
+			waiting += ": " + entry.Hold
+		}
 	case entry.Sandboxes == 1:
-		waiting = "1 sandbox runs"
+		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM that OpenShell does not report stopped)"
 	case entry.Sandboxes == 0:
 		waiting = "waiting to be tried again"
+	}
+	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify {
+		// status and verify read the record the last ensure kept: the
+		// account's own sandbox command may have applied the change since
+		// (it restarts an idle daemon), so the count is that run's, not
+		// now's (GAP-0679).
+		switch {
+		case entry.Sandboxes == 1:
+			waiting = "1 sandbox ran when it was last tried"
+		case entry.Sandboxes > 1:
+			waiting = fmt.Sprintf("%d sandboxes ran when it was last tried", entry.Sandboxes)
+		}
+		if entry.Sandboxes > 0 {
+			waiting += "; a change the user's own sandbox command applied since stays listed until the next ensure"
+		}
+	}
+	// A macOS LaunchAgent reload needs the user's GUI console session; with
+	// none active the reload waits for the next login or sandbox command,
+	// whatever the last ensure counted (g-unix-console).
+	if l.env.GOOS == "darwin" && entry.Kind == "launchd" {
+		if active, err := l.env.activeMacOSConsoleSession(ctx, entry.UID); err == nil && !active {
+			waiting = "no active GUI console session; the reload is deferred until this user's next login or sandbox command"
+		}
 	}
 	l.result.Services = append(l.result.Services, enterprisestatus.Service{
 		Name: "sandbox pending " + entry.User, Kind: sandboxRowKind, State: fmt.Sprintf("%s since %s: %s", entry.Kind, entry.Since, waiting),
@@ -237,7 +266,10 @@ func (l *lifecycle) describePending(entry pending) {
 			entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionRepair)))
 		return
 	}
-	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running",
+	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. "+
+		"The user's `defenseclaw sandbox stop NAME` flushes and stops a running one; a MicroVM whose workload completed or that is in OpenShell's error state, "+
+		"which OpenShell does not stop and whose VM may still run, holds the change until OpenShell reports it stopped (the user's `defenseclaw sandbox stop NAME` says how) "+
+		"or the user deletes it (`defenseclaw sandbox delete NAME`)",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
 
@@ -358,6 +390,10 @@ var versionRange = regexp.MustCompile(`^>=([0-9]+\.[0-9]+\.[0-9]+)(?: <([0-9]+\.
 // supports.
 func versionAllowed(spec string, have openshell.Version) (bool, string) {
 	spec = strings.TrimSpace(spec)
+	if err := openshell.CheckSandboxRelease(have); err != nil && openshell.Legacy(have) {
+		// Whatever the pin allows: each user's daemon starts no sandbox on it.
+		return false, err.Error()
+	}
 	switch {
 	case spec == "":
 		if err := openshell.CheckSupported(have); err != nil {
@@ -371,7 +407,9 @@ func versionAllowed(spec string, have openshell.Version) (bool, string) {
 			return false, fmt.Sprintf("%s is older than %s", have, m[1])
 		}
 		if m[2] != "" {
-			if high, _ := openshell.ParseVersion(m[2]); have.Compare(high) >= 0 {
+			// A prerelease of the ceiling is outside the range, as the
+			// ceiling is.
+			if high, _ := openshell.ParseVersion(m[2]); have.Release().Compare(high) >= 0 {
 				return false, fmt.Sprintf("%s is %s or newer", have, m[2])
 			}
 		}
@@ -397,6 +435,11 @@ func (e *Env) checkPrerequisiteMode(ctx context.Context, s openshellSettings) []
 	var rows []prereqRow
 	installFix := e.openshellInstallFix()
 	pinFix := "install a release that satisfies enterprise.openshell.version" + versionNote(s.Version) + " (" + installFix + ")"
+	if v, err := openshell.ParseVersion(s.Version); err == nil && openshell.CheckSandboxRelease(v) != nil {
+		// No release satisfies both the pin and openshell.SupportedMin.
+		pinFix = "set enterprise.openshell.version to " + openshell.InstallerVersion + " (or a range from " + openshell.SupportedMin +
+			") and install that release (" + installFix + ")"
+	}
 	var parts []string
 	releases := map[string]openshell.Version{}
 	part := func(row, name, pkg, path string, refused []string, fix string) {
@@ -505,6 +548,10 @@ func (e *Env) checkSetupMode(ctx context.Context, s openshellSettings) []prereqR
 	case versionRange.MatchString(s.Version) || openshell.TarballPins[s.Version] == nil:
 		rows = append(rows, prereqRow{Name: "openshell pin", Detail: fmt.Sprintf("%q is not a release this DefenseClaw build can install", s.Version),
 			Fix: "set enterprise.openshell.version to one of: " + strings.Join(openshell.PinnedTarballReleases(), ", ")})
+	case s.RaisedFrom != "":
+		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins; " +
+			"enterprise.openshell.version pins " + s.RaisedFrom + ", which runs no sandbox (" + openshell.SupportedMin + " closes a network-broker policy bypass, " +
+			"NVIDIA/OpenShell#4494), so each user's OpenShell moves to " + s.Version + " once none of the user's sandboxes runs; set the pin to " + s.Version})
 	default:
 		rows = append(rows, prereqRow{Name: "openshell pin", OK: true, Detail: s.Version + " from NVIDIA's release tarballs, verified against their checksums and the digests this build pins"})
 	}
@@ -758,7 +805,7 @@ func (e *Env) publishPrerequisites(ctx context.Context, s openshellSettings) err
 	for _, row := range primary {
 		if !row.OK {
 			record.Ready = false
-			record.Missing = append(record.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix})
+			record.Missing = append(record.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix, Version: row.Version})
 		}
 	}
 	if fallback != nil {
@@ -766,7 +813,7 @@ func (e *Env) publishPrerequisites(ctx context.Context, s openshellSettings) err
 		for _, row := range fallback {
 			if !row.OK {
 				record.Fallback.Ready = false
-				record.Fallback.Missing = append(record.Fallback.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix})
+				record.Fallback.Missing = append(record.Fallback.Missing, openshell.PrerequisiteMissing{Item: row.Name, Detail: row.Detail, Fix: row.Fix, Version: row.Version})
 			}
 		}
 	}

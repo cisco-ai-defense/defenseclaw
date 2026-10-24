@@ -97,6 +97,8 @@ func TestWindowsManagedInstallDefaultsOpenAndClaudeVersionCanBeMissing(t *testin
 }
 
 func TestWindowsCodexVersionFallbackStillRequiresProtectedMachineRuntime(t *testing.T) {
+	// The Secure Client profile of a verified install (GAP-0606).
+	setStandaloneProfileForTest(t, false)
 	for _, agentVersion := range []string{"", "codex-cli 0.142.0"} {
 		t.Run(agentVersion, func(t *testing.T) {
 			fixture := newWindowsGenericCodexFixture(t)
@@ -112,6 +114,8 @@ func TestWindowsCodexVersionFallbackStillRequiresProtectedMachineRuntime(t *test
 }
 
 func TestWindowsEnumerationUsesPresenceWithoutAgentVersion(t *testing.T) {
+	// The Secure Client profile of a verified install (GAP-0606).
+	setStandaloneProfileForTest(t, false)
 	for _, agent := range []string{"codex", "claudecode", "cursor"} {
 		t.Run(agent, func(t *testing.T) {
 			home := t.TempDir()

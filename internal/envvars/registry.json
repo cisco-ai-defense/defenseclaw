@@ -1,6 +1,6 @@
 {
   "$schema_version": "1",
-  "$description": "DefenseClaw environment-variable registry. Single source of truth for DEFENSECLAW_* environment variables and Fleet/Edge DCLAW_* runtime variables consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
+  "$description": "DefenseClaw environment-variable registry. Single source of truth for DEFENSECLAW_* environment variables and Fleet/Edge DCLAW_* runtime variables consumed by the codebase. Both internal/envvars (Go) and cli/defenseclaw/envvars (Python) load this file. The CI gate at cli/tests/test_envvars_codebase_coverage.py fails the build if any callsite references a DEFENSECLAW_* var not declared here. The canonical website catalog at docs-site/content/docs/reference/configuration/env-vars.mdx is rendered from this file; docs/ENV-VARS.md is a stable pointer to that catalog. Each entry's managed field says what a managed (standalone enterprise) host does with it: allow (read as set), ignore (treated as unset, from the environment and from .env) or tighten_only (honoured only when it makes the setting stricter).",
   "$categories": {
     "security_opt_out": "Toggles that weaken security defaults. Surfaced by 'defenseclaw doctor' whenever active.",
     "debug": "Verbose-logging toggles. Safe but noisy.",
@@ -108,8 +108,8 @@
     {
       "name": "DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT",
       "category": "security_opt_out",
-      "purpose": "Bypass the action-mode fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build) and for incompatible hook-contract lock drift during connector setup. Untested newer versions no longer need it.",
-      "default": "unset (fail-closed in action mode)",
+      "purpose": "Bypass the fail-closed checks for agent versions with no hook contract (below the tested floor, on the known-broken list, or an unmatched exact build; refused in observe and action mode by setup, init, quickstart and a single-connector gateway start), for unverified versions in action mode, and for incompatible hook-contract lock drift during connector setup. Untested newer versions no longer need it.",
+      "default": "unset (fail-closed)",
       "accepted_values": [
         "1",
         "unset"
@@ -120,7 +120,7 @@
       "consumers": [
         {
           "location": "internal/gateway/sidecar.go",
-          "description": "Blocks connector setup on an unverified hook contract in action mode unless set"
+          "description": "Blocks connector setup on an agent version with no hook contract (in every mode with one connector, in action mode or for OpenCode with several) and on an unverified version in action mode unless set"
         },
         {
           "location": "internal/gateway/sidecar.go",
@@ -128,7 +128,11 @@
         },
         {
           "location": "cli/defenseclaw/commands/cmd_setup.py",
-          "description": "Python setup path mirrors the gateway drift/contract enforcement"
+          "description": "Python setup refuses an agent version with no hook contract in observe and action mode, and an unverified version in action mode, unless set"
+        },
+        {
+          "location": "cli/defenseclaw/bootstrap.py",
+          "description": "init and quickstart leave out or refuse an agent version with no hook contract in observe and action mode unless set"
         }
       ],
       "since": "0.7.0",
@@ -936,7 +940,7 @@
     {
       "name": "DEFENSECLAW_CONNECTOR",
       "category": "hook_internal",
-      "purpose": "Runtime selector for the connector that owns an invocation of the shared hook scripts. Managed installations read the installer-owned connector sidecar; non-managed shells may set this explicitly.",
+      "purpose": "Runtime selector for the connector that owns an invocation of the shared hook scripts. Managed installations read the installer-owned connector sidecar; non-managed shells may set this explicitly to pick the connector token and identity, but it never opens the shared hooks: they run open only when every connector recorded for them is open.",
       "default": "unset",
       "accepted_values": [
         "normalized connector identifier",
@@ -948,7 +952,7 @@
       "consumers": [
         {
           "location": "internal/gateway/connector/hooks/_hardening.sh",
-          "description": "Selects one unambiguous connector runtime record for shared hooks"
+          "description": "Selects the connector token and identity for shared hooks; their fail mode is the strictest recorded mode"
         },
         {
           "location": "internal/gateway/connector/subprocess.go",
@@ -1372,13 +1376,11 @@
     {
       "name": "DEFENSECLAW_E2E_HARNESS",
       "category": "test_fixture",
-      "purpose": "Names the hook-only harness the live hook-only sandbox test drives (hermes, openhands, antigravity or omnigent); the test is skipped when it is unset.",
+      "purpose": "Names the hook-only harness the live hook-only sandbox test drives (hermes or antigravity); the test is skipped when it is unset.",
       "default": "unset",
       "accepted_values": [
         "hermes",
-        "openhands",
         "antigravity",
-        "omnigent",
         "unset"
       ],
       "security_impact": "none",
@@ -1503,7 +1505,7 @@
     {
       "name": "DEFENSECLAW_FAIL_MODE",
       "category": "security_opt_out",
-      "purpose": "Per-process override of guardrail.hook_fail_mode for hook delivery, missing-token/authentication, and invalid-response failures. Templated into or resolved by every managed hook.",
+      "purpose": "Not read by 1.0.4 hooks in any profile: a hook's fail mode is the guardrail.hook_fail_mode installed with it (the shell hook, the OpenCode plugin, hooks/.hookcfg for the native Windows hook), and status and doctor report that. Hooks rendered by 1.0.3 or earlier read it until the upgrade renders them again. Set the mode with defenseclaw guardrail fail-mode.",
       "default": "(value from guardrail.hook_fail_mode in config.yaml)",
       "accepted_values": [
         "open",
@@ -1515,8 +1517,8 @@
       "managed": "tighten_only",
       "consumers": [
         {
-          "location": "internal/gateway/connector/hooks/inspect-tool.sh",
-          "description": "Representative shared template; every generated hook reads the same override"
+          "location": "cli/defenseclaw/fail_mode.py",
+          "description": "Recognizes the old hook rendering while upgrading it; 1.0.4 hooks do not read this value"
         }
       ],
       "since": "0.4.0"
@@ -3505,7 +3507,7 @@
     {
       "name": "DEFENSECLAW_MANAGED_HOOK",
       "category": "hook_internal",
-      "purpose": "Immutable sentinel baked into managed-enterprise hook scripts so missing authentication material and unavailable enforcement fail closed even when an inherited environment requests permissive availability behavior.",
+      "purpose": "Immutable sentinel baked into managed-enterprise hook scripts so missing authentication material and unavailable enforcement fail closed even when an inherited environment requests permissive availability behavior. A per-user hook unsets an inherited value, so the agent environment cannot make it act as a managed hook.",
       "default": "unset (set to 1 only by generated managed hooks)",
       "accepted_values": [
         "1",
@@ -5469,7 +5471,7 @@
     {
       "name": "DEFENSECLAW_SPLUNK_HEC_TOKEN",
       "category": "credential",
-      "purpose": "Alternative HEC token consulted by the Python sink wiring when the canonical splunk_hec.token_env points to a different var.",
+      "purpose": "Credential reference of remote Splunk HEC destinations written before 1.0.4. Setup now stores each remote Splunk destination's token under its own reference, this name followed by an underscore and the destination name in capitals, and never reads a saved reference as input: pass the token with DEFENSECLAW_SETUP_SPLUNK_HEC_TOKEN.",
       "default": "unset",
       "accepted_values": [
         "HEC token",
@@ -5480,8 +5482,8 @@
       "managed": "allow",
       "consumers": [
         {
-          "location": "cli/defenseclaw/commands/cmd_setup.py",
-          "description": "Python Splunk wiring fallback"
+          "location": "cli/defenseclaw/observability/presets.py",
+          "description": "Splunk HEC preset reference, the prefix of each destination's own reference"
         }
       ],
       "since": "0.4.0"
@@ -5509,7 +5511,7 @@
     {
       "name": "DEFENSECLAW_STRICT_AVAILABILITY",
       "category": "security_opt_out",
-      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open. Invalid gateway responses still follow guardrail.hook_fail_mode.",
+      "purpose": "Force transport and missing-token hook failures closed even when the effective fail mode is open, on the hooks that read it (the gateway outage table of the connectors capability matrix lists them), and only when the process running the hook inherits this variable. A Codex TUI or app server may outlive the launching shell and not inherit it; use guardrail.hook_fail_mode: closed for a reliable policy. Invalid gateway responses still follow guardrail.hook_fail_mode; managed standalone hooks always close unusable gateway answers.",
       "default": "unset (no additional force-closed override)",
       "accepted_values": [
         "1",
@@ -7943,7 +7945,7 @@
     {
       "name": "DCLAW_FLEET_API_URL",
       "category": "fleet",
-      "purpose": "Fleet API URL used by the remote device installer.",
+      "purpose": "Fleet API URL used by the remote device installer and Fleet CLI.",
       "default": "",
       "accepted_values": [
         "URL"
@@ -7955,6 +7957,10 @@
         {
           "location": "cli/defenseclaw/commands/cmd_edge_install.py",
           "description": "Runtime environment reader"
+        },
+        {
+          "location": "cli/defenseclaw/commands/cmd_edge_connector_cli.py",
+          "description": "Fleet CLI endpoint reader"
         }
       ],
       "since": "1.1.0"
@@ -8217,6 +8223,74 @@
         }
       ],
       "since": "1.1.0"
+    },
+    {
+      "name": "DEFENSECLAW_CONTAINED_RUN_SUPERVISOR",
+      "category": "hook_internal",
+      "purpose": "Set to 1, together with the argv[0] defenseclaw-contained-run, only when a DefenseClaw Go binary re-runs itself on Linux as the PID-namespace runner of processutil.RunContained (the Hermes Verify execution probe) or the PID-namespace scanner launcher of processutil.RunTracked. The supervisor removes it before it starts the probed command.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/processutil/contain_linux.go",
+          "description": "Go reader: selects the supervisor mode at process start"
+        }
+      ],
+      "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_TRACKED_HOST_STAT_FD",
+      "category": "hook_internal",
+      "purpose": "Linux scanner custody channel descriptor, set to 5 by the trusted RunTracked launcher. A scanner in a one-ID user namespace uses the read-only channel to confirm the host owner of a previously inspected inode; the launcher overwrites inherited values and never opens or writes the requested path.",
+      "default": "unset",
+      "accepted_values": [
+        "5",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/processutil/contain_linux.go",
+          "description": "Go writer: passes the launcher-owned descriptor to the scanner"
+        },
+        {
+          "location": "internal/managed/trust_owner_linux.go",
+          "description": "Go reader: checks the host owner of managed runtime paths"
+        },
+        {
+          "location": "cli/defenseclaw/file_permissions.py",
+          "description": "Python reader: checks the host owner of scanner executable and config paths"
+        }
+      ],
+      "since": "1.0.4"
+    },
+    {
+      "name": "DEFENSECLAW_TRACKED_RUN_SUPERVISOR",
+      "category": "hook_internal",
+      "purpose": "Set to 1, together with the argv[0] defenseclaw-tracked-run, only when a DefenseClaw Go binary re-runs itself on macOS as the process-tree supervisor of processutil.RunTracked (gateway scanner runs). The supervisor removes it before it starts the tracked command.",
+      "default": "unset",
+      "accepted_values": [
+        "1",
+        "unset"
+      ],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "managed": "allow",
+      "consumers": [
+        {
+          "location": "internal/processutil/track_darwin.go",
+          "description": "Go reader: selects the supervisor mode at process start"
+        }
+      ],
+      "since": "1.0.4"
     }
   ]
 }

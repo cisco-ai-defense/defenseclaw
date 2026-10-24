@@ -3,7 +3,7 @@
 The canonical operator reference is the
 [published configuration page](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/).
 The complete environment-variable catalog is maintained separately on the
-[published environment-variable page](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/env-vars/).
+[published environment-variable page](https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/env-vars/).
 
 Repository implementation authorities are:
 

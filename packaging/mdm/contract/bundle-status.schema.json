@@ -48,6 +48,9 @@
         "anchors": {
           "type": "string"
         },
+        "anchors_summary": {
+          "$ref": "#/$defs/anchorsSummary"
+        },
         "current": {
           "oneOf": [
             {
@@ -145,6 +148,86 @@
           }
         }
       ]
+    },
+    "anchorsSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the installed trust anchor file says, without the public keys (SummarizeAnchors, internal/enterprisebundle/anchors.go), so an agent does not read and hash the file itself. Absent when the file is missing or fails its trust or format checks (the warnings say why); added in 1.0.4 without a management_contract bump.",
+      "required": [
+        "sha256",
+        "tenant_id",
+        "device_groups",
+        "min_version",
+        "keys"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$",
+          "description": "Lowercase hex SHA-256 of the anchor file bytes: equal to the hash of the file the agent installed."
+        },
+        "tenant_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+        },
+        "device_groups": {
+          "type": "array",
+          "maxItems": 256,
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+          },
+          "description": "Empty: any device group."
+        },
+        "min_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "keys": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "key_id",
+              "alg",
+              "status",
+              "not_before",
+              "not_after"
+            ],
+            "properties": {
+              "key_id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+              },
+              "alg": {
+                "enum": [
+                  "ed25519",
+                  "ecdsa-p256-sha256"
+                ]
+              },
+              "status": {
+                "enum": [
+                  "active",
+                  "retired",
+                  "revoked"
+                ]
+              },
+              "not_before": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "not_after": {
+                "type": "string",
+                "format": "date-time"
+              }
+            }
+          }
+        }
+      }
     },
     "ref": {
       "type": "object",
@@ -358,6 +441,20 @@
         "config_sha256": {
           "type": "string",
           "pattern": "^[0-9a-f]{64}$"
+        },
+        "base_config_sha256": {
+          "description": "SHA-256 of the config the run that staged this bundle started from, or none when there was no config; settle uses it to tell an interrupted run from one whose transaction installed the bundle config.",
+          "type": "string",
+          "pattern": "^([0-9a-f]{64}|none)$"
+        },
+        "base_config_generation": {
+          "description": "Config generation observed before this delivery's transaction; a later generation is required to prove a repeated bundle's own commit when config bytes are unchanged.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "base_config_generation_known": {
+          "description": "Whether the pre-transaction generation was read, including a missing generation file represented as zero.",
+          "type": "boolean"
         }
       },
       "allOf": [
@@ -385,6 +482,23 @@
       "ok": true,
       "bundle_mode": true,
       "anchors": "/etc/defenseclaw/trust/bundle-anchors.json",
+      "anchors_summary": {
+        "sha256": "3c5e7a9b1d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0c2e4b6d8f0a2c4e6b8d0f2a4c",
+        "tenant_id": "acme",
+        "device_groups": [
+          "eng-laptops"
+        ],
+        "min_version": 1,
+        "keys": [
+          {
+            "key_id": "acme-2026a",
+            "alg": "ed25519",
+            "status": "active",
+            "not_before": "2026-01-01T00:00:00Z",
+            "not_after": "2027-01-01T00:00:00Z"
+          }
+        ]
+      },
       "current": {
         "bundle_id": "b-01JAB3K9QX4M2N8P6R5T0V1WYZ",
         "version": 13,

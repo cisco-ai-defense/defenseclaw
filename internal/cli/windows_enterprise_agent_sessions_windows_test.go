@@ -329,13 +329,15 @@ func TestWindowsStandaloneUnknownOwnerKeepsRestartStatusIncomplete(t *testing.T)
 }
 
 func TestWindowsServiceSIDMatchesServiceIdentities(t *testing.T) {
-	for _, sid := range []string{"S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-80-1", "S-1-5-90-1", "S-1-5-96-1"} {
+	for _, sid := range []string{"S-1-5-18", "S-1-5-19", "S-1-5-20", "S-1-5-80-1", "S-1-5-90-1", "S-1-5-96-1", "S-1-5-82-1-2-3-4-5"} {
 		if !windowsServiceSID(sid) {
 			t.Errorf("service SID %q was treated as an interactive account", sid)
 		}
 	}
-	if windowsServiceSID("S-1-5-21-1-2-3-1001") {
-		t.Fatal("interactive account SID was treated as a service")
+	for _, sid := range []string{"S-1-5-21-1-2-3-1001", "S-1-12-1-1111111111-2222222222-333333333-44", ""} {
+		if windowsServiceSID(sid) {
+			t.Errorf("SID %q was treated as a service", sid)
+		}
 	}
 }
 

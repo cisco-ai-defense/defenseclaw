@@ -46,7 +46,11 @@ type enterpriseSecretOptions struct {
 	name      string
 	fromStdin bool
 	fromFile  string
-	json      bool
+	// bundle is the signed policy bundle that binds a new value (set
+	// --bundle): a credential the confirmed bundle binds rotates only to a
+	// value a newer verified bundle signs.
+	bundle string
+	json   bool
 	// lockWait is how long set and remove wait for another lifecycle run
 	// (Linux and macOS) or for a policy bundle run to release bundle.lock
 	// (Windows).
@@ -306,6 +310,7 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 	if action == "set" {
 		cmd.Flags().BoolVar(&opts.fromStdin, "from-stdin", false, "read the value from standard input")
 		cmd.Flags().StringVar(&opts.fromFile, "from-file", "", "read the value from this file")
+		cmd.Flags().StringVar(&opts.bundle, "bundle", "", "signed policy bundle (.dcbundle) that binds the new value; needed to change a credential the confirmed bundle binds")
 	}
 	if action != "status" {
 		addLockWaitFlag(cmd.Flags(), &opts.lockWait)

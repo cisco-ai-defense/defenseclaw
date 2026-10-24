@@ -1,0 +1,278 @@
+---
+title: Dashboards
+description: The 19 bundled Grafana dashboards, how they link, how to read empty panels, Agent360, and the Splunk dashboards.
+keywords:
+  - DefenseClaw Grafana dashboards
+  - Agent360
+  - Splunk dashboards
+  - Prometheus Loki Tempo
+---
+
+DefenseClaw provisions 19 Grafana dashboards into a **DefenseClaw** folder. Start the stack with [Run Grafana locally](/docs/how-to/observability/run-grafana-locally); the links on this page assume `localhost:3000`.
+
+Dashboards add no redaction, masking or field hiding. They show every field that reaches Loki, Tempo or Prometheus, including content when the producer supplied it. Set a [redaction profile](/docs/reference/observability/redaction) on the `local-observability` destination to reduce what they receive.
+
+## The 19 dashboards
+
+| Dashboard (UID) | Question it answers | Backends |
+| --- | --- | --- |
+| **DefenseClaw — Overview** (`defenseclaw-overview`) | Is DefenseClaw healthy and enforcing as expected? The landing board, with links to every other board. | Prometheus, Loki |
+| **DefenseClaw - Agent Activity (Live)** (`defenseclaw-activity`) | What are agents doing: prompt, model, tool, destination, session. | Prometheus, Loki |
+| **DefenseClaw — Agent identity** (`defenseclaw-agent-identity`) | Which agents and instances were seen? Holds the Runtime Agent Directory that opens Agent360. | Prometheus, Loki |
+| **DefenseClaw — Identity & Users** (`defenseclaw-identity`) | Who runs which agents, how verified is the identity, and which guardrail profile decided? | Loki |
+| **DefenseClaw — Agent360** (`defenseclaw-agent-360`) | What happened inside one agent, one execution, or a whole descendant tree? See [Agent360](#agent360). | Prometheus, Loki, Tempo |
+| **DefenseClaw — Blocked Events & Analysis** (`defenseclaw-blocked-events`) | What was blocked, by which rules, and what recurs? Includes kernel denials on Linux with Tetragon. | Prometheus, Loki |
+| **DefenseClaw — AI Agent Usage & Detection** (`defenseclaw-ai-discovery`) | Which AI products, skills, MCP servers, IDE plugins and dependencies exist? | Prometheus, Loki, Tempo |
+| **DefenseClaw — AI Discovery Runtime Planes** (`defenseclaw-ai-runtime`) | What did those AI runtimes run on this host? Coverage first, so a blind host is not read as clean. | Prometheus, Loki |
+| **DefenseClaw — Hook Connectors** (`defenseclaw-connectors`) | Which connectors are active, quiet, slow or drifting? | Prometheus, Loki |
+| **DefenseClaw — Connector Detail** (`defenseclaw-connector-detail`) | Why does one connector behave differently? | Prometheus, Loki |
+| **DefenseClaw — Guardrail Evaluations** (`defenseclaw-security`) | What did guardrails allow, alert, confirm or block? | Prometheus, Loki |
+| **DefenseClaw — Policy decisions** (`defenseclaw-policy-decisions`) | Which policy or egress branch caused the action? Includes observe-mode would-blocks. | Prometheus, Loki |
+| **DefenseClaw — HITL (Human-in-the-Loop)** (`defenseclaw-hitl`) | Where did a human approval enter, and what was the outcome? | Prometheus, Loki |
+| **DefenseClaw — Findings (Rule detail)** (`defenseclaw-findings`) | Which rule fired, against what, how often? | Prometheus, Loki |
+| **DefenseClaw — Scanners (Ops)** (`defenseclaw-scanners`) | Are scans healthy and producing the expected findings? | Prometheus |
+| **DefenseClaw — Proxy & LLM Guard** (`defenseclaw-traffic`) | What happens on proxy and router deployments? Empty unless proxy mode is active. | Prometheus, Loki, Tempo |
+| **DefenseClaw — Sandboxes** (`defenseclaw-sandboxes`) | What are OpenShell sandboxes doing, reaching and being refused? See [Sandboxes board](#sandboxes-board). | Prometheus, Loki |
+| **DefenseClaw — Runtime & Reliability** (`defenseclaw-runtime`) | Is the process, database, exporter or destination delivery unhealthy? | Prometheus, Loki |
+| **DefenseClaw IoT Fleet** (`defenseclaw-fleet`) | Which edge devices are online and receiving verdicts? Empty until the [authenticated Fleet scrape](/docs/how-to/install-the-edge-connector/) is set up. | Prometheus |
+
+The local stack ships these JSON files in `bundles/local_observability_stack/grafana/dashboards/`. `up` refreshes them on every start; pass `--no-refresh-config` to keep your edits. Edits made in the Grafana UI are not written back to disk, so copy a changed board out with **Dashboard → JSON Model**.
+
+## How the drill-down works
+
+<Flow
+  direction="TB"
+  caption="The main investigation paths, each one a link on the board it starts from. Every board also links back to Overview, and Agent360 opens a selected trace in its Tempo waterfall."
+>
+  <Node id="o" kind="generic" emphasis>{`Overview\nhealth and KPIs`}</Node>
+  <Node id="c" kind="generic">Hook Connectors</Node>
+  <Node id="i" kind="generic">Agent identity</Node>
+  <Node id="b" kind="generic">Blocked Events</Node>
+  <Node id="d" kind="generic">{`AI Agent Usage\n& Detection`}</Node>
+  <Node id="cd" kind="generic">Connector Detail</Node>
+  <Node id="a" kind="generic">Agent360</Node>
+  <Node id="p" kind="generic">Policy decisions</Node>
+  <Node id="r" kind="generic">{`Runtime Planes\nwhat actually ran`}</Node>
+  <Node id="t" kind="datastore">{`Tempo waterfall\none selected trace`}</Node>
+  <Edge from="o" to="c" />
+  <Edge from="o" to="i" />
+  <Edge from="o" to="b" />
+  <Edge from="o" to="d" />
+  <Edge from="c" to="cd" label="pick a connector" />
+  <Edge from="i" to="a" label="pick an agent" />
+  <Edge from="b" to="a" />
+  <Edge from="b" to="p" />
+  <Edge from="d" to="r" />
+  <Edge from="a" to="t" label="pick a trace" />
+</Flow>
+
+Agent and trace IDs are links. An **Agent ID** opens Agent360 with the time range kept. A **Trace ID** sets the `trace` variable on the same board and fills the Tempo waterfall without losing the connector, agent, lifecycle or execution filters.
+
+| Backend | Best for | Empty means |
+| --- | --- | --- |
+| Prometheus | Totals, rates, quantiles, current state, inventory | The series does not exist in the range. Counter totals use the selected range, so a finished run stays visible. |
+| Loki | Lifecycle graph, chronology, inputs and outputs, reasons, decisions | No matching event in the range and filters. |
+| Tempo | One request and its span timing | No valid Trace ID selected, or no matching spans. |
+
+## Read empty values
+
+DefenseClaw does not invent telemetry.
+
+| Display | Meaning |
+| --- | --- |
+| **0** | The signal is instrumented and the range has zero matching events. |
+| **No data** | The panel is conditional (approvals, findings, proxy-only traffic) and nothing matches the current filters. |
+| **Not reported** | The event exists, but the connector or provider did not send that optional field, most often tokens or cost. It is not zero and is never estimated. |
+
+If panels stay empty while Loki and Tempo have events, check the destination name. The boards read the short `local-observability-v1` metric labels, which the gateway exports only to the OTLP destination named `local-observability`. Any other name gets canonical labels, and connector- and scanner-filtered panels show nothing. If a global panel is empty while raw events are visible, widen the time range first.
+
+If rare events (a single block or finding) read `0` in Prometheus panels, counters are exported as deltas and `rate()` needs two samples. The Findings and Blocked Events tiles count Loki log records and are exact. For the others, set `observability.metric_policy.temporality: cumulative` ([Observability reference](/docs/reference/observability#local-stack)).
+
+## Filters
+
+**User regex** (`$user`) appears on Overview, Activity, Blocked Events, Policy decisions, Agent identity, Agent360, AI discovery and Identity & Users. It narrows Loki panels to records whose `user.id`, account name (`defenseclaw.user.name`) or directory principal matches the whole value, for example `1001`, `S-1-5-21-.*-1104`, `alice` or `alice.*`. The principal is on records only when `ai_discovery.include_user_principal` is on. Metric panels have no per-user label and do not change. Records without a `user.id` drop out when you narrow it.
+
+Some boxes filter on fields only the record body carries: **Root session ID regex** (Activity), **Agent or root ID regex**, **Lifecycle (drilldown)** and **Execution (drilldown)** (Agent360), **Hook surface regex** (Blocked Events). Loki cannot list their values, so they take a regex. The default `.+` matches everything, and table links fill them in.
+
+## Agent360
+
+Agent360 shows one agent, or an agent and all its descendants, from one stable identity. New root agents and subagents appear as hook events arrive; DefenseClaw creates no dashboard file per agent. Open it from **Agent identity → Runtime Agent Directory** by clicking an **Agent ID**.
+
+![Agent360 for a Claude Code agent: the Agent Directory, the KPI strip with turns, model and tool calls, tokens and cost marked Not reported, and the execution phase timeline](/images/grafana/agent360-overview.jpg)
+
+Complete coverage needs the `local-observability` destination to keep logs, traces, metrics and the agent, model, tool, security and health buckets. `defenseclaw observability plan` reports partial coverage if you narrow it.
+
+| Variable | Use |
+| --- | --- |
+| **Connector** | Separates Codex, Claude Code and other connectors. |
+| **Agent or root ID regex** | The durable agent identity. Text box; default `.+`. |
+| **Scope** | **This agent**, or **Agent tree** to include every descendant. |
+| **Lifecycle (drilldown)**, **Execution (drilldown)** | Restrict execution-detail panels to one lifecycle or execution. Tree panels ignore them. |
+| **Trace ID** | Pivot the lower section to one Tempo trace. |
+
+The same fields correlate all three backends:
+
+| Field | Purpose |
+| --- | --- |
+| `gen_ai.agent.id` | One logical root or delegated agent. |
+| `defenseclaw.agent.root.id`, `defenseclaw.agent.parent.id` | The descendant tree and direct parent. |
+| `defenseclaw.agent.lifecycle.id` | Identity across gateway restarts and resumed sessions. |
+| `defenseclaw.agent.execution.id` | One execution attempt. |
+| `trace_id` | Pivot from a log that reports W3C trace identity into the Tempo waterfall. Aggregate metrics never invent one. |
+
+Top panels, from identity to health:
+
+| Panel | Meaning |
+| --- | --- |
+| **Agent Directory** | Agents seen for the connector and range, with their root and parent IDs, name, type and observation count. |
+| **Turns**, **Model calls**, **Tool calls** | Distinct logical completed operations. Exact hook and native mirrors count once. |
+| **Descendants in selected root tree** | Transitive child agents under the root. |
+| **Input/output tokens**, **Reported cost** | Connector- or provider-reported usage only. |
+| **Terminal event success rate** | Successful terminal events over all terminal outcomes. Not the latest agent's state. |
+| **Enforced hook blocks** | Final hook decisions returned as `block`. |
+| **Observe-mode would-blocks** | Blocks returned as advisory because enforcement was off or unavailable. |
+
+**Lifecycle DAG — prompt → agents → work → outcomes** shows who spawned whom and which agent owned each piece of work. It is built from Loki events and durable relationship evidence, never from trace parentage alone. A session start points to the root agent. A parent points to each child recorded by `parent_of` or `delegated_by`. Each agent points to one node per provider and model, one per tool family (Bash, MCP, Skills, Collaboration, File edits, Web/browser, Visual, Task control; an unknown tool keeps its name), and to its messages, approvals and outcomes. Repeated calls raise a node's total instead of adding nodes. Click a node or edge for its grouping key, count and links to the exact records. Lineage goes to depth 64; the graph shows only reported or inferred levels.
+
+![Agent360 lifecycle DAG for a Codex agent tree: the prompt start, the root agent at depth 0, three depth-1 subagents, grouped tool-family and model nodes, and a terminal outcome](/images/grafana/agent360-topology.jpg)
+
+**Ordered lifecycle and work sequence — root to terminal** is the chronology: starts, prompts, subagent starts and stops, model and tool calls, approvals, egress, guardrail decisions and outcomes in timestamp order. Sequence numbers are monotonic within an execution, not across a tree. A missing trace ID does not break the sequence.
+
+**Hook enforcement and recovery paths** shows the decision the agent was given and what the agent did next. On a standalone managed host:
+
+- A native hook confirms the answer to a tool call with a delivery receipt on the same local request, after it gives the answer to the agent. The decision is recorded only then. The managed OpenCode plugin runs the native hook, so its `tool.execute.before` calls are confirmed this way too.
+- If the hook's answer budget runs out first, or the caller hangs up before the decision is recorded, a closed hook blocked the call. The decision is recorded as `block` with the reason `enterprise_managed_gateway_no_answer`, even when the gateway had evaluated an allow.
+- The action is `unconfirmed` when the gateway cannot prove the result: a tool call from a hook binary older than 1.0.4 while a package upgrade is in progress, a tool call whose hook stopped waiting for the receipt handshake before the gateway started it (the hook still takes the answer), or an administrator-selected open outage.
+- The Amp in-agent plugin and events without an answer budget (prompts, lifecycle events) send no receipt. They record the gateway's decision.
+
+Each `hook_decision` record has:
+
+| Field | Meaning |
+| --- | --- |
+| **Action** | The decision the connector was given: the confirmed answer, the fail-closed `block`, or `unconfirmed` when a managed gateway cannot prove it. Per-user and Secure Client hooks report the gateway response. |
+| **Raw action** | The guardrail result before connector and mode mapping. |
+| **Enforced** | `true` only when the connector was told to stop. |
+| **Would block** | `true` when a raw block became advisory. |
+| **Evaluation / rule IDs** | Join keys to the verdict and findings. |
+
+An enforced block does not guarantee a retry. When no later row appears, no further hook event was seen; DefenseClaw does not infer a retry.
+
+The **Correlation identity and relationship evidence** row compares **Logical events** (distinct `defenseclaw.logical_event.id`) with **Raw observations** (every Loki record). Mirrors are never deleted. Relationship methods are `reported`, `trace_exact`, `derived` or `inferred`; `unresolved`, `conflicted`, `superseded` and `rejected` stay visible. A shared trace ID or span parent never creates an agent edge on its own. Metric labels never carry semantic, logical, request, turn, tool or relationship IDs.
+
+Four read-only gateway endpoints return the same relationship state. Each takes exactly one anchor query parameter (`agent_id`, `session_id`, `turn_id`, `lifecycle_id`, `execution_id`, `trace_id`, `record_id`, `semantic_event_id`, `logical_event_id`, `model_request_id`, `model_response_id` or `tool_invocation_id`), plus `limit` (1 to 500), `after_time` and `after_id`:
+
+| Endpoint | Returns |
+| --- | --- |
+| `GET /api/v1/correlation/graph` | The relationship graph around the anchor. |
+| `GET /api/v1/correlation/explain` | How records link to the anchor. |
+| `GET /api/v1/correlation/timeline` | Correlated events in time order. |
+| `GET /api/v1/correlation/conflicts` | Relationship conflicts involving the anchor. |
+
+```bash
+curl -s -H "Authorization: Bearer $DEFENSECLAW_GATEWAY_TOKEN" \
+  "http://127.0.0.1:18970/api/v1/correlation/timeline?agent_id=AGENT_ID&limit=50"
+```
+
+See the [gateway API reference](/docs/reference/apis/gateway-api#auth) for the token and port.
+
+| Question | Start with | Then |
+| --- | --- | --- |
+| Why is an agent still running? | The execution phase timeline and ordered lifecycle sequence | Lifecycle logs and the newest trace. |
+| Which tool made it slow? | Top tools and tool p95 | The trace waterfall and ordered sequence. |
+| Did a subagent cause the failure? | Agent tree and lifecycle DAG | The child's work, errors and decisions, then its trace. |
+| Why did tokens or cost spike? | Tokens and cost over time | The provider and model breakdown. |
+| Was it blocked, advisory or approved, and what next? | Hook enforcement and recovery paths | Decision → recovery path, then the trace. |
+
+Claude Code can report completed model calls without token or price fields; Agent360 then shows **Not reported** instead of an estimate. Data from before a schema or dashboard change is not backfilled.
+
+## Identity & Users board
+
+Reads Loki only, with **Connector** and **User regex** boxes.
+
+| Row | Panels |
+| --- | --- |
+| Who runs agents | Users observed, Agent identities (`agt-`), Agent sessions (`ais-`), Verified principal share |
+| Directory and sessions | Users by directory and domain, Verified vs claimed identity, SSH vs local sessions |
+| Agents | Agents per user, Sessions per agent |
+| Guardrail profiles | Decisions by guardrail profile and match reason, Profile selection audit, Profile digest timeline |
+| `identity.observed` | Directory group counts, Recent `identity.observed` records |
+
+Directory shows `unreported` for a Linux SSSD account whose domain is not a joined realm. Principals are blank unless `ai_discovery.include_user_principal` is on. **SSH vs local sessions** counts only verified session kinds, so Windows and macOS records carry none. A new series on the digest timeline marks a reload where a profile's policy changed; compare it with `defenseclaw guardrail profile explain`.
+
+## Sandboxes board
+
+Shows [OpenShell sandbox](/docs/reference/sandboxes/telemetry) activity. Boxes: **Environment** (`deployment.environment.name`, set with `setup observability add --environment`), **Host** (`host.name`), **Connector** (metric panels) and **Sandbox** (log panels). Sandbox names are never metric labels, so the three metric panels ignore the Sandbox box and say "(all names)" in their title.
+
+The local Collector copies `defenseclaw.sandbox.name` onto the log resource, and the bundled Loki indexes it, along with `deployment.environment.name`, `host.name` and `os.type` (`otlp_config` in `loki/loki.yaml`). If you import the boards into your own Loki, add the same `index_label` rule or the boxes list no values; panels still filter correctly.
+
+| Row | Panels |
+| --- | --- |
+| Sandbox fleet | Active (all names), Sandboxes seen, Egress allowed, Egress blocked, Shadow-AI findings, Health degraded (sandboxes and gateway-wide) |
+| Lifecycle | Active sandboxes by connector, Phase transitions, Recent lifecycle changes |
+| Egress decisions | Egress by source and decision, Top blocked hosts, Top allowed hosts |
+| Traffic volume | Bytes up and down by destination and over time. Only the DefenseClaw egress proxy reports bytes. |
+| Destinations | Destinations table, Recent blocked egress |
+| Findings and shadow AI | Findings by kind, Shadow-AI destinations, Recent sandbox findings |
+| Integration health | Health degraded and restored, Recent health transitions |
+| Process starts | Empty unless the sandbox's process tree is on (`observe.process_tree` or `sandbox run --process-tree`). |
+
+Process names, paths and command lines are what the workload claims; each destination's redaction profile decides whether they leave the host.
+
+![Grafana Sandboxes board with the Environment, Host, Connector and Sandbox boxes, Sandbox fleet and Lifecycle rows: tiles for active sandboxes (all names), sandboxes seen, egress allowed, egress blocked, shadow-AI findings and health degraded split into sandboxes and gateway-wide, the active sandboxes by connector (all names) and phase transitions charts, and the recent lifecycle changes of the selected sandbox](/images/grafana/sandboxes-overview.png)
+
+## Kernel controls and your Tetragon policies
+
+On Linux with Tetragon and DefenseClaw's sensor helper, **AI Discovery Runtime Planes** and **Blocked Events & Analysis** show kernel-layer activity. They read the plane C `plane_health` records, `ai.runtime.kernel_policy`, `ai.runtime.kernel_event` and `enforcement.block.applied` records with initiator `kernel`. See [Tetragon on a Linux fleet](/docs/enterprise/runtime/tetragon).
+
+| Where | Panel | Answers |
+| --- | --- | --- |
+| Runtime Planes | **Fleet: kernel controls per host** | Tetragon version and mode per computer, whether `enforce_ack` approves the build, enforced and burn-in users, pauses, digests. |
+| Runtime Planes | **Kernel controls (Linux)** | Would-block and denial counts, burn-in hours per user, DefenseClaw kernel policies loaded or removed. |
+| Runtime Planes | **Your Tetragon policies: events from AI agents** | Events and blocks by your own policies, with the agent and hook join. |
+| Blocked Events | **Kernel denials**, **Blocked by your Tetragon policies** | Denials by control, connector, account and process. |
+
+![Grafana AI Discovery Runtime Planes, row Kernel controls (Linux): tiles for hosts with enforcing controls, kernel denials, would-blocks in monitor mode, agent activity with no hook decision, paused hosts and reconcile failures; charts of kernel denials by control and connector; a table of DefenseClaw kernel policies; and a table of burn-in progress per user](/images/tetragon/grafana-kernel-controls-linux.png)
+
+The **Hosts with enforcing controls** tile counts each computer once, using its latest plane C health record from the last 10 minutes with `users_enforced` above 0. The Host filter applies; the User filter does not. Five Prometheus rules cover the `defenseclaw_kernel_*` series:
+
+| Alert | Fires when |
+| --- | --- |
+| `DefenseClawKernelDenials` | A DefenseClaw kernel control denied an open (informational). |
+| `DefenseClawKernelAckStale` | A computer's `enforce_ack` no longer matches its build, for 30 minutes. |
+| `DefenseClawKernelPausedLong` | Kernel enforcement is paused for 8 hours. |
+| `DefenseClawTetragonFallback` | Tetragon is installed but the helper runs on `cn_proc` and `fanotify`, for 15 minutes. |
+| `DefenseClawCustomerPolicyBlocksAgents` | One of your Tetragon policies denied an AI agent (informational). |
+
+## Splunk
+
+Local Splunk ([Send to Splunk](/docs/how-to/observability/send-to-splunk)) installs the **DefenseClaw Local Mode** app. Its macros in `default/macros.conf` read `index=defenseclaw_local` and normalize the HEC envelope. `props.conf` sets `KV_MODE = json`, so do not add `| spath`.
+
+| Menu | Views |
+| --- | --- |
+| **Investigate** | Audit and security, runs and sessions, queue and runtime health |
+| **Observe** | Gateway health, gateway logs, model usage and cost |
+| **Demo Dashboards** | Agent Tokenomics Overview, Executive Agent Watch Overview, AI Discovery Inventory, AI Runtime Planes, Connector Activity, Policy Decisions, Findings and HITL |
+| **Operate** | Alerts and saved searches, search and drill-down |
+
+The saved searches have static syntax and field checks but have not been run against a live Splunk. Validate them in your deployment before you rely on them. On Linux with Tetragon, **AI Runtime Planes** adds the kernel-controls fleet table and your Tetragon events through the `defenseclaw_demo_kernel_denials` and `defenseclaw_demo_kernel_events` macros. Splunk counts distinct findings where Grafana counts activity records.
+
+Starting searches:
+
+```spl
+index=defenseclaw_local sourcetype=defenseclaw:json bucket="agent.lifecycle" connector="codex"
+| stats count by event_name, action, outcome
+| sort -count
+```
+
+```spl
+index=defenseclaw_local sourcetype=defenseclaw:json bucket="enforcement.action" action="block"
+| stats count by connector, source, severity
+| sort -count
+```
+
+`defenseclaw setup splunk dashboards apply` creates eight Splunk Observability dashboards and detectors from the bundled Terraform. Two parts cover sandboxes, from metrics only:
+
+- **Security and Policy** adds **Egress blocks by source**, split into `go` and `ts` (guardrail egress checks), `openshell` and `dc-egress-proxy`.
+- **Sandboxes** shows active sandboxes, phase changes, and egress by source and decision, filtered by harness connector. Sandbox names are never metric dimensions.
+- Detector `DefenseClaw - Sandbox egress blocks sustained` (warning) fires when blocked sandbox egress stays above 30 a minute for 10 minutes. The Prometheus rule `DefenseClawSandboxEgressBlocksSustained` has the same threshold.
+- Detector `DefenseClaw - Sandbox errors sustained` (warning) fires when changes into the error phase stay above 0.2 a minute for 10 minutes. The Prometheus rule is `DefenseClawSandboxErrorsSustained`.

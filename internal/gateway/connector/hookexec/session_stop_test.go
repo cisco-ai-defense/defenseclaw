@@ -81,6 +81,7 @@ func runSessionStop(t *testing.T, cause sessionStopCause, ev sessionStopEvent, s
 		}
 		cause.mutate(o)
 		home = o.Home
+		o.FailureLogHome = userLogHome(o.Home)
 	})
 	if cause.foreign && rt.requests != 0 {
 		t.Fatalf("%s: a foreign-hook block must not contact the gateway", ev)
@@ -292,6 +293,7 @@ func TestPerUserFailClosedStopEventsAllowWhileOtherEventsStayBlocked(t *testing.
 				m(o)
 			}
 			home = o.Home
+			o.FailureLogHome = userLogHome(o.Home)
 		})
 		log, _ := os.ReadFile(filepath.Join(home, "logs", "hook-failures.jsonl"))
 		return r, string(log)

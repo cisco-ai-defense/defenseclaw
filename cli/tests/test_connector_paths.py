@@ -54,9 +54,9 @@ class TestNormalize:
     @pytest.mark.parametrize(
         "inp,expected",
         [
-            (None, "openclaw"),
-            ("", "openclaw"),
-            ("   ", "openclaw"),
+        (None, ""),
+        ("", ""),
+        ("   ", ""),
             ("openclaw", "openclaw"),
             ("OpenClaw", "openclaw"),
             ("  CODEX  ", "codex"),
@@ -84,9 +84,12 @@ class TestIsKnown:
         assert not connector_paths.is_known("future-frame")
         assert not connector_paths.is_known("openclaaaaw")
 
-    def test_none_falls_back_to_openclaw_and_is_known(self):
-        # Per normalize() contract — None resolves to "openclaw"
-        assert connector_paths.is_known(None)
+    def test_none_selects_no_connector(self):
+        assert connector_paths.normalize(None) == ""
+        assert not connector_paths.is_known(None)
+        assert connector_paths.skill_dirs(None) == []
+        assert connector_paths.plugin_dirs(None) == []
+        assert connector_paths.mcp_servers(None) == []
 
 
 class TestSkillDirs:
@@ -518,34 +521,6 @@ class TestClaudeAutoMemory:
             workspace_dir=str(tmp_path),
         )
 
-    def test_cursor_skill_dirs_include_nested_documented_roots_without_aliases(self, tmp_path, monkeypatch):
-        home = tmp_path / "home"
-        workspace = tmp_path / "repo"
-        nested = workspace / "apps" / "web" / ".agents" / "skills"
-        nested.mkdir(parents=True)
-        rejected = workspace / "linked" / ".cursor" / "skills"
-        rejected.mkdir(parents=True)
-        monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr(
-            connector_paths,
-            "_cursor_walkable_directory",
-            lambda path: os.path.normcase(os.path.abspath(path))
-            != os.path.normcase(os.path.abspath(str(workspace / "linked"))),
-        )
-
-        roots = connector_paths.skill_dirs("cursor", workspace_dir=str(workspace))
-
-        assert str(nested) in roots
-        assert str(rejected) not in roots
-        openhands = connector_paths.skill_dirs("openhands")
-        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in openhands
-        assert os.path.join(str(tmp_path / "home"), ".openhands", "skills") in openhands
-        assert os.path.join(str(tmp_path / "home"), ".openhands", "microagents") in openhands
-        assert os.path.join(str(tmp_path / "home"), ".openhands", "skills", "installed") in openhands
-        assert (
-            os.path.join(str(tmp_path / "home"), ".openhands", "cache", "skills", "public-skills", "skills")
-            in openhands
-        )
 
     def test_hermes_skill_dirs_include_existing_external_dirs(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
@@ -722,19 +697,6 @@ class TestClaudeAutoMemory:
         assert str(workspace / ".github" / "agents") in agents
         assert str(workspace.parent / ".github" / "agents") not in agents
 
-    def test_openhands_skill_dirs_honor_workspace_override(self, tmp_path, monkeypatch):
-        outside = tmp_path / "outside"
-        workspace = tmp_path / "repo"
-        outside.mkdir()
-        workspace.mkdir()
-        monkeypatch.chdir(outside)
-
-        openhands = connector_paths.skill_dirs("openhands", workspace_dir=str(workspace))
-
-        assert os.path.join(str(workspace), ".agents", "skills") in openhands
-        assert os.path.join(str(workspace), ".openhands", "skills") in openhands
-        assert os.path.join(str(workspace), ".openhands", "microagents") in openhands
-        assert all(str(outside) not in path for path in openhands)
 
     def test_openclaw_default_paths(self, tmp_path):
         dirs = connector_paths.skill_dirs(
@@ -766,16 +728,13 @@ class TestClaudeAutoMemory:
         assert str(tmp_path / "extra1") in dirs
         assert os.path.join(str(tmp_path), "skills") in dirs
 
-    def test_unknown_connector_falls_back_to_openclaw(self, tmp_path):
+    def test_unknown_connector_selects_no_agent_paths(self, tmp_path):
         dirs = connector_paths.skill_dirs(
             "totally-unknown",
             openclaw_home=str(tmp_path),
             openclaw_config=str(tmp_path / "openclaw.json"),
         )
-        # Must not be empty and must include the OpenClaw home_dir/skills
-        # so "guardrail.connector got typo'd" doesn't silently swallow
-        # all skill discovery.
-        assert os.path.join(str(tmp_path), "skills") in dirs
+        assert dirs == []
 
 
 # ---------------------------------------------------------------------------
@@ -987,27 +946,6 @@ class TestPluginDirs:
         )
         assert dirs == [os.path.join(str(tmp_path), "extensions")]
 
-    def test_new_connector_plugin_dirs(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("HOME", str(tmp_path / "home"))
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home" / ".hermes"))
-        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
-        assert os.path.join(str(tmp_path / "home"), ".hermes", "plugins") in connector_paths.plugin_dirs("hermes")
-        # Cursor local plugins are inventory-only. The write/install path API
-        # intentionally remains empty so DefenseClaw cannot claim custody.
-        assert connector_paths.plugin_dirs("cursor") == []
-        assert connector_paths.plugin_inventory_dirs("cursor") == [
-            os.path.join(str(tmp_path / "home"), ".cursor", "plugins", "local"),
-        ]
-        assert connector_paths.plugin_dirs("devin") == []
-        assert connector_paths.plugin_dirs("copilot") == []
-        assert connector_paths.plugin_dirs("openhands") == []
-        antigravity = connector_paths.plugin_dirs("antigravity", workspace_dir=str(tmp_path))
-        assert os.path.join(str(tmp_path), ".agents", "plugins") in antigravity
-        assert os.path.join(str(tmp_path), "_agents", "plugins") in antigravity
-        assert os.path.join(str(tmp_path / "home"), ".gemini", "config", "plugins") in antigravity
-        assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "plugins") in antigravity
-        assert connector_paths.plugin_dirs("opencode", workspace_dir=str(tmp_path)) == []
 
     def test_no_overlap_between_connectors(self, tmp_path, monkeypatch):
         """Switching connectors must change the path set — pins the
@@ -1374,32 +1312,6 @@ class TestMCPServers:
         assert str(managed_settings.parent / "AGENTS.md") in paths
         assert str(workspace / "AGENTS.md") not in paths
 
-    def test_new_connector_mcp_readers(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        fake_home = tmp_path / "home"
-        fake_home.mkdir()
-        monkeypatch.setenv("HOME", str(fake_home))
-        monkeypatch.setenv("HERMES_HOME", str(fake_home / ".hermes"))
-
-        hermes = fake_home / ".hermes" / "config.yaml"
-        hermes.parent.mkdir(parents=True)
-        hermes.write_text("mcp:\n  servers:\n    h:\n      command: hermes-mcp\n")
-        assert connector_paths.mcp_servers("hermes")[0].command == "hermes-mcp"
-
-        cursor = tmp_path / ".cursor" / "mcp.json"
-        cursor.parent.mkdir(parents=True)
-        cursor.write_text(json.dumps({"mcpServers": {"c": {"command": "cursor-mcp"}}}))
-        assert connector_paths.mcp_servers("cursor", workspace_dir=str(tmp_path))[0].command == "cursor-mcp"
-
-        copilot = tmp_path / ".github" / "mcp.json"
-        copilot.parent.mkdir(parents=True)
-        copilot.write_text(json.dumps({"mcpServers": {"p": {"command": "copilot-mcp"}}}))
-        assert connector_paths.mcp_servers("copilot", workspace_dir=str(tmp_path))[0].command == "copilot-mcp"
-
-        openhands = fake_home / ".openhands" / "mcp.json"
-        openhands.parent.mkdir(parents=True)
-        openhands.write_text(json.dumps({"mcpServers": {"o": {"command": "openhands-mcp"}}}))
-        assert connector_paths.mcp_servers("openhands")[0].command == "openhands-mcp"
 
     def test_hermes_mcp_yaml_uses_bounded_utf8_decoding(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "hermes"
@@ -2501,31 +2413,8 @@ class TestConnectorConfigFiles:
         }
         assert names == {"kiro-project-server", "kiro-user-server"}
 
-    def test_omnigent_honors_config_home(self, tmp_path, monkeypatch):
-        config_home = tmp_path / "isolated-omnigent"
-        monkeypatch.delenv("OMNIGENT_CONFIG", raising=False)
-        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
 
-        assert connector_paths.omnigent_config_path() == str(config_home / "config.yaml")
-        assert connector_paths.connector_home("omnigent") == str(config_home)
-        assert connector_paths.connector_config_files("omnigent") == [str(config_home / "config.yaml")]
 
-    def test_omnigent_relative_config_home_is_resolved_consistently(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("OMNIGENT_CONFIG", raising=False)
-        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", "relative-omnigent")
-        config_home = tmp_path / "relative-omnigent"
-
-        assert connector_paths.omnigent_config_path() == str(config_home / "config.yaml")
-        assert connector_paths.connector_home("omnigent") == str(config_home)
-
-    def test_omnigent_explicit_config_path_takes_precedence(self, tmp_path, monkeypatch):
-        config_path = tmp_path / "explicit" / "server.yaml"
-        monkeypatch.setenv("OMNIGENT_CONFIG", str(config_path))
-        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "ignored-home"))
-
-        assert connector_paths.omnigent_config_path() == str(config_path)
-        assert connector_paths.connector_config_files("omnigent") == [str(config_path)]
 
     @pytest.mark.parametrize(
         ("connector", "variable", "directory", "file_name"),
@@ -2599,7 +2488,7 @@ class TestConfigDispatch:
 
         cfg.guardrail.connector = ""
         cfg.claw.mode = ""
-        assert cfg.active_connector() == "openclaw"
+        assert cfg.active_connector() == ""
 
 
 # ---------------------------------------------------------------------------
@@ -2924,10 +2813,6 @@ class TestMCPSourceLocations:
         # An empty location list is what lets the CLI say so and exit 1.
         assert connector_paths.mcp_source_locations("not-a-connector") == []
 
-    def test_omnigent_is_not_an_empty_location_list(self):
-        # Omnigent genuinely has no MCP registry. That is a real answer,
-        # not a discovery failure, so it must not trip the exit-1 path.
-        assert connector_paths.mcp_source_locations("omnigent") != []
 
     def test_openclaw_names_the_command_it_prefers(self):
         locations = connector_paths.mcp_source_locations("openclaw")
@@ -2943,7 +2828,6 @@ class TestMCPSourceLocations:
             "copilot",
             "antigravity",
             "opencode",
-            "openhands",
             "hermes",
         ],
     )

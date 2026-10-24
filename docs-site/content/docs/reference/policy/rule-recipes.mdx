@@ -1,0 +1,43 @@
+---
+title: Rule recipes
+description: Catalog of the bundled strict pack's regex rules and some of the shipped suppressions. Search, filter and copy the YAML.
+keywords:
+  - DefenseClaw recipes
+  - regex catalog
+  - guardrail rules
+  - suppressions
+---
+
+import { RecipeCatalog } from "@/components/policy-creator/recipe-catalog";
+
+The recipe catalog is the same library the [Policy creator](/docs/how-to/policies/build-a-policy-in-the-browser) draws from.
+It holds every rule in the bundled `strict` pack, the `strict` pack's pre-judge strips and finding
+suppressions, and the `default` pack's tool suppressions (the strict pack has none). The other
+suppressions of the `default` and `permissive` packs are not in it; read them in the pack's
+`suppressions.yaml`. Copy an entry's YAML into your own pack, or use the creator to drop one into a
+draft and tune it.
+
+<Callout type="info" title="Where these come from">
+Rules come from the strict pack's `rules/` files. Suppressions come from
+`policies/guardrail/strict/suppressions.yaml`, and tool suppressions from
+`policies/guardrail/default/suppressions.yaml`. Each card names its source file. The catalog is generated at build
+time by `docs-site/scripts/build-policy-assets.ts`, so it changes when the packs change.
+</Callout>
+
+## Reading a recipe
+
+| Field           | Meaning                                                                                                           |
+| --------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `kind`          | What this recipe slots into: a rule file (`rule:secret`, `rule:command`, …) or one of the three suppression layers (`pre_judge_strip`, `finding_suppression`, `tool_suppression`). |
+| `id`            | Stable identifier the engine uses for findings and telemetry. Keep it stable across edits.                        |
+| `pattern`       | The Go `regexp` (RE2) source the engine compiles. The creator's regex tester checks it is RE2-compatible.        |
+| `severity`      | `CRITICAL`, `HIGH`, `MEDIUM` or `LOW`. The active pack, or `guardrail block-at` and `alert-at`, maps it to an action. |
+| `confidence`    | How often a match is a true positive, from `0` to `1`.                                                            |
+| `tags`          | Free-form labels for filtering and reporting.                                                                     |
+| `examples` / `counterexamples` | Strings the creator's live tester runs through the pattern. Add your own in the regex tester.      |
+
+Each card's **YAML** view shows the entry as one list item. Paste a rule under the `rules:` key
+of a file in your pack's `rules/` directory, and a suppression under the matching list in
+`suppressions.yaml`.
+
+<RecipeCatalog />

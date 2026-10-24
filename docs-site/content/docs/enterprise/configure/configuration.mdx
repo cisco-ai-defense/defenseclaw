@@ -1,0 +1,115 @@
+---
+title: Write and deliver the config
+description: Where the standalone enterprise config lives on Windows, Linux and macOS, the keys every config needs, and how to choose the agents to protect.
+keywords:
+  - DefenseClaw enterprise config
+  - config.yaml managed_enterprise
+  - enterprise.profile standalone
+  - guardrail.connectors
+  - HTTPS proxy
+---
+
+A standalone deployment reads one administrator-owned `config.yaml` per host. The keys are the same on every OS. The lifecycle validates the whole file before it changes anything: an invalid config is refused and the host keeps the config it has. Every `enterprise` key is in [Enterprise settings](/docs/enterprise/configure/settings). Terms are in [Concepts](/docs/enterprise/plan/concepts).
+
+## Where the config lives
+
+| OS | Path | How a change takes effect |
+| --- | --- | --- |
+| Linux | `/etc/defenseclaw/config.yaml` (`0640`, root, group `defenseclaw`) | `defenseclaw-enterprise-apply.path` watches the file and runs `ensure --reason path`. |
+| macOS | `/opt/cisco/defenseclaw/etc/config.yaml` (`0640`, root, group `_defenseclaw`) | The `com.cisco.defenseclaw.apply` LaunchDaemon watches the file and runs `ensure --reason path`. |
+| Windows | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` (Administrators only) | Nothing watches it. Run ensure again with the new file, as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config). |
+
+- In bundle mode (bundle trust anchors installed), the config comes only from signed bundles: a plain config is refused with `bundle_required` and an edit of the file on Linux and macOS is reverted.
+- The package ships no config. Write it as root and keep it unwritable by other users. The MDM wrapper refuses a config file a non-administrator can write (`mdm_untrusted_input`); see [Deliver the config](/docs/enterprise/mdm#deliver-the-config).
+- Linux and macOS take the config from `--config`, else the file already at the path, else a built-in default that observes and protects nothing.
+- On Windows, supply the file to ensure (`--config`, Setup's `CONFIG=` or the wrapper's `-ConfigPath`). Do not edit the installed copy: ensure only compares the file you supply.
+- The file is limited to 4 MiB and 65,536 YAML nodes.
+
+## Required keys
+
+Set these in every standalone config. On Linux and macOS the lifecycle fills in `deployment_mode` and `enterprise.profile` when they are missing and refuses conflicting values.
+
+| Key | Value |
+| --- | --- |
+| `config_version` | `9` (a `8` file is migrated) |
+| `deployment_mode` | `managed_enterprise` |
+| `enterprise.profile` | `standalone` |
+| `data_dir` | Linux: exactly `/var/lib/defenseclaw` or unset. macOS: exactly `/opt/cisco/defenseclaw/runtime` or unset. Windows: leave unset. |
+| `gateway.api_bind`, `gateway.api_port` | `127.0.0.1` and `18970`, or unset. Every OS refuses another bind address; Linux and macOS also refuse another port. |
+| `guardrail.rule_pack` | Unset, a preset (`default`, `strict`, `permissive`) or a [custom pack](#custom-rule-packs) |
+
+Always set `enterprise.profile`. When it is unset, Windows and macOS resolve to the Secure Client profile and the `enterprise policy` commands refuse to run. The profile cannot change without a reinstall. For `policy_dir` and the rule-pack lookup rules, see [Config file detail](/docs/enterprise/configure/reference#config-file-detail).
+
+## Choose the agents to protect
+
+List each agent under `guardrail.connectors`. The key is the connector name; an empty value (`{}`) enables it with the defaults, and only `enabled: false` turns a listed agent off. A config without this map protects nothing, and `verify` fails on it (`no_connectors_enabled`).
+
+```yaml title="config.yaml (excerpt)"
+guardrail:
+  enabled: true
+  mode: observe          # observe | action (default observe)
+  connectors:
+    codex: {}            # machine policy
+    claudecode: {}       # machine policy
+    cursor: {}           # machine policy
+    copilot: {}          # machine policy
+    devin: {}            # per user
+    opencode:
+      mode: action       # this agent blocks; the others only observe
+```
+
+`observe` logs the verdict without blocking; `action` blocks what policy denies. A connector's own `mode` overrides the global value. `block_message` may contain at most 4096 characters.
+
+| Route | Connectors | What DefenseClaw changes |
+| --- | --- | --- |
+| Machine policy | `codex`, `claudecode`, `cursor`, `copilot`, and `opencode` through its managed plugin | The agent's machine-wide policy file, which standard users cannot edit |
+| Per user | `devin`, `antigravity`, `hermes`, `amp`, `kiro` | Each enrolled user's own agent config, which the guardian repairs |
+
+`openclaw` and `zeptoclaw` need the guardrail proxy, which a managed host does not run, so they are not managed. Per-user enrollment also depends on the [enrollment settings](/docs/enterprise/configure/enrollment) and on a supported agent version. The full route table is in [Machine policy](/docs/enterprise/configure/machine-policy#routes-by-connector).
+
+<Callout type="warn" title="Removing a connector removes its protection">
+`guardrail.connectors.<name>.enabled: false` disables the connector and removes its machine policy and hooks. An empty entry (`{}`) enables it. Removing a connector from both `guardrail.connectors` and `enterprise.machine_policy.connectors` also removes its protection, so stop agent use before making either change. On Linux and macOS, `ownership: "off"` leaves machine-policy agents without DefenseClaw hooks. On Windows, `ownership: "off"` does not disable configured Claude Code, Codex and Cursor machine hooks; `enterprise policy verify` checks them even with zero enrolled users. After a configuration change, run `defenseclaw-gateway enterprise policy show --json` and the OS-specific coverage check: `enterprise linux verify --json`, `enterprise macos verify --json` or `enterprise windows verify --json`, using the installed gateway as administrator.
+</Callout>
+
+## Apply and check
+
+Write the file, then apply it (Linux and macOS apply it for you when it changes):
+
+```bash
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux ensure --config /etc/defenseclaw/config.yaml
+sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux verify
+```
+
+`verify` must pass with no `no_connectors_enabled`. On macOS and Windows use `enterprise macos` or `enterprise windows` with the binary paths in [Lifecycle](/docs/enterprise/operate/lifecycle).
+
+## Policy in the config
+
+The config also holds the policy the gateway enforces: thresholds, rules, block and allow lists, admission and profiles. On a managed host these are the only places to change it. The key table is in the [reference](/docs/enterprise/configure/reference#policy-in-the-config).
+
+## Custom rule packs
+
+Create, validate and pin your own rule pack with the gateway's loader. The steps are in the [reference](/docs/enterprise/configure/reference#custom-rule-packs).
+
+## Network proxy
+
+`enterprise.network.https_proxy` and `no_proxy` set an outbound proxy for the gateway. See the [reference](/docs/enterprise/configure/reference#network-proxy).
+
+## Observability credentials
+
+Store telemetry tokens as protected credentials and reference them by name; environment variables do not work in this profile. See the [reference](/docs/enterprise/configure/reference#observability-credentials).
+
+## Sandbox policy pushdown
+
+`openshell.admin`, the guardrail profile `sandbox` section and `enterprise.openshell` are covered in [Sandboxes on managed computers](/docs/enterprise/runtime/sandboxes) and the [sandbox reference](/docs/enterprise/runtime/sandbox-reference).
+
+## Sample configs
+
+Observe-mode starters for Linux, macOS and Windows are in the [reference](/docs/enterprise/configure/reference#sample-configs).
+
+## Next
+
+<Cards>
+  <Card title="Enterprise settings" href="/docs/enterprise/configure/settings" description="Every enterprise key and its default." />
+  <Card title="Enrollment" href="/docs/enterprise/configure/enrollment" description="Choose which users are protected, per OS." />
+  <Card title="Machine policy" href="/docs/enterprise/configure/machine-policy" description="What DefenseClaw writes into each agent's machine-wide policy." />
+</Cards>

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/setuppayload"
@@ -82,18 +83,6 @@ var standalonePayloadBinding string
 type enterpriseSetupInvalidArguments struct{ error }
 
 func (err enterpriseSetupInvalidArguments) Unwrap() error { return err.error }
-
-// setupCodeBundleRequired is enterprisebundle.CodeBundleRequired, the code
-// the lifecycle and the Unix kit report when a computer that takes signed
-// bundles is given a config. A test pins the two together.
-const setupCodeBundleRequired = "bundle_required"
-
-// enterpriseSetupBundleRequired is a command line that hands a config to a
-// run that installs bundle trust anchors. It is still a command line that
-// can never succeed (1639), reported with the bundle_required code.
-type enterpriseSetupBundleRequired struct{ error }
-
-func (err enterpriseSetupBundleRequired) Unwrap() error { return err.error }
 
 var sourceCommitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -275,6 +264,9 @@ func embeddedEnterpriseSetupStandalone() bool {
 }
 
 func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
+	if len(arguments) == 2 && arguments[0] == "--internal-recover-after-parent" {
+		return runStandaloneSetupRecoveryWatchdog(arguments[1], stdout, stderr)
+	}
 	standalone := enterpriseSetupStandaloneFlavor()
 	opts, help, err := parseEnterpriseSetupOptionsForFlavor(arguments, standalone)
 	if help {
@@ -496,20 +488,27 @@ func parseEnterpriseSetupOptionsForFlavor(arguments []string, standalone bool) (
 	if opts.Force && opts.Action != "uninstall" {
 		return opts, false, errors.New("FORCE=1 is valid only with /uninstall")
 	}
-	if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "" || opts.RefuseCapabilityLoss) && opts.Action != "ensure" {
-		return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
-	}
-	if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
-		return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
-	}
-	if strings.TrimSpace(opts.TrustAnchors) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
-		// Installing the anchors puts the computer in bundle mode, which takes
-		// its policy only from signed bundles: the same refusal, and code, as a
-		// CONFIG= on a computer in bundle mode (#1288).
-		return opts, false, enterpriseSetupBundleRequired{errors.New("TRUSTANCHORS= cannot be combined with CONFIG= (or --mode/--connector): with trust anchors installed the computer takes its policy only from signed bundles; deliver BUNDLE= with TRUSTANCHORS=")}
-	}
-	if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
-		return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=")
+	// With TRUSTANCHORS= on a mutation the lifecycle refuses each of these
+	// command lines itself, before it changes anything, and on an installed
+	// computer records the refused anchor install (config.trust_anchors.changed)
+	// as the defenseclaw.exe route does; Setup refusing first left no audit
+	// row (GAP-0608). Without anchors there is nothing to record.
+	if strings.TrimSpace(opts.TrustAnchors) == "" || !enterpriseSetupMutation(opts.Action, standalone) {
+		if opts.RefuseCapabilityLoss && opts.Action != "ensure" {
+			if strings.TrimSpace(opts.Bundle) == "" {
+				return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE= and is valid only with /ensure; nothing was changed: deliver both with Setup /ensure")
+			}
+			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 is valid only with /ensure; nothing was changed: deliver BUNDLE= and REFUSECAPABILITYLOSS=1 with Setup /ensure")
+		}
+		if (strings.TrimSpace(opts.Bundle) != "" || strings.TrimSpace(opts.TrustAnchors) != "") && opts.Action != "ensure" {
+			return opts, false, errors.New("BUNDLE= and TRUSTANCHORS= are valid only with /ensure")
+		}
+		if strings.TrimSpace(opts.Bundle) != "" && (strings.TrimSpace(opts.Config) != "" || modeSupplied) {
+			return opts, false, errors.New("BUNDLE= cannot be combined with CONFIG= (or --mode/--connector): the signed bundle carries the config")
+		}
+		if opts.RefuseCapabilityLoss && strings.TrimSpace(opts.Bundle) == "" {
+			return opts, false, errors.New("REFUSECAPABILITYLOSS=1 requires BUNDLE=; nothing was changed: deliver both with Setup /ensure")
+		}
 	}
 	if opts.AllowUnsigned && strings.TrimSpace(opts.CertificationCodexHome) == "" {
 		return opts, false, errors.New("--allow-unsigned requires --certification-codex-home")
@@ -565,6 +564,10 @@ func captureStandaloneSetupErrorIntent(arguments []string, opts *enterpriseSetup
 	}
 }
 
+// standalonePathNames are the standalone Setup's file properties, whose
+// values the path checks see as given.
+var standalonePathNames = map[string]bool{"config": true, "manifest": true, "bundle": true, "trustanchors": true}
+
 func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone bool) ([]string, bool, error) {
 	normalized := make([]string, 0, len(arguments))
 	valueNames := map[string]string{
@@ -617,6 +620,11 @@ func normalizeEnterpriseSetupArgumentsForFlavor(arguments []string, standalone b
 		if separator := strings.IndexByte(trimmed, '='); separator > 0 && !strings.HasPrefix(trimmed, "--") {
 			name := strings.ToLower(strings.ReplaceAll(trimmed[:separator], "-", ""))
 			value := trimmed[separator+1:]
+			if standalone && standalonePathNames[name] {
+				// A path keeps its padding, so the path check refuses it as
+				// the refusal says (GAP-0632).
+				value = strings.TrimLeftFunc(argument, unicode.IsSpace)[separator+1:]
+			}
 			if canonical, ok := valueNames[name]; ok {
 				normalized = append(normalized, "--"+canonical+"="+value)
 				continue
@@ -857,7 +865,8 @@ func writeEnterpriseSetupFailureAs(stdout, stderr io.Writer, name string, opts e
 // writeEnterpriseSetupFailureFor reports a failure of Setup itself. With
 // JSON=1 the standalone Setup prints the lifecycle's schema-2 result, so an
 // MDM reads one shape whether Setup or the lifecycle refused (GAP-0562). It
-// reports no deployment state: nothing was inspected.
+// reports no deployment state unless Setup's bounded timeout recovery
+// proved one: its replay left no lifecycle record, and its status is shown.
 func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, name string, opts enterpriseSetupOptions, err error, exitCode int) {
 	if !standalone || !opts.JSON || err == nil {
 		writeEnterpriseSetupFailureAs(stdout, stderr, name, opts, err)
@@ -871,16 +880,24 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 	}
 	result := enterprisestatus.New(action, "standalone", "windows", opts.ProductVersion)
 	code := "setup_failed"
-	var bundleRequired enterpriseSetupBundleRequired
 	var invalid enterpriseSetupInvalidArguments
 	var timeout enterpriseSetupLifecycleTimeout
 	switch {
-	case errors.As(err, &bundleRequired):
-		code = setupCodeBundleRequired
 	case errors.As(err, &invalid):
 		code = "invalid_arguments"
 	case errors.As(err, &timeout):
 		code = "lifecycle_timeout"
+	}
+	if timeout.recovery != nil {
+		// Recovery is a second, successful lifecycle query of the host. Keep
+		// its proven deployment and service state, while this Setup request
+		// still fails because its first child hit TIMEOUTSECONDS.
+		recovered := *timeout.recovery
+		recovered.Action = action
+		recovered.AddError(code, err.Error())
+		recovered.Finish("windows", exitCode)
+		_ = json.NewEncoder(stdout).Encode(&recovered)
+		return
 	}
 	result.AddError(code, err.Error())
 	result.AddWarning("health_not_checked", "Setup stopped before the lifecycle reported on this computer, so installed, services and readiness are not evaluated; "+
@@ -891,17 +908,29 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 
 // enterpriseSetupLifecycleTimeout is a lifecycle run Setup stopped at its
 // TIMEOUTSECONDS limit.
-type enterpriseSetupLifecycleTimeout struct{ error }
+type enterpriseSetupLifecycleTimeout struct {
+	error
+	recovery *enterprisestatus.Result
+}
 
 func (err enterpriseSetupLifecycleTimeout) Unwrap() error { return err.error }
 
-// standaloneEnterpriseSetupTimeout names what a stopped run may have left
-// and the command that recovers it: a run stopped mid-transaction leaves it
-// pending with the services stopped, which only an ensure run as
-// LocalSystem recovers (GAP-0509). The recovery run gets the longest limit:
-// leaving TIMEOUTSECONDS out, as the hint said, keeps the default, which a
-// run that hit it would hit again (GAP-1063).
+// standaloneEnterpriseSetupTimeout names the manual retry when Setup's own
+// bounded replay could not prove restoration. That retry gets the longest
+// limit: omitting TIMEOUTSECONDS would use the default the run hit.
 func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) error {
+	return standaloneEnterpriseSetupTimeoutWithRecovery(opts, cause, nil)
+}
+
+func standaloneEnterpriseSetupTimeoutWithRecovery(opts enterpriseSetupOptions, cause error, report *enterprisestatus.Result) error {
+	if report != nil {
+		return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
+			"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). "+
+				"Setup replayed its pending transaction and no lifecycle record remains; this result is the recovered deployment's status, "+
+				"and the requested action did not finish. Run %s /status JSON=1, then retry the requested action",
+			opts.Action, int(opts.LifecycleTimeout/time.Second), cause, standaloneSetupArtifactName,
+		), recovery: report}
+	}
 	config := opts.Config
 	if strings.TrimSpace(config) == "" {
 		config = "<config.yaml>"
@@ -913,7 +942,7 @@ func standaloneEnterpriseSetupTimeout(opts enterpriseSetupOptions, cause error) 
 	if limit >= maximum {
 		recovery = fmt.Sprintf("/ensure CONFIG=%s JSON=1 TIMEOUTSECONDS=%d again to recover (%d seconds is the longest limit)", config, maximum, maximum)
 	}
-	return enterpriseSetupLifecycleTimeout{fmt.Errorf(
+	return enterpriseSetupLifecycleTimeout{error: fmt.Errorf(
 		"enterprise %s did not finish within TIMEOUTSECONDS=%d and Setup stopped it (%w). It may have left a lifecycle transaction pending with the DefenseClaw services stopped: "+
 			"run %s /status JSON=1 to check, then run Setup as LocalSystem with %s",
 		opts.Action, limit, cause, standaloneSetupArtifactName, recovery,

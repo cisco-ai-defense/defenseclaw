@@ -1,0 +1,182 @@
+---
+title: Secure Client managed deployment
+description: How DefenseClaw runs as a Cisco Secure Client module on Windows and macOS, and how to install, reconcile, verify, upgrade and remove it. The standalone profile is documented in the Enterprise section.
+keywords:
+  - DefenseClaw Secure Client
+  - Cisco Secure Client module
+  - secure_client profile
+  - managed_enterprise
+  - DefenseClawSetup-Enterprise-x64.exe
+  - Windows SCM services
+  - LaunchDaemon
+  - hook guardian
+---
+
+This page covers the **Secure Client profile**: DefenseClaw installed as a module
+of Cisco Secure Client on Windows or macOS. Cisco AI Defense makes every decision
+and the local detectors are off ([Secure Client profile](/docs/enterprise/plan/concepts#secure-client-profile)).
+For any other MDM, use the standalone profile and start with
+[Deploy to a fleet](/docs/enterprise/get-started). The Secure Client profile is not
+supported on Linux. Services, paths, the config and the production checklist are in
+the [Secure Client deployment reference](/docs/enterprise/install/reference/secure-client).
+
+## What is the same, and what is not
+
+Both profiles share the design in [Enterprise deployment](/docs/enterprise#what-runs-where):
+a gateway, a privileged hook guardian, an enumerator and a sensor helper. What a
+standard user can and cannot do is the same ([Who can change what](/docs/enterprise#who-can-change-what),
+[threat model](/docs/enterprise/plan/threat-model)). What is specific here:
+
+| Setting | Secure Client profile |
+| --- | --- |
+| Platforms | Windows (x64) and macOS (Apple silicon) |
+| Who decides on each tool call | Cisco AI Defense, authenticated with the Secure Client machine identity (CMID). The local detectors are off |
+| Config | `enterprise.profile` is the only `enterprise.*` key allowed |
+| Default profile | With no profile set, Windows and macOS resolve to `secure_client` |
+| Windows | Five services, including the CMID credential broker, installed by `DefenseClawSetup-Enterprise-x64.exe` with Windows PowerShell 5.1 |
+| macOS | Root LaunchDaemons under `/opt/cisco/secureclient/defenseclaw` |
+| One profile per computer | The profiles share the gateway port and, on Windows, the service names. The standalone lifecycle refuses to install over a Secure Client deployment |
+
+Enterprise enforcement is opt-in: installing a release does not create a machine
+service until an administrator runs the lifecycle with a managed config. A per-user install is
+not affected: normal mode uses the existing per-user repair loop.
+
+<Flow
+  direction="TB"
+  caption="Windows, Secure Client profile. The hook asks the gateway on 127.0.0.1:18970 after it checks that the listener is the DefenseClawGateway service. The gateway asks the CMID broker for a token over a gateway-only named pipe and sends the call to Cisco AI Defense, which decides."
+>
+  <Zone id="sc4" label="Z4 · User session (the user)" tone="untrusted">
+    <Node id="agent" kind="agent">{`AI agent\nruns as the user`}</Node>
+    <Node id="hook" kind="connector">{`defenseclaw-hook.exe\nchecks the listener`}</Node>
+  </Zone>
+  <Zone id="sc2" label="Z2 · Gateway (restricted LocalSystem)" tone="restricted">
+    <Node id="gw" kind="gateway">{`Gateway\nallows or blocks`}</Node>
+  </Zone>
+  <Zone id="sc1" label="Z1 · Services (LocalSystem)" tone="privileged">
+    <Node id="broker" kind="generic">{`CMID broker\nholds machine identity`}</Node>
+  </Zone>
+  <Zone id="sc5" label="Z5 · Cloud" tone="external">
+    <Node id="aid" kind="policy">{`Cisco AI Defense\ndecides each call`}</Node>
+  </Zone>
+  <Edge from="agent" to="hook" label="runs per tool call" />
+  <Edge from="hook" to="gw" label="asks over loopback TCP" />
+  <Edge from="gw" to="broker" label="token, named pipe" />
+  <Edge from="gw" to="aid" label="inspects, HTTPS" />
+</Flow>
+
+## Install on Windows
+
+`DefenseClawSetup-Enterprise-x64.exe` is one signed Setup. Run it elevated with the
+config and the first target manifest ([examples](/docs/enterprise/install/reference/secure-client#the-config-and-first-manifest)):
+
+```powershell
+$Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Staging'
+.\DefenseClawSetup-Enterprise-x64.exe /install JSON=1 `
+  CONFIG="$Stage\config.yaml" `
+  MANIFEST="$Stage\targets.yaml"
+```
+
+| Action | What it does |
+| --- | --- |
+| `/install` | First install. Requires `CONFIG=` and `MANIFEST=` |
+| `/upgrade` | Replace the payload with this release, transactionally |
+| `/repair` | Restore files, DACLs and services; also applies a new `CONFIG=` or `MANIFEST=` |
+| `/reconcile` | Run one guardian reconcile now |
+| `/status`, `/verify` | Report state; `verify` also checks every file, DACL and service |
+| `/uninstall` | Remove the services and binaries. `PURGE=1` also removes managed state |
+
+`NOSTART=1` installs with the services stopped (activate with `/repair`, never
+`Start-Service`). `TIMEOUTSECONDS=` bounds the run. The Setup exits `0` on success
+and `1603` on any failure. It has no `/ensure` action and no `ALLOWEDSIGNERS=`;
+those belong to the standalone Setup.
+
+A fresh install reports `security_complete=false` while a Claude Code target is
+enabled. Record the proof as in
+[Claude Code proof](/docs/enterprise/install/reference/secure-client#claude-code-proof-and-security_complete).
+
+## Reconcile and verify on Windows
+
+Only `DefenseClawHookGuardian` writes user hooks, as the user, and only while the
+user has an active session. Do not run `enterprise hooks install`, `reconcile` or
+`watch` from an elevated shell. Run one service-mediated reconcile before you
+accept an endpoint:
+
+```powershell
+$Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
+$Manifest = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml'
+& $Gateway enterprise windows reconcile --json
+& $Gateway enterprise hooks status --manifest $Manifest --json
+& $Gateway enterprise hooks verify --manifest $Manifest --json
+```
+
+A partial reconcile makes `status` and `verify` return `ok: false` and a nonzero
+exit. Service hardening checks: [Verify Windows service hardening](/docs/enterprise/install/reference/secure-client#verify-windows-service-hardening).
+
+## Upgrade, repair and remove on Windows
+
+Run every change through the lifecycle, from a fresh copy of the release's Setup.
+
+- **Upgrade.** `/upgrade` with the approved `CONFIG=` and `MANIFEST=`. A failed
+  validation leaves the previous deployment running; a failed activation rolls back.
+- **Change the config or manifest.** `/repair CONFIG=... MANIFEST=...`.
+- **Remove.** `/uninstall` revokes the targets, removes the services and binaries,
+  and removes DefenseClaw's Codex and Claude Code machine-policy entries. It keeps
+  runtime state, logs and guardian evidence. `PURGE=1` also removes managed state;
+  use it only for an approved decommission. This is the Secure Client profile: the
+  standalone Setup's `/uninstall` always removes its machine state (see
+  [Remove](/docs/enterprise/install/windows#remove)).
+
+Restart Codex and Claude Code sessions after a removal: a running session may still
+call the removed hook binary. After an upgrade, run `/status`, `/verify`, the
+guardian `status` and `verify`, and one allowed and one blocked tool call.
+
+## Install on macOS
+
+The Secure Client module runs as root LaunchDaemons, because the machine-identity
+provider needs root. There is no dedicated `defenseclaw` service user on macOS. The
+gateway bundle (`defenseclaw-macos-<version>-darwin-arm64`) carries the module's
+`install.sh` and `uninstall.sh` and the three plists. For an administrator-staged
+config and manifest:
+
+```bash
+sudo ./packaging/launchd/install-enterprise.sh \
+  --binary ./defenseclaw \
+  --config /path/to/approved-config.yaml \
+  --manifest /path/to/approved-targets.yaml
+```
+
+It is idempotent, checks the root-owned path chain, snapshots the deployment
+before replacing files, and on a failure restores the previous state.
+`--no-start` installs without loading the jobs. Check the daemons:
+
+```bash
+sudo launchctl print system/com.cisco.secureclient.defenseclaw
+sudo lsof -nP -iTCP:18970 -sTCP:LISTEN
+```
+
+Owners, modes and logs are in the
+[macOS LaunchDaemon layout](/docs/enterprise/install/reference/secure-client#macos-launchdaemon-layout).
+To change the config, edit it and restart both daemons
+([restart-required controls](/docs/enterprise/install/reference/secure-client#restart-required-controls)).
+
+### Native Windows Claude Code managed hooks
+
+Claude Code is enrolled through machine policy
+(`C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`), not by
+editing `~/.claude/settings.json`. See
+[Native Windows Claude Code managed hooks](/docs/enterprise/install/reference/secure-client#native-windows-claude-code-managed-hooks).
+
+## Troubleshooting
+
+| Symptom | Likely cause | What to do |
+| --- | --- | --- |
+| `security_complete` is `false` on Windows | Claude Code is enabled and its proof is not recorded, or no supported target is enabled | Record the [Claude Code proof](/docs/enterprise/install/reference/secure-client#claude-code-proof-and-security_complete) |
+| One user's target fails | No active session, missing native config, or a foreign-owned file in the footprint | Read the error in `enterprise hooks status --json`; fix the file's provenance |
+| HTTP 401 from one connector's hook | Its scoped token is missing or drifted | Run `/repair` or a reconcile |
+| AI Discovery reports `sensor helper (not started)` | `DefenseClawSensorHelper` is stopped or its socket DACL is unhealthy | Run `/verify`, then `/repair` |
+| The per-user installer or `defenseclaw upgrade` refuses | A managed deployment exists | Update through Secure Client |
+
+Exit codes and error codes shared with the standalone profile are in
+[Troubleshooting](/docs/troubleshooting/enterprise). If an AI agent gained
+administrator rights, treat the endpoint as compromised
+([Contain an incident](/docs/enterprise/operate/lifecycle#contain-an-incident)).

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -305,28 +306,40 @@ func TestUnixLifecycleLockWaitOutOfRange(t *testing.T) {
 	}
 }
 
-// GAP-2030: repair restarts the services even on a healthy deployment, and
-// its output says so; with --no-start (not_started) it does not claim it.
-func TestRepairOutputSaysItRestartedTheServices(t *testing.T) {
-	const note = "restarted the DefenseClaw services to re-apply the deployment"
+// I-1317: the first SIGTERM of a changing lifecycle run asks it to stop at
+// its next safe point, and says so; it no longer kills the run mid-step.
+func TestSettleInterruptedLifecycleAsksTheRunToStop(t *testing.T) {
+	var out bytes.Buffer
+	interrupted, stop := settleInterruptedLifecycle(&out, "enterprise linux ensure", "linux")
+	defer stop()
+	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-interrupted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("SIGTERM did not reach the lifecycle run")
+	}
+	if !strings.Contains(out.String(), "enterprise linux ensure was interrupted; finishing the current step") {
+		t.Fatalf("output: %q", out.String())
+	}
+}
+
+// GAP-2030, GAP-0020: the text output of a repair lists its changes, the
+// service restart and "nothing to repair" of a healthy deployment included,
+// once each: the lifecycle puts them in the result, which --json prints.
+func TestRepairOutputListsItsChangesOnce(t *testing.T) {
 	healthy := enterprisestatus.New(enterpriseunix.ActionRepair, "standalone", "linux", "1.0.0")
+	healthy.Changes = []string{enterpriseunix.RepairNothingChanged, enterpriseunix.RepairRestartedServices}
 	healthy.Finish("linux", 0)
 	var out bytes.Buffer
 	if err := printLifecycleResult(&out, healthy, false); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "nothing to repair") || !strings.Contains(out.String(), note) {
-		t.Fatalf("healthy repair output:\n%s", out.String())
-	}
-	stopped := enterprisestatus.New(enterpriseunix.ActionRepair, "standalone", "linux", "1.0.0")
-	stopped.AddWarning("not_started", "installed without starting the services (--no-start)")
-	stopped.Finish("linux", 0)
-	out.Reset()
-	if err := printLifecycleResult(&out, stopped, false); err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(out.String(), note) {
-		t.Fatalf("--no-start repair claims a restart:\n%s", out.String())
+	for _, line := range healthy.Changes {
+		if strings.Count(out.String(), line) != 1 {
+			t.Fatalf("healthy repair output does not list %q once:\n%s", line, out.String())
+		}
 	}
 }
 
@@ -352,8 +365,10 @@ func TestEnterpriseSecretArgumentErrorsPrintUsage(t *testing.T) {
 	}{
 		{"set", "pass exactly one of --from-stdin or --from-file", enterpriseSecretOptions{name: "ok-name"}},
 		{"set", "pass exactly one of --from-stdin or --from-file", enterpriseSecretOptions{name: "ok-name", fromStdin: true, fromFile: "/etc/hostname"}},
-		{"set", `--name takes lowercase letters, digits and dashes, not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME", fromStdin: true}},
-		{"remove", `--name takes lowercase letters, digits and dashes, not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME"}},
+		{"set", `--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME", fromStdin: true}},
+		{"remove", `--name takes 1 to 63 lowercase letters, digits and dashes, starting with a letter or digit; not "BAD_NAME"`, enterpriseSecretOptions{name: "BAD_NAME"}},
+		// p0.GAP-0670: a name one character too long says what the limit is.
+		{"set", "--name takes 1 to 63 lowercase letters", enterpriseSecretOptions{name: strings.Repeat("a", 64), fromStdin: true}},
 	}
 	for _, tc := range cases {
 		cmd := newEnterpriseSecretCommand(tc.action, "")

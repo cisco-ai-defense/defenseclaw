@@ -1,0 +1,133 @@
+---
+title: Cursor reference
+description: Cursor hook contract, response shapes, inventory, enterprise hooks file and the OpenShell sandbox image.
+keywords:
+  - Cursor hook contract
+  - Cursor hooks.json
+  - Cursor enterprise hooks
+---
+
+Reference for the [Cursor connector](/docs/connectors/cursor). DefenseClaw wires into Cursor's [user-scoped hooks.json](https://cursor.com/docs/hooks). Cursor talks to its upstream directly. There is no proxy path, and DefenseClaw claims no enterprise-wide authority or native human approval.
+
+## Install surface
+
+### Platform status
+
+| Platform | Status | Connector path |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | User-scoped command hooks invoke the portable DefenseClaw hook. |
+| Native Windows x64 | **Supported** | User-scoped command hooks invoke the managed `cursor-hook.ps1` pipeline adapter and the protected `defenseclaw-hook.exe`. |
+
+### Setup options
+
+| Flag | Default | What it does |
+| --- | --- | --- |
+| `--yes / -y` | off | Skip the confirmation prompt. |
+| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes. |
+| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`. Run its printed gateway-restart step before expecting exports. |
+
+The alias also accepts `--mode`, `--rule-pack`, `--fail-mode`, approval, block-message, add/replace and workspace options ([quick-alias reference](/docs/reference/commands/guardrail-setup#aliases)). For scanner and judge settings use [full guardrail setup](/docs/features/guardrail).
+
+### Files
+
+| What | macOS and Linux | Windows |
+| --- | --- | --- |
+| Hooks | `~/.cursor/hooks.json` | `%USERPROFILE%\.cursor\hooks.json` |
+| Hook program | `~/.defenseclaw/hooks/cursor-hook.sh` | `~/.defenseclaw/hooks/cursor-hook.ps1` and `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
+
+Fresh setup ignores `DEFENSECLAW_CURSOR_CONFIG_HOME` and binds the official `.cursor` location. Only an authenticated persisted custody record may restore or migrate a historical path. Teardown restores the earlier config or removes only DefenseClaw's entries, then its adapter files.
+
+### Inventory
+
+| Asset | Sources |
+| --- | --- |
+| MCP | Project and user `.cursor/mcp.json`. Same-name candidates and dynamic extension servers stay unverified. |
+| Skills | Recursive `SKILL.md` under project and user `.cursor/skills`, `.agents/skills`, `.claude/skills` and `.codex/skills`, including nested project roots. |
+| Rules | `.cursor/rules/**/*.mdc`, plus root and nested `AGENTS.md`. |
+| Agents | Project and user `.cursor/agents`, `.claude/agents` and `.codex/agents`. Project wins over user, and `.cursor` over the compatibility roots. |
+| Plugins | Existing local plugins under `~/.cursor/plugins/local`, inventory only. |
+
+Scanning is bounded and does not follow symlinks, junctions or reparse points. Multi-root selection, cloud agents, marketplace, team and private sources, dynamic sources, user UI rules and runtime-only assets stay unverified.
+
+### Enterprise standalone profile
+
+Cursor gets machine policy instead of `~/.cursor/hooks.json`. DefenseClaw merges one entry per event into Cursor's Enterprise hooks file and keeps every other key, event and entry.
+
+| OS | Enterprise hooks file |
+| --- | --- |
+| Linux | `/etc/cursor/hooks.json` |
+| macOS | `/Library/Application Support/Cursor/hooks.json` |
+| Windows | `%ProgramData%\Cursor\hooks.json`, with the `defenseclaw-hook.ps1` adapter beside it |
+
+Each entry runs the administrator's hook binary with `hook --connector cursor --enterprise-managed` and sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides what the running hook does on a gateway outage: managed `open` covers eligible gateway outages only; a foreign-hook guard can still block the call. Cursor still runs Team, Project and User hooks and a deny from any wins, so they cannot allow what DefenseClaw denies, but a foreign `preToolUse` hook can still rewrite tool input. Cursor applies the Enterprise file only on plans that support enterprise hooks, so confirm in a real session that DefenseClaw records its events. The macOS route is a preview and is not verified live.
+
+### OpenShell sandbox
+
+Cursor Agent cannot run in a sandbox yet. DefenseClaw builds the image, but it is **unverified**, so `defenseclaw sandbox run cursor` refuses it. Cursor Agent CLI needs a Cursor account (`CURSOR_API_KEY` or `cursor-agent login`) before any agent turn. Without one it stops at "Authentication required" and fires no hook, and it has no bring-your-own model endpoint. The image check uses a mock model, so it cannot pass.
+
+`sandbox run cursor` builds the whole image (several GB) and only then refuses it. The image stays: `defenseclaw sandbox image list` shows HOOKS VERIFIED `no`, and `defenseclaw sandbox image prune` keeps it as the newest Cursor Agent image. Remove it with `docker image rm <tag>`; the next prune forgets its record.
+
+| Item | Detail |
+| --- | --- |
+| Tier | Managed. Hooks are in root-owned `/etc/cursor/hooks.json` with `failClosed` on every event. The enterprise answer wins over team, user and project hooks. On Cursor's authless local build of the same release, enterprise hooks fired and blocked a shell call, and user and project `hooks.json` files answering allow changed nothing. |
+| Launch flags | `--sandbox disabled` and `--trust`, since Cursor's own sandbox cannot run inside OpenShell. Skip-permissions adds `--force`. `--safe` drops it. The launcher turns Node's compile cache off and drops `NODE_OPTIONS` and `NODE_PATH`. |
+| Sign-in | The daemon's `defenseclaw-cursor` profile binds a Cursor API key to Cursor's service, and the sandbox sees a placeholder. A browser login inside the sandbox (`/usr/local/lib/defenseclaw/bin/cursor-launch login`) keeps a session in the sandbox home, where the agent can read it. Neither was tested live. |
+| Image | Cursor Agent 2026.07.23-e383d2b, the reviewed build, from its release archive with a SHA-256 DefenseClaw measured. Cursor publishes no digests. |
+
+## Hook events
+
+| Contract | Agent versions | Hook script | Events | Can block | Can ask |
+| --- | --- | --- | --- | --- | --- |
+| `cursor-hooks-v1` | `>=2.4.0, <4.0.0`; exact pins `2026.07.23-e383d2b` | `v8` | 21 | 7 | 0 |
+
+| Contract | Events registered | Block events | Ask events |
+| --- | --- | --- | --- |
+| `cursor-hooks-v1` | `sessionStart`, `sessionEnd`, `preToolUse`, `postToolUse`, `postToolUseFailure`, `subagentStart`, `subagentStop`, `beforeShellExecution`, `afterShellExecution`, `beforeMCPExecution`, `afterMCPExecution`, `beforeReadFile`, `afterFileEdit`, `beforeTabFileRead`, `afterTabFileEdit`, `beforeSubmitPrompt`, `preCompact`, `stop`, `afterAgentResponse`, `afterAgentThought`, `workspaceOpen` | `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead`, `beforeSubmitPrompt` | none |
+
+| Fact | Value |
+| --- | --- |
+| Hook script | `cursor-hook.sh` |
+| Hook config paths | `~/.cursor/hooks.json` |
+| Response field | `hook_output` |
+| Native OTLP | no |
+| W3C traceparent | yes |
+| Fail closed | yes |
+
+The contract covers Cursor Desktop application versions `>=2.4.0, <4.0.0`, and for the Agent CLI only the reviewed exact build `2026.07.23-e383d2b`. The hook payload's `cursor_version` is the Desktop application version. A later Agent build runs as an untested newer version ([version policy](/docs/reference/apis/hook-contracts#version-policy)).
+
+## Verdict mapping
+
+Cursor runs every matching hook and merges conflicts in **Enterprise > Team > Project > User** priority. DefenseClaw owns only the user hook. It cannot prove that an Enterprise, Team or Project source is absent, and Cursor offers no safe API to detect a real higher-priority conflict, so DefenseClaw reports the limitation and does not infer one.
+
+| Mode | Registration | Behavior |
+| --- | --- | --- |
+| Action | `failClosed: true` | Returns the documented native deny on supported pre-action events. `beforeSubmitPrompt` blocks with `continue: false`. The permission-gated events use `permission: "deny"`. Confirm verdicts stay attributed alerts. Native ask is not enabled. |
+| Observe | `failClosed: true` | Allows on policy findings and records `would_block` audit state; on a per-user install, the running hook still blocks supported events during a gateway outage by default. If the hook process never answers, Cursor blocks the call. |
+
+Blocking events are `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`. `sessionStart` and `sessionEnd` are not gates. `stop` and `subagentStop` accept only a follow-up message. Result inspection reads `tool_output`, `error_message`, shell `output`, MCP `result_json`, file `edits`, agent `text` and subagent `summary`. `beforeMCPExecution` keeps its exact `tool_input` and URL or command, and derives a stable digest identity without inventing a vendor name.
+
+A conflicting `--fail-mode` is ignored with a warning; outside Secure Client, observe and action registrations both stay `failClosed: true`. The running hook's outage mode is described below. Setup reports readiness only after the current 21-event `type: command`, 30-second, mode-matched registration, the managed runtime adapter, the contract lock and the complete active-connector roster agree. Adding or repairing another connector waits for that full roster.
+
+## Native ask
+
+DefenseClaw does not enable Cursor native approval. Confirm verdicts stay attributed alerts and cannot resume the original hook call.
+
+## Fail mode
+
+Fail closed: yes. Per-user Cursor in observe mode still blocks supported events on a gateway outage by default: its running DefenseClaw hook makes the outage decision ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Action mode closes hook outages even if the config selects `open`. Outside Secure Client, action and observe both register `failClosed: true`, so a stopped, killed or timed-out hook cannot silently let a tool run; a conflicting `--fail-mode` during setup is ignored with a warning. Managed Cursor's running hook follows the administrator's resolved fail mode. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+
+## Limits
+
+- Cursor merges conflicting hooks in Enterprise > Team > Project > User priority. DefenseClaw owns only the user hook and cannot prove a higher-priority source is absent.
+- Cursor applies the Enterprise hooks file only on plans that support enterprise hooks. The macOS route is a preview and is not verified live.
+- Cursor Agent cannot run in an OpenShell sandbox yet.
+
+### Agent CLI behavior
+
+| Build | Behavior | Check |
+| --- | --- | --- |
+| Agent CLI 2026.10.01-14929f9 | Did not emit `beforeSubmitPrompt` in a managed standalone run although `hooks.json` registered it. Prompts reached the model with the gateway stopped. Tool hooks still ran and blocked. | Look for `beforeSubmitPrompt` rows with `hook_decision` in the audit log. DefenseClaw status and enterprise verify warn about this. |
+| Same build, gateway down, action mode | A refused prompt is dropped without a message: the input clears and the start screen returns. The hook answers `continue: false` with a reason, but the CLI does not display `user_message` for that event. Tool calls show their reason. | Run `defenseclaw-gateway status` (or `defenseclaw-gateway start` on a per-user install). Refusals are the `"connector":"cursor"` lines with `"fail_mode":"closed"` in `~/.defenseclaw/logs/hook-failures.jsonl`. |
+| 2026.10.01-e373342 and -14929f9, managed Windows | After you answer `[a] Trust this workspace` on the first start in a folder, the CLI can stay on "Trusting workspace..." and ignore typing and Ctrl+C. The folder is already trusted. | Close the tab and start `cursor-agent` again, or start new folders with `cursor-agent --trust`. |
+
+Cursor spawns command-hook processes and reloads `hooks.json` automatically. If a change is not loaded, restart Cursor.

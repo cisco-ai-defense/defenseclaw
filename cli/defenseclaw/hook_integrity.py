@@ -35,10 +35,12 @@ import re
 import shlex
 import stat
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from defenseclaw import codex_toml
+from defenseclaw.hook_guard_matrix import TOOL_GUARD_HOOKS, unguarded_tool_events
 
 _LOCK_LIMIT = 4 * 1024 * 1024
 
@@ -62,10 +64,12 @@ class HookProblem(str):
     """A problem sentence that carries the one step that repairs it."""
 
     repair: str
+    blocking: bool
 
-    def __new__(cls, text: str, repair: str) -> HookProblem:
+    def __new__(cls, text: str, repair: str, *, blocking: bool = False) -> HookProblem:
         problem = super().__new__(cls, text)
         problem.repair = repair
+        problem.blocking = blocking
         return problem
 
 
@@ -214,6 +218,42 @@ def _is_disabled_placeholder(path: Path) -> bool:
         return False
 
 
+def _trusted_owner_uids() -> set[int]:
+    return {os.geteuid(), 0}
+
+
+def _untrusted_hook_file(connector: str, script: Path) -> HookProblem | str:
+    """Why another account can change the generated hook *script* or its folder, or "" (rel-1-0-4 GAP-0600).
+
+    Setup writes the script 0700 in a 0700 folder of this account (or root,
+    for a managed install). A script another account owns or may write runs
+    whatever that account puts there.
+    """
+
+    for item, kind in ((script, "script"), (script.parent, "folder")):
+        try:
+            info = item.stat()
+        except OSError:
+            return ""  # the missing and unreadable checks report it
+        writable = info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        if info.st_uid in _trusted_owner_uids() and not writable:
+            continue
+        why = f"is owned by uid {info.st_uid}" if info.st_uid not in _trusted_owner_uids() else (
+            f"is writable by other accounts (mode {stat.S_IMODE(info.st_mode):04o})"
+        )
+        if kind == "script":
+            repair = f"run `{setup_command(connector)} --yes`; it writes the hook script again for this account"
+        elif info.st_uid in _trusted_owner_uids():
+            repair = f"run `chmod go-w {shlex.quote(str(item))}`"
+        else:
+            repair = f"give {item} back to this account (`chown`), then run `{setup_command(connector)} --yes`"
+        return HookProblem(
+            f"hook {kind} {item} {why}, so another account can change the hook DefenseClaw runs",
+            repair,
+        )
+    return ""
+
+
 def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
     """Return short descriptions of drifted hook files for *connector*."""
 
@@ -248,7 +288,12 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
             continue
         expected = digests.get(script.name)
         if not script.exists():
-            problems.append(f"hook script {script} is missing")
+            # A link to a target that is gone: the agent cannot run it either,
+            # so the posture warning must say so (p0 GAP-1384).
+            problems.append(
+                f"hook script {script} links to a file that is missing, so the agent cannot run it and "
+                "DefenseClaw is not guarding its tool calls"
+            )
             break
         if expected and not os.access(script, os.R_OK):
             # chmod 000 (an antivirus quarantine, a restored backup): the
@@ -272,6 +317,14 @@ def hook_runtime_problems(cfg: Any, connector: str) -> list[str]:
                 f"hook script {script} changed since setup (an edit, or a copy from another build; "
                 "it does not match hook_contract_lock.json)"
             )
+            break
+
+    hooks_dir = Path(str(getattr(cfg, "data_dir", "") or ""), "hooks")
+    for script in scripts:
+        if script in missing or script.parent != hooks_dir:
+            continue  # managed plugin artifacts live in the agent's folders
+        if untrusted := _untrusted_hook_file(connector, script):
+            problems.append(untrusted)
             break
 
     for script in non_executable_hook_scripts(cfg, connector):
@@ -308,13 +361,15 @@ def unrunnable_hook_problem(cfg: Any, connector: str) -> str:
 
     A hook the agent cannot start (missing, unreadable, not executable, or
     left at the old home after a move) is a non-blocking error to the agent,
-    so the fail mode never applies (GAP-0403, GAP-0542).
+    so the fail mode never applies (GAP-0403, GAP-0542). A hook entry edited
+    so the agent skips it for a tool call (disabled, narrowed matcher, other
+    type, short timeout) is the same (rel-1-0-4 GAP-0538).
     """
 
     for problem in hook_runtime_problems(cfg, connector):
         if "cannot run it" in problem or "no longer exist" in problem:
             return problem
-    switched_off = agent_hook_switch_problems(cfg, connector)
+    switched_off = agent_hook_switch_problems(cfg, connector) or unguarded_tool_call_hooks(cfg, connector)
     return switched_off[0] if switched_off else ""
 
 
@@ -575,18 +630,31 @@ def hook_registration_problems(cfg: Any, connector: str) -> list[str]:
         return [f"no DefenseClaw hooks are registered in {unregistered[0]}"]
     if registered:
         commands = [] if windows else hook_command_problems(cfg, connector)
-        return commands or missing_tool_inspection_hooks(cfg, connector) or agent_hook_switch_problems(cfg, connector)
+        problems = commands or unguarded_tool_call_hooks(cfg, connector) or agent_hook_switch_problems(cfg, connector)
+        if problems:
+            return problems
+        if windows and connector == "copilot":
+            # Status and Setup read-back use this function; the Windows native
+            # validator already supplies Doctor and fail-mode's deeper check.
+            from defenseclaw.commands.cmd_doctor import _windows_native_hook_check
+
+            try:
+                native = _windows_native_hook_check(cfg, connector)
+            except Exception as exc:  # noqa: BLE001 - an uninspectable hook is not healthy.
+                detail = f"inspection failed: {type(exc).__name__}"
+            else:
+                if native.healthy:
+                    return []
+                detail = f"{native.state}: {native.detail}"
+            return [
+                HookProblem(
+                    f"Windows Copilot hook registration is not current: {detail}",
+                    "run `defenseclaw setup copilot --yes --restart`",
+                    blocking=True,
+                )
+            ]
+        return []
     return agent_hook_switch_problems(cfg, connector)
-
-
-# The hook events whose DefenseClaw handler must be registered for an
-# agent's tool calls to be inspected. A Claude Code settings file that kept
-# every other DefenseClaw hook but lost PreToolUse left doctor passing
-# ("28 DefenseClaw hook(s) registered") and status showing the connector
-# running in action mode while no tool call reached DefenseClaw (GAP-0645).
-TOOL_INSPECTION_EVENTS: dict[str, tuple[str, ...]] = {
-    "claudecode": ("PreToolUse",),
-}
 
 
 def _tool_inspection_strict(cfg: Any) -> bool:
@@ -594,50 +662,133 @@ def _tool_inspection_strict(cfg: Any) -> bool:
     return not _is_windows() and not managed and bool(str(getattr(cfg, "data_dir", "") or ""))
 
 
-def _tool_inspection_state(cfg: Any, connector: str, document: Any) -> tuple[bool, list[str]]:
-    """Whether *document* registers DefenseClaw hooks, and the tool-inspection events it registers none for."""
+def _unguarded_tool_events(cfg: Any, connector: str, document: Any, path: Path) -> tuple[bool, list[tuple[str, str]]]:
+    """Whether *document* registers DefenseClaw hooks, and the tool-guard events it leaves unguarded.
 
-    events = TOOL_INSPECTION_EVENTS.get(connector, ())
-    hooks = document.get("hooks") if isinstance(document, dict) else None
-    if not events or not isinstance(hooks, dict):
+    The events and the fields their hook entries need are the shared table
+    (hook_guard_matrix.TOOL_GUARD_HOOKS). A Claude Code settings file that
+    kept every other DefenseClaw hook but lost PreToolUse left doctor passing
+    while no tool call reached DefenseClaw (GAP-0645); an Antigravity or
+    Copilot entry with ``enabled: false``, a narrowed matcher, another type
+    or a short timeout did the same on Linux and macOS (rel-1-0-4 GAP-0538).
+    Managed installs get the same checks: Antigravity, Devin, Hermes and
+    Kiro keep user-writable per-user files there, and the enterprise policy
+    guard checks no enabled flag or matcher. Only the timeout of a
+    machine-policy connector is left to the enterprise policy reconcile.
+    """
+
+    if connector not in TOOL_GUARD_HOOKS:
+        return False, []
+    section = _hook_section(document, path)
+    if section is None:
         return False, []
     strict = _tool_inspection_strict(cfg)
 
-    def registers(value: Any) -> bool:
+    def owns(handler: Any) -> bool:
         return any(
             _defenseclaw_hook_command(cfg, connector, command, strict=strict)
-            for command in _hook_command_lines(value, connector)
+            for command in hook_handler_command_lines(handler, connector)
         )
 
-    if not any(registers(value) for key, value in hooks.items() if key != "state"):
+    if not any(
+        _defenseclaw_hook_command(cfg, connector, command, strict=strict)
+        for command in _hook_command_lines(section, connector)
+    ):
         return False, []
-    return True, [event for event in events if not registers(hooks.get(event))]
+    managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
+    unguarded = unguarded_tool_events(connector, document, owns, managed=managed)
+    if connector == "hermes" and not unguarded:
+        unguarded = _hermes_unapproved_hooks(document, path, owns)
+    return True, unguarded
 
 
-def missing_tool_inspection_events(cfg: Any, connector: str, document: Any) -> list[str]:
-    """The tool-inspection events of *connector* the decoded agent config *document* registers no DefenseClaw hook for.
+# Hermes runs a shell hook only once (event, command) is approved in this
+# file beside config.yaml; a non-interactive Hermes skips an unapproved hook.
+HERMES_ALLOWLIST_FILE = "shell-hooks-allowlist.json"
 
-    A document that registers no DefenseClaw hook at all returns nothing:
-    the unregistered-file check reports it.
+
+def hermes_approved_pairs(document: Any) -> set[tuple[str, str]]:
+    """The (event, command) pairs a decoded Hermes shell-hooks-allowlist.json approves."""
+
+    approvals = document.get("approvals") if isinstance(document, dict) else None
+    if not isinstance(approvals, list):
+        return set()
+    return {
+        (raw["event"], raw["command"])
+        for raw in approvals
+        if isinstance(raw, dict) and isinstance(raw.get("event"), str) and isinstance(raw.get("command"), str)
+    }
+
+
+def _hermes_unapproved_hooks(document: Any, path: Path, owns: Callable[[Any], bool]) -> list[tuple[str, str]]:
+    """The DefenseClaw Hermes hooks of *document* that the allowlist beside *path* does not approve.
+
+    Doctor on Linux and macOS passed a Hermes registration whose approvals
+    were removed from the allowlist while Hermes skipped every hook; only
+    the Windows validator read the file (rel-1-0-4 GAP-0339). The tool-guard
+    events come first.
     """
 
-    return _tool_inspection_state(cfg, connector, document)[1]
+    hooks = document.get("hooks") if isinstance(document, dict) else None
+    if not isinstance(hooks, dict):
+        return []
+    allowlist = path.parent / HERMES_ALLOWLIST_FILE
+    try:
+        approved = hermes_approved_pairs(json.loads(allowlist.read_bytes()))
+    except (OSError, ValueError):
+        # A missing or unreadable allowlist approves nothing for Hermes either.
+        approved = set()
+    tool_events = TOOL_GUARD_HOOKS["hermes"].events
+    events = sorted(hooks, key=lambda event: (event not in tool_events, str(event)))
+    for event in events:
+        entries = hooks[event]
+        for entry in entries if isinstance(entries, list) else ():
+            command = str(entry.get("command") or "").strip() if isinstance(entry, dict) else ""
+            if command and owns(entry) and (event, command) not in approved:
+                return [(event, f"has no approval in {allowlist}, and Hermes skips a shell hook it has not approved")]
+    return []
 
 
-def missing_tool_inspection_hooks(cfg: Any, connector: str) -> list[str]:
-    """Report recorded agent config files that lost a tool-inspection hook (GAP-0645).
+def _unguarded_problem(connector: str, event: str, why: str, where: str) -> HookProblem:
+    if not why:
+        return tool_inspection_hook_problem(connector, event, where)
+    label = "Claude Code" if connector == "claudecode" else connector
+    if event in TOOL_GUARD_HOOKS[connector].events:
+        consequence = f"{label} tool calls can run unchecked"
+    else:
+        consequence = f"{label} runs its {event} events without DefenseClaw"
+    return HookProblem(
+        f"the DefenseClaw {event} hook in {where} {why}, so {consequence}",
+        f"run `{setup_command(connector)} --yes`; it registers the hook again",
+    )
+
+
+def unguarded_tool_call_problem(cfg: Any, connector: str, document: Any, where: str) -> str:
+    """Why the decoded agent config *document* at *where* leaves tool calls unguarded, or "".
+
+    A document that registers no DefenseClaw hook at all returns "": the
+    unregistered-file check reports it.
+    """
+
+    _registered, unguarded = _unguarded_tool_events(cfg, connector, document, Path(where))
+    return _unguarded_problem(connector, *unguarded[0], where) if unguarded else ""
+
+
+def unguarded_tool_call_hooks(cfg: Any, connector: str) -> list[str]:
+    """Report recorded agent config files whose DefenseClaw hooks leave tool calls unguarded.
 
     Every recorded file that registers DefenseClaw hooks must register the
-    connector's tool-inspection events too; on a managed install, whose
-    hooks may sit in one machine layer, one file is enough. Per-user
-    Windows status runs the same check: doctor failed the Claude Code hooks
-    row there while status kept the connector RUNNING (GAP-0068).
+    connector's tool-guard events with the fields of the shared table; on a
+    managed install, whose hooks may sit in one machine layer, one file with
+    the events is enough. Per-user Windows status runs the same check:
+    doctor failed the Claude Code hooks row there while status kept the
+    connector RUNNING (GAP-0068).
     """
 
-    if not TOOL_INSPECTION_EVENTS.get(connector):
+    if connector not in TOOL_GUARD_HOOKS:
         return []
     managed = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-    gaps: list[tuple[Path, str]] = []
+    gaps: list[tuple[Path, str, str]] = []
     covered = False
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -646,13 +797,13 @@ def missing_tool_inspection_hooks(cfg: Any, connector: str) -> list[str]:
             document = _load_agent_document(path)
         except (OSError, ValueError, ImportError):
             continue
-        registered, missing = _tool_inspection_state(cfg, connector, document)
-        gaps.extend((path, event) for event in missing)
-        covered = covered or (registered and not missing)
+        registered, unguarded = _unguarded_tool_events(cfg, connector, document, path)
+        gaps.extend((path, event, why) for event, why in unguarded)
+        covered = covered or (registered and not unguarded)
     if not gaps or (managed and covered):
         return []
-    path, event = gaps[0]
-    return [tool_inspection_hook_problem(connector, event, str(path))]
+    path, event, why = gaps[0]
+    return [_unguarded_problem(connector, event, why, str(path))]
 
 
 def tool_inspection_hook_problem(connector: str, event: str, where: str) -> HookProblem:
@@ -725,7 +876,10 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
     the current folder, GAP-1067) or Codex with ``[features] hooks = false``
     (GAP-1094). Codex also refuses to start when hook entries have lost their
     command, for example after hook lines were deleted by hand (GAP-1102).
-    Managed installs keep the hooks in machine policy that these settings
+    Copilot reads ``disableAllHooks`` from its user and repository settings
+    (rel-1-0-4 GAP-0580) and from the hook registration files themselves;
+    settings that cannot be read fail too, since what Copilot does with them
+    is unknown. Managed installs keep the hooks in machine policy that these settings
     cannot turn off, so they are not checked here.
     """
 
@@ -770,7 +924,70 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                         f"run `{setup_command(connector)} --yes`; it removes the entries without a command",
                     )
                 )
+    elif connector == "copilot":
+        from defenseclaw.connector_paths import connector_hook_config_paths, copilot_settings_resolution
+
+        if workspace_dir is None:
+            resolver = getattr(cfg, "connector_workspace_dir", None)
+            workspace_dir = resolver() if callable(resolver) else ""
+        settings = copilot_settings_resolution(workspace_dir)
+        if settings.errors:
+            problems.append(
+                HookProblem(
+                    "Copilot settings cannot be read (" + "; ".join(settings.errors) + "), so DefenseClaw cannot "
+                    "tell whether Copilot runs its hooks",
+                    "fix or remove the settings file named, then run `defenseclaw doctor` again",
+                )
+            )
+        elif settings.disable_all_hooks:
+            problems.append(
+                HookProblem(
+                    f"Copilot disableAllHooks is true in {settings.source}, so Copilot runs none of its hooks "
+                    "and DefenseClaw is not guarding its tool calls",
+                    f"remove disableAllHooks from {settings.source} (or set it to false), then restart Copilot",
+                )
+            )
+        # A lock written before the hook files were recorded (an upgrade)
+        # still has the registration at the path setup writes.
+        try:
+            canonical = [Path(item) for item in connector_hook_config_paths(connector, workspace_dir)]
+        except ValueError:
+            canonical = []
+        for path in dict.fromkeys([*_hook_config_paths(cfg, connector), *canonical]):
+            problem = copilot_registration_switch_problem(path)
+            if problem:
+                problems.append(problem)
+                break
     return problems
+
+
+def copilot_registration_switch_problem(path: Path | str) -> str:
+    """Why the Copilot hook registration file at *path* turns its own hooks off, or "".
+
+    Copilot also reads ``disableAllHooks`` from the hook file itself; setup
+    refuses such a file (hook_only.go) and so does the Windows doctor, while
+    POSIX doctor and status showed the hooks guarded. A value that is not a
+    boolean fails too, since what Copilot does with it is unknown.
+    """
+
+    path = Path(path)
+    document = _read_agent_config(path)
+    if not isinstance(document, dict) or "disableAllHooks" not in document:
+        return ""
+    value = document["disableAllHooks"]
+    if type(value) is not bool:
+        return HookProblem(
+            f"Copilot disableAllHooks in {path} is not a boolean, so DefenseClaw cannot tell whether Copilot "
+            "runs its hooks",
+            f"remove disableAllHooks from {path}, then restart Copilot",
+        )
+    if not value:
+        return ""
+    return HookProblem(
+        f"Copilot disableAllHooks is true in {path}, so Copilot runs none of its hooks "
+        "and DefenseClaw is not guarding its tool calls",
+        f"remove disableAllHooks from {path} (or set it to false), then restart Copilot",
+    )
 
 
 def _registered_commands(value: Any) -> list[str]:
@@ -803,9 +1020,6 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
 
     if os.name == "nt":
         return []
-    edited = edited_hook_problems(cfg, connector)
-    if edited:
-        return edited
     hooks_dir = os.path.join(str(getattr(cfg, "data_dir", "") or ""), "hooks")
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -828,7 +1042,7 @@ def hook_command_problems(cfg: Any, connector: str) -> list[str]:
                 f"hook command in {path} cannot run: the shell runs {program!r}, not the hook script "
                 f"under {hooks_dir} (a path with a space must be quoted)"
             ]
-    return []
+    return edited_hook_problems(cfg, connector)
 
 
 # The Unix hook script Setup registers for each hook connector. Windows
@@ -878,15 +1092,111 @@ def _split_hook_command(command: str) -> tuple[str, str] | None:
 def edited_hook_script(command: str, script_name: str) -> str:
     """The script path when *command* has the shape of a DefenseClaw hook entry, else "".
 
-    Mirrors ``editedDefenseClawHookScript`` / ``editedDefenseClawHookCommand``
-    in internal/gateway/connector/helpers.go (the shared golden
+    Mirrors ``editedDefenseClawHookCommand`` in
+    internal/gateway/connector/helpers.go (the shared golden
     testdata/hook_edited_commands.json keeps them in step): an absolute,
     clean script path whose name is the connector's script name, possibly
     edited around ".sh" (copilot-hookX.sh), under a .defenseclaw directory,
     or the exact name under an edited DefenseClaw data directory, alone or
-    with ``--event`` or ``--hook-surface``. Setup replaces such entries; doctor reports the ones
-    that are not the current command (GAP-0906, GAP-0907).
+    with ``--event`` or ``--hook-surface``; or a copy of a DefenseClaw hook
+    script anywhere (:func:`copied_hook_script`). Setup replaces such
+    entries; doctor reports the ones that are not the current command
+    (GAP-0906, GAP-0907, rel-1-0-4 GAP-0600).
     """
+
+    return _edited_hook_shape(command, script_name) or copied_hook_script(command, script_name)
+
+
+# The line every generated hook script of every release carries
+# (hookSchemaVersionMarker in internal/gateway/connector/subprocess.go).
+_HOOK_SCRIPT_MARKER = b"# defenseclaw-managed-hook v"
+_HOOK_SCRIPT_HEAD = 512
+_HOOK_BINDINGS = (" --event ", " --hook-surface ")
+
+
+def _is_defenseclaw_hook_file(path: str) -> bool:
+    """Whether *path* is a regular file that starts like a generated DefenseClaw hook script."""
+
+    if os.name == "nt":
+        return False
+    try:
+        # Non-blocking, so a named pipe in its place is refused, not waited on.
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    except OSError:
+        return False
+    try:
+        return stat.S_ISREG(os.fstat(descriptor).st_mode) and _HOOK_SCRIPT_MARKER in os.read(
+            descriptor, _HOOK_SCRIPT_HEAD
+        )
+    except OSError:
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def copied_hook_script(command: str, script_name: str) -> str:
+    """The script path when *command* runs a copy of a DefenseClaw hook script, else "".
+
+    Mirrors ``copiedDefenseClawHookCommand`` in
+    internal/gateway/connector/helpers.go: the first shell word is an
+    absolute, clean path to a file that carries the generated-hook marker of
+    any release (whatever follows it: Antigravity passes the event bare,
+    Claude Code appends its missing-script guard), or a path with the
+    connector's script name followed by DefenseClaw's ``--event`` /
+    ``--hook-surface`` binding (the copy may have been deleted since). A
+    shell or env wrapper in front of the script (:func:`_split_after_wrapper`)
+    is looked through. An entry repointed at an old copy in another folder
+    kept doctor and ``guardrail fail-mode`` green while the running gateway
+    had added its own entry back beside it (rel-1-0-4 GAP-0600). Only
+    DefenseClaw's current hook is a working registration, so Setup replaces
+    such an entry wherever it points.
+    """
+
+    split = _split_after_wrapper(command.strip())
+    if split is None:
+        return ""
+    word, rest = split
+    if (
+        any(char in word for char in "\x00\r\n")
+        or not word.startswith("/")
+        or word.startswith("//")
+        or posixpath.normpath(word) != word
+    ):
+        return ""
+    if rest.startswith(_HOOK_BINDINGS) and posixpath.basename(word) == script_name:
+        return word
+    return word if _is_defenseclaw_hook_file(word) else ""
+
+
+# The programs a hook command can run a script through (hookShellWrappers in
+# internal/gateway/connector/helpers.go).
+_HOOK_SHELL_WRAPPERS = frozenset({"sh", "bash", "dash", "zsh", "ksh", "env"})
+
+
+def _split_after_wrapper(command: str) -> tuple[str, str] | None:
+    """:func:`_split_hook_command` after one shell or env wrapper word and env's NAME=value words.
+
+    Mirrors ``hookScriptWordAfterWrapper``: ``bash /old/copilot-hook.sh
+    --event preToolUse`` ran an old copy the first-word check did not see
+    (rel-1-0-4 GAP-0600).
+    """
+
+    split = _split_hook_command(command)
+    if split is None:
+        return None
+    word, rest = split
+    base = posixpath.basename(word)
+    if base not in _HOOK_SHELL_WRAPPERS or ("/" in word and not word.startswith("/")):
+        return split
+    while True:
+        split = _split_hook_command(rest.lstrip(" \t"))
+        if split is None or base != "env" or "=" not in split[0] or split[0].startswith("/"):
+            return split
+        rest = split[1]
+
+
+def _edited_hook_shape(command: str, script_name: str) -> str:
+    """The script path when *command* runs the connector's script at an edited DefenseClaw path, else ""."""
 
     stem = script_name[:-3] if script_name.endswith(".sh") else ""
     if not stem.endswith("-hook") or "/" in script_name:
@@ -902,7 +1212,7 @@ def edited_hook_script(command: str, script_name: str) -> str:
         or posixpath.normpath(word) != word
     ):
         return ""
-    if rest and not rest.startswith((" --event ", " --hook-surface ")):
+    if rest and not rest.startswith(_HOOK_BINDINGS):
         return ""
     base = posixpath.basename(word)
     if not base.startswith(stem):
@@ -938,13 +1248,143 @@ def _hook_command_strings(value: Any) -> list[str]:
     return found
 
 
+# DefenseClaw's own hook files: Copilot's <hooks>/defenseclaw.json and
+# Kiro's .kiro/hooks/defenseclaw.json. On an event DefenseClaw binds, Setup
+# leaves its own entry alone there (patchCopilotHooksForOS, patchKiroV3Hooks).
+_OWNED_HOOK_FILE = "defenseclaw.json"
+# kiroV3HookSpecs: name, description, trigger and matcher of each entry.
+_KIRO_V3_SPECS = (
+    ("defenseclaw-user-prompt", "DefenseClaw prompt inspection", "UserPromptSubmit", ""),
+    ("defenseclaw-pre-tool", "DefenseClaw tool-use inspection", "PreToolUse", ".*"),
+    ("defenseclaw-post-tool", "DefenseClaw tool-use audit", "PostToolUse", ".*"),
+    ("defenseclaw-stop", "DefenseClaw session stop", "Stop", ""),
+)
+_POSIX_SAFE_WORD = re.compile(r"[A-Za-z0-9/._\-+=:,@%]+")
+
+
+def _shell_quote(word: str) -> str:
+    return "'" + word.replace("'", "'\\''") + "'"
+
+
+def _locked_contract_id(cfg: Any, connector: str) -> str:
+    lock_path = Path(str(getattr(cfg, "data_dir", "") or ""), "hook_contract_lock.json")
+    try:
+        lock = json.loads(lock_path.read_text(encoding="utf-8")) if lock_path.stat().st_size <= _LOCK_LIMIT else {}
+    except (OSError, ValueError):
+        return ""
+    connectors = lock.get("connectors") if isinstance(lock, dict) else None
+    entry = connectors.get(connector) if isinstance(connectors, dict) else None
+    return str(entry.get("contract_id") or "") if isinstance(entry, dict) else ""
+
+
+def _owned_file_renders(cfg: Any, connector: str, current: str) -> dict[str, dict[str, Any]]:
+    """Setup's entry for each event DefenseClaw binds in its own hook file of *connector*."""
+
+    if connector == "copilot":
+        from defenseclaw.doctor_hooks import _COPILOT_CONTRACT_EVENTS
+
+        events = _COPILOT_CONTRACT_EVENTS.get(_locked_contract_id(cfg, connector)) or tuple(
+            {event for contract in _COPILOT_CONTRACT_EVENTS.values() for event in contract}
+        )
+        return {
+            event: {
+                "type": "command",
+                "bash": f"{_shell_quote(current)} --event {_shell_quote(event)}",
+                "timeoutSec": TOOL_GUARD_HOOKS["copilot"].timeout,
+            }
+            for event in events
+        }
+    if connector == "kiro":
+        word = current if _POSIX_SAFE_WORD.fullmatch(current) else _shell_quote(current)
+        renders = {}
+        for name, description, trigger, matcher in _KIRO_V3_SPECS:
+            entry: dict[str, Any] = {
+                "name": name,
+                "description": description,
+                "trigger": trigger,
+                "action": {"type": "command", "command": f"{word} --hook-surface v3"},
+                "timeout": TOOL_GUARD_HOOKS["kiro"].timeout,
+                "enabled": True,
+            }
+            if matcher:
+                entry["matcher"] = matcher
+            renders[trigger] = entry
+        return renders
+    return {}
+
+
+def _same_hook_json(left: Any, right: Any) -> bool:
+    # sameHookJSON: true is not 1, and key order does not matter.
+    return json.dumps(left, sort_keys=True) == json.dumps(right, sort_keys=True)
+
+
+def _foreign_owned_file_entry(
+    cfg: Any, connector: str, path: Path, document: Any, current: str
+) -> tuple[str, bool] | None:
+    """The first entry in DefenseClaw's own hook file, on an event it binds, that is not Setup's render.
+
+    A wrapper (``bash <copy>``), a renamed copy or a copy without the
+    generated-hook marker beside DefenseClaw's entry was not claimed by the
+    command shape, so the agent ran it while doctor, status and fail-mode
+    passed (rel-1-0-4 GAP-0600). DefenseClaw's own entry with Setup's command
+    but another key (a per-entry ``env`` such as ``BASH_ENV``, a ``cwd``, a
+    shorter timeout) runs the hook under the user's terms, so the whole entry
+    must be Setup's, as the gateway's presence check requires. Returns the
+    entry's command and True when that is what differs, else the entry and
+    False.
+    """
+
+    if _is_windows() or path.name != _OWNED_HOOK_FILE or not isinstance(document, dict):
+        return None  # Windows: the native validators check the handlers
+    renders = _owned_file_renders(cfg, connector, current)
+    hooks = document.get("hooks")
+    if connector == "copilot" and isinstance(hooks, dict):
+        bound = [(event, entry) for event in renders if isinstance(hooks.get(event), list) for entry in hooks[event]]
+        for event, raw in hooks.items():
+            if event in renders:
+                continue
+            entries = raw if isinstance(raw, list) else [raw]
+            for entry in entries:
+                if any(current in command for command in _hook_command_strings(entry)):
+                    return f"unexpected Copilot event {event}: {json.dumps(entry, sort_keys=True)}", False
+    elif connector == "kiro" and isinstance(hooks, list):
+        bound = [
+            (entry.get("trigger"), entry)
+            for entry in hooks
+            if isinstance(entry, dict) and entry.get("trigger") in renders
+        ]
+    else:
+        return None
+    matched: set[str] = set()
+    for event, entry in bound:
+        if event not in matched and _same_hook_json(entry, renders[event]):
+            matched.add(event)
+            continue
+        expected = _hook_command_strings(renders[event])
+        changed = [command for command in _hook_command_strings(entry) if command not in expected]
+        return (changed[0], True) if changed else (json.dumps(entry, sort_keys=True), False)
+    return None
+
+
+def _edited_hook_problem(connector: str, path: Path, runs: str, current: str) -> HookProblem:
+    return HookProblem(
+        f"{_EDITED_HOOK_PREFIX}{connector}: {path} runs {runs}, not the hook script setup "
+        f"registered ({current}), so that entry fails or runs unguarded",
+        f"run `defenseclaw doctor --fix` or `{setup_command(connector)} --yes`; it replaces the edited entries",
+    )
+
+
 def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
     """Report DefenseClaw hook entries whose script path or name was edited.
 
     An edited entry keeps running a script that is not there: Copilot then
     denied every call next to the set setup added again, and Hermes, whose
-    hook failures are fail-open, ran unguarded (GAP-0906, GAP-0907). Setup
-    (``doctor --fix`` restarts the gateway, which runs it) replaces them.
+    hook failures are fail-open, ran unguarded (GAP-0906, GAP-0907). An
+    entry repointed at a copy of the script runs a hook DefenseClaw does not
+    keep current, from any folder (rel-1-0-4 GAP-0600), and in DefenseClaw's
+    own file any entry on a bound event that is not Setup's render
+    (:func:`_foreign_owned_file_entry`). Setup (``doctor --fix`` restarts
+    the gateway, which runs it) replaces them.
     """
 
     script_name = HOOK_SCRIPT_NAMES.get(connector)
@@ -952,8 +1392,10 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
         return []
     data_dir = os.path.normpath(str(getattr(cfg, "data_dir", "") or ""))
     current = os.path.join(data_dir, "hooks", script_name)
-    # Only an edit of this install's own path is reported; setup also
-    # replaces another data directory's entries, which are not an edit.
+    # Reported: an edited path under this install's home, and a command that
+    # runs any copy of a DefenseClaw hook script (copied_hook_script), even
+    # through a wrapper or from another data directory. An unedited entry of
+    # another data directory is not reported here.
     owner = os.path.dirname(data_dir).rstrip("/") + "/"
     for path in _hook_config_paths(cfg, connector):
         try:
@@ -962,15 +1404,18 @@ def edited_hook_problems(cfg: Any, connector: str) -> list[str]:
             document = _load_agent_document(path)
         except (OSError, ValueError, ImportError):
             continue
+        foreign = _foreign_owned_file_entry(cfg, connector, path, document, current)
+        if foreign is not None:
+            runs, command_changed = foreign
+            # Setup's command with a type, timeout, matcher or enabled flag
+            # that leaves the tool call unchecked: that check names the field.
+            unguarded = [] if command_changed else unguarded_tool_call_hooks(cfg, connector)
+            return unguarded or [_edited_hook_problem(connector, path, repr(runs.strip()), current)]
         for command in _hook_command_strings(document):
             word = edited_hook_script(command, script_name)
-            if word and word != current and word.startswith(owner):
+            first = (_split_hook_command(command.strip()) or ("",))[0]
+            if word and first != current and (first.startswith(owner) or copied_hook_script(command, script_name)):
                 return [
-                    HookProblem(
-                        f"{_EDITED_HOOK_PREFIX}{connector}: {path} runs {word}, not the hook script setup "
-                        f"registered ({current}), so that entry fails or runs unguarded",
-                        f"run `defenseclaw doctor --fix` or `{setup_command(connector)} --yes`; "
-                        "it replaces the edited entries",
-                    )
+                    _edited_hook_problem(connector, path, word if first == word else repr(command.strip()), current)
                 ]
     return []

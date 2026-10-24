@@ -63,7 +63,7 @@ MAX_SPAN_FILTER_OPERATIONS: Final = 256
 MAX_REQUIRED_ATTRIBUTES: Final = 128
 MAX_TOKEN_BYTES: Final = 128
 MAX_ARTIFACT_BYTES: Final = 128 * 1024
-MAX_CATALOG_BYTES: Final = 4 * 1024 * 1024
+MAX_CATALOG_BYTES: Final = 8 * 1024 * 1024
 
 _TOKEN: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _SHA256: Final = re.compile(r"^[0-9a-f]{64}$")

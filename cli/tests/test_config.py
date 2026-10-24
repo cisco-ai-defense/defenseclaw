@@ -654,6 +654,37 @@ class TestConfigLoadSave(unittest.TestCase):
         self.assertEqual(judge.llm.api_key_env, "DC_V4_JUDGE_KEY")
         self.assertEqual(judge.llm.base_url, "https://judge-v4.example")
 
+    def test_load_records_the_generation_of_the_bytes_it_read(self):
+        # r103 GAP-0021: an install decision names the config generation it
+        # used; unknown (-1) when config.generation.json does not record the
+        # bytes load() read.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            path = Path(data_dir, "config.yaml")
+            path.write_text(f"config_version: 8\ndata_dir: {data_dir}\n", encoding="utf-8")
+            cfg = load(data_dir=data_dir)
+            self.assertEqual(cfg._loaded_generation, -1)
+            cfg.save()
+            saved = load(data_dir=data_dir)
+            self.assertGreaterEqual(saved._loaded_generation, 1)
+            self.assertNotIn("_loaded_generation", path.read_text(encoding="utf-8"))
+            path.write_text(path.read_text(encoding="utf-8") + "# hand edit\n", encoding="utf-8")
+            self.assertEqual(load(data_dir=data_dir)._loaded_generation, -1)
+
+    def test_load_survives_a_malformed_generation_record(self):
+        # A malformed config.generation.json is ancillary: config.yaml still
+        # loads, with the generation unknown.
+        from defenseclaw import config_writer
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            config_path = Path(data_dir, "config.yaml")
+            config_path.write_text(f"config_version: 8\ndata_dir: {data_dir}\n", encoding="utf-8")
+            record = Path(config_writer.generation_path(str(config_path)))
+            for body in ('{"generation": null}', '{"generation": [1]}', '{"generation": Infinity}'):
+                record.write_text(body, encoding="utf-8")
+                self.assertEqual(load(data_dir=data_dir)._loaded_generation, -1, body)
+
     def test_load_missing_config_returns_defaults(self):
         with patch("defenseclaw.config.default_data_path") as mock_dp:
             mock_dp.return_value = Path(tempfile.mkdtemp()) / ".defenseclaw"
@@ -1074,8 +1105,8 @@ class TestConfigLoadSave(unittest.TestCase):
         cfg = AssetPolicyConfig(
             enabled=True,
             connectors={
-                "open-hands": PerConnectorAssetPolicy(mode="action"),
-                "openhands": PerConnectorAssetPolicy(mode="observe"),
+                "claude-code": PerConnectorAssetPolicy(mode="action"),
+                "claude_code": PerConnectorAssetPolicy(mode="observe"),
             },
         )
         with self.assertRaises(ValueError):

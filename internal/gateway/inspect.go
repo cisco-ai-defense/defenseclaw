@@ -545,8 +545,9 @@ func inspectToolTrustedShellCWD(dir string) string {
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
-			Tool: req.Tool,
-			Args: req.Args,
+			Tool:       req.Tool,
+			Args:       req.Args,
+			ActiveHome: hookActiveHome(ctx),
 		},
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
@@ -715,12 +716,20 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Findings:   []string{"STATIC-BLOCK"},
 		}
 	}
-	// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
-	// still run CodeGuard on their content (D2): the allow bypasses the
-	// scan gate, not code-content inspection.
+	// An explicit allow skips ordinary rule/pattern/AID/judge scanning. A
+	// resolved high-severity write is still inspected: allowing the tool name
+	// cannot authorize an active instruction-file mutation. Write tools also
+	// keep CodeGuard inspection of their content (D2).
 	allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
 	if err != nil {
 		return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
+	}
+	if allowed {
+		cfg := a.decisionConfig(ctx)
+		if (cfg == nil || !cfg.SecureClientIntegration()) &&
+			len(provedHighWriteFindings(ctx, action, nil)) != 0 {
+			allowed = false
+		}
 	}
 	if allowed {
 		if !isWriteToolName(strings.ToLower(req.Tool)) {
@@ -750,6 +759,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 	}
 	ruleFindings := dispatchTrustedAction(ctx, action)
+	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
 
 	// CodeGuard: scan file content for any file-write tool.
 	//
@@ -1391,6 +1401,9 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
 	connector = canonicalConnectorRulePackKey(connector)
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
+		if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
+			return meet.rulePack(ctx, a, resolved.set, connector)
+		}
 		key := effectiveRulePackKey(resolved.derived, connector)
 		if pack := resolved.set.packs[key]; pack != nil {
 			return pack
@@ -1545,6 +1558,9 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool") {
 		return
 	}
 

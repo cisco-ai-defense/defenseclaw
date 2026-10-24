@@ -72,6 +72,18 @@ func TestAuditWALGuardPassReportsAWriterHoldOverTheBudget(t *testing.T) {
 	}
 }
 
+// A bounded catch-up (a log over the limit) says why the hooks waited.
+func TestAuditWALGuardPassReportsABoundedCatchUp(t *testing.T) {
+	fake := &fakeWALCheckpointer{result: audit.WALCheckpoint{
+		Bounded: true, Restarted: true, LogBytes: 300 << 20, WriterHeld: 480 * time.Millisecond, HoldCap: 4 * time.Second,
+	}}
+	var log bytes.Buffer
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
+	if want := "audit WAL over its 256 MiB limit (300 MiB): held the audit writer for 480ms of up to 4s to bring it back (restarted true)"; !strings.Contains(log.String(), want) {
+		t.Fatalf("log = %q, want %q", log.String(), want)
+	}
+}
+
 // rel-1-0-3 GAP-0288: a writer statement that overran its budget returned a
 // deadline error, and the guard logged only "yielded the writer after 200ms",
 // so a 1.1-1.7 s hold never produced the held line. Both lines are logged,

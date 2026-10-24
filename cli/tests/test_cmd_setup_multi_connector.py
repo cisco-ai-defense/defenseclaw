@@ -35,6 +35,7 @@ import io
 import json
 import os
 import shlex
+import shutil
 import stat
 import sys
 import unittest
@@ -50,9 +51,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from click.testing import CliRunner
 
 pytestmark = pytest.mark.supported_connector_host
-from defenseclaw.agent_selection import SetupAgentSelection
 from defenseclaw.commands import cmd_setup
-from defenseclaw.commands.cmd_doctor import _omnigent_setup_repair_command
 from defenseclaw.commands.cmd_setup import (
     _configured_connector_set,
     _print_observability_summary,
@@ -224,6 +223,39 @@ def _setup_patches(prompt=None):
         yield restart
 
 
+@pytest.mark.parametrize("batch", [False, True])
+def test_refused_action_setup_does_not_stage_observe_or_report_success(batch):
+    app, root, db_path = make_app_context()
+    try:
+        before = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        with (
+            _setup_patches() as restart,
+            patch.object(cmd_setup, "_check_connector_version_supported_for_setup", return_value=False),
+            patch.object(app.cfg, "save") as save,
+        ):
+            if batch:
+                ctx = click.Context(setup_group, obj=app)
+                with ctx, pytest.raises(click.ClickException, match="did not pass setup preflight"):
+                    cmd_setup._apply_setup_batch(
+                        ctx, app, ["claudecode", "cursor"], mode="action", restart=False,
+                        prompt_per_connector=False,
+                    )
+            else:
+                for _ in range(2):
+                    result = CliRunner().invoke(
+                        setup_group,
+                        ["cursor", "--yes", "--mode", "action", "--no-human-approval", "--no-restart"],
+                        obj=app,
+                    )
+                    assert result.exit_code != 0, result.output
+            save.assert_not_called()
+            restart.assert_not_called()
+        after = cmd_setup._capture_setup_config_snapshot(app.cfg)
+        assert after == before
+    finally:
+        cleanup_app(app, db_path, root)
+
+
 class TestAdditiveSetupCommand(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
@@ -369,6 +401,131 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "claudecode")
         self.assertEqual(restart.call_count, 2)
         self.assertEqual(restart.call_args_list[1].kwargs["connectors"], ["claudecode"])
+
+    def test_failed_restart_restores_the_discovery_cache_from_before_the_version_check(self):
+        # GAP-0547: `setup codex --mode action` republished agent_discovery.json
+        # in its version check, before the rollback point was taken. The
+        # restart failed on a peer the new cache left unversioned, and the
+        # rollback put that same cache back, so the gateway still could not
+        # start on the restored configuration.
+        self._seed_map("claudecode", "codex")
+        for name in ("claudecode", "codex"):
+            self.app.cfg.guardrail.connectors[name].mode = "action"
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        prior = b'{"agents":{"claudecode":{"version":"2.1.304 (Claude Code)"}}}\n'
+        atomic_write_private_bytes(cache, prior)
+
+        def version_check(*_args, **_kwargs):
+            atomic_write_private_bytes(cache, b'{"agents":{"claudecode":{"version":""}}}\n')
+            return True
+
+        seen_by_restart: list[bytes] = []
+
+        def _restart(*_args, **_kwargs):
+            with open(cache, "rb") as handle:
+                seen_by_restart.append(handle.read())
+            if len(seen_by_restart) == 1:
+                raise click.ClickException("connector claudecode refresh failed: agent version not probed")
+
+        with (
+            _setup_patches() as restart,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=version_check,
+            ),
+        ):
+            restart.side_effect = _restart
+            result = _invoke(["codex", "--yes", "--mode", "action"], self.app)
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("restored the prior connector configuration and runtime", result.output)
+        self.assertEqual(len(seen_by_restart), 2)
+        self.assertEqual(seen_by_restart[1], prior)
+        with open(cache, "rb") as handle:
+            self.assertEqual(handle.read(), prior)
+
+    def _run_codex_action_setup_over_cache(self, mode: int, *, fail_first_restart: bool):
+        self._seed_map("claudecode", "codex")
+        for name in ("claudecode", "codex"):
+            self.app.cfg.guardrail.connectors[name].mode = "action"
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        prior = b'{"agents":{"claudecode":{"version":"2.1.304 (Claude Code)"}}}\n'
+        checked = b'{"agents":{"claudecode":{"version":""}}}\n'
+        atomic_write_private_bytes(cache, prior)
+        os.chmod(cache, mode)
+
+        def version_check(*_args, **_kwargs):
+            atomic_write_private_bytes(cache, checked)
+            return True
+
+        def _restart(*_args, **_kwargs):
+            if fail_first_restart and restart.call_count == 1:
+                raise click.ClickException("connector claudecode refresh failed: agent version not probed")
+
+        with (
+            _setup_patches() as restart,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=version_check,
+            ),
+        ):
+            restart.side_effect = _restart
+            result = _invoke(["codex", "--yes", "--mode", "action"], self.app)
+        with open(cache, "rb") as handle:
+            final = handle.read()
+        return result, restart.call_count, prior, checked, final
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_group_readable_prior_discovery_cache_is_tightened_and_kept(self):
+        # An older release's umask could leave agent_discovery.json 0644. The
+        # early rollback copy refused setup on it on every retry.
+        result, restarts, prior, _checked, final = self._run_codex_action_setup_over_cache(
+            0o644, fail_first_restart=True
+        )
+        self.assertNotIn("Cannot establish connector setup rollback point", result.output)
+        self.assertIn("restored the prior connector configuration and runtime", result.output)
+        self.assertEqual(restarts, 2)
+        self.assertEqual(final, prior)
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        self.assertEqual(stat.S_IMODE(os.stat(cache).st_mode) & 0o077, 0)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_untrusted_prior_discovery_cache_does_not_refuse_setup(self):
+        # A cache writable by others cannot be the rollback copy; setup uses
+        # the private one the version check writes instead of exiting 1.
+        result, restarts, _prior, checked, final = self._run_codex_action_setup_over_cache(
+            0o666, fail_first_restart=False
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertNotIn("Cannot establish connector setup rollback point", result.output)
+        self.assertIn("agent_discovery.json from before setup cannot be kept", result.output)
+        self.assertEqual(restarts, 1)
+        self.assertEqual(final, checked)
+
+    @pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs a non-root POSIX user")
+    def test_root_owned_prior_discovery_cache_names_the_chown_step(self):
+        cache = os.path.join(self.app.cfg.data_dir, "agent_discovery.json")
+        atomic_write_private_bytes(cache, b"{}\n")
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            info = real_lstat(path, *args, **kwargs)
+            if os.fspath(path) == cache:
+                return os.stat_result((info.st_mode, info.st_ino, info.st_dev, info.st_nlink, 0, *info[5:]))
+            return info
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._capture_setup_agent_discovery_file",
+                side_effect=OSError("agent_discovery.json rollback source is root-owned from a sudo-started gateway"),
+            ),
+            patch("defenseclaw.commands.cmd_setup.os.lstat", side_effect=lstat),
+            patch("defenseclaw.commands.cmd_setup.ux.warn") as warn,
+        ):
+            self.assertIsNone(cmd_setup._capture_setup_prior_agent_discovery(self.app.cfg.data_dir))
+        message = warn.call_args.args[0]
+        self.assertIn('sudo chown "$(id -un)"', message)
+        self.assertIn(shlex.quote(cache), message)
 
     def test_replace_readiness_failure_restores_prior_connector_set(self):
         self._seed_map("claudecode", "codex")
@@ -689,121 +846,7 @@ class TestAdditiveSetupCommand(unittest.TestCase):
             with open(path, "rb") as handle:
                 self.assertEqual(handle.read(), payload)
 
-    def test_direct_opencode_rollback_restores_exact_prior_persistence_before_prior_readiness(self):
-        # Exercise the real v8 config merge writer. A mocked ``save`` cannot
-        # reproduce the rollback defect where the restored object's modeled
-        # baseline matches its prior-four state while config.yaml still holds
-        # the newly staged five-connector generation.
-        del self.app.cfg.save
-        prior_connectors = ("claudecode", "codex", "cursor", "omnigent")
-        self._seed_map(*prior_connectors)
-        self.app.cfg.guardrail.connectors["cursor"].mode = "action"
-        self.app.cfg.guardrail.connectors["cursor"].hook_fail_mode = "closed"
-        self.app.cfg.save()
 
-        data_dir = self.app.cfg.data_dir
-        config_path = os.path.join(data_dir, "config.yaml")
-        hint_path = os.path.join(data_dir, "picked_connector")
-        selection_path = os.path.join(data_dir, "agent_selection.json")
-        prior_hint = b"cursor\n"
-        prior_selection = (
-            b'{"schema_version":1,"selections":{'
-            b'"claudecode":{"executable":"prior-claude"},'
-            b'"codex":{"executable":"prior-codex"},'
-            b'"omnigent":{"executable":"prior-omnigent"}}}\n'
-        )
-        atomic_write_private_bytes(hint_path, prior_hint)
-        atomic_write_private_bytes(selection_path, prior_selection)
-        with open(config_path, "rb") as handle:
-            prior_config = handle.read()
-
-        restart_attempt = 0
-
-        def _restart(*_args, **kwargs):
-            nonlocal restart_attempt
-            restart_attempt += 1
-            if restart_attempt == 1:
-                self.assertEqual(set(kwargs["connectors"]), {*prior_connectors, "opencode"})
-                self.assertIn("opencode", load(data_dir=data_dir).active_connectors())
-                raise click.ClickException("requested five-connector readiness failed")
-            self.assertEqual(set(kwargs["connectors"]), set(prior_connectors))
-            self.assertEqual(tuple(load(data_dir=data_dir).active_connectors()), prior_connectors)
-            with open(config_path, "rb") as handle:
-                self.assertEqual(handle.read(), prior_config)
-            with open(hint_path, "rb") as handle:
-                self.assertEqual(handle.read(), prior_hint)
-            with open(selection_path, "rb") as handle:
-                self.assertEqual(handle.read(), prior_selection)
-            raise click.ClickException("prior four-connector readiness failed")
-
-        with _setup_patches() as restart:
-            restart.side_effect = _restart
-            result = _invoke(
-                ["opencode", "--yes", "--mode", "action", "--no-human-approval"],
-                self.app,
-            )
-
-        self.assertNotEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn("rollback was incomplete", result.output)
-        self.assertIn("prior four-connector readiness failed", result.output)
-        self.assertEqual(tuple(self.app.cfg.active_connectors()), prior_connectors)
-        with open(config_path, "rb") as handle:
-            self.assertEqual(handle.read(), prior_config)
-        with open(hint_path, "rb") as handle:
-            self.assertEqual(handle.read(), prior_hint)
-        with open(selection_path, "rb") as handle:
-            self.assertEqual(handle.read(), prior_selection)
-        self.assertEqual(restart.call_count, 2)
-
-    def test_successful_batch_records_complete_codex_and_hermes_selection_receipt(self):
-        self._seed_single("codex")
-        selection_path = os.path.join(self.app.cfg.data_dir, "agent_selection.json")
-        atomic_write_private_bytes(
-            selection_path,
-            b'{"schema_version":1,"selections":{"omnigent":{"executable":"stale"}}}\n',
-        )
-        selected = {
-            "codex": SetupAgentSelection(
-                connector="codex",
-                executable=os.path.abspath(os.path.join(self.tmp_dir, "codex.exe")),
-                raw_version="codex 0.144.3",
-                normalized_version="0.144.3",
-                sha256="a" * 64,
-            ),
-            "hermes": SetupAgentSelection(
-                connector="hermes",
-                executable=os.path.abspath(os.path.join(self.tmp_dir, "hermes.exe")),
-                raw_version="Hermes Agent v0.20.0",
-                normalized_version="0.20.0",
-                sha256="b" * 64,
-            ),
-        }
-
-        with (
-            _setup_patches(),
-            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
-            patch(
-                "defenseclaw.agent_selection._SUPPORTED_CONNECTORS",
-                frozenset({"codex", "claudecode", "hermes", "omnigent"}),
-            ),
-            patch(
-                "defenseclaw.agent_selection._select_agent_executable",
-                side_effect=lambda _data_dir, connector: selected[connector],
-            ) as select,
-        ):
-            result = _invoke(
-                ["-c", "codex", "-c", "hermes", "--yes", "--no-restart"],
-                self.app,
-            )
-
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual([call.args[1] for call in select.call_args_list], ["codex", "hermes"])
-        with open(selection_path, encoding="utf-8") as handle:
-            receipt = json.load(handle)
-        self.assertEqual(set(receipt["selections"]), {"codex", "hermes"})
-        self.assertEqual(receipt["selections"]["codex"]["executable"], selected["codex"].executable)
-        self.assertEqual(receipt["selections"]["hermes"]["executable"], selected["hermes"].executable)
-        self.assertNotIn("omnigent", receipt["selections"])
 
     def test_bare_batch_unsupported_target_never_reconciles_prior_roster(self):
         self._seed_map("codex", "cursor")
@@ -1473,7 +1516,22 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertRegex(out, r"connectors:\s+claudecode, codex, opencode\n")
         self.assertRegex(out, r"not guarded now:\s+hermes ")
         self.assertIn("This install now has 4 connectors configured; 3 guarded now: claudecode, codex, opencode.", out)
-        self.assertIn("Not guarded now: hermes. To guard it again, run: defenseclaw setup hermes", out)
+        self.assertIn("Not guarded now: hermes.", out)
+        self.assertIn("To guard hermes again, run: defenseclaw setup hermes", out)
+
+    def test_summary_does_not_offer_setup_for_a_refused_retired_peer(self):
+        self._seed_map("codex", "hermes", "omnigent")
+        buf = io.StringIO()
+        with click.Context(click.Command("setup")), contextlib.redirect_stdout(buf):
+            cmd_setup._remember_runtime_skipped_peers({"hermes", "omnigent"})
+            _print_observability_summary("codex", self.app.cfg, mode="action", os_name="posix")
+        out = buf.getvalue()
+
+        self.assertIn("not guarded now:", out)
+        self.assertIn("omnigent", out)
+        self.assertIn("defenseclaw setup hermes", out)
+        self.assertIn("defenseclaw doctor", out)
+        self.assertNotIn("defenseclaw setup omnigent", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):
@@ -1703,6 +1761,186 @@ class TestRemoveConnector(unittest.TestCase):
                 self.assertEqual(self._effective_policy(survivor), expected_policy)
 
     # D3=A: --restart bounces the gateway so boot-time set-diff teardown runs.
+    def test_remove_modified_plugin_refuses_before_config_save(self):
+        for connector in ("opencode", "amp"):
+            with self.subTest(connector=connector):
+                self._seed_map("codex", connector)
+                plugin = os.path.join(self.tmp_dir, f"{connector}.js")
+                pristine = b"// defenseclaw-managed-plugin v1\n"
+                original = pristine + b"// operator edit\n"
+                with open(plugin, "wb") as stream:
+                    stream.write(original)
+                record = {
+                    "version": 1, "connector": connector, "logical_name": "config",
+                    "path": plugin, "existed": False, "pristine_sha256": "missing",
+                    "post_sha256": hashlib.sha256(pristine).hexdigest(),
+                }
+                receipt = os.path.join(self.app.cfg.data_dir, "connector_backups", connector, "config.json")
+                atomic_write_private_bytes(receipt, json.dumps(record).encode())
+                with (
+                    patch("defenseclaw.connector_paths.managed_plugin_path", return_value=plugin),
+                    self._no_restart_bounce() as bounce,
+                    patch.object(self.app.cfg, "save") as save,
+                ):
+                    result = _invoke(["remove", connector, "--yes"], self.app)
+                self.assertNotEqual(result.exit_code, 0, result.output)
+                self.assertIn(f"defenseclaw setup {connector} --yes --restart", result.output)
+                save.assert_not_called()
+                bounce.assert_not_called()
+                self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", connector})
+                with open(plugin, "rb") as stream:
+                    self.assertEqual(stream.read(), original)
+
+    def _seed_intact_plugin(self, connector, home, *, target=None):
+        """Install a pristine DefenseClaw plugin of *connector* plus its setup receipt."""
+        from defenseclaw.connector_paths import managed_plugin_path
+
+        with self._plugin_home(home):
+            plugin = managed_plugin_path(connector)
+        body = b"// defenseclaw-managed-plugin v1\n"
+        os.makedirs(os.path.dirname(plugin), exist_ok=True)
+        with open(plugin, "wb") as stream:
+            stream.write(body)
+        record = {
+            "version": 1, "connector": connector, "logical_name": "config",
+            "path": target or plugin, "existed": False, "pristine_sha256": "missing",
+            "post_sha256": hashlib.sha256(body).hexdigest(),
+        }
+        receipt = os.path.join(self.app.cfg.data_dir, "connector_backups", connector, "config.json")
+        atomic_write_private_bytes(receipt, json.dumps(record).encode())
+        return plugin
+
+    @contextlib.contextmanager
+    def _plugin_home(self, home):
+        """Resolve Amp's and OpenCode's config homes (and Amp's managed settings) under *home*."""
+        from defenseclaw import connector_paths
+
+        real_home = connector_paths.connector_home
+
+        def connector_home(name, **kwargs):
+            if connector_paths.normalize(name) == "opencode":
+                return os.path.join(home, ".config", "opencode")
+            return real_home(name, **kwargs)
+
+        with (
+            patch("defenseclaw.connector_paths.amp_config_home", return_value=os.path.join(home, ".config", "amp")),
+            patch(
+                "defenseclaw.connector_paths.amp_managed_settings_path",
+                return_value=os.path.join(home, "managed", "amp-settings.json"),
+            ),
+            patch("defenseclaw.connector_paths.connector_home", side_effect=connector_home),
+        ):
+            yield
+
+    # The plugin receipt binds only the plugin. The agent's own settings files
+    # (edited freely by the operator) never block removal of an intact plugin.
+    def test_remove_intact_plugin_succeeds_with_agent_settings_present(self):
+        from defenseclaw.connector_paths import connector_config_files
+
+        for connector in ("amp", "opencode"):
+            with self.subTest(connector=connector):
+                home = os.path.join(self.tmp_dir, f"home-{connector}")
+                workspace = os.path.join(self.tmp_dir, f"ws-{connector}")
+                plugin = self._seed_intact_plugin(connector, home)
+                settings = [
+                    os.path.join(home, ".config", "amp", "settings.json"),
+                    os.path.join(home, ".config", "amp", "settings.jsonc"),
+                    os.path.join(home, "managed", "amp-settings.json"),
+                    os.path.join(workspace, ".amp", "settings.json"),
+                    os.path.join(home, ".config", "opencode", "opencode.json"),
+                    os.path.join(home, ".config", "opencode", "opencode.jsonc"),
+                ]
+                for index, path in enumerate(settings):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", encoding="utf-8") as stream:
+                        stream.write(f'{{"operator": {index}}}\n')
+                self._seed_map("codex", connector)
+                with self._plugin_home(home):
+                    if connector == "amp":
+                        listed = connector_config_files("amp")
+                        self.assertIn(settings[0], listed)
+                        self.assertIn(plugin, listed)
+                    with self._no_restart_bounce() as bounce:
+                        result = _invoke(["remove", connector, "--yes", "--no-restart"], self.app)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn(f"Removed connector {connector!r}", result.output)
+                bounce.assert_not_called()
+                self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex"})
+                for index, path in enumerate(settings):
+                    with open(path, encoding="utf-8") as stream:
+                        self.assertEqual(stream.read(), f'{{"operator": {index}}}\n')
+
+    # A receipt bound to anything but the active plugin (a settings file, a
+    # stale home) is not proof of teardown: removal refuses before saving.
+    def test_remove_refuses_receipt_bound_to_another_file(self):
+        for connector in ("amp", "opencode"):
+            with self.subTest(connector=connector):
+                home = os.path.join(self.tmp_dir, f"foreign-{connector}")
+                foreign = os.path.join(home, "settings.json")
+                os.makedirs(home, exist_ok=True)
+                with open(foreign, "wb") as stream:
+                    stream.write(b"// defenseclaw-managed-plugin v1\n")
+                self._seed_intact_plugin(connector, home, target=foreign)
+                self._seed_map("codex", connector)
+                with (
+                    self._plugin_home(home),
+                    self._no_restart_bounce() as bounce,
+                    patch.object(self.app.cfg, "save") as save,
+                ):
+                    result = _invoke(["remove", connector, "--yes", "--no-restart"], self.app)
+                self.assertNotEqual(result.exit_code, 0, result.output)
+                self.assertIn("does not match the active plugin", result.output)
+                save.assert_not_called()
+                bounce.assert_not_called()
+                self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", connector})
+
+    # A supported home move (usermod -m, or rsync and then emptying the old
+    # home) leaves the receipt naming the old home. The unchanged plugin in
+    # the new home still proves the teardown; an edited one still refuses.
+    def test_remove_plugin_after_home_move(self):
+        from defenseclaw.commands.cmd_doctor import _managed_plugin_drift
+
+        home = self.app.cfg.data_dir
+        for connector in ("amp", "opencode"):
+            for move in ("old home gone", "old home emptied", "edited after move", "old home kept"):
+                with self.subTest(connector=connector, move=move):
+                    old_home = os.path.join(os.path.dirname(home), f"old-{os.path.basename(home)}-{connector}")
+                    plugin = self._seed_intact_plugin(connector, home)
+                    old_plugin = os.path.join(old_home, os.path.relpath(plugin, home))
+                    if move == "old home emptied":
+                        os.makedirs(old_home)
+                    if move == "old home kept":
+                        os.makedirs(os.path.dirname(old_plugin))
+                        shutil.copyfile(plugin, old_plugin)
+                    self._seed_intact_plugin(connector, home, target=old_plugin)
+                    if move == "edited after move":
+                        with open(plugin, "ab") as stream:
+                            stream.write(b"// operator edit\n")
+                    with open(plugin, "rb") as stream:
+                        plugin_bytes = stream.read()
+                    self._seed_map("codex", connector)
+                    with (
+                        self._plugin_home(home),
+                        patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}),
+                        self._no_restart_bounce() as bounce,
+                    ):
+                        drift = _managed_plugin_drift(self.app.cfg, plugin, connector)
+                        result = _invoke(["remove", connector, "--yes", "--no-restart"], self.app)
+                    shutil.rmtree(old_home, ignore_errors=True)
+                    bounce.assert_not_called()
+                    if move in ("old home gone", "old home emptied"):
+                        self.assertEqual(drift, "")
+                        self.assertEqual(result.exit_code, 0, result.output)
+                        self.assertIn(f"Removed connector {connector!r}", result.output)
+                        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex"})
+                    else:
+                        self.assertNotEqual(drift, "")
+                        self.assertNotEqual(result.exit_code, 0, result.output)
+                        self.assertIn("plugin teardown is unverified", result.output)
+                        self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", connector})
+                    with open(plugin, "rb") as stream:
+                        self.assertEqual(stream.read(), plugin_bytes)
+
     def test_remove_restart_bounces_gateway(self):
         self._seed_map("codex", "cursor")
         with self._no_restart_bounce() as bounce:
@@ -3682,53 +3920,6 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 self.assertEqual(gc.effective_mode(connector), "action")
                 self.assertEqual(gc.effective_hook_fail_mode(connector), "closed")
 
-    def test_omnigent_doctor_repair_command_preserves_roster_peers_lock_and_posture(self):
-        gc = self.app.cfg.guardrail
-        gc.mode = "observe"
-        gc.hook_fail_mode = "closed"
-        gc.connector = "claudecode"
-        self.app.cfg.claw.mode = "claudecode"
-        gc.connectors = {
-            "claudecode": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="closed"),
-            "codex": PerConnectorGuardrailConfig(mode="observe", hook_fail_mode="open"),
-            "cursor": PerConnectorGuardrailConfig(mode="observe", hook_fail_mode="open"),
-            "omnigent": PerConnectorGuardrailConfig(
-                mode="action",
-                hook_fail_mode="closed",
-                hilt=HILTConfig(enabled=True, min_severity="LOW"),
-            ),
-        }
-        peer_posture = copy.deepcopy({name: gc.connectors[name] for name in ("claudecode", "codex", "cursor")})
-        lock_path = os.path.join(self.app.cfg.data_dir, "hook_contract_lock.json")
-        lock_body = (
-            b'{"version":2,"connectors":{"claudecode":{"compatibility_status":"known"},'
-            b'"codex":{"compatibility_status":"known"},'
-            b'"cursor":{"compatibility_status":"known"},'
-            b'"omnigent":{"compatibility_status":"known"}}}\n'
-        )
-        atomic_write_private_bytes(lock_path, lock_body)
-
-        command = _omnigent_setup_repair_command(self.app.cfg)
-        argv = shlex.split(command, posix=True)
-        self.assertEqual(argv[:3], ["defenseclaw", "setup", "omnigent"])
-        with _setup_patches(), patch(
-            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
-            return_value=None,
-        ):
-            result = _invoke(argv[2:], self.app)
-
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertEqual(set(gc.connectors), {"claudecode", "codex", "cursor", "omnigent"})
-        self.assertEqual(
-            {name: gc.connectors[name] for name in ("claudecode", "codex", "cursor")},
-            peer_posture,
-        )
-        self.assertEqual(gc.effective_mode("omnigent"), "action")
-        self.assertEqual(gc.effective_hook_fail_mode("omnigent"), "closed")
-        self.assertTrue(gc.effective_hilt("omnigent").enabled)
-        self.assertEqual(gc.effective_hilt("omnigent").min_severity, "LOW")
-        with open(lock_path, "rb") as lock_file:
-            self.assertEqual(lock_file.read(), lock_body)
 
     def test_toggling_one_connector_mode_lands_per_connector(self):
         # Configure two hook connectors (codex seeded into the map), then flip

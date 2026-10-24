@@ -19,26 +19,24 @@ import (
 // tests replace it.
 var resolveBundleSecret = managed.ResolveServiceCredentialAs
 
-// managedBundleSecretPresent looks a credential up in the standalone
+// managedBundleSecretValue reads a credential from the standalone
 // enterprise secret store with the checks the gateway reads it with, as the
 // Windows bundle apply does (it passes this function), so verify and apply
 // agree. The caller is an administrator or plain SYSTEM shell without the
 // service's environment pins, so the gateway service account comes from the
-// layout the installer pins it from (GAP-0009). The value is dropped at once
-// and never printed. A credential that is not stored, or that is stored but
-// fails a check the gateway's read applies (path trust, an extra reader ACE,
-// empty, too large), is missing, so a required reference refuses. Only a
-// store the caller cannot read (a standard account, a failed security
-// descriptor read) is an error, so verify warns secret_presence_unchecked
-// (managed.ServiceCredentialPresence).
-func managedBundleSecretPresent(name string) (bool, error) {
+// layout the installer pins it from (GAP-0009). Verify compares the value
+// with the signed value_sha256 and clears it; it is never printed. A
+// credential that is not stored, or that is stored but fails a check the
+// gateway's read applies (path trust, an extra reader ACE, empty, too
+// large), is missing (nil), so a required reference refuses. Only a store
+// the caller cannot read (a standard account, a failed security descriptor
+// read) is an error, so verify warns secret_presence_unchecked
+// (managed.ServiceCredentialValue).
+func managedBundleSecretValue(name string) ([]byte, error) {
 	layout, err := enterprisebundle.Layout(runtime.GOOS)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	value, _, err := resolveBundleSecret(name, layout.SecretsDir, layout.ServiceUser)
-	for i := range value {
-		value[i] = 0
-	}
-	return managed.ServiceCredentialPresence(err)
+	return managed.ServiceCredentialValue(value, err)
 }

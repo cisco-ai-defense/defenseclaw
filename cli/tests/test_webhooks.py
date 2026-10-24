@@ -39,6 +39,7 @@ import os
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import yaml
@@ -61,6 +62,7 @@ from defenseclaw.webhooks import (
     synthetic_event,
     validate_webhook_url,
 )
+from defenseclaw.webhooks.writer import redact_webhook_url
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -355,8 +357,71 @@ class ApplyWebhookRoundTripTests(unittest.TestCase):
 
 
 class SSRFValidationTests(unittest.TestCase):
+    def test_invalid_port_is_refused_before_write_and_existing_bad_url_is_safe_to_display(self):
+        bad = "https://example.com:bad/private-path?token=private-value"
+        with tempfile.TemporaryDirectory() as td:
+            _write_cfg(td)
+            with open(os.path.join(td, "config.yaml"), "rb") as config_file:
+                before = config_file.read()
+            for dry_run in (True, False):
+                with self.subTest(dry_run=dry_run):
+                    # This is URL validation, not the config-lock ACL test.
+                    # A native Windows temp directory may have a foreign
+                    # owner SID under an elevated test token.
+                    with patch("defenseclaw.webhooks.writer.locked_config_yaml", return_value=nullcontext()):
+                        with self.assertRaisesRegex(ValueError, "port"):
+                            apply_webhook(
+                                data_dir=td, name="badport", type_="generic", url=bad,
+                                enabled=False, dry_run=dry_run,
+                            )
+                    with open(os.path.join(td, "config.yaml"), "rb") as config_file:
+                        self.assertEqual(config_file.read(), before)
+        shown = redact_webhook_url(bad)
+        self.assertNotIn("private-path", shown)
+        self.assertNotIn("private-value", shown)
+        self.assertNotIn("bad", shown)
+
     def test_accepts_public_https(self):
         validate_webhook_url("https://hooks.slack.com/services/X/Y/Z")
+
+    def test_rejects_nonnumeric_and_out_of_range_url_ports_before_write(self):
+        from defenseclaw.webhooks.writer import redact_webhook_url
+
+        for bad in ("https://example.com:bad/private", "https://example.com:65536/private"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, "[Pp]ort"):
+                validate_webhook_url(bad)
+            with tempfile.TemporaryDirectory() as td:
+                _write_cfg(td)
+                with open(os.path.join(td, "config.yaml"), "rb") as handle:
+                    before = handle.read()
+                with self.assertRaisesRegex(ValueError, "[Pp]ort"):
+                    apply_webhook(data_dir=td, name="badport", type_="generic", url=bad, enabled=False)
+                with open(os.path.join(td, "config.yaml"), "rb") as handle:
+                    self.assertEqual(handle.read(), before)
+            # A pre-upgrade config may already contain an invalid value. All
+            # list/show/config views share this helper and must redact safely.
+            self.assertEqual(redact_webhook_url(bad), "***")
+        self.assertEqual(redact_webhook_url("https://user:secret@host.example:bad/private?token=abc"), "***")
+
+        from types import SimpleNamespace
+
+        from click.testing import CliRunner
+        from defenseclaw.commands.cmd_setup_webhook import webhook
+        from defenseclaw.context import AppContext
+
+        with tempfile.TemporaryDirectory() as td:
+            _write_cfg(td, webhooks=[{
+                "name": "badport", "type": "generic", "enabled": False,
+                "url": "https://user:secret@host.example:bad/private?token=abc",
+            }])
+            app = AppContext()
+            app.cfg = SimpleNamespace(data_dir=td)
+            for args in (["list"], ["list", "--json"], ["show", "badport", "--json"]):
+                result = CliRunner().invoke(webhook, args, obj=app)
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertIn("badport", result.output)
+                self.assertNotIn("user:secret", result.output)
+                self.assertNotIn("/private", result.output)
 
     def test_rejects_empty(self):
         with self.assertRaises(ValueError):
