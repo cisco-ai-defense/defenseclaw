@@ -3734,7 +3734,6 @@ def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
 # agent. The agent is told by its executable, never by a name (GAP-1128).
 _WINDOWS_AGENT_ROWS = [
     (r"C:\Users\u\.opencode\bin\opencode.exe", "opencode.exe", "opencode"),
-    (r"C:\Users\u\scoop\shims\opencode.exe", "opencode", "opencode"),
     (r"C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\.opencode.exe", "opencode", "opencode"),
     (r"C:\Users\u\AppData\Roaming\npm\node_modules\opencode-windows-x64\bin\opencode.exe", "opencode", "opencode"),
     (r"C:\Program Files\nodejs\node.exe",
@@ -3771,6 +3770,18 @@ _WINDOWS_AGENT_ROWS = [
     (r"C:\w\node_modules\opencode-linux-x64\bin\opencode.exe", "opencode.exe", ""),
     (r"C:\w\node_modules\opencode-windows-arm64\bin\opencode.exe", "opencode.exe", "opencode"),
     (r"C:\w\node_modules\opencode-windows-x64-baseline\bin\opencode.exe", "opencode.exe", "opencode"),
+    # Review loop 1 (rc.7 at 677bf76b): a program is an agent by its package,
+    # never by the command name PATH finds or a folder's name.
+    (r"C:\Users\u\scoop\shims\opencode.exe", "opencode", ""),
+    (r"C:\Tools\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\no-manifest\node_modules\opencode-windows-x64\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\no-manifest\node_modules\opencode-ai\bin\.opencode.exe", "opencode.exe", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\no-manifest\node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:/no-manifest/node_modules/@sourcegraph/amp/dist/main.js", ""),
+    # pnpm: the package is the last node_modules\opencode-ai; any case.
+    (r"C:\Program Files\nodejs\node.exe",
+     r"node C:\w\node_modules\.pnpm\opencode-ai@1.19.4\node_modules\opencode-ai\bin\opencode", "opencode"),
+    (r"C:\W\Node_Modules\OpenCode-Windows-X64\bin\opencode.exe", "opencode.exe", "opencode"),
 ]
 
 
@@ -3779,7 +3790,7 @@ _WINDOWS_AGENT_ROWS = [
 def test_a_windows_agent_is_told_by_its_executable() -> None:
     installed = (
         "$script:InstalledAgentPrograms = @{ "
-        "'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode'; 'c:\\users\\u\\scoop\\shims\\opencode.exe' = 'opencode'; "
+        "'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode'; "
         "'c:\\users\\u\\.amp\\bin\\amp.exe' = 'amp' }\n"
     )
     # Name is the image file name, as Win32_Process reports it.
@@ -3790,7 +3801,16 @@ def test_a_windows_agent_is_told_by_its_executable() -> None:
         )
         for program, command, _ in _WINDOWS_AGENT_ROWS
     )
+    # Test-NpmPackage reads the package's manifest (its own test reads real
+    # files); here a package under no-manifest\ has none, and the stub checks
+    # the folder and name Get-LoadedPluginAgent asks about.
+    manifests = (
+        "function Test-NpmPackage([string]$Root, [string]$Name) { "
+        "[bool]$Root -and $Root -notlike '*\\no-manifest\\*' -and "
+        "$Root.EndsWith('\\node_modules\\' + $Name.Replace('/', '\\'), [StringComparison]::OrdinalIgnoreCase) }\n"
+    )
     script = ("Set-StrictMode -Version Latest\n" + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Get-ScriptOperand")
+              + _ps1_function("Get-NpmPackageFolder") + manifests
               + "function Get-InstalledAgentPrograms { " + installed.split("=", 1)[1].strip() + " }\n" + rows)
     result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
@@ -3800,7 +3820,9 @@ def test_a_windows_agent_is_told_by_its_executable() -> None:
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.allow_subprocess
-def test_the_installed_windows_agents_are_what_path_and_the_native_installers_run(tmp_path: Path) -> None:
+def test_the_installed_windows_agents_are_those_of_the_native_installers(tmp_path: Path) -> None:
+    # Review loop 1 (rc.7 at 677bf76b): the opencode.exe that PATH runs is no
+    # agent by that name; the native installers' programs are.
     on_path = tmp_path / "bin"
     on_path.mkdir()
     (on_path / "opencode.exe").write_bytes(b"MZ")
@@ -3818,10 +3840,47 @@ def test_the_installed_windows_agents_are_what_path_and_the_native_installers_ru
     result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     lines = sorted(line for line in result.stdout.splitlines() if "=" in line)
-    assert lines == sorted([
-        f"{str(on_path / 'opencode.exe').lower()}=opencode",
-        f"{str(profile / '.amp' / 'bin' / 'amp.exe').lower()}=amp",
-    ])
+    assert lines == [f"{str(profile / '.amp' / 'bin' / 'amp.exe').lower()}=amp"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_windows_package_counts_by_its_own_manifest(tmp_path: Path) -> None:
+    # Review loop 1 (rc.7 at 677bf76b): a folder named like an agent package
+    # is the agent only when the package's own manifest says so.
+    cases = {
+        "real": ('{"name": "opencode-ai", "version": "1.19.4"}', "opencode-ai", True),
+        "scoped": ('{"name":"@sourcegraph/amp"}', "@sourcegraph/amp", True),
+        "upper": ('{"name":"opencode-windows-x64"}', "OpenCode-Windows-X64", True),
+        "fork": ('{"name": "opencode-ai-fork"}', "opencode-ai", False),
+        "nested": ('{"name":"tools","author":{"name":"opencode-ai"}}', "opencode-ai", False),
+        "broken": ("not a manifest", "opencode-ai", False),
+        "none": (None, "opencode-ai", False),
+    }
+    lines = []
+    for folder, (text, name, _) in cases.items():
+        (tmp_path / folder).mkdir()
+        if text is not None:
+            (tmp_path / folder / "package.json").write_text(text, encoding="utf-8")
+        lines.append(f"'{folder}=' + (Test-NpmPackage '{tmp_path / folder}' '{name}')")
+    lines.append("'empty=' + (Test-NpmPackage '' 'opencode-ai')")
+    folders = [
+        (r"C:\w\node_modules\opencode-ai\bin\opencode", "opencode-ai", r"C:\w\node_modules\opencode-ai"),
+        (r"C:\w\NODE_MODULES\@Sourcegraph\Amp\dist\main.js", r"@sourcegraph\amp", r"C:\w\NODE_MODULES\@Sourcegraph\Amp"),
+        (r"C:\w\node_modules\opencode-ai-fork\bin\opencode", "opencode-ai", ""),
+        (r"C:\a\node_modules\opencode-ai\node_modules\.pnpm\x\node_modules\opencode-ai\b.js", "opencode-ai",
+         r"C:\a\node_modules\opencode-ai\node_modules\.pnpm\x\node_modules\opencode-ai"),
+    ]
+    for index, (path, package, _) in enumerate(folders):
+        lines.append(f"'folder{index}=' + (Get-NpmPackageFolder '{path}' '{package}')")
+    script = ("Set-StrictMode -Version Latest\n" + _ps1_function("Get-Field") + _ps1_function("Read-Json")
+              + _ps1_function("Test-NpmPackage") + _ps1_function("Get-NpmPackageFolder") + "\n".join(lines))
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    got = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    want = {folder: str(ok) for folder, (_, _, ok) in cases.items()} | {"empty": "False"}
+    want |= {f"folder{index}": folder for index, (_, _, folder) in enumerate(folders)}
+    assert got == want, result.stdout
 
 
 @pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")

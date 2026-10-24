@@ -26,6 +26,7 @@ scripts/test-install-lifecycle.sh.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -1397,8 +1398,8 @@ def _install_sh_functions(*names: str) -> str:
     return helpers + "".join(bodies)
 
 
-_AGENT_SCAN = ("loaded_plugin_agents", "agent_program", "installed_agent_programs", "agent_of", "script_operand",
-               "assert_no_loaded_plugin_agents")
+_AGENT_SCAN = ("loaded_plugin_agents", "agent_program", "installed_agent_programs", "npm_package_is", "homebrew_opencode",
+               "agent_of", "script_operand", "assert_no_loaded_plugin_agents")
 
 
 def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str]:
@@ -1416,6 +1417,18 @@ def _program(path: Path, source: str) -> Path:
     shutil.copy2(source, path)
     path.chmod(0o755)
     return path
+
+
+def _manifest(folder: Path, name: str) -> None:
+    # The package.json npm (or Bun) writes into an installed package.
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "package.json").write_text(json.dumps({"name": name, "version": "1.19.4", "bin": {"opencode": "bin/opencode"}}, indent=2), encoding="utf-8")
+
+
+def _receipt(keg: Path, tap: str) -> None:
+    # The INSTALL_RECEIPT.json Homebrew writes into a keg (Cellar/NAME/VERSION).
+    keg.mkdir(parents=True, exist_ok=True)
+    (keg / "INSTALL_RECEIPT.json").write_text(json.dumps({"homebrew_version": "4.6.0", "source": {"tap": tap, "spec": "stable"}}, indent=2), encoding="utf-8")
 
 
 def _started(argv: list[str], program: Path, executable: str | None = None) -> subprocess.Popen[bytes]:
@@ -1447,9 +1460,16 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("argv0 opencode", None),
         # R1 review: an opencode-* package that OpenCode does not publish.
         ("binary of another opencode-linux-* package", None),
+        # Review loop 1 (rc.7 at 677bf76b): a program PATH finds as opencode
+        # or amp, or a folder only named like an agent package, is no agent.
+        ("unrelated program named opencode on PATH", None),
+        ("unrelated program named amp on PATH", None),
+        ("opencode platform folder without its manifest", None),
+        ("node script in an opencode-ai folder of another package", None),
+        ("Homebrew opencode of another tap", None),
         # A real agent, by the program file it runs, refuses.
         ("native installer opencode", "OpenCode"),
-        ("opencode on PATH through a link", "OpenCode"),
+        ("opencode of Homebrew through its PATH link", "OpenCode"),
         ("opencode npm binary", "OpenCode"),
         ("opencode npm launcher through its PATH link", "OpenCode"),
         ("opencode npm launcher under bun", "OpenCode"),
@@ -1496,11 +1516,25 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     elif case == "argv0 opencode":
         program = Path(sleep)
         argv = ["opencode", "60"]
+    elif case in ("unrelated program named opencode on PATH", "unrelated program named amp on PATH"):
+        # A copy of sleep that PATH finds as opencode (or amp, also the name
+        # of a text editor) was refused as the agent.
+        program = _program(tmp_path / "tools" / "bin" / case.split()[3], sleep)
+        path.append(program.parent)
+        argv = [str(program), "60"]
+    elif case == "opencode platform folder without its manifest":
+        program = _program(tmp_path / "work" / "node_modules" / "opencode-linux-x64" / "bin" / "opencode", sleep)
+        argv = [str(program), "60"]
+    elif case == "node script in an opencode-ai folder of another package":
+        launcher = script("work/node_modules/opencode-ai/bin/opencode")
+        _manifest(launcher.parents[1], "opencode-ai-fork")
+        argv, program = [str(node), str(launcher)], node
     elif case == "native installer opencode":
         program = _program(home / ".opencode" / "bin" / "opencode", sleep)
         argv = [str(program), "60"]
-    elif case == "opencode on PATH through a link":
+    elif case in ("opencode of Homebrew through its PATH link", "Homebrew opencode of another tap"):
         program = _program(tmp_path / "brew" / "Cellar" / "opencode" / "1.18.34" / "bin" / "opencode", sleep)
+        _receipt(program.parents[1], "homebrew/core" if case.startswith("opencode of") else "opencode-ai/tap")
         link = tmp_path / "brew" / "bin" / "opencode"
         link.parent.mkdir(parents=True)
         link.symlink_to(program)
@@ -1508,14 +1542,17 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         argv = [str(link), "60"]
     elif case == "binary of another opencode-linux-* package":
         program = _program(tmp_path / "work" / "node_modules" / "opencode-linux-tools" / "bin" / "opencode", sleep)
+        _manifest(program.parents[1], "opencode-linux-tools")
         argv = [str(program), "60"]
     elif case == "opencode npm binary":
         program = _program(tmp_path / "npm" / "lib" / "node_modules" / "opencode-linux-x64" / "bin" / "opencode", sleep)
+        _manifest(program.parents[1], "opencode-linux-x64")
         argv = [str(program), "60"]
     elif case in ("opencode npm launcher through its PATH link", "opencode npm launcher under bun"):
         launcher = tmp_path / "npm" / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode"
         launcher.parent.mkdir(parents=True)
         launcher.write_text(script_body, encoding="utf-8")
+        _manifest(launcher.parents[1], "opencode-ai")
         link = tmp_path / "npm" / "bin" / "opencode"
         link.parent.mkdir(parents=True)
         link.symlink_to(launcher)
@@ -1532,6 +1569,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         main = tmp_path / "npm" / "lib" / "node_modules" / "@sourcegraph" / "amp" / "dist" / "main.js"
         main.parent.mkdir(parents=True)
         main.write_text(script_body, encoding="utf-8")
+        _manifest(main.parents[1], "@sourcegraph/amp")
         # An option before the script (the fake node is bash, so a bash one).
         argv, program = [str(node), "--norc", str(main)], node
     else:
@@ -1562,7 +1600,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     [
         # macOS reads the program file with lsof; the rules are the same.
         ("/Users/u/.opencode/bin/opencode", "opencode", "OpenCode /Users/u/.opencode/bin/opencode", "OpenCode"),
-        ("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode", "opencode", "OpenCode /opt/homebrew/Cellar/opencode/1.18.34/bin/opencode", "OpenCode"),
+        ("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode", "opencode", "", "OpenCode"),
         ("/Users/u/.npm-global/lib/node_modules/opencode-ai/bin/.opencode", "opencode", "", "OpenCode"),
         ("/Users/u/.npm-global/lib/node_modules/opencode-darwin-arm64/bin/opencode", "opencode", "", "OpenCode"),
         ("/opt/homebrew/bin/node", "node /opt/homebrew/lib/node_modules/@sourcegraph/amp/dist/main.js", "", "Amp"),
@@ -1604,15 +1642,84 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         *[(f"/w/node_modules/opencode-{name}/bin/opencode", "opencode", "", "OpenCode") for name in (
             "linux-x64", "linux-arm64", "linux-x64-musl", "linux-arm64-musl", "linux-x64-baseline",
             "linux-x64-baseline-musl", "darwin-x64", "darwin-arm64", "darwin-x64-baseline")],
+        # Review loop 1 (rc.7 at 677bf76b): a program is an agent by its
+        # package, never by the command name PATH finds or a folder's name.
+        ("/usr/local/bin/opencode", "opencode", "", ""),
+        ("/home/u/.local/bin/amp", "amp 60", "", ""),
+        ("/no-manifest/node_modules/opencode-darwin-arm64/bin/opencode", "opencode", "", ""),
+        ("/no-manifest/node_modules/opencode-ai/bin/.opencode", "opencode", "", ""),
+        ("/usr/bin/node", "node /no-manifest/node_modules/opencode-ai/bin/opencode", "", ""),
+        ("/usr/bin/node", "node /no-manifest/node_modules/@sourcegraph/amp/dist/main.js", "", ""),
+        ("/opt/no-manifest/Cellar/opencode/0.0.55/bin/opencode", "opencode", "", ""),
+        ("/opt/homebrew/Cellar/opencode-tools/1.0/bin/opencode", "opencode", "", ""),
+        # pnpm: the package is the last node_modules/opencode-ai on the path.
+        ("/usr/bin/node", "node /w/node_modules/.pnpm/opencode-ai@1.19.4/node_modules/opencode-ai/bin/opencode", "", "OpenCode"),
     ],
 )
 def test_an_agent_is_told_by_its_program_file(tmp_path: Path, program: str, args: str, installed: str, agent: str) -> None:
+    # npm_package_is and homebrew_opencode read the package's manifest (their
+    # own test reads real files); here a package under no-manifest/ has none,
+    # and the stubs check the folder and name agent_of asks about.
+    manifests = (
+        'npm_package_is() { [[ "$1" == */node_modules/"$2" && "$1" != */no-manifest/* ]]; }\n'
+        'homebrew_opencode() { [[ "$1" == */Cellar/opencode/* && "$1" != */no-manifest/* ]]; }\n'
+    )
     result = subprocess.run(
-        [BASH, "-c", _install_sh_functions("agent_of", "script_operand") + 'agent_of "$1" "$2" "$3"', "agent_of", program, args, installed],
+        [BASH, "-c", _install_sh_functions("agent_of", "script_operand") + manifests + 'agent_of "$1" "$2" "$3"', "agent_of", program, args, installed],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout == agent, (program, args)
+
+
+@pytest.mark.parametrize(
+    ("helper", "file", "text", "want", "ok"),
+    [
+        ("npm_package_is", "package.json", None, "opencode-ai", True),
+        ("npm_package_is", "package.json", '{"name":"@sourcegraph/amp","version":"0.0.1"}', "@sourcegraph/amp", True),
+        ("npm_package_is", "package.json", '{"name": "opencode-ai-fork"}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"name":"tools","author":{"name":"opencode-ai"}}', "opencode-ai", False),
+        ("npm_package_is", "package.json", "not a manifest", "opencode-ai", False),
+        ("npm_package_is", "", "", "opencode-ai", False),
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", "homebrew/core", "", True),
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", "sst/tap", "", True),
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", "anomalyco/tap", "", True),
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", "opencode-ai/tap", "", False),
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", "{}", "", False),
+        ("homebrew_opencode", "", "", "", False),
+    ],
+)
+def test_a_package_counts_by_its_own_manifest(tmp_path: Path, helper: str, file: str, text: str | None, want: str, ok: bool) -> None:
+    # Review loop 1 (rc.7 at 677bf76b): a folder named like an agent package
+    # is the agent only when the package's own manifest says so.
+    folder = tmp_path / "pkg"
+    folder.mkdir()
+    if helper == "homebrew_opencode" and text and not text.startswith("{"):
+        _receipt(folder, text)
+    elif text is None:
+        _manifest(folder, want)
+    elif file:
+        (folder / file).write_text(text, encoding="utf-8")
+    result = subprocess.run(
+        [BASH, "-c", "set -euo pipefail\n" + _install_sh_functions(helper) + f'if {helper} "$1" "$2"; then echo yes; else echo no; fi', helper, str(folder), want],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert (result.returncode, result.stdout.strip()) == (0, "yes" if ok else "no"), result.stderr
+
+
+def test_the_installed_agents_are_those_of_the_native_installers(tmp_path: Path) -> None:
+    # Review loop 1 (rc.7 at 677bf76b): the opencode and amp that PATH runs
+    # are no agents by that name; the native installers' programs are.
+    sleep, home, tools = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", tmp_path / "tools"
+    _program(tools / "opencode", sleep)
+    _program(tools / "amp", sleep)
+    native = _program(home / ".amp" / "bin" / "amp", sleep)
+    result = subprocess.run(
+        [BASH, "-c", _install_sh_functions("installed_agent_programs") + "installed_agent_programs"],
+        env={"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"}, capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [f"Amp {native.resolve()}"]
 
 
 @pytest.mark.skipif(shutil.which("node") is None or not Path("/proc/self/exe").exists(), reason="runs Node, reads /proc")

@@ -501,11 +501,14 @@ installed_version() {
 # agent processes immediately before a gateway swap; an unreadable process
 # list cannot establish that the swap is safe.
 #
-# A process is OpenCode or Amp by the program file it runs, never by a name
-# in its command line or the folder it runs from (GAP-1128): the program
-# (agent_program) is the installed agent (installed_agent_programs) or an
-# OpenCode binary of its npm packages, or Node or Bun runs a script of the
-# agents' npm packages (opencode-ai, @sourcegraph/amp). A project, script or
+# A process is OpenCode or Amp by the program file it runs and the package
+# that installed it, never by a name in its command line, the folder it runs
+# from or the command name PATH finds (GAP-1128): the program (agent_program)
+# is the agent of the native installers (installed_agent_programs), an
+# OpenCode binary of its npm packages or of its Homebrew formula, or Node or
+# Bun runs a script of the agents' npm packages (opencode-ai,
+# @sourcegraph/amp). A package counts by its own manifest (npm_package_is,
+# homebrew_opencode), never by the name of its folder. A project, script or
 # other program that is only named opencode or amp is not an agent.
 loaded_plugin_agents() {
     local processes installed pid args program agent
@@ -533,37 +536,67 @@ agent_program() {
     lsof -nP -a -p "$1" -d txt -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); found = 1; exit } END { exit !found }'
 }
 
-# installed_agent_programs: one "<agent> <program>" line for each installed
-# OpenCode and Amp: the opencode and amp that PATH runs, and those of the
-# native installers (~/.opencode/bin, ~/.amp/bin), links resolved.
+# installed_agent_programs: one "<agent> <program>" line for the OpenCode
+# and Amp of the native installers (~/.opencode/bin, ~/.amp/bin), links
+# resolved. The opencode or amp that PATH runs is not an agent by that name
+# alone: an unrelated program (the amp text editor, a copy of a system tool)
+# can carry it. agent_of tells an npm or Homebrew install by its package.
 installed_agent_programs() {
     local agent name path
     for agent in OpenCode:opencode Amp:amp; do
         name="${agent#*:}"
-        for path in "$(command -v "${name}" 2>/dev/null || true)" "${HOME}/.${name}/bin/${name}"; do
-            [[ "${path}" == /* && -f "${path}" ]] || continue
-            printf '%s %s\n' "${agent%%:*}" "$(readlink -f "${path}" 2>/dev/null || printf '%s' "${path}")"
-        done
+        path="${HOME}/.${name}/bin/${name}"
+        [[ -f "${path}" ]] || continue
+        printf '%s %s\n' "${agent%%:*}" "$(readlink -f "${path}" 2>/dev/null || printf '%s' "${path}")"
     done
+}
+
+# npm_package_is FOLDER NAME: FOLDER holds the npm package NAME by the name
+# its own package.json gives first (npm, pnpm and Bun install a package so).
+# A folder that is only named like the package is not it.
+npm_package_is() {
+    local manifest pattern='"name"[[:space:]]*:[[:space:]]*"([^"]*)"'
+    manifest="$(cat "$1/package.json" 2>/dev/null)" || return 1
+    [[ "${manifest}" =~ ${pattern} ]] && [[ "${BASH_REMATCH[1]}" == "$2" ]]
+}
+
+# homebrew_opencode KEG: KEG (.../Cellar/opencode/VERSION) is OpenCode as
+# Homebrew installed it: its install receipt names a tap that ships this
+# OpenCode (homebrew/core, sst/tap, anomalyco/tap). Another formula named
+# opencode (the archived Go opencode of opencode-ai/tap) is not this agent.
+homebrew_opencode() {
+    local receipt pattern='"tap"[[:space:]]*:[[:space:]]*"([^"]*)"'
+    receipt="$(cat "$1/INSTALL_RECEIPT.json" 2>/dev/null)" || return 1
+    [[ "${receipt}" =~ ${pattern} ]] || return 1
+    case "${BASH_REMATCH[1]}" in
+        homebrew/core | sst/tap | anomalyco/tap) return 0 ;;
+    esac
+    return 1
 }
 
 # agent_of PROGRAM ARGS INSTALLED: OpenCode or Amp when a process running
 # PROGRAM with the command line ARGS is that agent, else nothing.
 agent_of() {
-    local program="${1% (deleted)}" args="$2" installed="$3" agent path lower runtime script
+    local program="${1% (deleted)}" args="$2" installed="$3" agent path runtime script
     # The OpenCode binary of opencode-ai or of one of the platform packages it
     # publishes (opencode-linux-x64-baseline-musl, opencode-darwin-arm64, ...),
-    # by exact name: another package named opencode-* is not OpenCode.
-    local opencode_binary='/node_modules/opencode-(ai|linux-(x64|arm64)(-baseline)?(-musl)?|darwin-(x64|arm64)(-baseline)?)/bin/\.?opencode$'
+    # by exact name and by that package's manifest: another package named
+    # opencode-*, or a folder only named like one, is not OpenCode.
+    local opencode_binary='^(.*/node_modules/(opencode-(ai|linux-(x64|arm64)(-baseline)?(-musl)?|darwin-(x64|arm64)(-baseline)?)))/bin/\.?opencode$'
+    # OpenCode as its Homebrew formula installs it (Cellar/opencode/VERSION).
+    local opencode_keg='^(.*/Cellar/opencode/[^/]+)/bin/opencode$'
     while read -r agent path; do
         [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
-    lower="$(printf '%s' "${program}" | tr '[:upper:]' '[:lower:]')"
-    if [[ "${lower}" =~ ${opencode_binary} ]]; then
-        printf 'OpenCode'
+    if [[ "${program}" =~ ${opencode_binary} ]]; then
+        ! npm_package_is "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" || printf 'OpenCode'
         return 0
     fi
-    case "${lower##*/}" in
+    if [[ "${program}" =~ ${opencode_keg} ]]; then
+        ! homebrew_opencode "${BASH_REMATCH[1]}" || printf 'OpenCode'
+        return 0
+    fi
+    case "${program##*/}" in
         node | nodejs) runtime=node ;;
         bun) runtime=bun ;;
         *) return 0 ;;
@@ -579,10 +612,14 @@ agent_of() {
     while read -r agent path; do
         [[ -n "${path}" && "${script}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
-    script="$(printf '%s' "${script}" | tr '[:upper:]' '[:lower:]')"
+    # The package is the last node_modules/<name> on the path (pnpm nests).
     case "${script}" in
-        */node_modules/opencode-ai/*) printf 'OpenCode' ;;
-        */node_modules/@sourcegraph/amp/*) printf 'Amp' ;;
+        */node_modules/opencode-ai/*)
+            ! npm_package_is "${script%/node_modules/opencode-ai/*}/node_modules/opencode-ai" opencode-ai || printf 'OpenCode'
+            ;;
+        */node_modules/@sourcegraph/amp/*)
+            ! npm_package_is "${script%/node_modules/@sourcegraph/amp/*}/node_modules/@sourcegraph/amp" @sourcegraph/amp || printf 'Amp'
+            ;;
     esac
     return 0
 }

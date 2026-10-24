@@ -807,12 +807,14 @@ function Get-GatewayProcess {
 
 # A loaded 1.0.3 OpenCode or Amp plugin cannot acquire this release's lock
 # check until its agent process exits. A process is OpenCode or Amp by the
-# program file it runs, never by a name in its command line or the folder it
-# runs from (GAP-1128): its executable is the installed agent
+# program file it runs and the package that installed it, never by a name in
+# its command line, the folder it runs from or the command name PATH finds
+# (GAP-1128): its executable is the agent of the native installers
 # (Get-InstalledAgentPrograms) or an OpenCode binary of its npm packages, or
 # Node or Bun runs a script of the agents' npm packages (opencode-ai,
-# @sourcegraph/amp). A project, script or other program that is only named
-# opencode or amp is not an agent.
+# @sourcegraph/amp). A package counts by its own manifest (Test-NpmPackage),
+# never by the name of its folder. A project, script or other program that is
+# only named opencode or amp is not an agent.
 function Get-LoadedPluginAgent($Process) {
     $program = [string]$Process.ExecutablePath
     if (-not $program) { return "" }
@@ -825,28 +827,49 @@ function Get-LoadedPluginAgent($Process) {
     $key = $program.ToLowerInvariant()
     if ($installed.ContainsKey($key)) { return $installed[$key] }
     # The OpenCode binary of opencode-ai or of one of the Windows packages it
-    # publishes (opencode-windows-x64, -x64-baseline, -arm64), by exact name:
-    # another package named opencode-windows-* is not OpenCode.
-    if ($key -match '\\node_modules\\opencode-(ai|windows-(x64|arm64)(-baseline)?)\\bin\\\.?opencode(\.exe)?$') { return "opencode" }
+    # publishes (opencode-windows-x64, -x64-baseline, -arm64), by exact name
+    # and by that package's manifest: another package named
+    # opencode-windows-*, or a folder only named like one, is not OpenCode.
+    if ($program -match '^(.*\\node_modules\\(opencode-(ai|windows-(x64|arm64)(-baseline)?)))\\bin\\\.?opencode(\.exe)?$') {
+        if (Test-NpmPackage $Matches[1] $Matches[2]) { return "opencode" }
+        return ""
+    }
     if ($key -match '[\\/](node|bun)\.exe$') { $runtime = $Matches[1] } else { return "" }
-    $operand = (Get-ScriptOperand $runtime ([string]$Process.CommandLine)).Replace('/', '\').ToLowerInvariant()
-    if ($operand.Contains('\node_modules\opencode-ai\')) { return "opencode" }
-    if ($operand.Contains('\node_modules\@sourcegraph\amp\')) { return "amp" }
+    $operand = (Get-ScriptOperand $runtime ([string]$Process.CommandLine)).Replace('/', '\')
+    if (Test-NpmPackage (Get-NpmPackageFolder $operand "opencode-ai") "opencode-ai") { return "opencode" }
+    if (Test-NpmPackage (Get-NpmPackageFolder $operand "@sourcegraph\amp") "@sourcegraph/amp") { return "amp" }
     return ""
 }
 
-# The installed OpenCode and Amp executables, lower-cased full path to
-# agent: the opencode.exe and amp.exe that PATH runs, and those of the
-# native installers (%USERPROFILE%\.opencode\bin, %USERPROFILE%\.amp\bin).
+# The folder of the npm package $Package (a\b for a scoped one) that holds
+# the file $Path: its last node_modules\$Package (pnpm nests), or "".
+function Get-NpmPackageFolder([string]$Path, [string]$Package) {
+    $marker = "\node_modules\$Package\"
+    $at = $Path.LastIndexOf($marker, [StringComparison]::OrdinalIgnoreCase)
+    if ($at -lt 0) { return "" }
+    return $Path.Substring(0, $at + $marker.Length - 1)
+}
+
+# Whether the folder $Root holds the npm package $Name by the name its own
+# package.json gives (npm and Bun install a package so). A folder that is
+# only named like the package is not it.
+function Test-NpmPackage([string]$Root, [string]$Name) {
+    if (-not $Root) { return $false }
+    return [string](Get-Field (Read-Json (Join-Path $Root "package.json")) "name") -ieq $Name
+}
+
+# The OpenCode and Amp executables of the native installers
+# (%USERPROFILE%\.opencode\bin, %USERPROFILE%\.amp\bin), lower-cased full
+# path to agent. The opencode.exe or amp.exe that PATH runs is not an agent
+# by that name alone: an unrelated program can carry it. An npm install is
+# told by its package (Test-NpmPackage).
 function Get-InstalledAgentPrograms {
     $installed = @{}
+    if (-not $env:USERPROFILE) { return $installed }
     foreach ($name in @("opencode", "amp")) {
-        $paths = @(Get-Command "$name.exe" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
-        if ($env:USERPROFILE) { $paths += Join-Path $env:USERPROFILE ".$name\bin\$name.exe" }
-        foreach ($path in $paths) {
-            if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
-                $installed[[IO.Path]::GetFullPath($path).ToLowerInvariant()] = $name
-            }
+        $path = Join-Path $env:USERPROFILE ".$name\bin\$name.exe"
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            $installed[[IO.Path]::GetFullPath($path).ToLowerInvariant()] = $name
         }
     }
     return $installed
