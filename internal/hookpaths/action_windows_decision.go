@@ -624,28 +624,57 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 		if index == 0 || strings.HasPrefix(words[index], "-") {
 			return false
 		}
-		switch strings.ToLower(words[index-1]) {
-		case "-path", "-literalpath", "-filepath":
-			return true
-		case "-value", "-inputobject", "-encoding", "-delimiter", "-stream", "-width":
-			return false
-		}
-		for i := 1; i < index; i++ {
-			switch strings.ToLower(words[i]) {
-			case "-value", "-inputobject", "-encoding", "-delimiter", "-stream", "-width":
-				if i+1 >= index {
-					return false
+		positionalPath, pathArray, unknownOption := false, false, false
+		for i := 1; i <= index; i++ {
+			word := strings.ToLower(words[i])
+			if strings.HasPrefix(word, "-") {
+				pathArray = false
+				switch {
+				case actionWindowsDataParameter(word):
+					if i+1 == index {
+						return false
+					}
+					i++ // Confirmed content or option value.
+				case actionWindowsPathParameter(word):
+					for i++; i <= index && i < len(words); i++ {
+						if i == index {
+							return true
+						}
+						if !strings.HasSuffix(words[i], ",") {
+							break
+						}
+					}
+					positionalPath = true
+				case word == "-append" || word == "-force" || word == "-nonewline" ||
+					word == "-passthru" || word == "-whatif" || word == "-confirm":
+				default:
+					unknownOption = true
 				}
-				i++ // named data or option value
-			case "-append", "-force", "-nonewline", "-passthru", "-whatif", "-confirm":
-				// Switches do not consume the first positional path.
-			default:
-				return false // another path or an option we cannot bind
+				continue
+			}
+			if i == index {
+				return unknownOption || !positionalPath || pathArray
+			}
+			if !positionalPath || pathArray {
+				positionalPath = true
+				pathArray = strings.HasSuffix(words[i], ",")
 			}
 		}
-		return true // first positional path, including after named data
+		return false
 	}
 	return true
+}
+
+func actionWindowsDataParameter(word string) bool {
+	return len(word) >= 3 && strings.HasPrefix("-value", word) ||
+		len(word) >= 4 && strings.HasPrefix("-inputobject", word) ||
+		strings.Contains(" -encoding -delimiter -stream -width ", " "+word+" ")
+}
+
+func actionWindowsPathParameter(word string) bool {
+	return len(word) >= 3 && strings.HasPrefix("-path", word) ||
+		len(word) >= 4 && strings.HasPrefix("-literalpath", word) ||
+		len(word) >= 5 && strings.HasPrefix("-filepath", word)
 }
 
 func actionWindowsBoundedSourceGlob(program string, index int, words []string, word, cwd, home string) bool {

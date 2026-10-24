@@ -370,62 +370,80 @@ func windowsLocationDirectory(tokens []windowsLocationToken, dialect actionfacts
 	return tokens[index].text, true
 }
 
-func windowsLocationWriteTarget(tokens []windowsLocationToken, dialect actionfacts.Dialect) (string, bool) {
+func windowsLocationWriteTargets(tokens []windowsLocationToken, dialect actionfacts.Dialect) []windowsLocationToken {
 	program := strings.ToLower(tokens[0].text)
 	if dialect == actionfacts.DialectCMD {
 		for i := 1; i+1 < len(tokens); i++ {
 			if tokens[i].text == ">" || tokens[i].text == ">>" {
-				return tokens[i+1].text, true
+				return []windowsLocationToken{tokens[i+1]}
 			}
 		}
-		return "", false
+		return nil
 	}
 	if program != "add-content" && program != "set-content" && program != "out-file" {
 		// PowerShell redirections write independently of the command.
 		for i := 1; i+1 < len(tokens); i++ {
 			if tokens[i].text == ">" || tokens[i].text == ">>" {
-				return tokens[i+1].text, true
+				return []windowsLocationToken{tokens[i+1]}
 			}
 		}
-		return "", false
+		return nil
 	}
 	for _, token := range tokens {
 		if strings.EqualFold(token.text, "-WhatIf") || strings.EqualFold(token.text, "-Confirm") {
-			return "", false
+			return nil
 		}
 	}
-	for i := 1; i+1 < len(tokens); i++ {
-		if strings.EqualFold(tokens[i].text, "-Path") ||
-			strings.EqualFold(tokens[i].text, "-LiteralPath") ||
-			strings.EqualFold(tokens[i].text, "-FilePath") {
-			if tokens[i+1].singleQuoted && strings.Contains(tokens[i+1].text, "$") {
-				return "", false
-			}
-			return tokens[i+1].text, true
-		}
-	}
+	var targets []windowsLocationToken
+	positionalPath, pathArray, unknownOption := false, false, false
 	for i := 1; i < len(tokens); i++ {
 		token := tokens[i]
 		if strings.HasPrefix(token.text, "-") {
-			switch strings.ToLower(token.text) {
-			case "-value", "-inputobject", "-encoding", "-delimiter", "-stream", "-width":
-				if i+1 >= len(tokens) {
-					return "", false
+			pathArray = false
+			switch {
+			case windowsLocationDataParameter(token.text):
+				i++ // Confirmed content or option value.
+			case windowsLocationPathParameter(token.text):
+				for i++; i < len(tokens); i++ {
+					target := tokens[i]
+					target.text = strings.TrimSuffix(target.text, ",")
+					targets = append(targets, target)
+					if !strings.HasSuffix(tokens[i].text, ",") {
+						break
+					}
 				}
-				i++ // content or option value, not the write path
-			case "-append", "-force", "-nonewline", "-passthru", "-whatif", "-confirm":
-				// A switch does not consume the first positional path.
+				positionalPath = true
+			case strings.Contains(" -append -force -nonewline -passthru -whatif -confirm ", " "+strings.ToLower(token.text)+" "):
 			default:
-				return "", false // unknown operand binding is audit-only
+				unknownOption = true
 			}
 			continue
 		}
-		if token.singleQuoted && strings.Contains(token.text, "$") {
-			return "", false
+		if !positionalPath || pathArray || unknownOption {
+			candidate := token
+			candidate.text = strings.TrimSuffix(candidate.text, ",")
+			targets = append(targets, candidate)
 		}
-		return token.text, true
+		if !positionalPath || pathArray {
+			positionalPath = true
+			pathArray = strings.HasSuffix(token.text, ",")
+		}
 	}
-	return "", false
+	return targets
+}
+
+func windowsLocationDataParameter(word string) bool {
+	word = strings.ToLower(word)
+	return len(word) >= 3 && strings.HasPrefix("-value", word) ||
+		len(word) >= 4 && strings.HasPrefix("-inputobject", word) ||
+		strings.Contains(" -encoding -delimiter -stream -width ", " "+word+" ")
+}
+
+func windowsLocationPathParameter(word string) bool {
+	word = strings.ToLower(word)
+	return len(word) >= 3 && strings.HasPrefix("-path", word) ||
+		len(word) >= 4 && strings.HasPrefix("-literalpath", word) ||
+		len(word) >= 5 && strings.HasPrefix("-filepath", word)
 }
 
 func trustedWindowsNativeLocationWrite(input actionfacts.Input, dialect actionfacts.Dialect) bool {
@@ -497,26 +515,30 @@ func trustedWindowsNativeLocationWrite(input actionfacts.Input, dialect actionfa
 			current, changed = next, true
 			continue
 		}
-		target, ok := windowsLocationWriteTarget(tokens, dialect)
-		if !ok {
+		targets := windowsLocationWriteTargets(tokens, dialect)
+		if len(targets) == 0 {
 			continue
 		}
 		if !changed && dialect == actionfacts.DialectCMD {
 			continue
 		}
-		if dialect == actionfacts.DialectPowerShell && strings.HasPrefix(target, "$") {
-			if resolved, ok := variables[strings.ToLower(target)]; ok {
-				target = resolved
-			} else if _, builtIn := windowsLocationResolve(target, current, input, dialect); !builtIn {
-				// An unbound destination, including PowerShell's $null sink,
-				// does not prove a write to an authorized-keys file. Keep any
-				// uncertainty in the audit note, not the persistence finding.
+		for _, candidate := range targets {
+			target := candidate.text
+			if candidate.singleQuoted && strings.Contains(target, "$") {
 				continue
 			}
-		}
-		resolved, ok := windowsLocationResolve(target, current, input, dialect)
-		if ok && windowsLocationAuthorizedKeys(resolved, input) {
-			return true
+			if dialect == actionfacts.DialectPowerShell && strings.HasPrefix(target, "$") {
+				if resolved, ok := variables[strings.ToLower(target)]; ok {
+					target = resolved
+				} else if _, builtIn := windowsLocationResolve(target, current, input, dialect); !builtIn {
+					// An unbound destination, including $null, proves no write.
+					continue
+				}
+			}
+			resolved, ok := windowsLocationResolve(target, current, input, dialect)
+			if ok && windowsLocationAuthorizedKeys(resolved, input) {
+				return true
+			}
 		}
 	}
 	return false

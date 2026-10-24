@@ -313,6 +313,26 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 	if got := ActionCommandDecision(positionalData, cwd, home); got != "" {
 		t.Fatalf("protected path used only as positional data blocked: %q", got)
 	}
+	for _, command := range []string{
+		`Add-Content -Value marker -Path report.txt, C:\Users\alice\.ssh\authorized_keys`,
+		`Add-Content -Value marker -LiteralPath report.txt, C:\Users\alice\.ssh\authorized_keys`,
+		`Add-Content -Va marker C:\Users\alice\.ssh\authorized_keys`,
+		`Add-Content -Value marker -Path report.txt, $env:USERPROFILE\.ssh\authorized_keys`,
+		`Add-Content -Va marker $env:USERPROFILE\.ssh\authorized_keys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("resolved Windows write destination allowed: %q", command)
+		}
+	}
+	for _, command := range []string{
+		`Add-Content -Value C:\Users\alice\.ssh\authorized_keys report.txt`,
+		`Add-Content -Va C:\Users\alice\.ssh\authorized_keys report.txt`,
+		`Out-File -Inp C:\Users\alice\.ssh\authorized_keys -FilePath report.txt`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("protected path used only as data blocked: %q, reason=%q", command, got)
+		}
+	}
 }
 
 func TestR104ActionWindowsUninspectedScripts(t *testing.T) {

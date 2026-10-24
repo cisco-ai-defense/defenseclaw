@@ -41,6 +41,9 @@ func TestWindowsAuthorizedKeysLocationChains(t *testing.T) {
 		{"git bash UNC", "Bash", `cd //server/share/Users/Alice/.ssh && echo dccert-block-marker >> authorized_keys`, `\\server\share\Users\Alice`, `\\server\share\Users\Alice`, actionfacts.DialectPOSIX, true},
 		{"powershell path switch", "Bash", `Set-Location -Path $HOME\.ssh; Set-Content -Path authorized_keys -Value dccert-block-marker`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
 		{"powershell literal path", "Bash", `cd -LiteralPath $env:USERPROFILE\.ssh; Add-Content -LiteralPath authorized_keys -Value dccert-block-marker`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
+		{"powershell location path array", "Bash", `Set-Location $HOME; Add-Content -Value marker -Path report.txt, .ssh\authorized_keys`, `C:\Users\dcw-rv24p\project`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
+		{"powershell location abbreviated value", "Bash", `Set-Location $HOME; Add-Content -Va marker .ssh\authorized_keys`, `C:\Users\dcw-rv24p\project`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
+		{"powershell location data control", "Bash", `Set-Location $HOME; Add-Content -Va .ssh\authorized_keys report.txt`, `C:\Users\dcw-rv24p\project`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, false},
 		{"powershell push location", "Bash", `Push-Location ~\.ssh; Out-File -Append -FilePath authorized_keys -InputObject dccert-block-marker`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
 		{"powershell pop location", "Bash", `Push-Location build; Pop-Location; Set-Location .ssh; Add-Content authorized_keys dccert-block-marker`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
 		{"powershell pop control", "Bash", `Push-Location .ssh; Pop-Location; Add-Content notes.txt ok`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, false},
@@ -80,6 +83,26 @@ func TestWindowsAuthorizedKeysLocationChains(t *testing.T) {
 				t.Errorf("benign command findings = %v", findingIDs(findings))
 			}
 		})
+	}
+}
+
+func TestWindowsNativeLocationArrayBinder(t *testing.T) {
+	input := actionfacts.Input{
+		CWD: `C:\Users\Alice\project`, ActiveHome: `C:\Users\Alice`,
+		DialectHint: actionfacts.DialectPowerShell,
+	}
+	for _, tc := range []struct {
+		command string
+		write   bool
+	}{
+		{`Set-Location $HOME; Add-Content -Value marker -Path report.txt, .ssh\authorized_keys`, true},
+		{`Set-Location $HOME; Add-Content -Va marker .ssh\authorized_keys`, true},
+		{`Set-Location $HOME; Add-Content -Va .ssh\authorized_keys report.txt`, false},
+	} {
+		input.Command = tc.command
+		if got := trustedWindowsNativeLocationWrite(input, actionfacts.DialectPowerShell); got != tc.write {
+			t.Errorf("native location write=%t, want %t: %s", got, tc.write, tc.command)
+		}
 	}
 }
 
