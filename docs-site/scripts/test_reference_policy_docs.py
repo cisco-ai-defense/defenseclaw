@@ -41,6 +41,15 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("429", row.split("|")[1])
 
 
+    def test_foreign_hook_outage_scope_names_the_shared_remove_setting(self):
+        text = (DOCS / "configuration/fail-modes.mdx").read_text()
+        guard = next(line for line in text.splitlines()
+                     if "foreign-hook guard" in line and "requires a current gateway answer" in line)
+        self.assertIn("On a managed standalone host with `foreign_hooks: remove`", guard)
+        self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
+        self.assertIn("Hermes on Linux and macOS", guard)
+
+
     def test_amp_is_excluded_from_persisted_fail_open_reporting(self):
         text = (DOCS / "configuration/fail-modes.mdx").read_text()
         reporting = text.split("## Reporting and diagnosis", 1)[1]
