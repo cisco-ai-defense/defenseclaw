@@ -4062,6 +4062,40 @@ def _registered_pack_names(gc: object) -> str:
     )
 
 
+def _refresh_hook_outage_modes(app: AppContext) -> None:
+    """Rewrite the installed per-user hooks' outage records from the saved config.
+
+    A per-user hook's outage mode follows its connector's rule pack. The
+    gateway rewrites the records when it reloads; a stopped gateway, or one
+    with ``hook_self_heal`` off, does not, so a pack switched to strict would
+    leave the old open record behind (the hooks also check the config before
+    they open). ``defenseclaw-gateway connector refresh-fail-modes`` writes
+    them now. Best effort: no hooks folder, no gateway binary or a failed run
+    changes nothing here, and managed installs are left alone by the command.
+    """
+    import subprocess
+
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    data_dir = str(getattr(app.cfg, "data_dir", "") or "")
+    if not data_dir or not os.path.isdir(os.path.join(data_dir, "hooks")):
+        return
+    binary = resolve_gateway_binary()
+    if not binary:
+        return
+    try:
+        subprocess.run(
+            [binary, "connector", "refresh-fail-modes", "--data-dir", data_dir],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
 def _applied_note(app: AppContext, result: object) -> str:
     """How the change reaches the gateway, with the config generation."""
     generation = getattr(result, "generation", 0)
@@ -4241,6 +4275,7 @@ def use_pack_cmd(
             _fail,
         )
         previous_name = policy_catalog.pack_name_for_path(app.cfg, previous)[0]
+        _refresh_hook_outage_modes(app)
         _log_guardrail_change(
             app, "guardrail-use-pack", f"scope={connector_key} pack={fallback.pack} previous={previous_name}"
         )
@@ -4515,6 +4550,7 @@ def use_pack_cmd(
             f"config changed, run again: {snapshot[0] if snapshot else 'config.yaml'} changed or was removed "
             "after --repin read it. Nothing was changed.",
         )
+    _refresh_hook_outage_modes(app)
     if connector_key is None:
         message = f"All connectors now use the '{pack_name}' rule pack."
         if cleared:

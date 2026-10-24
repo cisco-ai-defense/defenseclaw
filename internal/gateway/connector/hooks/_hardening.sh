@@ -156,6 +156,9 @@ _DC_GATEWAY_RESTART_WAITED=""
 # Set only by defenseclaw_await_gateway for this call; an inherited value can
 # never open a per-user outage (defenseclaw_per_user_outage_open).
 _DC_TRANSPORT_STATUS=""
+# The config's outage mode for this call (defenseclaw_config_outage_open);
+# never inherited.
+_DC_CONFIG_OUTAGE_MODE=""
 
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
@@ -1219,7 +1222,10 @@ defenseclaw_log_hook_delivery_failure() {
 # window, an answer the gateway gave (any HTTP status, a cut-off or
 # malformed body), another program on the port, a missing token and every
 # record that is missing, malformed or closed keep the call closed. Managed,
-# socket, Secure Client and shared inspect-* hooks never take this path.
+# socket, Secure Client and shared inspect-* hooks never take this path. The
+# record is what the gateway or the last refresh wrote, so the config on disk
+# has the last word (defenseclaw_config_outage_open): a rule-pack change
+# since, such as strict selected while the gateway is stopped, closes it.
 defenseclaw_per_user_outage_open() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
@@ -1240,7 +1246,29 @@ defenseclaw_per_user_outage_open() {
   recorded="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_CONNECTOR 2>/dev/null)" || return 1
   mode="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_FAIL_MODE 2>/dev/null)" || return 1
   source="$(defenseclaw_flat_hookcfg_value "$record" FAIL_MODE_SOURCE 2>/dev/null)" || return 1
-  [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ]
+  [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ] || return 1
+  defenseclaw_config_outage_open "$connector"
+}
+
+# defenseclaw_config_outage_open CONNECTOR returns 0 (true) when the config on
+# disk gives CONNECTOR's per-user hooks the open outage mode now: this
+# account's gateway binary (`hook-outage-mode`, which only reads config.yaml)
+# prints "open". No binary, a config it cannot load, a strict rule pack and
+# any other answer return 1, and the outage stays closed.
+defenseclaw_config_outage_open() {
+  local home="${DEFENSECLAW_AGENT_HOME:-}" bin=""
+  if [ -z "$_DC_CONFIG_OUTAGE_MODE" ]; then
+    _DC_CONFIG_OUTAGE_MODE=closed
+    if [ -n "$home" ] && [ -d "$home" ] &&
+      bin="$(defenseclaw_gateway_binary "${DEFENSECLAW_HOME:-${home}/.defenseclaw}" "$home")"; then
+      # The Go runtime cannot start under the hook's address-space limit.
+      _DC_CONFIG_OUTAGE_MODE="$(
+        ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
+        HOME="$home" exec "$bin" hook-outage-mode --connector "$1" </dev/null 2>/dev/null
+      )" || _DC_CONFIG_OUTAGE_MODE=closed
+    fi
+  fi
+  [ "$_DC_CONFIG_OUTAGE_MODE" = open ]
 }
 
 defenseclaw_hook_delivery_outcome() {

@@ -48,7 +48,7 @@ An outage is a call that no gateway took: this account's gateway is stopped (als
 - Another account's or program's listener on the gateway port, a missing or refused token and input over the hook's size limit.
 - An install or upgrade of this account's DefenseClaw (`.install.lock`).
 
-The guardrail mode does not change the outage mode: observe and action mode fail the same way. The hooks follow the mode Setup recorded for the connector (`hooks/.hookcfg.<connector>` for the shell hooks, `hooks/.hookcfg` for the native Windows hook, the plugin itself for OpenCode and Amp). A rule-pack change re-renders them; `defenseclaw guardrail fail-mode` shows each connector's mode and any drift.
+The guardrail mode does not change the outage mode: observe and action mode fail the same way. The hooks follow the mode Setup recorded for the connector (`hooks/.hookcfg.<connector>` for the shell hooks, `hooks/.hookcfg` for the native Windows hook, the plugin itself for OpenCode and Amp). A rule-pack change re-renders them, and `defenseclaw guardrail use-pack` rewrites the records while the gateway is stopped. Before a hook lets an outage run it also reads the rule pack in `config.yaml` again (`defenseclaw-gateway hook-outage-mode`), so a pack switched to strict while the gateway is stopped, or a config the hook cannot read, blocks the outage even where an older record still says `open`. `defenseclaw guardrail fail-mode` shows each connector's mode and any drift.
 
 ### Refusals that ignore the fail mode
 

@@ -10034,6 +10034,8 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
 					t.Fatal(err)
 				}
+				// The config the outage-open hook reads gives the open tier.
+				installOutageOpenRuntimeForHookTest(t, home, home)
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)
 				cmd.Stdin = strings.NewReader(agent.payload)
 				cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_HOME=" + home,

@@ -106,6 +106,8 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 						opts.Stdin = strings.NewReader(call.stdin)
 						opts.FailMode = "closed"
 						opts.OutageFailMode = tier.mode
+						// The config on disk agrees with the record.
+						opts.OutageFailModeNow = func() string { return tier.mode }
 						if sc.mutate != nil {
 							sc.mutate(opts)
 						}
@@ -128,6 +130,48 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 	}
 }
 
+// The record (OutageFailMode) is what Setup last wrote; the config on disk
+// now (OutageFailModeNow) has the last word. An outage runs only when both
+// say open, and the config is asked only for an outage the record opens.
+func TestPerUserNativeHookOutageFollowsTheConfigNow(t *testing.T) {
+	fastRestartRetries(t)
+	constant := func(mode string) func() string { return func() string { return mode } }
+	for _, connector := range []string{"claudecode", "codex", "copilot", "cursor"} {
+		for _, tc := range []struct {
+			name   string
+			record string
+			now    func() string
+			opens  bool
+		}{
+			{"record and config open", "open", constant("open"), true},
+			{"strict selected since the record", "open", constant("closed"), false},
+			{"config unreadable", "open", constant(""), false},
+			{"no config check", "open", nil, false},
+			{"record closed, config open", "closed", constant("open"), false},
+		} {
+			t.Run(connector+"/"+tc.name, func(t *testing.T) {
+				result := run(t, connector, &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+					opts.FailMode = "closed"
+					opts.OutageFailMode = tc.record
+					opts.OutageFailModeNow = tc.now
+				})
+				if blocked := nativeOutageBlocked(result); blocked == tc.opens {
+					t.Fatalf("blocked=%v, want %v: code=%d stdout=%q stderr=%q", blocked, !tc.opens, result.code, result.stdout, result.stderr)
+				}
+			})
+		}
+	}
+	asked := 0
+	result := run(t, "codex", &stubRT{status: 503, body: "unavailable"}, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.OutageFailMode = "open"
+		opts.OutageFailModeNow = func() string { asked++; return "open" }
+	})
+	if !nativeOutageBlocked(result) || asked != 0 {
+		t.Fatalf("an error status asked the config %d times or ran: code=%d stdout=%q", asked, result.code, result.stdout)
+	}
+}
+
 // A managed or Secure Client hook never takes the per-user outage mode: an
 // OutageFailMode left in its options does not open a refused call.
 func TestManagedNativeHookIgnoresThePerUserOutageMode(t *testing.T) {
@@ -135,6 +179,7 @@ func TestManagedNativeHookIgnoresThePerUserOutageMode(t *testing.T) {
 	result := run(t, "codex", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		managedCodex(opts)
 		opts.OutageFailMode = "open"
+		opts.OutageFailModeNow = func() string { return "open" }
 	})
 	if !nativeOutageBlocked(result) {
 		t.Fatalf("a managed closed hook let a refused call run: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)

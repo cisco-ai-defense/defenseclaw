@@ -322,6 +322,13 @@ type Options struct {
 	// withPerUserOutage marked; FailMode governs every other failure.
 	// Managed and Secure Client hooks ignore it.
 	OutageFailMode string
+	// OutageFailModeNow returns the outage mode the config on disk gives the
+	// connector now. A per-user outage runs only when OutageFailMode and it
+	// both say "open": the record is what the gateway last wrote, and a
+	// rule-pack change since (strict while the gateway is stopped) has not
+	// reached it. It is called only for an outage the record would open; a
+	// nil OutageFailModeNow keeps the outage closed.
+	OutageFailModeNow func() string
 
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
 	// or contains a .disabled file the hook is a no-op (exit 0).
@@ -2259,12 +2266,14 @@ func perUserOutageError(opts Options, err error) bool {
 
 // perUserOutageMode is the fail mode of a per-user failure: OutageFailMode
 // for a gateway outage withPerUserOutage marked (open in the default and
-// permissive policy tiers, config.HookOutageFailMode), failMode for every
-// other failure. Strict availability and this account's install window
-// close the outage too (closeDuringInstall runs first).
+// permissive policy tiers, config.HookOutageFailMode) when the config on
+// disk still gives it (OutageFailModeNow), failMode for every other failure.
+// Strict availability and this account's install window close the outage
+// too (closeDuringInstall runs first).
 func perUserOutageMode(opts *Options, failMode string) string {
 	if !opts.perUserOutage || opts.StrictAvailability || perUserInstallWindow(*opts) ||
-		normalizeFailMode(opts.OutageFailMode) != "open" {
+		normalizeFailMode(opts.OutageFailMode) != "open" ||
+		opts.OutageFailModeNow == nil || normalizeFailMode(opts.OutageFailModeNow()) != "open" {
 		return failMode
 	}
 	opts.FailMode = "open"

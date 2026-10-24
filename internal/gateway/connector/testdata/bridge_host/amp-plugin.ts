@@ -611,14 +611,30 @@ async function installWindow(): Promise<boolean> {
 // perUserOutageOpen reports a per-user call that may run unchecked: the
 // native helper exited 7 (hookexec.PerUserPostOutageExit: this account's
 // gateway refused or dropped the connection before any status), the outage
-// mode is open and no install holds the data
-// directory. An answer the gateway gave, an unverified listener and every
-// other error keep the call blocked. Like the rest of this plugin it reads
-// no environment, so strict availability does not apply (the strict policy
-// tier closes it).
+// mode is open, no install holds the data directory and the config on disk
+// still gives the open outage mode. An answer the gateway gave, an
+// unverified listener and every other error keep the call blocked. Like the
+// rest of this plugin it reads no environment, so strict availability does
+// not apply (the strict policy tier closes it).
 async function perUserOutageOpen(error: unknown): Promise<boolean> {
 	if (DC_OUTAGE_FAIL_MODE !== "open" || (error as { status?: unknown } | null)?.status !== 7) return false
-	return !(await installWindow())
+	return !(await installWindow()) && configOutageOpen()
+}
+
+// configOutageOpen asks the per-user helper (`hook-outage-mode`, which only
+// reads config.yaml) for Amp's outage mode now. The mode baked above is the
+// one of the last render, and a rule-pack change since (strict selected
+// while the gateway is stopped) has not reached it. A helper that cannot run
+// or answers anything but "open" keeps it closed.
+function configOutageOpen(): boolean {
+	try {
+		const output = execFileSync(perUserNativePostBinary(), ["hook-outage-mode", "--connector", "amp"], {
+			timeout: 3000, maxBuffer: 4096, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+		})
+		return String(output).trim() === "open"
+	} catch {
+		return false
+	}
 }
 
 // perUserOutageNotice is the one warning of a call that ran because this

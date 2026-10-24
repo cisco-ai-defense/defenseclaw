@@ -71,15 +71,15 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "ce696ed570f22bd8185d8abfc4b77a95b36612e6f74841f01d2503b06467c872",  # amp-plugin.ts
-            "b3aec59a73ed38bffe4326901f07b6c9cbfed7a81a3eabe433ea625b234334e8",  # amp-plugin-managed.ts
+            "fc8bddc3aa20def399eed2d92c0e7b3eab6705f06a51ddbf0c6217172064aa47",  # amp-plugin.ts
+            "8d4d91153cfefd522206636953d54af30db42f4b8f773efffea2524fc09f7ba1",  # amp-plugin-managed.ts
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "5af30aea098d1c9ab46a1ba9a5b4197b0dec10b7f83fbf16e7f3202d6d112a47",  # opencode-plugin.js
-            "f877340ea9bb5eb9b7575483a9fde55d08e1f2ade5a2dbe970c3c68267a51c37",  # opencode-plugin-managed.js
+            "10ebe7c7d5b0ddc1c46ab6afe2232a0a5d357872118db8b755e1c5bf02455ee4",  # opencode-plugin.js
+            "582f87196f9ef307ce8813b14da8c60c0aa95914af9d6ff171b03034e9697d44",  # opencode-plugin-managed.js
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
     ),
