@@ -2812,6 +2812,10 @@ func (a *APIServer) handleAuditEvent(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "action is required"})
 		return
 	}
+	if !audit.IsKnownAction(event.Action) && !audit.IsKnownActionPrefix(event.Action) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported action"})
+		return
+	}
 	// Sandbox attribution comes only from an authenticated sandbox binding
 	// (audit.CorrelationEnvelope), never from a request body.
 	event.SandboxID, event.SandboxName = "", ""

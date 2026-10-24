@@ -16,7 +16,35 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 )
+
+func TestAuditEventEndpointClassifiesUnknownActionAsClientError(t *testing.T) {
+	store, logger := newNativeSkillRuntimeTestStore(t)
+	api := &APIServer{health: NewSidecarHealth(), store: store, logger: logger}
+	for _, tc := range []struct {
+		action string
+		want   int
+	}{
+		{"sa5.audit.attribution", http.StatusBadRequest},
+		{"gateway-tool-call", http.StatusOK},
+	} {
+		w := httptest.NewRecorder()
+		body := `{"action":"` + tc.action + `","target":"inert-test","actor":"test","severity":"INFO"}`
+		api.handleAuditEvent(w, httptest.NewRequest(http.MethodPost, "/audit/event", strings.NewReader(body)))
+		if w.Code != tc.want {
+			t.Errorf("action %q status = %d, want %d: %s", tc.action, w.Code, tc.want, w.Body.String())
+		}
+	}
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Action != string(audit.ActionGatewayToolCall) {
+		t.Fatalf("stored events after invalid and valid posts: %+v", events)
+	}
+}
 
 // TestAuditEventEndpointIgnoresBodySandboxAttribution pins the binding-only
 // contract of sandbox attribution: POST /audit/event decodes a whole
