@@ -151,6 +151,9 @@ class ConnectorFailModeState:
     # its default, says), or a managed native Windows hook, which runs the
     # guardian's authenticated runtime generation.
     runtime_verified: bool = True
+    # Reporting context only; the resolver still decides the hook mode.
+    deployment: str = ""
+    policy_tier: str = ""
 
     @property
     def _managed_windows_runtime(self) -> bool:
@@ -200,25 +203,28 @@ class ConnectorFailModeState:
     def note(self) -> str:
         """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
 
-        A saved open preference on a per-user host does not override its
-        closed hooks. A closed Copilot CLI, Antigravity or Hermes hook names
-        the vendor limit it keeps instead.
+        Deployment and policy tier explain a saved value overridden by the
+        effective policy. A closed Copilot CLI, Antigravity or Hermes hook
+        names the vendor limit it keeps instead.
         """
 
         notes = []
         if self.limit and self.effective == "closed":
             notes.append(self.limit)
         elif self.configured != self.desired and self.effective == self.desired:
-            if self.desired == "closed":
-                notes.append(
-                    "this per-user deployment keeps hooks fail-closed; "
-                    f"guardrail.hook_fail_mode={self.configured} does not control hook failures here"
-                )
+            if self.deployment == "managed":
+                reason = f"managed application protection selects hooks fail-{self.desired}"
+            elif self.deployment == "secure-client":
+                reason = f"Secure Client policy selects hooks fail-{self.desired}"
+            elif self.deployment == "per-user" and self.policy_tier:
+                reason = f"the {self.policy_tier} per-user policy tier keeps gateway outages fail-{self.desired}"
+            elif self.deployment == "per-user":
+                reason = f"this per-user deployment keeps hooks fail-{self.desired}"
             else:
-                notes.append(
-                    f"observe mode keeps hooks fail-{self.desired}; "
-                    f"guardrail.hook_fail_mode={self.configured} applies in action mode"
-                )
+                reason = f"the effective policy selects hooks fail-{self.desired}"
+            notes.append(
+                f"{reason}; guardrail.hook_fail_mode={self.configured} does not control hook failures here"
+            )
         if not self.runtime_verified and self._managed_windows_runtime:
             notes.append(
                 "the managed native hook runs the mode of the runtime generation the guardian publishes, "
@@ -328,6 +334,19 @@ def _windows_native_integrity_drift(cfg: Any, connector: str) -> str | None:
     return HOOK_RUNTIME_STALE if check.state == "stale" else REGISTRATION_FOREIGN
 
 
+def _fail_mode_note_context(cfg: Any, guardrail: Any, connector: str) -> tuple[str, str]:
+    """Identify the policy that selected a hook mode for status wording."""
+
+    standalone = getattr(cfg, "managed_outside_secure_client", None)
+    if callable(standalone) and standalone():
+        return "managed", ""
+    secure_client = getattr(guardrail, "secure_client_hook_fail_modes", None)
+    if callable(secure_client) and secure_client():
+        return "secure-client", ""
+    tier = getattr(guardrail, "hook_policy_tier", None)
+    return "per-user", str(tier(connector)) if callable(tier) else ""
+
+
 def resolve_connector_fail_mode(
     cfg: Any,
     connector: str,
@@ -346,6 +365,7 @@ def resolve_connector_fail_mode(
     configured = normalize_fail_mode(raw or getattr(guardrail, "hook_fail_mode", ""))
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     desired = normalize_fail_mode(resolver(name) if callable(resolver) else configured)
+    deployment, policy_tier = _fail_mode_note_context(cfg, guardrail, name)
     sources: list[tuple[str, str | None]] = [("config", configured)]
     drift: list[str] = []
 
@@ -353,7 +373,11 @@ def resolve_connector_fail_mode(
     if sidecar_drift:
         drift.append(sidecar_drift)
     if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
-        state = _resolve_native_deny_fail_mode(cfg, name, configured, desired)
+        state = replace(
+            _resolve_native_deny_fail_mode(cfg, name, configured, desired),
+            deployment=deployment,
+            policy_tier=policy_tier,
+        )
         if sidecar_drift:
             return replace(state, drift=(*state.drift, sidecar_drift))
         return state
@@ -468,6 +492,8 @@ def resolve_connector_fail_mode(
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
         runtime_verified=runtime_verified,
+        deployment=deployment,
+        policy_tier=policy_tier,
     )
 
 
