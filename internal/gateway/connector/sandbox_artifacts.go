@@ -458,7 +458,7 @@ func finalizeSandboxArtifacts(a SandboxArtifacts) (SandboxArtifacts, error) {
 // cannot write; TestSandboxHookRuntimeBinariesCoverEveryTool keeps the list
 // complete.
 var sandboxHookRuntimeTools = []string{
-	"bash", "chmod", "curl", "date", "find", "head", "id", "jq", "mkdir", "mktemp", "od", "readlink", "rm", "sed", "tail", "tr",
+	"awk", "bash", "chmod", "curl", "date", "find", "head", "id", "jq", "mkdir", "mktemp", "od", "readlink", "rm", "sed", "tail", "tr",
 }
 
 // sandboxHookRuntimeBinaries are the tools every sandbox hook set executes.

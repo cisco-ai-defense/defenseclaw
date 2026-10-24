@@ -247,14 +247,8 @@ func TestRecoveredHookFailModeByDeployment(t *testing.T) {
 							reason = "an explicit closed wins under Secure Client too"
 						} else if deployment.name == "secure_client" {
 							want, wantMode, reason = "allow", mode, "Secure Client's unset or open fail mode allows recovered errors"
-						} else if deployment.name == "standalone" && failMode == "open" {
-							reason = "the administrator's open applies to outages, not recovered evaluator errors"
-						} else if deployment.name == "oss" && failMode == "open" {
-							reason = "a legacy per-user open remains closed on evaluator failure"
-						} else if failMode == "open" && name != "cursor" {
-							want, wantMode, reason = "allow", mode, "explicit open is effective for this connector"
-						} else if failMode == "open" && name == "cursor" {
-							reason = "the cursor accessor keeps this connector closed"
+						} else if failMode == "open" {
+							reason = "saved per-user open and managed outage-open do not allow an internal failure"
 						}
 						wantWouldBlock := want == "allow"
 						if response["action"] != want || response["raw_action"] != "block" || response["would_block"] != wantWouldBlock || response["mode"] != wantMode {

@@ -72,9 +72,9 @@ func newHookArgvRecorder(t *testing.T) *hookArgvRecorder {
 	t.Helper()
 	logDir := t.TempDir()
 	r := &hookArgvRecorder{dir: t.TempDir(), log: filepath.Join(logDir, "argv.log"), envLog: filepath.Join(logDir, "env.log")}
-	cat, envBin := hookArgvLookPath("cat"), hookArgvLookPath("env")
-	if cat == "" || envBin == "" {
-		t.Skip("cat and env are required")
+	cat, envBin, rm := hookArgvLookPath("cat"), hookArgvLookPath("env"), hookArgvLookPath("rm")
+	if cat == "" || envBin == "" || rm == "" {
+		t.Skip("cat, env and rm are required")
 	}
 	for _, name := range hookArgvTools {
 		// The macOS /usr/bin/python3 may be the developer-tools stub that
@@ -86,14 +86,19 @@ func newHookArgvRecorder(t *testing.T) *hookArgvRecorder {
 		if real == "" {
 			continue
 		}
+		// Each record reaches its log in one append: commands of one
+		// pipeline (curl | tr) run at once and must not interleave.
 		wrapper := "#!/bin/sh\n" +
 			"{\n" +
 			"  printf '%s' " + shellSingleQuoteForTest(name) + "\n" +
 			"  for a in \"$@\"; do printf '\\037%s' \"$a\"; done\n" +
 			"  printf '\\036'\n" +
 			"  if [ -r /proc/$$/cmdline ]; then " + shellSingleQuoteForTest(cat) + " /proc/$$/cmdline; printf '\\036'; fi\n" +
-			"} >> " + shellSingleQuoteForTest(r.log) + "\n" +
-			"{ printf '%s\\n' " + shellSingleQuoteForTest(name) + "; " + shellSingleQuoteForTest(envBin) + "; printf '\\036'; } >> " + shellSingleQuoteForTest(r.envLog) + "\n" +
+			"} > " + shellSingleQuoteForTest(r.log) + ".$$\n" +
+			shellSingleQuoteForTest(cat) + " " + shellSingleQuoteForTest(r.log) + ".$$ >> " + shellSingleQuoteForTest(r.log) + "\n" +
+			"{ printf '%s\\n' " + shellSingleQuoteForTest(name) + "; " + shellSingleQuoteForTest(envBin) + "; printf '\\036'; } > " + shellSingleQuoteForTest(r.envLog) + ".$$\n" +
+			shellSingleQuoteForTest(cat) + " " + shellSingleQuoteForTest(r.envLog) + ".$$ >> " + shellSingleQuoteForTest(r.envLog) + "\n" +
+			shellSingleQuoteForTest(rm) + " -f -- " + shellSingleQuoteForTest(r.log) + ".$$ " + shellSingleQuoteForTest(r.envLog) + ".$$\n" +
 			"exec " + shellSingleQuoteForTest(real) + " \"$@\"\n"
 		if err := os.WriteFile(filepath.Join(r.dir, name), []byte(wrapper), 0o755); err != nil {
 			t.Fatal(err)

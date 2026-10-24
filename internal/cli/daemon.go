@@ -2026,7 +2026,7 @@ func rotationConnectorStateFromConfig(cfg *config.Config) (rotationConnectorStat
 		state.Connectors = append(state.Connectors, rotationConnectorPolicy{
 			Name:         name,
 			Mode:         strings.ToLower(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))),
-			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookFailModeForConnector(name))),
+			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookOutageFailModeForConnector(name))),
 			Enabled:      cfg.Guardrail.EffectiveEnabled(name),
 		})
 	}

@@ -71,15 +71,15 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "18a13928b5ec16b8b6fca3036e1bcec6f5215dae1be6dfd6491536866dfc8a8b",  # amp-plugin.ts
-            "13b87331e4d23a12329741186ceec144479a4fb1244f9c2a58fcb7c76245cbf6",  # amp-plugin-managed.ts
+            "f8d46a9a8e81014584bb1f51bc3bb794e591a8fb20d5cae7b49d94af7ad75521",  # amp-plugin.ts
+            "8d4d91153cfefd522206636953d54af30db42f4b8f773efffea2524fc09f7ba1",  # amp-plugin-managed.ts
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "05d0de48f970852e7e82fc8539c05885c7193458ea63e1107cca45a638ee06fa",  # opencode-plugin.js
-            "f877340ea9bb5eb9b7575483a9fde55d08e1f2ade5a2dbe970c3c68267a51c37",  # opencode-plugin-managed.js
+            "e7bb5a87ac494005faa03c193adf21edceedbadcb632db7817f8f6230992aa9e",  # opencode-plugin.js
+            "582f87196f9ef307ce8813b14da8c60c0aa95914af9d6ff171b03034e9697d44",  # opencode-plugin-managed.js
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
     ),
@@ -208,6 +208,21 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";\n',
             "proof",
         ),
+    ),
+}
+# A per-user bridge's gateway-outage mode line (Go pluginOutageFailMode):
+# present once in a per-user render, absent from managed and Secure Client
+# ones; its value is open or closed.
+_BRIDGE_OUTAGE_MODE_LINES = {
+    "amp": (
+        b'const DC_OUTAGE_FAIL_MODE: string = "',
+        b'"\n',
+        b'const DC_OUTAGE_FAIL_MODE: string = "{{.OutageFailMode}}"\n',
+    ),
+    "opencode": (
+        b'const DC_OUTAGE_FAIL_MODE = "',
+        b'";\n',
+        b'const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";\n',
     ),
 }
 _LOWER_HEX = frozenset("0123456789abcdef")
@@ -516,6 +531,14 @@ def _matches_immutable_bridge_template(
         ):
             return False
         lines[index] = canonical
+    prefix, suffix, canonical = _BRIDGE_OUTAGE_MODE_LINES[connector]
+    outage = [index for index, line in enumerate(lines) if line.startswith(prefix) and line.endswith(suffix)]
+    if len(outage) > 1:
+        return False
+    if outage:
+        if lines[outage[0]][len(prefix) : -len(suffix)] not in {b"open", b"closed"}:
+            return False
+        lines[outage[0]] = canonical
     if hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests:
         return True
     # Managed and Secure Client variants retain an administrator-selected

@@ -1349,7 +1349,9 @@ func newHookContractLockEntry(
 		HookScriptVersion:      contract.HookScriptVersion,
 		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
-		HookFailMode:           resolveHookFailMode(opts, conn),
+		// The mode the hooks' runtime records hold (OutageHookFailMode): a
+		// per-user render's gateway-outage mode.
+		HookFailMode: OutageHookFailMode(opts, conn),
 		RegistrationPosture: &HookRegistrationPosture{
 			CodexOtelEnvironment:  opts.CodexOtelEnvironment,
 			ConfigHome:            opts.ConfigHome,

@@ -47,7 +47,7 @@ def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None
 
     unix = UNIX_LANE.read_text(encoding="utf-8")
     lines = unix.splitlines()
-    for step in ("04-verify", "05-status"):
+    for step in ("02-ensure-config", "03-ensure-noop", "04-verify", "05-status", "06-upgrade"):
         matches = [i for i, line in enumerate(lines) if f'check "$results/{step}.json"' in line]
         assert len(matches) == 1, step
         i = matches[0]
@@ -85,6 +85,41 @@ def test_lifecycle_checker_keeps_python36_annotations() -> None:
         assert not (
             isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr)
         ), f"Python 3.6 cannot evaluate {ast.get_source_segment(source, node)}"
+
+
+# Secure Client results carry no hook_process_fail_open warning (the warning
+# is standalone-only), so its pages may still expect security_complete true.
+_SECURE_CLIENT_PAGES = ("install/secure-client.mdx", "install/reference/secure-client.mdx")
+_WARNED_CONNECTOR_KEYS = re.compile(r'"(antigravity|claudecode|codex|copilot|devin|hermes|kiro)"\s*:')
+
+
+def test_docs_never_promise_security_complete_with_hook_residual() -> None:
+    """No status example or verification step expects a plain security_complete true.
+
+    Standalone status, verify and ensure report security_complete false and
+    hook_process_fail_open whenever Codex, Claude Code, Copilot, Devin, Hermes,
+    Kiro or Antigravity is enabled. An install guide, operations sample,
+    troubleshooting check or agent instruction that expects true would make
+    an operator or agent report a healthy install as failed.
+    """
+    problems: list[str] = []
+    for page in sorted((ROOT / "docs-site/content/docs").rglob("*.mdx")):
+        rel = page.relative_to(ROOT / "docs-site/content/docs").as_posix()
+        if rel.endswith(_SECURE_CLIENT_PAGES):
+            continue
+        text = page.read_text(encoding="utf-8")
+        for block in re.findall(r"```json[^\n]*\n(.*?)```", text, flags=re.S):
+            if '"security_complete": true' in block and _WARNED_CONNECTOR_KEYS.search(block):
+                problems.append(f"{rel}: JSON sample with a warned connector reports security_complete true")
+        for number, line in enumerate(text.splitlines(), 1):
+            expects_true = (
+                re.match(r"\|\s*`security_complete`\s*\|\s*`true`", line)
+                or "`security_complete` is `true`" in line
+                or ("Expected:" in line and "security_complete" in line and "`true`" in line)
+            )
+            if expects_true and "hook_process_fail_open" not in line:
+                problems.append(f"{rel}:{number}: expects security_complete true without hook_process_fail_open")
+    assert not problems, "\n".join(problems)
 
 
 def _result(**overrides: Any) -> dict[str, Any]:
