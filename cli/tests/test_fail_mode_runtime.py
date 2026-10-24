@@ -16,7 +16,7 @@ import yaml
 from click.testing import CliRunner
 from defenseclaw import config as dcconfig
 from defenseclaw import fail_mode as fail_mode_runtime
-from defenseclaw.commands import cmd_guardrail
+from defenseclaw.commands import cmd_doctor, cmd_guardrail
 from defenseclaw.context import AppContext
 from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS
 from defenseclaw.fail_mode import (
@@ -24,6 +24,7 @@ from defenseclaw.fail_mode import (
     connector_fail_mode_report,
     resolve_connector_fail_mode,
 )
+
 from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
@@ -1858,6 +1859,16 @@ def test_native_deny_state_reports_a_stale_lock_or_registration_next_to_a_closed
     # rendered open). Neither is current, so guardrail fail-mode closed
     # reconciles instead of saying there is nothing to do.
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    if connector == "hermes":
+        # This test checks the lock and registered command. Its synthetic
+        # hook is not a containment test, and CI hosts may forbid user PID
+        # namespaces needed by Doctor's real execution probe.
+
+        def registered_hook_probe(argv: list[str]) -> tuple[int, bytes]:
+            assert argv[0] == str(Path(cfg.data_dir) / "hooks" / "hermes-hook.sh")
+            return 0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE
+
+        monkeypatch.setattr(cmd_doctor, "_run_hermes_execution_probe", registered_hook_probe)
     script = f"{connector}-hook.sh"
     (Path(cfg.data_dir) / "hooks" / script).write_text(
         "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"
