@@ -21,6 +21,8 @@ Mirrors internal/cli/setup.go.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import hashlib
 import http.client
@@ -52,7 +54,7 @@ import click
 # pulled name-by-name so the wizard call sites read like
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
-from defenseclaw import connector_paths, envvars, platform_support, terminal_checkbox, ux
+from defenseclaw import codex_toml, connector_paths, envvars, platform_support, terminal_checkbox, ux
 from defenseclaw.audit_actions import (
     ACTION_SETUP_GATEWAY,
     ACTION_SETUP_GUARDRAIL,
@@ -7682,15 +7684,82 @@ def _codex_config_matches_backup(path: str, expected_sha256: str | None) -> bool
         os.close(fd)
 
 
+def _codex_config_has_managed_hooks(
+    path: str, data_dir: str | None, copied_data_dir: str | None = None,
+) -> bool:
+    """Find Codex hook commands in one stable bounded config, ignoring user edits."""
+    try:
+        config = codex_toml.loads(read_regular_file_no_follow(path, max_bytes=_SETUP_CODEX_BACKUP_MAX_BYTES))
+    except (OSError, ValueError, UnicodeError):
+        return False
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    expected_scripts = tuple(
+        os.path.join(root, "hooks", "codex-hook.sh").replace("\\", "/")
+        for root in (data_dir, copied_data_dir) if root is not None
+    )
+    for event, groups in hooks.items():
+        if event == "state" or not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            for handler in group["hooks"]:
+                if not isinstance(handler, dict):
+                    continue
+                for key in ("command", "command_windows", "commandWindows"):
+                    command = handler.get(key)
+                    if not isinstance(command, str):
+                        continue
+                    if os.name != "nt":
+                        try:
+                            words = shlex.split(command)
+                        except ValueError:
+                            continue
+                        if len(words) >= 3 and words[1] == "--event":
+                            script = words[0].replace("\\", "/")
+                            if script in expected_scripts or (
+                                not expected_scripts and script.endswith("/hooks/codex-hook.sh")
+                            ):
+                                return True
+                        continue
+                    normalized = command.replace("\\", "/").casefold()
+                    scripts = expected_scripts or ("/hooks/codex-hook.sh",)
+                    if "--event" in command and any(
+                        re.search(re.escape(script.casefold()) + r"(?=['\"\s])", normalized)
+                        for script in scripts
+                    ):
+                        return True
+                    # Windows writes an encoded native launcher command, which
+                    # has no data-dir path. Its Codex hook signature is root proof.
+                    encoded = re.search(r"-EncodedCommand\s+([A-Za-z0-9+/=]+)", command, re.IGNORECASE)
+                    if encoded is None or len(encoded.group(1)) > 65536:
+                        continue
+                    try:
+                        script = base64.b64decode(encoded.group(1), validate=True).decode("utf-16-le")
+                    except (ValueError, UnicodeError, binascii.Error):
+                        continue
+                    if (
+                        "$env:NoDefaultCurrentDirectoryInExePath='1'" in script
+                        and "[System.Diagnostics.ProcessStartInfo]::new" in script
+                        and "'hook' '--connector' 'codex'" in script
+                        and "'--hook-contract'" in script
+                        and "defenseclaw-hook.exe" in script.casefold()
+                    ):
+                        return True
+    return False
+
+
 def _effective_codex_rollback_path(
     record_path: str, captured: str, *, installed_sha256: str | None = None,
 ) -> str:
     """Resolve the installed Codex config before a failed root migration.
 
     A copied backup can still name an obsolete home even if that home has
-    unrelated files or an empty .codex directory. Its installed hash proves
-    which file moved. Fall back to Go's narrower home-move rule for older
-    receipts and user-edited configs that no longer match the installed hash.
+    unrelated files or an empty .codex directory. The installed hash or this
+    data dir's or copied receipt's hook commands prove which file moved, even
+    after Codex writes unrelated settings. An old home with hooks keeps its root.
     """
     home = os.path.abspath(os.path.expanduser("~"))
     captured = os.path.normpath(captured)
@@ -7707,18 +7776,27 @@ def _effective_codex_rollback_path(
 
     if installed_sha256 and not _codex_config_matches_backup(captured, installed_sha256):
         matches: set[str] = set()
-        ancestor = os.path.dirname(captured)
-        for _ in range(32):
-            parent = os.path.dirname(ancestor)
-            if parent == ancestor:
-                break
-            try:
-                candidate = os.path.join(home, os.path.relpath(captured, ancestor))
-            except ValueError:  # Different Windows volumes.
-                break
-            if within(candidate, home) and _codex_config_matches_backup(candidate, installed_sha256):
-                matches.add(os.path.normpath(candidate))
-            ancestor = parent
+        if not _codex_config_has_managed_hooks(captured, None):
+            data_dir = os.path.dirname(os.path.dirname(os.path.dirname(record_path)))
+            copied_data_dir = None
+            if os.path.basename(os.path.dirname(captured)).casefold() == ".codex" and within(data_dir, home):
+                old_home = os.path.dirname(os.path.dirname(captured))
+                copied_data_dir = os.path.join(old_home, os.path.relpath(data_dir, home))
+            ancestor = os.path.dirname(captured)
+            for _ in range(32):
+                parent = os.path.dirname(ancestor)
+                if parent == ancestor:
+                    break
+                try:
+                    candidate = os.path.join(home, os.path.relpath(captured, ancestor))
+                except ValueError:  # Different Windows volumes.
+                    break
+                if within(candidate, home) and (
+                    _codex_config_matches_backup(candidate, installed_sha256)
+                    or _codex_config_has_managed_hooks(candidate, data_dir, copied_data_dir)
+                ):
+                    matches.add(os.path.normpath(candidate))
+                ancestor = parent
         if len(matches) == 1:
             return matches.pop()
         if len(matches) > 1:
@@ -8953,6 +9031,7 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
         return []
     failures: list[str] = []
     backup_record = _codex_backup_path(cfg.data_dir)
+    current: dict[str, Any] | None = None
     try:
         existed, body, _generation = _capture_protected_setup_file(
             backup_record, _SETUP_CODEX_BACKUP_MAX_BYTES, "Codex managed backup",
@@ -8962,12 +9041,19 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
             failures.append("Codex managed backup is missing after rollback")
         else:
             current = _codex_backup_identity(body)
-            # Verify using the Go loader's home-move rule. A hash-matched
-            # rollback root is a one-time snapshot proof, not permission to
-            # leave Go's persisted backup pointed at an obsolete home.
-            current_root = os.path.dirname(_effective_codex_rollback_path(backup_record, current["path"]))
+            # Resolve the same installed-hash and managed-hook evidence as
+            # Go's loader before judging a copied-home receipt.
+            current_root = os.path.dirname(_effective_codex_rollback_path(
+                backup_record, current["path"], installed_sha256=current.get("post_sha256"),
+            ))
             if os.path.normcase(os.path.normpath(current_root)) != os.path.normcase(os.path.normpath(prior.root)):
-                failures.append("Codex managed backup still names the new root")
+                selected = os.environ.get("CODEX_HOME")
+                is_new = selected is not None and (
+                    os.path.normcase(os.path.normpath(current_root))
+                    == os.path.normcase(os.path.normpath(selected))
+                )
+                location = "new root" if is_new else "old root"
+                failures.append(f"Codex managed backup still names an unresolved or obsolete root ({location})")
             if prior.backup_existed:
                 original = _codex_backup_identity(prior.backup_bytes)
                 for key in ("existed", "mode", "pristine_sha256", "pristine_bytes"):
@@ -8984,8 +9070,11 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
                 "hook_contract_lock.json",
             )
             current_path = _codex_registration_path(body) if existed else None
-            if prior.backup_existed and current_path is not None:
-                current_path = _effective_codex_rollback_path(backup_record, current_path)
+            if prior.backup_existed and current_path is not None and current is not None:
+                current_path = _effective_codex_rollback_path(
+                    backup_record, current_path,
+                    installed_sha256=current.get("post_sha256") if current_path == current["path"] else None,
+                )
             if current_path is None or (
                 os.path.normcase(os.path.normpath(current_path))
                 != os.path.normcase(os.path.normpath(prior.registration_path))
@@ -8996,6 +9085,36 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
                 f"Codex hook registration verification unavailable [{_setup_runtime_ref(type(exc).__name__)}]"
             )
     return failures
+
+
+def _restore_setup_codex_backup_snapshot(cfg, snapshot: _SetupConfigSnapshot) -> None:
+    """Return the prior Codex restore point after the gateway has restored hooks."""
+    prior = getattr(snapshot, "codex_rollback", None)
+    if prior is None or not prior.backup_existed or prior.root is None:
+        return
+    original = _codex_backup_identity(prior.backup_bytes)
+    if not isinstance(original.get("post_sha256"), str):
+        return  # Older receipts do not have the installed-file evidence.
+    backup_record = _codex_backup_path(cfg.data_dir)
+    existed, body, _generation = _capture_protected_setup_file(
+        backup_record, _SETUP_CODEX_BACKUP_MAX_BYTES, "Codex managed backup",
+        trust_windows_administrators=True,
+    )
+    if not existed:
+        raise OSError("Codex managed backup is missing after gateway rollback")
+    if body == prior.backup_bytes:
+        return
+    current = _codex_backup_identity(body)
+    effective = _effective_codex_rollback_path(
+        backup_record, current["path"], installed_sha256=current.get("post_sha256"),
+    )
+    expected = os.path.join(prior.root, "config.toml")
+    if (
+        os.path.normcase(os.path.normpath(effective)) != os.path.normcase(os.path.normpath(expected))
+        or not _codex_config_has_managed_hooks(expected, os.path.abspath(os.fspath(cfg.data_dir)))
+    ):
+        raise OSError("Codex gateway rollback did not restore the prior managed hooks")
+    atomic_write_private_bytes(backup_record, prior.backup_bytes)
 
 
 def _verify_preserved_setup_hook_contract_lock(
@@ -9755,11 +9874,13 @@ def _rollback_failed_connector_application(
                     _restore_setup_hook_contract_lock_snapshot(app.cfg, snapshot)
                     if lifecycle_error is not None:
                         raise lifecycle_error
+                    _restore_setup_codex_backup_snapshot(app.cfg, snapshot)
                 else:
                     restore_kwargs: dict[str, Any] = {"skip_openclaw": isinstance(cause, _OpenClawGatewayNotRunning)}
                     if isinstance(cause, _GatewayRestartFailed) and not isinstance(cause, _OpenClawGatewayNotRunning):
                         restore_kwargs["same_failure"] = cause
                     _restart_restored_connector_runtime(app, **restore_kwargs)
+                    _restore_setup_codex_backup_snapshot(app.cfg, snapshot)
         except BaseException as exc:  # Report both non-secret transaction failures.
             if _secret_safe:
                 secret_rollback_failed = True

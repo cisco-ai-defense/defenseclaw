@@ -467,8 +467,9 @@ func loadManagedFileBackupPath(path string) (managedFileBackup, error) {
 
 // codexBackupTargetMatchingPostHash locates the installed config when a home
 // was copied but the old home still contains unrelated files. Path-only home
-// move detection cannot distinguish that copy from another user's root; the
-// backup's post-write hash identifies the exact Codex file Setup installed.
+// move detection cannot distinguish that copy from another user's root. The
+// post-write hash or the current data dir's Codex hooks identify its copy,
+// including after Codex appends a project trust entry to config.toml.
 func codexBackupTargetMatchingPostHash(recordPath, captured, postSHA256 string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" || !filepath.IsAbs(captured) || filepath.Base(captured) != "config.toml" {
@@ -485,6 +486,27 @@ func codexBackupTargetMatchingPostHash(recordPath, captured, postSHA256 string) 
 	if codexConfigMatchesBackupHash(captured, expected) {
 		return "", nil // the recorded root still has the installed hooks
 	}
+	oldHome := ""
+	if strings.EqualFold(filepath.Base(filepath.Dir(captured)), ".codex") {
+		oldHome = filepath.Dir(filepath.Dir(captured))
+	}
+	var copiedHomeCommands map[string]struct{}
+	if runtime.GOOS == "windows" && oldHome != "" {
+		oldLauncher := filepath.Join(oldHome, ".local", "bin", windowsHookBinaryName)
+		copiedHomeCommands = codexNativeCommandsForLauncher(oldLauncher)
+	}
+	// A populated previous home can still be a working Codex installation.
+	// Never rebind its receipt to a different home while it has managed hooks.
+	if codexConfigHasManagedHooks(captured, "", "", copiedHomeCommands) {
+		return "", nil
+	}
+	dataDir := filepath.Dir(filepath.Dir(filepath.Dir(record)))
+	copiedDataDir := ""
+	if oldHome != "" && managedPathWithin(dataDir, home) {
+		if relative, err := filepath.Rel(home, dataDir); err == nil {
+			copiedDataDir = filepath.Join(oldHome, relative)
+		}
+	}
 	var match string
 	for ancestor, i := filepath.Dir(captured), 0; ancestor != filepath.Dir(ancestor) && i < 32; ancestor, i = filepath.Dir(ancestor), i+1 {
 		rel, err := filepath.Rel(ancestor, captured)
@@ -492,7 +514,9 @@ func codexBackupTargetMatchingPostHash(recordPath, captured, postSHA256 string) 
 			break // different Windows volumes
 		}
 		candidate := filepath.Join(home, rel)
-		if !managedPathWithin(candidate, home) || !codexConfigMatchesBackupHash(candidate, expected) {
+		if !managedPathWithin(candidate, home) ||
+			(!codexConfigMatchesBackupHash(candidate, expected) &&
+				!codexConfigHasManagedHooks(candidate, dataDir, copiedDataDir, copiedHomeCommands)) {
 			continue
 		}
 		if match != "" && !sameManagedTargetPath(match, candidate) {
@@ -501,6 +525,143 @@ func codexBackupTargetMatchingPostHash(recordPath, captured, postSHA256 string) 
 		match = candidate
 	}
 	return match, nil
+}
+
+// codexConfigHasManagedHooks reads only bounded Codex config and inspects hook
+// commands. On Unix the candidate must invoke this backup's current or copied
+// data-dir script; native Windows registrations use the installer-owned launcher.
+// Passing an empty dataDir checks whether the recorded old root still has any
+// DefenseClaw Codex registration, which must take precedence over a copy.
+func codexConfigHasManagedHooks(path, dataDir, copiedDataDir string, copiedHomeCommands map[string]struct{}) bool {
+	readPath, err := userOwnedSettingsReadPath(path)
+	if err != nil {
+		return false
+	}
+	raw, err := safefile.ReadRegularFileBounded(readPath, atomicTransformMaxConfigBytes)
+	if err != nil {
+		return false
+	}
+	var config map[string]interface{}
+	if err := parseCodexTOML(raw, &config); err != nil {
+		return false
+	}
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	hooksDir := ""
+	if dataDir != "" {
+		hooksDir = filepath.Join(dataDir, "hooks")
+	}
+	for event, value := range hooks {
+		if event == "state" {
+			continue
+		}
+		groups, ok := value.([]interface{})
+		if !ok {
+			continue
+		}
+		for _, value := range groups {
+			group, ok := value.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			handlers, ok := group["hooks"].([]interface{})
+			if !ok {
+				continue
+			}
+			for _, handler := range handlers {
+				if runtime.GOOS == "windows" {
+					entry, ok := handler.(map[string]interface{})
+					if ok {
+						for _, key := range []string{"command", "command_windows", "commandWindows"} {
+							command, _ := entry[key].(string)
+							if _, ok := copiedHomeCommands[command]; ok {
+								return true
+							}
+						}
+					}
+				}
+				if !isOwnedCodexHookHandler(handler, hooksDir) {
+					continue
+				}
+				if dataDir == "" {
+					return true
+				}
+				entry, ok := handler.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				command, _ := entry["command"].(string)
+				if runtime.GOOS == "windows" {
+					for _, key := range []string{"command", "command_windows", "commandWindows"} {
+						candidate, _ := entry[key].(string)
+						if isNativeHookCommand(candidate) {
+							return true
+						}
+					}
+					continue
+				}
+				command = posixHookCommandUnquoted(claudeCodeUnguardedHookCommand(command))
+				if strings.HasPrefix(command, filepath.Join(hooksDir, "codex-hook.sh")+" --event ") ||
+					(copiedDataDir != "" && strings.HasPrefix(
+						command, filepath.Join(copiedDataDir, "hooks", "codex-hook.sh")+" --event ",
+					)) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// A copied Windows home may retain native Codex commands bound to its old
+// ~/.local launcher. The copied backup proves that old home belongs to this
+// data dir; claim only Codex commands that the shipped contracts generated for
+// that exact launcher, so repair replaces them instead of appending a second
+// hook matrix beside them.
+func codexCopiedHomeNativeCommands(dataDir, configPath string) (map[string]struct{}, error) {
+	if runtime.GOOS != "windows" || dataDir == "" {
+		return nil, nil
+	}
+	recordPath := managedFileBackupPath(dataDir, "codex", "config.toml")
+	raw, err := os.ReadFile(recordPath)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var backup managedFileBackup
+	if err := json.Unmarshal(raw, &backup); err != nil {
+		return nil, err
+	}
+	if backup.Version != managedBackupVersion || backup.Connector != "codex" || backup.LogicalName != "config.toml" ||
+		!filepath.IsAbs(backup.Path) || !strings.EqualFold(filepath.Base(filepath.Dir(backup.Path)), ".codex") {
+		return nil, nil
+	}
+	moved, err := codexBackupTargetMatchingPostHash(recordPath, backup.Path, backup.PostSHA256)
+	if err != nil || !sameManagedTargetPath(moved, configPath) {
+		return nil, err
+	}
+	oldHome := filepath.Dir(filepath.Dir(backup.Path))
+	oldLauncher := filepath.Join(oldHome, ".local", "bin", windowsHookBinaryName)
+	return codexNativeCommandsForLauncher(oldLauncher), nil
+}
+
+func codexNativeCommandsForLauncher(oldLauncher string) map[string]struct{} {
+	commands := map[string]struct{}{}
+	add := func(command string) { commands[command] = struct{}{} }
+	add(windowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
+	add(legacyStartProcessWindowsNativePowerShellHookCommand("codex", oldLauncher))
+	add(legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
+	add(legacyWindowsNativePowerShellHookCommandForBinary("codex", oldLauncher))
+	for _, contract := range builtinHookContracts["codex"] {
+		for _, event := range contract.Events {
+			add(windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, oldLauncher))
+		}
+	}
+	return commands
 }
 
 func codexConfigMatchesBackupHash(path string, expected []byte) bool {
