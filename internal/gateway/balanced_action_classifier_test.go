@@ -130,10 +130,11 @@ func TestBalancedActionWindowsOrdinaryCommands(t *testing.T) {
 func TestBalancedActionScriptArgumentsAreData(t *testing.T) {
 	home, cwd := r104ReviewHome(t)
 	for name, body := range map[string]string{
-		"build.sh": "printf ok > report.txt\n",
-		"build.py": "print('ok')\n",
-		"write.sh": "printf marker >> ~/.ssh/authorized_keys\n",
-		"write.py": "open('" + filepath.Join(home, ".ssh", "authorized_keys") + "', 'a').write('marker')\n",
+		"build.sh":     "printf ok > report.txt\n",
+		"build.py":     "print('ok')\n",
+		"write.sh":     "printf marker >> ~/.ssh/authorized_keys\n",
+		"write-pos.sh": "printf marker >> \"$1\"\n",
+		"write.py":     "open('" + filepath.Join(home, ".ssh", "authorized_keys") + "', 'a').write('marker')\n",
 	} {
 		if err := os.WriteFile(filepath.Join(cwd, name), []byte(body), 0o700); err != nil {
 			t.Fatal(err)
@@ -155,7 +156,12 @@ func TestBalancedActionScriptArgumentsAreData(t *testing.T) {
 			}
 		})
 	}
-	for _, command := range []string{"bash write.sh " + keyPath, "python write.py " + keyPath} {
+	for _, command := range []string{
+		"bash write.sh " + keyPath,
+		"python write.py " + keyPath,
+		"bash write-pos.sh " + keyPath,
+		"./write-pos.sh " + keyPath,
+	} {
 		for route, denied := range r104ReviewProtectedWrite(t, command, cwd, home) {
 			if !denied {
 				t.Fatalf("route %d missed the script body's protected write: %q", route, command)

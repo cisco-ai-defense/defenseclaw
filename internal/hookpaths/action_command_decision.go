@@ -389,6 +389,17 @@ func actionScriptArgumentsAreData(file *syntax.File, cwd, home string) bool {
 			if shellBodyProtectedWrite(content, cwd, home) {
 				return false
 			}
+			if scriptIndex+1 < len(call.Args) {
+				if arg, known := StaticWord(call.Args[scriptIndex+1], home); known {
+					protected := newProtectedFiles(home)
+					ssh := filepath.Join(home, ".ssh")
+					for _, target := range literalPositionalShellRedirects(content, arg, cwd, home) {
+						if protectedReachPath(target, protected, ssh) {
+							return false
+						}
+					}
+				}
+			}
 		} else {
 			protected := newProtectedFiles(home)
 			ssh := filepath.Join(home, ".ssh")
