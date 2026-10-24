@@ -110,14 +110,23 @@ class GrafanaAccessPolicyError(LocalStackError):
     """Grafana is reachable in the opposite access mode."""
 
 
-def _grafana_basic_get(password: str, *, timeout: float = 3) -> tuple[int, bytes]:
-    """Send Basic only over the accepted socket of this account or the OS.
+def _grafana_verified_get(
+    path: str,
+    authorization: str,
+    *,
+    timeout: float = 3,
+    max_response_bytes: int | None = None,
+) -> tuple[int, bytes]:
+    """Send Grafana auth only over the accepted socket of this account or the OS.
 
     A container-status or listener check before dialing cannot prove the
     socket that receives the password: the port can change hands between
     those steps. The installed gateway's local-peer verifier checks the
     connected tuple before http.client writes the first request byte.
     """
+
+    if not path.startswith("/") or path.startswith("//") or "\r" in path or "\n" in path:
+        raise ValueError("Grafana request path is invalid")
 
     from defenseclaw.gateway import (
         _connected_verifier_timeout,
@@ -154,15 +163,14 @@ def _grafana_basic_get(password: str, *, timeout: float = 3) -> tuple[int, bytes
         if check.returncode != 0:
             raise OSError("the connected Grafana peer could not be verified; the admin credential was not sent")
         connection.sock, sock = sock, None
-        token = base64.b64encode(f"{GRAFANA_ADMIN_USER}:{password}".encode("ascii")).decode("ascii")
         connection.request(
             "GET",
-            GRAFANA_SEARCH_PATH,
-            headers={"Authorization": f"Basic {token}"},
+            path,
+            headers={"Authorization": authorization},
         )
         response = connection.getresponse()
-        body = response.read(2 * 1024 * 1024 + 1)
-        if len(body) > 2 * 1024 * 1024:
+        body = response.read(max_response_bytes + 1 if max_response_bytes is not None else None)
+        if max_response_bytes is not None and len(body) > max_response_bytes:
             raise ValueError("Grafana response is too large")
         return response.status, body
     except LocalStackError as exc:
@@ -171,6 +179,13 @@ def _grafana_basic_get(password: str, *, timeout: float = 3) -> tuple[int, bytes
         connection.close()
         if sock is not None:
             sock.close()
+
+
+def _grafana_basic_get(password: str, *, timeout: float = 3) -> tuple[int, bytes]:
+    token = base64.b64encode(f"{GRAFANA_ADMIN_USER}:{password}".encode("ascii")).decode("ascii")
+    return _grafana_verified_get(
+        GRAFANA_SEARCH_PATH, f"Basic {token}", timeout=timeout, max_response_bytes=2 * 1024 * 1024,
+    )
 
 
 @dataclass(frozen=True)
