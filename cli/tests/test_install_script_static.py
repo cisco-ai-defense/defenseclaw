@@ -291,7 +291,7 @@ def test_running_sandboxes_are_named_before_the_gateway_restarts(tmp_path: Path,
     # hooks failed closed meanwhile; the user learned it from the end summary.
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert 'warn_running_sandboxes "${stranded}"\n    ask_yes_no "${question}"' in text
-    assert 'warn_running_sandboxes\nif [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]' in text
+    assert 'warn_running_sandboxes\nif [[ "${REPAIR}" == true ]]; then\n    ask_yes_no "Reinstall' in text
     start = text.index("warn_running_sandboxes() {")
     func = text[start : text.index("\n}\n", start) + 3]
     bin_dir, venv = tmp_path / "bin", tmp_path / "venv"
@@ -1680,8 +1680,8 @@ def test_an_older_release_over_a_newer_one_is_called_a_downgrade(tmp_path: Path)
     # GAP-0287: 1.0.23's installer over 1.0.24 asked nothing and said "Upgraded from 1.0.24".
     text = INSTALL_SH.read_text(encoding="utf-8")
     helpers = text[text.index("version_key() {") : text.index("is_version() {")]
-    start = text.index('    changed="Upgraded"')
-    end = text.index("\n", text.index('printf "  ${changed} from', start))
+    start = text.index('    changed="Upgraded from')
+    end = text.index("\n", text.index('printf "  ${changed}. Undo with', start))
     script = tmp_path / "end.sh"
     for version, prev, word in (("1.0.23", "1.0.24", "Downgraded"), ("1.0.25", "1.0.24", "Upgraded")):
         script.write_text(f"{helpers}CYAN= NC=\nVERSION={version} PREV_VERSION={prev}\n{text[start:end]}\n")
@@ -2267,3 +2267,145 @@ def test_a_failed_audit_quarantine_never_replaces_a_file(tmp_path: Path) -> None
     assert "rc=1" in out
     assert [Path(f"{home / 'audit.db'}{s}").read_text(encoding="utf-8") for s in ("", "-wal", "-shm")] == ["db", "wal", "shm"]
     assert sorted(p.name for p in home.iterdir()) == ["aside-shm", "audit.db", "audit.db-shm", "audit.db-wal"]
+
+
+# ── GAP-1063 / GAP-1067: same-version builds and the saved installer ────────
+
+
+def _version_gateway(path: Path, output: str | None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = "exit 1\n" if output is None else f"printf '%s\\n' '{output}'\n"
+    path.write_text(f"#!/bin/bash\n{body}", encoding="utf-8")
+    path.chmod(0o755)
+
+
+def _swap_decision(tmp_path: Path, version: str, prev: str, installed: str | None, staged: str) -> str:
+    """Run the swap's repair decision, its prompt and the snapshot choice of install.sh."""
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    decision = text[text.index("REPAIR=false\n") : text.index('if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]]')]
+    start = text.index('if [[ "${REPAIR}" == true ]]; then\n    SNAP=')
+    snap = text[start : text.index("\nfi\n", start) + 4]
+    bin_dir, staging = tmp_path / "bin", tmp_path / "staging"
+    _version_gateway(bin_dir / "defenseclaw-gateway", installed)
+    _version_gateway(staging / "bin" / "defenseclaw-gateway", staged)
+    script = tmp_path / "decide.sh"
+    script.write_text(
+        "set -euo pipefail\n"
+        'info() { echo "info: $*"; }\nask_yes_no() { echo "ask: $1"; }\ndie() { echo "die: $*"; exit 1; }\n'
+        "warn_running_sandboxes() { :; }\n"
+        + _install_sh_functions("other_build_installed")
+        + f'VERSION={version} PREV_VERSION={prev} BIN_DIR="{bin_dir}" STAGING="{staging}"\n'
+        + f'DEFENSECLAW_HOME="{tmp_path}/dc" PREVIOUS="{tmp_path}/dc/previous"\n'
+        + decision
+        + snap
+        + 'echo "REPAIR=${REPAIR} SNAP=${SNAP##*/}"\n',
+        encoding="utf-8",
+    )
+    proc = _run([str(script)], tmp_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    return proc.stdout
+
+
+def test_another_build_of_the_installed_version_keeps_the_replaced_build_for_rollback(tmp_path: Path) -> None:
+    # GAP-1063: two 1.0.4 builds (release candidates) were a same-version
+    # repair: no rollback copy was kept and nothing said so before the swap.
+    out = _swap_decision(
+        tmp_path,
+        "1.0.4",
+        "1.0.4",
+        "defenseclaw-gateway version 1.0.4 (commit=16d085f75a, built=2026-10-22)",
+        "defenseclaw-gateway version 1.0.4 (commit=78c01d5c88, built=2026-10-23)",
+    )
+    lines = out.splitlines()
+    assert lines[0] == (
+        "info: The installed DefenseClaw 1.0.4 is another build (commit 16d085f75a) than this one (commit 78c01d5c88); "
+        f"it is kept in {tmp_path}/dc/previous, so 'defenseclaw rollback' returns to it"
+    ), out
+    assert lines[1] == "ask: Replace the installed build of DefenseClaw 1.0.4?", out
+    assert lines[-1] == "REPAIR=false SNAP=previous.new", out
+
+
+@pytest.mark.parametrize(
+    ("prev", "installed", "expected"),
+    [
+        # The same build again: a repair keeps the rollback copy there is.
+        ("1.0.4", "defenseclaw-gateway version 1.0.4 (commit=78c01d5c88, built=2026-10-23)", "REPAIR=true SNAP=.repair"),
+        # An installed gateway that does not answer is repaired, as before.
+        ("1.0.4", None, "REPAIR=true SNAP=.repair"),
+        # One that answers for another version is not this version's build.
+        ("1.0.4", "defenseclaw-gateway version 1.0.3 (commit=aaaa, built=x)", "REPAIR=true SNAP=.repair"),
+        # An upgrade keeps the replaced install, as it always did.
+        ("1.0.3", "defenseclaw-gateway version 1.0.3 (commit=aaaa, built=x)", "REPAIR=false SNAP=previous.new"),
+    ],
+)
+def test_only_another_build_of_the_same_version_changes_the_repair(
+    tmp_path: Path, prev: str, installed: str | None, expected: str
+) -> None:
+    out = _swap_decision(
+        tmp_path, "1.0.4", prev, installed, "defenseclaw-gateway version 1.0.4 (commit=78c01d5c88, built=2026-10-23)"
+    )
+    assert out.splitlines()[-1] == expected, out
+    assert "another build" not in out
+    if prev == "1.0.4":
+        assert "ask: Reinstall DefenseClaw 1.0.4?" in out
+
+
+@pytest.mark.parametrize(
+    ("prev", "word"),
+    [("1.0.4", "Replaced the other build of 1.0.4"), ("1.0.3", "Upgraded from 1.0.3"), ("1.0.5", "Downgraded from 1.0.5")],
+)
+def test_the_summary_names_a_replaced_build(tmp_path: Path, prev: str, word: str) -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    helpers = text[text.index("version_key() {") : text.index("is_version() {")]
+    start = text.index('    changed="Upgraded from')
+    end = text.index("\n", text.index('printf "  ${changed}. Undo with', start))
+    script = tmp_path / "end.sh"
+    script.write_text(f"{helpers}CYAN= NC=\nVERSION=1.0.4 PREV_VERSION={prev}\n{text[start:end]}\n", encoding="utf-8")
+    assert _run([str(script)], tmp_path).stdout.strip() == f"{word}. Undo with: defenseclaw rollback"
+    assert 'if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then\n    changed="Upgraded from' in text
+
+
+def _record_saved_installer(tmp_path: Path, saved: bool) -> Path:
+    home = tmp_path / "dc"
+    (home / "installer").mkdir(parents=True)
+    (home / "receipts").mkdir()
+    (home / "receipts" / "installer.sha256").write_text("stale\n", encoding="utf-8")
+    if saved:
+        (home / "installer" / "install.sh").write_bytes(b'#!/bin/bash\nDC_VERSION="1.0.4"\n')
+    script = tmp_path / "record.sh"
+    script.write_text(
+        'set -euo pipefail\nhas() { command -v "$1" >/dev/null 2>&1; }\nwarn() { echo "warn: $*"; }\n'
+        + _install_sh_functions("sha256_of", "record_saved_installer")
+        + f'DEFENSECLAW_HOME="{home}" INSTALLER_DIR="{home}/installer" VERSION=1.0.4\nrecord_saved_installer\n',
+        encoding="utf-8",
+    )
+    proc = _run([str(script)], tmp_path)
+    assert proc.returncode == 0 and "warn" not in proc.stdout, proc.stdout + proc.stderr
+    return home
+
+
+def test_the_saved_installer_is_recorded_in_the_form_rollback_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # GAP-1067: rollback ran a saved installer an agent had changed. The
+    # install records its digest, and the shim refuses a copy that differs.
+    from defenseclaw import upgrade_shim
+
+    home = _record_saved_installer(tmp_path, saved=True)
+    saved = home / "installer" / "install.sh"
+    record = (home / "receipts" / "installer.sha256").read_text(encoding="ascii")
+    assert record == f"{hashlib.sha256(saved.read_bytes()).hexdigest()}  install.sh\n"
+    monkeypatch.setattr(upgrade_shim, "_installer_name", lambda: "install.sh")
+    upgrade_shim._check_saved_installer(str(saved), str(saved), str(home), "1.0.4")
+    saved.write_bytes(saved.read_bytes() + b"# r28sa note\n")
+    with pytest.raises(upgrade_shim.ShimError, match="is not the one DefenseClaw saved"):
+        upgrade_shim._check_saved_installer(str(saved), str(saved), str(home), "1.0.4")
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    finish = text[text.index("finish_swap() {") : text.index("\n}\n", text.index("finish_swap() {"))]
+    assert finish.index('mv -f "${tmp}" "${INSTALLER_DIR}/install.sh"') < finish.index("record_saved_installer")
+    assert finish.index('cp "${BASH_SOURCE[0]}" "${INSTALLER_DIR}/install.sh"') < finish.index("record_saved_installer")
+
+
+def test_no_saved_installer_leaves_no_record(tmp_path: Path) -> None:
+    home = _record_saved_installer(tmp_path, saved=False)
+    assert not (home / "receipts" / "installer.sha256").exists()

@@ -55,6 +55,8 @@ Rollback swaps the live install with the one the last upgrade replaced: programs
 - Rollback starts the restored gateway and waits up to 3 minutes. If it does not come up, rollback exits `1` and agent hooks are not guarded until `defenseclaw-gateway start` succeeds.
 - If an upgrade or rollback is interrupted, run the same command again. The installer first restores the install it was replacing.
 - Rolling back to 0.8.x, and the Windows 0.8.7-0.8.10 Setup case, are covered in [Upgrade from 0.8.x](/docs/appendix/upgrade-from-0-8#roll-back-to-08x).
+- Running the installer again for the build you have is a repair: it keeps the rollback copy you have. Installing another build of the same version, such as the next release candidate, works like an upgrade: the installer says before the swap that it keeps the installed build in `~/.defenseclaw/previous`, and rollback returns to that build.
+- Before it runs the saved installer, rollback checks it against the SHA-256 the install recorded in `~/.defenseclaw/receipts/installer.sha256`. If the installer was changed after the install, rollback stops and changes nothing. `defenseclaw upgrade --version <your version> --yes` saves a verified copy again.
 
 ## Update notices
 

@@ -3624,3 +3624,91 @@ def test_a_pending_lifecycle_record_closes_the_hooks_with_the_kept_closer(tmp_pa
     assert out.returncode == 0, text
     assert "RAN: " in text and ".lifecycle-closer" in text.split("RAN: ", 1)[1].splitlines()[0], text
     assert "every agent hook blocks tool calls" in text, text
+
+
+# ── GAP-1063 / GAP-1067: same-version builds and the saved installer ────────
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_windows_names_another_build_of_the_installed_version(tmp_path: Path) -> None:
+    # GAP-1063: two 1.0.4 builds were a same-version repair that kept no
+    # rollback copy and said nothing before the swap.
+    cases = [
+        ("defenseclaw-gateway version 1.0.4 (commit=16d085f75a, built=a)", "OTHER commit 16d085f75a | commit 78c01d5c88"),
+        ("defenseclaw-gateway version 1.0.4 (commit=78c01d5c88, built=b)", "SAME"),
+        ("", "SAME"),
+        ("defenseclaw-gateway version 1.0.3 (commit=aaaa, built=c)", "SAME"),
+    ]
+    rows = ", ".join(f"'{installed}'" for installed, _ in cases)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{tmp_path}'
+$Ver = '1.0.4'
+New-Item -ItemType File -Path (Join-Path $BinDir 'defenseclaw-gateway.exe') -Force | Out-Null
+$script:installed = ''
+function Get-NativeOutput([string]$FilePath, [string[]]$Arguments = @()) {{
+    if ((Split-Path -Leaf $FilePath) -eq 'defenseclaw-gateway.exe') {{ return "$script:installed`r`n" }}
+    return "defenseclaw-gateway version 1.0.4 (commit=78c01d5c88, built=b)`r`n"
+}}
+{_ps_functions("Get-OtherBuildInstalled")}
+foreach ($row in @({rows})) {{
+    $script:installed = $row
+    $other = Get-OtherBuildInstalled (Join-Path $BinDir 'staged-gateway.exe')
+    if ($other) {{ Write-Output "OTHER $($other.Installed) | $($other.Staged)" }} else {{ Write-Output 'SAME' }}
+}}
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert completed.stdout.split() == " ".join(expected for _, expected in cases).split(), out
+    text = _text()
+    swap = text[text.index("    # Swap. A same-version run") : text.index("$operation = if ($Repair)")]
+    assert "$Repair = $PrevVersion -and $PrevVersion -eq $Ver -and -not $otherBuild" in swap
+    assert "it is kept in $Previous, so 'defenseclaw rollback' returns to it" in swap
+    assert swap.index("$otherBuild = ") < swap.index("Confirm-Step") < swap.index("$Snap = if ($Repair)")
+    assert '$Snap = if ($Repair) { Join-Path $DataDir ".repair" }' in text
+    assert 'if ($PrevVersion -eq $Ver) { $changed = "Replaced the other build of $Ver" }' in text
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("saved", [True, False])
+def test_windows_records_the_saved_installer_in_the_form_rollback_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved: bool
+) -> None:
+    # GAP-1067: rollback ran a saved installer an agent had changed.
+    data = tmp_path / "dc"
+    (data / "installer").mkdir(parents=True)
+    (data / "receipts").mkdir()
+    (data / "receipts" / "installer.sha256").write_text("stale\n", encoding="ascii")
+    installer = data / "installer" / "install.ps1"
+    if saved:
+        installer.write_bytes(b'$DcVersion = "1.0.4"\r\n')
+    text = _text()
+    body = text.split("function Save-InstallerDigest {", 1)[1].split("\n}\n", 1)[0]
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$InstallerDir = '{data / "installer"}'
+$Ver = '1.0.4'
+function Write-Warn([string]$Message) {{ Write-Output "WARN $Message" }}
+{_ps_functions("Get-Sha256")}
+function Save-InstallerDigest {{{body}
+}}
+Save-InstallerDigest
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0 and "WARN" not in out, out
+    record = data / "receipts" / "installer.sha256"
+    if not saved:
+        assert not record.exists()
+        return
+    assert record.read_bytes() == f"{hashlib.sha256(installer.read_bytes()).hexdigest()}  install.ps1\n".encode()
+    monkeypatch.setattr(upgrade_shim, "_installer_name", lambda: "install.ps1")
+    upgrade_shim._check_saved_installer(str(installer), str(installer), str(data), "1.0.4")
+    installer.write_bytes(installer.read_bytes() + b"# r28sa note\r\n")
+    with pytest.raises(upgrade_shim.ShimError, match="is not the one DefenseClaw saved"):
+        upgrade_shim._check_saved_installer(str(installer), str(installer), str(data), "1.0.4")
+    save = text.split("function Save-Installer {", 1)[1].split("\n}\n", 1)[0]
+    assert save.rstrip().endswith("Save-InstallerDigest")
+    assert "    Save-Installer\n" in text.split("function Complete-Swap {", 1)[1].split("\n}\n", 1)[0]
