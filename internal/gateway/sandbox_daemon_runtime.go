@@ -820,9 +820,10 @@ func (d *SandboxDaemon) Run(ctx context.Context) error {
 	// A daemon restarted while sandboxes run (a crash) binds the ports
 	// again at once, or stops them: their hooks must reach this daemon.
 	listenersFailed := false
+	listFailed := false
 	if d.lockLifecycle(ctx) == nil {
 		if n, err := d.runningSandboxes(ctx); err != nil {
-			listenersFailed = true
+			listFailed = true
 		} else if n > 0 {
 			if err := d.ensureListeners(); err != nil {
 				d.logf("listeners at start: %v", err)
@@ -830,6 +831,9 @@ func (d *SandboxDaemon) Run(ctx context.Context) error {
 			}
 		}
 		d.unlockLifecycle()
+	}
+	if listFailed {
+		go d.retryStartupListeners(ctx)
 	}
 	if listenersFailed {
 		go d.containLostListener(ctx, "ingress")
@@ -848,6 +852,39 @@ func (d *SandboxDaemon) Run(ctx context.Context) error {
 	d.api.SetSandboxController(nil)
 	d.opts.Health.SetSandbox(StateStopped, "", nil)
 	return err
+}
+
+// retryStartupListeners waits out a transient OpenShell List failure. Only
+// an actual bind failure needs containment; a recovered List with free ports
+// lets the daemon restore its listeners without stopping healthy sandboxes.
+func (d *SandboxDaemon) retryStartupListeners(ctx context.Context) {
+	every := d.rt.recheck
+	if every <= 0 {
+		every = time.Second
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+		if err := d.lockLifecycle(ctx); err != nil {
+			return
+		}
+		n, err := d.runningSandboxes(ctx)
+		if err == nil && n > 0 {
+			if bindErr := d.ensureListeners(); bindErr != nil {
+				d.logf("listeners at start: %v", bindErr)
+				d.unlockLifecycle()
+				d.containLostListener(ctx, "ingress")
+				return
+			}
+		}
+		d.unlockLifecycle()
+		if err == nil {
+			return
+		}
+	}
 }
 
 // superviseLoop runs the idle, restart and listener checks.
