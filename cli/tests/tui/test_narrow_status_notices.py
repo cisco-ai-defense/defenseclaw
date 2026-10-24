@@ -33,8 +33,9 @@ async def test_config_editor_and_palette_status_labels_fit_at_80_columns(tmp_pat
         await pilot.press("escape", ":", *"zzqq")
         await pilot.pause()
         status = screen_text(app).splitlines()[-1]
-        assert "Command palette" in status and app.status_text in status, status
+        assert "Ready." in status and app.status_text in status, status
         assert all(name in status for name in ("Gateway", "Watchdog", "Guardrail")), status
+        assert "Tab complete" in app.hint_text
 
 
 async def test_doctor_failure_notice_keeps_the_remediation_command(tmp_path):

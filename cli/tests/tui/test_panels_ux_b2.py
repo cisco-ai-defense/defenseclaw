@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -28,6 +29,7 @@ from defenseclaw.tui.panels.registries import require_entry_intent
 from defenseclaw.tui.screens.command_preview import build_command_preview
 from defenseclaw.tui.services.registry_cache import RegistryEntryRow
 from defenseclaw.tui.services.v8_event_history import V8EventHistoryReader, V8EventHistoryRow
+from textual.geometry import Region
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -169,12 +171,23 @@ async def test_search_keeps_capitals_and_digits_leave_the_config_editor(tmp_path
         await pilot.press("escape")
         await pilot.pause()
 
-        app.action_open_command()
+        app.overview_model.set_health(
+            dataclasses.replace(app.overview_model.health, policy_generation=1, policy_digest="sha256:" + "5d" * 32)
+        )
+        app.action_switch_panel("setup")
         await pilot.pause()
-        open_hint = app.status_text
-        assert "Command palette" in open_hint
+        app.action_open_command()
+        app.notify_toast("info", "DefenseClaw 1.0.4 is available")
+        await pilot.pause()
+        status = app.query_one("#status")
+        assert status.region.bottom <= app.size.height
+        row = "".join(segment.text for segment in status.render_lines(Region(0, 0, status.size.width, 1))[0])
+        assert all(label in row for label in ("Gateway", "gen 1", "Watchdog", "Guardrail", "Ready.")), row
+        assert "…" not in row, row
+        assert "Tab complete" in app.hint_text
         app._close_command_palette()
-        assert app.status_text != open_hint
+        await pilot.pause()
+        assert "Tab complete" not in app.hint_text
 
         app.action_switch_panel("setup")
         await pilot.pause()
