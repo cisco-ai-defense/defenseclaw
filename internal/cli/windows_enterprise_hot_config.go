@@ -780,7 +780,7 @@ func windowsHotConfigTargetLabels(targets []enterprisehooks.ManifestTarget) []st
 }
 
 // windowsEnterpriseHotConfigTargetHooksProven waits, up to wait, until the
-// installed CLI's read-only live verification (enterprise hooks verify)
+// installed CLI's read-only live registration proof (enterprise hooks readiness)
 // reports each of targets verified, or pending its own Windows session (its
 // hook is registered at that logon), under the service pins. It names the
 // targets still without a verified hook at the deadline. A seam for tests.
@@ -808,14 +808,14 @@ var windowsEnterpriseHotConfigTargetHooksProven = func(ctx context.Context, layo
 	}
 }
 
-// windowsEnterpriseHotConfigUnprovenTargetHooks runs enterprise hooks verify
+// windowsEnterpriseHotConfigUnprovenTargetHooks runs enterprise hooks readiness
 // --json once and returns the targets whose row is neither verified nor
 // pending. The command exits nonzero when any target fails, so its report is
 // read whatever its exit status.
 func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installedCLI string, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget) ([]enterprisehooks.ManifestTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "verify", "--json")
+	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "readiness", "--json")
 	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
 	out, runErr := command.Output()
 	var report struct {
@@ -823,14 +823,14 @@ func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installe
 	}
 	if err := json.Unmarshal(out, &report); err != nil {
 		if runErr != nil {
-			return targets, fmt.Errorf("enterprise hooks verify: %w", runErr)
+			return targets, fmt.Errorf("enterprise hooks readiness: %w", runErr)
 		}
-		return targets, fmt.Errorf("read the enterprise hooks verify report: %w", err)
+		return targets, fmt.Errorf("read the enterprise hooks readiness report: %w", err)
 	}
 	return windowsHotConfigUnprovenTargets(targets, report.Results), nil
 }
 
-// windowsHotConfigUnprovenTargets returns each of targets whose verify row is
+// windowsHotConfigUnprovenTargets returns each of targets whose readiness row is
 // missing, or neither verified nor pending.
 func windowsHotConfigUnprovenTargets(targets []enterprisehooks.ManifestTarget, rows []enterpriseHookReconcileRow) []enterprisehooks.ManifestTarget {
 	proven := make(map[string]bool, len(rows))
