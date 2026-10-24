@@ -11,7 +11,7 @@ import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw installs one plugin file in OpenCode's plugin directory. The plugin sends each tool call to the gateway before it runs and throws if the verdict is a block. OpenCode talks to its model provider directly and no proxy is involved.
 
-For a per-user install, an explicit saved `guardrail.hook_fail_mode` chooses the gateway outage mode; an unset value follows the tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="opencode" />

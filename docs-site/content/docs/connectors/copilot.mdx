@@ -11,7 +11,7 @@ import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw installs a hook file that Copilot CLI runs on its lifecycle events. This is a hook connector: Copilot talks to GitHub directly and no proxy is involved.
 
-For a per-user install, an explicit saved `guardrail.hook_fail_mode` chooses the gateway outage mode; an unset value follows the tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
+On a per-user install, an explicitly saved `guardrail.hook_fail_mode` takes precedence over the selected tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="copilot" />
