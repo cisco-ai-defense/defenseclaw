@@ -1215,9 +1215,9 @@ defenseclaw_log_hook_delivery_failure() {
 # defenseclaw_per_user_outage_open returns 0 (true) when a per-user hook lets
 # the call through because this account's gateway is down (owner decision
 # 2026-10-23, config.HookOutageFailMode): the call's last transport status
-# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, 52, 55 or 56, with
-# no HTTP status or body after the cold-start retries, and the connector's
-# current config selects an open tier. Strict availability, this account's install
+# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, no gateway took the
+# connection after the cold-start retries, and the connector's current config
+# selects an open tier. Strict availability, this account's install
 # window, an answer the gateway gave (any HTTP status, a cut-off or
 # malformed body), another program on the port, a missing token and a
 # config that is missing, malformed or strict keep the call closed. Managed,
@@ -1230,10 +1230,7 @@ defenseclaw_per_user_outage_open() {
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
-  case "${_DC_TRANSPORT_STATUS:-}:${RESPONSE:-}" in
-    7:|7:$'\n000'|52:$'\n000'|55:$'\n000'|56:$'\n000') ;;
-    *) return 1 ;;
-  esac
+  [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || return 1
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
@@ -2698,7 +2695,7 @@ defenseclaw_keep_nul_visible() {
 # into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
-  local _dc_post_auth="" _dc_post_arg _dc_listener_status=0 _dc_post_status=0
+  local _dc_post_auth="" _dc_post_arg _dc_listener_status=0
   local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path
   local _dc_post_headers="" _dc_post_sep="" _dc_header_name _dc_header_value _dc_post_output
   local -a _dc_post_args _dc_post_auth_args
@@ -2809,16 +2806,9 @@ defenseclaw_gateway_post() {
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"
     )" || {
-      _dc_post_status=$?
       _dc_listener_status=0
       defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
-      # hook-post returns 7 only after its own connected-socket check and
-      # only when no HTTP status arrived. Preserve that result if the listener
-      # is still ours or has gone away; a foreign or unverified listener
-      # keeps every hook closed.
-      case "$_dc_post_status:$_dc_listener_status" in
-        7:1|7:2) return 7 ;;
-      esac
+      [ "$_dc_listener_status" -eq 2 ] && return 7
       return 1
     }
     printf '%s' "$_dc_post_output"
