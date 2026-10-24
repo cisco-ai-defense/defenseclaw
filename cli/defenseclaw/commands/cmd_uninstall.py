@@ -1673,6 +1673,7 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         install_root = os.path.abspath(os.path.expanduser("~/.local/bin"))
         names = (
             "defenseclaw-gateway",
+            "defenseclaw-hook-post",
             "defenseclaw-acp",
             "defenseclaw-sensor-helper",
             "defenseclaw",
@@ -2844,6 +2845,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
             if plan.platform_name == "win32"
             else {
                 "defenseclaw-gateway",
+                "defenseclaw-hook-post",
                 "defenseclaw-acp",
                 "defenseclaw-sensor-helper",
                 "defenseclaw",

@@ -6,6 +6,7 @@ package useridentity
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,25 @@ import (
 	"testing"
 	"time"
 )
+
+func TestLegacySessionFactsCacheRefreshesForShellExpiry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), SessionFactsCacheFileName)
+	now := time.Now()
+	legacy := fmt.Sprintf(`{"key":"key","env_key":"env","written_at":%q,"header":"v1;k=local"}`,
+		now.UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := cachedSessionFactsHeader(path, "key", "env", now); ok {
+		t.Fatal("legacy cache without shell-readable expiry was reused")
+	}
+	if err := writeSessionFactsCache(path, "key", "env", "v1;k=local", now); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := cachedSessionFactsHeader(path, "key", "env", now); !ok || got != "v1;k=local" {
+		t.Fatalf("current cache = %q, %t", got, ok)
+	}
+}
 
 func ccachePrincipalBytes(realm string, components ...string) []byte {
 	var buf bytes.Buffer

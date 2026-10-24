@@ -82,6 +82,12 @@ func cachedSessionFactsHeader(path, key, envKey string, now time.Time) (string, 
 	if json.Unmarshal(data, &cached) != nil || cached.Key != key || cached.EnvKey != envKey {
 		return "", false
 	}
+	// The shell hook reads this exact expiry before it can reuse the cache.
+	// Older releases wrote only written_at; refresh them once on upgrade so a
+	// 10 Hz hook does not launch the full gateway CLI for the next five minutes.
+	if cached.ExpiresAt <= now.Unix() || cached.ExpiresAt > now.Add(SessionFactsCacheTTL).Unix() {
+		return "", false
+	}
 	age := now.Sub(cached.WrittenAt)
 	if age < 0 || age >= SessionFactsCacheTTL {
 		return "", false
