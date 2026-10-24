@@ -17861,10 +17861,7 @@ producer_mappings:
   allowed_context_identity_set: identity_set.compliance_activity
   severity_policy: canonical_or_info
   mandatory_rules:
-  - control_plane_mutation
-  - approval_resolution
-  - alert_mutation
-  - protected_boundary_auth_failure
+  - always
   companion_rules: []
   compatibility:
     introduced_in: telemetry-registry-v1
