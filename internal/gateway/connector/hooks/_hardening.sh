@@ -153,6 +153,9 @@ if [ "${BASH_VERSINFO[0]:-0}" -ge 5 ]; then
 fi
 _DC_HOOK_STARTED_S="${SECONDS:-0}"
 _DC_GATEWAY_RESTART_WAITED=""
+# Set only by defenseclaw_await_gateway for this call; an inherited value can
+# never open a per-user outage (defenseclaw_per_user_outage_open).
+_DC_TRANSPORT_STATUS=""
 
 # Resource limits — bound the hook so a stuck regex / hostile input
 # can't wedge the agent. Plan F16 ask: CPU 5s, virt mem 512MiB, fds 32.
@@ -1162,7 +1165,9 @@ defenseclaw_log_hook_failure() {
     fail_open|fail_closed|diagnostic) : ;;
     *) outcome=unknown ;;
   esac
-  if [ "$outcome" = "fail_open" ]; then
+  # A per-user outage the hook lets through gets its one warning, with the
+  # cause and the fix, from defenseclaw_emit_unreachable_stderr.
+  if [ "$outcome" = "fail_open" ] && ! { [ "$category" = transport ] && defenseclaw_per_user_outage_open; }; then
     printf 'defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %s\n' \
       "$(defenseclaw_json_escape "$connector")" "$(defenseclaw_json_escape "$hook_name")" \
       "$(defenseclaw_json_escape "$category")" "$(defenseclaw_json_escape "$reason")" >&2 || true
@@ -1196,13 +1201,55 @@ defenseclaw_log_hook_failure() {
 # apply strict availability to transport failures. Diagnostic-only records and
 # payload reader fallbacks must not claim that inspection was bypassed.
 defenseclaw_log_hook_delivery_failure() {
-  local outcome
+  local outcome mode="$5"
   outcome="$(defenseclaw_hook_delivery_outcome "$4" "$5")"
-  defenseclaw_log_hook_failure "$1" "$2" "$3" "$4" "$5" "$outcome"
+  # A per-user outage the hook lets through records the open outage mode it
+  # followed, so the gateway reports the unchecked call when it is back.
+  [ "$outcome" != fail_open ] || mode=open
+  defenseclaw_log_hook_failure "$1" "$2" "$3" "$4" "$mode" "$outcome"
+}
+
+# defenseclaw_per_user_outage_open returns 0 (true) when a per-user hook lets
+# the call through because this account's gateway is down (owner decision
+# 2026-10-23, config.HookOutageFailMode): the call's last transport status
+# (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, no gateway took the
+# connection after the cold-start retries, and the connector's runtime record
+# (hooks/.hookcfg.<connector>, written by Setup from the policy tier) says
+# open with its config source. Strict availability, this account's install
+# window, an answer the gateway gave (any HTTP status, a cut-off or
+# malformed body), another program on the port, a missing token and every
+# record that is missing, malformed or closed keep the call closed. Managed,
+# socket, Secure Client and shared inspect-* hooks never take this path.
+defenseclaw_per_user_outage_open() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
+  [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
+  [ "${_DC_TRANSPORT_STATUS:-}" = 7 ] || return 1
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
+    1|true|TRUE|yes|YES) return 1 ;;
+  esac
+  # Either data folder an installer may hold (GAP-0914, defenseclaw_install_held).
+  ! defenseclaw_install_held || return 1
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
+  case "$connector" in
+    ""|inspect|*[!a-z0-9_-]*) return 1 ;;
+  esac
+  [ -n "${HOOK_DIR:-}" ] || return 1
+  record="${HOOK_DIR}/.hookcfg.${connector}"
+  recorded="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_CONNECTOR 2>/dev/null)" || return 1
+  mode="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_FAIL_MODE 2>/dev/null)" || return 1
+  source="$(defenseclaw_flat_hookcfg_value "$record" FAIL_MODE_SOURCE 2>/dev/null)" || return 1
+  [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ]
 }
 
 defenseclaw_hook_delivery_outcome() {
   local outcome=fail_closed
+  if [ "${1:-response}" = "transport" ] && defenseclaw_per_user_outage_open; then
+    printf fail_open
+    return 0
+  fi
   if [ "${2:-${FAIL_MODE:-closed}}" = "open" ] && ! defenseclaw_install_in_progress; then
     outcome=fail_open
     if [ "${1:-response}" = "transport" ] && defenseclaw_should_fail_closed_on_unreachable; then
@@ -1245,13 +1292,35 @@ defenseclaw_install_held() {
   [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
 }
 
+# defenseclaw_managed_lifecycle_held returns 0 (true) while the enterprise
+# lifecycle of this computer runs: its run marker exists, as any file type.
+# The lifecycle holds it with its lock, from before it can stop or restart
+# the gateway until the gateway it started is ready, in the root-only /run
+# (/var/run on macOS). The native hook (managedLifecycleActive) reads the
+# same marker (GAP-1074).
+defenseclaw_managed_lifecycle_held() {
+  local marker
+  for marker in /run/defenseclaw-lifecycle.active /var/run/defenseclaw-lifecycle.active; do
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # defenseclaw_install_in_progress returns 0 (true) while this account is
 # being installed or upgraded (defenseclaw_install_held of its data
-# directories). Managed and Secure Client hooks use administrator-owned
-# delivery policy instead of this per-user marker, and return 1.
+# directories). A managed hook outside Secure Client reads its computer's
+# lifecycle instead (defenseclaw_managed_lifecycle_held): an administrator's
+# open covers an outage, never an install, upgrade or lifecycle restart. A
+# Secure Client hook keeps its delivery policy and returns 1.
 defenseclaw_install_in_progress() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) return 1 ;;
+    1|true|TRUE|yes|YES)
+      [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
+      defenseclaw_managed_lifecycle_held
+      return
+      ;;
   esac
   defenseclaw_install_held
 }
@@ -1559,12 +1628,17 @@ _dc_hook_elapsed_ms() {
 defenseclaw_await_gateway() {
   local status="${1:-1}" post="${2:-}" launched="" tries=0
   local data="${DEFENSECLAW_HOME:-${DEFENSECLAW_AGENT_HOME:-${HOME}}/.defenseclaw}"
+  # The final transport status of the call: 7 (no gateway took the
+  # connection) is the one outage a per-user hook may let through
+  # (defenseclaw_per_user_outage_open).
+  _DC_TRANSPORT_STATUS="$status"
   [ -n "$post" ] || return "$status"
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return "$status" ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return "$status"
   while :; do
+    _DC_TRANSPORT_STATUS="$status"
     case "$status" in
       0) return 0 ;;
       7|52|55|56) ;;
@@ -1704,9 +1778,15 @@ defenseclaw_response_failure_reason() {
 defenseclaw_should_fail_closed_on_unreachable() {
   # An install that started since the hook selected its mode closes it.
   defenseclaw_close_during_install
-  # An older per-user script may still carry FAIL_MODE=open after the helper
-  # has been refreshed. Its baked value is never an outage exception.
-  [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = 1 ] || return 0
+  # A per-user hook bakes closed for every failure (an older script's baked
+  # open included); only an outage its runtime record opens lets the call
+  # through (defenseclaw_per_user_outage_open).
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != 1 ]; then
+    if defenseclaw_per_user_outage_open; then
+      return 1
+    fi
+    return 0
+  fi
   # Only an explicit open opens: an unset, empty or unknown FAIL_MODE closes.
   case "${FAIL_MODE:-}" in
     open) ;;
@@ -1872,6 +1952,8 @@ defenseclaw_emit_unreachable_stderr() {
   fi
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
+  elif defenseclaw_per_user_outage_open; then
+    echo "defenseclaw: gateway unreachable, allowing ${subject} unchecked (fail mode open for an outage): ${reason}. If it does not start, run \`defenseclaw doctor\`." >&2
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
@@ -1901,6 +1983,10 @@ defenseclaw_unreachable_notice_json() {
     text='DefenseClaw is not checking this session: the gateway could not start because config.yaml does not load. Run `defenseclaw config validate`, fix the file, then run `defenseclaw-gateway start`.'
   else
     text='DefenseClaw is not checking this session: this account'"'"'s gateway is not running. Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state.'
+  fi
+  # A per-user outage the hook lets through also names the repair command.
+  if defenseclaw_per_user_outage_open; then
+    text="${text} If it does not start, run \`defenseclaw doctor\`."
   fi
   printf '{"systemMessage":"%s"}\n' "$(defenseclaw_json_escape "$text")"
 }
@@ -2526,6 +2612,15 @@ defenseclaw_payload_tool_gate_max_time() {
   defenseclaw_tool_gate_max_time "$event" "$2"
 }
 
+# defenseclaw_keep_nul_visible copies a gateway answer with each NUL byte
+# turned into U+0001. Command substitution drops NUL bytes, so an answer with
+# "al<NUL>low" read as "allow" (GAP-1008). No JSON parser here (the strict
+# validator, jq, Python) accepts an unescaped control character, so such an
+# answer now fails as malformed.
+defenseclaw_keep_nul_visible() {
+  tr '\000' '\001'
+}
+
 # defenseclaw_gateway_post URL MAX_TIME BODY [CURL_ARGS...]
 #
 # POSTs BODY to the gateway at URL and prints "<response body>\n<http code>"
@@ -2658,7 +2753,9 @@ defenseclaw_gateway_post() {
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
           fi
           exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
-        ) 2>/dev/null
+        ) 2>/dev/null |
+        defenseclaw_keep_nul_visible
+      exit "${PIPESTATUS[1]}"
     )" || {
       _dc_listener_status=0
       defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
@@ -2681,5 +2778,7 @@ defenseclaw_gateway_post() {
     --max-time "$_dc_post_max_time" \
     --data-binary @/dev/fd/9 2>/dev/null \
     8< <(printf 'header = "%s"\n' "$_dc_post_auth") \
-    9< <(printf '%s' "$_dc_post_body")
+    9< <(printf '%s' "$_dc_post_body") |
+    defenseclaw_keep_nul_visible
+  return "${PIPESTATUS[0]}"
 }

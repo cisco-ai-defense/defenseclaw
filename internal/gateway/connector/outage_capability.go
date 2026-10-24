@@ -16,10 +16,6 @@ package connector
 const (
 	OutageBlocks = "blocks"
 	OutageRuns   = "runs"
-	// OutageFollowsGuardrailMode blocks in action mode and runs in observe
-	// mode, whatever fail mode is set (the per-user Cursor hooks,
-	// resolveHookFailMode).
-	OutageFollowsGuardrailMode = "guardrail-mode"
 )
 
 // Whether a connector's hooks read DEFENSECLAW_STRICT_AVAILABILITY, which
@@ -38,7 +34,8 @@ const (
 // The hook tests check each field against the rendered and running hooks.
 type HookOutage struct {
 	// PerUserClosed and PerUserOpen are the per-user hook installed with
-	// fail mode closed or open.
+	// outage mode closed (the strict policy tier) or open (default and
+	// permissive, config.HookOutageFailMode).
 	PerUserClosed string
 	PerUserOpen   string
 	// ManagedOpenUnixPerUserRoute is a managed standalone Linux or macOS hook
@@ -123,20 +120,15 @@ func ConnectorHookOutage(conn Connector) HookOutage {
 }
 
 // perUserHookOutage is the outage outcome of conn's per-user hooks installed
-// with mode, in observe and in action mode.
+// with outage mode mode; the guardrail mode does not change it.
 func perUserHookOutage(conn Connector, mode string) string {
-	observe := hookOutage(conn, SetupOpts{HookFailMode: mode, GuardrailMode: "observe"})
-	action := hookOutage(conn, SetupOpts{HookFailMode: mode, GuardrailMode: "action"})
-	if observe != action {
-		return OutageFollowsGuardrailMode
-	}
-	return observe
+	return hookOutage(conn, SetupOpts{HookFailMode: mode})
 }
 
-// hookOutage is the outage outcome of the fail mode conn's hooks are
-// rendered with for opts (CapableHookFailMode).
+// hookOutage is the outage outcome of the outage mode conn's hooks are
+// rendered with for opts (OutageHookFailMode, CapableHookFailMode).
 func hookOutage(conn Connector, opts SetupOpts) string {
-	if CapableHookFailMode(opts, conn, resolveHookFailMode(opts, conn)) == "closed" {
+	if CapableHookFailMode(opts, conn, OutageHookFailMode(opts, conn)) == "closed" {
 		return OutageBlocks
 	}
 	return OutageRuns

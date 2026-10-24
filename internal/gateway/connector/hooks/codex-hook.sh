@@ -530,15 +530,24 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 
+{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
+{{end}}
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }
 {{if not .SecureClient}}# A block or confirmation reaches Codex as the native object, which Codex acts
 # on: one that does not deny (or ask) for the registered event would let the
 # call run beside the gateway's block. The hook refuses such an answer
-# closed, in every fail mode, as the native hook does (GAP-0950).
+# closed, in every fail mode, as the native hook does (GAP-0950). A
+# confirmation with no object at all would let the call run too: Codex asks
+# only through it (GAP-0983).
+_DC_GATEWAY_ACTION="$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null)" || _DC_GATEWAY_ACTION=""
+if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && [ "$_DC_GATEWAY_ACTION" = "confirm" ] &&
+  codex_event_can_control "$BOUND_CONTRACT" "$BOUND_EVENT"; then
+  [ "$FAIL_MODE" = "closed" ] || FAIL_MODE=closed
+  fail_response "confirm without native output in gateway response"
+fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  _DC_GATEWAY_ACTION="$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null)" || _DC_GATEWAY_ACTION=""
   case "$_DC_GATEWAY_ACTION" in
     block|confirm)
       if codex_event_can_control "$BOUND_CONTRACT" "$BOUND_EVENT" &&
@@ -549,9 +558,10 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
       ;;
   esac
 fi
-{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{end}}{{if not .Sandbox}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
+{{end}}
 
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
@@ -562,6 +572,14 @@ case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
+
+{{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/codex/hook" "$RESULT"; then
+  fail_unreachable "sandbox hook receipt was not acknowledged"
+fi
+if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  echo "$OUTPUT"
+fi
+{{end}}
 
 # Codex's hook protocol is strictly EITHER structured JSON on stdout
 # with exit 0 (Codex parses the decision from the JSON) OR exit 2

@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -302,7 +303,7 @@ func TestDarwinLifecyclePinsPerAccountPreferencesAndRepairsDrift(t *testing.T) {
 	}
 	write("alice")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
-	getPins := func() map[string]managed.PolicyViewFilePin {
+	getPins := func() map[string]string {
 		t.Helper()
 		descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
 		if err != nil {
@@ -310,7 +311,7 @@ func TestDarwinLifecyclePinsPerAccountPreferencesAndRepairsDrift(t *testing.T) {
 		}
 		return descriptor.PolicyViewUserSources["codex"]
 	}
-	if pins := getPins(); len(pins) != 1 || pins["alice"].SHA256 == "" {
+	if pins := getPins(); len(pins) != 1 || pins["alice"] == "" {
 		t.Fatalf("install did not attest alice's preference: %+v", pins)
 	}
 	write("bob")
@@ -319,7 +320,7 @@ func TestDarwinLifecyclePinsPerAccountPreferencesAndRepairsDrift(t *testing.T) {
 		t.Fatalf("status hid a new per-account source: %+v", status)
 	}
 	requireOK(t, h.run(Options{Action: ActionEnsure}))
-	if pins := getPins(); len(pins) != 2 || pins["bob"].SHA256 == "" {
+	if pins := getPins(); len(pins) != 2 || pins["bob"] == "" {
 		t.Fatalf("ensure did not attest bob's preference: %+v", pins)
 	}
 }
@@ -365,9 +366,105 @@ func TestDarwinEnsureMigratesDescriptorWithoutPerAccountPins(t *testing.T) {
 		t.Fatal("ensure kept a descriptor without per-account pins")
 	}
 	updated, err := managed.ParseRuntimeDescriptor([]byte(h.read(path)))
-	if err != nil || updated.PolicyViewUserSources["codex"]["alice"].SHA256 == "" {
+	if err != nil || updated.PolicyViewUserSources["codex"]["alice"] == "" {
 		t.Fatalf("ensure did not attest alice's preference: %+v, %v", updated, err)
 	}
+}
+
+// One account entry in /Library/Managed Preferences that can not be pinned
+// (here a folder where the plist should be, and an invalid account name)
+// is reported for that account only: install and ensure succeed, the other
+// accounts keep their pins, and ensure stays a no-op for it.
+func TestDarwinUnpinnableAccountEntryDoesNotFailTheHost(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	root := h.env.P("/Library/Managed Preferences")
+	for _, dir := range []string{"alice", "bob/com.openai.codex.plist", `corp\dave`} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, file := range []string{"alice/com.openai.codex.plist", `corp\dave/com.openai.codex.plist`} {
+		if err := os.WriteFile(filepath.Join(root, file), []byte("<?xml version=\"1.0\"?><plist><dict></dict></plist>"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	descriptor, err := managed.ParseRuntimeDescriptor([]byte(h.read(h.env.Layout.DescriptorPath)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pins := descriptor.PolicyViewUserSources["codex"]; len(pins) != 1 || pins["alice"] == "" {
+		t.Fatalf("pins = %v, want only alice", pins)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if !hasWarningContaining(status, codeMachinePolicyIncomplete, "bob") || !hasWarningContaining(status, codeMachinePolicyIncomplete, "dave") {
+		t.Fatalf("status did not name the unpinnable accounts: %+v", status.Warnings)
+	}
+	if hasWarningContaining(status, codeMachinePolicyIncomplete, "alice") {
+		t.Fatalf("status blamed alice for another account's entry: %+v", status.Warnings)
+	}
+	result := h.run(Options{Action: ActionEnsure})
+	requireOK(t, result)
+	if !result.Noop {
+		t.Fatalf("ensure is not a no-op for an entry no publish can pin: %+v", result.Changes)
+	}
+}
+
+// An MDM agent that delivers the same preference bytes again (a new file,
+// new times) changes nothing: status stays clean and no re-pin is needed.
+func TestDarwinByteIdenticalPreferenceRewriteKeepsPins(t *testing.T) {
+	h := newTestHost(t, "darwin")
+	pref := h.env.P("/Library/Managed Preferences/alice/com.openai.codex.plist")
+	content := []byte("<?xml version=\"1.0\"?><plist><dict></dict></plist>")
+	if err := os.MkdirAll(filepath.Dir(pref), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pref, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	if err := os.WriteFile(pref+".mdm", content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(pref+".mdm", pref); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	if hasWarning(status, codeMachinePolicyIncomplete) {
+		t.Fatalf("a byte-identical rewrite was reported as policy drift: %+v", status.Warnings)
+	}
+	result := h.run(Options{Action: ActionEnsure})
+	requireOK(t, result)
+	if !result.Noop {
+		t.Fatalf("a byte-identical rewrite needed a re-pin: %+v", result.Changes)
+	}
+}
+
+// An administrator's valid policy edit is pinned by reconcile, which names
+// the re-pinned connector in its result.
+func TestReconcileReportsTheRepinnedPolicyView(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
+	if err := os.WriteFile(h.env.P(codexRequirements), []byte(h.read(codexRequirements)+"\n# administrator note\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result := h.run(Options{Action: ActionReconcile})
+	reported := false
+	for _, change := range result.Changes {
+		reported = reported || strings.Contains(change, "pinned the verified vendor machine-policy view of codex")
+	}
+	if !reported || hasWarning(result, codeMachinePolicyIncomplete) {
+		t.Fatalf("reconcile did not report its re-pin: changes %q warnings %+v", result.Changes, result.Warnings)
+	}
+}
+
+func hasWarningContaining(result *enterprisestatus.Result, code, text string) bool {
+	for _, warning := range result.Warnings {
+		if warning.Code == code && strings.Contains(warning.Message, text) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHookBinaryIsTheMachinePolicyCommand(t *testing.T) {
@@ -715,19 +812,21 @@ func TestTamperedCopilotDropInWithCWDIsPutBackByEnsure(t *testing.T) {
 	}
 }
 
-func TestCombinedCopilotDropInEnsureRefusesIndependentContent(t *testing.T) {
-	for _, field := range []string{"command", "operator"} {
+func TestTamperedCopilotDropInEnsureRepairsOwnHandler(t *testing.T) {
+	for _, field := range []string{"command", "operator", "timeoutSec", "type"} {
 		t.Run(field, func(t *testing.T) {
 			h := newTestHost(t, "linux")
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
 			writeFreshLedger(t, h)
 			dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+			want := h.read(dropIn)
 			var doc map[string]any
-			if err := json.Unmarshal([]byte(h.read(dropIn)), &doc); err != nil {
+			if err := json.Unmarshal([]byte(want), &doc); err != nil {
 				t.Fatal(err)
 			}
 			pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
-			pre[field] = "operator-tool"
+			pre[field] = "changed"
+			pre["cwd"] = "/tmp"
 			combined, err := json.Marshal(doc)
 			if err != nil {
 				t.Fatal(err)
@@ -737,13 +836,16 @@ func TestCombinedCopilotDropInEnsureRefusesIndependentContent(t *testing.T) {
 			}
 			verify := h.run(Options{Action: ActionVerify})
 			requireError(t, verify, codeVerify)
-			if !strings.Contains(messagesOf(verify.Errors, codeVerify), "move independent content to a separate handler") {
-				t.Fatalf("verify did not identify the combined handler: %+v", verify.Errors)
+			if !strings.Contains(messagesOf(verify.Errors, codeVerify), "next lifecycle run") {
+				t.Fatalf("verify did not identify repairable drift: %+v", verify.Errors)
+			}
+			if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{dropIn}) {
+				t.Fatalf("guardian did not find its changed drop-in: %v", got)
 			}
 			ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
-			if ensure.OK || ensure.SecurityComplete || h.read(dropIn) != string(combined) ||
-				!strings.Contains(fmt.Sprint(ensure.Errors), "move independent content to a separate handler") {
-				t.Fatalf("ensure changed or claimed the combined handler: %+v", ensure)
+			requireOK(t, ensure)
+			if h.read(dropIn) != want || len(h.env.TamperedFiles()) != 0 {
+				t.Fatalf("ensure did not restore its exact handler: %+v", ensure)
 			}
 		})
 	}

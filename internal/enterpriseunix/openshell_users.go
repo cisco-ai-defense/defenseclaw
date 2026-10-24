@@ -583,11 +583,6 @@ func (e *Env) retainedComputeRefusal(a SandboxAccount) error {
 		if !openshell.HoldsGateway(phase, rec.PhaseReason, false) {
 			continue
 		}
-		runs := false
-		if release, err := openshell.ParseVersion(rec.SessionRelease); err == nil {
-			minimum, _ := openshell.ParseVersion(openshell.SupportedMin)
-			runs = release.Compare(minimum) >= 0
-		}
 		detail := sandboxapi.DisplayText(rec.PhaseReason)
 		if runes := []rune(detail); len(runes) > 160 {
 			detail = string(runes[:160]) + "…"
@@ -596,7 +591,7 @@ func (e *Env) retainedComputeRefusal(a SandboxAccount) error {
 			detail = ": " + detail
 		}
 		return fmt.Errorf("retained MicroVM %s of %s is %s%s and may still hold compute; %s; then rerun `%s`",
-			sandboxName, a.Name, phase, detail, openshell.StopWayOn(sandboxName, phase, rec.PhaseReason, runs), e.lifecycleCommand(ActionEnsure))
+			sandboxName, a.Name, phase, detail, openshell.StopWayOn(sandboxName, phase, rec.PhaseReason, rec.SessionRelease), e.lifecycleCommand(ActionEnsure))
 	}
 	return nil
 }

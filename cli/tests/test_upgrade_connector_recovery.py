@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import types
 from pathlib import Path
@@ -54,7 +55,15 @@ def _saved(home: Path, version: str = "1.0.2") -> Path:
     saved = home / "installer" / "install.ps1"
     saved.parent.mkdir(parents=True)
     saved.write_bytes(f'$DcVersion = "{version}"\n# current recovery controller\n'.encode())
+    _record(home, saved)
     return saved
+
+
+def _record(home: Path, saved: Path) -> None:
+    # The digest the install records with the installer it saves (GAP-1067).
+    record = home / "receipts" / "installer.sha256"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_bytes(f"{hashlib.sha256(saved.read_bytes()).hexdigest()}  install.ps1\n".encode())
 
 
 @pytest.mark.parametrize("local", [False, True])
@@ -77,7 +86,7 @@ def test_windows_downgrade_runs_a_copy_of_current_installer(routing, monkeypatch
     )
 
 
-@pytest.mark.parametrize("kind", ["missing", "directory", "wrong-version", "unstamped"])
+@pytest.mark.parametrize("kind", ["missing", "directory", "wrong-version", "unstamped", "changed", "unrecorded"])
 def test_windows_downgrade_refuses_without_current_controller(routing, kind):
     home, launches = routing
     if kind == "directory":
@@ -85,7 +94,16 @@ def test_windows_downgrade_refuses_without_current_controller(routing, kind):
     elif kind == "wrong-version":
         _saved(home, "1.0.1")
     elif kind == "unstamped":
-        _saved(home).write_bytes(b"# unknown controller\n")
+        saved = _saved(home)
+        saved.write_bytes(b"# unknown controller\n")
+        _record(home, saved)
+    elif kind == "changed":
+        # GAP-1067: a controller changed after the install saved it.
+        saved = _saved(home)
+        saved.write_bytes(saved.read_bytes() + b"# r28sa note\n")
+    elif kind == "unrecorded":
+        _saved(home)
+        (home / "receipts" / "installer.sha256").unlink()
 
     with pytest.raises(upgrade_shim.ShimError, match="Repair DefenseClaw 1.0.2"):
         upgrade_shim._upgrade("1.0.1", yes=True)
@@ -198,6 +216,7 @@ def test_windows_saved_controller_read_is_bounded(routing, command, extra_byte):
     saved = _saved(home)
     body = saved.read_bytes()
     saved.write_bytes(body + b"#" * (4 * 1024 * 1024 + int(extra_byte) - len(body)))
+    _record(home, saved)
 
     def invoke():
         return upgrade_shim._upgrade("1.0.1", yes=True) if command == "upgrade" else upgrade_shim._rollback(yes=True)

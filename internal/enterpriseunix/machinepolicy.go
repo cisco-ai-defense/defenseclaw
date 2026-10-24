@@ -17,9 +17,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"sort"
 	"strconv"
@@ -417,17 +417,17 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 	policyOpts.Root = env.Root
 	policyOpts.SkipTrustChecks = env.Root != "" // rooted test host
 	p.render.PolicyViewDigests = make(map[string]string, len(covered))
-	p.render.PolicyViewUserSources = make(map[string]map[string]managed.PolicyViewFilePin)
+	p.render.PolicyViewUserSources = make(map[string]map[string]string)
 	for _, name := range covered {
 		digest, digestErr := enterprisepolicy.PolicyViewDigest(policyOpts, name)
 		if digestErr != nil {
 			return &codedError{code: codeMachinePolicy, err: fmt.Errorf("pin %s policy view: %w", name, digestErr)}
 		}
 		p.render.PolicyViewDigests[name] = digest
-		pins, pinErr := enterprisepolicy.PolicyViewUserPins(policyOpts, name)
-		if pinErr != nil {
-			return &codedError{code: codeMachinePolicy, err: fmt.Errorf("pin %s per-account policy view: %w", name, pinErr)}
-		}
+		// An account entry that can not be pinned leaves only that
+		// account's hook unproven (it alerts and keeps enforcing); it never
+		// fails the host. describe reports it.
+		pins, _, _ := enterprisepolicy.PolicyViewUserPins(policyOpts, name)
 		if len(pins) != 0 {
 			p.render.PolicyViewUserSources[name] = pins
 		}
@@ -458,52 +458,64 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 	return &codedError{code: codeApply, err: errors.New("the plan has no runtime descriptor")}
 }
 
-// policyViewPinProblems reports why a managed hook would refuse its current
-// policy view. Ensure uses it to migrate older descriptors and repair drift;
-// status and verify report the same observed fact to the administrator.
-func (l *lifecycle) policyViewPinProblems(connectors []string) []string {
+// policyViewAlert is how status names what an unproven policy view does to
+// a managed hook: it never refuses a call because of it.
+const policyViewAlert = "keeps enforcing the managed policy while the gateway raises a policy-view alert"
+
+// policyViewPinProblems reports where a managed hook can not prove its
+// policy view against the trusted descriptor. drift is what a new publish
+// repairs, so ensure migrates older descriptors and re-pins on it;
+// unpinnable is an account entry no publish can pin (an invalid name, a
+// symlinked folder, an unreadable or oversize file), which leaves ensure a
+// no-op. Status and verify report both to the administrator.
+func (l *lifecycle) policyViewPinProblems(connectors []string) (drift, unpinnable []string) {
 	if len(connectors) == 0 {
-		return nil
+		return nil, nil
 	}
 	env := l.env
 	path := env.P(env.Layout.DescriptorPath)
 	if err := env.Trust(path, TrustAdminFile); err != nil {
-		return []string{fmt.Sprintf("the managed runtime descriptor is not trusted: %v", err)}
+		return []string{fmt.Sprintf("the managed runtime descriptor is not trusted: %v", err)}, nil
 	}
 	data, err := readBounded(path, 64<<10)
 	if err != nil {
-		return []string{fmt.Sprintf("cannot read the managed runtime descriptor: %v", err)}
+		return []string{fmt.Sprintf("cannot read the managed runtime descriptor: %v", err)}, nil
 	}
 	descriptor, err := managed.ParseRuntimeDescriptor(data)
 	if err != nil {
-		return []string{fmt.Sprintf("cannot parse the managed runtime descriptor: %v", err)}
+		return []string{fmt.Sprintf("cannot parse the managed runtime descriptor: %v", err)}, nil
 	}
 	opts := enterprisepolicy.LayoutOptions(env.Layout, "", "")
 	opts.GOOS, opts.Root, opts.SkipTrustChecks = env.GOOS, env.Root, env.Root != ""
-	var problems []string
 	for _, name := range connectors {
 		pin := descriptor.PolicyViewDigests[name]
 		observed, err := enterprisepolicy.PolicyViewDigest(opts, name)
 		switch {
 		case pin == "":
-			problems = append(problems, fmt.Sprintf("%s has no trusted policy-view digest; its managed hook refuses calls", name))
+			drift = append(drift, fmt.Sprintf("%s has no trusted policy-view digest; its managed hook %s", name, policyViewAlert))
 		case err != nil:
-			problems = append(problems, fmt.Sprintf("%s policy view cannot be read: %v; its managed hook refuses calls", name, err))
+			drift = append(drift, fmt.Sprintf("%s policy view cannot be read: %v; its managed hook %s", name, err, policyViewAlert))
 		case observed != pin:
-			problems = append(problems, fmt.Sprintf("%s policy view differs from its trusted digest; its managed hook refuses calls", name))
+			drift = append(drift, fmt.Sprintf("%s policy view differs from its trusted digest; its managed hook %s", name, policyViewAlert))
 		}
-		currentUsers, userErr := enterprisepolicy.PolicyViewUserPins(opts, name)
+		currentUsers, unpinned, userErr := enterprisepolicy.PolicyViewUserPins(opts, name)
 		if userErr != nil {
-			problems = append(problems, fmt.Sprintf("%s per-account policy views cannot be attested: %v; affected managed hooks refuse calls", name, userErr))
-		} else if pinnedUsers := descriptor.PolicyViewUserSources[name]; len(currentUsers) != len(pinnedUsers) || len(currentUsers) != 0 && !reflect.DeepEqual(currentUsers, pinnedUsers) {
-			problems = append(problems, fmt.Sprintf("%s per-account policy views differ from their trusted attestations; affected managed hooks refuse calls", name))
+			unpinnable = append(unpinnable, fmt.Sprintf("%s per-account policy views cannot be pinned: %v; the managed hook of each account with a preference %s", name, userErr, policyViewAlert))
+			continue
+		}
+		for _, problem := range unpinned {
+			unpinnable = append(unpinnable, problem+"; that account's managed hook "+policyViewAlert)
+		}
+		if !maps.Equal(currentUsers, descriptor.PolicyViewUserSources[name]) {
+			drift = append(drift, fmt.Sprintf("%s per-account policy views differ from their trusted pins; the affected accounts' managed hooks %s", name, policyViewAlert))
 		}
 	}
-	return problems
+	return drift, unpinnable
 }
 
 func (l *lifecycle) policyViewPinsCurrent(connectors []string) bool {
-	return len(l.policyViewPinProblems(connectors)) == 0
+	drift, _ := l.policyViewPinProblems(connectors)
+	return len(drift) == 0
 }
 
 // restoreMachinePolicy puts vendor machine policy back to the previous
@@ -963,7 +975,7 @@ func (l *lifecycle) repinVerifiedMachinePolicyView(record *Deployment, cfg *conf
 	opts := enterprisepolicy.LayoutOptions(env.Layout, "", "")
 	opts.GOOS, opts.Root, opts.SkipTrustChecks = env.GOOS, env.Root, env.Root != ""
 	before := make(map[string]string, len(record.MachinePolicyConnectors))
-	beforeUsers := make(map[string]map[string]managed.PolicyViewFilePin)
+	beforeUsers := make(map[string]map[string]string)
 	for _, name := range record.MachinePolicyConnectors {
 		digest, err := enterprisepolicy.PolicyViewDigest(opts, name)
 		if err != nil {
@@ -971,12 +983,8 @@ func (l *lifecycle) repinVerifiedMachinePolicyView(record *Deployment, cfg *conf
 			return
 		}
 		before[name] = digest
-		pins, pinErr := enterprisepolicy.PolicyViewUserPins(opts, name)
-		if pinErr != nil {
-			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot re-pin %s per-account policy view: %v", name, pinErr))
-			return
-		}
-		beforeUsers[name] = pins
+		// describe reports an account entry that can not be pinned.
+		beforeUsers[name], _, _ = enterprisepolicy.PolicyViewUserPins(opts, name)
 	}
 	verified, verifyErr := env.MachinePolicy.Verify(cfg)
 	if verifyErr != nil || !verified.Complete() ||
@@ -999,7 +1007,8 @@ func (l *lifecycle) repinVerifiedMachinePolicyView(record *Deployment, cfg *conf
 		return
 	}
 	digests := make(map[string]string, len(record.MachinePolicyConnectors))
-	users := make(map[string]map[string]managed.PolicyViewFilePin)
+	users := make(map[string]map[string]string)
+	var repinned []string
 	for _, name := range record.MachinePolicyConnectors {
 		digest, err := enterprisepolicy.PolicyViewDigest(opts, name)
 		if err != nil {
@@ -1011,17 +1020,16 @@ func (l *lifecycle) repinVerifiedMachinePolicyView(record *Deployment, cfg *conf
 			return
 		}
 		digests[name] = digest
-		pins, pinErr := enterprisepolicy.PolicyViewUserPins(opts, name)
-		if pinErr != nil {
-			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot re-pin %s per-account policy view: %v", name, pinErr))
-			return
-		}
-		if !reflect.DeepEqual(pins, beforeUsers[name]) {
+		pins, _, _ := enterprisepolicy.PolicyViewUserPins(opts, name)
+		if !maps.Equal(pins, beforeUsers[name]) {
 			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("%s per-account policy view changed during root verification; run ensure after the policy update finishes", name))
 			return
 		}
 		if len(pins) != 0 {
 			users[name] = pins
+		}
+		if digest != descriptor.PolicyViewDigests[name] || !maps.Equal(pins, descriptor.PolicyViewUserSources[name]) {
+			repinned = append(repinned, name)
 		}
 	}
 	descriptor.PolicyViewDigests = digests
@@ -1051,5 +1059,7 @@ func (l *lifecycle) repinVerifiedMachinePolicyView(record *Deployment, cfg *conf
 		return
 	}
 	*record = committed
-	l.noteChange("pinned the verified vendor machine-policy view in the runtime descriptor")
+	// Reported for every action, reconcile included: an administrator's
+	// policy edit becomes the trusted view only here.
+	r.Changes = append(r.Changes, fmt.Sprintf("pinned the verified vendor machine-policy view of %s in the runtime descriptor", strings.Join(repinned, ", ")))
 }

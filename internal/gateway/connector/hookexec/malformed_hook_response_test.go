@@ -25,6 +25,17 @@ func TestMalformedGatewayHookRefusalIsClosedEvenInPerUserOpenMode(t *testing.T) 
 	}
 }
 
+func TestPerUserOpenCannotAllowCompletedGatewayErrorStatus(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusConflict, http.StatusInternalServerError} {
+		result := run(t, "codex", &stubRT{status: status, body: `{"error":"gateway refused request"}`},
+			func(o *Options) { o.FailMode = "open" })
+		if !blocked(result) {
+			t.Errorf("HTTP %d was allowed in per-user open mode: code=%d stdout=%q stderr=%q",
+				status, result.code, result.stdout, result.stderr)
+		}
+	}
+}
+
 // A duplicated event key can make the hook's local JSON decoder see only the
 // later PostToolUse spelling. A gateway parse rejection must still be a native
 // failure, never the empty allow that the original driven hook produced.

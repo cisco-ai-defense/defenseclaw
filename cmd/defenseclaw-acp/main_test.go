@@ -72,7 +72,6 @@ func TestRemovedBindingAnswersInitializeWithPlainError(t *testing.T) {
 // A managed host has only the gateway binary; the guard told its users to
 // run the Python CLI commands of a per-user install (GAP-0270).
 func TestManagedGuardStartFailureNamesTheGatewaySetup(t *testing.T) {
-	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
 	dir := t.TempDir()
 	gateway, want := filepath.Join(dir, "defenseclaw-gateway"), ""
 	if runtime.GOOS == "windows" {
@@ -109,8 +108,8 @@ func TestManagedGuardStartFailureNamesTheGatewaySetup(t *testing.T) {
 	}
 }
 
-// An explicit Secure Client profile keeps main's available setup guidance
-// byte for byte, even with an old managed-custody lock and adjacent gateway.
+// A Secure Client host keeps main's available setup guidance byte for byte,
+// even with an old managed-custody lock and adjacent gateway.
 func TestSecureClientGuardStartupKeepsMainErrorBytes(t *testing.T) {
 	dir := t.TempDir()
 	gateway := filepath.Join(dir, "defenseclaw-gateway")
@@ -125,10 +124,10 @@ func TestSecureClientGuardStartupKeepsMainErrorBytes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileSecureClient)
-	previous := guardExecutable
-	t.Cleanup(func() { guardExecutable = previous })
+	previous, previousSC := guardExecutable, secureClientHost
+	t.Cleanup(func() { guardExecutable, secureClientHost = previous, previousSC })
 	guardExecutable = func() (string, error) { return filepath.Join(dir, "defenseclaw-acp"), nil }
+	secureClientHost = func() bool { return true }
 	for _, test := range []struct {
 		err  error
 		want string

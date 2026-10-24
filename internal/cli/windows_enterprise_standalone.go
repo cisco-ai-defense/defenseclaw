@@ -488,22 +488,24 @@ func windowsEnterpriseInstallerRequestEnvironment(ctx context.Context, args []st
 // access included (q-win-lifecycle review, loop round 3): a deferred install over an installed deployment and, while the
 // deployment waits for its deferred configuration, an install or upgrade,
 // or a repair without both --config and --manifest or with --no-start. With
-// a pending transaction the installer recovers it first, which can change
-// the record, so the installer decides; so it does for a record this cannot
-// read.
+// a record of an interrupted lifecycle of this run's scope
+// (windowsEnterpriseStandaloneRecoveryPending) the installer recovers it
+// first, which can change the record (a first install interrupted before
+// its pending transaction cleared rolls back to no deployment), so the
+// installer decides; so it does for a deployment record this cannot read.
 func refuseWindowsEnterpriseStandaloneDeferredState(action string, opts *windowsEnterpriseLifecycleOptions) error {
 	if opts == nil || (action != "install" && action != "upgrade" && action != "repair") {
 		return nil
 	}
 	deployment, err := windowsEnterpriseTargetDeployment(opts)
-	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled {
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || windowsEnterpriseStandaloneRecoveryPending(opts) {
 		return nil
 	}
 	if action == "install" && opts.deferredConfig {
 		return windowsEnterpriseInvalidArguments("deferred Install without Config and Manifest requires an empty deployment; " +
 			"use Repair or Ensure for the installed deployment (nothing was changed)")
 	}
-	if !deployment.DeferredConfigPending || windowsEnterpriseStandaloneTransactionPending() {
+	if !deployment.DeferredConfigPending {
 		return nil
 	}
 	switch {

@@ -10,6 +10,7 @@ from defenseclaw.commands import cmd_guardrail
 
 from tests.test_fail_mode_runtime import _runtime_cfg
 from tests.test_fcux_cli_messages_b11 import _app, _fail_mode, _roster
+from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 
 def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -39,14 +40,15 @@ def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.Mo
 
 
 def test_fail_mode_open_on_per_user_openclaw_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # Per-user profiles remain closed even when the selected connector has no hooks.
+    # A per-user value the policy tier does not give is refused, also for a
+    # connector without hooks (oss-outage-open).
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"openclaw": ""})
     cfg.guardrail.connectors = {}
     cfg.guardrail.connector = "openclaw"
     cfg.guardrail.hook_fail_mode = "closed"
     result = _fail_mode(cfg, "open")
     assert result.exit_code == 1, result.output
-    assert "Fail-open is reserved for administrator-managed hosts during an outage" in result.output
+    assert "follows the policy tier" in " ".join(result.output.split())
     assert cfg.guardrail.hook_fail_mode == "closed"
 
     bare = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [], obj=_app(cfg))

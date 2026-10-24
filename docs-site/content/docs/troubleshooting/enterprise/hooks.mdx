@@ -44,19 +44,19 @@ An antivirus or EDR quarantined `C:\Program Files\Cisco\DefenseClaw\bin\defensec
 
 ## `security_complete` is `false` on Windows
 
-Claude Code is enabled and its attestation is not recorded, or no Codex, Claude Code or Cursor row is enabled in the target manifest.
+Claude Code is enabled and its attestation is not recorded, no Codex, Claude Code or Cursor row is enabled in the target manifest, or Codex or Claude Code is enabled (`hook_process_fail_open`).
 
-**Fix.** Run `verify` and read the warning `security_incomplete`. See [Health fields](/docs/enterprise/operate/operations#health-fields).
+**Fix.** Run `verify` and read the warning `security_incomplete`. See [Health fields](/docs/enterprise/operate/operations#health-fields). `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
 
-**Check.** `security_complete` is `true`.
+**Check.** `security_complete` is `true`, or `false` with `hook_process_fail_open` as its only warning.
 
 ## `security_complete` is `false` on Linux or macOS
 
-The sensor helper is not running, the run had errors, an agent is `agent_unprotected` or `hook_contract_unverified`, a user target is `guardian_target_failed`, or the config enables no agent (`no_connectors_enabled`).
+The sensor helper is not running, the run had errors, an agent is `agent_unprotected` or `hook_contract_unverified`, a user target is `guardian_target_failed`, the config enables no agent (`no_connectors_enabled`), or Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity is enabled (`hook_process_fail_open`).
 
-**Fix.** Run `verify` and read the errors and warnings.
+**Fix.** Run `verify` and read the errors and warnings. `hook_process_fail_open` is a known agent limit: protect the hook process with application control or EDR.
 
-**Check.** `security_complete` is `true`.
+**Check.** `security_complete` is `true`, or `false` with `hook_process_fail_open` as its only warning.
 
 ## `verify` fails because of one user (`guardian_target_failed`)
 

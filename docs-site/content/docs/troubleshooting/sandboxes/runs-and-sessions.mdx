@@ -8,7 +8,7 @@ keywords:
   - EROFS
 ---
 
-These problems appear while a sandbox runs or when you pull its work back.
+These problems appear while a sandbox runs or when you pull its work back. Before following a stop step below, save or sync accessible guest work; on a copy-mode MicroVM, pull work you need on the host. Then use `defenseclaw sandbox stop NAME`, which requests a disk sync before stopping a running MicroVM. A failed sync can lose changes since the last successful one.
 
 ## Copy mode, `--context` and the copy limit
 

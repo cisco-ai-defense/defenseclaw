@@ -13,6 +13,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -21,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // The Unix enumerator holds every row of the Kiro forms table: discovery's
@@ -90,8 +92,8 @@ func withAccount(reports []UnprotectedAgent) []UnprotectedAgent {
 
 // DiscoverUnixKiroIDEForms reports an installed IDE whose product.json cannot
 // be read as an unknown form (it was skipped, so a supported kiro-cli or
-// another IDE hid it), and PutUnixKiroIDEForms keeps the least protected
-// install of each kind.
+// another IDE hid it), and PutUnixKiroIDEForms keeps every install of each
+// kind.
 func TestDiscoverUnixKiroIDEFormsReportsAnUnreadableInstall(t *testing.T) {
 	origGOOS := unixAgentAppBundleGOOS
 	unixAgentAppBundleGOOS = "linux"
@@ -120,8 +122,9 @@ func TestDiscoverUnixKiroIDEFormsReportsAnUnreadableInstall(t *testing.T) {
 		{Kind: KiroFormMachineIDE, Version: "1.0.150"},
 		user[0],
 	}, versions, reasons)
-	if versions[KiroIDEMachineDiscoveryKey] != "1.0.150" || !UnixAgentInstalledWithoutVersion(strings.TrimPrefix(reasons[KiroIDEDiscoveryKey], "Kiro IDE ")) {
-		t.Fatalf("discovery result versions=%v reasons=%v, want the old machine IDE and the unknown user IDE", versions, reasons)
+	if versions[KiroIDEMachineDiscoveryKey] != "1.2.4" || versions[KiroIDEMachineDiscoveryKey+".2"] != "1.0.150" ||
+		!UnixAgentInstalledWithoutVersion(strings.TrimPrefix(reasons[KiroIDEDiscoveryKey], "Kiro IDE ")) {
+		t.Fatalf("discovery result versions=%v reasons=%v, want both machine IDEs and the unknown user IDE", versions, reasons)
 	}
 	report := applyKiroIDESurface("alice", 501, versions, reasons)
 	if len(report) != 2 || versions["kiro"] != "2.27.1" {
@@ -145,5 +148,101 @@ func TestKiroActionInstallRefusesAnUnreadVersion(t *testing.T) {
 	}
 	if err := validateHookContract("action", kiro, connector.SetupOpts{DataDir: t.TempDir(), AgentVersion: "2.27.1"}); err != nil {
 		t.Fatalf("action install of kiro-cli 2.27.1: %v", err)
+	}
+}
+
+// Review loop round 2: with /usr/share/kiro holding a supported Kiro IDE and
+// /opt/Kiro an older or unreadable one, PutUnixKiroIDEForms kept only the
+// least protected machine install, so with no supported kiro-cli the user
+// was never enrolled. Every install of a kind now reaches AssessKiro: the
+// supported one enrolls the user, and each one that is not protected is
+// still reported, whatever the discovery order.
+func TestPutUnixKiroIDEFormsKeepsASupportedInstallBesideAnUnsupportedOne(t *testing.T) {
+	supported := KiroForm{Kind: KiroFormMachineIDE, Version: "1.2.4"}
+	older := KiroForm{Kind: KiroFormMachineIDE, Version: "1.0.150"}
+	unread := KiroForm{Kind: KiroFormMachineIDE, Unread: "Kiro IDE " + UnixAgentUnversionedReasonPrefix + "/opt/Kiro/resources/app/product.json"}
+	userUnread := KiroForm{Kind: KiroFormUserIDE, Unread: "Kiro IDE " + UnixAgentUnversionedReasonPrefix + "/home/alice/Kiro/resources/app/product.json"}
+	userSupported := KiroForm{Kind: KiroFormUserIDE, Version: "1.2.4"}
+	cases := []struct {
+		name  string
+		cli   string // versions["kiro"]
+		forms []KiroForm
+		codes []string
+	}{
+		{"supported then unreadable", "", []KiroForm{supported, unread}, []string{UnprotectedCodeHookContractUnverified}},
+		{"unreadable then supported", "", []KiroForm{unread, supported}, []string{UnprotectedCodeHookContractUnverified}},
+		{"supported then older", "", []KiroForm{supported, older}, []string{UnprotectedCodeKiroIDEBelowGlobalHooksFloor}},
+		{"older then supported", "", []KiroForm{older, supported}, []string{UnprotectedCodeKiroIDEBelowGlobalHooksFloor}},
+		{"older, unreadable and supported", "", []KiroForm{older, unread, supported},
+			[]string{UnprotectedCodeHookContractUnverified, UnprotectedCodeKiroIDEBelowGlobalHooksFloor}},
+		{"user IDE beside a user IDE", "", []KiroForm{userUnread, userSupported}, []string{UnprotectedCodeHookContractUnverified}},
+		{"kiro-cli below its floor", "kiro-cli 1.20.0", []KiroForm{older, supported},
+			[]string{UnprotectedCodeKiroCLIBelowHookFloor, UnprotectedCodeKiroIDEBelowGlobalHooksFloor}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			versions, reasons := map[string]string{}, map[string]string{}
+			if tc.cli != "" {
+				versions["kiro"] = tc.cli
+			}
+			PutUnixKiroIDEForms(tc.forms, versions, reasons)
+			reports := applyKiroIDESurface("alice", 501, versions, reasons)
+			if want := "1.2.4" + KiroIDEVersionSuffix; versions["kiro"] != want {
+				t.Fatalf("kiro row version = %q, want the supported IDE %q (reports %+v)", versions["kiro"], want, reports)
+			}
+			var codes []string
+			for _, report := range reports {
+				codes = append(codes, report.Code)
+			}
+			sort.Strings(codes)
+			if !slices.Equal(codes, tc.codes) {
+				t.Fatalf("reported %v, want %v: %+v", codes, tc.codes, reports)
+			}
+			for key := range versions {
+				if key != "kiro" {
+					t.Fatalf("discovery key %q left after applyKiroIDESurface: %v", key, versions)
+				}
+			}
+			if len(reasons) != 0 {
+				t.Fatalf("discovery reasons left after applyKiroIDESurface: %v", reasons)
+			}
+		})
+	}
+}
+
+// The same host through EnumerateUnix: a supported machine IDE next to an
+// older one, with no kiro-cli, creates the Kiro row at the IDE's version.
+func TestEnumerateUnixEnrollsASupportedMachineKiroIDEBesideAnOlderOne(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	opts := UnixEnumerateOptions{
+		Resolver: &fakeResolver{
+			accounts: map[string]unixidentity.Account{"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"}},
+			listed:   []string{"alice"},
+		},
+		HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+	}
+	opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+		versions, reasons := map[string]string{}, map[string]string{}
+		PutUnixKiroIDEForms([]KiroForm{
+			{Kind: KiroFormMachineIDE, Version: "1.2.4"},
+			{Kind: KiroFormMachineIDE, Unread: "Kiro IDE " + UnixAgentUnversionedReasonPrefix + "/opt/Kiro/resources/app/product.json"},
+		}, versions, reasons)
+		return versions, reasons, nil
+	}
+	manifest, report, err := EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != "1.2.4"+KiroIDEVersionSuffix || manifest.Targets[0].User != "alice" {
+		t.Fatalf("rows = %+v, want one Kiro row at the supported IDE", manifest.Targets)
+	}
+	if len(report.Unprotected) != 1 || report.Unprotected[0].Code != UnprotectedCodeHookContractUnverified {
+		t.Fatalf("unprotected = %+v, want the unreadable /opt/Kiro install reported", report.Unprotected)
 	}
 }
