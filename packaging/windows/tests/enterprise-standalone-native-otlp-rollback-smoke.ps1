@@ -217,9 +217,10 @@ try {
                 -Snapshot $saved -SnapshotPath $fixture.snapshot `
                 -Layout $fixture.layout
             if (@($script:DefenseClawRollbackLeftovers | Where-Object {
+                $_ -match '^native OTLP user rollback: ' -and
                 $_ -match 'preimage could not be captured'
             }).Count -lt 2) {
-                throw 'uncaptured linked user files were not reported on rollback'
+                throw 'uncaptured linked user files were not tagged on rollback'
             }
             if ([IO.File]::ReadAllText((Join-Path $outside 'config.toml')) -cne
                     'outside Codex stays unchanged' -or

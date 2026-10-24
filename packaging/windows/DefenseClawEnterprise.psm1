@@ -14722,12 +14722,12 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
 function Add-DefenseClawUserNativeOTLPRollbackLeftover {
     param([Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Reason)
-    $message = $Path + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic `
+    $message = 'native OTLP user rollback: ' + $Path + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic `
         -Value $Reason -MaxLength 512)
     if (@($script:DefenseClawRollbackLeftovers).Count -lt 256) {
         $script:DefenseClawRollbackLeftovers += $message
     }
-    Write-DefenseClawLifecyclePhase -Stage ('native OTLP rollback left ' + $message)
+    Write-DefenseClawLifecyclePhase -Stage ('rollback left ' + $message)
 }
 
 function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
