@@ -2951,6 +2951,11 @@ func loadConfigSourceCheckedWithLayout(
 		return nil, err
 	}
 	applySecureClientScannerDefaults(&cfg)
+	// Viper supplies the historical closed default even when no value was
+	// saved. Preserve that distinction for the OSS outage tier decision.
+	if !managed.IsManagedEnterprise(cfg.DeploymentMode) && !viper.InConfig("guardrail.hook_fail_mode") {
+		cfg.Guardrail.HookFailMode = ""
+	}
 	cfg.CiscoAIDefense.protectedCredentialRequired = cfg.StandaloneEnterprise()
 	if ai := cfg.Enterprise.Inspection.AIDefense; cfg.StandaloneEnterprise() && ai.Enabled {
 		cfg.CiscoAIDefense.protectedCredential = strings.TrimSpace(ai.Credential)

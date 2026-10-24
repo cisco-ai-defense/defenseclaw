@@ -9,6 +9,7 @@ keywords:
 
 Reference for the [Claude Code connector](/docs/connectors/claudecode). Claude Code talks to `api.anthropic.com` directly. DefenseClaw observes host activity through [Anthropic's hooks](https://code.claude.com/docs/en/hooks). Only isolated OpenShell also uses native OpenTelemetry. No proxy listener is involved.
 
+For a per-user install, an explicit saved `guardrail.hook_fail_mode` chooses the gateway outage mode; an unset value follows the tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Install surface
 
 ### Platform status

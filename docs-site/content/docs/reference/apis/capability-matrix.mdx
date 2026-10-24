@@ -53,16 +53,17 @@ One with **Block**, **Native ask** and **Fail-closed** all yes, and a managed-ti
 ## Gateway outage
 
 What each connector's hooks do with a call they can't check because the
-gateway is not running, is still restarting or gives no answer in time. This
+gateway is not running, is still restarting or refuses the connection before accepting the call. This
 table is the only place the docs give it per connector, and it is checked
 against the hook code on every change.
 
 <OutageMatrix />
 
-- **Per-user** is an install without a managed deployment. Its outage mode
-  follows the connector's policy tier (rule pack): the default (balanced) and
-  permissive policies let the call run with a warning and a
-  `hook-failures.jsonl` record, the strict policy blocks it. Every other
+- **Per-user** is an install without a managed deployment. An explicitly saved
+  `guardrail.hook_fail_mode` chooses its outage mode. When that setting is
+  absent, the connector's policy tier (rule pack) decides: the default
+  (balanced) and permissive policies let the call run with one warning and a
+  `hook-failures.jsonl` record, and the strict policy blocks it. Every other
   failure blocks in every tier
   ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail

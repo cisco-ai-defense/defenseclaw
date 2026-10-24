@@ -34,6 +34,14 @@ func installNativeGatewayForHookTest(t *testing.T, home string, hookDirs ...stri
 			return
 		}
 		nativeGatewayForHookTests.path = filepath.Join(nativeGatewayForHookTests.dir, "defenseclaw-gateway")
+		if prebuilt := os.Getenv("DC_TEST_NATIVE_GATEWAY"); filepath.IsAbs(prebuilt) {
+			body, readErr := os.ReadFile(prebuilt)
+			if readErr == nil {
+				readErr = os.WriteFile(nativeGatewayForHookTests.path, body, 0o700)
+			}
+			nativeGatewayForHookTests.err = readErr
+			return
+		}
 		cmd := exec.Command("go", "build", "-o", nativeGatewayForHookTests.path, "./cmd/defenseclaw")
 		cmd.Dir = filepath.Join("..", "..", "..")
 		if output, buildErr := cmd.CombinedOutput(); buildErr != nil {
@@ -79,16 +87,18 @@ func linkGatewayBinaryToHookDirForTest(t *testing.T, hookDir, binary string) {
 		if installedErr != nil || sourceErr != nil {
 			t.Fatalf("inspect hook helper %s and fixture %s: %v, %v", target, binary, installedErr, sourceErr)
 		}
-		if os.SameFile(installed, source) {
-			return
+		if !os.SameFile(installed, source) {
+			// A test may render another hook beside this one with a different
+			// stub. Each call is sequential; replace the previous fixture.
+			if err := os.Remove(target); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Link(binary, target); err != nil {
+				t.Fatal(err)
+			}
 		}
-		// A test may render another hook beside this one with a different
-		// stub. Each call is sequential; replace the previous fixture.
-		if err := os.Remove(target); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Link(binary, target); err != nil {
-			t.Fatal(err)
-		}
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".gateway-helper"), []byte(target+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

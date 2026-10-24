@@ -9,6 +9,7 @@ keywords:
 
 Reference for the [OpenCode connector](/docs/connectors/opencode). OpenCode has no command-hook config surface. It [auto-loads JavaScript and TypeScript plugins](https://opencode.ai/docs/plugins/) from its user plugin directory at startup. DefenseClaw installs one dependency-free bridge plugin, `defenseclaw.js`, there. Its `tool.execute.before` hook forwards every tool call to the local gateway and throws when the verdict is a block. That awaited, thrown-error path is the authoritative enforcement boundary. OpenCode talks to its configured model provider directly, and there is no `opencode.json` edit or shell shim. The per-user bridge invokes the account-owned DefenseClaw native helper, which checks the connected listener before sending any bearer or event. The bridge needs no npm dependencies and never triggers a `bun install`.
 
+For a per-user install, an explicit saved `guardrail.hook_fail_mode` chooses the gateway outage mode; an unset value follows the tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Install surface
 
 ### Platform status

@@ -11,6 +11,7 @@ import { ConnectorSupport } from '@/components/support-matrix';
 
 DefenseClaw writes hooks into Codex's `config.toml`. Host setup removes native OpenTelemetry exporters installed by earlier releases: Codex cannot verify which local account holds a stopped gateway's TCP port. Isolated OpenShell images retain native telemetry. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
 
+For a per-user install, an explicit saved `guardrail.hook_fail_mode` chooses the gateway outage mode; an unset value follows the tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Platform support
 
 <ConnectorSupport id="codex" />

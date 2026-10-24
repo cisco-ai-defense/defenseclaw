@@ -29,6 +29,9 @@ func writeOutageTierConfig(t *testing.T, dir, body string) {
 	if err := os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := writePerUserGatewayHelperRecord(filepath.Join(dir, "hooks")); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // installOutageOpenRuntimeForHookTest gives a per-user hook test what an

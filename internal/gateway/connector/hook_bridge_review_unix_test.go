@@ -84,6 +84,9 @@ func TestShellOutageLogAndVerdictUseOneTierSnapshot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(binDir, "defenseclaw-gateway"), []byte(bin), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".gateway-helper"), []byte(filepath.Join(binDir, "defenseclaw-gateway")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	helper := writeBridgeReviewHelper(t, dir)
 	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; DEFENSECLAW_HOME="$3"
 DEFENSECLAW_HOOK_CONNECTOR=codex; _DC_TRANSPORT_STATUS=7; FAIL_MODE=closed
@@ -101,6 +104,52 @@ if defenseclaw_should_fail_closed_on_unreachable; then printf 'block\n'; else pr
 	}
 }
 
+func TestShellOutageWarningIsOncePerSessionAcrossHookProcesses(t *testing.T) {
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeBridgeReviewHelper(t, dir)
+	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; DEFENSECLAW_HOME="$3"
+DEFENSECLAW_HOOK_CONNECTOR=hermes; _DC_TRANSPORT_STATUS=7; _DC_CONFIG_OUTAGE_MODE=open; FAIL_MODE=closed
+PAYLOAD='{"session_id":"same-session","tool_call_id":"call"}'
+defenseclaw_emit_unreachable_stderr tool "gateway unreachable"`
+	for i := 0; i < 2; i++ {
+		cmd := exec.Command("bash", "-c", script, "bash", helper, hookDir, filepath.Dir(hookDir))
+		cmd.Env = append(sanitizedTestEnv(), "HOME="+dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("call %d: %v: %s", i, err, out)
+		}
+		warned := strings.Contains(string(out), "fail mode open for an outage")
+		if warned != (i == 0) {
+			t.Fatalf("call %d warned=%v: %q", i, warned, out)
+		}
+	}
+}
+
+func TestShellFailureAuditKeepsSessionAndCall(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeBridgeReviewHelper(t, dir)
+	script := `set -euo pipefail; . "$1"; DEFENSECLAW_HOME="$2"
+PAYLOAD='{"sessionId":"session-1","callID":"call-1"}'
+defenseclaw_log_hook_failure codex codex-hook 'gateway unreachable' transport open fail_open`
+	cmd := exec.Command("bash", "-c", script, "bash", helper, dataDir)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("failure logger: %v: %s", err, out)
+	}
+	rows := hookFailureRecords(t, dataDir)
+	if len(rows) != 1 || rows[0]["session_id"] != "session-1" || rows[0]["call_id"] != "call-1" {
+		t.Fatalf("audit correlation missing: %+v", rows)
+	}
+}
+
 func writeBridgeReviewBinary(t *testing.T, home, action string) {
 	t.Helper()
 	dir := filepath.Join(home, ".local", "bin")
@@ -112,6 +161,13 @@ func writeBridgeReviewBinary(t *testing.T, home, action string) {
 		body = "#!/bin/sh\ncat >/dev/null\nexit 1\n"
 	}
 	if err := os.WriteFile(filepath.Join(dir, "defenseclaw-gateway"), []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	hooks := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hooks, ".gateway-helper"), []byte(filepath.Join(dir, "defenseclaw-gateway")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -139,6 +195,48 @@ defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{}' -H 'Autho
 	out, err := cmd.CombinedOutput()
 	if err != nil || string(out) != "{\"action\":\"block\"}\n200" {
 		t.Fatalf("bridge selected an untrusted helper: output=%q err=%v", out, err)
+	}
+}
+
+// A valid-looking account binary cannot become the hook's helper unless
+// setup recorded its absolute path next to the installed hook. The record
+// also has to be private and point at a private regular executable.
+func TestShellBridgeRequiresPrivateInstalledHelperRecord(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "account")
+	writeBridgeReviewBinary(t, home, "block")
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeBridgeReviewHelper(t, dir)
+	record := filepath.Join(hookDir, ".gateway-helper")
+	bin := filepath.Join(home, ".local", "bin", "defenseclaw-gateway")
+	if err := os.Remove(record); err != nil {
+		t.Fatal(err)
+	}
+	probe := func() (string, error) {
+		cmd := exec.Command("bash", "-c", `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
+defenseclaw_api_listener_unproven() { return 1; }
+defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{}' -H 'Authorization: Bearer example'`, "bash", helper, hookDir)
+		cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
+	if out, err := probe(); err == nil || strings.Contains(out, `"action":"block"`) {
+		t.Fatalf("missing install record executed a helper: out=%q err=%v", out, err)
+	}
+	if err := os.WriteFile(record, []byte(bin+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := probe(); err != nil || out != "{\"action\":\"block\"}\n200" {
+		t.Fatalf("private installed helper was not used: out=%q err=%v", out, err)
+	}
+	if err := os.Chmod(record, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := probe(); err == nil || strings.Contains(out, `"action":"block"`) {
+		t.Fatalf("writable install record executed a helper: out=%q err=%v", out, err)
 	}
 }
 
@@ -210,5 +308,47 @@ defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{}' \
 	}
 	if n := len(strings.Fields(string(launches))); n > 3 {
 		t.Fatalf("bridge launched %d tr/sed/stat processes for one call: %s", n, launches)
+	}
+}
+
+// A ten-per-second stream must start just one bounded POST helper per hook
+// process. No retry or header creates an accumulating bridge child.
+func TestShellBridgeTenHertzHasOneHelperPerHookProcess(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "account")
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	binDir := filepath.Join(home, ".local", "bin")
+	for _, path := range []string{hookDir, binDir} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker := filepath.Join(dir, "helper-pids")
+	bin := "#!/bin/sh\nprintf '%s\\n' \"$$\" >>\"$DC_PROCESS_MARKER\"\nsleep 0.05\nprintf '{\\\"action\\\":\\\"allow\\\"}\\n200\\n'\n"
+	binary := filepath.Join(binDir, "defenseclaw-gateway")
+	if err := os.WriteFile(binary, []byte(bin), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".gateway-helper"), []byte(binary+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	helper := writeBridgeReviewHelper(t, dir)
+	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
+defenseclaw_api_listener_unproven() { return 1; }
+defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{}' -H 'Authorization: Bearer example' >/dev/null`
+	for i := 0; i < 20; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		cmd := exec.CommandContext(ctx, "bash", "-c", script, "bash", helper, hookDir)
+		cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DC_PROCESS_MARKER="+marker)
+		out, err := cmd.CombinedOutput()
+		cancel()
+		if err != nil {
+			t.Fatalf("call %d: %v: %s", i, err, out)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	pids, err := os.ReadFile(marker)
+	if err != nil || len(strings.Fields(string(pids))) != 20 {
+		t.Fatalf("bridge launches=%d, want 20 (one per call): %v", len(strings.Fields(string(pids))), err)
 	}
 }

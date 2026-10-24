@@ -9,6 +9,7 @@ keywords:
 
 Reference for the [Amp connector](/docs/connectors/amp). DefenseClaw installs a dependency-free TypeScript policy plugin into Amp's user plugin directory. Amp's docs call these system plugins, but they are per user, not machine-wide. The plugin sends `session.start`, `agent.start`, `tool.call`, `tool.result` and `agent.end` to the local gateway. Amp waits for `tool.call` before running the tool, and `tool.result` can replace unsafe output before the model sees it. Amp talks to its own model provider directly. See Amp's [manual](https://ampcode.com/manual) and [plugin API](https://ampcode.com/manual/plugin-api).
 
+For a per-user install, an explicit saved `guardrail.hook_fail_mode` chooses the gateway outage mode; an unset value follows the tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Install surface
 
 ### Platform status

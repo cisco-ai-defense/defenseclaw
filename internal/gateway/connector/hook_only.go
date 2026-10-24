@@ -1509,6 +1509,11 @@ func ManagedPluginArtifactDrift(conn Connector, opts SetupOpts) (string, error) 
 // sidecar. The managed-file backup lets Teardown restore a prior file only
 // when it is unchanged since Setup.
 func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
+	if !opts.ManagedEnterprise {
+		if err := writePerUserGatewayHelperRecord(filepath.Join(opts.DataDir, "hooks")); err != nil {
+			return fmt.Errorf("%s install helper record: %w", c.name, err)
+		}
+	}
 	renderedBody, err := c.renderPluginArtifact(opts)
 	if err != nil {
 		return err

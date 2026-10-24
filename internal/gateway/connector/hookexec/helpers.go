@@ -17,6 +17,9 @@
 package hookexec
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +28,69 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
+	var fields struct {
+		SessionID     string `json:"session_id"`
+		SessionCamel  string `json:"sessionID"`
+		SessionTitle  string `json:"sessionId"`
+		ThreadID      string `json:"thread_id"`
+		SourceEventID string `json:"source_event_id"`
+		ToolCallID    string `json:"tool_call_id"`
+		CallCamel     string `json:"callID"`
+		CallID        string `json:"call_id"`
+	}
+	if len(payload) > 0 && json.Unmarshal(payload, &fields) == nil {
+		for _, value := range []string{fields.SessionID, fields.SessionCamel, fields.SessionTitle, fields.ThreadID} {
+			if sessionID = strings.TrimSpace(value); sessionID != "" {
+				break
+			}
+		}
+		for _, value := range []string{fields.SourceEventID, fields.ToolCallID, fields.CallCamel, fields.CallID} {
+			if callID = strings.TrimSpace(value); callID != "" {
+				break
+			}
+		}
+	}
+	if len(sessionID) > 256 {
+		sessionID = sessionID[:256]
+	}
+	if len(callID) > 256 {
+		callID = callID[:256]
+	}
+	if callID == "" {
+		var id [16]byte
+		if _, err := rand.Read(id[:]); err == nil {
+			callID = hex.EncodeToString(id[:])
+		}
+	}
+	return sessionID, callID
+}
+
+// firstOutageWarning reserves one user-visible warning per agent session.
+// The marker is advisory only: failure to create it leaves the warning on,
+// and neither its presence nor its contents can affect the hook verdict.
+func firstOutageWarning(opts Options) bool {
+	sessionID, _ := hookFailureCorrelation(opts.failurePayload)
+	if sessionID == "" || opts.HookDir == "" {
+		return true
+	}
+	dir := filepath.Join(opts.HookDir, ".outage-warnings")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return true
+	}
+	hash := sha256.Sum256([]byte(sessionID))
+	path := filepath.Join(dir, hex.EncodeToString(hash[:]))
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, os.ErrExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	_ = f.Close()
+	return true
+}
 
 // readCapped reads up to max bytes from r. It returns overflow=true (and the
 // first max bytes, which no caller hands on as the payload) when the input
@@ -149,7 +215,9 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		outcome = "fail_open"
 		// Quote diagnostics so an unexpected transport error cannot forge lines.
 		// Never include request/response bodies or authentication credentials.
-		fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
+		if !opts.perUserOutage {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %q\n", sp.connector, sp.hookName, category, reason)
+		}
 	}
 	home := opts.Home
 	if opts.ManagedEnterprise {
@@ -175,6 +243,7 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		return
 	}
 	failMode = loggedFailMode(opts, sp, failMode)
+	sessionID, callID := hookFailureCorrelation(opts.failurePayload)
 	logDir := filepath.Join(home, "logs")
 	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return
@@ -185,16 +254,20 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		Hook      string `json:"hook"`
 		// Event names the hook event, so a neutral stop event's allow
 		// reads apart from a tool call's fail-open (GAP-0527).
-		Event    string `json:"event,omitempty"`
-		Reason   string `json:"reason"`
-		Category string `json:"category"`
-		FailMode string `json:"fail_mode"`
-		Outcome  string `json:"outcome"`
+		Event     string `json:"event,omitempty"`
+		SessionID string `json:"session_id,omitempty"`
+		CallID    string `json:"call_id,omitempty"`
+		Reason    string `json:"reason"`
+		Category  string `json:"category"`
+		FailMode  string `json:"fail_mode"`
+		Outcome   string `json:"outcome"`
 	}{
 		TS:        opts.Now().UTC().Format("2006-01-02T15:04:05Z"),
 		Connector: sp.connector,
 		Hook:      sp.hookName,
 		Event:     strings.TrimSpace(opts.Event),
+		SessionID: sessionID,
+		CallID:    callID,
 		Reason:    reason,
 		Category:  category,
 		FailMode:  failMode,

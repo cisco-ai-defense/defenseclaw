@@ -18,11 +18,11 @@
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 import { execFile, execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
-import { lstatSync } from 'node:fs'
+import { lstatSync, readFileSync } from 'node:fs'
 
 import { lstat, stat } from 'node:fs/promises'
 import { homedir, userInfo } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
@@ -378,34 +378,23 @@ async function provenTCPRequest(path: string, init: RequestInit, token: string):
 
 function perUserNativePostBinary(): string {
 	const account = userInfo()
-	const dataDir = dirname(dirname(DC_TOKEN_FILE))
-	const dataHome = dirname(dataDir)
-	// The token path is baked into this plugin at setup. A custom data
-	// directory uses the OS account home. Neither path follows the agent's HOME.
-	const homes = dataDir === join(dataHome, ".defenseclaw") ? [dataHome, account.homedir] : [account.homedir]
-	let lastError: unknown = new Error("per-user gateway helper path is missing")
-	for (const home of new Set(homes)) {
-		const directory = join(home, ".local", "bin")
-		const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
-		const paths = [home, join(home, ".local"), directory, binary]
-		try {
-			for (let index = 0; index < paths.length; index++) {
-				const info = lstatSync(paths[index])
-				if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
-					throw new Error("per-user gateway helper path is untrusted")
-				}
-				if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) {
-					throw new Error("per-user gateway helper path is writable by another account")
-				}
-			}
-			return binary
-		} catch (error) {
-			lastError = error
-		}
+	const hookDir = dirname(DC_TOKEN_FILE)
+	const record = join(hookDir, ".gateway-helper")
+	const recordInfo = lstatSync(record)
+	if (!recordInfo.isFile() || recordInfo.isSymbolicLink() || recordInfo.size > 4096) throw new Error("per-user gateway helper record is untrusted")
+	const content = readFileSync(record, "utf8")
+	if (!content.endsWith("\n") || /[\r\n\0]/.test(content.slice(0, -1))) throw new Error("per-user gateway helper record is malformed")
+	const binary = content.slice(0, -1)
+	const home = dirname(dirname(dirname(binary)))
+	if (!isAbsolute(binary) || binary !== join(home, ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")) throw new Error("per-user gateway helper path is untrusted")
+	const paths = [dirname(hookDir), hookDir, record, home, join(home, ".local"), join(home, ".local", "bin"), binary]
+	for (let index = 0; index < paths.length; index++) {
+		const info = lstatSync(paths[index])
+		if (info.isSymbolicLink() || ([2, 6].includes(index) ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted")
+		if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account")
 	}
-	throw lastError
+	return binary
 }
-
 // gatewayFetch posts over the verified managed hook socket when one is
 // configured (Bun's unix fetch option). A per-user post goes through the
 // native helper, which verifies the same connected socket it sends on.
@@ -814,21 +803,21 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		}
 	}
 
+	const warnedUncheckedThreads = new Set<string>()
 	async function warnUncheckedThread(
 		threadID: string,
 		message: string,
-		ctx: { thread: { id: string; append(messages: { type: "user-message"; content: string }[]): Promise<void> }; ui: { notify(message: string): Promise<void> } },
+		ctx: { ui: { notify(message: string): Promise<void> } },
 	) {
-		if (!message) return
+		if (!message || warnedUncheckedThreads.has(threadID)) return
+		warnedUncheckedThreads.add(threadID)
+		if (warnedUncheckedThreads.size > 1024) warnedUncheckedThreads.delete(warnedUncheckedThreads.values().next().value as string)
 		try {
-			// A toast follows the foreground UI and disappears. Append to the
-			// event's thread so a background call keeps its own visible warning.
-			if (ctx.thread.id !== threadID) throw new Error("thread mismatch")
-			await ctx.thread.append([{ type: "user-message", content: message }])
+			// UI notifications reach the user without becoming a model turn.
+			await ctx.ui.notify(message)
 		} catch {
-			// Preserve the allow decision and surface the warning if Amp cannot
-			// append while this thread is processing the tool event.
-			try { await ctx.ui.notify(message) } catch { /* audit row still records the bypass */ }
+			// Retry on the next call if the UI was temporarily unavailable.
+			warnedUncheckedThreads.delete(threadID)
 		}
 	}
 

@@ -19,13 +19,13 @@
 // reason}; decision "deny"/"block" aborts the tool.
 
 import { execFile, execFileSync } from "node:child_process";
-import { lstatSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, mkdir, open } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import { stat } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 // DC_-prefixed constants are non-secret values baked in at setup time, not
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
@@ -485,34 +485,23 @@ async function defenseclawProvenTCPRequest(path, init, token) {
 
 function defenseclawPerUserNativePostBinary() {
   const account = userInfo();
-  const dataDir = dirname(dirname(DC_TOKEN_FILE));
-  const dataHome = dirname(dataDir);
-  // The token path is baked into this plugin at setup. A custom data
-  // directory uses the OS account home. Neither path follows the agent's HOME.
-  const homes = dataDir === join(dataHome, ".defenseclaw") ? [dataHome, account.homedir] : [account.homedir];
-  let lastError = new Error("per-user gateway helper path is missing");
-  for (const home of new Set(homes)) {
-    const directory = join(home, ".local", "bin");
-    const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
-    const paths = [home, join(home, ".local"), directory, binary];
-    try {
-      for (let index = 0; index < paths.length; index++) {
-        const info = lstatSync(paths[index]);
-        if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
-          throw new Error("per-user gateway helper path is untrusted");
-        }
-        if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) {
-          throw new Error("per-user gateway helper path is writable by another account");
-        }
-      }
-      return binary;
-    } catch (error) {
-      lastError = error;
-    }
-  }
-  throw lastError;
+  const hookDir = dirname(DC_TOKEN_FILE);
+  const record = join(hookDir, ".gateway-helper");
+  const recordInfo = lstatSync(record);
+  if (!recordInfo.isFile() || recordInfo.isSymbolicLink() || recordInfo.size > 4096) throw new Error("per-user gateway helper record is untrusted");
+  const content = readFileSync(record, "utf8");
+  if (!content.endsWith("\n") || /[\r\n\0]/.test(content.slice(0, -1))) throw new Error("per-user gateway helper record is malformed");
+  const binary = content.slice(0, -1);
+  const home = dirname(dirname(dirname(binary)));
+  if (!isAbsolute(binary) || binary !== join(home, ".local", "bin", process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")) throw new Error("per-user gateway helper path is untrusted");
+  const paths = [dirname(hookDir), hookDir, record, home, join(home, ".local"), join(home, ".local", "bin"), binary];
+  for (let index = 0; index < paths.length; index++) {
+    const info = lstatSync(paths[index]);
+    if (info.isSymbolicLink() || ([2, 6].includes(index) ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted");
+    if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account");
+  };
+  return binary;
 }
-
 // defenseclawFetch posts to the gateway over the managed hook socket when one
 // is configured. A per-user post goes through the native helper, which
 // verifies the same connected socket it sends on.
@@ -683,7 +672,7 @@ function defenseclawShowNotice(client, message, variant) {
 // that holds the hook credential). The gateway's fail-open report reads it,
 // so such a call is never silent (rel-1-0-2 GAP-0446). Best effort: a log
 // that cannot be written never changes the verdict.
-async function defenseclawLogFailOpen(reason, category) {
+async function defenseclawLogFailOpen(reason, category, context) {
   try {
     const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs");
     await mkdir(dir, { recursive: true, mode: 0o700 });
@@ -696,6 +685,8 @@ async function defenseclawLogFailOpen(reason, category) {
         reason: String(reason || "unknown"),
         category,
         fail_mode: "open",
+		session_id: String(context && (context.sessionID || context.sessionId) || "").slice(0, 256),
+		call_id: String(context && (context.callID || context.callId) || randomBytes(16).toString("hex")).slice(0, 256),
       }) + "\n");
     } finally {
       await file.close();
@@ -768,7 +759,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       if (await defenseclawFailModeNow(res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE, actionable) === "closed") {
         return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
-      if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
+      if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response", context);
       return null;
     }
     const data = defenseclawGatewayJSON(await res.text());
@@ -796,7 +787,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
     }
-    if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
+    if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport", context);
     return null;
   } finally {
     clearTimeout(timer);
@@ -894,6 +885,7 @@ async function defenseclawPostLifecycle(event, cwd) {
 
 export const DefenseClaw = async ({ client, directory, worktree }) => {
   const cwd = directory || worktree || "";
+  const warnedOutageSessions = new Set();
   // OpenCode loads plugins once at startup: a foreign plugin present now
   // keeps running for this process even if its file is deleted later, so a
   // block found at load holds for the whole process.
@@ -939,6 +931,16 @@ export const DefenseClaw = async ({ client, directory, worktree }) => {
       );
       if (verdict && verdict.reason) throw defenseclawBlock(client, verdict.reason);
       if (verdict && verdict.notice) defenseclawShowNotice(client, verdict.notice);
+      if (verdict && verdict.outage_notice) {
+        const sessionID = String(input && (input.sessionID || input.sessionId) || "");
+        if (!sessionID || !warnedOutageSessions.has(sessionID)) {
+          defenseclawShowNotice(client, verdict.outage_notice);
+          if (sessionID && client && client.tui && typeof client.tui.showToast === "function") {
+            warnedOutageSessions.add(sessionID);
+            if (warnedOutageSessions.size > 1024) warnedOutageSessions.delete(warnedOutageSessions.values().next().value);
+          }
+        }
+      }
       if (verdict && verdict.mode === "action" && mcpIdentity.status === "ambiguous") {
         throw defenseclawBlock(client, "DefenseClaw refused an OpenCode tool with ambiguous MCP server identity.");
       }

@@ -25,12 +25,66 @@ await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 let verdict = "allow";
 try {
   await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" }, { args: { command: "echo marker" } });
+  if (process.env.DC_TWO_CALLS === "1") {
+    await plugin["tool.execute.before"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C2" }, { args: { command: "echo marker" } });
+  }
 } catch (error) {
   verdict = "block:" + String(error && error.message || error);
 }
 await new Promise((resolve) => setTimeout(resolve, 50));
 console.log(JSON.stringify({ verdict, notices: toasts }));
 `
+
+func TestOpenCodeOutageToastOncePerSessionAndAuditEveryCall(t *testing.T) {
+	nodeForTest(t)
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := "#!/bin/sh\nif [ \"$1\" = hook-post ]; then exit 7; fi\nif [ \"$1\" = hook-outage-mode ]; then printf 'open\\n'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "defenseclaw-gateway"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	writeOutageTierConfig(t, dataDir, outageDefaultTierConfig)
+	token := filepath.Join(dataDir, "hooks", ".hook-opencode.token")
+	if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(token), ".gateway-helper"), []byte(filepath.Join(binDir, "defenseclaw-gateway")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := renderPluginAssetForTest(t, "opencode-plugin.js", templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
+		TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
+	path := filepath.Join(home, "defenseclaw.mjs")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", openCodeOutageHarness, path)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DC_TWO_CALLS=1", "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	var result struct {
+		Verdict string   `json:"verdict"`
+		Notices []string `json:"notices"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("harness output %q: %v", out, err)
+	}
+	if result.Verdict != "allow" || len(result.Notices) != 1 ||
+		!strings.Contains(result.Notices[0], "defenseclaw-gateway start") {
+		t.Fatalf("one user warning for two unchecked calls: %+v", result)
+	}
+	if rows := hookFailureRecords(t, dataDir); len(rows) != 2 || rows[0]["call_id"] != "C" || rows[1]["call_id"] != "C2" {
+		t.Fatalf("two correlated audit rows: %+v", rows)
+	}
+}
 
 const ampOutageHarness = `
 import { pathToFileURL } from "node:url";
@@ -124,14 +178,12 @@ func TestAmpBackgroundOutageWarnsAffectedThreadForCallAndResult(t *testing.T) {
 	if err := json.Unmarshal(out, &result); err != nil {
 		t.Fatalf("harness output %q: %v", out, err)
 	}
-	if result.Call.Action != "allow" || result.Result != nil || len(result.Notices) != 0 || len(result.Appended) != 2 {
-		t.Fatalf("unchecked background call/result lacked two durable warnings: %+v", result)
+	if result.Call.Action != "allow" || result.Result != nil || len(result.Notices) != 1 || len(result.Appended) != 0 {
+		t.Fatalf("unchecked background call/result lacked one UI warning or injected a model turn: %+v", result)
 	}
-	for _, message := range result.Appended {
-		if message.Type != "user-message" || !strings.Contains(message.Content, "fail mode open for an outage") ||
-			!strings.Contains(message.Content, "defenseclaw-gateway start") {
-			t.Fatalf("background warning missing cause or recovery step: %+v", message)
-		}
+	if !strings.Contains(result.Notices[0], "fail mode open for an outage") ||
+		!strings.Contains(result.Notices[0], "defenseclaw-gateway start") {
+		t.Fatalf("background warning missing cause or recovery step: %+v", result.Notices)
 	}
 	if rows := hookFailureRecords(t, dataDir); len(rows) != 2 {
 		t.Fatalf("background call/result audit rows = %+v, want two", rows)

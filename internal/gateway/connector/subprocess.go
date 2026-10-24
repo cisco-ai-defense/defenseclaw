@@ -453,6 +453,11 @@ func writeHookHelpers(hookDir string) error {
 
 func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 	writeFile := hookRuntimeFileWriter(managedEnterprise)
+	if !managedEnterprise {
+		if err := writePerUserGatewayHelperRecord(hookDir); err != nil {
+			return err
+		}
+	}
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
@@ -477,6 +482,40 @@ func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 		if err := writeFile(helperPath, content, 0o600); err != nil {
 			return fmt.Errorf("write hook helper %s: %w", name, err)
 		}
+	}
+	return nil
+}
+
+// The record is written at setup beside the installed hook files. Agent
+// environment never selects the executable that receives a bearer or reads
+// a call-time outage decision. Plugins use the same record as shell hooks.
+func writePerUserGatewayHelperRecord(hookDir string) error {
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return err
+	}
+	home := userHomeDir()
+	dataDir := filepath.Dir(filepath.Clean(hookDir))
+	if filepath.Base(dataDir) == ".defenseclaw" {
+		home = filepath.Dir(dataDir)
+	}
+	if !filepath.IsAbs(home) {
+		return fmt.Errorf("hook helper account home is not absolute")
+	}
+	name := "defenseclaw-gateway"
+	if runtime.GOOS == "windows" {
+		name = windowsGatewayBinaryName
+	}
+	// A custom per-user data root can carry the gateway installation itself.
+	// Resolve that path once during setup, from the installed hook location;
+	// the hook never derives an executable from its caller's environment.
+	if dataDir != home && filepath.Base(dataDir) != ".defenseclaw" {
+		if info, err := os.Lstat(filepath.Join(dataDir, ".local", "bin", name)); err == nil && info.Mode().IsRegular() {
+			home = dataDir
+		}
+	}
+	binary := filepath.Join(home, ".local", "bin", name)
+	if err := hookRuntimeFileWriter(false)(filepath.Join(hookDir, ".gateway-helper"), []byte(binary+"\n"), 0o600); err != nil {
+		return fmt.Errorf("write hook helper record: %w", err)
 	}
 	return nil
 }

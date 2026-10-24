@@ -7520,6 +7520,7 @@ func runHookAndCaptureNativeTransport(t *testing.T, scriptPath string, extraEnv 
 	if err := os.WriteFile(binary, []byte(wrapper), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	linkGatewayBinaryToHookDirForTest(t, filepath.Dir(scriptPath), binary)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.Mkdir(dataDir, 0o700); err != nil {
 		t.Fatal(err)

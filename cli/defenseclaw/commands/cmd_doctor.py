@@ -9725,7 +9725,16 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     from defenseclaw.fail_mode import rendered_fail_mode, report_renders_fail_mode
 
     rendered = rendered_fail_mode(fail_mode)
-    if report_renders_fail_mode(fail_mode) and rendered != lock_mode_target:
+    # A current OSS OpenCode bridge asks the installed runtime config when a
+    # proven outage occurs. It has no install-time outage mode to render.
+    # The Doctor hook/contract checks below still validate its exact plugin
+    # bytes and custody receipt before Setup can report ready.
+    call_time_opencode = (
+        name == "opencode"
+        and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() not in {"managed_enterprise", "secure_client"}
+        and callable(getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None))
+    )
+    if report_renders_fail_mode(fail_mode) and rendered != lock_mode_target and not call_time_opencode:
         return ConnectorSetupReadiness(
             False,
             name,

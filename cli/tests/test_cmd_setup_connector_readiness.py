@@ -957,6 +957,28 @@ def test_readiness_requires_the_rendered_windows_mode_to_match_the_lock(
         assert f"rendered={rendered or 'missing'}" in readiness.detail
 
 
+def test_opencode_recovery_setup_uses_call_time_mode_without_rendered_mode(monkeypatch, tmp_path: Path) -> None:
+    cfg = _config(tmp_path)
+    cfg.guardrail.effective_hook_outage_fail_mode = lambda _name: "open"
+    entry = _entry("opencode", tmp_path)
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": {"opencode": entry}}), encoding="utf-8"
+    )
+    monkeypatch.setattr(fail_mode, "connector_registration_lock_state", lambda *_: ("open", ""))
+    monkeypatch.setattr(fail_mode, "connector_fail_mode_report", lambda *_a, **_kw: {
+        "configured": "open", "desired": "open", "effective": "open",
+        "sources": [{"name": "opencode-plugin", "mode": None}],
+    })
+
+    def passing(label: str):
+        return lambda _cfg, _name, r, *_args, **_kwargs: cmd_doctor._emit("pass", label, "ok", r=r)
+
+    monkeypatch.setattr(cmd_doctor, "_check_hook_contract_lock", passing("Hook contract"))
+    monkeypatch.setattr(cmd_doctor, "_check_connector_hooks", passing("OpenCode hooks"))
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "opencode")
+    assert readiness, readiness
+
+
 def test_readiness_lock_reports_digest_drift(monkeypatch, tmp_path: Path) -> None:
     cfg = _config(tmp_path)
     entry = _entry("amp", tmp_path)

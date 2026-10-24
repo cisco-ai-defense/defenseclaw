@@ -9,6 +9,7 @@ keywords:
 
 Reference for the [Codex connector](/docs/connectors/codex). Codex talks to `api.openai.com` or the ChatGPT backend directly. DefenseClaw observes host activity through Codex's hooks. Isolated OpenShell images also use Codex's [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry). Secure Client and the OpenShell sandbox use a notify bridge. Per-user and standalone installs on the host do not register a notify bridge or native exporter. No proxy is involved.
 
+For a per-user install, an explicit saved `guardrail.hook_fail_mode` chooses the gateway outage mode; an unset value follows the tier. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) and [Fail modes](/docs/reference/configuration/fail-modes).
 ## Install surface
 
 <Flow

@@ -284,6 +284,9 @@ type Options struct {
 	// not be started. Only such a failure asks OutageFailModeNow; an answer the
 	// gateway gave, a stalled answer and every local failure stay closed.
 	perUserOutage bool
+	// The already bounded input is retained for failure-only audit correlation
+	// and session warning deduplication. It is never written to the audit log.
+	failurePayload []byte
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -574,6 +577,7 @@ func runHook(ctx context.Context, opts Options) int {
 	}
 
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
+	opts.failurePayload = payload
 	// The agent may take its time writing the payload: an install that
 	// started meanwhile closes this call.
 	failMode = closeDuringInstall(&opts, failMode)
@@ -2258,12 +2262,15 @@ func perUserOutageError(opts Options, err error) bool {
 // Strict availability and this account's install window close the outage
 // too (closeDuringInstall runs first).
 func perUserOutageMode(opts *Options, failMode string) string {
-	if !opts.perUserOutage || opts.StrictAvailability || perUserInstallWindow(*opts) ||
-		opts.OutageFailModeNow == nil || normalizeFailMode(opts.OutageFailModeNow()) != "open" {
+	if !opts.perUserOutage {
 		return failMode
 	}
-	opts.FailMode = "open"
-	return "open"
+	mode := "closed"
+	if !opts.StrictAvailability && !perUserInstallWindow(*opts) && opts.OutageFailModeNow != nil {
+		mode = normalizeFailMode(opts.OutageFailModeNow())
+	}
+	opts.FailMode = mode
+	return mode
 }
 
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
@@ -2313,12 +2320,20 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", text)
-	} else {
-		fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+	showWarning := true
+	if opts.perUserOutage {
+		showWarning = firstOutageWarning(opts)
 	}
-	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
+	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
+		if showWarning && perUserGatewayDownNotice(opts, sp, reason) == "" {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", text)
+		}
+	} else {
+		if showWarning {
+			fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+		}
+	}
+	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" && showWarning {
 		fmt.Fprintln(opts.Stdout, notice)
 		return 0
 	}
