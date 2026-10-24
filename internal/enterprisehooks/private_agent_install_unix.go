@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -49,7 +50,10 @@ func privateInstallContractReason(connector, version string) string {
 // installer's versions and the Homebrew casks. Every unsupported or unversioned copy is listed with its path; a
 // part of the scan that could not finish is listed as incomplete with the
 // reason.
-func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []PrivateAgentInstall {
+func DiscoverUnixPrivateAgentInstalls(ctx context.Context, home string, connectors []string) []PrivateAgentInstall {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	wanted := privateInstallConnectors(connectors, func(name string) bool { return privateUnixNPMPackages[name] != "" })
 	if len(wanted) == 0 {
 		return nil
@@ -67,23 +71,38 @@ func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []Privat
 		scan.skipAll(wanted, PrivateInstallSkippedVersionManagers)
 	}
 	roots = append(roots, prefixes...)
-	nested, complete := walkPrivateNPMPrefixes(home, privateInstallWalk{open: os.Open, unreachable: unixPrivateWalkUnreachable, homeLinks: true})
+	nested, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: os.Open, unreachable: unixPrivateWalkUnreachable, homeLinks: true})
 	if !complete {
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
 	}
 	roots = append(roots, nested...)
+	if ctx.Err() != nil {
+		return scan.result()
+	}
 	machine := privateInstallMachinePrefixes()
 	roots = append(roots, machine...)
 	for _, connector := range wanted {
+		if ctx.Err() != nil {
+			scan.skipAll(wanted, PrivateInstallSkippedHome)
+			return scan.result()
+		}
 		pkg := privateUnixNPMPackages[connector]
 		// Volta stores each package in its own image, rather than directly
 		// under tools/image. A supported selected image can hide an old one.
 		connectorRoots := append(append([]string{}, roots...), filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg)))
 		for _, root := range connectorRoots {
+			if ctx.Err() != nil {
+				scan.skipAll(wanted, PrivateInstallSkippedHome)
+				return scan.result()
+			}
 			for _, manifest := range nodeModulesPackage(root, pkg) {
 				scanUnixNPMPackage(scan, home, connector, pkg, filepath.Dir(manifest))
 			}
 		}
+	}
+	if ctx.Err() != nil {
+		scan.skipAll(wanted, PrivateInstallSkippedHome)
+		return scan.result()
 	}
 	if connectorListed(wanted, "claudecode") {
 		local := filepath.Join(home, ".claude", "local")
@@ -100,10 +119,17 @@ func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []Privat
 	}
 	for _, connector := range wanted {
 		for _, prefix := range machine {
+			if ctx.Err() != nil {
+				scan.skipAll(wanted, PrivateInstallSkippedHome)
+				return scan.result()
+			}
 			for _, token := range privateUnixCaskTokens[connector] {
 				scanUnixVersionDir(scan, home, connector, filepath.Join(prefix, "Caskroom", token), true)
 			}
 		}
+	}
+	if ctx.Err() != nil {
+		scan.skipAll(wanted, PrivateInstallSkippedHome)
 	}
 	return scan.result()
 }

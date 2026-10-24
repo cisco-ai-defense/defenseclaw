@@ -243,7 +243,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	if err != nil {
 		return Manifest{}, err
 	}
-	if err := ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil && !standalone {
 		return Manifest{}, err
 	}
 
@@ -291,13 +291,15 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 	visited := map[string]bool{}
 	signedIn := windowsSignedInCheck(opts.Logger)
 	targets := make([]ManifestTarget, 0, len(profiles)*len(connectors))
-	for _, profile := range profiles {
-		// Fast-fail per row so a wedged cycle never runs to
-		// completion after ctx has been cancelled — the 60 s
-		// cycle ceiling depends on this loop noticing the
-		// deadline.
+	for profileIndex, profile := range profiles {
+		// Leave time to write the manifest and coverage record. A timed-out
+		// profile must never discard rows already decided in this cycle.
+		if standalone && windowsPrivateProfileBudget(ctx, len(profiles)-profileIndex) <= 0 {
+			reportWindowsProfilesNotInspected(profiles[profileIndex:], connectors, opts, exclude, previous, running, lookupAccount, groups, visited, judged, &targets)
+			break
+		}
 		if err := ctx.Err(); err != nil {
-			return Manifest{}, err
+			return Manifest{}, err // Secure Client keeps its existing behavior.
 		}
 		if _, skip := exclude[canonicalManifestTargetSID(profile.SID)]; skip {
 			logfSafely(opts.Logger, profile.SID, "excluded by caller (targeted uninstall)")
@@ -309,6 +311,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			if _, enrolled := opts.ManifestSubjects[sid]; !enrolled {
 				// Manifest enrollment: only the administrator's enabled
 				// targets are enrolled, so no one else's installs count.
+				reportWindowsUnenrolledManifestRunningAgents(profile, connectors, running[sid], opts.ExcludeUsers, lookupAccount, opts.ReportUnprotected)
 				judged[sid] = true
 				continue
 			}
@@ -338,23 +341,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			continue
 		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
-		// An administrator-authored target is enrolled whatever the group
-		// filters say; only exclude_users and exempt_users still apply.
-		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() && opts.ManifestSubjects == nil {
-			sid := canonicalManifestTargetSID(profile.SID)
-			groupDecision, groupReason, inDoubt := groups.evaluate(sid)
-			if inDoubt && (groupDecision != windowsEnrollmentExcluded || windowsHasPreviousRows(previous, sid)) {
-				// The decision rests on groups cached at an earlier sign-in,
-				// and the user may be signed in now with groups this cycle
-				// could not read: nothing changes for them. Their rows stay,
-				// they get no new ones, and a user without rows whom the
-				// cache excludes stays excluded.
-				groupDecision, groupReason = windowsEnrollmentUndecided, groups.inDoubtReason(sid)
-			}
-			if groupDecision != windowsEnrollmentEnrolled {
-				decision, reason = groupDecision, groupReason
-			}
-		}
+		decision, reason = windowsProfileGroupDecision(profile, decision, reason, groups, previous, opts.ManifestSubjects == nil)
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
 			judged[canonicalManifestTargetSID(profile.SID)] = true
@@ -397,7 +384,9 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		if standalone && rowContext.report != nil {
 			// A selected, supported CLI is not evidence that every copy
 			// this account can launch reads the machine policy.
-			reportWindowsPrivateInstalls(rowContext.report, rowContext.user, profile.SID, profile.Home, connectors)
+			profileCtx, cancel := context.WithTimeout(ctx, windowsPrivateProfileBudget(ctx, len(profiles)-profileIndex))
+			reportWindowsPrivateInstalls(profileCtx, rowContext.report, rowContext.user, profile.SID, profile.Home, connectors)
+			cancel()
 		}
 		for _, conn := range connectors {
 			_, known := previous[previousManifestKey(profile.SID, conn)]
@@ -470,6 +459,13 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				continue
 			}
 			judged[sid] = true
+			if windowsPrivateProfileBudget(ctx, 1) <= 0 {
+				for _, conn := range subject.Connectors {
+					opts.ReportUnprotected(UnprotectedAgent{User: user, SID: sid, Connector: conn, Code: UnprotectedCodeInstallScanIncomplete,
+						Reason: privateInstallIncompleteReason(PrivateInstallSkippedUnresolved)})
+				}
+				continue
+			}
 			if info, err := os.Lstat(subject.Home); err != nil || !info.IsDir() {
 				if err == nil || !os.IsNotExist(err) {
 					for _, conn := range subject.Connectors {
@@ -479,10 +475,145 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 				}
 				continue // no profile folder yet: nothing the account could run
 			}
-			reportWindowsPrivateInstalls(opts.ReportUnprotected, user, sid, subject.Home, subject.Connectors)
+			profileCtx, cancel := context.WithTimeout(ctx, windowsPrivateProfileBudget(ctx, 1))
+			reportWindowsPrivateInstalls(profileCtx, opts.ReportUnprotected, user, sid, subject.Home, subject.Connectors)
+			cancel()
 		}
 	}
 	return Manifest{Version: 1, Targets: targets}, nil
+}
+
+// Reserve time for publishing targets and the coverage record. Divide the
+// remaining inspection time among the profiles still in this cycle, so one
+// large home cannot consume the entire 60-second Setup budget.
+func windowsPrivateProfileBudget(ctx context.Context, profilesLeft int) time.Duration {
+	if ctx.Err() != nil {
+		return 0
+	}
+	const maximum = 20 * time.Second
+	deadline, bounded := ctx.Deadline()
+	if !bounded {
+		return maximum
+	}
+	available := time.Until(deadline) - 10*time.Second
+	if available <= 0 {
+		return 0
+	}
+	if profilesLeft < 1 {
+		profilesLeft = 1
+	}
+	share := available / time.Duration(profilesLeft)
+	if share > maximum {
+		return maximum
+	}
+	return share
+}
+
+// Apply the same group result on the regular and out-of-time profile paths.
+// An administrator-authored manifest target is enrolled regardless of group
+// filters; explicit user exclusions and exemptions still apply.
+func windowsProfileGroupDecision(profile windowsUserProfile, decision windowsEnrollmentDecision, reason string,
+	groups *windowsEnrollmentGroups, previous map[string]ManifestTarget, automatic bool) (windowsEnrollmentDecision, string) {
+	if (decision != windowsEnrollmentEnrolled && decision != windowsEnrollmentExempt) || !groups.active() || !automatic {
+		return decision, reason
+	}
+	sid := canonicalManifestTargetSID(profile.SID)
+	groupDecision, groupReason, inDoubt := groups.evaluate(sid)
+	if inDoubt && (groupDecision != windowsEnrollmentExcluded || windowsHasPreviousRows(previous, sid)) {
+		// A decision resting on groups cached at an earlier sign-in cannot
+		// revoke existing rows while the current token is unreadable.
+		groupDecision, groupReason = windowsEnrollmentUndecided, groups.inDoubtReason(sid)
+	}
+	if groupDecision != windowsEnrollmentEnrolled {
+		return groupDecision, groupReason
+	}
+	return decision, reason
+}
+
+// Preserve rows already published for profiles the cycle could not reach,
+// and name their incomplete inspection in the protected coverage record.
+func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors []string, opts EnumerateOptions,
+	exclude map[string]struct{}, previous map[string]ManifestTarget, running map[string]map[string]string,
+	lookup windowsEnrollmentAccountLookup, groups *windowsEnrollmentGroups, visited, judged map[string]bool, targets *[]ManifestTarget) {
+	for _, profile := range profiles {
+		sid := canonicalManifestTargetSID(profile.SID)
+		user := filepath.Base(filepath.Clean(profile.Home))
+		if _, skip := exclude[sid]; skip {
+			judged[sid] = true
+			continue
+		}
+		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookup)
+		if decision == windowsEnrollmentExcluded {
+			logfSafely(opts.Logger, profile.SID, reason)
+			judged[sid] = true
+			if opts.ReportExcluded != nil {
+				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+			}
+			continue
+		}
+		profileConnectors := connectors
+		if opts.ManifestSubjects != nil {
+			subject, enrolled := opts.ManifestSubjects[sid]
+			if !enrolled {
+				reportWindowsUnenrolledManifestRunningAgents(profile, connectors, running[sid], opts.ExcludeUsers, lookup, opts.ReportUnprotected)
+				judged[sid] = true
+				continue
+			}
+			visited[sid] = true
+			profileConnectors = subject.Connectors
+		}
+		if windowsDeletedLocalAccount(profile.SID, lookup) {
+			// A stale local profile cannot be repaired by the guardian.
+			// Keep a lookup failure uncertain, as in the normal profile path.
+			logfSafely(opts.Logger, profile.SID,
+				"the local account no longer exists; its rows are revoked although its profile folder remains")
+			continue
+		}
+		decision, reason = windowsProfileGroupDecision(profile, decision, reason, groups, previous, opts.ManifestSubjects == nil)
+		if decision == windowsEnrollmentExcluded {
+			logfSafely(opts.Logger, profile.SID, reason)
+			judged[sid] = true
+			if opts.ReportExcluded != nil {
+				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+			}
+			continue
+		}
+		for _, conn := range profileConnectors {
+			if row, known := previous[previousManifestKey(sid, conn)]; known {
+				*targets = append(*targets, row)
+			}
+			if opts.ReportUnprotected != nil {
+				opts.ReportUnprotected(UnprotectedAgent{User: user, SID: sid, Connector: conn,
+					Code:   UnprotectedCodeInstallScanIncomplete,
+					Reason: privateInstallIncompleteReason(PrivateInstallSkippedUnresolved)})
+			}
+		}
+		judged[sid] = true
+	}
+}
+
+// A manifest subject check does not inspect unselected profiles. A running
+// agent there still needs an explicit coverage report before the SID is
+// marked judged, including when the cycle has no profile time left.
+func reportWindowsUnenrolledManifestRunningAgents(profile windowsUserProfile, connectors []string,
+	running map[string]string, excludeUsers []string, lookup windowsEnrollmentAccountLookup,
+	report func(UnprotectedAgent)) {
+	if report == nil || len(running) == 0 {
+		return
+	}
+	if decision, _ := windowsProfileEnrollmentDecision(profile, excludeUsers, nil, lookup); decision == windowsEnrollmentExcluded {
+		return
+	}
+	for _, conn := range connectors {
+		if label := strings.TrimSpace(running[conn]); label != "" {
+			report(UnprotectedAgent{
+				User: filepath.Base(filepath.Clean(profile.Home)), SID: profile.SID, Connector: conn,
+				Code: UnprotectedCodeAgentUnprotected,
+				Reason: fmt.Sprintf("%s runs for this account, which has no enabled enrollment manifest target; %s",
+					label, windowsUnenrolledConsequence(conn)),
+			})
+		}
+	}
 }
 
 // windowsHasPreviousRows reports whether the previous manifest has a row of
@@ -1633,8 +1764,28 @@ func sortedManifestSubjects(subjects map[string]WindowsManifestSubject) []string
 
 // reportWindowsPrivateInstalls reports each unsupported, unversioned or
 // uninspected agent copy the profile at home can run.
-func reportWindowsPrivateInstalls(report func(UnprotectedAgent), user, sid, home string, connectors []string) {
-	installs := append(DiscoverWindowsPrivateAgentInstalls(home, connectors), discoverWindowsWinGetCopies(sid, connectors)...)
+var windowsPrivateInstallsForEnumeration = DiscoverWindowsPrivateAgentInstalls
+
+func reportWindowsPrivateInstalls(ctx context.Context, report func(UnprotectedAgent), user, sid, home string, connectors []string) {
+	installs := windowsPrivateInstallsForEnumeration(ctx, home, connectors)
+	if ctx.Err() == nil {
+		installs = append(installs, discoverWindowsWinGetCopies(sid, connectors)...)
+	} else {
+		// The WinGet pass was not reached. The home walk already marks its
+		// connectors incomplete; name any other connector the skipped pass
+		// could have covered so the deadline never looks like a clean scan.
+		incomplete := make(map[string]bool, len(installs))
+		for _, install := range installs {
+			if install.Incomplete {
+				incomplete[install.Connector] = true
+			}
+		}
+		for _, conn := range connectors {
+			if (conn == "claudecode" || conn == "codex" || conn == "copilot") && !incomplete[conn] {
+				installs = append(installs, PrivateAgentInstall{Connector: conn, Incomplete: true, Skipped: PrivateInstallSkippedHome})
+			}
+		}
+	}
 	for _, install := range installs {
 		if agent, ok := privateInstallUnprotected(install); ok {
 			agent.User, agent.SID = user, sid

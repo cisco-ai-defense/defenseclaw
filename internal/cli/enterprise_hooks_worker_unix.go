@@ -408,6 +408,12 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		response.CopilotVSCode = vscode
 		return respond(response, 0)
 	case enterpriseHookWorkerOpDiscover:
+		// The parent can only kill a worker whose request outlives its
+		// deadline. Give discovery its own deadline so the private-home
+		// walk can return an incomplete result while there is still time
+		// to write the response.
+		scanCtx, cancel := context.WithTimeout(ctx, workerTimeout(request)*3/4)
+		defer cancel()
 		versions := map[string]string{}
 		reasons := map[string]string{}
 		surfaces := map[string][]connector.AgentSurface{}
@@ -419,9 +425,9 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			}
 			var version, reason string
 			if request.StaticDiscovery {
-				version, reason = enterpriseHookWorkerDiscoverStaticVersion(ctx, request.Home, name)
+				version, reason = enterpriseHookWorkerDiscoverStaticVersion(scanCtx, request.Home, name)
 			} else {
-				version, reason = enterpriseHookWorkerDiscoverVersion(ctx, request.Home, name, true)
+				version, reason = enterpriseHookWorkerDiscoverVersion(scanCtx, request.Home, name, true)
 			}
 			if version != "" {
 				versions[name] = version
@@ -430,7 +436,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			}
 			// Host apps are never run; an engine CLI bundled in one is run
 			// only outside a static (untrusted-home) discovery.
-			found, complete := enterpriseHookWorkerDiscoverSurfaces(ctx, request.Home, name, !request.StaticDiscovery)
+			found, complete := enterpriseHookWorkerDiscoverSurfaces(scanCtx, request.Home, name, !request.StaticDiscovery)
 			if len(found) != 0 {
 				surfaces[name] = found
 			}
@@ -442,7 +448,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 				enterprisehooks.PutUnixKiroIDEForms(enterpriseHookWorkerDiscoverKiroIDE(request.Home), versions, reasons)
 			}
 		}
-		installs := append(enterprisehooks.DiscoverUnixPrivateAgentInstalls(request.Home, request.Connectors), unlisted...)
+		installs := append(enterpriseHookWorkerDiscoverPrivateInstalls(scanCtx, request.Home, request.Connectors), unlisted...)
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: installs}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {
@@ -493,10 +499,11 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 // enterpriseHookWorkerDiscoverSurfaces and
 // enterpriseHookWorkerDiscoverKiroIDE are replaceable in tests.
 var (
-	enterpriseHookWorkerDiscoverVersion       = enterprisehooks.DiscoverUnixAgentVersion
-	enterpriseHookWorkerDiscoverStaticVersion = enterprisehooks.DiscoverUnixAgentVersionStatically
-	enterpriseHookWorkerDiscoverSurfaces      = enterprisehooks.DiscoverUnixAgentSurfaces
-	enterpriseHookWorkerDiscoverKiroIDE       = enterprisehooks.DiscoverUnixKiroIDEForms
+	enterpriseHookWorkerDiscoverVersion         = enterprisehooks.DiscoverUnixAgentVersion
+	enterpriseHookWorkerDiscoverStaticVersion   = enterprisehooks.DiscoverUnixAgentVersionStatically
+	enterpriseHookWorkerDiscoverSurfaces        = enterprisehooks.DiscoverUnixAgentSurfaces
+	enterpriseHookWorkerDiscoverKiroIDE         = enterprisehooks.DiscoverUnixKiroIDEForms
+	enterpriseHookWorkerDiscoverPrivateInstalls = enterprisehooks.DiscoverUnixPrivateAgentInstalls
 )
 
 func validateEnterpriseHookWorkerIdentity(request enterpriseHookWorkerRequest) error {

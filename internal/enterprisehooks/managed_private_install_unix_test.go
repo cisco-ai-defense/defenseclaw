@@ -72,7 +72,7 @@ func TestDiscoverUnixPrivateClaudeCopiesKeepsEveryOldVersion(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(native, "2.0.0"), []byte("native fixture"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+	findings := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 	if len(findings) != 3 {
 		t.Fatalf("private copies = %+v, want both old npm installs and native release", findings)
 	}
@@ -110,7 +110,7 @@ func TestDiscoverUnixClaudeLocalAndVoltaCopiesBesideSupportedInstall(t *testing.
 	if err := os.WriteFile(filepath.Join(home, ".claude", "local", "claude"), []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	got := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+	got := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 	if len(got) != 2 || got[0].Path != local || got[0].Version != "2.0.77" ||
 		got[1].Path != volta || got[1].Version != "2.0.76" {
 		t.Fatalf("vendor local and Volta old copies = %+v", got)
@@ -165,7 +165,7 @@ func TestDiscoverUnixClaudeLocalWrapperWithoutMetadataIsUnprotected(t *testing.T
 	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+	findings := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 	if len(findings) != 1 || findings[0].Path != wrapper || findings[0].Version != "" || findings[0].Incomplete {
 		t.Fatalf("unversioned vendor wrapper = %+v", findings)
 	}
@@ -187,7 +187,7 @@ func TestDiscoverUnixPrivateClaudeWithoutVersionIsUnprotected(t *testing.T) {
 	if err := os.WriteFile(native, []byte("native fixture"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+	findings := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode"})
 	if len(findings) != 2 || findings[0].Version != "" || findings[1].Version != "" ||
 		findings[0].Path == findings[1].Path {
 		t.Fatalf("unversioned runnable copies = %+v", findings)
@@ -199,7 +199,7 @@ func TestDiscoverUnixPrivateCodexAndCopilotBelowContract(t *testing.T) {
 	for pkg, entry := range map[string]string{"@openai/codex": "bin/codex.js", "@github/copilot": "npm-loader.js"} {
 		npmCopy(t, filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg)), pkg, "0.0.1", entry)
 	}
-	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"codex", "copilot"})
+	findings := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"codex", "copilot"})
 	if len(findings) != 2 || findings[0].Connector != "codex" || findings[1].Connector != "copilot" {
 		t.Fatalf("private npm agent versions = %+v", findings)
 	}
@@ -211,7 +211,7 @@ func TestDiscoverUnixVoltaCodexAndCopilotCopies(t *testing.T) {
 		npmCopy(t, filepath.Join(home, ".volta", "tools", "image", "packages", filepath.FromSlash(pkg),
 			"node_modules", filepath.FromSlash(pkg)), pkg, "0.0.1", entry)
 	}
-	findings := DiscoverUnixPrivateAgentInstalls(home, []string{"codex", "copilot"})
+	findings := DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"codex", "copilot"})
 	if len(findings) != 2 || findings[0].Connector != "codex" || findings[1].Connector != "copilot" {
 		t.Fatalf("old Volta package copies = %+v", findings)
 	}
