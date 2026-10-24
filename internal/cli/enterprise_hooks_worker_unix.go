@@ -442,7 +442,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 				enterprisehooks.PutUnixKiroIDEForms(enterpriseHookWorkerDiscoverKiroIDE(request.Home), versions, reasons)
 			}
 		}
-		installs := append(enterprisehooks.DiscoverUnixPrivateAgentInstalls(request.Home, request.Connectors), unlisted...)
+		installs := append(enterprisehooks.DiscoverUnixPrivateAgentInstalls(ctx, request.Home, request.Connectors), unlisted...)
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: installs}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {

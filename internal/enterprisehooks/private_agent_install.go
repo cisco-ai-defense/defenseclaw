@@ -4,6 +4,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -59,6 +60,7 @@ var privateInstallWalkMaxEntries = 1 << 19
 // hides nothing the account can run below dir.
 type privateInstallWalk struct {
 	open        func(dir string) (*os.File, error)
+	openChild   func(parent *os.File, name string) (*os.File, error)
 	unreachable func(dir string, err error) bool
 	// homeLinks returns a link directly below the home that names a
 	// directory as a prefix, without descending into it (Unix only: the
@@ -66,7 +68,10 @@ type privateInstallWalk struct {
 	homeLinks bool
 	budget    int
 	complete  bool
+	ctx       context.Context
 }
+
+const privateInstallWalkMaxDepth = 64
 
 // walkPrivateNPMPrefixes returns every npm prefix below home, at any depth:
 // each directory that holds a node_modules directory (npm install --prefix
@@ -76,27 +81,82 @@ type privateInstallWalk struct {
 // it or lead it outside the home. complete is false when the walk ran out
 // of its bound or a directory could not be listed: the scan then says so
 // instead of reporting the account clean.
-func walkPrivateNPMPrefixes(home string, w privateInstallWalk) (prefixes []string, complete bool) {
-	w.budget, w.complete = privateInstallWalkMaxEntries, true
-	type pending struct {
-		dir     string
-		modules bool // dir is a node_modules directory
+func walkPrivateNPMPrefixes(ctx context.Context, home string, w privateInstallWalk) (prefixes []string, complete bool) {
+	w.budget, w.complete, w.ctx = privateInstallWalkMaxEntries, true, ctx
+	if w.ctx == nil {
+		w.ctx = context.Background()
 	}
-	stack := []pending{{dir: home}}
-	probe := func(pkg string) {
-		modules := filepath.Join(pkg, "node_modules")
-		if info, err := os.Lstat(modules); err == nil && info.Mode().Type() == fs.ModeDir {
-			prefixes = append(prefixes, pkg)
-			stack = append(stack, pending{dir: modules, modules: true})
+	var visit func(dir string, parent *os.File, name string, modules bool, depth int, held *os.File)
+	var probe func(pkg string, parent *os.File, name string, depth int)
+	open := func(dir string, parent *os.File, name string) (*os.File, error) {
+		if parent != nil && w.openChild != nil {
+			return w.openChild(parent, name)
 		}
+		return w.open(dir)
 	}
-	for len(stack) > 0 && w.budget >= 0 {
-		next := stack[len(stack)-1]
-		stack = stack[:len(stack)-1]
-		for _, entry := range w.list(next.dir) {
-			name, child := entry.Name(), filepath.Join(next.dir, entry.Name())
+	probe = func(pkg string, parent *os.File, name string, depth int) {
+		moduleDir := filepath.Join(pkg, "node_modules")
+		if depth+2 > privateInstallWalkMaxDepth {
+			w.complete = false
+			return
+		}
+		if w.openChild == nil {
+			if info, err := os.Lstat(moduleDir); err != nil || info.Mode().Type() != fs.ModeDir {
+				return
+			}
+			prefixes = append(prefixes, pkg)
+			visit(moduleDir, nil, "", true, depth+2, nil)
+			return
+		}
+		packageHandle, err := open(pkg, parent, name)
+		if err != nil {
+			if !w.unreachable(pkg, err) {
+				w.complete = false
+			}
+			return
+		}
+		defer packageHandle.Close()
+		// A pathname Lstat of pkg/node_modules would traverse a raced
+		// junction in pkg as LocalSystem. Check both components through
+		// held handles instead, and list the same modules handle.
+		modulesHandle, err := open(moduleDir, packageHandle, "node_modules")
+		if err != nil {
+			if !w.unreachable(moduleDir, err) {
+				w.complete = false
+			}
+			return
+		}
+		prefixes = append(prefixes, pkg)
+		visit(moduleDir, nil, "", true, depth+2, modulesHandle)
+	}
+	visit = func(dir string, parent *os.File, name string, modules bool, depth int, held *os.File) {
+		if w.ctx.Err() != nil || w.budget < 0 || depth > privateInstallWalkMaxDepth {
+			w.complete = false
+			if held != nil {
+				_ = held.Close()
+			}
+			return
+		}
+		f := held
+		if f == nil {
+			var err error
+			f, err = open(dir, parent, name)
+			if err != nil {
+				if !w.unreachable(dir, err) {
+					w.complete = false
+				}
+				return
+			}
+		}
+		defer f.Close()
+		for _, entry := range w.list(f, dir) {
+			if w.ctx.Err() != nil || w.budget < 0 {
+				w.complete = false
+				return
+			}
+			name, child := entry.Name(), filepath.Join(dir, entry.Name())
 			if entry.Type() != fs.ModeDir {
-				if w.homeLinks && next.dir == home && entry.Type()&fs.ModeSymlink != 0 {
+				if w.homeLinks && dir == home && entry.Type()&fs.ModeSymlink != 0 {
 					if info, err := os.Stat(child); err == nil && info.IsDir() {
 						prefixes = append(prefixes, child)
 					}
@@ -104,41 +164,50 @@ func walkPrivateNPMPrefixes(home string, w privateInstallWalk) (prefixes []strin
 				continue
 			}
 			switch {
-			case !next.modules && name == "node_modules":
-				prefixes = append(prefixes, next.dir)
-				stack = append(stack, pending{dir: child, modules: true})
-			case !next.modules:
-				stack = append(stack, pending{dir: child})
+			case !modules && name == "node_modules":
+				prefixes = append(prefixes, dir)
+				visit(child, f, name, true, depth+1, nil)
+			case !modules:
+				visit(child, f, name, false, depth+1, nil)
 			case strings.HasPrefix(name, "@") || name == ".pnpm":
-				// A scope's packages; pnpm's <name>@<version> store entries.
-				for _, inner := range w.list(child) {
-					if inner.Type() == fs.ModeDir {
-						probe(filepath.Join(child, inner.Name()))
+				if depth+1 > privateInstallWalkMaxDepth {
+					w.complete = false
+					continue
+				}
+				scope, err := open(child, f, name)
+				if err != nil {
+					if !w.unreachable(child, err) {
+						w.complete = false
+					}
+					continue
+				}
+				for _, inner := range w.list(scope, child) {
+					if inner.Type() == fs.ModeDir && w.ctx.Err() == nil {
+						probe(filepath.Join(child, inner.Name()), scope, inner.Name(), depth+1)
 					}
 				}
+				_ = scope.Close()
 			default:
-				probe(child)
+				probe(child, f, name, depth)
 			}
 		}
 	}
-	return prefixes, w.complete && w.budget >= 0
+	visit(home, nil, "", false, 0, nil)
+	return prefixes, w.complete && w.budget >= 0 && w.ctx.Err() == nil
 }
 
 // list reads dir's entries in batches, charging each to the walk's bound.
-func (w *privateInstallWalk) list(dir string) []fs.DirEntry {
-	if w.budget < 0 {
+func (w *privateInstallWalk) list(f *os.File, dir string) []fs.DirEntry {
+	if w.budget < 0 || w.ctx.Err() != nil {
+		w.complete = false
 		return nil
 	}
-	f, err := w.open(dir)
-	if err != nil {
-		if !w.unreachable(dir, err) {
-			w.complete = false
-		}
-		return nil
-	}
-	defer f.Close()
 	var out []fs.DirEntry
 	for {
+		if w.ctx.Err() != nil {
+			w.complete = false
+			return out
+		}
 		batch, err := f.ReadDir(256)
 		if w.budget -= len(batch); w.budget < 0 {
 			return nil
@@ -166,7 +235,7 @@ const (
 )
 
 var privateInstallSkippedText = map[string]string{
-	PrivateInstallSkippedHome:            "the account's home could not be listed within the scan bound",
+	PrivateInstallSkippedHome:            "the account's home could not be fully listed within the scan bounds",
 	PrivateInstallSkippedVersionManagers: "a Node version manager holds more installed versions than the scan inspects",
 	PrivateInstallSkippedNativeVersions:  "a native installer or Homebrew cask holds more releases than the scan inspects",
 	PrivateInstallSkippedFindings:        "the account has more unsupported agent copies than the record holds",

@@ -148,7 +148,7 @@ func TestDiscoverWindowsPrivateInstallsCoverEveryCopyLayout(t *testing.T) {
 			t.Cleanup(func() { windowsPrivateInstallMachineRoots = previous })
 			tc.build(t, home, machine)
 			var got []string
-			for _, install := range DiscoverWindowsPrivateAgentInstalls(home, []string{"claudecode"}) {
+			for _, install := range DiscoverWindowsPrivateAgentInstalls(context.Background(), home, []string{"claudecode"}) {
 				if install.Incomplete {
 					skipped, _ := windowsInstallFacts(t, install)["skipped"].(string)
 					got = append(got, install.Connector+" incomplete "+skipped)
@@ -225,7 +225,7 @@ func TestDiscoverWindowsPrivateNPMCopiesNeedAnEntryPoint(t *testing.T) {
 				home := t.TempDir()
 				dir := filepath.Join(home, "private", "node_modules", filepath.FromSlash(pkg))
 				tc.build(t, dir, connector)
-				found := DiscoverWindowsPrivateAgentInstalls(home, []string{connector})
+				found := DiscoverWindowsPrivateAgentInstalls(context.Background(), home, []string{connector})
 				switch {
 				case tc.skipped != "":
 					if len(found) != 1 || !found[0].Incomplete || found[0].Skipped != tc.skipped {

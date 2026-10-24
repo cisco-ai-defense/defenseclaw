@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -55,7 +56,7 @@ func TestDiscoverWindowsPrivateInstallsFindCopiesAtAnyDepth(t *testing.T) {
 			home, outside := t.TempDir(), t.TempDir()
 			tc.build(t, home, outside)
 			var got []string
-			for _, install := range DiscoverWindowsPrivateAgentInstalls(home, []string{"claudecode"}) {
+			for _, install := range DiscoverWindowsPrivateAgentInstalls(context.Background(), home, []string{"claudecode"}) {
 				if install.Incomplete {
 					skipped, _ := windowsInstallFacts(t, install)["skipped"].(string)
 					got = append(got, install.Connector+" incomplete "+skipped)

@@ -153,7 +153,7 @@ func TestDiscoverUnixPrivateInstallsFindCopiesAtAnyDepth(t *testing.T) {
 			home := makeHome(t, trustedTestDir(t), "alice")
 			tc.build(t, home)
 			var got []string
-			for _, line := range describeInstalls(t, DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode", "codex"}), home) {
+			for _, line := range describeInstalls(t, DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode", "codex"}), home) {
 				got = append(got, strings.ReplaceAll(line, "/.pnpm/@anthropic-ai+claude-code@2.0.77/node_modules/", "/"))
 			}
 			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
@@ -199,7 +199,7 @@ func TestDiscoverUnixPrivateInstallsJudgeNestedCaskExecutables(t *testing.T) {
 			tc.build(t, filepath.Join(machine, "Caskroom"))
 			home := makeHome(t, trustedTestDir(t), "alice")
 			var got []string
-			for _, line := range describeInstalls(t, DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode", "codex"}), home) {
+			for _, line := range describeInstalls(t, DiscoverUnixPrivateAgentInstalls(context.Background(), home, []string{"claudecode", "codex"}), home) {
 				got = append(got, strings.ReplaceAll(line, machine, "MACHINE"))
 			}
 			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
