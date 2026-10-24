@@ -305,6 +305,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, err
 	}
 	var installedConfig []byte
+	var inUse error
 	if action == "remove" {
 		installedConfig, err = readWindowsSecretInstalledConfig(layout)
 		if err != nil {
@@ -321,7 +322,13 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 			if opts.undoRotation != "" {
 				err = fmt.Errorf("the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)
 			}
-			return windowsSecretChange{}, secretFailed("credential_in_use", windowsSecretExitFailure, err)
+			inUse = secretFailed("credential_in_use", windowsSecretExitFailure, err)
+			// A put-back first learns whether its rotation committed
+			// (rotation_confirmed, below), the only refusal that retires
+			// the wrapper's entry; neither refusal changes anything.
+			if opts.undoRotation == "" {
+				return windowsSecretChange{}, inUse
+			}
 		}
 	}
 	// Start an independent child before changing credentials, but only arm it
@@ -354,6 +361,9 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
 			return windowsSecretChange{}, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
 		}
+	}
+	if inUse != nil {
+		return windowsSecretChange{}, inUse
 	}
 	// A change this computer could not audit is not made: the spool must
 	// hold room for its change event before the credential is written or

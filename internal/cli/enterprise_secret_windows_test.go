@@ -1324,6 +1324,11 @@ func TestWindowsSecretUndoRotationKeepsACredentialALaterConfigUses(t *testing.T)
 		{"a config installed since still uses it", uses, reapplied, false},
 		{"the config from before uses it", uses, uses, true},
 		{"a config installed since does not use it", uses, unused, true},
+		// A bundle confirmed since the rotation (here: the journaled one
+		// is no longer confirmed) proves it committed: rotation_confirmed,
+		// whatever config is installed now, so the wrapper retires its
+		// entry instead of keeping it for good.
+		{"a bundle confirmed since and a config installed since", unused, uses, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := os.WriteFile(layout.ConfigPath, []byte(tc.before), 0o600); err != nil {
@@ -1335,7 +1340,11 @@ func TestWindowsSecretUndoRotationKeepsACredentialALaterConfigUses(t *testing.T)
 			if err := os.WriteFile(layout.ConfigPath, []byte(tc.after), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: windowsTestSHA256(tc.before)}, "")
+			undoRotation, code := "none", "credential_in_use"
+			if strings.HasPrefix(tc.name, "a bundle confirmed since") {
+				undoRotation, code = strings.Repeat("a", 64), "rotation_confirmed"
+			}
+			out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: undoRotation, undoConfig: windowsTestSHA256(tc.before)}, "")
 			if tc.removed {
 				if err != nil {
 					t.Fatalf("put-back: %v\n%s", err, out)
@@ -1345,7 +1354,13 @@ func TestWindowsSecretUndoRotationKeepsACredentialALaterConfigUses(t *testing.T)
 				}
 				return
 			}
-			windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
+			windowsSecretFailureDoc(t, out, err, "remove", code)
+			if code == "rotation_confirmed" {
+				if !windowsSecretStored(dir, name) {
+					t.Fatal("a put-back refused rotation_confirmed removed the credential")
+				}
+				return
+			}
 			if !strings.Contains(out, "not the config installed before the rotation") || strings.Contains(out, "new-key") {
 				t.Fatalf("refusal does not say why, or prints the value:\n%s", out)
 			}
