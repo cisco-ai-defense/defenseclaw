@@ -14,7 +14,13 @@ import click
 import pytest
 import yaml
 from click.testing import CliRunner
-from defenseclaw.commands import cmd_config, cmd_edge_connector_cli, cmd_edge_install, cmd_setup_edge_connector, cmd_setup_mqtt
+from defenseclaw.commands import (
+    cmd_config,
+    cmd_edge_connector_cli,
+    cmd_edge_install,
+    cmd_setup_edge_connector,
+    cmd_setup_mqtt,
+)
 from defenseclaw.context import AppContext
 from defenseclaw.dotenv_utils import persist_env_var
 from defenseclaw.file_permissions import make_private_directory
@@ -121,14 +127,18 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
 def test_documented_proxy_trust_command_writes_fleet_setting(tmp_path, monkeypatch) -> None:
     make_private_directory(tmp_path)
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    recorded = []
+    app = AppContext()
+    app.logger = SimpleNamespace(log_config_change=lambda *args: recorded.append(args))
     result = CliRunner().invoke(
         cmd_config.config_cmd,
         ["set", "fleet.trust_proxy_headers", "true"],
-        obj=AppContext(),
+        obj=app,
     )
     assert result.exit_code == 0, result.output
     written = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert written["fleet"]["trust_proxy_headers"] is True
+    assert recorded == [("config-set", "fleet.trust_proxy_headers=(set)")]
 
 
 def test_edge_register_uses_saved_https_endpoint_without_redirects(tmp_path, monkeypatch) -> None:
