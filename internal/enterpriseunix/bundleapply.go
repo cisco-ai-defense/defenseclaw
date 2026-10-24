@@ -1007,6 +1007,17 @@ func (l *lifecycle) failBundle(ctx context.Context, run *bundleRun, record *Depl
 	r := l.result
 	rc := run.receipt
 	rc.RolledBack = hasMessageCode(r.Warnings, codeRolledBack)
+	enforces := "the last good policy keeps enforcing"
+	if owner := installedPendingPredecessor(run.store, rc, record); owner != nil {
+		// The rollback put back a config another run committed and the
+		// gateway has not confirmed: that is not the last good bundle, so it
+		// is reported as itself, never as rolled_back.
+		rc.RolledBack = false
+		enforces = fmt.Sprintf("the deployment holds policy bundle %s version %d again, which an earlier run applied and the gateway has not confirmed", displayID(owner), owner.Version)
+		r.AddWarning(enterprisebundle.WarnBundlePending, fmt.Sprintf(
+			"policy bundle %s version %d stays installed and pending (it is not the last good bundle); the next lifecycle run settles it once the gateway reports its policy",
+			displayID(owner), owner.Version))
+	}
 	if record != nil {
 		rc.EnforcingDigest, _ = l.gatewayPolicyNow(ctx, record.ServiceUID)
 	}
@@ -1014,8 +1025,28 @@ func (l *lifecycle) failBundle(ctx context.Context, run *bundleRun, record *Depl
 		r.AddWarning(codeBundleStateUnreadable, "could not record the failed policy bundle receipt: "+err.Error())
 	}
 	if !hasMessageCode(r.Errors, string(code)) {
-		r.AddError(string(code), fmt.Sprintf("policy bundle %s version %d was not applied: %s; the last good policy keeps enforcing", displayID(rc), rc.Version, message))
+		r.AddError(string(code), fmt.Sprintf("policy bundle %s version %d was not applied: %s; %s", displayID(rc), rc.Version, message, enforces))
 	}
+}
+
+// installedPendingPredecessor is the other unfinished receipt whose committed
+// config the deployment holds after rc's run, or nil: an applied (or staged
+// and committed) bundle no run has confirmed or failed yet.
+func installedPendingPredecessor(store *enterprisebundle.Store, rc *enterprisebundle.Receipt, record *Deployment) *enterprisebundle.Receipt {
+	if store == nil || rc == nil || record == nil || record.ConfigSHA256 == "" {
+		return nil
+	}
+	receipts, err := store.Unsettled()
+	if err != nil {
+		return nil
+	}
+	for _, other := range receipts {
+		if other.ReceiptID != rc.ReceiptID && (other.State == enterprisebundle.StateApplied || other.State == enterprisebundle.StateStaged) &&
+			other.ConfigSHA256 == record.ConfigSHA256 {
+			return other
+		}
+	}
+	return nil
 }
 
 func displayID(rc *enterprisebundle.Receipt) string {

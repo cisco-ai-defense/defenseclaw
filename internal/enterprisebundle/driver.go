@@ -68,6 +68,10 @@ type Driver struct {
 	// DeliveryID is the --delivery-id Prepare records on the receipt it
 	// starts ("" for none).
 	DeliveryID string
+	// CurrentReceiptID is the receipt of the delivery this process installs
+	// ("" when it installs none): ConfigGenerationOptions attributes bytes
+	// that staged receipts of different bundles render to it.
+	CurrentReceiptID string
 }
 
 // Prepared is a bundle ready for the ensure transaction.
@@ -89,6 +93,12 @@ type Prepared struct {
 	// receipt was discarded and Config is the current bundle config.
 	AlreadyApplied bool
 	Warnings       []Warning
+	// InstalledPending is set when Finish failed this delivery while the
+	// deployment holds the committed config of another receipt that no run
+	// has confirmed or failed yet: that config is neither this bundle's nor
+	// the last good one, nothing was rolled back, and the next run settles
+	// that receipt.
+	InstalledPending *Receipt
 }
 
 // GatewayPolicy is what the running gateway reports after the transaction.
@@ -341,8 +351,24 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 			// Only codes: lifecycle messages can quote config values.
 			message = fmt.Sprintf("the ensure transaction failed (%s)", joinCodes(failure))
 		}
-		rc.RolledBack = installed != p.ConfigSHA256
-		if !rc.RolledBack && rollback != nil {
+		rc.RolledBack = false
+		switch owner := d.installedPendingOwner(rc, installed); {
+		case owner != nil:
+			// The installed config is another receipt's pending commit (a
+			// retry that failed before its own commit, or a transaction that
+			// put back its unconfirmed predecessor). Neither is a rollback,
+			// and the last good config never replaces it here.
+			p.InstalledPending = owner
+			message += installedPendingMessage(owner)
+		case installed != p.ConfigSHA256:
+			// The transaction left another config. It is a rollback only once
+			// the installed bytes, their generation and the live gateway
+			// prove the last good config enforces again.
+			rc.RolledBack = d.lastGoodEnforced(rc, installed, &policy)
+			if !rc.RolledBack {
+				message += "; the deployment does not hold this bundle's config, and the last good config is not proven to enforce again"
+			}
+		case rollback != nil:
 			// The transaction failed after it installed the bundle config:
 			// put the last good config back, as for an unconfirmed bundle.
 			enforcing, ok := rollback()
@@ -368,21 +394,21 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 			}
 			return State{}, &Error{Code: CodeNotConfirmed, Detail: "the bundle config is installed, but the gateway is unavailable; its receipt stays applied until the gateway reports the verified policy"}
 		}
-		return State{}, d.failAfterRollback(rc, CodeNotConfirmed,
+		return State{}, d.failAfterRollback(p, installed, CodeNotConfirmed,
 			"the gateway is unavailable and the bundle transaction was not committed", rollback)
 	}
 	if err := ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err != nil {
-		return State{}, d.failAfterRollback(rc, CodeDigestMismatch, err.Error(), rollback)
+		return State{}, d.failAfterRollback(p, installed, CodeDigestMismatch, err.Error(), rollback)
 	}
 	if !policy.Applied || policy.ReloadError != "" || !digestPattern.MatchString(policy.Digest) || !digestPattern.MatchString(policy.EffectiveDigest) {
 		reason := "the gateway does not report the effective policy of the bundle config"
 		if policy.ReloadError != "" {
 			reason = "the gateway rejected the bundle config and keeps enforcing its previous policy"
 		}
-		return State{}, d.failAfterRollback(rc, CodeNotConfirmed, reason, rollback)
+		return State{}, d.failAfterRollback(p, installed, CodeNotConfirmed, reason, rollback)
 	}
 	if !d.TransactionApplied(rc, installed, &policy) {
-		return State{}, d.failAfterRollback(rc, CodeNotConfirmed,
+		return State{}, d.failAfterRollback(p, installed, CodeNotConfirmed,
 			"the installed generation and gateway do not prove this bundle's transaction; run `defenseclaw enterprise windows ensure --profile standalone --bundle <bundle file>` to apply it again", rollback)
 	}
 	at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
@@ -736,7 +762,15 @@ func (d *Driver) installedBeforeRun(rc *Receipt, installedConfig []byte, install
 	}
 }
 
-func (d *Driver) failAfterRollback(rc *Receipt, code Code, message string, rollback func() (string, bool)) error {
+func (d *Driver) failAfterRollback(p *Prepared, installed string, code Code, message string, rollback func() (string, bool)) error {
+	rc := p.Receipt
+	if owner := d.installedPendingOwner(rc, installed); owner != nil {
+		// This run committed nothing over another receipt's pending config:
+		// the last good config must not replace it (see Finish).
+		rc.RolledBack = false
+		p.InstalledPending = owner
+		return d.fail(rc, code, message+installedPendingMessage(owner))
+	}
 	if rollback != nil {
 		enforcing, ok := rollback()
 		rc.RolledBack = ok
@@ -748,6 +782,69 @@ func (d *Driver) failAfterRollback(rc *Receipt, code Code, message string, rollb
 		}
 	}
 	return d.fail(rc, code, message)
+}
+
+// installedPendingOwner is the other unfinished receipt whose committed
+// generation holds the installed config while rc's own transaction committed
+// nothing for it, or nil.
+func (d *Driver) installedPendingOwner(rc *Receipt, installed string) *Receipt {
+	if rc == nil || installed == "" {
+		return nil
+	}
+	if _, committed := d.committedGeneration(rc, installed); committed {
+		return nil
+	}
+	receipts, err := d.Store.Unsettled()
+	if err != nil {
+		return nil
+	}
+	for _, other := range receipts {
+		if other.ReceiptID == rc.ReceiptID || (other.State != StateStaged && other.State != StateApplied) {
+			continue
+		}
+		if _, committed := d.committedGeneration(other, installed); committed {
+			return other
+		}
+	}
+	return nil
+}
+
+func installedPendingMessage(owner *Receipt) string {
+	return fmt.Sprintf("; the deployment holds policy bundle %s version %d (receipt %s), which an earlier run committed and the gateway has not confirmed: "+
+		"it stays installed and pending, nothing was rolled back, and the next lifecycle run settles it", owner.BundleID, owner.Version, owner.ReceiptID)
+}
+
+// lastGoodEnforced proves that the installed config is the last good one and
+// that the live gateway enforces it: the confirmed bundle's rendered config
+// under its own generation record, or, with no confirmed bundle, the config
+// rc's run started from under a record that names no bundle. No config at
+// all is the last good state of a run that started with none.
+func (d *Driver) lastGoodEnforced(rc *Receipt, installed string, policy *GatewayPolicy) bool {
+	st, err := d.Store.LoadState()
+	if err != nil {
+		return false
+	}
+	var id, signer string
+	var version uint64
+	if st.Current != nil {
+		raw, ref, err := d.CurrentConfig()
+		if err != nil || ref == nil || installed == "" || sha256Hex(raw) != installed {
+			return false
+		}
+		id, version, signer = ref.BundleID, ref.Version, ref.SignerKeyID
+	} else if rc.BaseConfigSHA256 == NoBaseConfig {
+		return installed == ""
+	} else if rc.BaseConfigSHA256 == "" || rc.BaseConfigSHA256 != installed {
+		return false
+	}
+	if d.ConfigPath == "" || policy == nil || policy.Unavailable() || !policy.Applied || policy.ReloadError != "" ||
+		!digestPattern.MatchString(policy.Digest) || policy.Digest != policy.EffectiveDigest ||
+		policy.BundleID != id || policy.BundleVersion != version {
+		return false
+	}
+	record, err := configwrite.ReadGenerationState(d.ConfigPath)
+	return err == nil && record.Generation > 0 && record.ConfigSHA256 == installed && policy.Generation == record.Generation &&
+		record.BundleID == id && record.BundleVersion == version && record.SignerKeyID == signer
 }
 
 func (d *Driver) fail(rc *Receipt, code Code, message string) error {
