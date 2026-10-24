@@ -146,6 +146,7 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 			}
 			for _, action := range []string{ActionStatus, ActionVerify} {
 				r := h.run(Options{Action: action})
+				contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", r)
 				if got := r.Connectors["hermes"].HooksInstalled; got != enterprisestatus.HooksInstalledUnknown {
 					t.Fatalf("%s certified Hermes hooks from a persistent-home receipt: %q", action, got)
 				}

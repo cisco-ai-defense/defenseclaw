@@ -173,6 +173,8 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 	if state, ok := block["hermes"]; ok && state.Enabled &&
 		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
 		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
+		// A persistent-home target cannot prove a session-only HERMES_HOME.
+		state.Targets = nil
 		block["hermes"] = state
 		result.CoverageComplete, result.SecurityComplete = false, false
 		message := "connectors.hermes: the guardian's persistent-home registration cannot prove a session-only HERMES_HOME is hooked; Windows managed Hermes coverage cannot be verified"

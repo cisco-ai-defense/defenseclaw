@@ -111,6 +111,9 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 	if state, ok := block["hermes"]; ok && state.Enabled &&
 		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
 		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
+		// Persistent-home targets cannot establish coverage of a session-only
+		// HERMES_HOME. Do not publish their counts as coverage for this state.
+		state.Targets = nil
 		block["hermes"] = state
 		r.CoverageComplete, r.SecurityComplete = false, false
 		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(env.GOOS, "hermes", true, false); err != nil {

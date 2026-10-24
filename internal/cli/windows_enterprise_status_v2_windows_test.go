@@ -134,7 +134,10 @@ func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
 }
 
 func TestWindowsVerifyV2KeepsCompleteResultWhenHermesIsNotInstalled(t *testing.T) {
-	cfg := windowsStatusV2Config()
+	// Keep the fixture limited to a connector whose hook process is not
+	// separately known to fail open. This assertion is about Hermes absence.
+	cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"amp": {}}
 	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
 		cfg: cfg, guardianKnown: true,
 	})
