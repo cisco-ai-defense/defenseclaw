@@ -2321,8 +2321,10 @@ def _activate_additional_connectors(
         previous.setdefault(connector_paths.normalize(name), block)
 
     def _fresh_block(key: str) -> PerConnectorGuardrailConfig:
-        # Init asks for mode, fail mode and HITL; the rule pack, levels and
-        # block message it never asks about carry over (GAP-1713).
+        # Init asks for mode and HITL; the rule pack, levels, block message
+        # and a saved outage mode carry over (GAP-1713). Only a fail mode
+        # chosen in this run replaces the saved one (owner decision
+        # 2026-10-23: a saved choice wins over the policy tier).
         block = PerConnectorGuardrailConfig()
         old = previous.get(key)
         for field in _KEPT_CONNECTOR_FIELDS:
@@ -2330,6 +2332,8 @@ def _activate_additional_connectors(
         return block
 
     gc.connectors = {primary_name: _fresh_block(primary_name)}
+    if primary.get("fail_mode"):
+        gc.connectors[primary_name].hook_fail_mode = _chosen_fail_mode(primary["fail_mode"])
     trusted_prompt_cache: dict[str, bool] | None = {} if allow_trusted_path_prompt else None
     if (
         allow_trusted_path_prompt
@@ -2408,7 +2412,7 @@ def _activate_additional_connectors(
         if pc.mode == "observe" and (gc.mode or "observe").lower() == "observe" and not s.get("mode_warning"):
             pc.mode = ""
         if s["fail_mode"]:
-            pc.hook_fail_mode = "closed" if s["fail_mode"].lower() == "closed" else "open"
+            pc.hook_fail_mode = _chosen_fail_mode(s["fail_mode"])
         if s["human_approval"] is not None:
             pc.hilt = HILTConfig(
                 enabled=bool(s["human_approval"]),
@@ -2456,8 +2460,13 @@ def _activate_additional_connectors(
     return active, sidecar_step
 
 
-# Per-connector guardrail settings init never prompts for (GAP-1713).
-_KEPT_CONNECTOR_FIELDS = ("rule_pack", "block_at", "alert_at", "block_message")
+# Per-connector guardrail settings a first-run rerun keeps (GAP-1713). A
+# saved hook_fail_mode is kept unless the run supplies a new fail mode.
+_KEPT_CONNECTOR_FIELDS = ("rule_pack", "block_at", "alert_at", "block_message", "hook_fail_mode")
+
+
+def _chosen_fail_mode(value: str) -> str:
+    return "closed" if str(value).strip().lower() == "closed" else "open"
 
 
 def _saved_connector_overrides() -> dict[str, object]:

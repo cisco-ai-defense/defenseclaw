@@ -6,7 +6,8 @@
 Setup, init, the TUI first-run form, ``guardrail mode`` and adding a connector
 never write ``hook_fail_mode`` as a side effect, so a later switch to the
 strict tier closes a gateway outage unless the operator explicitly saved open.
-An upgrade from 1.0.0-1.0.3 never loosens the config it finds.
+An explicit saved choice is never dropped: an init rerun keeps it unless the
+run supplies a new one. An upgrade from 1.0.0-1.0.3 never loosens the config it finds.
 """
 
 from __future__ import annotations
@@ -262,6 +263,65 @@ def test_cursor_upgrade_step_does_not_hide_the_providers_fold(tmp_path) -> None:
     steps = [name for name, _fn in _pending_migration_steps(9, "1.0.3", str(tmp_path), str(tmp_path / "config.yaml"), 9)]
     assert "fold the legacy custom-providers.json into config.yaml" in steps
     assert "remove old automatic Cursor outage setting" in steps
+
+
+def _first_run_env(tmp_path, monkeypatch) -> None:
+    for key, value in isolated_home_env(tmp_path / "home").items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", lambda *_a, **_k: True)
+
+
+@pytest.mark.parametrize("saved", ["", "open", "closed"])
+@pytest.mark.parametrize("choice", [None, "open", "closed"])
+def test_init_rerun_keeps_each_saved_connector_fail_mode_unless_one_is_chosen(tmp_path, monkeypatch, saved, choice):
+    # Loop round 2 P1: a multi-connector init rerun rebuilt every connector
+    # block without its hook_fail_mode, so a saved closed fell to the tier
+    # (open on default) during an outage.
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.commands.cmd_init import _activate_additional_connectors
+
+    _first_run_env(tmp_path, monkeypatch)
+    other = {"": "", "open": "closed", "closed": "open"}[saved]
+    cfg = default_config()
+    cfg.guardrail.connector = "codex"
+    cfg.claw.mode = "codex"
+    cfg.guardrail.enabled = True
+    before = {
+        "codex": PerConnectorGuardrailConfig(mode="action", hook_fail_mode=saved),
+        "claudecode": PerConnectorGuardrailConfig(mode="action", hook_fail_mode=other),
+    }
+    cfg.guardrail.connectors = dict(before)
+    cfg.save()
+    knobs = {"fail_mode": choice, "human_approval": None, "hilt_min_severity": None}
+    _activate_additional_connectors(
+        {"connector": "codex", "profile": "action", **knobs},
+        [{"connector": "claudecode", "profile": "action", **knobs}],
+        start_gateway=False,
+        overrides_before=before,
+    )
+    gc = cfg_mod.load().guardrail
+    for tier, tier_mode in TIERS.items():
+        gc.rule_pack = tier
+        assert gc.effective_hook_fail_mode("codex") == (choice or saved or tier_mode), tier
+        assert gc.effective_hook_fail_mode("claudecode") == (choice or other or tier_mode), tier
+    if not choice and not saved:
+        assert _saved_fail_modes(gc) == {}
+
+
+@pytest.mark.parametrize("saved", ["", "open", "closed"])
+@pytest.mark.parametrize("choice", ["", "open", "closed"])
+def test_first_run_choice_replaces_the_connectors_own_saved_mode(saved, choice) -> None:
+    # The single-connector first run keeps the connector's own block; its
+    # saved value would otherwise win over the global choice just made.
+    from defenseclaw.bootstrap import FirstRunOptions, _apply_first_run_choices
+
+    cfg = default_config()
+    cfg.guardrail.connectors = {"codex": PerConnectorGuardrailConfig(hook_fail_mode=saved)}
+    _apply_first_run_choices(cfg, FirstRunOptions(connector="codex", hook_fail_mode=choice), "codex", "action", "local")
+    gc = cfg.guardrail
+    for tier, tier_mode in TIERS.items():
+        gc.rule_pack = tier
+        assert gc.effective_hook_fail_mode("codex") == (choice or saved or tier_mode), tier
 
 
 # Owner decision 2026-10-23, written out on its own so the table below checks

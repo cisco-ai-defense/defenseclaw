@@ -1567,6 +1567,9 @@ def _apply_first_run_choices(
     desired = (options.hook_fail_mode or "").strip().lower()
     if desired:
         cfg.guardrail.hook_fail_mode = "closed" if desired == "closed" else "open"
+        selected = _first_run_selected_connector_override(cfg, connector)
+        if selected is not None and (selected.hook_fail_mode or "").strip():
+            selected.hook_fail_mode = cfg.guardrail.hook_fail_mode
 
     # Human-In-the-Loop (HITL). ``None`` is the no-op sentinel so
     # init/quickstart reruns don't clobber an operator who already
