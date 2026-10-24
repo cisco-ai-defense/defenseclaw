@@ -232,10 +232,8 @@ type State struct {
 	// guardian rewrites them as the user; until it has, verify fails.
 	UserFileDrift []string `json:"user_file_drift,omitempty"`
 	// UserFileForeign names files at DefenseClaw's own per-user paths (the
-	// Copilot plugin) that hold hooks DefenseClaw did not write. The
-	// guardian leaves them in place, and the foreign-hook guard denies that
-	// user's agent calls while they are there, so verify fails on them
-	// (GAP-1232).
+	// Copilot Local hook or plugin) that hold independent content. The
+	// guardian leaves them in place, so verify fails on them (GAP-1232).
 	UserFileForeign []string `json:"user_file_foreign,omitempty"`
 	LiveVerifiedAt  string   `json:"live_verified_at,omitempty"`
 	// VersionFloor is Claude Code's requiredMinimumVersion state (claudecode

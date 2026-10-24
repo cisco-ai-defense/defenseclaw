@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import json
 import re
 import shutil
 import subprocess
@@ -907,7 +908,7 @@ def test_refused_late_swap_restores_setup_hooks_without_restarting_gateway(tmp_p
     staged.write_text("enforcing", encoding="ascii")
     root = str(tmp_path).replace("'", "''")
     destination = str(restored).replace("'", "''")
-    script = _ps1_function("Restore-SetupInstall") + f"""
+    script = _ps1_function("Enable-SetupHooks") + _ps1_function("Restore-SetupInstall") + f"""
 $Staging = '{root}'
 $SetupHookState = '{destination}'
 $WasRunning = $true
@@ -1000,7 +1001,7 @@ def test_a_slow_first_start_is_waited_for_before_restoring() -> None:
     assert "if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }" in body
     assert "$deadline = (Get-Date).AddMinutes(3)" in body
     assert 'Invoke-Native $gateway @("status") -Quiet' in body
-    assert 'Write-Ok "The gateway finished starting"; return 0' in body
+    assert 'Write-Ok "The gateway finished starting"' in body
 
 
 def test_a_restore_that_leaves_the_old_gateway_down_says_so() -> None:
@@ -1245,7 +1246,7 @@ def test_an_interrupted_setup_upgrade_restarts_the_setup_gateway() -> None:
     # DefenseClaw Setup install never had ("is not recognized").
     start = _ps1_function("Start-Gateway")
     assert "if (-not (Test-Path -LiteralPath $gateway -PathType Leaf))" in start
-    assert start.index("Test-Path -LiteralPath $gateway") < start.index('Invoke-Native $gateway @("start")')
+    assert start.index("Test-Path -LiteralPath $gateway") < start.index("$rc = Invoke-Native $gateway $startArgs")
     resume = _ps1_function("Resume-InterruptedRun")
     assert 'Start-RecoveredGateway "restored"' in resume and "Start-Gateway)" not in resume
     assert "Start-SetupGateway $setupInstall.Root" in _ps1_function("Start-RecoveredGateway")
@@ -1314,7 +1315,7 @@ def test_a_rollback_to_1_0_0_starts_its_gateway_on_a_large_wal_audit_db(tmp_path
         assert not (tmp_path / "audit.db-wal").exists()
     start = _ps1_function("Start-Gateway")
     guard = 'if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }'
-    assert start.index(guard) < start.index('Invoke-Native $gateway @("start")')
+    assert start.index(guard) < start.index("$rc = Invoke-Native $gateway $startArgs")
     sh_start = sh_text[sh_text.index("\nstart_gateway() {") :]
     assert sh_start.index('version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi') < sh_start.index(
         '"${BIN_DIR}/defenseclaw-gateway" start'
@@ -2623,6 +2624,7 @@ function Die([string]$Message) {{ throw $Message }}
 function Invoke-Quietly([scriptblock]$Block) {{ & $Block }}
 function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
 function Get-InstalledVersion {{ return '1.0.3' }}
+function Assert-NoLoadedPluginAgents {{ }}
 function Assert-NoActiveConnectorRecovery {{ }}
 function Save-Url([string]$Url, [string]$To) {{ [IO.File]::WriteAllText($To.Replace([char]92, [IO.Path]::DirectorySeparatorChar), '{installer.replace("'", "''")}'); return $true }}
 function Get-ListedSha256 {{ return 'verified' }}
@@ -3318,6 +3320,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $Staging = '{staging}'
 $SetupHookState = '{state}'
+$SetupDelegatedHooks = Join-Path '{staging}' 'delegated'
 $Setup = {setup}
 $events = New-Object System.Collections.Generic.List[string]
 $script:looks = @({looks})
@@ -3340,6 +3343,8 @@ function Get-RestoredNote {{ return 'restored' }}
 function Get-UtcClock {{ return 'T' }}
 function Write-Info([string]$m) {{ }}
 function Die([string]$m) {{ throw $m }}
+function Write-Warn([string]$m) {{ $events.Add("warn") }}
+function Protect-SetupLauncherFile([string]$Path) {{ }}
 """
 
 
@@ -3391,6 +3396,11 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
     script.write_text(
         stubs
         + _ps1_function("Move-Path")
+        + _ps1_function("Get-Field")
+        + _ps1_function("Read-Json")
+        + _ps1_function("Invoke-Quietly")
+        + _ps1_function("Test-SetupLauncherTrampoline")
+        + _ps1_function("Publish-SetupLauncherTrampoline")
         + _ps1_function("Disable-SetupHooks")
         + _ps1_function("Enable-SetupHooks")
         + _ps1_function("Restore-SetupInstall")
@@ -3577,7 +3587,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
     real = "".join(
         _ps1_function(name)
         for name in (
-            "Invoke-Quietly", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
+            "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote", "Resume-InterruptedRun",
         )
@@ -3589,7 +3599,7 @@ def test_a_blocked_early_hook_restore_keeps_the_install_locked(tmp_path: Path, s
         "$LockDir = Join-Path $DataDir '.install.lock'\n"
         "$ManagedFiles = @('defenseclaw-hook.exe', 'defenseclaw-gateway.exe')\n"
         "$Run = @{ Lock = $true; OldGatewayDown = $false; UndoPending = $false; RestorePending = $false }\n"
-        "$Setup = $null; $PrevVersion = '1.0.2'; $Ver = '1.0.4'; $versionChange = $true; $stagedGateway = 'staged'\n"
+        "$Setup = $null; $PrevVersion = '1.0.2'; $Ver = '1.0.4'; $versionChange = $true; $Repair = $false; $stagedGateway = 'staged'\n"
         f"$script:site = '{site}'; $script:blocks = {blocks}; $script:silent = ${str(block == 'silent').lower()}; $script:lose = '{block}'\n"
         "$script:running = $true; $script:starts = 0; $script:modeCalls = 0\n"
         "function Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
@@ -3726,7 +3736,7 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
     real = "".join(
         _ps1_function(name)
         for name in (
-            "Invoke-Quietly", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
+            "Invoke-Quietly", "Start-SwapHookFailModes", "Read-Text", "Get-Sha256", "Copy-BinDir", "Save-BinarySnapshot", "Install-HookFirst", "Save-HookCloser",
             "Undo-HookFirst", "Undo-Snapshot", "Undo-EarlySnapshot", "Restart-Old", "Test-RecoveryPending",
             "Get-UnchangedNote", "Close-InstallLock", "Get-RestoredNote",
         )
@@ -3738,7 +3748,7 @@ def test_a_step_that_throws_after_the_hook_swap_restores_the_old_install(
         "$LockDir = Join-Path $DataDir '.install.lock'\n"
         "$ManagedFiles = @('defenseclaw-hook.exe', 'defenseclaw-gateway.exe')\n"
         "$Run = @{ Lock = $true; OldGatewayDown = $false; UndoPending = $false; RestorePending = $false }\n"
-        "$Setup = $null; $PrevVersion = '1.0.3'; $Ver = '1.0.4'; $versionChange = $true; $stagedGateway = 'staged'\n"
+        "$Setup = $null; $PrevVersion = '1.0.3'; $Ver = '1.0.4'; $versionChange = $true; $Repair = $false; $stagedGateway = 'staged'\n"
         f"$script:site = '{site}'; $script:blocked = ${str(block == 'always').lower()}\n"
         "$script:running = $true; $script:starts = 0; $script:modeCalls = 0\n"
         "function Write-Info([string]$m) { Write-Host \"info: $m\" }\n"
@@ -5080,6 +5090,7 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\nfunction Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
         "function Die([string]$m) { throw $m }\n"
         "function Get-InstalledVersion { return '1.0.4' }\n"
+        "function Assert-NoLoadedPluginAgents { }\n"
         "function Assert-NoActiveConnectorRecovery { }\nfunction Confirm-Step { return $true }\n"
         "function Test-HookRollbackRestoreAvailable { return $false }\nfunction Wait-VenvFree { }\n"
         "function Test-RollbackData { return $false }\nfunction Get-GatewayProcess { return $true }\n"
@@ -5135,3 +5146,479 @@ def test_a_pending_lifecycle_record_closes_the_hooks_with_the_kept_closer(tmp_pa
     assert out.returncode == 0, text
     assert "RAN: " in text and ".lifecycle-closer" in text.split("RAN: ", 1)[1].splitlines()[0], text
     assert "every agent hook blocks tool calls" in text, text
+
+
+_TRAMPOLINE_STUBS = """
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$Staging = '{staging}'
+$SetupHookState = '{state}'
+$SetupDelegatedHooks = '{delegated}'
+$BinDir = '{bin}'
+$DataDir = '{data}'
+$protected = New-Object System.Collections.Generic.List[string]
+function Protect-SetupLauncherFile([string]$Path) {{ $protected.Add($Path) }}
+function Write-Warn([string]$m) {{ Write-Host "warn $m" }}
+"""
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.skipif(not _POWERSHELLS, reason="PowerShell is not installed")
+@pytest.mark.parametrize("shell", _POWERSHELLS)
+@pytest.mark.parametrize("case", ["trampoline", "full-launcher", "launcher-changed", "refresh", "enable"])
+def test_setup_launcher_delegates_to_this_releases_hook(tmp_path: Path, shell: str, case: str) -> None:
+    # GAP-1000: an agent session started before a Setup -> 1.0.x upgrade keeps
+    # running Setup's stable launcher, which answered every call with exit 0
+    # and no decision once its state was set aside. Setup 0.8.10's launcher is
+    # a trampoline: the installer points it at a private copy of this
+    # release's hook (closed during the install, the gateway's verdict after),
+    # keeps Setup's own state to put back, and refreshes the copy on every
+    # later install. A launcher it cannot point elsewhere keeps the no-op.
+    runtime, staging, bin_dir, data = tmp_path / "HookRuntime", tmp_path / "staging", tmp_path / "bin", tmp_path / "data"
+    for folder in (runtime, staging / "bin", bin_dir, data):
+        folder.mkdir(parents=True)
+    launcher = runtime / "defenseclaw-hook.exe"
+    launcher.write_bytes(b"setup-0.8.10-trampoline")
+    state = runtime / "hook-runtime-state.json"
+    original = {
+        "schema_version": 2,
+        "status": "active",
+        "runtime_root": str(runtime),
+        "launcher_path": str(launcher),
+        "launcher_sha256": _sha256(launcher) if case != "launcher-changed" else "0" * 64,
+        "launcher_kind": "trampoline",
+        "hook_path": str(tmp_path / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-hook.exe"),
+        "hook_sha256": "1" * 64,
+        "data_root": str(data),
+        "gateway_path": str(tmp_path / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-gateway.exe"),
+        "gateway_sha256": "2" * 64,
+        "transaction_id": "3" * 32,
+    }
+    if case == "full-launcher":
+        for key in ("launcher_kind", "hook_path", "hook_sha256"):
+            del original[key]
+    original_text = json.dumps(original)
+    state.write_text(original_text, encoding="utf-8")
+    for folder, label in ((staging / "bin", "staged"), (bin_dir, "live")):
+        (folder / "defenseclaw-hook.exe").write_bytes(f"{label}-1.0.4-hook".encode())
+        (folder / "defenseclaw-gateway.exe").write_bytes(f"{label}-1.0.4-gateway".encode())
+    delegated = runtime / "delegated"
+    actions = {
+        "trampoline": "Disable-SetupHooks",
+        "full-launcher": "Disable-SetupHooks",
+        "launcher-changed": "Disable-SetupHooks",
+        "refresh": (
+            "Disable-SetupHooks; $first = (Get-Content -LiteralPath $SetupHookState -Raw | ConvertFrom-Json).hook_path; "
+            "Write-Host \"first=$first\"; "
+            "[void](Publish-SetupLauncherTrampoline $SetupHookState (Join-Path $BinDir 'defenseclaw-hook.exe') (Join-Path $BinDir 'defenseclaw-gateway.exe'))"
+        ),
+        "enable": "Disable-SetupHooks; Enable-SetupHooks",
+    }
+    script = tmp_path / "trampoline.ps1"
+    script.write_text(
+        _TRAMPOLINE_STUBS.format(staging=staging, state=state, delegated=delegated, bin=bin_dir, data=data)
+        + "".join(
+            _ps1_function(name)
+            for name in (
+                "Get-Field",
+                "Read-Json",
+                "Move-Path",
+                "Invoke-Quietly",
+                "Test-SetupLauncherTrampoline",
+                "Publish-SetupLauncherTrampoline",
+                "Disable-SetupHooks",
+                "Enable-SetupHooks",
+            )
+        )
+        + actions[case]
+        + "\nforeach ($p in $protected) { Write-Host \"protected $p\" }\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "warn" not in completed.stdout, completed.stdout
+    kept = staging / "hook-runtime-state.json"
+    if case in ("full-launcher", "launcher-changed"):
+        # Nothing to delegate to: Setup's state is set aside, as before.
+        assert not state.exists() and kept.read_text(encoding="utf-8") == original_text, completed.stdout
+        assert not delegated.exists() or not any(delegated.iterdir()), completed.stdout
+        return
+    if case == "enable":
+        assert state.read_text(encoding="utf-8") == original_text, completed.stdout
+        assert not kept.exists(), completed.stdout
+        return
+    assert kept.read_text(encoding="utf-8") == original_text, completed.stdout
+    live = json.loads(state.read_text(encoding="utf-8-sig"))
+    copy = Path(live["hook_path"])
+    source = (bin_dir if case == "refresh" else staging / "bin") / "defenseclaw-hook.exe"
+    assert copy.parent.parent == delegated and copy.name == "defenseclaw-hook.exe", live
+    assert copy.read_bytes() == source.read_bytes() and live["hook_sha256"] == _sha256(copy), live
+    assert live["transaction_id"] == copy.parent.name and re.fullmatch(r"[0-9a-f]{32}", live["transaction_id"]), live
+    for key in ("runtime_root", "launcher_path", "launcher_sha256"):
+        assert live[key] == original[key], (key, live)
+    assert (live["schema_version"], live["status"], live["launcher_kind"]) == (2, "active", "trampoline"), live
+    assert live["data_root"] == str(data) and live["gateway_path"] == str(bin_dir / "defenseclaw-gateway.exe"), live
+    assert live["gateway_sha256"] == _sha256(source.parent / "defenseclaw-gateway.exe"), live
+    assert f"protected {copy}" in completed.stdout, completed.stdout
+    # Exactly one copy is left: an earlier one goes once a newer one is live.
+    assert [p.name for p in delegated.iterdir()] == [copy.parent.name], list(delegated.iterdir())
+    if case == "refresh":
+        assert f"first={copy}" not in completed.stdout, completed.stdout
+
+
+def test_the_installer_keeps_setups_launcher_pointed_at_its_own_hook() -> None:
+    # GAP-1000: every place that sets Setup's launcher state aside or puts it
+    # back goes through the trampoline helpers.
+    assert "Publish-SetupLauncherTrampoline $state (Join-Path $Staging" in _ps1_function("Disable-SetupHooks")
+    assert "Test-SetupLauncherTrampoline" in _ps1_function("Enable-SetupHooks")
+    assert "Publish-SetupLauncherTrampoline" in _ps1_function("Remove-SetupInstall")
+    assert "Test-SetupLauncherTrampoline" in _ps1_function("Complete-Swap")
+    assert "Enable-SetupHooks" in _ps1_function("Resume-InterruptedRun")
+
+
+# ── GAP-1063 / GAP-1067: same-version builds and the saved installer ────────
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+def test_windows_names_another_build_of_the_installed_version(tmp_path: Path) -> None:
+    # GAP-1063: two 1.0.4 builds were a same-version repair that kept no
+    # rollback copy and said nothing before the swap.
+    cases = [
+        ("defenseclaw-gateway version 1.0.4 (commit=16d085f75a, built=a)", "OTHER commit 16d085f75a | commit 78c01d5c88"),
+        ("defenseclaw-gateway version 1.0.4 (commit=78c01d5c88, built=b)", "SAME"),
+        ("", "SAME"),
+        ("defenseclaw-gateway version 1.0.3 (commit=aaaa, built=c)", "SAME"),
+    ]
+    rows = ", ".join(f"'{installed}'" for installed, _ in cases)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$BinDir = '{tmp_path}'
+$Ver = '1.0.4'
+New-Item -ItemType File -Path (Join-Path $BinDir 'defenseclaw-gateway.exe') -Force | Out-Null
+$script:installed = ''
+function Get-NativeOutput([string]$FilePath, [string[]]$Arguments = @()) {{
+    if ((Split-Path -Leaf $FilePath) -eq 'defenseclaw-gateway.exe') {{ return "$script:installed`r`n" }}
+    return "defenseclaw-gateway version 1.0.4 (commit=78c01d5c88, built=b)`r`n"
+}}
+{_ps_functions("Get-OtherBuildInstalled")}
+foreach ($row in @({rows})) {{
+    $script:installed = $row
+    $other = Get-OtherBuildInstalled (Join-Path $BinDir 'staged-gateway.exe')
+    if ($other) {{ Write-Output "OTHER $($other.Installed) | $($other.Staged)" }} else {{ Write-Output 'SAME' }}
+}}
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0, out
+    assert completed.stdout.split() == " ".join(expected for _, expected in cases).split(), out
+    text = _text()
+    swap = text[text.index("    # Swap. A same-version run") : text.index("$operation = if ($Repair)")]
+    assert "$Repair = $PrevVersion -and $PrevVersion -eq $Ver -and -not $otherBuild" in swap
+    assert "it is kept in $Previous, so 'defenseclaw rollback' returns to it" in swap
+    assert swap.index("$otherBuild = ") < swap.index("Confirm-Step") < swap.index("$Snap = if ($Repair)")
+    assert '$Snap = if ($Repair) { Join-Path $DataDir ".repair" }' in text
+    assert 'if ($PrevVersion -eq $Ver) { $changed = "Replaced the other build of $Ver" }' in text
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("saved", [True, False])
+def test_windows_records_the_saved_installer_in_the_form_rollback_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, saved: bool
+) -> None:
+    # GAP-1067: rollback ran a saved installer an agent had changed.
+    data = tmp_path / "dc"
+    (data / "installer").mkdir(parents=True)
+    (data / "receipts").mkdir()
+    (data / "receipts" / "installer.sha256").write_text("stale\n", encoding="ascii")
+    installer = data / "installer" / "install.ps1"
+    if saved:
+        installer.write_bytes(b'$DcVersion = "1.0.4"\r\n')
+    text = _text()
+    body = text.split("function Save-InstallerDigest {", 1)[1].split("\n}\n", 1)[0]
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$DataDir = '{data}'
+$InstallerDir = '{data / "installer"}'
+$Ver = '1.0.4'
+function Write-Warn([string]$Message) {{ Write-Output "WARN $Message" }}
+{_ps_functions("Get-Sha256")}
+function Save-InstallerDigest {{{body}
+}}
+Save-InstallerDigest
+"""
+    completed = _run_powershell(script)
+    out = completed.stdout + completed.stderr
+    assert completed.returncode == 0 and "WARN" not in out, out
+    record = data / "receipts" / "installer.sha256"
+    if not saved:
+        assert not record.exists()
+        return
+    assert record.read_bytes() == f"{hashlib.sha256(installer.read_bytes()).hexdigest()}  install.ps1\n".encode()
+    monkeypatch.setattr(upgrade_shim, "_installer_name", lambda: "install.ps1")
+    upgrade_shim._check_saved_installer(str(installer), str(installer), str(data), "1.0.4")
+    installer.write_bytes(installer.read_bytes() + b"# r28sa note\r\n")
+    with pytest.raises(upgrade_shim.ShimError, match="is not the one DefenseClaw saved"):
+        upgrade_shim._check_saved_installer(str(installer), str(installer), str(data), "1.0.4")
+    save = text.split("function Save-Installer {", 1)[1].split("\n}\n", 1)[0]
+    assert save.rstrip().endswith("Save-InstallerDigest")
+    assert "    Save-Installer\n" in text.split("function Complete-Swap {", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_the_windows_installer_asks_for_every_connector_to_be_guarded() -> None:
+    # GAP-0878: Start-Gateway took exit 0 from a gateway whose boot skipped a
+    # configured connector. A gateway that has --require-every-connector is
+    # asked for it (an older one refuses the flag), also after a slow first
+    # start, and its 3 keeps the install with "a connector needs attention".
+    body = _ps1_function("Start-Gateway")
+    probe = 'if ((Invoke-Native $gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0) { $startArgs += "--require-every-connector" }'
+    assert body.index('$startArgs = @("start")') < body.index(probe) < body.index("$rc = Invoke-Native $gateway $startArgs")
+    slow = body[body.index('Write-Ok "The gateway finished starting"') :]
+    assert slow.index("if ($startArgs.Count -gt 1 -and (Invoke-Native $gateway $startArgs) -ne 0) { return 3 }") < slow.index(
+        "return 0"
+    )
+    assert 'if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again' in _text()
+
+
+@pytest.mark.skipif(POWERSHELL is None or os.name == "nt", reason="needs pwsh running a shebang fake gateway")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("supports_flag", "every_rc", "want_rc", "want_last"),
+    [
+        (True, 3, 3, "start --require-every-connector"),
+        (True, 0, 0, "start --require-every-connector"),
+        (False, 0, 0, "start"),
+    ],
+)
+def test_start_gateway_passes_the_every_connector_flag_only_to_a_gateway_that_has_it(
+    tmp_path: Path, supports_flag: bool, every_rc: int, want_rc: int, want_last: str
+) -> None:
+    # GAP-0878: Start-Gateway's exit 0 from a gateway that skipped a
+    # configured connector ended the upgrade with it unprotected.
+    bin_dir, calls = tmp_path / "bin", tmp_path / "calls"
+    bin_dir.mkdir()
+    gateway = bin_dir / "defenseclaw-gateway.exe"
+    gateway.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{calls}"\n'
+        'case "$*" in\n'
+        f'  "start --require-every-connector --help") exit {0 if supports_flag else 1} ;;\n'
+        f'  "start --require-every-connector") exit {every_rc} ;;\n'
+        f"  start) exit {0 if not supports_flag else 9} ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    gateway.chmod(0o755)
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$BinDir = '{bin_dir}'\n"
+        'function Write-Info([string]$m) { Write-Host "info: $m" }\n'
+        'function Write-Warn([string]$m) { Write-Host "warn: $m" }\n'
+        'function Write-Ok([string]$m) { Write-Host "ok: $m" }\n'
+        'function Get-UtcClock { "now" }\nfunction Get-InstalledVersion { "1.0.4" }\n'
+        "function Test-Version($v) { $true }\nfunction Reset-AuditJournalMode { }\nfunction Get-GatewayProcess { $null }\n"
+        + _ps1_function("Invoke-Native")
+        + _ps1_function("Start-Gateway")
+        + '$rc = Start-Gateway\nWrite-Host "rc=$rc"\n'
+    )
+
+    out = _run_powershell(script)
+
+    assert f"rc={want_rc}" in out.stdout, out.stdout + out.stderr
+    assert calls.read_text(encoding="utf-8").splitlines()[-1] == want_last
+
+
+# ── 1.0.4 (T8 smoke review loop round 2 of the Hermes/upgrade class) ────────
+
+
+def test_every_windows_upgrade_checks_the_removed_connectors_whatever_the_gateway_state() -> None:
+    # The Windows installer never checked the removed connectors (OpenHands,
+    # OmniGent) itself, and an upgrade of a stopped gateway does not start it,
+    # so a 1.0.3 registration could stay unsealed with exit 0. The check runs
+    # on every upgrade or repair once the swap is done, outside the gateway
+    # start, and its failure is the install's exit 3.
+    body = _ps1_function("Invoke-Install")
+    call = "if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup)) { $startRc = 3 }"
+    assert body.count(call) == 1
+    assert body.index("Complete-Swap\n") < body.index(call) < body.index("if ($startRc -eq 3) { Write-Warn")
+    assert body.index("    if ($startNew) {\n") < body.index("    if ($startNew) { Remove-Item") < body.index(call)
+
+
+@pytest.mark.skipif(POWERSHELL is None or os.name == "nt", reason="needs pwsh running a shebang fake gateway")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("dirty", "configured", "binary", "want", "want_calls"),
+    [
+        ({}, True, True, "True", ["verify openhands", "verify omnigent"]),
+        (
+            {"omnigent": "once"},
+            True,
+            True,
+            "True",
+            ["verify openhands", "verify omnigent", "teardown omnigent", "verify omnigent"],
+        ),
+        (
+            {"openhands": "always"},
+            True,
+            True,
+            "False",
+            ["verify openhands", "teardown openhands", "verify openhands", "verify omnigent"],
+        ),
+        ({}, True, False, "False", []),
+        ({"openhands": "always"}, False, True, "True", []),
+    ],
+)
+def test_the_windows_removed_connector_check_seals_or_names_the_cause(
+    tmp_path: Path, dirty: dict[str, str], configured: bool, binary: bool, want: str, want_calls: list[str]
+) -> None:
+    data_dir, bin_dir, state, calls = tmp_path / "dc", tmp_path / "bin", tmp_path / "state", tmp_path / "calls"
+    for folder in (data_dir, bin_dir, state):
+        folder.mkdir()
+    if configured:
+        (data_dir / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    for name, how in dirty.items():
+        (state / name).write_text(how, encoding="utf-8")
+    if binary:
+        gateway = bin_dir / "defenseclaw-gateway.exe"
+        gateway.write_text(
+            "#!/bin/sh\n"
+            f'[ "$5" = --data-dir ] && [ "$6" = "{data_dir}" ] || exit 9\n'
+            f'echo "$2 $4" >> "{calls}"\n'
+            f'state="{state}/$4"\n'
+            '[ -f "$state" ] || exit 0\n'
+            'if [ "$2" = teardown ]; then [ "$(cat "$state")" = once ] && rm -f "$state"; exit 1; fi\n'
+            'echo "  X $4: $4 cleanup incomplete: C:/h/hook.ps1 is gone, but C:/w/.openhands/hooks.json still runs it. To finish: run defenseclaw-gateway connector teardown --connector $4" >&2\n'
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\n$BinDir = '{bin_dir}'\n$Ver = '1.0.4'\n"
+        "Remove-Item Env:DEFENSECLAW_CONFIG -ErrorAction SilentlyContinue\n"
+        'function Write-Err([string]$m) { Write-Host "err: $m" }\n'
+        + _ps1_function("Invoke-Native")
+        + _ps1_function("Complete-RetiredConnectorCleanup")
+        + "$clean = @(Complete-RetiredConnectorCleanup)\nWrite-Host \"clean=$($clean -join ',')\"\n"
+    )
+
+    out = _run_powershell(script)
+    text = out.stdout + out.stderr
+
+    assert out.returncode == 0, text
+    assert f"clean={want}" in out.stdout, text
+    assert (calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []) == want_calls
+    if dirty.get("openhands") == "always" and configured:
+        assert (
+            "could not finish removing the openhands connector, so its agent may not be blocked: openhands: openhands cleanup incomplete"
+            in text
+        )
+        assert (
+            "C:/w/.openhands/hooks.json still runs it. To finish: run defenseclaw-gateway connector teardown --connector openhands"
+            in text
+        )
+        assert "omnigent connector" not in text
+    if not binary:
+        assert (
+            "could not check that the removed OpenHands and OmniGent connectors are blocked" in text
+            and "is missing" in text
+        )
+
+
+# ── 1.0.4 (T8 smoke review loop round 3 of the Hermes/upgrade class) ────────
+
+
+def test_a_stopped_windows_upgrade_puts_every_connector_on_its_current_hook() -> None:
+    # An upgrade of a stopped per-user install does not start the gateway, so
+    # nothing rendered this release's hooks (a 1.0.3 Hermes hook cannot answer
+    # the execution probe) and it exited 0. Once the swap is done, a gateway
+    # that was not started is reconciled, and a failure is the exit 3.
+    body = _ps1_function("Invoke-Install")
+    call = "if ($PrevVersion -and -not $startNew -and -not (Complete-StoppedConnectorReconcile)) { $startRc = 3 }"
+    assert body.count(call) == 1
+    assert (
+        body.index("Complete-Swap\n")
+        < body.index("if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup))")
+        < body.index(call)
+        < body.index("if ($startRc -eq 3) { Write-Warn")
+    )
+
+
+@pytest.mark.skipif(POWERSHELL is None or os.name == "nt", reason="needs pwsh running a shebang fake gateway")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(
+    ("configured", "binary", "help_rc", "reconcile_rc", "want", "want_calls"),
+    [
+        (False, True, 0, 0, "True", []),
+        (True, False, 0, 0, "False", []),
+        (True, True, 1, 0, "True", ["help"]),
+        (True, True, 0, 0, "True", ["help", "reconcile"]),
+        (True, True, 0, 3, "False", ["help", "reconcile"]),
+    ],
+)
+def test_the_windows_stopped_upgrade_reconcile_names_the_cause(
+    tmp_path: Path,
+    configured: bool,
+    binary: bool,
+    help_rc: int,
+    reconcile_rc: int,
+    want: str,
+    want_calls: list[str],
+) -> None:
+    data_dir, bin_dir, calls = tmp_path / "dc", tmp_path / "bin", tmp_path / "calls"
+    data_dir.mkdir()
+    bin_dir.mkdir()
+    if configured:
+        (data_dir / "config.yaml").write_text("config_version: 9\n", encoding="utf-8")
+    if binary:
+        gateway = bin_dir / "defenseclaw-gateway.exe"
+        gateway.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            f'  "connector reconcile --every-connector --help") echo help >> "{calls}"; exit {help_rc} ;;\n'
+            f'  "connector reconcile --every-connector --data-dir {data_dir}")\n'
+            f'    echo reconcile >> "{calls}"\n'
+            f'    [ "$DEFENSECLAW_CONFIG" = "{data_dir}/config.yaml" ] || exit 9\n'
+            '    echo "  OK claudecode is on its current hook"\n'
+            f"    [ {reconcile_rc} -eq 0 ] && exit 0\n"
+            '    echo "Error: not every connector is on its current hook: hermes: its current hook is not in place" >&2\n'
+            f"    exit {reconcile_rc} ;;\n"
+            "  *) exit 8 ;;\n"
+            "esac\n",
+            encoding="utf-8",
+        )
+        gateway.chmod(0o755)
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$DataDir = '{data_dir}'\n$BinDir = '{bin_dir}'\n$Ver = '1.0.4'\n"
+        "Remove-Item Env:DEFENSECLAW_CONFIG -ErrorAction SilentlyContinue\n"
+        'function Write-Err([string]$m) { Write-Host "err: $m" }\n'
+        + _ps1_function("Invoke-Native")
+        + _ps1_function("Complete-StoppedConnectorReconcile")
+        + "$ok = @(Complete-StoppedConnectorReconcile)\n"
+        + "Write-Host \"ok=$($ok -join ',')\"\n"
+        + 'Write-Host "config-after=[$env:DEFENSECLAW_CONFIG]"\n'
+    )
+
+    out = _run_powershell(script)
+    text = out.stdout + out.stderr
+
+    assert out.returncode == 0, text
+    assert f"ok={want}" in out.stdout, text
+    assert "config-after=[]" in out.stdout, text
+    assert (calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []) == want_calls
+    if reconcile_rc:
+        assert (
+            "err: DefenseClaw 1.0.4 could not put every connector on its current hook while the gateway is stopped: "
+            "not every connector is on its current hook: hermes: its current hook is not in place" in text
+        ), text
+    if not binary:
+        assert "defenseclaw-gateway.exe is missing" in text, text

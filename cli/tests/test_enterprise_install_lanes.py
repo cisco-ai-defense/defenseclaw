@@ -12,6 +12,7 @@ every lane relies on.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -27,9 +28,9 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 CHECKER = SCRIPTS / "check_enterprise_lifecycle_result.py"
-REBOOT_CHECKER_TEST = SCRIPTS / "test_check_enterprise_lifecycle_reboot.py"
+RESULT_CHECKER_TEST = SCRIPTS / "test_check_enterprise_lifecycle_result.py"
 UNIX_LANE = SCRIPTS / "test-enterprise-unix-install.sh"
-POSTINSTALL_REBOOT_TEST = ROOT / "packaging/linux/tests/test_postinstall_userns_reboot.sh"
+POSTINSTALL_RESULT_TEST = ROOT / "packaging/linux/tests/test_postinstall_result.sh"
 # CI selects Python modules that name the changed file's basename.
 POSTINSTALL = ROOT / "packaging/linux/postinstall.sh"
 
@@ -68,6 +69,22 @@ def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None
                  "install/reference/windows.mdx"):
         text = (docs / page).read_text(encoding="utf-8")
         assert "hook_process_fail_open" in text and "security_complete" in text, page
+
+
+def test_lifecycle_checker_keeps_python36_annotations() -> None:
+    # RHEL 8 runs this file with platform-python 3.6, where built-in
+    # collection generics and union annotations cannot be evaluated.
+    source = CHECKER.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(CHECKER), feature_version=(3, 6))
+    for node in ast.walk(tree):
+        assert not (
+            isinstance(node, ast.Subscript)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in {"dict", "list", "tuple", "set", "frozenset"}
+        ), f"Python 3.6 cannot evaluate {ast.get_source_segment(source, node)}"
+        assert not (
+            isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr)
+        ), f"Python 3.6 cannot evaluate {ast.get_source_segment(source, node)}"
 
 
 def _result(**overrides: Any) -> dict[str, Any]:
@@ -118,19 +135,19 @@ def _check(tmp_path: Path, document: Any, *arguments: str, raw: bytes | None = N
 FULL = ("--action", "ensure", "--platform", "linux", "--changed", "--installed", "--version", "1.4.0", "--ready")
 
 
-def test_pending_reboot_contract_runs_in_ci() -> None:
+def test_policy_view_result_contract_runs_in_ci() -> None:
     result = subprocess.run(
-        [sys.executable, str(REBOOT_CHECKER_TEST)],
+        [sys.executable, str(RESULT_CHECKER_TEST)],
         capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Linux postinstall requires a POSIX shell")
-def test_postinstall_reboot_contract_runs_in_ci() -> None:
+def test_postinstall_failure_contract_runs_in_ci() -> None:
     assert POSTINSTALL.is_file()
     result = subprocess.run(
-        ["sh", str(POSTINSTALL_REBOOT_TEST)],
+        ["sh", str(POSTINSTALL_RESULT_TEST)],
         cwd=ROOT, capture_output=True, text=True, timeout=60, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

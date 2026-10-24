@@ -15,10 +15,6 @@ contract or a rejected config as a warning. Pass --allow-warning for each
 warning code the step may report, and --complete to require coverage_complete
 and security_complete. A step that must fail (the upgrade gate's rollback
 drill) passes --expect-error for each error code it must report instead.
-Linux install and upgrade steps before the required reboot use
---reboot-pending: the sole error code must be unprivileged_user_namespaces,
-with an installed deployment, coverage_complete=true and
-security_complete=false.
 --policy-applied and --config-generation-above check the effective policy the
 step reports (the result's optional policy object).
 
@@ -123,21 +119,7 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
     problems = structural_problems(document)
     if problems:
         return problems
-    if args.reboot_pending:
-        if document["platform"] != "linux":
-            problems.append("a pending user namespace reboot is Linux-only")
-        if document["ok"] is not False or document["exit_code"] == 0:
-            problems.append("pending reboot must have ok false and a nonzero exit_code")
-        if document["installed"] is not True:
-            problems.append("pending reboot has no installed deployment")
-        if document["coverage_complete"] is not True:
-            problems.append("pending reboot has coverage_complete false")
-        if document["security_complete"] is not False:
-            problems.append("pending reboot has security_complete true")
-        codes = [message["code"] for message in document["errors"]]
-        if not codes or any(code != "unprivileged_user_namespaces" for code in codes):
-            problems.append(f"pending reboot has unexpected errors: {codes}")
-    elif args.expect_error:
+    if args.expect_error:
         if document["ok"] is not False:
             problems.append("ok is true, want a failed step")
         if document["exit_code"] == 0:
@@ -190,6 +172,15 @@ def check(document: Dict[str, Any], args: argparse.Namespace) -> List[str]:
         problems.append("security_complete is false")
     if args.security_incomplete and document["security_complete"] is not False:
         problems.append("security_complete is true, want false")
+    if args.policy_view_status:
+        if document["platform"] != "linux":
+            problems.append("policy-view status is Linux-only")
+        if document["coverage_complete"] is not True:
+            problems.append("policy-view status has coverage_complete false")
+        open_view = any(message["code"] in ("unprivileged_user_namespaces", "unprivileged_ptrace")
+                        for message in document.get("warnings") or [])
+        if document["security_complete"] is open_view:
+            problems.append("security_complete does not match the open policy-view warnings")
     # The warning texts follow the problems in the failure output.
     allowed = set(args.allow_warning)
     # security_incomplete explains a false security_complete, which
@@ -238,12 +229,17 @@ def machine_policy_problems(policies: Dict[str, Any], args: argparse.Namespace) 
         if connector in args.machine_policy and (not isinstance(owned, int) or isinstance(owned, bool) or owned < 1):
             problems.append(f"machine_policy.{connector} owns no entries")
         if connector in args.machine_policy_enforced and entry.get("effective_lock") != "enforce":
-            problems.append(f"machine_policy.{connector}.effective_lock is {entry.get('effective_lock')!r}, want 'enforce'")
+            problems.append(
+                f"machine_policy.{connector}.effective_lock is {entry.get('effective_lock')!r}, want 'enforce'"
+            )
     return problems
 
 
 def describe(document: Dict[str, Any]) -> str:
-    return "action={} ok={} noop={} installed={} installed_version={} exit_code={} coverage_complete={} security_complete={}".format(
+    return (
+        "action={} ok={} noop={} installed={} installed_version={} exit_code={} "
+        "coverage_complete={} security_complete={}"
+    ).format(
         document.get("action"),
         document.get("ok"),
         document.get("noop"),
@@ -286,17 +282,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="require security_complete to be false (Windows before the live Claude Code policy proof)",
     )
+    security.add_argument(
+        "--policy-view-status",
+        action="store_true",
+        help="require security_complete to be false exactly when Linux warns of open policy-view routes",
+    )
     parser.add_argument(
         "--expect-error",
         action="append",
         default=[],
         metavar="CODE",
         help="require a failed step (ok false, non-zero exit_code) that reports this error code (repeatable)",
-    )
-    parser.add_argument(
-        "--reboot-pending",
-        action="store_true",
-        help="require an installed Linux deployment with only unprivileged_user_namespaces errors and security_complete false",
     )
     parser.add_argument(
         "--policy-applied",
@@ -339,8 +335,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="require this connector's machine policy to report effective_lock 'enforce' (repeatable)",
     )
     args = parser.parse_args(argv)
-    if args.reboot_pending and (args.expect_error or args.complete or args.security_incomplete):
-        parser.error("--reboot-pending cannot be combined with --expect-error, --complete or --security-incomplete")
     label = args.label or args.result.name
     try:
         document = load_result(args.result)

@@ -36,6 +36,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
@@ -1088,5 +1089,188 @@ func TestSandboxDaemonStopsIdleOpenShell(t *testing.T) {
 	g.d.stopOpenShellIfIdle()
 	if g.os.stopped.Load() != 0 {
 		t.Fatal("stopped the gateway under a running sandbox")
+	}
+}
+
+// A ready from a CLI of DefenseClaw 1.0.3 or older does not say which agent
+// the run is for, and profiles match per connector. The first agent the
+// organization runs being forbidden must not
+// refuse a run of an agent whose profile allows sandboxes, configured or
+// not: Ready readies (the create judges the run's own agent). Nor must an
+// agent whose view is slow or unanswered: one view timing out, or every
+// other one, does not refuse or hold up a ready another agent's profile
+// allows (S2 review, loop round 2). It still refuses before any install when
+// no agent's profile allows a run, or when the gateway answers none of them,
+// and then only after asking every agent, the daemon's own included.
+func TestSandboxDaemonReadyReadiesForAnyAllowedAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		harnesses    []string
+		allowed      map[string]bool
+		down         map[string]bool
+		slow         map[string]bool
+		wantCode     string
+		wantPrepared int64
+	}{
+		{"first agent forbidden, second allowed", []string{"claudecode", "codex"}, map[string]bool{"codex": true}, nil, nil, "", 1},
+		{"configured agent forbidden, another allowed", []string{"claudecode"}, map[string]bool{"codex": true}, nil, nil, "", 1},
+		{"first agent unanswered, another allowed", []string{"claudecode", "codex"}, map[string]bool{"codex": true},
+			map[string]bool{"claudecode": true}, nil, "", 1},
+		{"first agent's view times out, another allowed", []string{"claudecode", "codex"}, map[string]bool{"codex": true},
+			nil, map[string]bool{"claudecode": true}, "", 1},
+		{"configured agent's view times out, another allowed", []string{"claudecode"}, map[string]bool{"codex": true},
+			nil, map[string]bool{"claudecode": true}, "", 1},
+		{"every other agent's view times out, one allowed", []string{"claudecode", "codex"}, map[string]bool{"opencode": true},
+			nil, map[string]bool{"*": true}, "", 1},
+		{"every agent forbidden", []string{"claudecode", "codex"}, nil, nil, nil, sandboxapi.CodeAdminViolation, 0},
+		{"first agent forbidden, others unanswered", []string{"claudecode", "codex"}, nil, map[string]bool{"*": true}, nil,
+			sandboxapi.CodeUnavailable, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+				o.Settings.Operational.Harnesses = tc.harnesses
+			})
+			var mu sync.Mutex
+			var asked []string
+			f.relay.explainCtx = func(ctx context.Context, req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				mu.Lock()
+				asked = append(asked, req.Connector)
+				first := len(asked) == 1
+				mu.Unlock()
+				// slow holds an agent's own policy view (the one Ready asks
+				// for each agent); the unclaimed view of the status Ready
+				// answers with is not one.
+				if req.Harness != "" && (tc.slow[req.Connector] || tc.slow["*"] && !tc.allowed[req.Connector]) {
+					<-ctx.Done()
+					return sandboxapi.ManagedExplain{}, ctx.Err()
+				}
+				if tc.down[req.Connector] || tc.down["*"] && !first {
+					return sandboxapi.ManagedExplain{}, sandboxrelay.ErrGatewayUnreachable
+				}
+				return sandboxapi.ManagedExplain{Allowed: tc.allowed[req.Connector]}, nil
+			}
+			f.run(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, err := sandboxapi.NewUnixClient(f.socket).Ready(ctx, sandboxapi.ReadyRequest{})
+			mu.Lock()
+			defer mu.Unlock()
+			if tc.wantCode == "" && err != nil || tc.wantCode != "" && !sandboxapi.IsCode(err, tc.wantCode) ||
+				f.os.prepared.Load() != tc.wantPrepared {
+				t.Fatalf("ready = %v (prepared %d, asked %v); want code %q, prepared %d",
+					err, f.os.prepared.Load(), asked, tc.wantCode, tc.wantPrepared)
+			}
+			if tc.wantCode != "" {
+				for _, name := range harness.Names() {
+					if !slices.Contains(asked, name) {
+						t.Fatalf("refused after asking for %v, not every agent (%s missing)", asked, name)
+					}
+				}
+			}
+		})
+	}
+}
+
+// Ready asks only the agent the run names, so no other agent's view can
+// rate-limit, hold up or refuse its first run, and an agent no harness
+// knows is refused before anything is asked. A ready that names none (a CLI
+// of DefenseClaw 1.0.3 or older) asks every agent, but never more views at
+// once than readyViewsInFlight, inside the managed gateway's per-account
+// policy admission (sandboxBudgetPolicy.InFlight), so slow denied views
+// cannot push the allowed agent's view into a 429. A view the gateway's
+// admission refused is asked again before Ready refuses; one it keeps
+// refusing fails the ready closed (S2 review, loop round 2).
+func TestSandboxDaemonReadyStaysInsideThePolicyAdmission(t *testing.T) {
+	admit := sandboxBudgetLimits[sandboxBudgetPolicy].InFlight
+	if readyViewsInFlight >= admit {
+		t.Fatalf("readyViewsInFlight %d leaves no room in the gateway's %d policy requests", readyViewsInFlight, admit)
+	}
+	const last = "<the older CLI's last agent>"
+	for _, tc := range []struct {
+		name      string
+		harness   string
+		allowed   string
+		limited   int
+		wantCode  string
+		wantAsked []string
+	}{
+		{name: "named agent allowed, every other forbidden", harness: "codex", allowed: "codex", wantAsked: []string{"codex"}},
+		{name: "named agent forbidden, another allowed", harness: "claudecode", allowed: "codex",
+			wantCode: sandboxapi.CodeAdminViolation, wantAsked: []string{"claudecode"}},
+		{name: "named agent rate-limited first", harness: "codex", allowed: "codex", limited: 2,
+			wantAsked: []string{"codex", "codex", "codex"}},
+		{name: "named agent always rate-limited", harness: "codex", allowed: "codex", limited: 1 << 20,
+			wantCode: sandboxapi.CodeUnavailable},
+		{name: "no such agent", harness: "nosuchagent", allowed: "codex", wantCode: sandboxapi.CodeInvalid, wantAsked: []string{}},
+		{name: "older CLI, allowed agent asked last", allowed: last},
+		{name: "older CLI, allowed agent rate-limited first", allowed: last, limited: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newSandboxDaemonFixture(t)
+			allowed := tc.allowed
+			if allowed == last {
+				order := f.d.olderCLIReadyHarnesses()
+				allowed = order[len(order)-1]
+			}
+			var mu sync.Mutex
+			asked := []string{}
+			inFlight, maxInFlight, limited := 0, 0, tc.limited
+			f.relay.explainCtx = func(ctx context.Context, req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				if req.Harness == "" || f.os.prepared.Load() > 0 {
+					// The views of the status Ready answers with once it readied
+					// OpenShell (the unclaimed view, and each configured agent's).
+					return sandboxapi.ManagedExplain{Allowed: true}, nil
+				}
+				mu.Lock()
+				asked = append(asked, req.Connector)
+				inFlight++
+				maxInFlight = max(maxInFlight, inFlight)
+				over := inFlight > admit
+				rateLimited := !over && req.Connector == allowed && limited > 0
+				if rateLimited {
+					limited--
+				}
+				mu.Unlock()
+				defer func() {
+					mu.Lock()
+					inFlight--
+					mu.Unlock()
+				}()
+				if over || rateLimited {
+					return sandboxapi.ManagedExplain{}, &sandboxrelay.Error{Status: http.StatusTooManyRequests, Reason: "rate_limited"}
+				}
+				if req.Connector != allowed {
+					// A denied agent's view is slow, holding its admission.
+					select {
+					case <-ctx.Done():
+						return sandboxapi.ManagedExplain{}, ctx.Err()
+					case <-time.After(150 * time.Millisecond):
+					}
+					return sandboxapi.ManagedExplain{Allowed: false}, nil
+				}
+				return sandboxapi.ManagedExplain{Allowed: true}, nil
+			}
+			f.run(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			_, err := sandboxapi.NewUnixClient(f.socket).Ready(ctx, sandboxapi.ReadyRequest{Harness: tc.harness})
+			mu.Lock()
+			defer mu.Unlock()
+			wantPrepared := int64(0)
+			if tc.wantCode == "" {
+				wantPrepared = 1
+			}
+			if tc.wantCode == "" && err != nil || tc.wantCode != "" && !sandboxapi.IsCode(err, tc.wantCode) ||
+				f.os.prepared.Load() != wantPrepared {
+				t.Fatalf("ready = %v (prepared %d, asked %v); want code %q, prepared %d",
+					err, f.os.prepared.Load(), asked, tc.wantCode, wantPrepared)
+			}
+			if tc.wantAsked != nil && !slices.Equal(asked, tc.wantAsked) {
+				t.Fatalf("asked %v, want %v", asked, tc.wantAsked)
+			}
+			if maxInFlight > readyViewsInFlight {
+				t.Fatalf("%d policy views at once, past readyViewsInFlight %d (gateway admits %d)", maxInFlight, readyViewsInFlight, admit)
+			}
+		})
 	}
 }

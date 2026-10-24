@@ -1058,6 +1058,10 @@ func (c *hookOnlyConnector) checkAgentSettings(opts SetupOpts) error {
 	return nil
 }
 
+// hermesSetupWarningOutput receives Setup's warning about a Hermes release
+// whose TUI runs tools without the hooks (the gateway's log).
+var hermesSetupWarningOutput io.Writer = os.Stderr
+
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err := c.checkAgentSettings(opts); err != nil {
 		return err
@@ -1068,6 +1072,13 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 	}
 	if c.name == "hermes" {
+		// A Hermes whose TUI and dashboard chat run tools without the shell
+		// hooks (GAP-0978) still runs them in its classic interface, cron,
+		// ACP and messaging gateway: Setup registers them and says what they
+		// miss. Refusing the release left every session unguarded.
+		if warning := ResolveHookContract(c.name, opts.AgentVersion).Warning; warning != "" {
+			fmt.Fprintf(hermesSetupWarningOutput, "[guardrail] WARNING: hermes %s: %s\n", strings.TrimSpace(opts.AgentVersion), warning)
+		}
 		configPath, err := hermesResolvedConfigPath(opts)
 		if err != nil {
 			return fmt.Errorf("%w; no changes made", err)
@@ -4338,6 +4349,9 @@ func validateHermesSingleProfile(configPath string) error {
 			return fmt.Errorf("Hermes profiles directory exceeds the bounded inspection limit") //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 		}
 		for _, entry := range entries {
+			if !hermesProfileEntryName(entry.Name()) {
+				continue
+			}
 			if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
 				return fmt.Errorf("Hermes named profile %q is unsupported by the single-HERMES_HOME connector; remove it with 'hermes profile delete %s' (or move it out of %s) and retry; no changes made", entry.Name(), entry.Name(), profilesDir) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 			}
@@ -4350,6 +4364,34 @@ func validateHermesSingleProfile(configPath string) error {
 	// the default profile plus the named profiles under profiles/, which are
 	// refused above. With none, it serves only this HERMES_HOME (GAP-1844).
 	return nil
+}
+
+// hermesProfileEntryName reports whether an entry under profiles/ is one
+// Hermes can run as a named profile. Hermes lists, serves and resolves the
+// names its id pattern ^[a-z0-9][a-z0-9_-]{0,63}$ admits under Python's
+// re.match, whose $ also matches before one final newline, so "coder\n" is
+// a profile as well. Only the exact name "default" means the root
+// HERMES_HOME; Hermes's own metadata (the .deleted 'hermes profile delete'
+// can leave, other dot directories) and any other name are never a profile.
+// The name is lowercased first: on a case-insensitive file system
+// 'hermes -p coder' opens profiles/Coder. The Python CLI's preflight
+// (hermes_profile_entry_name in cli/defenseclaw/connector_paths.py) applies
+// the same rule; testdata/hermes_profile_names.json holds the cases both
+// are tested against.
+func hermesProfileEntryName(name string) bool {
+	id, newline := strings.CutSuffix(strings.ToLower(name), "\n")
+	if (id == "default" && !newline) || len(id) == 0 || len(id) > 64 {
+		return false
+	}
+	for i, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case i > 0 && (r == '_' || r == '-'):
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func readHermesBoundedConfig(path string) (map[string]interface{}, error) {
@@ -5895,14 +5937,7 @@ func removeCopilotHookReferencesProfile(path string, secureClient bool, hookScri
 	}
 	var pruned map[string]interface{}
 	if secureClient {
-		remaining, changed, err := stripCopilotOwnedEntry(cfg, hookScript)
-		if err != nil {
-			return fmt.Errorf("copilot: cannot remove Secure Client hooks in %s: %w", path, err)
-		}
-		if !changed {
-			return nil
-		}
-		pruned, _ = remaining.(map[string]interface{})
+		pruned, _ = removeHookScriptReferencesLegacy(cfg, hookScript).(map[string]interface{})
 	} else {
 		pruned = make(map[string]interface{}, len(cfg))
 		for key, value := range cfg {

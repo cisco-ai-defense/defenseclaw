@@ -717,6 +717,17 @@ func TestWindowsWSLPolicyValidation(t *testing.T) {
 	}
 }
 
+func TestLinuxHostKernelOptInIsRetired(t *testing.T) {
+	const doc = "config_version: 8\nenterprise:\n  machine_policy:\n    linux:\n      namespaces_and_ptrace: restrict\n"
+	parsed, err := ParseV8YAML("retired.yaml", []byte(doc))
+	if err == nil {
+		err = validateV8Schema("retired.yaml", parsed)
+	}
+	if err == nil {
+		t.Fatal("retired host-wide kernel opt-in was accepted")
+	}
+}
+
 func TestClaudeVersionFloorValidation(t *testing.T) {
 	managedConfig := func(m EnterpriseMachinePolicyConfig) Config {
 		return Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{MachinePolicy: m}}

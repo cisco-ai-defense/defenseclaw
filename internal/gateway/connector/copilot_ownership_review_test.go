@@ -94,13 +94,12 @@ func TestCopilotSetupAndTeardownPreserveIndependentNestedHandler(t *testing.T) {
 	check("teardown")
 }
 
-func TestCopilotSecureClientTeardownPreservesIndependentHandler(t *testing.T) {
+func TestCopilotSecureClientTeardownUsesLegacyRemoval(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "defenseclaw.json")
 	script := filepath.Join(root, "hooks", "copilot-hook.sh")
-	operator := map[string]interface{}{"type": "command", "bash": "/opt/operator/audit.sh"}
 	doc := map[string]interface{}{"hooks": map[string]interface{}{"extraEvent": []interface{}{
-		map[string]interface{}{"handlers": []interface{}{copilotHookRegistration("linux", "preToolUse", script), operator}},
+		map[string]interface{}{"type": "command", "bash": copilotHookInvocationCommandForEvent("linux", "preToolUse", script), "powershell": "Write-Output operator"},
 	}}}
 	if err := writeJSONObject(path, doc); err != nil {
 		t.Fatal(err)
@@ -108,13 +107,8 @@ func TestCopilotSecureClientTeardownPreservesIndependentHandler(t *testing.T) {
 	if err := removeCopilotHookReferencesProfile(path, true, script); err != nil {
 		t.Fatal(err)
 	}
-	hooks, ok := decodeHookFileForTest(t, path)["hooks"].(map[string]interface{})
-	if !ok {
-		t.Fatal("Secure Client teardown removed the hook document containing an independent handler")
-	}
-	want := []interface{}{map[string]interface{}{"handlers": []interface{}{operator}}}
-	if !sameHookJSON(hooks["extraEvent"], want) {
-		t.Fatalf("Secure Client teardown removed an independent handler: %v", hooks["extraEvent"])
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("Secure Client legacy teardown left the owned file: %v", err)
 	}
 }
 

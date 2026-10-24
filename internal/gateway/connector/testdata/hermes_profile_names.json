@@ -1,0 +1,153 @@
+{
+  "comment": "Entries under a Hermes home's profiles/ that Hermes can run as a named profile (profile: true). Go hermesProfileEntryName (internal/gateway/connector/hook_only.go) and Python hermes_profile_entry_name (cli/defenseclaw/connector_paths.py) are both tested against this list.",
+  "names": [
+    {
+      "name": "coder",
+      "profile": true
+    },
+    {
+      "name": "Coder",
+      "profile": true
+    },
+    {
+      "name": "coder\n",
+      "profile": true
+    },
+    {
+      "name": "Coder\n",
+      "profile": true
+    },
+    {
+      "name": "default\n",
+      "profile": true
+    },
+    {
+      "name": "Default\n",
+      "profile": true
+    },
+    {
+      "name": "DEFAULT\n",
+      "profile": true
+    },
+    {
+      "name": "0",
+      "profile": true
+    },
+    {
+      "name": "0\n",
+      "profile": true
+    },
+    {
+      "name": "co_der",
+      "profile": true
+    },
+    {
+      "name": "co-der",
+      "profile": true
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "profile": true
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "profile": true
+    },
+    {
+      "name": "\u212aey",
+      "profile": true
+    },
+    {
+      "name": "\u0130d",
+      "profile": true
+    },
+    {
+      "name": "default",
+      "profile": false
+    },
+    {
+      "name": "Default",
+      "profile": false
+    },
+    {
+      "name": "DEFAULT",
+      "profile": false
+    },
+    {
+      "name": "",
+      "profile": false
+    },
+    {
+      "name": "\n",
+      "profile": false
+    },
+    {
+      "name": "coder\n\n",
+      "profile": false
+    },
+    {
+      "name": "coder\r\n",
+      "profile": false
+    },
+    {
+      "name": "coder\r",
+      "profile": false
+    },
+    {
+      "name": "\ncoder",
+      "profile": false
+    },
+    {
+      "name": "co\nder",
+      "profile": false
+    },
+    {
+      "name": "coder ",
+      "profile": false
+    },
+    {
+      "name": " coder",
+      "profile": false
+    },
+    {
+      "name": ".deleted",
+      "profile": false
+    },
+    {
+      "name": ".deleted\n",
+      "profile": false
+    },
+    {
+      "name": ".trash",
+      "profile": false
+    },
+    {
+      "name": "_scratch",
+      "profile": false
+    },
+    {
+      "name": "_scratch\n",
+      "profile": false
+    },
+    {
+      "name": "-coder",
+      "profile": false
+    },
+    {
+      "name": "co.der",
+      "profile": false
+    },
+    {
+      "name": "c\u00f6der",
+      "profile": false
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "profile": false
+    },
+    {
+      "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+      "profile": false
+    }
+  ]
+}

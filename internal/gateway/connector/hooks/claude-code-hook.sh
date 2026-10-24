@@ -504,6 +504,8 @@ fi
 # let the call run beside the gateway's block. The hook refuses such an
 # answer closed, in every fail mode, as the native hook does (GAP-0950). The
 # Stop directives above already agree (or were replaced).
+# A confirmation with no object at all would let the call run too: Claude
+# Code asks only through it (GAP-0983).
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   case "$ACTION" in
     block|confirm)
@@ -519,11 +521,20 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
       esac
       ;;
   esac
+elif [ "$ACTION" = "confirm" ]; then
+  [ "$FAIL_MODE" = "closed" ] || FAIL_MODE=closed
+  fail_response "confirm without native output in gateway response"
 fi
-{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{end}}{{if not .Sandbox}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   printf '%s\n' "$OUTPUT"
 fi
-
+{{end}}{{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/claude-code/hook" "$RESULT"; then
+  fail_unreachable "sandbox hook receipt was not acknowledged"
+fi
+if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  printf '%s\n' "$OUTPUT"
+fi
+{{end}}
 # Anthropic's Claude Code hook protocol — like Codex's — is strictly
 # EITHER structured JSON on stdout with exit 0 (Claude parses the
 # permissionDecision/decision from the JSON) OR exit 2 with the reason

@@ -889,11 +889,10 @@ func (c removedOnlyConnector) hookLeft(opts SetupOpts) error {
 		}
 		return nil
 	case state == removedScriptAbsent:
-		if _, err := os.Lstat(opts.DataDir); errors.Is(err, os.ErrNotExist) {
-			// An uninstall removed the data directory, the stub with it: an
-			// agent config that still names the script is a leftover the
-			// teardown lists for the user, never residue that holds the
-			// uninstall (until 1.1).
+		if removedDataDirGone(opts.DataDir) {
+			// DefenseClaw is uninstalled from this data directory (a deferred
+			// uninstall verify): nothing of it is left to block, and a config
+			// that still names the script is a leftover the uninstall lists.
 			return nil
 		}
 		if config, live := c.registrationRunsScript(opts); live {
@@ -909,6 +908,15 @@ func (c removedOnlyConnector) hookLeft(opts SetupOpts) error {
 	}
 	return fmt.Errorf("%s was not changed: DefenseClaw cannot prove it wrote it (a link, no DefenseClaw marker in its first %d lines, or not a regular file), and it may still run the old hook. To finish: %s",
 		path, removedMarkerLines, c.foreignStep())
+}
+
+// removedDataDirGone reports whether the data directory itself is gone.
+func removedDataDirGone(dataDir string) bool {
+	if strings.TrimSpace(dataDir) == "" {
+		return false
+	}
+	_, err := os.Lstat(dataDir)
+	return errors.Is(err, os.ErrNotExist)
 }
 
 // hardLinkStep is the manual step for a script with more than one name.

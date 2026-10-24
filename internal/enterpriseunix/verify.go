@@ -183,6 +183,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
+	// This is the observed host setting. The hook proves its managed policy
+	// view separately on each invocation.
+	l.warnOpenPolicyViews()
 	if strict {
 		// An agent the guardian or the enumerator could not protect for one
 		// account (an unverified hook contract, an agent it could not enroll)
@@ -863,10 +866,9 @@ func (e *Env) lastPackageInstallFailure() string {
 		return ""
 	}
 	var last struct {
-		OK        bool                       `json:"ok"`
-		Installed bool                       `json:"installed"`
-		Action    string                     `json:"action"`
-		Errors    []enterprisestatus.Message `json:"errors"`
+		OK     bool                       `json:"ok"`
+		Action string                     `json:"action"`
+		Errors []enterprisestatus.Message `json:"errors"`
 	}
 	if json.Unmarshal(raw, &last) != nil || last.OK || len(last.Errors) == 0 {
 		return ""
@@ -876,29 +878,7 @@ func (e *Env) lastPackageInstallFailure() string {
 	default:
 		return ""
 	}
-	if e.GOOS == "linux" && last.Installed {
-		// The package applied, but a user namespace from before the host
-		// restriction can survive until reboot. Report that through status
-		// and verify without claiming the package itself was not applied.
-		onlyReboot := true
-		for _, problem := range last.Errors {
-			if problem.Code != codeUserNamespaces {
-				onlyReboot = false
-			}
-		}
-		if onlyReboot {
-			return ""
-		}
-	}
 	first := last.Errors[0]
-	if first.Code == codeUserNamespaces {
-		for _, problem := range last.Errors[1:] {
-			if problem.Code != codeUserNamespaces {
-				first = problem
-				break
-			}
-		}
-	}
 	return strings.TrimSpace(first.Code + ": " + first.Message)
 }
 
@@ -1138,25 +1118,17 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
 	if record != nil {
-		if problem := env.userNamespaceProblem(); problem != "" {
-			r.AddError(codeUserNamespaces, problem)
-			r.SecurityComplete = false
+		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
+		for _, problem := range drift {
+			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionReconcile)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to pin the verified policy view")
 		}
-		if problem := env.ptraceProblem(); problem != "" {
-			r.AddError(codeUnprivilegedPtrace, problem)
-			r.SecurityComplete = false
-		}
-		if problem := env.userNamespaceBootProblem(); problem != "" {
-			r.AddError(codeUserNamespaces, problem)
-			r.SecurityComplete = false
-		}
-		if problem := env.ptraceBootProblem(); problem != "" {
-			r.AddError(codeUserNamespaces, problem)
-			r.SecurityComplete = false
+		for _, problem := range unpinnable {
+			r.AddWarning(codeMachinePolicyIncomplete, problem)
 		}
 	}
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
+		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()
@@ -1255,6 +1227,7 @@ func (l *lifecycle) warnDirectoryUnreachable() {
 }
 
 const codeOptionalDestination = "optional_destination_failing"
+const codeAuditWriteFailed = "audit_write_failed"
 
 // codeJudgeFailing names an LLM judge whose recent calls all failed, or that
 // could not start.
@@ -1275,8 +1248,10 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		ProfileWarningCount           int `json:"profile_warning_count"`
 		Telemetry                     struct {
 			Details struct {
-				OptionalState  string `json:"optional_destination_state"`
-				FailureSummary string `json:"optional_destination_failure_summary"`
+				OptionalState       string `json:"optional_destination_state"`
+				FailureSummary      string `json:"optional_destination_failure_summary"`
+				EventHistoryFailure string `json:"event_history_failure"`
+				LastSQLiteClass     string `json:"event_history_last_sqlite_class"`
 			} `json:"details"`
 		} `json:"telemetry"`
 		Inspection *struct {
@@ -1296,6 +1271,22 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
+	}
+	l.gatewayAuditFailure = health.Telemetry.Details.EventHistoryFailure != ""
+	if l.gatewayAuditFailure {
+		failure := health.Telemetry.Details.EventHistoryFailure
+		switch failure {
+		case "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed":
+		default:
+			failure = "unknown"
+		}
+		message := "the gateway cannot write mandatory audit records (" + failure + ")"
+		class := health.Telemetry.Details.LastSQLiteClass
+		switch class {
+		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
+			message += "; last SQLite failure class: " + class
+		}
+		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
 	}
 	// A judge that stops answering silently downgrades detection to the
 	// static rules; only /health and the journal said so (GAP-0626).

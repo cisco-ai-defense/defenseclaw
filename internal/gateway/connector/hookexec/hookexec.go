@@ -143,13 +143,33 @@ const AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
 // ClientRefusalHeader carries, on the standalone hook socket, a refusal the
 // hook made itself before it could send the event: the gateway records it
 // (audit row and log line) and answers 403. Only
-// ManagedUserNamespaceReason is accepted.
+// IsManagedProcessContextReason limits the accepted values.
 const ClientRefusalHeader = "X-DefenseClaw-Client-Refusal"
 
 // ManagedUserNamespaceReason is the refusal of a hook that runs in a private
 // user namespace (unshare -U, a sandbox tool): from there it cannot check the
 // root-owned runtime state, whose owners read as the overflow uid.
 const ManagedUserNamespaceReason = "enterprise_managed_user_namespace"
+
+const (
+	ManagedTracedProcessReason         = "enterprise_managed_traced_process"
+	ManagedProcessContextUnknownReason = "enterprise_managed_process_context_unverified"
+	// ManagedPolicyViewReason is the gateway's alert for managed hook calls
+	// under a vendor policy view it can not prove; never a refusal.
+	ManagedPolicyViewReason = "enterprise_managed_policy_view_unverified"
+)
+
+// IsManagedProcessContextReason accepts only the hook's fixed context
+// diagnostics, never caller-supplied text, for the managed socket refusal
+// audit.
+func IsManagedProcessContextReason(reason string) bool {
+	switch reason {
+	case ManagedUserNamespaceReason, ManagedTracedProcessReason, ManagedProcessContextUnknownReason:
+		return true
+	default:
+		return false
+	}
+}
 
 // AgentSurfaceHeaderValue returns surface when it is cli, desktop or
 // extension, else "".
@@ -334,6 +354,12 @@ type Options struct {
 	// ManagedRuntimeFailure is a stable, non-sensitive resolver diagnostic
 	// selected before target-owned runtime files are consulted.
 	ManagedRuntimeFailure string
+	// InvocationFailure is why a per-user hook command failed before it
+	// could check the call (an unknown flag, a malformed value, a stray
+	// argument) while its policy is closed: Run answers it with the
+	// connector's own block, never the generic status 1 most agents run the
+	// call on (GAP-0982). A managed hook sets ManagedRuntimeFailure instead.
+	InvocationFailure string
 	// ExplainUnenrolledAccount makes the refusal of an account absent from
 	// the protected target set (managedSIDUnregisteredReason), or registered
 	// but without a runtime yet (managedEnrollmentPendingReason), say so,
@@ -477,6 +503,9 @@ func runHook(ctx context.Context, opts Options) int {
 		failMode = "closed"
 		opts.FailMode = "closed"
 	}
+	if reason := strings.TrimSpace(opts.InvocationFailure); reason != "" && !opts.ManagedEnterprise {
+		return failInvocation(opts, sp, reason)
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		if code, handled := refuseClosedUnboundHook(&opts, sp, "closed"); handled {
 			return code
@@ -606,6 +635,24 @@ func runHook(ctx context.Context, opts Options) int {
 		return watchdog.finish(sendToGateway(ctx, opts, sp, failMode, payload, startedAt))
 	}
 	return sendToGateway(ctx, opts, sp, failMode, payload, startedAt)
+}
+
+// failInvocation answers a per-user hook command that failed before it
+// could check the call (Options.InvocationFailure) with the connector's
+// closed answer for that event: Codex's own block object, Claude Code's,
+// Devin's and Kiro's exit 2, Hermes' block directive, Copilot's and
+// Antigravity's deny, Cursor's. It reads the payload for the event an
+// unbound command does not name; an unbound Copilot or Antigravity command
+// gets the denies refuseClosedUnboundHook gives.
+func failInvocation(opts Options, sp spec, reason string) int {
+	opts.FailMode = "closed"
+	opts.StrictAvailability = true
+	if code, handled := refuseClosedUnboundHook(&opts, sp, "closed"); handled {
+		return code
+	}
+	payload, _, _ := readCapped(opts.Stdin, opts.MaxBody)
+	opts.Event = resolveHookEvent(strings.TrimSpace(opts.Event), payload)
+	return failResponse(opts, sp, "closed", reason)
 }
 
 // sendToGateway is Run once the call's payload and event are known: it
@@ -1576,6 +1623,15 @@ func (sp spec) decide(opts Options, body []byte) int {
 		!nativeOutputAgrees(sp, opts.Event, action, output) {
 		return failResponse(opts, sp, "closed", "native output contradicts gateway action")
 	}
+	if !opts.SecureClient && action == "confirm" && output == "" &&
+		(sp.style == styleClaudeCode || sp.style == styleCodex) &&
+		(sp.style != styleCodex || codexEventCanControl(opts.HookContractID, opts.Event)) {
+		// A confirmation is the gateway's ask; Claude Code and Codex ask only
+		// through the native object, so without one the call would run as if
+		// the gateway had allowed it. It is refused closed, in every fail
+		// mode, as an answer that contradicts its action is (GAP-0983).
+		return failResponse(opts, sp, "closed", missingNativeAskReason)
+	}
 
 	switch sp.style {
 	case styleClaudeCode:
@@ -1699,6 +1755,10 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return 0
 	}
 }
+
+// missingNativeAskReason is the hook-failure reason of a confirmation that
+// carries no native ask (GAP-0983).
+const missingNativeAskReason = "confirm without native output in gateway response"
 
 // managedNativeDecision reports a managed hook outside Secure Client (the
 // standalone profile, Unix or Windows).
@@ -2619,11 +2679,13 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 // the gateway has answered (or failed to); decide reads it once the whole
 // body is in, and every failure answer reads it again when it answers.
 // While the installer holds the per-user data directory
-// (perUserInstallInProgress) the call is closed, with strict availability,
-// so an install or upgrade that starts during a call closes it as well
-// (GAP-0893, GAP-0894, GAP-0916). It returns the fail mode to answer with.
+// (perUserInstallInProgress), and on a managed host while its lifecycle
+// runs (managedLifecycleActive), the call is closed, with strict
+// availability, so an install or upgrade that starts during a call closes
+// it as well (GAP-0893, GAP-0894, GAP-0916, GAP-1074, GAP-1075). It returns
+// the fail mode to answer with.
 func closeDuringInstall(opts *Options, failMode string) string {
-	if !perUserInstallInProgress(*opts) {
+	if !perUserInstallInProgress(*opts) && !managedLifecycleActive(*opts) {
 		return failMode
 	}
 	opts.FailMode = "closed"
@@ -3008,9 +3070,9 @@ func failClosedStopEvent(opts Options, sp spec) bool {
 
 // logDeliberateAllow records a failure that a reviewed rule answers with the
 // connector's neutral allow (a stop/session-end event, or a Cursor event with
-// no block response). The record carries the fail_open outcome, but the
-// generic "inspection bypassed" warning is left out: the caller prints its own
-// explanation, which is the first line the agent shows.
+// no block response). The generic "inspection bypassed" warning is left out:
+// the caller prints its own explanation, which is the first line the agent
+// shows. Managed OpenCode background events have a diagnostic outcome.
 func logDeliberateAllow(opts Options, sp spec, reason, category string) {
 	quiet := opts
 	quiet.Stderr = io.Discard
@@ -3073,15 +3135,23 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // unusable answer), any failure after an HTTP error reply
 // (Options.answeredErrorStatus) and every
 // closed or unset mode keep the refusal.
+// A lifecycle transition (managedLifecycleActive) keeps it too: an install,
+// upgrade, repair or lifecycle restart is not an outage (GAP-0993, GAP-1074,
+// GAP-1075).
 func ManagedOutageFailsOpen(opts Options, err error) bool {
 	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability || opts.answeredErrorStatus != 0 ||
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}
-	if errors.Is(err, errManagedGatewayPortHeld) {
+	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errAnswerBudgetSpentLocally) {
 		return false
 	}
-	return errors.Is(err, errManagedGatewayNotRunning)
+	// Only a proven stopped service is an outage; a restart or a missing
+	// answer keeps the refusal.
+	if !errors.Is(err, errManagedGatewayNotRunning) {
+		return false
+	}
+	return !managedLifecycleActive(opts)
 }
 
 // managedCopilotOpen reports a managed GitHub Copilot hook whose delivery
@@ -3267,6 +3337,12 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 	case reason == ManagedUserNamespaceReason:
 		// The setup is fine; the agent's process is the problem (GAP-0923).
 		cause, advice = "this agent runs in a private user namespace (for example one started with unshare or a sandbox tool), where DefenseClaw cannot check it or reach its hook socket",
+			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == ManagedTracedProcessReason:
+		cause, advice = "this agent's hook is being traced, so another process may change the policy paths it reads",
+			"Start the agent without a tracer; if this continues, contact your administrator."
+	case reason == ManagedProcessContextUnknownReason:
+		cause, advice = "DefenseClaw cannot verify this agent's Linux process context and managed policy view",
 			"Start the agent from your normal login session; if this continues, contact your administrator."
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",

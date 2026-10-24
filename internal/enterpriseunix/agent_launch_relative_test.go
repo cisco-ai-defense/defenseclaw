@@ -85,8 +85,11 @@ func TestManagedClaudeRelativeMacOSLaunchUsesTheKernelImage(t *testing.T) {
 			t.Fatalf("%s flagged a relatively launched supported build: %s", action, warning)
 		}
 		requireOK(t, result)
-		if !result.CoverageComplete || !result.SecurityComplete {
-			t.Fatalf("%s lowered health for a relative launch: %+v", action, result)
+		// Security stays incomplete for reasons this test does not cover:
+		// the fake sessions predate activation (agent_sessions_restart_required)
+		// and a Claude Code hook process can fail open (hook_process_fail_open).
+		if !result.CoverageComplete {
+			t.Fatalf("%s lowered coverage for a relative launch: %+v", action, result)
 		}
 	}
 	if len(*audited) != 0 {

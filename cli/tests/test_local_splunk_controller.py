@@ -21,6 +21,7 @@ from defenseclaw.observability.local_splunk import (
     COMPOSE_FILE_REL,
     COMPOSE_PROJECT,
     ENV_FILE_REL,
+    RETIRED_SPLUNK_IMAGE,
     NativeLocalSplunkController,
     _credential_values,
     package_splunk_app,
@@ -28,6 +29,7 @@ from defenseclaw.observability.local_splunk import (
 )
 from defenseclaw.observability.local_stack import (
     CommandResult,
+    CommandTimeoutError,
     LocalStackError,
     resolve_native_docker_executable,
 )
@@ -552,6 +554,73 @@ def test_failed_upgrade_stop_restores_prior_running_stack_before_returning(
     assert (stable / ENV_FILE_REL).read_bytes() == previous_env
     assert runner.containers
     assert all(state["running"] for state in runner.containers.values())
+
+
+@pytest.mark.parametrize("failure", ["unavailable", "timeout"])
+@pytest.mark.parametrize("running", [True, False])
+def test_upgrade_resolves_staged_image_before_changing_prior_stack(
+    tmp_path: Path, docker_exe: Path, monkeypatch: pytest.MonkeyPatch, failure: str, running: bool,
+) -> None:
+    data_dir = tmp_path / "Offline Upgrade"
+    stable = data_dir / "splunk-bridge"
+    local_splunk._copy_bundle(bundled_splunk_bridge_dir(), stable)
+    previous_values = _credential_values(
+        {"SPLUNK_IMAGE": RETIRED_SPLUNK_IMAGE},
+        {},
+        index="previous_index",
+        source="previous_source",
+        sourcetype="previous:type",
+    )
+    previous_env = local_splunk._dotenv_bytes(previous_values)
+    local_splunk.atomic_write_private_bytes(stable / ENV_FILE_REL, previous_env)
+    local_splunk.protect_private_file(stable / ENV_FILE_REL)
+    replacement = "splunk/splunk:10.2.0"
+
+    class OfflineReplacementRunner(FakeDockerRunner):
+        def run(self, argv, *, timeout: float, capture: bool = True, env=None) -> CommandResult:
+            command = tuple(argv)
+            if command[1:3] == ("image", "inspect"):
+                self.calls.append((command, timeout, dict(env or {})))
+                return CommandResult(command, 0 if command[-1] == RETIRED_SPLUNK_IMAGE else 1)
+            if command[1] == "pull":
+                self.calls.append((command, timeout, dict(env or {})))
+                assert (stable / ENV_FILE_REL).read_bytes() == previous_env
+                assert self.containers["prior-container"]["running"] is running
+                if failure == "timeout":
+                    raise CommandTimeoutError("pull timed out", CommandResult(command, -1))
+                return CommandResult(command, 1, stderr="registry unavailable")
+            return super().run(argv, timeout=timeout, capture=capture, env=env)
+
+    runner = OfflineReplacementRunner()
+    runner.add_owned(stable, container_id="prior-container")
+    runner.containers["prior-container"]["running"] = running
+    monkeypatch.setattr(local_splunk, "validate_native_docker_preflight", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(NativeLocalSplunkController, "_port_in_use", staticmethod(lambda _port: True))
+    monkeypatch.setattr(NativeLocalSplunkController, "_web_ready", staticmethod(lambda _timeout: True))
+    monkeypatch.setattr(NativeLocalSplunkController, "_hec_ready", lambda self, _timeout: True)
+
+    with pytest.raises(LocalStackError, match="registry|timed out"):
+        start_native_local_splunk(
+            str(data_dir),
+            license_accepted=True,
+            index="replacement_index",
+            source="replacement_source",
+            sourcetype="replacement:type",
+            docker_path=docker_exe,
+            runner=runner,
+            os_name="windows",
+            environment={},
+            timeout=2,
+        )
+
+    assert (stable / ENV_FILE_REL).read_bytes() == previous_env
+    assert runner.containers["prior-container"]["running"] is running
+    assert not any("down" in command for command, _, _ in runner.calls)
+    assert not any("up" in command for command, _, _ in runner.calls)
+    assert not list(data_dir.glob(".splunk-stage-*"))
+    pull = next(call for call in runner.calls if call[0][1] == "pull")
+    assert pull[0][-1] == replacement
+    assert pull[2]["SPLUNK_IMAGE"] == replacement
 
 
 def test_upgrade_rollback_restores_prior_assets_running_stack_and_volumes(

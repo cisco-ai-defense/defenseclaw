@@ -724,25 +724,41 @@ async function defenseclawLogFailOpen(reason, category) {
 const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
   "and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state.";
 
-async function defenseclawInstallWindow() {
-  try {
-    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
-    return true;
-  } catch (err) {
-    // Only a missing lock ends the install window. An unreadable lock must
-    // never turn an upgrade into a fail-open outage.
-    return !(err && err.code === "ENOENT");
+{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// defenseclawInstallLockHeld reports whether an installer holds this
+// account's DefenseClaw data: the gateway's data_dir (the folder that holds
+// the hook credential) or the folder install.sh and install.ps1 lock,
+// DEFENSECLAW_HOME or else ~/.defenseclaw, which differ when data_dir is set
+// apart from it (GAP-1002); the shell hooks check the same two (GAP-0948).
+// A lock is held when its .install.lock exists, as any file type, or cannot
+// be read for any reason but its absence.
+async function defenseclawInstallLockHeld() {
+  const dirs = [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")];
+  for (const dir of dirs) {
+    try {
+      await lstat(join(dir, ".install.lock"));
+      return true;
+    } catch (err) {
+      if (!err || err.code !== "ENOENT") return true;
+    }
+    try {
+      // A folder that is not one cannot be looked in (Windows reports its
+      // child as absent).
+      if (!(await lstat(dir)).isDirectory()) return true;
+    } catch (err) {
+      if (!err || err.code !== "ENOENT") return true;
+    }
   }
+  return false;
+}
+
+// defenseclawInstallWindow is the install check of the tool paths below.
+async function defenseclawInstallWindow() {
+  return await defenseclawInstallLockHeld();
 }
 
 {{end}}async function defenseclawPerUserInstallInProgress() {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  if (DC_FAIL_MODE !== "open") return false;
-  try {
-    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
-    return true;
-  } catch (err) {
-    return !err || err.code !== "ENOENT";
-  }
+  return await defenseclawInstallLockHeld();
 {{else}}  return false;
 {{end}}}
 
@@ -871,7 +887,7 @@ async function defenseclawPerUserGatewayDownText(err, status) {
     }
   };
   let text;
-  if (await present(".install.lock")) {
+  if (await defenseclawInstallLockHeld()) {
     text = "DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done (fail mode closed). " +
       "Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install.";
   } else if (await present("gateway.stopped")) {

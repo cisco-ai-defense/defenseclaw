@@ -164,6 +164,13 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// gatewayAuditFailure is the active mandatory event-history write failure
+	// in the gateway's latest /health answer, used when describe computes
+	// security_complete after reading that answer.
+	gatewayAuditFailure bool
+	// replacedHooksFenced is set once the run fenced the replaced
+	// release's shell hooks (fenceReplacedHooks).
+	replacedHooksFenced bool
 	// keepThroughRollback names the units a rollback leaves running: the
 	// gateway and the sensor helper of an interrupted hot transaction
 	// (recoverInterrupted, GAP-0238).
@@ -494,6 +501,15 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) before it started; nothing was changed")
 		return 0
 	}
+	// Managed hooks answer closed while this run can stop or restart the
+	// gateway (GAP-1074). Removed before the lock is released.
+	releaseMarker, err := env.holdLifecycleMarker()
+	if err != nil {
+		r.AddError(codeState, err.Error()+"; nothing was changed")
+		l.reportNoSpace(err)
+		return 0
+	}
+	defer releaseMarker()
 	if l.opts.FromPackage && l.opts.Reason != "package" {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.
@@ -541,7 +557,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddWarning(codeSuperseded, fmt.Sprintf("this apply run's binary (%s) is older than the installed deployment (%s), which another run applied while this one waited; the installed binary applies later changes",
 			env.ProductVersion, record.ProductVersion))
 		l.describe(ctx, record, false)
-		return 0
+		return l.requireProtectedTargetsOnChange(0)
 	}
 	if l.applyRunAfterRolledBackUpgrade(record) {
 		r.Noop = true
@@ -549,7 +565,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddWarning(codeUpgradeRolledBack, fmt.Sprintf("the upgrade to %s failed and was rolled back to %s, and config.yaml and the protected credentials are still the ones %s applied, so this apply run does not retry the upgrade; install the package again, or run `%s --from-package`",
 			env.ProductVersion, record.ProductVersion, record.ProductVersion, env.lifecycleCommand(ActionEnsure)))
 		l.describe(ctx, record, false)
-		return 0
+		return l.requireProtectedTargetsOnChange(0)
 	}
 	if l.opts.Mutate != nil {
 		if l.opts.Action != ActionEnsure {
@@ -580,7 +596,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	}
 
 	if code, done := l.prepareBundleMode(ctx, record); done {
-		return code
+		return l.requireProtectedTargetsOnChange(code)
 	}
 
 	switch l.opts.Action {
@@ -1933,7 +1949,6 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 
 	l.rememberGeneration()
-
 	failAndRollback := func(code string, cause error) int {
 		r.AddError(code, cause.Error())
 		// Before the rollback, which can free space: what was full when the
@@ -1972,7 +1987,12 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			// back before the services restart.
 			revertConfig = func() { newerConfig = l.revertRejectedConfig(record, committedConfig, p.config.Raw, cause.Error()) }
 		}
-		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, revertConfig)
+		restoreLiveBeforeStart := func(_ bool) {
+			if revertConfig != nil {
+				revertConfig()
+			}
+		}
+		restored, err := l.rollback(ctx, snap, pending, false, keepNewerConfig, restoreLiveBeforeStart)
 		if newerConfig != nil {
 			l.restoreNewerConfig(record.ServiceGID, newerConfig)
 		}
@@ -2049,19 +2069,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(codeApply, err)
 	}
 	l.clearStaleHookSocket(account)
-	// Capture whether the host had a trusted, live restriction before this
-	// transaction wrote the sysctl file. A zero value alone cannot prove that
-	// a namespace created earlier in this boot has gone away.
-	uninstalledThisBoot, hasUninstallMarker := env.userNamespaceUninstallState()
-	priorUserNamespaceRestricted := env.userNamespaceBootProblem() == "" && env.ptraceBootProblem() == "" && env.ptraceProblem() == "" &&
-		(env.userNamespaceProblem() == "" || uninstalledThisBoot ||
-			record != nil && record.Files[userNamespacesConfigPath] == sha256Bytes(env.desiredPolicyViewConfig()) && !hasUninstallMarker)
 	changed, err := l.applyFilesRecorded(ctx, p, account)
 	if err != nil {
 		return failAndRollback(errorCode(err, codeApply), err)
-	}
-	if err := env.restrictManagedPolicyViews(priorUserNamespaceRestricted); err != nil {
-		return failAndRollback(codeUserNamespaces, err)
 	}
 	if record != nil {
 		// An edit made in place (the config-apply trigger) is never rewritten,
@@ -2268,6 +2278,13 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		r.AddError(codeMachinePolicyIncomplete, "repair could not put DefenseClaw hooks back in vendor machine policy: "+
 			l.machinePolicyErr.Error()+"; the rest of the deployment is repaired")
 	}
+	if l.opts.Action == ActionEnsure && l.machinePolicyErr != nil {
+		// Ensure can apply other deployment changes while a combined or
+		// unreadable vendor entry remains. A successful exit would claim the
+		// requested coverage even though the descriptor excludes it.
+		r.AddError(codeMachinePolicyIncomplete, "ensure could not put DefenseClaw hooks in vendor machine policy: "+
+			l.machinePolicyErr.Error()+"; other deployment changes may have been applied")
+	}
 	return 0
 }
 
@@ -2283,6 +2300,11 @@ func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]b
 	for _, unit := range ordered {
 		if unit.Kind == "socket" || unit.Kind == "timer" || unit.Name == l.env.SelfUnit || keep[unit.Name] {
 			continue
+		}
+		if unit.Kind == "gateway" {
+			// The guardian and the enumerator are stopped (a later stage),
+			// so nothing renders the hooks again meanwhile (GAP-1123).
+			l.fenceReplacedHooks(ctx)
 		}
 		_ = l.env.Services.Stop(ctx, unit)
 	}
@@ -2786,10 +2808,10 @@ const keptSnapshotAdvice = "the previous deployment could not be fully restored;
 // policies stops first, so its policies are retired with the binary that
 // loaded them and never under it; it starts again when the restore fails.
 // beforeRestore runs once the services are stopped, just before the
-// snapshot is put back, and beforeStart right after. restored is false when
-// any file could not be put back; the snapshot must then be kept for a
-// retry.
-func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeRestore, beforeStart func()) (restored bool, err error) {
+// snapshot is put back. beforeStart runs afterwards and learns whether all
+// files were restored. restored is false when any file could not be put
+// back; the snapshot must then be kept for a retry.
+func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pending, restoreFirst bool, beforeRestore func(), beforeStart func(bool)) (restored bool, err error) {
 	env := l.env
 	units := env.Services.Units()
 	previouslyActive, previouslyEnabled := intent.PreviouslyActive, intent.PreviouslyEnabled
@@ -2863,7 +2885,7 @@ func (l *lifecycle) rollback(ctx context.Context, snap *snapshot, intent *Pendin
 	}
 	restoreErr := env.restore(snap)
 	if beforeStart != nil {
-		beforeStart()
+		beforeStart(restoreErr == nil)
 	}
 	l.rollbackConfigSHA, l.rollbackConfigFile = "", nil
 	if restoreErr == nil {
@@ -3148,9 +3170,6 @@ func (l *lifecycle) restoreUnchangedConfigMetadata(ctx context.Context, record *
 func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, string) {
 	env := l.env
 	l.noopPolicy, l.policyAssetsEdited, l.policyAssetRefusal = nil, false, ""
-	if env.userNamespaceProblem() != "" || env.ptraceProblem() != "" || env.userNamespaceBootProblem() != "" || env.ptraceBootProblem() != "" {
-		return false, ""
-	}
 	account, ok, err := env.Accounts.Lookup(ctx, env.Layout.ServiceUser)
 	if err != nil || !ok || account.UID != record.ServiceUID || account.GID != record.ServiceGID {
 		return false, ""
@@ -3191,6 +3210,9 @@ func (l *lifecycle) ensureNoop(ctx context.Context, record *Deployment) (bool, s
 		}
 	}
 	if l.machinePolicyDrift(p) {
+		return false, ""
+	}
+	if !l.policyViewPinsCurrent(p.machinePolicy) {
 		return false, ""
 	}
 	if l.helperModeDrift(ctx, p) {
@@ -3396,12 +3418,6 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 	removePerUser := gatewayPresent && (record != nil || exists(env.P(env.Layout.ManifestPath)))
 	if removePerUser && l.refuseUnresolvedPerUserRows(ctx) {
 		return 0
-	}
-	if record != nil && env.GOOS == "linux" {
-		if err := env.markUserNamespaceUninstall(); err != nil {
-			r.AddError(codeUninstall, err.Error())
-			return 0
-		}
 	}
 	// The guardian repairs any DefenseClaw registration that goes missing
 	// from a manifest target, the enumerator republishes the manifest, and

@@ -26,14 +26,14 @@
     "/etc/hermes/.env": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 276,
-      "sha256": "533b47ee6519eead8f5287b391949590b0d35bb088c198a10d66479b37825857"
+      "size": 289,
+      "sha256": "872dc6d18b304086ad3fec27e57c4acb7506823739181080a8d3181e8fdf6959"
     },
     "/etc/hermes/config.yaml": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 3287,
-      "sha256": "3bfa7c7cbff9b50ea7417b27d736fd7659b142ad346137b1dd4b91504f45cdfc"
+      "size": 3315,
+      "sha256": "643055bc7ba5edb3d4f60163399c8ae0714dbb57c65e13e14ec46c8ca8785fc7"
     },
     "/sandbox/.hermes/config.yaml": {
       "mode": "-rw-------",
@@ -44,14 +44,14 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 121704,
-      "sha256": "cb0ef378be0ac7e22d1c76fb59f6ce095c440c26ab0f6c7d9ff8b4a26ee053a4"
+      "size": 122786,
+      "sha256": "6e05e547ecedc753c04d5415e158b6193541b79333b8f25e69594928fa19eb23"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 12561,
-      "sha256": "2c40147b2c6e3833c37722e73b7ee12ad1f6da5866622b811feb0ab22531cfc1"
+      "size": 14106,
+      "sha256": "2693cb593ddce0a98771843c95863e958aedbbd5da74a61dfa364f6a373acc06"
     },
     "/usr/local/lib/defenseclaw/hooks/hermes-hook.sh": {
       "mode": "-rwxr-xr-x",

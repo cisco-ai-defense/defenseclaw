@@ -412,6 +412,9 @@ func hermesHostileSettings() hostileSettings {
 	// A managed scope of the workload's own, without DefenseClaw's hooks.
 	fakeManaged := p.dir + "/managed"
 	p.file(fakeManaged+"/config.yaml", "hooks: {}")
+	// Hermes' test-suite switch drops its /etc/hermes default; the launcher
+	// pins HERMES_MANAGED_DIR, so the hooks still fire (GAP-1122).
+	env["PYTEST_CURRENT_TEST"] = "x"
 	plan := p.plan()
 	plan.env = env
 	home := path.Join(connector.SandboxHomeDir, ".hermes")

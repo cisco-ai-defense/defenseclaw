@@ -225,7 +225,7 @@ access. Status shows presence, modification time and a digest prefix only.
 | L-23 | — | SELinux, fapolicyd or AppArmor silently blocks a service | Relabel after install; lifecycle warnings | Host certification record |
 | L-24 | W-21 | The gateway hangs without exiting | `WatchdogSec=60s` with `Type=notify`; systemd restarts it | SIGSTOP drill |
 | L-25 | W-27 | An old, copied or self-built agent client (for example Codex built from source, or an older Codex or Claude Code under `~/.local`) ignores `/etc/codex/requirements.toml` or the managed-settings drop-in; user-controlled loader or runtime preloads (`LD_PRELOAD`, `LD_AUDIT`, `NODE_OPTIONS=--require` and similar) can intercept policy reads in an approved client | Out of DefenseClaw's reach from user space: the hook-contract floors are in `cli/defenseclaw/inventory/hook_contracts.json`. Application control such as fapolicyd must restrict executable, shared-library and untrusted language-file loading, and launch policy must sanitize loader and runtime preload variables. `status` and `verify` cannot attest that control. Claude Code releases that do not read `/etc/claude-code/managed-settings.d` (for example 1.0.128 and 2.0.77) ignore both DefenseClaw drop-ins, including the version floor, run with no DefenseClaw hook and no audit row, and are not reported by `status` or `verify` ([#920](https://github.com/cisco-ai-defense/defenseclaw/issues/920)). GitHub Copilot CLI 1.0.15, below its 1.0.18 floor, installed with `npm install --prefix` and run with `--no-auto-update`, does not load `/etc/github-copilot/policy.d` either. Per-user connectors below their contract minimum are the same class. | Application-control profile on a host; an old or preloaded client started from a user's home |
-| L-26 | — | A standard user creates a private user and mount namespace, or uses ptrace path translation, and starts an agent with its own view of machine policy, runtime descriptor or hook socket directory | Managed install sets and persists `user.max_user_namespaces=0` and `kernel.yama.ptrace_scope=2`. Status and verify fail with `unprivileged_user_namespaces` or `unprivileged_ptrace` if either live restriction, the persistent file or reboot marker drifts; ensure restores drift. A reboot ends preexisting namespaces and tracers (enterprise R20). `ptrace_scope=2` also prevents ordinary users from using `gdb` and `strace` on their own processes | `internal/enterpriseunix/userns_test.go` |
+| L-26 | — | A standard user gives an agent a private view of machine policy before it loads the managed hook | At start and when a policy file or the descriptor changes, the gateway compares the host's policy content with digests pinned in the trusted runtime descriptor; a mismatch raises a `HIGH` `managed_hook` runtime alert and managed hook calls are still inspected under the managed policy (only a hook without a trusted descriptor refuses). The hook does no policy-view work, so a private view inside one agent process is outside this check. Linux also refuses a private user namespace and a tracer; a private mount view alone is not refused. `status` and `verify` report only current kernel facts and warn when unprivileged namespaces or ptrace are open. DefenseClaw never changes host kernel settings. A client that omits the hook remains outside this invocation check; administrators may apply optional host hardening with their own tools (residual 11, enterprise R20) | `internal/enterpriseunix/userns_test.go`, `internal/cli/hook_trusted_state_unix_test.go`, `internal/enterprisepolicy/policy_view_digest_test.go`, `internal/gateway/managed_policy_view_unix_test.go` |
 | L-27 | W-57 | A user has an agent only as a desktop app or editor extension and is never enrolled | Not in this release: machine-policy hook calls are inspected under the default contract or refused (`unenrolled_users`), and per-user connectors get no hooks ([R25](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#912](https://github.com/cisco-ai-defense/defenseclaw/issues/912)) | Tracked in #912 |
 | L-28 | W-58 | A Copilot agent chat in VS Code's Local harness runs without DefenseClaw policy or audit | Partly covered: `ChatHooks` and `ChatEditorPreferCopilotHarness` through `/etc/vscode/policy.json` send new editor chats to the SDK harness. A per-user Local hook file governs a Local chat. Under `managed_hooks_only: enforce`, a per-user plugin is also placed, and `allowManagedHooksOnly` is set in `/etc/github-copilot/managed-settings.json` once every enrolled user has the plugin and every VS Code found is 1.139.x ([R26](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#913](https://github.com/cisco-ai-defense/defenseclaw/issues/913)) | Tracked in #913 |
 | L-29 | W-59 | The standalone profile is installed inside a WSL 2 distribution, where the Windows user is root | Not a supported deployment: the user controls the distribution. The lifecycle refuses a new install inside WSL and warns on an existing one (`wsl_distribution`) ([R27](ENTERPRISE-THREAT-MODEL.md#residual-risks), [#914](https://github.com/cisco-ai-defense/defenseclaw/issues/914)) | Govern WSL from the Windows side |
@@ -332,20 +332,19 @@ access. Status shows presence, modification time and a digest prefix only.
     not installed for such users, and their per-user hook calls fail closed;
     machine-policy connectors treat them as unenrolled users, which are
     inspected unless `enrollment.unenrolled_users` is `deny`.
-11. Managed Linux install applies `user.max_user_namespaces=0` and
-    `kernel.yama.ptrace_scope=2`, and persists both in
-    `/etc/sysctl.d/99-zz-defenseclaw-userns.conf`. A standard user otherwise
-    can give an agent a private view of `/etc/codex/requirements.toml`, other
-    machine-policy files, the runtime descriptor and `/run/defenseclaw-hook`.
-    Status and verify fail with `unprivileged_user_namespaces` or
-    `unprivileged_ptrace` if the live or persistent restrictions or reboot
-    marker drift, or until a reboot after first application. Existing user
-    namespaces and tracers survive changing the live settings; reboot ends
-    them. The restrictions also prevent rootless containers, user namespace
-    based agent command sandboxes, and standard-user debugging with `gdb` or
-    `strace`. A preexisting ptrace scope of `3` remains unchanged. Loader or
-    runtime preload interception through `LD_PRELOAD`, `LD_AUDIT`,
-    `NODE_OPTIONS=--require` and similar remains an application-control
+11. A private namespace or ptrace path translation can hide machine policy
+    before an agent registers its hook. When the policy files change, the
+    gateway compares the host's policy content with digests pinned in an
+    administrator-owned runtime descriptor and raises an alert for a mismatch;
+    managed hook calls are still inspected, and the hook does no policy-view
+    work. Linux hooks also refuse a private user namespace and a tracer. A
+    private view inside one agent process is outside the gateway's host check.
+    `enterprise linux status` and `verify` report current kernel facts:
+    they warn when unprivileged namespaces or ptrace are open. DefenseClaw
+    never changes host-wide kernel or sysctl settings. An administrator can
+    apply optional hardening with their own tools after testing affected
+    workloads. An agent that never loaded the hook makes no call to check.
+    Loader and runtime preload interception remains an application-control
     residual under L-25.
 12. `defenseclaw-hook` and the per-user hook scripts run as the user, who
     can terminate, suspend or starve them; agents that block only on an

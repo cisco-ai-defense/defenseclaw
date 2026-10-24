@@ -578,16 +578,23 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get(hookexec.ClientRefusalHeader) == hookexec.ManagedUserNamespaceReason {
-			// A hook in a private user namespace refused its agent before it
-			// could check the runtime state; the refusal left no audit row or
-			// log line, unlike a refused unenrolled account (GAP-0923).
+		if connectorName, _ := a.managedHookRouteScope(r); a.managedPolicyView.Load().unproven(connectorName, peer.Name) {
+			// The gateway can not prove the vendor policy this connector's
+			// managed hooks enforce (managedPolicyView, published when the
+			// policy changes). The call is still served and inspected under
+			// the managed policy below; this queues the alert without
+			// waiting on it (GAP-0922, GAP-0923, GAP-1061).
+			a.recordManagedPolicyViewAlert(r, peer, route)
+		}
+		if reason := r.Header.Get(hookexec.ClientRefusalHeader); hookexec.IsManagedProcessContextReason(reason) {
+			// A hook refused an unsafe or unverified process context before it
+			// could inspect the event. Keep the refusal in the audit and log.
 			connectorName, _ := a.managedHookRouteScope(r)
 			fmt.Fprintf(os.Stderr,
-				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent runs in a private user namespace\n",
-				peer.UID, connectorName, route, hookexec.ManagedUserNamespaceReason)
-			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, hookexec.ManagedUserNamespaceReason, connectorName)
-			writeManagedHookRefusal(w, http.StatusForbidden, hookexec.ManagedUserNamespaceReason)
+				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent process context is unsafe or unverified\n",
+				peer.UID, connectorName, route, reason)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason, connectorName)
+			writeManagedHookRefusal(w, http.StatusForbidden, reason)
 			return
 		}
 		connectorName, inspect := a.managedHookRouteScope(r)

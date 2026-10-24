@@ -431,6 +431,25 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 (local / "DefenseClaw" / "HookRuntime" / "hook-runtime-state.json").write_text("{}")
                 self.assertEqual(cmd_uninstall._windows_setup_leftovers("win32"), ())
 
+    def test_binaries_removes_the_launcher_trampoline_this_install_published(self):
+        # GAP-1000: once install.ps1 replaced Setup, Setup's launcher delegates
+        # to a copy of this install's hook (HookRuntime\delegated). That state
+        # goes with this install; Setup's own state keeps its folders.
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp).resolve()
+            runtime = local / "DefenseClaw" / "HookRuntime"
+            copy = runtime / "delegated" / ("0" * 32) / "defenseclaw-hook.exe"
+            copy.parent.mkdir(parents=True)
+            copy.write_bytes(b"MZ")
+            (runtime / "defenseclaw-hook.exe").write_bytes(b"MZ")
+            state = runtime / "hook-runtime-state.json"
+            with patch.object(cmd_uninstall.windows_native_uninstall, "_known_folder_path", return_value=str(local)):
+                state.write_text(json.dumps({"schema_version": 2, "hook_path": str(copy)}), encoding="utf-8")
+                leftovers = cmd_uninstall._windows_setup_leftovers("win32")
+                self.assertEqual(leftovers, (str(runtime),))
+                state.write_text(json.dumps({"schema_version": 2, "hook_path": str(local / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-hook.exe")}), encoding="utf-8")
+                self.assertEqual(cmd_uninstall._windows_setup_leftovers("win32"), ())
+
     def test_binary_removal_drops_install_bookkeeping_and_pip_hint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve() / "bin"
@@ -2241,6 +2260,35 @@ class OrphanCopilotPluginTests(unittest.TestCase):
             ):
                 cmd_uninstall._remove_orphan_copilot_plugin()
             self.assertFalse(plugin.exists(), "the released Windows plugin was DefenseClaw's")
+
+    def test_orphan_cleanup_removes_current_guarded_plugin_on_both_platforms(self):
+        fixture_dir = (
+            Path(__file__).resolve().parents[2]
+            / "internal"
+            / "enterprisepolicy"
+            / "testdata"
+            / "copilot-vscode-guarded"
+        )
+        for platform_name in ("linux", "windows"):
+            with self.subTest(platform=platform_name), tempfile.TemporaryDirectory() as tmp:
+                fixture = fixture_dir / f"{platform_name}-hooks.json"
+                hooks = json.loads(fixture.read_text(encoding="utf-8"))
+                commands = [handler["command"] for group in hooks["hooks"].values() for handler in group]
+                self.assertTrue(commands)
+                if platform_name == "linux":
+                    self.assertTrue(all(" || exit 0; exec " in command for command in commands))
+                else:
+                    self.assertTrue(all("-EncodedCommand " in command for command in commands))
+                plugin = Path(tmp) / ".copilot" / "installed-plugins" / "defenseclaw" / "defenseclaw"
+                (plugin / "hooks").mkdir(parents=True)
+                (plugin / "plugin.json").write_text(json.dumps(cmd_uninstall._COPILOT_PLUGIN_MANIFEST))
+                (plugin / "hooks" / "hooks.json").write_text(json.dumps(hooks))
+                with (
+                    patch.dict(os.environ, {"HOME": tmp, "USERPROFILE": tmp}, clear=False),
+                    patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
+                ):
+                    cmd_uninstall._remove_orphan_copilot_plugin()
+                self.assertFalse(plugin.exists(), f"the guarded {platform_name} plugin was DefenseClaw's")
 
     def test_orphan_cleanup_keeps_edited_windows_handler_with_operator_command(self):
         fixture = Path(__file__).resolve().parents[2] / "internal" / "enterprisepolicy" / "testdata" / "copilot-vscode-1.0.0" / "windows-hooks.json"

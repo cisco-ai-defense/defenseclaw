@@ -84,7 +84,9 @@ func TestDoctorIsNotReadyWhileALegacySandboxRuns(t *testing.T) {
 	ta.daemon.add(ended)
 	c := row(ta)
 	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil ||
-		!strings.Contains(c.Detail, "old-ready, old-ended: legacy sandbox running, not protected by the 1.0.4 egress policy") ||
+		// The fake daemon lists its sandboxes in map order.
+		!(strings.Contains(c.Detail, "old-ready, old-ended: legacy sandbox running, not protected by the 1.0.4 egress policy") ||
+			strings.Contains(c.Detail, "old-ended, old-ready: legacy sandbox running, not protected by the 1.0.4 egress policy")) ||
 		!strings.Contains(c.Detail, "creates and starts no sandbox until they are gone") ||
 		!strings.Contains(c.Fix.Summary, "save the work you need in old-ready, then run `defenseclaw sandbox stop old-ready`, which syncs the VM's disk first") ||
 		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox delete old-ended` deletes old-ended and its work") {
@@ -109,7 +111,9 @@ func TestAStopAnOlderDaemonCouldNotMakeSaysTheWayOn(t *testing.T) {
 		{name: "older daemon, MicroVM", driver: "vm", err: generic,
 			want: "is in error state; t8 is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 137): OpenShell does not stop it, " +
 				"so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades no OpenShell gateway under it, nor moves this account to another OpenShell setup, " +
-				"until OpenShell reports it stopped: `defenseclaw sandbox delete t8` (DefenseClaw sandbox) or `openshell sandbox delete t8` (raw OpenShell sandbox), which deletes it and its work"},
+				"until OpenShell reports it stopped: save or sync any accessible guest work outside the guest first; " +
+				"OpenShell 0.1.3 cannot stop or start a completed or error-state MicroVM: " +
+				"`defenseclaw sandbox delete t8` (DefenseClaw sandbox) or `openshell sandbox delete t8` (raw OpenShell sandbox), which deletes it and its work"},
 		{name: "older daemon, docker", driver: "docker", err: generic, not: "OpenShell does not stop it"},
 		{name: "current daemon", driver: "vm", err: &sandboxapi.Error{Code: sandboxapi.CodeConflict, Message: "t8 is in OpenShell's error state", Detail: "its own way on"},
 			want: "t8 is in OpenShell's error state: its own way on", not: "OpenShell does not stop it"},

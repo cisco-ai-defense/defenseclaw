@@ -387,3 +387,108 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 		}
 	})
 }
+
+// GAP-1001: the installers run the refresh while they hold the data
+// directory. The hooks of 0.8.10 to 1.0.3 never read .install.lock, so an
+// open the config sets let a call run while the gateway was down for the
+// swap. With the lock held every hook is closed, the config's open included,
+// in the sidecar the old native hooks read and in the open an old script
+// bakes; the hold refreshes the same way. Without the lock the operator's
+// open stays open (control). The lock in DEFENSECLAW_HOME counts too, for
+// a refresh whose --data-dir names the gateway's data_dir.
+func TestRefreshFailModesClosesEveryHookWhileAnInstallHoldsTheDataDirectory(t *testing.T) {
+	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"
+	const v7 = "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"
+	released, err := os.ReadFile(filepath.Join("..", "gateway", "connector", "testdata", "released-hooks", "1.0.3", "copilot-hook.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(released, []byte(`FAIL_MODE="open"`)) {
+		t.Fatal("precondition: the released 1.0.3 Copilot hook bakes no open")
+	}
+	for _, test := range []struct {
+		name, config, read string
+		lock               string // "", "data" or "home"
+		hold               bool
+		want               string
+	}{
+		{name: "1.0.x config open, install", config: v9, read: "install", lock: "data", want: "closed"},
+		{name: "0.8.x config open, install", config: v7, read: "install", lock: "data", want: "closed"},
+		{name: "config open, install in DEFENSECLAW_HOME", config: v9, read: "install", lock: "home", want: "closed"},
+		{name: "config open, install, hold", config: v9, read: "install", lock: "data", hold: true, want: "closed"},
+		// A per-user hook is closed whatever the config saved (sa-port-peer).
+		{name: "config open, no install", config: v9, read: "loaded", want: "closed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := t.TempDir()
+			dataDir := home
+			if test.lock == "home" {
+				dataDir = t.TempDir()
+			}
+			isolateHookEnvForTest(t, home)
+			if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeHookSidecarForTest(t, dataDir, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","copilot":"open"},"fail_mode_sources":{"codex":"config","copilot":"config"}}`)
+			script := filepath.Join(dataDir, "hooks", "copilot-hook.sh")
+			if err := os.WriteFile(script, released, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			switch test.lock {
+			case "data":
+				if err := os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			case "home":
+				if err := os.Mkdir(filepath.Join(home, ".install.lock"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.hold {
+				runRefreshFailModesHoldForTest(t, dataDir)
+			} else if result := runRefreshFailModesForTest(t, dataDir); result.Config != test.read {
+				t.Fatalf("refresh %+v, want config %q", result, test.read)
+			}
+			for _, name := range []string{"codex", "copilot"} {
+				if got := oldHookFailMode(t, dataDir, name); got != test.want {
+					t.Fatalf("the old %s hook reads %q, want %q", name, got, test.want)
+				}
+			}
+			body, err := os.ReadFile(script)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if baked := bytes.Contains(body, []byte(`FAIL_MODE="open"`)); baked != (test.want == "open") {
+				t.Fatalf("the released Copilot hook still bakes open = %v, want %v", baked, test.want == "open")
+			}
+		})
+	}
+}
+
+// runRefreshFailModesHoldForTest runs the refresh with --hold-until-exit for
+// a gateway that has already exited, as an installer does for a gateway
+// that stops at once.
+func runRefreshFailModesHoldForTest(t *testing.T, dataDir string) {
+	t.Helper()
+	gateway := exec.Command(os.Args[0], "-test.run=^$")
+	if err := gateway.Run(); err != nil {
+		t.Fatal(err)
+	}
+	previousCfg, previousDir, previousJSON := cfg, connectorFlagDataDir, connectorFlagJSON
+	previousPID, previousTimeout := refreshFailModesHoldPID, refreshFailModesHoldTimeout
+	t.Cleanup(func() {
+		cfg, connectorFlagDataDir, connectorFlagJSON = previousCfg, previousDir, previousJSON
+		refreshFailModesHoldPID, refreshFailModesHoldTimeout = previousPID, previousTimeout
+		connectorRefreshFailModesCmd.SetOut(nil)
+	})
+	connectorFlagDataDir, connectorFlagJSON = dataDir, false
+	refreshFailModesHoldPID, refreshFailModesHoldTimeout = gateway.Process.Pid, time.Minute
+	var out bytes.Buffer
+	connectorRefreshFailModesCmd.SetOut(&out)
+	if err := runConnectorRefreshFailModes(connectorRefreshFailModesCmd, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "Hook fail modes closed for the install until the gateway starts: ") {
+		t.Fatalf("hold output %q names no install close", out.String())
+	}
+}

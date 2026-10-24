@@ -408,3 +408,34 @@ func TestWriteEnterpriseHookRefusedSurfacesEmptyWithoutFileIsNoop(t *testing.T) 
 		t.Fatalf("refused-surfaces.json still present: %v", err)
 	}
 }
+
+// Review loop round 2: the worker carries every Kiro IDE install of a kind
+// (a supported /usr/share/kiro beside an older /opt/Kiro), and the parent
+// keeps each of them next to the kiro-cli result instead of only the first.
+func TestEnumerateDiscoverKeepsEveryKiroIDEInstall(t *testing.T) {
+	origRunner := enterpriseHookWorkerRunner
+	t.Cleanup(func() { enterpriseHookWorkerRunner = origRunner })
+	unread := "Kiro IDE " + enterprisehooks.UnixAgentUnversionedReasonPrefix + "/opt/Kiro/resources/app/product.json"
+	enterpriseHookWorkerRunner = func(context.Context, enterpriseHookWorkerAccount, enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		versions, reasons := map[string]string{}, map[string]string{}
+		enterprisehooks.PutUnixKiroIDEForms([]enterprisehooks.KiroForm{
+			{Kind: enterprisehooks.KiroFormMachineIDE, Version: "1.2.4"},
+			{Kind: enterprisehooks.KiroFormMachineIDE, Unread: unread},
+			{Kind: enterprisehooks.KiroFormMachineIDE, Version: "1.0.150"},
+		}, versions, reasons)
+		return enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons}, nil
+	}
+	versions, reasons, err := enterpriseHooksEnumerateDiscover(context.Background(), unixidentity.Account{Name: "alice", UID: 1000, GID: 1000, Home: "/home/alice"}, []string{"kiro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	machine := enterprisehooks.KiroIDEMachineDiscoveryKey
+	if versions[machine] != "1.2.4" || versions[machine+".3"] != "1.0.150" || reasons[machine+".2"] != unread {
+		t.Fatalf("parent kept versions=%v reasons=%v, want all three machine IDE installs", versions, reasons)
+	}
+	// Without kiro asked for, no Kiro IDE install is kept.
+	versions, reasons, err = enterpriseHooksEnumerateDiscover(context.Background(), unixidentity.Account{Name: "alice", UID: 1000, GID: 1000, Home: "/home/alice"}, []string{"codex"})
+	if err != nil || len(versions) != 0 || len(reasons) != 0 {
+		t.Fatalf("kiro not asked for: versions=%v reasons=%v err=%v", versions, reasons, err)
+	}
+}
