@@ -223,6 +223,20 @@ type compiledRulePackCategories struct {
 	ruleIdentityTitles map[string]map[string]struct{}
 	overridden         int
 	added              int
+	// dispatchCost is the semantic rules' CEL cost one dispatch may spend
+	// (dispatchMaxCost), 0 for trustedActionDispatchMaxCost.
+	dispatchCost uint64
+}
+
+// dispatchMaxCost is the semantic rules' CEL cost one dispatch of g may
+// spend: trustedActionDispatchMaxCost, or for the union of a meet's member
+// generations the sum of theirs (mergeRuleGenerations), so every member's
+// rules are evaluated as they are alone.
+func (g *compiledRulePackCategories) dispatchMaxCost() uint64 {
+	if g == nil || g.dispatchCost == 0 {
+		return trustedActionDispatchMaxCost
+	}
+	return g.dispatchCost
 }
 
 const (

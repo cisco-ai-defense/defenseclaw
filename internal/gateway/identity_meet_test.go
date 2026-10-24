@@ -166,10 +166,7 @@ func TestProfileMeetEnforcesTheRulesOfEveryPack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	merged, err := mergeRuleGenerations([]*compiledRulePackCategories{a, b})
-	if err != nil {
-		t.Fatal(err)
-	}
+	merged := mergeRuleGenerations([]*compiledRulePackCategories{a, b})
 	ids := map[string]int{}
 	for _, category := range merged.categories {
 		for _, r := range category.Rules {

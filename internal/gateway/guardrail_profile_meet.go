@@ -30,9 +30,10 @@ import (
 // inspect mode action wherever a member's inspect mode is (each apart), the
 // lowest block level and
 // the strictest HILT of the members that block, the lowest alert level, the
-// rules of every member's rule pack (a rule any member enforces is enforced),
-// the suppressions all members share (allows are the intersection), every
-// sensitive tool any member inspects, and the members' sandbox floors
+// rules of every member's rule pack, each scanned only where its own member
+// would decide it (profileMeet.ruleGeneration), the suppressions all members
+// that enforce share (allows are the intersection), every sensitive tool any
+// of them inspects, and the members' sandbox floors
 // tightened together (config.Config.SandboxFloor). Each surface takes its
 // block levels and HILT only from the members that enforce on it: the agent
 // hooks from those whose hook mode is action, the inspect endpoints and the
@@ -226,6 +227,53 @@ type meetSettings struct {
 	hilt                         config.HILTConfig
 }
 
+// memberEnforcement is how one member enforces for a connector: whether its
+// hook mode and its inspect mode are action, and the lowest severity ranks
+// it blocks at and asks at (HILT, 0 for none) where it enforces.
+type memberEnforcement struct {
+	hooks, inspect bool
+	block, hilt    int
+}
+
+// memberEnforcementFor is how cfg enforces for connectorName ("" for the
+// global settings): its block level is the lower of its hook and its proxy
+// thresholds, its HILT the one that asks most.
+func memberEnforcementFor(cfg *config.Config, connectorName string) memberEnforcement {
+	e := memberEnforcement{
+		hooks:   hookModeForConfig(cfg, connectorName) == "action",
+		inspect: inspectMode(cfg, connectorName) == "action",
+	}
+	block, _ := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
+	proxy, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cfg.Guardrail, connectorName))
+	e.block = min(block, proxy)
+	for _, hilt := range []struct {
+		enabled bool
+		rank    int
+	}{
+		{hiltEnabledForConfig(cfg, connectorName), hiltMinRankForConfig(cfg, connectorName)},
+		{hiltEnabled(&cfg.Guardrail, connectorName), hiltMinRank(&cfg.Guardrail, connectorName)},
+	} {
+		if hilt.enabled && (e.hilt == 0 || hilt.rank < e.hilt) {
+			e.hilt = hilt.rank
+		}
+	}
+	return e
+}
+
+// enforcesOn reports whether the member enforces on one of surfaces: the
+// hooks by its hook mode, inspect by its inspect mode.
+func (e memberEnforcement) enforcesOn(surfaces profileSurfaces) bool {
+	return e.hooks && surfaces&profileSurfaceHooks != 0 || e.inspect && surfaces&profileSurfaceInspect != 0
+}
+
+// decidesAt is the lowest severity rank the member blocks or asks at.
+func (e memberEnforcement) decidesAt() int {
+	if e.hilt != 0 && e.hilt < e.block {
+		return e.hilt
+	}
+	return e.block
+}
+
 // meetSettingsFor is the meet of members' effective settings for
 // connectorName ("" for the global settings) as surfaces apply them: the
 // hook mode is action wherever a member's hook mode is, and the inspect mode
@@ -243,41 +291,28 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 	blockRank, alertRank, hiltRank := 0, 0, 0
 	for _, member := range members {
 		cfg := set.profileConfig(member)
-		hookBlock := hookModeForConfig(cfg, connectorName) == "action"
-		inspectBlock := inspectMode(cfg, connectorName) == "action"
 		_, alert := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
 		if alertRank == 0 || alert < alertRank {
 			alertRank = alert
 		}
-		if !hookBlock && !inspectBlock {
+		e := memberEnforcementFor(cfg, connectorName)
+		if !e.hooks && !e.inspect {
 			continue
 		}
-		if hookBlock {
+		if e.hooks {
 			out.hookMode = "action"
 		}
-		if inspectBlock || connectorName == "" {
+		if e.inspect || connectorName == "" {
 			out.mode = "action"
 		}
-		if enforces := hookBlock && surfaces&profileSurfaceHooks != 0 || inspectBlock && surfaces&profileSurfaceInspect != 0; !enforces {
+		if !e.enforcesOn(surfaces) {
 			continue
 		}
-		block, _ := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
-		proxy, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cfg.Guardrail, connectorName))
-		for _, rank := range []int{block, proxy} {
-			if blockRank == 0 || rank < blockRank {
-				blockRank = rank
-			}
+		if blockRank == 0 || e.block < blockRank {
+			blockRank = e.block
 		}
-		for _, hilt := range []struct {
-			enabled bool
-			rank    int
-		}{
-			{hiltEnabledForConfig(cfg, connectorName), hiltMinRankForConfig(cfg, connectorName)},
-			{hiltEnabled(&cfg.Guardrail, connectorName), hiltMinRank(&cfg.Guardrail, connectorName)},
-		} {
-			if hilt.enabled && (hiltRank == 0 || hilt.rank < hiltRank) {
-				hiltRank = hilt.rank
-			}
+		if e.hilt != 0 && (hiltRank == 0 || e.hilt < hiltRank) {
+			hiltRank = e.hilt
 		}
 	}
 	if blockRank == 0 {
@@ -336,58 +371,140 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 	return key
 }
 
-// meetRuleGeneration is the rule generation of the meet for connectorName:
-// every rule of every member's generation, a rule all of them define the
-// same way once. A merge that does not compile (over the semantic rule
-// limits) keeps the largest member generation and is logged.
+// ruleGeneration is the rule generation of the meet for connectorName on
+// the surface the request is marked with (profileSurfaceFrom). Each rule
+// keeps its member: it is scanned when a member that enforces on that
+// surface has it at a severity that member blocks or asks at, or when it is
+// below the lowest level any member that enforces there blocks or asks at,
+// so it can only alert. A rule only a member that observes there has, or
+// one below its own member's levels but at another member's, is not
+// scanned, so the meet never blocks what no member alone blocks (review of
+// r104 Q-identity, review at 9e7531fb: an inspect-only member's CRITICAL
+// rule blocked hooks at the other member's level). When no member enforces
+// there, the meet observes and scans every member's rules. The generations
+// are combined, not compiled again (mergeRuleGenerations).
 func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) *compiledRulePackCategories {
-	var sources []*compiledRulePackCategories
+	surface := profileSurfaceFrom(ctx)
+	type memberRules struct {
+		generation  *compiledRulePackCategories
+		enforcement memberEnforcement
+	}
+	var members []memberRules
+	var generations []*compiledRulePackCategories
+	floor := 0
 	for _, member := range m.members {
-		if generation := set.memberRuleGeneration(ctx, member, connectorName); generation != nil && !slices.Contains(sources, generation) {
-			sources = append(sources, generation)
+		generation := set.memberRuleGeneration(ctx, member, connectorName)
+		if generation == nil {
+			continue
 		}
+		e := memberEnforcementFor(set.profileConfig(member), connectorName)
+		if e.enforcesOn(surface) && (floor == 0 || e.decidesAt() < floor) {
+			floor = e.decidesAt()
+		}
+		members = append(members, memberRules{generation: generation, enforcement: e})
+		generations = append(generations, generation)
 	}
-	switch len(sources) {
-	case 0:
+	if len(members) == 0 {
 		return nil
-	case 1:
-		return sources[0]
 	}
-	key := meetSourcesKey(connectorName, sources)
+	key := fmt.Sprintf("%d|", surface) + meetSourcesKey(connectorName, generations)
 	if cached, ok := m.rules.Load(key); ok {
 		return cached.(*compiledRulePackCategories)
 	}
-	merged, err := mergeRuleGenerations(sources)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] strictest combination %s: merging the rule packs of its profiles: %v; it scans with the largest one\n", m.derived.Name, err)
-		merged = sources[0]
-		for _, source := range sources[1:] {
-			if ruleCount(source) > ruleCount(merged) {
-				merged = source
-			}
+	var sources []*compiledRulePackCategories
+	for _, member := range members {
+		generation := member.generation
+		if floor != 0 {
+			e := member.enforcement
+			generation = generation.withRules(func(rule PatternRule) bool {
+				rank := guardrailSeverityRank(rule.Severity)
+				return rank < floor || e.enforcesOn(surface) && rank >= e.decidesAt()
+			})
 		}
+		if !slices.Contains(sources, generation) {
+			sources = append(sources, generation)
+		}
+	}
+	merged := sources[0]
+	if len(sources) > 1 {
+		merged = mergeRuleGenerations(sources)
 	}
 	value, _ := m.rules.LoadOrStore(key, merged)
 	return value.(*compiledRulePackCategories)
 }
 
-func ruleCount(generation *compiledRulePackCategories) int {
-	count := 0
-	for _, category := range generation.categories {
-		count += len(category.Rules)
+// enforcers are the members that enforce for connectorName on surfaces,
+// every member when none does (the meet observes there).
+func (m *profileMeet) enforcers(set *guardrailProfileSet, connectorName string, surfaces profileSurfaces) []string {
+	var out []string
+	for _, member := range m.members {
+		if memberEnforcementFor(set.profileConfig(member), connectorName).enforcesOn(surfaces) {
+			out = append(out, member)
+		}
 	}
-	return count
+	if len(out) == 0 {
+		return m.members
+	}
+	return out
 }
 
-// mergeRuleGenerations compiles the union of sources' categories: each
+// withRules is g with only the rules keep keeps, g itself when it keeps
+// every one. Its compiled programs are shared, not compiled again.
+func (g *compiledRulePackCategories) withRules(keep func(PatternRule) bool) *compiledRulePackCategories {
+	out := &compiledRulePackCategories{ruleIdentityTitles: g.ruleIdentityTitles,
+		overridden: g.overridden, added: g.added, dispatchCost: g.dispatchCost}
+	dropped := false
+	for _, category := range g.categories {
+		kept := ruleCategory{Name: category.Name}
+		for _, rule := range category.Rules {
+			if keep(rule) {
+				kept.Rules = append(kept.Rules, rule)
+			} else {
+				dropped = true
+			}
+		}
+		out.categories = append(out.categories, kept)
+	}
+	for _, rule := range g.semanticRules {
+		if keep(rule.rule) {
+			out.semanticRules = append(out.semanticRules, rule)
+		} else {
+			dropped = true
+		}
+	}
+	if !dropped {
+		return g
+	}
+	return out
+}
+
+// mergeRuleGenerations combines sources' already compiled rules: each
 // category keeps every rule any source has, a rule two sources define the
-// same way once.
-func mergeRuleGenerations(sources []*compiledRulePackCategories) (*compiledRulePackCategories, error) {
+// same way once. Nothing is compiled again, so no limit of one generation
+// can fail the union and drop a member's rules: each source is within the
+// limits on its own, and the union's semantic dispatch may spend the cost
+// budget of every source (dispatchMaxCost), as each member alone would
+// (review of r104 Q-identity, review at 9e7531fb: a union over the semantic
+// rule limit scanned with the largest member alone). Definitions of one
+// rule ID that differ are all kept, the strongest first, since a scan
+// reports a rule ID once, from the first definition that matches.
+func mergeRuleGenerations(sources []*compiledRulePackCategories) *compiledRulePackCategories {
+	merged := &compiledRulePackCategories{ruleIdentityTitles: map[string]map[string]struct{}{}}
 	var categories []ruleCategory
 	index := map[string]int{}
-	overridden, added := 0, 0
+	asRule := func(rule PatternRule) PatternRule { return rule }
+	ofSemantic := func(rule compiledSemanticRule) PatternRule { return rule.rule }
 	for _, source := range sources {
-		overridden, added = max(overridden, source.overridden), max(added, source.added)
+		merged.overridden, merged.added = max(merged.overridden, source.overridden), max(merged.added, source.added)
+		merged.dispatchCost += source.dispatchMaxCost()
+		for id, titles := range source.ruleIdentityTitles {
+			if merged.ruleIdentityTitles[id] == nil {
+				merged.ruleIdentityTitles[id] = map[string]struct{}{}
+			}
+			for title := range titles {
+				merged.ruleIdentityTitles[id][title] = struct{}{}
+			}
+		}
 		for _, category := range source.categories {
 			i, ok := index[category.Name]
 			if !ok {
@@ -396,18 +513,34 @@ func mergeRuleGenerations(sources []*compiledRulePackCategories) (*compiledRuleP
 				index[category.Name] = i
 			}
 			for _, rule := range category.Rules {
-				if !slices.ContainsFunc(categories[i].Rules, func(have PatternRule) bool { return samePatternRule(have, rule) }) {
-					categories[i].Rules = append(categories[i].Rules, rule)
-				}
+				categories[i].Rules = insertRuleDefinition(categories[i].Rules, rule, asRule)
 			}
 		}
+		for _, rule := range source.semanticRules {
+			merged.semanticRules = insertRuleDefinition(merged.semanticRules, rule, ofSemantic)
+		}
 	}
-	merged, err := compileRulePackGeneration(categories)
-	if err != nil {
-		return nil, err
+	merged.categories = cloneRuleCategories(categories)
+	return merged
+}
+
+// insertRuleDefinition adds rule to rules unless one of them defines it the
+// same way, before the first other definition of its ID with a lower
+// severity, else last.
+func insertRuleDefinition[T any](rules []T, rule T, definition func(T) PatternRule) []T {
+	added := definition(rule)
+	at := len(rules)
+	for i, have := range rules {
+		existing := definition(have)
+		if samePatternRule(existing, added) {
+			return rules
+		}
+		if at == len(rules) && strings.EqualFold(existing.ID, added.ID) &&
+			guardrailSeverityRank(existing.Severity) < guardrailSeverityRank(added.Severity) {
+			at = i
+		}
 	}
-	merged.overridden, merged.added = overridden, added
-	return merged, nil
+	return slices.Insert(rules, at, rule)
 }
 
 // samePatternRule reports whether two rules are one definition.
@@ -456,13 +589,16 @@ func (a *APIServer) generationRulePack(ctx context.Context, connectorName string
 	return g.RulePacks["global"]
 }
 
-// rulePack is the composed pack of the meet for connectorName: the first
-// member's pack with only the suppressions every member's pack has, and
-// every sensitive tool any member's pack inspects, at its strictest.
+// rulePack is the composed pack of the meet for connectorName on the
+// request's surface: of the members that enforce there (all of them when
+// none does, enforcers), the first one's pack with only the suppressions
+// every one's pack has, and every sensitive tool any one's pack inspects, at
+// its strictest. A member that only observes there adds no tool to inspect,
+// as it adds no rule (ruleGeneration).
 func (m *profileMeet) rulePack(ctx context.Context, a *APIServer, set *guardrailProfileSet, connectorName string) *guardrail.RulePack {
 	var sources []*guardrail.RulePack
 	missing := false
-	for _, member := range m.members {
+	for _, member := range m.enforcers(set, connectorName, profileSurfaceFrom(ctx)) {
 		pack := a.memberRulePack(ctx, set, member, connectorName)
 		if pack == nil {
 			missing = true

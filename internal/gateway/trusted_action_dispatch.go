@@ -285,6 +285,7 @@ func dispatchTrustedAction(
 	}
 
 	excluded := make(map[string]struct{})
+	maxCost := generation.dispatchMaxCost()
 	semanticFindings := make([]RuleFinding, 0, len(generation.semanticRules))
 	matchedSemanticOwnerIDs := make(map[string]struct{})
 	var consumedCost uint64
@@ -306,7 +307,7 @@ func dispatchTrustedAction(
 		projectionCode := semantic.ProjectionOK
 		for _, candidate := range generation.semanticRules {
 			if ctx.Err() != nil ||
-				consumedCost >= trustedActionDispatchMaxCost {
+				consumedCost >= maxCost {
 				break
 			}
 			if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
@@ -327,7 +328,7 @@ func dispatchTrustedAction(
 			}
 			result, evalCode := candidate.program.EvalBool(ctx, projection)
 			consumedCost += result.Cost
-			if consumedCost > trustedActionDispatchMaxCost {
+			if consumedCost > maxCost {
 				break
 			}
 			if evalCode != semantic.EvalOK {
@@ -356,7 +357,7 @@ func dispatchTrustedAction(
 				enforcementProjection,
 			)
 			consumedCost += enforcementResult.Cost
-			if consumedCost > trustedActionDispatchMaxCost {
+			if consumedCost > maxCost {
 				break
 			}
 			if enforcementCode != semantic.EvalOK {
