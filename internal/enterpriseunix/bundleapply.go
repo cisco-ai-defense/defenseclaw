@@ -1311,6 +1311,14 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 		r.AddWarning(codeBundleConfirmedLate, lateConfirmMessage(rc.BundleID, rc.Version))
 		return false
 	}
+	if l.olderThanDeployment(record) {
+		// The installed gateway is the newer build, whose policy digest of
+		// this bundle can differ from the one this binary computes: another
+		// digest does not prove the bundle failed. The installed binary
+		// settles the receipt.
+		return pending(fmt.Sprintf("this binary (%s) is older than the installed deployment (%s), so it cannot prove the gateway enforces another policy; the installed binary settles the receipt",
+			l.env.ProductVersion, record.ProductVersion))
+	}
 	st, _ := store.LoadState()
 	rc.RolledBack = st.Current != nil
 	rc.EnforcingDigest = health.digest

@@ -529,8 +529,13 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeState, err.Error())
 		return 0
 	}
+	// A superseded apply run is an older binary than the deployment: the
+	// policy digest it computes is not the one the installed gateway
+	// reports, so it proves nothing about a pending receipt. It settles no
+	// receipt and reinstalls no bundle; the installed binary does that.
+	superseded := l.supersededApplyRun(record)
 	settlePending := false
-	if l.opts.Action != ActionUninstall {
+	if l.opts.Action != ActionUninstall && !superseded {
 		settlePending = l.settleBundles(ctx, record)
 	}
 	if record != nil {
@@ -566,7 +571,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			}
 		}()
 	}
-	if l.supersededApplyRun(record) {
+	if superseded {
 		// A transaction leaves a queued apply run alone. When that
 		// transaction upgraded the deployment, the queued run is still the
 		// previous binary, whose rendering would undo part of the upgrade;
@@ -865,9 +870,7 @@ const codeSuperseded = "lifecycle_superseded"
 // supersededApplyRun reports an apply-trigger ensure (--reason path) whose
 // binary is an older release than the recorded deployment.
 func (l *lifecycle) supersededApplyRun(record *Deployment) bool {
-	running := strings.TrimPrefix(l.env.ProductVersion, "v")
-	if record == nil || l.opts.Action != ActionEnsure || l.opts.Reason != "path" || l.opts.AllowDowngrade ||
-		running == "dev" || !versionPattern.MatchString(running) || compareProductVersions(running, record.ProductVersion) >= 0 {
+	if l.opts.Action != ActionEnsure || l.opts.Reason != "path" || l.opts.AllowDowngrade || !l.olderThanDeployment(record) {
 		return false
 	}
 	// Stand down only while the newer binary the record describes is the
@@ -877,6 +880,14 @@ func (l *lifecycle) supersededApplyRun(record *Deployment) bool {
 	installed := filepath.Join(l.env.Layout.BinDir, binGateway)
 	digest, err := sha256File(l.env.P(installed))
 	return err == nil && record.Files[installed] != "" && digest == record.Files[installed]
+}
+
+// olderThanDeployment reports a release binary older than the recorded
+// deployment. A development build is never older.
+func (l *lifecycle) olderThanDeployment(record *Deployment) bool {
+	running := strings.TrimPrefix(l.env.ProductVersion, "v")
+	return record != nil && running != "dev" && versionPattern.MatchString(running) &&
+		compareProductVersions(running, record.ProductVersion) < 0
 }
 
 // A package upgrade whose ensure fails rolls back to the previous

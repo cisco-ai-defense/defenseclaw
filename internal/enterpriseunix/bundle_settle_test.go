@@ -10,6 +10,7 @@ package enterpriseunix
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -403,6 +404,83 @@ func TestBundleSettleAfterProductUpgradeKeepsAnEnforcedReceipt(t *testing.T) {
 					got.EffectivePolicyDigest != before.EffectivePolicyDigest || b.state().Current.BundleID != bundleID(2) ||
 					b.read(b.env.Layout.ConfigPath) != installed {
 					t.Fatalf("the upgraded gateway did not confirm the historical receipt: receipt=%+v state=%+v", got, b.state())
+				}
+			})
+		}
+	}
+}
+
+// An apply run of the previous binary that waited through an upgrade must
+// not settle the receipt the upgrade carried: the digest it computes for the
+// stored bundle is the old build's, while the upgraded gateway reports the
+// new build's. A superseded run stands down without settling (with the
+// gateway up, and after an outage at its first settle, when the deferred
+// re-settle would install the last good bundle). Any other run of an older
+// binary keeps the receipt pending. The installed binary confirms it.
+func TestAnOlderBinaryDoesNotSettleAnUpgradedPendingBundle(t *testing.T) {
+	type variant struct {
+		name    string
+		options Options
+		outage  bool
+	}
+	variants := []variant{
+		{"superseded", Options{Action: ActionEnsure, Reason: "path"}, false},
+		{"superseded-after-outage", Options{Action: ActionEnsure, Reason: "path"}, true},
+		{"ensure", Options{Action: ActionEnsure}, false},
+		{"ensure-after-outage", Options{Action: ActionEnsure}, true},
+		{"repair-after-outage", Options{Action: ActionRepair}, true},
+	}
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, v := range variants {
+			t.Run(goos+"/"+v.name, func(t *testing.T) {
+				b := pendingBundleHost(t, goos, "1.0.3")
+				before := b.receipt(bundleID(2))
+				pendingConfig := b.read(b.env.Layout.ConfigPath)
+				oldDigester := b.env.BundleDigester
+				// The upgrade keeps B pending: the gateway reports B's
+				// historical digest throughout.
+				upgradeBundleHostDigest(b)
+				newDigester := b.env.BundleDigester
+				b.frozen = before.EffectivePolicyDigest
+				upgrade := b.run(Options{Action: ActionUpgrade, PayloadDir: b.payload("1.0.4")})
+				requireOK(t, upgrade)
+				if upgrade.InstalledVersion != "1.0.4" || b.receipt(bundleID(2)).State != enterprisebundle.StateApplied {
+					t.Fatalf("setup: the upgrade did not keep B pending: version=%s receipt=%+v", upgrade.InstalledVersion, b.receipt(bundleID(2)))
+				}
+				// The upgraded gateway now reports B's 1.0.4 digest; the run
+				// is the 1.0.3 binary, which computes B's 1.0.3 digest.
+				b.frozen = ""
+				b.env.ProductVersion, b.env.BundleDigester = "1.0.3", oldDigester
+				originalHealth := b.env.HealthGet
+				calls := 0
+				b.env.HealthGet = func(ctx context.Context) (int, []byte, error) {
+					calls++
+					if v.outage && calls == 1 {
+						return 0, nil, errors.New("connection refused")
+					}
+					return originalHealth(ctx)
+				}
+				result := b.run(v.options)
+				b.env.HealthGet = originalHealth
+				if v.options.Reason == "path" && result.NoopReason != "superseded" {
+					t.Fatalf("the older apply run did not stand down: warnings=%+v errors=%+v changes=%+v", result.Warnings, result.Errors, result.Changes)
+				}
+				got := b.receipt(bundleID(2))
+				if got.State != enterprisebundle.StateApplied || got.RolledBack {
+					t.Fatalf("the older binary settled the upgraded receipt: receipt=%+v warnings=%+v", got, result.Warnings)
+				}
+				if b.read(b.env.Layout.ConfigPath) != pendingConfig || b.state().Current.BundleID != bundleID(1) {
+					t.Fatalf("the older binary replaced the pending bundle: state=%+v warnings=%+v", b.state(), result.Warnings)
+				}
+				if v.options.Reason != "path" && !hasPendingReason(result, "older than the installed deployment") {
+					t.Fatalf("the older binary did not say why the receipt stays pending: %+v", result.Warnings)
+				}
+				// The installed binary settles it.
+				b.env.ProductVersion, b.env.BundleDigester = "1.0.4", newDigester
+				requireOK(t, b.run(Options{Action: ActionEnsure}))
+				if got := b.receipt(bundleID(2)); got.State != enterprisebundle.StateConfirmed || b.state().Current.BundleID != bundleID(2) ||
+					b.read(b.env.Layout.ConfigPath) != pendingConfig {
+					t.Fatalf("the installed binary did not confirm the receipt: receipt=%+v state=%+v", got, b.state())
 				}
 			})
 		}
