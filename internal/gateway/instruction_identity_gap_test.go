@@ -295,7 +295,7 @@ func TestInstructionProtectionUnloadedInstructionFileNeighbors(t *testing.T) {
 		{"CLAUDE.md", "COG-CLAUDE-MD"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			unrelated := filepath.Join(root, "unrelated-"+tc.name)
+			unrelated := filepath.Join(root, "unrelated-"+tc.rule)
 			instruction := writeActiveAgentTestFile(t, unrelated, tc.name)
 			notes := instructionIdentityTestLink(t, instruction, filepath.Join(unrelated, "notes.txt"))
 			for _, call := range instructionIdentityWrites(notes) {

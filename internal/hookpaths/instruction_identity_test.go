@@ -216,7 +216,7 @@ func TestInstructionAliasOnlyTheCallsInstructionFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, name := range InstructionFileNames {
-		unrelated := filepath.Join(root, "unrelated-"+name)
+		unrelated := filepath.Join(root, "unrelated-"+strings.ReplaceAll(name, ".", "-"))
 		instruction := instructionIdentityFile(t, unrelated, name)
 		for _, kind := range []struct {
 			name string
@@ -226,13 +226,13 @@ func TestInstructionAliasOnlyTheCallsInstructionFiles(t *testing.T) {
 				return instructionIdentityLink(t, instruction, filepath.Join(unrelated, "notes.txt"))
 			}},
 			{"hard link elsewhere", func(t *testing.T) string {
-				return instructionIdentityLink(t, instruction, filepath.Join(root, "tmp", name+".txt"))
+				return instructionIdentityLink(t, instruction, filepath.Join(root, "tmp", strings.ReplaceAll(name, ".", "-")+".txt"))
 			}},
 			{"same-directory symlink", func(t *testing.T) string {
 				return instructionIdentitySymlink(t, instruction, filepath.Join(unrelated, "notes.link"))
 			}},
 			{"symlink in the project", func(t *testing.T) string {
-				return instructionIdentitySymlink(t, instruction, filepath.Join(project, name+".link"))
+				return instructionIdentitySymlink(t, instruction, filepath.Join(project, strings.ReplaceAll(name, ".", "-")+".link"))
 			}},
 			{"case variant", func(t *testing.T) string {
 				variant := filepath.Join(unrelated, strings.ToLower(name))
