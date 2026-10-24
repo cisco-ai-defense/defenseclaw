@@ -179,6 +179,7 @@ def test_mac_listener_owner_checks_the_configured_address() -> None:
 
     with (
         mock.patch.object(gateway.sys, "platform", "darwin"),
+        mock.patch.object(gateway.os, "getuid", return_value=1000, create=True),
         mock.patch.object(doctor_gateway, "trusted_lsof_path", return_value="/usr/sbin/lsof"),
         mock.patch("subprocess.run", side_effect=lsof_result) as lsof,
         mock.patch.object(gateway.socket, "create_connection") as connect,
