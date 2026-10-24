@@ -83,14 +83,6 @@ var (
 	// reports it stopped). The hook fails closed, except an authenticated
 	// Secure Client hook, which follows its fail mode (managedPeerFailMode).
 	errManagedGatewayNotRunning = errors.New("enterprise managed gateway service is not running")
-	// errManagedGatewayQuiesced wraps errManagedGatewayNotRunning when the
-	// service is stopped with its start type disabled: the enterprise
-	// lifecycle (install, upgrade, repair, uninstall) disables every
-	// DefenseClaw service before it stops it and restores the start types
-	// once the new release runs, so this is a package transition, not an
-	// outage. An administrator's open is outage-only and does not apply
-	// (GAP-0993); a start type the hook cannot read counts as disabled.
-	errManagedGatewayQuiesced = errors.New("enterprise managed gateway service is disabled for an install, upgrade or repair")
 	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
 	// where SELinux kept this account from the hook socket.
 	errManagedHookSocketSELinuxDenied = errors.New("SELinux denied this account access to the DefenseClaw hook socket")
@@ -2760,11 +2752,13 @@ func failResponse(opts Options, sp spec, failMode, reason string) int {
 // the gateway has answered (or failed to); decide reads it once the whole
 // body is in, and every failure answer reads it again when it answers.
 // While the installer holds the per-user data directory
-// (perUserInstallInProgress) the call is closed, with strict availability,
-// so an install or upgrade that starts during a call closes it as well
-// (GAP-0893, GAP-0894, GAP-0916). It returns the fail mode to answer with.
+// (perUserInstallInProgress), and on a managed host while its lifecycle
+// runs (managedLifecycleActive), the call is closed, with strict
+// availability, so an install or upgrade that starts during a call closes
+// it as well (GAP-0893, GAP-0894, GAP-0916, GAP-1074, GAP-1075). It returns
+// the fail mode to answer with.
 func closeDuringInstall(opts *Options, failMode string) string {
-	if !perUserInstallInProgress(*opts) {
+	if !perUserInstallInProgress(*opts) && !managedLifecycleActive(*opts) {
 		return failMode
 	}
 	opts.FailMode = "closed"
@@ -3149,9 +3143,9 @@ func failClosedStopEvent(opts Options, sp spec) bool {
 
 // logDeliberateAllow records a failure that a reviewed rule answers with the
 // connector's neutral allow (a stop/session-end event, or a Cursor event with
-// no block response). The record carries the fail_open outcome, but the
-// generic "inspection bypassed" warning is left out: the caller prints its own
-// explanation, which is the first line the agent shows.
+// no block response). The generic "inspection bypassed" warning is left out:
+// the caller prints its own explanation, which is the first line the agent
+// shows. Managed OpenCode background events have a diagnostic outcome.
 func logDeliberateAllow(opts Options, sp spec, reason, category string) {
 	quiet := opts
 	quiet.Stderr = io.Discard
@@ -3196,10 +3190,6 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 // other peer failure (another process on the gateway port, a service the
 // hook cannot query) fails closed.
 func managedPeerFailMode(opts Options, failMode string, err error) string {
-	if errors.Is(err, errManagedGatewayQuiesced) && managedNativeDecision(opts) {
-		// No call runs during a package transition (GAP-0993).
-		return "closed"
-	}
 	if errors.Is(err, errManagedGatewayNotRunning) && ((opts.SecureClient && secureClientHook(opts)) || managedNativeDecision(opts)) {
 		return failMode
 	}
@@ -3218,15 +3208,23 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // unusable answer), any failure after an HTTP error reply
 // (Options.answeredErrorStatus) and every
 // closed or unset mode keep the refusal.
+// A lifecycle transition (managedLifecycleActive) keeps it too: an install,
+// upgrade, repair or lifecycle restart is not an outage (GAP-0993, GAP-1074,
+// GAP-1075).
 func ManagedOutageFailsOpen(opts Options, err error) bool {
 	if err == nil || !managedNativeDecision(opts) || opts.StrictAvailability || opts.answeredErrorStatus != 0 ||
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}
-	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errManagedGatewayQuiesced) {
+	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errAnswerBudgetSpentLocally) {
 		return false
 	}
-	return errors.Is(err, errManagedGatewayNotRunning)
+	// Only a proven stopped service is an outage; a restart or a missing
+	// answer keeps the refusal.
+	if !errors.Is(err, errManagedGatewayNotRunning) {
+		return false
+	}
+	return !managedLifecycleActive(opts)
 }
 
 // managedCopilotOpen reports a managed GitHub Copilot hook whose delivery

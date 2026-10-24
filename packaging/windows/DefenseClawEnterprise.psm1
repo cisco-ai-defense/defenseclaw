@@ -17895,7 +17895,67 @@ function Publish-DefenseClawEarlyHook {
     $Intent['early_hook_preimage'] = $preimage
     Write-DefenseClawJsonAtomic -Value $Intent -Path $Layout.PendingPath
     Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
+    # GAP-1070: a call the replaced release's hook took before the swap (one
+    # still waiting for its input or its answer) is answered by the gateway
+    # that runs now, not after the services stop.
+    $running = @(Wait-DefenseClawPriorHookCalls -HookPath $Layout.HookPath -StartedBefore ([DateTime]::Now))
+    if ($running.Count -gt 0) {
+        Write-DefenseClawLifecyclePhase -Stage ("transaction quiesce: hook calls of the replaced release still running after the wait (process ids {0})" -f ($running -join ', '))
+    }
     return $preimage
+}
+
+function Get-DefenseClawPriorHookProcessIds {
+    <#
+        GAP-1070: the ids of the running hook processes (the hook's image
+        name) that started before StartedBefore. A process whose start time
+        cannot be read counts.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$HookPath,
+        [Parameter(Mandatory)][datetime]$StartedBefore
+    )
+    $name = [IO.Path]::GetFileNameWithoutExtension($HookPath)
+    foreach ($process in @([Diagnostics.Process]::GetProcessesByName($name))) {
+        try {
+            $started = $process.StartTime
+        }
+        catch {
+            $started = $null
+        }
+        if ($null -eq $started -or $started -lt $StartedBefore) {
+            [int]$process.Id
+        }
+        $process.Dispose()
+    }
+}
+
+function Wait-DefenseClawPriorHookCalls {
+    <#
+        GAP-1070: waits, up to TimeoutSeconds, until no hook process that
+        started before StartedBefore runs: Publish-DefenseClawEarlyHook has put
+        this release's hook in place, so those are the replaced release's,
+        whose 1.0.2 and 1.0.3 forms let a call run while their gateway service
+        is stopped (Hermes in 1.0.2 always, every connector under an
+        administrator's open). The gateway still answers them meanwhile. The
+        wait covers a hook's whole answer budget; it returns the ids still
+        running at its end, which the transaction reports and does not stop:
+        ending a hook process gives the agent no answer, which most agents
+        take as an allow.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$HookPath,
+        [Parameter(Mandatory)][datetime]$StartedBefore,
+        [int]$TimeoutSeconds = 60
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ($true) {
+        $running = @(Get-DefenseClawPriorHookProcessIds -HookPath $HookPath -StartedBefore $StartedBefore)
+        if ($running.Count -eq 0 -or [DateTime]::UtcNow -ge $deadline) {
+            return $running
+        }
+        Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
+    }
 }
 
 function Restore-DefenseClawEarlyHook {

@@ -20,6 +20,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/manager"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/google/uuid"
 )
@@ -203,8 +205,32 @@ type pendingHookOccurrence struct {
 	BodyBytes    int64
 	ElapsedNanos int64
 	Panicked     bool
-	// Attempts counts recovery's tries of the row, recorded before each.
+	// SandboxReceipt binds a buffered relay acknowledgement to the original
+	// sandbox and audit identity. It contains no hook body or tool arguments.
+	SandboxReceipt *sandboxPendingHookReceipt
+	// Final is set before a failed acknowledgement is answered closed, when
+	// the journal remains writable. Recovery uses it to audit that block.
+	Final *pendingHookResponse
+	// Settled keeps an acknowledged row available for a bounded retry without
+	// counting the same hook a second time when that window ends.
+	Settled bool
+	// Attempts counts recovery tries recorded before each.
 	Attempts int `json:",omitempty"`
+}
+
+type sandboxPendingHookReceipt struct {
+	BindingID      string
+	RegistrationID string
+	OfferedAt      time.Time
+	Reason         string
+	SourceReason   string
+	CallRef        string
+}
+
+func (s sandboxPendingHookReceipt) response(proposed pendingHookResponse) agentHookResponse {
+	resp := proposed.response()
+	resp.Reason, resp.SourceReason = s.Reason, s.SourceReason
+	return resp
 }
 
 // pendingHookProvenance is the policy and the turn a journaled call was
@@ -474,17 +500,32 @@ func truncatePendingHookText(s string, text int) string {
 func (a *APIServer) journalHookDelivery(
 	ctx context.Context, req *agentHookRequest, proposed agentHookResponse,
 	rawEventIDs []string, bodyBytes int64, elapsed time.Duration,
-	panicked bool, extra map[string]string,
+	panicked bool, extra map[string]string, sandboxReceipt ...bool,
 ) (*pendingHookOccurrence, error) {
 	p := &pendingHookOccurrence{
 		ID: uuid.NewString(), Request: pendingRequest(*req),
 		Proposed:    pendingResponse(proposed),
-		NoReceipt:   pendingResponse(a.deliveredHookDecision(false, req.ConnectorName, proposed, "")),
+		NoReceipt:   pendingResponse(a.deliveredHookDecision(req.ConnectorName, proposed, "")),
 		Provenance:  a.pendingHookProvenanceFor(ctx, *req, proposed),
 		Envelope:    audit.EnvelopeFromContext(ctx),
 		Identity:    AgentIdentityFromContext(ctx),
 		RawEventIDs: rawEventIDs, Extra: extra, BodyBytes: bodyBytes,
 		ElapsedNanos: int64(elapsed), Panicked: panicked,
+	}
+	if len(sandboxReceipt) > 0 && sandboxReceipt[0] {
+		binding, ok := sandboxauth.FromContext(ctx)
+		if !ok || binding.ID == "" {
+			return p, errors.New("sandbox hook receipt has no authenticated binding")
+		}
+		p.SandboxReceipt = &sandboxPendingHookReceipt{
+			BindingID: binding.ID, RegistrationID: binding.RegistrationID,
+			OfferedAt: time.Now(), Reason: proposed.Reason,
+			SourceReason: hookSourceReason(proposed),
+			CallRef:      manager.ContentRef(req.SessionID, req.ToolName, sandboxDecisionToolInput(*req)),
+		}
+		if p.Proposed.RawAction == "" {
+			p.Proposed.RawAction = proposed.Action
+		}
 	}
 	req.pendingOccurrenceID, req.pendingBodyBytes, req.pendingProvenance = p.ID, bodyBytes, &p.Provenance
 	if a.store == nil {
@@ -779,6 +820,33 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 		p.ID != entry.ID || p.Request.ConnectorName == "" || p.Request.HookEventName == "" {
 		return a.evictPendingHook(ctx, entry.ID, nil, false, "the journal row cannot be read")
 	}
+	if p.SandboxReceipt != nil {
+		remaining := time.Until(p.SandboxReceipt.OfferedAt.Add(sandboxHookReceiptWindow))
+		if remaining > 0 {
+			wait := time.NewTimer(remaining)
+			defer wait.Stop()
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-wait.C:
+			}
+		}
+		sandboxHookReceiptLock(p.ID).Lock()
+		defer sandboxHookReceiptLock(p.ID).Unlock()
+		latest, found, err := a.store.HookDelivery(ctx, p.ID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return nil
+		}
+		if err := json.Unmarshal(latest.Occurrence, &p); err != nil {
+			return err
+		}
+		if p.Settled {
+			return a.forgetPendingHook(ctx, p.ID)
+		}
+	}
 	tries := p.Attempts + pendingHookUnrecordedTries[p.ID]
 	if tries >= pendingHookRecoveryAttempts {
 		return a.evictPendingHook(ctx, p.ID, &p, p.Decided != nil, fmt.Sprintf("not audited in %d recovery attempts", tries))
@@ -833,6 +901,9 @@ func (a *APIServer) recoverPendingHook(ctx context.Context, entry audit.HookDeli
 func (a *APIServer) writePendingHookRecords(ctx context.Context, p *pendingHookOccurrence, held bool) error {
 	resp := p.Decided.response()
 	req := p.request()
+	if p.SandboxReceipt != nil {
+		req.pendingSandboxCallRef = p.SandboxReceipt.CallRef
+	}
 	persistCtx := audit.ContextWithEnvelope(ctx, p.Envelope)
 	persistCtx = ContextWithAgentIdentity(persistCtx, p.Identity)
 	persistCtx = enrichAgentHookContext(persistCtx, req)
@@ -967,6 +1038,12 @@ func (a *APIServer) pendingHookRecoveryVerdict(ctx context.Context, p *pendingHo
 		}
 		return agentHookResponse{}, fmt.Errorf("the stored record %s holds a %q verdict its journal row cannot rebuild", record.id, stored.Action)
 	}
+	if p.Final != nil {
+		if p.SandboxReceipt != nil && p.Final.Action == "block" {
+			return failedClosedHookDelivery(p.SandboxReceipt.response(p.Proposed), hookexec.ManagedGatewayNoAnswerReason), nil
+		}
+		return p.Final.response(), nil
+	}
 	return p.NoReceipt.response(), nil
 }
 
@@ -980,11 +1057,20 @@ func (a *APIServer) pendingHookRecoveryVerdict(ctx context.Context, p *pendingHo
 // injection.
 func (p *pendingHookOccurrence) responseFor(stored audit.StoredHookVerdict, decision bool) (agentHookResponse, bool) {
 	proposed := p.Proposed.response()
-	for _, resp := range []agentHookResponse{
+	candidates := []agentHookResponse{
 		p.NoReceipt.response(), proposed, unconfirmedHookDelivery(proposed),
 		failedClosedHookDelivery(proposed, hookexec.ManagedGatewayNoAnswerReason),
 		failedClosedHookDelivery(proposed, hookDeliveryRejectedReason),
-	} {
+	}
+	if p.SandboxReceipt != nil {
+		received := p.SandboxReceipt.response(p.Proposed)
+		candidates = append(candidates, received,
+			failedClosedHookDelivery(received, hookexec.ManagedGatewayNoAnswerReason))
+	}
+	if p.Final != nil {
+		candidates = append(candidates, p.Final.response())
+	}
+	for _, resp := range candidates {
 		reason := sanitizeEnvelopeFreeForm(hookSourceReason(resp))
 		if decision {
 			reason, _ = hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes).Get()

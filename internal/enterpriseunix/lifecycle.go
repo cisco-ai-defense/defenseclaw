@@ -164,6 +164,10 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// gatewayAuditFailure is the active mandatory event-history write failure
+	// in the gateway's latest /health answer, used when describe computes
+	// security_complete after reading that answer.
+	gatewayAuditFailure bool
 	// keepThroughRollback names the units a rollback leaves running: the
 	// gateway and the sensor helper of an interrupted hot transaction
 	// (recoverInterrupted, GAP-0238).
@@ -494,6 +498,15 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) before it started; nothing was changed")
 		return 0
 	}
+	// Managed hooks answer closed while this run can stop or restart the
+	// gateway (GAP-1074). Removed before the lock is released.
+	releaseMarker, err := env.holdLifecycleMarker()
+	if err != nil {
+		r.AddError(codeState, err.Error()+"; nothing was changed")
+		l.reportNoSpace(err)
+		return 0
+	}
+	defer releaseMarker()
 	if l.opts.FromPackage && l.opts.Reason != "package" {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.
