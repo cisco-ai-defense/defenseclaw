@@ -17938,15 +17938,21 @@ function Wait-DefenseClawPriorHookCalls {
         whose 1.0.2 and 1.0.3 forms let a call run while their gateway service
         is stopped (Hermes in 1.0.2 always, every connector under an
         administrator's open). The gateway still answers them meanwhile. The
-        wait covers a hook's whole answer budget; it returns the ids still
-        running at its end, which the transaction reports and does not stop:
-        ending a hook process gives the agent no answer, which most agents
-        take as an allow.
+        wait covers the replaced hook's whole budget for a call, counted from
+        its own start (GAP-1124): 90 s for a Claude Code Stop, SubagentStop or
+        PostToolBatch call (30 s at most for a tool call), plus the 30 s of
+        launch delay a 1.0.3 hook still counts from its creation. A replaced
+        hook process still running after that has no budget left for the
+        gateway, so stopping it does not change its answer, except for a
+        process whose own start took longer than 30 s. It returns the ids
+        still running at its end, which the transaction reports and does not
+        stop: ending a hook process gives the agent no answer, which most
+        agents take as an allow.
     #>
     param(
         [Parameter(Mandatory)][string]$HookPath,
         [Parameter(Mandatory)][datetime]$StartedBefore,
-        [int]$TimeoutSeconds = 60
+        [int]$TimeoutSeconds = 120
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ($true) {
