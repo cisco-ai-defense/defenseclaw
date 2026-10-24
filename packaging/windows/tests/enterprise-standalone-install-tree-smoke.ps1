@@ -576,6 +576,15 @@ try {
             [IO.File]::WriteAllText($rollbackHook, 'stand-in')
             $security = Initialize-DefenseClawNativeSecurity
             $rootSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($rollback.InstallRoot)
+            # Run this same smoke against the pre-fix module: it has no retry
+            # parameters, and must fail on the actual held file after its
+            # five old attempts. The new module gets the recorded-root guard.
+            $rollbackOptions = @{}
+            if ((Get-Command Remove-DefenseClawManagedTree).Parameters.ContainsKey('RetryHeldFileMilliseconds')) {
+                $rollbackOptions.RetryHeldFileMilliseconds = 15000
+                $rollbackOptions.ExpectedRootIdentity = [string]$rootSnapshot.Identity
+                $rollbackOptions.ExpectedRootSecurityDescriptor = [byte[]]$rootSnapshot.SecurityDescriptor
+            }
             $holder = Start-Job -ScriptBlock {
                 param([string]$Hook, [string]$Ready)
                 $stream = [IO.File]::Open($Hook, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -602,9 +611,7 @@ try {
                                 -Path $rollback.InstallRoot `
                                 -RequiredBase $Root `
                                 -Label 'InstallRoot' `
-                                -RetryHeldFileMilliseconds 15000 `
-                                -ExpectedRootIdentity ([string]$rootSnapshot.Identity) `
-                                -ExpectedRootSecurityDescriptor ([byte[]]$rootSnapshot.SecurityDescriptor)
+                                @rollbackOptions
                         }
                         catch {
                             $failures.Add("fresh-install rollback did not wait for an active hook: $($_.Exception.Message)")
@@ -628,14 +635,18 @@ try {
 
             $otherRoot = New-TestLayout 'rollback-other-root'
             $otherSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($otherRoot.InstallRoot)
+            $otherOptions = @{}
+            if ($rollbackOptions.Count -gt 0) {
+                $otherOptions.RetryHeldFileMilliseconds = 15000
+                $otherOptions.ExpectedRootIdentity = [string]$rootSnapshot.Identity
+                $otherOptions.ExpectedRootSecurityDescriptor = [byte[]]$otherSnapshot.SecurityDescriptor
+            }
             Test-Refused 'fresh-install rollback root identity changed' {
                 Remove-DefenseClawManagedTree `
                     -Path $otherRoot.InstallRoot `
                     -RequiredBase $Root `
                     -Label 'InstallRoot' `
-                    -RetryHeldFileMilliseconds 15000 `
-                    -ExpectedRootIdentity ([string]$rootSnapshot.Identity) `
-                    -ExpectedRootSecurityDescriptor ([byte[]]$otherSnapshot.SecurityDescriptor)
+                    @otherOptions
             } 'identity changed'
             if (-not [IO.File]::Exists($otherRoot.GatewayPath)) {
                 $failures.Add('fresh-install rollback removed a root with a different identity')
