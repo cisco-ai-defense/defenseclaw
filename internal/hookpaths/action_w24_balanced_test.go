@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"unicode/utf16"
 )
@@ -56,8 +57,7 @@ func w24BalancedHome(t *testing.T) (home, cwd string) {
 // persistence evidence. It counts only when the text names a protected
 // target or the command also writes to a computed destination.
 func TestW24UnreadScriptLaunchesNeedProtectedEvidence(t *testing.T) {
-	home, cwd := w24BalancedHome(t)
-	for _, tc := range []struct {
+	w24POSIXRows(t, []w24Row{
 		command string
 		block   bool
 	}{
@@ -79,16 +79,8 @@ func TestW24UnreadScriptLaunchesNeedProtectedEvidence(t *testing.T) {
 		{`bash run.sh test && cat key | tee -a "$target"`, true},
 		{`"$RUNNER" "$HOME/.ssh/authorized_keys"`, true},
 		{`./run.sh test alias`, true},
-	} {
-		if got := ActionCommandDecision(tc.command, cwd, home); (got != "") != tc.block {
-			t.Errorf("POSIX %q decision = %q, want block=%t", tc.command, got, tc.block)
-		}
-	}
-	const wcwd, whome = `C:\Users\alice\project`, `C:\Users\alice`
-	for _, tc := range []struct {
-		command string
-		block   bool
-	}{
+	})
+	w24WindowsRows(t, []w24Row{
 		{`pwsh.exe -NoProfile -ExecutionPolicy Bypass -File C:/dc-test/t9-a4w1-sec/scripts/t9s-webhook-case.ps1 -Case missing-dry -Source native`, false},
 		{`pwsh -File .\build.ps1 -Configuration Release`, false},
 		{`powershell -ExecutionPolicy Bypass -File .\build.ps1`, false},
@@ -104,8 +96,36 @@ func TestW24UnreadScriptLaunchesNeedProtectedEvidence(t *testing.T) {
 		{`pwsh -EncodedCommand ` + w24EncodedPowerShell(`.\x.ps1 C:\Users\alice\.ssh\authorized_keys`), true},
 		{`Set-Location ~; .\setup.ps1`, true},
 		{`Add-Content -Path C:\Users\alice\.ssh\authorized_keys -Value key`, true},
-	} {
-		if got := ActionCommandDecision(tc.command, wcwd, whome); (got != "") != tc.block {
+	})
+}
+
+type w24Row struct {
+	command string
+	block   bool
+}
+
+// w24POSIXRows judges POSIX rows in a real temporary home. Native Windows
+// has no POSIX home (and no unprivileged symlink), so they run elsewhere.
+func w24POSIXRows(t *testing.T, rows []w24Row) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Log("POSIX rows need a POSIX home")
+		return
+	}
+	home, cwd := w24BalancedHome(t)
+	for _, tc := range rows {
+		if got := ActionCommandDecision(tc.command, cwd, home); (got != "") != tc.block {
+			t.Errorf("POSIX %q decision = %q, want block=%t", tc.command, got, tc.block)
+		}
+	}
+}
+
+// w24WindowsRows judges rows for a Windows profile, on every OS.
+func w24WindowsRows(t *testing.T, rows []w24Row) {
+	t.Helper()
+	const cwd, home = `C:\Users\alice\project`, `C:\Users\alice`
+	for _, tc := range rows {
+		if got := ActionCommandDecision(tc.command, cwd, home); (got != "") != tc.block {
 			t.Errorf("Windows %q decision = %q, want block=%t", tc.command, got, tc.block)
 		}
 	}
@@ -115,11 +135,7 @@ func TestW24UnreadScriptLaunchesNeedProtectedEvidence(t *testing.T) {
 // patterns binds known values, and an unresolved copy or read source names
 // no destination. A possible protected destination still blocks.
 func TestW24LoopValuesAndCopySourcesNeedProtectedDestination(t *testing.T) {
-	home, cwd := w24BalancedHome(t)
-	for _, tc := range []struct {
-		command string
-		block   bool
-	}{
+	w24POSIXRows(t, []w24Row{
 		{`for f in regular.txt; do cp "$f" copy/; done; echo ok > second-report.txt`, false},
 		{`for f in regular.txt report.txt; do cp "$f" copy/; done`, false},
 		{`for f in *.txt; do cp "$f" copy/; done`, false},
@@ -147,16 +163,8 @@ func TestW24LoopValuesAndCopySourcesNeedProtectedDestination(t *testing.T) {
 		// A computed copy destination inside a loop is the 1.0.3 decision
 		// of UnprovenProtectedWrite, unchanged here.
 		{`for f in regular.txt; do cp -- "$f" "copy/$f.bak"; done`, true},
-	} {
-		if got := ActionCommandDecision(tc.command, cwd, home); (got != "") != tc.block {
-			t.Errorf("POSIX %q decision = %q, want block=%t", tc.command, got, tc.block)
-		}
-	}
-	const wcwd, whome = `C:\Users\alice\project`, `C:\Users\alice`
-	for _, tc := range []struct {
-		command string
-		block   bool
-	}{
+	})
+	w24WindowsRows(t, []w24Row{
 		{`for f in regular.txt; do cp "$f" copy/; done; echo ok > second-report.txt`, false},
 		{`foreach ($f in 'regular.txt','report.txt') { Copy-Item $f copy }`, false},
 		{`Copy-Item $src out\`, false},
@@ -169,9 +177,5 @@ func TestW24LoopValuesAndCopySourcesNeedProtectedDestination(t *testing.T) {
 		{`Copy-Item $f C:\Users\alice\.ssh\authorized_keys`, true},
 		{`Copy-Item $f $env:USERPROFILE\.ssh\`, true},
 		{`cp -t $d a.txt`, true},
-	} {
-		if got := ActionCommandDecision(tc.command, wcwd, whome); (got != "") != tc.block {
-			t.Errorf("Windows %q decision = %q, want block=%t", tc.command, got, tc.block)
-		}
-	}
+	})
 }

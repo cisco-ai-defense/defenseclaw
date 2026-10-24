@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -15,6 +16,14 @@ import (
 // and copy loops (GAP-1012) are not SSH persistence on any route, while a
 // protected or computed destination still blocks.
 func TestTrustedActionW24ScriptsAndCopyLoopsAreNotPersistence(t *testing.T) {
+	t.Run("POSIX", testTrustedActionW24POSIXScriptsAndCopyLoops)
+	t.Run("Windows", testTrustedActionW24WindowsScriptsAndCopyLoops)
+}
+
+func testTrustedActionW24POSIXScriptsAndCopyLoops(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX rows need a POSIX home")
+	}
 	home, cwd := r104ReviewHome(t)
 	for _, dir := range []string{filepath.Join(cwd, "copy")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -55,6 +64,9 @@ func TestTrustedActionW24ScriptsAndCopyLoopsAreNotPersistence(t *testing.T) {
 			}
 		})
 	}
+}
+
+func testTrustedActionW24WindowsScriptsAndCopyLoops(t *testing.T) {
 	const wcwd, whome = `C:\Users\alice\project`, `C:\Users\alice`
 	for _, tc := range []struct {
 		name, connector, tool, command string
