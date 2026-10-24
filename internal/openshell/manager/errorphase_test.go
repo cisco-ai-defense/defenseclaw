@@ -23,10 +23,89 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
+
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 )
+
+func TestTimeoutConditionOutranksConfigurationPending(t *testing.T) {
+	pending := stream.Condition{Type: "ConfigurationReady", Status: "False", Reason: "ConfigurationPending"}
+	timedOut := stream.Condition{Type: "Ready", Status: "False", Reason: "ImagePreparationTimedOut",
+		Message: "Image preparation exceeded its absolute deadline"}
+	for _, conditions := range [][]stream.Condition{{pending, timedOut}, {timedOut, pending}} {
+		e := newVMEnv(t, nil)
+		e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
+		b := e.boxOf("box")
+		e.m.statusEvent(t.Context(), b, &stream.Status{Phase: openshell.PhaseError, Conditions: conditions})
+		e.m.mu.Lock()
+		reason := b.rec.PhaseReason
+		e.m.mu.Unlock()
+		if !strings.Contains(reason, "ImagePreparationTimedOut") || strings.Contains(reason, "ConfigurationPending") {
+			t.Fatalf("conditions %+v recorded %q, want timeout recovery", conditions, reason)
+		}
+		way := errorPhaseWayOn("box", reason, "", true)
+		if !strings.Contains(way, "then `defenseclaw sandbox start box` (no stop)") || strings.Contains(way, "`defenseclaw sandbox stop box`") {
+			t.Fatalf("timeout recovery = %q", way)
+		}
+	}
+}
+
+// Both the live stream and a failed operation's GetSandbox recovery choose
+// the first failing condition unless a failing Ready gives the phase's cause.
+func TestErrorPhaseConditionPriorityOnWatchAndRestore(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		conditions []types.SandboxCondition
+		want       string
+		reject     string
+	}{
+		{"first non-Ready", []types.SandboxCondition{
+			{Type: "ConfigurationReady", Status: "False", Reason: "SpecificConfigurationFailure"},
+			{Type: "ImagePreparation", Status: "False", Reason: "GenericImageFailure"},
+		}, "SpecificConfigurationFailure", "GenericImageFailure"},
+		{"later Ready", []types.SandboxCondition{
+			{Type: "ConfigurationReady", Status: "False", Reason: "ConfigurationPending"},
+			{Type: "Ready", Status: "False", Reason: "ImagePreparationTimedOut"},
+		}, "ImagePreparationTimedOut", "ConfigurationPending"},
+		{"earlier Ready", []types.SandboxCondition{
+			{Type: "Ready", Status: "False", Reason: "ImagePreparationTimedOut"},
+			{Type: "ConfigurationReady", Status: "False", Reason: "ConfigurationPending"},
+		}, "ImagePreparationTimedOut", "ConfigurationPending"},
+	} {
+		for _, path := range []string{"watch", "restore"} {
+			t.Run(tc.name+"/"+path, func(t *testing.T) {
+				e := newVMEnv(t, nil)
+				e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
+				b := e.boxOf("box")
+				if path == "watch" {
+					conditions := make([]stream.Condition, 0, len(tc.conditions))
+					for _, c := range tc.conditions {
+						conditions = append(conditions, stream.Condition{Type: c.Type, Status: c.Status, Reason: c.Reason})
+					}
+					e.m.statusEvent(t.Context(), b, &stream.Status{Phase: openshell.PhaseError, Conditions: conditions})
+				} else {
+					sb, err := e.client.GetSandbox(t.Context(), "box")
+					if err != nil {
+						t.Fatal(err)
+					}
+					sb.Status.Phase = openshell.PhaseError
+					sb.Status.Conditions = tc.conditions
+					e.fake.SDK().AddSandbox(openshell.DefaultWorkspace, sb)
+					e.m.restorePhase(t.Context(), e.gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
+				}
+				e.m.mu.Lock()
+				reason := b.rec.PhaseReason
+				e.m.mu.Unlock()
+				if !strings.Contains(reason, tc.want) || strings.Contains(reason, tc.reject) {
+					t.Fatalf("%s: recorded %q, want %s before %s", path, reason, tc.want, tc.reject)
+				}
+			})
+		}
+	}
+}
 
 // A gateway that runs sandboxes (openshell.SupportedMin, which includes
 // NVIDIA/OpenShell#4231) stops a sandbox in its error state and starts it

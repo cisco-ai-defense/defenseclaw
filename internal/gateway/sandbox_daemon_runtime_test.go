@@ -568,6 +568,29 @@ func portFree(addr string) bool {
 	return true
 }
 
+// A failed startup List does not mean that the listeners are lost. Once
+// OpenShell answers again, the daemon can bind free ports for the sandbox
+// that survived its restart without stopping it.
+func TestSandboxDaemonStartupListRetryBindsListenersWithoutStopping(t *testing.T) {
+	var lists atomic.Int32
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.countRunning = func(context.Context) (int, error) {
+			if lists.Add(1) == 1 {
+				return 0, errors.New("OpenShell List temporarily unavailable")
+			}
+			return 1, nil
+		}
+	})
+	fleet := &fakeSandboxFleet{phases: map[string]string{"vm": "ready"}}
+	f.d.rt.fleet = fleet
+	f.d.rt.recheck = 5 * time.Millisecond
+	f.run(t)
+	eventuallyTrue(t, func() bool { return lists.Load() >= 2 && f.d.listening() })
+	if stopped := fleet.stops(); len(stopped) != 0 {
+		t.Fatalf("stopped a healthy sandbox after transient List failure: %v", stopped)
+	}
+}
+
 // The CLI socket is 0600 in a 0700 directory, a stale socket is replaced,
 // a live one refused, and only the daemon's own uid is served.
 func TestSandboxDaemonSocketAndPeerCheck(t *testing.T) {
