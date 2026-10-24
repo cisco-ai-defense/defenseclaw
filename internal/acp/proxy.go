@@ -1028,10 +1028,10 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		}
 		if evalErr != nil {
 			if errors.Is(evalErr, ErrBindingRefused) && state.peerProtocolFixes {
-				return endSessionTelling(direction, msg, bindingRefusedError(opts, evalErr), rejectDst)
+				return endSessionTellingActive(state, direction, msg, bindingRefusedError(opts, evalErr), dst, rejectDst)
 			}
 			if errors.Is(evalErr, ErrModeMismatch) && state.peerProtocolFixes {
-				return endSessionTelling(direction, msg, modeDriftError(opts), rejectDst)
+				return endSessionTellingActive(state, direction, msg, modeDriftError(opts), dst, rejectDst)
 			}
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
@@ -1078,10 +1078,10 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				})
 				if turnErr != nil {
 					if errors.Is(turnErr, ErrBindingRefused) && state.peerProtocolFixes {
-						return bindingRefusedError(opts, turnErr)
+						return endCompletedTurnTelling(msg.ID, session, bindingRefusedError(opts, turnErr), delivered, dst)
 					}
 					if errors.Is(turnErr, ErrModeMismatch) && state.peerProtocolFixes {
-						return modeDriftError(opts)
+						return endCompletedTurnTelling(msg.ID, session, modeDriftError(opts), delivered, dst)
 					}
 					if errors.Is(turnErr, ErrModeMismatch) {
 						return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
@@ -1338,6 +1338,37 @@ func bindingRefusedError(opts ProxyOptions, err error) error {
 // maxSessionEndNoticeBytes bounds the reason a session-ending notice shows.
 const maxSessionEndNoticeBytes = 2048
 
+func sessionEndText(reason error, delivered bool) string {
+	text := reason.Error()
+	if delivered {
+		text += " The prompt reached the agent. Tool actions may have run. Inspect their results before retrying."
+	}
+	if len(text) > maxSessionEndNoticeBytes {
+		text = strings.ToValidUTF8(text[:maxSessionEndNoticeBytes], "") + "..."
+	}
+	return text
+}
+
+// A refusal from the agent side also owes the editor an answer to its
+// outstanding prompt. The source frame's ID may be a notification, so use
+// the tracked prompt ID and suppress any late agent answer.
+func endSessionTellingActive(state *proxyState, direction Direction, msg Message, reason error, dst, rejectDst io.Writer) error {
+	if direction != AgentToClient {
+		return endSessionTelling(direction, msg, reason, rejectDst)
+	}
+	delivered := state.deliveredActivePrompt()
+	id, session := state.abortPrompt()
+	if len(id) > 0 {
+		_, _ = dst.Write(blockedTurnFrames(id, session, sessionEndText(reason, delivered)))
+	}
+	return reason
+}
+
+func endCompletedTurnTelling(id json.RawMessage, session string, reason error, delivered bool, client io.Writer) error {
+	_, _ = client.Write(blockedTurnFrames(id, session, sessionEndText(reason, delivered)))
+	return reason
+}
+
 // endSessionTelling answers the editor request that ended the session with
 // the reason, so the editor shows it, and returns the reason: an editor
 // shows the agent's stderr only in its log.
@@ -1345,10 +1376,7 @@ func endSessionTelling(direction Direction, msg Message, reason error, client io
 	if direction != ClientToAgent || !msg.IsRequest() {
 		return reason
 	}
-	text := reason.Error()
-	if len(text) > maxSessionEndNoticeBytes {
-		text = strings.ToValidUTF8(text[:maxSessionEndNoticeBytes], "") + "..."
-	}
+	text := sessionEndText(reason, false)
 	if session := promptSessionID(msg); msg.Method == "session/prompt" && session != "" {
 		result, _ := json.Marshal(struct {
 			JSONRPC string          `json:"jsonrpc"`

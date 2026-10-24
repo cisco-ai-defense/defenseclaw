@@ -592,6 +592,66 @@ func TestCopyFramesActionOutageAfterDeliveredPromptNamesPossibleToolEffect(t *te
 	}
 }
 
+type turnDriftEvaluator struct {
+	err           error
+	aggregateOnly bool
+}
+
+func (e turnDriftEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if in.Direction == AgentToClient && in.Method == "session/update" && (!e.aggregateOnly || in.Aggregate) {
+		return Verdict{}, e.err
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
+// A binding or mode change after a prompt reached the agent must complete
+// the editor's pending turn with the cause, including at the aggregate check.
+func TestCopyFramesMidTurnDriftCompletesEditorPrompt(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		err           error
+		wantErr       error
+		want          string
+		mode          Mode
+		aggregateOnly bool
+	}{
+		{name: "binding on update", err: &BindingRefusedError{Code: RefusalProfileChanged, Profile: "next", Mode: "action"}, wantErr: ErrBindingRefused, want: "from ACP profile current to next"},
+		{name: "binding on completed turn", err: &BindingRefusedError{Code: RefusalProfileChanged, Profile: "next", Mode: "action"}, wantErr: ErrBindingRefused, want: "from ACP profile current to next", aggregateOnly: true},
+		{name: "managed observe binding on update", err: &BindingRefusedError{Code: RefusalProfileChanged, Profile: "next", Mode: "action"}, wantErr: ErrBindingRefused, want: "from ACP profile current to next", mode: ModeObserve},
+		{name: "mode on update", err: ErrModeMismatch, wantErr: ErrModeMismatch, want: "profile current is in observe mode"},
+		{name: "mode on completed turn", err: ErrModeMismatch, wantErr: ErrModeMismatch, want: "profile current is in observe mode", aggregateOnly: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}, peerProtocolFixes: true}
+			var agentInput, clientOutput bytes.Buffer
+			mode := tc.mode
+			if mode == "" {
+				mode = ModeAction
+			}
+			opts := ProxyOptions{Mode: mode, Managed: true, Profile: "current", ClientID: "zed", AgentID: "hermes", Evaluator: turnDriftEvaluator{err: tc.err, aggregateOnly: tc.aggregateOnly}, Stderr: io.Discard}
+			prompt := `{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"sessionId":"s","prompt":[{"type":"text","text":"run a terminal command"}]}}` + "\n"
+			if err := copyFrames(context.Background(), opts, state, ClientToAgent, strings.NewReader(prompt), &agentInput, &clientOutput); err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(agentInput.String(), `"method":"session/prompt"`) {
+				t.Fatalf("prompt was not delivered to agent: %q", agentInput.String())
+			}
+			agentInput.Reset()
+			updates := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"tool_call_update","toolCallId":"terminal-1","status":"completed","content":[{"type":"text","text":"command exited 0"}]}}}` + "\n" +
+				`{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}` + "\n"
+			err := copyFrames(context.Background(), opts, state, AgentToClient, strings.NewReader(updates), &clientOutput, &agentInput)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("session error = %v, want %v", err, tc.wantErr)
+			}
+			text, stop := blockedTurn(t, clientOutput.Bytes(), "7")
+			if stop != "end_turn" || !strings.Contains(text, tc.want) || !strings.Contains(text, "Tool actions may have run") ||
+				!strings.Contains(text, "before retrying") || strings.Contains(clientOutput.String(), "command exited 0") {
+				t.Fatalf("editor turn = %q / %q, want cause and possible-tool-effect warning", text, stop)
+			}
+		})
+	}
+}
+
 // One slow gateway answer must not end the agent session: the guard retries
 // once, then refuses only that prompt and keeps proxying (GAP-1834).
 func TestCopyFramesActionEvaluationTimeoutRefusesOnlyThatFrame(t *testing.T) {
