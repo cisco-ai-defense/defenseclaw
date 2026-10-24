@@ -155,11 +155,13 @@ type proxyState struct {
 	pendingAgent  map[string]string
 	activePrompt  string
 	activeSession string
-	// promptDelivered distinguishes a refused request from a failure after
-	// the agent may already have performed tool actions.
-	promptDelivered bool
-	turnBuffer      []byte
-	turnFrames      []json.RawMessage
+	// prompts holds every outstanding editor session/prompt by request ID.
+	// Observe mode runs several at once and activePrompt names only the
+	// latest, so a failing agent frame is matched to its own prompt before
+	// the editor is answered (promptOfAgentFrameLocked).
+	prompts    map[string]*promptTurn
+	turnBuffer []byte
+	turnFrames []json.RawMessage
 	// abortedPrompts holds prompts the guard ended for the editor while the
 	// agent was still working on them; the agent's late answer is dropped
 	// instead of failing the whole proxy as an unmatched response.
@@ -186,6 +188,14 @@ type proxyState struct {
 	// not answer a prompt (armSilenceNotice).
 	silenceGen   uint64
 	silenceTimer *time.Timer
+}
+
+// promptTurn is an editor session/prompt that has not finished: its session,
+// and whether it reached the agent. Once it has, a failed check cannot undo
+// a tool action the agent may already have run.
+type promptTurn struct {
+	session   string
+	delivered bool
 }
 
 // agentSilenceNotice is how long a prompt waits for any frame of the agent
@@ -327,12 +337,18 @@ func (s *proxyState) track(msg Message, direction Direction, mode Mode) (string,
 				delete(pending, key)
 				return "", errors.New("concurrent session/prompt requests are not supported in action mode")
 			}
+			if len(s.prompts) >= MaxPendingIDs {
+				delete(pending, key)
+				return "", errors.New("too many pending ACP request IDs")
+			}
+			if s.prompts == nil {
+				s.prompts = make(map[string]*promptTurn)
+			}
+			s.prompts[key] = &promptTurn{session: promptSessionID(msg)}
+			s.clearActiveLocked()
 			s.activePrompt = key
 			s.activeSession = promptSessionID(msg)
-			s.promptDelivered = false
 			delete(s.mutedSessions, s.activeSession)
-			s.turnBuffer = s.turnBuffer[:0]
-			s.turnFrames = s.turnFrames[:0]
 		}
 		return "", nil
 	}
@@ -410,13 +426,21 @@ func (s *proxyState) bufferOrFlush(
 		return nil, nil, "", false, err
 	}
 	session := s.activeSession
-	delivered := s.promptDelivered
-	s.turnBuffer = s.turnBuffer[:0]
-	s.turnFrames = s.turnFrames[:0]
+	delivered := false
+	if p := s.prompts[s.activePrompt]; p != nil {
+		delivered = p.delivered
+	}
+	delete(s.prompts, s.activePrompt)
+	s.clearActiveLocked()
+	return out, aggregate, session, delivered, nil
+}
+
+// clearActiveLocked forgets the action-mode turn and its buffered output.
+func (s *proxyState) clearActiveLocked() {
 	s.activePrompt = ""
 	s.activeSession = ""
-	s.promptDelivered = false
-	return out, aggregate, session, delivered, nil
+	s.turnBuffer = s.turnBuffer[:0]
+	s.turnFrames = s.turnFrames[:0]
 }
 
 func (s *proxyState) markPromptDelivered(msg Message) {
@@ -425,53 +449,93 @@ func (s *proxyState) markPromptDelivered(msg Message) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.activePrompt == msg.IDKey() {
-		s.promptDelivered = true
+	if p := s.prompts[msg.IDKey()]; p != nil {
+		p.delivered = true
 	}
 }
 
-func (s *proxyState) deliveredActivePrompt() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.activePrompt != "" && s.promptDelivered
+// promptOfAgentFrameLocked names the outstanding editor prompt an agent
+// frame belongs to, or "" for none. Action mode runs one prompt at a time,
+// and every agent frame belongs to it. Observe mode may run several: a
+// response belongs to the prompt it answers, any other frame to the one
+// prompt of its sessionId, and a frame without a sessionId to the only
+// outstanding prompt. A frame that matches no prompt, or several, belongs
+// to none, so another turn is never answered with its failure.
+func (s *proxyState) promptOfAgentFrameLocked(msg Message, mode Mode) string {
+	if mode == ModeAction {
+		return s.activePrompt
+	}
+	if msg.Method == "" {
+		if s.prompts[msg.IDKey()] != nil {
+			return msg.IDKey()
+		}
+		return ""
+	}
+	session := promptSessionID(msg)
+	match := ""
+	for key, p := range s.prompts {
+		if session != "" && p.session != session {
+			continue
+		}
+		if match != "" {
+			return ""
+		}
+		match = key
+	}
+	return match
 }
 
-// finishIfPromptResponse ends the active turn when msg is the agent's own
-// answer to it, so a blocked answer is replaced instead of being recorded as
+// agentFramePromptDelivered reports whether the prompt an agent frame
+// belongs to has reached the agent.
+func (s *proxyState) agentFramePromptDelivered(msg Message, mode Mode) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p := s.prompts[s.promptOfAgentFrameLocked(msg, mode)]
+	return p != nil && p.delivered
+}
+
+// finishIfPromptResponse ends a turn when msg is the agent's own answer to
+// its prompt, so a blocked answer is replaced instead of being recorded as
 // an aborted turn whose late answer is still due. It returns the turn's
 // session and whether msg was that answer.
 func (s *proxyState) finishIfPromptResponse(msg Message) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if msg.Method != "" || s.activePrompt == "" || msg.IDKey() != s.activePrompt {
+	key := msg.IDKey()
+	p := s.prompts[key]
+	if msg.Method != "" || p == nil {
 		return "", false
 	}
-	session := s.activeSession
-	s.activePrompt = ""
-	s.activeSession = ""
-	s.promptDelivered = false
-	s.turnBuffer = s.turnBuffer[:0]
-	s.turnFrames = s.turnFrames[:0]
-	return session, true
+	delete(s.prompts, key)
+	if key == s.activePrompt {
+		s.clearActiveLocked()
+	}
+	return p.session, true
 }
 
-// abortPrompt ends the active turn for the editor while the agent is still
-// working on it. It returns the prompt ID and session; the agent's late
+// abortAgentFramePrompt ends, for the editor, the prompt an agent frame
+// belongs to (promptOfAgentFrameLocked) while the agent is still working on
+// it. It returns the prompt ID, its session and whether it reached the
+// agent, or a nil ID when the frame belongs to no prompt. The agent's late
 // answer and further output for that session are dropped (track).
-func (s *proxyState) abortPrompt() (json.RawMessage, string) {
+func (s *proxyState) abortAgentFramePrompt(msg Message, mode Mode) (json.RawMessage, string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.activePrompt == "" {
-		return nil, ""
+	key := s.promptOfAgentFrameLocked(msg, mode)
+	if key == "" {
+		return nil, "", false
 	}
-	id := json.RawMessage(s.activePrompt)
-	session := s.activeSession
-	delete(s.pendingClient, s.activePrompt)
+	session, delivered := s.activeSession, false
+	if p := s.prompts[key]; p != nil {
+		session, delivered = p.session, p.delivered
+	}
+	delete(s.prompts, key)
+	delete(s.pendingClient, key)
 	if len(s.abortedPrompts) < MaxPendingIDs {
 		if s.abortedPrompts == nil {
 			s.abortedPrompts = make(map[string]string)
 		}
-		s.abortedPrompts[s.activePrompt] = session
+		s.abortedPrompts[key] = session
 		if session != "" {
 			if s.mutedSessions == nil {
 				s.mutedSessions = make(map[string]struct{})
@@ -479,12 +543,10 @@ func (s *proxyState) abortPrompt() (json.RawMessage, string) {
 			s.mutedSessions[session] = struct{}{}
 		}
 	}
-	s.activePrompt = ""
-	s.activeSession = ""
-	s.promptDelivered = false
-	s.turnBuffer = s.turnBuffer[:0]
-	s.turnFrames = s.turnFrames[:0]
-	return id, session
+	if key == s.activePrompt {
+		s.clearActiveLocked()
+	}
+	return json.RawMessage(key), session, delivered
 }
 
 type turnEvaluationPayload struct {
@@ -639,12 +701,11 @@ func (s *proxyState) reject(msg Message, direction Direction) {
 	delete(s.pendingClient, msg.IDKey())
 	// A blocked session/prompt never reaches the agent, so its turn is over.
 	// Leaving it active refused every later prompt as "concurrent".
-	if msg.Method == "session/prompt" && s.activePrompt == msg.IDKey() {
-		s.activePrompt = ""
-		s.activeSession = ""
-		s.promptDelivered = false
-		s.turnBuffer = s.turnBuffer[:0]
-		s.turnFrames = s.turnFrames[:0]
+	if msg.Method == "session/prompt" {
+		delete(s.prompts, msg.IDKey())
+		if s.activePrompt == msg.IDKey() {
+			s.clearActiveLocked()
+		}
 	}
 }
 
@@ -1028,10 +1089,10 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		}
 		if evalErr != nil {
 			if errors.Is(evalErr, ErrBindingRefused) && state.peerProtocolFixes {
-				return endSessionTellingActive(state, direction, msg, bindingRefusedError(opts, evalErr), dst, rejectDst)
+				return endSessionTellingActive(state, opts.Mode, direction, msg, bindingRefusedError(opts, evalErr), dst, rejectDst)
 			}
 			if errors.Is(evalErr, ErrModeMismatch) && state.peerProtocolFixes {
-				return endSessionTellingActive(state, direction, msg, modeDriftError(opts), dst, rejectDst)
+				return endSessionTellingActive(state, opts.Mode, direction, msg, modeDriftError(opts), dst, rejectDst)
 			}
 			if errors.Is(evalErr, ErrModeMismatch) {
 				return fmt.Errorf("ACP evaluation unavailable: %w", evalErr)
@@ -1040,12 +1101,12 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 				// Fail closed for this frame only, exactly as for a block.
 				logf(opts.Stderr, "[defenseclaw-acp] evaluation unavailable, refused %s %s: %v\n", direction, msg.Method, evalErr)
 				reason := state.refusalReason(opts, evalErr)
-				if direction == AgentToClient && state.deliveredActivePrompt() {
+				if direction == AgentToClient && state.agentFramePromptDelivered(msg, opts.Mode) {
 					reason = postDeliveryRefusalReason(opts.Managed)
 				}
 				verdict = Verdict{Action: "block", Reason: reason}
 				if opts.Mode != ModeAction {
-					if err := writeBlock(state, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
+					if err := writeBlock(state, opts.Mode, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
 						return err
 					}
 					continue
@@ -1058,7 +1119,7 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 		}
 		if verdict.Action == "block" || verdict.Action == "confirm" {
 			if opts.Mode == ModeAction {
-				if err := writeBlock(state, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
+				if err := writeBlock(state, opts.Mode, direction, msg, verdict.Reason, dst, rejectDst); err != nil {
 					return err
 				}
 				continue
@@ -1349,15 +1410,16 @@ func sessionEndText(reason error, delivered bool) string {
 	return text
 }
 
-// A refusal from the agent side also owes the editor an answer to its
-// outstanding prompt. The source frame's ID may be a notification, so use
-// the tracked prompt ID and suppress any late agent answer.
-func endSessionTellingActive(state *proxyState, direction Direction, msg Message, reason error, dst, rejectDst io.Writer) error {
+// A refusal from the agent side also owes the editor an answer to the prompt
+// the refused frame belongs to. The frame may be a notification without an
+// ID, so the prompt is looked up (promptOfAgentFrameLocked) and its late
+// agent answer suppressed. A frame that belongs to no single prompt answers
+// none: another turn's prompt must not end with this frame's failure.
+func endSessionTellingActive(state *proxyState, mode Mode, direction Direction, msg Message, reason error, dst, rejectDst io.Writer) error {
 	if direction != AgentToClient {
 		return endSessionTelling(direction, msg, reason, rejectDst)
 	}
-	delivered := state.deliveredActivePrompt()
-	id, session := state.abortPrompt()
+	id, session, delivered := state.abortAgentFramePrompt(msg, mode)
 	if len(id) > 0 {
 		_, _ = dst.Write(blockedTurnFrames(id, session, sessionEndText(reason, delivered)))
 	}
@@ -1404,7 +1466,7 @@ func acpPeerName(direction Direction) string {
 
 // writeBlock answers a frame refused in action mode. dst is the peer the
 // frame was travelling to and rejectDst the peer that sent it.
-func writeBlock(state *proxyState, direction Direction, msg Message, reason string, dst, rejectDst io.Writer) error {
+func writeBlock(state *proxyState, mode Mode, direction Direction, msg Message, reason string, dst, rejectDst io.Writer) error {
 	if direction == AgentToClient {
 		// The agent's own answer to the prompt: end the turn in its place.
 		if session, ok := state.finishIfPromptResponse(msg); ok {
@@ -1434,9 +1496,9 @@ func writeBlock(state *proxyState, direction Direction, msg Message, reason stri
 	if direction != AgentToClient {
 		return nil
 	}
-	// Agent output was refused mid-turn: end the turn for the editor and ask
+	// Agent output was refused mid-turn: end its turn for the editor and ask
 	// the agent to stop; its late answer is dropped (track).
-	promptID, session := state.abortPrompt()
+	promptID, session, _ := state.abortAgentFramePrompt(msg, mode)
 	if len(promptID) == 0 {
 		return nil
 	}
