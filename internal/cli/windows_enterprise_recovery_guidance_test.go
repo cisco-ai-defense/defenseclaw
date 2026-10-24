@@ -271,6 +271,14 @@ func TestWindowsEnterprisePendingLeadFollowsTheServiceStates(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterprisePendingInspectionDoesNotClaimRunningServicesStopped(t *testing.T) {
+	step := windowsEnterprisePendingInspectionStep(`C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml`)
+	if strings.Contains(step, "services stay stopped") || !strings.Contains(step, "lifecycle transaction is pending") ||
+		!strings.Contains(step, "Setup") {
+		t.Fatalf("pending status guidance contradicts four running services: %q", step)
+	}
+}
+
 // GAP-0741: a committed install whose lifecycle journal could not be retired
 // because of a per-user .defenseclaw folder says it is installed, names the
 // folder and its fix, and says that /ensure again converges.
