@@ -561,10 +561,12 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 
 // actionWindowsControlSource turns PowerShell control syntax into statement
 // boundaries, so each statement of a body is judged as if it runs: if,
-// elseif, while, until and foreach with an inert header, else, try, catch,
-// finally and do, switch with an inert header and simple case labels, the
-// braces of their bodies, and the while or until of a do loop. A header that can run or assign something, or unbalanced text, keeps
-// its spelling and so its strict decision.
+// elseif, while, until and foreach with an inert header, foreach over a
+// listing command (its own statement), else, try, catch, finally and do,
+// switch with an inert header and simple case labels, the scriptblock of a
+// ForEach-Object or Where-Object stage, the braces of their bodies, and the
+// while or until of a do loop. A header that can run or assign something,
+// or unbalanced text, keeps its spelling and so its strict decision.
 func actionWindowsControlSource(command string) string {
 	if !strings.Contains(command, "{") {
 		return command
@@ -661,10 +663,14 @@ func actionWindowsControlSource(command string) string {
 
 // actionWindowsControlHead returns the end of the control keyword and inert
 // header at start: after the { of its body, with kind 'c' ('s' for a switch
-// body), or, for the while or until of a do loop, at the end of its
+// body; 'c' also for the scriptblock of a ForEach-Object or Where-Object
+// stage), or, for the while or until of a do loop, at the end of its
 // statement, with kind 0. For a foreach over a listing command, keepStart and
 // keepEnd bound that command, which is judged as a statement of its own.
 func actionWindowsControlHead(command string, start int) (end int, kind byte, keepStart, keepEnd int) {
+	if end := actionWindowsPipelineBlockHead(command, start); end > start {
+		return end, 'c', 0, 0
+	}
 	lower := strings.ToLower(command[start:])
 	for _, keyword := range []string{"elseif", "else", "if", "while", "until", "foreach", "switch", "try", "catch", "finally", "do"} {
 		next := start + len(keyword)
@@ -689,18 +695,18 @@ func actionWindowsControlHead(command string, start int) (end int, kind byte, ke
 			if index >= len(command) || command[index] != '(' {
 				return 0, 0, 0, 0
 			}
-			closing := strings.IndexByte(command[index:], ')')
+			closing := actionWindowsCloseParen(command, index)
 			if closing < 0 {
 				return 0, 0, 0, 0
 			}
-			if header := command[index+1 : index+closing]; !actionWindowsInertHeader(keyword, header) {
-				collection, ok := actionWindowsListingCollection(keyword, header)
+			if header := command[index+1 : closing]; !actionWindowsInertHeader(keyword, header) {
+				from, to, ok := actionWindowsListingCollection(keyword, header)
 				if !ok {
 					return 0, 0, 0, 0
 				}
-				keepStart, keepEnd = index+1+collection, index+closing
+				keepStart, keepEnd = index+1+from, index+1+to
 			}
-			index = actionWindowsSkipSpace(command, index+closing+1)
+			index = actionWindowsSkipSpace(command, closing+1)
 		}
 		if index < len(command) && command[index] == '{' {
 			if keyword == "switch" {
@@ -717,30 +723,171 @@ func actionWindowsControlHead(command string, start int) (end int, kind byte, ke
 	return 0, 0, 0, 0
 }
 
-// actionWindowsListingCollection returns the offset in a foreach header of
+// actionWindowsPipelineBlockHead returns the end, after the { of its
+// scriptblock, of a ForEach-Object or Where-Object command (also %,
+// foreach, ? and where) whose only argument is that block, optionally after
+// -Process or -FilterScript. The block runs once for each input value, like
+// a loop body, so its statements are judged; $_ stays unknown. Any other
+// form returns 0 and keeps its spelling.
+func actionWindowsPipelineBlockHead(command string, start int) int {
+	lower := strings.ToLower(command[start:])
+	for _, name := range []string{"foreach-object", "where-object", "foreach", "where", "%", "?"} {
+		next := start + len(name)
+		if !strings.HasPrefix(lower, name) || next < len(command) && !strings.ContainsRune(" \t{", rune(command[next])) {
+			continue
+		}
+		index := actionWindowsSkipSpace(command, next)
+		for _, option := range []string{"-process", "-filterscript"} {
+			after := index + len(option)
+			if strings.HasPrefix(strings.ToLower(command[index:]), option) &&
+				after < len(command) && strings.ContainsRune(" \t{", rune(command[after])) {
+				index = actionWindowsSkipSpace(command, after)
+			}
+		}
+		if index < len(command) && command[index] == '{' {
+			return index + 1
+		}
+		return 0
+	}
+	return 0
+}
+
+// actionWindowsListingCollection returns the bounds in a foreach header of
 // its collection when that is a listing command with literal arguments
-// (foreach ($f in Get-ChildItem *.txt)). The listing runs no other command;
-// the loop variable stays unknown in the body. A listing that names the .ssh
-// directory or a key keeps the strict spelling.
-func actionWindowsListingCollection(keyword, header string) (int, bool) {
+// (foreach ($f in Get-ChildItem *.txt)), also inside (...), $(...) or @(...)
+// and with a property such as .FullName after them. The listing runs no
+// other command; the loop variable stays unknown in the body. Literal values
+// in parentheses, ('a.txt','b.txt') or @('a.txt'), run nothing: from == to.
+// A listing or value that names the .ssh directory or a key keeps the strict
+// spelling, and so does any other collection.
+func actionWindowsListingCollection(keyword, header string) (from, to int, ok bool) {
 	if keyword != "foreach" {
-		return 0, false
+		return 0, 0, false
 	}
-	fields := strings.Fields(header)
-	if len(fields) < 3 || len(fields[0]) < 2 || fields[0][0] != '$' || !strings.EqualFold(fields[1], "in") {
-		return 0, false
+	// $name in, also with no space before the collection: $f in(gci *.txt).
+	from = actionWindowsSkipSpace(header, 0)
+	if from >= len(header) || header[from] != '$' {
+		return 0, 0, false
 	}
-	at := strings.Index(header, fields[0]) + len(fields[0])
-	at += strings.Index(header[at:], fields[1]) + len(fields[1])
-	collection := header[at:]
-	if strings.ContainsAny(collection, "(){}[]@`<>=|;&$\r\n") || actionNamesSSH(collection) {
-		return 0, false
+	name := from + 1
+	for from = name; from < len(header) && (asciiLetter(header[from]) || header[from] == '_' ||
+		header[from] >= '0' && header[from] <= '9'); from++ {
 	}
-	switch strings.ToLower(fields[2]) {
+	from = actionWindowsSkipSpace(header, from)
+	if from == name || from+2 > len(header) || !strings.EqualFold(header[from:from+2], "in") ||
+		from+2 < len(header) && !strings.ContainsRune(" \t($@'\"", rune(header[from+2])) {
+		return 0, 0, false
+	}
+	from += 2
+	to = len(header)
+	wrapped := false
+	for {
+		from = actionWindowsSkipSpace(header, from)
+		to = len(strings.TrimRight(header[:to], " \t\r\n"))
+		open := from
+		if strings.HasPrefix(header[from:to], "$(") || strings.HasPrefix(header[from:to], "@(") {
+			open++
+		}
+		if open >= to || header[open] != '(' {
+			break
+		}
+		closing := actionWindowsCloseParen(header[:to], open)
+		if closing < 0 || !actionWindowsPropertyChain(header[closing+1:to]) {
+			return 0, 0, false
+		}
+		from, to, wrapped = open+1, closing, true
+	}
+	collection := header[from:to]
+	if actionNamesSSH(collection) {
+		return 0, 0, false
+	}
+	if wrapped && actionWindowsInertHeader("if", collection) {
+		return from, from, true
+	}
+	if !actionWindowsLiteralWords(collection) {
+		return 0, 0, false
+	}
+	listing := strings.Fields(collection)
+	if len(listing) == 0 {
+		return 0, 0, false
+	}
+	switch strings.ToLower(listing[0]) {
 	case "get-childitem", "gci", "ls", "dir", "get-item", "gi":
-		return at, true
+		return from, to, true
 	}
-	return 0, false
+	return 0, 0, false
+}
+
+// actionWindowsLiteralWords reports text that runs and expands nothing:
+// outside quotes no subexpression, block, type, splat, redirect, assignment
+// or statement; a single-quoted string is text; a double-quoted one has no
+// variable or escape.
+func actionWindowsLiteralWords(text string) bool {
+	for i := 0; i < len(text); i++ {
+		switch c := text[i]; c {
+		case '\'', '"':
+			closing := strings.IndexByte(text[i+1:], c)
+			if closing < 0 || c == '"' && strings.ContainsAny(text[i+1:i+1+closing], "$`") {
+				return false
+			}
+			i += closing + 1
+		default:
+			if strings.IndexByte("(){}[]@`<>=|;&$\r\n", c) >= 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// actionWindowsPropertyChain reports text that only reads properties of a
+// value: empty or .Name.FullName. A method call is not a property read.
+func actionWindowsPropertyChain(text string) bool {
+	for text != "" {
+		if text[0] != '.' || len(text) < 2 || !asciiLetter(text[1]) && text[1] != '_' {
+			return false
+		}
+		end := 2
+		for end < len(text) && (asciiLetter(text[end]) || text[end] == '_' || text[end] >= '0' && text[end] <= '9') {
+			end++
+		}
+		text = text[end:]
+	}
+	return true
+}
+
+// actionWindowsCloseParen returns the index of the ) that closes the ( at
+// open, outside PowerShell quotes and escapes, or -1.
+func actionWindowsCloseParen(text string, open int) int {
+	depth := 0
+	var quote byte
+	for i := open; i < len(text); i++ {
+		c := text[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				if i+1 < len(text) && text[i+1] == quote {
+					i++
+				} else {
+					quote = 0
+				}
+			} else if quote == '"' && c == '`' {
+				i++
+			}
+		case c == '`':
+			i++
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
 }
 
 // actionWindowsSwitchLabel returns the end, after the { of its body, of a

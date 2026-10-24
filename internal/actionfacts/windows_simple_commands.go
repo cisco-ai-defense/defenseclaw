@@ -224,20 +224,27 @@ func windowsSimpleStatementEnds(runes []rune, from int) bool {
 }
 
 // windowsSimpleInertConsumers take a pipeline value without invoking it:
-// they discard, write, format, measure or convert it.
+// they discard, write, format, measure or convert it. A sink (false) binds
+// its arguments as data, such as a path, an encoding or a width, so a
+// variable, subexpression, splat or parenthesized value in them cannot run
+// the input. A property consumer (true) also evaluates a property expression
+// that such a value may carry, as a calculated property @{e={...}} in $p does
+// with the input as $_; there only quoted text and bare words are data.
 var windowsSimpleInertConsumers = map[string]bool{
-	"out-null": true, "out-string": true, "out-host": true, "out-default": true,
-	"out-file": true, "write-output": true, "echo": true, "write": true,
-	"write-host": true, "get-member": true, "gm": true, "measure-object": true,
-	"measure": true, "format-list": true, "fl": true, "format-table": true,
-	"ft": true, "format-wide": true, "fw": true, "convertto-json": true,
-	"convertto-xml": true, "convertto-csv": true, "convertto-html": true,
+	"out-null": false, "out-string": false, "out-host": false, "out-default": false,
+	"out-file": false, "write-output": false, "echo": false, "write": false,
+	"write-host": false, "get-member": false, "gm": false, "convertto-json": false,
+	"convertto-xml": false, "convertto-csv": false,
+	"measure-object": true, "measure": true, "format-list": true, "fl": true,
+	"format-table": true, "ft": true, "format-wide": true, "fw": true,
+	"convertto-html": true,
 }
 
 // windowsSimpleInertPipeline reports whether the PowerShell value that ends
-// at from flows only into inert consumers until its statement ends. A stage
-// with a variable, subexpression, scriptblock, type, splat or redirect could
-// invoke the value, so it is not inert.
+// at from flows only into inert consumers until its statement ends. A quoted
+// string is data, also with a variable or subexpression in it. A scriptblock
+// argument, which PowerShell may bind to the input and run, makes a stage
+// not inert, and so does a computed value for a property consumer.
 func windowsSimpleInertPipeline(runes []rune, from int) bool {
 	stages := 0
 	for {
@@ -249,9 +256,10 @@ func windowsSimpleInertPipeline(runes []rune, from int) bool {
 		}
 		start := from + 1
 		var quote rune
+		depth, computed := 0, false
 		for from = start; from < len(runes); from++ {
 			char := runes[from]
-			if quote == 0 && strings.ContainsRune("|;\r\n}#&", char) {
+			if quote == 0 && depth == 0 && strings.ContainsRune("|;\r\n}#&", char) {
 				break
 			}
 			if quote == '\'' {
@@ -261,32 +269,45 @@ func windowsSimpleInertPipeline(runes []rune, from int) bool {
 				continue
 			}
 			if quote == '"' {
-				// In a double-quoted string only a variable or subexpression
-				// ($) and the escape character are special; brackets, @ and
-				// the rest are literal filename text.
-				if char == '$' || char == '`' {
-					return false
-				}
-				if char == quote {
+				if char == '`' {
+					from++
+				} else if char == quote {
 					quote = 0
 				}
 				continue
 			}
-			if char == '@' && from > start && windowsSimpleWordRune(runes[from-1]) {
-				continue // @ inside a bare word, as in report@2026.txt
-			}
-			if strings.ContainsRune("$(){}[]@`<>", char) {
-				return false
-			}
-			if char == '\'' || char == '"' {
+			switch char {
+			case '`':
+				from++
+			case '\'', '"':
 				quote = char
+			case '{', '}', '<':
+				return false
+			case '(':
+				depth++
+				computed = true
+			case ')':
+				if depth == 0 {
+					return false
+				}
+				depth--
+			case '$', '[', ']':
+				computed = true
+			case '@':
+				if from == start || !windowsSimpleWordRune(runes[from-1]) {
+					computed = true // a splat or an array, not @ inside report@2026.txt
+				}
 			}
 		}
-		if quote != 0 {
+		if quote != 0 || depth != 0 {
 			return false
 		}
 		fields := strings.Fields(string(runes[start:from]))
-		if len(fields) == 0 || !windowsSimpleInertConsumers[strings.ToLower(fields[0])] {
+		if len(fields) == 0 {
+			return false
+		}
+		evaluates, known := windowsSimpleInertConsumers[strings.ToLower(fields[0])]
+		if !known || evaluates && computed {
 			return false
 		}
 		stages++

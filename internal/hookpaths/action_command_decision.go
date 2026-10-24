@@ -1152,13 +1152,32 @@ func actionBindLoopValue(loop *syntax.ForClause, values actionValues, cwd, home 
 	}
 }
 
-// actionNamesSSH reports text that names the .ssh directory (also as an 8.3
-// alias), an authorized_keys file or a private key file.
+// actionNamesSSH reports a path in text that names the .ssh directory (also
+// as an 8.3 alias such as SSH~1) as one of its components, or an
+// authorized_keys or private key file inside a directory ($KEYS/id_rsa).
+// Only whole path components count: a name inside a longer word, as in
+// -Case id_rsa-smoke or notes.ssh-config, is argument data. A bare key name
+// is judged by where it resolves, relative to the working directory.
 func actionNamesSSH(text string) bool {
-	lower := strings.ToLower(text)
-	for _, name := range []string{".ssh", "ssh~", "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
-		if strings.Contains(lower, name) {
-			return true
+	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\r' || r == '\n' || strings.ContainsRune("'\"`=,;:|&(){}<>", r)
+	})
+	for _, word := range words {
+		components := strings.FieldsFunc(word, func(r rune) bool { return r == '/' || r == '\\' })
+		for index, component := range components {
+			if component == ".ssh" {
+				return true
+			}
+			if alias, ok := strings.CutPrefix(component, "ssh~"); ok && alias != "" && strings.Trim(alias, "0123456789") == "" {
+				return true
+			}
+			if index > 0 || word[0] == '/' || word[0] == '\\' {
+				switch component {
+				case "authorized_keys", "authorized_keys2", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa",
+					"id_ed25519_sk", "id_ecdsa_sk":
+					return true
+				}
+			}
 		}
 	}
 	return false

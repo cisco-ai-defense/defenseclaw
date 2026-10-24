@@ -969,10 +969,110 @@ func simpleArgvMayCallExported(args []*syntax.Word, source string, exported []st
 	case simpleCommandRunners[base]:
 		return simpleCommandRunnerMayCallExported(base, args[1:], source, exported, depth+1)
 	case simpleInlineInterpreters[base]:
-		return simpleWordsNameShellOrFunction(args[1:], source, exported, 1)
+		return simpleInterpreterRunsInlineCode(base, args[1:]) &&
+			simpleWordsNameShellOrFunction(args[1:], source, exported, 1)
+	case simpleShellTextOptionPrograms[base]:
+		// Shell text inside a word, such as git rebase --exec 'bash -c f'.
+		return simpleGitHandsTextToShell(base, args[1:]) &&
+			simpleWordsNameShellOrFunction(args[1:], source, exported, 2)
 	}
-	// Shell text inside a word, such as tmux new 'bash -c f'.
-	return simpleWordsNameShellOrFunction(args[1:], source, exported, 2)
+	// Any other program takes its words as data: grep -F 'bash f' runs no
+	// shell, so it cannot call an exported function.
+	return false
+}
+
+// simpleShellTextOptionPrograms hand an option value or an argument to a
+// shell: git (rebase --exec, -c core.pager=..., bisect run), tar
+// --to-command, rsync -e, ssh -o ProxyCommand, sed's e command, make,
+// editors, man -P, entr, debuggers, terminals and package runners. A word of
+// theirs that names a shell or an exported function among its words counts.
+var simpleShellTextOptionPrograms = map[string]bool{
+	"git": true, "tar": true, "gtar": true, "bsdtar": true, "rsync": true, "ssh": true,
+	"scp": true, "sftp": true, "sed": true, "gsed": true, "make": true, "gmake": true,
+	"vim": true, "vi": true, "nvim": true, "ex": true, "view": true, "emacs": true,
+	"man": true, "entr": true, "gdb": true, "lldb": true, "xterm": true,
+	"gnome-terminal": true, "konsole": true, "kitty": true, "alacritty": true,
+	"wezterm": true, "terminator": true, "npm": true, "npx": true, "pnpm": true,
+	"yarn": true, "nix-shell": true,
+}
+
+// simpleGitHandsTextToShell reports whether a git argv has a form that runs
+// text through a shell: -c or --config-env (an alias, pager, editor or ssh
+// command), --exec or -x, an upload or receive pack program, --extcmd,
+// bisect run, submodule foreach or filter-branch. Any other git argv, such
+// as commit -m or log --grep, is data. Other programs always count.
+func simpleGitHandsTextToShell(base string, words []*syntax.Word) bool {
+	if base != "git" {
+		return true
+	}
+	for _, word := range words {
+		value, static := simpleStaticScriptWord(word, nil)
+		if !static {
+			return true
+		}
+		name, _, _ := strings.Cut(value, "=")
+		switch name {
+		case "-c", "--config-env", "--exec", "-x", "--extcmd", "--upload-pack", "--receive-pack",
+			"-u", "bisect", "submodule", "filter-branch":
+			return true
+		}
+	}
+	return false
+}
+
+// simpleInterpreterRunsInlineCode reports whether an interpreter argv
+// carries inline code: python -c, perl -e or -E and ruby, lua, Rscript or
+// osascript -e (also in a cluster such as -ne), node or bun -e, -p, --eval
+// or --print, php -r, -B, -R or -E, deno eval, and an awk program that is not
+// only read from a file (-f, -E). pwsh and powershell take command text as
+// positional words, so they always count. The arguments of a script file
+// are data: python3 tool.py 'bash f' starts no shell from its argv.
+func simpleInterpreterRunsInlineCode(base string, words []*syntax.Word) bool {
+	letters := ""
+	switch base {
+	case "pwsh", "powershell":
+		return true
+	case "python", "python2", "python3":
+		letters = "c"
+	case "perl":
+		letters = "eE"
+	case "ruby", "lua", "Rscript", "osascript":
+		letters = "e"
+	case "node", "nodejs", "bun":
+		letters = "ep"
+	case "php":
+		letters = "rBRE"
+	}
+	awk := strings.HasSuffix(base, "awk")
+	file, inline := false, false
+	for _, word := range words {
+		value, static := simpleStaticScriptWord(word, nil)
+		if !static {
+			return true // A runtime word may be inline code.
+		}
+		switch {
+		case base == "deno" && value == "eval":
+			return true
+		case strings.HasPrefix(value, "--"):
+			name, _, _ := strings.Cut(value[2:], "=")
+			switch name {
+			case "eval", "print", "source":
+				return true
+			case "file", "exec":
+				file = true
+			}
+		case awk && len(value) > 1 && value[0] == '-':
+			switch value[1] {
+			case 'f', 'E':
+				file = true
+			case 'e':
+				inline = true
+			}
+		case letters != "" && len(value) > 1 && value[0] == '-' && strings.ContainsAny(value[1:], letters):
+			return true
+		}
+	}
+	return awk && (inline || !file)
 }
 
 // simpleScriptMayCallExported reports whether shell text may call an exported

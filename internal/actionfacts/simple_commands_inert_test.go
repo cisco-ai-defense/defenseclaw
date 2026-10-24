@@ -102,7 +102,7 @@ func TestSimpleCommandsInertDefinitionsRunNothing(t *testing.T) {
 		{"scriptblock to a member consumer", `{ Remove-Item -Recurse -Force C:\ } | ForEach-Object -MemberName Invoke`, DialectPowerShell, destructivePS, true},
 		{"scriptblock through an inert stage to a consumer", `{ Remove-Item -Recurse -Force C:\ } | Write-Output | ForEach-Object Invoke`, DialectPowerShell, destructivePS, true},
 		{"scriptblock to a consumer alias", `{ Remove-Item -Recurse -Force C:\ } | % Invoke`, DialectPowerShell, destructivePS, true},
-		{"scriptblock to a variable stage", `{ Remove-Item -Recurse -Force C:\ } | Out-Null $x`, DialectPowerShell, destructivePS, true},
+		{"scriptblock to a variable stage", `{ Remove-Item -Recurse -Force C:\ } | $x`, DialectPowerShell, destructivePS, true},
 		// Loop round 1 of continuation 3 (balanced defaults): more spellings
 		// in which a function name or a scriptblock is only data.
 		{"exported name in echo data", "f() { rm -rf /; }; export -f f; echo bash f", DialectPOSIX, destructivePOSIX, false},
@@ -141,9 +141,11 @@ func TestSimpleCommandsInertDefinitionsRunNothing(t *testing.T) {
 		{"scriptblock to Out-File with @ in a bare name", `{ Remove-Item -Recurse -Force C:\ } | Out-File report@2026.txt`, DialectPowerShell, destructivePS, false},
 		{"scriptblock to Out-File with brackets in a quoted name", `{ Remove-Item -Recurse -Force C:\ } | Out-File "out[1](2){3}.txt"`, DialectPowerShell, destructivePS, false},
 		{"scriptblock to Out-File with @ in a single-quoted name", `{ Remove-Item -Recurse -Force C:\ } | Out-File 'a@b.txt'`, DialectPowerShell, destructivePS, false},
-		{"scriptblock to Out-File with a subexpression name", `{ Remove-Item -Recurse -Force C:\ } | Out-File "r$(Get-Date).txt"`, DialectPowerShell, destructivePS, true},
-		{"scriptblock to Out-File with a variable name", `{ Remove-Item -Recurse -Force C:\ } | Out-File "r$x.txt"`, DialectPowerShell, destructivePS, true},
-		{"scriptblock to Out-File with a splat", `{ Remove-Item -Recurse -Force C:\ } | Out-File @params`, DialectPowerShell, destructivePS, true},
+		// Loop round 3: a sink's arguments are data, also when they expand.
+		{"scriptblock to Out-File with a subexpression name", `{ Remove-Item -Recurse -Force C:\ } | Out-File "r$(Get-Date).txt"`, DialectPowerShell, destructivePS, false},
+		{"scriptblock to Out-File with a variable name", `{ Remove-Item -Recurse -Force C:\ } | Out-File "r$x.txt"`, DialectPowerShell, destructivePS, false},
+		{"scriptblock to Out-File with a splat", `{ Remove-Item -Recurse -Force C:\ } | Out-File @params`, DialectPowerShell, destructivePS, false},
+		{"scriptblock to a property consumer with a variable", `{ Remove-Item -Recurse -Force C:\ } | Format-Table $p`, DialectPowerShell, destructivePS, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cwd, home := "/repo", "/home/alice"
