@@ -112,7 +112,7 @@ func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
 			skill := cfg.Scanners.SkillScanner
 			derived = derivedScannerGate(skill.EffectiveFailOnSeverity(), skill.EffectiveReviewQueueMin())
 		}
-		out[assetType] = compileAssetType(assetType, own, adm.Defaults, derived)
+		out[assetType] = compileAssetType(assetType, own, adm.Defaults, derived, assetType == config.AdmissionTypeMCP && legacyStrictMCP(adm))
 	}
 	return out
 }
@@ -225,9 +225,20 @@ func AdmissionFor(compiled map[string]CompiledAdmission, assetType string) *Comp
 	return &c
 }
 
-func compileAssetType(assetType string, own, defaults config.AdmissionAssetType, derived map[string]CompiledAction) CompiledAdmission {
+// legacyStrictMCP recognizes the v8 -> v9 strict preset representation:
+// migration wrote the strict per-skill actions but left MCP severities equal
+// to the old built-in map unset. Preserve that selected tier on upgrade.
+func legacyStrictMCP(adm config.AdmissionConfig) bool {
+	if adm.Defaults.AllowListBypassScan == nil || *adm.Defaults.AllowListBypassScan || !adm.Defaults.Actions.IsZero() {
+		return false
+	}
+	skill := compileActionMap(adm.Skill.Actions)
+	return skill["HIGH"] == actionQuarantine && skill["MEDIUM"] == actionQuarantine && skill["LOW"] == actionWarn
+}
+
+func compileAssetType(assetType string, own, defaults config.AdmissionAssetType, derived map[string]CompiledAction, legacyStrict bool) CompiledAdmission {
 	out := builtinAdmission(assetType)
-	if assetType == config.AdmissionTypeMCP {
+	if assetType == config.AdmissionTypeMCP && !legacyStrict {
 		// Balanced MCP scans report findings without refusing ordinary tools.
 		// Secure Client compiles the unchanged 1.0 actions separately.
 		for _, severity := range []string{"HIGH", "MEDIUM", "LOW"} {

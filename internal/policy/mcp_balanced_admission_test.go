@@ -40,6 +40,27 @@ func TestBalancedMCPFindingsWarnUnlessPolicyTightens(t *testing.T) {
 	strict := config.DefaultConfig()
 	strict.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
 	check("strict high", strict, "HIGH", "rejected")
+	// A config upgraded from the old strict preset can have only per-skill
+	// actions: the old built-in MCP actions supplied its other severities.
+	// Keep that selected strict behavior across the balanced default change.
+	legacyStrict := config.DefaultConfig()
+	bypass := false
+	legacyStrict.Admission.Defaults.AllowListBypassScan = &bypass
+	legacyStrict.Admission.Skill.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
+	legacyStrict.Admission.Skill.Actions.Medium = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
+	legacyStrict.Admission.Skill.Actions.Low = &config.AdmissionAction{Shorthand: config.AdmissionActionWarn}
+	check("upgraded strict high", legacyStrict, "HIGH", "rejected")
+	check("upgraded strict medium", legacyStrict, "MEDIUM", "rejected")
+	legacyMCP := AdmissionFor(CompileAdmission(legacyStrict), config.AdmissionTypeMCP)
+	if got := legacyMCP.Actions["LOW"]; got.Runtime != "block" || got.Install != "none" {
+		t.Fatalf("upgraded strict low action %+v, want runtime disabled", got)
+	}
+	legacyStrict.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionWarn}
+	check("upgraded strict explicit high warning", legacyStrict, "HIGH", "warning")
+	// Disabling allow-list bypass alone does not select the old strict preset.
+	balancedNoBypass := config.DefaultConfig()
+	balancedNoBypass.Admission.Defaults.AllowListBypassScan = &bypass
+	check("balanced without bypass high", balancedNoBypass, "HIGH", "warning")
 	secure := config.DefaultConfig()
 	secure.DeploymentMode = "managed_enterprise"
 	secure.Enterprise.Profile = "secure_client"

@@ -41,7 +41,7 @@ def test_builtin_summaries_match_yaml(policy_dir: Path) -> None:
     assert (default.block_at, default.alert_at, default.install_block_at) == ("CRITICAL", "MEDIUM+", "HIGH+")
     assert default.firewall_default == "deny"
     assert default.hilt is False
-    assert default.scanner_overrides == 4
+    assert default.scanner_overrides == 5
     assert default.adds_webhooks is False  # webhooks: [] adds nothing (GAP-1273)
     assert default.edited is False
     assert default.sets_cisco is False
@@ -92,9 +92,22 @@ def test_active_policy_is_the_preset_the_config_holds(policy_dir: Path) -> None:
     migrated.skill.actions = {"critical": "quarantine", "high": "quarantine", "medium": "quarantine",
                               "low": "warn", "info": "warn"}
     cfg.admission = migrated
+    from defenseclaw.enforce.admission import compile_admission
+
+    mcp = compile_admission(cfg, "mcp")
+    assert mcp.actions["HIGH"][0].install == "block"
+    assert mcp.actions["MEDIUM"][0].install == "block"
+    assert mcp.actions["LOW"][0].runtime == "disable"
     assert pc.active_policy_name(policy_dir, cfg) == "strict"
+    migrated.mcp.actions["high"] = "warn"
+    assert compile_admission(cfg, "mcp").actions["HIGH"][0].install == "none"
+    migrated.mcp.actions.clear()
     cfg.guardrail.block_at = "LOW"
     assert pc.active_policy_name(policy_dir, cfg) == ""
+
+    balanced_no_bypass = default_config()
+    balanced_no_bypass.admission.defaults.allow_list_bypass_scan = False
+    assert compile_admission(balanced_no_bypass, "mcp").actions["HIGH"][0].install == "none"
 
 
 def test_user_policy_shadows_builtin_and_bad_yaml_skipped(policy_dir: Path) -> None:
