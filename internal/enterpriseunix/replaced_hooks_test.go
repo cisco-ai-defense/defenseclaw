@@ -10,12 +10,53 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// A standalone manifest may name an account without publishing its UID.
+// The guardian resolves that row, so the lifecycle must fence it as well.
+func TestReplacedHookTargetsResolveNameOnlyManifestRows(t *testing.T) {
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uid, err := strconv.Atoi(current.Uid)
+	if err != nil || uid <= 0 {
+		t.Skip("the fixture needs a non-root account")
+	}
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.2")}))
+	dataDir := filepath.Join(current.HomeDir, "managed-data")
+	writeHostFile(t, h, h.env.Layout.ManifestPath, fmt.Sprintf("version: 1\ntargets:\n  - user: %q\n    data_dir: %q\n    connector: claudecode\n", current.Username, dataDir))
+	l := &lifecycle{env: h.env}
+	targets := l.replacedHookTargets(t.Context())
+	if len(targets) != 1 || targets[0].uid != uid || targets[0].home != current.HomeDir || targets[0].folder() != filepath.Join(dataDir, "hooks") {
+		t.Fatalf("name-only targets = %+v, want uid %d and hooks in %s", targets, uid, dataDir)
+	}
+	if err := os.MkdirAll(h.env.P(current.HomeDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeReplacedHooks(t, h.env.P(targets[0].folder()), replacedHardening103)
+	var stops int
+	var stoppedUnfenced bool
+	h.services.observe = func(call string) {
+		if strings.HasPrefix(call, "stop ") && strings.HasSuffix(call, " "+unitGateway) {
+			stops++
+			data, _ := os.ReadFile(h.env.P(filepath.Join(targets[0].folder(), hardeningFile)))
+			stoppedUnfenced = stoppedUnfenced || !strings.Contains(string(data), lifecycleFenceTag)
+		}
+	}
+	requireOK(t, h.run(Options{Action: ActionUpgrade, PayloadDir: h.payload("1.0.3"), ProductVersion: "1.0.3"}))
+	if stops == 0 || stoppedUnfenced {
+		t.Fatalf("the gateway stopped %d times, with an unfenced old hook: %t", stops, stoppedUnfenced)
+	}
+}
 
 // replacedHardening103 is the decision of a 1.0.3 _hardening.sh that a
 // managed shell hook's fail_unreachable reads, verbatim, with the two

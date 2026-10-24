@@ -28,6 +28,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
 // The replaced release's managed shell hooks (GAP-1123). A 1.0.3 managed
@@ -140,7 +141,7 @@ func (l *lifecycle) fenceReplacedHooks(ctx context.Context) {
 		return
 	}
 	l.replacedHooksFenced = true
-	targets := l.replacedHookTargets()
+	targets := l.replacedHookTargets(ctx)
 	if len(targets) == 0 {
 		return
 	}
@@ -184,7 +185,7 @@ func (t replacedHookTarget) folder() string { return filepath.Join(t.home, t.rel
 // replacedHookTargets are the hook folders of the guardian manifest's
 // accounts: the target's data_dir, by default ~/.defenseclaw, and its hooks
 // folder.
-func (l *lifecycle) replacedHookTargets() []replacedHookTarget {
+func (l *lifecycle) replacedHookTargets(ctx context.Context) []replacedHookTarget {
 	env := l.env
 	manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath))
 	if err != nil {
@@ -199,16 +200,33 @@ func (l *lifecycle) replacedHookTargets() []replacedHookTarget {
 	}
 	seen := map[string]bool{}
 	var out []replacedHookTarget
+	resolver := unixidentity.Default(ctx)
 	for _, target := range manifest.Targets {
-		if target.UID == nil || *target.UID <= 0 {
-			continue
+		uid := 0
+		home := strings.TrimSpace(target.UserHome)
+		if target.UID != nil {
+			uid = *target.UID
+			if home == "" {
+				home = homes[uid]
+			}
+		} else if name := strings.TrimSpace(target.User); name != "" {
+			// The guardian also resolves a name-only row. Leaving it out here
+			// would stop the gateway before its old hook was fenced.
+			account, lookupErr := resolver.LookupUser(name)
+			if lookupErr != nil {
+				l.result.AddWarning(codeReplacedHooks, fmt.Sprintf("the DefenseClaw hooks of user %s were not fenced for the gateway restart: resolve the account: %v", name, lookupErr))
+				continue
+			}
+			uid = account.UID
+			if home == "" {
+				home = account.Home
+			} else if filepath.Clean(home) != filepath.Clean(account.Home) {
+				l.result.AddWarning(codeReplacedHooks, fmt.Sprintf("the DefenseClaw hooks of user %s were not fenced for the gateway restart: its manifest home %s differs from the directory home %s", name, home, account.Home))
+				continue
+			}
 		}
-		uid := *target.UID
-		home := filepath.Clean(strings.TrimSpace(target.UserHome))
-		if strings.TrimSpace(target.UserHome) == "" {
-			home = homes[uid]
-		}
-		if !filepath.IsAbs(home) || home == "/" {
+		home = filepath.Clean(home)
+		if uid <= 0 || !filepath.IsAbs(home) || home == "/" {
 			continue
 		}
 		rel := filepath.Join(".defenseclaw", "hooks")
