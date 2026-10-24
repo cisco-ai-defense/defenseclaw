@@ -26,10 +26,9 @@ const (
 	// late and leave the on-disk WAL above it (GAP-0952).
 	auditWALGuardHeadroomBytes = 80 << 20
 	auditWALGuardTriggerBytes  = auditWALLimitBytes - auditWALGuardHeadroomBytes
-	// auditWALWriterBudget bounds the idle-gap trim, the only statement a pass
-	// runs on the audit store's writer connection (the catch-up copy holds it
-	// for at most 100 ms, or up to 2 s to bring a log over the limit back,
-	// doubled after each such hold that could not, up to 30 s).
+	// auditWALWriterBudget bounds the idle-gap trim and catch-up writer holds.
+	// A catch-up over the limit also holds it for at most 100 ms; after a
+	// miss, the next pass settles checkpoint pages off the writer.
 	// Hooks need that connection for correlation and their verdict records, so
 	// never let maintenance consume a hook's budget.
 	auditWALWriterBudget = 200 * time.Millisecond
