@@ -184,7 +184,7 @@ On a managed standalone computer, hooks reject an invalid runtime, an unverified
 
 ## The environment does not set the fail mode
 
-A per-user 1.0.4 hook reads `config.yaml` next to its own hooks on each call that reaches a classified gateway outage. Its helper checks the current policy tier and the machine's managed marker. A missing or unreadable config or marker state closes the outage. The hook's inherited `DEFENSECLAW_CONFIG`, `DEFENSECLAW_HOME` and `HOME` cannot select a different config or helper to open it. Other per-user failures stay closed. On a managed computer the administrator's protected config selects the installed mode, which defaults to closed and covers a classified outage only when explicitly open. Secure Client keeps its separate mode. `DEFENSECLAW_FAIL_MODE` is not read by 1.0.4 hooks.
+A per-user 1.0.4 hook reads `config.yaml` next to its own hooks on each call that reaches a classified gateway outage. Its helper checks the current policy tier and the machine's managed marker. A missing or unreadable config, or a managed marker that cannot be verified, closes the outage. The hook's inherited `DEFENSECLAW_CONFIG`, `DEFENSECLAW_HOME` and `HOME` cannot select a different config or helper to open it. Other per-user failures stay closed. On a managed computer the administrator's protected config selects the installed mode, which defaults to closed and covers a classified outage only when explicitly open. Secure Client keeps its separate mode. `DEFENSECLAW_FAIL_MODE` is not read by 1.0.4 hooks.
 
 `defenseclaw status` and `defenseclaw doctor` report the effective config and any registration drift. A variable set in the agent's shell cannot widen a per-user outage mode.
 
