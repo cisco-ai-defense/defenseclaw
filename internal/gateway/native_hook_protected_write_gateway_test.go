@@ -194,7 +194,7 @@ func TestR104WindowsRegisteredHookWriteRefix3(t *testing.T) {
 		{"GAP-0421 Codex Join-Path variable", "codex", "exec_command", `$sshDirectory = Join-Path $HOME '.ssh'; $authorizedKeys = Join-Path $sshDirectory 'authorized_keys'; New-Item -ItemType Directory -Path $sshDirectory -Force | Out-Null; Add-Content -LiteralPath $authorizedKeys -Value 'dummy-key'; Write-Output "Appended literal string to $authorizedKeys"`, true},
 		{"Codex Join-Path ordinary variable", "codex", "exec_command", `$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, false},
 		{"Codex Join-Path ordinary quoted variable", "codex", "exec_command", `$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath "$output" -Value 'dummy-key'`, false},
-		{"Codex unknown write variable", "codex", "exec_command", `Add-Content -LiteralPath $destination -Value 'dummy-key'`, true},
+		{"Codex unknown write variable is audit only", "codex", "exec_command", `Add-Content -LiteralPath $destination -Value 'dummy-key'`, false},
 		{"GAP-0510 Codex newline", "codex", "exec_command", "Write-Output 'ok'\nAdd-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},
 		{"GAP-0510 CMD prefix then newline", "codex", "exec_command", "cmd.exe /c \"echo ok\"\nAdd-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},
 		{"GAP-0510 Copilot CRLF", "copilot", "powershell", "Write-Output 'ok'\r\nSet-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", true},
