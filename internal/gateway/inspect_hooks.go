@@ -497,39 +497,26 @@ func toolResultAlertSeverity(severity string) string {
 // that scanned this request. Findings from a judge or another category do not
 // prove a sensitive value; only matched entity values count.
 func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
-	g := a.decisionGeneration(ctx)
-	if g == nil {
-		return "", false
-	}
-	pack := g.RulePacks["conn:"+connectorName]
-	if pack == nil {
-		pack = g.RulePacks["global"]
-	}
-	if g.Profiles != nil {
-		resolved := resolvedGuardrailProfileFrom(ctx)
-		if resolved == nil || resolved.set != g.Profiles {
-			resolved = resolveGuardrailProfileFor(ctx, g.Profiles)
-		}
-		var meet *profileMeet
-		if resolved != nil {
-			meet = g.Profiles.meet(resolved.decision.Name)
-		}
-		if meet != nil {
-			if selected := meet.rulePack(ctx, a, g.Profiles, connectorName); selected != nil {
-				pack = selected
-			}
-		} else if resolved != nil && resolved.derived != nil {
-			key := effectiveRulePackKey(resolved.derived, connectorName)
-			if key != effectiveRulePackKey(g.Profiles.base, connectorName) {
-				if selected := g.Profiles.packs[key]; selected != nil {
-					pack = selected
-				} else if retry := g.Profiles.missing[key]; retry != nil {
-					if selected := retry.rulePack(time.Now()); selected != nil {
-						pack = selected
-					}
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
+		if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
+			for _, member := range meet.members {
+				if reason, alert := a.sensitiveToolResultAlertSingle(meetMemberContext(ctx, resolved, member), connectorName, tool, severity, findings, output); alert {
+					return reason, true
 				}
 			}
+			return "", false
 		}
+	}
+	return a.sensitiveToolResultAlertSingle(ctx, connectorName, tool, severity, findings, output)
+}
+
+func (a *APIServer) sensitiveToolResultAlertSingle(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
+	if a.decisionGeneration(ctx) == nil {
+		return "", false
+	}
+	pack := a.connectorRulePack(ctx, connectorName)
+	if pack == nil {
+		return "", false
 	}
 	entry := pack.LookupSensitiveTool(tool)
 	if entry == nil || !entry.ResultInspection {
@@ -572,7 +559,11 @@ func (a *APIServer) buildVerdict(ctx context.Context, ruleFindings []RuleFinding
 	if cfg != nil && cfg.SecureClientIntegration() {
 		connector = ""
 	}
-	return buildVerdictWithConfig(ruleFindings, direction, cfg, connector, confirmable)
+	verdict := buildVerdictWithConfig(ruleFindings, direction, cfg, connector, confirmable)
+	if len(ruleFindings) > 0 {
+		verdict.Action = profileMeetActionForFindings(ctx, cfg, connector, ruleFindings, confirmable, true)
+	}
+	return verdict
 }
 
 func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *config.Config, connector string, confirmable bool) *ToolInspectVerdict {

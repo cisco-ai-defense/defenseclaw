@@ -276,19 +276,24 @@ func dispatchTrustedAction(
 		return dispatchTrustedActionWith(parent, request, facts, generation, budget, &telemetry)
 	}
 	// A strictest combination of profiles judges the call with each
-	// member's own rules, within one budget, and keeps the strongest finding
-	// of each rule.
+	// member's own rules within one budget. Each finding keeps its member for
+	// the later verdict and audit, even when two members share a rule ID.
 	if budget == nil {
 		budget = newTrustedActionBudget(true)
 	}
-	lists := make([][]RuleFinding, 0, len(generation.members))
-	for _, member := range generation.members {
+	for i, member := range generation.members {
 		var memberTelemetry trustedActionTelemetry
-		lists = append(lists, dispatchTrustedActionWith(parent, request, facts, member, budget, &memberTelemetry))
+		found := dispatchTrustedActionWith(parent, request, facts, member, budget, &memberTelemetry)
+		if i < len(generation.memberNames) {
+			for j := range found {
+				found[j].profile = generation.memberNames[i]
+			}
+		}
+		findings = append(findings, found...)
 		telemetry.widen(memberTelemetry)
 	}
 	noteMeetBudget(generation, budget)
-	return strongestRuleFindings(lists, trustedActionFindingKey)
+	return findings
 }
 
 // dispatchTrustedActionWith is dispatchTrustedAction's judgment of the

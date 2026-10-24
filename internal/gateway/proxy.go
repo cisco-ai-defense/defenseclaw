@@ -661,7 +661,7 @@ func (p *GuardrailProxy) toolCallAction(ctx context.Context, findings []RuleFind
 		connectorName = ""
 	}
 	if cfg := requestPolicyConfig(ctx); cfg != nil {
-		return guardrailActionForConnectorFindings(cfg, connectorName, findings, false)
+		return profileMeetActionForFindings(ctx, cfg, connectorName, findings, false, false)
 	}
 	p.rtMu.RLock()
 	gc := p.cfg

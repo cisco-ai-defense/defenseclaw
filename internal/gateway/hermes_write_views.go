@@ -60,7 +60,7 @@ func (a *APIServer) inspectHermesWriteToolPolicyCtx(
 	}
 	cfg, connectorName := a.decisionConfig(ctx), firstNonEmpty(req.Connector, action.Connector)
 	for _, extra := range hermesWriteViewRequests(ctx, action, views) {
-		verdict = mergeSandboxShellCommandVerdict(cfg, connectorName, verdict, dispatchTrustedAction(ctx, extra))
+		verdict = mergeSandboxShellCommandVerdict(ctx, cfg, connectorName, verdict, dispatchTrustedAction(ctx, extra))
 	}
 	return verdict
 }

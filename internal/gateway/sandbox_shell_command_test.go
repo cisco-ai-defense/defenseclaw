@@ -309,7 +309,7 @@ func TestMergeSandboxShellCommandVerdict(t *testing.T) {
 	allow := &ToolInspectVerdict{Action: "allow", Severity: "CRITICAL", Reason: "matched: E2E-SANDBOX-MARKER:E2E sandbox marker command",
 		Findings: []string{"E2E-SANDBOX-MARKER:E2E sandbox marker command"}, DetailedFindings: []RuleFinding{candidate}}
 
-	got := mergeSandboxShellCommandVerdict(nil, "opencode", allow, []RuleFinding{proven})
+	got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", allow, []RuleFinding{proven})
 	if got == allow || got.Action != "block" || got.Severity != "CRITICAL" ||
 		len(got.DetailedFindings) != 1 || !got.DetailedFindings[0].contributesToEnforcement() ||
 		len(got.Findings) != 1 || got.Reason != "matched: E2E-SANDBOX-MARKER:E2E sandbox marker command" {
@@ -320,19 +320,19 @@ func TestMergeSandboxShellCommandVerdict(t *testing.T) {
 	}
 	// A candidate alone, or no finding, adds nothing.
 	for _, findings := range [][]RuleFinding{{candidate}, nil} {
-		if got := mergeSandboxShellCommandVerdict(nil, "opencode", allow, findings); got != allow {
+		if got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", allow, findings); got != allow {
 			t.Fatalf("merged %+v = %+v", findings, got)
 		}
 	}
 	// Never lifts a verdict: a block stays a block whatever the command.
 	block := &ToolInspectVerdict{Action: "block", Severity: "HIGH", Findings: []string{"STATIC-BLOCK"}}
-	if got := mergeSandboxShellCommandVerdict(nil, "opencode", block, nil); got != block {
+	if got := mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", block, nil); got != block {
 		t.Fatalf("block = %+v", got)
 	}
 	// A new rule is added next to the call's findings and raises severity.
 	low := &ToolInspectVerdict{Action: "allow", Severity: "LOW", Findings: []string{"OTHER:Other"},
 		DetailedFindings: []RuleFinding{{RuleID: "OTHER", Title: "Other", Severity: "LOW"}}}
-	got = mergeSandboxShellCommandVerdict(nil, "opencode", low, []RuleFinding{proven})
+	got = mergeSandboxShellCommandVerdict(t.Context(), nil, "opencode", low, []RuleFinding{proven})
 	if got.Action != "block" || got.Severity != "CRITICAL" || got.Confidence != 0.99 ||
 		len(got.DetailedFindings) != 2 || len(got.Findings) != 2 {
 		t.Fatalf("merged = %+v", got)

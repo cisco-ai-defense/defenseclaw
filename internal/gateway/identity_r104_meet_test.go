@@ -14,7 +14,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/agentidentity"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
@@ -297,31 +296,6 @@ func TestProfileMeetEnforcesTheRulesOfEveryPack(t *testing.T) {
 		if findings := scanRuleGeneration(merged, text, "Bash", ruleScanOptions{}); len(findings) == 0 {
 			t.Errorf("%q: no finding; want the member's rule to fire", text)
 		}
-	}
-}
-
-// Allows are the intersection: a suppression applies only when every
-// member's pack has it; a sensitive tool any member inspects is inspected.
-func TestProfileMeetIntersectsSuppressionsAndUnionsSensitiveTools(t *testing.T) {
-	shared := guardrail.FindingSuppression{ID: "shared", FindingPattern: "PII-EMAIL"}
-	only := guardrail.FindingSuppression{ID: "only-a", FindingPattern: "SECRET-KEY"}
-	a := &guardrail.RulePack{Suppressions: &guardrail.SuppressionsConfig{FindingSupps: []guardrail.FindingSuppression{shared, only}},
-		SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{{Name: "read_db", MinEntitiesAlert: 5}}}}
-	b := &guardrail.RulePack{Suppressions: &guardrail.SuppressionsConfig{FindingSupps: []guardrail.FindingSuppression{shared}},
-		SensitiveTools: &guardrail.SensitiveToolsConfig{Tools: []guardrail.SensitiveTool{{Name: "read_db", ResultInspection: true, MinEntitiesAlert: 2}, {Name: "fetch", JudgeResult: true}}}}
-	merged := mergeRulePacks([]*guardrail.RulePack{a, b}, false)
-	if len(merged.Suppressions.FindingSupps) != 1 || merged.Suppressions.FindingSupps[0].ID != "shared" {
-		t.Fatalf("suppressions %+v; want only the shared one", merged.Suppressions.FindingSupps)
-	}
-	db := merged.LookupSensitiveTool("read_db")
-	if db == nil || !db.ResultInspection || db.MinEntitiesAlert != 2 || merged.LookupSensitiveTool("fetch") == nil {
-		t.Fatalf("sensitive tools %+v; want every tool at its strictest", merged.SensitiveTools)
-	}
-	if none := mergeRulePacks([]*guardrail.RulePack{a, b}, true); len(none.Suppressions.FindingSupps) != 0 {
-		t.Fatalf("a member with no pack: suppressions %+v; want none", none.Suppressions.FindingSupps)
-	}
-	if len(a.Suppressions.FindingSupps) != 2 {
-		t.Fatal("the merge changed a member's pack")
 	}
 }
 

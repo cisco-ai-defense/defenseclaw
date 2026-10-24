@@ -108,7 +108,7 @@ func TestMeetReusesAJudgedExpressionAfterTheBudgetIsSpent(t *testing.T) {
 			if budget.consumed != costA || !budget.reached {
 				t.Errorf("meet cost %d (reached %v); want a's alone (%d): b's shared expression costs nothing more", budget.consumed, budget.reached, costA)
 			}
-			x := findingWithID(findings, "BUD-X")
+			x := strongestMeetFinding(findings, "BUD-X")
 			if x == nil || x.Severity != "HIGH" || !x.contributesToEnforcement() {
 				t.Fatalf("meet: BUD-X %+v; want b's HIGH finding, which blocks at block_at HIGH", x)
 			}

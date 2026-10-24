@@ -86,12 +86,7 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 	}
 	intent := guardrailActionAllow
 	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		intent = guardrailActionForConnector(
-			a.decisionConfig(ctx),
-			req.ConnectorName,
-			HighestSeverity(enforceable),
-			true,
-		)
+		intent = profileMeetActionForFindings(ctx, a.decisionConfig(ctx), req.ConnectorName, enforceable, true, false)
 	}
 	resp = mergeAgentHookFindings(profile, req, resp, findings, intent)
 	if !req.SuppressCorrelationEmit {
@@ -186,6 +181,11 @@ func promotedArtifactFindings(
 				generation:         member,
 				budget:             budget,
 			})
+			if generation != nil && i < len(generation.memberNames) {
+				for j := range matched {
+					matched[j].profile = generation.memberNames[i]
+				}
+			}
 			lists = append(lists, matched)
 			for _, finding := range matched {
 				if _, duplicate := seenRules[i][finding.RuleID]; duplicate {
@@ -212,10 +212,11 @@ func promotedArtifactFindings(
 			)
 		}
 	}
-	if len(findings) == 1 {
-		return findings[0]
+	var all []RuleFinding
+	for _, member := range findings {
+		all = append(all, member...)
 	}
-	return strongestRuleFindings(findings, func(ruleID string) string { return ruleID })
+	return all
 }
 
 // promotedArtifactSequentialReachabilityEligible masks a narrow POSIX case

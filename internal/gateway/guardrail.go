@@ -91,6 +91,10 @@ type ScanVerdict struct {
 	TraceContext        trace.SpanContext `json:"-"`
 	EnforcementID       string            `json:"-"`
 	FindingsEmitted     bool              `json:"-"`
+	// findingProfiles parallels Findings for a profile meet. It is retained
+	// for the audit emitter and never exposed to the caller.
+	findingProfiles   []string
+	findingSeverities []string
 	// findingSeverity is the severity of the judge that reported each
 	// finding of a verdict merged from several judges (mergeJudgeVerdicts),
 	// whose own severity is the strictest one. In-process only.
@@ -748,6 +752,67 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 
 // inspectStrategy runs the configured detection strategy on one text.
 func (g *GuardrailInspector) inspectStrategy(ctx context.Context, strategy, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
+	if !g.managedMode {
+		if resolved := proxyProfileFor(ctx); resolved != nil && resolved.set != nil {
+			if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
+				var combined *ScanVerdict
+				connector := profileRequestConnector(ctx)
+				for _, member := range meet.members {
+					cfg := resolved.set.profileConfig(member)
+					memberCtx := meetMemberContext(ctx, resolved, member)
+					// Judge each member under its own settings before the observe
+					// ceiling. The outer meet applies the strongest member action.
+					verdict := g.inspectStrategySingle(memberCtx, strategy, direction, content, messages, model, "action")
+					if verdict == nil {
+						continue
+					}
+					if !configBlocksOn(cfg, connector, profilePathInspect) &&
+						(verdict.Action == guardrailActionBlock || verdict.Action == guardrailActionConfirm) {
+						verdict.Action = guardrailActionAlert
+					}
+					if combined == nil {
+						combined = &ScanVerdict{Action: guardrailActionAllow, Severity: "NONE"}
+					}
+					if strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action {
+						combined.Action, combined.Reason = verdict.Action, verdict.Reason
+					}
+					if guardrailSeverityRank(verdict.Severity) > guardrailSeverityRank(combined.Severity) {
+						combined.Severity = verdict.Severity
+					}
+					if combined.Scanner == "" {
+						combined.Scanner = verdict.Scanner
+					}
+					combined.CiscoElapsedMs += verdict.CiscoElapsedMs
+					combined.JudgeFailed = combined.JudgeFailed || verdict.JudgeFailed
+					if verdict.Confidence > combined.Confidence {
+						combined.Confidence = verdict.Confidence
+					}
+					if verdict.RedactionEnabled != nil &&
+						(combined.RedactionEnabled == nil || *verdict.RedactionEnabled) {
+						combined.RedactionEnabled = verdict.RedactionEnabled
+					}
+					combined.Findings = append(combined.Findings, verdict.Findings...)
+					for _, finding := range verdict.Findings {
+						combined.findingProfiles = append(combined.findingProfiles, member)
+						severity := verdict.Severity
+						if own := verdict.findingSeverity[finding]; own != "" {
+							severity = own
+						}
+						combined.findingSeverities = append(combined.findingSeverities, severity)
+					}
+					combined.ScannerSources = appendUniqueStrings(combined.ScannerSources, verdict.ScannerSources...)
+				}
+				if combined != nil {
+					return combined
+				}
+				return allowVerdict("local-pattern")
+			}
+		}
+	}
+	return g.inspectStrategySingle(ctx, strategy, direction, content, messages, model, mode)
+}
+
+func (g *GuardrailInspector) inspectStrategySingle(ctx context.Context, strategy, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	switch {
 	case g.managedMode:
 		// managed_enterprise: Cisco AI Defense (CMID-authenticated) is

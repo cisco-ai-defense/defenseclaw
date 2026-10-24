@@ -58,7 +58,7 @@ func TestShippedPackMeetKeepsTheStrictDefinitionOfASharedRuleID(t *testing.T) {
 				if generation == nil {
 					t.Fatal("fixture: no profile rule generation")
 				}
-				return findingWithID(scanContentRuleCategoryWithGeneration(generation, text, "message", ruleContentScopeUntrusted, ""), "ENT-EMAIL-BULK")
+				return strongestMeetFinding(scanContentRuleCategoryWithGeneration(generation, text, "message", ruleContentScopeUntrusted, ""), "ENT-EMAIL-BULK")
 			}
 			profiles := map[string]config.GuardrailProfile{
 				order[0]: {Mode: "action", BlockAt: "MEDIUM", RulePackDir: filepath.Join(root, "default")},
@@ -116,7 +116,7 @@ func TestMeetScansEachDefinitionOfACollidingRuleID(t *testing.T) {
 					sources[0], sources[1] = sources[1], sources[0]
 				}
 				merged := meetRuleGeneration(sources)
-				got := findingWithID(scanRuleGeneration(merged, tc.text, "Bash", ruleScanOptions{}), "R-SHARED")
+				got := strongestMeetFinding(scanRuleGeneration(merged, tc.text, "Bash", ruleScanOptions{}), "R-SHARED")
 				if got == nil || got.Severity != "HIGH" {
 					t.Fatalf("finding %+v; want the stronger member's HIGH", got)
 				}

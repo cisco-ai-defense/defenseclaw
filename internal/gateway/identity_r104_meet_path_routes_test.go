@@ -22,8 +22,8 @@ import (
 // hook acts and inspect observes, so a acts on the Codex hook only; in
 // "inspect only" the reverse. Every inspect route (tool, request, response,
 // tool-response), unscoped and with a Codex inspect credential, blocks a's
-// marker and b's MEDIUM marker only where a acts on inspect, and b's HIGH
-// marker always; the Codex hook route, for UserPromptSubmit and
+// marker only where a acts on inspect, and b's HIGH marker always. B's
+// MEDIUM marker alerts under its own threshold; the Codex hook route, for UserPromptSubmit and
 // PreToolUse, only where a acts on the hook.
 func TestMeetMemberActsOnlyOnItsOwnPathOnEveryRoute(t *testing.T) {
 	stubProfileSources(t)
@@ -67,13 +67,12 @@ func TestMeetMemberActsOnlyOnItsOwnPathOnEveryRoute(t *testing.T) {
 				meetName := config.ProfileMeetName([]string{"a", "b"})
 
 				markers := []struct {
-					text           string
-					onlyWhereAActs bool
-					name           string
+					text string
+					name string
 				}{
-					{meetPlainMarker("ROUTE-A"), true, "a's HIGH marker"},
-					{meetMediumMarker("ROUTE-B"), true, "b's MEDIUM marker"},
-					{meetPlainMarker("ROUTE-B"), false, "b's HIGH marker"},
+					{meetPlainMarker("ROUTE-A"), "a's HIGH marker"},
+					{meetMediumMarker("ROUTE-B"), "b's MEDIUM marker"},
+					{meetPlainMarker("ROUTE-B"), "b's HIGH marker"},
 				}
 				quoted := func(s string) string {
 					raw, _ := json.Marshal(s)
@@ -100,7 +99,8 @@ func TestMeetMemberActsOnlyOnItsOwnPathOnEveryRoute(t *testing.T) {
 				for _, credential := range []string{"", "codex"} {
 					for _, route := range routes {
 						for _, marker := range markers {
-							want := !marker.onlyWhereAActs || setup.aInspect
+							want := marker.text == meetPlainMarker("ROUTE-B") ||
+								marker.text == meetPlainMarker("ROUTE-A") && setup.aInspect
 							ctx := subject
 							if credential != "" {
 								ctx = withAuthenticatedInspectConnector(ctx, credential)
@@ -112,9 +112,8 @@ func TestMeetMemberActsOnlyOnItsOwnPathOnEveryRoute(t *testing.T) {
 								seen = resolvedGuardrailProfileFrom(r.Context())
 								route.handler(w, r)
 							})).ServeHTTP(rec, req)
-							// An unscoped prompt or response inspect scans the global
-							// scope, where a acts only in "inspect only"; elsewhere b
-							// covers a there and decides alone.
+							// On an unscoped prompt or response inspect the global
+							// scope may be covered by b alone.
 							wantName := meetName
 							if credential == "" && route.path != "/api/v1/inspect/tool" && !setup.aInspect {
 								wantName = "b"
@@ -138,7 +137,8 @@ func TestMeetMemberActsOnlyOnItsOwnPathOnEveryRoute(t *testing.T) {
 					}},
 				} {
 					for _, marker := range markers {
-						want := !marker.onlyWhereAActs || setup.aHook
+						want := marker.text == meetPlainMarker("ROUTE-B") ||
+							marker.text == meetPlainMarker("ROUTE-A") && setup.aHook
 						req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", strings.NewReader(event.body(marker.text))).WithContext(subject)
 						setTestCodexHookBinding(req, event.name, defaultTestCodexHookContract)
 						rec := httptest.NewRecorder()

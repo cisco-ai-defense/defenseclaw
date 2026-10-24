@@ -480,7 +480,7 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 		// A judge finding is titled by its category and keeps the
 		// severity of the judge that reported it, not the strictest one
 		// of the judges merged into the lane verdict (GAP-1886).
-		for _, f := range aid.Findings {
+		for i, f := range aid.Findings {
 			rf := RuleFinding{
 				RuleID:   f,
 				Title:    f,
@@ -489,6 +489,12 @@ func mergeWithLaneVerdict(local *ToolInspectVerdict, aid *ScanVerdict, findingTa
 			}
 			if s := aid.findingSeverity[f]; s != "" {
 				rf.Severity = s
+			}
+			if i < len(aid.findingSeverities) && aid.findingSeverities[i] != "" {
+				rf.Severity = aid.findingSeverities[i]
+			}
+			if i < len(aid.findingProfiles) {
+				rf.profile = aid.findingProfiles[i]
 			}
 			if findingTag == "llm-judge:" {
 				if title := judgeFindingTitle(f); title != "" {
@@ -787,12 +793,12 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 		confidence := highestInspectConfidence(ruleFindings, cgFindings, severity)
 
-		runtimeAction := guardrailActionForConnectorFindings(
-			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
+		runtimeAction := profileMeetActionForFindings(
+			ctx, a.decisionConfig(ctx), req.Connector, ruleFindings, true, false,
 		)
 		if enforceableSeverity != "NONE" {
-			codeGuardAction := guardrailActionForConnector(
-				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,
+			codeGuardAction := profileMeetActionForSeverity(
+				ctx, a.decisionConfig(ctx), req.Connector, enforceableSeverity, true, false,
 			)
 			runtimeAction = strongerGuardrailAction(runtimeAction, codeGuardAction)
 		}
@@ -1090,7 +1096,7 @@ func (a *APIServer) codeGuardOnlyVerdict(
 	)
 	action := guardrailActionAllow
 	if enforceableSeverity != "NONE" {
-		action = guardrailActionForConnector(a.decisionConfig(ctx), req.Connector, enforceableSeverity, true)
+		action = profileMeetActionForSeverity(ctx, a.decisionConfig(ctx), req.Connector, enforceableSeverity, true, false)
 	}
 	findingStrs := make([]string, 0, len(cgFindings))
 	for _, cf := range cgFindings {
@@ -1248,11 +1254,9 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 
 		action := guardrailActionAllow
 		if enforceable := enforceableRuleFindings(ruleFindings); len(enforceable) > 0 {
-			action = guardrailContentAction(
-				a.decisionConfig(ctx),
-				req.Connector,
-				HighestSeverity(enforceable),
-				strings.EqualFold(req.Direction, "outbound"),
+			action = profileMeetActionForFindings(
+				ctx, a.decisionConfig(ctx), req.Connector, enforceable,
+				strings.EqualFold(req.Direction, "outbound"), true,
 			)
 		}
 
@@ -1369,9 +1373,6 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *guardrail.RulePack {
 	connector = canonicalConnectorRulePackKey(connector)
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil && resolved.derived != nil {
-		if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
-			return meet.rulePack(ctx, a, resolved.set, connector)
-		}
 		key := effectiveRulePackKey(resolved.derived, connector)
 		if pack := resolved.set.packs[key]; pack != nil {
 			return pack
@@ -1422,6 +1423,81 @@ func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *gu
 // failure/timeout is logged LOUDLY to stderr; the lane never silently
 // substitutes a clean pass.
 func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
+		if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
+			// The hook client has one round-trip budget even when several
+			// profiles judge. Each member inherits the same deadline.
+			timeout := defaultHookJudgeTimeout
+			if cfg := a.decisionConfig(ctx); cfg != nil && cfg.Guardrail.Judge.HookTimeout > 0 {
+				timeout = time.Duration(cfg.Guardrail.Judge.HookTimeout * float64(time.Second))
+			}
+			judgeCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			var combined *ScanVerdict
+			for _, member := range meet.members {
+				memberCtx := meetMemberContext(judgeCtx, resolved, member)
+				memberCurrent := meetMemberJudgeCurrent(memberCtx, connector, current, member)
+				verdict := a.runHookJudgeSingle(memberCtx, strategyDirection, judgeDirection, connector, content, toolName, memberCurrent)
+				if verdict == nil {
+					continue
+				}
+				if !configBlocksOn(resolved.set.profileConfig(member), connector, requestProfilePath(ctx)) &&
+					(verdict.Action == guardrailActionBlock || verdict.Action == guardrailActionConfirm) {
+					verdict.Action = guardrailActionAlert
+				}
+				if combined == nil {
+					combined = &ScanVerdict{Action: guardrailActionAllow, Severity: "NONE"}
+				}
+				if strongerGuardrailAction(combined.Action, verdict.Action) != combined.Action {
+					combined.Action, combined.Reason = verdict.Action, verdict.Reason
+				}
+				if guardrailSeverityRank(verdict.Severity) > guardrailSeverityRank(combined.Severity) {
+					combined.Severity = verdict.Severity
+				}
+				if combined.Scanner == "" {
+					combined.Scanner = verdict.Scanner
+				}
+				if verdict.Confidence > combined.Confidence {
+					combined.Confidence = verdict.Confidence
+				}
+				combined.Findings = append(combined.Findings, verdict.Findings...)
+				for _, finding := range verdict.Findings {
+					combined.findingProfiles = append(combined.findingProfiles, member)
+					severity := verdict.Severity
+					if own := verdict.findingSeverity[finding]; own != "" {
+						severity = own
+					}
+					combined.findingSeverities = append(combined.findingSeverities, severity)
+				}
+				combined.ScannerSources = appendUniqueStrings(combined.ScannerSources, verdict.ScannerSources...)
+			}
+			return combined
+		}
+	}
+	return a.runHookJudgeSingle(ctx, strategyDirection, judgeDirection, connector, content, toolName, current)
+}
+
+func meetMemberJudgeCurrent(ctx context.Context, connector string, current *ToolInspectVerdict, member string) *ToolInspectVerdict {
+	if current == nil || len(current.DetailedFindings) == 0 {
+		return current
+	}
+	var own []RuleFinding
+	for _, finding := range current.DetailedFindings {
+		if finding.profile == "" || finding.profile == member {
+			own = append(own, finding)
+		}
+	}
+	if len(own) == 0 {
+		return nil
+	}
+	memberConfig := resolvedGuardrailProfileFrom(ctx).derived
+	return &ToolInspectVerdict{
+		Action:   profileMeetActionForFindings(ctx, memberConfig, connector, own, true, true),
+		Severity: HighestSeverity(own),
+	}
+}
+
+func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
 	judge := a.judgeFor(ctx)
 	if judge == nil || content == "" {
 		return nil
@@ -1905,16 +1981,21 @@ func (a *APIServer) emitCodeGuardTelemetry(
 // ("" for none), the same content with invisible separators and look-alike
 // letters folded, for a rule the first pass did not find. A strictest
 // combination of profiles runs it with each member's own rules and keeps
-// the strongest finding of each rule, so one member's weaker match of a
-// rule ID on content never hides another member's definition of that ID
-// that only the folded text matches.
+// every member's finding, so even distinct definitions of one rule ID keep
+// their separate audit provenance.
 func messageRuleFindings(generation *compiledRulePackCategories, content, folded string, scope ruleContentScope, scanRaw bool) []RuleFinding {
 	if generation != nil && len(generation.members) > 0 {
-		lists := make([][]RuleFinding, 0, len(generation.members))
-		for _, member := range generation.members {
-			lists = append(lists, messageRuleFindings(member, content, folded, scope, scanRaw))
+		var out []RuleFinding
+		for i, member := range generation.members {
+			findings := messageRuleFindings(member, content, folded, scope, scanRaw)
+			if i < len(generation.memberNames) {
+				for j := range findings {
+					findings[j].profile = generation.memberNames[i]
+				}
+			}
+			out = append(out, findings...)
 		}
-		return strongestRuleFindings(lists, func(ruleID string) string { return ruleID })
+		return out
 	}
 	var findings []RuleFinding
 	if scanRaw {

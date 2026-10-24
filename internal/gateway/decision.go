@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"context"
 	"path/filepath"
 	"strings"
 
@@ -131,6 +132,53 @@ func guardrailActionForConnectorFindings(
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForConnector(cfg, connector, severity, confirmable)
 	})
+}
+
+// profileMeetActionForFindings evaluates each member's own findings under its
+// own thresholds, HILT and mode on this request path. Untagged findings come
+// from shared scanners (such as CodeGuard) and apply to every member. The
+// strictest resulting action is the meet's verdict; an observing member can
+// contribute an alert but never a confirmation or block.
+func profileMeetActionForFindings(
+	ctx context.Context, cfg *config.Config, connector string, findings []RuleFinding,
+	confirmable, content bool,
+) string {
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil || resolved.set == nil {
+		return singleProfileActionForFindings(cfg, connector, findings, confirmable, content)
+	}
+	meet := resolved.set.meet(resolved.decision.Name)
+	if meet == nil {
+		return singleProfileActionForFindings(cfg, connector, findings, confirmable, content)
+	}
+	action := guardrailActionAllow
+	for _, member := range meet.members {
+		memberCfg := resolved.set.profileConfig(member)
+		var own []RuleFinding
+		for _, finding := range findings {
+			if finding.profile == "" || finding.profile == member {
+				own = append(own, finding)
+			}
+		}
+		candidate := singleProfileActionForFindings(memberCfg, connector, own, confirmable, content)
+		if !configBlocksOn(memberCfg, connector, requestProfilePath(ctx)) &&
+			(candidate == guardrailActionBlock || candidate == guardrailActionConfirm) {
+			candidate = guardrailActionAlert
+		}
+		action = strongerGuardrailAction(action, candidate)
+	}
+	return action
+}
+
+func singleProfileActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable, content bool) string {
+	if content {
+		return guardrailContentActionForFindings(cfg, connector, findings, confirmable)
+	}
+	return guardrailActionForConnectorFindings(cfg, connector, findings, confirmable)
+}
+
+func profileMeetActionForSeverity(ctx context.Context, cfg *config.Config, connector, severity string, confirmable, content bool) string {
+	return profileMeetActionForFindings(ctx, cfg, connector, []RuleFinding{{Severity: severity}}, confirmable, content)
 }
 
 // guardrailContentAction is guardrailActionForConnector for a content
