@@ -6,6 +6,7 @@ package gateway
 import (
 	"encoding/json"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -71,10 +72,19 @@ func TestInstructionProtectionOnlyInLoadLocations(t *testing.T) {
 	patch := func(target string) string {
 		return "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: " + target + "\n+x\n*** End Patch\nPATCH"
 	}
-	cases = append(cases,
-		posix("patch to a fixture", patch("/tmp/fixtures/AGENTS.md"), cwd, ""),
-		posix("patch to the project", patch("/repo/AGENTS.md"), cwd, "COG-AGENTS-MD"),
-	)
+	// A patch envelope's targets are this host's paths
+	// (hookpaths.ApplyPatchWriteTargets).
+	if runtime.GOOS == "windows" {
+		cases = append(cases,
+			windows("patch to a fixture", patch(`C:\fixtures\AGENTS.md`), ""),
+			windows("patch to the project", patch(`C:\Repo\AGENTS.md`), "COG-AGENTS-MD"),
+		)
+	} else {
+		cases = append(cases,
+			posix("patch to a fixture", patch("/tmp/fixtures/AGENTS.md"), cwd, ""),
+			posix("patch to the project", patch("/repo/AGENTS.md"), cwd, "COG-AGENTS-MD"),
+		)
+	}
 	loadedByClient := posix("loaded, identified by the hook client", "printf x >> /opt/persona/IDENTITY.md", cwd, "COG-IDENTITY")
 	loadedByClient.loadedIdentity = "/opt/persona/IDENTITY.md"
 	guest := posix("sandbox guest working directory", "printf x >> /sandbox/project/CLAUDE.md", "/host/mount/project", "COG-CLAUDE-MD")
