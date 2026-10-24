@@ -187,12 +187,12 @@ func TestObserveOnlyMeetOverTheRuleLimitObservesInsteadOfRefusing(t *testing.T) 
 				"b": {Mode: tc.bMode, BlockAt: "HIGH", RulePackDir: meetRulePackDir(t, root, "OBS-B"),
 					Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"b.example"}}},
 			}
-			set, ctx := meetOfTwoAssignments(t, "observe", profiles, "a", "b", "codex")
+			set, _ := meetOfTwoAssignments(t, "observe", profiles, "a", "b", "codex")
 			set.rules[effectiveRulePackKey(set.profiles["a"].Config, "codex")] = aRules
 			set.rules[effectiveRulePackKey(set.profiles["b"].Config, "codex")] = bRules
 			set.missing = nil
 			// Resolve again now that the fixture packs are in place.
-			ctx = withGuardrailProfile(context.WithValue(t.Context(), testVerifiedSubjectKey{},
+			ctx := withGuardrailProfile(context.WithValue(t.Context(), testVerifiedSubjectKey{},
 				identityTestSubject(identityTestPlatforms[0], identityTestPlatforms[0].providers[0], stateProven, true)), set, "codex")
 			decision := resolvedGuardrailProfileFrom(ctx).decision
 			if decision.Name != config.ProfileMeetName([]string{"a", "b"}) {
