@@ -212,15 +212,16 @@ func cpuHasVirtualization(cpuinfo []byte) bool {
 	return false
 }
 
-// UserVMDriverDirs are where a user's OpenShell gateway finds
-// openshell-driver-vm: dir (the rendered driver_dir) first when set, then
-// the user's own ~/.local/libexec/openshell and the system directories
-// (AdminVMDriverDirs; the VM probe runs on Linux only).
+// UserVMDriverDirs are where the Linux user probe looks for
+// openshell-driver-vm. It checks only the rendered driver_dir when set;
+// otherwise it checks the user's ~/.local/libexec/openshell and the system
+// directories (AdminVMDriverDirs). The gateway can also use its executable's
+// sibling, which this probe does not locate.
 func UserVMDriverDirs(home, dir string) []string {
-	var dirs []string
 	if dir != "" {
-		dirs = append(dirs, dir)
+		return []string{dir}
 	}
+	var dirs []string
 	if home != "" {
 		dirs = append(dirs, filepath.Join(home, ".local", "libexec", "openshell"))
 	}

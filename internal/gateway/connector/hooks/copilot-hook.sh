@@ -32,11 +32,73 @@ trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_managed_fa
 # environment is not read, so status and doctor report what runs (GAP-0315).
 # Strict availability closes it.
 case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) FAIL_MODE="closed" ;; esac
+# copilot_per_user_install_block answers with Copilot's native deny while
+# DefenseClaw is being installed or upgraded for this account, whatever the
+# fail mode, even before helpers, the token or the gateway are available
+# (GAP-0649); otherwise it returns 1.
+copilot_per_user_install_block() {
+  local home="${DEFENSECLAW_HOME:-${HOME:-${USERPROFILE:-}}/.defenseclaw}"
+  local installing=0
+  if [ ! -d "$home" ] || [ ! -x "$home" ] || defenseclaw_install_lock_held "$home"; then
+    installing=1
+  fi
+  # A caller can override DEFENSECLAW_HOME. The registered hook's own data
+  # directory is authoritative once its path has been resolved.
+  if [ -n "${HOOK_DIR:-}" ]; then
+    local hook_home="${HOOK_DIR}/.."
+    if [ ! -d "$hook_home" ] || [ ! -x "$hook_home" ] || defenseclaw_install_lock_held "$hook_home"; then
+      installing=1
+    fi
+  fi
+  if [ "$installing" = "1" ]; then
+    if declare -F defenseclaw_harden_env >/dev/null 2>&1; then
+      defenseclaw_log_hook_failure copilot copilot-hook "${1:-install or upgrade in progress}" "${2:-transport}" closed fail_closed
+    fi
+    echo "defenseclaw: blocking Copilot call while DefenseClaw is being installed or upgraded" >&2
+    local message='DefenseClaw is being installed or upgraded for this account; try again in a moment, or run the installer again if it has stopped.'
+    case "$_DC_COPILOT_EVENT" in
+      preToolUse) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s"}\n' "$message" ;;
+      permissionRequest) printf '{"behavior":"deny","message":"%s"}\n' "$message" ;;
+      sessionEnd|agentStop|subagentStop) ;;
+      *) printf '{"permissionDecision":"deny","permissionDecisionReason":"%s","behavior":"deny","message":"%s"}\n' "$message" "$message" ;;
+    esac
+    exit 0
+  fi
+  return 1
+}
 # Copilot CLI lets a call run when its hook fails. In fail mode closed every
 # failure DefenseClaw sees prints Copilot's native deny with the reason ($1)
 # instead; Copilot's other events cannot block. Fail mode open lets the call
 # run.
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# copilot_hook_failure reads the install state when it answers, through the
+# shared check, also before the helpers load: a hook path that does not
+# resolve or a missing helper during an install or upgrade is closed
+# (GAP-0914).
 copilot_hook_failure() {
+  copilot_per_user_install_block "$@" || true
+  if [ "$FAIL_MODE" != "closed" ] && defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"; then
+    FAIL_MODE="closed"
+  fi
   [ "$FAIL_MODE" != "open" ] || exit 0
   local text="DefenseClaw blocked this tool call (fail mode closed). Run \`defenseclaw doctor\` to see why."
   if [ -n "${1:-}" ] && declare -F defenseclaw_json_escape >/dev/null 2>&1; then
@@ -45,6 +107,9 @@ copilot_hook_failure() {
   copilot_deny "$text"
   exit 0
 }
+# An unexpected error status (set -e, set -u) before the hook's own EXIT
+# trap below is installed answers through copilot_hook_failure too.
+trap '_dc_copilot_rc=$?; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_hook_failure; fi' EXIT
 {{end}}# Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-}}"
 if [ -z "$HOME" ]; then
@@ -91,7 +156,10 @@ export DEFENSECLAW_HOME
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "hook home unavailable" transport || true
+{{end}}
   # A registered closed hook cannot treat missing local state as retirement.
+  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || FAIL_MODE="closed"
   if [ "$FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     copilot_hook_failure
@@ -152,11 +220,13 @@ if ! defenseclaw_harden_env; then
   echo "defenseclaw: environment hardening failed{{if .SecureClient}}, allowing copilot tool{{end}}" >&2
   {{$failure}}
 fi
+{{if not .Managed}}defenseclaw_close_during_install
+{{end}}
 
 {{if .Managed}}# A standalone hook denies every call it cannot check. A Secure Client hook
 # keeps Copilot's upstream fail-open and ignores inherited strict or closed
 # settings: only a valid event-native gateway response may enforce.
-FAIL_MODE="{{if .SecureClient}}open{{else}}closed{{end}}"
+FAIL_MODE="{{if .ManagedOutageClosed}}closed{{else}}open{{end}}"
 {{else}}# Every failure below goes through copilot_hook_failure, which follows
 # FAIL_MODE. An unexpected error status (set -e, set -u) does too.
 trap '_dc_copilot_rc=$?; _defenseclaw_hook_cleanup; if [ "$_dc_copilot_rc" -ne 0 ]; then copilot_hook_failure; fi' EXIT
@@ -182,10 +252,12 @@ case "$COPILOT_HOOK_EVENT" in
     ;;
 esac
 
-{{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
+{{if and (not .Managed) (not .Sandbox)}}copilot_per_user_install_block "install or upgrade in progress" transport || true
+{{end}}{{if .Sandbox}}defenseclaw_sandbox_require_token copilot copilot-hook "copilot tool"
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
-  echo "defenseclaw: copilot hook refusing oversized payload, blocking copilot tool (sandbox hooks fail closed)" >&2
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  echo "defenseclaw: copilot hook refusing oversized payload, blocking copilot tool (sandbox hooks fail closed)" >&2
   exit 2
 }
 # The per-sandbox binding token is an OpenShell provider placeholder; the
@@ -194,14 +266,16 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
-  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" transport
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" transport
   defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" fail_closed
   echo "defenseclaw: sandbox ingress unreachable, blocking copilot tool (sandbox hooks fail closed): $1" >&2
   exit 2
 }
 
 fail_response() {
-  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" response
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_allow_failed_stop_event copilot copilot-hook "$COPILOT_HOOK_EVENT" "" "$1" response
   defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" fail_closed
   echo "defenseclaw: copilot hook error, blocking copilot tool (sandbox hooks fail closed): $1" >&2
   exit 2
@@ -213,7 +287,8 @@ fail_response() {
 fi
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")")" || {
-  echo "defenseclaw: copilot hook refusing oversized payload" >&2
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  echo "defenseclaw: copilot hook refusing oversized payload" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "it is too large for DefenseClaw to inspect. Make it smaller and try again."{{end}}
 }
 API_ADDR="{{.APIAddr}}"
@@ -232,22 +307,32 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
-  defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "$1" transport || true
+{{end}}{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if .Managed}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
+{{else}}  defenseclaw_log_hook_delivery_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
+{{end}}  defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
 {{if .Managed}}  {{$failure}}
-{{else}}  local next=""
+{{else}}  # This account's gateway is down and the policy tier lets an outage
+  # through (defenseclaw_per_user_outage_open): the tool runs, with the
+  # warning above and a hook-failures.jsonl row.
+  if ! defenseclaw_should_fail_closed_on_unreachable; then
+    exit 0
+  fi
+  local next=""
   [ "$1" != "gateway unreachable" ] || next="$(defenseclaw_unreachable_next_step)"
   copilot_hook_failure "${next:-the DefenseClaw gateway is unavailable ($1). Run \`defenseclaw-gateway status\`.}"
 {{end}}}
 
 fail_response() {
-{{if and (not .SecureClient) (not .Sandbox)}}  FAIL_MODE="closed"
+{{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "$1" response || true
+{{end}}{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
 {{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" response "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
   echo "defenseclaw: copilot hook error: $1" >&2
   {{if .Managed}}{{$failure}}{{else}}copilot_hook_failure "the DefenseClaw gateway returned an answer DefenseClaw could not use. Run \`defenseclaw doctor\` to see why."{{end}}
 }
 {{end}}
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
@@ -286,8 +371,8 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/copilot/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
-}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+}{{else}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
 fi
 # A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call
@@ -306,43 +391,29 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  _dc_post_status=$?
-{{if and (not .SecureClient) (not .Sandbox)}}  # Curl can fail after receiving HTTP headers (short or stalled body).
-  if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
-    fail_response "incomplete gateway response"
-  fi
-  if [ "$_dc_post_status" = 28 ]; then
-    FAIL_MODE="closed"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  DC_POST_STATUS=$?
+  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+  defenseclaw_await_gateway "$DC_POST_STATUS" _dc_hook_post_response || {
+    defenseclaw_split_response
+    defenseclaw_managed_http_result "$HTTP_CODE" incomplete
     fail_unreachable "gateway unreachable"
-  fi
-{{end}}  defenseclaw_await_gateway "$_dc_post_status" _dc_hook_post_response || {
-    _dc_post_status=$?
-{{if and (not .SecureClient) (not .Sandbox)}}    if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
-      fail_response "incomplete gateway response"
-    fi
-    if [ "$_dc_post_status" = 28 ]; then
-      FAIL_MODE="closed"
-      fail_unreachable "gateway unreachable"
-    fi
-{{end}}    fail_unreachable "gateway unreachable"
   }
+{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 }
-defenseclaw_retry_busy _dc_hook_post_response || {{if and (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
+defenseclaw_retry_busy _dc_hook_post_response || {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response "gateway returned HTTP 429"{{else}}fail_unreachable "gateway unreachable"{{end}}{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}case "$HTTP_CODE" in
-  [0-9][0-9][0-9]) ;;
-  *) fail_response "invalid HTTP status" ;;
-esac
-{{end}}if [ -z "$HTTP_CODE" ]; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
+{{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
   {{if and (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
-fi
+fi{{end}}
 
 {{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
 {{end}}
@@ -392,7 +463,10 @@ if [ "$ACTION" = "confirm" ]; then
   esac
   [ "$NATIVE_ASK" = "true" ] || fail_response "missing native confirmation in gateway response"
 fi
-{{else if not .Managed}}if [ "$FAIL_MODE" != "open" ]; then
+{{else if not .Managed}}# Fail mode open skips these checks, except while an install that started
+# during the call holds the data directory.
+defenseclaw_close_during_install
+if [ "$FAIL_MODE" != "open" ]; then
   # Every verdict names its action, and on a tool boundary a block carries
   # Copilot's native deny and a confirmation its native ask, as the Windows
   # hook checks: anything else is no verdict, and would let the call run.

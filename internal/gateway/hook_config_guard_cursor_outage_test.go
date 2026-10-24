@@ -14,11 +14,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// A managed Cursor's outage mode follows the administrator's explicit fail
-// mode independently of observe or action mode. Setting or removing outage
-// open re-renders its hooks without a restart, so a removed choice cannot
-// remain in effect while the gateway is down (r104 W3 G3-upg).
-func TestHookConfigGuardRerendersACursorOutageModeChange(t *testing.T) {
+// A managed administrator's explicit Cursor outage mode is re-rendered
+// without a restart when the administrator changes it (r104 W3 G3-upg).
+func TestHookConfigGuardRerendersManagedCursorOutageModeChange(t *testing.T) {
 	root := t.TempDir()
 	conn := &runtimePolicyCaptureConnector{
 		stubConnector: stubConnector{name: "cursor"},
@@ -60,15 +58,15 @@ func TestHookConfigGuardRerendersACursorOutageModeChange(t *testing.T) {
 	open := cloneConfig(live)
 	open.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{"cursor": {HookFailMode: "open"}}
 	if open.EffectiveHookFailModeForConnector("cursor") == live.EffectiveHookFailModeForConnector("cursor") {
-		t.Fatal("precondition: the managed Cursor outage mode did not change")
+		t.Fatal("precondition: the resolved Cursor mode changed")
 	}
 	sidecar.publishConfig(open)
 	if err := guard.RefreshPolicy(ctx); err != nil {
 		t.Fatal(err)
 	}
 	calls, opts := state()
-	if calls != before+1 || opts.ConfiguredHookFailMode != "open" || connector.OutageHookFailMode(opts, conn) != "open" {
-		t.Fatalf("explicit open: Setup calls %d (want %d), configured %q", calls, before+1, opts.ConfiguredHookFailMode)
+	if calls != before+1 || opts.HookFailMode != "open" || connector.OutageHookFailMode(opts, conn) != "open" {
+		t.Fatalf("explicit open: Setup calls %d (want %d), mode %q", calls, before+1, opts.HookFailMode)
 	}
 
 	guard.mu.Lock()
@@ -79,7 +77,7 @@ func TestHookConfigGuardRerendersACursorOutageModeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls, opts = state()
-	if calls != before+2 || opts.ConfiguredHookFailMode != "" || connector.OutageHookFailMode(opts, conn) != "closed" {
-		t.Fatalf("explicit open removed: Setup calls %d (want %d), configured %q", calls, before+2, opts.ConfiguredHookFailMode)
+	if calls != before+2 || opts.HookFailMode != "closed" || connector.OutageHookFailMode(opts, conn) != "closed" {
+		t.Fatalf("explicit open removed: Setup calls %d (want %d), mode %q", calls, before+2, opts.HookFailMode)
 	}
 }

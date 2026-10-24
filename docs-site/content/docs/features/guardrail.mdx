@@ -13,7 +13,7 @@ The guardrail checks what your agent is about to do (a prompt, a shell command, 
 
 You choose how strict it is per agent with a mode:
 
-- **Observe** records every finding and blocks nothing. Start here.
+- **Observe** records policy findings without enforcing them. Start here.
 - **Action** applies the block and alert levels below.
 - **Human approval (HITL)** is an option in action mode. A risky call below the block level pauses and asks you first, on agents that can ask.
 
@@ -63,7 +63,7 @@ Human approval is off by default. Its default minimum severity is HIGH. Change t
 
 ## Fail mode
 
-The hook fail mode decides what happens when the gateway cannot answer (unreachable, bad response, authentication failure). The default is `closed`: the agent blocks the call where the event can carry a block response. `open` allows the call and logs the failure.
+The hook fail mode decides what happens when the gateway cannot answer (unreachable, bad response, authentication failure). On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with a warning and a record, the strict policy blocks it; every other failure blocks. On a managed host the default is `closed` and an administrator can choose `open` for an outage only. See [Fail modes](/docs/reference/configuration/fail-modes#per-user-installs).
 
 ## Which agents can ask
 
@@ -82,7 +82,7 @@ Codex, Cursor, Hermes, OpenCode, Devin, Kiro and ZeptoClaw cannot ask. The [capa
 ## What it does not do
 
 - It cannot see what a child program writes after a command starts. For protected files, add a sandbox or file permissions.
-- Observe mode never blocks, whatever the levels say.
+- Observe mode does not enforce policy findings, whatever the levels say. Hook fail mode and proxy availability still apply.
 - The TUI does not hold or resume a paused call. Approval happens in the agent.
 
 ## Do it

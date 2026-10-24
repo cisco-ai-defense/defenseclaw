@@ -69,12 +69,11 @@ var newHookConfigFSWatcher = fsnotify.NewWatcher
 var errHookRepairSuppressed = errors.New("hook registration repair is suppressed during connector transition")
 
 type hookRuntimePolicy struct {
-	hookFailMode string
-	// configuredHookFailMode is the config's explicit value
-	// (SetupOpts.ConfiguredHookFailMode): a per-user Cursor's outage mode.
-	configuredHookFailMode string
-	guardrailMode          string
-	hiltEnabled            bool
+	// hookFailMode is the connector's hook outage mode
+	// (config.Config.EffectiveHookOutageFailModeForConnector).
+	hookFailMode  string
+	guardrailMode string
+	hiltEnabled   bool
 }
 
 type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
@@ -670,7 +669,6 @@ func (g *HookConfigGuard) repairCurrent(
 			return errors.New("authoritative hook runtime fail mode is invalid")
 		}
 		opts.HookFailMode = policy.hookFailMode
-		opts.ConfiguredHookFailMode = policy.configuredHookFailMode
 		opts.GuardrailMode = policy.guardrailMode
 		opts.HILTEnabled = policy.hiltEnabled
 	}
@@ -688,10 +686,10 @@ func (g *HookConfigGuard) repairCurrent(
 
 	// Check the files against the policy that rendered them. A legitimate
 	// policy change can leave the registration intact while its hook options
-	// differ, including a per-user Cursor's configured outage mode.
+	// differ. A per-user hook's outage mode follows its policy tier
+	// (config.HookOutageFailMode), so a rule-pack change re-renders it.
 	policyDrift := policyResolver != nil &&
 		((installedFailMode != "" && installedFailMode != opts.HookFailMode) ||
-			strings.ToLower(strings.TrimSpace(renderedOpts.ConfiguredHookFailMode)) != opts.ConfiguredHookFailMode ||
 			!strings.EqualFold(strings.TrimSpace(renderedOpts.GuardrailMode), strings.TrimSpace(opts.GuardrailMode)) ||
 			renderedOpts.HILTEnabled != opts.HILTEnabled ||
 			installedOutage != connector.OutageHookFailMode(opts, conn))
@@ -875,7 +873,6 @@ func (g *HookConfigGuard) activeConnector() connector.Connector {
 func (g *HookConfigGuard) adoptRenderedPolicy(opts connector.SetupOpts) {
 	g.mu.Lock()
 	g.opts.HookFailMode = opts.HookFailMode
-	g.opts.ConfiguredHookFailMode = opts.ConfiguredHookFailMode
 	g.opts.GuardrailMode = opts.GuardrailMode
 	g.opts.HILTEnabled = opts.HILTEnabled
 	g.mu.Unlock()

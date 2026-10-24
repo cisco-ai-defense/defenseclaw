@@ -76,3 +76,30 @@ def test_observability_v8_staged_python_data_is_byte_identical_when_present() ->
     assert (generator.PYTHON_DATA_DIR / generator.SCHEMA_PATH.name).read_bytes() == generator.SCHEMA_PATH.read_bytes()
     assert (generator.PYTHON_DATA_DIR / generator.CANONICAL_YAML.name).read_bytes() == generator.CANONICAL_YAML.read_bytes()
     assert (generator.PYTHON_DATA_DIR / generator.CANONICAL_MARKDOWN.name).read_bytes() == generator.CANONICAL_MARKDOWN.read_bytes()
+
+
+def test_observability_reference_states_the_current_config_version() -> None:
+    # GAP-0617: a config_version 9 install printed a "v8" reference whose
+    # example selected config_version 8. Every generated format must name the
+    # version this build writes, taken from the code constant.
+    from defenseclaw.config import CURRENT_CONFIG_VERSION
+
+    version = CURRENT_CONFIG_VERSION
+    document = yaml.safe_load(generator.CANONICAL_YAML.read_text(encoding="utf-8"))
+    assert document["config_version"] == version
+
+    yaml_text = generator.CANONICAL_YAML.read_text(encoding="utf-8")
+    assert yaml_text.startswith(f"# DEFENSECLAW CONFIGURATION v{version} — OBSERVABILITY REFERENCE\n")
+    assert f"# Selects the strict v{version} configuration contract; unknown keys are errors.\nconfig_version: {version}\n" in yaml_text
+
+    markdown = generator.CANONICAL_MARKDOWN.read_text(encoding="utf-8")
+    assert markdown.startswith(f"# DefenseClaw v{version} observability configuration reference\n")
+    assert f"`config_version: {version}`" in markdown
+
+    schema = json.loads(generator.SCHEMA_PATH.read_bytes())
+    assert max(schema["properties"]["config_version"]["enum"]) == version
+    assert generator.current_config_version(schema) == version
+    # --format json-schema prints this schema verbatim; its title and
+    # description must name the current version too.
+    assert schema["title"] == f"DefenseClaw configuration v{version}"
+    assert f"config_version {version}, the current version" in schema["description"]

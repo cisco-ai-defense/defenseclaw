@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,11 +19,10 @@ import (
 
 // Owner decision 2026-10-20: a standalone managed hook follows the fail mode
 // its administrator-owned runtime records. In fail mode open a call
-// DefenseClaw cannot check because the gateway is down, did not answer or
-// gave an unusable answer goes ahead and is logged fail-open, as on a
-// per-user install. Refusals that are not an outage stay closed: a gateway
-// peer DefenseClaw cannot verify, an invalid managed runtime and a missing
-// token, an authentication refusal (401/403, also after the 401 retries) and
+// DefenseClaw cannot check because the gateway is down or did not answer
+// goes ahead and is logged fail-open. Answered errors and unusable replies
+// stay closed, as do an unverified gateway peer, an invalid managed runtime,
+// a missing token, an authentication refusal (401/403, also after retries), and
 // a local event binding or contract mismatch. Strict availability still
 // closes it.
 func TestStandaloneManagedHookFollowsTheAdministratorsOpenFailMode(t *testing.T) {
@@ -133,6 +134,70 @@ func TestStandaloneManagedCopilotFollowsTheAdministratorsFailMode(t *testing.T) 
 			if !tc.blocked && !strings.Contains(result.stderr, "allowing") {
 				t.Fatalf("%s: an open outage must say the call is allowed: stderr=%q", event, result.stderr)
 			}
+		}
+	}
+}
+
+// The managed Copilot hook a standalone install publishes through machine
+// policy (defenseclaw-hook --enterprise-managed, on Linux, macOS and Windows)
+// follows the administrator's fail mode during an outage: closed and strict
+// availability deny, open lets the call run. The gateway outage table says so
+// (enterprisepolicy TestDocsCapabilityMatrixOutageMatchesTheHooks); the
+// per-user-route shell hook is checked in the connector package.
+func TestManagedCopilotOutageFollowsTheFailMode(t *testing.T) {
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for _, tc := range []struct {
+		mode    string
+		strict  bool
+		blocked bool
+	}{
+		{mode: "closed", blocked: true},
+		{mode: "open", strict: true, blocked: true},
+		{mode: "open"},
+	} {
+		result := run(t, "copilot", &stubRT{err: notRunning}, func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.Event = "preToolUse"
+			o.FailMode = tc.mode
+			o.StrictAvailability = tc.strict
+			o.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`)
+		})
+		if got := blocked(result); got != tc.blocked {
+			t.Fatalf("fail mode %q, strict %v: blocked = %v, want %v: stdout=%q", tc.mode, tc.strict, got, tc.blocked, result.stdout)
+		}
+	}
+}
+
+// 1.0.4 review (loop round 4 of G-hooks-upg): no managed hook reads
+// DEFENSECLAW_FAIL_MODE (the native hook resolves the administrator's mode
+// before hookexec runs; TestManagedWindowsHookIgnoresTheEnvironmentFailMode
+// pins that on Windows), so an open managed Copilot hook still lets a call
+// run during an outage whatever the environment says. Only the installed
+// mode and strict availability decide.
+func TestManagedHookIgnoresTheEnvironmentFailMode(t *testing.T) {
+	t.Setenv("DEFENSECLAW_FAIL_MODE", "closed")
+	notRunning := fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+	for _, tc := range []struct {
+		mode    string
+		strict  bool
+		blocked bool
+	}{
+		{mode: "open"},
+		{mode: "open", strict: true, blocked: true},
+		{mode: "closed", blocked: true},
+	} {
+		result := run(t, "copilot", &stubRT{err: notRunning}, func(o *Options) {
+			managedCodex(o)
+			o.ExplainUnenrolledAccount = true
+			o.Event = "preToolUse"
+			o.FailMode = tc.mode
+			o.StrictAvailability = tc.strict
+			o.Stdin = strings.NewReader(`{"toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`)
+		})
+		if got := blocked(result); got != tc.blocked {
+			t.Fatalf("installed mode %q, strict %v, DEFENSECLAW_FAIL_MODE=closed: blocked = %v, want %v: stdout=%q",
+				tc.mode, tc.strict, got, tc.blocked, result.stdout)
 		}
 	}
 }
@@ -502,5 +567,62 @@ func TestStandaloneManagedRateLimitBlocksUnderOpen(t *testing.T) {
 	perUser := run(t, "codex", &stubRT{onRequest: func(*stubRT, *http.Request) (*http.Response, error) { return busy() }}, nil)
 	if !blocked(perUser) {
 		t.Fatalf("per-user open: a rate limit must block: code=%d stdout=%q", perUser.code, perUser.stdout)
+	}
+}
+
+// A 401 is already an answered refusal even when enrollment retries are
+// enabled. A failed retry cannot turn it into an outage allow or transport
+// log entry on a standalone managed hook.
+func TestStandaloneManagedAuthRetryKeepsAnsweredErrorClosed(t *testing.T) {
+	previousDelay := hookAuthRetryDelay
+	hookAuthRetryDelay = time.Millisecond
+	t.Cleanup(func() { hookAuthRetryDelay = previousDelay })
+	shortAnswerBudget(t, 300*time.Millisecond)
+	for connector, event := range map[string]string{
+		"claudecode": "PreToolUse",
+		"codex":      "PreToolUse",
+		"copilot":    "preToolUse",
+		"devin":      "PreToolUse",
+		"hermes":     "pre_tool_call",
+		"opencode":   "tool.execute.before",
+	} {
+		for _, failure := range []string{"service stopped", "retry timed out"} {
+			t.Run(connector+"/"+failure, func(t *testing.T) {
+				logHome := filepath.Join(t.TempDir(), ".defenseclaw")
+				if err := os.MkdirAll(logHome, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				rt := &stubRT{onRequest: func(s *stubRT, request *http.Request) (*http.Response, error) {
+					if s.requests == 1 {
+						return &http.Response{StatusCode: http.StatusUnauthorized, Header: make(http.Header),
+							Body: io.NopCloser(strings.NewReader(`{"error":"unauthorized"}`))}, nil
+					}
+					if failure == "retry timed out" {
+						<-request.Context().Done()
+						return nil, request.Context().Err()
+					}
+					return nil, fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+				}}
+				result := run(t, connector, rt, func(opts *Options) {
+					managedCodex(opts)
+					opts.ExplainUnenrolledAccount = true
+					opts.FailMode = "open"
+					opts.Event = event
+					opts.FailureLogHome = func() string { return logHome }
+					opts.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `","tool_name":"Bash","tool_input":{"command":"echo ok"},` +
+						`"tool":"bash","args":{"command":"echo ok"},"toolName":"bash","toolArgs":"{}"}`)
+				})
+				if !blocked(result) || rt.requests < 2 || strings.Contains(result.stderr, "fail-open") {
+					t.Fatalf("HTTP 401 then %s: blocked=%v requests=%d stdout=%q stderr=%q", failure, blocked(result), rt.requests, result.stdout, result.stderr)
+				}
+				logged, err := os.ReadFile(filepath.Join(logHome, "logs", "hook-failures.jsonl"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !strings.Contains(string(logged), `"category":"response"`) || !strings.Contains(string(logged), `"outcome":"fail_closed"`) {
+					t.Fatalf("HTTP 401 then %s logged as %q", failure, logged)
+				}
+			})
+		}
 	}
 }

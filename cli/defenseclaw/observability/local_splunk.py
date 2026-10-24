@@ -49,6 +49,7 @@ from defenseclaw.file_permissions import (
 from defenseclaw.observability.local_stack import (
     CommandResult,
     CommandRunner,
+    CommandTimeoutError,
     LocalStackError,
     docker_cli_missing_message,
     resolve_native_docker_executable,
@@ -68,6 +69,7 @@ DEFAULTS_REL = Path("splunk") / "default.yml"
 LOCAL_TOKEN_ENV = "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN"
 WEB_URL = "http://127.0.0.1:8000"
 DEFAULT_HEC_URL = "https://127.0.0.1:8088/services/collector/event"
+RETIRED_SPLUNK_IMAGE = "splunk/splunk-claw-bridge:10.2.0"
 SERVICE_NAMES = frozenset({"splunk", "splunk-s3-exporter"})
 MANAGED_VOLUME_NAMES = frozenset(
     {
@@ -345,6 +347,9 @@ def _credential_values(
 ) -> dict[str, str]:
     values = dict(template)
     values.update(previous)
+    # Keep for 0.8.10 and 1.0.0-1.0.3 private env upgrades; remove after the 1.0.x upgrade bridge.
+    if values.get("SPLUNK_IMAGE") == RETIRED_SPLUNK_IMAGE:
+        values["SPLUNK_IMAGE"] = template.get("SPLUNK_IMAGE", "")
     previous_token = previous.get("SPLUNK_HEC_TOKEN", "")
     hec_token = (
         previous_token
@@ -396,6 +401,8 @@ def package_splunk_app(stack_dir: str | os.PathLike[str]) -> Path:
     reject_reparse_path(build_dir)
     build_dir.mkdir(parents=True, exist_ok=True)
     reject_reparse_path(build_dir)
+    if os.name != "nt":
+        build_dir.chmod(0o755)
     package_path = root / APP_PACKAGE_REL
     descriptor, temp_name = tempfile.mkstemp(prefix=".defenseclaw_local_mode-", suffix=".tgz", dir=build_dir)
     os.close(descriptor)
@@ -432,6 +439,8 @@ def package_splunk_app(stack_dir: str | os.PathLike[str]) -> Path:
                         else:
                             raise LocalStackError(f"unsupported Splunk app asset: {candidate}")
         reject_reparse_path(package_path)
+        if os.name != "nt":
+            temp_path.chmod(0o644)
         os.replace(temp_path, package_path)
     finally:
         try:
@@ -479,6 +488,42 @@ def _remove_safe_tree(path: Path) -> None:
     if _is_reparse_or_symlink(path):
         raise LocalStackError(f"refusing to remove reparse/symlink tree: {path}")
     shutil.rmtree(path)
+
+
+def running_splunk_container_id(
+    docker_path: str | os.PathLike[str],
+    runner: CommandRunner,
+    environment: Mapping[str, str] | None,
+) -> str:
+    """Return the full ID of the running Splunk container of the local stack.
+
+    Local setup stores it in the sink's record after it started the stack.
+    """
+
+    result = runner.run(
+        [
+            str(docker_path),
+            "ps",
+            "--no-trunc",
+            "--filter",
+            f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+            "--filter",
+            "label=com.docker.compose.service=splunk",
+            "--filter",
+            "status=running",
+            "--format",
+            "{{.ID}}",
+        ],
+        timeout=10,
+        env=environment,
+    )
+    found = [line.strip() for line in result.stdout.splitlines() if line.strip()] if result.returncode == 0 else []
+    if len(found) != 1 or not re.fullmatch(r"[0-9a-f]{64}", found[0]):
+        raise LocalStackError(
+            "could not read the ID of the running local Splunk container; "
+            "run defenseclaw setup splunk --logs again once the container runs"
+        )
+    return found[0]
 
 
 class NativeLocalSplunkController:
@@ -576,6 +621,42 @@ class NativeLocalSplunkController:
         detail = self._redacted_detail(result)
         suffix = f": {detail}" if detail else ""
         raise LocalStackError(f"{description} failed with exit code {result.returncode}{suffix}")
+
+    def verify_splunk_image(self) -> None:
+        """Check a fresh host can resolve the selected image before Compose starts."""
+        environment = self._compose_environment()
+        image = environment.get("SPLUNK_IMAGE", "")
+        if not image:
+            raise LocalStackError("Local Splunk credential contract is missing SPLUNK_IMAGE")
+        try:
+            architecture = self.runner.run(
+                [self.docker_path, "info", "--format", "{{.Architecture}}"], timeout=15, env=environment,
+            )
+        except CommandTimeoutError as exc:
+            raise LocalStackError("Docker engine architecture check timed out") from exc
+        if architecture.returncode != 0:
+            raise LocalStackError("cannot read Docker engine architecture; check that the Docker daemon is running")
+        engine_arch = architecture.stdout.strip().lower()
+        if engine_arch not in {"amd64", "x86_64"}:
+            raise LocalStackError(
+                "Local Splunk needs a linux/amd64 Docker engine; use setup splunk --enterprise "
+                f"with an existing Splunk server on {engine_arch or 'unknown'} hosts"
+            )
+        if self.runner.run(
+            [self.docker_path, "image", "inspect", image], timeout=10, env=environment,
+        ).returncode == 0:
+            return
+        try:
+            pulled = self.runner.run(
+                [self.docker_path, "pull", image], timeout=7200, capture=False, env=environment,
+            )
+        except CommandTimeoutError as exc:
+            raise LocalStackError(f"Local Splunk image download timed out after 2 hours while pulling {image}") from exc
+        if pulled.returncode != 0:
+            raise LocalStackError(
+                f"cannot resolve Local Splunk image from the registry through the Docker daemon: {image}; "
+                f"check daemon proxy, registry mirror, access, and the image tag with 'docker pull {image}'"
+            )
 
     def _project_container_ids(self, *, running_only: bool = False) -> set[str]:
         argv = [
@@ -776,6 +857,7 @@ class NativeLocalSplunkController:
         overrides: Mapping[str, str] | None = None,
         emit_startup_telemetry: bool = True,
     ) -> tuple[NativeSplunkContract, set[str]]:
+        self.verify_splunk_image()
         before = self._project_container_ids()
         try:
             self._checked(
@@ -842,17 +924,26 @@ class NativeLocalSplunkController:
         deadline = time.monotonic() + timeout
         web_ready = False
         hec_ready = False
+        app_ready = False
         while time.monotonic() < deadline:
             remaining = max(0.05, deadline - time.monotonic())
             web_ready = self._web_ready(min(1.5, remaining))
             hec_ready = self._hec_ready(min(1.5, remaining))
             if web_ready and hec_ready:
+                remaining = max(0.05, deadline - time.monotonic())
+                app_ready = self._run_compose(
+                    "exec", "--no-TTY", "--user", "splunk", "splunk",
+                    "test", "-r", "/opt/splunk/etc/apps/defenseclaw_local_mode/default/app.conf",
+                    timeout=min(5.0, remaining),
+                ).returncode == 0
+            if web_ready and hec_ready and app_ready:
                 return
             time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
         raise LocalStackError(
             "Local Splunk readiness timeout after "
             f"{timeout}s: web={'ready' if web_ready else 'fail'} "
-            f"hec={'ready' if hec_ready else 'fail'}"
+            f"hec={'ready' if hec_ready else 'fail'} app={'ready' if app_ready else 'fail'}. "
+            "Repair the local stack, then run defenseclaw setup splunk --logs again."
         )
 
     @staticmethod
@@ -862,6 +953,8 @@ class NativeLocalSplunkController:
         try:
             with opener.open(request, timeout=timeout) as response:
                 return 200 <= response.status < 400
+        except urllib.error.HTTPError as exc:
+            return 300 <= exc.code < 400
         except (OSError, urllib.error.URLError, ValueError):
             return False
 

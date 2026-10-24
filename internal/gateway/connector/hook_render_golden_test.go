@@ -23,6 +23,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -294,7 +295,7 @@ const bridgeHostTemplateDir = "testdata/bridge_host"
 // bridge; the host template keeps each as its {{.Field}} placeholder.
 var bridgeHostTemplateFields = []string{
 	"APIAddr", "TokenFileJS", "FailMode", "HookSocketJS", "ServiceUID",
-	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS",
+	"ForeignHookGuardJS", "InstallMarkerJS", "ListenerProofJS", "OutageFailMode",
 }
 
 // renderBridgeHostTemplate resolves a bridge template's sandbox branches to
@@ -310,7 +311,7 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false}
+	data := map[string]any{"Sandbox": false, "Managed": managed, "SecureClient": false, "ManagedOutageClosed": managed}
 	for _, field := range bridgeHostTemplateFields {
 		data[field] = "{{." + field + "}}"
 	}
@@ -318,7 +319,20 @@ func renderBridgeHostTemplate(asset string, managed bool) ([]byte, error) {
 	if err := tmpl.Execute(&out, data); err != nil {
 		return nil, err
 	}
-	return out.Bytes(), nil
+	if !managed {
+		return out.Bytes(), nil
+	}
+	// The scanner normalizes this rendered field before hashing. Keep its
+	// canonical placeholder in both host template variants.
+	line := `DC_FAIL_MODE = "closed"`
+	if asset == "amp-plugin.ts" {
+		line = `DC_FAIL_MODE: string = "closed"`
+	}
+	canonical := strings.Replace(line, `"closed"`, `"{{.FailMode}}"`, 1)
+	if strings.Count(out.String(), line) != 1 {
+		return nil, fmt.Errorf("managed bridge %s has no unique fail mode", asset)
+	}
+	return []byte(strings.Replace(out.String(), line, canonical, 1)), nil
 }
 
 func TestBridgeHostTemplatesGolden(t *testing.T) {
@@ -354,31 +368,20 @@ func TestBridgeHostTemplatesGolden(t *testing.T) {
 	}
 }
 
-// A bridge rendered open keeps the user's or administrator's outage choice
-// (per-user, managed and Secure Client alike), while outside Secure Client
-// an answered call still uses the closed response mode and a per-user
-// transport failure opens only for a refused connection.
-func TestBridgeTemplatesKeepTheOutageChoiceAndCloseAnswers(t *testing.T) {
+func TestManagedBridgeTemplatesCloseOpenRender(t *testing.T) {
 	for _, asset := range []string{"opencode-plugin.js", "amp-plugin.ts"} {
 		for _, tc := range []struct {
-			name                  string
 			managed, secureClient bool
-		}{{"per-user", false, false}, {"managed", true, false}, {"secure client", true, true}} {
+			wantClosed            bool
+		}{{true, false, true}, {false, false, true}, {true, true, false}} {
 			body, err := renderHookTemplate(asset, templateData{FailMode: "open", Managed: tc.managed, SecureClient: tc.secureClient})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !bytes.Contains(body, []byte(`DC_FAIL_MODE = "open"`)) && !bytes.Contains(body, []byte(`DC_FAIL_MODE: string = "open"`)) {
-				t.Errorf("%s %s lost the outage choice", asset, tc.name)
-			}
-			responseClosed := bytes.Contains(body, []byte(`DC_RESPONSE_FAIL_MODE = "closed"`)) ||
-				bytes.Contains(body, []byte(`DC_RESPONSE_FAIL_MODE: string = "closed"`))
-			if responseClosed == tc.secureClient {
-				t.Errorf("%s %s response fail mode closed=%v", asset, tc.name, responseClosed)
-			}
-			guard := bytes.Contains(body, []byte("A per-user outage-open choice lets through only a gateway"))
-			if guard != (!tc.managed && !tc.secureClient) {
-				t.Errorf("%s %s refused-connection guard present=%v", asset, tc.name, guard)
+			closed := bytes.Contains(body, []byte(`DC_FAIL_MODE = "closed"`)) ||
+				bytes.Contains(body, []byte(`DC_FAIL_MODE: string = "closed"`))
+			if closed != tc.wantClosed {
+				t.Errorf("%s managed=%v secureClient=%v closed=%v", asset, tc.managed, tc.secureClient, closed)
 			}
 		}
 	}

@@ -16,8 +16,35 @@ HOOK_EVENT="${1:-}"
 {{if or .Sandbox (and .Managed (not .SecureClient) (not .SecureClientDelivery))}}_DC_BOOT_FAIL_MODE="closed"
 {{else}}_DC_BOOT_FAIL_MODE="{{.FailMode}}"
 case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE="closed" ;; esac
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# While this account's installer holds its data directory every failure
+# before the helpers load is closed as well (GAP-0914).
+defenseclaw_boot_fails_closed() {
+  [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"
+}
 {{end}}antigravity_bootstrap_failure() {
-  if [ "$_DC_BOOT_FAIL_MODE" != "open" ] && [ "$HOOK_EVENT" = "PreToolUse" ]; then
+  if {{if and (not .Managed) (not .Sandbox)}}defenseclaw_boot_fails_closed{{else}}[ "$_DC_BOOT_FAIL_MODE" != "open" ]{{end}} && [ "$HOOK_EVENT" = "PreToolUse" ]; then
     echo "defenseclaw: antigravity hook could not start; blocking (fail mode closed)" >&2
     printf '%s\n' '{"decision":"deny","reason":"DefenseClaw hook failed closed"}'
     exit 0
@@ -34,7 +61,7 @@ trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ]; then antigravity_bootstrap_fa
 case "$HOOK_EVENT" in
   PreInvocation|PreToolUse|PostToolUse|PostInvocation|Stop) ;;
   *)
-    if [ "$_DC_BOOT_FAIL_MODE" != "open" ]; then
+    if {{if and (not .Managed) (not .Sandbox)}}defenseclaw_boot_fails_closed{{else}}[ "$_DC_BOOT_FAIL_MODE" != "open" ]{{end}}; then
       _dc_unbound_input=""
       IFS= read -r -d '' -n 1048576 _dc_unbound_input || true
       _dc_object_re='^[[:space:]]*\{'
@@ -95,6 +122,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # A registered closed hook cannot treat missing local state as retirement.
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage (_DC_BOOT_FAIL_MODE).
+  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || _DC_BOOT_FAIL_MODE="closed"
   if [ "$_DC_BOOT_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
     if [ "$HOOK_EVENT" = "PreToolUse" ]; then
@@ -134,7 +162,8 @@ FAIL_MODE="closed"
 readonly FAIL_MODE{{else}}FAIL_MODE="{{.FailMode}}"
 # The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the agent's
 # environment is not read, so status and doctor report what runs (GAP-0461).{{end}}
-
+{{if and (not .Managed) (not .Sandbox)}}defenseclaw_close_during_install
+{{end}}
 {{if .Sandbox}}# A closed PreToolUse fallback's deny reason says why (the second argument):
 # an unreachable DefenseClaw, a request it refused, a reply that is no
 # verdict. The tool call is blocked either way.
@@ -200,7 +229,9 @@ fi
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the administrator's open covers a gateway outage only.
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-  echo "defenseclaw: antigravity hook refusing oversized payload" >&2
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}  echo "defenseclaw: antigravity hook refusing oversized payload" >&2
   if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     antigravity_emit_fallback 1{{if .Sandbox}} "DefenseClaw hook payload is too large, so the tool call is blocked."{{end}}
   else
@@ -226,7 +257,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 fail_unreachable() {
-  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "antigravity tool" "$1"
   if defenseclaw_should_fail_closed_on_unreachable; then
     antigravity_emit_fallback 1
@@ -237,7 +269,10 @@ fail_unreachable() {
 }
 
 fail_response() {
-{{if and (not .SecureClient) (not .Sandbox)}}  # A gateway answer or local parse failure cannot use outage-open mode.
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+  # outage only (the service not running, restarting or giving no answer
+  # in time). A refusal, an error status or an unusable answer blocks.
   FAIL_MODE="closed"
 {{end}}  defenseclaw_log_hook_delivery_failure antigravity antigravity-hook "$1" response "$FAIL_MODE"
   echo "defenseclaw: antigravity hook error: $1" >&2
@@ -249,7 +284,7 @@ fail_response() {
   exit 0
 }
 
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
@@ -288,8 +323,8 @@ RESPONSE="$(defenseclaw_sandbox_post "/api/v1/antigravity/hook" "$PAYLOAD" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}")" || {
   fail_unreachable "$(defenseclaw_sandbox_unreachable_reason "$RESPONSE")"
-}{{else}}if defenseclaw_api_listener_foreign "$API_ADDR"; then
-  fail_unreachable "${API_ADDR} is held by another account while this account's gateway is not running; no token was sent. Run \`defenseclaw-gateway start\` for the fix"
+}{{else}}if defenseclaw_api_listener_unproven "$API_ADDR"; then
+  fail_unreachable "${API_ADDR} is not proven to be this account's gateway; no token or payload was sent. Another account may hold the port. Run \`defenseclaw setup gateway --api-port <free-port>\` to choose a free port"
 fi
 # A refused or dropped connection means this account's gateway is
 # restarting or not running (after a reboot, for example): send the call
@@ -308,26 +343,15 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  _dc_post_status=$?
-{{if and (not .SecureClient) (not .Sandbox)}}  # Curl can fail after receiving HTTP headers (short or stalled body).
-  if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
-    fail_response "incomplete gateway response"
-  fi
-  if [ "$_dc_post_status" = 28 ]; then
-    FAIL_MODE="closed"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  DC_POST_STATUS=$?
+  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+  defenseclaw_await_gateway "$DC_POST_STATUS" _dc_hook_post_response || {
+    defenseclaw_split_response
+    defenseclaw_managed_http_result "$HTTP_CODE" incomplete
     fail_unreachable "gateway unreachable"
-  fi
-{{end}}  defenseclaw_await_gateway "$_dc_post_status" _dc_hook_post_response || {
-    _dc_post_status=$?
-{{if and (not .SecureClient) (not .Sandbox)}}    if [[ "${RESPONSE##*$'\n'}" == [1-9][0-9][0-9] ]] || [ "$_dc_post_status" = 18 ]; then
-      fail_response "incomplete gateway response"
-    fi
-    if [ "$_dc_post_status" = 28 ]; then
-      FAIL_MODE="closed"
-      fail_unreachable "gateway unreachable"
-    fi
-{{end}}    fail_unreachable "gateway unreachable"
   }
+{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 }
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# The gateway answered 429, so it is up: a resend that fails after it is no
 # outage in a standalone managed hook.
@@ -336,17 +360,20 @@ RESPONSE=$(defenseclaw_hook_post) || {
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-if [ -z "$HTTP_CODE" ]; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
+{{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  {{if and (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
 {{if .Sandbox}}elif [ "$HTTP_CODE" -ge 400 ] 2>/dev/null && [ "$HTTP_CODE" -lt 500 ] 2>/dev/null; then
   # The request was refused (a malformed hook input, a token or route the
   # ingress does not accept, a rate limit), which is no unreachable service.
   fail_response "gateway returned HTTP ${HTTP_CODE}" "DefenseClaw hook request was refused (HTTP ${HTTP_CODE}), so the tool call is blocked."
 {{end}}elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
-fi
+fi{{end}}
 
 {{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
 {{end}}

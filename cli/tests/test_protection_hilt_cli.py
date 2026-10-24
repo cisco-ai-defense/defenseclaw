@@ -22,6 +22,7 @@ from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 from tests.environment import isolated_home_env
+from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 
 @pytest.fixture
@@ -32,6 +33,9 @@ def app(tmp_path, monkeypatch):
     cfg.data_dir = str(tmp_path / "dc")
     cfg.policy_dir = str(tmp_path / "dc" / "policies")
     cfg.guardrail.enabled = False  # no gateway restart
+    # Secure Client, where `guardrail fail-mode` saves the hooks' mode: a
+    # per-user install takes its outage mode from the policy tier.
+    object.__setattr__(cfg.guardrail, "_secure_client", True)
     cfg.save = MagicMock()
     context = AppContext()
     context.cfg = cfg
@@ -59,10 +63,11 @@ def test_a_saved_change_exits_0_when_the_audit_event_cannot_be_written(app, conn
 
 def test_fail_mode_exits_0_with_a_plain_note_when_the_gateway_is_stopped(app) -> None:
     """GAP-1250: after defenseclaw-gateway stop, fail-mode saved the value, then crashed."""
-    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    app.cfg.guardrail.hook_fail_mode = "open"  # old persisted value
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
     assert result.exit_code == 0, result.output
     assert result.exception is None
-    assert app.cfg.guardrail.hook_fail_mode == "open"
+    assert app.cfg.guardrail.hook_fail_mode == "closed"
     # GAP-1718: one stopped-gateway note that also names the skipped audit event.
     assert result.output.count("gateway isn't running") == 1, result.output
     assert "the audit event was not recorded" in result.output
@@ -148,10 +153,10 @@ def test_bare_fail_mode_writes_an_unset_or_invalid_global_value(app, connectors,
     gc = app.cfg.guardrail
     gc.hook_fail_mode = saved
     gc.connectors = {key: PerConnectorGuardrailConfig(hook_fail_mode=value) for key, value in connectors.items()}
-    for mode in ("closed", "open"):
+    for mode in ("closed",):
         result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, [mode, "--no-restart", "--yes"], obj=app)
         assert result.exit_code == 0, result.output
         assert "nothing to do" not in result.output
         assert gc.hook_fail_mode == mode
         gc.hook_fail_mode = saved
-    assert app.cfg.save.call_count == 2
+    assert app.cfg.save.call_count == 1

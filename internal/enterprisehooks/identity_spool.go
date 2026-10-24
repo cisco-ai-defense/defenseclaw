@@ -87,7 +87,11 @@ type IdentitySpoolRecord struct {
 	UPNSource string `json:"upn_source,omitempty"`
 	// UPNKeptSince is when the guardian first kept an InfoPipe UPN that
 	// InfoPipe no longer reported (UPNSource infopipe_kept): the UPN goes
-	// once it is IdentitySpoolKeptUPNMaxAge old.
+	// once it is IdentitySpoolKeptUPNMaxAge old. On Windows it is when the
+	// guardian first kept the last known UPN of a pass that did not verify
+	// one (MarkWindowsKeptUPN); the UPN stays for profile matching
+	// (GAP-0129, GAP-0284) and UPNSource keeps naming the lookup that
+	// verified it. The gateway leaves a kept UPN out of agent identity rows.
 	UPNKeptSince time.Time `json:"upn_kept_since,omitzero"`
 	// AccountSID is the SID SSSD holds for the uid (Linux), the account's
 	// immutable directory identifier; empty for an account without one. An
@@ -99,6 +103,11 @@ type IdentitySpoolRecord struct {
 	// not in the record object, which the 1.0.3 and older gateways decode
 	// with unknown fields refused.
 	AccountSID string `json:"-"`
+	// LegacyOwnerToken is the root guardian's home or SID proof for the
+	// pre-1.0.4 agents migration map. The gateway service cannot stat a
+	// private home under ProtectHome=yes. It lives in the extension so an
+	// older gateway can still read the first record object on rollback.
+	LegacyOwnerToken string `json:"-"`
 	// SSSDDomain is the SSSD domain that holds the uid by InfoPipe
 	// Users.FindByID (Linux): the gateway drops a domain, realm and
 	// principal of its own that name another domain (mergeSpoolFacts).
@@ -136,7 +145,8 @@ type IdentitySpoolRecord struct {
 // the first object only and stop there. It is decoded without refusing
 // unknown fields, so a later build can add facts to it the same way.
 type identitySpoolRecordExtension struct {
-	AccountSID string `json:"account_sid,omitempty"`
+	AccountSID       string `json:"account_sid,omitempty"`
+	LegacyOwnerToken string `json:"legacy_owner_token,omitempty"`
 }
 
 // identitySpoolClockSlack is how far in the future a record may be dated
@@ -286,6 +296,7 @@ func ParseIdentitySpoolRecord(data []byte, key string) (IdentitySpoolRecord, err
 			return record, errors.New("identity spool record has data after its extension")
 		}
 		record.AccountSID = strings.TrimSpace(extension.AccountSID)
+		record.LegacyOwnerToken = strings.TrimSpace(extension.LegacyOwnerToken)
 	}
 	if record.Version != IdentitySpoolRecordVersion {
 		return record, fmt.Errorf("unsupported identity spool record version %d", record.Version)
@@ -319,6 +330,34 @@ func KeepLastKnownUPN(record, previous IdentitySpoolRecord) IdentitySpoolRecord 
 		record.Facts.Domain = previous.Facts.Domain
 	}
 	return record
+}
+
+// MarkWindowsKeptUPN sets UPNKeptSince on a Windows record whose UPN is not
+// the answer of this pass (kept): the last known UPN KeepLastKnownUPN
+// carried, the last good answer the AD UPN cache gave through a failed
+// TranslateNameW, or a token-group-only record's earlier UPN. It dates the
+// first pass that kept the same UPN, and clears the mark on a record whose
+// UPN this pass verified. It changes no UPN, principal or source, so
+// profile matching is what it was; the mark only keeps the UPN out of
+// agent identity rows, which list current facts (UPNKept).
+func MarkWindowsKeptUPN(record, previous IdentitySpoolRecord, kept bool) IdentitySpoolRecord {
+	record.UPNKeptSince = time.Time{}
+	if !kept || record.Facts.UPN == "" {
+		return record
+	}
+	record.UPNKeptSince = record.UpdatedAt
+	if strings.EqualFold(record.Key, previous.Key) && strings.EqualFold(record.Facts.UPN, previous.Facts.UPN) &&
+		!previous.UPNKeptSince.IsZero() && !previous.UPNKeptSince.After(record.UpdatedAt) {
+		record.UPNKeptSince = previous.UPNKeptSince
+	}
+	return record
+}
+
+// UPNKept reports whether the record's UPN is one the guardian kept rather
+// than verified in the pass that wrote it: InfoPipe's infopipe_kept, or a
+// Windows UPN MarkWindowsKeptUPN dated.
+func (r IdentitySpoolRecord) UPNKept() bool {
+	return r.Facts.UPN != "" && (r.UPNSource == UPNSourceInfoPipeKept || !r.UPNKeptSince.IsZero())
 }
 
 // IdentitySpoolRecordStillProves reports whether previous, the record an
@@ -544,10 +583,10 @@ func ReadIdentitySpoolRecords(dir string, trust func(path, label string) error, 
 func MarshalIdentitySpoolRecord(record IdentitySpoolRecord) ([]byte, error) {
 	record.Version = IdentitySpoolRecordVersion
 	data, err := json.Marshal(record)
-	if err != nil || record.AccountSID == "" {
+	if err != nil || record.AccountSID == "" && record.LegacyOwnerToken == "" {
 		return data, err
 	}
-	extension, err := json.Marshal(identitySpoolRecordExtension{AccountSID: record.AccountSID})
+	extension, err := json.Marshal(identitySpoolRecordExtension{AccountSID: record.AccountSID, LegacyOwnerToken: record.LegacyOwnerToken})
 	if err != nil {
 		return nil, err
 	}

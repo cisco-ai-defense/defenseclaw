@@ -102,6 +102,11 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	if err := openshell.CheckHost(runtime.GOOS, runtime.GOARCH); err != nil {
 		st.Available, st.Reason = false, err.Error()
 	}
+	if m.opts.Listeners != nil {
+		if err := m.opts.Listeners(); err != nil {
+			st.Available, st.Reason = false, err.Error()
+		}
+	}
 	if eff, err := m.baseEffective(cfg); err == nil {
 		st.Profile = eff.Profile
 		if eff.Pack != nil {
@@ -180,6 +185,21 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 	m.sharedLimitsWarnings(out, shared)
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
+}
+
+// KnownComputeCount counts sandboxes that may hold compute from the
+// manager's saved phases, without contacting OpenShell. It is used while
+// managed sandboxes are off and their account gateway cannot start.
+func (m *Manager) KnownComputeCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, b := range m.boxes {
+		if !b.deleted && !b.retained && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
+			n++
+		}
+	}
+	return n
 }
 
 // Get returns one sandbox.
@@ -332,9 +352,14 @@ func (m *Manager) refuseRetained(b *box) error {
 		"sandbox %s was deleted; only its undo point is kept (undo, review or delete it)", name)
 }
 
-// stop stops the sandbox of b. One whose main process completed or failed
-// OpenShell returns as it is: it keeps its phase, and with it the
-// OpenShell gateway (HoldsCompute), until OpenShell reports another.
+// stop stops the sandbox of b once its harness has exited and, on a driver
+// whose stop does not flush (the MicroVM driver), after sync(1) in the
+// guest. A flush that fails does not hold the stop back: once OpenShell
+// takes the stop, the feed says what it may have lost (flushFailed), never
+// for a stop that was refused or not made. One whose main process
+// completed or failed OpenShell returns as it is: it keeps its phase, and
+// with it the OpenShell gateway (HoldsCompute), until OpenShell reports
+// another.
 func (m *Manager) stop(ctx context.Context, b *box) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
@@ -356,7 +381,7 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	// and its terminal ends as after /exit (graceful.go); a detached run
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
-	run := m.endHarness(ctx, gw, b)
+	run, flushErr := m.endHarness(ctx, gw, b)
 	if !ended {
 		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	}
@@ -408,6 +433,10 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 		m.lifecycle(ctx, b, ph, audit.SandboxTriggerStop, false, cond, stopped.Status.ExitCode)
 		return nil
 	}
+	// OpenShell took the stop: what the flush did not confirm is lost now.
+	if flushErr != nil {
+		m.flushFailed(name, flushErr)
+	}
 	sb, err := gw.Client.WaitStopped(ctx, name)
 	if err != nil && transientGatewayError(err) {
 		if cur, ok := m.reconnect(ctx, gw, err); ok {
@@ -417,6 +446,13 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	}
 	if err != nil {
 		m.stopFailed(ctx, gw, b)
+		// OpenShell before 0.1.5 takes the stop of a MicroVM in its error
+		// state and then fails the wait ("sandbox is in error state"): the
+		// sandbox, why and the way on, not OpenShell's words alone
+		// (GAP-0871).
+		if e := m.errorPhaseNow(b); e != nil {
+			return e
+		}
 		return upstream("wait for sandbox "+name+" to stop", err)
 	}
 	m.mu.Lock()
@@ -699,7 +735,7 @@ func (e *sessionRulesError) Unwrap() error { return e.err }
 // stopErr is that stop's failure: the sandbox then still runs with the
 // rules, and the refusal says so and how to end it instead. The gateway's
 // own words stay in the log.
-func sessionRulesLeft(name string, err, stopErr error) error {
+func sessionRulesLeft(name string, err, stopErr error, stopFlushes bool) error {
 	rules, these := "the network rules", "the rules"
 	what := "the network rules approved for its last session"
 	var left *sessionRulesError
@@ -724,7 +760,7 @@ func sessionRulesLeft(name string, err, stopErr error) error {
 	}
 	return &sandboxapi.Error{Code: code,
 		Message: "sandbox " + name + " did not start: " + what + " could not be removed from its policy, " +
-			"so DefenseClaw stopped it again (its work is kept)",
+			"so " + stoppedUnverifiedOutcome(stopFlushes),
 		Detail: "a new session does not keep what was approved for the last one; start it again " +
 			"(the removal is tried first), and if this repeats, `defenseclaw sandbox doctor` checks the OpenShell gateway"}
 }
@@ -775,6 +811,20 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	if err := lingeringStartRefusal(rec.Name, gw.Driver, sb, rec.PhaseReason, req.EndVM); err != nil {
 		return err
 	}
+	// No new session while a legacy guest runs unprotected; this one's
+	// start ends it when it is an ended legacy MicroVM (--end-vm).
+	if err := m.legacyRunRefusal(rec.Name); err != nil {
+		return err
+	}
+	// Containment may have detached providers or removed rules before an
+	// OpenShell error prevented its final confirmation, and the legacy VM
+	// may have stopped since: the record said so before the first change
+	// (OldSupervisorNetworkRestore), so the create-time policy comes back
+	// even when the closed-network checkpoint was not reached. The closed
+	// and providers fields alone are what earlier 1.0.4 builds of this
+	// change recorded, until 1.0.4 ships.
+	restoreLegacyNetwork := rec.OldSupervisorNetworkRestore || rec.OldSupervisorNetworkClosed || len(rec.OldSupervisorProviders) > 0 ||
+		oldSupervisorLingering(auditPhase(sb.Status.Phase), rec)
 	// A sandbox an OpenShell before 0.1.5 created keeps a Docker bootstrap
 	// that 0.1.5 cannot read (GAP-0300): it moves to 0.1.5's format first.
 	if err := m.migrateBootstrap(gw, rec.Name, sb); err != nil {
@@ -942,13 +992,29 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 		}
 		return vmExitFailure(runtime.GOOS, m.managedMode(), gw.Driver, upstream("wait for sandbox "+rec.Name, err))
 	}
+	if restoreLegacyNetwork {
+		// The old VM is gone now. Restore only its create-time network policy,
+		// after the new supervisor is ready: never reopen a route while the
+		// legacy supervisor can still run background work. Session approvals
+		// removed above are not brought into the new session.
+		if err := m.restoreOldSupervisorNetwork(ctx, gw, b, sb, eff); err != nil {
+			stopErr := m.stopUnverified(ctx, gw, b)
+			detail := "DefenseClaw stopped the new session before it could run without its network policy"
+			if stopErr != nil {
+				detail += "; stopping it also failed: " + stopErr.Error()
+			}
+			return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable,
+				Message: "sandbox " + rec.Name + " did not restore its network on the new OpenShell supervisor: " + err.Error(),
+				Detail:  detail}
+		}
+	}
 	if rulesLeft != nil {
 		if err := m.endSessionRules(ctx, gw, b, eff); err != nil {
 			// Fail closed: a sandbox must not run a new session with a rule
 			// approved for the last one.
 			m.logf("sandbox %s: the rules approved for its last session are still in its policy: %v (before the start: %v); stopping it again",
 				rec.Name, err, rulesLeft)
-			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b))
+			return sessionRulesLeft(rec.Name, err, m.stopUnverified(ctx, gw, b), gw.Driver.StopFlushes)
 		}
 	}
 	if err := settle(ctx, m.opts.SettleDelay); err != nil {
@@ -963,6 +1029,9 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	b.rulesAdded, b.autoApproved = 0, nil
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStart, false, nil, nil)
+	if restoreLegacyNetwork {
+		m.syncCredential(b, eff)
+	}
 	m.observeNow(b)
 	m.startWatch(b)
 	m.enforceApprovedRules(ctx, gw, b, eff)

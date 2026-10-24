@@ -26,6 +26,7 @@ def _powershell_engines() -> list[str]:
     candidates: list[str | None] = [
         shutil.which("powershell.exe"),
         shutil.which("pwsh.exe"),
+        shutil.which("pwsh"),
     ]
     windows_root = os.environ.get("SystemRoot")
     if windows_root:
@@ -140,6 +141,62 @@ def test_canonical_setter_replaces_the_entire_protected_dacl() -> None:
     assert "$script:IcaclsExe" not in setter_without_raw_verifier
 
 
+def test_shared_vendor_ace_updates_preserve_other_raw_aces() -> None:
+    # GAP-0760: .NET's projected AddAccessRule/PurgeAccessRules round trip
+    # widened a pre-existing BUILTIN Users 0x1200a0 ACE to 0x1200a9.
+    source = MODULE.read_text(encoding="utf-8")
+    for start, end in (
+        ("function Grant-DefenseClawStateAncestorTraverse", "function Assert-DefenseClawStateAncestorTraverse"),
+        ("function Revoke-DefenseClawStateAncestorTraverse", "$script:VendorDirectoryUsersRights"),
+        ("function Grant-DefenseClawStandaloneVendorUsersRead", "function Revoke-DefenseClawStandaloneVendorUsersRead"),
+        ("function Revoke-DefenseClawStandaloneVendorUsersRead", "function Initialize-DefenseClawManagedRoot"),
+    ):
+        body = _extract_function_body(source, start, end)
+        assert "Set-DefenseClawSharedDirectoryRawAce" in body
+        assert "Microsoft.PowerShell.Security\\Set-Acl" not in body
+    editor = _extract_function_body(source, "function Set-DefenseClawSharedDirectoryRawAce", "function Grant-DefenseClawStateAncestorTraverse")
+    assert "SetSharedDirectoryDaclNoFollow" in editor
+    assert "Test-DefenseClawExactRawDACL" in editor
+
+
+@pytest.mark.skipif(os.name != "nt" or not _powershell_engines(), reason="requires Windows ACL APIs")
+def test_shared_vendor_raw_ace_editor_keeps_existing_users_bytes() -> None:
+    source = MODULE.read_text(encoding="utf-8")
+    editor = _extract_function_body(
+        source, "function Update-DefenseClawSharedRawDescriptor", "function Set-DefenseClawSharedDirectoryRawAce",
+    )
+    script = editor + r"""
+$ErrorActionPreference = 'Stop'
+$before = [Security.AccessControl.RawSecurityDescriptor]::new(
+    'O:BAG:BAD:P(A;;0x1200a0;;;BU)(A;;FA;;;SY)')
+$service = 'S-1-5-80-1-2-3-4-5'
+$granted = Update-DefenseClawSharedRawDescriptor -Descriptor $before -SID $service -Action Replace -AccessMask 0x1200a9
+$twice = Update-DefenseClawSharedRawDescriptor -Descriptor $granted.Descriptor -SID $service -Action Replace -AccessMask 0x1200a9
+$removed = Update-DefenseClawSharedRawDescriptor -Descriptor $granted.Descriptor -SID $service -Action Remove
+if (-not $granted.Changed -or $twice.Changed -or -not $removed.Changed -or
+    $before.GetSddlForm('All') -cne $removed.Descriptor.GetSddlForm('All')) { throw 'service grant changed a foreign ACE' }
+$partial = [Security.AccessControl.RawSecurityDescriptor]::new(
+    'O:BAG:BAD:P(A;;0x120080;;;BU)(A;;FA;;;SY)')
+$added = Update-DefenseClawSharedRawDescriptor -Descriptor $partial -SID 'S-1-5-32-545' -Action Add -AccessMask 0x20
+$users = @($added.Descriptor.DiscretionaryAcl | Where-Object {
+    $_ -is [Security.AccessControl.KnownAce] -and $_.SecurityIdentifier.Value -ceq 'S-1-5-32-545'
+})
+if ($users.Count -ne 2 -or @($users | Where-Object { $_.AccessMask -eq 0x120080 }).Count -ne 1 -or
+    @($users | Where-Object { $_.AccessMask -eq 0x20 }).Count -ne 1) { throw 'partial Users ACE was merged or widened' }
+$reverted = Update-DefenseClawSharedRawDescriptor -Descriptor $added.Descriptor -SID 'S-1-5-32-545' -Action RemoveExact -AccessMask 0x20
+if (-not $reverted.Changed -or $partial.GetSddlForm('All') -cne $reverted.Descriptor.GetSddlForm('All')) {
+    throw 'removal changed the pre-existing Users ACE'
+}
+'OK'
+"""
+    for engine in _powershell_engines():
+        result = subprocess.run(
+            [engine, "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
 def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None:
     """A state-root ancestor is a shared vendor directory.
 
@@ -149,14 +206,14 @@ def test_state_root_ancestor_grant_is_additive_not_a_canonical_seizure() -> None
     """
     source = MODULE.read_text(encoding="utf-8")
     grant = source[
-        source.index("function Add-DefenseClawStateAncestorTraverseRule") : source.index(
+        source.index("function Update-DefenseClawSharedRawDescriptor") : source.index(
             "function Assert-DefenseClawStateAncestorTraverse"
         )
     ]
 
-    assert "PurgeAccessRules" in grant
-    assert "InheritanceFlags]::None" in grant
-    assert "Get-Acl" in grant
+    assert "SetSharedDirectoryDaclNoFollow" in grant
+    assert "[Security.AccessControl.AceFlags]::None" in grant
+    assert "GetDirectorySecuritySnapshotNoFollow" in grant
     # The canonical builder replaces the owner and the whole DACL.
     assert "New-DefenseClawCanonicalPathAcl" not in grant
     assert "Set-DefenseClawPathAcl" not in grant
@@ -747,6 +804,8 @@ def test_every_managed_path_kind_has_an_exact_descriptor(engine: str) -> None:
         "split_explicit_aces_rejected": True,
         "acl_kind_sets_agree": True,
         "state_ancestor_grant_is_additive": True,
+        "widened_prior_grant_collapsed": True,
+        "tree_not_seized": True,
         "managed_ipc_scope_cleanup_exact": True,
         "managed_ipc_other_service_ace_preserved": True,
         "managed_ipc_cleanup_idempotent": True,

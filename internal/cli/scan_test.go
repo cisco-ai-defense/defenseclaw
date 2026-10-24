@@ -7,6 +7,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 	"github.com/defenseclaw/defenseclaw/internal/version"
@@ -58,6 +60,51 @@ func TestGatewayScanRefusesForeignListenerBeforeSendingToken(t *testing.T) {
 	}
 	if got := requests.Load(); got != 0 {
 		t.Fatalf("foreign listener received %d scan requests", got)
+	}
+}
+
+func TestGatewayScanUsesTheConnectedPeerVerifier(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	previousCfg, previousEndpoint := cfg, scanGatewayEndpoint
+	previousHolder, previousState := gatewayPortHolder, gatewayManagedState
+	previousFactory := perUserGatewayClientFactory
+	t.Cleanup(func() {
+		cfg, scanGatewayEndpoint = previousCfg, previousEndpoint
+		gatewayPortHolder, gatewayManagedState = previousHolder, previousState
+		perUserGatewayClientFactory = previousFactory
+	})
+	cfg = config.DefaultConfig()
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	scanGatewayEndpoint = func() (string, string, error) { return server.URL, "gateway-secret", nil }
+	gatewayPortHolder = func(string, int) (daemon.PortHolder, error) {
+		return daemon.PortHolder{UID: os.Getuid(), PID: os.Getpid()}, nil
+	}
+	gatewayManagedState = func() (bool, int) { return true, os.Getpid() }
+	called := false
+	perUserGatewayClientFactory = func(_ time.Duration, addr string) (*http.Client, error) {
+		called = true
+		if addr != net.JoinHostPort(host, portText) {
+			t.Errorf("verified address = %s", addr)
+		}
+		return nil, errors.New("connected peer rejected")
+	}
+	err = runGatewayScan(&cobra.Command{}, "skill", t.TempDir())
+	if !called || err == nil || !strings.Contains(err.Error(), "connected peer rejected") || requests.Load() != 0 {
+		t.Fatalf("scan bypassed connected peer check: called=%t requests=%d error=%v", called, requests.Load(), err)
 	}
 }
 

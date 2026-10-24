@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -95,50 +94,4 @@ func createForeignHookSessionStoreParent(_, dir string) error {
 		return err
 	}
 	return nil
-}
-
-// PublishedSessionKeysLockPath is the key lock in the standalone lifecycle
-// folder lifecycleDir (managed.StandaloneLayout.LifecycleDir), which only
-// SYSTEM and Administrators can reach and where the lifecycle command keeps
-// its other locks across an installer run.
-func PublishedSessionKeysLockPath(lifecycleDir string) string {
-	return filepath.Join(lifecycleDir, "session-keys.lock")
-}
-
-// publishedSessionKeysLockGuardianCreates is true: a lifecycle command
-// makes the lock only when the lifecycle folder exists before its installer
-// runs, so the guardian of a first install makes it.
-const publishedSessionKeysLockGuardianCreates = true
-
-// openPublishedSessionKeysLockFile opens the key lock, creating it only when
-// create is set, never through a reparse point. It inherits the lifecycle
-// folder's protected DACL.
-func openPublishedSessionKeysLockFile(path string, create bool) (*os.File, error) {
-	pointer, err := winpath.UTF16Ptr(path)
-	if err != nil {
-		return nil, err
-	}
-	disposition := uint32(windows.OPEN_EXISTING)
-	if create {
-		disposition = windows.OPEN_ALWAYS
-	}
-	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, nil, disposition,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
-	if err != nil {
-		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
-			return nil, fs.ErrNotExist
-		}
-		return nil, err
-	}
-	var info windows.ByHandleFileInformation
-	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
-		_ = windows.CloseHandle(handle)
-		return nil, err
-	}
-	if info.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-		_ = windows.CloseHandle(handle)
-		return nil, fmt.Errorf("%s is not a regular file", path)
-	}
-	return os.NewFile(uintptr(handle), path), nil
 }

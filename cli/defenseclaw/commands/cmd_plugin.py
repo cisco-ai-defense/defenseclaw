@@ -656,7 +656,7 @@ def _active_plugin_connectors(app: AppContext) -> list[str]:
         active = cfg.active_connector()
         if active:
             return [active]
-    return ["openclaw"]
+    return []
 
 
 def _plugin_roots_for_connector(
@@ -679,7 +679,7 @@ def _plugin_roots_for_connector(
         pass
 
     if include_legacy and getattr(app.cfg, "plugin_dir", ""):
-        active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        active = app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
         active_connectors = _active_plugin_connectors(app)
         if len(active_connectors) <= 1 or connector == active:
             roots.append(app.cfg.plugin_dir)
@@ -4257,7 +4257,7 @@ _PLUGIN_RUNTIME_PROBE_CONNECTORS = {"claudecode"}
 def _normalize_runtime_connector(connector: str) -> str:
     from defenseclaw import connector_paths
 
-    return connector_paths.normalize(connector or "openclaw")
+    return connector_paths.normalize(connector)
 
 
 def _plugin_runtime_probe_enforced(connector: str) -> bool:

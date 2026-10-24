@@ -1027,14 +1027,16 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         # Simulate scripts/install.sh --connector codex having recorded
         # the operator's choice. The CLI should pick it up without
         # requiring --connector / --agent on every subsequent setup call.
+        # The hint counts only for an installed agent (GAP-0568).
         atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex\n")
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.claw.home_dir = self.tmp_dir
-        result = self.runner.invoke(
-            setup,
-            ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
-            obj=self.app,
-        )
+        with patch("defenseclaw.commands.cmd_setup._detect_installed_connectors", return_value=["codex"]):
+            result = self.runner.invoke(
+                setup,
+                ["guardrail", "--non-interactive", "--mode", "observe", "--no-restart"],
+                obj=self.app,
+            )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("Connector: Codex (codex)", result.output)
 
@@ -3034,7 +3036,10 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_name = "cursor-hook.ps1" if os.name == "nt" else "cursor-hook.sh"
-            runtime_path = os.path.join(tmpdir, runtime_name)
+            # Setup's own path: a copy anywhere else is not DefenseClaw's
+            # current hook (rel-1-0-4 GAP-0600).
+            runtime_path = os.path.join(tmpdir, "hooks", runtime_name)
+            os.mkdir(os.path.dirname(runtime_path), 0o700)
             if os.name == "nt":
                 runtime_body = (
                     "# defenseclaw-managed-hook v9\ndefenseclaw-hook.exe\n"
@@ -3055,7 +3060,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                         "type": "command",
                         "command": command,
                         "timeout": 30,
-                        "failClosed": True,
+                        "failClosed": True,  # per-user Setup registers it in observe too
                     }
                 ]
                 for event in CURSOR_HOOK_EVENTS
@@ -3074,7 +3079,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                         "contract_id": "cursor-hooks-v1",
                         "compatibility_status": "unversioned",
                         "hook_script_version": "v8",
-                        "hook_fail_mode": "closed",
+                        "hook_fail_mode": "open",
                         "hook_script_digests": {
                             runtime_name: "sha256:" + hashlib.sha256(Path(runtime_path).read_bytes()).hexdigest(),
                         },
@@ -3091,9 +3096,9 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
 
             guardrail = SimpleNamespace(
                 connectors={},
-                hook_fail_mode="closed",
+                hook_fail_mode="open",
                 effective_mode=lambda _name: "observe",
-                effective_hook_fail_mode=lambda _name: "closed",
+                effective_hook_fail_mode=lambda _name: "open",
                 effective_hilt=lambda _name: SimpleNamespace(enabled=False),
             )
             cfg = SimpleNamespace(

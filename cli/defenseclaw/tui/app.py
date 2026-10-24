@@ -3752,7 +3752,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         # Don't carry stale finish/rejection state into a fresh command
         # entry. Idle = strip is hidden, exactly what we want here.
         self._strip_clear()
-        self._set_status("Command palette open. Type, use Up/Down, Tab complete, or click a row.")
+        self._set_status("Command palette. Type or pick.")
 
     def action_open_panel_jumper(self) -> None:
         """Open the Ctrl+P fuzzy panel jumper modal.
@@ -3977,10 +3977,10 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         palette.clear(columns=True)
         self._command_palette_values = []
         self.set_focus(None)
-        # Closing the palette by running a row left "Command palette open."
+        # Closing the palette by running a row left its open hint
         # in the status bar (GAP-1213). Callers that report something else
         # set their own status after this.
-        if self.status_text.startswith("Command palette open"):
+        if self.status_text == "Command palette. Type or pick.":
             self._set_status(self._status_text())
 
     def _handle_command_palette_key(self, event: events.Key) -> bool:
@@ -13042,7 +13042,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
                     order = setup_catalog.section_order(self.setup_model.sections)
                     if order:
                         self.setup_model.select_section(order[0])
-                return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
+                return SetupPanelAction(True, hint="Config editor. Esc/w: tasks.")
             self.setup_model.active_wizard = setup_catalog.step_group(self.setup_model.active_wizard, delta)
             return SetupPanelAction(True)
         if key == "i":
@@ -13060,7 +13060,7 @@ class DefenseClawTUI(SandboxPanelMixin, PolicyPanelMixin, App[None]):
         if key in {"c", "`"}:
             self.setup_model.mode = "config"
             self.setup_model.active_line = self.setup_model.first_editable_line()
-            return SetupPanelAction(True, hint="Config editor opened. Esc or w goes back to the tasks.")
+            return SetupPanelAction(True, hint="Config editor. Esc/w: tasks.")
         if key == "r":
             return SetupPanelAction(True, refresh_credentials=True, hint="Reloading API keys...")
         if self.setup_model.active_wizard == SetupWizard.CREDENTIALS and key in {"f", "s"}:
@@ -15826,7 +15826,7 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         return GatewayHealthResult("error", "sidecar API port is not configured")
 
     try:
-        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+        from defenseclaw.gateway import OrchestratorClient, applied_config_generation, gateway_api_client_host
 
         host = gateway_api_client_host(config)
         resolve_token = getattr(gateway_cfg, "resolved_token", None)
@@ -15909,7 +15909,7 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     if isinstance(policy, dict) and policy.get("effective_digest"):
         snapshot = replace(
             snapshot,
-            policy_generation=_coerce_int(policy.get("generation")),
+            policy_generation=applied_config_generation(policy),
             policy_digest=_coerce_str(policy.get("effective_digest")),
         )
     state = _gateway_state_from_snapshot(snapshot)
@@ -16217,8 +16217,23 @@ def _doctor_cache_from_payload(raw: object) -> DoctorCache | None:
     )
 
 
+def _no_connector_configured(config: object) -> bool:
+    """True when ``config`` reports that it configures no connector.
+
+    A ``claw.mode`` that only implies an OpenClaw the machine does not have
+    configures none (GAP-0568), so the TUI names no agent for it.
+    """
+    configured = getattr(config, "has_connector_configured", None)
+    if not callable(configured):
+        return False
+    try:
+        return not configured()
+    except Exception:  # noqa: BLE001 - connector name is cosmetic in the shell.
+        return False
+
+
 def _active_connector(config: object | None) -> str:
-    if config is None:
+    if config is None or _no_connector_configured(config):
         return ""
     active = getattr(config, "active_connector", None)
     if callable(active):
@@ -16346,7 +16361,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
     except Exception as exc:  # noqa: BLE001 - a bad connector key must not blank the roster.
         actives = []
         roster_error = f"Connector roster unavailable: {exc}"
-    display_claw_mode = str(getattr(claw, "mode", "") or "")
+    display_claw_mode = "" if _no_connector_configured(config) else str(getattr(claw, "mode", "") or "")
     display_guardrail_connector = str(getattr(guardrail, "connector", "") or "")
 
     # A one-entry ``guardrail.connectors`` map is still connector-scoped.
@@ -16445,7 +16460,7 @@ def _overview_config(config: object | None) -> OverviewConfig | None:
         # collapse an empty mode to "openclaw". OverviewPanelModel.active_connector_name()
         # then resolves the genuinely-zero-connector case to "" (no phantom
         # connector) instead of fabricating "openclaw". The Go-parity
-        # config.active_connector() contract is deliberately left untouched.
+        # The config resolver and Overview both leave an absent agent empty.
         claw_mode=display_claw_mode,
         guardrail_enabled=effective_guardrail_enabled,
         guardrail_connector=display_guardrail_connector,

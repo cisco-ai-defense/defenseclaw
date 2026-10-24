@@ -46,6 +46,33 @@ func TestErrorPhaseWayOnFollowsTheGatewayRelease(t *testing.T) {
 	}
 }
 
+func TestStoppedUnverifiedAdviceQualifiesMicroVMWork(t *testing.T) {
+	err := sessionRulesLeft("box", errors.New("policy store busy"), nil, false)
+	if !strings.Contains(err.Error(), "last successful disk sync") || strings.Contains(err.Error(), "(its work is kept)") {
+		t.Fatalf("failed start promises unsynced MicroVM work: %v", err)
+	}
+	if msg := unflushedStopMessage("box"); !strings.Contains(msg, "last successful disk sync") || strings.Contains(msg, "flushes first") {
+		t.Fatalf("unflushed stop advice promises a successful sync: %q", msg)
+	}
+}
+
+func TestFailedMicroVMRecoveryDoesNotPromiseUnsyncedWork(t *testing.T) {
+	for _, upgrade := range []string{"", "upgrade OpenShell"} {
+		for _, reason := range []string{"ProcessExited: VM process exited with status 1", "ProcessPollFailed: Bad file descriptor"} {
+			got := errorPhaseWayOn("box", reason, upgrade, true)
+			if upgrade != "" && !openshell.VMGone(reason) {
+				continue // an older gateway must wait for the user's delete
+			}
+			if !strings.Contains(got, "last successful disk sync") {
+				t.Errorf("failed VM reason %q, upgrade %q has no sync limit: %s", reason, upgrade, got)
+			}
+			if strings.Contains(got, "which keep the sandbox and its work") || strings.Contains(got, "start Docker again") {
+				t.Errorf("failed VM reason %q, upgrade %q: %s", reason, upgrade, got)
+			}
+		}
+	}
+}
+
 // NVIDIA/OpenShell#4231 refuses the stop of a sandbox whose provisioning
 // timed out ("sandbox provisioning timed out; retry start after timeout
 // cleanup completes"): the way on waits for OpenShell's cleanup and starts

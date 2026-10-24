@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // The standalone enumerator keeps two small records beside targets.yaml:
@@ -112,14 +113,20 @@ func readWindowsProtectedRecord(path string, limit int64) ([]byte, error) {
 }
 
 // ReadWindowsUnprotectedAgents reads the enumerator's unprotected-agents
-// record for manifestPath. A missing record is an empty list.
+// record for manifestPath. A missing record is an error: status and verify
+// cannot assert complete coverage before the enumerator publishes it.
 func ReadWindowsUnprotectedAgents(manifestPath string) ([]UnprotectedAgent, error) {
-	data, err := readWindowsProtectedRecord(UnprotectedAgentsPath(manifestPath), UnprotectedAgentsMaxBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
+	path := UnprotectedAgentsPath(manifestPath)
+	data, err := readWindowsProtectedRecord(path, UnprotectedAgentsMaxBytes)
 	if err != nil {
 		return nil, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if UnprotectedAgentsRecordStale(info.ModTime(), time.Now()) {
+		return nil, fmt.Errorf("enterprise hooks: unprotected-agents record is stale")
 	}
 	return ParseUnprotectedAgents(data)
 }
@@ -131,7 +138,13 @@ func WriteWindowsUnprotectedAgents(manifestPath string, agents []UnprotectedAgen
 	if err != nil {
 		return false, err
 	}
-	return WriteWindowsProtectedRecordAtomic(UnprotectedAgentsPath(manifestPath), data)
+	path := UnprotectedAgentsPath(manifestPath)
+	changed, err := WriteWindowsProtectedRecordAtomic(path, data)
+	if err != nil {
+		return changed, err
+	}
+	now := time.Now()
+	return changed, os.Chtimes(path, now, now)
 }
 
 func readWindowsBoundedPlainFile(path string, limit int64) ([]byte, error) {

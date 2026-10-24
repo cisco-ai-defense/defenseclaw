@@ -189,6 +189,6 @@ func (l *lifecycle) bundlePolicyWant(ctx context.Context, receipt *enterprisebun
 			}
 		}
 	}
-	digest, _, ok := l.computePolicy(ctx)
-	return digest, ok
+	digest, _, err := l.computePolicy(ctx)
+	return digest, err == nil
 }

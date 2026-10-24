@@ -227,6 +227,14 @@ func CommandLine() ([]string, string, error) {
 	return commandLine(agent.PID)
 }
 
+// CommandLineForPID reads an agent process's arguments for a privileged
+// managed coverage scan. Callers must first classify the process by its
+// executable and must not expose the returned arguments in status or audit.
+func CommandLineForPID(pid int) ([]string, error) {
+	argv, _, err := commandLine(pid)
+	return argv, err
+}
+
 // Host returns the normalized executable name of the process that started
 // the agent (the agent's nearest ancestor that is not a shell or wrapper),
 // or "" when it cannot be resolved. It tells an agent a desktop app runs

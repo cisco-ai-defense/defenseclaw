@@ -5,7 +5,6 @@
   "env": {},
   "binaries": [
     "agy (harness)",
-    "awk (runtime)",
     "bash (runtime)",
     "chmod (runtime)",
     "curl (runtime)",
@@ -45,8 +44,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 100417,
-      "sha256": "f9655759848833488f7135b53f8b8edcd5605dd200b34b9958a13fe1db399729"
+      "size": 121547,
+      "sha256": "20815799cb73318c3f25d9e608bab230062505a95751a46e2eafb3fa499eb5e0"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -58,31 +57,31 @@
       "mode": "-rwxr-xr-x",
       "owner": "root",
       "size": 12792,
-      "sha256": "88b9d8eaa49baf6a979c79f12da2722ad605ef84998ceff04b0ed7017e093942"
+      "sha256": "33c796ac5c4e9818beab4f0cd0fe73f8a8d086ef5c86aca3e0373d79803c68ea"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7035,
-      "sha256": "d5c1709a66b6da0328c56558cdde20cbbbd3e189d774b95ccac43195113d8e3c"
+      "size": 6925,
+      "sha256": "bd72389be7045726f177b47c378e01622b5743e349830c0b65a3d2a2ffb8e791"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6226,
-      "sha256": "6483dc8e3040870d22290abcabb324bb81de2f71f5c9fc217383938ac6c2621c"
+      "size": 6116,
+      "sha256": "7ca83c22e652e6679c35b74a76e7a42618c8f6e2784ad15393747a9de520a7f6"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool-response.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 6654,
-      "sha256": "c4e37b7870790cdab25c97b7e830fde3246a991ea8f64efa304d3b35c569f37f"
+      "size": 6544,
+      "sha256": "c960f71d737bbe881aba72fe1cb9417d9b1c84f7e44137d5a5ce33c849ee8fc2"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-tool.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7003,
-      "sha256": "aa2152f589d5047db8039f904b11a59c476360bc057711b7502c64bb7110465e"
+      "size": 6893,
+      "sha256": "868f716f078b5704b8df8262c470c0c532f2d59bf6c010ad8981f01fcb4b347c"
     }
   }
 }

@@ -39,7 +39,7 @@ from defenseclaw.observability import PRESETS
 from defenseclaw.observability import v8_activation as v8_activation_module
 from defenseclaw.observability.v8_activation import V8ActivationError
 from defenseclaw.observability.v8_config import load_validate_v8
-from defenseclaw.observability.v8_presets import apply_secret
+from defenseclaw.observability.v8_presets import apply_secret, splunk_sink_token_env
 from defenseclaw.observability.v8_status import V8DestinationStatus, V8OperatorStatus
 from defenseclaw.observability.v8_writer import V8PolicyWriteResult
 from defenseclaw.observability.v8_yaml import DELETE
@@ -1838,7 +1838,8 @@ def test_failed_setup_rollback_keeps_a_newer_token(tmp_path: Path, monkeypatch: 
 
     _stub_canonical_v8_gateway(monkeypatch)
     (tmp_path / "config.yaml").write_text("config_version: 8\nobservability: {}\n")
-    key = PRESETS["splunk-hec"].token_env
+    # A Splunk destination keeps its credential under its own reference.
+    key = splunk_sink_token_env("hec")
     monkeypatch.delenv(key, raising=False)
     original_mutate = v8_writer.mutate_v8_config
     inside_first = False
@@ -1881,7 +1882,8 @@ def test_failed_setup_rollback_waits_out_a_concurrent_setup_of_the_same_token(
 
     _stub_canonical_v8_gateway(monkeypatch)
     (tmp_path / "config.yaml").write_text("config_version: 8\nobservability: {}\n")
-    key = PRESETS["splunk-hec"].token_env
+    # A Splunk destination keeps its credential under its own reference.
+    key = splunk_sink_token_env("hec")
     monkeypatch.delenv(key, raising=False)
 
     def add(token: str, endpoint: str = "https://hec.example.com:8088/services/collector"):

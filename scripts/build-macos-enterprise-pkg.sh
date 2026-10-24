@@ -31,7 +31,8 @@
 #
 # Signing is optional and off by default:
 #   MACOS_APP_SIGN_IDENTITY        "Developer ID Application: ..." codesigns
-#                                  the binaries with the hardened runtime.
+#                                  the binaries with the hardened runtime;
+#                                  "-" uses an ad hoc identity for CI.
 #   MACOS_INSTALLER_SIGN_IDENTITY  "Developer ID Installer: ..." signs the
 #                                  product archive.
 #   MACOS_SIGN_KEYCHAIN            keychain holding both identities.
@@ -127,7 +128,13 @@ ln -s "/$INSTALL_BIN/defenseclaw-gateway" "$ROOT/$LAUNCHER_DIR/defenseclaw"
 # decision after an upgrade. The lifecycle renders the same path from the
 # installed gateway's SHA-256.
 if [ -n "${MACOS_APP_SIGN_IDENTITY:-}" ]; then
-    sign_args=(--force --timestamp --options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
+    sign_args=(--force)
+    # Ad hoc signing lets the disposable macOS CI install lane exercise the
+    # same signed-program copy and label path without a release certificate.
+    if [ "$MACOS_APP_SIGN_IDENTITY" != - ]; then
+        sign_args+=(--timestamp)
+    fi
+    sign_args+=(--options runtime --sign "$MACOS_APP_SIGN_IDENTITY")
     [ -n "${MACOS_SIGN_KEYCHAIN:-}" ] && sign_args+=(--keychain "$MACOS_SIGN_KEYCHAIN")
     for binary in "$ROOT/$INSTALL_BIN"/* "$e2fs_root/sbin"/*; do
         codesign "${sign_args[@]}" --identifier "com.cisco.defenseclaw.$(basename "$binary")" "$binary"
@@ -142,13 +149,19 @@ cp -p "$ROOT/$INSTALL_BIN/defenseclaw-gateway" "$ROOT$agent_program"
 # only when root:wheel owns it and nobody else can write it, which pkgbuild
 # --ownership recommended gives (mode 0644 here). The agents load at each
 # account's next sign-in; the launcher bootstraps them on demand for an
-# account that is already signed in.
+# account that is already signed in. Each label carries the first 12 digits
+# of the gateway's SHA-256 too: macOS keeps the code-signing decision it made
+# for a job label, and killed the job of an upgraded program under its old
+# label (GAP-0206). The lifecycle names the same label and removes the
+# plists of earlier labels (openshell.LaunchAgentLabel).
 mkdir -p "$ROOT/$LAUNCH_AGENTS_DIR"
+agent_tag=$(printf '%s' "$gateway_digest" | cut -c1-12)
 for label in com.cisco.defenseclaw.sandbox com.cisco.defenseclaw.openshell-gateway; do
     agent="$REPO_ROOT/packaging/launchd-standalone/agents/$label.plist"
     [ -f "$agent" ] || { echo "missing $agent" >&2; exit 1; }
-    sed "s|/$INSTALL_BIN/defenseclaw-gateway|$agent_program|" "$agent" >"$ROOT/$LAUNCH_AGENTS_DIR/$label.plist"
-    chmod 0644 "$ROOT/$LAUNCH_AGENTS_DIR/$label.plist"
+    sed -e "s|/$INSTALL_BIN/defenseclaw-gateway|$agent_program|" -e "s|<string>$label</string>|<string>$label.$agent_tag</string>|" \
+        "$agent" >"$ROOT/$LAUNCH_AGENTS_DIR/$label.$agent_tag.plist"
+    chmod 0644 "$ROOT/$LAUNCH_AGENTS_DIR/$label.$agent_tag.plist"
 done
 
 # preinstall refuses before any file lands on a Secure Client host: the two

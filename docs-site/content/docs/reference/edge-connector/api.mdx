@@ -52,7 +52,7 @@ JSON API request and response bodies use `Content-Type: application/json`; `/met
 
 ### CSRF protection
 
-State-changing requests (`POST`, `PUT`, `DELETE`) through the gateway require the `X-DefenseClaw-Client` header. This is enforced by the gateway's CSRF middleware, not the fleet API itself. Direct fleet API calls (e.g., from the CLI) include this header automatically.
+Every `POST` needs the `X-DefenseClaw-Client` header and `Content-Type: application/json`, also a `POST` with no body such as `/token/rotate` and `/devices/{id}/rotate-key`. Without the header the gateway answers `403`; without the content type it answers `415` with `{"error":"Content-Type must be application/json"}`.
 
 ---
 
@@ -657,7 +657,7 @@ Both rollback counters increment when a device's authenticated heartbeat first c
 
 ## Error format
 
-All error responses use a consistent JSON structure:
+Error responses from the fleet API use this JSON structure. A method the path does not accept returns `405` with the plain text `Method Not Allowed` instead.
 
 ```json
 {
@@ -679,13 +679,19 @@ Some errors include an additional `detail` field with diagnostic information:
 | Status | Meaning |
 | --- | --- |
 | `200` | Success |
-| `201` | Resource created |
-| `202` | Accepted (async processing) |
-| `400` | Bad request (validation error) |
-| `401` | Unauthorized (missing or invalid Bearer token) |
+| `201` | Device registered |
+| `202` | Threat intelligence accepted and published |
+| `207` | Partial result: a batch decommission or threat-intelligence publication partly failed, or the decommission hit its 30-second deadline |
+| `400` | Bad request (validation error, malformed JSON) |
+| `401` | Missing or invalid Bearer token, or `DCLAW_FLEET_API_TOKEN` is not set |
+| `403` | Token not allowed for this tenant or endpoint, missing CSRF header, non-localhost `Origin`, or key or token delivery without TLS |
 | `404` | Resource not found |
-| `413` | Request body too large (exceeds 1 MB) |
-| `422` | Unprocessable entity (e.g., invalid policy YAML) |
-| `500` | Internal server error |
-| `501` | Not implemented (policy service not configured) |
-| `503` | Service unavailable (MQTT not configured) |
+| `405` | Method not allowed for this path (plain text `Method Not Allowed`) |
+| `409` | Device decommissioned (`force_reregister` needed), or policy version 65534 reached |
+| `413` | Request body or compiled policy too large |
+| `415` | `POST` without `Content-Type: application/json` |
+| `422` | Policy YAML cannot be compiled |
+| `429` | Token or device key rotated less than a minute ago |
+| `500` | Internal error, including signing or distribution failure (for example MQTT not configured) |
+| `501` | Policy service or device key store not configured |
+| `503` | Credential, registration or audit store unavailable; retry |

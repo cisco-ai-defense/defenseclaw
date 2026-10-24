@@ -113,6 +113,21 @@ var agentIdentityVerifiedAccountToken = func(identity string) string {
 	return token
 }
 
+// agentIdentityAdminHolderToken is the account token of the account that
+// holds a uid now as the administrator's root proof of its home shows it,
+// and whether it is another one than the hooks last recorded
+// (managedHookPeerHomeCache.adminHolderToken). Tests replace it.
+var agentIdentityAdminHolderToken = func(identity, proof string) (string, bool) {
+	if useridentity.KindForID(identity) != useridentity.KindPOSIXUID {
+		return "", false
+	}
+	uid, err := strconv.Atoi(identity)
+	if err != nil {
+		return "", false
+	}
+	return managedHookPeerHomes.adminHolderToken(uid, proof)
+}
+
 // agentIdentityHolderHistory is the last account token of a uid and whether
 // another account is known to have held it (managedHookPeerHomeCache.holderHistory).
 // Tests replace it.

@@ -40,7 +40,9 @@ import (
 // requested failure mode and input, returning stdout/stderr/exit error.
 func runCursorHookAgainst(t *testing.T, apiAddr, failMode, input string) (string, string, error) {
 	t.Helper()
-	return runCursorHookWithInput(t, apiAddr, failMode, true, input)
+	home := t.TempDir()
+	installNativeGatewayForHookTest(t, home)
+	return runCursorHookWithInput(t, apiAddr, failMode, true, input, "HOME="+home)
 }
 
 // stubGatewayAddr stands up an httptest server that returns the given
@@ -144,8 +146,8 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 				"open",
 				`{"hook_event_name":"beforeShellExecution"}`,
 			)
-			if err != nil {
-				t.Fatalf("expected exit 0 (fail-open), got %v; stderr=%s", err, stderr)
+			if (tc.name == "server_5xx" || tc.name == "gateway_unreachable") != (err != nil) {
+				t.Fatalf("unexpected per-user hook exit %v; stdout=%s; stderr=%s", err, stdout, stderr)
 			}
 			trimmed := strings.TrimSpace(stdout)
 			if trimmed == "" {
@@ -168,8 +170,8 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 			"open",
 			strings.Repeat("x", (1<<20)+1),
 		)
-		if err != nil {
-			t.Fatalf("expected exit 0 for oversized fail-open input, got %v; stderr=%s", err, stderr)
+		if err == nil {
+			t.Fatalf("expected fail-closed for oversized per-user input, stdout=%s; stderr=%s", stdout, stderr)
 		}
 		assertJSONEnvelope(t, stdout)
 	})

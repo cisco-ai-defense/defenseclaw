@@ -60,7 +60,7 @@ Amp and DefenseClaw must run on the same host with the gateway reachable over lo
 
 The guardian writes the managed plugin into each enrolled user's `~/.config/amp/plugins/defenseclaw.ts` (or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`) and repairs it when the user changes it. Amp has no machine-wide plugin location, so coverage is advisory against a user who sets out to avoid it.
 
-- Amp loads plugins from the `amp/plugins` folder under `XDG_CONFIG_HOME` (default `~/.config`). A session started with `XDG_CONFIG_HOME` or `HOME` pointing elsewhere does not load the plugin (`amp plugins list` shows only Amp's own). Its tool calls are not inspected or logged, the guardian never repairs that session, and status and verify keep reporting the user's Amp ready. `DEFENSECLAW_*` overrides do not turn the plugin off.
+- Amp loads plugins from the `amp/plugins` folder under `XDG_CONFIG_HOME` (default `~/.config`). A session started with `XDG_CONFIG_HOME` or `HOME` pointing elsewhere does not load the plugin (`amp plugins list` shows only Amp's own). Its tool calls are not inspected, and the guardian cannot repair that session. Managed status and verify now report a running relocated or unverified launch as incomplete and audit the observation. `DEFENSECLAW_*` overrides do not turn the plugin off.
 - Amp does not define plugin order.
 
 To reduce this, prefer agents DefenseClaw governs through machine policy (Claude Code, Codex, Cursor, GitHub Copilot, OpenCode), and use application control so users start Amp only through an administrator-owned launcher that resets `XDG_CONFIG_HOME` and `HOME`. See R1 and R3 in the [threat model](/docs/enterprise/plan/threat-model#residual-risks).

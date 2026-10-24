@@ -11,16 +11,333 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// A standalone gateway starts its config watcher with asset watches attached.
+// Readiness and later no-op events must prove the published generation again;
+// an unsigned asset edit must leave that generation in place and name the asset.
+func TestStandaloneConfigManagerStartupAndAssetEventsProveGeneration(t *testing.T) {
+	clearGenerationBuildError()
+	t.Cleanup(clearGenerationBuildError)
+	fixture := newSidecarV8BootstrapFixture(t, config.ConfigVersionV9, "")
+	previousTrust := managedPolicyTreeTrust
+	managedPolicyTreeTrust = func(*config.Config, string) error { return nil }
+	t.Cleanup(func() { managedPolicyTreeTrust = previousTrust })
+	pack := filepath.Join(fixture.dataDir, "signature-pack.json")
+	originalPack := []byte(`{"version":1,"signatures":[]}`)
+	if err := os.WriteFile(pack, originalPack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(fmt.Sprintf("config_version: 9\ndata_dir: %q\npolicy_dir: %q\nai_discovery:\n  signature_packs: [%q]\nobservability: {}\n",
+		fixture.dataDir, filepath.Join(fixture.dataDir, "policies"), pack))
+	if err := os.WriteFile(fixture.configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(fixture.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial = withEnterpriseProfile(initial, managed.ProfileStandalone)
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, fixture.configPath, raw, fixture.dataDir); err != nil {
+		t.Fatal(err)
+	}
+	fixture.sidecar.publishConfig(initial)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap: bound=%t err=%v", bound, err)
+	}
+	rulePacks, err := preflightSidecarRulePacks(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := newGuardrailProfileSet(initial, rulePacks.cache, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := buildGeneration(t.Context(), generationInputs{
+		cfg: cloneConfig(initial), raw: raw, rulePacks: rulePacks, profiles: profiles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.N = 1
+	fixture.sidecar.publishGeneration(live)
+	mgr := newConfigManagerWithSnapshot(fixture.configPath, initial, nil, fixture.sidecar.health,
+		fixture.sidecar.observabilityV8ActivePlanDigest(), fixture.sidecar.applyConfigReloadSnapshot)
+	mgr.bindInitialObservabilityV8Plan(fixture.sidecar.observabilityV8ActivePlan())
+	loader := mgr.loadSnapshot
+	mgr.loadSnapshot = func(path string, raw []byte) (*config.Config, error) {
+		candidate, err := loader(path, raw)
+		if err == nil {
+			candidate = withEnterpriseProfile(candidate, managed.ProfileStandalone)
+		}
+		return candidate, err
+	}
+	fixture.sidecar.configMgr = mgr
+	fixture.sidecar.watchGenerationAssets()
+	mgr.setStartupSource(fixture.configPath, raw)
+	ctx, cancel := context.WithCancel(t.Context())
+	ready := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+	select {
+	case err := <-ready:
+		cancel()
+		<-done
+		if err != nil {
+			t.Fatalf("standalone startup with unchanged assets: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("standalone startup did not report readiness")
+	}
+	if !bytes.Equal(mgr.appliedRaw, raw) || mgr.rejected || mgr.gen.Load() != 0 || fixture.sidecar.Generation() != live {
+		t.Fatal("startup did not preserve the applied standalone generation")
+	}
+	if err := os.WriteFile(pack, originalPack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(t.Context(), "asset_watch"); err != nil {
+		t.Fatalf("unchanged asset event: %v", err)
+	}
+	if got := fixture.sidecar.health.Snapshot().Config; got.State != StateRunning || got.LastError != "" || hasRejection() {
+		t.Fatalf("unchanged asset event health = %+v", got)
+	}
+	if err := os.WriteFile(pack, []byte(`{"version":1, "signatures":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = mgr.ReloadAssets(t.Context(), "asset_watch")
+	if err == nil || !strings.Contains(err.Error(), "signature_pack:") || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unsigned signature pack edit = %v, want named asset refusal", err)
+	}
+	if fixture.sidecar.Generation() != live || mgr.gen.Load() != 0 || !mgr.rejected || !hasRejection() {
+		t.Fatal("unsigned asset edit changed the generation or did not set rejection")
+	}
+	if err := os.WriteFile(pack, originalPack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(t.Context(), "asset_watch"); err != nil {
+		t.Fatalf("restored asset: %v", err)
+	}
+	if fixture.sidecar.Generation() != live || mgr.gen.Load() != 0 || mgr.rejected || hasRejection() {
+		t.Fatal("restored asset did not clear the error without a generation swap")
+	}
+}
+
+// A repaired config may clear a standing reload error only when rebuilding it
+// proves that the running generation is still the same. Neither the repair
+// nor a later asset event grants permission to apply an unsigned generation.
+func TestStandaloneConfigManagerRestoredConfigClearsRejection(t *testing.T) {
+	for _, rejection := range []string{"invalid YAML", "unsigned edit"} {
+		for _, restoreWithAssets := range []bool{false, true} {
+			name := fmt.Sprintf("%s/assets=%t", rejection, restoreWithAssets)
+			t.Run(name, func(t *testing.T) {
+				clearGenerationBuildError()
+				t.Cleanup(clearGenerationBuildError)
+				dir := t.TempDir()
+				path := filepath.Join(dir, "config.yaml")
+				asset := filepath.Join(dir, "asset.rego")
+				if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writeConfigForManagerTest(t, path, dir, "observe")
+				good, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Boot and reload must use the same in-memory migration path,
+				// including its platform-specific default directories.
+				initial, err := loadRuntimeConfigCandidate(path, good)
+				if err != nil {
+					t.Fatal(err)
+				}
+				initial = withEnterpriseProfile(initial, managed.ProfileStandalone)
+				if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, path, good, dir); err != nil {
+					t.Fatal(err)
+				}
+				health := NewSidecarHealth()
+				applyCalls := 0
+				mgr := newConfigManagerWithSnapshot(path, initial, nil, health, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+					applyCalls++
+					if !slices.Equal(diff.Changed, []string{configDiffAssets}) {
+						t.Fatalf("recovery diff = %+v, want assets-only rebuild", diff)
+					}
+					contents, err := os.ReadFile(asset)
+					if err != nil {
+						return err
+					}
+					if string(contents) != "package original" {
+						return fmt.Errorf("config reload refused: referenced asset %s differs; apply a new signed policy bundle", asset)
+					}
+					return errGenerationUnchanged
+				})
+				mgr.assetFiles = func() []string { return []string{asset} }
+				loader := mgr.loadSnapshot
+				mgr.loadSnapshot = func(path string, raw []byte) (*config.Config, error) {
+					candidate, err := loader(path, raw)
+					if err == nil {
+						candidate = withEnterpriseProfile(candidate, managed.ProfileStandalone)
+					}
+					return candidate, err
+				}
+				// Boot and hot reload both use the in-memory migration for v8.
+				// Seed the applied snapshot through that same path so Windows
+				// does not compare v8 path defaults against migrated v9 defaults.
+				applied, source, err := mgr.loadStableCandidate(t.Context())
+				if err != nil {
+					t.Fatal(err)
+				}
+				mgr.current.Store(cloneConfig(applied))
+				mgr.bindInitialObservabilityV8Plan(source.compiledV8.Plan)
+				mgr.appliedRaw = good
+				mgr.appliedGenerationKnown = true
+				bad := []byte("openshell: [invalid\n")
+				if rejection == "unsigned edit" {
+					bad = append(append([]byte(nil), good...), []byte("\ngateway:\n  api_port: 19080\n")...)
+				}
+				if err := os.WriteFile(path, bad, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := mgr.Reload(t.Context(), "watch"); err == nil {
+					t.Fatal("unsigned or invalid edit was accepted")
+				}
+				if !mgr.rejected || health.Snapshot().Config.State != StateError || !hasRejection() {
+					t.Fatalf("rejection not reported: manager=%t health=%+v", mgr.rejected, health.Snapshot().Config)
+				}
+				if err := os.WriteFile(path, good, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if restoreWithAssets {
+					err = mgr.ReloadAssets(t.Context(), "asset_watch")
+				} else {
+					err = mgr.Reload(t.Context(), "watch")
+				}
+				if err != nil || mgr.rejected || hasRejection() || applyCalls != 1 || mgr.gen.Load() != 0 {
+					t.Fatalf("restored config: err=%v rejected=%t reload_error=%t rebuilds=%d generation=%d", err, mgr.rejected, hasRejection(), applyCalls, mgr.gen.Load())
+				}
+				if got := health.Snapshot().Config; got.State != StateRunning || got.LastError != "" {
+					t.Fatalf("restored config health = %+v", got)
+				}
+				if err := mgr.ReloadAssets(t.Context(), "unchanged_asset_watch"); err != nil {
+					t.Fatalf("unchanged later asset event = %v", err)
+				}
+				if err := os.WriteFile(asset, []byte("package changed"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := mgr.ReloadAssets(t.Context(), "unsigned_asset_watch"); err == nil || !strings.Contains(err.Error(), asset) {
+					t.Fatalf("unreceipted changed asset event = %v, want named refusal", err)
+				}
+				if applyCalls != 3 {
+					t.Fatalf("expected recovery, unchanged proof and changed refusal; rebuilds=%d", applyCalls)
+				}
+			})
+		}
+	}
+}
+
+func TestStandaloneConfigManagerRecoveryNeverPublishesChangedAsset(t *testing.T) {
+	clearGenerationBuildError()
+	t.Cleanup(clearGenerationBuildError)
+	fixture := newSidecarV8BootstrapFixture(t, config.ConfigVersionV9, "")
+	previousTrust := managedPolicyTreeTrust
+	managedPolicyTreeTrust = func(*config.Config, string) error { return nil } // TempDir is not root-owned.
+	t.Cleanup(func() { managedPolicyTreeTrust = previousTrust })
+	pack := filepath.Join(fixture.dataDir, "signature-pack.json")
+	originalPack := []byte(`{"version":1,"signatures":[]}`)
+	if err := os.WriteFile(pack, originalPack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	raw := []byte(fmt.Sprintf("config_version: 9\ndata_dir: %q\npolicy_dir: %q\nai_discovery:\n  signature_packs: [%q]\nobservability: {}\n",
+		fixture.dataDir, filepath.Join(fixture.dataDir, "policies"), pack))
+	if err := os.WriteFile(fixture.configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(fixture.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial = withEnterpriseProfile(initial, managed.ProfileStandalone)
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, fixture.configPath, raw, fixture.dataDir); err != nil {
+		t.Fatal(err)
+	}
+	fixture.sidecar.publishConfig(initial)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap: bound=%t err=%v", bound, err)
+	}
+	rulePacks, err := preflightSidecarRulePacks(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := newGuardrailProfileSet(initial, rulePacks.cache, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := buildGeneration(t.Context(), generationInputs{
+		cfg: cloneConfig(initial), raw: raw, rulePacks: rulePacks, profiles: profiles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.N = 1
+	fixture.sidecar.publishGeneration(live)
+	mgr := newConfigManagerWithSnapshot(fixture.configPath, initial, nil, fixture.sidecar.health,
+		fixture.sidecar.observabilityV8ActivePlanDigest(), fixture.sidecar.applyConfigReloadSnapshot)
+	mgr.bindInitialObservabilityV8Plan(fixture.sidecar.observabilityV8ActivePlan())
+	loader := mgr.loadSnapshot
+	mgr.loadSnapshot = func(path string, raw []byte) (*config.Config, error) {
+		candidate, err := loader(path, raw)
+		if err == nil {
+			candidate = withEnterpriseProfile(candidate, managed.ProfileStandalone)
+		}
+		return candidate, err
+	}
+	mgr.appliedRaw = raw
+	mgr.appliedGenerationKnown = true
+	if err := os.WriteFile(fixture.configPath, []byte("openshell: [invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(t.Context(), "watch"); err == nil {
+		t.Fatal("invalid candidate was accepted")
+	}
+	if err := os.WriteFile(fixture.configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pack, []byte(`{"version":1, "signatures":[]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(t.Context(), "restore"); err == nil || !strings.Contains(err.Error(), "referenced assets differ") {
+		t.Fatalf("restored config with unreceipted asset = %v, want asset mismatch refusal", err)
+	}
+	if fixture.sidecar.Generation() != live || mgr.gen.Load() != 0 || !mgr.rejected {
+		t.Fatal("unreceipted asset changed the published generation or cleared the rejection")
+	}
+	if err := os.WriteFile(pack, originalPack, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadAssets(t.Context(), "asset_restored"); err != nil {
+		t.Fatalf("restored asset: %v", err)
+	}
+	if fixture.sidecar.Generation() != live || mgr.gen.Load() != 0 || mgr.rejected || hasRejection() {
+		t.Fatalf("restored asset changed the generation or left health rejected: gen=%d rejected=%t error=%t", mgr.gen.Load(), mgr.rejected, hasRejection())
+	}
+	if got := fixture.sidecar.health.Snapshot().Config; got.State != StateRunning || got.LastError != "" {
+		t.Fatalf("restored asset health = %+v", got)
+	}
+}
 
 func withEnterpriseProfile(cfg *config.Config, profile string) *config.Config {
 	next := cloneConfig(cfg)
@@ -180,7 +497,7 @@ func TestStandaloneReloadRebuildsTheAIDefenseClient(t *testing.T) {
 	}
 }
 
-func TestConfigManagerReloadAppliesEnterpriseOnlyStandaloneChanges(t *testing.T) {
+func TestConfigManagerReloadRefusesUnbundledEnterpriseOnlyStandaloneChanges(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)
 	writeConfigForManagerTest(t, path, dir, "observe")
@@ -189,15 +506,13 @@ func TestConfigManagerReloadAppliesEnterpriseOnlyStandaloneChanges(t *testing.T)
 		t.Fatalf("initial load: %v", err)
 	}
 	initial := withEnterpriseProfile(loaded, managed.ProfileStandalone)
-	var applied ConfigDiff
 	calls := 0
-	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, diff ConfigDiff, _ configReloadSource) error {
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, _ configReloadSource) error {
 		calls++
-		applied = diff
 		return nil
 	})
-	// The candidate differs from the running config only in its enterprise
-	// block, which used to reload as "no change".
+	// An enterprise-only candidate used to reload as "no change". The
+	// standalone manager now requires its signed bundle generation too.
 	mgr.loadSnapshot = func(path string, raw []byte) (*config.Config, error) {
 		cfg, err := config.LoadRuntimeV8CandidateFromBytes(path, raw)
 		if err != nil {
@@ -207,14 +522,11 @@ func TestConfigManagerReloadAppliesEnterpriseOnlyStandaloneChanges(t *testing.T)
 		cfg.Enterprise.Inspection.AIDefense = config.EnterpriseAIDefenseConfig{Enabled: true, Credential: "ai-defense-api-key"}
 		return cfg, nil
 	}
-	if err := mgr.Reload(context.Background(), "test"); err != nil {
-		t.Fatalf("reload: %v", err)
+	if err := mgr.Reload(context.Background(), "test"); err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+		t.Fatalf("unbundled enterprise-only reload = %v, want signed-bundle refusal", err)
 	}
-	if calls != 1 || !slices.Contains(applied.Changed, "enterprise.inspection") {
-		t.Fatalf("enterprise-only change was not applied: calls=%d diff=%+v", calls, applied)
-	}
-	if !mgr.Current().Enterprise.Inspection.AIDefense.Enabled {
-		t.Fatal("the running snapshot kept the old enterprise block")
+	if calls != 0 || mgr.Current().Enterprise.Inspection.AIDefense.Enabled {
+		t.Fatalf("unbundled enterprise-only change applied: calls=%d current=%+v", calls, mgr.Current().Enterprise.Inspection.AIDefense)
 	}
 }
 
@@ -266,11 +578,11 @@ func TestConfigManagerReloadProfileGuard(t *testing.T) {
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("unmanaged to managed reload = %v, want the candidate handed to apply", err)
+			if err == nil || !strings.Contains(err.Error(), "signed policy bundle") {
+				t.Fatalf("unmanaged to managed reload = %v, want signed-bundle refusal", err)
 			}
-			if applied == nil || !slices.Contains(applied.RestartRequired, "deployment_mode") {
-				t.Fatalf("unmanaged to managed must reach apply as a deployment_mode restart, got %+v", applied)
+			if applied != nil {
+				t.Fatalf("unbundled managed candidate reached apply: %+v", *applied)
 			}
 		})
 	}

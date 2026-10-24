@@ -173,13 +173,14 @@ func TestStandaloneVerifyReportsAndRepairsAChangedHookScript(t *testing.T) {
 		t.Fatalf("hermes-hook.sh after the repairs differs from the install (err=%v)", err)
 	}
 
-	// The Secure Client profile keeps its earlier verification.
+	// Secure Client keeps its existing registration-first verification: it
+	// reports the missing owned command, without inspecting script digests.
 	setStandaloneProfileForTest(t, false)
 	if err := os.Remove(script); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Verify(context.Background(), opts); err != nil {
-		t.Fatalf("Secure Client verify changed: %v", err)
+	if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "owned hook command not present") {
+		t.Fatalf("Secure Client verify = %v, want the existing missing registration error", err)
 	}
 }
 

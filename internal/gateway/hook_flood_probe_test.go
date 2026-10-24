@@ -7,6 +7,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -27,6 +28,144 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 )
+
+// A provider's tool ID is unique within its session, not necessarily across
+// sessions. Offer three overlapping hook calls every 300 ms (10/s) and keep
+// each session's ten calls distinct. Every benign call must get a decision,
+// and every session/tool pair must retain its own pending audit operation.
+func TestHookFloodKeepsPendingIdentityPerCall(t *testing.T) {
+	const calls = 60
+	installCorrelationHMACForTest()
+	installDefaultProfileConnector(t, "claudecode")
+	fixture := newSidecarRuntimeFixture(t, true)
+	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime, redactionEngine: fingerprints})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+	bindHookLifecycleV8(t, api, fixture.runtime)
+	cwd := t.TempDir()
+	failures := make(chan string, calls)
+	var pending sync.WaitGroup
+	start := time.Now()
+	for group := range calls / 3 {
+		if wait := time.Until(start.Add(time.Duration(group) * 300 * time.Millisecond)); wait > 0 {
+			time.Sleep(wait)
+		}
+		for slot := range 3 {
+			index := group*3 + slot
+			pending.Add(1)
+			go func() {
+				defer pending.Done()
+				body, _ := json.Marshal(map[string]any{
+					"session_id":      fmt.Sprintf("flood-session-%02d", index/10),
+					"transcript_path": filepath.Join(cwd, "transcript.jsonl"),
+					"cwd":             cwd, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+					"tool_use_id": fmt.Sprintf("toolu_%02d", index%10),
+					"tool_input":  map[string]any{"command": "echo ok"},
+				})
+				recorder := httptest.NewRecorder()
+				api.handleAgentHook("claudecode").ServeHTTP(recorder,
+					httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)))
+				var answer struct {
+					Action string `json:"action"`
+				}
+				if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &answer) != nil || answer.Action != "allow" {
+					failures <- fmt.Sprintf("call %d: status=%d answer=%s", index, recorder.Code, recorder.Body.String())
+				}
+			}()
+		}
+	}
+	pending.Wait()
+	close(failures)
+	for failure := range failures {
+		t.Error(failure)
+	}
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var operations int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM correlation_pending_operations WHERE operation_type='tool'`).Scan(&operations); err != nil {
+		t.Fatal(err)
+	}
+	if operations != calls {
+		t.Fatalf("pending operations=%d, want one unique session/tool key for each of %d decisions", operations, calls)
+	}
+	terminal := func(session, toolID string) {
+		t.Helper()
+		payload := map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Bash",
+			"tool_use_id": toolID, "tool_response": "ok"}
+		if session != "" {
+			payload["session_id"] = session
+		}
+		body, _ := json.Marshal(payload)
+		recorder := httptest.NewRecorder()
+		api.handleAgentHook("claudecode").ServeHTTP(recorder,
+			httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(body)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("terminal status=%d answer=%s", recorder.Code, recorder.Body.String())
+		}
+	}
+	status := func(session, toolID string) audit.CorrelationOperationStatus {
+		t.Helper()
+		var got string
+		if err := database.QueryRow(`SELECT status FROM correlation_pending_operations WHERE session_id=? AND operation_id=?`,
+			session, toolID).Scan(&got); err != nil {
+			t.Fatal(err)
+		}
+		return audit.CorrelationOperationStatus(got)
+	}
+	terminal("flood-session-01", "toolu_00")
+	if got := status("flood-session-01", "toolu_00"); got != audit.CorrelationOperationCompleted {
+		t.Fatalf("exact session terminal left status %s, want completed", got)
+	}
+	if got := status("flood-session-00", "toolu_00"); got != audit.CorrelationOperationActive {
+		t.Fatalf("another session's operation changed to %s", got)
+	}
+	terminal("unrelated-session", "toolu_00")
+	for session := range calls / 10 {
+		if session == 1 {
+			continue
+		}
+		if got := status(fmt.Sprintf("flood-session-%02d", session), "toolu_00"); got != audit.CorrelationOperationActive {
+			t.Fatalf("mismatched session terminal changed session %d to %s", session, got)
+		}
+	}
+	terminal("", "toolu_01")
+	for session := range calls / 10 {
+		if got := status(fmt.Sprintf("flood-session-%02d", session), "toolu_01"); got != audit.CorrelationOperationActive {
+			t.Fatalf("ambiguous terminal changed session %d to %s", session, got)
+		}
+	}
+	// A provider can omit the session on the start and report it on the
+	// terminal. The exact ID still names the connector-scoped start uniquely.
+	startBody, _ := json.Marshal(map[string]any{
+		"transcript_path": filepath.Join(cwd, "transcript.jsonl"),
+		"cwd":             cwd, "hook_event_name": "PreToolUse", "tool_name": "Bash",
+		"tool_use_id": "sessionless-tool", "tool_input": map[string]any{"command": "echo ok"},
+	})
+	startRecorder := httptest.NewRecorder()
+	api.handleAgentHook("claudecode").ServeHTTP(startRecorder,
+		httptest.NewRequest(http.MethodPost, "/api/v1/claudecode/hook", bytes.NewReader(startBody)))
+	if startRecorder.Code != http.StatusOK {
+		t.Fatalf("sessionless start status=%d answer=%s", startRecorder.Code, startRecorder.Body.String())
+	}
+	terminal("reported-session", "sessionless-tool")
+	var sessionlessStatus string
+	if err := database.QueryRow(`SELECT status FROM correlation_pending_operations WHERE session_id IS NULL AND operation_id='sessionless-tool'`).Scan(&sessionlessStatus); err != nil {
+		t.Fatal(err)
+	}
+	if sessionlessStatus != string(audit.CorrelationOperationCompleted) {
+		t.Fatalf("sessionless start with reported-session terminal status=%s, want completed", sessionlessStatus)
+	}
+}
 
 // hookFloodMinute is one minute of a flood: the latencies of the calls
 // launched in it, summarized.

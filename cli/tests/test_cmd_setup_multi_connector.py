@@ -272,12 +272,10 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(gc.connectors["codex"].mode, "observe")
         self.assertEqual(gc.connectors["codex"].hook_fail_mode, "open")
         self.assertEqual(gc.connectors["cursor"].mode, "action")
-        # Setup no longer writes a Cursor fail mode of its own (it would
-        # replace the user's outage choice); action mode resolves closed.
+        # The guardrail mode does not pin Cursor's fail mode (oss-outage-open).
         self.assertEqual(gc.connectors["cursor"].hook_fail_mode, "")
-        self.assertEqual(gc.effective_hook_fail_mode("cursor"), "closed")
         self.assertFalse(gc.connectors["cursor"].hilt.enabled)
-        self.assertIn("cursor hook failures=closed (failClosed=true)", result.output)
+        self.assertIn("cursor gateway outage=open (failClosed=true)", result.output)
 
     def test_later_setup_revalidates_every_active_connector_before_success(self):
         self._seed_single("codex")
@@ -1353,9 +1351,10 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         gc.hook_fail_mode = "closed"
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "")
-        # Observe mode follows the global closed too, under Secure Client as
-        # well, and so does action mode.
-        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
+        # A per-user outage follows the default tier, whatever is saved
+        # (oss-outage-open); Secure Client keeps the global closed in observe
+        # and action mode.
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
         gc._secure_client = True
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc.connectors["claudecode"].mode = "action"
@@ -1476,7 +1475,22 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertRegex(out, r"connectors:\s+claudecode, codex, opencode\n")
         self.assertRegex(out, r"not guarded now:\s+hermes ")
         self.assertIn("This install now has 4 connectors configured; 3 guarded now: claudecode, codex, opencode.", out)
-        self.assertIn("Not guarded now: hermes. To guard it again, run: defenseclaw setup hermes", out)
+        self.assertIn("Not guarded now: hermes.", out)
+        self.assertIn("To guard hermes again, run: defenseclaw setup hermes", out)
+
+    def test_summary_does_not_offer_setup_for_a_refused_retired_peer(self):
+        self._seed_map("codex", "hermes", "omnigent")
+        buf = io.StringIO()
+        with click.Context(click.Command("setup")), contextlib.redirect_stdout(buf):
+            cmd_setup._remember_runtime_skipped_peers({"hermes", "omnigent"})
+            _print_observability_summary("codex", self.app.cfg, mode="action", os_name="posix")
+        out = buf.getvalue()
+
+        self.assertIn("not guarded now:", out)
+        self.assertIn("omnigent", out)
+        self.assertIn("defenseclaw setup hermes", out)
+        self.assertIn("defenseclaw doctor", out)
+        self.assertNotIn("defenseclaw setup omnigent", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):
@@ -3863,7 +3877,8 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 self.assertEqual(gc.connectors[connector].mode, "action")
                 self.assertEqual(gc.connectors[connector].hook_fail_mode, "closed")
                 self.assertEqual(gc.effective_mode(connector), "action")
-                self.assertEqual(gc.effective_hook_fail_mode(connector), "closed")
+                # Saved, but a per-user outage follows the default tier.
+                self.assertEqual(gc.effective_hook_fail_mode(connector), "open")
 
 
     def test_toggling_one_connector_mode_lands_per_connector(self):

@@ -358,7 +358,11 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 		eventNameCol = "event_name"
 	}
 	hasExactTime, _ := columnExists(db, "audit_events", "retention_timestamp_unix_nano")
-	q := `SELECT id, timestamp, action, target, actor, details, structured_json, severity, run_id,
+	// A native v8 row keeps its structured fields only in payload_json
+	// (GAP-0614).
+	hasPayloadJSON, _ := columnExists(db, "audit_events", "payload_json")
+	structuredCol := audit.StructuredJSONReadSQL("", hasPayloadJSON, eventNameCol != "NULL")
+	q := `SELECT id, timestamp, action, target, actor, details, ` + structuredCol + `, severity, run_id,
 session_id, trace_id, agent_id, agent_name, agent_instance_id, sidecar_instance_id,
 schema_version, content_hash, generation, binary_version,
 destination_app, tool_name, tool_id, policy_id, connector, ` + eventNameCol + `

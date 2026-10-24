@@ -35,7 +35,7 @@ The ACP guard sits between an editor that speaks the Agent Client Protocol (ACP)
 - `defenseclaw acp setup` replaces the editor's agent entry with a `DefenseClaw · <agent>` entry that starts `defenseclaw-acp`.
 - The guard checks prompts, agent output, permission requests, file and terminal calls, and vendor extensions.
 - It talks only to the gateway on a loopback address. Each request is encrypted and each verdict is authenticated, so another process on the port cannot read content or fake a verdict.
-- Setup starts in observe mode: it records and never blocks. Add `--activate` for action mode.
+- Setup starts in observe mode: it records policy findings without blocking on them. A standalone managed guard refuses an unevaluated frame by default; a previously authenticated profile verdict selecting `fail_mode: closed` also refuses it on a per-user install. Add `--activate` for action mode.
 - In action mode a blocked prompt ends that turn, and the editor shows the reason as an agent message.
 - Policy is set per editor and agent pair through [profiles](/docs/reference/apis/acp-guard#configuration), so one editor can enforce on one agent and observe another.
 
@@ -62,7 +62,7 @@ Zed is tested. JetBrains is cataloged. A cataloged entry point matches the vendo
 
 ## Managed computers
 
-`defenseclaw acp setup` is for a per-user install. On an enterprise managed computer an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user then runs the setup command it reports, `defenseclaw-gateway enterprise acp setup`. The administrator tools are `enroll`, `list`, `verify` and `revoke`; `list` shows each enrollment and whether its user has run setup. Secure Client deployments are not covered.
+`defenseclaw acp setup` is for a per-user install. On an enterprise managed computer an administrator enrolls each user, editor and agent with `defenseclaw-gateway enterprise acp enroll`, and the user then runs the setup command it reports, `defenseclaw-gateway enterprise acp setup`. The administrator tools are `enroll`, `list`, `verify` and `revoke`; `list` shows each enrollment and whether its user has run setup. `revoke` leaves the user's editor entry and contract lock in place; [Managed computers](/docs/reference/apis/acp-guard#managed-computers) says how the user removes them. Secure Client deployments are not covered.
 
 ## Next
 

@@ -163,8 +163,9 @@ else
     detect="$repo/packaging/mdm/macos/detect.sh"
     launcher=/usr/local/bin/defenseclaw
     launcher_target=$install_root/bin/defenseclaw-gateway
-    sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist
-        /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.plist)
+    # Each label carries the first 12 digits of the gateway's SHA-256
+    # (macos_agent_files).
+    sandbox_files=()
     openshell_config_dir=$config_dir/openshell
 fi
 gateway=$install_root/bin/defenseclaw-gateway
@@ -274,6 +275,24 @@ retry_busy() { # step-name verb
         sleep 2
         lifecycle "$1" "$2"
     done
+}
+
+# The lifecycle starts the enumerator but does not claim install coverage
+# until its first bounded scan publishes a fresh protected record. A package
+# ensure can therefore truthfully report agent_install_scan_incomplete. Wait
+# for that separate cycle before the lane's healthy verify and MDM checks.
+wait_for_install_scan() {
+    local deadline=$((SECONDS + 180))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        lifecycle 03-install-scan status
+        retry_busy 03-install-scan status
+        if "$python" -c 'import json,sys; r=json.load(open(sys.argv[1], encoding="utf-8-sig")); sys.exit(0 if r.get("coverage_complete") is True and not any(w.get("code") == "agent_install_scan_incomplete" for w in r.get("warnings", [])) else 1)' "$results/03-install-scan.json"; then
+            check "$results/03-install-scan.json" install-scan --action status --installed --ready --coverage-complete
+            return
+        fi
+        sleep 2
+    done
+    die "the enumerator did not publish a complete install scan within 180 seconds"
 }
 
 services_running() {
@@ -403,6 +422,7 @@ as_standard_user() {
 # Linux, the directory of the rendered OpenShell gateway.toml.
 sandbox_files_present() {
     local file root_group
+    [ "$platform" = linux ] || macos_agent_files
     root_group=0 # root:root, root:wheel
     [ -L "$launcher" ] || die "$launcher is not a symbolic link"
     [ "$(readlink "$launcher")" = "$launcher_target" ] || die "$launcher points at '$(readlink "$launcher")', want $launcher_target"
@@ -423,9 +443,23 @@ sandbox_files_present() {
     echo "sandbox launcher $launcher -> $launcher_target and ${#sandbox_files[@]} user service definitions are in place"
 }
 
-# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent.
+# macos_agent_files: the launch agents of the installed gateway, whose labels
+# carry the first 12 digits of its SHA-256 (openshell.LaunchAgentLabel).
+macos_agent_files() {
+    local tag
+    tag=$(shasum -a 256 "$gateway" | cut -c1-12) || die "cannot hash $gateway"
+    sandbox_files=("/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.$tag.plist"
+        "/Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway.$tag.plist")
+}
+
+# sandbox_files_gone: an uninstall left no launcher, user unit or launch agent
+# (on macOS, of any label).
 sandbox_files_gone() {
     local file
+    if [ "$platform" != linux ]; then
+        sandbox_files=(/Library/LaunchAgents/com.cisco.defenseclaw.sandbox*.plist
+            /Library/LaunchAgents/com.cisco.defenseclaw.openshell-gateway*.plist)
+    fi
     for file in "$launcher" "${sandbox_files[@]}"; do
         { [ ! -e "$file" ] && [ ! -L "$file" ]; } || die "$file remains after uninstall"
     done
@@ -533,9 +567,13 @@ seed_upgrade_secret() {
 }
 
 # upgrade_secret_kept: the stored credential holds exactly upgrade_secret_value.
+# python3 compares the bytes: cmp (diffutils) is absent from the minimal
+# UBI 9 init image the rpm-el9 lane boots (GAP-0886).
 upgrade_secret_kept() {
     [ -n "$upgrade_secret_value" ] && [ -f "$secrets_dir/$upgrade_secret_name" ] &&
-        printf '%s' "$upgrade_secret_value" | cmp -s - "$secrets_dir/$upgrade_secret_name"
+        DC_LANE_SECRET=$upgrade_secret_value "${python:-python3}" -c \
+            'import os, sys; sys.exit(open(sys.argv[1], "rb").read() != os.environ["DC_LANE_SECRET"].encode())' \
+            "$secrets_dir/$upgrade_secret_name"
 }
 
 write_admin_config() {
@@ -641,7 +679,7 @@ upgrade_lane() {
     # The version 9 config keeps its bytes, so its generation does not drop.
     check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready \
         --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
-        "${policy_checks[@]}" --policy-applied --config-generation-above "$((previous_generation - 1))"
+        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" --policy-applied --config-generation-above "$((previous_generation - 1))"
     sandbox_files_present
     launcher_offers_only_sandbox
     cp "$config" "$results/config-upgraded.yaml"
@@ -672,7 +710,7 @@ else
     # host with eligible users is honestly security-incomplete (GAP-0266); the
     # step after this one applies the config and checks the hook-process warning.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
-        --coverage-complete --allow-warning no_connectors_enabled
+        --allow-warning no_connectors_enabled --allow-warning agent_install_scan_incomplete
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
     [ -x "$gateway" ] || die "$gateway was not installed"
     [ -f "$config" ] || die "the lifecycle did not write $config"
@@ -699,7 +737,8 @@ else
     write_admin_config
     lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
-        --coverage-complete --security-incomplete --allow-warning hook_process_fail_open "${policy_checks[@]}"
+        --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
+        --allow-warning agent_install_scan_incomplete "${policy_checks[@]}"
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
     echo "machine policy entries: $(policy_entries | tr '\n' ' ')"
@@ -715,7 +754,10 @@ fi
 step "ensure again (must be a no-op)"
 lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
 check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
-    --coverage-complete --security-incomplete --allow-warning hook_process_fail_open
+    --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
+    --allow-warning agent_install_scan_incomplete
+
+wait_for_install_scan
 
 step "verify"
 lifecycle 04-verify verify

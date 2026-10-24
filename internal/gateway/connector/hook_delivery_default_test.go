@@ -167,7 +167,7 @@ func TestManagedNativeHookSidecarDeliveryModes(t *testing.T) {
 	}
 }
 
-func TestShellFailOpenWarningEscapingAndLogWriteFailure(t *testing.T) {
+func TestSecureClientShellFailOpenWarningEscapingAndLogWriteFailure(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
 	}
@@ -184,7 +184,7 @@ func TestShellFailOpenWarningEscapingAndLogWriteFailure(t *testing.T) {
 				}
 			}
 			cmd := exec.Command("bash", "-c", `. "$1"; FAIL_MODE=open; defenseclaw_log_hook_delivery_failure codex codex-hook $'offline\nforged' transport open`, "test", filepath.Join(hooks, "_hardening.sh"))
-			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_HOME=" + home}
+			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_HOME=" + home, "DEFENSECLAW_MANAGED_HOOK=1"}
 			out, err := cmd.CombinedOutput()
 			if err != nil || !strings.Contains(string(out), "WARNING hook fail-open") || strings.Count(string(out), "\n") != 1 {
 				t.Fatalf("warning failed or forged line: err=%v output=%q", err, out)
@@ -227,8 +227,9 @@ func TestNormalizeHookFailModeOpenIgnoresCase(t *testing.T) {
 // TestManagedHookDeliveryOutsideSecureClientFailsClosed keeps origin/main's
 // managed contract for every profile but Secure Client: an unset mode renders
 // closed, and a managed hook blocks on a gateway outage or a missing token
-// even when its baked mode is open. Response failures follow the baked mode;
-// a binding error (stdin naming another event) is integrity and blocks.
+// even when its baked mode is open. A baked open covers a gateway outage only
+// (r104 W8 review P2): an unusable answer, a missing token and a binding
+// error (stdin naming another event) block in every mode.
 func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("native Windows uses the authenticated hook executor")
@@ -284,9 +285,8 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 				out, err := cmd.CombinedOutput()
 				blocked := err != nil || strings.Contains(string(out), `"decision":"block"`)
 				// The baked mode is the administrator's (owner decision
-				// 2026-10-20): open permits a classified outage only.
-				// An unusable answer and a broken install must block.
-				wantBlocked := scenario == "missing-token" || scenario == "binding-error" || scenario == "malformed" || wantBaked == "closed"
+				// 2026-10-20): open lets an outage through, nothing else.
+				wantBlocked := scenario != "outage" || wantBaked == "closed"
 				if blocked != wantBlocked {
 					t.Fatalf("blocked=%t want=%t err=%v output=%s", blocked, wantBlocked, err, out)
 				}
@@ -297,7 +297,7 @@ func TestManagedHookDeliveryOutsideSecureClientFailsClosed(t *testing.T) {
 
 // TestResolveHookFailModeSecureClientOnlyOpenDefault is the renderer half of
 // the owner rule: an unset mode renders open only under Secure Client, and
-// Cursor's action/observe rule applies everywhere else. Under Secure Client
+// per-user Cursor stays closed in either mode. Under Secure Client
 // an explicit mode wins for every connector (#1163).
 func TestResolveHookFailModeSecureClientOnlyOpenDefault(t *testing.T) {
 	useVerifiedSecureClientDeployment(t)
@@ -312,8 +312,7 @@ func TestResolveHookFailModeSecureClientOnlyOpenDefault(t *testing.T) {
 		{"managed codex unset", SetupOpts{ManagedEnterprise: true}, NewCodexConnector(), "closed"},
 		{"oss cursor action explicit open", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, NewCursorConnector(), "closed"},
 		{"oss cursor observe explicit closed", SetupOpts{GuardrailMode: "observe", HookFailMode: "closed"}, NewCursorConnector(), "closed"},
-		{"oss cursor observe configured open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, NewCursorConnector(), "open"},
-		{"oss explicit Open", SetupOpts{HookFailMode: " Open "}, NewCodexConnector(), "open"},
+		{"oss explicit Open", SetupOpts{HookFailMode: " Open "}, NewCodexConnector(), "closed"},
 		{"secure client codex unset", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true}, NewCodexConnector(), "open"},
 		{"secure client claudecode unset with enforcement", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, ClaudeCodeEnforcement: true}, NewClaudeCodeConnector(), "open"},
 		{"secure client cursor action unset", SetupOpts{ManagedEnterprise: true, SecureClientHookDelivery: true, GuardrailMode: "action"}, NewCursorConnector(), "open"},

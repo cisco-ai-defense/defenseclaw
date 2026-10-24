@@ -951,7 +951,9 @@ def test_linux_wrapper_layout_reads_the_result_the_postinstall_writes(os_dir: st
     # back to mdm_binaries_damaged (GAP-0108).
     postinstall = _text(ROOT / "packaging" / "linux" / "postinstall.sh")
     state = re.findall(r"^state=(\S+)$", postinstall, re.MULTILINE)
-    written = set(re.findall(r'>"\$state/([^"]+\.json)"', postinstall))
+    # The result is written to a temporary file and renamed into place
+    # (w4-unix-obs: a full disk never erases the last result).
+    written = set(re.findall(r'(?:>|mv -fT "\$result_tmp" )"\$state/([^"]+\.json)"', postinstall))
     assert len(state) == 1 and len(written) == 1, (state, written)
     expected = f"{state[0]}/{written.pop()}"
     assert expected == "/var/lib/defenseclaw-enterprise/last-package-result.json"

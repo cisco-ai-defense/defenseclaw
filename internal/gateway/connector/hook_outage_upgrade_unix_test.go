@@ -97,14 +97,13 @@ func runOutageToolCall(t *testing.T, home, dataDir string, call outageToolCall) 
 	return code == 2 || strings.Contains(out, `"deny"`), fmt.Sprintf("exit %d stdout=%q stderr=%q", code, out, stderr.String())
 }
 
-// The owner rule (hooks fail closed everywhere except Secure Client) for the
-// per-user hooks of agents without a fail-closed hook contract of their own,
-// and for Cursor, whose observe verdicts are nonblocking: with the gateway
-// down, this release's Copilot, Antigravity and Cursor hooks block a tool
-// call unless the config opens their outages. Before r104 W3 G3-upg the
-// Copilot and Antigravity renders were lowered to open for an unset mode
-// (and Copilot's script let every failure run whatever its mode), and a
-// Cursor in observe rendered open.
+// The per-user hooks of agents without a fail-closed hook contract of their
+// own, and Cursor, follow the outage mode of their policy tier
+// (oss-outage-open, owner decision 2026-10-23): with the gateway down, an
+// unset or strict (closed) mode blocks the tool call and the default or
+// permissive (open) mode lets it run, in observe and action mode alike.
+// Before r104 W3 G3-upg the Copilot and Antigravity renders were lowered to
+// open for an unset mode, which they no longer are.
 func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	requireShellHookToolsForTest(t)
 	addr := closedLoopbackAddrForTest(t)
@@ -114,15 +113,14 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 		block           bool
 	}{
 		{"copilot unset", "copilot", SetupOpts{}, true},
-		{"copilot closed", "copilot", SetupOpts{HookFailMode: "closed", ConfiguredHookFailMode: "closed"}, true},
-		{"copilot open", "copilot", SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, false},
+		{"copilot closed", "copilot", SetupOpts{HookFailMode: "closed"}, true},
+		{"copilot open", "copilot", SetupOpts{HookFailMode: "open"}, false},
 		{"antigravity unset", "antigravity", SetupOpts{}, true},
-		{"antigravity open", "antigravity", SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, false},
-		// The gateway passes Cursor's resolved mode (open in observe) and the
-		// config's own value separately.
-		{"cursor observe unset", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, true},
-		{"cursor observe open", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, false},
-		{"cursor action open", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "closed", ConfiguredHookFailMode: "open"}, true},
+		{"antigravity open", "antigravity", SetupOpts{HookFailMode: "open"}, false},
+		{"cursor observe unset", "cursor", SetupOpts{GuardrailMode: "observe"}, true},
+		{"cursor observe open", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, false},
+		{"cursor action strict", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "closed"}, true},
+		{"cursor action open", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conn, ok := NewDefaultRegistry().Get(test.connector)
@@ -163,8 +161,10 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 // 1.0.3 rendered them for an unset fail mode. Each lets a tool call run while
 // the gateway is down. After a refresh that resolves closed every one of
 // them blocks it, Copilot's 1.0.x hook included (its failure functions exit 0
-// whatever FAIL_MODE says); after one that resolves the operator's open they
-// are left as they were.
+// whatever FAIL_MODE says). A refresh to open closes them too: a released
+// script and its released helper have no outage-only open, and the setup
+// that follows renders this release's hooks, which read their outage mode
+// from the runtime record.
 func TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown(t *testing.T) {
 	requireShellHookToolsForTest(t)
 	addr := closedLoopbackAddrForTest(t)
@@ -198,11 +198,6 @@ func TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown(t *testing.T) {
 					if err := os.WriteFile(filepath.Join(hookDir, ".token"), []byte("DEFENSECLAW_GATEWAY_TOKEN=outage-test-token\n"), 0o600); err != nil {
 						t.Fatal(err)
 					}
-					script := filepath.Join(hookDir, call.script)
-					before, err := os.ReadFile(script)
-					if err != nil {
-						t.Fatal(err)
-					}
 					blockedBefore, detail := runOutageToolCall(t, home, dataDir, call)
 					if blockedBefore {
 						t.Fatalf("precondition: the %s hook blocks before the refresh: %s", release, detail)
@@ -212,13 +207,8 @@ func TestRefreshMakesReleasedHooksBlockWhileTheGatewayIsDown(t *testing.T) {
 						t.Fatal(err)
 					}
 					blocked, detail := runOutageToolCall(t, home, dataDir, call)
-					if blocked != (mode == "closed") {
+					if !blocked {
 						t.Fatalf("after a refresh to %s: blocked = %v: %s", mode, blocked, detail)
-					}
-					if mode == "open" {
-						if after, _ := os.ReadFile(script); !bytes.Equal(after, before) {
-							t.Fatalf("a refresh to the operator's open changed the %s hook", release)
-						}
 					}
 				})
 			}

@@ -103,3 +103,48 @@ func TestHandleMCPScanRejectsBundledNamedEntry(t *testing.T) {
 		t.Fatalf("response = %q, want bundled discovery-only refusal", w.Body.String())
 	}
 }
+
+func TestHandleMCPScanRejectsLocalPathBeforeScanner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owned.json")
+	if err := os.WriteFile(path, []byte(`{"mcpServers":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{path, "./owned.json", ".", "file://" + filepath.ToSlash(path), path + "://copy", "C:relative"} {
+		body, err := json.Marshal(mcpScanRequest{Target: target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		(&APIServer{scannerCfg: &config.Config{}}).handleMCPScan(w,
+			httptest.NewRequest(http.MethodPost, "/v1/mcp/scan", bytes.NewReader(body)))
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "local path") ||
+			!strings.Contains(w.Body.String(), "not supported") {
+			t.Fatalf("local MCP path %q = %d %s; want explicit unsupported-target refusal", target, w.Code, w.Body.String())
+		}
+	}
+}
+
+func TestHandleMCPScanRejectsOtherPathFormsAndUnsupportedScheme(t *testing.T) {
+	for _, target := range []string{"..", "own.json", `C:\Users\operator\own.json`, "file:relative"} {
+		body, err := json.Marshal(mcpScanRequest{Target: target})
+		if err != nil {
+			t.Fatal(err)
+		}
+		w := httptest.NewRecorder()
+		(&APIServer{scannerCfg: &config.Config{}}).handleMCPScan(w,
+			httptest.NewRequest(http.MethodPost, "/v1/mcp/scan", bytes.NewReader(body)))
+		if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "local path") {
+			t.Fatalf("target %q: status %d, body %s; want named local-path refusal", target, w.Code, w.Body.String())
+		}
+	}
+	body, err := json.Marshal(mcpScanRequest{Target: "git://example.com/server"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	(&APIServer{scannerCfg: &config.Config{}}).handleMCPScan(w,
+		httptest.NewRequest(http.MethodPost, "/v1/mcp/scan", bytes.NewReader(body)))
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "unsupported MCP scan URL scheme") {
+		t.Fatalf("unsupported scheme: status %d, body %s", w.Code, w.Body.String())
+	}
+}

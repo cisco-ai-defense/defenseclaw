@@ -25,25 +25,56 @@ import (
 // another release; such a failure stays a failure. Both profiles: a Secure
 // Client upgrade with a signed-out enrolled account failed the same way.
 func WindowsProtectedTargetFromOtherRelease(opts InstallOptions) (string, bool, error) {
-	home, _, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
-	if err != nil {
-		return "", false, err
-	}
-	dataDir, err := resolveWindowsEnterpriseDataDir(home, opts.DataDir)
-	if err != nil {
-		return "", false, err
-	}
-	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
-	lock, err := connector.LoadHookContractLockEntryForMode(dataDir, name, true)
+	lock, err := windowsProtectedTargetLock(opts)
 	if err != nil {
 		return "", false, err
 	}
 	written := strings.TrimSpace(lock.DefenseClawVersion)
-	if lock.Connector != name || written == "" ||
-		written == strings.TrimSpace(version.Current().BinaryVersion) {
+	if written == "" || written == strings.TrimSpace(version.Current().BinaryVersion) {
 		return "", false, nil
 	}
 	return written, true, nil
+}
+
+// WindowsProtectedTargetHookFailModeChange reads, without writing, one
+// managed target's protected hook-contract lock entry and returns the hook
+// fail mode it records and the one opts asks for, both canonical; locked is
+// "" without an entry for the target's connector. An administrator who
+// changes the hook fail mode makes every enrolled target fail verification,
+// and the guardian asks only after one failed while its account has no
+// active session (rel-1-0-4 GAP-0585): a change to open waits for the next
+// sign-in, its hooks still failing closed, and a change to closed is
+// rendered now, under a disconnected session or an S4U logon.
+func WindowsProtectedTargetHookFailModeChange(opts InstallOptions) (locked, wanted string, err error) {
+	lock, err := windowsProtectedTargetLock(opts)
+	if err != nil {
+		return "", "", err
+	}
+	wanted = canonicalHookFailMode(opts.HookFailMode)
+	if lock.Connector == "" {
+		return "", wanted, nil
+	}
+	return canonicalHookFailMode(lock.HookFailMode), wanted, nil
+}
+
+// windowsProtectedTargetLock reads, without writing, the protected
+// hook-contract lock entry of one managed target; an entry for another
+// connector reads as none.
+func windowsProtectedTargetLock(opts InstallOptions) (connector.HookContractLockEntry, error) {
+	home, _, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
+	if err != nil {
+		return connector.HookContractLockEntry{}, err
+	}
+	dataDir, err := resolveWindowsEnterpriseDataDir(home, opts.DataDir)
+	if err != nil {
+		return connector.HookContractLockEntry{}, err
+	}
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	lock, err := connector.LoadHookContractLockEntryForMode(dataDir, name, true)
+	if err != nil || lock.Connector != name {
+		return connector.HookContractLockEntry{}, err
+	}
+	return lock, nil
 }
 
 // WindowsSecureClientProfileProcess reports whether this guardian serves the

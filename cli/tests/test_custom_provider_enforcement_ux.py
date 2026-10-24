@@ -66,3 +66,16 @@ def test_provider_list_legend_hook(capsys) -> None:
     out = capsys.readouterr().out
     assert "hook connector" in out
     assert "judge/aux model only" in out
+
+
+def test_provider_enforcement_does_not_claim_openclaw_without_an_agent(capsys) -> None:
+    cfg = _cfg("")
+    _echo_custom_provider_enforcement(cfg)
+    setup_out = capsys.readouterr().out
+    assert "No agent connector configured" in setup_out
+    assert "Enforced" not in setup_out
+
+    _echo_provider_enforcement_legend(SimpleNamespace(cfg=cfg))
+    list_out = capsys.readouterr().out
+    assert "No agent connector configured" in list_out
+    assert "enforced on the agent" not in list_out

@@ -285,6 +285,121 @@ func TestEnterpriseHookVerifyOrRepairTargetWaitsForSignInOnlyForDeferredEarlierR
 	}
 }
 
+// GAP-0585: a hook fail mode change with an account that has no active
+// session never fails the whole change while the fail mode is the only
+// drift. A change to open waits for the sign-in, its hooks failing closed; a
+// change to closed is rendered now under a disconnected session or an S4U
+// logon, and waits for the sign-in only when Windows gives neither. Any
+// other drift stays a failure.
+func TestEnterpriseHookVerifyOrRepairTargetHandlesFailModeChangeWithoutSession(t *testing.T) {
+	previousVerifier, previousInstaller, previousSession := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller, enterpriseHookReconcileSessionAvailable
+	previousRelease, previousSecureClient := enterpriseHookReconcileTargetRelease, enterpriseHookReconcileSecureClient
+	previousChange, previousLogon := enterpriseHookReconcileTargetFailModeChange, enterpriseHookReconcileClosingLogon
+	t.Cleanup(func() {
+		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller, enterpriseHookReconcileSessionAvailable = previousVerifier, previousInstaller, previousSession
+		enterpriseHookReconcileTargetRelease, enterpriseHookReconcileSecureClient = previousRelease, previousSecureClient
+		enterpriseHookReconcileTargetFailModeChange, enterpriseHookReconcileClosingLogon = previousChange, previousLogon
+	})
+	enterpriseHookReconcileSecureClient = func() bool { return false }
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return false, nil }
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "", false, nil }
+	locked, otherDrift := "closed", false
+	var logonErr error
+	var installs []enterprisehooks.InstallOptions
+	enterpriseHookReconcileVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if opts.HookFailMode == locked && !otherDrift {
+			return enterprisehooks.InstallResult{}, nil
+		}
+		return enterprisehooks.InstallResult{}, errors.New("fail mode drift")
+	}
+	enterpriseHookReconcileInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		installs = append(installs, opts)
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName}, nil
+	}
+	enterpriseHookReconcileTargetFailModeChange = func(opts enterprisehooks.InstallOptions) (string, string, error) {
+		return locked, opts.HookFailMode, nil
+	}
+	enterpriseHookReconcileClosingLogon = func(enterprisehooks.ManifestTarget) error { return logonErr }
+	deferred := enterprisehooks.ManifestTarget{Connector: "claudecode", Deferred: true}
+	open := enterprisehooks.InstallOptions{ConnectorName: "claudecode", HookFailMode: "open"}
+	closed := open
+	closed.HookFailMode = "closed"
+	run := func(opts enterprisehooks.InstallOptions) (bool, error) {
+		installs = nil
+		_, repaired, err := enterpriseHookVerifyOrRepairTarget(context.Background(), deferred, opts, true)
+		return repaired, err
+	}
+	awaiting := func(err error, cause string) bool {
+		return err != nil && strings.HasPrefix(err.Error(), enterpriseHookAwaitingSignInPrefix+": "+cause)
+	}
+
+	if _, err := run(open); !awaiting(err, enterpriseHookAwaitingSignInFailClosed) || len(installs) != 0 {
+		t.Fatalf("closed to open: err=%v installs=%d, want the fail-closed sign-in wait and no install", err, len(installs))
+	}
+
+	locked = "open"
+	repaired, err := run(closed)
+	if err != nil || !repaired || len(installs) != 1 ||
+		installs[0].WindowsTargetLogon != enterprisehooks.WindowsTargetLogonAnyWithS4U || installs[0].HookFailMode != "closed" {
+		t.Fatalf("open to closed with a logon: repaired=%v err=%v installs=%+v, want a closed install under any logon", repaired, err, installs)
+	}
+
+	logonErr = fmt.Errorf("%w (no credentials)", enterprisehooks.ErrEnrolledUserSignedOut)
+	if _, err := run(closed); !awaiting(err, enterpriseHookAwaitingSignInFailOpen) || len(installs) != 0 {
+		t.Fatalf("open to closed, no logon: err=%v installs=%d, want the fail-open sign-in wait and no install", err, len(installs))
+	}
+
+	otherDrift = true
+	if _, err := run(closed); err == nil || strings.HasPrefix(err.Error(), enterpriseHookAwaitingSignInPrefix) {
+		t.Fatalf("open to closed, no logon, other drift: err=%v, want the signed-out failure", err)
+	}
+	locked = "closed"
+	if _, err := run(open); err == nil || strings.HasPrefix(err.Error(), enterpriseHookAwaitingSignInPrefix) {
+		t.Fatalf("closed to open, other drift: err=%v, want the signed-out failure", err)
+	}
+
+	locked, otherDrift, logonErr = "open", false, errors.New("enterprise hooks: process is not LocalSystem")
+	if _, err := run(closed); err == nil || err.Error() != logonErr.Error() || len(installs) != 0 {
+		t.Fatalf("open to closed, logon check failed: err=%v installs=%d, want that error and no install", err, len(installs))
+	}
+}
+
+// GAP-0585: status and verify say why a row waits for its account's sign-in,
+// from the guardian error: a hook fail mode change is not blamed on an
+// earlier release, and a change to closed that waits says its hooks stay open.
+func TestEnterpriseHookAwaitingSignInNotesNameTheCause(t *testing.T) {
+	cases := []struct {
+		guardianErr, want, notWant string
+	}{
+		{
+			enterpriseHookAwaitingSignInPrefix + ": DefenseClaw 1.0.2 protected it, and this release's hooks install only ...",
+			"an earlier DefenseClaw release protected it", "",
+		},
+		{
+			enterpriseHookAwaitingSignInPrefix + ": " + enterpriseHookAwaitingSignInFailClosed + ", and hook fail mode open installs ...",
+			"its hooks still fail closed", "earlier DefenseClaw release",
+		},
+		{
+			enterpriseHookAwaitingSignInPrefix + ": " + enterpriseHookAwaitingSignInFailOpen + " until the account's next sign-in ...",
+			"keep hook fail mode open", "earlier DefenseClaw release",
+		},
+	}
+	for _, tc := range cases {
+		row := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1001", Connector: "claudecode", Error: "verify failed"}
+		key := enterpriseHookProtectedTargetKey(row)
+		run := enterpriseHookVerifyRun{Excused: []enterpriseHookReconcileRow{row}, AwaitingSignIn: map[string]string{key: tc.guardianErr}}
+		note := enterpriseHookVerifyExcusedNote(run, row)
+		if !strings.HasPrefix(note, " (pending until the account signs in: ") || !strings.Contains(note, tc.want) ||
+			(tc.notWant != "" && strings.Contains(note, tc.notWant)) {
+			t.Fatalf("verify note for %q = %q, want %q", tc.guardianErr, note, tc.want)
+		}
+		cause := enterpriseHookAwaitingSignInCause(tc.guardianErr)
+		if !strings.Contains(cause, tc.want) || (tc.notWant != "" && strings.Contains(cause, tc.notWant)) {
+			t.Fatalf("status cause for %q = %q, want %q", tc.guardianErr, cause, tc.want)
+		}
+	}
+}
+
 // GAP-0644: verify excuses a row the guardian left waiting for a sign-in
 // only while that account is still signed out, and names it pending.
 func TestEnterpriseHookVerifyAwaitingSignInNeedsTheAccountSignedOut(t *testing.T) {
@@ -292,17 +407,20 @@ func TestEnterpriseHookVerifyAwaitingSignInNeedsTheAccountSignedOut(t *testing.T
 	t.Cleanup(func() { enterpriseHookReconcileSessionAvailable = previousSession })
 	row := enterpriseHookReconcileRow{SID: "S-1-12-1-1-2-3-1002", Connector: "codex", Error: "verify failed"}
 	target := enterprisehooks.ManifestTarget{SID: row.SID, Connector: "codex", Deferred: true}
-	awaiting := map[string]struct{}{enterpriseHookProtectedTargetKey(row): {}}
+	awaiting := map[string]string{enterpriseHookProtectedTargetKey(row): enterpriseHookAwaitingSignInPrefix}
 	signedIn := false
 	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return signedIn, nil }
 	if !enterpriseHookVerifyAwaitingSignIn(awaiting, target, row) {
 		t.Fatal("a signed-out account's waiting row was not excused")
 	}
-	run := enterpriseHookVerifyRun{Excused: []enterpriseHookReconcileRow{row}, AwaitingSignIn: []enterpriseHookReconcileRow{row}}
-	if note := enterpriseHookVerifyExcusedNote(run, row); note != enterpriseHookAwaitingSignInNote {
+	run := enterpriseHookVerifyRun{
+		Excused:        []enterpriseHookReconcileRow{row},
+		AwaitingSignIn: map[string]string{enterpriseHookProtectedTargetKey(row): enterpriseHookAwaitingSignInPrefix},
+	}
+	if note := enterpriseHookVerifyExcusedNote(run, row); !strings.HasPrefix(note, " (pending until the account signs in: ") {
 		t.Fatalf("note = %q, want the sign-in note", note)
 	}
-	if enterpriseHookVerifyAwaitingSignIn(map[string]struct{}{}, target, row) {
+	if enterpriseHookVerifyAwaitingSignIn(map[string]string{}, target, row) {
 		t.Fatal("a row the guardian did not leave waiting was excused")
 	}
 	target.Deferred = false

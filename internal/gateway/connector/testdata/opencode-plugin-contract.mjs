@@ -46,13 +46,6 @@ async function runScenario({
     if (failure?.status) {
       return { ok: false, status: failure.status };
     }
-    if (failure?.refused) {
-      // Node's fetch reports a refused connection as a TypeError whose cause
-      // carries the socket error code.
-      const error = new TypeError("fetch failed");
-      error.cause = { code: "ECONNREFUSED" };
-      throw error;
-    }
     if (failure?.timeout) {
       throw new DOMException("fixture timeout", "AbortError");
     }
@@ -180,16 +173,13 @@ try {
     expectBlocked: true,
   });
 
-  // Fail mode open covers only a gateway that refused the connection: an
-  // answered (401, 503), timed-out or malformed call blocks in either mode.
   for (const failure of [
-    { name: "refused", refused: true },
     { name: "401", status: 401 },
     { name: "5xx", status: 503 },
     { name: "timeout", timeout: true },
     { name: "malformed", malformed: true },
   ]) {
-    await runScenario({ name: `${failure.name}-open`, failure, expectBlocked: !failure.refused });
+    await runScenario({ name: `${failure.name}-old-per-user-open`, failure, expectBlocked: true });
     await runScenario({
       name: `${failure.name}-closed`,
       pluginPath: closedPluginPath,

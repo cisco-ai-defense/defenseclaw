@@ -47,6 +47,20 @@ func hookOnlyProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 	}
 }
 
+// Copilot CLI does not report whether it can show a hook approval prompt.
+// In autopilot and -p it turns ask into a denial with no post hook, so a
+// gateway confirm would leave the audit action different from the result.
+// Until prompt availability is part of the trusted hook contract, deny an
+// action-mode confirmation at the synchronous preToolUse boundary. The VS
+// Code Local harness has a separate profile and keeps its native ask.
+func copilotCLIProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
+	if in.Mode == "action" && normalizedGuardrailAction(in.RawAction) == "confirm" &&
+		canonicalHookEvent(in.Event) == "pretooluse" && in.Caps.CanBlock && eventInProfile(in.Event, in.Caps.BlockEvents) {
+		return HookVerdictOutput{Action: "block", WouldBlock: false}
+	}
+	return hookOnlyProfileMapVerdict(in)
+}
+
 func openCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 	status, _ := in.Payload["mcp_identity_status"].(string)
 	if canonicalHookEvent(in.Event) != "toolexecutebefore" ||

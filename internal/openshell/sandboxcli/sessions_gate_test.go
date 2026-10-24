@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
 // attached is a second terminal's attach: its lease's release, or why it
@@ -305,6 +306,59 @@ func TestGAP0466PullLeavesACopyRunningForANewSession(t *testing.T) {
 	ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
 	ta.wantCalls(t, 0, "POST", "copybox/stop")
 	has(t, ta.output(), "copybox keeps running: 1 terminal is attached to copybox", "stop it once it ends: defenseclaw sandbox stop copybox")
+}
+
+// A connect can read a stopped copy just before pull starts it. Its start
+// conflict means pull got there first, so it should attach to that ready
+// sandbox. A reused pull can likewise finish while a new session runs.
+func TestGAP0756PullConnectRace(t *testing.T) {
+	t.Run("connect attaches after pull won start", func(t *testing.T) {
+		ta := newTestApp(t, "s\n", copySandbox("copybox"))
+		ta.daemon.onStart = func(sb *sandboxapi.Sandbox) *sandboxapi.Error {
+			sb.Phase = "ready"
+			return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox copybox is ready, not stopped; stop it before starting a new session")
+		}
+		ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "copybox", Prompt: "fix it"}))
+		ta.wantCalls(t, 1, "POST", "copybox/start")
+		has(t, ta.output(), "copybox keeps running")
+	})
+	t.Run("connect waits while pull is still starting", func(t *testing.T) {
+		ta := newTestApp(t, "s\n", copySandbox("copybox"))
+		gets := 0
+		ta.daemon.onStart = func(sb *sandboxapi.Sandbox) *sandboxapi.Error {
+			sb.Phase = "starting"
+			return sandboxapi.Errorf(sandboxapi.CodeConflict, "sandbox copybox is starting, not stopped")
+		}
+		ta.daemon.onGet = func(sb *sandboxapi.Sandbox) {
+			gets++
+			if gets > 2 && sb.Phase == "starting" {
+				sb.Phase = "ready"
+			}
+		}
+		ta.ok(t, ta.Connect(bg, ConnectOptions{Name: "copybox", Prompt: "fix it"}))
+		ta.wantCalls(t, 1, "POST", "copybox/start")
+		has(t, ta.output(), "waiting for it", "copybox keeps running")
+	})
+	t.Run("reused pull names newly attached session", func(t *testing.T) {
+		ta := newTestApp(t, "", copySandbox("copybox"))
+		ta.copy.pull = &workspace.PullResult{Name: "copybox", Result: "r1", Effective: "r1", PulledAt: ta.Now(),
+			Changes: []workspace.TreeChange{{Path: "main.go", Status: "M", Added: 4}}, Review: workspace.ReviewReport{FilesChanged: 1, Insertions: 4}}
+		ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Branch: true}))
+		ta.fresh()
+		var release func()
+		ta.copy.onApply = func() {
+			ta.daemon.edit("copybox", func(sb *sandboxapi.Sandbox) { sb.Phase = "ready" })
+			release = holdTestSession(t, ta, "copybox")
+		}
+		t.Cleanup(func() {
+			if release != nil {
+				release()
+			}
+		})
+		ta.ok(t, ta.Pull(bg, PullOptions{Name: "copybox", Apply: true}))
+		ta.wantCalls(t, 1, "POST", "copybox/start")
+		has(t, ta.output(), "copybox keeps running: 1 terminal is attached to copybox", "stop it once it ends: defenseclaw sandbox stop copybox")
+	})
 }
 
 // The W4b2 review's "a vanished lease hides other live sessions", the

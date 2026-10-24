@@ -1466,7 +1466,8 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 	symlinkWrite := trustedExistingAuthorizedKeysSymlinkWrite(request, facts)
 	if commandText != "" && !strings.Contains(commandText, "authorized_k") &&
 		!strings.Contains(commandText, "administrators_authorized") &&
-		!strings.Contains(commandText, "base64") && !symlinkWrite {
+		!strings.Contains(commandText, "base64") && !symlinkWrite &&
+		!trustedWindowsLocationAuthorizedKeysWrite(input) {
 		return appendTrustedCMDPrivateKeyReadFinding(
 			appendTrustedSSHPrivateKeyWriteFinding(findings, generation, request, facts),
 			generation, request, input,
@@ -1479,7 +1480,7 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 		}
 	}
 	if request.EnforcementCapable &&
-		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite, trustedPythonImportDir(request, facts)) ||
+		(trustedAuthorizedKeysWriteProof(input, facts, symlinkWrite) ||
 			trustedSandboxGuestAuthorizedKeysWrite(request)) {
 		_, rule, ok := trustedActionCatalogRule(generation, "persistence.ssh_authorized_keys_command")
 		if ok {
@@ -1493,10 +1494,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 			title := rule.Title
 			reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]
 			if reason == "" {
-				reason = hookpaths.UnprovenProtectedWrite(input.Command, input.CWD, input.ActiveHome)
+				reason = hookpaths.ActionCommandDecision(input.Command, input.CWD, input.ActiveHome)
 			}
 			if unproven := hookpaths.UnprovenWriteTitle(reason); unproven != "" {
-				title = unproven + "; use a literal path or split the command"
+				title = unproven + unprovenWriteGuidance
 			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
@@ -1517,14 +1518,15 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 
 // trustedAuthorizedKeysWriteProof reports a bounded positive proof that the
 // call writes an authorized-keys file. input is the request's input with
-// the command text of a shell tool filled in. pythonDir is the directory a
-// python -c program imports from first, "" when the gateway cannot look at
-// it (trustedPythonImportDir).
-func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool, pythonDir string) bool {
+// the command text of a shell tool filled in.
+func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool) bool {
 	enforcementFacts := facts.EnforcementProjection()
 	return enforcementFacts.EnforcementEligible() &&
 		(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
 			sshAuthorizedKeysStructuredPrerequisite(enforcementFacts)) ||
+		trustedUnknownOutputAuthorizedKeysWrite(facts) ||
+		trustedAwkOutputAuthorizedKeysWrite(facts) ||
+		trustedGitConfigEnvironmentAuthorizedKeysWrite(facts) ||
 		trustedUnknownKeyAuthorizedKeysWrite(input, facts) ||
 		homeResolvedTwinProves(input, facts, sshAuthorizedKeysCommandPrerequisite) ||
 		trustedStaticStatementAuthorizedKeysWrite(input) ||
@@ -1541,12 +1543,74 @@ func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.
 		trustedWindowsLocationAuthorizedKeysWrite(input) ||
 		trustedShellWrapperAuthorizedKeysWrite(input, facts) ||
 		trustedBase64ShellAuthorizedKeysWrite(input, facts) ||
-		trustedInlineAuthorizedKeysWrite(input, facts, pythonDir) ||
+		trustedInlineAuthorizedKeysWrite(input, facts) ||
 		trustedPOSIXPowerShellAuthorizedKeysWrite(input, facts) ||
 		trustedCMDAuthorizedKeysWrite(input) ||
 		trustedNamedOutFileAuthorizedKeysWrite(input) ||
 		trustedGitBashAuthorizedKeysWrite(input) ||
 		trustedNestedAuthorizedKeysWrite(input, facts)
+}
+
+// An unmodeled program's output option cannot prove a safe read. When that
+// possible destination is the protected file, use the tool family's strict
+// decision even though the remaining operand grammar is partial.
+func trustedUnknownOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite ||
+			!matchesAuthorizedKeys(facts, candidate) {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete {
+			continue
+		}
+		if slices.Contains(actionfacts.UnknownOutputOptionTargets(command.Argv), candidate.Value) {
+			return true
+		}
+	}
+	return false
+}
+
+func trustedGitConfigEnvironmentAuthorizedKeysWrite(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite ||
+			!matchesAuthorizedKeys(facts, candidate) {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Program != "git" || command.Effect != actionfacts.EffectExecute ||
+			len(command.Argv) < 3 || command.Argv[1] != "config" {
+			continue
+		}
+		for _, arg := range command.Argv[2:] {
+			if arg == "--global" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// AWK source remains opaque. A statically parsed output option or inplace
+// operand is still positive evidence of a protected write on a partial call.
+func trustedAwkOutputAuthorizedKeysWrite(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessWrite ||
+			!matchesAuthorizedKeys(facts, candidate) {
+			continue
+		}
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok || command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete {
+			continue
+		}
+		switch command.Program {
+		case "gawk", "awk", "mawk", "nawk":
+			return true
+		}
+	}
+	return false
 }
 
 // archiveBeforeWriteTitle is the title of an authorized-keys block whose
@@ -1594,8 +1658,7 @@ func trustedSandboxGuestAuthorizedKeysWrite(request trustedActionRequest) bool {
 			input.Command = command
 		}
 	}
-	// The guest's directory is not the gateway's to look at.
-	return trustedAuthorizedKeysWriteProof(input, facts, false, "")
+	return trustedAuthorizedKeysWriteProof(input, facts, false)
 }
 
 func appendTrustedSSHPrivateKeyWriteFinding(
@@ -1711,6 +1774,7 @@ func integrityExplicitCommandMutator(
 	}
 	switch strings.ToLower(command.Program) {
 	case "tee", "truncate", "rm", "unlink", "cp", "mv", "install", "sed", "curl", "wget", "copy",
+		"find", "git", "gawk", "uniq",
 		"move", "set-content", "sc", "add-content", "ac", "out-file",
 		"remove-item", "ri", "copy-item", "cpi", "move-item", "mi":
 		return true

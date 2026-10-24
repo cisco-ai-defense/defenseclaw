@@ -355,15 +355,15 @@ func TestStandaloneCleanupKeepsUntrustedRecordedHomeAndReportsPending(t *testing
 				t.Fatal(err)
 			}
 			remaining, err := loadEnterpriseHookUserCleanups(f.dataDir)
-			warningHome := oldHome
-			if kind == "long-path" {
-				// The ledger keeps the remedy within 512 bytes by shortening
-				// this unusually long path while retaining its basename.
-				warningHome = shortEnterpriseHookReportPath(oldHome)
-			}
+			// The ledger keeps the remedy within 512 bytes by shortening long
+			// paths while retaining their basename. This unusually long path
+			// is always shortened; the others are too when the checkout path
+			// (the fixture's root) is long (rel-1-0-4 GAP-0559).
+			namesHome := strings.Contains(guardianLog.String(), shortEnterpriseHookReportPath(oldHome)) ||
+				(kind != "long-path" && strings.Contains(guardianLog.String(), oldHome))
 			if err != nil || len(remaining) != 1 ||
 				!strings.Contains(guardianLog.String(), "warn: per-user cleanup of hermes/sample-user:") ||
-				!strings.Contains(guardianLog.String(), warningHome) ||
+				!namesHome ||
 				!strings.Contains(guardianLog.String(), "fix owner/permissions and rerun") ||
 				strings.Contains(guardianLog.String(), "no longer enrolled; per-user cleanup done") {
 				t.Fatalf("untrusted recorded-home guardian result = %+v, %v, log %q", remaining, err, guardianLog.String())

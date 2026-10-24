@@ -31,8 +31,9 @@ import (
 // openshell_block.go, identity_block.go) of a standalone Windows status and
 // verify. Go assembles them from the installed config, the enumerator's
 // manifest and unprotected-agents record, the guardian state and one
-// loopback /health read; the PowerShell report is not involved. They never
-// add an error or change security_complete.
+// loopback /health read; the PowerShell report is not involved. An enabled
+// Hermes target cannot be certified against an unobservable session-only
+// HERMES_HOME, so its coverage and security flags are incomplete.
 
 // windowsEnterpriseStatusV2Inputs are the files the connectors block reads.
 type windowsEnterpriseStatusV2Inputs struct {
@@ -181,6 +182,18 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 	sort.Strings(inputs.MachinePolicy)
 	failMode := func(name string) string { return enterprisehooks.ManagedHookFailMode(cfg, name) }
 	block, hidden := enterprisestatus.BuildConnectors(inputs, failMode)
+	if state, ok := block["hermes"]; ok && state.Enabled &&
+		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
+		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
+		block["hermes"] = state
+		result.CoverageComplete, result.SecurityComplete = false, false
+		message := "connectors.hermes: the guardian's persistent-home registration cannot prove a session-only HERMES_HOME is hooked; Windows managed Hermes coverage cannot be verified"
+		if result.Action == "verify" {
+			result.AddError(enterprisestatus.CodeStatusDetailUnavailable, message)
+		} else {
+			result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+		}
+	}
 	if hidden > 0 {
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+
 			"they are not plain version strings", hidden))

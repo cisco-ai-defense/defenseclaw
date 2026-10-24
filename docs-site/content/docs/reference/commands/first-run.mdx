@@ -35,7 +35,7 @@ On a terminal, `init` runs local agent discovery, pre-selects every installed ho
 
 Proxy connectors are detected but left out of the observe-all set, because they own the single LLM proxy port. Use `defenseclaw setup <proxy>` for them.
 
-An agent version newer than DefenseClaw's tested versions keeps action mode and is reported as untested. An action connector whose installed version has no hook contract is downgraded to observe with a warning. For Claude Code and Codex the gateway then does not start, because their hooks are built from the contract: upgrade the agent and run `defenseclaw setup <connector>`. See [Hook contracts](/docs/reference/apis/hook-contracts).
+An agent version newer than DefenseClaw's tested versions keeps action mode and is reported as untested. A connector whose installed version has no hook contract is left out in observe and action mode, because setup refuses it in both. With other connectors selected, `init` configures them and reports the one it left out. Alone, it writes no connector config and reports `needs_attention`. `quickstart` refuses it the same way. The refusal names the version to install and the command to run after the upgrade: `defenseclaw init`, or `defenseclaw quickstart --connector <name>` for quickstart. An action connector whose version could not be read (not probed, or outside a trusted prefix) is configured in observe with a warning. See [Hook contracts](/docs/reference/apis/hook-contracts).
 
 Scripted use skips the wizard:
 
@@ -45,7 +45,7 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 
 | Flag | What it does |
 | --- | --- |
-| `--connector` / `--agent` `<name>` | Pre-select a single agent. Wins over the multi-connector flags. |
+| `--connector <name>` | Pre-select a single agent. Wins over the multi-connector flags. `init` has no `--agent` alias; `quickstart` has one. |
 | `--observe-all` | Configure every detected hook connector in `observe`. |
 | `--action-connectors a,b` | Connectors to configure in `action`. Works with `--observe-all`. |
 | `--non-interactive` | Skip every prompt. |
@@ -57,12 +57,16 @@ defenseclaw init --non-interactive --yes --observe-all --action-connectors codex
 | `--hilt-min-severity` | Lowest severity that asks. |
 | `--with-judge` / `--no-judge` | The LLM judge. |
 | `--llm-provider`, `--llm-model`, `--llm-api-key-env`, `--llm-base-url` | The unified LLM key settings. |
+| `--llm-api-key` | LLM key to save into `.env`; the config stores only the env name. Other local users can see a command-line value, so prefer `DEFENSECLAW_INIT_LLM_API_KEY`. |
 | `--cisco-endpoint`, `--cisco-api-key-env` | Cisco AI Defense. |
+| `--cisco-api-key` | Cisco AI Defense key to save into `.env`. Prefer `DEFENSECLAW_INIT_CISCO_API_KEY`, for the same reason. |
+| `--enable-guardrail` | Configure the LLM guardrail during `init`. |
 | `--start-gateway` / `--no-start-gateway` | Answer the gateway prompt in advance. |
 | `--verify` / `--no-verify` | Run readiness checks before exiting. |
 | `--rescan-agents` | Refresh cached agent discovery. |
 | `--json-summary` | Print the report as JSON. |
 | `--verbose` | Show full subprocess output. |
+| `--skip-install` | Skip the scanner and built-in guardrail availability checks. |
 
 With no multi-connector flag and no `--connector`, non-interactive `init` keeps one connector found by discovery, in `observe`. `defenseclaw init --help` lists every option.
 

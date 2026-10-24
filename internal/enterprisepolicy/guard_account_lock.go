@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -118,8 +119,8 @@ func LockForeignHookAccountExchange(ctx context.Context, dataDir, identity strin
 
 // LockForeignHookAccountRemoval holds identity's removal lock exclusively for
 // one removal commit: the gate within ctx (an error when it expires), then
-// the lock for at most ForeignHookRemovalDrainWait. drained reports that no
-// exchange was inside when it went on.
+// the lock for at most ForeignHookRemovalDrainWait, a wait ctx does not
+// shorten. drained reports that no exchange was inside when it went on.
 func LockForeignHookAccountRemoval(ctx context.Context, dataDir, identity string) (release func(), drained bool, err error) {
 	gatePath, mainPath, ok := ForeignHookAccountLockPaths(dataDir, identity)
 	if !ok {
@@ -144,7 +145,13 @@ func LockForeignHookAccountRemoval(ctx context.Context, dataDir, identity string
 		gate.release()
 		return nil, false, err
 	}
-	drainCtx, cancel := context.WithTimeout(ctx, ForeignHookRemovalDrainWait)
+	// The drain always gets its whole wait, whatever is left of ctx: the
+	// removal goes on past an exchange still inside only once that
+	// exchange's answer deadline has passed (it set it before it asked for
+	// the gate, which this removal now holds). A caller whose own deadline
+	// ended the wait early would go on while that exchange may still
+	// publish an allow under the key the removal is about to rotate.
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), foreignHookRemovalDrainWait())
 	err = main.lock(drainCtx, true, foreignHookLockRemovalPoll)
 	cancel()
 	held := err == nil
@@ -160,6 +167,27 @@ func LockForeignHookAccountRemoval(ctx context.Context, dataDir, identity string
 		main.close()
 		gate.release()
 	}), held, nil
+}
+
+// foreignHookRemovalDrainOverride replaces ForeignHookRemovalDrainWait
+// when set (nanoseconds): tests in other packages shorten the drain to
+// probe whether an exchange is inside the lock
+// (OverrideForeignHookRemovalDrainWaitForTest).
+var foreignHookRemovalDrainOverride atomic.Int64
+
+func foreignHookRemovalDrainWait() time.Duration {
+	if d := foreignHookRemovalDrainOverride.Load(); d > 0 {
+		return time.Duration(d)
+	}
+	return ForeignHookRemovalDrainWait
+}
+
+// OverrideForeignHookRemovalDrainWaitForTest sets how long a removal waits
+// for the exchanges inside the lock, for tests that probe whether one is
+// inside without waiting the whole drain.
+func OverrideForeignHookRemovalDrainWaitForTest(wait time.Duration) (restore func()) {
+	previous := foreignHookRemovalDrainOverride.Swap(int64(wait))
+	return func() { foreignHookRemovalDrainOverride.Store(previous) }
 }
 
 func foreignHookLockWaitError(err error) error {
@@ -250,96 +278,4 @@ func LockForeignHookRemovalLedger(ctx context.Context, dir string) (func(), erro
 		return nil, fmt.Errorf("take the foreign-hook removal ledger lock: %w", err)
 	}
 	return sync.OnceFunc(lock.release), nil
-}
-
-// The key lock decides who may make the keys of the protected session
-// records (PublishedSessionKeysLockPath, in the root-only lifecycle
-// folder). A lifecycle run (install, upgrade, repair, ensure, uninstall)
-// holds it exclusively from before it removes every key until it made new
-// ones: on Linux and macOS it is the run's own lifecycle lock, on Windows a
-// lock the lifecycle command holds around the installer
-// (LockPublishedSessionKeysForLifecycle). The hook guardian holds it shared
-// around every key it makes or rotates, and makes none while a run holds
-// it (WithPublishedSessionKeyCreation). So no key made while a run changes
-// the deployment, and no allow published under one, outlives the run's own
-// kill.
-
-// publishedSessionKeysLockTry bounds the guardian's wait for the key lock:
-// a lifecycle run holds it for its whole run, so the guardian does not wait
-// for it.
-const publishedSessionKeysLockTry = 100 * time.Millisecond
-
-// LockPublishedSessionKeysForLifecycle holds the key lock at path
-// exclusively for a lifecycle run, waiting within ctx. A host whose
-// lifecycle folder does not exist (nothing is installed yet) has no key to
-// guard, and nothing is held.
-func LockPublishedSessionKeysForLifecycle(ctx context.Context, path string) (func(), error) {
-	if _, err := os.Lstat(filepath.Dir(path)); errors.Is(err, fs.ErrNotExist) {
-		return func() {}, nil
-	}
-	lock, err := openPublishedSessionKeysLock(path, true)
-	if err != nil {
-		return nil, fmt.Errorf("open the protected session record key lock %s: %w", path, err)
-	}
-	if err := lock.lock(ctx, true, foreignHookLockRemovalPoll); err != nil {
-		lock.close()
-		return nil, fmt.Errorf("take the protected session record key lock: %w", err)
-	}
-	return sync.OnceFunc(lock.release), nil
-}
-
-// WithPublishedSessionKeyCreation runs create, which makes or rotates keys
-// of the protected session records, holding the key lock at path shared,
-// only when no lifecycle run holds it. ran reports whether create ran:
-// false, with no error, while a run holds the lock or when there is no
-// lock (no lifecycle ran yet, or an uninstall removed it; on Windows, where
-// the lock is not the lifecycle's own, the guardian makes a missing lock in
-// a lifecycle folder that exists), and false with an error when the lock
-// cannot be taken. The caller then makes no key.
-func WithPublishedSessionKeyCreation(path string, create func() error) (ran bool, err error) {
-	lock, err := openPublishedSessionKeysLock(path, publishedSessionKeysLockGuardianCreates)
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("open the protected session record key lock %s: %w", path, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), publishedSessionKeysLockTry)
-	err = lock.lock(ctx, false, foreignHookLockRemovalPoll)
-	cancel()
-	if errors.Is(err, context.DeadlineExceeded) {
-		lock.close()
-		return false, nil
-	}
-	if err != nil {
-		lock.close()
-		return false, fmt.Errorf("take the protected session record key lock: %w", err)
-	}
-	defer lock.release()
-	return true, create()
-}
-
-// openPublishedSessionKeysLock opens the key lock at path, creating it only
-// when create is set: a regular file, not a link, that the path still names
-// once open.
-func openPublishedSessionKeysLock(path string, create bool) (*foreignHookAccountLock, error) {
-	file, err := openPublishedSessionKeysLockFile(path, create)
-	if err != nil {
-		return nil, err
-	}
-	opened, err := file.Stat()
-	if err == nil && !opened.Mode().IsRegular() {
-		err = errors.New("not a regular file")
-	}
-	if err == nil {
-		var current fs.FileInfo
-		if current, err = os.Lstat(path); err == nil && !os.SameFile(opened, current) {
-			err = errors.New("replaced while it was opened")
-		}
-	}
-	if err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	return &foreignHookAccountLock{path: path, info: opened, file: file}, nil
 }

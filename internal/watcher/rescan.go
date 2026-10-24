@@ -17,6 +17,7 @@
 package watcher
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -1635,16 +1636,23 @@ func (w *InstallWatcher) rulePackDigest(evt InstallEvent) string {
 	return ""
 }
 
+// probeScannerBinaryVersion runs `<binary> --version` in a tree the gateway
+// owns, like every scan (processutil.RunTracked), so a helper the scanner
+// starts ends with the probe. A tree that cannot be contained, or any other
+// failure, leaves the version unknown.
 func (w *InstallWatcher) probeScannerBinaryVersion(binary string) string {
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	out, err := processutil.CommandContext(ctx, binary, "--version").CombinedOutput()
-	if err != nil {
+	var out bytes.Buffer
+	cmd := processutil.CommandContext(ctx, binary, "--version")
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	cmd.WaitDelay = time.Second
+	if err := processutil.RunTracked(cmd); err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(out))
+	return strings.TrimSpace(out.String())
 }
 
 // loadScanResult retrieves a past scan result from the audit store.

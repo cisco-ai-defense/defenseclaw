@@ -215,6 +215,35 @@ def test_gateway_auth_fails_actionably_when_token_missing(tmp_path):
     assert "doctor --fix" in row["detail"]
 
 
+@pytest.mark.skipif(os.name == "nt" or os.geteuid() == 0, reason="needs a POSIX account that mode 000 locks out")
+def test_gateway_auth_names_an_unreadable_dotenv_and_fix_keeps_it(tmp_path):
+    # GAP-0662: the token exists in a .env this account cannot read; doctor
+    # names that and --fix does not replace the file with a new token.
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=" + "cd" * 32 + "\nOTHER_SECRET=x\n", encoding="utf-8")
+    dotenv.chmod(0)
+    cfg = _cfg(str(tmp_path))
+    clean_env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"DEFENSECLAW_GATEWAY_TOKEN", "OPENCLAW_GATEWAY_TOKEN"}
+    }
+    result = _DoctorResult()
+    try:
+        with patch.dict(os.environ, clean_env, clear=True):
+            _check_gateway_auth(cfg, result)
+            tag, detail = _fix_gateway_token(cfg, assume_yes=True)
+    finally:
+        dotenv.chmod(0o600)
+
+    row = next(row for row in result.checks if row["label"] == "Gateway authentication")
+    assert row["status"] == "fail"
+    assert "cannot read" in row["detail"] and str(dotenv) in row["detail"]
+    assert "generate" not in row["detail"]
+    assert tag == "fail" and "cannot read" in detail
+    assert dotenv.read_text(encoding="utf-8") == "DEFENSECLAW_GATEWAY_TOKEN=" + "cd" * 32 + "\nOTHER_SECRET=x\n"
+
+
 def test_gateway_auth_probes_status_with_bearer_without_rendering_token(tmp_path):
     result = _DoctorResult()
     secret = "never-render-this-token"

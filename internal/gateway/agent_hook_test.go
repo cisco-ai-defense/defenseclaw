@@ -84,15 +84,6 @@ func TestCursorProfileEmptyOfficialResultDoesNotUseGenericDecoy(t *testing.T) {
 	}
 }
 
-func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
-	if got := normalizeAgentHookMode("enforce"); got != "action" {
-		t.Fatalf("normalizeAgentHookMode(enforce) = %q, want action", got)
-	}
-	if got := normalizeAgentHookMode("warn"); got != "observe" {
-		t.Fatalf("normalizeAgentHookMode(warn) = %q, want observe", got)
-	}
-}
-
 func TestNormalizeAgentHookRequest_AntigravityNilToolArgsProjectionUsesEmptyObject(t *testing.T) {
 	raw := []byte(`{"hookEventName":"PreToolUse","toolCall":{"name":"run_command"}}`)
 	var payload map[string]interface{}
@@ -170,6 +161,29 @@ func TestHermesHookActionModeVerdicts(t *testing.T) {
 	}
 }
 
+func TestGAP0870HermesSudoListWithCWDIsAllowed(t *testing.T) {
+	home, cwd := r104ReviewHome(t)
+	store, logger := testStoreAndLogger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "hermes"
+	api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+	profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
+	payload := map[string]interface{}{
+		"hook_event_name": "pre_tool_call", "tool_name": "terminal",
+		"tool_input": map[string]interface{}{"command": "sudo -l"},
+		"cwd":        cwd, "session_id": "sudo-list",
+	}
+	req := normalizeAgentHookRequestWithProfile("hermes", payload, profile)
+	if req.CWD != cwd {
+		t.Fatalf("Hermes cwd = %q, want %q (home %q)", req.CWD, cwd, home)
+	}
+	resp := api.evaluateAgentHook(t.Context(), req)
+	if resp.Action != "allow" || resp.HookOutput != nil {
+		t.Fatalf("Hermes sudo -l: action=%q, reason=%q, output=%v", resp.Action, resp.Reason, resp.HookOutput)
+	}
+}
+
 // TestHookOutputFor_AllConnectors_AllActions is the contract test
 // that locks the JSON shape every hook script downstream parses.
 // Each row pins:
@@ -209,7 +223,8 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 		{connector: "cursor", event: "subagentStart", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "beforeShellExecution", action: "confirm", rawAction: "confirm", expectedKey: "permission", expectedValue: "ask"},
 
-		// copilot PreToolUse -- ask + deny on permissionDecision.
+		// Copilot PreToolUse -- ask is for VS Code Local and Secure Client;
+		// the ordinary CLI profile maps an unavailable confirmation to deny.
 		{connector: "copilot", event: "PreToolUse", action: "block", rawAction: "block", expectedKey: "permissionDecision", expectedValue: "deny"},
 		{connector: "copilot", event: "PreToolUse", action: "confirm", rawAction: "confirm", expectedKey: "permissionDecision", expectedValue: "ask"},
 		// copilot permissionRequest -- different key ("behavior").
@@ -1238,10 +1253,10 @@ func TestAgentHookDispatch_WouldBlockFiresOnWouldBlock(t *testing.T) {
 }
 
 func TestMapHookAction_ConfirmRequiresNativeAskSurface(t *testing.T) {
-	copilot := connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
-	action, wouldBlock := mapHookAction("confirm", "action", "PreToolUse", copilot)
-	if action != "confirm" || wouldBlock {
-		t.Fatalf("copilot PreToolUse confirm = (%q,%v), want (confirm,false)", action, wouldBlock)
+	copilot := connector.NewCopilotConnector().HookProfile(connector.SetupOpts{})
+	action, wouldBlock := mapHookActionForProfile("confirm", "action", "PreToolUse", copilot.Capabilities, copilot, nil)
+	if action != "block" || wouldBlock {
+		t.Fatalf("Copilot CLI PreToolUse confirm = (%q,%v), want (block,false)", action, wouldBlock)
 	}
 
 	devin := connector.NewDevinConnector().HookCapabilities(connector.SetupOpts{})

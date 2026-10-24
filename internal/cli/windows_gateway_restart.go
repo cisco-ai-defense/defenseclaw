@@ -4,9 +4,20 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
+
+var errWindowsGatewayStopRefused = errors.New("gateway stop was refused")
+
+type windowsGatewayStopRefusalError struct{ cause error }
+
+func (e windowsGatewayStopRefusalError) Error() string { return e.cause.Error() }
+func (e windowsGatewayStopRefusalError) Unwrap() error { return e.cause }
+func (e windowsGatewayStopRefusalError) Is(target error) bool {
+	return target == errWindowsGatewayStopRefused
+}
 
 // windowsServiceState is an SCM service state (SERVICE_STOPPED 1 to
 // SERVICE_PAUSED 7, the values of golang.org/x/sys/windows/svc.State). The
@@ -57,6 +68,12 @@ type windowsGatewayServiceControl interface {
 // (startWindowsGatewayService); one that does not settle, stop or run within
 // timeout is an error, never a success without a running gateway.
 func restartWindowsGatewayService(service windowsGatewayServiceControl, name string, timeout, poll time.Duration) (bool, error) {
+	return restartWindowsGatewayServiceBeforeStop(service, name, timeout, poll, nil)
+}
+
+// beforeStop arms recovery only after a live gateway has been observed, and
+// before this command can stop it. A stopped gateway has nothing to recover.
+func restartWindowsGatewayServiceBeforeStop(service windowsGatewayServiceControl, name string, timeout, poll time.Duration, beforeStop func() error) (bool, error) {
 	state, err := waitWindowsServiceState(service, name, timeout, poll, func(state windowsServiceState) bool { return !windowsServiceSettling(state) })
 	if err != nil {
 		return false, err
@@ -64,8 +81,13 @@ func restartWindowsGatewayService(service windowsGatewayServiceControl, name str
 	if !windowsServiceProcessLive(state) {
 		return false, nil
 	}
+	if beforeStop != nil {
+		if err := beforeStop(); err != nil {
+			return false, fmt.Errorf("arm %s restart recovery: %w", name, err)
+		}
+	}
 	if err := service.stop(); err != nil {
-		return false, fmt.Errorf("stop %s: %w", name, err)
+		return false, fmt.Errorf("stop %s: %w", name, windowsGatewayStopRefusalError{cause: err})
 	}
 	if _, err := waitWindowsServiceState(service, name, timeout, poll, func(state windowsServiceState) bool { return state == windowsServiceStopped }); err != nil {
 		return false, err

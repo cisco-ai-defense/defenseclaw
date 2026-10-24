@@ -13,7 +13,10 @@ import (
 
 // A package root reached through a link into ~/Documents is not walked
 // without Full Disk Access, though its own path names no protected folder
-// (GAP-1201).
+// (GAP-1201). The privacy exclusion applies to the path the links resolve
+// to: a relative link below a linked folder resolves from the folder the
+// first link leads to, and /System/Volumes/Data is the same home seen
+// through the Data volume's firmlink (GAP-0637).
 func TestPackageRootThroughALinkIntoAProtectedFolderIsSkipped(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("macOS privacy rule; symbolic links need privileges on Windows")
@@ -23,37 +26,60 @@ func TestPackageRootThroughALinkIntoAProtectedFolderIsSkipped(t *testing.T) {
 	discoveryGOOS = "darwin"
 	macOSFullDiskAccess = func() bool { return false }
 
-	home, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustWrite(t, filepath.Join(home, "Documents", "project", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
-	mustWrite(t, filepath.Join(home, "work", "real", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
-	if err := os.Symlink(filepath.Join(home, "Documents"), filepath.Join(home, "work", "link")); err != nil {
-		t.Fatal(err)
-	}
-	catalog, err := LoadAISignatures()
-	if err != nil {
-		t.Fatalf("LoadAISignatures: %v", err)
-	}
-	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
-		Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
-		ScanRoots:       []string{filepath.Join(home, "work", "link", "project"), filepath.Join(home, "work", "real")},
-		MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
-	}, catalog)
-	cleanupPreparedDiscoveryService(t, svc)
-	signals, _, err := svc.detectPackageManifests(context.Background())
-	if err != nil {
-		t.Fatalf("detectPackageManifests: %v", err)
-	}
-	projects := 0
-	for _, sig := range signals {
-		if sig.Component != nil && sig.Component.Name == "ai" {
-			projects++
-		}
-	}
-	if projects != 1 || !svc.tccSkipped {
-		t.Fatalf("%d manifest projects, privacy skip recorded %v; want only work/real and a recorded skip", projects, svc.tccSkipped)
+	for _, tc := range []struct {
+		name  string
+		links func(home string) [][2]string // link, target
+		root  string
+	}{
+		{"absolute link", func(home string) [][2]string {
+			return [][2]string{{"work/link", filepath.Join(home, "Documents")}}
+		}, "work/link/project"},
+		{"relative link below a linked folder", func(home string) [][2]string {
+			return [][2]string{{"work/alias", filepath.Join(home, "stuff")}, {"stuff/docs", "../Documents"}}
+		}, "work/alias/docs/project"},
+		{"link through the Data volume", func(home string) [][2]string {
+			return [][2]string{{"work/data", "/System/Volumes/Data" + filepath.Join(home, "Documents")}}
+		}, "work/data/project"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(home, "Documents", "project", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+			mustWrite(t, filepath.Join(home, "work", "real", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+			if err := os.MkdirAll(filepath.Join(home, "stuff"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, link := range tc.links(home) {
+				if err := os.Symlink(link[1], filepath.Join(home, link[0])); err != nil {
+					t.Fatal(err)
+				}
+			}
+			catalog, err := LoadAISignatures()
+			if err != nil {
+				t.Fatalf("LoadAISignatures: %v", err)
+			}
+			svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+				Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+				ScanRoots:       []string{filepath.Join(home, tc.root), filepath.Join(home, "work", "real")},
+				MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+			}, catalog)
+			cleanupPreparedDiscoveryService(t, svc)
+			signals, _, err := svc.detectPackageManifests(context.Background())
+			if err != nil {
+				t.Fatalf("detectPackageManifests: %v", err)
+			}
+			projects := 0
+			for _, sig := range signals {
+				if sig.Component != nil && sig.Component.Name == "ai" {
+					projects++
+				}
+			}
+			if projects != 1 || !svc.tccSkipped {
+				t.Fatalf("%d manifest projects, privacy skip recorded %v; want only work/real and a recorded skip", projects, svc.tccSkipped)
+			}
+		})
 	}
 }
 

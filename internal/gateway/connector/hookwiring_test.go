@@ -749,8 +749,10 @@ func TestUnmanagedHookRuntimeContractRetainsUnboundedLegacyReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A record the shared hooks read (KEY=value lines only, 1.0.4 loop
+	// round 3 of G-hooks-upg), padded past the enterprise limit.
 	flat = append(
-		[]byte("# "+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
+		[]byte("PAD="+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
 		flat...,
 	)
 	if err := os.WriteFile(flatPath, flat, 0o600); err != nil {
@@ -2672,15 +2674,11 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 			if runtimeState.GatewayAddr != "127.0.0.1:18970" {
 				t.Errorf("hook config sidecar API address = %q, want 127.0.0.1:18970", runtimeState.GatewayAddr)
 			}
-			// The rendered mode keeps closed for a connector whose hook
-			// blocks its own failures (the per-user Hermes, Copilot and
-			// Antigravity hooks, GAP-0269, r104 W3 G3-upg) and is open for
-			// the other connectors without a fail-closed contract. That
-			// open has no config source: the native hook fails it closed
-			// while the gateway is down (OutageHookFailMode).
+			// Every per-user hook records closed, including connectors that
+			// use their native deny response for a failure DefenseClaw sees.
 			outage := OutageHookFailMode(opts, tt.conn)
 			wantFailMode := renderedHookFailMode(opts, tt.conn)
-			if hookBlocksItsOwnFailures(opts, tt.conn) && wantFailMode != "closed" {
+			if wantFailMode != "closed" {
 				t.Errorf("per-user %s resolves fail mode %q, want closed", tt.conn.Name(), wantFailMode)
 			}
 			if got := runtimeState.FailModes[connectorName]; got != wantFailMode {

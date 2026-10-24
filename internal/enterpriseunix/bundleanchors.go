@@ -77,7 +77,7 @@ type AnchorsInstall struct {
 // InstallBundleAnchors installs the anchor file src as the device trust
 // anchors. Refusals are *enterprisebundle.Error with codes not_root,
 // anchor_missing, anchor_insecure, anchor_invalid, anchor_restore_failed,
-// lifecycle_busy and state_invalid; nothing is written for any of them but
+// lifecycle_busy, state_invalid and disk_full; nothing is written for any of them but
 // anchor_restore_failed.
 func (e *Env) InstallBundleAnchors(ctx context.Context, src string) (*AnchorsInstall, error) {
 	var reservation *enterprisestatus.ChangeReservation
@@ -122,7 +122,7 @@ func (e *Env) installBundleAnchors(ctx context.Context, src string, reservation 
 	}
 
 	if err := e.ensureDir(e.P(e.Layout.LifecycleDir), 0o700, rootOwner()); err != nil {
-		return refuse(enterprisebundle.CodeStateInvalid, "%v", err)
+		return refuse(anchorsWriteCode(err), "%v%s", err, stateWriteAction(err))
 	}
 	lock, err := e.acquireLock(ctx)
 	if errors.Is(err, errLockBusy) {
@@ -148,14 +148,14 @@ func (e *Env) installBundleAnchors(ctx context.Context, src string, reservation 
 		return out, nil
 	}
 	if err := e.ensureDir(filepath.Dir(dest), 0o755, rootOwner()); err != nil {
-		return refuse(enterprisebundle.CodeStateInvalid, "prepare the trust anchor folder: %v", err)
+		return refuse(anchorsWriteCode(err), "prepare the trust anchor folder: %v%s", err, stateWriteAction(err))
 	}
 	// An install this device could not audit is not made: the spool must
 	// hold room for its change event before the file is written, until the
 	// event is written.
 	reserved, err := e.ReserveChange(enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
 	if err != nil {
-		return refuse(enterprisebundle.CodeStateInvalid, "cannot record the trust anchor change: %v", err)
+		return refuse(anchorsWriteCode(err), "cannot record the trust anchor change: %v%s", err, stateWriteAction(err))
 	}
 	*reservation = reserved
 	if previous != nil {
@@ -166,8 +166,12 @@ func (e *Env) installBundleAnchors(ctx context.Context, src string, reservation 
 		}
 	}
 	attempted = true
-	if err := e.writeFileAtomic(dest, raw, 0o644, rootOwner()); err != nil {
-		return refuse(enterprisebundle.CodeStateInvalid, "write the trust anchor file: %v", err)
+	err = e.fault("anchors-write")
+	if err == nil {
+		err = e.writeFileAtomic(dest, raw, 0o644, rootOwner())
+	}
+	if err != nil {
+		return refuse(anchorsWriteCode(err), "write the trust anchor file: %v%s", err, stateWriteAction(err))
 	}
 	if _, installed, err := enterprisebundle.ReadAnchorsFile(dest, trust); err != nil || !bytes.Equal(installed, raw) {
 		problem := "the installed bytes differ from the checked file"
@@ -187,6 +191,16 @@ func (e *Env) installBundleAnchors(ctx context.Context, src string, reservation 
 		out.Result, out.PreviousSHA256 = AnchorsReplaced, sha256Bytes(previous)
 	}
 	return out, nil
+}
+
+// anchorsWriteCode is the code of an anchor install whose own write failed:
+// disk_full when the filesystem or quota is full, state_invalid otherwise
+// (GAP-0609).
+func anchorsWriteCode(err error) enterprisebundle.Code {
+	if noSpace(err) {
+		return enterprisebundle.CodeDiskFull
+	}
+	return enterprisebundle.CodeStateInvalid
 }
 
 // readInstalledAnchors returns the installed anchor file (nil when there is

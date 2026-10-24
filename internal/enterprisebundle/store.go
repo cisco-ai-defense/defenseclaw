@@ -297,6 +297,11 @@ type Receipt struct {
 	// whether that transaction installed anything (GAP-0484). "" on a
 	// receipt written before it existed.
 	BaseConfigSHA256 string `json:"base_config_sha256,omitempty"`
+	// BaseConfigGeneration is the config generation observed before this
+	// delivery's transaction. The known flag distinguishes a missing
+	// generation file (zero) from an older receipt with no such record.
+	BaseConfigGeneration      uint64 `json:"base_config_generation,omitempty"`
+	BaseConfigGenerationKnown bool   `json:"base_config_generation_known,omitempty"`
 }
 
 // SetDigestComparison replaces any digest classification from an earlier
@@ -456,6 +461,12 @@ type Store struct {
 	// has not reported past MaxReceiptEvents; nil treats every event as
 	// reported.
 	ReceiptEventReported func(id string) bool
+	// Receipt hooks let a platform finish files delivered with a bundle
+	// before its receipt becomes terminal. Nil leaves the store unchanged.
+	BeforeConfirm func(*Receipt) error
+	AfterConfirm  func(*Receipt) error
+	BeforeFail    func(*Receipt) error
+	AfterFail     func(*Receipt) error
 }
 
 func (s *Store) ensurePrivateDirectory(path string) error {
@@ -1002,11 +1013,21 @@ func (s *Store) Fail(r *Receipt, code Code, message string) error {
 	if err := CheckTransition(r.State, StateFailed); err != nil {
 		return err
 	}
+	if s.BeforeFail != nil {
+		if err := s.BeforeFail(r); err != nil {
+			return err
+		}
+	}
 	r.ErrorCode, r.ErrorMessage = code, boundedMessage(message)
 	r.State = StateFailed
 	r.Transitions = append(r.Transitions, Transition{State: StateFailed, At: stamp(s.now())})
 	if err := s.writeReceipt(r); err != nil {
 		return err
+	}
+	if s.AfterFail != nil {
+		if err := s.AfterFail(r); err != nil {
+			return err
+		}
 	}
 	return removeTree(s.stagingPath(r.ReceiptID))
 }
@@ -1204,6 +1225,11 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	if r.Version < st.Floor || (r.Version == st.Floor && !sameAsCurrent) {
 		return State{}, refuse(CodeVersionNotNewer, "version", "bundle %s version %d is not above the confirmed floor %d", r.BundleID, r.Version, st.Floor)
 	}
+	if s.BeforeConfirm != nil {
+		if err := s.BeforeConfirm(r); err != nil {
+			return State{}, err
+		}
+	}
 	at := stamp(s.now())
 	ref.ConfirmedAt = at
 	next := State{Current: ref, LastGood: st.LastGood, Floor: max(st.Floor, r.Version), UpdatedAt: at}
@@ -1216,6 +1242,11 @@ func (s *Store) Confirm(r *Receipt) (State, error) {
 	next.SchemaVersion = StateSchemaVersion
 	if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = at }); err != nil {
 		return next, err
+	}
+	if s.AfterConfirm != nil {
+		if err := s.AfterConfirm(r); err != nil {
+			return next, err
+		}
 	}
 	return next, s.gc(next, nil)
 }
@@ -1244,9 +1275,14 @@ type SettleReport struct {
 	// gateway and then confirm or roll back.
 	Unconfirmed []*Receipt
 	// Pending are receipts whose transaction is committed for the
-	// installed config but whose gateway could not be read (an outage):
-	// left open for the next run to confirm, never failed for it.
+	// installed config but whose gateway could not be read (an outage), or
+	// whose state ref proves an apply but confirmation needs a missing
+	// prerequisite. They remain open and are never failed for that alone.
 	Pending []string
+	// PendingReasons explains state-named receipts that could not be sealed
+	// because a confirmation prerequisite is missing. Gateway outages have
+	// no entry here.
+	PendingReasons map[string]string
 }
 
 // Settle finishes what an interrupted run left, at the start of every
@@ -1288,6 +1324,18 @@ func (s *Store) SettleOpen(open map[string]bool, keep ...string) (SettleReport, 
 			continue
 		}
 		switch r.State {
+		case StateConfirmed:
+			if s.AfterConfirm != nil {
+				if err := s.AfterConfirm(r); err != nil {
+					return report, err
+				}
+			}
+		case StateFailed:
+			if s.AfterFail != nil {
+				if err := s.AfterFail(r); err != nil {
+					return report, err
+				}
+			}
 		case StateReceived, StateVerified, StateStaged:
 			if err := s.Fail(r, CodeInterrupted, "the run that received this bundle ended before it was applied; the last good bundle kept enforcing"); err != nil {
 				return report, err
@@ -1295,9 +1343,32 @@ func (s *Store) SettleOpen(open map[string]bool, keep ...string) (SettleReport, 
 			report.Interrupted = append(report.Interrupted, r.ReceiptID)
 		case StateApplied:
 			if st.names(r) {
+				if s.BeforeConfirm != nil {
+					if prerequisiteErr := s.BeforeConfirm(r); prerequisiteErr != nil {
+						if !errors.Is(prerequisiteErr, ErrConfirmationPrerequisiteMissing) {
+							return report, prerequisiteErr
+						}
+						// The state ref is durable proof of a previously confirmed
+						// apply. A missing prerequisite prevents sealing the
+						// receipt; later live evidence cannot disprove that apply
+						// or make this receipt a rollback target.
+						kept[r.Dir] = true
+						report.Pending = append(report.Pending, r.ReceiptID)
+						if report.PendingReasons == nil {
+							report.PendingReasons = map[string]string{}
+						}
+						report.PendingReasons[r.ReceiptID] = prerequisiteErr.Error()
+						continue
+					}
+				}
 				markConfirmed(r)
 				if err := s.Advance(r, StateConfirmed, func(r *Receipt) { r.ConfirmedAt = st.Current.ConfirmedAt }); err != nil {
 					return report, err
+				}
+				if s.AfterConfirm != nil {
+					if err := s.AfterConfirm(r); err != nil {
+						return report, err
+					}
 				}
 				report.Completed = append(report.Completed, r.ReceiptID)
 				continue

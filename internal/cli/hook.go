@@ -62,6 +62,7 @@ func newHookCmd() *cobra.Command {
 		inputFile         string
 		enterpriseManaged bool
 		foreignHookCheck  bool
+		executionProbe    bool
 	)
 
 	cmd := &cobra.Command{
@@ -69,7 +70,7 @@ func newHookCmd() *cobra.Command {
 		Short:  "Run an agent guardrail hook (invoked by the agent runtime)",
 		Hidden: true,
 		Args: func(cmd *cobra.Command, args []string) error {
-			return hookFailure(hookFailureContext{connector: connector}, cobra.NoArgs(cmd, args))
+			return hookFailure(hookFailureContext{connector}, cobra.NoArgs(cmd, args))
 		},
 		// The hook is a short-lived per-event subprocess. Skip the daemon's
 		// PersistentPreRunE/PostRun (config load and audit store open):
@@ -79,7 +80,17 @@ func newHookCmd() *cobra.Command {
 		PersistentPostRun: func(*cobra.Command, []string) {},
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateHookSurface(connector, hookSurface); err != nil {
-				return hookFailure(hookFailureContext{connector: connector}, err)
+				return hookFailure(hookFailureContext{connector}, err)
+			}
+			if executionProbe {
+				if connector != "hermes" || event != "" || hookContractID != "" || hookSurface != "" ||
+					apiAddr != "" || failMode != "" || inputFile != "" || enterpriseManaged || foreignHookCheck {
+					return fmt.Errorf("hermes execution probe requires the exact registered command")
+				}
+				// cmd/defenseclaw-hook reaches this only after the protected
+				// runtime is active. A disabled stable launcher returns no proof.
+				_, err := io.WriteString(cmd.OutOrStdout(), "defenseclaw-execution-probe-ok\n")
+				return err
 			}
 			if foreignHookCheck {
 				// The standalone Amp and OpenCode plugins ask for the
@@ -128,7 +139,7 @@ func newHookCmd() *cobra.Command {
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {
-					return hookFailure(hookFailureContext{connector: connector}, fmt.Errorf("--input-file is only supported for the Cursor Windows hook adapter"))
+					return hookFailure(hookFailureContext{connector}, fmt.Errorf("--input-file is only supported for the Cursor Windows hook adapter"))
 				}
 				var err error
 				input, err = openCursorHookInputFile(opts.HookDir, inputFile)
@@ -158,12 +169,14 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&hookContractID, "hook-contract", "", "installer-bound connector hook contract")
 	cmd.Flags().StringVar(&hookSurface, "hook-surface", "", "hook dialect the invoking hook configuration speaks (per connector; kiro: v3, copilot: vscode-local)")
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
-	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar, else closed)")
+	cmd.Flags().StringVar(&failMode, "fail-mode", "", "managed response-failure policy (per-user hooks always close)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
 	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
 	cmd.Flags().BoolVar(&foreignHookCheck, "foreign-hook-check", false, "print the standalone foreign-hook guard decision as JSON (in-agent plugins)")
+	cmd.Flags().BoolVar(&executionProbe, "defenseclaw-execution-probe", false, "prove the registered Hermes command reaches the active hook runtime")
 	_ = cmd.Flags().MarkHidden("input-file")
 	_ = cmd.Flags().MarkHidden("foreign-hook-check")
+	_ = cmd.Flags().MarkHidden("defenseclaw-execution-probe")
 	_ = cmd.Flags().MarkHidden("hook-contract")
 	_ = cmd.Flags().MarkHidden("hook-surface")
 	_ = cmd.Flags().MarkHidden("enterprise-managed")
@@ -171,7 +184,7 @@ func newHookCmd() *cobra.Command {
 	// A flag the hook does not know (or a malformed value) fails before
 	// RunE. Report it with the connector's failure status, not cobra's 1.
 	cmd.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
-		return hookFailure(hookFailureContext{connector: connector}, err)
+		return hookFailure(hookFailureContext{connector}, err)
 	})
 	cmd.AddCommand(newHookSessionFactsCmd())
 	cmd.AddCommand(&cobra.Command{
@@ -228,6 +241,15 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 		SecureClient:      managed && secureClientHost(),
 		StartedAt:         startedAt,
 		Exit:              exit,
+	}
+	if !managed {
+		// The data directory whose install lock closes the call's early
+		// answer (GAP-0862); Run's own home replaces it when Run adopts the
+		// watchdog. DEFENSECLAW_HOME counts, as for Run.
+		opts.Home = config.DefaultDataPath()
+		// The registered command may still carry --fail-mode open from an
+		// earlier release. A per-user timeout must never allow the event.
+		opts.FailMode = "closed"
 	}
 	if managed {
 		// The watchdog starts this account lookup in the background before
@@ -301,8 +323,9 @@ func (c hookFailureContext) resolve() hookFailureContext {
 // a positional argument. Cobra reports these as 1. Kiro treats every status
 // other than 0 and 2 as a failed hook, shows its stderr as a warning and
 // lets the prompt or tool call go ahead (kiro.dev/docs/hooks/actions). A
-// Kiro hook exits 2, the only status Kiro honors as a block. Every other
-// connector keeps 1 for its own hook dialect.
+// Kiro hook that fails closed exits 2, the only status Kiro honors as a
+// block. Per-user flags and sidecars cannot open this path. Other connectors
+// keep Cobra's status 1.
 func hookFailureExitCode(failure hookFailureContext) int {
 	failure = failure.resolve()
 	if strings.EqualFold(strings.TrimSpace(failure.connector), "kiro") && hookPreRunFailsClosed(failure) {
@@ -311,24 +334,10 @@ func hookFailureExitCode(failure hookFailureContext) int {
 	return 1
 }
 
-// hookPreRunFailsClosed covers errors before hookexec can classify an outage.
-// Such errors never carry a verified gateway decision or connection outage.
+// hookPreRunFailsClosed applies the fail-closed boundary before hookexec has
+// loaded trusted runtime state. A flag or old sidecar cannot open this path.
 func hookPreRunFailsClosed(_ hookFailureContext) bool {
 	return true
-}
-
-// nativeHookFailMode resolves the fail mode a hook command ends with (flag,
-// else sidecar) as the config resolver does: only an explicit "open" opens.
-// A Windows native command carries no --fail-mode and relies on
-// hooks/.hookcfg; when that sidecar is missing, unreadable or names no mode
-// for the connector the hook fails closed, never open. The mode governs a
-// confirmed gateway outage only: hookexec closes every answered, malformed or
-// unanswered call outside Secure Client whatever it says.
-func nativeHookFailMode(mode string) string {
-	if strings.EqualFold(strings.TrimSpace(mode), "open") {
-		return "open"
-	}
-	return "closed"
 }
 
 // hookFailure labels a pre-run hook failure with the connector's failure
@@ -440,7 +449,7 @@ func failureLogHomeIn(profileDir func() (string, error)) string {
 	return filepath.Join(home, config.DefaultDataDirName)
 }
 
-func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, enterpriseManaged bool) hookexec.Options {
+func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseManaged bool) hookexec.Options {
 	if enterpriseManaged && enterpriseManagedHookRuntimeForceClosed() {
 		// The administrator-owned runtime failed trust validation. Do not read its
 		// sidecar/token or contact any endpoint derived from those files; hand an
@@ -468,7 +477,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 
 	// Setup writes hooks/.hookcfg on Windows so the agent's hook command can
 	// stay free of per-install flags (keeping its trust-hash / match string
-	// stable). It supplies the gateway address + fail mode the flags omit.
+	// stable). It supplies the gateway address the flags omit.
 	sidecar := map[string]string{}
 	if !enterpriseManaged {
 		// Managed Windows resolution already consumed the same sidecar through
@@ -531,14 +540,15 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
-	// The fail mode is installed state only: the registered command's
-	// --fail-mode, else the hook sidecar setup wrote. DEFENSECLAW_FAIL_MODE in
-	// the agent's environment is never read, so status and doctor, which read
-	// the same sidecar, report what the hook does (GAP-0315).
-	if failMode == "" {
-		failMode = hookSidecarFailMode(sidecar, connector, home)
+	// Per-user native hooks fail closed for every failure but a gateway
+	// outage. Their outage mode is the one Setup recorded for the connector
+	// in hooks/.hookcfg from its policy tier (config.HookOutageFailMode); an
+	// older registration flag or the environment cannot open them. Managed
+	// hooks take their mode from protected administrator state below.
+	outageFailMode := "closed"
+	if !enterpriseManaged {
+		outageFailMode = perUserHookOutageFailMode(filepath.Join(hookDir, ".hookcfg"), connector)
 	}
-	failMode = nativeHookFailMode(failMode)
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
 	if trustedNativeState {
 		// Connector-scoped token sidecars are ACL-protected installer state.
@@ -550,7 +560,8 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 		Connector:                 connector,
 		Event:                     event,
 		APIAddr:                   apiAddr,
-		FailMode:                  failMode,
+		FailMode:                  "closed",
+		OutageFailMode:            outageFailMode,
 		Home:                      home,
 		HookDir:                   hookDir,
 		Token:                     token,
@@ -621,61 +632,33 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, failMode string, ente
 	return opts
 }
 
-// readHookSidecar parses the hooks/.hookcfg file setup writes on Windows.
-// Version 2 is JSON with a connector-keyed fail_modes map. The legacy
-// KEY=value shape remains readable so the first connector refresh can migrate
-// an existing install without changing its runtime behavior beforehand.
-// A connector map that is present but not an object of strings (null
-// included), or a blank entry, is malformed state: it resolves closed and
-// never falls back to the legacy mode. A missing map is what every release
-// writes before the first connector entry, so the legacy mode still applies.
-// A JSON document that does not parse, or is not version 2 or later, is
-// malformed too: it resolves closed and is never read as KEY=value lines.
-// A missing or unreadable file names no mode, which is closed as well.
+// readHookSidecar reads only the gateway address from a per-user hook
+// sidecar. Legacy fail-mode fields are ignored: they cannot grant an outage
+// exception. Malformed JSON is never retried as KEY=value lines.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
+	// A link, another file type or a file past the writers' bound
+	// (gwconnector.HookSidecarMaxBytes) supplies no address.
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > gwconnector.HookSidecarMaxBytes {
+		return out
+	}
 	data, err := os.ReadFile(path)
-	if err != nil {
+	if err != nil || len(data) > gwconnector.HookSidecarMaxBytes {
 		return out
 	}
 	var current struct {
-		Version     int               `json:"version"`
-		GatewayAddr string            `json:"gateway_addr"`
-		FailModes   json.RawMessage   `json:"fail_modes"`
-		Sources     map[string]string `json:"fail_mode_sources"`
-		LegacyMode  string            `json:"legacy_fail_mode"`
-		LegacySrc   string            `json:"legacy_fail_mode_source"`
+		Version     int    `json:"version"`
+		GatewayAddr string `json:"gateway_addr"`
 	}
 	if json.Unmarshal(data, &current) == nil && current.Version >= 2 {
 		out["DEFENSECLAW_GATEWAY_ADDR"] = current.GatewayAddr
-		var modes map[string]string
-		if len(current.FailModes) > 0 {
-			if err := json.Unmarshal(current.FailModes, &modes); err != nil || modes == nil {
-				out["DEFENSECLAW_FAIL_MODE"] = "closed"
-				return out
-			}
-		}
-		for connector, mode := range modes {
-			if strings.TrimSpace(mode) == "" {
-				mode = "closed"
-			}
-			out[hookSidecarFailModeKey(connector)] = mode
-		}
-		for connector, source := range current.Sources {
-			out[hookSidecarFailModeSourceKey(connector)] = source
-		}
-		if current.LegacyMode != "" {
-			out["DEFENSECLAW_FAIL_MODE"] = current.LegacyMode
-			out[hookSidecarFailModeSourceKey("")] = current.LegacySrc
-		}
 		return out
 	}
 	if trimmed := bytes.TrimSpace(data); json.Valid(trimmed) ||
 		(len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[')) {
-		// JSON that is not a v2 sidecar (an older or unknown version, an
-		// array, a scalar) or that does not parse is no sidecar this hook
-		// understands: closed, never KEY=value lines.
-		out["DEFENSECLAW_FAIL_MODE"] = "closed"
+		// An older or malformed JSON sidecar supplies no address. It is not
+		// interpreted as flat lines even if it embeds an address assignment.
 		return out
 	}
 	for _, line := range strings.Split(string(data), "\n") {
@@ -695,34 +678,42 @@ func readHookSidecar(path string) map[string]string {
 		} else {
 			val = strings.Trim(val, `"'`)
 		}
-		// Only this release's JSON records a source.
-		if key != "" && !strings.HasPrefix(key, hookSidecarSourcePrefix) {
+		if key == "DEFENSECLAW_GATEWAY_ADDR" {
 			out[key] = val
 		}
 	}
 	return out
 }
 
-// hookSidecarFailMode is connector's fail mode in the hook sidecar. An open
-// counts only when the sidecar records that the config chose it
-// (fail_mode_sources, written by this release). Any other open is closed
-// unless home's config.yaml sets open for the connector: an earlier release's
-// (the 0.8.x KEY=value file, a 1.0.x file without that field, an unscoped
-// legacy mode), which may be an unset mode resolved from the guardrail mode,
-// and one CapableHookFailMode lowered for a vendor that cannot fail closed,
-// which is that vendor's limit, not an operator's open. The installers
-// refresh the sidecar from the config before the gateway stops; this covers
-// one that was not refreshed.
-func hookSidecarFailMode(sidecar map[string]string, connector, home string) string {
-	mode := sidecar[hookSidecarFailModeKey(connector)]
-	source := sidecar[hookSidecarFailModeSourceKey(connector)]
-	if mode == "" {
-		mode, source = sidecar["DEFENSECLAW_FAIL_MODE"], sidecar[hookSidecarFailModeSourceKey("")]
+// perUserHookOutageFailMode is connector's outage mode in the per-user hook
+// sidecar at path: "open" only when the sidecar is a regular, bounded v2+
+// JSON document of a per-user install whose fail_modes entry for the
+// connector is "open" with the config source (Setup's record of
+// config.HookOutageFailMode). Anything else (no entry, another value, no
+// source, a managed or malformed sidecar, a link) is "closed".
+func perUserHookOutageFailMode(path, connector string) string {
+	name := strings.ToLower(strings.TrimSpace(connector))
+	if name == "" {
+		return "closed"
 	}
-	if nativeHookFailMode(mode) != "open" || source == gwconnector.HookFailModeSourceConfig {
-		return mode
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > hookConfigMaxBytes {
+		return "closed"
 	}
-	if hookConfigSetsOpen(home, connector) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "closed"
+	}
+	var state struct {
+		Version   int               `json:"version"`
+		FailModes map[string]string `json:"fail_modes"`
+		Sources   map[string]string `json:"fail_mode_sources"`
+		Managed   bool              `json:"managed_enterprise"`
+	}
+	if json.Unmarshal(data, &state) != nil || state.Version < 2 || state.Managed {
+		return "closed"
+	}
+	if state.FailModes[name] == "open" && state.Sources[name] == gwconnector.HookFailModeSourceConfig {
 		return "open"
 	}
 	return "closed"
@@ -743,32 +734,6 @@ func readHookConfigDocument(path string) []byte {
 		return nil
 	}
 	return data
-}
-
-// hookConfigSetsOpen reports whether home's config.yaml sets hook fail mode
-// open for connector (config.ConfiguredHookFailModeInDocument). Only the
-// data directory's own config.yaml is read, never DEFENSECLAW_CONFIG: the
-// environment can only tighten a hook.
-func hookConfigSetsOpen(home, connector string) bool {
-	data := readHookConfigDocument(filepath.Join(home, "config.yaml"))
-	return data != nil && config.ConfiguredHookFailModeInDocument(data, connector) == "open"
-}
-
-func hookSidecarFailModeKey(connector string) string {
-	return "DEFENSECLAW_FAIL_MODE_" + hookSidecarConnectorKey(connector)
-}
-
-// hookSidecarSourcePrefix keys readHookSidecar's sources. No KEY=value
-// sidecar line can set one.
-const hookSidecarSourcePrefix = "source:"
-
-func hookSidecarFailModeSourceKey(connector string) string {
-	return hookSidecarSourcePrefix + hookSidecarConnectorKey(connector)
-}
-
-func hookSidecarConnectorKey(connector string) string {
-	name := strings.ToUpper(strings.TrimSpace(connector))
-	return strings.NewReplacer("-", "", "_", "", " ", "").Replace(name)
 }
 
 // hookIsLoopbackAddr reports whether addr ("host:port" or a bare host) targets

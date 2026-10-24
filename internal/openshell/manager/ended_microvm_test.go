@@ -21,6 +21,8 @@ package manager
 import (
 	"context"
 	"errors"
+	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -29,10 +31,271 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/egress"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 )
+
+// A 1.0.3 MicroVM may finish its main process while background work and its
+// 0.1.3 supervisor remain alive. The 1.0.4 daemon must keep its compute and
+// disk, but close both DefenseClaw proxy tunnels and direct OpenShell rules
+// before that legacy network broker can keep using them indefinitely.
+func TestCompletedLegacyMicroVMKeepsComputeButLosesNetwork(t *testing.T) {
+	e, _ := newEndedVM(t, "legacy")
+	proxy := startLiveProxy(t, e)
+	e.addNetworkRule("legacy", "background_direct", "background.example.org", 443)
+	conn, reader := proxy.open(t, "legacy", "background.example.org:443")
+	if !tunnelOpen(conn, reader) {
+		t.Fatal("the background proxy tunnel was not open")
+	}
+	b := e.boxOf("legacy")
+	providers := slices.Clone(b.rec.Providers)
+	if len(providers) == 0 {
+		t.Fatal("the regression needs an attached OpenShell provider")
+	}
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	e.m.mu.Unlock()
+	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+	endIn(t, e, "legacy", openshell.PhaseCompleted)
+	if got := busy(t, e); got != 1 || e.fake.Calls(openshelltest.MethodStopSandbox) != stops || e.fake.Calls(openshelltest.MethodDeleteSandbox) != 0 {
+		t.Fatalf("completed legacy VM: busy %d, stops %d, deletes %d, want compute and disk kept", got,
+			e.fake.Calls(openshelltest.MethodStopSandbox)-stops, e.fake.Calls(openshelltest.MethodDeleteSandbox))
+	}
+	if tunnelOpen(conn, reader) {
+		t.Fatal("the background proxy tunnel remained open")
+	}
+	if code, denied := proxy.connect(t, "legacy", "background.example.org:443"); code != http.StatusForbidden || denied.Category != egress.CategoryEgressOff {
+		t.Fatalf("new background CONNECT = %d %+v", code, denied)
+	}
+	pol, _ := e.fake.SandboxPolicy(openshell.DefaultWorkspace, "legacy")
+	if len(pol.NetworkPolicies) != 0 {
+		t.Fatalf("legacy VM still has OpenShell network rules: %+v", pol.NetworkPolicies)
+	}
+	old, err := e.client.GetSandbox(t.Context(), "legacy")
+	must(t, err)
+	if len(old.Spec.Providers) != 0 || !slices.Equal(b.rec.OldSupervisorProviders, providers) {
+		t.Fatalf("legacy provider routes remained attached: active %v, saved %v, want %v", old.Spec.Providers, b.rec.OldSupervisorProviders, providers)
+	}
+	if got := e.get("legacy"); got.Phase != "completed" || !got.OldSupervisor || !legacyWarned(got, "`defenseclaw sandbox delete legacy`") {
+		t.Fatalf("completed legacy VM view = %+v", got)
+	}
+	if found := e.events("legacy", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor); len(found) != 1 || !strings.Contains(found[0].Message, "network") {
+		t.Fatalf("legacy VM findings = %+v", found)
+	}
+	e.m.refreshEgress()
+	if code, denied := proxy.connect(t, "legacy", "background.example.org:443"); code != http.StatusForbidden || denied.Category != egress.CategoryEgressOff {
+		t.Fatalf("CONNECT after a policy refresh = %d %+v", code, denied)
+	}
+	if rec := loadRecord(t, e, "legacy"); rec == nil || !rec.OldSupervisorNetworkClosed {
+		t.Fatalf("the closed-network state was not kept through a daemon restart: %+v", rec)
+	}
+	// Only an explicit end-vm may replace the ended VM. Its new supervisor
+	// gets the original create-time policy, not the direct rule approved
+	// during the old session; the proxy works again for that new session.
+	e.startBox("legacy", sandboxapi.StartRequest{EndVM: true})
+	pol, _ = e.fake.SandboxPolicy(openshell.DefaultWorkspace, "legacy")
+	if _, ok := pol.NetworkPolicies["defenseclaw_egress"]; !ok || len(pol.NetworkPolicies) == 0 || e.hasRule("legacy", "background_direct") {
+		t.Fatalf("the new supervisor's policy = %+v", pol.NetworkPolicies)
+	}
+	if got := e.get("legacy"); got.Phase != "ready" || got.OldSupervisor || e.boxOf("legacy").rec.OldSupervisorNetworkClosed {
+		t.Fatalf("the new session = %+v; record = %+v", got, e.boxOf("legacy").rec)
+	}
+	newSession, err := e.client.GetSandbox(t.Context(), "legacy")
+	must(t, err)
+	if !slices.Equal(newSession.Spec.Providers, providers) || len(e.boxOf("legacy").rec.OldSupervisorProviders) != 0 {
+		t.Fatalf("the new supervisor did not recover its providers: active %v, saved %v, want %v", newSession.Spec.Providers,
+			e.boxOf("legacy").rec.OldSupervisorProviders, providers)
+	}
+	if code, denied := proxy.connect(t, "legacy", "background.example.org:443"); code != http.StatusOK {
+		t.Fatalf("new session CONNECT = %d %+v", code, denied)
+	}
+}
+
+func TestLegacyMicroVMErrorStatesCloseNetworkWhileComputeLives(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cond    stream.Condition
+		live    bool
+		release string
+	}{
+		{"failed main process", mainFailed, true, "0.1.3"},
+		{"VM cannot be polled, old record", vmUnpolled, true, ""},
+		{"provisioning timed out", provTimeout, true, "0.1.3"},
+		{"VM exited", vmExited, false, "0.1.3"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newEndedVM(t, "legacy")
+			e.addNetworkRule("legacy", "background_direct", "background.example.org", 443)
+			b := e.boxOf("legacy")
+			e.m.mu.Lock()
+			b.rec.SessionRelease = tc.release
+			e.m.mu.Unlock()
+			endIn(t, e, "legacy", openshell.PhaseProvisioning)
+			endIn(t, e, "legacy", openshell.PhaseError, tc.cond)
+			if got := busy(t, e); got != boolInt(tc.live) {
+				t.Fatalf("%s busy = %d", tc.name, got)
+			}
+			got := e.get("legacy")
+			if got.OldSupervisor != tc.live || legacyWarned(got, "`defenseclaw sandbox delete legacy`") != tc.live {
+				t.Fatalf("%s view = %+v", tc.name, got)
+			}
+			if e.hasRule("legacy", "background_direct") == tc.live {
+				t.Fatalf("%s direct network rule was not handled for a live VM", tc.name)
+			}
+		})
+	}
+}
+
+func TestLegacyMicroVMRetriesNetworkContainmentAfterAnOpenShellFailure(t *testing.T) {
+	e, _ := newEndedVM(t, "legacy")
+	proxy := startLiveProxy(t, e)
+	e.addNetworkRule("legacy", "background_direct", "background.example.org", 443)
+	b := e.boxOf("legacy")
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	e.m.mu.Unlock()
+	e.fake.FailNext(openshelltest.MethodUpdateConfig, &types.StatusError{Code: types.ErrorInternal, Message: "policy store is busy"})
+	endIn(t, e, "legacy", openshell.PhaseCompleted)
+	if !e.hasRule("legacy", "background_direct") || b.rec.OldSupervisorNetworkClosed {
+		t.Fatal("a rejected network update was reported as contained")
+	}
+	if got := e.get("legacy"); len(got.Warnings) < 2 || !strings.Contains(strings.Join(got.Warnings, " "), "policy store is busy") {
+		t.Fatalf("the failed containment was not reported: %+v", got)
+	}
+	if code, _ := proxy.connect(t, "legacy", "background.example.org:443"); code != http.StatusForbidden {
+		t.Fatalf("the proxy stayed open after a direct-policy failure: HTTP %d", code)
+	}
+	must(t, e.m.Reconcile(t.Context()))
+	if e.hasRule("legacy", "background_direct") || !b.rec.OldSupervisorNetworkClosed || b.oldSupervisorNetworkErr != "" {
+		t.Fatalf("the next reconcile did not contain the VM: %+v, error %q", b.rec, b.oldSupervisorNetworkErr)
+	}
+}
+
+func TestLegacyMicroVMRetriesProviderDetachBeforeClosingNetwork(t *testing.T) {
+	e, _ := newEndedVM(t, "legacy")
+	b := e.boxOf("legacy")
+	if len(b.rec.Providers) == 0 {
+		t.Fatal("the regression needs an attached provider")
+	}
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	e.m.mu.Unlock()
+	e.fake.FailNext(openshelltest.MethodDetachProvider, &types.StatusError{Code: types.ErrorInternal, Message: "provider is busy"})
+	endIn(t, e, "legacy", openshell.PhaseCompleted)
+	if b.rec.OldSupervisorNetworkClosed || !strings.Contains(b.oldSupervisorNetworkErr, "provider is busy") || len(b.rec.OldSupervisorProviders) == 0 {
+		t.Fatalf("the provider failure was hidden: record %+v, error %q", b.rec, b.oldSupervisorNetworkErr)
+	}
+	must(t, e.m.Reconcile(t.Context()))
+	if !b.rec.OldSupervisorNetworkClosed || b.oldSupervisorNetworkErr != "" {
+		t.Fatalf("the provider detach was not retried: record %+v, error %q", b.rec, b.oldSupervisorNetworkErr)
+	}
+	sb, err := e.client.GetSandbox(t.Context(), "legacy")
+	must(t, err)
+	if len(sb.Spec.Providers) != 0 {
+		t.Fatalf("legacy providers still attached: %v", sb.Spec.Providers)
+	}
+}
+
+func TestLegacyMicroVMStartRestoresAfterPartialContainment(t *testing.T) {
+	e, _ := newEndedVM(t, "legacy")
+	e.addNetworkRule("legacy", "background_direct", "background.example.org", 443)
+	b := e.boxOf("legacy")
+	providers := slices.Clone(b.rec.Providers)
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	e.m.mu.Unlock()
+	e.fake.FailNext(openshelltest.MethodUpdateConfig, &types.StatusError{Code: types.ErrorInternal, Message: "policy store is busy"})
+	endIn(t, e, "legacy", openshell.PhaseCompleted)
+	if b.rec.OldSupervisorNetworkClosed || len(b.rec.OldSupervisorProviders) == 0 || !e.hasRule("legacy", "background_direct") {
+		t.Fatalf("expected a partially contained legacy VM: %+v", b.rec)
+	}
+	// No reconcile occurs between the failed update and the explicit start.
+	e.startBox("legacy", sandboxapi.StartRequest{EndVM: true})
+	newSession, err := e.client.GetSandbox(t.Context(), "legacy")
+	must(t, err)
+	if !slices.Equal(newSession.Spec.Providers, providers) || !e.hasRule("legacy", "defenseclaw_egress") ||
+		e.hasRule("legacy", "background_direct") || len(b.rec.OldSupervisorProviders) != 0 {
+		t.Fatalf("the new supervisor did not restore the baseline after partial containment: providers %v, record %+v",
+			newSession.Spec.Providers, b.rec)
+	}
+}
+
+func TestCompletedLegacyMicroVMNetworkStateSurvivesDaemonRestart(t *testing.T) {
+	e, _ := newEndedVM(t, "legacy")
+	b := e.boxOf("legacy")
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	e.m.mu.Unlock()
+	endIn(t, e, "legacy", openshell.PhaseCompleted)
+	if !b.rec.OldSupervisorNetworkClosed {
+		t.Fatal("the completed VM did not keep its closed-network state")
+	}
+	e.restartDaemon()
+	if got := e.get("legacy"); got.Phase != "completed" || !got.OldSupervisor || busy(t, e) != 1 {
+		t.Fatalf("the adopted legacy VM = %+v, busy %d", got, busy(t, e))
+	}
+	if e.hasRule("legacy", "defenseclaw_egress") {
+		t.Fatal("the daemon restart reopened the legacy VM's network")
+	}
+	e.startBox("legacy", sandboxapi.StartRequest{EndVM: true})
+	if !e.hasRule("legacy", "defenseclaw_egress") || e.boxOf("legacy").rec.OldSupervisorNetworkClosed {
+		t.Fatalf("the new session after restart did not restore its baseline network: %+v", e.boxOf("legacy").rec)
+	}
+}
+
+func TestLegacyMicroVMNetworkContainmentWaitsForLifecycleOperation(t *testing.T) {
+	e, _ := newEndedVM(t, "legacy")
+	e.addNetworkRule("legacy", "background_direct", "background.example.org", 443)
+	b := e.boxOf("legacy")
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	e.m.mu.Unlock()
+	b.op.Lock()
+	endIn(t, e, "legacy", openshell.PhaseCompleted)
+	if !b.oldSupervisorNetworkBusy || b.rec.OldSupervisorNetworkClosed || !e.hasRule("legacy", "background_direct") {
+		b.op.Unlock()
+		t.Fatal("containment ran through an in-flight sandbox operation")
+	}
+	b.op.Unlock()
+	e.m.tamperStops.Wait()
+	if e.hasRule("legacy", "background_direct") || !b.rec.OldSupervisorNetworkClosed {
+		t.Fatal("containment did not finish after the sandbox operation")
+	}
+}
+
+func TestAdoptionDoesNotReopenProxyBeforeLegacyCompletedPhaseIsRepublished(t *testing.T) {
+	e, _ := newEndedVM(t, "legacy")
+	proxy := startLiveProxy(t, e)
+	conn, reader := proxy.open(t, "legacy", "background.example.org:443")
+	b := e.boxOf("legacy")
+	e.m.mu.Lock()
+	b.rec.SessionRelease = "0.1.3"
+	// Adoption has the live OpenShell object before lifecycle republishes
+	// its phase; the record can still say Ready or the new box can be blank.
+	b.sb.Status.Phase = openshell.PhaseCompleted
+	eff := b.eff
+	e.m.mu.Unlock()
+	e.m.syncCredential(b, nil)
+	if tunnelOpen(conn, reader) {
+		t.Fatal("credential recovery left the old VM's proxy tunnel open")
+	}
+	if code, _ := proxy.connect(t, "legacy", "background.example.org:443"); code != http.StatusForbidden {
+		t.Fatalf("credential recovery opened a CONNECT before the Completed phase was published: HTTP %d", code)
+	}
+	// A restart can also see the new Ready phase before it restores the
+	// policy that was withdrawn from the old VM. The saved closed state
+	// keeps the credential suspended until that restoration finishes.
+	e.m.mu.Lock()
+	b.rec.OldSupervisorNetworkClosed = true
+	b.sb.Status.Phase = openshell.PhaseReady
+	e.m.mu.Unlock()
+	e.m.syncCredential(b, eff)
+	if code, _ := proxy.connect(t, "legacy", "background.example.org:443"); code != http.StatusForbidden {
+		t.Fatalf("credential recovery opened a CONNECT before restoring the new supervisor's policy: HTTP %d", code)
+	}
+}
 
 // newEndedVM is a MicroVM gateway running the sandbox name, with the
 // manager on a fake clock (advance moves it on).
@@ -251,7 +514,8 @@ func TestOldGatewayErrorMicroVMHoldsTheUpgradeUntilOpenShellReportsItGone(t *tes
 	endIn(t, e, "box", openshell.PhaseProvisioning)
 	endIn(t, e, "box", openshell.PhaseError, vmExited)
 	if line := feedLine(); !strings.Contains(line, "this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+
-		", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") {
+		", then fix why its MicroVM exited; then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`") ||
+		!strings.Contains(line, "last successful disk sync") || strings.Contains(line, "which keep the sandbox and its work") {
 		t.Fatalf("the feed's line for a MicroVM whose VM is gone: %q", line)
 	}
 	if got := busy(t, e); got != 0 {
@@ -379,5 +643,33 @@ func TestAStartOfAnEndedMicroVMLosesNothingUnasked(t *testing.T) {
 	endIn(t, d, "dockerdone", openshell.PhaseCompleted)
 	if _, err := d.m.Start(t.Context(), "dockerdone", sandboxapi.StartRequest{}); err != nil {
 		t.Fatalf("a start of a completed docker sandbox: %v", err)
+	}
+}
+
+// TestAFailedWaitForAnErrorMicroVMSaysTheWayOn (GAP-0871): OpenShell before
+// 0.1.5 takes the stop of a MicroVM in its error state and then fails the
+// wait ("sandbox is in error state"). The stop's error names the sandbox,
+// why OpenShell holds it and its way on (on that OpenShell, its delete),
+// not OpenShell's words alone.
+func TestAFailedWaitForAnErrorMicroVMSaysTheWayOn(t *testing.T) {
+	e, _ := newEndedVM(t, "box")
+	connectAtFakeRelease(e)
+	e.fake.SetRelease("0.1.3")
+	if _, err := e.tryCreate(sandboxapi.CreateRequest{Name: "fresh", Harness: "opencode", Copy: true, Project: e.otherProject("other")}); err == nil {
+		t.Fatal("a create on 0.1.3 succeeded")
+	}
+	endIn(t, e, "box", openshell.PhaseProvisioning)
+	endIn(t, e, "box", openshell.PhaseError, vmUnpolled)
+	e.fake.Intercept(func(method string) error {
+		if method != openshelltest.MethodWaitStopped {
+			return nil
+		}
+		must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "box", openshell.PhaseError))
+		return &types.StatusError{Code: types.ErrorInternal, Message: `sandbox "box" is in error state`}
+	})
+	_, err := e.m.Stop(t.Context(), "box")
+	apiErr := wantCode(t, err, sandboxapi.CodeConflict)
+	if !strings.Contains(apiErr.Message, "box is in OpenShell's error state") || !strings.Contains(apiErr.Detail, "`defenseclaw sandbox delete box` deletes it and its work") {
+		t.Fatalf("the stop whose wait OpenShell failed = %+v", apiErr)
 	}
 }

@@ -12,6 +12,7 @@ import (
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -256,6 +257,7 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {
 		for _, tc := range []struct {
 			name            string
+			sourceVersion   string
 			comparable      bool
 			mismatch        bool
 			gatewayMismatch bool
@@ -266,15 +268,23 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 			{name: "gateway differs from receipt effective", comparable: true, gatewayMismatch: true, wantCode: enterprisebundle.CodeDigestMismatch},
 			{name: "non-comparable", mismatch: true},
 			{name: "non-comparable equal digest"},
+			{name: "upgrade from 0.8.10", sourceVersion: "0.8.10", mismatch: true},
+			{name: "upgrade from 1.0.0", sourceVersion: "1.0.0", mismatch: true},
+			{name: "upgrade from 1.0.1", sourceVersion: "1.0.1", mismatch: true},
+			{name: "upgrade from 1.0.2", sourceVersion: "1.0.2", mismatch: true},
+			{name: "upgrade from 1.0.3", sourceVersion: "1.0.3", mismatch: true},
 		} {
 			t.Run(platform+"/"+tc.name, func(t *testing.T) {
 				f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
 					in.HostPlatform = platform
+					if tc.sourceVersion != "" {
+						in.ProductVersion = tc.sourceVersion
+					}
 				})
 				d := driverFor(t, f)
 				d.Platform = platform
 				if !tc.comparable {
-					d.ProductVersion = "1.0.3"
+					d.ProductVersion = "1.0.4"
 				}
 				p, err := d.Prepare(context.Background(), f.bundle, nil)
 				if err != nil {
@@ -613,6 +623,40 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 	}
 }
 
+// The config writer committed the signed candidate, but the gateway was
+// stopped before it could answer. The receipt is applied and pending, with
+// no current-bundle swap until a later run proves the live policy.
+func TestDriverFinishKeepsGatewayOutagePending(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	p, err := d.Prepare(ctx, f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmedPolicy := installPreparedBundle(t, d, p)
+	rolledBack := false
+	_, err = d.Finish(p, p.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{}, false,
+		func() (string, bool) { rolledBack = true; return "", true })
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed || rolledBack ||
+		p.Receipt.State != enterprisebundle.StateApplied || p.Receipt.EffectivePolicyDigest == "" {
+		t.Fatalf("outage: receipt=%+v rollback=%t error=%v", p.Receipt, rolledBack, err)
+	}
+	if state, err := d.Store.LoadState(); err != nil || state.Current != nil {
+		t.Fatalf("outage moved current: state=%+v error=%v", state, err)
+	}
+	report, rollback, err := d.SettleRun(p.Config, nil)
+	if err != nil || len(report.Pending) != 1 || len(rollback) != 0 {
+		t.Fatalf("gateway still down: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	report, rollback, err = d.SettleRun(p.Config, &confirmedPolicy)
+	state, stateErr := d.Store.LoadState()
+	if err != nil || len(report.Completed) != 1 || len(rollback) != 0 || stateErr != nil ||
+		state.Current == nil || state.Current.BundleID != p.Receipt.BundleID {
+		t.Fatalf("gateway recovered: report=%+v rollback=%+v state=%+v errors=%v/%v", report, rollback, state, err, stateErr)
+	}
+}
+
 func TestDriverSettleRunKeepsInterruptedReceiptOnRetry(t *testing.T) {
 	f := newFixture(t, bundleConfig(t), nil)
 	d := driverFor(t, f)
@@ -753,5 +797,51 @@ func TestDriverRecordsDeliveryID(t *testing.T) {
 	}
 	if p.Receipt.DeliveryID != d.DeliveryID || p.Receipt.Status(nil).DeliveryID != d.DeliveryID {
 		t.Fatalf("receipt delivery id = %q", p.Receipt.DeliveryID)
+	}
+}
+
+// GAP-0609: a receipt the driver cannot write on a full volume is disk_full
+// with the write cause, not state_invalid (a state that cannot be read).
+func TestDriverReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	d.Store.EnsurePrivateDirectory = func(path string) error {
+		return &os.PathError{Op: "mkdir", Path: path, Err: syscall.ENOSPC}
+	}
+	_, err := d.Prepare(t.Context(), f.bundle, nil)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeDiskFull || !strings.Contains(err.Error(), "cannot write the policy bundle receipt") ||
+		!strings.Contains(err.Error(), "free space on that volume") {
+		t.Fatalf("receipt write error = %v; want disk_full naming the receipt", err)
+	}
+	if got := enterprisebundle.FailureCode(fmt.Errorf("write: %w", syscall.ENOSPC)); got != enterprisebundle.CodeDiskFull {
+		t.Fatalf("FailureCode(ENOSPC) = %s", got)
+	}
+	if got := enterprisebundle.FailureCode(errors.New("other")); got != enterprisebundle.CodeApplyFailed {
+		t.Fatalf("FailureCode(other) = %s", got)
+	}
+}
+
+func TestDriverConfirmWriteOnAFullVolumeNamesTheRecoveryStep(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	p, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := installPreparedBundle(t, d, p)
+	d.Store.PublishPrivateFile = func(path string) error {
+		if path == d.Store.StatePath() {
+			return &os.PathError{Op: "publish", Path: path, Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	_, err = d.Finish(p, p.ConfigSHA256, nil, policy, false, nil)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeDiskFull ||
+		!strings.Contains(err.Error(), "recording its confirmation failed") ||
+		!strings.Contains(err.Error(), "free space on that volume, then run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it") {
+		t.Fatalf("confirmation error = %v; want disk_full and a free-space recovery step", err)
+	}
+	if p.Receipt.State != enterprisebundle.StateApplied {
+		t.Fatalf("receipt state = %s; want applied for recovery", p.Receipt.State)
 	}
 }

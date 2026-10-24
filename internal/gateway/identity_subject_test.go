@@ -623,10 +623,9 @@ func TestOpenDirectoryGroupsUnavailableIsALookupFailure(t *testing.T) {
 // GAP-0496, GAP-0517: on a managed Mac whose guardian has not confirmed an
 // account for an hour (its record aged out during the outage), Open
 // Directory's answer without the account's domain groups ends the facts
-// cached from Open Directory's own caches at once: the account gets
-// default_lookup_failed (provisional sandboxes), not its group profile for
-// another hour or plain "default". With a current record the cached facts
-// are kept as before.
+// cached from Open Directory's own caches at once: requests needing its
+// missing groups are refused and name them; others use a proven or default
+// profile. With a current record the cached facts are kept as before.
 func TestMacOutageWithoutGuardianRecordDropsCachedFacts(t *testing.T) {
 	t.Cleanup(func() { openDirectoryOfflineAt.Store(0); setIdentitySpoolDir("") })
 	setIdentitySpoolDir(t.TempDir())
@@ -680,8 +679,9 @@ func TestMacOutageWithoutGuardianRecordDropsCachedFacts(t *testing.T) {
 // path's cache: while Open Directory lists the Active Directory node offline
 // the account keeps the facts cached before the outage (its group profile),
 // they are dropped an hour after the last lookup that succeeded (then
-// default_lookup_failed), and after the outage an answer that still misses
-// the account's group is refreshed after one retry cycle, not 15 minutes.
+// requests needing the missing groups refuse and name them). After the
+// outage an answer still missing the account's group is refreshed after
+// one retry cycle, not 15 minutes.
 func TestMacDirectoryOutageTimeline(t *testing.T) {
 	t.Cleanup(func() { openDirectoryOfflineAt.Store(0) })
 	start := time.Unix(1_800_000_000, 0)
@@ -736,7 +736,7 @@ func TestMacDirectoryOutageTimeline(t *testing.T) {
 		settle(bob, 2) // the refresh fails: the cached group facts are served
 	}
 	at(identityDirectoryMaxAge)
-	settle(bob, 0) // dropped: directory-dependent assignments use default_lookup_failed
+	settle(bob, 0) // dropped: assignments needing missing groups refuse and name the fact
 	down.Store(false)
 	at(identityDirectoryMaxAge + identityDirectoryRetry)
 	settle(bob, 1) // Open Directory answers, still without the group

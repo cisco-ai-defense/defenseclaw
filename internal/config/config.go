@@ -288,6 +288,11 @@ type Config struct {
 	legacyOpenShellPackDir   string
 	// offlineInspection never probes a signer's filesystem for a device default.
 	offlineInspection bool
+	// openClawNotInstalled records that an implied OpenClaw has no local
+	// installation or remote fleet host, so HasConnectorConfigured reports no
+	// connector (GAP-0568). Set only by the loader, on a device load outside
+	// a managed enterprise service.
+	openClawNotInstalled bool
 	// offlineVendorPolicyDir and offlineVendorPolicyRoot redirect rule packs
 	// under the target layout's shipped policy folder to a private copy of
 	// the policies this binary embeds (UseOfflineVendorPolicies).
@@ -1346,14 +1351,15 @@ func (c *WebhookConfig) ResolvedSecret() string {
 //   - GuardrailConfig.HookFailMode (yaml: guardrail.hook_fail_mode)
 //     is the SHELL-side fail-mode baked into the generated hook
 //     templates (codex-hook.sh, claude-code-hook.sh, inspect-*).
-//     It governs a confirmed gateway outage at the hook boundary (the
-//     gateway not running or not accepting connections). "open" allows,
-//     logs and warns; "closed" (the default) blocks where the connector
-//     exposes a block response. A per-user install takes the user's value;
-//     a managed standalone install the administrator's. Outside Secure
-//     Client any HTTP status, malformed or incomplete answer, or missing
-//     answer at the hook deadline blocks in either mode. Secure Client
-//     keeps its separate fail-mode contract.
+//     On a managed install it is the administrator's outage mode: "open"
+//     allows, logs and warns for a confirmed gateway outage (the gateway
+//     not running or not accepting connections); "closed" (the default)
+//     blocks where the connector exposes a block response. A per-user
+//     install's outage mode follows its policy tier instead
+//     (HookOutageFailMode). Outside Secure Client any HTTP status,
+//     malformed or incomplete answer, or missing answer at the hook
+//     deadline blocks in every mode and tier. Secure Client keeps its
+//     separate fail-mode contract.
 //     DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
 //     missing-token failures closed.
 //
@@ -1365,9 +1371,8 @@ func (c *WebhookConfig) ResolvedSecret() string {
 //     compatibility with installs that wrote it before
 //     hook_fail_mode existed.
 //
-// Operators who want to change the runtime behavior of the
-// generated hooks should edit guardrail.hook_fail_mode (or run
-// `defenseclaw guardrail fail-mode`), NOT this field.
+// A managed administrator can select an outage mode through
+// guardrail.hook_fail_mode. This field never changes hook availability.
 type AgentHookConfig struct {
 	Enabled                      bool     `mapstructure:"enabled"                         yaml:"enabled"`
 	Mode                         string   `mapstructure:"mode"                            yaml:"mode,omitempty"`
@@ -1755,14 +1760,12 @@ type GuardrailConfig struct {
 	//     the event with a stderr warning and an entry in
 	//     $DEFENSECLAW_HOME/logs/hook-failures.jsonl.
 	//
-	//   - "closed" (fresh-install default): the same failures BLOCK where
-	//     the connector/event exposes a blocking response. Migrated legacy
-	//     configs can retain an explicit "open".
+	//   - "closed" (per-user and managed-host default): the same failures
+	//     BLOCK where the connector/event exposes a blocking response.
 	//
-	// An explicit value always wins, on a managed computer too (there the
-	// administrator's config sets it). Secure Client is the one exception to
-	// the closed default: when this key is unset, Secure Client resolves it
-	// to "open" (#1163). See Config.EffectiveHookFailModeForConnector.
+	// Only an administrator-managed host can choose open for an outage.
+	// Per-user hosts resolve closed even if a migrated file contains open.
+	// Secure Client defaults open when unset (#1163).
 	//
 	// DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
 	// missing-token failures closed. See
@@ -2529,14 +2532,15 @@ func LoadFromFile(configFile string) (*Config, error) {
 }
 
 // LoadManagedFileForLifecycleRecovery loads a managed config like
-// LoadFromFile, without publishing provenance and without requiring the
+// LoadFromFile, without publishing provenance, without requiring the
 // standalone policy inputs (policy_dir, rule-pack dirs) to be readable by
-// the gateway service. The Windows managed-hook lifecycle snapshot and
-// teardown read only listener settings from it, and they run during the
-// rollback of an install whose new config the services could not load:
-// refusing that config there failed the rollback too, and left every
-// service stopped (GAP-1291). The gateway and every activation keep the
-// strict loaders.
+// the gateway service, and without the loopback API bind check. The Windows
+// managed-hook lifecycle snapshot and teardown read only the API port (the
+// hooks always dial 127.0.0.1) and the connectors from it, and they run
+// during the rollback of an install whose new config the services could not
+// load: refusing that config there failed the rollback too, and left every
+// service stopped (GAP-1291, GAP-0647). The gateway and every activation
+// keep the strict loaders.
 func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
 	return loadFromFile(configFile, false, false)
 }
@@ -2968,34 +2972,9 @@ func loadConfigSourceCheckedWithLayout(
 				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
 		}
-		if err := managed.ValidateTrustedServiceRuntimeDir(
-			cfg.DataDir,
-			"managed data_dir",
-			os.Getenv(managed.WindowsServiceAccountEnv),
-		); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
-			}
-			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
-		}
-		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
-			}
-			return nil, err
-		}
-		if checkPolicyInputs {
-			if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
-				if ReportConfigLoadError != nil {
-					ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
-				}
-				return nil, err
-			}
-		}
-		if err := validateManagedEnterpriseWindowsPeerAuthKnobs(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_ipc_peer_auth_unsupported_on_windows")
-			}
+		// The recovery loader (checkPolicyInputs false) also skips the
+		// loopback listener check (GAP-1291, GAP-0647).
+		if err := validateManagedEnterpriseRuntime(&cfg, checkPolicyInputs, true, checkPolicyInputs); err != nil {
 			return nil, err
 		}
 	}
@@ -3118,6 +3097,12 @@ func loadConfigSourceCheckedWithLayout(
 
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
+	}
+
+	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		// Older installs can use OpenClaw only through a remote fleet gateway.
+		// A remote host or explicit fleet mode must keep that connector on upgrade.
+		cfg.openClawNotInstalled = cfg.OpenClawImpliedButNotInstalled()
 	}
 
 	warnPlaintextSecrets(&cfg)
@@ -3423,12 +3408,12 @@ func applyManagedEnterpriseListenerDefault(cfg *Config) {
 	}
 }
 
-// validateManagedEnterpriseListenerBindings keeps every inbound enterprise
+// ValidateManagedEnterpriseListenerBindings keeps every inbound enterprise
 // surface on loopback. The managed hook transport is intentionally pinned to
 // canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
 // than another loopback spelling or address. This is enterprise-only:
 // unmanaged/BYOD deployments retain their existing remote-bind behavior.
-func validateManagedEnterpriseListenerBindings(cfg *Config) error {
+func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
@@ -3454,7 +3439,7 @@ func validateManagedEnterpriseListenerBindings(cfg *Config) error {
 	return nil
 }
 
-// validateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
+// ValidateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
 // managed_enterprise config on Windows that carries non-empty
 // AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs. Those allowlists
 // only take effect on macOS / linux, where LOCAL_PEERCRED-style peer
@@ -3473,7 +3458,7 @@ func validateManagedEnterpriseListenerBindings(cfg *Config) error {
 // unmanaged/BYOD contract (unmanaged doesn't ship the IPC surface at
 // all outside dev rigs), so this validator is scoped to
 // managed_enterprise on Windows.
-func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
+func ValidateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}

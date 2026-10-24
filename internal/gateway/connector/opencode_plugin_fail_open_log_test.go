@@ -12,7 +12,9 @@ package connector
 
 import (
 	"encoding/json"
-	"net"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,15 +29,20 @@ import (
 // data directory, so the gateway's fail-open report finds it.
 func TestOpenCodePluginFailOpenWritesAHookFailureLine(t *testing.T) {
 	nodeForTest(t)
-	// The tool calls meet a gateway that refuses the connection: the outage
-	// fail mode open covers. An HTTP 503 is an answer and blocks
-	// (TestOpenCodePluginTakesItsInstalledModeAndStrictAvailability).
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	refused := listener.Addr().String()
-	_ = listener.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Event string `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		if payload.Event == "tool.execute.before" || payload.Event == "tool.execute.after" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"action":"allow","mode":"observe"}`)
+	}))
+	t.Cleanup(server.Close)
 	dataDir := testenv.PrivateTempDir(t)
 	token := filepath.Join(dataDir, "hooks", ".hook-opencode.token")
 	if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
@@ -45,9 +52,11 @@ func TestOpenCodePluginFailOpenWritesAHookFailureLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	data := templateData{
-		APIAddr:     refused,
-		TokenFileJS: javaScriptStringContent(token),
-		FailMode:    "open",
+		APIAddr:      strings.TrimPrefix(server.URL, "http://"),
+		TokenFileJS:  javaScriptStringContent(token),
+		FailMode:     "open",
+		Managed:      true,
+		SecureClient: true,
 	}
 	harness := strings.Replace(openCodePluginHarness, `console.log("allow");`, `await plugin["tool.execute.after"]({ tool: "bash", sessionID: "S", messageID: "M", callID: "C" + i }, { output: "marker" }); console.log("allow");`, 1)
 	lines := runNodeHarness(t, harness, writeRenderedPlugin(t, "opencode-plugin.js", "defenseclaw.mjs", data), "1")
@@ -63,7 +72,7 @@ func TestOpenCodePluginFailOpenWritesAHookFailureLine(t *testing.T) {
 		t.Fatalf("hook-failures line %q: %v", raw, err)
 	}
 	if entry["connector"] != "opencode" || entry["hook"] != "opencode-plugin" || entry["fail_mode"] != "open" ||
-		entry["category"] != "transport" || entry["reason"] == "" || entry["ts"] == "" {
+		entry["category"] != "transport" || entry["reason"] != "gateway returned HTTP 503" || entry["ts"] == "" {
 		t.Fatalf("hook-failures line = %v", entry)
 	}
 }

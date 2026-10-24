@@ -23,9 +23,10 @@ import (
 	"testing"
 )
 
-// A per-user Copilot CLI, Antigravity or Hermes hook with an unset
-// hook_fail_mode resolves closed outside Secure Client; only an explicit
-// "open" renders open. No hook reads DEFENSECLAW_FAIL_MODE (GAP-0315).
+// A per-user Copilot CLI, Antigravity or Hermes hook bakes closed for every
+// failure and records the outage mode of its policy tier: closed when unset
+// or strict, open in the default and permissive tiers (oss-outage-open). No
+// hook reads DEFENSECLAW_FAIL_MODE (GAP-0315).
 func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 	scripts := map[string]string{"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh", "hermes": "hermes-hook.sh"}
 	for _, conn := range nativeDenyConnectors() {
@@ -34,7 +35,7 @@ func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 		}{
 			{name: "unset", mode: "", want: "closed"},
 			{name: "closed", mode: "closed", want: "closed"},
-			{name: "open", mode: "open", want: "open"},
+			{name: "outage open tier", mode: "open", want: "open"},
 		} {
 			t.Run(conn.Name()+"/"+tc.name, func(t *testing.T) {
 				dir := t.TempDir()
@@ -54,11 +55,11 @@ func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 				if err != nil {
 					t.Fatalf("read %s: %v", scripts[conn.Name()], err)
 				}
-				if want := "\nFAIL_MODE=\"" + tc.want + "\"\n"; !strings.Contains(string(body), want) || strings.Contains(string(body), perUserEnvFailModeRead) {
+				if want := "\nFAIL_MODE=\"closed\"\n"; !strings.Contains(string(body), want) || strings.Contains(string(body), perUserEnvFailModeRead) {
 					t.Fatalf("%s does not render %s, or reads DEFENSECLAW_FAIL_MODE", scripts[conn.Name()], want)
 				}
-				if strings.Contains(string(body), "\nFAIL_MODE=\"open\"\n") != (tc.want == "open") {
-					t.Fatalf("%s renders another fail mode next to %s", scripts[conn.Name()], tc.want)
+				if strings.Contains(string(body), "\nFAIL_MODE=\"open\"\n") {
+					t.Fatalf("%s bakes an open fail mode", scripts[conn.Name()])
 				}
 				flat, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+"."+conn.Name()))
 				if err != nil {
@@ -128,9 +129,10 @@ func TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown(t *testing.T) {
 }
 
 // With the gateway down, the per-user Copilot CLI hook rendered with an unset
-// or closed fail mode denies preToolUse and permissionRequest with Copilot's
-// native deny and a reason that names the next step; an explicit open lets
-// the call run. Copilot's other events cannot block and stay neutral.
+// or closed (strict tier) outage mode denies preToolUse and permissionRequest
+// with Copilot's native deny and a reason that names the next step; the
+// outage-open tier lets the call run with a warning that names the fix.
+// Copilot's other events cannot block and stay neutral.
 func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
 		t.Skip("curl not available")
@@ -165,9 +167,13 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 				if code != 0 {
 					t.Fatalf("exit %d, want 0 (stdout %q stderr %q)", code, out, errOut)
 				}
-				if mode == "open" || tc.deny == "" {
+				if tc.deny == "" || mode == "open" {
 					if strings.TrimSpace(out) != "" {
 						t.Fatalf("stdout %q, want no decision (stderr %q)", out, errOut)
+					}
+					if mode == "open" && tc.deny != "" &&
+						(!strings.Contains(errOut, "defenseclaw-gateway start") || !strings.Contains(errOut, "defenseclaw doctor")) {
+						t.Fatalf("stderr %q, want the outage warning with its fix", errOut)
 					}
 					return
 				}

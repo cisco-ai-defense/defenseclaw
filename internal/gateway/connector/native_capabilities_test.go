@@ -30,8 +30,9 @@ func TestCodexCapabilitiesExposeResolvedInventoryAndTelemetry(t *testing.T) {
 	t.Setenv("CODEX_HOME", filepath.Join(home, "codex-state"))
 
 	opts := SetupOpts{
-		APIAddr:      "127.0.0.1:18970",
-		WorkspaceDir: workspace,
+		APIAddr:           "127.0.0.1:18970",
+		WorkspaceDir:      workspace,
+		ManagedEnterprise: true,
 	}
 	conn := NewCodexConnector()
 	caps := conn.Capabilities(opts)
@@ -80,8 +81,9 @@ func TestClaudeCodeCapabilitiesExposeResolvedInventoryAndTelemetry(t *testing.T)
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
 
 	opts := SetupOpts{
-		APIAddr:      "127.0.0.1:18970",
-		WorkspaceDir: workspace,
+		APIAddr:           "127.0.0.1:18970",
+		WorkspaceDir:      workspace,
+		ManagedEnterprise: true,
 	}
 	conn := NewClaudeCodeConnector()
 	caps := conn.Capabilities(opts)

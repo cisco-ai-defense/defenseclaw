@@ -243,7 +243,7 @@ func DynamicRedirectTargetReduction(input Input, facts Facts) (view, twin Facts,
 	if original.Parse.Status != StatusPartial {
 		return Facts{}, Facts{}, false
 	}
-	if sequence, ok := shortCircuitListSequence(capture.source); ok {
+	if sequence, ok := shortCircuitListSequence(capture.source, false); ok {
 		_, capture = analyzeWithRedirectTargets(input, sequence)
 	}
 	twinSource, placeholders, ok := capture.twin()

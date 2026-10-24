@@ -99,11 +99,15 @@ does not run the skill or MCP scanners.`,
 type enterpriseDiscoveryAccount struct {
 	User string `json:"user"`
 	// UID is the Linux or macOS account; SID the Windows one.
-	UID       *int                 `json:"uid,omitempty"`
-	SID       string               `json:"sid,omitempty"`
-	UpdatedAt time.Time            `json:"updated_at"`
-	Result    string               `json:"result"`
-	Signals   []inventory.AISignal `json:"signals"`
+	UID       *int      `json:"uid,omitempty"`
+	SID       string    `json:"sid,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Result    string    `json:"result"`
+	// DetectorErrors are the scan's own explanations of a partial result,
+	// by detector: a retained record names why the last complete scan is
+	// shown (user_scan) instead of a fresh one (GAP-0889).
+	DetectorErrors map[string]string    `json:"detector_errors,omitempty"`
+	Signals        []inventory.AISignal `json:"signals"`
 	// twin marks an account that shares its bare name with another one; the
 	// summary then shows its SID too (GAP-1091).
 	twin bool
@@ -637,7 +641,8 @@ func writeEnterpriseDiscovery(w io.Writer, dir, user string, asJSON bool) error 
 		accountUID := record.UID
 		report.Accounts = append(report.Accounts, enterpriseDiscoveryAccount{
 			User: record.User, UID: &accountUID, UpdatedAt: record.UpdatedAt,
-			Result: record.Report.Summary.Result, Signals: record.Report.Signals,
+			Result: record.Report.Summary.Result, DetectorErrors: record.Report.Summary.DetectorErrors,
+			Signals: record.Report.Signals,
 		})
 	}
 	sort.Slice(report.Accounts, func(i, j int) bool { return *report.Accounts[i].UID < *report.Accounts[j].UID })
@@ -705,6 +710,14 @@ func writeEnterpriseDiscoveryReport(w io.Writer, report enterpriseDiscoveryRepor
 		}
 		fmt.Fprintf(w, "%s: scanned %s, result %s, %d signal(s)\n",
 			name, account.UpdatedAt.UTC().Format(time.RFC3339), account.Result, len(account.Signals))
+		detectors := make([]string, 0, len(account.DetectorErrors))
+		for detector := range account.DetectorErrors {
+			detectors = append(detectors, detector)
+		}
+		sort.Strings(detectors)
+		for _, detector := range detectors {
+			fmt.Fprintf(w, "  %s: %s\n", detector, account.DetectorErrors[detector])
+		}
 		if user == "" {
 			counts := map[string]int{}
 			for _, signal := range account.Signals {

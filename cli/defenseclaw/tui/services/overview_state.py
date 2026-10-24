@@ -133,8 +133,9 @@ class HealthSnapshot:
     # to the config-derived roster.
     connector: ConnectorHealth | None = None
     connectors: tuple[ConnectorHealth, ...] = ()
-    # The effective policy the gateway applied (/status ``policy``): its
-    # applied generation and effective_policy_digest ("" when not reported).
+    # The effective policy the gateway applied (/status ``policy``): the
+    # config generation it was built from (0 when not reported) and its
+    # effective_policy_digest ("" when not reported).
     policy_generation: int = 0
     policy_digest: str = ""
 
@@ -143,6 +144,8 @@ class HealthSnapshot:
         digest = self.policy_digest.removeprefix("sha256:")
         if not digest:
             return ""
+        if not self.policy_generation:
+            return digest[:digest_chars]
         return f"gen {self.policy_generation} · {digest[:digest_chars]}"
 
 
@@ -177,7 +180,7 @@ class OverviewConfig:
     data_dir: str = ""
     environment: str = ""
     policy_dir: str = ""
-    claw_mode: str = "openclaw"
+    claw_mode: str = ""
     guardrail_enabled: bool = False
     guardrail_connector: str = ""
     guardrail_mode: str = "observe"
@@ -817,8 +820,7 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "warn",
-                    "DefenseClaw is not set up yet (no config.yaml). "
-                    "Press 0 for Setup, or run: defenseclaw init",
+                    "DefenseClaw is not set up yet - press 0 or run: defenseclaw init",
                 )
             )
         elif gateway_broken and guardrail_off and not self.skill_scanner_available:
@@ -903,6 +905,10 @@ class OverviewPanelModel:
                 )
             )
 
+        # A notice with a remedy fits one line at 80 columns (67 cells), or
+        # puts its remedy first: at 80x24 only the first line of a notice is
+        # above the fold, so a wrapped "press [d] to refresh" was cut off
+        # (GAP-0566, as GAP-1775).
         if self.doctor is not None and not self.doctor.is_empty():
             contradicted = tuple(check for check in self.doctor.checks if self.doctor_check_stale_reason(check))
             removed = tuple(check for check in contradicted if self._doctor_destination_removed(check))
@@ -921,16 +927,14 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "info",
-                        f"The last doctor run ({format_age(self.doctor.age(now=now))}) checked "
-                        f"{len(removed)} telemetry destination(s) that no longer exist - press [d] to refresh",
+                        f"Doctor checked {len(removed)} removed destination(s) - press [d] to refresh",
                     )
                 )
             elif contradicted:
                 notices.append(
                     OverviewNotice(
                         "info",
-                        f"Doctor cache shows {len(contradicted)} stale failure(s) that /health disagrees with - "
-                        "press [d] to refresh",
+                        f"{len(contradicted)} stale failure(s): /health disagrees - press [d] to refresh",
                     )
                 )
             elif self.doctor.is_stale(now=now):
@@ -947,8 +951,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        f"Doctor repairs need attention ({', '.join(parts)}) - "
-                        "see the DOCTOR panel or rerun the selected repair",
+                        f"Doctor repairs: {', '.join(parts)} - see the DOCTOR panel",
                     )
                 )
             elif (
@@ -962,8 +965,7 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        "The last Doctor run ended with a failed outcome - "
-                        "see the DOCTOR panel or rerun: defenseclaw doctor",
+                        "The last Doctor run ended with a failed outcome - see DOCTOR panel",
                     )
                 )
             elif self.doctor.outcome_state(now=now) == "warning" and self.doctor.warned == 0:
@@ -980,9 +982,8 @@ class OverviewPanelModel:
                 notices.append(
                     OverviewNotice(
                         "error",
-                        "Missing required API key(s): "
-                        f"{', '.join(preview)}{keys_overflow_suffix(len(missing), len(preview))} "
-                        "- run: defenseclaw keys fill-missing",
+                        "Missing required API key(s) · run: defenseclaw keys fill-missing · "
+                        f"{', '.join(preview)}{keys_overflow_suffix(len(missing), len(preview))}",
                     )
                 )
 
@@ -1036,8 +1037,7 @@ class OverviewPanelModel:
             notices.append(
                 OverviewNotice(
                     "info",
-                    f"{runtime.unobserved} runtime finding(s) are inventory-unobserved. "
-                    "Open AI Discovery and press Scan now so Runtime can correlate them.",
+                    f"{runtime.unobserved} runtime finding(s) unobserved - press Scan now in AI Discovery",
                 )
             )
         elif runtime.scanned and runtime.findings == 0 and runtime.processes and not self.gateway_down():
@@ -1405,11 +1405,10 @@ class OverviewPanelModel:
         ``"openclaw"`` for an empty / hook-only state. Precedence: explicit
         singular override (``guardrail.connector``) → the active *set*'s
         primary (``connector_modes`` — the multi-connector roster that the
-        singular ``config.active_connector()`` ignores, which is why a
-        ``[codex, openclaw]`` map used to surface a phantom ``openclaw``) →
-        the singular ``claw.mode`` → ``""`` (none configured). The Go-parity
-        ``config.active_connector()`` contract is deliberately left untouched;
-        this distinguishes "none configured" at the display layer only.
+        singular selection can omit, which is why a ``[codex, openclaw]`` map
+        used to surface a phantom ``openclaw``) →
+        the singular ``claw.mode`` → ``""`` (none configured). The config
+        resolver also returns ``""`` for an unconfigured install.
         Callers treat ``""`` as "no connector present" (e.g. the app's
         ``connector_present`` gate / merged-catalog fallback).
 

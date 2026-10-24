@@ -1,6 +1,6 @@
 ---
 title: Codex
-description: Guard Codex with DefenseClaw hooks that can block before a tool runs, plus Codex's native OpenTelemetry.
+description: Guard Codex with DefenseClaw hooks that can block before a tool runs.
 keywords:
   - Codex connector
   - Codex hooks
@@ -9,7 +9,7 @@ keywords:
 
 import { ConnectorSupport } from '@/components/support-matrix';
 
-DefenseClaw writes hooks and an OpenTelemetry exporter into Codex's `config.toml`. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
+DefenseClaw writes hooks into Codex's `config.toml`. Per-user host setup removes the native OpenTelemetry exporter installed by earlier releases: Codex cannot verify which local account holds a stopped gateway's TCP port. Managed hosts and OpenShell images retain native telemetry. On an ordinary host install, per-user and standalone enterprise installs do not register a notify bridge; only Secure Client does. Codex in an OpenShell sandbox (`defenseclaw sandbox run codex`) is the exception: the sandbox image installs `codex-notify.sh` and sets `notify` in its managed config. This is a hook connector: Codex talks to OpenAI directly and no proxy is involved.
 
 ## Platform support
 
@@ -17,12 +17,16 @@ DefenseClaw writes hooks and an OpenTelemetry exporter into Codex's `config.toml
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector codex` first. Until DefenseClaw is initialized, `defenseclaw setup codex` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
-defenseclaw setup codex                # observe (default): record only
+defenseclaw setup codex                # first setup defaults to observe: record only
 defenseclaw setup codex --mode action  # block on policy hits
 ```
 
-On Windows, run the same commands in PowerShell. Quit and reopen Codex afterwards.
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Quit and reopen Codex afterwards.
+After upgrading from an earlier per-user release, quit all running Codex processes and reopen them so they stop using the old exporter configuration.
 
 ## Check it
 
@@ -46,7 +50,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 
 | What | macOS and Linux | Windows |
 | --- | --- | --- |
-| Hooks and OpenTelemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
+| Hooks; managed native telemetry | `$CODEX_HOME/config.toml` (default `~/.codex`) | `%CODEX_HOME%\config.toml` |
 | Hook program | `~/.defenseclaw/hooks/codex-hook.sh` | `%USERPROFILE%\.local\bin\defenseclaw-hook.exe` (one-line install) or `%LOCALAPPDATA%\DefenseClaw\HookRuntime\defenseclaw-hook.exe` (Setup installer) |
 | Connector credentials | `~/.defenseclaw/hooks` | `%USERPROFILE%\.defenseclaw\hooks` |
 | Proxy bypass for telemetry | `$CODEX_HOME/.env` (marked block, only when a proxy is set) | not written |
@@ -62,7 +66,28 @@ Teardown restores the backup, or removes only DefenseClaw's entries.
 
 ## On a managed computer
 
-The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on.
+The per-user commands on this page do not run on a computer with a standalone enterprise install. On Linux and macOS, `defenseclaw` there offers only `sandbox` commands, `help` and `--version`: anything else prints "This computer is managed; only `defenseclaw sandbox` commands are available here." and exits 2. On native Windows, `defenseclaw` is the administrator's command: it refuses `setup codex` and `setup remove`, and has no `guardrail` group. Protected requirements pin `[features] hooks = true`, so `codex features disable hooks` writes the user's config but hooks stay on. On standalone Linux and macOS, the guardian also removes that conflicting user preference during reconciliation; while it remains, Codex can reject an unrelated project trust write.
+
+The per-user files in [Files it changes](#files-it-changes) are not used there. The hooks are in Codex's machine requirements file and run the administrator's hook program:
+
+| | Hooks | Hook program |
+| --- | --- | --- |
+| Linux | `/etc/codex/requirements.toml` | `/opt/defenseclaw/bin/defenseclaw-hook` |
+| macOS | `/etc/codex/requirements.toml` | `/opt/cisco/defenseclaw/bin/defenseclaw-hook` |
+| Windows | `C:\ProgramData\OpenAI\Codex\requirements.toml` | `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe` |
+
+`enterprise policy verify` prints both. On Windows its first line names the hook program:
+
+```text
+Standalone machine agent policy (hook binary C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe)
+```
+
+and the `codex` row names the requirements file:
+
+```text
+codex        machine_policy  covered      lock=enforce  foreign_hooks=remove  owned=10 foreign=0
+    file:      C:\ProgramData\OpenAI\Codex\requirements.toml
+```
 
 The administrator manages Codex in the managed `config.yaml` under `guardrail.connectors.codex` (`{}` adds it, `enabled: false` removes it). Apply the change as in [Change the config](/docs/enterprise/operate/lifecycle#change-the-config), then check it with `enterprise policy verify` ([Machine policy](/docs/enterprise/configure/machine-policy#inspect-export-and-verify)).
 
@@ -74,7 +99,11 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Codex's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove codex --yes` (add `--force` if it is the last one).
+With the default gateway restart, disabling removes DefenseClaw's hooks and
+OpenTelemetry entries from Codex's config and preserves your other Codex
+settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks and
+telemetry entries. To remove the connector, run
+`defenseclaw setup remove codex --yes` (add `--force` if it is the last one).
 
 On a multi-connector install, add `--connector codex` to `guardrail disable` and `guardrail enable` to change only this agent.
 

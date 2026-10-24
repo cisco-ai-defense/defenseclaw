@@ -93,12 +93,14 @@ func TestR104ReviewFixDecisions(t *testing.T) {
 		{"Perl unrelated copy control", `perl -e 'sub copy { return 1 }; copy("payload","alias")'`, false},
 		{"copy source control", `node -e 'require("fs").copyFileSync("alias","out.txt")'`, false},
 		{"copy destination control", `python3 -c 'import shutil; shutil.copy2("payload","out.txt")'`, false},
-		{"Python hash comment", `python3 -c '#open("alias","a").write("marker")'`, false},
+		// The project contains a symlink, so T7's import-path proof cannot
+		// certify that Python keeps an inert string inert at runtime.
+		{"Python hash comment beside uncertain import path", `python3 -c '#open("alias","a").write("marker")'`, true},
 		{"bound pattern redirect", `printf -v f %s 'ali*'; echo marker >> $f`, true},
 		{"bound pattern loop", `for f in 'ali*'; do echo marker >> $f; done`, true},
 		{"quoted bound pattern", `printf -v f %s 'ali*'; echo marker >> "$f"`, false},
 		{"search-path cd writes the link", `cd sub && ln -s ../authorized_keys b && echo marker > b`, true},
-		{"search-path cd writes another file", `cd sub && ln -s ../a b && echo marker > out.txt`, false},
+		{"search-path cd writes another file", `cd sub && ln -s ../a b && echo marker > out.txt`, true},
 		{"explicit cd writes the link", `cd ./sub && ln -s ../authorized_keys b && echo marker > b`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

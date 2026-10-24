@@ -80,9 +80,9 @@ func atomicTransformFileLegacyPrepared(
 		if writePerm == 0 {
 			writePerm = perm
 		}
-		semanticNoop := (!snapshot.exists && result.Remove) ||
+		semanticNoop := result.Keep || !result.Force && ((!snapshot.exists && result.Remove) ||
 			(snapshot.exists && !result.Remove && bytes.Equal(snapshot.data, result.Data) &&
-				atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm))
+				atomicTransformSnapshotSatisfiesPermissions(snapshot, writePerm)))
 		if !semanticNoop {
 			// A change through a path that leads out of a bound account
 			// home is refused before anything is staged (rel-1-0-3

@@ -1,13 +1,13 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""The customer chooses open or closed; the default is closed (owner, 2026-10-20).
+"""Per-user hooks close; managed administrators may choose outage-open.
 
 Mirrors internal/config/hook_fail_mode_matrix_test.go: for every connector,
 per-user, managed standalone and Secure Client, in observe and action mode,
-an explicit open or closed wins (on a managed computer the administrator's
-config sets it), and an unset fail mode is closed except under Secure Client,
-where it is open (#1163). Per-user Cursor in action mode stays closed. On the
+an administrator's explicit open or closed wins on a managed computer, and
+an unset fail mode is closed except under Secure Client, where it is open
+(#1163). On the
 standalone profile no connector is lowered to an upstream fail-open: its
 managed hooks block through the native deny.
 """
@@ -78,9 +78,10 @@ def test_hook_fail_mode_matrix(connector, deployment, mode, global_mode, connect
     cfg = _config(deployment, mode, global_mode, connector, connector_mode)
     if want is None:
         want = DEPLOYMENTS[deployment][2]
-    if connector == "cursor" and deployment == "per-user" and mode == "action":
-        # Cursor's action registration fails closed whatever is configured.
-        want = "closed"
+    if deployment == "per-user":
+        # A per-user outage mode follows the policy tier, never the saved
+        # value: the default tier is open (oss-outage-open).
+        want = "open"
     assert cfg.guardrail.effective_hook_fail_mode(connector) == want
     assert cfg.managed_outside_secure_client() is (deployment == "standalone")
 
@@ -106,3 +107,30 @@ def test_machine_marker_makes_any_managed_config_standalone(monkeypatch: pytest.
     assert cfg.guardrail.effective_hook_fail_mode("kiro") == "closed"
     cfg.guardrail.hook_fail_mode = "open"
     assert cfg.guardrail.effective_hook_fail_mode("kiro") == "open"
+
+
+@pytest.mark.parametrize("connector", CONNECTORS)
+@pytest.mark.parametrize(
+    ("global_pack", "connector_pack", "saved", "want"),
+    [
+        ("", "", "closed", "open"),
+        ("default", "", "closed", "open"),
+        ("permissive", "", "closed", "open"),
+        ("strict", "", "open", "closed"),
+        ("strict", "permissive", "closed", "open"),
+        ("default", "strict", "open", "closed"),
+    ],
+)
+def test_per_user_outage_mode_follows_the_policy_tier(connector, global_pack, connector_pack, saved, want):
+    # Owner decision 2026-10-23: a per-user install fails open for a gateway
+    # outage in the default and permissive tiers and closed in strict; the
+    # saved hook_fail_mode does not change it. A managed install keeps its
+    # administrator's mode whatever the tier.
+    guardrail = GuardrailConfig(mode="action", hook_fail_mode=saved, rule_pack=global_pack)
+    if connector_pack:
+        guardrail.connectors = {connector: PerConnectorGuardrailConfig(rule_pack=connector_pack, hook_fail_mode=saved)}
+    cfg = Config(deployment_mode="", enterprise_profile="", guardrail=guardrail)
+    assert cfg.guardrail.effective_hook_fail_mode(connector) == want
+    managed = Config(deployment_mode="managed_enterprise", enterprise_profile="standalone",
+                     guardrail=GuardrailConfig(mode="action", rule_pack=global_pack))
+    assert managed.guardrail.effective_hook_fail_mode(connector) == "closed"

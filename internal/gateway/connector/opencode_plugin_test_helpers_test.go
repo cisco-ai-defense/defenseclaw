@@ -274,10 +274,18 @@ func (s *nodeHarnessSession) wait() (report string, ok bool) {
 func writeRenderedPlugin(t *testing.T, asset, name string, data templateData) string {
 	t.Helper()
 	path := filepath.Join(testenv.PrivateTempDir(t), name)
-	if err := os.WriteFile(path, []byte(renderPluginAssetForTest(t, asset, data)), 0o600); err != nil {
+	body := withoutPeerCheckForTest(renderPluginAssetForTest(t, asset, data))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func withoutPeerCheckForTest(body string) string {
+	// Verdict tests use an in-process fake gateway. The account guard has
+	// its own transport test, which renders the unmodified plugin.
+	body = strings.ReplaceAll(body, `const DC_PER_USER_NATIVE_POST: string = "1"`, `const DC_PER_USER_NATIVE_POST: string = ""`)
+	return strings.ReplaceAll(body, `const DC_PER_USER_NATIVE_POST = "1";`, `const DC_PER_USER_NATIVE_POST = "";`)
 }
 
 // openCodePluginHarness loads a rendered OpenCode plugin with a stub TUI

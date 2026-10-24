@@ -94,9 +94,6 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 		if connectorFlagJSON {
 			return errors.New("connector refresh-fail-modes: --hold-until-exit does not take --json")
 		}
-		if refreshFailModesClosed {
-			return errors.New("connector refresh-fail-modes: --closed does not take --hold-until-exit")
-		}
 		if refreshFailModesHoldPID < 0 || refreshFailModesHoldTimeout <= 0 {
 			return errors.New("connector refresh-fail-modes: --hold-until-exit takes a process ID and --hold-timeout a positive time")
 		}
@@ -124,7 +121,7 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 }
 
 // holdConnectorFailModes is refresh-fail-modes --hold-until-exit: the
-// refresh under the sidecar lock held until the gateway exits
+// refresh under the sidecar lock is held until the gateway exits
 // (connector.HoldHookFailModes). A managed install is left alone and has
 // nothing to hold.
 func holdConnectorFailModes(cmd *cobra.Command, hookDir string, mode func(string) string, managedInstall bool) error {
@@ -177,8 +174,7 @@ func refreshFailModeResolver(cmd *cobra.Command) (func(string) string, string, b
 				conn = found
 			}
 			return connector.OutageHookFailMode(connector.SetupOpts{
-				HookFailMode:             loaded.EffectiveHookFailModeForConnector(name),
-				ConfiguredHookFailMode:   loaded.ConfiguredHookFailModeForConnector(name),
+				HookFailMode:             loaded.EffectiveHookOutageFailModeForConnector(name),
 				SecureClientHookDelivery: loaded.SecureClientIntegration(),
 				GuardrailMode:            loaded.EffectiveGuardrailModeForConnector(name),
 			}, conn)
@@ -186,16 +182,13 @@ func refreshFailModeResolver(cmd *cobra.Command) (func(string) string, string, b
 	}
 	// This release cannot load the config: a 0.8.x one before 'defenseclaw
 	// migrate', which the installer's 'migrate --check' has just validated,
-	// or none. Its explicit fail modes are the operator's (every migration
-	// keeps them); everything else is closed, Cursor included.
+	// or none. Per-user hooks must be closed during that migration too, even
+	// if an older config document still contains an explicit open.
 	raw := readHookConfigDocument(config.ConfigPath())
 	if config.ManagedEnterpriseDocument(raw) {
 		return nil, "document", true
 	}
-	return func(name string) string {
-		if config.ConfiguredHookFailModeInDocument(raw, name) == "open" {
-			return "open"
-		}
+	return func(string) string {
 		return "closed"
 	}, "document", false
 }

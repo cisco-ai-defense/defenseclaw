@@ -26,6 +26,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
@@ -48,9 +49,15 @@ func TestMain(m *testing.M) {
 		serveCodexPolicyFixture()
 		os.Exit(0)
 	}
+	cleanupHermes, err := hermespath.IsolateHostForTests()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "isolate the tests from the host's Hermes:", err)
+		os.Exit(1)
+	}
 	restore := isolateTestHost()
 	code := m.Run()
 	restore()
+	cleanupHermes()
 	os.Exit(code)
 }
 
@@ -394,6 +401,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorPruneOrphans(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
+	case "check-agent-settings":
+		err = runConnectorCheckAgentSettings(cmd, nil)
 	default:
 		t.Fatalf("unknown subcommand for harness: %s", sub)
 	}
@@ -515,7 +524,9 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	}
 	stdout, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
 	assertConnectorReconcileStderr(t, "codex", stderr)
-	if !strings.Contains(stdout, `"fail_mode":"closed"`) {
+	// A per-user outage mode follows the policy tier (default: open), not
+	// the saved hook_fail_mode (oss-outage-open).
+	if !strings.Contains(stdout, `"fail_mode":"open"`) {
 		t.Fatalf("reconcile output = %s", stdout)
 	}
 	if _, err := os.Stat(codexPath); err != nil {
@@ -535,16 +546,12 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	if err := toml.Unmarshal(codexRegistration, &codexConfig); err != nil {
 		t.Fatalf("parse reconciled Codex config: %v", err)
 	}
-	otel, ok := codexConfig["otel"].(map[string]interface{})
-	if !ok || otel["environment"] != cfg.Environment {
-		t.Fatalf("reconciled Codex OTel environment = %#v; want %q", otel["environment"], cfg.Environment)
+	if _, exists := codexConfig["otel"]; exists {
+		t.Fatal("per-user Codex reconciliation installed a native OTel exporter")
 	}
 	otlpToken, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeCodex)
-	if err != nil || otlpToken == "" {
-		t.Fatalf("load connector-scoped OTLP token = %q, %v", otlpToken, err)
-	}
-	if !bytes.Contains(codexRegistration, []byte(otlpToken)) {
-		t.Fatal("selected registration does not contain the connector-scoped OTLP path token")
+	if err != nil || otlpToken != "" {
+		t.Fatalf("per-user Codex reconciliation retained an OTLP token: present=%t, error=%v", otlpToken != "", err)
 	}
 	claudeAfter, err := os.ReadFile(claudePath)
 	if err != nil {
@@ -553,9 +560,10 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	if !bytes.Equal(claudeAfter, claudeBefore) {
 		t.Fatalf("peer Claude registration changed: %s", claudeAfter)
 	}
+	// The lock records the outage mode: the default tier's open.
 	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
-	if lock.HookFailMode != "closed" {
-		t.Fatalf("lock fail mode = %q, want closed", lock.HookFailMode)
+	if lock.HookFailMode != "open" {
+		t.Fatalf("lock fail mode = %q, want open", lock.HookFailMode)
 	}
 }
 
@@ -712,8 +720,17 @@ func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh
 			t.Fatalf("%s parse Claude settings: %v", stage, err)
 		}
 		env, ok := settings["env"].(map[string]interface{})
-		if !ok || env["OPERATOR_SENTINEL"] != "preserve" || env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
-			t.Fatalf("%s lost Claude operator or managed environment state", stage)
+		if !ok || env["OPERATOR_SENTINEL"] != "preserve" {
+			t.Fatalf("%s lost Claude operator environment state", stage)
+		}
+		if env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "0" ||
+			env["OTEL_LOGS_EXPORTER"] != "none" ||
+			env["OTEL_METRICS_EXPORTER"] != "none" ||
+			env["OTEL_TRACES_EXPORTER"] != "none" {
+			t.Fatalf("%s restored an unsafe per-user Claude native exporter", stage)
+		}
+		if _, endpoint := env["OTEL_EXPORTER_OTLP_ENDPOINT"]; endpoint {
+			t.Fatalf("%s restored a per-user Claude OTLP endpoint", stage)
 		}
 		if hooks, ok := settings["hooks"].(map[string]interface{}); !ok || len(hooks) == 0 {
 			t.Fatalf("%s lost Claude hook registration", stage)
@@ -1099,7 +1116,7 @@ func TestConnectorReconcileCopilotSupportsOrdinaryPath(t *testing.T) {
 	}
 }
 
-func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
+func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
 	home := testenv.PrivateTempDir(t)
@@ -1156,8 +1173,10 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	closed := assertMixedHookContractsCurrent(t, dataDir, home)
-	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "open" {
-		t.Fatalf("mixed lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
+	// The saved value does not move a per-user outage mode: both stay in
+	// the default tier's open (oss-outage-open).
+	if closed.Connectors["claudecode"].HookFailMode != "open" || closed.Connectors["codex"].HookFailMode != "open" {
+		t.Fatalf("per-user lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
 	}
 	codexAfter, err := os.ReadFile(codexPath)
 	if err != nil {
@@ -1205,8 +1224,9 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	assertMixedHookContractsCurrent(t, dataDir, home)
 
-	// Reverse the mixed state and repeatedly switch one connector.  Every
-	// intermediate lock must validate both registrations simultaneously.
+	// Repeatedly edit saved values on one connector. Every resulting lock
+	// must still validate both registrations with the default tier's outage
+	// mode, which no saved value moves (oss-outage-open).
 	claudeMode = cfg.Guardrail.Connectors["claudecode"]
 	claudeMode.HookFailMode = "open"
 	cfg.Guardrail.Connectors["claudecode"] = claudeMode
@@ -1218,8 +1238,8 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
 	assertConnectorReconcileStderr(t, "codex", stderr)
 	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
-	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "closed" {
-		t.Fatalf("reverse mixed modes are wrong: %+v", reverse.Connectors)
+	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "open" {
+		t.Fatalf("a saved value moved the per-user outage mode: %+v", reverse.Connectors)
 	}
 	for _, mode := range []string{"closed", "open", "closed", "open"} {
 		claudeMode = cfg.Guardrail.Connectors["claudecode"]

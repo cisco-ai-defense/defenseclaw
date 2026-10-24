@@ -7,6 +7,7 @@ package gateway
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -14,9 +15,10 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// TestWindowsFailedDirectoryLookupUsesDefaultProfile keeps an unavailable LSA
-// lookup from selecting a connector-only assignment ahead of the strict default.
-func TestWindowsFailedDirectoryLookupUsesDefaultProfile(t *testing.T) {
+// TestWindowsFailedDirectoryLookupRefusesUnprovenGroups keeps an unavailable
+// LSA lookup from selecting a connector-only assignment while an unproven
+// group assignment could change the outcome.
+func TestWindowsFailedDirectoryLookupRefusesUnprovenGroups(t *testing.T) {
 	previousDir := currentIdentitySpoolDir()
 	setIdentitySpoolDir("")
 	t.Cleanup(func() { setIdentitySpoolDir(previousDir) })
@@ -36,8 +38,9 @@ func TestWindowsFailedDirectoryLookupUsesDefaultProfile(t *testing.T) {
 			{Profile: "lenient", Match: config.ProfileMatch{Connectors: []string{"codex"}}},
 		},
 	}
-	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
-		t.Fatalf("failed SID lookup selected %+v; want strict default_lookup_failed", got)
+	if got := set.matchUncached(&subject, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed ||
+		!strings.Contains(got.Refused, "group") {
+		t.Fatalf("failed SID lookup selected %+v; want refusal naming the missing group fact, with strict only as candidate", got)
 	}
 }
 

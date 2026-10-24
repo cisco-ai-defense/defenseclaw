@@ -138,7 +138,7 @@ func deleteRecord(opts Options, connector string) error {
 
 // reservedDropIn reports whether the record names a drop-in whose file
 // name DefenseClaw reserves for itself: 90-defenseclaw.json for the Claude
-// Code hooks and the Copilot policy. Once the record says DefenseClaw
+// Code hooks. Once the record says DefenseClaw
 // published it, the file is DefenseClaw's whatever bytes it holds. A copy
 // someone edited (hook paths pointed at another folder or binary name) is
 // tamper that the next publish repairs, never the administrator's preimage,
@@ -146,9 +146,10 @@ func deleteRecord(opts Options, connector string) error {
 // commands inside, which an edit can change: an edited copy recorded as
 // administrator content was restored by uninstall --purge, so every Claude
 // Code call ran a missing hook (GAP-1099). Administrator settings belong in
-// another drop-in, which DefenseClaw never touches.
+// another drop-in, which DefenseClaw never touches. Copilot can share its
+// drop-in with independent handlers, which its surgical strip preserves.
 func reservedDropIn(connector string) bool {
-	return connector == ConnectorClaudeCode || connector == ConnectorCopilot
+	return connector == ConnectorClaudeCode
 }
 
 // publishedByRecord reports whether record says DefenseClaw published path.

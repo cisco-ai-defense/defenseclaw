@@ -48,7 +48,7 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}{
 		{NewHermesConnector(), true, false, false, "user", "config.yaml"},
 		{NewCursorConnector(), true, false, true, "user", "hooks.json"},
-		{NewCopilotConnector(), true, true, false, "user,workspace", "defenseclaw.json"},
+		{NewCopilotConnector(), true, false, false, "user,workspace", "defenseclaw.json"},
 		{NewAntigravityConnector(), true, true, false, "user", "hooks.json"},
 	}
 	for _, tc := range cases {
@@ -73,6 +73,47 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}
 }
 
+func TestDevinTeardownRevokesScopedCredentialAndEmptyBackupDirectory(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	opts := SetupOpts{
+		DataDir:      dataDir,
+		ConfigHome:   filepath.Join(t.TempDir(), "devin"),
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "test-token",
+		HookFailMode: "closed",
+	}
+	conn := NewDevinConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EnsureHookAPIToken(dataDir, "devin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatal(err)
+	}
+	token, err := HookAPITokenFilePath(dataDir, "devin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(token); !os.IsNotExist(err) {
+		t.Fatalf("removed Devin credential remains: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dataDir, "connector_backups", "devin")); !os.IsNotExist(err) {
+		t.Fatalf("empty Devin backup directory remains: %v", err)
+	}
+	// A cached agent process can still call the old hook path. The disabled
+	// tombstone is deliberately retained until the agent exits.
+	tombstone, err := os.ReadFile(filepath.Join(dataDir, "hooks", "devin-hook.sh"))
+	if err != nil || !bytes.Contains(tombstone, []byte("disabled tombstone")) ||
+		!bytes.Contains(tombstone, []byte("exit 2")) {
+		t.Fatalf("cached hook path must block with a disabled tombstone: %v, %q", err, tombstone)
+	}
+}
+
 func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
 	root := t.TempDir()
 	old := filepath.Join(root, "project", "old-open", "copilot-hook.sh")
@@ -85,11 +126,9 @@ func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
 	}
 	path := filepath.Join(root, "defenseclaw.json")
 	oldCommand := copilotHookInvocationCommandForEvent("linux", "preToolUse", old)
-	operatorCommand := "/usr/local/bin/operator-hook"
 	data, err := json.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
 		"preToolUse": []interface{}{
 			map[string]interface{}{"type": "command", "bash": oldCommand, "timeoutSec": 30},
-			map[string]interface{}{"type": "command", "bash": operatorCommand, "timeoutSec": 30},
 		},
 	}})
 	if err != nil {
@@ -98,6 +137,19 @@ func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	assertCurrentOnly := func(body []byte) {
+		t.Helper()
+		var document struct {
+			Hooks map[string][]map[string]interface{} `json:"hooks"`
+		}
+		if err := json.Unmarshal(body, &document); err != nil {
+			t.Fatal(err)
+		}
+		entries := document.Hooks["preToolUse"]
+		if len(entries) != 1 || entries[0]["bash"] != copilotHookInvocationCommandForEvent("linux", "preToolUse", current) {
+			t.Fatalf("owned event must contain only the current hook: %s", body)
+		}
+	}
 	if err := patchCopilotHooksForOS(path, current, []string{"preToolUse"}, "linux"); err != nil {
 		t.Fatal(err)
 	}
@@ -105,13 +157,7 @@ func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(repaired, []byte(oldCommand)) {
-		t.Fatal("the old open hook still runs beside the closed registration")
-	}
-	if !bytes.Contains(repaired, []byte(copilotHookInvocationCommandForEvent("linux", "preToolUse", current))) ||
-		!bytes.Contains(repaired, []byte(operatorCommand)) {
-		t.Fatalf("repair lost the canonical or operator hook: %s", repaired)
-	}
+	assertCurrentOnly(repaired)
 	// A copied launcher is still DefenseClaw-owned when the user renamed it.
 	// The registered command, rather than its basename, determines exposure.
 	renamed := filepath.Join(root, "project", "old-open", "retired-open.sh")
@@ -122,7 +168,6 @@ func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
 	data, err = json.Marshal(map[string]interface{}{"hooks": map[string]interface{}{
 		"preToolUse": []interface{}{
 			map[string]interface{}{"type": "command", "bash": renamedCommand, "timeoutSec": 30},
-			map[string]interface{}{"type": "command", "bash": operatorCommand, "timeoutSec": 30},
 		},
 	}})
 	if err != nil {
@@ -138,10 +183,89 @@ func TestCopilotReconcileReplacesRegisteredOldOpenCopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Contains(repaired, []byte(renamedCommand)) ||
-		!bytes.Contains(repaired, []byte(copilotHookInvocationCommandForEvent("linux", "preToolUse", current))) ||
-		!bytes.Contains(repaired, []byte(operatorCommand)) {
-		t.Fatalf("renamed managed copy survived repair or operator hook was lost: %s", repaired)
+	assertCurrentOnly(repaired)
+}
+
+func TestCopilotBoundEventRefusesIndependentHandlersWithoutRewriting(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, independent := range []string{"separate", "alone", "combined", "nested", "mapping", "lookalike"} {
+			t.Run(goos+"/"+independent, func(t *testing.T) {
+				root := t.TempDir()
+				path := filepath.Join(root, "defenseclaw.json")
+				script := filepath.Join(root, "hooks", "copilot-hook.sh")
+				if goos == "windows" {
+					script = windowsCopilotPowerShellAdapterCommand(script)
+				}
+				field := "bash"
+				if goos == "windows" {
+					field = "powershell"
+				}
+				owned := copilotHookInvocationCommandForEvent(goos, "preToolUse", script)
+				other := "echo operator deny"
+				if goos == "windows" {
+					other = "Write-Output 'operator deny'"
+				}
+				if independent == "lookalike" {
+					operatorBase := filepath.Join(root, "operator", "copilot-hook.sh")
+					operatorScript := operatorBase
+					if goos == "windows" {
+						operatorScript = strings.TrimSuffix(operatorScript, ".sh") + ".ps1"
+					}
+					if err := os.MkdirAll(filepath.Dir(operatorScript), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(operatorScript, []byte("operator hook\n"), 0o700); err != nil {
+						t.Fatal(err)
+					}
+					operatorCommand := operatorScript
+					if goos == "windows" {
+						operatorCommand = windowsCopilotPowerShellAdapterCommand(operatorBase)
+					}
+					other = copilotHookInvocationCommandForEvent(goos, "preToolUse", operatorCommand)
+				}
+				var extra interface{} = map[string]interface{}{"type": "command", field: other}
+				switch independent {
+				case "combined":
+					extra = map[string]interface{}{"type": "command", field: other + "; " + owned}
+				case "nested":
+					extra = map[string]interface{}{"type": "command", field: owned, "handlers": []interface{}{map[string]interface{}{field: other}}}
+				}
+				var bound interface{} = []interface{}{
+					map[string]interface{}{"type": "command", field: owned},
+					extra,
+				}
+				switch independent {
+				case "alone":
+					bound = []interface{}{extra}
+				case "mapping":
+					bound = extra
+				}
+				body, err := json.Marshal(map[string]interface{}{
+					"version": 1,
+					"hooks": map[string]interface{}{
+						"preToolUse":   bound,
+						"sessionStart": []interface{}{map[string]interface{}{"type": "command", field: copilotHookInvocationCommandForEvent(goos, "sessionStart", script)}},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				err = patchCopilotHooksForOS(path, script, []string{"preToolUse", "sessionStart"}, goos)
+				if err == nil || !strings.Contains(err.Error(), "preToolUse") || !strings.Contains(err.Error(), "another hook file") {
+					t.Fatalf("Setup must explain how to move an independent handler: %v", err)
+				}
+				after, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(after, body) {
+					t.Fatalf("Setup rewrote hooks before refusing the independent handler: %s", after)
+				}
+			})
+		}
 	}
 }
 
@@ -1226,6 +1350,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if err := conn.Setup(context.Background(), opts); err != nil {
 				t.Fatalf("Setup: %v", err)
 			}
+			if _, err := EnsureHookAPIToken(dataDir, conn.Name()); err != nil {
+				t.Fatalf("issue scoped hook token: %v", err)
+			}
 			if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
 				t.Fatalf("OwnedHooksPresent after Setup = %t, %v; want true, nil", present, err)
 			}
@@ -1279,6 +1406,9 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			if err := conn.Teardown(context.Background(), opts); err != nil {
 				t.Fatalf("Teardown: %v", err)
 			}
+			if token, err := LoadHookAPIToken(dataDir, conn.Name()); err != nil || token != "" {
+				t.Fatalf("removed %s still authenticates with scoped token: %q, %v", conn.Name(), token, err)
+			}
 			if _, err := os.Stat(cfgPath); err == nil {
 				t.Fatalf("config file still exists after teardown of previously missing config: %s", cfgPath)
 			} else if !os.IsNotExist(err) {
@@ -1307,6 +1437,29 @@ func TestHermesSetup_WritesFullLifecycleAndScopedAllowlist(t *testing.T) {
 	opts = prepareHermesSetupAdmissionFixture(t, opts)
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
+	}
+	if runtime.GOOS != "windows" {
+		if present, err := conn.ownedHookContractPresent(opts); err != nil || !present {
+			t.Fatalf("newly rendered Hermes hook cannot complete its execution probe: present=%v err=%v", present, err)
+		}
+		helper := filepath.Join(opts.DataDir, "hooks", "_hardening.sh")
+		data, err := os.ReadFile(helper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(helper)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(helper); err != nil {
+			t.Fatal(err)
+		}
+		if present, err := conn.ownedHookContractPresent(opts); err != nil || present {
+			t.Fatalf("broken Hermes helper still completed execution probe: present=%v err=%v", present, err)
+		}
+		if err := os.WriteFile(helper, data, info.Mode().Perm()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := os.Stat(managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")); err != nil {
 		t.Fatalf("canonical Hermes config.yaml backup was not captured: %v", err)
@@ -2878,13 +3031,13 @@ func TestCopilotSettingsCascadePreservesEffectiveOperatorPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	opts := SetupOpts{WorkspaceDir: workspace}
-	if err := validateCopilotHookPolicy(opts, filepath.Join(repo, "missing-hooks.json")); err != nil {
+	if err := validateCopilotOperatorSettings(opts); err != nil {
 		t.Fatalf("higher-priority false did not override user true: %v", err)
 	}
 	if err := os.WriteFile(local, []byte(`{"disableAllHooks": true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := validateCopilotHookPolicy(opts, filepath.Join(repo, "missing-hooks.json"))
+	err := validateCopilotOperatorSettings(opts)
 	if err == nil || !strings.Contains(err.Error(), "refusing to overwrite operator policy") {
 		t.Fatalf("effective disableAllHooks did not block setup: %v", err)
 	}
@@ -2904,9 +3057,66 @@ func TestCopilotSettingsCascadeRejectsMalformedJSONC(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(home, "settings.json"), []byte(`{"disableAllHooks": "yes"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := validateCopilotHookPolicy(SetupOpts{}, filepath.Join(home, "hooks", "missing.json"))
+	err := validateCopilotOperatorSettings(SetupOpts{})
 	if err == nil || !strings.Contains(err.Error(), "must be boolean") {
 		t.Fatalf("malformed setting was not rejected: %v", err)
+	}
+}
+
+func TestCopilotOwnRegistrationSwitchIsRepairedOnEveryOS(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin", "windows"} {
+		for _, value := range []interface{}{true, "invalid"} {
+			t.Run(fmt.Sprintf("%s/%v", goos, value), func(t *testing.T) {
+				path := filepath.Join(t.TempDir(), "defenseclaw.json")
+				body, err := json.Marshal(map[string]interface{}{
+					"version": 1, "disableAllHooks": value,
+					"hooks": map[string]interface{}{"preToolUse": []interface{}{copilotHookRegistration(goos, "preToolUse", "/opt/defenseclaw/hooks/copilot-hook.sh")}},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := patchCopilotHooksForOS(path, "/opt/defenseclaw/hooks/copilot-hook.sh", []string{"preToolUse"}, goos); err != nil {
+					t.Fatal(err)
+				}
+				got, err := readJSONObject(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, exists := got["disableAllHooks"]; exists {
+					t.Fatalf("Setup kept its own disabled registration: %+v", got)
+				}
+			})
+		}
+	}
+}
+
+func TestCopilotSetupRepairsDisabledOwnRegistrationButRespectsOperatorSettings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("COPILOT_HOME", home)
+	dataDir := t.TempDir()
+	registration := filepath.Join(home, "hooks", "defenseclaw.json")
+	if err := os.MkdirAll(filepath.Dir(registration), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(registration, []byte(`{"version":1,"disableAllHooks":true,"hooks":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{DataDir: dataDir}
+	if err := NewCopilotConnector().patchConfig(opts, filepath.Join(dataDir, "hooks", "copilot-hook.sh")); err != nil {
+		t.Fatalf("Setup must repair its own hook file: %v", err)
+	}
+	if value, present, err := readCopilotDisableAllHooks(registration); err != nil || present || value {
+		t.Fatalf("own registration after Setup: value=%t present=%t err=%v", value, present, err)
+	}
+	settings := filepath.Join(home, "settings.json")
+	if err := os.WriteFile(settings, []byte(`{"disableAllHooks":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := NewCopilotConnector().patchConfig(opts, filepath.Join(dataDir, "hooks", "copilot-hook.sh")); err == nil || !strings.Contains(err.Error(), "operator setting") {
+		t.Fatalf("Setup must leave operator settings disabled: %v", err)
 	}
 }
 
@@ -2933,6 +3143,13 @@ func TestCopilotShellBootstrapFailuresFollowProfile(t *testing.T) {
 			t.Fatal(err)
 		}
 		assertCopilotShellBootstrapFailure(t, string(script), tc.failure)
+		if !tc.secureClient {
+			for _, required := range []string{`copilot_per_user_install_block() {`, `copilot_per_user_install_block "$@" || true`} {
+				if !strings.Contains(string(script), required) {
+					t.Errorf("per-user Copilot shell bootstrap missing install guard %q", required)
+				}
+			}
+		}
 	}
 }
 
@@ -2963,7 +3180,19 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, hookBinary)
 	current := windowsCopilotPowerShellAdapterCommand(filepath.Join(t.TempDir(), "copilot-hook.sh"))
-	previous := windowsCopilotPowerShellAdapterCommand(filepath.Join(t.TempDir(), "previous", "copilot-hook.sh"))
+	previousScript := filepath.Join(t.TempDir(), "previous", "copilot-hook.sh")
+	previous := windowsCopilotPowerShellAdapterCommand(previousScript)
+	previousAdapter := strings.TrimSuffix(previousScript, ".sh") + ".ps1"
+	if err := os.MkdirAll(filepath.Dir(previousAdapter), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previousBody, err := os.ReadFile(filepath.Join("testdata", "released-hooks", "1.0.3", "copilot-hook.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(previousAdapter, previousBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
 	previousEvent := copilotHookInvocationCommandForEvent("windows", "preToolUse", previous)
 	legacy := legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary)
 	duplicated := legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary)
@@ -2980,6 +3209,8 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 				map[string]interface{}{"type": "command", "powershell": duplicated, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": legacy, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": historic, "timeoutSec": 30},
+			},
+			"operatorEvent": []interface{}{
 				map[string]interface{}{"type": "command", "powershell": foreign, "timeoutSec": 10},
 			},
 		},
@@ -3002,6 +3233,15 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 	hooks := repaired["hooks"].(map[string]interface{})
 	for event, raw := range hooks {
 		entries := raw.([]interface{})
+		if event == "operatorEvent" {
+			if len(entries) != 1 || entries[0].(map[string]interface{})["powershell"] != foreign {
+				t.Errorf("Setup changed the operator's unexpected-event hook: %v", entries)
+			}
+			continue
+		}
+		if len(entries) != 1 {
+			t.Errorf("%s has %d handlers; want only Setup's render", event, len(entries))
+		}
 		managed := 0
 		wantEventCommand := copilotHookInvocationCommandForEvent("windows", event, current)
 		for _, rawEntry := range entries {
@@ -3067,9 +3307,6 @@ func TestCopilotHookContractReconciliationIsEventBoundAndVersionExact(t *testing
 	if err := os.WriteFile(path, []byte(`{
   "version": 1,
   "hooks": {
-    "userPromptTransformed": [
-      {"type":"command","bash":"/opt/operator/transform.sh","timeoutSec":15}
-    ],
     "futureEvent": [
       {"type":"command","bash":"/opt/operator/future.sh","timeoutSec":15}
     ]
@@ -3107,6 +3344,13 @@ func TestCopilotHookContractReconciliationIsEventBoundAndVersionExact(t *testing
 		}
 	}
 
+	// A contract downgrade removes DefenseClaw's retired event binding but
+	// keeps an independent handler once the event is no longer bound.
+	hooks["userPromptTransformed"] = append(hooks["userPromptTransformed"].([]interface{}),
+		map[string]interface{}{"type": "command", "bash": "/opt/operator/transform.sh", "timeoutSec": 15})
+	if err := writeJSONObject(path, current); err != nil {
+		t.Fatal(err)
+	}
 	if err := patchCopilotHooksForOS(path, hookScript, copilotLegacyHookEvents, "linux"); err != nil {
 		t.Fatalf("reconcile legacy contract: %v", err)
 	}
@@ -3115,9 +3359,9 @@ func TestCopilotHookContractReconciliationIsEventBoundAndVersionExact(t *testing
 		t.Fatal(err)
 	}
 	legacyHooks := legacy["hooks"].(map[string]interface{})
-	transformed := legacyHooks["userPromptTransformed"].([]interface{})
-	if len(transformed) != 1 || transformed[0].(map[string]interface{})["bash"] != "/opt/operator/transform.sh" {
-		t.Fatalf("v2-to-v1 reconciliation did not preserve only foreign transformed handler: %#v", transformed)
+	if transformed := legacyHooks["userPromptTransformed"].([]interface{}); len(transformed) != 1 ||
+		transformed[0].(map[string]interface{})["bash"] != "/opt/operator/transform.sh" {
+		t.Fatalf("v2-to-v1 reconciliation changed the independent handler: %#v", transformed)
 	}
 	if future := legacyHooks["futureEvent"].([]interface{}); len(future) != 1 {
 		t.Fatalf("unknown future event was changed: %#v", future)

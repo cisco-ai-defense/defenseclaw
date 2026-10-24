@@ -93,7 +93,9 @@ func agentCLIOf(argv []string) string {
 	if strings.Contains(argv[0], "/.local/share/claude/versions/") {
 		return "claude"
 	}
-	name := filepath.Base(argv[0])
+	// Node can replace its argv area with a short process title padded by
+	// spaces. Claude Code does this during an interactive npm session.
+	name := strings.TrimSpace(filepath.Base(argv[0]))
 	if agentCLINames[name] {
 		return name
 	}
@@ -115,6 +117,9 @@ func agentCLIOf(argv []string) string {
 			continue
 		}
 		script := strings.TrimSuffix(filepath.Base(argument), filepath.Ext(argument))
+		if filepath.Base(argument) == "cli.js" && strings.Contains(filepath.ToSlash(argument), "/@anthropic-ai/claude-code/") {
+			return "claude"
+		}
 		if agentCLINames[script] {
 			return script
 		}
@@ -125,10 +130,18 @@ func agentCLIOf(argv []string) string {
 
 // agentSession is a running agent CLI process.
 type agentSession struct {
-	PID     int
-	UID     int
-	Agent   string
-	Started time.Time
+	PID       int
+	PPID      int // the parent process; 0 when unknown
+	UID       int
+	Agent     string
+	Started   time.Time
+	Args      []string
+	ArgsKnown bool
+	// Executable is the kernel's executable path, independent of a process
+	// title that overwrote argv (notably interactive npm Claude Code).
+	Executable string
+	Env        map[string]string
+	EnvKnown   bool
 	// Unknown marks an unreadable agent-shaped command on macOS.
 	Unknown bool
 	// CodexServer marks the Codex background server.
@@ -165,9 +178,14 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 // linuxAgentSessions reads the agent processes from /proc: the start time is
 // field 22 of /proc/<pid>/stat, in clock ticks (USER_HZ, 100) after btime.
 func (e *Env) linuxAgentSessions() []agentSession {
+	sessions, _ := e.linuxAgentSessionsWithError()
+	return sessions
+}
+
+func (e *Env) linuxAgentSessionsWithError() ([]agentSession, error) {
 	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var boot int64
 	for _, line := range strings.Split(string(stat), "\n") {
@@ -176,9 +194,12 @@ func (e *Env) linuxAgentSessions() []agentSession {
 		}
 	}
 	if boot == 0 {
-		return nil
+		return nil, fmt.Errorf("missing Linux boot time")
 	}
-	entries, _ := os.ReadDir(e.P("/proc"))
+	entries, err := os.ReadDir(e.P("/proc"))
+	if err != nil {
+		return nil, err
+	}
 	var out []agentSession
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
@@ -186,11 +207,14 @@ func (e *Env) linuxAgentSessions() []agentSession {
 			continue
 		}
 		dir := filepath.Join(e.P("/proc"), entry.Name())
-		cmdline, err := readBounded(filepath.Join(dir, "cmdline"), 64<<10)
-		if err != nil {
-			continue
+		cmdline, argvErr := readBounded(filepath.Join(dir, "cmdline"), 64<<10)
+		argvKnown := argvErr == nil && len(cmdline) > 0
+		var argv []string
+		if argvKnown {
+			argv = strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
+		} else if comm, err := readBounded(filepath.Join(dir, "comm"), 128); err == nil {
+			argv = []string{strings.TrimSpace(string(comm))}
 		}
-		argv := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
 		agent := agentCLIOf(argv)
 		if agent == "" {
 			continue
@@ -220,16 +244,31 @@ func (e *Env) linuxAgentSessions() []agentSession {
 			continue
 		}
 		started := time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)
-		out = append(out, agentSession{PID: pid, UID: int(owner.Uid), Agent: agent, Started: started, CodexServer: codexBackgroundServer(argv)})
+		executable, _ := os.Readlink(filepath.Join(dir, "exe"))
+		ppid, _ := strconv.Atoi(fields[1])
+		session := agentSession{PID: pid, PPID: ppid, UID: int(owner.Uid), Agent: agent, Started: started, Args: argv, Executable: executable,
+			ArgsKnown: argvKnown, CodexServer: codexBackgroundServer(argv)}
+		if pluginLaunchConnector(agent) {
+			raw, err := readBounded(filepath.Join(dir, "environ"), 64<<10)
+			if err == nil {
+				session.Env, session.EnvKnown = pluginLaunchEnvironment(raw), true
+			}
+		}
+		out = append(out, session)
 	}
-	return out
+	return out, nil
 }
 
 // darwinAgentSessions asks ps for every process with its elapsed time.
 func (e *Env) darwinAgentSessions(ctx context.Context) []agentSession {
+	sessions, _ := e.darwinAgentSessionsWithError(ctx)
+	return sessions
+}
+
+func (e *Env) darwinAgentSessionsWithError(ctx context.Context) ([]agentSession, error) {
 	result, err := e.Runner.Run(ctx, "ps", "-axww", "-o", "pid=,uid=,etime=,args=")
 	if err != nil && len(result.Stdout) == 0 {
-		return nil
+		return nil, err
 	}
 	now := e.Now()
 	var out []agentSession
@@ -249,12 +288,31 @@ func (e *Env) darwinAgentSessions(ctx context.Context) []agentSession {
 			argv = psArgv(fields[3:])
 		}
 		if agent := agentCLIOf(argv); agent != "" {
-			out = append(out, agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed), CodexServer: codexBackgroundServer(argv)})
+			execPath := e.ProcessExecPath
+			if execPath == nil {
+				execPath = processExecPath
+			}
+			imagePath := e.ProcessImagePath
+			if imagePath == nil {
+				imagePath = processImagePath
+			}
+			executable, _ := execPath(pid)
+			executable = absoluteExecPath(executable, func() (string, error) { return imagePath(pid) })
+			ppid, _ := darwinProcessParent(pid)
+			session := agentSession{PID: pid, PPID: ppid, UID: uid, Agent: agent, Started: now.Add(-elapsed), Args: argv, Executable: executable,
+				ArgsKnown: argvErr == nil, CodexServer: codexBackgroundServer(argv)}
+			if pluginLaunchConnector(agent) {
+				if raw, err := darwinProcessEnv(pid); err == nil {
+					session.Env, session.EnvKnown = raw, true
+				}
+			}
+			out = append(out, session)
 		} else if argvErr != nil && psUnknownAgent(fields[3:]) {
-			out = append(out, agentSession{PID: pid, UID: uid, Started: now.Add(-elapsed), Unknown: true})
+			name := strings.TrimSuffix(strings.TrimPrefix(fields[3], "("), ")")
+			out = append(out, agentSession{PID: pid, UID: uid, Agent: name, Started: now.Add(-elapsed), Unknown: true})
 		}
 	}
-	return out
+	return out, err
 }
 
 // psArgv keeps a script host's command or module argument together when ps

@@ -876,9 +876,10 @@ type GatewayPlan struct {
 // gateway on the MicroVM driver that no gateway service runs (a Manual
 // plan): the restart stops its sandboxes, which DefenseClaw's own restarts
 // refuse to do unless OpenShell reports them stopped (CheckStopped), and
-// `sandbox stop` flushes.
-const manualRestartFlushFirst = "first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes, which flushes their disks, " +
-	"or what they wrote since their last sync is lost"
+// DefenseClaw's stop requests a disk sync; raw OpenShell stop requests a
+// guest flush starting with OpenShell 0.1.5.
+const manualRestartFlushFirst = "first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; " +
+	"DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop, but on an older gateway save its work first; if a flush fails, changes after the last successful disk sync may be lost"
 
 // switchesDriver reports whether the plan moves the gateway to another
 // compute driver.
@@ -1264,32 +1265,32 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 		return nil, err
 	}
 	if err := g.writeFiles(res, plan); err != nil {
-		return res, g.rollbackAfter(ctx, res, err, false)
+		return res, g.rollbackAfter(ctx, res, plan, err, beforeRestart)
 	}
 	if err := g.reloadUnits(ctx, res.Files); err != nil {
-		return res, g.rollbackAfter(ctx, res, err, false)
+		return res, g.rollbackAfter(ctx, res, plan, err, beforeRestart)
 	}
 	// The restart stops every sandbox on the gateway: where its driver's
 	// stop would not keep what they wrote, one that OpenShell does not
 	// report stopped refuses it. Checked last, right before the restart,
 	// under the lifecycle lock.
 	if err := g.CheckStopped(ctx); err != nil {
-		return res, g.rollbackAfter(ctx, res, err, false)
+		return res, g.rollbackAfter(ctx, res, plan, err, beforeRestart)
 	}
 	if err := g.restart(ctx); err != nil {
-		return res, g.rollbackAfter(ctx, res, err, true)
+		return res, g.rollbackAfter(ctx, res, plan, err, restartFailed)
 	}
 	if plan.BindMounts {
 		// Check again against the gateway that now honours bind mounts.
 		if err := g.requirePrivateGateway(ctx, env); err != nil {
-			return res, g.rollbackAfter(ctx, res, err, true)
+			return res, g.rollbackAfter(ctx, res, plan, err, restarted)
 		}
 	}
 	if plan.ServiceUMask != "" {
 		// A later drop-in (or a unit setting systemd applies after ours) can
 		// still set another UMask=: the service must run with ours.
 		if err := g.checkServiceUMask(ctx, plan.ServiceUMask); err != nil {
-			return res, g.rollbackAfter(ctx, res, err, true)
+			return res, g.rollbackAfter(ctx, res, plan, err, restarted)
 		}
 	}
 	if plan.ComputeDriver != "" {
@@ -1300,7 +1301,7 @@ func (g *GatewayConfigurator) Apply(ctx context.Context, plan *GatewayPlan) (*Ga
 			err = fmt.Errorf("openshell: the restarted gateway runs the %s compute driver, not %s; something else in its environment selects it", d.Name, plan.ComputeDriver)
 		}
 		if err != nil {
-			return res, g.rollbackAfter(ctx, res, err, true)
+			return res, g.rollbackAfter(ctx, res, plan, err, restarted)
 		}
 	}
 	res.Restarted = true
@@ -1437,7 +1438,9 @@ func (g *GatewayConfigurator) requirePrivateGateway(ctx context.Context, env map
 	}
 	st, err := g.Read()
 	if err != nil {
-		return err
+		// A check that cannot be made is not passed: after Apply's restart
+		// the files that enable bind mounts are then not kept either.
+		return fmt.Errorf("%w: cannot read the gateway configuration to check who can reach it: %w", ErrBindMountsRefused, err)
 	}
 	if err := gatewayExposure(reg, st, env, env == nil && g.NoService(ctx)); err != nil {
 		return refuse(err)
@@ -1528,14 +1531,40 @@ func envFlag(v string) bool {
 	return true
 }
 
+// applyStage is how far Apply got with the new files when it rolls back.
+type applyStage int
+
+const (
+	// beforeRestart: the gateway never saw the new files.
+	beforeRestart applyStage = iota
+	// restartFailed: the restart onto them failed (the service manager
+	// refused it, or the gateway did not come back healthy), so the
+	// gateway may run them, the previous ones or nothing, and no check of
+	// the restarted gateway passed.
+	restartFailed
+	// restarted: the gateway runs them, and a check of it failed.
+	restarted
+)
+
 // rollbackAfter restores what Apply wrote after cause, restarting the
-// gateway again when it was already restarted with the new files. That
+// gateway again when a restart onto the new files was made or tried. That
 // second restart makes the same check as the first (CheckStopped), still
 // under Apply's lifecycle lock. If another OpenShell client started a
-// sandbox, keep the active gateway files and refuse the second restart.
-func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApplyResult, cause error, restart bool) error {
+// sandbox, keep the active gateway files and refuse the second restart,
+// unless they are files that enable bind mounts and the restarted gateway
+// did not pass the security check: it failed it (ErrBindMountsRefused: it
+// lets in clients without the registration's certificate while it honours
+// bind mounts, or the check could not be made), or the restart failed
+// before it could run. Such files are never kept and such a gateway never
+// keeps running: the previous files stay restored and it is restarted on
+// them all the same (a raw OpenShell start during Apply is unsupported).
+// When that restart fails, the restart stays pending and the error says
+// the gateway may still run that configuration. The restart stays pending
+// too when the active files are kept after the service manager refused the
+// restart onto them: the gateway may still run the previous ones.
+func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApplyResult, plan *GatewayPlan, cause error, stage applyStage) error {
 	var activeFiles []gatewayFileState
-	if restart {
+	if stage != beforeRestart {
 		var err error
 		activeFiles, err = g.snapshotGatewayFiles(res)
 		if err != nil {
@@ -1545,10 +1574,30 @@ func (g *GatewayConfigurator) rollbackAfter(ctx context.Context, res *GatewayApp
 	if err := g.restore(ctx, res); err != nil {
 		return fmt.Errorf("%w; restoring the previous configuration also failed: %v", cause, err)
 	}
-	if restart {
-		if err := g.CheckStopped(ctx); err != nil {
+	if stage != beforeRestart {
+		// The restarted gateway runs the new files, which its restart
+		// cleared the mark of: the restored ones wait for a restart until
+		// one succeeds.
+		_ = g.markRestartPending()
+		failedCheck := errors.Is(cause, ErrBindMountsRefused)
+		unchecked := failedCheck || stage == restartFailed && plan.BindMounts
+		if err := g.CheckStopped(ctx); err != nil && unchecked {
+			what, kept := "the configuration that failed the check, reachable without the registration's certificate", "a gateway that failed the security check"
+			if !failedCheck {
+				what, kept = "the configuration that enables bind mounts, which no check of the restarted gateway passed", "a gateway on bind mounts that no security check passed"
+			}
+			if restartErr := g.restart(ctx); restartErr != nil {
+				return fmt.Errorf("%w; the previous configuration was restored, but the gateway could not be restarted on it (%v), so it may still run %s: restart it with `%s` before you use a sandbox", cause, restartErr, what, g.restartCommand())
+			}
+			return fmt.Errorf("%w; the previous configuration was restored and the gateway restarted on it although OpenShell did not report every sandbox stopped (%v): %s is never kept running", cause, err, kept)
+		} else if err != nil {
 			if restoreErr := g.restoreGatewayFiles(ctx, activeFiles, res); restoreErr != nil {
 				return fmt.Errorf("%w; the rollback was refused (%v) and restoring the active gateway files failed: %v", cause, err, restoreErr)
+			}
+			if stage == restartFailed && errors.Is(cause, errRestartCommand) {
+				// The service manager refused the restart: the gateway may
+				// still run the previous files.
+				return fmt.Errorf("%w; the rollback was refused and the active gateway files were kept without another restart, which stays pending: restart the gateway with `%s` once OpenShell reports its sandboxes stopped: %w", cause, g.restartCommand(), err)
 			}
 			g.clearRestartPending()
 			return fmt.Errorf("%w; the rollback was refused and the active gateway files were kept without another restart: %w", cause, err)

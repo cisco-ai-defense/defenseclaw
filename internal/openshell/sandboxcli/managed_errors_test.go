@@ -19,6 +19,7 @@
 package sandboxcli
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
@@ -113,5 +114,37 @@ func TestManagedRunOfAnUnenrolledHarnessNamesTheLimit(t *testing.T) {
 		if ta.creates() != 0 {
 			t.Fatalf("run %s created a sandbox", c.harness)
 		}
+	}
+}
+
+// A driver-switch refusal ended "...and run this again: driver_mismatch",
+// managed or not: the CLI printed the daemon's reason code after its
+// sentence. Any refusal whose detail is a bare reason code now prints its
+// sentence alone, and keeps its exit status (GAP-0607).
+func TestDaemonRefusalNeverEndsWithItsReasonCode(t *testing.T) {
+	const sentence = "this sandbox needs the docker driver, but your OpenShell gateway runs the vm driver for your other sandboxes; " +
+		"a running sandbox never switches driver, so stop them (defenseclaw sandbox stop NAME) and run this again"
+	for _, managedHost := range []bool{false, true} {
+		prev := onManagedHost
+		onManagedHost = func() bool { return managedHost }
+		ta := newTestApp(t, "")
+		if managedHost {
+			ta.daemon.status.Managed = managedStatusFixture()
+		}
+		ta.daemon.errors["POST "+sandboxapi.PathSandboxes] = &sandboxapi.Error{Code: sandboxapi.CodeConflict, Detail: "driver_mismatch", Message: sentence}
+		err := ta.ManagedError(bg, ta.Run(bg, RunOptions{Harness: "claude"}))
+		onManagedHost = prev
+		if err == nil || err.Error() != sentence {
+			t.Fatalf("managed %v: Run = %v\nwant %s", managedHost, err, sentence)
+		}
+		var e *sandboxapi.Error
+		if !errors.As(err, &e) || e.Detail != "driver_mismatch" {
+			t.Fatalf("managed %v: the refusal lost its code for programs: %#v", managedHost, err)
+		}
+	}
+	exit := &ExitError{Code: 3, Err: &sandboxapi.Error{Code: sandboxapi.CodeConflict, Detail: "driver_mismatch", Message: sentence}}
+	var kept *ExitError
+	if err := withoutReasonCode(exit); !errors.As(err, &kept) || kept.Code != 3 || err.Error() != sentence {
+		t.Fatalf("withoutReasonCode(exit 3) = %#v", err)
 	}
 }

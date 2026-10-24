@@ -32,10 +32,7 @@ ProtectKernelModules=true
 ProtectKernelTunables=true
 ProtectProc=invisible
 ReadOnlyPaths=/etc/defenseclaw /opt/defenseclaw
-# /run/defenseclaw-hook: the guardian removes the key of the protected
-# session records in sessions/ before it records a removal, and makes a new
-# one after it and at every pass when there is none (GAP-0352).
-ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian -/run/defenseclaw-hook
+ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-guardian
 # CAP_SETUID and CAP_SETGID are also ambient: systemd 255 (Ubuntu 24.04)
 # drops CAP_SETUID from a User= service that filters system calls unless it
 # is in the ambient set, and the per-user workers need both. The kernel
@@ -43,7 +40,11 @@ ReadWritePaths=/home -/var/home /var/lib/defenseclaw /var/lib/defenseclaw-hook-g
 CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_DAC_READ_SEARCH CAP_KILL CAP_SETGID CAP_SETUID
 AmbientCapabilities=CAP_SETGID CAP_SETUID
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-RestrictNamespaces=true
+# The Hermes Verify probe runs the registered hook as PID 1's child in a PID
+# namespace of its own, owned by a user namespace (processutil.RunContained):
+# a hook could kill the process that ended its tree and leave a child running
+# (r104 W5b review). No other namespace type may be created.
+RestrictNamespaces=user pid
 RestrictRealtime=true
 RestrictSUIDSGID=true
 RemoveIPC=true

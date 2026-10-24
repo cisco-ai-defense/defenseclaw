@@ -26,6 +26,7 @@ module in 1.1.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -41,6 +42,19 @@ _MARKER_LINES = 3
 STUB_PHRASE = "support was removed in DefenseClaw 1.0.4"
 _MODULE = "defenseclaw_omnigent_policy"
 _POLICY_KEY = "defenseclaw_guardrail"
+# A removed connector's script that is gone while an agent config still runs
+# or imports it: that agent does not block its calls (removed.go
+# RemovedScriptGoneWhat). doctor fails on it.
+SCRIPT_GONE_WHAT = (
+    "gone, while an agent config above still runs or imports it, so DefenseClaw does not block those calls"
+)
+# A removed connector's stub the agent may not run or load (its mode is not
+# one that works, or another account owns it): that agent may let its calls
+# through (removed.go RemovedStubUnusableWhat). doctor fails on it.
+STUB_UNUSABLE_WHAT = (
+    "the stub, but with a mode or owner that may keep the agent from running or loading it, "
+    "so DefenseClaw may not block those calls"
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +67,10 @@ class _Removed:
     default_dir: str
     config_what: str
     config_step: str
+    # The mode the teardown writes the stub with (removed.go mode).
+    mode: int
+    # Mirrors removed.go keepHookToken until the removed connectors expire.
+    keep_hook_token: bool = False
 
 
 _CONNECTORS: tuple[_Removed, ...] = (
@@ -68,6 +86,8 @@ _CONNECTORS: tuple[_Removed, ...] = (
             "remove every hook whose command runs openhands-hook.sh (or defenseclaw-hook --connector openhands) "
             "from this file, then restart OpenHands"
         ),
+        keep_hook_token=True,
+        mode=0o700,
     ),
     _Removed(
         name="omnigent",
@@ -81,10 +101,17 @@ _CONNECTORS: tuple[_Removed, ...] = (
             f"remove {_MODULE} from policy_modules and the {_POLICY_KEY} policy (handler "
             f"{_MODULE}.defenseclaw_policy) from this file, then restart OmniGent"
         ),
+        mode=0o600,
     ),
 )
 
 NAMES: tuple[str, ...] = tuple(c.name for c in _CONNECTORS)
+KEPT_HOOK_TOKEN_NAMES: frozenset[str] = frozenset(c.name for c in _CONNECTORS if c.keep_hook_token)
+
+
+def is_removed(name: str | None) -> bool:
+    """Recognize a connector removed in 1.0.4, including its old ID aliases."""
+    return isinstance(name, str) and name.strip().casefold() in {*NAMES, "open-hands", "open_hands"}
 
 # How a Windows hooks.json command names the OpenHands connector of the
 # native launcher (defenseclaw-hook --connector openhands).
@@ -100,13 +127,22 @@ def _text_names(c: _Removed, text: str) -> bool:
     return "openhands-hook.sh" in lower or bool(_LAUNCHER_FLAG.search(text))
 
 
-def _value_names(c: _Removed, value: object) -> bool:
+def _script_names(c: _Removed, text: str) -> bool:
+    """Whether one config text runs or imports the script file itself.
+
+    A Windows registration of the native launcher (``--connector openhands``)
+    needs no script: the launcher reaches the retired route, which blocks.
+    """
+    return (_MODULE if c.name == "omnigent" else "openhands-hook.sh") in text.lower()
+
+
+def _value_names(c: _Removed, value: object, names=_text_names) -> bool:
     """Whether a string or key anywhere in a decoded JSON or YAML value names the script."""
     stack, seen = [value], set()
     while stack:
         item = stack.pop()
         if isinstance(item, str):
-            if _text_names(c, item):
+            if names(c, item):
                 return True
         elif isinstance(item, (dict, list, tuple)):
             # YAML aliases share one object: visit it once.
@@ -115,7 +151,7 @@ def _value_names(c: _Removed, value: object) -> bool:
             seen.add(id(item))
             if isinstance(item, dict):
                 for key, val in item.items():
-                    if _text_names(c, str(key)):
+                    if names(c, str(key)):
                         return True
                     stack.append(val)
             else:
@@ -123,13 +159,13 @@ def _value_names(c: _Removed, value: object) -> bool:
     return False
 
 
-def _config_names(c: _Removed, data: bytes) -> tuple[bool, str]:
+def _config_names(c: _Removed, data: bytes, names=_text_names) -> tuple[bool, str]:
     """Whether an agent config still runs or imports the script, and why it could not be checked.
 
     The bytes and the decoded values (JSON for hooks.json, YAML for
     config.yaml) are checked, so a name written with escapes is found too.
     """
-    if _text_names(c, data.decode("utf-8", "replace")):
+    if names(c, data.decode("utf-8", "replace")):
         return True, ""
     if len(data) > _READ_LIMIT:
         return False, f"it is larger than {_READ_LIMIT >> 20} MiB"
@@ -142,7 +178,7 @@ def _config_names(c: _Removed, data: bytes) -> tuple[bool, str]:
     except (UnicodeDecodeError, ValueError, yaml.YAMLError, RecursionError) as exc:
         kind = "JSON" if c.name == "openhands" else "YAML"
         return False, f"it is not {kind}: {exc}"
-    return _value_names(c, doc), ""
+    return _value_names(c, doc, names), ""
 
 
 def _same_path(left: str, right: str) -> bool:
@@ -207,14 +243,56 @@ class RemovedConnectorLeftovers:
             "items": [{"path": i.path, "what": i.what, "step": i.step} for i in self.items],
         }
 
-    def lines(self, *, without_under: str = "") -> list[str]:
-        """Text lines for a person; items under *without_under* are left out."""
-        items = [i for i in self.items if not (without_under and _is_under(i.path, without_under))]
+    def lines(self, *, without_under: str = "", moved: dict[str, str] | None = None) -> list[str]:
+        """Text lines for a person; items under *without_under* are left out.
+
+        An item under a folder in *moved* (old path to new path) is named at
+        its new path and is listed even under *without_under*.
+        """
+        items: list[Leftover] = []
+        for item in self.items:
+            path = _moved_path(item.path, moved or {})
+            if path == item.path and without_under and _is_under(item.path, without_under):
+                continue
+            items.append(Leftover(path, item.what, item.step))
         if not items:
             return []
         return [f"{self.label} support was removed in DefenseClaw 1.0.4. Left for you to remove by hand:"] + [
             f"  - {i.path}: {i.what}. To remove: {i.step}." for i in items
         ]
+
+
+def _moved_path(path: str, moved: dict[str, str]) -> str:
+    for old, new in moved.items():
+        if _same_path(path, old):
+            return new
+        if _is_under(path, old):
+            return os.path.join(new, os.path.relpath(path, old))
+    return path
+
+
+def kept_backups_root(data_dir: str) -> str:
+    """Where a data folder removal moves the removed connectors' backups.
+
+    connector_backups/<connector> holds the only copy of the files as they
+    were before an older DefenseClaw's setup changed them (the removed
+    connectors' teardown never puts them back), and the leftover list tells
+    the user to copy back what they need from it. So ``uninstall --all`` and
+    Windows Setup (DELETEUSERDATA=1) move it beside the data folder before
+    they remove it: ``<data folder>-removed-connector-backups/<connector>``.
+    Windows Setup uses the same name (removedConnectorBackupsKeptRoot).
+    """
+    return os.path.normpath(data_dir) + "-removed-connector-backups"
+
+
+def backup_dirs(data_dir: str) -> list[tuple[str, str]]:
+    """(connector, connector_backups/<connector> folder) for each removed connector that has one."""
+    out: list[tuple[str, str]] = []
+    for c in _CONNECTORS:
+        path = os.path.join(data_dir, "connector_backups", c.name)
+        if os.path.lexists(path):
+            out.append((c.name, path))
+    return out
 
 
 def _is_under(path: str, root: str) -> bool:
@@ -254,23 +332,44 @@ def _backup_target(data_dir: str, name: str, logical: str) -> str:
     return path.strip() if isinstance(path, str) else ""
 
 
-def _lock_config_paths(data_dir: str, c: _Removed) -> list[str]:
+def _lock_entry(data_dir: str, c: _Removed) -> dict:
     lock = _json_file(os.path.join(data_dir, "hook_contract_lock.json"))
     connectors = lock.get("connectors")
     entry = connectors.get(c.name) if isinstance(connectors, dict) else None
-    locations = entry.get("locations") if isinstance(entry, dict) else None
+    return entry if isinstance(entry, dict) else {}
+
+
+def _lock_config_paths(data_dir: str, c: _Removed) -> list[str]:
+    locations = _lock_entry(data_dir, c).get("locations")
     paths = locations.get("hook_config_paths") if isinstance(locations, dict) else None
     if not isinstance(paths, list):
         return []
     return [_absolute(p) for p in paths if isinstance(p, str) and os.path.basename(p).lower() == c.config_file]
 
 
-def _config_paths(data_dir: str, c: _Removed, home: str) -> list[str]:
+def _lock_workspace(data_dir: str, c: _Removed) -> str:
+    posture = _lock_entry(data_dir, c).get("registration_posture")
+    workspace = posture.get("workspace_dir") if isinstance(posture, dict) else None
+    return workspace if isinstance(workspace, str) else ""
+
+
+def _config_paths(data_dir: str, c: _Removed, home: str, workspace: str = "") -> list[str]:
     paths: list[str] = []
+    workspaces = [workspace]
     if data_dir:
         paths.append(_backup_target(data_dir, c.name, "config"))
         paths.extend(_lock_config_paths(data_dir, c))
+        workspaces.append(_lock_workspace(data_dir, c))
     paths.append(os.path.join(home, c.default_dir, c.config_file))
+    if c.name == "openhands":
+        # A 1.0.x setup with a pinned workspace (claw.workspace_dir, or the
+        # one its lock entry records) wrote the repo-local
+        # <workspace>/.openhands/hooks.json instead, unless the workspace was
+        # inside the data directory (removed.go configPaths).
+        for root in workspaces:
+            root = _absolute(root)
+            if root and not (data_dir and _is_under(root, data_dir)):
+                paths.append(os.path.join(root, c.default_dir, c.config_file))
     if c.name == "omnigent":
         paths.append(_absolute(os.environ.get("OMNIGENT_CONFIG", "")))
         env_home = _absolute(os.environ.get("OMNIGENT_CONFIG_HOME", ""))
@@ -301,7 +400,30 @@ def _script_state(path: str, c: _Removed) -> str:
     head = data.split(b"\n", _MARKER_LINES)[:_MARKER_LINES]
     if not any(line.strip().startswith(c.marker.encode()) for line in head):
         return "foreign"
-    return "stub" if STUB_PHRASE.encode() in data else "owned"
+    if STUB_PHRASE.encode() not in data:
+        return "owned"
+    return "unusable" if _stub_unusable(path, c) else "stub"
+
+
+def _stub_unusable(path: str, c: _Removed) -> bool:
+    """Whether the agent may not run or load the stub, or another account may change it.
+
+    The same check as removed.go removedStubMetadataRefusal: its owner cannot
+    read it, an OpenHands stub is not executable by its owner, others may
+    write it, or another account than the hooks folder's owner owns it. No
+    such check applies on Windows.
+    """
+    if os.name == "nt":
+        return False
+    try:
+        info = os.lstat(path)
+        folder = os.stat(os.path.dirname(path))
+    except OSError:
+        return True
+    perm = info.st_mode & 0o777
+    if not perm & 0o400 or (c.mode & 0o100 and not perm & 0o100) or perm & 0o022:
+        return True
+    return info.st_uid != folder.st_uid
 
 
 def _links(path: str) -> int:
@@ -314,6 +436,7 @@ def _links(path: str) -> int:
 def _hard_link_step(c: _Removed, script: str) -> str:
     lister = f"fsutil hardlink list {script}" if os.name == "nt" else f"find / -xdev -samefile {script}"
     return (
+        "copy back what you need from connector_backups before deleting any linked name there; "
         f"delete every other name of this file ({lister} lists them), then run "
         f"defenseclaw-gateway connector teardown --connector {c.name}, which writes the stub and revokes the tokens"
     )
@@ -340,10 +463,29 @@ def _kept_token(c: _Removed, token: str) -> Leftover:
     return Leftover(token, what, step)
 
 
-def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
+def _stub_publication_receipt(data_dir: str, c: _Removed) -> str:
+    """Find the read-only marker for an interrupted module CAS publication."""
+    script = os.path.abspath(os.path.join(data_dir, "hooks", c.script))
+    digest = hashlib.sha256(os.fsencode(script)).hexdigest()[:24]
+    name = f".defenseclaw-cas-{digest}.intent"
+    for folder in (
+        os.path.join(data_dir, "connector_backups", c.name),
+        os.path.join(data_dir, "hooks", ".defenseclaw-cas-state"),
+    ):
+        for suffix in ("", ".complete"):
+            candidate = os.path.join(folder, name + suffix)
+            if os.path.lexists(candidate):
+                return candidate
+    return ""
+
+
+def _leftovers_of(data_dir: str, c: _Removed, home: str, workspace: str = "") -> list[Leftover]:
     items: list[Leftover] = []
     teardown = f"run defenseclaw-gateway connector teardown --connector {c.name}"
-    for path in _config_paths(data_dir, c, home):
+    # A config that runs or imports the script file, or that could not be read
+    # or checked (it may).
+    runs_script = False
+    for path in _config_paths(data_dir, c, home, workspace):
         try:
             if not os.path.exists(path):
                 continue
@@ -351,7 +493,10 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
                 data = fh.read(_READ_LIMIT + 1)
         except OSError as exc:
             items.append(Leftover(path, f"could not be read ({exc})", "check it by hand: " + c.config_step))
+            runs_script = True
             continue
+        script_named, script_why = _config_names(c, data, _script_names)
+        runs_script = runs_script or script_named or bool(script_why)
         names, why = _config_names(c, data)
         if names:
             items.append(Leftover(path, c.config_what, c.config_step))
@@ -372,6 +517,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         if left:
             items.append(left)
     script = os.path.join(hooks, c.script)
+    publication_receipt = _stub_publication_receipt(data_dir, c)
     state = _script_state(script, c)
     # The teardown keeps the tokens while an old hook may still run at the
     # script path (removed.go hookLeft): they go once its step is done.
@@ -381,6 +527,8 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         items.append(
             Leftover(script, f"the stub that blocks every {c.label} call", "delete it once nothing above runs it")
         )
+    elif state == "unusable":
+        items.append(Leftover(script, STUB_UNUSABLE_WHAT, f"{teardown}, which puts it right"))
     elif state == "owned" and links > 1:
         what = (
             f"still the hook script an older DefenseClaw wrote, with {links} names (hard links); teardown leaves it "
@@ -398,8 +546,20 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
         )
         items.append(Leftover(script, what, _foreign_step(c)))
         token_step = f"follow the step for {script} first"
-    elif state != "absent":
+    elif state == "absent":
+        if runs_script:
+            step = f"{teardown}, which writes the stub that blocks every call; or {c.config_step}"
+            items.append(Leftover(script, SCRIPT_GONE_WHAT, step))
+    else:
         items.append(Leftover(script, state, "delete it once nothing above runs it"))
+    if publication_receipt:
+        items.append(
+            Leftover(
+                publication_receipt,
+                "interrupted publication of the stub that blocks every call; cleanup is incomplete",
+                teardown + " before deleting saved copies or tokens; keep this receipt if teardown reports an error",
+            )
+        )
     if c.name == "openhands":
         record = os.path.join(hooks, ".hookcfg.openhands")
         if os.path.lexists(record):
@@ -407,11 +567,14 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
             items.append(Leftover(record, what, "delete it"))
     backups = os.path.join(data_dir, "connector_backups", c.name)
     if os.path.lexists(backups):
+        backup_step = "copy back what you need, then delete this folder"
+        if publication_receipt:
+            backup_step = "do not delete this folder until " + teardown + " has recovered the interrupted publication"
         items.append(
             Leftover(
                 backups,
                 "the copies of your files DefenseClaw saved before its setup changed them (pristine_bytes, base64)",
-                "copy back what you need, then delete this folder",
+                backup_step,
             )
         )
     if c.name == "omnigent" and os.path.isdir(backups):
@@ -428,7 +591,7 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
                     )
                 )
     hook_token = os.path.join(hooks, f".hook-{c.name}.token")
-    if c.name == "openhands" and os.path.lexists(hook_token):
+    if c.keep_hook_token and os.path.lexists(hook_token):
         items.append(_kept_token(c, hook_token))
         hook_token = ""
     for token in (hook_token, os.path.join(hooks, f".otlp-{c.name}.token")):
@@ -437,12 +600,16 @@ def _leftovers_of(data_dir: str, c: _Removed, home: str) -> list[Leftover]:
     return items
 
 
-def leftovers(data_dir: str, *, home: str | None = None) -> list[RemovedConnectorLeftovers]:
-    """Return what each removed connector left on this host (none when nothing is left)."""
+def leftovers(data_dir: str, *, home: str | None = None, workspace: str = "") -> list[RemovedConnectorLeftovers]:
+    """Return what each removed connector left on this host (none when nothing is left).
+
+    *workspace* is the configured connector workspace (``claw.workspace_dir``),
+    where a workspace-pinned 1.0.x OpenHands setup registered its hook.
+    """
     home = home or os.path.expanduser("~")
     out: list[RemovedConnectorLeftovers] = []
     for c in _CONNECTORS:
-        items = _leftovers_of(data_dir or "", c, home)
+        items = _leftovers_of(data_dir or "", c, home, workspace or "")
         if items:
             out.append(RemovedConnectorLeftovers(c.name, c.label, tuple(items)))
     return out

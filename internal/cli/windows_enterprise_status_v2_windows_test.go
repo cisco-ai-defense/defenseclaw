@@ -93,14 +93,56 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 	if amp := result.Connectors["amp"]; amp.ManagedHook == nil || *amp.ManagedHook || amp.Targets == nil || amp.Targets.Pending != 1 {
 		t.Fatalf("amp = %+v", amp)
 	}
-	if hermes := result.Connectors["hermes"]; hermes.Detected == nil || !*hermes.Detected || strings.Join(hermes.Versions, ",") != "0.9.0" {
+	if hermes := result.Connectors["hermes"]; hermes.Detected == nil || !*hermes.Detected || strings.Join(hermes.Versions, ",") != "0.9.0" || hermes.HooksInstalled != enterprisestatus.HooksInstalledUnknown {
 		t.Fatalf("hermes = %+v", hermes)
+	}
+	if result.SecurityComplete || result.CoverageComplete {
+		t.Fatalf("unverified Hermes home reported complete coverage: security=%v coverage=%v", result.SecurityComplete, result.CoverageComplete)
+	}
+	if !strings.Contains(string(document), "session-only HERMES_HOME") {
+		t.Fatalf("managed Hermes status omitted the unverified session home: %s", document)
 	}
 	if result.OpenShell == nil || result.OpenShell.ReasonCode != enterprisestatus.CodePlatformUnsupported || result.OpenShell.DriverAvailable != "none" {
 		t.Fatalf("openshell = %+v", result.OpenShell)
 	}
 	if result.Identity == nil || result.Identity.State != enterprisestatus.IdentityStateOK || result.Identity.Sources[0].Source != "windows_lsa" {
 		t.Fatalf("identity = %+v", result.Identity)
+	}
+}
+
+func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
+	cfg := windowsStatusV2Config()
+	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+		cfg: cfg,
+		manifest: []enterprisestatus.ConnectorInstall{
+			{Connector: "hermes", Version: "0.9.0", Enabled: true},
+		},
+		guardianKnown: true,
+		guardian:      []enterprisestatus.ConnectorTarget{{Connector: "hermes", OK: true}},
+	})
+	result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
+	result.Installed, result.CoverageComplete, result.SecurityComplete = true, true, true
+	applyWindowsEnterpriseStatusV2(result)
+	if code := result.Finish("windows", 0); code != enterprisestatus.WindowsExitFailure || result.OK ||
+		result.SecurityComplete || result.CoverageComplete {
+		t.Fatalf("unverified Hermes verify result: code=%d ok=%v security=%v coverage=%v", code, result.OK, result.SecurityComplete, result.CoverageComplete)
+	}
+	if len(result.Errors) == 0 || !strings.Contains(result.Errors[0].Message, "session-only HERMES_HOME") ||
+		result.Connectors["hermes"].HooksInstalled != enterprisestatus.HooksInstalledUnknown {
+		t.Fatalf("unverified Hermes cause or coverage missing: errors=%+v connector=%+v", result.Errors, result.Connectors["hermes"])
+	}
+}
+
+func TestWindowsVerifyV2KeepsCompleteResultWhenHermesIsNotInstalled(t *testing.T) {
+	cfg := windowsStatusV2Config()
+	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
+		cfg: cfg, guardianKnown: true,
+	})
+	result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
+	result.Installed, result.CoverageComplete, result.SecurityComplete = true, true, true
+	applyWindowsEnterpriseStatusV2(result)
+	if code := result.Finish("windows", 0); code != 0 || !result.SecurityComplete || !result.CoverageComplete {
+		t.Fatalf("absent Hermes changed a complete verify: code=%d security=%v coverage=%v", code, result.SecurityComplete, result.CoverageComplete)
 	}
 }
 

@@ -49,6 +49,8 @@ func TestWindowsAuthorizedKeysLocationChains(t *testing.T) {
 		{"cmd wrapped control", "Bash", `cmd /d /c "cd build && echo ok >> notes.txt"`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, "", false},
 		{"cmd home drive", "Bash", `pushd %HOMEDRIVE%%HOMEPATH%\.ssh && echo dccert-block-marker >> authorized_keys`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectCMD, true},
 		{"codex powershell", "Bash", `Set-Location ~\.ssh; Add-Content authorized_keys dccert-block-marker`, `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
+		{"powershell newline protected", "Bash", "Write-Output 'ok'\nAdd-Content -Path '~/.ssh/authorized_keys' -Value 'marker'", `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, true},
+		{"powershell newline ordinary", "Bash", "Write-Output 'ok'\nAdd-Content -Path 'notes.txt' -Value 'marker'", `C:\Users\dcw-rv24p`, `C:\Users\dcw-rv24p`, actionfacts.DialectPowerShell, false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

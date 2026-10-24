@@ -840,6 +840,38 @@ func TestLoadManagedFileForLifecycleRecoverySkipsPolicyInputChecks(t *testing.T)
 	}
 }
 
+// GAP-0647: the snapshot restore of a rollback, and the /ensure that
+// recovers it, read the protected config while it still held an api_bind
+// the gateway refuses; the refusal kept the transaction pending.
+func TestLoadManagedFileForLifecycleRecoverySkipsListenerBindCheck(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+		t.Skip("needs root on Linux: a managed config must sit on a root-owned path")
+	}
+	root, err := os.MkdirTemp("/var/lib", "dc-config-recovery-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	if err := os.Chmod(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "config.yaml")
+	body := fmt.Sprintf("config_version: 8\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\ndata_dir: %s\ngateway:\n  api_bind: 0.0.0.0\n  api_port: 18971\n", root)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadFromFile(path); err == nil || !strings.Contains(err.Error(), "0.0.0.0") {
+		t.Fatalf("strict load of api_bind 0.0.0.0: err = %v, want the listener refusal", err)
+	}
+	cfg, err := LoadManagedFileForLifecycleRecovery(path)
+	if err != nil {
+		t.Fatalf("lifecycle recovery load: %v", err)
+	}
+	if cfg.Gateway.APIPort != 18971 {
+		t.Fatalf("lifecycle recovery load API port = %d, want 18971", cfg.Gateway.APIPort)
+	}
+}
+
 // GAP-1193: a connector that inherits the global rule pack is not checked
 // again, so a refusal names guardrail.rule_pack_dir, or guardrail.rule_pack
 // when the global pack is selected by name (GAP-0039).

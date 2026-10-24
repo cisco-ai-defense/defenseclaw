@@ -60,6 +60,28 @@ func runConfigValidate(t *testing.T, body string, asJSON bool) (string, string, 
 
 const managedValidateHead = "config_version: 9\ndeployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"
 
+func TestConfigValidateManagedBlankSelectorsNameTheSettingOnce(t *testing.T) {
+	onStandaloneManagedHost(t)
+	for _, selector := range []string{"groups", "users"} {
+		t.Run(selector, func(t *testing.T) {
+			body := managedValidateHead + "guardrail:\n  profiles:\n    contractors: {mode: action}\n" +
+				"  profile_assignments:\n    - profile: contractors\n      match: {" + selector + ": [\" \"]}\n"
+			_, out, err := runConfigValidate(t, body, true)
+			setting := "guardrail.profile_assignments[0].match." + selector
+			if err == nil || strings.Count(err.Error(), setting) != 1 || !strings.Contains(err.Error(), "an entry is empty") {
+				t.Fatalf("managed plain refusal repeats or loses the setting: %v", err)
+			}
+			var failure configV8WireFailure
+			if decodeErr := json.Unmarshal([]byte(out), &failure); decodeErr != nil || failure.Message != err.Error() {
+				t.Fatalf("managed JSON does not carry the plain refusal: %+v, %v", failure, decodeErr)
+			}
+			if _, _, err := runConfigValidate(t, strings.Replace(body, `[" "]`, `[admins]`, 1), true); err != nil {
+				t.Fatalf("nonblank selector refused: %v", err)
+			}
+		})
+	}
+}
+
 // r103.GAP-0087, r103.GAP-0088, GAP-0023: on a standalone managed host
 // config validate words a refusal the way ensure does, in one plain sentence
 // with the file, the setting and the fix, and the JSON result carries the

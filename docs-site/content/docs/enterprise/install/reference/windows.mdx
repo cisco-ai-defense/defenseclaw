@@ -49,7 +49,7 @@ The four services restart after a failure:
 | --- | --- | --- |
 | `DefenseClawGateway` | LocalSystem, write-restricted by its `NT SERVICE\DefenseClawGateway` service SID, with only `SeChangeNotifyPrivilege` | Policy engine and hook API on `127.0.0.1:18970` |
 | `DefenseClawSensorHelper` | LocalSystem, `SeChangeNotifyPrivilege` only | Answers the gateway's fixed AI Discovery requests |
-| `DefenseClawHookGuardian` | LocalSystem | Writes and repairs each enrolled user's hook registrations every minute |
+| `DefenseClawHookGuardian` | LocalSystem | Writes and repairs each enrolled user's registrations and the configured machine hooks every minute, even with no enrolled users |
 | `DefenseClawHookEnumerator` | LocalSystem | Finds eligible profiles (local, domain and Microsoft Entra ID accounts) every five minutes and writes the target manifest |
 
 <Flow
@@ -224,8 +224,11 @@ The guardian writes a user's registrations only while that user has an active
 found but could not enroll (`hook_contract_unverified`, `agent_unprotected`;
 [Enrollment](/docs/enterprise/configure/enrollment#agents-that-cannot-be-enrolled)). Each
 applies to one account: `security_complete` is `false`, but `verify` and MDM
-detection still pass. Cursor's machine hooks file is published only while a user
-is enrolled for Cursor ([Machine policy](/docs/enterprise/configure/machine-policy#routes-by-connector)).
+detection still pass while the machine policy remains complete. Configured Claude
+Code, Codex and Cursor machine hooks stay installed before the first enrollment
+and after the last enrolled user is removed. Even with zero enrolled users, an
+unenrolled account's hook calls are refused
+([Machine policy](/docs/enterprise/configure/machine-policy#routes-by-connector)).
 
 ## Review the audit log
 
@@ -411,7 +414,17 @@ an elevated prompt.
 ```
 
 `show` lists each connector's route, lock and coverage. `verify` exits `1` while
-coverage is incomplete. With `managed_hooks_only: enforce` (the default) the Claude
+coverage is incomplete. A missing machine policy is a protection failure, even
+with zero enrolled users: stop the affected agent with application control, fix
+the reported cause, and from an elevated session run
+`defenseclaw enterprise windows reconcile --profile standalone` or
+`defenseclaw enterprise windows repair --profile standalone`, then rerun
+`enterprise policy verify`. A missing hook executable is also a protection
+failure for Claude Code, Codex, Cursor and Copilot while their machine policy files
+stay installed. Stop affected agent use, repair the installation, and require the full
+`enterprise windows verify --profile standalone --json` check to pass before
+allowing agent use. With
+`managed_hooks_only: enforce` (the default) the Claude
 Code drop-in `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json`
 sets `allowManagedHooksOnly: true`. Claude Code applies drop-ins in name order, so
 a later file that sets it to `false` turns the lock off; `policy verify` and
@@ -473,6 +486,16 @@ Other recovery notes:
   or `etc` stops the gateway from starting. `repair`, `/ensure`, `/uninstall` and
   recovery put the deployment's permissions back. A redaction correlation key
   another account can open is refused before any service stops.
+- If Setup `/repair` refuses because the running gateway's installed config
+  cannot be validated for rollback, restore an approved, gateway-valid
+  `config.yaml` and retry `/repair`. If the refusal names an administrator-selected
+  policy, rule-pack or JSONL path that Repair does not restamp, correct
+  its permissions and the gateway service account's access before retrying.
+  Repair restores ACLs on its installed config, runtime root, bundle store and
+  protected credential store;
+  it leaves those administrator-selected paths in place. When `deployment.json` is readable, Setup
+  `/ensure CONFIG=<approved config>` can replace the invalid installed config.
+  All paths are checked again after Repair restores its managed permissions.
 - The rollback never deletes content in an account's `%USERPROFILE%\.defenseclaw`
   it cannot prove DefenseClaw wrote; it renames the folder to
   `.defenseclaw.rollback-<random>`. Review and delete that folder.

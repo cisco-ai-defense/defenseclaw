@@ -161,6 +161,20 @@ try {
                 $failures.Add("plugin path $($paths.PluginPath), want $plugin")
             }
             Test-Accepted 'standalone tree with the managed OpenCode plugin' $layout
+            try {
+                Assert-DefenseClawInstallTreeRetirementState -Layout $layout -AllowUnretiredAcls
+            }
+            catch {
+                $failures.Add("committed install-tree check refused the managed OpenCode plugin before finalization: $($_.Exception.Message)")
+            }
+            $retiredAllowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
+                -Layout $layout `
+                -RetiredRoot $layout.InstallRoot
+            if ([string]$paths.PluginPath -in $retiredAllowlist.files -or
+                [string]$paths.PluginDirectory -in $retiredAllowlist.directories -or
+                [string]$paths.ShareDirectory -in $retiredAllowlist.directories) {
+                $failures.Add('the retired tree still permits the managed OpenCode plugin after finalization')
+            }
             Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $layout
             foreach ($gone in @($plugin, [string]$paths.PluginDirectory, [string]$paths.ShareDirectory)) {
                 if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $gone) {
@@ -429,6 +443,9 @@ try {
             $plantedPlugin = [IO.Path]::Combine([IO.Path]::GetDirectoryName($extraPlugin), 'planted.js')
             [IO.File]::WriteAllText($plantedPlugin, 'x')
             Test-Refused 'unexpected plugin file (walk)' { Assert-DefenseClawManagedInstallTree -Layout $extra } 'unexpected file'
+            Test-Refused 'unexpected plugin file (committed check)' {
+                Assert-DefenseClawInstallTreeRetirementState -Layout $extra -AllowUnretiredAcls
+            } 'committed InstallRoot contains unexpected content'
             Test-Refused 'unexpected plugin file (removal)' { Remove-DefenseClawStandaloneOpenCodeManagedPlugin -Layout $extra } 'unexpected managed OpenCode content'
             foreach ($kept in @($plantedIPC, $plantedPlugin, $extraPlugin)) {
                 if (-not [IO.File]::Exists($kept)) {

@@ -255,12 +255,8 @@ def _guardrail_proxy_uses_llm(cfg: Config) -> bool:
         if active:
             return any(name not in _HOOK_POLICY_ONLY_CONNECTORS for name in active)
 
-    connector = _connector_name(getattr(gc, "connector", "") if gc is not None else "")
-    if not connector:
-        claw = getattr(cfg, "claw", None)
-        connector = _connector_name(getattr(claw, "mode", ""))
-    # An unconfigured legacy install historically defaults to OpenClaw.
-    return not connector or connector not in _HOOK_POLICY_ONLY_CONNECTORS
+    connector = _connector_name(cfg.active_connector())
+    return bool(connector) and connector not in _HOOK_POLICY_ONLY_CONNECTORS
 
 
 def _defenseclaw_llm_key(cfg: Config) -> Requirement:

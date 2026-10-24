@@ -7,6 +7,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -270,13 +271,44 @@ func bundleStatus(ctx context.Context, res *bundleStatusResult) error {
 	if st.Current != nil {
 		addReceiptWarning(enterprisebundle.DigestWarningCode(signedExpected, policy.GatewayReportedDigest, gatewayComparable))
 	}
-	res.Applied = st.Current != nil && policy.GatewayReportedDigest != "" &&
+	res.Applied = st.Current != nil && policy.Applied && !policy.ConfigUnrecorded && policy.GatewayReportedDigest != "" &&
+		policy.EffectiveDigest == policy.GatewayReportedDigest &&
 		policy.GatewayReportedDigest == st.Current.EffectivePolicyDigest && policy.LastReloadError == ""
+	if st.Current != nil && !res.Applied && policy.Applied && !policy.ConfigUnrecorded && policy.LastReloadError == "" &&
+		policy.EffectiveDigest != "" && policy.EffectiveDigest == policy.GatewayReportedDigest {
+		// A confirmed receipt keeps the digest of the build that applied it.
+		// An upgrade can change the derived digest without changing the
+		// signed bundle. The state pins the manifest that was verified on
+		// apply; read it and its hashed files again with this build, then
+		// check its exact rendered config against the installed bytes. Anchor
+		// rotation after confirmation does not change what now enforces.
+		if digest, rendered, err := currentBuildBundleDigest(ctx, store, st.Current); err == nil && digest == policy.EffectiveDigest {
+			if installed, err := bundleInstalledConfig(runtime.GOOS); err == nil && bytes.Equal(installed, rendered) {
+				res.Applied = true
+				current := *st.Current
+				current.EffectivePolicyDigest = digest
+				res.Current = &current
+				if res.Bundle != nil && res.Bundle.BundleID == current.BundleID && res.Bundle.Version == current.Version &&
+					res.Bundle.State == enterprisebundle.StateConfirmed {
+					res.Bundle.EffectivePolicyDigest = digest
+				}
+			}
+		}
+	}
 	if policy.LastReloadError != "" {
 		res.Warnings = append(res.Warnings, enterprisebundle.Warning{Code: "policy_reload_rejected",
 			Message: "the gateway rejected its last reload and keeps enforcing the policy it last built"})
 	}
 	return nil
+}
+
+func currentBuildBundleDigest(ctx context.Context, store *enterprisebundle.Store, ref *enterprisebundle.Ref) (string, []byte, error) {
+	layout, err := enterprisebundle.Layout(runtime.GOOS)
+	if err != nil {
+		return "", nil, err
+	}
+	return enterprisebundle.VerifiedCurrentDigest(ctx, store, ref, runtime.GOOS,
+		enterprisebundle.DeviceLayoutFromManaged(layout), bundleDigester)
 }
 
 // bundleReceiptWarningMessage explains a warning code the confirmed

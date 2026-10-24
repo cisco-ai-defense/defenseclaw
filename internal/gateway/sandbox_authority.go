@@ -795,7 +795,9 @@ func (a *APIServer) sandboxMatchPeer(ctx context.Context, peer managedHookPeer, 
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: verifiedAccountName(id, peer.Name),
 		Directory: facts, Source: subjectSourcePeerCredentials,
 	}, lookup)
-	decision := set.match(&subject, profileSubjectVerified, config.NormalizeConnectorName(connectorName), "")
+	connectorName = config.NormalizeConnectorName(connectorName)
+	decision := set.match(&subject, profileSubjectVerified, connectorName, "")
+	decision = set.refuseUncompiledMeet(ctx, decision, connectorName)
 	return sandboxMatch{
 		decision: decision, resolved: resolved, facts: facts,
 		provisional: decision.Match == profileMatchDefaultLookupFailed,

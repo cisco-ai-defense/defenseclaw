@@ -796,8 +796,7 @@ var builtinHookContracts = map[string][]HookContract{
 			AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
 			Capabilities: HookCapability{
 				CanBlock:     true,
-				CanAskNative: true,
-				AskEvents:    []string{"preToolUse"},
+				CanAskNative: false,
 				BlockEvents: []string{
 					"preToolUse",
 					"permissionRequest",
@@ -811,7 +810,7 @@ var builtinHookContracts = map[string][]HookContract{
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
 				"GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
-				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
 			},
 		},
@@ -827,8 +826,7 @@ var builtinHookContracts = map[string][]HookContract{
 			AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
 			Capabilities: HookCapability{
 				CanBlock:     true,
-				CanAskNative: true,
-				AskEvents:    []string{"preToolUse"},
+				CanAskNative: false,
 				BlockEvents: []string{
 					"preToolUse",
 					"permissionRequest",
@@ -843,7 +841,7 @@ var builtinHookContracts = map[string][]HookContract{
 			Notes: []string{
 				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Windows Secure Client profile replaces a prompt the guardrail blocks.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
-				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
 				"Copilot documents optional native OpenTelemetry metrics and traces on POSIX hosts. DefenseClaw records that upstream surface but does not configure, launch, or certify the exporter; every DefenseClaw contract remains hook-only.",
 			},

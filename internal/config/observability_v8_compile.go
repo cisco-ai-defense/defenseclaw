@@ -962,12 +962,13 @@ func validateObservabilityV8KindSpecificFields(source ObservabilityV8Destination
 		"tls": observabilityV8TLSConfigured(source.TLS), "batch": observabilityV8BatchConfigured(source.Batch),
 		"network_safety":   observabilityV8NetworkSafetyConfigured(source.NetworkSafety),
 		"signal_overrides": source.SignalOverrides != nil,
+		"local_stack":      source.LocalStack != nil,
 	}
 	allowed := map[ObservabilityV8DestinationKind]map[string]struct{}{
 		ObservabilityV8DestinationJSONL:      setObservabilityV8Fields("path", "rotation", "batch"),
 		ObservabilityV8DestinationConsole:    setObservabilityV8Fields("batch"),
 		ObservabilityV8DestinationPrometheus: setObservabilityV8Fields("listen", "path"),
-		ObservabilityV8DestinationSplunkHEC:  setObservabilityV8Fields("endpoint", "token_env", "token_credential", "index", "source", "sourcetype", "sourcetype_overrides", "timeout_ms", "tls", "batch", "network_safety"),
+		ObservabilityV8DestinationSplunkHEC:  setObservabilityV8Fields("endpoint", "token_env", "token_credential", "index", "source", "sourcetype", "sourcetype_overrides", "timeout_ms", "tls", "batch", "network_safety", "local_stack"),
 		ObservabilityV8DestinationHTTPJSONL:  setObservabilityV8Fields("endpoint", "method", "headers", "bearer_env", "bearer_credential", "timeout_ms", "tls", "batch", "network_safety"),
 		ObservabilityV8DestinationOTLP:       setObservabilityV8Fields("preset", "endpoint", "protocol", "headers", "logger_name", "timeout_ms", "tls", "batch", "network_safety", "signal_overrides"),
 	}
@@ -978,7 +979,7 @@ func validateObservabilityV8KindSpecificFields(source ObservabilityV8Destination
 	order := []string{
 		"preset", "path", "rotation", "listen", "endpoint", "protocol", "method", "headers",
 		"token_env", "token_credential", "bearer_env", "bearer_credential", "index", "source", "sourcetype", "sourcetype_overrides", "logger_name", "timeout_ms", "tls", "batch",
-		"network_safety", "signal_overrides",
+		"network_safety", "signal_overrides", "local_stack",
 	}
 	for _, field := range order {
 		if !configured[field] {

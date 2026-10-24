@@ -245,6 +245,33 @@ func TestConfigMigrateLeavesASecureClientConfigUnchanged(t *testing.T) {
 	}
 }
 
+// --dry-run writes nothing, so --dry-run --ack is refused and leaves the
+// pending record as it is (GAP-0627).
+func TestConfigMigrateDryRunAckWritesNothing(t *testing.T) {
+	previousPath, previousTo, previousDry, previousAck := configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck
+	t.Cleanup(func() {
+		configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck = previousPath, previousTo, previousDry, previousAck
+	})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("config_version: 9\ndata_dir: "+dir+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	record := config.MigrationRecordPath(path)
+	pending := []byte(`{"from_version":8,"to_version":9}`)
+	if err := os.WriteFile(record, pending, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configMigratePath, configMigrateTo, configMigrateDryRun, configMigrateAck = path, config.ConfigVersionV9, true, true
+	err := configMigrateCmd.RunE(configMigrateCmd, nil)
+	if err == nil || !strings.Contains(err.Error(), "use one of them") {
+		t.Fatalf("config migrate --dry-run --ack = %v, want a refusal", err)
+	}
+	if raw, _ := os.ReadFile(record); string(raw) != string(pending) {
+		t.Fatalf("config migrate --dry-run --ack changed %s: %s", record, raw)
+	}
+}
+
 // A v8 policy_dir under the login home must be read by the CLI migration,
 // just as the gateway's in-memory migration reads it.
 func TestConfigMigrateReadsTildePolicyData(t *testing.T) {

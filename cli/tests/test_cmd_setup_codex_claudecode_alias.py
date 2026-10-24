@@ -482,7 +482,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 if connector == "cursor":
                     self.assertIn("defenseclaw setup cursor --mode action", result.output)
                     self.assertIn(
-                        "cursor hook failures=closed (failClosed=true)",
+                        "cursor gateway outage=open (failClosed=true)",
                         result.output,
                     )
                     self.assertIn(
@@ -534,7 +534,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("set guardrail.mode=observe", result.output)
                 if connector == "cursor":
                     self.assertIn(
-                        "cursor hook failures=closed (failClosed=true)",
+                        "cursor gateway outage=open (failClosed=true)",
                         result.output,
                     )
                     self.assertIn(
@@ -638,11 +638,12 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("cursor mode=observe", result.output)
+        # failClosed is true in observe mode too; while the gateway is down
+        # the hook follows the default tier's open (oss-outage-open).
         self.assertIn(
-            "cursor hook failures=closed (failClosed=true)",
+            "cursor gateway outage=open (failClosed=true)",
             result.output,
         )
-        self.assertIn("hook failures fail closed", result.output)
 
     def test_later_connector_setup_waits_for_cursor_and_full_active_roster(self):
         from defenseclaw.config import PerConnectorGuardrailConfig

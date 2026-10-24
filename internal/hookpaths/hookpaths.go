@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
+	"github.com/defenseclaw/defenseclaw/internal/shellparse"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
@@ -34,6 +35,11 @@ const CWDKey = "\x00cwd"
 // TruncatedKey means at least one static write target could not fit in the
 // bounded evidence. The gateway must not treat the remaining map as complete.
 const TruncatedKey = "\x00truncated"
+
+// PatchCompleteKey is positive hook-side proof that every apply_patch
+// directive was parsed and each target was resolved in the user's filesystem
+// view. The gateway may be unable to repeat that walk under ProtectHome.
+const PatchCompleteKey = "\x00patch-complete"
 
 // SourceLinkFactPrefix identifies a copy source inspected by the user-side hook.
 const SourceLinkFactPrefix = "\x00source-link:"
@@ -260,15 +266,7 @@ func parseShell(command string) (*syntax.File, bool) {
 	if len(command) > MaxPayloadBytes {
 		return nil, false
 	}
-	var file *syntax.File
-	var err error
-	for _, variant := range []syntax.LangVariant{syntax.LangBash, syntax.LangPOSIX} {
-		file, err = syntax.NewParser(syntax.Variant(variant)).Parse(strings.NewReader(command), "")
-		if err == nil {
-			return file, true
-		}
-	}
-	return nil, false
+	return shellparse.Parse(command)
 }
 
 // staticShellWord expands a redirect word that names one fixed path: quotes,
@@ -335,7 +333,7 @@ func homeParam(param *syntax.ParamExp, haveHome bool) bool {
 // until each has been checked, so a linked directory before ".." is not
 // removed lexically.
 func resolveWritePath(path string, linkDepth int) (string, bool) {
-	resolved, _, _, ok := walkWritePath("", path, linkDepth, false)
+	resolved, _, _, ok := walkWritePath("", path, linkDepth, false, false)
 	return resolved, ok
 }
 
@@ -344,7 +342,7 @@ func resolveWritePath(path string, linkDepth int) (string, bool) {
 // is true, forms includes every traversed name and link hop for opaque-scope
 // checks. A missing component is permitted at the end (redirects create
 // files), but it cannot be crossed by "..": its link status is unknown.
-func walkWritePath(base, path string, linkDepth int, collect bool) (string, []string, int, bool) {
+func walkWritePath(base, path string, linkDepth int, collect, patchTarget bool) (string, []string, int, bool) {
 	if linkDepth > maxWriteTargetLinkDepth {
 		return "", nil, linkDepth, false
 	}
@@ -407,10 +405,16 @@ func walkWritePath(base, path string, linkDepth int, collect bool) (string, []st
 				if err != nil {
 					return "", nil, linkDepth, false
 				}
+				// A patch tool may reinterpret a link target with line breaks
+				// as multiple file directives. Ordinary file opens use the
+				// literal kernel path and retain their normal proof.
+				if patchTarget && strings.ContainsAny(link, "\r\n") {
+					return "", nil, linkDepth, false
+				}
 				var extra []string
 				var nextDepth int
 				var ok bool
-				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect)
+				current, extra, nextDepth, ok = walkWritePath(current, link, linkDepth+1, collect, patchTarget)
 				if !ok || collect && len(forms)+len(extra) > maxOpaquePathForms {
 					return "", nil, linkDepth, false
 				}
@@ -463,6 +467,13 @@ func ProtectedAuthorizedKeysPaths(home string) []string {
 // exist yet. ok is false when the target cannot be resolved.
 func ResolveWriteTarget(path string) (string, bool) {
 	return resolveWritePath(path, 0)
+}
+
+// ResolvePatchWriteTarget rejects a link whose target contains a line break:
+// a patch parser can interpret the resolved name as another directive.
+func ResolvePatchWriteTarget(path string) (string, bool) {
+	resolved, _, _, ok := walkWritePath("", path, 0, false, true)
+	return resolved, ok
 }
 
 // ResolveProcSelfCWDTarget interprets the cwd alias using the event cwd, not
@@ -611,6 +622,25 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 	}
 	cwd = filepath.Clean(cwd)
+	var toolArgs map[string]json.RawMessage
+	_ = json.Unmarshal(args, &toolArgs)
+	// Codex exec_command runs in tool_input.workdir, which can differ from
+	// the session cwd carried by the hook event. Resolve relative operands
+	// there so client evidence and the gateway proof name the same files.
+	if tool == "exec_command" {
+		if raw, present := toolArgs["workdir"]; present {
+			var workdir string
+			if json.Unmarshal(raw, &workdir) != nil || workdir == "" ||
+				strings.HasPrefix(workdir, "~") || strings.IndexByte(workdir, 0) >= 0 {
+				return incompleteEvidence(cwd)
+			}
+			if filepath.IsAbs(workdir) {
+				cwd = filepath.Clean(workdir)
+			} else {
+				cwd = filepath.Join(cwd, workdir)
+			}
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return incompleteEvidence(cwd)
@@ -654,13 +684,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
 	var unprovenReason string
-	var toolArgs map[string]json.RawMessage
-	if json.Unmarshal(args, &toolArgs) == nil {
+	if toolArgs != nil {
 		for _, key := range []string{"command", "cmd"} {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
-					unprovenReason = UnprovenProtectedWrite(command, cwd, home)
+					unprovenReason = ActionCommandDecision(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -777,8 +806,20 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// redirect. Unknown targets make the map incomplete.
 	patchTargets, patchKnown := ApplyPatchWriteTargets(tool, args, "", cwd, home)
 	truncated = truncated || !patchKnown
+	patchListed := patchKnown && len(patchTargets) > 0
 	for _, target := range patchTargets {
 		add(target, true, false)
+		if targets[OperandPath(target, cwd)] == "" {
+			patchListed = false
+		}
+	}
+	if isApplyPatchToolName(tool) && patchListed {
+		entry := len(jsonString(PatchCompleteKey)) + 1 + len(jsonString("1")) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
+			return incompleteEvidence(cwd)
+		}
+		targets[PatchCompleteKey] = "1"
+		size += entry
 	}
 	for key, value := range sourceFacts {
 		entry := len(jsonString(key)) + 1 + len(jsonString(value)) + 1
@@ -828,8 +869,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 func copilotCall(envelope map[string]json.RawMessage, surface, event string) (json.RawMessage, json.RawMessage, bool, bool) {
 	var hookEvent string
 	_ = json.Unmarshal(envelope["hook_event_name"], &hookEvent)
-	_, local := copilotargs.LocalDialect(surface, event, hookEvent,
-		aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"]))
+	_, local := copilotargs.LocalDialect(surface, event)
 	toolNames := []string{"toolName", "tool_name"}
 	argNames := []string{"toolArgs", "tool_input", "toolInput", "tool_args", "args", "arguments"}
 	var nativeHook string
@@ -845,6 +885,12 @@ func copilotCall(envelope map[string]json.RawMessage, surface, event string) (js
 	}
 	toolRaw, toolConflict := dialectAlias(envelope, toolNames)
 	rawArgs, argsConflict := dialectAlias(envelope, argNames)
+	if !local && (hookEvent != "" || aliasSet(envelope["tool_name"]) || aliasSet(envelope["tool_input"])) {
+		toolConflict = true
+	}
+	if local && (aliasSet(envelope["toolName"]) || aliasSet(envelope["toolArgs"])) {
+		toolConflict = true
+	}
 	var tool string
 	_ = json.Unmarshal(toolRaw, &tool)
 	tool = strings.TrimSpace(tool)
@@ -937,7 +983,11 @@ func incompleteEvidence(cwd string) string {
 }
 
 func unprovenEvidence(cwd, reason string) string {
-	encoded, _ := json.Marshal(map[string]string{CWDKey: cwd, UnprovenReasonKey: reason})
+	// The full target map overflowed while adding the class reason. Keep
+	// both incomplete-map and unproven-command evidence in the small header.
+	encoded, _ := json.Marshal(map[string]string{
+		CWDKey: cwd, TruncatedKey: "1", UnprovenReasonKey: reason,
+	})
 	return base64.RawURLEncoding.EncodeToString(encoded)
 }
 
@@ -956,8 +1006,9 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+3 ||
+	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+4 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
+		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
@@ -1010,7 +1061,7 @@ var (
 	renamePrograms    = []string{"mv", "gmv", "rename"}
 	cdPrograms        = []string{"cd", "pushd", "popd"}
 	multicallPrograms = []string{"busybox", "toybox"}
-	archivePrograms   = []string{"rsync", "cpio", "bsdcpio", "pax", "tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr"}
+	archivePrograms   = []string{"rsync", "cpio", "bsdcpio", "pax", "tar", "gtar", "bsdtar", "unzip", "7z", "7za", "7zr", "jar", "ditto"}
 	copyLinkOption    = regexp.MustCompile(`(?:^|\s)(?:-[A-Za-z]*[ls][A-Za-z]*|--(?:link|symbolic-link))(?:[\s=]|$)`)
 	// opaqueLink is a link that an interpreter, PowerShell or a Windows tool
 	// creates from text this package does not evaluate.
@@ -1141,7 +1192,7 @@ func (l shellLinks) opaqueTargetWithFacts(path, ownCopy string, facts map[string
 const maxOpaquePathForms = 256
 
 func writePathForms(path string, linkDepth int) ([]string, bool) {
-	_, forms, _, ok := walkWritePath("", path, linkDepth, true)
+	_, forms, _, ok := walkWritePath("", path, linkDepth, true, false)
 	return forms, ok
 }
 
@@ -1163,6 +1214,7 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 	env := expand.ListEnviron("HOME=" + strings.TrimRight(home, "/"))
 	renames, cds := false, false
 	var copyScopes []string
+	boundPrograms := actionBoundProgramWords(file, home)
 	syntax.Walk(file, func(node syntax.Node) bool {
 		call, isCall := node.(*syntax.CallExpr)
 		if !isCall || len(call.Args) == 0 {
@@ -1173,6 +1225,13 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 		static := make([]bool, len(args))
 		for i, arg := range args {
 			words[i], static[i] = staticShellWord(arg, env, home != "")
+		}
+		if !static[0] {
+			words[0], static[0] = staticProgramWord(args[0], home)
+		}
+		if !static[0] {
+			words[0], static[0] = boundPrograms[call]
+			static[0] = words[0] != ""
 		}
 		program, start := "", call.Pos()
 		if static[0] {
@@ -1242,9 +1301,22 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 			if archiveCopiesLinks(program, words[1:], static[1:]) {
 				destination := archiveDestination(program, words[1:], static[1:], cwd)
 				copyScopes = append(copyScopes, destination)
-				if archiveCopiesDiskSymlink(words[1:], static[1:], cwd, home, facts, record) {
+				if archiveCopiesDiskSymlink(program, words[1:], static[1:], cwd, home, facts, record) {
 					links.unknownIn(destination)
 				}
+			}
+		case program == "git":
+			if destination, materializes := gitMaterializationScope(words[1:], static[1:], cwd); materializes {
+				for _, assignment := range call.Assigns {
+					if assignment.Name == nil {
+						continue
+					}
+					switch assignment.Name.Value {
+					case "GIT_WORK_TREE", "GIT_DIR", "GIT_COMMON_DIR":
+						destination = ""
+					}
+				}
+				links.unknownIn(destination)
 			}
 		case slices.Contains(renamePrograms, program):
 			renames = true
@@ -1291,9 +1363,9 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 // control flow. The hook cannot see the CDPATH of the agent's shell, which
 // startup files may set without exporting it, so only an absolute or ./
 // operand without dot-dot names a proven directory. After any other cd the
-// link may sit in another directory, where its relative target may name the
-// protected file: the chain is accepted only when the write cannot open the
-// new link.
+// shell may stand in a directory the hook cannot name, where the new link or a
+// link already there may lead the write to a protected file, so the chain is
+// not accepted and the link scope stays opaque.
 func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.CallExpr, string) {
 	if len(file.Stmts) != 1 {
 		return nil, ""
@@ -1326,22 +1398,13 @@ func staticChangedDirectoryLink(file *syntax.File, cwd, home string) (*syntax.Ca
 	link, linkOK := StaticWord(second.Args[0], home)
 	option, optionOK := StaticWord(second.Args[1], home)
 	writer, writerOK := StaticWord(third.Args[0], home)
-	if !cdOK || cd != "cd" || !pathOK || path == "" || strings.HasPrefix(path, "-") ||
+	if !cdOK || cd != "cd" || !pathOK || path == "" || strings.HasPrefix(path, "-") || !cdBypassesSearchPath(path) ||
 		!linkOK || !slices.Contains(linkPrograms, programBase(link)) || !optionOK || option != "-s" ||
 		!writerOK || writer != "echo" || len(statements[2].Redirs) != 1 {
 		return nil, ""
 	}
 	for _, word := range second.Args[2:] {
 		if _, static := StaticWord(word, home); !static {
-			return nil, ""
-		}
-	}
-	if !cdBypassesSearchPath(path) {
-		target, _ := StaticWord(second.Args[2], home)
-		name, _ := StaticWord(second.Args[3], home)
-		written, static := StaticWord(statements[2].Redirs[0].Word, home)
-		if !static || written == "" || strings.ContainsAny(written, `/\`) || shellAuthorizedKeysBase(written) ||
-			written == filepath.Clean(name) || written == filepath.Base(target) {
 			return nil, ""
 		}
 	}
@@ -1800,6 +1863,129 @@ func archiveCopyDestination(args []string, static []bool, cwd string) string {
 	return ""
 }
 
+// gitMaterializationScope identifies worktree operations that can install a
+// link whose name is not available from the shell command. A fixed clone
+// destination narrows the uncertainty; worktree updates can change any name
+// in the repository, even when -C starts Git in a subdirectory.
+//
+// Only a materializing subcommand (clone or a worktree update) installs a
+// link. Global options that redirect the repository or worktree, or that the
+// parser does not know, only matter once such a subcommand is found, so the
+// scan reaches the subcommand before it decides. A read subcommand such as
+// show, diff or log installs no link whatever the global options are; the
+// joined -C<path>, --git-dir=<path> and --bare forms are read the same way as
+// their spaced spellings so they no longer force a global opaque scope.
+func gitMaterializationScope(args []string, static []bool, cwd string) (string, bool) {
+	working := cwd
+	scopeUnknown := false
+	for i := 0; i < len(args); i++ {
+		if !static[i] {
+			return working, true
+		}
+		arg := args[i]
+		switch {
+		case arg == "-C" || arg == "--chdir":
+			i++
+			if i >= len(args) || !static[i] || args[i] == "" {
+				return "", true
+			}
+			working = OperandPath(args[i], working)
+			continue
+		case strings.HasPrefix(arg, "-C") && len(arg) > 2:
+			working = OperandPath(arg[2:], working)
+			continue
+		case arg == "-c" || arg == "--config-env":
+			i++
+			if i >= len(args) || !static[i] {
+				return "", true
+			}
+			if gitConfigRedirectsTree(args[i]) {
+				scopeUnknown = true
+			}
+			continue
+		case strings.HasPrefix(arg, "-c") && len(arg) > 2:
+			if gitConfigRedirectsTree(arg[len("-c"):]) {
+				scopeUnknown = true
+			}
+			continue
+		case arg == "--git-dir" || arg == "--work-tree" ||
+			arg == "--namespace" || arg == "--super-prefix":
+			i++
+			if i >= len(args) || !static[i] {
+				return "", true
+			}
+			// The repository or worktree can be redirected by these options.
+			scopeUnknown = true
+			continue
+		case strings.HasPrefix(arg, "--git-dir=") || strings.HasPrefix(arg, "--work-tree=") ||
+			strings.HasPrefix(arg, "--namespace=") || strings.HasPrefix(arg, "--super-prefix="):
+			scopeUnknown = true
+			continue
+		case strings.HasPrefix(arg, "-"):
+			// An unknown global option may redirect the worktree, so the scope
+			// is unknown; only a materializing subcommand installs a link.
+			scopeUnknown = true
+			continue
+		}
+		switch arg {
+		case "clone":
+			// Clone's final operand is a destination only when both source and
+			// destination are explicit ordinary operands. Otherwise the name
+			// depends on Git's option and URL grammar.
+			if scopeUnknown {
+				return "", true
+			}
+			if len(args)-i == 3 && static[i+1] && static[i+2] &&
+				!strings.HasPrefix(args[i+1], "-") && !strings.HasPrefix(args[i+2], "-") {
+				return OperandPath(args[i+2], working), true
+			}
+			return working, true
+		case "checkout", "switch", "pull", "apply", "restore", "reset", "merge", "rebase", "cherry-pick", "am":
+			if scopeUnknown {
+				return "", true
+			}
+			return gitWorktreeRoot(working), true
+		default:
+			// A read or inspection subcommand (show, diff, log, config, ...)
+			// installs no link, whatever the global options were.
+			return "", false
+		}
+	}
+	return "", false
+}
+
+// gitConfigRedirectsTree reports a -c/--config-env assignment that can move the
+// repository's worktree or make it bare, changing where a later write lands.
+func gitConfigRedirectsTree(assignment string) bool {
+	option := strings.ToLower(assignment)
+	return strings.HasPrefix(option, "core.worktree=") || strings.HasPrefix(option, "core.bare=")
+}
+
+// gitWorktreeRoot uses the nearest .git marker, as Git does for a worktree
+// update from a subdirectory. Resolve directory aliases to the physical tree
+// used by the write-path proof; if no worktree is found, the scope is global.
+func gitWorktreeRoot(working string) string {
+	working = filepath.Clean(working)
+	resolved, err := filepath.EvalSymlinks(working)
+	if err != nil {
+		return ""
+	}
+	working = resolved
+	for dir, depth := working, 0; depth < 64; dir, depth = filepath.Dir(dir), depth+1 {
+		marker, err := os.Lstat(filepath.Join(dir, ".git"))
+		if err == nil {
+			if marker.IsDir() || marker.Mode().IsRegular() {
+				return dir
+			}
+			return ""
+		}
+		if !os.IsNotExist(err) || filepath.Dir(dir) == dir {
+			return ""
+		}
+	}
+	return ""
+}
+
 // cpOperands reads the options that can change source and destination
 // positions. Unknown or dynamic options make the destination unbounded.
 type cpOperandsResult struct {
@@ -1983,7 +2169,7 @@ func cpDiskSymlink(args []string, static []bool, cwd, home string, facts map[str
 	return false
 }
 
-func archiveCopiesDiskSymlink(args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
+func archiveCopiesDiskSymlink(program string, args []string, static []bool, cwd, home string, facts map[string]string, record bool) bool {
 	operands := make([]string, 0, len(args))
 	for i, arg := range args {
 		if !static[i] || strings.HasPrefix(arg, "-") {
@@ -1997,6 +2183,13 @@ func archiveCopiesDiskSymlink(args []string, static []bool, cwd, home string, fa
 		return true
 	}
 	for _, source := range operands[:len(operands)-1] {
+		if program == "rsync" && !strings.HasPrefix(source, "/") &&
+			!strings.HasPrefix(source, "./") && !strings.HasPrefix(source, "../") &&
+			strings.Contains(source, ":") {
+			// A remote source cannot be inspected by the hook client. It can
+			// materialize a link at any name in the destination tree.
+			return true
+		}
 		if diskSourceMayLink(source, cwd, home, facts, record, os.Lstat) {
 			return true
 		}
@@ -2069,7 +2262,8 @@ func archiveDestination(program string, args []string, static []bool, cwd string
 		if !ok {
 			return ""
 		}
-	} else if program == "rsync" || (program == "pax" || program == "cpio" || program == "bsdcpio") && archiveCopiesLinks(program, args, static) {
+	} else if program == "rsync" || program == "ditto" ||
+		(program == "pax" || program == "cpio" || program == "bsdcpio") && archiveCopiesLinks(program, args, static) {
 		return archiveCopyDestination(args, static, cwd)
 	} else if program == "unzip" || program == "cpio" || program == "bsdcpio" || strings.HasPrefix(program, "7z") {
 		for i, arg := range args {
@@ -2276,6 +2470,24 @@ func archiveCopiesLinks(program string, args []string, static []bool) bool {
 
 // archiveMayLink reports an archive or sync call that can create links.
 func archiveMayLink(program string, args []string, static []bool) bool {
+	if program == "jar" {
+		for i, arg := range args {
+			if static[i] && (arg == "--extract" || arg == "-x" ||
+				len(arg) > 0 && len(strings.TrimLeft(arg, "-")) > 0 &&
+					strings.HasPrefix(strings.TrimLeft(arg, "-"), "x")) {
+				return true
+			}
+		}
+		return false
+	}
+	if program == "ditto" {
+		for i, arg := range args {
+			if static[i] && (arg == "-x" || arg == "--extract") {
+				return true
+			}
+		}
+		return false
+	}
 	tar := strings.HasSuffix(program, "tar")
 	cpio := program == "cpio" || program == "bsdcpio"
 	pax := program == "pax"

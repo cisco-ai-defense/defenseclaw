@@ -38,7 +38,7 @@ Every decision you make lives in one file, `~/.defenseclaw/config.yaml`. The run
 
 ## The three modes
 
-- **Observe** logs everything and blocks nothing. Start here.
+- **Observe** records policy findings without enforcing them. Hook fail mode and proxy availability still apply. Start here.
 - **Action** blocks findings at or above the block level. The shipped default blocks CRITICAL and alerts on HIGH and MEDIUM. Change it with `defenseclaw guardrail block-at`.
 - **Action with human approval (HITL)** pauses a risky call and asks you, on agents with a native approval prompt. Other agents take the connector's fallback right away.
 

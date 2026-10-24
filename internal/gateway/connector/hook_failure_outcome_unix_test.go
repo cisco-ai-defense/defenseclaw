@@ -136,8 +136,27 @@ func TestShellHookFailureRecordsNameTheOutcomeTheHookApplied(t *testing.T) {
 					if last["outcome"] != want {
 						t.Fatalf("blocked=%v but the record says %q: %+v\n%s", blocked, last["outcome"], last, output)
 					}
-					if scenario == "strict-outage" && run.name != "copilot" && !blocked {
-						t.Fatalf("strict availability did not block the outage:\n%s", output)
+					// The per-user outage outcome and the strict availability
+					// column of the gateway outage table (HookOutage). The
+					// per-user outage mode is the record this render wrote.
+					outage := ConnectorHookOutage(run.conn)
+					perUser := outage.PerUserOpen
+					if mode == "closed" || strings.HasPrefix(run.invoke.script, "inspect-") {
+						// The shared inspect-* scripts close a per-user
+						// outage in every tier (defenseclaw_per_user_outage_open).
+						perUser = outage.PerUserClosed
+					}
+
+					switch scenario {
+					case "outage":
+						if want := perUser == OutageBlocks; blocked != want {
+							t.Fatalf("installed %s, gateway down: blocked=%v, HookOutage says %s:\n%s", mode, blocked, perUser, output)
+						}
+					case "strict-outage":
+						if want := perUser == OutageBlocks || outage.StrictAvailability == StrictAvailabilityRead; blocked != want {
+							t.Fatalf("installed %s, strict availability, gateway down: blocked=%v, HookOutage says %s, strict %s:\n%s",
+								mode, blocked, perUser, outage.StrictAvailability, output)
+						}
 					}
 				})
 			}
@@ -157,6 +176,7 @@ func TestShellHookDiagnosticRecordsAreNotDeliveryOutcomes(t *testing.T) {
 		t.Run(conn.Name(), func(t *testing.T) {
 			invoke := hookArgvConnectorCase(t, conn.Name())
 			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
 			hookDir := filepath.Join(home, "hooks")
 			opts := SetupOpts{DataDir: home, APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "scoped-test-token", HookFailMode: "open"}
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {

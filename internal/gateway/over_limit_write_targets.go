@@ -4,6 +4,8 @@
 package gateway
 
 import (
+	"strings"
+
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
@@ -39,15 +41,30 @@ func appendTrustedWriteTargetFindings(
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 ) []RuleFinding {
-	findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
 	if !actionfacts.LimitExceededWriteTool(request.Input, facts) {
-		return findings
+		return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
 	}
 	if view, args, ok := actionfacts.OverLimitWriteTargetReduction(request.Input, facts); ok {
 		reduced := request
 		reduced.Input.Args = args
 		return appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, reduced, view)
 	}
+	if actionfacts.ApplyPatchTool(request.Input.Tool) {
+		if clientProvedOrdinaryOverLimitPatch(request.ResolvedWriteTargets, facts.ActiveHome) {
+			// The semantic view of an oversized patch can be invalid even when
+			// the user's hook proved every file target. In that case a generic
+			// protected-write finding from the reduced/legacy view is stale.
+			// Keep all unrelated findings and the protected-link decision.
+			kept := findings[:0]
+			for _, finding := range findings {
+				if finding.RuleID != "persistence.ssh_authorized_keys_command" {
+					kept = append(kept, finding)
+				}
+			}
+			return kept
+		}
+	}
+	findings = appendTrustedHomeResolvedSSHKeyWriteFinding(findings, generation, request, facts)
 	if !request.EnforcementCapable {
 		return findings
 	}
@@ -73,4 +90,29 @@ func appendTrustedWriteTargetFindings(
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 		enforcement: findingEnforcementAllowed,
 	}))
+}
+
+func clientProvedOrdinaryOverLimitPatch(evidence map[string]string, home string) bool {
+	if evidence[hookpaths.PatchCompleteKey] != "1" || home == "" {
+		return false
+	}
+	protected := hookpaths.ProtectedAuthorizedKeysPaths(home)
+	targets := 0
+	for operand, resolved := range evidence {
+		if strings.HasPrefix(operand, "\x00") {
+			continue
+		}
+		if !isAbsoluteSemanticPath(operand) || !isAbsoluteSemanticPath(resolved) ||
+			strings.ContainsAny(operand+resolved, "\x00\r\n") {
+			return false
+		}
+		for _, path := range protected {
+			if canonicalSemanticPath(operand) == canonicalSemanticPath(path) ||
+				canonicalSemanticPath(resolved) == canonicalSemanticPath(path) {
+				return false
+			}
+		}
+		targets++
+	}
+	return targets > 0
 }

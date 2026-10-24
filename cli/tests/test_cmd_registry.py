@@ -460,7 +460,7 @@ class TestRegistrySync(RegistryCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         logger.log_action.assert_any_call(
             "registry-sync", "corp-skills",
-            "sync id=corp-skills fetched=1 scanned=1 promoted_skills=1 promoted_mcps=0 "
+            "sync id=corp-skills fetched=1 scanned=1 skipped=0 promoted_skills=1 promoted_mcps=0 "
             "blocked=0 errors=0 promote=on",
         )
 

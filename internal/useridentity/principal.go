@@ -248,7 +248,7 @@ func (f AccountFilter) matches(id, name, domains string, own, another func() boo
 		return true
 	case id != "" && strings.EqualFold(f.raw, id):
 		return true
-	case id != "" && slices.ContainsFunc(f.ids, func(resolved string) bool {
+	case f.domain != "" && id != "" && slices.ContainsFunc(f.ids, func(resolved string) bool {
 		return strings.EqualFold(resolved, id)
 	}) && own():
 		return true
@@ -301,9 +301,14 @@ func (f AccountFilter) ownRow(id, domains, incarnation string) bool {
 // with a new SID, its RFC 2307 uid and CORP\alice), so the recorded name
 // selected the former holder's rows, and their history, for the new account
 // (review of GAP-1263, loop 4). A bare filter names every account of the
-// name.
+// name; given the uid the name names now (its ids), it does not select that
+// uid's rows recorded for another holder, as a qualified one does not: a
+// local account deleted and created again under the same name and uid
+// listed the rows of the account before it (GAP-0422).
 func (f AccountFilter) recordedForAnother(id, incarnation string) bool {
-	if f.domain == "" {
+	if f.domain == "" && !slices.ContainsFunc(f.ids, func(resolved string) bool {
+		return strings.EqualFold(resolved, strings.TrimSpace(id))
+	}) {
 		return false
 	}
 	incarnation = strings.TrimSpace(incarnation)

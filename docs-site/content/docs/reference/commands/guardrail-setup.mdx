@@ -68,7 +68,7 @@ When you omit `--connector`, DefenseClaw resolves it in this order:
 
 1. The `--connector` flag.
 2. The `guardrail.connector` an earlier setup run saved.
-3. The `<data_dir>/picked_connector` hint, written by `install.sh --connector ...` and by connector setup.
+3. The `<data_dir>/picked_connector` hint, written by `install.sh --connector ...` and by connector setup, when that agent is installed on this machine.
 4. Otherwise pass `--connector`. The interactive wizard suggests an agent it finds on this machine; the non-interactive path does no detection.
 
 ## Every flag

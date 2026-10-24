@@ -77,6 +77,12 @@ func enterpriseHookTargetSessionAvailable(enterprisehooks.ManifestTarget) (bool,
 	return true, nil
 }
 
+// enterpriseHookTargetClosingLogon is the native Windows check; no other
+// platform's guardian defers a target to a sign-in.
+func enterpriseHookTargetClosingLogon(enterprisehooks.ManifestTarget) error {
+	return fmt.Errorf("deferred enterprise hook targets are supported only on native Windows")
+}
+
 func stageEnterpriseHookDeferredManagedPolicies(
 	enterprisehooks.Manifest,
 	[]enterprisehooks.ManifestTarget,
