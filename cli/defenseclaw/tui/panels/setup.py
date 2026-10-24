@@ -3361,6 +3361,24 @@ def _active_connector_names_for_setup(cfg: object | Mapping[str, Any] | None) ->
     return [singular] if singular else []
 
 
+def connector_turned_off(cfg: object | Mapping[str, Any] | None, name: str) -> bool:
+    """Whether the config turns this roster connector off.
+
+    The same test as ``defenseclaw status`` (``enabled: false``) and the
+    Inventory's "(off)" chip: ``guardrail.effective_enabled``, or for a plain
+    mapping an explicit ``guardrail.connectors.<name>.enabled: false``. Setup
+    listed such a connector as active (GAP-0854).
+    """
+
+    resolver = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)
+    if callable(resolver):
+        try:
+            return not resolver(name)
+        except Exception:  # noqa: BLE001 - a config quirk must not hide setup workflows.
+            return False
+    return get_config_value(cfg, f"guardrail.connectors.{name}.enabled", None) is False
+
+
 def _guardrail_connector_choices(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
     """Connector choices for Guardrail forms.
 
@@ -4403,7 +4421,11 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {_effective_strategy_text(cfg, strategy)}"
     if wizard == SetupWizard.CONNECTOR_SETUP:
         connectors = _active_connector_names_for_setup(cfg)
-        return f"Active connectors: {', '.join(connectors) if connectors else 'not set'}"
+        on = [name for name in connectors if not connector_turned_off(cfg, name)]
+        off = [name for name in connectors if connector_turned_off(cfg, name)]
+        summary = f"Active connectors: {', '.join(on) if on else 'none' if off else 'not set'}"
+        # A connector turned off stays in the roster; it is not active (GAP-0854).
+        return f"{summary}  ·  Off: {', '.join(off)}" if off else summary
     if wizard == SetupWizard.AI_DISCOVERY:
         enabled = "on" if bool(get_config_value(cfg, "ai_discovery.enabled", True)) else "off"
         mode = _cfg_str(cfg, "ai_discovery.mode", "enhanced") or "enhanced"

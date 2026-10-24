@@ -146,6 +146,7 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 			}
 			for _, action := range []string{ActionStatus, ActionVerify} {
 				r := h.run(Options{Action: action})
+				contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", r)
 				if got := r.Connectors["hermes"].HooksInstalled; got != enterprisestatus.HooksInstalledUnknown {
 					t.Fatalf("%s certified Hermes hooks from a persistent-home receipt: %q", action, got)
 				}
@@ -160,6 +161,16 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 				if action == ActionVerify && r.ExitCode == 0 {
 					t.Fatal("verify certified an unobservable Hermes launch home")
 				}
+			}
+			// A no-op ensure describes the same managed deployment without
+			// status-v2 blocks. It must not certify coverage that verify rejects.
+			ensure := h.run(Options{Action: ActionEnsure})
+			if ensure.CoverageComplete || ensure.SecurityComplete || ensure.Connectors != nil {
+				t.Fatalf("ensure certified Hermes or changed its result shape: coverage=%t security=%t connectors=%+v",
+					ensure.CoverageComplete, ensure.SecurityComplete, ensure.Connectors)
+			}
+			if message := messagesOf(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(message, "session-only HERMES_HOME") {
+				t.Fatalf("ensure did not name the unobservable home: %q", message)
 			}
 		})
 	}
@@ -259,6 +270,38 @@ func TestStatusV2IdentityFromGatewayHealth(t *testing.T) {
 	notReady.describeStatusV2(nil)
 	if got := notReady.result.Identity; got.State != enterprisestatus.IdentityStateUnknown || got.ReasonCode != enterprisestatus.CodeGatewayNotReady {
 		t.Fatalf("not ready identity = %+v", got)
+	}
+}
+
+// A live local audit-write failure makes managed enforcement incomplete even
+// while the gateway and its hook socket remain healthy.
+func TestStatusAndVerifyReportActiveGatewayAuditWriteFailure(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		baseline := h.run(Options{Action: action})
+		if !baseline.SecurityComplete || hasWarning(baseline, codeAuditWriteFailed) {
+			t.Fatalf("%s baseline: security_complete=%t warnings=%+v", action, baseline.SecurityComplete, baseline.Warnings)
+		}
+	}
+	health := h.env.HealthGet
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"telemetry":{"state":"error","details":{"event_history_failure":"sqlite_write_failed","event_history_last_sqlite_class":"constraint_corrupt"}}}`), nil
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if result.SecurityComplete || !hasWarning(result, "audit_write_failed") {
+			t.Fatalf("%s: security_complete=%t warnings=%+v, want the active audit failure", action, result.SecurityComplete, result.Warnings)
+		}
+		if message := messagesOf(result.Warnings, "audit_write_failed"); !strings.Contains(message, "sqlite_write_failed") || !strings.Contains(message, "constraint_corrupt") {
+			t.Fatalf("%s: audit warning %q", action, message)
+		}
+	}
+	h.env.HealthGet = health
+	recovered := h.run(Options{Action: ActionStatus})
+	if hasWarning(recovered, "audit_write_failed") {
+		t.Fatalf("recovered status retained an active audit warning: %+v", recovered.Warnings)
 	}
 }
 

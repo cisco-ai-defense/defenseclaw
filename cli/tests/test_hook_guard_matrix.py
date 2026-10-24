@@ -48,6 +48,7 @@ from defenseclaw.context import AppContext
 from defenseclaw.hook_guard_matrix import ANTIGRAVITY, KIRO, TOOL_GUARD_HOOKS, _entries, antigravity_hook_key
 
 from tests.test_hook_registration_every_connector import _CASES, _case_id, _install
+from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 _GUARDED = [case for case in _CASES if case["connector"] in TOOL_GUARD_HOOKS]
 
@@ -292,6 +293,8 @@ def test_doctor_fix_restarts_the_gateway_for_an_unguarded_hook_edit(tmp_path, mo
 
 
 def _single_connector_fail_mode(cfg) -> str:
+    # The strict tier (fail_mode_tier: a saved closed), whose outage mode is closed.
+    cfg.guardrail.hook_fail_mode = "closed"
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()

@@ -14,9 +14,11 @@ package gateway
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -62,7 +64,7 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 		return peercred.Credentials{UID: 7101, GID: 7101, PID: 301}, nil
 	}
 	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
-	socket, _, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`})
+	socket, api, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`})
 	client := hookSocketClient(socket, 10*time.Second)
 	post := func(path, connectorName string, body any) int {
 		t.Helper()
@@ -117,7 +119,7 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 	// A hook that refused an unsafe process context reports its fixed reason,
 	// so the refusal is audited like the unenrolled-account refusal above.
 	for _, reason := range []string{
-		hookexec.ManagedUserNamespaceReason, hookexec.ManagedMountNamespaceReason,
+		hookexec.ManagedUserNamespaceReason,
 		hookexec.ManagedTracedProcessReason, hookexec.ManagedProcessContextUnknownReason,
 	} {
 		report, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader("{}"))
@@ -133,6 +135,67 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 			return event.Action == string(audit.ActionAPIAuthFailure) && event.Structured["defenseclaw.admin.principal_ref"] == "uid:7101" &&
 				event.Structured["defenseclaw.admin.reason"] == reason && event.Connector == "claudecode"
 		})
+	}
+
+	// A call under a vendor policy view the gateway can not prove (its
+	// published managedPolicyView) is inspected and answered as any other,
+	// never refused, and the gateway records the alert with it. The hook
+	// sends nothing extra (review loop round 1, P1).
+	inspectRows := func() int {
+		events, err := store.ListEvents(500)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, event := range events {
+			if strings.HasPrefix(event.Action, "inspect-tool-") && hasCaller(event) {
+				n++
+			}
+		}
+		return n
+	}
+	inspectedBefore := inspectRows()
+	alertBody, _ := json.Marshal(map[string]any{"tool": "Bash", "args": map[string]any{"command": "echo policy-view-alert"}})
+	alert, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader(string(alertBody)))
+	alert.Header.Set("Content-Type", "application/json")
+	alert.Header.Set("X-DefenseClaw-Client", "claude-code-hook/1.0")
+	alert.Header.Set("X-DefenseClaw-Connector", "claudecode")
+	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{"claudecode": {shared: true}}})
+	if response, err := client.Do(alert); err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("inspected call with the policy-view alert = %v %v", response, err)
+	} else {
+		verdict, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		if !strings.Contains(string(verdict), `"action"`) {
+			t.Fatalf("the alerting call got no verdict: %s", verdict)
+		}
+	}
+	for deadline := time.Now().Add(5 * time.Second); inspectRows() < inspectedBefore+1; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("the alerting call was not inspected: %d inspect-tool rows, want %d", inspectRows(), inspectedBefore+1)
+		}
+	}
+	alertRow := waitForAuditRow(t, store, "policy-view alert", func(event audit.Event) bool {
+		return event.Action == string(audit.ActionAlert)
+	})
+	if alertRow.Structured["defenseclaw.health.subsystem"] != "managed_hook" ||
+		alertRow.Structured["defenseclaw.schema.error_code"] != hookexec.ManagedPolicyViewReason || alertRow.Connector != "claudecode" || alertRow.Severity != "HIGH" ||
+		!strings.Contains(alertRow.Details, hookexec.ManagedPolicyViewReason) || !strings.Contains(alertRow.Details, "uid:7101") {
+		t.Fatalf("policy-view alert row = %+v", alertRow)
+	}
+	// The policy-view reason is no refusal reason any more.
+	stale, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader("{}"))
+	stale.Header.Set("Content-Type", "application/json")
+	stale.Header.Set("X-DefenseClaw-Connector", "claudecode")
+	stale.Header.Set(hookexec.ClientRefusalHeader, hookexec.ManagedPolicyViewReason)
+	if response, err := client.Do(stale); err != nil {
+		t.Fatal(err)
+	} else {
+		body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		if strings.Contains(string(body), hookexec.ManagedPolicyViewReason) {
+			t.Fatalf("a policy-view reason was still accepted as a hook refusal: %d %s", response.StatusCode, body)
+		}
 	}
 
 	// A foreign-hook guard denial recorded by the session exchange.
@@ -184,5 +247,105 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 	}
 	if data, _ := json.Marshal(row.Structured); len(data) > 8<<10 {
 		t.Fatalf("oversized request wrote a %d-byte audit row", len(data))
+	}
+}
+
+// Review loop round 3 (P2): the policy-view alert of a valid call never holds
+// the call up. With the alert writer stalled (an
+// audit store that does not answer), every alerting call still gets its
+// verdict at once; the alerts are written once the store answers.
+func TestPolicyViewAlertNeverDelaysTheCallItRidesOn(t *testing.T) {
+	release := make(chan struct{})
+	var written atomic.Int32
+	restoreWriter := writeManagedPolicyViewAlert
+	writeManagedPolicyViewAlert = func(a *APIServer, alert managedPolicyViewAlert) {
+		<-release
+		restoreWriter(a, alert)
+		written.Add(1)
+	}
+	useTestPeerResolver(t, &slowPeerResolver{slowUID: -1, started: make(chan struct{}), release: make(chan struct{})})
+	restoreCredentials := hookSocketPeerCredentials
+	hookSocketPeerCredentials = func(net.Conn) (peercred.Credentials, error) {
+		return peercred.Credentials{UID: 7102, GID: 7102, PID: 302}, nil
+	}
+	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
+	socket, api, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7102","uid":7102,"connector":"claudecode","ok":true}]}`})
+	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{"claudecode": {shared: true}}})
+	const calls = 5
+	// Registered after the server: runs first, so every queued alert is
+	// written before the writer is restored.
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		for deadline := time.Now().Add(10 * time.Second); written.Load() < calls && time.Now().Before(deadline); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		writeManagedPolicyViewAlert = restoreWriter
+	})
+	client := hookSocketClient(socket, 2*time.Second)
+	for i := 0; i < calls; i++ {
+		body, _ := json.Marshal(map[string]any{"tool": "Bash", "args": map[string]any{"command": "echo stalled-alert"}})
+		request, _ := http.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/inspect/tool", strings.NewReader(string(body)))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-DefenseClaw-Client", "claude-code-hook/1.0")
+		request.Header.Set("X-DefenseClaw-Connector", "claudecode")
+		started := time.Now()
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("call %d with the policy-view alert waited on the stalled audit write: %v after %s", i, err, time.Since(started))
+		}
+		verdict, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK || !strings.Contains(string(verdict), `"action"`) {
+			t.Fatalf("call %d with the policy-view alert = %d %s", i, response.StatusCode, verdict)
+		}
+	}
+	if n := written.Load(); n != 0 {
+		t.Fatalf("%d alerts written while the writer was stalled", n)
+	}
+	close(release)
+	alertRow := waitForAuditRow(t, store, "policy-view alert after the store answered", func(event audit.Event) bool {
+		return event.Action == string(audit.ActionAlert) && strings.Contains(event.Details, "uid:7102")
+	})
+	if alertRow.Connector != "claudecode" || alertRow.Severity != "HIGH" || !strings.Contains(alertRow.Details, hookexec.ManagedPolicyViewReason) {
+		t.Fatalf("policy-view alert row = %+v", alertRow)
+	}
+}
+
+// The alert queue is bounded: with its writer stalled, enqueueing never
+// blocks, and what the full queue cannot take is counted, not waited for.
+func TestManagedPolicyViewAlertQueueNeverBlocks(t *testing.T) {
+	release := make(chan struct{})
+	var written atomic.Int32
+	restoreWriter := writeManagedPolicyViewAlert
+	writeManagedPolicyViewAlert = func(*APIServer, managedPolicyViewAlert) {
+		<-release
+		written.Add(1)
+	}
+	var queue managedPolicyViewAlerts
+	accepted := int32(0)
+	t.Cleanup(func() {
+		close(release)
+		for deadline := time.Now().Add(10 * time.Second); written.Load() < accepted && time.Now().Before(deadline); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		writeManagedPolicyViewAlert = restoreWriter
+	})
+	const offered = managedPolicyViewAlertQueueSize + 8
+	started := time.Now()
+	for i := 0; i < offered; i++ {
+		if queue.enqueue(&APIServer{}, managedPolicyViewAlert{uid: i, connector: "claudecode", route: "/api/v1/inspect/tool"}) {
+			accepted++
+		}
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("enqueueing %d alerts behind a stalled writer took %s", offered, elapsed)
+	}
+	dropped := queue.dropped.Load()
+	if accepted > managedPolicyViewAlertQueueSize+1 || dropped == 0 || int(accepted)+int(dropped) != offered {
+		t.Fatalf("accepted %d and dropped %d of %d alerts; the queue holds %d", accepted, dropped, offered, managedPolicyViewAlertQueueSize)
 	}
 }

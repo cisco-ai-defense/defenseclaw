@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import click
 import pytest
 from click.testing import CliRunner
+from defenseclaw import config_writer
 from defenseclaw.commands import cmd_setup
 from defenseclaw.context import AppContext
 from defenseclaw.file_permissions import atomic_write_private_bytes
@@ -28,9 +29,144 @@ def _mkdir_owned(path: Path) -> None:
         set_known_windows_directory_acl(path)
 
 
+def test_codex_rollback_does_not_rebase_a_populated_previous_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    old_home = tmp_path / "old-home"
+    current_home = tmp_path / "current-home"
+    old_path = old_home / ".codex" / "config.toml"
+    _mkdir_owned(old_path.parent)
+    _mkdir_owned(current_home / ".codex")
+    (old_home / ".profile").write_text("kept", encoding="utf-8")
+    def hooks_for(data_dir: Path) -> bytes:
+        command = str(data_dir / "hooks" / "codex-hook.sh") + " --event PreToolUse"
+        return (
+            "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+            "command = " + json.dumps(command) + "\n"
+        ).encode()
+
+    atomic_write_private_bytes(old_path, hooks_for(old_home / ".defenseclaw"))
+    atomic_write_private_bytes(
+        current_home / ".codex" / "config.toml", hooks_for(current_home / ".defenseclaw")
+    )
+    monkeypatch.setenv("HOME", str(current_home))
+    monkeypatch.setenv("USERPROFILE", str(current_home))
+    record = current_home / ".defenseclaw" / "connector_backups" / "codex" / "config.toml.json"
+    assert cmd_setup._effective_codex_rollback_path(
+        str(record), str(old_path), installed_sha256=hashlib.sha256(b"pre-edit install").hexdigest()
+    ) == str(old_path)
+
+
+def test_codex_rollback_reports_an_unresolved_old_receipt(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    old_home = tmp_path / "old-home"
+    current_home = tmp_path / "current-home"
+    _mkdir_owned(old_home)
+    _mkdir_owned(current_home)
+    (old_home / ".profile").write_text("retained", encoding="utf-8")
+    old_path = old_home / ".codex" / "config.toml"
+    current_root = current_home / ".codex"
+    data_dir = current_home / ".defenseclaw"
+    backup_path = data_dir / "connector_backups" / "codex" / "config.toml.json"
+    _mkdir_owned(backup_path.parent)
+    body = json.dumps({
+        "version": 1, "connector": "codex", "logical_name": "config.toml",
+        "path": str(old_path), "post_sha256": hashlib.sha256(b"installed hooks").hexdigest(),
+    }).encode()
+    atomic_write_private_bytes(backup_path, body)
+    monkeypatch.setenv("HOME", str(current_home))
+    monkeypatch.setenv("USERPROFILE", str(current_home))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "attempted-new-root"))
+    snapshot = SimpleNamespace(codex_rollback=cmd_setup._SetupCodexRollbackPoint(
+        backup_existed=True,
+        backup_bytes=body,
+        backup_generation=None,
+        registration_path=None,
+        root=str(current_root),
+    ))
+    assert cmd_setup._verify_restored_codex_root(SimpleNamespace(data_dir=str(data_dir)), snapshot) == [
+        "Codex managed backup still names an unresolved or obsolete root (old root)"
+    ]
+
+
+@pytest.mark.parametrize("predecessor", ("1.0.2", "1.0.3"))
+@pytest.mark.parametrize("old_home_state", ("unrelated", "empty-codex"))
+def test_codex_rollback_finds_copied_hooks_edited_before_upgrade(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, predecessor: str, old_home_state: str,
+) -> None:
+    old_home = tmp_path / "old-home"
+    current_home = tmp_path / "current-home"
+    _mkdir_owned(old_home)
+    current_path = current_home / ".codex" / "config.toml"
+    _mkdir_owned(current_path.parent)
+    old_path = old_home / ".codex" / "config.toml"
+    if old_home_state == "unrelated":
+        (old_home / ".profile").write_text("kept", encoding="utf-8")
+    else:
+        _mkdir_owned(old_path.parent)
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "internal/gateway/connector/testdata/predecessor_1_0_2_1_0_3/codex.toml"
+    ).read_text(encoding="utf-8")
+    installed = fixture.replace("{home}", str(old_home)).replace("{data_dir}", str(old_home / ".defenseclaw")).encode()
+    edited = installed + (
+        "\n[projects." + json.dumps(str(current_home / "trusted-project")) + "]\n"
+        'trust_level = "trusted"\n'
+    ).encode()
+    atomic_write_private_bytes(current_path, edited)
+    monkeypatch.setenv("HOME", str(current_home))
+    monkeypatch.setenv("USERPROFILE", str(current_home))
+    record = current_home / ".defenseclaw" / "connector_backups" / "codex" / "config.toml.json"
+    assert cmd_setup._effective_codex_rollback_path(
+        str(record), str(old_path), installed_sha256=hashlib.sha256(installed).hexdigest(),
+    ) == str(current_path), predecessor
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows Codex command override")
+def test_codex_rollback_resolves_windows_command_override_after_trust_edit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    old_home = tmp_path / "old-home"
+    current_home = tmp_path / "current-home"
+    _mkdir_owned(old_home)
+    current_path = current_home / ".codex" / "config.toml"
+    _mkdir_owned(current_path.parent)
+    (old_home / ".profile").write_text("kept", encoding="utf-8")
+    old_path = old_home / ".codex" / "config.toml"
+    launcher = old_home / ".local" / "bin" / "defenseclaw-hook.exe"
+    script = (
+        "$env:NoDefaultCurrentDirectoryInExePath='1'; "
+        f"& '{launcher}' 'hook' '--connector' 'codex' '--event' 'PreToolUse' "
+        "'--hook-contract' 'codex-hooks-v4'; "
+        f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new('{launcher}','hook --connector codex')"
+    )
+    command = "powershell.exe -EncodedCommand " + base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    installed = (
+        "[[hooks.PreToolUse]]\n[[hooks.PreToolUse.hooks]]\n"
+        "command = \"user-owned fallback\"\n"
+        "command_windows = " + json.dumps(command) + "\n"
+    ).encode()
+    atomic_write_private_bytes(current_path, installed + b'\n[projects."trusted"]\ntrust_level = "trusted"\n')
+    monkeypatch.setenv("HOME", str(current_home))
+    monkeypatch.setenv("USERPROFILE", str(current_home))
+    record = current_home / ".defenseclaw" / "connector_backups" / "codex" / "config.toml.json"
+    post_hash = hashlib.sha256(installed).hexdigest()
+    assert cmd_setup._effective_codex_rollback_path(
+        str(record), str(old_path), installed_sha256=post_hash,
+    ) == str(current_path)
+    _mkdir_owned(old_path.parent)
+    atomic_write_private_bytes(old_path, installed)
+    assert cmd_setup._effective_codex_rollback_path(
+        str(record), str(old_path), installed_sha256=hashlib.sha256(b"other installed bytes").hexdigest(),
+    ) == str(old_path)
+
+
 def test_exact_runtime_rollback_reverses_codex_root_before_verification(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
+    # This fixture models one OSS user's Setup even on a managed CI lane.
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
     profile_dir = tmp_path / "profile"
     _mkdir_owned(profile_dir)
     app, profile, db_path = make_app_context(str(profile_dir))
@@ -103,6 +239,7 @@ def test_exact_runtime_rollback_reverses_codex_root_before_verification(
 def test_failed_batch_restores_previous_codex_root_and_backup(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, predecessor: str, rollback_republishes: bool,
 ) -> None:
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
     profile_dir = tmp_path / "profile"
     _mkdir_owned(profile_dir)
     app, profile, db_path = make_app_context(str(profile_dir))
@@ -199,7 +336,7 @@ def test_failed_batch_restores_previous_codex_root_and_backup(
             assert "restored the prior connector configuration and runtime" in result.output
         else:
             assert "rollback was incomplete" in result.output
-            assert "Codex managed backup still names the new root" in result.output
+            assert "Codex managed backup still names an unresolved or obsolete root (new root)" in result.output
 
         assert restarts == 2
         if rollback_republishes:
@@ -211,6 +348,160 @@ def test_failed_batch_restores_previous_codex_root_and_backup(
             ]
         assert os.environ["CODEX_HOME"] == str(new_root)
         assert os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] == str(old_root)
+    finally:
+        cleanup_app(app, db_path, profile)
+
+
+@pytest.mark.parametrize("predecessor", ("1.0.2", "1.0.3"))
+@pytest.mark.parametrize("old_home_state", ("removed", "empty", "unrelated", "empty-codex"))
+@pytest.mark.parametrize("restore_receipts", (True, False))
+@pytest.mark.parametrize("codex_wrote_trust", (False, True))
+def test_failed_batch_after_home_move_keeps_codex_hooks_in_current_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    predecessor: str,
+    old_home_state: str,
+    restore_receipts: bool,
+    codex_wrote_trust: bool,
+) -> None:
+    old_home = tmp_path / "old-home"
+    current_home = tmp_path / "current-home"
+    old_root = old_home / ".codex"
+    _mkdir_owned(old_root)
+    old_path = old_root / "config.toml"
+    fixture = (
+        Path(__file__).resolve().parents[2]
+        / "internal/gateway/connector/testdata/predecessor_1_0_2_1_0_3/codex.toml"
+    ).read_text(encoding="utf-8")
+    old_hooks = fixture.replace("{home}", str(old_home)).replace("{data_dir}", str(old_home / ".defenseclaw")).encode()
+    installed_current_hooks = fixture.replace("{home}", str(current_home)).replace(
+        "{data_dir}", str(current_home / ".defenseclaw")
+    ).encode()
+    project_trust = b""
+    if codex_wrote_trust:
+        project_trust = (
+            "\n[projects." + json.dumps(str(current_home / "trusted-project")) + "]\n"
+            'trust_level = "trusted"\n'
+        ).encode()
+    current_hooks = installed_current_hooks + project_trust
+    original_pristine = b'model = "original"\n'
+    atomic_write_private_bytes(old_path, old_hooks)
+    data_dir = old_home / ".defenseclaw"
+    _mkdir_owned(data_dir)
+    backup_path = data_dir / "connector_backups" / "codex" / "config.toml.json"
+    _mkdir_owned(backup_path.parent)
+    lock_path = data_dir / "hook_contract_lock.json"
+
+    def backup_for(path: Path, pristine: bytes, installed: bytes) -> bytes:
+        return (json.dumps({
+            "version": 1, "connector": "codex", "logical_name": "config.toml",
+            "path": str(path), "existed": True, "mode": 384,
+            "pristine_sha256": hashlib.sha256(pristine).hexdigest(),
+            "pristine_bytes": base64.b64encode(pristine).decode("ascii"),
+            "post_sha256": hashlib.sha256(installed).hexdigest(),
+            "captured_at": f"{predecessor} predecessor",
+        }) + "\n").encode()
+
+    def lock_for(path: Path) -> bytes:
+        return json.dumps({
+            "version": 2,
+            "connectors": {"codex": {"locations": {"hook_config_paths": [str(path)]}}},
+        }).encode()
+
+    atomic_write_private_bytes(backup_path, backup_for(old_path, original_pristine, old_hooks))
+    atomic_write_private_bytes(lock_path, lock_for(old_path))
+    old_home.rename(current_home)
+    if old_home_state != "removed":
+        _mkdir_owned(old_home)
+    if old_home_state == "unrelated":
+        (old_home / ".profile").write_text("retained", encoding="utf-8")
+    if old_home_state == "empty-codex":
+        _mkdir_owned(old_root)
+    current_root = current_home / ".codex"
+    current_path = current_root / "config.toml"
+    next_root = tmp_path / "next-codex"
+    _mkdir_owned(next_root)
+    next_path = next_root / "config.toml"
+    next_hooks = fixture.replace("{home}", str(tmp_path)).replace(
+        "{data_dir}", str(current_home / ".defenseclaw")
+    ).encode()
+    atomic_write_private_bytes(current_path, current_hooks)
+    prior_backup = backup_for(old_path, original_pristine, installed_current_hooks)
+    atomic_write_private_bytes(
+        current_home / ".defenseclaw" / "connector_backups" / "codex" / "config.toml.json",
+        prior_backup,
+    )
+    monkeypatch.setenv("HOME", str(current_home))
+    monkeypatch.setenv("USERPROFILE", str(current_home))
+    monkeypatch.setenv("CODEX_HOME", str(next_root))
+    monkeypatch.setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", str(next_root))
+    # The fixture is an isolated per-user install even on a managed CI host.
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
+    app, profile, db_path = make_app_context(str(current_home / ".defenseclaw"))
+    try:
+        app.cfg.guardrail.connector = "codex"
+        app.cfg.claw.mode = "codex"
+        app.cfg.save()
+        backup_path = current_home / ".defenseclaw" / "connector_backups" / "codex" / "config.toml.json"
+        lock_path = current_home / ".defenseclaw" / "hook_contract_lock.json"
+        monkeypatch.setattr(cmd_setup, "_windows_runtime_rollback", lambda _restart: False)
+        monkeypatch.setattr(cmd_setup, "_agent_settings_refusal", lambda *_a, **_k: "")
+        monkeypatch.setattr(cmd_setup, "_check_connector_version_supported_for_setup", lambda *_a, **_k: True)
+        monkeypatch.setattr(cmd_setup.agent_discovery, "discover_with_probes", lambda *_a, **_k: object())
+        monkeypatch.setattr(cmd_setup.agent_discovery, "_write_cache", lambda *_a, **_k: True)
+        monkeypatch.setattr(cmd_setup, "_record_windows_setup_agent_selections", lambda *_a, **_k: None)
+        monkeypatch.setattr(cmd_setup, "_apply_hook_connector_setup", lambda *_a, **_k: True)
+        monkeypatch.setattr(cmd_setup, "_echo_batch_setup_summary", lambda *_a, **_k: None)
+        restarts = 0
+
+        def restart(*_args: object, **_kwargs: object) -> None:
+            nonlocal restarts
+            restarts += 1
+            selected_root = Path(os.environ["CODEX_HOME"])
+            assert os.environ["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] == str(selected_root)
+            if restarts == 1:
+                assert selected_root == next_root
+                atomic_write_private_bytes(current_path, original_pristine)
+                atomic_write_private_bytes(next_path, next_hooks)
+                atomic_write_private_bytes(backup_path, backup_for(next_path, original_pristine, next_hooks))
+                atomic_write_private_bytes(lock_path, lock_for(next_path))
+                raise RuntimeError("another required connector failed readiness")
+            if selected_root != current_root:
+                # The Go migration tears down the repaired registration and
+                # recreates it wherever the explicit rollback marker points.
+                _mkdir_owned(selected_root)
+                atomic_write_private_bytes(selected_root / "config.toml", old_hooks)
+            else:
+                atomic_write_private_bytes(current_path, current_hooks)
+            atomic_write_private_bytes(next_path, original_pristine)
+            if restore_receipts or selected_root != current_root:
+                installed = old_hooks if selected_root != current_root else current_hooks
+                pristine = original_pristine if selected_root != current_root else original_pristine + project_trust
+                atomic_write_private_bytes(backup_path, backup_for(selected_root / "config.toml", pristine, installed))
+                atomic_write_private_bytes(lock_path, lock_for(selected_root / "config.toml"))
+            else:
+                # Leave the copied-home receipts as they were before setup.
+                # The verifier must resolve them just as the Go loader does.
+                atomic_write_private_bytes(backup_path, prior_backup)
+                atomic_write_private_bytes(lock_path, lock_for(old_path))
+
+        monkeypatch.setattr(cmd_setup, "_restart_services", restart)
+        result = CliRunner().invoke(
+            cmd_setup.setup, ["-c", "codex", "-c", "cursor", "--yes"], obj=app,
+            catch_exceptions=False,
+        )
+        assert result.exit_code == 1
+        assert "restored the prior connector configuration and runtime" in result.output, result.output
+        assert "rollback was incomplete" not in result.output
+        assert restarts == 2
+        assert current_path.read_bytes() == current_hooks
+        assert next_path.read_bytes() == original_pristine
+        assert backup_path.read_bytes() == prior_backup
+        expected_receipt = old_path if not restore_receipts else current_path
+        assert json.loads(lock_path.read_bytes())["connectors"]["codex"]["locations"]["hook_config_paths"] == [
+            str(expected_receipt)
+        ]
+        assert not old_path.exists()
     finally:
         cleanup_app(app, db_path, profile)
 

@@ -3186,3 +3186,100 @@ def test_version_probe_never_reads_the_terminal(monkeypatch, tmp_path):
     ad._version_for_binary(str(binary), ("--version",), require_trusted_binary_paths=False)
     assert seen.get("stdin") is subprocess.DEVNULL
     assert seen.get("start_new_session") is True
+
+
+# Review loop round 2: an older kiro-cli found first kept signal.version (and
+# the discovery cache the gateway writes its lock from) at the older version
+# while setup preflight selected the supported form from kiro_forms, so the
+# gateway's not-gated lock no longer matched what setup accepts. The cached
+# version is now the form assess_kiro selects, whatever the probe order; the
+# older forms are still recorded for reporting.
+_KIRO_CLI_OLD, _KIRO_CLI_NEW = "/usr/local/bin/kiro-cli", "/opt/kiro/bin/kiro-cli"
+_KIRO_IDE_OLD, _KIRO_IDE_NEW = "/usr/local/bin/kiro", "/opt/Kiro/bin/kiro"
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected", "unprotected"),
+    (
+        pytest.param({_KIRO_CLI_OLD: "2.26.1", _KIRO_CLI_NEW: "2.27.1"}, (_KIRO_CLI_NEW, "kiro-cli 2.27.1"), 1, id="old-cli-then-cli"),
+        pytest.param({_KIRO_CLI_OLD: "", _KIRO_CLI_NEW: "2.27.1"}, (_KIRO_CLI_NEW, "kiro-cli 2.27.1"), 1, id="unread-cli-then-cli"),
+        pytest.param({_KIRO_IDE_OLD: "1.0.181", _KIRO_IDE_NEW: "1.2.4"}, (_KIRO_IDE_NEW, "1.2.4"), 1, id="old-ide-then-ide"),
+        pytest.param(
+            {_KIRO_CLI_OLD: "2.26.1", _KIRO_IDE_OLD: "1.0.181", _KIRO_IDE_NEW: "1.2.4"},
+            (_KIRO_IDE_NEW, "1.2.4"),
+            2,
+            id="old-cli-old-ide-then-ide",
+        ),
+        pytest.param(
+            {_KIRO_CLI_OLD: "2.26.1", _KIRO_CLI_NEW: "slow"},
+            (_KIRO_CLI_NEW, "kiro-cli 2.27.1"),
+            1,
+            id="old-cli-then-slow-cli",
+        ),
+        pytest.param(
+            {_KIRO_CLI_NEW: "2.27.1", _KIRO_CLI_OLD: "2.26.1"}, (_KIRO_CLI_NEW, "kiro-cli 2.27.1"), 1, id="cli-then-old-cli"
+        ),
+    ),
+)
+def test_kiro_cached_version_is_the_form_setup_protects(monkeypatch, answers, expected, unprotected):
+    from defenseclaw.connector_contracts import (
+        STATUS_NOT_GATED,
+        assess_kiro_signal,
+        connector_lock_contract_invariant,
+    )
+
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: tuple(answers))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+    slow_calls: dict[str, int] = {}
+
+    def probe(_name, path, _args, **_kwargs):
+        answer = answers[path]
+        if answer == "slow":
+            slow_calls[path] = slow_calls.get(path, 0) + 1
+            return ("", ad.VERSION_PROBE_TIMED_OUT) if slow_calls[path] == 1 else ("2.27.1", "")
+        return (answer, "") if answer else ("", "exit status 1")
+
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    signal = ad._scan_agent("kiro")
+
+    assert (signal.binary_path, signal.version) == expected
+    kiro = assess_kiro_signal(signal)
+    assert kiro.selected is not None
+    assert (kiro.selected.path, kiro.selected.version) == expected
+    # The surface version setup and doctor read is the protected one too.
+    surface = signal.kiro_cli_version if expected[1].startswith("kiro-cli ") else signal.kiro_ide_version
+    assert surface == expected[1]
+    # Every install is still a form, and each older one is reported.
+    assert {form["path"] for form in signal.kiro_forms} == set(answers)
+    assert len(kiro.unprotected()) == unprotected
+    # The lock the gateway writes for the cached version passes setup's
+    # readiness check.
+    lock = {
+        "connector": "kiro",
+        "raw_agent_version": signal.version,
+        "compatibility_status": STATUS_NOT_GATED,
+        "hook_fail_mode": "closed",
+    }
+    assert connector_lock_contract_invariant("kiro", lock) == ""
+
+
+def test_kiro_without_a_protected_form_caches_the_cli_version_setup_refuses(monkeypatch):
+    from defenseclaw.connector_contracts import STATUS_NOT_GATED, assess_kiro_signal, connector_lock_contract_invariant
+
+    answers = {_KIRO_CLI_OLD: "2.26.1", _KIRO_CLI_NEW: "2.25.0", _KIRO_IDE_OLD: "1.0.181"}
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: tuple(answers))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+    monkeypatch.setattr(ad, "_version_for_agent_binary", lambda _name, path, _args, **_kwargs: (answers[path], ""))
+
+    signal = ad._scan_agent("kiro")
+    assert (signal.binary_path, signal.version) == (_KIRO_CLI_OLD, "kiro-cli 2.26.1")
+    assert assess_kiro_signal(signal).selected is None
+    lock = {
+        "connector": "kiro",
+        "raw_agent_version": signal.version,
+        "compatibility_status": STATUS_NOT_GATED,
+        "hook_fail_mode": "closed",
+    }
+    assert connector_lock_contract_invariant("kiro", lock) != ""

@@ -187,13 +187,12 @@ const (
 	// remotely while the local store is down (GAP-1536).
 	RemoteExportDefault RemoteExport = iota
 	// RemoteExportAfterLocalWrite sends the record only once the local store
-	// keeps it. A producer that writes the occurrence again after a failed
-	// write, under the same id, uses it: the remote destinations get the
-	// record once, and never one the producer later writes differently.
+	// keeps it through a power loss, and never a managed-only projection,
+	// which the local store does not keep. A producer that writes the
+	// occurrence again after a failed or lost write, under the same id, uses
+	// it: the remote destinations get the record once, and never one the
+	// producer later writes differently.
 	RemoteExportAfterLocalWrite
-	// RemoteExportNone writes the record to the local store only. A producer
-	// uses it for a record the remote destinations already got.
-	RemoteExportNone
 )
 
 // WithRemoteExport sets when the runtime sends the records emitted with ctx

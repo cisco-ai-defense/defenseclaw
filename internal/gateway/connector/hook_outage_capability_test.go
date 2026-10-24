@@ -34,6 +34,8 @@ var (
 		return regexp.MustCompile(`(?:process\.env\.|process\.env\[["']|environ(?:\.get)?\(\s*["']|environ\[["']|getenv\(\s*["'])` + name)
 	}
 	renderedPluginOutageMode = regexp.MustCompile(`const DC_FAIL_MODE(?:: string)? = "([a-z]*)"`)
+	// A per-user plugin's outage mode (pluginOutageFailMode).
+	renderedPluginPerUserOutageMode = regexp.MustCompile(`const DC_OUTAGE_FAIL_MODE(?:: string)? = "([a-z]*)"`)
 )
 
 // renderedHookOutage renders conn's hooks for opts the way Setup does and
@@ -50,7 +52,13 @@ func renderedHookOutage(t *testing.T, conn Connector, opts SetupOpts) string {
 			if err != nil {
 				t.Fatalf("%s: render plugin: %v", conn.Name(), err)
 			}
-			for _, m := range renderedPluginOutageMode.FindAllSubmatch(body, -1) {
+			pattern := renderedPluginOutageMode
+			if perUserOutageRender(opts) {
+				// A per-user plugin bakes closed for every failure but the
+				// outage, whose mode is DC_OUTAGE_FAIL_MODE.
+				pattern = renderedPluginPerUserOutageMode
+			}
+			for _, m := range pattern.FindAllSubmatch(body, -1) {
 				modes = append(modes, string(m[1]))
 			}
 			break
@@ -62,6 +70,31 @@ func renderedHookOutage(t *testing.T, conn Connector, opts SetupOpts) string {
 		hookDir := filepath.Join(opts.DataDir, "hooks")
 		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 			t.Fatalf("%s: render: %v", conn.Name(), err)
+		}
+		if perUserOutageRender(opts) {
+			// A per-user script bakes closed for every failure; its outage
+			// mode is its runtime record (defenseclaw_per_user_outage_open).
+			for _, name := range owner.HookScriptNames(opts) {
+				body, err := os.ReadFile(filepath.Join(hookDir, name))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, m := range renderedShellOutageMode.FindAllSubmatch(body, -1) {
+					if string(m[1]) != "closed" {
+						t.Fatalf("%s: per-user %s bakes FAIL_MODE=%s, want closed", conn.Name(), name, m[1])
+					}
+				}
+			}
+			record, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+"."+conn.Name()))
+			if err != nil {
+				t.Fatalf("%s: runtime record: %v", conn.Name(), err)
+			}
+			mode := "closed"
+			if strings.Contains(string(record), "DEFENSECLAW_FAIL_MODE=open\n") && strings.Contains(string(record), "FAIL_MODE_SOURCE=config\n") {
+				mode = "open"
+			}
+			modes = append(modes, mode)
+			break
 		}
 		for _, name := range owner.HookScriptNames(opts) {
 			body, err := os.ReadFile(filepath.Join(hookDir, name))
@@ -131,13 +164,6 @@ func TestHookOutageMatchesTheRenderedHooks(t *testing.T) {
 				for _, guardrail := range []string{"observe", "action"} {
 					opts := base()
 					opts.HookFailMode, opts.GuardrailMode = mode, guardrail
-					if want == OutageFollowsGuardrailMode {
-						// Cursor: its hooks.json failClosed follows the
-						// guardrail mode, not the FAIL_MODE line of the
-						// script; the running-hook test checks the outcome
-						// (TestShellHookFailureRecordsNameTheOutcomeTheHookApplied).
-						continue
-					}
 					expected := want
 					if got := renderedHookOutage(t, conn, opts); got != expected {
 						t.Errorf("per-user, fail mode %s, %s mode: hooks render %s, HookOutage says %s", mode, guardrail, got, want)

@@ -69,6 +69,11 @@ const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST = "1";
+// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
+// in the default and permissive policy tiers lets a tool call run with a
+// warning and a hook-failures.jsonl row while this account's gateway is not
+// running; "closed" (strict) blocks it. Every other failure blocks.
+const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
@@ -302,6 +307,41 @@ async function defenseclawDeploymentRemoved() {
   }
 }
 
+// defenseclawGatewayJSON parses a gateway answer and refuses one that
+// repeats a key in any object. JSON.parse keeps the last copy, so
+// {"action":"block","action":"allow"} would read as allow; the native and
+// shell hooks refuse such an answer too (GAP-1007). The caller's catch closes
+// the call.
+function defenseclawGatewayJSON(text) {
+  const value = JSON.parse(text);
+  const objects = [];
+  let keyNext = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let end = i + 1;
+      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      const keys = objects[objects.length - 1];
+      if (keyNext && keys) {
+        const key = JSON.parse(text.slice(i, end + 1));
+        if (keys.has(key)) throw new Error("ambiguous gateway answer (repeated key)");
+        keys.add(key);
+      }
+      keyNext = false;
+      i = end;
+    } else if (c === "{" || c === "[") {
+      objects.push(c === "{" ? new Set() : null);
+      keyNext = c === "{";
+    } else if (c === "}" || c === "]") {
+      objects.pop();
+      keyNext = false;
+    } else if (c === ",") {
+      keyNext = objects[objects.length - 1] instanceof Set;
+    }
+  }
+  return value;
+}
+
 async function defenseclawToken() {
   const file = await open(DC_TOKEN_FILE, "r");
   try {
@@ -365,7 +405,7 @@ async function defenseclawSocketRequest(path, init) {
           ok: res.statusCode >= 200 && res.statusCode < 300,
           status: res.statusCode,
           headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
-          json: async () => JSON.parse(text),
+          text: async () => text,
         });
       });
       res.on("error", reject);
@@ -441,6 +481,7 @@ async function defenseclawProvenTCPRequest(path, init, token) {
     }
     return { ok: response.status >= 200 && response.status < 300, status: response.status,
       headers: { get: (name) => response.headers[String(name).toLowerCase()] ?? null },
+      text: async () => response.body,
       json: async () => JSON.parse(response.body) };
   } finally {
     agent.destroy();
@@ -484,7 +525,7 @@ async function defenseclawFetch(path, init, token) {
         ok: reply.status >= 200 && reply.status < 300,
         status: reply.status,
         headers: { get: (name) => name.toLowerCase() === "retry-after" ? reply.retry_after || null : null },
-        json: async () => JSON.parse(reply.body),
+        text: async () => reply.body,
       };
     }
     if (DC_LISTENER_PROOF) return defenseclawProvenTCPRequest(path, init, token);
@@ -662,25 +703,41 @@ async function defenseclawLogFailOpen(reason, category) {
 const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
   "and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state.";
 
-async function defenseclawInstallWindow() {
-  try {
-    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
-    return true;
-  } catch (err) {
-    // Only a missing lock ends the install window. An unreadable lock must
-    // never turn an upgrade into a fail-open outage.
-    return !(err && err.code === "ENOENT");
+// defenseclawInstallLockHeld reports whether an installer holds this
+// account's DefenseClaw data: the gateway's data_dir (the folder that holds
+// the hook credential) or the folder install.sh and install.ps1 lock,
+// DEFENSECLAW_HOME or else ~/.defenseclaw, which differ when data_dir is set
+// apart from it (GAP-1002); the shell hooks check the same two (GAP-0948).
+// A lock is held when its .install.lock exists, as any file type, or cannot
+// be read for any reason but its absence.
+async function defenseclawInstallLockHeld() {
+  const dirs = [dirname(dirname(DC_TOKEN_FILE)), String(process.env.DEFENSECLAW_HOME || "") || join(homedir(), ".defenseclaw")];
+  for (const dir of dirs) {
+    try {
+      await lstat(join(dir, ".install.lock"));
+      return true;
+    } catch (err) {
+      if (!err || err.code !== "ENOENT") return true;
+    }
+    try {
+      // A folder that is not one cannot be looked in (Windows reports its
+      // child as absent).
+      if (!(await lstat(dir)).isDirectory()) return true;
+    } catch (err) {
+      if (!err || err.code !== "ENOENT") return true;
+    }
   }
+  return false;
+}
+
+// defenseclawInstallWindow is the install check of the tool paths below.
+async function defenseclawInstallWindow() {
+  return await defenseclawInstallLockHeld();
 }
 
 async function defenseclawPerUserInstallInProgress() {
   if (DC_FAIL_MODE !== "open") return false;
-  try {
-    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
-    return true;
-  } catch (err) {
-    return !err || err.code !== "ENOENT";
-  }
+  return await defenseclawInstallLockHeld();
 }
 
 // defenseclawFailModeNow is the fail mode a failed tool check answers with,
@@ -748,7 +805,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
       return null;
     }
-    const data = await res.json();
+    const data = defenseclawGatewayJSON(await res.text());
     if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
@@ -766,7 +823,14 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (err && err.code === "DC_PEER_UNVERIFIED") {
       return { reason: "DefenseClaw hook failed closed (" + err.message + ")" };
     }
-    if (DC_PER_USER_NATIVE_POST) return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
+    if (DC_PER_USER_NATIVE_POST) {
+      if (await defenseclawPerUserOutageOpen(err)) {
+        if (actionable) await defenseclawLogFailOpen("gateway unreachable", "transport");
+        return { reason: "", notice: actionable ? await defenseclawPerUserOutageNotice() : "" };
+      }
+      if (err && err.status === 7) return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
+      return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
+    }
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
@@ -780,6 +844,36 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
   } finally {
     clearTimeout(timer);
   }
+}
+
+// defenseclawPerUserOutageOpen reports a per-user tool check that may run
+// unchecked: the native helper exited 7 (hookexec.PerUserPostOutageExit:
+// this account's gateway refused or dropped the connection before any
+// status), the outage mode is open, strict availability is off and no
+// install holds the data directory. An answer the gateway gave, an
+// unverified listener and every other error keep the call blocked.
+async function defenseclawPerUserOutageOpen(err) {
+  if (DC_OUTAGE_FAIL_MODE !== "open" || !err || err.status !== 7) return false;
+  if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;
+  return !(await defenseclawInstallWindow());
+}
+
+// defenseclawPerUserOutageNotice is the one warning of a tool call that ran
+// because this account's gateway is down: the cause and the fix.
+async function defenseclawPerUserOutageNotice() {
+  let stopped = false;
+  try {
+    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), "gateway.stopped"));
+    stopped = true;
+  } catch (_) {
+    // No marker: the gateway is down for another reason.
+  }
+  const cause = stopped
+    ? "this account's gateway was stopped with `defenseclaw-gateway stop`"
+    : "this account's gateway is not running";
+  return "DefenseClaw is not checking this session: " + cause + ", so tool calls run unchecked (fail mode open for an outage). " +
+    "Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state. " +
+    "If it does not start, run `defenseclaw doctor`.";
 }
 
 // defenseclawPerUserGatewayDownText is what a per-user install that fails
@@ -800,7 +894,7 @@ async function defenseclawPerUserGatewayDownText(err, status) {
     }
   };
   let text;
-  if (await present(".install.lock")) {
+  if (await defenseclawInstallLockHeld()) {
     text = "DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done (fail mode closed). " +
       "Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install.";
   } else if (await present("gateway.stopped")) {
@@ -833,6 +927,8 @@ const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the Defense
 // gateway is not running: its hook socket is missing, or nothing accepts
 // the connection.
 function defenseclawGatewayStopped(err) {
+  // The per-user native helper exits 7 for a gateway that is not running.
+  if (err && err.status === 7) return true;
   const codes = [err && err.code, err && err.cause && err.cause.code];
   return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused");
 }
