@@ -74,9 +74,9 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
-	// Both API listeners start one background recovery of the hook delivery
-	// journal rows earlier gateway processes left (startPendingHookRecovery);
-	// neither waits for it.
+	// Both API listeners start this server's one background recovery loop
+	// of the hook delivery journal (startPendingHookRecovery); neither
+	// waits for it.
 	pendingHookRecoveryOnce sync.Once
 	// hookDeliveryProcessID, when set, replaces this process's journal
 	// identity (deliveryProcessID): tests start a server as the next process.

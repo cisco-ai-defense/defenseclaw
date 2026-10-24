@@ -262,34 +262,82 @@ async function verifyHookSocket(): Promise<void> {
 	}
 }
 
-// proveListener resolves once the TCP listener has proven it can derive
-// token (the gateway's listener proof); anything else rejects, and the
-// caller then sends the listener nothing else.
-async function proveListener(token: string, signal?: AbortSignal | null): Promise<void> {
+function peerError(reason: string): Error & { code: string } {
+	return Object.assign(new Error(reason), { code: "DC_PEER_UNVERIFIED" })
+}
+
+// The proof and the hook request must use the same accepted socket. A new
+// listener can take the port between two fetch calls, so never hand a bearer
+// or event to a second socket even after a valid proof response.
+async function provenTCPRequest(path: string, init: RequestInit, token: string): Promise<Response> {
 	if (!DC_TOKEN_PATTERN.test(token || "")) throw new Error("invalid scoped hook credential")
+	const http = await import("node:http")
+	const endpoint = new URL(`http://${DC_API_ADDR}`)
+	const agent = new http.Agent({ keepAlive: true, maxSockets: 1, maxFreeSockets: 1 })
+	let provenSocket: import("node:net").Socket | undefined
+	type TCPReply = { status: number; headers: Record<string, string | string[] | undefined>; body: string }
+	const send = (
+		requestPath: string, method: string, headers: Record<string, string>, body?: string,
+		requiredSocket?: import("node:net").Socket,
+	): Promise<TCPReply> => new Promise((resolve, reject) => {
+		const req = http.request({
+			hostname: endpoint.hostname.replace(/^\[|\]$/g, ""), port: endpoint.port,
+			path: requestPath, method, headers, agent, signal: init.signal ?? undefined,
+		}, (res) => {
+			const chunks: Buffer[] = []
+			let length = 0
+			res.on("data", (chunk: Buffer) => {
+				length += chunk.length
+				if (length > 1048576) {
+					req.destroy(new Error("oversized DefenseClaw gateway response"))
+					return
+				}
+				chunks.push(chunk)
+			})
+			res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers,
+				body: Buffer.concat(chunks).toString("utf8") }))
+			res.on("error", reject)
+		})
+		req.on("error", reject)
+		req.on("socket", (socket) => {
+			if (requiredSocket && socket !== requiredSocket) {
+				req.destroy(peerError("the DefenseClaw gateway listener changed after proving its identity"))
+				return
+			}
+			if (!requiredSocket) provenSocket = socket
+			req.end(body)
+		})
+	})
 	const nonce = randomBytes(32).toString("hex")
-	const response = await fetch(`http://${DC_API_ADDR}/api/v1/hook-listener-proof`, {
-		method: "GET",
-		headers: {
+	try {
+		const challenge = await send("/api/v1/hook-listener-proof", "GET", {
 			"X-DefenseClaw-Connector": "amp",
 			"X-DefenseClaw-Listener-Key-Id": createHash("sha256").update(token).digest("hex"),
 			"X-DefenseClaw-Listener-Nonce": nonce,
-		},
-		signal,
-	})
-	const proof = String(response.headers.get("x-defenseclaw-listener-proof") || "")
-	if (response.body) {
-		try {
-			await response.body.cancel()
-		} catch {
-			// Nothing is read from the proof response body.
+		})
+		const proof = String(challenge.headers["x-defenseclaw-listener-proof"] || "")
+		const want = createHmac("sha256", token)
+			.update(`${DC_LISTENER_PROOF_DOMAIN}\u0000amp\u0000${nonce}`)
+			.digest("hex")
+		if (challenge.status !== 204 || !/^[0-9a-f]{64}$/.test(proof) ||
+			!timingSafeEqual(Buffer.from(proof, "hex"), Buffer.from(want, "hex"))) {
+			throw peerError("the DefenseClaw gateway listener did not prove its identity")
 		}
-	}
-	const want = createHmac("sha256", token)
-		.update(`${DC_LISTENER_PROOF_DOMAIN}\u0000amp\u0000${nonce}`)
-		.digest("hex")
-	if (response.status !== 204 || proof.length !== want.length || !timingSafeEqual(Buffer.from(proof), Buffer.from(want))) {
-		throw new Error("the DefenseClaw gateway listener did not prove its identity")
+		const response = await send(path, init.method || "POST", init.headers as Record<string, string>,
+			String(init.body || ""), provenSocket)
+		if (response.status >= 300 && response.status < 400) {
+			throw peerError("the DefenseClaw gateway redirected a proven hook request")
+		}
+		return {
+			ok: response.status >= 200 && response.status < 300, status: response.status,
+			headers: { get: (name: string) => {
+				const value = response.headers[name.toLowerCase()]
+				return Array.isArray(value) ? value.join(", ") : value ?? null
+			} },
+			json: async () => JSON.parse(response.body),
+		} as Response
+	} finally {
+		agent.destroy()
 	}
 }
 
@@ -333,8 +381,8 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 				json: async () => JSON.parse(reply.body),
 			} as Response
 		}
-		if (DC_LISTENER_PROOF) await proveListener(token, init.signal)
-		return fetch(`http://${DC_API_ADDR}${path}`, { ...init, redirect: "error" })
+		if (DC_LISTENER_PROOF) return provenTCPRequest(path, init, token)
+		throw peerError("the DefenseClaw gateway listener has no account proof")
 	}
 	await verifyHookSocket()
 	if (!(globalThis as typeof globalThis & { Bun?: unknown }).Bun) {
@@ -694,6 +742,9 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			}
 			return data
 		} catch (error) {
+			if (error && typeof error === "object" && "code" in error && error.code === "DC_PEER_UNVERIFIED") {
+				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
+			}
 			if (DC_PER_USER_NATIVE_POST) {
 				return { action: "block", reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" }
 			}

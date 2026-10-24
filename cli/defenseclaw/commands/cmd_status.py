@@ -642,7 +642,10 @@ def _sidecar_listener_state(port: int, host: str) -> tuple[bool | None, str]:
         return False, stopped_reason
     except OSError:
         return None, "API listener state is unconfirmed; loopback connection could not be checked"
-    return None, "the API port answers, but its owner cannot be inspected from this account"
+    return None, (
+        f"the API port answers at {port} and is held by another account; "
+        "its owner is not visible to this account"
+    )
 
 
 def _status_refused_detail(cfg, client, public) -> str:

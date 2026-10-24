@@ -127,6 +127,29 @@ def _origin_main_gateway_trust(
     )
 
 
+def _trust_by_generation(before, after):
+    """Return before until the lifecycle restarts the gateway, then after.
+
+    Doctor reads health only from a verified accepting process, so every
+    health read, lifecycle proof and replacement check consults the listener
+    trust. The mock answers by gateway generation, not by call order.
+    """
+    state = {"restarted": False}
+
+    def trust(*_args, **_kwargs):
+        return after if state["restarted"] else before
+
+    def restarted(*_args, **_kwargs):
+        state["restarted"] = True
+        return (True, "")
+
+    def restarted_bool(*_args, **_kwargs):
+        state["restarted"] = True
+        return True
+
+    return trust, restarted, restarted_bool
+
+
 def _health(**states: str) -> str:
     return json.dumps({name: {"state": state} for name, state in states.items()})
 
@@ -1451,19 +1474,20 @@ def test_fix_gateway_service_restarts_deterministic_config_runtime_drift(
         pid=4343,
         start_identity="101",
     )
+    trust_for, restarted, _ = _trust_by_generation(before_trust, after_trust)
 
     with (
         patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             side_effect=[(200, before_health), (200, after_health)],
-        ),
+        ) as probe,
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            side_effect=[before_trust, after_trust],
+            side_effect=trust_for,
         ) as trust,
         patch(
             "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
-            return_value=(True, ""),
+            side_effect=restarted,
         ) as repair,
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
@@ -1471,7 +1495,9 @@ def test_fix_gateway_service_restarts_deterministic_config_runtime_drift(
     assert tag == "pass"
     assert expected_reason in detail
     repair.assert_called_once_with(cfg, start_if_stopped=True)
-    assert trust.call_count == 2
+    # Health read, lifecycle proof, verified health read, replacement proof.
+    assert trust.call_count == 4
+    assert [call.kwargs["bound_peer"] for call in probe.call_args_list] == [before_trust, after_trust]
 
 
 def test_origin_main_bridge_refuses_foreign_listener_before_sending_token(tmp_path):
@@ -1558,6 +1584,7 @@ def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_ap
     cfg = _cfg(str(tmp_path), token="configured-token")
     cfg.guardrail = SimpleNamespace(enabled=True)
     current_controller = os.fspath(tmp_path / "current-defenseclaw-gateway")
+    trust_for, _, restarted_bool = _trust_by_generation(origin_main, replacement)
 
     with (
         patch(
@@ -1571,8 +1598,7 @@ def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_ap
         ) as probe,
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            # The first call is the foreign-port-holder check.
-            side_effect=[origin_main, origin_main, replacement],
+            side_effect=trust_for,
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._managed_gateway_process_trust",
@@ -1588,7 +1614,7 @@ def test_doctor_service_repair_migrates_linux_env_bound_origin_main_pid_after_ap
         ) as confirm,
         patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway",
-            return_value=True,
+            side_effect=restarted_bool,
         ) as restart,
         patch(
             "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
@@ -1629,18 +1655,23 @@ def test_fix_gateway_service_does_not_restart_operational_subsystem_errors(
         cfg._source_config_version = 8
     else:
         cfg.openshell = SimpleNamespace(enabled=True)
+    peer = _strong_gateway_trust(str(tmp_path))
 
     with (
         patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, _health(api="running", **{subsystem: "error"})),
-        ),
+        ) as probe,
         patch(
             "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
         ) as repair,
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=peer,
         ) as trust,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener_for_lifecycle",
+        ) as lifecycle_trust,
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
 
@@ -1648,7 +1679,10 @@ def test_fix_gateway_service_does_not_restart_operational_subsystem_errors(
     assert "automatic restart was not attempted" in detail
     assert f"{subsystem} reports error" in detail
     repair.assert_not_called()
-    trust.assert_not_called()
+    # Only the health read's peer check runs; no lifecycle proof is attempted.
+    trust.assert_called_once()
+    lifecycle_trust.assert_not_called()
+    assert probe.call_args.kwargs["bound_peer"] is peer
 
 
 def test_fix_gateway_service_restarts_running_guardrail_when_disabled(
@@ -1663,6 +1697,7 @@ def test_fix_gateway_service_restarts_running_guardrail_when_disabled(
         pid=4343,
         start_identity="101",
     )
+    trust_for, restarted, _ = _trust_by_generation(before_trust, after_trust)
 
     with (
         patch(
@@ -1674,11 +1709,11 @@ def test_fix_gateway_service_restarts_running_guardrail_when_disabled(
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            side_effect=[before_trust, after_trust],
+            side_effect=trust_for,
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle",
-            return_value=(True, ""),
+            side_effect=restarted,
         ) as repair,
     ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
@@ -1691,16 +1726,24 @@ def test_fix_gateway_service_restarts_running_guardrail_when_disabled(
 def test_fix_gateway_service_uses_explicit_api_bind_without_proxy(tmp_path):
     cfg = _cfg(str(tmp_path), token="configured")
     cfg.gateway.api_bind = "10.200.0.1"
+    peer = _strong_gateway_trust(str(tmp_path))
 
-    with patch(
-        "defenseclaw.commands.cmd_doctor._http_probe",
-        return_value=(200, _health(api="running")),
-    ) as probe:
+    with (
+        patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, _health(api="running")),
+        ) as probe,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=peer,
+        ),
+    ):
         tag, _ = _fix_gateway_service(cfg, assume_yes=True)
 
     assert tag == "skip"
     assert probe.call_args.args[0] == "http://10.200.0.1:18970/health"
     assert probe.call_args.kwargs["bypass_proxy"] is True
+    assert probe.call_args.kwargs["bound_peer"] is peer
 
 
 def test_fix_dotenv_permissions_uses_private_windows_dacl(tmp_path):
@@ -1866,6 +1909,7 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
         start_identity="101",
     )
     current_controller = os.fspath(tmp_path / "current-defenseclaw-gateway")
+    trust_for, _, restarted_bool = _trust_by_generation(before_trust, after_trust)
 
     with (
         patch(
@@ -1877,11 +1921,11 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
         ),
         patch(
             "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
-            side_effect=[before_trust, after_trust],
+            side_effect=trust_for,
         ),
         patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway",
-            return_value=True,
+            side_effect=restarted_bool,
         ) as restart,
         patch(
             "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
@@ -1907,12 +1951,42 @@ def test_fix_gateway_service_restarts_stale_enabled_subsystem(tmp_path):
 def test_fix_gateway_service_skips_healthy_current_gateway(tmp_path):
     cfg = _cfg(str(tmp_path), token="configured")
     body = _health(api="running", gateway="disabled", guardrail="disabled")
+    peer = _strong_gateway_trust(str(tmp_path))
 
-    with patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, body)):
+    with (
+        patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, body)) as probe,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=peer,
+        ),
+    ):
         tag, detail = _fix_gateway_service(cfg, assume_yes=True)
 
     assert tag == "skip"
     assert "healthy and current" in detail
+    assert probe.call_args.kwargs["bound_peer"] is peer
+
+
+def test_fix_gateway_service_reads_no_health_from_an_unverified_listener(tmp_path):
+    """A listener Doctor cannot bind to its gateway gets no health request."""
+    cfg = _cfg(str(tmp_path), token="configured")
+    foreign = _GatewayTrust("foreign_listener", "configured API endpoint is owned by another account")
+
+    with (
+        patch("defenseclaw.commands.cmd_doctor._http_probe") as probe,
+        patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=foreign,
+        ),
+        patch("defenseclaw.commands.cmd_doctor._repair_gateway_lifecycle") as repair,
+    ):
+        tag, detail = _fix_gateway_service(cfg, assume_yes=True)
+
+    assert tag == "fail"
+    assert "another account" in detail
+    assert "refusing lifecycle mutation" in detail
+    probe.assert_not_called()
+    repair.assert_not_called()
 
 
 def test_fix_gateway_service_surfaces_only_safe_lifecycle_reason(tmp_path):

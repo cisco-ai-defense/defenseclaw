@@ -22,8 +22,100 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// The first boot after upgrade can still have config_version 8 on disk. The
+// boot loader and the watcher must agree on its effective configuration, and
+// the startup asset reconciliation must recognize the exact disk snapshot.
+func TestStandaloneStartupReconcilesUnmigratedV8File(t *testing.T) {
+	clearGenerationBuildError()
+	t.Cleanup(clearGenerationBuildError)
+	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
+	previousTrust := managedPolicyTreeTrust
+	managedPolicyTreeTrust = func(*config.Config, string) error { return nil }
+	t.Cleanup(func() { managedPolicyTreeTrust = previousTrust })
+	raw := []byte(fmt.Sprintf("config_version: 8\ndata_dir: %q\npolicy_dir: %q\nskill_actions:\n  medium:\n    install: block\n    file: quarantine\n    runtime: disable\nobservability: {}\n",
+		fixture.dataDir, filepath.Join(fixture.dataDir, "policies")))
+	if err := os.WriteFile(fixture.configPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := config.MigrateV8InMemory(fixture.configPath, raw, guardrail.RulePackDigest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8FromBytes(fixture.configPath, migrated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := config.ParseCompileObservabilityV8(fixture.configPath, migrated,
+		config.ObservabilityV8CompileOptions{DefaultDataDir: fixture.dataDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial = withEnterpriseProfile(initial, managed.ProfileStandalone)
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(initial, fixture.configPath, migrated, fixture.dataDir); err != nil {
+		t.Fatal(err)
+	}
+	initial.DataDir = compiled.DataDir
+	initial.AuditDB = compiled.Plan.Snapshot().Local.Path
+	initial.JudgeBodiesDB = compiled.Plan.Snapshot().Local.JudgeBodiesPath
+	fixture.sidecar.publishConfig(initial)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, raw)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap unmigrated v8 file: bound=%t err=%v", bound, err)
+	}
+	rulePacks, err := preflightSidecarRulePacks(initial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profiles, err := newGuardrailProfileSet(initial, rulePacks.cache, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := buildGeneration(t.Context(), generationInputs{
+		cfg: cloneConfig(initial), raw: raw, rulePacks: rulePacks, profiles: profiles,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	live.N = 1
+	fixture.sidecar.publishGeneration(live)
+	mgr := newConfigManagerWithSnapshot(fixture.configPath, initial, nil, fixture.sidecar.health,
+		fixture.sidecar.observabilityV8ActivePlanDigest(), fixture.sidecar.applyConfigReloadSnapshot)
+	mgr.bindInitialObservabilityV8Plan(fixture.sidecar.observabilityV8ActivePlan())
+	loader := mgr.loadSnapshot
+	mgr.loadSnapshot = func(path string, raw []byte) (*config.Config, error) {
+		candidate, err := loader(path, raw)
+		if err == nil {
+			candidate = withEnterpriseProfile(candidate, managed.ProfileStandalone)
+		}
+		return candidate, err
+	}
+	fixture.sidecar.configMgr = mgr
+	fixture.sidecar.watchGenerationAssets()
+	mgr.setStartupSource(fixture.sidecar.bootConfigSourceName, fixture.sidecar.bootConfigSource)
+	ctx, cancel := context.WithCancel(t.Context())
+	ready := make(chan error, 1)
+	done := make(chan error, 1)
+	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+	select {
+	case err := <-ready:
+		cancel()
+		<-done
+		if err != nil {
+			t.Fatalf("managed startup asset reconcile from v8 file: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("managed startup from v8 file did not report readiness")
+	}
+	if mgr.rejected || !bytes.Equal(mgr.appliedRaw, raw) || fixture.sidecar.Generation() != live {
+		t.Fatalf("startup rejected or lost v8 disk snapshot: rejected=%t applied=%q", mgr.rejected, mgr.appliedRaw)
+	}
+}
 
 // A standalone gateway starts its config watcher with asset watches attached.
 // Readiness and later no-op events must prove the published generation again;

@@ -852,9 +852,9 @@ def _http_probe(
     on Linux, macOS, and Windows.  A timed-out worker owns no mutable Doctor
     state and cannot delay process exit.
 
-    Pass ``bound_peer`` (a trusted gateway listener) for any request that
-    carries the gateway token: the request is then written only on a
-    connection whose accepting process is that verified gateway.
+    Pass ``bound_peer`` for requests that carry a gateway token or consume a
+    local gateway health decision: the request is written only on a connection
+    whose accepting process is the verified gateway.
     """
 
     if timeout <= 0:
@@ -1017,7 +1017,7 @@ def _gateway_peer_bound_request(
     allow_truncation: bool = True,
     evidence: GatewayEvidence | None = None,
 ) -> tuple[int, str]:
-    """Send one token-bearing request only over a connection the gateway accepted.
+    """Send one local request only over a connection the gateway accepted.
 
     Listener inspection says which process owned the endpoint a moment ago,
     but the request needs its own connection, and the endpoint can change
@@ -2524,9 +2524,17 @@ def _check_live_audit_store(health: dict | None, r: _DoctorResult) -> None:
         )
 
 
+def _gateway_health_probe(cfg, **kwargs) -> tuple[int, str]:
+    """Read gateway health only from a verified accepting process."""
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        return 0, f"gateway listener identity is unverified: {trust.detail}"
+    return _http_probe(_gateway_api_url(cfg, "/health"), bound_peer=trust, **kwargs)
+
+
 def _live_gateway_health(cfg) -> dict | None:
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    code, body = _gateway_health_probe(
+        cfg,
         timeout=5.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
@@ -4035,27 +4043,26 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         )
         return None
     bind = _gateway_api_host(cfg)
-    url = _gateway_api_url(cfg, "/health")
     while True:
-        code, body = _http_probe(
-            url,
+        lock_holder = None
+        trust = _trusted_gateway_listener(cfg)
+        if not trust.trusted:
+            # The listener can be mid-handover (GAP-0535): wait for a start,
+            # restart or stop that holds the start lock before reading it.
+            locked, lock_holder = _gateway_start_in_progress(cfg, r)
+            if locked and lock_holder is None:
+                # The start lock was released, so the listener may have
+                # changed hands: read it again. The run waits for the lock
+                # only once, so this ends.
+                continue
+        code, body = _gateway_health_probe(
+            cfg,
             timeout=5.0,
             response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
             allow_truncation=False,
             bypass_proxy=True,
         )
-        lock_holder = None
-        if code != 200:
-            break
-        trust = _trusted_gateway_listener(cfg)
-        if trust.trusted:
-            break
-        locked, lock_holder = _gateway_start_in_progress(cfg, r)
-        if not locked or lock_holder is not None:
-            break
-        # The start lock was released, so the listener may have changed hands:
-        # the /health read before the wait is no evidence about it. Probe
-        # again; the run waits for the lock only once, so this ends.
+        break
     if code == 200:
         holder = "" if trust.trusted or lock_holder is not None else _gateway_port_holder(cfg)
         if lock_holder is not None:
@@ -4268,6 +4275,41 @@ def _check_sidecar(cfg, r: _DoctorResult) -> dict | None:
         except (json.JSONDecodeError, TypeError):
             detail = body if body.startswith("response exceeds") else "could not parse /health response"
             _emit("warn", "Sidecar health JSON", detail, r=r)
+    elif code == 0 and lock_holder is not None:
+        # Neither this account's verified gateway nor shown to be another
+        # process's while a start, restart or stop still runs.
+        _emit(
+            "warn",
+            "Sidecar API",
+            f"{bind}:{cfg.gateway.api_port}: {_gateway_start_in_progress_detail(lock_holder)}",
+            r=r,
+            remediation=_GATEWAY_START_IN_PROGRESS_REMEDIATION,
+        )
+        r.sidecar_unverified = True
+    elif code == 0 and body.startswith("gateway listener identity is unverified:"):
+        trust = _trusted_gateway_listener(cfg)
+        if holder := _foreign_gateway_port_holder(cfg):
+            _emit(
+                "fail",
+                "Sidecar API",
+                f"{_foreign_gateway_port_detail(cfg, holder)} ({trust.detail})",
+                r=r,
+                remediation=_foreign_gateway_port_remediation(cfg, holder=holder),
+            )
+            r.gateway_down = "foreign"
+        elif trust.code == "missing":
+            start = "start it: 'defenseclaw-gateway start' or 'defenseclaw doctor --fix'"
+            _emit(
+                "fail",
+                "Sidecar API",
+                f"the gateway is not running (no verified listener on {bind}:{cfg.gateway.api_port}); {start}",
+                r=r,
+                remediation=start,
+            )
+            r.gateway_down = "stopped"
+        else:
+            _emit("fail", "Sidecar API", body, r=r)
+            r.sidecar_unverified = True
     elif holder := _foreign_gateway_port_holder(cfg):
         # A refused health probe does not prove the port is free. A holder
         # found independently is the cause the operator needs to act on.
@@ -6138,14 +6180,6 @@ def _gateway_start_in_progress_detail(holder: int) -> str:
 
 def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
     """Report home ownership only from the same strong trust chain as auth."""
-    code, _ = _http_probe(
-        _gateway_api_url(cfg, "/health"),
-        timeout=5.0,
-        bypass_proxy=True,
-    )
-    if code != 200:
-        return
-
     trust = _trusted_gateway_listener(cfg)
     if not trust.trusted:
         locked, holder = _gateway_start_in_progress(cfg, r)
@@ -6160,29 +6194,26 @@ def _check_gateway_home_mismatch(cfg, r: _DoctorResult) -> None:
             return
         if locked:
             trust = _trusted_gateway_listener(cfg)
-    if trust.trusted:
-        _emit(
-            "pass",
-            "Gateway home",
-            "managed listener is bound to this canonical data home",
-            r=r,
-        )
+    if not trust.trusted:
+        if trust.code == "foreign_home":
+            _emit("fail", "Gateway home", "managed PID record is bound to a different canonical data home", r=r)
+        elif trust.code in {"foreign_listener", "ambiguous_listener"}:
+            _emit("fail", "Gateway home", trust.detail, r=r)
+        else:
+            _emit("skip", "Gateway home", f"{trust.detail}; canonical runtime-home ownership was not inferred", r=r)
         return
-    if trust.code == "foreign_home":
-        _emit(
-            "fail",
-            "Gateway home",
-            "managed PID record is bound to a different canonical data home",
-            r=r,
-        )
+    code, _ = _gateway_health_probe(
+        cfg,
+        timeout=5.0,
+        bypass_proxy=True,
+    )
+    if code != 200:
         return
-    if trust.code in {"foreign_listener", "ambiguous_listener"}:
-        _emit("fail", "Gateway home", trust.detail, r=r)
-        return
+
     _emit(
-        "skip",
+        "pass",
         "Gateway home",
-        f"{trust.detail}; canonical runtime-home ownership was not inferred",
+        "managed listener is bound to this canonical data home",
         r=r,
     )
 
@@ -7292,6 +7323,29 @@ def _check_codex_telemetry_proxy(cfg, r: _DoctorResult) -> None:
     _emit(tag, "Codex telemetry proxy", detail, r=r, remediation=remediation)
 
 
+def _codex_otel_exports_to_defenseclaw(otel) -> bool:
+    """Whether a Codex [otel] table holds an exporter DefenseClaw wrote.
+
+    The markers are the ones the gateway's codexExporterLooksManaged reads:
+    DefenseClaw's product headers or its scoped /otlp/codex endpoint.
+    """
+    if not isinstance(otel, dict):
+        return False
+    for value in otel.values():
+        if not isinstance(value, dict):
+            continue
+        http = value.get("otlp-http")
+        if not isinstance(http, dict):
+            continue
+        endpoint = str(http.get("endpoint") or "")
+        headers = http.get("headers") if isinstance(http.get("headers"), dict) else {}
+        if "/otlp/codex" in endpoint or headers.get("x-defenseclaw-source") == "codex" or (
+            headers.get("x-defenseclaw-client") == "codex-otel/1.0"
+        ):
+            return True
+    return False
+
+
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """Bind Codex's configured OTel tag to trusted live runtime status.
 
@@ -7324,6 +7378,17 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
 
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
+    elif not _codex_otel_exports_to_defenseclaw(otel):
+        # Host Codex sends no native OTLP to DefenseClaw since 1.0.4: setup
+        # writes [otel] only inside an OpenShell sandbox and puts the user's
+        # own [otel] back on upgrade (GAP-1101). Hook telemetry carries
+        # DefenseClaw's environment, so there is nothing to align here.
+        _emit(
+            "pass",
+            "Codex OTel environment",
+            "Codex sends no native OTLP to DefenseClaw on this host; hook telemetry carries its environment",
+            r=r,
+        )
     elif not expected:
         _emit("fail", "Codex OTel environment", "DefenseClaw environment is empty", r=r)
     elif not actual:
@@ -7643,9 +7708,8 @@ _HOOK_HEALTH_LABELS = {
 
 
 # Kiro IDE 1.0.182 is the first build that reads the global ~/.kiro/hooks
-# (kiro.dev/changelog/ide/1-0-182, "adds user-level global hooks"). Keep in
-# parity with KiroIDEGlobalHooksFloor in internal/enterprisehooks.
-_KIRO_IDE_GLOBAL_HOOKS_FLOOR = (1, 0, 182)
+# (kiro.dev/changelog/ide/1-0-182, "adds user-level global hooks"); the floor
+# is judged by connector_contracts.judge_kiro_form, like setup and Go.
 _KIRO_IDE_PRODUCT_MAX_BYTES = 256 << 10
 
 
@@ -7671,24 +7735,32 @@ def _kiro_ide_product_candidates() -> list[str]:
     return [os.path.join(home, "Kiro", app), os.path.join("/usr/share/kiro", app), os.path.join("/opt/Kiro", app)]
 
 
-def _installed_kiro_ide_version() -> tuple[str, tuple[int, int, int]] | None:
-    """Return the installed Kiro IDE version, read from product.json, never run."""
+def _installed_kiro_ide_forms() -> list:
+    """Judge every installed Kiro IDE, read from product.json, never run.
+
+    A product.json that exists but cannot be read, or that does not name the
+    Kiro IDE and a version, is an install whose version is unknown, and
+    unknown is not protected (judge_kiro_form).
+    """
+    from defenseclaw.connector_contracts import KIRO_FORM_IDE, judge_kiro_form
+
+    forms = []
     for path in _kiro_ide_product_candidates():
+        if not os.path.lexists(path):
+            continue
+        version = ""
         try:
             with open(path, "rb") as fh:
                 data = fh.read(_KIRO_IDE_PRODUCT_MAX_BYTES + 1)
             product = json.loads(data) if len(data) <= _KIRO_IDE_PRODUCT_MAX_BYTES else None
         except (OSError, ValueError):
-            continue
-        if not isinstance(product, dict):
-            continue
-        if product.get("nameShort") != "Kiro" or product.get("applicationName") != "kiro":
-            continue
-        version = str(product.get("version") or "").strip()
-        match = re.match(r"^(\d+)\.(\d+)(?:\.(\d+))?", version)
-        if match:
-            return version, (int(match.group(1)), int(match.group(2)), int(match.group(3) or 0))
-    return None
+            product = None
+        named = isinstance(product, dict) and product.get("nameShort") == "Kiro"
+        if named and product.get("applicationName") == "kiro":
+            version = str(product.get("version") or "").strip()
+        unread = f"Kiro IDE at {path} is installed, but its version could not be read"
+        forms.append(judge_kiro_form(KIRO_FORM_IDE, version, unread=unread, path=path))
+    return forms
 
 
 def _check_kiro_global_scope(r: _DoctorResult) -> None:
@@ -7706,28 +7778,38 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
     """
     global_hooks = os.path.join(connector_home("kiro"), "hooks", "defenseclaw.json")
     if _file_references_marker(global_hooks, _HOOK_HEALTH_FALLBACK["kiro"][1]):
-        ide = _installed_kiro_ide_version()
-        if ide is not None and ide[1] < _KIRO_IDE_GLOBAL_HOOKS_FLOOR:
-            _emit(
-                "warn",
-                "Connector scope",
-                f"Kiro IDE {ide[0]} reads only the project's .kiro/hooks, so its agent sessions run "
-                f"without DefenseClaw hooks; {global_hooks} covers kiro-cli --v3",
-                r=r,
-                reason_code="kiro_ide_below_global_hooks_floor",
-                remediation=(
-                    "Update Kiro IDE to 1.0.182 or later, or set claw.workspace_dir to the "
-                    "project root and run `defenseclaw setup kiro`"
-                ),
-            )
+        ides = _installed_kiro_ide_forms()
+        unprotected = [form for form in ides if not form.protected]
+        for form in unprotected:
+            if form.below_floor:
+                _emit(
+                    "warn",
+                    "Connector scope",
+                    f"Kiro IDE {form.version} reads only the project's .kiro/hooks, so its agent sessions run "
+                    f"without DefenseClaw hooks; {global_hooks} covers kiro-cli --v3",
+                    r=r,
+                    reason_code="kiro_ide_below_global_hooks_floor",
+                    remediation="Update Kiro IDE to 1.0.182 or later, then run `defenseclaw setup kiro`",
+                )
+            else:
+                _emit(
+                    "warn",
+                    "Connector scope",
+                    f"Kiro IDE at {form.path} is installed, but its version could not be read, so it is not "
+                    "counted as protected; Kiro IDE reads the global hooks file from 1.0.182",
+                    r=r,
+                    reason_code="kiro_ide_version_unknown",
+                    remediation="Reinstall or update Kiro IDE so its product.json names its version",
+                )
+        if unprotected:
             return
-        if ide is not None:
-            detail = f"global user config ({global_hooks}); Kiro IDE {ide[0]} and kiro-cli --v3 load it"
+        if ides:
+            detail = f"global user config ({global_hooks}); Kiro IDE {ides[0].version} and kiro-cli --v3 load it"
         else:
             detail = (
                 f"global user config ({global_hooks}); Kiro IDE 1.0.182+ and kiro-cli --v3 "
                 "load it. Kiro IDE builds before 1.0.182 read only the project's "
-                ".kiro/hooks: set claw.workspace_dir for them"
+                ".kiro/hooks, so they are not covered"
             )
         _emit("pass", "Connector scope", detail, r=r)
         return
@@ -7740,8 +7822,7 @@ def _check_kiro_global_scope(r: _DoctorResult) -> None:
         reason_code="kiro_hooks_not_workspace_scoped",
         remediation=(
             "Run `defenseclaw setup kiro`, which writes ~/.kiro/hooks/defenseclaw.json "
-            "(read by Kiro IDE 1.0.182+ and kiro-cli --v3); for older Kiro IDE builds also "
-            "set claw.workspace_dir to the project root"
+            "(read by Kiro IDE 1.0.182+ and kiro-cli --v3); update an older Kiro IDE first"
         ),
     )
 
@@ -8312,7 +8393,6 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     if api_port <= 0 or api_port > 65535:
         return False, "cannot resolve the sidecar API port for a Cursor runtime probe"
 
-    health_url = _gateway_api_url(cfg, "/health")
     payload = json.dumps(
         {
             "hook_event_name": "sessionStart",
@@ -8384,8 +8464,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
         # process tree is fully reaped and live sidecar state is read again
         # before a second native event is allowed to start.
         for attempt in range(_CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS):
-            before_code, before_body = _http_probe(
-                health_url,
+            before_code, before_body = _gateway_health_probe(
+                cfg,
                 timeout=3.0,
                 response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
                 allow_truncation=False,
@@ -8439,8 +8519,8 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     if "additional_context" in response and not isinstance(response["additional_context"], str):
         return False, "configured Cursor adapter returned invalid sessionStart additional_context"
 
-    after_code, after_body = _http_probe(
-        health_url,
+    after_code, after_body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
@@ -9931,12 +10011,21 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
     # a /c/<connector> base URL, never through an advertised model name.
 
     host = getattr(cfg.guardrail, "host", None) or "127.0.0.1"
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        _emit("fail", "Guardrail proxy", f"gateway listener identity is unverified: {trust.detail}", r=r)
+        return
     url = f"http://{host}:{cfg.guardrail.port}/health"
-    code, _ = _http_probe(url, timeout=5.0)
+    code, detail = _http_probe(url, timeout=5.0, bypass_proxy=True, bound_peer=trust)
     if code == 200:
         _emit("pass", "Guardrail proxy", f"healthy on port {cfg.guardrail.port}", r=r)
     else:
-        _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
+        reason = (
+            "connected proxy listener is not the verified DefenseClaw gateway process"
+            if "connected gateway endpoint is not served" in detail
+            else f"not responding on port {cfg.guardrail.port}"
+        )
+        _emit("fail", "Guardrail proxy", reason, r=r)
 
 
 # ZeptoClaw rewrites api_base natively and does not run the fetch
@@ -10876,6 +10965,9 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
     if _doctor_secure_client(cfg):
         return
     label = "Policy"
+    if r.sidecar_unverified or r.gateway_down == "foreign":
+        _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
+        return
     if not isinstance(live_health, dict):
         reason = (
             "live state was not checked while config.yaml is invalid; see the Config validation row"
@@ -10883,9 +10975,6 @@ def _check_policy_state(cfg, r: _DoctorResult, *, live_health: dict | None) -> N
             else "the gateway is not running"
         )
         _emit_policy_without_gateway(cfg, r, label, reason)
-        return
-    if r.sidecar_unverified:
-        _emit_policy_without_gateway(cfg, r, label, "the API port is not served by this account's verified gateway")
         return
     policy = live_health.get("policy")
     if not isinstance(policy, dict) or not policy.get("effective_digest"):
@@ -13734,10 +13823,16 @@ def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
             f"{type(exc).__name__}: connector compatibility evidence is unavailable; "
             "no unsupported version decision was inferred",
         )
+    # A Kiro form beside the protected one setup covers (assess_kiro) is
+    # reported, but it does not block repairing that form.
+    auxiliary_kiro = tuple(
+        finding for finding in problems
+        if finding.connector == "kiro" and finding.reason_code.endswith("-auxiliary")
+    )
     unsupported = tuple(
         finding
         for finding in problems
-        if finding.status is HealthStatus.UNSUPPORTED
+        if finding.status is HealthStatus.UNSUPPORTED and finding not in auxiliary_kiro
     )
     if unsupported:
         summary = ", ".join(
@@ -13749,6 +13844,12 @@ def _plan_connector_compatibility_gate(cfg) -> RepairDecision:
             "gateway lifecycle repair is blocked by positively unsupported "
             f"connector compatibility evidence ({summary})",
             blockers=("unsupported connector compatibility",),
+        )
+    if auxiliary_kiro and len(auxiliary_kiro) == len(problems):
+        return RepairDecision(
+            "noop",
+            "the selected Kiro surface can be repaired; each Kiro form that is not protected "
+            "(an older or unreadable kiro-cli or Kiro IDE) is reported separately",
         )
     if problems:
         return RepairDecision(
@@ -16240,7 +16341,9 @@ def _check_removed_connector_cleanup(cfg, r: _DoctorResult) -> None:
         # finished (GAP-0833 class).
         unblocked = any(item.what in (SCRIPT_GONE_WHAT, STUB_UNUSABLE_WHAT) for item in left.items)
         if not pending_publication and unblocked:
-            remediation = f"run defenseclaw-gateway connector teardown --connector {left.connector}, then do each step above"
+            remediation = (
+                f"run defenseclaw-gateway connector teardown --connector {left.connector}, then do each step above"
+            )
         _emit(
             "fail" if unblocked else "warn",
             f"Removed connector [{left.label}]",
@@ -17530,13 +17633,21 @@ def _fix_gateway_service(
         plan_only and "doctor.gateway.pid.remove-stale" in projected_repairs
     )
 
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    code, body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,
         bypass_proxy=True,
     )
+    if (
+        code == 0
+        and body.startswith("gateway listener identity is unverified:")
+        and not stale_pid_projected
+    ):
+        endpoint_trust = _trusted_gateway_listener_for_lifecycle(cfg)
+        if endpoint_trust.code != "missing":
+            return ("fail", f"{endpoint_trust.detail}; refusing lifecycle mutation")
 
     reason = ""
     process_trust: _GatewayTrust | None = None
@@ -17647,8 +17758,8 @@ def _fix_gateway_service(
             f"could not {action} gateway service ({lifecycle_detail}); run `defenseclaw-gateway status`",
         )
 
-    verified_code, verified_body = _http_probe(
-        _gateway_api_url(cfg, "/health"),
+    verified_code, verified_body = _gateway_health_probe(
+        cfg,
         timeout=3.0,
         response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
         allow_truncation=False,

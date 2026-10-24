@@ -533,6 +533,7 @@ def _add_v8_destination(
     allow_private_networks: bool = False,
     plaintext: bool = False,
     local_stack: dict[str, str] | None = None,
+    legacy_local_destination: tuple[dict[str, Any], str] | None = None,
 ):
     """Add or update one v8 destination through the surgical writer.
 
@@ -587,9 +588,12 @@ def _add_v8_destination(
 
     with config_writer.hold_lock(config_path_for_data_dir(data_dir), timeout_s=None):
         authored, expected_sha256 = _v8_authored_destination_snapshot(data_dir)
+        if legacy_local_destination is not None and expected_sha256 != legacy_local_destination[1]:
+            raise ValueError("Local Splunk destination changed during setup; run setup splunk --logs again")
         if preset.adapter_kind == "splunk_hec":
             preset = _splunk_destination_preset(
-                preset, destination_name, authored, token_value=token_value, local_stack=local_stack
+                preset, destination_name, authored, token_value=token_value, local_stack=local_stack,
+                legacy_local_destination=legacy_local_destination[0] if legacy_local_destination else None,
             )
             destination["token_env"] = preset.token_env
             if local_stack is not None:
@@ -671,11 +675,14 @@ def _add_v8_destination(
         return result, warnings
 
 
-def _local_splunk_sink_name(authored: list[dict[str, Any]], preferred: str) -> str:
+def _local_splunk_sink_name(
+    authored: list[dict[str, Any]], preferred: str, *,
+    legacy_local_destination: dict[str, Any] | None = None,
+) -> str:
     """Return the destination local Splunk setup writes: its recorded sink, or *preferred*.
 
-    A destination named *preferred* without the record was not created by
-    local setup, so it is remote and is never taken over.
+    An unrecorded destination is reused only when setup supplies the exact
+    legacy destination it proved belongs to the managed bridge and container.
     """
 
     from defenseclaw.observability.local_splunk import LOCAL_TOKEN_ENV
@@ -684,7 +691,10 @@ def _local_splunk_sink_name(authored: list[dict[str, Any]], preferred: str) -> s
     recorded = [str(item.get("name")) for item in authored if is_recorded_local_splunk(item)]
     if recorded:
         name = recorded[0]
-    elif any(item.get("name") == preferred for item in authored):
+    elif any(item.get("name") == preferred for item in authored) and not any(
+        item.get("name") == preferred and legacy_local_destination is not None
+        and item == legacy_local_destination for item in authored
+    ):
         raise ValueError(
             f"Destination {preferred!r} exists, but local Splunk setup did not record it, so DefenseClaw "
             "treats it as a remote destination and does not change it. Nothing was changed. If an older "
@@ -725,6 +735,7 @@ def _splunk_destination_preset(
     *,
     token_value: str | None,
     local_stack: dict[str, str] | None,
+    legacy_local_destination: dict[str, Any] | None = None,
 ) -> Preset:
     """Choose the credential reference of one Splunk HEC destination.
 
@@ -743,7 +754,9 @@ def _splunk_destination_preset(
     existing = next((item for item in authored if item.get("name") == name), None)
     keeps_reference = token_value is None and existing is not None and bool(existing.get("token_env"))
     if local_stack is not None:
-        if _local_splunk_sink_name(authored, name) != name:
+        if _local_splunk_sink_name(
+            authored, name, legacy_local_destination=legacy_local_destination,
+        ) != name:
             raise ValueError(f"local Splunk setup already recorded another destination than {name!r}")
         token_env = LOCAL_TOKEN_ENV
         keeps_reference = False

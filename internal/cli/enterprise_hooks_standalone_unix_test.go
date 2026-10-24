@@ -1181,6 +1181,47 @@ func TestStandaloneVerifyAcceptsOnlyRecordedPendingTargets(t *testing.T) {
 	}
 }
 
+func TestStandaloneVerifyRefusesUnattestableHermesHome(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
+	f := newStandaloneFixture(t, resolver)
+	alice := f.home(t, "alice", 0o700)
+	bob := filepath.Join(f.homes, "bob")
+	resolver.accounts["alice"] = unixidentity.Account{Name: "alice", UID: uid, GID: gid, Home: alice}
+	resolver.accounts["bob"] = unixidentity.Account{Name: "bob", UID: uid, GID: gid, Home: bob}
+	f.writeManifest(t,
+		enterprisehooks.ManifestTarget{User: "alice", Connector: "hermes"},
+		enterprisehooks.ManifestTarget{User: "bob", Connector: "hermes"},
+	)
+	_, sha, err := enterprisehooks.LoadManifestWithSHA256(f.manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	standalone := cfg
+	cfg = &config.Config{DataDir: f.dataDir}
+	err = writeEnterpriseHookGuardianState(f.dataDir, f.manifest, sha, []enterpriseHookReconcileRow{
+		protectedRow("alice", alice, "hermes"),
+		{User: "bob", UserHome: bob, Connector: "hermes", Pending: true},
+	}, 0, true)
+	cfg = standalone
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := runEnterpriseHookVerifyAttempt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Rows) != 2 || run.Failures != 1 || run.Pending != 1 {
+		t.Fatalf("unobservable session home must fail a successful Hermes target and preserve recorded pending: rows=%+v failures=%d pending=%d", run.Rows, run.Failures, run.Pending)
+	}
+	if row := run.Rows[0]; row.OK || row.Pending || !strings.Contains(row.Error, "session-only HERMES_HOME") {
+		t.Fatalf("Hermes target was certified or the cause was hidden: %+v", row)
+	}
+	if row := run.Rows[1]; row.OK || !row.Pending || row.Error != "" {
+		t.Fatalf("recorded unavailable home must remain pending: %+v", row)
+	}
+}
+
 func TestResolveEnterpriseHookTargetFallsBackToTheDirectory(t *testing.T) {
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{
 		"ldap-only-user": {Name: "ldap-only-user", UID: 1234567, GID: 1234567, Home: "/home/ldap-only-user"},

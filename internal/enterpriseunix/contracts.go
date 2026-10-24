@@ -381,7 +381,7 @@ func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
 // describeUnprotectedAgents reports the agents the enumerator found
-// installed but could not enroll (its unprotected-agents record next to the
+// uncovered (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one
 // account's agent, so it is a warning for that account, verify included; an
 // unreadable record hides which agents they are, so verify fails on it, as
@@ -422,12 +422,18 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		r.CoverageComplete, r.SecurityComplete = false, false
 	}
 	for _, agent := range agents {
-		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified || agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete {
-			// No hook contract: the agent runs with no DefenseClaw hook, so
-			// the deployment does not cover it (GAP-0151).
+		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||
+			agent.Code == enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor {
+			// No contract, an incomplete install scan, a headless CLI path
+			// without hooks, or an IDE that cannot read global hooks: the
+			// deployment does not cover it (GAP-0151).
 			r.CoverageComplete = false
 		}
-		if agent.Refusal == enterprisehooks.RefusalMissing && l.opts.Action == ActionVerify {
+		if l.opts.Action == ActionVerify && (agent.Refusal == enterprisehooks.RefusalMissing ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroCLIBelowHookFloor ||
+			agent.Code == enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor) {
 			r.AddError(agent.Code, agent.Message())
 			continue
 		}

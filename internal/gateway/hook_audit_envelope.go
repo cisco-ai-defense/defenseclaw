@@ -139,6 +139,11 @@ type HookAuditEnvelope struct {
 	AuditActionOverride string `json:"-"`
 
 	occurrenceID string
+	// configGeneration and configHash, when set, are the configuration
+	// the audit row names in place of the current one (a journaled call,
+	// pendingHookProvenance).
+	configGeneration uint64
+	configHash       string
 }
 
 // renderHookAuditEnvelope serializes the envelope as a compact JSON

@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import http.client
 import json as _json
 import os
 import queue
@@ -95,11 +94,13 @@ from defenseclaw.config import (
 )
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
+    KIRO_CLI_HOOK_FLOOR,
     PROXY_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
+    assess_kiro_signal,
     compare_agent_versions,
     connector_lock_contract_invariant,
     normalize_agent_version,
@@ -5412,6 +5413,50 @@ def _installed_picked_connector(data_dir: str | None, installed: list[str] | Non
     return picked if picked in installed else None
 
 
+def _non_interactive_guardrail_connector(app: AppContext, gc) -> str:
+    """Return the connector a non-interactive ``setup guardrail`` configures.
+
+    Precedence:
+      1. the configured primary, roster or non-default ``claw.mode``
+         (``Config.active_connector``);
+      2. otherwise the ``picked_connector`` hint, only when that agent is
+         installed;
+      3. otherwise an older implied OpenClaw that the loader kept.
+
+    Whether an implied OpenClaw (3) exists is the loader's decision
+    (``openclaw_implied_but_not_installed``). OpenClaw from 1 is kept only
+    when this host has OpenClaw or a fleet link points at an OpenClaw gateway
+    (``openclaw_setup_fleet_link_configured``). A stale OpenClaw instead
+    yields the installed hint when it is in the enabled roster, else the
+    first installed enabled roster connector, else (no roster) the installed
+    hint. With none of these the result is ``""`` and setup refuses: a
+    default never selects an agent the host does not have (GAP-0568), and
+    roster entries stay enrolled either way.
+    """
+    cfg = app.cfg
+    data_dir = getattr(cfg, "data_dir", None)
+    configured = cfg.active_connector() if cfg.has_connector_configured() else ""
+    pinned = bool(str(gc.connector or "").strip() or gc.connectors) or configured not in {"", "openclaw"}
+    if not pinned:
+        return _installed_picked_connector(data_dir) or configured
+    if configured != "openclaw" or openclaw_presence.openclaw_setup_fleet_link_configured(cfg):
+        return configured
+    installed = _detect_installed_connectors()
+    if platform_support.connector_supported_on_os("openclaw") and (
+        "openclaw" in installed or openclaw_presence.openclaw_installed(cfg)
+    ):
+        return "openclaw"
+    picked = _installed_picked_connector(data_dir, installed)
+    if not gc.connectors:
+        return picked or ""
+    enrolled = [
+        name
+        for name in cfg.active_connectors()
+        if name in installed and getattr(_existing_connector_override(gc, name), "enabled", None) is not False
+    ]
+    return picked if picked in enrolled else next(iter(enrolled), "")
+
+
 def _select_connector_interactive(current: str, data_dir: str | None = None) -> str:
     """Present a numbered menu and return the selected connector name.
 
@@ -5508,6 +5553,8 @@ def _connector_contract_upgrade_guidance(
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
     contracts = HOOK_CONTRACTS.get(key, ())
+    if key == "kiro":
+        return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then run: {rerun}."
     if not contracts:
         return f"Use a {label} version covered by a DefenseClaw hook contract, then run: {rerun}."
 
@@ -5635,6 +5682,7 @@ def _check_connector_version_supported_for_setup(
     _allow_prompt: bool = True,
     _trusted_prompt_cache: dict[str, bool] | None = None,
     _discovery: Any = None,
+    _refusal_scope: dict[str, Any] | None = None,
 ) -> bool:
     """Verify the selected connector's installed version before setup.
 
@@ -5649,6 +5697,9 @@ def _check_connector_version_supported_for_setup(
     trusting a prefix — pass ``False`` to force the non-interactive path.
     ``_trusted_prompt_cache`` is a flow-local map keyed by trusted directory so
     batch setup can avoid asking the same yes/no question repeatedly.
+    ``_refusal_scope`` receives ``observe_admitted=False`` and the reason when
+    the refusal holds in every mode, so an action refusal is not turned into
+    an observe setup (:func:`_observe_fallback_admitted`, GAP-0828).
     """
     connector = normalize_connector(connector)
     label = _CONNECTOR_META.get(connector, {}).get("label", connector or "connector")
@@ -5697,20 +5748,50 @@ def _check_connector_version_supported_for_setup(
         if problem := codex_setup_version_problem(raw_version):
             if emit:
                 ux.err(problem)
+            _refuse_in_every_mode(_refusal_scope, problem)
             return False
         if _discovery is None and platform_support.host_os() != "windows":
             if not agent_discovery._write_cache(disc, data_dir=data_dir):
                 if emit:
                     ux.err("Codex version evidence could not be saved for gateway restart; no setup change was made.")
+                _refuse_in_every_mode(_refusal_scope, "Codex version evidence could not be saved for gateway restart")
                 return False
 
     compatibility = resolve_connector_contract(connector, raw_version)
+    if connector == "kiro":
+        # Every installed Kiro form is judged on its own (assess_kiro, the
+        # table Go's AssessKiro holds too): setup covers a protected form,
+        # and each other form is named as not protected. An installed form
+        # whose version could not be read is unknown, and unknown is not
+        # protected (GAP-0895, GAP-0829).
+        kiro = assess_kiro_signal(signal)
+        installed = installed or bool(kiro.forms)
+        if kiro.selected is not None:
+            raw_version = kiro.selected.version
+            compatibility = resolve_connector_contract(connector, raw_version)
+            if emit:
+                for form in kiro.unprotected():
+                    ux.warn(f"{label}: {form.reason}; it is not counted as protected.")
+        elif kiro.every_mode_refusal and compatibility.status != STATUS_UNKNOWN and not allow_drift:
+            # A Kiro IDE below its floor reads no global hooks; with no
+            # protected form, observe setup would stage hooks it never runs.
+            if emit:
+                ux.err(f"{label}: {kiro.every_mode_refusal}")
+                ux.subhead("Refusing Kiro setup in observe and action mode before activation.")
+                ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+            _refuse_in_every_mode(_refusal_scope, kiro.every_mode_refusal)
+            return False
+        elif kiro.forms and not kiro.every_mode_refusal and compatibility.status == STATUS_NOT_GATED:
+            # Only unknown forms: action refuses, observe warns.
+            compatibility = replace(compatibility, status=STATUS_UNVERSIONED)
     # Some CLIs end their version banner with a period ("... 1.0.90.").
     version_display = raw_version.rstrip(".") or "(not probed)"
     contract = compatibility.contract.contract_id if compatibility.contract else "none"
 
     if not installed:
-        if action_mode and compatibility.status != STATUS_NOT_GATED and not allow_drift:
+        # Kiro is not version-gated, but nothing proves a protected Kiro form
+        # on this host, so action mode refuses it like a gated connector.
+        if action_mode and (compatibility.status != STATUS_NOT_GATED or connector == "kiro") and not allow_drift:
             # F9: no agent on this host is not the same as no verified hook
             # surface. In the layout the sandbox documentation recommends the
             # agent lives inside the harness image, and that image carries a
@@ -5761,7 +5842,13 @@ def _check_connector_version_supported_for_setup(
         detail = f"{label}: version not available"
         if probe_error:
             detail += f" ({probe_error})"
-        detail += f"; using default hook contract {contract}."
+        if connector == "kiro":
+            detail += (
+                f"; Kiro CLI is supported from {KIRO_CLI_HOOK_FLOOR}, so this install is not "
+                "counted as protected until its version is read."
+            )
+        else:
+            detail += f"; using default hook contract {contract}."
         # SU-08: the untrusted-binary-prefix remediation prompt used to be
         # nested inside the action-mode branch, so an OBSERVE-mode setup with an
         # untrusted binary path only got a bare warning and no way to fix it.
@@ -5814,6 +5901,7 @@ def _check_connector_version_supported_for_setup(
                     data_dir=data_dir,
                     _allow_prompt=False,
                     _trusted_prompt_cache=_trusted_prompt_cache,
+                    _refusal_scope=_refusal_scope,
                 )
             if _trusted_prompt_cache is not None:
                 _trusted_prompt_cache[parent] = False
@@ -5853,6 +5941,9 @@ def _check_connector_version_supported_for_setup(
     # Refused in observe mode too: a gateway started with this connector alone
     # refuses a version with no contract in every mode, so "continuing in
     # observe mode" left the gateway down after the restart (GAP-0554).
+    # OpenCode needs a validated plugin contract, and a kiro-cli below the
+    # floor has a surface that sends no hooks (GAP-0227): their messages say so.
+    strict_unknown = connector in {"opencode", "kiro"}
     if compatibility.status == STATUS_UNKNOWN and not allow_drift:
         if emit:
             ux.err(detail)
@@ -5862,6 +5953,8 @@ def _check_connector_version_supported_for_setup(
                     "OpenCode requires a bounded validated plugin contract in both observe and action mode; "
                     "refusing setup before activation."
                 )
+            elif strict_unknown:
+                ux.subhead("Refusing Kiro setup in observe and action mode before activation.")
             else:
                 mode_name = "action" if action_mode else "observe"
                 ux.subhead(
@@ -5869,11 +5962,47 @@ def _check_connector_version_supported_for_setup(
                     "this connector alone refuses a version without a hook contract. Nothing was changed."
                 )
             ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
+        _refuse_in_every_mode(_refusal_scope, f"{detail} {upgrade_guidance}")
         return False
     if emit:
         ux.warn(detail + " Continuing because the explicit drift override is set.")
         ux.subhead(upgrade_guidance)
     return True
+
+
+def _refuse_in_every_mode(scope: dict[str, Any] | None, reason: str) -> None:
+    """Record that a setup refusal does not depend on the requested mode."""
+    if scope is not None:
+        scope["observe_admitted"] = False
+        scope["reason"] = reason
+
+
+def _observe_fallback_admitted(scope: dict[str, Any] | None) -> bool:
+    """Whether a refused action request may be configured in observe mode.
+
+    Only a refusal that depends on action mode falls back (no local install,
+    an unreadable version, a version outside the action contract). A refusal
+    that holds in every mode stays a refusal: a kiro-cli below its hook floor
+    runs headless sessions that load no hooks, so an observe fallback would
+    stage an agent DefenseClaw never sees (GAP-0828); the same holds for an
+    OpenCode version outside its plugin contract and for an old Codex.
+    """
+    return (scope or {}).get("observe_admitted", True) is not False
+
+
+def _kiro_setup_refusal(*, data_dir: str | os.PathLike[str] | None, _discovery: Any = None) -> str:
+    """The reason no setup mode can protect the installed Kiro, else "".
+
+    First-run and init extras configure connectors without the setup command;
+    they ask this before they write a Kiro connector in any mode (GAP-0828).
+    """
+    scope: dict[str, Any] = {}
+    if _check_connector_version_supported_for_setup(
+        "kiro", mode="observe", emit=False, data_dir=data_dir, _allow_prompt=False,
+        _discovery=_discovery, _refusal_scope=scope,
+    ):
+        return ""
+    return str(scope.get("reason") or "Kiro cannot be protected in observe or action mode")
 
 
 def _windows_opencode_requires_exact_selection(connector: str) -> bool:
@@ -6834,13 +6963,10 @@ def setup_guardrail(
         # flip ``gc.judge.enabled`` on, so the hook-gate default only fires when
         # this run actually turns the judge on (not on every re-run).
         judge_enabled_by_this_run = False
-        # Connector resolution order in non-interactive mode:
-        #   1. explicit --connector / --agent flag
-        #   2. configured primary, roster, or non-default claw.mode; a saved
-        #      OpenClaw with no local installation keeps a remote/fleet link
-        #   3. <data_dir>/picked_connector, only when that agent is installed
-        #   4. an older implied OpenClaw kept by the loader
-        # There is no connector fallback on an unconfigured host.
+        # Connector resolution order in non-interactive mode: an explicit
+        # --connector / --agent flag, then _non_interactive_guardrail_connector
+        # (configured primary or roster, installed picked hint, older implied
+        # OpenClaw). There is no connector fallback on an unconfigured host.
         # We deliberately do NOT run filesystem auto-detect (the
         # ``~/.claude`` / ``~/.codex`` heuristic) in non-interactive mode:
         # those directories often pre-exist on developer workstations
@@ -6848,32 +6974,7 @@ def setup_guardrail(
         # back during scripted installs. Filesystem detection is only
         # used in the interactive picker where the operator can see and
         # confirm the suggested default.
-        if explicit_connector:
-            target_connector = explicit_connector
-        elif (
-            gc.connector == "openclaw"
-            and not gc.connectors
-            and not openclaw_presence.openclaw_fleet_link_configured(app.cfg)
-        ):
-            # An older local setup could pin OpenClaw before the operator
-            # picked an agent. A remote host or explicit fleet mode above
-            # remains authoritative even without a local OpenClaw binary.
-            installed = _detect_installed_connectors()
-            target_connector = (
-                "openclaw"
-                if platform_support.connector_supported_on_os("openclaw")
-                and ("openclaw" in installed or openclaw_presence.openclaw_installed(app.cfg))
-                else _installed_picked_connector(getattr(app.cfg, "data_dir", None), installed)
-                or ""
-            )
-        elif gc.connector or gc.connectors:
-            target_connector = app.cfg.active_connector()
-        elif app.cfg.has_connector_configured() and app.cfg.active_connector() != "openclaw":
-            target_connector = app.cfg.active_connector()
-        else:
-            target_connector = _installed_picked_connector(getattr(app.cfg, "data_dir", None)) or (
-                app.cfg.active_connector() if app.cfg.has_connector_configured() else ""
-            )
+        target_connector = explicit_connector or _non_interactive_guardrail_connector(app, gc)
         if not target_connector:
             raise click.ClickException(no_connector_message)
         _ensure_connector_available(normalize_connector(target_connector))
@@ -6898,7 +6999,7 @@ def setup_guardrail(
                 # is not set up; the summary, claw.mode and the gateway's
                 # primary must follow the connector this run configures.
                 gc.connector = target_connector
-        elif not gc.connector or gc.connector == "openclaw":
+        elif not (gc.connector or "").strip() or normalize_connector(gc.connector.strip()) == "openclaw":
             gc.connector = target_connector
         per_connector_target = bool(
             explicit_connector
@@ -8604,11 +8705,18 @@ def _restore_setup_agent_selection_snapshot(cfg, snapshot: _SetupConfigSnapshot)
 
 def _restore_setup_agent_discovery_snapshot(cfg, snapshot: _SetupConfigSnapshot) -> None:
     """Restore peer versions that the prior guarded runtime used at startup."""
+    _restore_setup_agent_discovery_state(
+        cfg, snapshot.agent_discovery_existed, snapshot.agent_discovery_bytes
+    )
+
+
+def _restore_setup_agent_discovery_state(cfg, existed: bool, body: bytes) -> None:
+    """Restore the protected cache captured before setup's version preflight."""
     if not cfg.data_dir:
         return
     path = os.path.join(os.path.abspath(os.fspath(cfg.data_dir)), _AGENT_DISCOVERY_FILENAME)
-    if snapshot.agent_discovery_existed:
-        atomic_write_private_bytes(path, snapshot.agent_discovery_bytes)
+    if existed:
+        atomic_write_private_bytes(path, body)
     elif os.path.lexists(path):
         delete_file_durable(path)
 
@@ -10117,6 +10225,16 @@ def _apply_hook_connector_setup(
         desired_mode = "observe"
 
     exact_windows_opencode = _windows_opencode_requires_exact_selection(connector)
+    prior_discovery: tuple[bool, bytes, tuple[int, int, int, int] | None] | None = None
+
+    def restore_preflight_discovery() -> None:
+        if prior_discovery is None:
+            return
+        try:
+            _restore_setup_agent_discovery_state(app.cfg, prior_discovery[0], prior_discovery[1])
+        except OSError as exc:
+            raise click.ClickException("connector setup preflight could not restore agent_discovery.json") from exc
+
     # Preserve the predecessor's ordering for every non-OpenCode connector:
     # generic version admission still precedes rule-pack validation and the
     # setup snapshot. Only native-Windows OpenCode takes the exact-selection
@@ -10137,7 +10255,13 @@ def _apply_hook_connector_setup(
         }
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
-        if not _check_connector_version_supported_for_setup(connector, **version_check_kwargs):
+        # The scope records why a refusal holds; the train has no observe
+        # fallback for a refused version (GAP-0554).
+        refusal_scope: dict[str, Any] = {}
+        if not _check_connector_version_supported_for_setup(
+            connector, _refusal_scope=refusal_scope, **version_check_kwargs
+        ):
+            restore_preflight_discovery()
             return False
 
     cfg = app.cfg
@@ -10149,6 +10273,7 @@ def _apply_hook_connector_setup(
             capture_codex_backup=connector == "codex" and restart,
         )
     except _SetupGatewayNoAnswerError as exc:
+        restore_preflight_discovery()
         # Same next step as the busy-gateway restart check (GAP-1668).
         ux.echo(
             f"  ✗ Setup did not start: {exc}; the host may be busy.\n"
@@ -10157,6 +10282,7 @@ def _apply_hook_connector_setup(
         )
         return False
     except OSError as exc:
+        restore_preflight_discovery()
         ux.echo(
             f"  ✗ Cannot establish connector setup rollback point: {exc}\n"
             f"    {_SETUP_ROLLBACK_POINT_NEXT_STEP}",
@@ -14709,7 +14835,7 @@ def _gateway_pid_generation_marker(data_dir: str) -> bytes | None:
         return None
 
 
-def _gateway_api_endpoint(data_dir: str) -> tuple[str, int] | None:
+def _gateway_api_config(data_dir: str) -> Any | None:
     try:
         cfg = load_config(data_dir=data_dir)
         gateway = cfg.gateway
@@ -14721,28 +14847,33 @@ def _gateway_api_endpoint(data_dir: str) -> tuple[str, int] | None:
         return None
     if not isinstance(host, str) or not host.strip() or not 1 <= port <= 65535:
         return None
-    return host, port
+    return cfg
 
 
 def _read_defense_gateway_health_once(
-    host: str,
-    port: int,
+    cfg: Any,
     *,
     timeout: float,
 ) -> dict[str, Any] | None:
-    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    # Setup uses this document to decide whether a replacement gateway is
+    # ready. Bind the request to the configured gateway's accepted socket, as
+    # Doctor does for audit-store and lifecycle decisions.
+    from defenseclaw.commands.cmd_doctor import _gateway_health_probe
+
+    code, body = _gateway_health_probe(
+        cfg,
+        timeout=timeout,
+        response_limit=1 << 20,
+        allow_truncation=False,
+        bypass_proxy=True,
+    )
+    if code != 200:
+        return None
     try:
-        connection.request("GET", "/health")
-        response = connection.getresponse()
-        body = response.read(1 << 20)
-        if response.status != 200:
-            return None
         health = _json.loads(body)
         return health if isinstance(health, dict) else None
-    except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
+    except (TypeError, ValueError):
         return None
-    finally:
-        connection.close()
 
 
 def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntimeGeneration:
@@ -14754,13 +14885,13 @@ def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntime
     # probing an ambient/default API endpoint that may belong to a different
     # installation while preparing a fresh start.
     config_path = config_path_for_data_dir(data_dir)
-    endpoint = (
-        _gateway_api_endpoint(data_dir)
+    gateway_cfg = (
+        _gateway_api_config(data_dir)
         if pid_marker is not None and os.path.isfile(config_path)
         else None
     )
-    if endpoint is not None:
-        health = _read_defense_gateway_health_once(*endpoint, timeout=0.5)
+    if gateway_cfg is not None:
+        health = _read_defense_gateway_health_once(gateway_cfg, timeout=0.5)
         raw_started_at = health.get("started_at") if health is not None else None
         if isinstance(raw_started_at, str) and raw_started_at.strip():
             started_at = raw_started_at.strip()
@@ -15497,33 +15628,12 @@ def _connector_runtime_snapshot_failure(
 
 
 def _read_gateway_health(data_dir: str, *, timeout: float = 1.0) -> dict[str, Any] | None:
-    try:
-        config_path = config_path_for_data_dir(data_dir)
-        if not os.path.isfile(config_path):
-            return None
-        cfg = load_config(data_dir=data_dir)
-        gateway = cfg.gateway
-        from defenseclaw.logger import _gateway_api_host
-
-        host = _gateway_api_host(cfg)
-        port = int(getattr(gateway, "api_port", 18970) or 18970)
-    except (AttributeError, OSError, TypeError, ValueError):
+    if not os.path.isfile(config_path_for_data_dir(data_dir)):
         return None
-    if not 1 <= port <= 65535:
+    gateway_cfg = _gateway_api_config(data_dir)
+    if gateway_cfg is None:
         return None
-    connection = http.client.HTTPConnection(host, port, timeout=max(0.01, min(timeout, 1.0)))
-    try:
-        connection.request("GET", "/health")
-        response = connection.getresponse()
-        body = response.read(1 << 20)
-        if response.status != 200:
-            return None
-        health = _json.loads(body)
-        return health if isinstance(health, dict) else None
-    except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
-        return None
-    finally:
-        connection.close()
+    return _read_defense_gateway_health_once(gateway_cfg, timeout=max(0.01, min(timeout, 1.0)))
 
 
 def _gateway_health_generation(data_dir: str) -> str | None:
@@ -16564,10 +16674,9 @@ def _wait_for_defense_gateway_api(
     This also covers the platform socket-reclaim retry in the Go API server,
     which may legitimately take up to 30 seconds.
     """
-    endpoint = _gateway_api_endpoint(data_dir)
-    if endpoint is None:
+    gateway_cfg = _gateway_api_config(data_dir)
+    if gateway_cfg is None:
         return False
-    host, port = endpoint
     expected = {normalize_connector(name) for name in expected_connectors if name}
 
     bounded_timeout = max(0.0, timeout)
@@ -16581,7 +16690,7 @@ def _wait_for_defense_gateway_api(
         # the caller's budget. Clamp to that original budget so a single
         # health probe never receives a longer timeout than setup promised,
         # particularly for short test/automation deadlines.
-        health = _read_defense_gateway_health_once(host, port, timeout=probe_timeout)
+        health = _read_defense_gateway_health_once(gateway_cfg, timeout=probe_timeout)
         api = health.get("api") if health is not None else None
         state = api.get("state") if isinstance(api, dict) else None
         ready = isinstance(state, str) and state.strip().lower() == "running"
@@ -18022,6 +18131,7 @@ def _apply_v8_observability_preset(
     signals: tuple[str, ...] | None = None,
     secret_value: str | None = None,
     local_stack: dict[str, str] | None = None,
+    legacy_local_destination: tuple[dict[str, Any], str] | None = None,
     allow_private_networks: bool = False,
 ) -> str:
     """Write one setup alias through the canonical v8 destination writer.
@@ -18053,6 +18163,7 @@ def _apply_v8_observability_preset(
         dry_run=False,
         allow_private_networks=allow_private_networks,
         local_stack=local_stack,
+        legacy_local_destination=legacy_local_destination,
     )
     return resolved_name
 
@@ -18133,10 +18244,14 @@ def _apply_logs_config(
         )
         return
 
-    # Refuse a destination local setup did not record before the stack is
-    # refreshed, restarted or started. The name comes from the address the
-    # bridge will report, which a custom bridge env file can change.
-    _local_splunk_sink_name_or_exit(app, local_splunk_destination_name(_planned_local_splunk_hec_url(app.cfg.data_dir)))
+    # Prove an unrecorded legacy sink belongs to this exact bridge before the
+    # stack is refreshed or stopped. A matching name or loopback URL alone is
+    # also possible for a remote destination reached through a tunnel.
+    preferred = local_splunk_destination_name(_planned_local_splunk_hec_url(app.cfg.data_dir))
+    legacy_local_destination = _verified_legacy_local_splunk_destination(
+        app.cfg.data_dir, preferred, native_windows=False, gateway_token_env=gateway_token_env,
+    )
+    _local_splunk_sink_name_or_exit(app, preferred, legacy_local_destination=legacy_local_destination)
     contract = _bootstrap_bridge(
         app.cfg.data_dir,
         gateway_token_env=gateway_token_env,
@@ -18173,9 +18288,12 @@ def _apply_logs_config(
             "sourcetype": sourcetype,
             "verify_tls": "false",
         },
-        name=_local_splunk_sink_name_or_exit(app, local_splunk_destination_name(hec_url)),
+        name=_local_splunk_sink_name_or_exit(
+            app, local_splunk_destination_name(hec_url), legacy_local_destination=legacy_local_destination,
+        ),
         secret_value=hec_token or None,
         local_stack=record,
+        legacy_local_destination=legacy_local_destination,
         # The local Splunk container listens on this computer.
         allow_private_networks=True,
     )
@@ -18195,15 +18313,107 @@ def _planned_local_splunk_hec_url(data_dir: str) -> str:
     return entries.get("DEFENSECLAW_HEC_URL") or _SPLUNK_BRIDGE_DEFAULT_HEC_URL
 
 
-def _local_splunk_sink_name_or_exit(app: AppContext, preferred: str) -> str:
+def _local_splunk_sink_name_or_exit(
+    app: AppContext, preferred: str, *, legacy_local_destination: tuple[dict[str, Any], str] | None = None,
+) -> str:
     """The destination local setup writes; refuse one it did not record."""
 
     from defenseclaw.commands.cmd_setup_observability import _local_splunk_sink_name, _v8_authored_destinations
 
     try:
-        return _local_splunk_sink_name(_v8_authored_destinations(app.cfg.data_dir), preferred)
+        return _local_splunk_sink_name(
+            _v8_authored_destinations(app.cfg.data_dir), preferred,
+            legacy_local_destination=legacy_local_destination[0] if legacy_local_destination else None,
+        )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _verified_legacy_local_splunk_destination(
+    data_dir: str, preferred: str, *, native_windows: bool, gateway_token_env: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Identify a pre-record sink only with its bridge contract and exact Docker ownership."""
+    from defenseclaw.commands.cmd_setup_observability import _stored_secret, _v8_authored_destination_snapshot
+    from defenseclaw.observability.local_splunk import COMPOSE_PROJECT, LOCAL_TOKEN_ENV
+    from defenseclaw.observability.local_stack import CommandRunner, LocalStackError
+    from defenseclaw.observability.v8_config import load_masked_v8_with_source
+    from defenseclaw.observability.v8_presets import is_recorded_local_splunk
+
+    authored, source_sha256 = _v8_authored_destination_snapshot(data_dir)
+    masked_existing = next((item for item in authored if item.get("name") == preferred), None)
+    if masked_existing is None:
+        return None
+    source_bytes = config_path_for_data_dir(data_dir).read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != source_sha256:
+        return None
+    _, source = load_masked_v8_with_source(source_bytes)
+    destinations = source.get("observability", {}).get("destinations", [])
+    existing = next((item for item in destinations if isinstance(item, dict) and item.get("name") == preferred), None)
+    expected_ref = LOCAL_TOKEN_ENV if native_windows else "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+    if (
+        existing is None or is_recorded_local_splunk(existing) or "local_stack" in existing
+        or existing.get("kind") != "splunk_hec" or existing.get("token_env") != expected_ref
+    ):
+        return None
+    stack_dir = Path(data_dir) / "splunk-bridge"
+    bin_dir = stack_dir / "bin"
+    compose_dir = stack_dir / "compose"
+    env_dir = stack_dir / "env"
+    bridge = bin_dir / "splunk-claw-bridge"
+    compose = compose_dir / "docker-compose.local.yml"
+    env_file = env_dir / ".env"
+    try:
+        for path in (stack_dir, bin_dir, compose_dir, env_dir, bridge, compose, env_file):
+            reject_symlink(path, what="local Splunk bridge ownership path")
+            if not path.exists():
+                return None
+        if not all(path.is_dir() for path in (stack_dir, bin_dir, compose_dir, env_dir)):
+            return None
+        if not all(path.is_file() for path in (bridge, compose, env_file)):
+            return None
+        contract = _load_dotenv(str(env_file))
+        credential = _stored_secret(data_dir, expected_ref)
+        if (
+            not credential or contract.get("DEFENSECLAW_HEC_TOKEN") != credential
+            or existing.get("endpoint") != contract.get("DEFENSECLAW_HEC_URL")
+        ):
+            return None
+        docker = shutil.which("docker")
+        if not docker:
+            return None
+        runner = CommandRunner()
+        environment = _splunk_bridge_child_env(gateway_token_env, platform_name="nt" if native_windows else None)
+        listed = runner.run(
+            [docker, "ps", "--all", "--no-trunc", "--filter", f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+             "--filter", "label=com.docker.compose.service=splunk", "--format", "{{.ID}}"],
+            timeout=10, env=environment,
+        )
+        ids = listed.stdout.splitlines() if listed.returncode == 0 else []
+        if len(ids) != 1 or not re.fullmatch(r"[0-9a-f]{64}", ids[0]):
+            return None
+        inspected = runner.run(
+            [docker, "inspect", "--format", "{{json .Config.Labels}}", ids[0]],
+            timeout=8, env=environment,
+        )
+        labels = _json.loads(inspected.stdout) if inspected.returncode == 0 else None
+        if not isinstance(labels, dict):
+            return None
+        def same_path(raw: str, expected: Path) -> bool:
+            return os.path.normcase(os.path.abspath(raw)) == os.path.normcase(os.path.abspath(expected))
+        config_files = str(labels.get("com.docker.compose.project.config_files", ""))
+        if (
+            labels.get("com.docker.compose.project") != COMPOSE_PROJECT
+            or labels.get("com.docker.compose.service") != "splunk"
+            or not same_path(
+                str(labels.get("com.docker.compose.project.working_dir", "")),
+                stack_dir if native_windows else compose_dir,
+            )
+            or not any(same_path(item.strip(), compose) for item in config_files.split(",") if item.strip())
+        ):
+            return None
+    except (OSError, ValueError, LocalStackError):
+        return None
+    return masked_existing, source_sha256
 
 
 def _local_splunk_container_id(gateway_token_env: str) -> str:
@@ -18266,7 +18476,13 @@ def _apply_native_windows_logs_config(
     contract = None
     config_mutated = False
     # Refuse a destination local setup did not record before the stack starts.
-    sink_name = _local_splunk_sink_name_or_exit(app, NATIVE_LOCAL_SPLUNK_DESTINATION)
+    legacy_local_destination = _verified_legacy_local_splunk_destination(
+        app.cfg.data_dir, NATIVE_LOCAL_SPLUNK_DESTINATION,
+        native_windows=True, gateway_token_env=gateway_token_env,
+    )
+    sink_name = _local_splunk_sink_name_or_exit(
+        app, NATIVE_LOCAL_SPLUNK_DESTINATION, legacy_local_destination=legacy_local_destination,
+    )
     click.echo("  Pre-flight checks:")
     try:
         transaction = start_native_local_splunk(
@@ -18309,6 +18525,7 @@ def _apply_native_windows_logs_config(
             name=sink_name,
             secret_value=contract.hec_token,
             local_stack=record,
+            legacy_local_destination=legacy_local_destination,
             allow_private_networks=True,
         )
         _reload_cfg_from_data_dir(app)
@@ -18549,33 +18766,46 @@ def _splunk_bridge_child_env(
     return child_env
 
 
+def _preflight_splunk_bridge_image(
+    env_file: str,
+    child_env: dict[str, str],
+    *,
+    image_override: str | None = None,
+) -> None:
+    """Resolve an image before changing the private env or running Compose stack."""
+    preflight = str(bundled_splunk_bridge_dir() / "bin" / "splunk-claw-bridge")
+    preflight_args = [preflight, "preflight-image", "--env-file", env_file]
+    if image_override:
+        preflight_args.extend(["--image", image_override])
+    try:
+        preflight_kwargs = {
+            "capture_output": True, "text": True, "timeout": 10800, "check": False,
+            "env": child_env,
+        }
+        if click.get_text_stream("stderr").isatty():
+            # A registry download may take hours; show daemon progress.
+            preflight_kwargs.pop("capture_output")
+            preflight_kwargs.update(stdout=subprocess.PIPE, stderr=None)
+        checked = subprocess.run(preflight_args, **preflight_kwargs)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise click.ClickException(
+            f"Local Splunk image preflight failed; local stack was left untouched: {exc}"
+        ) from exc
+    if checked.returncode != 0:
+        _echo_bridge_output_tail(checked)
+        raise click.ClickException("Local Splunk image is unavailable; local stack was left untouched")
+
+
 def _refresh_and_maybe_restart_splunk_bridge(
     data_dir: str,
     *,
     env_file: str | None = None,
     child_env: dict[str, str] | None = None,
     gateway_token_env: str = "",
+    image_override: str | None = None,
+    image_preflighted: bool = False,
 ) -> RefreshResult:
-    """Refresh the seeded Splunk bridge, stopping any running stack first.
-
-    Sequence (all best-effort — refresh failures don't abort the parent
-    setup flow because the operator can still run with a stale bundle):
-
-    1. Detect a running ``defenseclaw-splunk-local`` compose project.
-    2. If running and a bridge binary exists, invoke ``bridge down``
-       to release the compose project (named volumes survive, so user
-       data is preserved across the bounce).
-    3. Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundle. The
-       refresh preserves operator secrets (``env/.env``) and the
-       generated app tarball (``splunk/build/``).
-    4. The caller then runs ``bridge up`` so the freshly refreshed
-       bundle (compose, bin, s3_exporter Dockerfile, app source) is
-       what materializes the next stack.
-
-    Surface every step inline so an operator sees exactly what
-    happened and never has to wonder why a previously-running stack
-    came back up on a different image.
-    """
+    """Resolve the image before stopping a running stack, then refresh its bundle."""
     effective_child_env = _splunk_bridge_child_env(
         gateway_token_env,
         environment=child_env,
@@ -18586,6 +18816,12 @@ def _refresh_and_maybe_restart_splunk_bridge(
     )
     stopped = False
     if was_running:
+        if not image_preflighted:
+            _preflight_splunk_bridge_image(
+                env_file or os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL),
+                effective_child_env,
+                image_override=image_override,
+            )
         ux.echo(f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle...")
         bridge = _resolve_bridge_bin(data_dir)
         if bridge:
@@ -18655,12 +18891,17 @@ def _bootstrap_bridge(
     """
     env = _splunk_bridge_child_env(gateway_token_env)
     env_file = _ensure_private_splunk_bridge_env(data_dir)
+    replacement_image = _replacement_splunk_image(env_file)
+    if replacement_image:
+        _preflight_splunk_bridge_image(env_file, env, image_override=replacement_image)
     if refresh_bundle:
         _refresh_and_maybe_restart_splunk_bridge(
             data_dir,
             env_file=env_file,
             child_env=env,
             gateway_token_env=gateway_token_env,
+            image_override=replacement_image,
+            image_preflighted=bool(replacement_image),
         )
     _migrate_retired_splunk_image(env_file)
 
@@ -18791,17 +19032,26 @@ def _ensure_private_splunk_bridge_env(data_dir: str) -> str:
 
 def _migrate_retired_splunk_image(env_file: str) -> None:
     """Upgrade 0.8.10 and 1.0.0-1.0.3 private envs; remove after the 1.0.x bridge."""
+    image = _replacement_splunk_image(env_file)
+    if image is None:
+        return
+    entries = _load_dotenv(env_file)
+    entries["SPLUNK_IMAGE"] = image
+    _write_dotenv(env_file, entries)
+
+
+def _replacement_splunk_image(env_file: str) -> str | None:
+    """Find the retired image's replacement without changing the private env."""
     from defenseclaw.observability.local_splunk import RETIRED_SPLUNK_IMAGE
 
     entries = _load_dotenv(env_file)
     if entries.get("SPLUNK_IMAGE") != RETIRED_SPLUNK_IMAGE:
-        return
+        return None
     current_template = _load_dotenv(str(bundled_splunk_bridge_dir() / "env" / ".env.example"))
     image = current_template.get("SPLUNK_IMAGE", "")
     if not image or image == RETIRED_SPLUNK_IMAGE:
         raise click.ClickException("Bundled Splunk image reference is unavailable")
-    entries["SPLUNK_IMAGE"] = image
-    _write_dotenv(env_file, entries)
+    return image
 
 
 def _load_splunk_bridge_example_env(data_dir: str) -> dict[str, str]:

@@ -539,6 +539,16 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			a.serveSandboxRoute(authorizer, peer, route, w, r, next)
 			return
 		}
+		if r.URL.Path == connector.UserScopedRotationProofPath {
+			// A root lifecycle can prove a large roster during key rotation.
+			// Hook-call budgets must not make that transaction fail mid-roster.
+			if peer.UID != 0 {
+				writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonGuardianOnly)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		r, release := a.admitHookCaller(w, r, strconv.Itoa(peer.UID), route)
 		if release == nil {
 			return
@@ -568,16 +578,15 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get(hookexec.ClientRefusalHeader) == hookexec.ManagedUserNamespaceReason {
-			// A hook in a private user namespace refused its agent before it
-			// could check the runtime state; the refusal left no audit row or
-			// log line, unlike a refused unenrolled account (GAP-0923).
+		if reason := r.Header.Get(hookexec.ClientRefusalHeader); hookexec.IsManagedProcessContextReason(reason) {
+			// A hook refused an unsafe or unverified process context before it
+			// could inspect the event. Keep the refusal in the audit and log.
 			connectorName, _ := a.managedHookRouteScope(r)
 			fmt.Fprintf(os.Stderr,
-				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent runs in a private user namespace\n",
-				peer.UID, connectorName, route, hookexec.ManagedUserNamespaceReason)
-			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, hookexec.ManagedUserNamespaceReason, connectorName)
-			writeManagedHookRefusal(w, http.StatusForbidden, hookexec.ManagedUserNamespaceReason)
+				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent process context is unsafe or unverified\n",
+				peer.UID, connectorName, route, reason)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason, connectorName)
+			writeManagedHookRefusal(w, http.StatusForbidden, reason)
 			return
 		}
 		connectorName, inspect := a.managedHookRouteScope(r)
@@ -683,9 +692,10 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 // managedHookSocketMux registers only the agent-facing routes on the hook
 // socket: connector hook endpoints, the inspect endpoints, the Codex
 // notifier, the refused-write report of a standard user CLI, the root
-// guardian's repair report and the managed sandbox authority routes a user's
-// sandbox daemon calls. Management, status, configuration, policy and scan
-// routes are not reachable through it at all.
+// guardian's repair report, the root lifecycle's credential rotation proof,
+// and the managed sandbox authority routes a user's sandbox daemon calls.
+// Management, status, configuration, policy and scan routes are not reachable
+// through it at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
@@ -701,6 +711,7 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
 	mux.HandleFunc(managed.LaunchCoverageReportPath, a.handleManagedLaunchCoverageAudit)
+	mux.HandleFunc(connector.UserScopedRotationProofPath, a.serveRotationListenerProof)
 	a.registerSandboxAuthorityRoutes(mux)
 	a.registerSandboxRelayRoutes(mux)
 	handler := bodyLimitMiddleware(mux, func(r *http.Request) int64 {

@@ -125,15 +125,22 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 	// A plugin rendered before the listener proof existed would still send
 	// its credential to whoever holds the TCP port; it is repaired.
 	if managedPluginListenerProof(opts) {
+		proofCall := []byte("if (DC_LISTENER_PROOF) return provenTCPRequest(path, init, token)")
 		markers = append(markers,
 			[]byte("const DC_LISTENER_PROOF: string = \"1\"\n"),
-			[]byte("if (DC_LISTENER_PROOF) await proveListener(token, init.signal)"),
+			proofCall,
 		)
 	}
 	if !opts.ManagedEnterprise {
 		markers = append(markers,
 			[]byte("const DC_PER_USER_NATIVE_POST: string = \"1\"\n"),
 			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
+		)
+	}
+	if pluginSecureClientProfile(opts) {
+		markers = append(markers,
+			[]byte(`const DC_NATIVE_POST_BINARY = "`),
+			[]byte(`return nativePost(path, init)`),
 		)
 	}
 	for _, marker := range markers {

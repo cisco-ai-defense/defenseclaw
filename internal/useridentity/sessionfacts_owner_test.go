@@ -37,7 +37,9 @@ func TestCredentialCacheFileRequiresEffectiveOwner(t *testing.T) {
 // hook a short bound, not the whole session-facts deadline, and the hooks
 // after it send the session variables alone without touching the cache.
 func TestSessionFactsSkipAStalledCredentialCache(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	// The session-facts cache, where a stalled read is remembered, lives in
+	// the DefenseClaw folder, which the cache no longer creates (GAP-0654).
+	sessionFactsHomeForTest(t)
 	t.Setenv("KRB5CCNAME", "FILE:/stalled-mount/krb5cc")
 	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.1 22")
 	t.Setenv("SSH_TTY", "")
@@ -71,7 +73,9 @@ func TestSessionFactsSkipAStalledCredentialCache(t *testing.T) {
 // 1.8 s of its own) inside the 3.5 s hook answer budget; the hooks after it
 // do not ask the KCM again.
 func TestSessionFactsBoundAHungKCM(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	// The session-facts cache, where a stalled read is remembered, lives in
+	// the DefenseClaw folder, which the cache no longer creates (GAP-0654).
+	sessionFactsHomeForTest(t)
 	t.Setenv("KRB5CCNAME", "KCM:")
 	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.1 22")
 	t.Setenv("SSH_TTY", "")
@@ -116,7 +120,9 @@ func TestSessionFactsBoundAHungKCM(t *testing.T) {
 // bound: an include on a stalled path costs one hook the bound, and the hooks
 // after it do not read the file again.
 func TestSessionFactsBoundAStalledKrb5Conf(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	// The session-facts cache, where a stalled read is remembered, lives in
+	// the DefenseClaw folder, which the cache no longer creates (GAP-0654).
+	sessionFactsHomeForTest(t)
 	t.Setenv("KRB5CCNAME", "")
 	t.Setenv("SSH_CONNECTION", "192.0.2.10 50000 192.0.2.1 22")
 	t.Setenv("SSH_TTY", "")
@@ -143,4 +149,15 @@ func TestSessionFactsBoundAStalledKrb5Conf(t *testing.T) {
 	if n := reads.Load(); n != 1 {
 		t.Fatalf("krb5.conf was read %d times, want once", n)
 	}
+}
+
+// sessionFactsHomeForTest points HOME at a new folder with the DefenseClaw
+// folder an installed account has.
+func sessionFactsHomeForTest(t *testing.T) {
+	t.Helper()
+	home := t.TempDir()
+	if err := os.Mkdir(filepath.Join(home, ".defenseclaw"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
 }

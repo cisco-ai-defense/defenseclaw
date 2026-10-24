@@ -267,9 +267,9 @@ func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 		return
 	}
 	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. "+
-		"The user's `defenseclaw sandbox stop NAME` flushes and stops a running one; a MicroVM whose workload completed or that is in OpenShell's error state, "+
+		"Save or sync any accessible guest work first; the user's `defenseclaw sandbox stop NAME` requests a disk sync before stopping a running one (a failed sync can lose later changes); a MicroVM whose workload completed or that is in OpenShell's error state, "+
 		"which OpenShell does not stop and whose VM may still run, holds the change until OpenShell reports it stopped (the user's `defenseclaw sandbox stop NAME` says how) "+
-		"or the user deletes it (`defenseclaw sandbox delete NAME`)",
+		"or, after saving accessible work outside the guest, the user deletes it (`defenseclaw sandbox delete NAME`)",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
 

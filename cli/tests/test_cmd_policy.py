@@ -19,6 +19,7 @@
 import os
 import sys
 import unittest
+from pathlib import Path
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -789,6 +790,40 @@ class TestPolicyDeleteKeepsConfig(PolicyCommandTestBase):
         self.assertFalse(os.path.exists(
             os.path.join(self.app.cfg.policy_dir, "drop.yaml")
         ))
+
+
+class TestPolicyLoadRefusals(PolicyCommandTestBase):
+    def test_malformed_or_nonmapping_yaml_names_the_cause(self):
+        source = Path(self.tmp_dir) / "input.yaml"
+        for content, cause in (
+            ("name: [unterminated\n", "invalid YAML"),
+            ("- one\n- two\n", "mapping"),
+        ):
+            with self.subTest(content=content):
+                source.write_text(content, encoding="utf-8")
+                result = self.invoke(["load", str(source)])
+                self.assertEqual(result.exit_code, 1, result.output)
+                self.assertIn(cause, result.output)
+                self.assertNotIn("Traceback", result.output)
+                self.assertEqual(list(Path(self.app.cfg.policy_dir).glob("input*.yaml")), [])
+
+    def test_linked_catalog_destination_is_refused_without_touching_its_target(self):
+        source = Path(self.tmp_dir) / "source.yaml"
+        source.write_text("name: linked\nadmission:\n  scan_on_install: true\n", encoding="utf-8")
+        target = Path(self.tmp_dir) / "outside.yaml"
+        original = b"outside target remains untouched\n"
+        target.write_bytes(original)
+        dest = Path(self.app.cfg.policy_dir) / "linked.yaml"
+        try:
+            dest.symlink_to(target)
+        except OSError as exc:
+            self.skipTest(f"cannot create a file symlink on this host: {exc}")
+
+        result = self.invoke(["load", str(source)])
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("symbolic link", result.output)
+        self.assertTrue(dest.is_symlink())
+        self.assertEqual(target.read_bytes(), original)
 
 
 if __name__ == "__main__":

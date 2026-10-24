@@ -35,12 +35,54 @@ def test_cli_checks_connected_socket_before_sending_after_listener_replacement()
         with (
             mock.patch.object(gateway, "_unproven_per_user_gateway_target", return_value=""),
             mock.patch.object(
-                gateway, "_verify_connected_gateway_socket",
+                gateway,
+                "_verify_connected_gateway_socket",
                 side_effect=gateway.GatewayListenerNotOwnedError("connected peer is another account"),
                 create=True,
             ) as verify,
         ):
             with pytest.raises(requests.ConnectionError):
+                client.status()
+            assert verify.called
+        assert received == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_managed_cli_checks_service_peer_before_sending_to_a_foreign_listener(tmp_path) -> None:
+    from defenseclaw import upgrade_shim
+
+    received: list[str] = []
+
+    class Peer(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received.append(self.headers.get("Authorization", ""))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *_args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Peer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    binary = tmp_path / "defenseclaw-gateway"
+    binary.write_text("#!/bin/sh\nexit 1\n", encoding="ascii")
+    binary.chmod(0o700)
+    descriptor = "/etc/defenseclaw/managed-runtime.json"
+    try:
+        client = gateway.OrchestratorClient(host="127.0.0.1", port=server.server_port, token="private-token")
+        with (
+            mock.patch.object(upgrade_shim, "managed_descriptor", return_value=descriptor),
+            mock.patch.dict(gateway._MANAGED_GATEWAY_BINARIES, {descriptor: str(binary)}),
+            mock.patch.object(gateway, "_trusted_connected_verifier_binary"),
+            mock.patch.object(gateway.subprocess, "run", return_value=SimpleNamespace(returncode=1)) as verify,
+        ):
+            with pytest.raises(requests.ConnectionError, match="connected gateway"):
                 client.status()
             assert verify.called
         assert received == []
@@ -58,10 +100,13 @@ def test_mac_status_and_doctor_name_a_peer_listener_hidden_from_lsof() -> None:
         mock.patch.object(cmd_doctor.sys, "platform", "darwin"),
         mock.patch.object(cmd_doctor, "_gateway_port_holder", return_value=""),
         mock.patch.object(cmd_doctor, "_gateway_api_host", return_value="127.0.0.1"),
-        mock.patch.object(gateway, "foreign_loopback_listener", return_value="127.0.0.1:19081 is held by a process of another account"),
+        mock.patch.object(
+            gateway, "foreign_loopback_listener", return_value="127.0.0.1:19081 is held by a process of another account"
+        ),
     ):
         holder = cmd_doctor._foreign_gateway_port_holder(cfg)
     assert "another account" in holder
+
 
 _HEADER = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
 
@@ -121,7 +166,9 @@ def test_mac_listener_owner_checks_the_configured_address() -> None:
 def test_client_refuses_to_send_its_token_to_a_foreign_listener() -> None:
     client = gateway.OrchestratorClient(host="127.0.0.1", port=18960, token="t" * 64)
     with (
-        mock.patch.object(gateway, "_unproven_per_user_gateway_target", return_value="held by another account") as check,
+        mock.patch.object(
+            gateway, "_unproven_per_user_gateway_target", return_value="held by another account"
+        ) as check,
         mock.patch.object(requests.adapters.HTTPAdapter, "send", side_effect=AssertionError("token sent")),
     ):
         with pytest.raises(gateway.GatewayListenerNotOwnedError, match="held by another account"):
@@ -140,6 +187,42 @@ def test_client_without_a_token_still_requires_listener_proof() -> None:
     check.assert_called_once_with("127.0.0.1", 18960)
 
 
+def test_doctor_health_refuses_an_unverified_gateway_before_reading_its_decision() -> None:
+    from defenseclaw.commands import cmd_doctor
+
+    received: list[str] = []
+
+    class Peer(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            received.append(self.path)
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"audit_store":{"state":"replaced"}}')
+
+        def log_message(self, *_args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Peer)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        cfg = SimpleNamespace(gateway=SimpleNamespace(api_port=server.server_port))
+        with (
+            mock.patch.object(cmd_doctor, "_gateway_api_host", return_value="127.0.0.1"),
+            mock.patch.object(
+                cmd_doctor,
+                "_trusted_gateway_listener",
+                return_value=SimpleNamespace(trusted=False, detail="listener belongs to another account"),
+            ),
+        ):
+            assert cmd_doctor._live_gateway_health(cfg) is None
+        assert received == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
 def test_client_requires_positive_gateway_listener_proof_even_when_foreign_probe_is_empty() -> None:
     from defenseclaw import config, upgrade_shim
     from defenseclaw.commands import cmd_doctor
@@ -150,7 +233,11 @@ def test_client_requires_positive_gateway_listener_proof_even_when_foreign_probe
         mock.patch.object(upgrade_shim, "managed_descriptor", return_value=None),
         mock.patch.object(config, "load", return_value=cfg),
         mock.patch.object(gateway, "gateway_api_client_host", return_value="127.0.0.1"),
-        mock.patch.object(cmd_doctor, "_trusted_gateway_listener", return_value=SimpleNamespace(trusted=False, detail="listener not proven")),
+        mock.patch.object(
+            cmd_doctor,
+            "_trusted_gateway_listener",
+            return_value=SimpleNamespace(trusted=False, detail="listener not proven"),
+        ),
         mock.patch.object(gateway, "foreign_loopback_listener", return_value=""),
         mock.patch.object(requests.adapters.HTTPAdapter, "send", side_effect=AssertionError("token sent")),
     ):
@@ -165,7 +252,9 @@ def test_client_rejects_a_token_bearing_request_to_a_changed_target() -> None:
         mock.patch.object(requests.adapters.HTTPAdapter, "send", side_effect=AssertionError("token sent")),
     ):
         with pytest.raises(gateway.GatewayListenerNotOwnedError, match="target changed"):
-            client._session.post("http://127.0.0.1:18961/otlp", headers={"Authorization": "Bearer secret"}, data=b"telemetry")
+            client._session.post(
+                "http://127.0.0.1:18961/otlp", headers={"Authorization": "Bearer secret"}, data=b"telemetry"
+            )
 
 
 @pytest.mark.parametrize(
@@ -183,7 +272,9 @@ def test_windows_listener_owner(tmp_path, recorded_pid, process_status, expected
     record = evidence.PIDRecord("ok", pid=recorded_pid) if recorded_pid else evidence.PIDRecord("missing")
     with (
         mock.patch.dict(os.environ, {"DEFENSECLAW_HOME": str(tmp_path)}),
-        mock.patch.object(evidence, "_windows_listener_evidence", return_value=evidence.ListenerEvidence("ok", pid=13496)),
+        mock.patch.object(
+            evidence, "_windows_listener_evidence", return_value=evidence.ListenerEvidence("ok", pid=13496)
+        ),
         mock.patch.object(evidence, "read_pid_record", return_value=record) as read,
         mock.patch.object(evidence, "_windows_process_evidence", return_value=evidence.ProcessEvidence(process_status)),
     ):

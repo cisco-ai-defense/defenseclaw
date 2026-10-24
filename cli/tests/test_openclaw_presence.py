@@ -223,6 +223,11 @@ def test_doctor_sidecar_row_shows_the_gateway_summary(tmp_path, no_openclaw_bina
         "telemetry": {"state": "running"},
     }
     monkeypatch.setattr(cmd_doctor, "_http_probe", lambda *_a, **_k: (200, json.dumps(health)))
+    monkeypatch.setattr(
+        cmd_doctor,
+        "_trusted_gateway_listener",
+        lambda *_a, **_k: cmd_doctor._GatewayTrust("trusted", "fixture gateway", 4242, home_bound=True),
+    )
     cfg = _cfg(tmp_path)
 
     result = cmd_doctor._DoctorResult()

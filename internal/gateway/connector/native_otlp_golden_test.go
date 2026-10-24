@@ -79,6 +79,7 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 	t.Parallel()
 	opts := fixedSetupOpts(t)
 	opts.ManagedEnterprise = true
+	opts.sandboxNativeOTLP = true
 
 	pathToken, err := EnsureOTLPPathToken(opts.DataDir, OTLPScopeCodex)
 	if err != nil || pathToken == "" {
@@ -98,7 +99,7 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		t.Errorf("codex [otel].environment = %#v; want configured environment %q", got, opts.CodexOtelEnvironment)
 	}
 	defaultBlock, err := buildCodexOtelBlockWithPathToken(
-		SetupOpts{APIAddr: opts.APIAddr, ManagedEnterprise: true},
+		SetupOpts{APIAddr: opts.APIAddr, ManagedEnterprise: true, sandboxNativeOTLP: true},
 		pathToken,
 	)
 	if err != nil {
@@ -198,7 +199,7 @@ func TestCodexOtelEnvironmentFollowsSetupEnvironment(t *testing.T) {
 func TestCodexHookProfile_IsPureAndLeavesScopedTokenUnresolved(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-credential", ManagedEnterprise: true}
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970", APIToken: "hook-credential", ManagedEnterprise: true, sandboxNativeOTLP: true}
 	tokenPath, err := OTLPPathTokenFilePath(dir, OTLPScopeCodex)
 	if err != nil {
 		t.Fatalf("OTLPPathTokenFilePath: %v", err)
@@ -233,6 +234,7 @@ func TestCodexHookProfile_IsPureAndLeavesScopedTokenUnresolved(t *testing.T) {
 		DataDir:           existingDir,
 		APIAddr:           opts.APIAddr,
 		ManagedEnterprise: true,
+		sandboxNativeOTLP: true,
 	})
 	if existingProfile.NativeOTLP.PathToken != "" || existingProfile.NativeOTLP.PathScope != "" {
 		t.Fatal("Codex HookProfile loaded an existing setup-owned token")
@@ -251,8 +253,9 @@ func TestCodexHookProfile_IsPureAndLeavesScopedTokenUnresolved(t *testing.T) {
 func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	t.Parallel()
 	opts := fixedSetupOpts(t)
-	// Managed installs use the native exporter on every platform.
+	// The isolated sandbox retains its own native exporter.
 	opts.ManagedEnterprise = true
+	opts.sandboxNativeOTLP = true
 	opts.GOOS = "windows"
 
 	env := buildClaudeCodeOtelEnv(opts)
@@ -367,6 +370,7 @@ func TestClaudeCodeManagedSettingsProjectionIsStableAcrossGatewayMasterRotation(
 			HookAPITokenScoped: true,
 			OTLPPathToken:      scopedOTLPToken,
 			ManagedEnterprise:  true,
+			sandboxNativeOTLP:  true,
 			// The static bearer contract (Windows and managed installs).
 			GOOS: "windows",
 		}

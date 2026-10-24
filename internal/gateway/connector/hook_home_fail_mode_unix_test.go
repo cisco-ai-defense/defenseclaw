@@ -63,7 +63,7 @@ func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 					"DEFENSECLAW_HOME=" + filepath.Join(home, "missing"), "DEFENSECLAW_GATEWAY_AUTOSTART=0"}, tc.env...)
 				out, err := cmd.CombinedOutput()
 				text := string(out)
-				blocked := err != nil || strings.Contains(text, `"decision":"deny"`) ||
+				blocked := err != nil || strings.Contains(text, `"decision":"deny"`) || strings.Contains(text, `"permissionDecision":"deny"`) ||
 					strings.Contains(text, `"action":"block"`) || strings.Contains(text, `"permission":"deny"`)
 				if blocked != tc.wantBlock {
 					t.Fatalf("blocked=%v want %v err=%v\n%s", blocked, tc.wantBlock, err, text)

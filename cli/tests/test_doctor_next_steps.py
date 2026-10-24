@@ -298,7 +298,8 @@ def test_untracked_exporter_and_unattributed_credentials_read_plainly() -> None:
     credentials = rows["Native OTLP credentials"]
     assert credentials["status"] == "warn"
     assert "defenseclaw setup <connector>" not in credentials["remediation"]
-    assert "does not prove" in credentials["remediation"]
+    assert "does not prove an installed exporter is broken" in credentials["remediation"]
+    assert "defenseclaw setup <connector>" not in credentials["remediation"]
 
 
 def test_drop_reason_class_is_read_from_the_drop_record() -> None:

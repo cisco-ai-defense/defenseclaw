@@ -122,6 +122,15 @@ func checkConfigV8Candidate(path, dataDir string) (*loadedConfigV8File, error) {
 	if err != nil {
 		return nil, err
 	}
+	if loaded.runtime.StandaloneEnterprise() {
+		if err := config.ValidateManagedGuardrailProxyBind(loaded.runtime); err != nil {
+			return nil, &configV8SourceError{version: loaded.runtime.ConfigVersion, err: &config.V8SemanticError{
+				Path: "$.guardrail.host", Summary: "managed guardrail proxy must bind to loopback",
+				Expected: "localhost or a literal loopback address",
+				Action:   "set guardrail.host to 127.0.0.1",
+			}}
+		}
+	}
 	err = config.CheckCandidateAssets(loaded.runtime)
 	if err == nil {
 		err = checkJSONLDestinationPaths(loaded.compiled, "")
@@ -532,6 +541,7 @@ type loadedConfigV8File struct {
 	document       *config.V8YAMLDocument
 	runtime        *config.Config
 	source         string
+	sourceRaw      []byte
 	raw            []byte
 	gatewayAPIPort int
 }
@@ -573,6 +583,7 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 	if err != nil {
 		return nil, err
 	}
+	sourceRaw := append([]byte(nil), raw...)
 	legacyV8 := migrate && config.NeedsMigrationV9(raw)
 	if migrate {
 		if raw, err = config.MigrateV8InMemory(absPath, raw, guardrail.RulePackDigest); err != nil {
@@ -654,6 +665,7 @@ func loadConfigV8Source(path, defaultDataDir, credentialsDir string, migrate boo
 		document:       document,
 		runtime:        runtimeCandidate,
 		source:         absPath,
+		sourceRaw:      sourceRaw,
 		raw:            append([]byte(nil), raw...),
 		gatewayAPIPort: gatewayAPIPort,
 	}, nil

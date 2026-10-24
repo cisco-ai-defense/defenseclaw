@@ -12,16 +12,26 @@ if [ "${1:-}" = "--defenseclaw-execution-probe" ] && [ "${2:-}" = "--forkless" ]
   . "${_DC_PROBE_HOOK_DIR}/_hardening.sh"
   declare -F defenseclaw_harden_resources >/dev/null || exit 125
   declare -F defenseclaw_harden_env >/dev/null || exit 125
+  _DC_FORKLESS_PROBE=1
   defenseclaw_harden_resources
   printf '%s\n' 'defenseclaw-execution-probe-ok'
   exit 0
 fi
-{{end}}{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+{{end}}{{if and (not .Managed) (not .Sandbox)}}# _DC_HOOK_DATA_DIR is the data directory this hook was installed in, the
+# folder above its hooks folder (defenseclaw_install_held). Until the hook
+# path is resolved below it is the folder above the path the agent ran.
+_DC_HOOK_DATA_DIR="${BASH_SOURCE[0]:-$0}"
+case "$_DC_HOOK_DATA_DIR" in
+  */*) _DC_HOOK_DATA_DIR="${_DC_HOOK_DATA_DIR%/*}/.." ;;
+  *) _DC_HOOK_DATA_DIR=".." ;;
+esac
+# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
 # installer holds its data directory DATA: DATA/.install.lock exists as any
 # file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. It is the one install
-# check of every shell hook. The native hook (installLockHeld), the in-agent
-# plugins and the Windows adapters apply the same rule (GAP-0914).
+# shown absent; no DATA to look in counts as held too. The native hook
+# (installLockHeld), the in-agent plugins and the Windows adapters apply the
+# same rule (GAP-0914). defenseclaw_install_held below, the one install check
+# of every shell hook, reads it.
 defenseclaw_install_lock_held() {
   local data="${1:-}"
   [ -n "$data" ] || return 0
@@ -36,6 +46,17 @@ defenseclaw_install_lock_held() {
   fi
   return 1
 }
+# defenseclaw_install_held returns 0 (true) while an installer holds either
+# data directory of this account's hook: the one DEFENSECLAW_HOME names, else
+# ~/.defenseclaw, where install.sh and install.ps1 take the lock, and the one
+# the hook was installed in (_DC_HOOK_DATA_DIR, the folder above its hooks
+# folder), which the gateway rendered it into from its resolved data
+# directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
+# data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+defenseclaw_install_held() {
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
+  [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
+}
 # A failure before the helpers load (a hook path that does not resolve, a
 # missing or broken _hardening.sh, a set -e error) answers Hermes' block
 # in fail mode closed, under strict availability and while this account's
@@ -46,7 +67,7 @@ _DC_BOOT_FAIL_MODE="{{.FailMode}}"
 defenseclaw_boot_fails_closed() {
   [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
-  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"
+  defenseclaw_install_held
 }
 hermes_bootstrap_failure() {
   echo "defenseclaw: hermes hook could not start; blocking (fail mode closed)" >&2
@@ -98,12 +119,14 @@ export DEFENSECLAW_HOME
 # a missing token.
 unset DEFENSECLAW_MANAGED_HOOK _DC_SECURE_CLIENT_HOOK _DC_SECURE_CLIENT_DELIVERY
 DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
-if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
+{{if not .Sandbox}}# The hook path is resolved: this is the data directory it was installed in.
+_DC_HOOK_DATA_DIR="${HOOK_DIR}/.."
+{{end}}if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   # A registered closed hook cannot treat missing local state as retirement.
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage.
   _DC_HOME_FAIL_MODE="{{.FailMode}}"
-  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || _DC_HOME_FAIL_MODE="closed"
+  ! defenseclaw_install_held || _DC_HOME_FAIL_MODE="closed"
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
   if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2

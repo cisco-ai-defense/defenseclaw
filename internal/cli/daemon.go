@@ -424,7 +424,6 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		// must fail closed during readiness.
 		requirements.verifyConnectorHookTokens = expectedConnectorState.HookTokenFingerprints != nil ||
 			expectedConnectorState.OrphanHookTokenFingerprints != nil
-		requirements.verifyConnectorOTLP = rotationNativeOTLPRequired(cfg)
 	} else {
 		// Upstream agent drift refused at admission is not a start failure the
 		// previous release would avoid: leave the gateway running and report it.
@@ -489,13 +488,6 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		return hookContractAdmissionStartError(refused, snap.Guardrail.LastError)
 	}
 	return nil
-}
-
-// Per-user upgrades remove native exporter settings and scoped OTLP tokens.
-// Rotation must only require the native exporter probe on deployments that
-// still install those exporters.
-func rotationNativeOTLPRequired(cfg *config.Config) bool {
-	return cfg != nil && (cfg.StandaloneEnterprise() || cfg.SecureClientIntegration())
 }
 
 // gatewayStartAdmissionRefusedExitCode reports a gateway that is running but
@@ -1015,7 +1007,7 @@ type daemonReadinessRequirements struct {
 	watcherEnabled   bool
 	telemetryEnabled bool
 	routingEnabled   bool
-	// requiredConnectors, verifyConnectorHookTokens, and verifyConnectorOTLP
+	// requiredConnectors and verifyConnectorHookTokens
 	// are transaction-only gates.
 	// Ordinary starts retain multi-connector failure isolation; token rotation
 	// must prove that every enabled configured connector converged and that the
@@ -1025,7 +1017,6 @@ type daemonReadinessRequirements struct {
 	verifyConnectorState        bool
 	requireExactConnectorRoster bool
 	verifyConnectorHookTokens   bool
-	verifyConnectorOTLP         bool
 	startedNotBefore            time.Time
 	expectedPID                 int
 	expectedDataDir             string
@@ -1808,17 +1799,6 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 					err = fmt.Errorf("rotation connector convergence: %w", err)
 				}
 			}
-			if err == nil && requirements.verifyConnectorOTLP {
-				err = verifyRotationConnectorOTLPAuthentication(
-					client,
-					statusURL,
-					requirements.expectedDataDir,
-					requirements.requiredConnectors,
-				)
-				if err != nil {
-					err = fmt.Errorf("rotation connector convergence: %w", err)
-				}
-			}
 			if err == nil {
 				return snap, true, nil
 			}
@@ -2120,8 +2100,6 @@ func rotationRequiredConnectorNamesFromState(state rotationConnectorState, guard
 	return names
 }
 
-var loadRotationOTLPPathToken = connector.LoadOTLPPathToken
-var loadRotationClaudeNativeOTLPProbes = connector.LoadClaudeCodeNativeOTLPProbes
 var loadRotationHookAPIToken = connector.LoadHookAPIToken
 
 func rotationHookTokenFingerprint(token string) string {
@@ -2294,142 +2272,6 @@ func rotationConnectorHookProbeStatus(
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
 	_ = resp.Body.Close()
 	return resp.StatusCode, nil
-}
-
-func verifyRotationConnectorOTLPAuthentication(
-	client *http.Client,
-	statusURL string,
-	dataDir string,
-	requiredConnectors []string,
-) error {
-	if len(requiredConnectors) == 0 {
-		return nil
-	}
-	if client == nil {
-		return errors.New("scoped OTLP authentication client is unavailable")
-	}
-	base, err := url.Parse(statusURL)
-	if err != nil || base.Scheme != "http" || base.Host == "" || base.Opaque != "" ||
-		base.User != nil || base.RawQuery != "" || base.Fragment != "" {
-		return errors.New("scoped OTLP authentication endpoint is invalid")
-	}
-	host := strings.TrimSpace(base.Hostname())
-	hostIP := net.ParseIP(host)
-	if !strings.EqualFold(host, "localhost") && (hostIP == nil || !hostIP.IsLoopback()) {
-		return fmt.Errorf("refusing scoped OTLP authentication probe to non-loopback host %q", host)
-	}
-
-	requestClient := *client
-	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	for _, name := range requiredConnectors {
-		scope, ok := connector.OTLPPathTokenScopeForConnector(name)
-		if !ok {
-			continue
-		}
-		if scope == connector.OTLPScopeClaude {
-			probes, loadErr := loadRotationClaudeNativeOTLPProbes()
-			if loadErr != nil {
-				return fmt.Errorf("connector %s native OTLP settings are unavailable: %w", name, loadErr)
-			}
-			if len(probes) != 2 {
-				return fmt.Errorf("connector %s native OTLP settings do not configure logs and metrics", name)
-			}
-			for _, probe := range probes {
-				if probe.Signal != connector.NativeOTLPSignalLogs && probe.Signal != connector.NativeOTLPSignalMetrics {
-					return fmt.Errorf("connector %s native OTLP settings contain an unsupported signal", name)
-				}
-				if probeErr := probeRotationConnectorOTLPAuthentication(
-					&requestClient,
-					base,
-					name,
-					probe.Endpoint,
-					"/v1/"+string(probe.Signal),
-					probe.Headers,
-				); probeErr != nil {
-					return probeErr
-				}
-			}
-			continue
-		}
-		token, loadErr := loadRotationOTLPPathToken(dataDir, scope)
-		if loadErr != nil {
-			return fmt.Errorf("connector %s scoped OTLP credential is unavailable: %w", name, loadErr)
-		}
-		token = strings.TrimSpace(token)
-		if token == "" {
-			return fmt.Errorf("connector %s scoped OTLP credential is unavailable", name)
-		}
-
-		probeURL := *base
-		probeURL.RawPath = ""
-		probeURL.RawQuery = ""
-		probeURL.Fragment = ""
-		switch scope {
-		case connector.OTLPScopeCodex, connector.OTLPScopeClaude:
-			probeURL.Path = "/v1/logs"
-		default:
-			return fmt.Errorf("connector %s has no rotation OTLP authentication contract", name)
-		}
-
-		req, requestErr := http.NewRequest(http.MethodGet, probeURL.String(), nil)
-		if requestErr != nil {
-			return fmt.Errorf("connector %s scoped OTLP authentication probe could not be created", name)
-		}
-		req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
-		if scope == connector.OTLPScopeCodex || scope == connector.OTLPScopeClaude {
-			req.Header.Set("Authorization", "Bearer "+token)
-			req.Header.Set("X-DefenseClaw-Source", name)
-		}
-		resp, requestErr := requestClient.Do(req)
-		if requestErr != nil {
-			// Do not wrap the transport error: for path-token connectors it may
-			// include the credential-bearing URL.
-			return fmt.Errorf("connector %s scoped OTLP authentication probe failed", name)
-		}
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
-		_ = resp.Body.Close()
-		// Authentication happens before the OTLP handler's POST-only method
-		// check. A valid credential therefore reaches the handler and returns
-		// 405 without ingesting a synthetic telemetry record; 401/403 proves
-		// the persisted credential and gateway runtime did not converge.
-		if resp.StatusCode != http.StatusMethodNotAllowed {
-			return fmt.Errorf("connector %s scoped OTLP authentication probe returned %s", name, resp.Status)
-		}
-	}
-	return nil
-}
-
-func probeRotationConnectorOTLPAuthentication(
-	client *http.Client,
-	base *url.URL,
-	connectorName string,
-	endpoint string,
-	expectedPath string,
-	headers http.Header,
-) error {
-	probeURL, err := url.Parse(strings.TrimSpace(endpoint))
-	if err != nil || probeURL.Scheme != "http" || probeURL.User != nil || probeURL.RawQuery != "" ||
-		probeURL.Fragment != "" || probeURL.RawPath != "" || !strings.EqualFold(probeURL.Host, base.Host) ||
-		probeURL.Path != expectedPath {
-		return fmt.Errorf("connector %s native OTLP endpoint does not match the gateway", connectorName)
-	}
-	req, err := http.NewRequest(http.MethodGet, probeURL.String(), nil)
-	if err != nil {
-		return fmt.Errorf("connector %s native OTLP authentication probe could not be created", connectorName)
-	}
-	req.Header = headers.Clone()
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("connector %s native OTLP authentication probe failed", connectorName)
-	}
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
-	_ = resp.Body.Close()
-	if resp.StatusCode != http.StatusMethodNotAllowed {
-		return fmt.Errorf("connector %s native OTLP authentication probe returned %s", connectorName, resp.Status)
-	}
-	return nil
 }
 
 // waitForGatewayReadiness waits for every required local startup subsystem to

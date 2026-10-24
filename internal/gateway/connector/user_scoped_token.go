@@ -261,6 +261,10 @@ const (
 	// UserScopedListenerProofPath is the gateway route that answers a
 	// listener proof. It is served before bearer authentication.
 	UserScopedListenerProofPath = "/api/v1/hook-listener-proof"
+	// UserScopedRotationProofPath is available only to the root lifecycle
+	// process over the protected managed hook socket. Rotation cannot call
+	// the TCP proof route as root on behalf of a user's credential.
+	UserScopedRotationProofPath = "/api/v1/rotation-listener-proof"
 	// UserScopedListenerKeyIDHeader carries UserScopedCredentialKeyID.
 	UserScopedListenerKeyIDHeader = "X-DefenseClaw-Listener-Key-Id"
 	// UserScopedListenerNonceHeader carries the plugin's fresh nonce.

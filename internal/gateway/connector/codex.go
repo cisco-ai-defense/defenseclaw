@@ -46,8 +46,9 @@ import (
 //   - codex-hook.sh under [hooks] for tool-call inspection
 //   - notify-bridge.sh wired to `notify` for agent-turn events
 //
-// Managed hosts additionally configure native OTLP. Per-user hosts do not:
-// Codex cannot prove who owns a replaced loopback listener before exporting.
+// Host installs do not configure native OTLP: Codex cannot prove who owns a
+// replaced loopback listener before exporting. Isolated sandbox rendering
+// keeps its own receiver within the sandbox boundary.
 //
 // Implements ComponentScanner, StopScanner.
 type CodexConnector struct {
@@ -467,9 +468,9 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 	// notify bridge without rewriting provider URLs or exporting a
 	// global OPENAI_BASE_URL. The legacy LLM-proxy surface has been
 	// removed — Codex talks directly to its native upstream and
-	// DefenseClaw only observes via hooks + OTel.
+	// DefenseClaw observes host sessions through hooks.
 
-	if opts.ManagedEnterprise {
+	if opts.sandboxNativeOTLP {
 		otlpToken, tokenErr := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeCodex, opts.OTLPPathToken)
 		if tokenErr != nil {
 			return c.rollbackSetupAfterSnapshot(
@@ -517,7 +518,7 @@ func (c *CodexConnector) setupLocked(ctx context.Context, opts SetupOpts) error 
 			false,
 		)
 	}
-	if !opts.ManagedEnterprise {
+	if !opts.sandboxNativeOTLP {
 		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 			return fmt.Errorf("revoke obsolete Codex native OTLP credential: %w", err)
 		}
@@ -918,12 +919,12 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	nativeSignals := []string(nil)
 	sourceModes := []string{"hook"}
 	telemetryAuth := ""
-	telemetryNote := "Per-user Codex telemetry uses hooks; native export to an unverified loopback listener is disabled."
+	telemetryNote := "Host Codex telemetry uses hooks; native export to an unverified loopback listener is disabled."
 	if profile.NativeOTLP != nil {
 		nativeSignals = []string{"logs", "metrics", "traces"}
 		sourceModes = []string{"native", "hook"}
 		telemetryAuth = "header-token"
-		telemetryNote = "Managed Codex native OTLP uses a connector-scoped Authorization header; hooks and Secure Client notify are separate channels."
+		telemetryNote = "Isolated sandbox Codex native OTLP uses a connector-scoped Authorization header; hooks are a separate channel."
 	}
 
 	return ConnectorCapabilities{
@@ -1012,8 +1013,8 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 //   - the setup-only Codex OTLP renderer for ~/.codex/config.toml; and
 //   - operator-visible doctor reports.
 //
-// The native spec exists only for managed hosts and isolated sandbox artifact
-// rendering. Per-user hosts have no direct native destination. When present,
+// The native spec exists only for isolated sandbox artifact rendering. Host
+// installs have no direct native destination. When present,
 // its endpoint is the gateway's standard loopback OTLP receiver. Codex supports
 // arbitrary exporter headers, so its connector-scoped credential is carried
 // as an Authorization bearer instead of appearing in the URL. The gateway
@@ -1026,14 +1027,14 @@ func (c *CodexConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 // auth_mode, etc.) on every span/metric. See the inline comment in
 // the returned spec for the full rationale and links.
 //
-// Managed native LogUserPrompts is enabled at the source. Observability v8 keeps the
+// Sandbox native LogUserPrompts is enabled at the source. Observability v8 keeps the
 // canonical record immutable and applies redaction independently for every
 // destination, so suppressing prompt content here would make an unredacted
 // route impossible and would make two destinations disagree about one source
 // occurrence.
 func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	var headers map[string]string
-	if opts.ManagedEnterprise || opts.sandboxNativeOTLP {
+	if opts.sandboxNativeOTLP {
 		otlpToken := strings.TrimSpace(opts.OTLPPathToken)
 		if otlpToken == "" && opts.DataDir != "" {
 			otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
@@ -1075,7 +1076,7 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	// the upstream tags are richer than anything we could
 	// synthesize from the outside.
 	var nativeOTLP *NativeOTLPSpec
-	if opts.ManagedEnterprise || opts.sandboxNativeOTLP {
+	if opts.sandboxNativeOTLP {
 		nativeOTLP = &NativeOTLPSpec{
 			Kind:           NativeOTLPTOMLBlock,
 			Endpoint:       "http://" + opts.APIAddr,
@@ -1840,7 +1841,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			cfg["features"] = features
 		}
 
-		if opts.ManagedEnterprise {
+		if opts.sandboxNativeOTLP {
 			otelBlock, err := buildCodexOtelBlockWithPathToken(opts, opts.OTLPPathToken)
 			if err != nil {
 				return fmt.Errorf("render scoped Codex OTLP config: %w", err)
@@ -2484,6 +2485,9 @@ func codexCanonicalJSON(v interface{}) []byte {
 // traffic. Keeping it in Authorization prevents credential leakage through
 // endpoint URLs, diagnostics, and proxy logs.
 func buildCodexOtelBlockWithPathToken(opts SetupOpts, pathToken string) (map[string]interface{}, error) {
+	// This renderer also constructs historical host blocks for cleanup and
+	// migration tests. Only the isolated sandbox setup installs its result.
+	opts.sandboxNativeOTLP = true
 	// Spec-driven OTLP wiring. The connector's HookProfile carries
 	// the declarative NativeOTLPSpec; this helper just asks it for
 	// the TOML rendering. spec.TOMLBlock() validates Endpoint /

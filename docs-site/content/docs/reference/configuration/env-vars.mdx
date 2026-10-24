@@ -352,7 +352,7 @@ Fleet and Edge `DCLAW_*` variables marked `allow` are read by the Go or C servic
 These variables exist for DefenseClaw's own test suites. Do not set them on a real install.
 
 <Accordions type="single">
-<Accordion title="Show the 140 test-only variables">
+<Accordion title="Show the 145 test-only variables">
 
 | Variable | What it does |
 | --- | --- |
@@ -382,6 +382,11 @@ These variables exist for DefenseClaw's own test suites. Do not set them on a re
 | `DEFENSECLAW_GATEWAY_CODEX_APP_SERVER_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the bounded Codex app-server fixture used by gateway package tests.<br/>**Read by:** `internal/gateway/codex_setup_fixture_windows_test.go` |
 | `DEFENSECLAW_GATEWAY_URL`<br/>Default: `unset` (in-process e2e server)<br/>Values: `http(s) base URL e.g. http://127.0.0.1:18970`, `unset`<br/>Managed host: `ignore` | Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E).<br/>**Read by:** `internal/gateway/security_suite_test.go` |
 | `DEFENSECLAW_HOOKEXEC_TEST_CPU_BURN`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Marks a child process of the hookexec answer-watchdog tests that keeps one CPU busy, so the tests can fill every CPU of the host while a hook call runs.<br/>**Read by:** `internal/gateway/connector/hookexec/answer_watchdog_test.go` |
+| `DEFENSECLAW_HOOK_BURST_CALLS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls in the probe burst.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BURST_OUT`<br/>Default: `unset`<br/>Values: `temporary directory path`, `unset`<br/>Managed host: `ignore` | Selects the output directory for burst probe profiles.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BURST_PROBE`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Enables the opt-in hook burst probe test.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BURST_WARM`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls written before the probe burst.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
+| `DEFENSECLAW_HOOK_BURST_WORKERS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of concurrent callers in the probe burst.<br/>**Read by:** `internal/gateway/hook_burst_probe_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATED_ADMISSION_TEST_ROOT`<br/>Default: `unset`<br/>Values: `test-defined absolute directory path`, `unset`<br/>Managed host: `ignore` | Selects the isolated protected runtime root for the delegated hook-admission helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER`<br/>Default: `unset`<br/>Values: `1`, `unset`<br/>Managed host: `ignore` | Selects the isolated stable-hook delegation helper subprocess.<br/>**Read by:** `internal/hookruntime/delegation_windows_test.go` |
 | `DEFENSECLAW_HOOK_FLOOD_CALLS`<br/>Default: `unset`<br/>Values: `non-negative integer`, `unset`<br/>Managed host: `ignore` | Sets the number of hook calls in each probe flood.<br/>**Read by:** `internal/gateway/hook_flood_probe_test.go` |

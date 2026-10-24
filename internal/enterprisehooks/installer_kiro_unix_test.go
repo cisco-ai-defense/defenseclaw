@@ -15,6 +15,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 func kiroStandaloneInstallOptions(home, version string) InstallOptions {
@@ -47,7 +48,7 @@ func TestStandaloneKiroFollowsCLIUpgradesAtOrAboveTheFloor(t *testing.T) {
 	setStandaloneProfileForTest(t, true)
 	home := newTestHome(t)
 
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.24.1")); err != nil {
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.27.1")); err != nil {
 		t.Fatalf("first install at the certified version: %v", err)
 	}
 	hooks := filepath.Join(home, ".kiro", "hooks", "defenseclaw.json")
@@ -55,37 +56,65 @@ func TestStandaloneKiroFollowsCLIUpgradesAtOrAboveTheFloor(t *testing.T) {
 		t.Fatalf("global Kiro hook file missing: %v", err)
 	}
 
-	upgraded, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.25.0"))
+	upgraded, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.28.0"))
 	if err != nil {
 		t.Fatalf("repair after a kiro-cli self-update: %v", err)
 	}
-	if upgraded.AgentVersion != "kiro-cli 2.25.0" {
+	if upgraded.AgentVersion != "kiro-cli 2.28.0" {
 		t.Fatalf("repair recorded %q, want the new version", upgraded.AgentVersion)
 	}
-	if _, err := Verify(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.25.0")); err != nil {
+	if _, err := Verify(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.28.0")); err != nil {
 		t.Fatalf("verify after the repair: %v", err)
 	}
 
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.20.0")); err == nil ||
-		!strings.Contains(err.Error(), "below the certified minimum 2.24.1") {
+	// 2.26.1 runs a non-interactive --v3 session without hooks (GAP-0227).
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.26.1")); err == nil ||
+		!strings.Contains(err.Error(), "is below 2.27.1") {
 		t.Fatalf("install below the floor = %v, want the certified-minimum refusal", err)
 	}
 }
 
-// Outside the standalone profile the floor does not apply, and a version
-// change is no longer refused as drift (#1163): Kiro's hooks are not
-// version-gated, so the repair keeps the configured delivery policy.
-func TestKiroFloorIsStandaloneOnly(t *testing.T) {
+// A new CLI below the floor cannot protect headless runs under either managed
+// profile. Secure Client's open delivery setting does not make an unhooked
+// agent a supported connector.
+func TestKiroFloorAppliesOutsideStandalone(t *testing.T) {
 	useSecureClientHookDelivery(t)
 	skipIfRoot(t)
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
 	setStandaloneProfileForTest(t, false)
 	home := newTestHome(t)
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.20.0")); err != nil {
-		t.Fatalf("install below the standalone floor outside the standalone profile: %v", err)
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.20.0")); err == nil ||
+		!strings.Contains(err.Error(), "is below 2.27.1") {
+		t.Fatalf("new Secure Client install below the floor = %v", err)
 	}
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.25.0")); err != nil {
-		t.Fatalf("version change outside the standalone profile = %v, want the repair to follow it", err)
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.27.1")); err != nil {
+		t.Fatalf("install at the floor outside the standalone profile: %v", err)
+	}
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.25.0")); err == nil ||
+		!strings.Contains(err.Error(), "is below 2.27.1") {
+		t.Fatalf("downgrade below the floor = %v", err)
+	}
+}
+
+// Seed the protected lock an earlier release wrote, without asking the
+// current installer to make a new below-floor enrollment.
+func seedEarlierKiroLock(t *testing.T, opts InstallOptions) {
+	t.Helper()
+	dataDir := filepath.Join(opts.UserHome, ".defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	conn := connector.NewKiroConnector()
+	setup := connector.SetupOpts{
+		DataDir: dataDir, ProxyAddr: opts.ProxyAddr, APIAddr: opts.APIAddr,
+		APIToken: opts.APIToken, OTLPPathToken: opts.OTLPPathToken,
+		ManagedEnterprise: true, HookFailMode: opts.HookFailMode,
+		GuardrailMode: opts.GuardrailMode, AgentVersion: opts.AgentVersion,
+		HookContractID: defaultHookContractID(resolveHookContract("kiro", opts.AgentVersion)),
+	}
+	if err := connector.SaveHookContractLockEntry(dataDir,
+		connector.NewHookContractLockEntry(setup, conn, version.Current().BinaryVersion)); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -108,12 +137,8 @@ func TestEnumerateUnixKeepsABelowFloorKiroRowThatInstallCanRepair(t *testing.T) 
 	uid, gid := os.Getuid(), os.Getgid()
 	alice := makeHome(t, homes, "alice")
 
-	// An earlier release, which had no floor, enrolled and installed alice.
-	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
-	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(alice, enrolled)); err != nil {
-		t.Fatalf("earlier install: %v", err)
-	}
-	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	// An earlier release, which had no floor, enrolled alice.
+	seedEarlierKiroLock(t, kiroStandaloneInstallOptions(alice, enrolled))
 
 	info, err := os.Stat(alice)
 	if err != nil {
@@ -151,7 +176,7 @@ func TestEnumerateUnixKeepsABelowFloorKiroRowThatInstallCanRepair(t *testing.T) 
 		t.Fatalf("rows = %+v, want alice's kiro row kept at %s", manifest.Targets, enrolled)
 	}
 	if len(report.Unprotected) != 1 || report.Unprotected[0].Connector != "kiro" || report.Unprotected[0].Version != installed ||
-		!strings.Contains(report.Unprotected[0].Reason, "below the certified minimum 2.24.1") ||
+		!strings.Contains(report.Unprotected[0].Reason, "is below 2.27.1") ||
 		!strings.Contains(report.Unprotected[0].Reason, "the row stays enrolled at "+enrolled) {
 		t.Fatalf("unprotected = %+v, want the installed version reported", report.Unprotected)
 	}
@@ -164,22 +189,40 @@ func TestEnumerateUnixKeepsABelowFloorKiroRowThatInstallCanRepair(t *testing.T) 
 		t.Fatalf("verify of the enumerated row: %v", err)
 	}
 
+	// A supported IDE later installed beside the older CLI can take over the
+	// row without erasing the CLI's unprotected-surface report.
+	opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+		return map[string]string{"kiro": installed, KiroIDEDiscoveryKey: "1.0.182"}, nil, nil
+	}
+	manifest, report, err = EnumerateUnix(context.Background(), enumeratorConfig("kiro"), connector.NewDefaultRegistry(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ideVersion := "1.0.182" + KiroIDEVersionSuffix
+	if len(manifest.Targets) != 1 || manifest.Targets[0].AgentVersion != ideVersion ||
+		len(report.Unprotected) != 1 || report.Unprotected[0].Version != installed {
+		t.Fatalf("earlier CLI row did not follow supported IDE: rows=%+v unprotected=%+v", manifest.Targets, report.Unprotected)
+	}
+	if _, err := Install(context.Background(), kiroStandaloneInstallOptions(alice, ideVersion)); err != nil {
+		t.Fatalf("install after following supported IDE: %v", err)
+	}
+
 	// A known Kiro row does not follow its user to a version below the floor;
 	// the enumerator keeps it at its last enrolled version and reports the
 	// installed one. That holds for a row an earlier release enrolled below the
 	// floor too: the guardian keeps repairing it at its own version, and Install
 	// refuses a change to another version below the floor as drift.
 	t.Run("known row version", func(t *testing.T) {
-		if refused := unixKnownRowVersionRefused("kiro", "kiro-cli 2.24.1", "kiro-cli 2.25.0"); refused != "" {
+		if refused := unixKnownRowVersionRefused("kiro", "kiro-cli 2.27.1", "kiro-cli 2.28.0"); refused != "" {
 			t.Fatalf("upgrade refused: %s", refused)
 		}
-		if refused := unixKnownRowVersionRefused("kiro", "kiro-cli 2.24.1", "kiro-cli 2.20.0"); !strings.Contains(refused, "below the certified minimum 2.24.1") {
+		if refused := unixKnownRowVersionRefused("kiro", "kiro-cli 2.27.1", "kiro-cli 2.26.1"); !strings.Contains(refused, "is below 2.27.1") {
 			t.Fatalf("downgrade below the floor = %q, want the certified-minimum reason", refused)
 		}
-		if refused := unixKnownRowVersionRefused("kiro", "kiro-cli 2.19.0", "kiro-cli 2.20.0"); !strings.Contains(refused, "below the certified minimum 2.24.1") {
+		if refused := unixKnownRowVersionRefused("kiro", "kiro-cli 2.19.0", "kiro-cli 2.20.0"); !strings.Contains(refused, "is below 2.27.1") {
 			t.Fatalf("a change between two versions below the floor = %q, want the certified-minimum reason", refused)
 		}
-		if refused := unixKnownRowVersionRefused("kiro", "kiro-cli 2.19.0", "kiro-cli 2.24.1"); refused != "" {
+		if refused := unixKnownRowVersionRefused("kiro", "kiro-cli 2.19.0", "kiro-cli 2.27.1"); refused != "" {
 			t.Fatalf("an upgrade from below the floor to the floor refused: %s", refused)
 		}
 	})
@@ -196,13 +239,8 @@ func TestEnumerateUnixKeepsABelowFloorKiroRowThatInstallCanRepair(t *testing.T) 
 		setStandaloneProfileForTest(t, true)
 		home := newTestHome(t)
 
-		// The earlier release's install: no floor applied, so it wrote a lock.
-		earlier := kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")
-		t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
-		if _, err := Install(context.Background(), earlier); err != nil {
-			t.Fatalf("earlier install: %v", err)
-		}
-		t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+		// The earlier release's install wrote a lock before the floor existed.
+		seedEarlierKiroLock(t, kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0"))
 
 		if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")); err != nil {
 			t.Fatalf("repair of a row enrolled below the floor: %v", err)
@@ -214,14 +252,14 @@ func TestEnumerateUnixKeepsABelowFloorKiroRowThatInstallCanRepair(t *testing.T) 
 			!strings.Contains(err.Error(), "hook contract drift detected") {
 			t.Fatalf("a version change below the floor = %v, want the drift refusal", err)
 		}
-		if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.24.1")); err != nil {
+		if _, err := Install(context.Background(), kiroStandaloneInstallOptions(home, "kiro-cli 2.27.1")); err != nil {
 			t.Fatalf("upgrade to the floor: %v", err)
 		}
 
 		// A new enrollment below the floor is still refused.
 		fresh := newTestHome(t)
 		if _, err := Install(context.Background(), kiroStandaloneInstallOptions(fresh, "kiro-cli 2.22.0")); err == nil ||
-			!strings.Contains(err.Error(), "below the certified minimum 2.24.1") {
+			!strings.Contains(err.Error(), "is below 2.27.1") {
 			t.Fatalf("new enrollment below the floor = %v, want the certified-minimum refusal", err)
 		}
 	})
@@ -239,7 +277,7 @@ func TestStandaloneKiroFirstInstallCreatesItsHookFolders(t *testing.T) {
 	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
 	setStandaloneProfileForTest(t, true)
 	firstInstall := func(home string) InstallOptions {
-		opts := kiroStandaloneInstallOptions(home, "kiro-cli 2.24.1")
+		opts := kiroStandaloneInstallOptions(home, "kiro-cli 2.27.1")
 		opts.AllowMissingHookConfigRepair = false
 		return opts
 	}
@@ -313,7 +351,7 @@ func TestStandaloneKiroFirstInstallCreatesItsHookFolders(t *testing.T) {
 		home := newTestHome(t)
 		opts := kiroStandaloneInstallOptions(home, "kiro-cli 2.22.0")
 		opts.AllowMissingHookConfigRepair = false
-		if _, err := Install(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "below the certified minimum") {
+		if _, err := Install(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "is below 2.27.1") {
 			t.Fatalf("install below the floor = %v, want the certified-minimum refusal", err)
 		}
 		if _, err := os.Lstat(filepath.Join(home, ".kiro")); !os.IsNotExist(err) {

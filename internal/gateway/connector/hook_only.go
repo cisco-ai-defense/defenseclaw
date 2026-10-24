@@ -1283,6 +1283,23 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 	}
 	installedMarker, _, _ := bytes.Cut(data, []byte("\n"))
 	installedMarker = bytes.TrimSuffix(installedMarker, []byte("\r"))
+	if c.name == "opencode" {
+		if pluginSecureClientProfile(opts) &&
+			(!bytes.Contains(data, []byte(`const DC_NATIVE_POST_BINARY = "`)) ||
+				!bytes.Contains(data, []byte(`return defenseclawNativePost(path, init);`))) {
+			return false, nil
+		}
+		if !opts.ManagedEnterprise && (!bytes.Contains(data, []byte(`const DC_PER_USER_NATIVE_POST = "1";`)) ||
+			!bytes.Contains(data, []byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`))) {
+			return false, nil
+		}
+		if managedPluginListenerProof(opts) {
+			proofCall := []byte(`if (DC_LISTENER_PROOF) return defenseclawProvenTCPRequest(path, init, token);`)
+			if !bytes.Contains(data, []byte(`const DC_LISTENER_PROOF = "1";`)) || !bytes.Contains(data, proofCall) {
+				return false, nil
+			}
+		}
+	}
 	return bytes.Equal(installedMarker, marker), nil
 }
 
@@ -1358,7 +1375,7 @@ func managedPluginForeignHookGuardMarker(opts SetupOpts, declaration, terminator
 // asks for it and keeps the TCP transport renders it; a plugin on the hook
 // socket verifies the socket's owner instead.
 func managedPluginListenerProof(opts SetupOpts) bool {
-	if !opts.ManagedEnterprise || !opts.ManagedListenerProof {
+	if !opts.ManagedEnterprise || !opts.ManagedListenerProof || pluginSecureClientProfile(opts) {
 		return false
 	}
 	socket, _ := managedPluginHookSocket(opts)
@@ -1416,6 +1433,7 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 	rendered, err := renderTemplate(string(tmpl), templateData{
 		APIAddr:            opts.APIAddr,
 		TokenFileJS:        javaScriptStringContent(tokenPath),
+		NativePostBinaryJS: javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
 		HookSocketJS:       javaScriptStringContent(hookSocket),
 		ServiceUID:         serviceUID,
 		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
@@ -1431,6 +1449,13 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)
 	}
 	return []byte(rendered), nil
+}
+
+func secureClientPluginNativePostBinary(opts SetupOpts) string {
+	if !pluginSecureClientProfile(opts) || !filepath.IsAbs(opts.HookExecutable) {
+		return ""
+	}
+	return filepath.Clean(opts.HookExecutable)
 }
 
 // managedPluginArtifactDrift returns the managed plugin path when the
@@ -5881,14 +5906,7 @@ func removeCopilotHookReferencesProfile(path string, secureClient bool, hookScri
 	}
 	var pruned map[string]interface{}
 	if secureClient {
-		remaining, changed, err := stripCopilotOwnedEntry(cfg, hookScript)
-		if err != nil {
-			return fmt.Errorf("copilot: cannot remove Secure Client hooks in %s: %w", path, err)
-		}
-		if !changed {
-			return nil
-		}
-		pruned, _ = remaining.(map[string]interface{})
+		pruned, _ = removeHookScriptReferencesLegacy(cfg, hookScript).(map[string]interface{})
 	} else {
 		pruned = make(map[string]interface{}, len(cfg))
 		for key, value := range cfg {

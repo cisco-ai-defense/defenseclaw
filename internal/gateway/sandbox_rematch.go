@@ -74,34 +74,25 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 	if reg.State == sandboxreg.StateRevoked {
 		return reg
 	}
+	// Nearly every call finds nothing due. That is decided without the
+	// registration's lock, so the concurrent hook calls of one sandbox do
+	// not queue behind each other, nor behind a re-match that is storing its
+	// result: a burst of 32 relayed calls waited in that line for seconds
+	// (rel-1-0-4 GAP-0367). A due re-match or a stop is decided again under
+	// the lock.
+	if current, state := a.sandboxRematchDue(ctx, auth, peer, reg); !state.due {
+		return current
+	}
 	unlock := auth.rematch.lock(reg.ID)
 	defer unlock()
-	if fresh, ok, err := auth.store.Get(peer.UID, reg.ID); err == nil && ok {
-		reg = fresh
-	}
-	if reg.State == sandboxreg.StateRevoked {
+	reg, state := a.sandboxRematchDue(ctx, auth, peer, reg)
+	if !state.due {
 		return reg
 	}
-	run, hasRun, err := auth.store.Run(peer.UID, reg.ID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[sandbox-authority] re-match uid=%d registration=%s: %v\n", peer.UID, reg.ID, err)
+	if reg = a.sandboxRevokeIfStopped(auth, peer, reg, state.run); reg.State == sandboxreg.StateRevoked || state.current {
 		return reg
 	}
-	if reg = a.sandboxRevokeIfStopped(auth, peer, reg, run); reg.State == sandboxreg.StateRevoked {
-		return reg
-	}
-	cfg := a.liveBaseConfig(ctx)
-	key := a.sandboxPolicyKey(ctx, cfg)
-	match := a.sandboxMatchPeer(ctx, peer, reg.Connector, 0)
-	if match.decision.Refused != "" {
-		// No candidate profile is proven to be this caller's policy. Keep
-		// the registration's last bound profile while relay calls refuse.
-		match.resolved = false
-	}
-	factsDigest := sandboxFactsDigest(auth.key, match.facts, match.resolved)
-	if hasRun && key != "" && key == run.PolicyKey && (!match.resolved || factsDigest == reg.FactsDigest) {
-		return reg
-	}
+	cfg, key, match, factsDigest, run, hasRun := state.cfg, state.key, state.match, state.factsDigest, state.run, state.hasRun
 	next := reg
 	if next.CreateProfile == nil && !reg.Provisional {
 		// Made before floors were pinned at create (GAP-0242): the profile
@@ -186,6 +177,54 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 		next = a.sandboxRevokeIfStopped(auth, peer, next, nextRun)
 	}
 	return next
+}
+
+// sandboxRematchState is what decides whether reg is due for a re-match.
+type sandboxRematchState struct {
+	// due: a stop is pending or the match is not current.
+	due bool
+	// current: the policy key and the facts are the ones reg was matched
+	// under.
+	current     bool
+	run         sandboxreg.Run
+	hasRun      bool
+	cfg         *config.Config
+	key         string
+	match       sandboxMatch
+	factsDigest string
+}
+
+// sandboxRematchDue reads reg as stored and its run record and reports
+// whether a stop or a re-match is due for it. It only reads, so it needs no
+// lock; a registration that is revoked, or whose run record can't be read,
+// is never due. The two are read in one store call: read apart, a re-match
+// stored between them paired the old registration with the new policy key,
+// and the call was answered under the old profile without the lock.
+func (a *APIServer) sandboxRematchDue(ctx context.Context, auth *sandboxAuthority, peer managedHookPeer, reg sandboxreg.Registration) (sandboxreg.Registration, sandboxRematchState) {
+	fresh, ok, run, hasRun, err := auth.store.GetWithRun(peer.UID, reg.ID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[sandbox-authority] re-match uid=%d registration=%s: %v\n", peer.UID, reg.ID, err)
+		return reg, sandboxRematchState{}
+	}
+	if ok {
+		reg = fresh
+	}
+	if reg.State == sandboxreg.StateRevoked {
+		return reg, sandboxRematchState{}
+	}
+	state := sandboxRematchState{run: run, hasRun: hasRun, cfg: a.liveBaseConfig(ctx)}
+	state.key = a.sandboxPolicyKey(ctx, state.cfg)
+	state.match = a.sandboxMatchPeer(ctx, peer, reg.Connector, 0)
+	if state.match.decision.Refused != "" {
+		// No candidate profile is proven to be this caller's policy. Keep
+		// the registration's last bound profile while relay calls refuse.
+		state.match.resolved = false
+	}
+	state.factsDigest = sandboxFactsDigest(auth.key, state.match.facts, state.match.resolved)
+	state.current = hasRun && state.key != "" && state.key == run.PolicyKey &&
+		(!state.match.resolved || state.factsDigest == reg.FactsDigest)
+	state.due = !run.StopAt.IsZero() || !state.current
+	return reg, state
 }
 
 // sandboxProfileDigest is the current digest of profile in the request's

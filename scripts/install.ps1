@@ -103,6 +103,9 @@ $Setup = $null
 $SetupUninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw"
 $SetupCache = Join-Path $env:LOCALAPPDATA "DefenseClaw\InstallerCache"
 $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runtime-state.json"
+# Private copies of this release's hook that Setup's launcher delegates to
+# once Setup is replaced (Publish-SetupLauncherTrampoline).
+$SetupDelegatedHooks = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\delegated"
 # Real files in BinDir. Connector hooks record these paths, so they never move.
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
@@ -1169,13 +1172,113 @@ function Find-SetupInstall {
 
 function Disable-SetupHooks {
     # Setup's hook launcher runs Setup's hook and restarts Setup's gateway on
-    # demand; without its state file it does nothing.
-    if (Test-Path -LiteralPath $SetupHookState) { Move-Path $SetupHookState (Join-Path $Staging "hook-runtime-state.json") }
+    # demand; without its state file it does nothing. Its state is set aside
+    # and the launcher delegates to this release's staged hook instead, which
+    # answers closed while this install holds the data directory (GAP-1000).
+    if (-not (Test-Path -LiteralPath $SetupHookState)) { return }
+    $state = Join-Path $Staging "hook-runtime-state.json"
+    Move-Path $SetupHookState $state
+    Invoke-Quietly {
+        [void](Publish-SetupLauncherTrampoline $state (Join-Path $Staging "bin\defenseclaw-hook.exe") (Join-Path $Staging "bin\defenseclaw-gateway.exe"))
+    }
+}
+
+function Enable-SetupHooks {
+    # Undo Disable-SetupHooks: Setup's hook launcher answers again.
+    $state = Join-Path $Staging "hook-runtime-state.json"
+    if (-not (Test-Path -LiteralPath $state)) { return }
+    if (Test-SetupLauncherTrampoline) { Remove-Item -LiteralPath $SetupHookState -Force }
+    if (-not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
+}
+
+function Test-SetupLauncherTrampoline {
+    # True when Setup's launcher delegates to a copy of this release's hook
+    # (Publish-SetupLauncherTrampoline), not to Setup's own.
+    $hook = [string](Get-Field (Read-Json $SetupHookState) "hook_path")
+    if (-not $hook) { return $false }
+    try {
+        $folder = Split-Path -Parent (Split-Path -Parent $hook)
+        return [string]::Equals([IO.Path]::GetFullPath($folder).TrimEnd("\", "/"), [IO.Path]::GetFullPath($SetupDelegatedHooks).TrimEnd("\", "/"),
+            [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        # A path that does not parse is not this installer's.
+        return $false
+    }
+}
+
+function Protect-SetupLauncherFile([string]$Path) {
+    # Setup's launcher runs only a hook and a state file that this account
+    # owns and that only it and LocalSystem can open.
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = New-Object Security.AccessControl.FileSecurity
+    $acl.SetOwner($user)
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($user, (New-Object Security.Principal.SecurityIdentifier "S-1-5-18"))) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, "FullControl", "Allow")))
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Publish-SetupLauncherTrampoline([string]$Template, [string]$Hook, [string]$Gateway) {
+    # GAP-1000: an agent session started before the upgrade keeps running
+    # Setup's stable launcher (%LOCALAPPDATA%\DefenseClaw\HookRuntime) until
+    # it restarts, and with its state set aside that launcher answers every
+    # call with exit 0 and no decision. Setup 0.8.10's launcher is a
+    # trampoline to the hook its state names: point it at a private copy of
+    # this release's hook (Hook), under the launcher identity Template
+    # records, so those sessions stay guarded. The state names the gateway
+    # at its final path in the bin folder, with Gateway's digest. True when
+    # the launcher now delegates; an older full launcher keeps its no-op.
+    $prior = Read-Json $Template
+    $launcher = [string](Get-Field $prior "launcher_path")
+    if (-not $prior -or [string](Get-Field $prior "schema_version") -ne "2" -or [string](Get-Field $prior "launcher_kind") -ne "trampoline" -or
+        -not $launcher -or -not (Test-Path -LiteralPath $launcher -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $Hook -PathType Leaf) -or -not (Test-Path -LiteralPath $Gateway -PathType Leaf)) {
+        return $false
+    }
+    $launcherHash = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($launcherHash -ne ([string](Get-Field $prior "launcher_sha256")).ToLowerInvariant()) { return $false }
+    # A new folder for each copy: the launcher holds the copy it runs open
+    # without delete sharing, so a copy in use is never replaced.
+    $id = [guid]::NewGuid().ToString("N")
+    $folder = Join-Path $SetupDelegatedHooks $id
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $copy = Join-Path $folder "defenseclaw-hook.exe"
+    Copy-Item -LiteralPath $Hook -Destination $copy -Force
+    Protect-SetupLauncherFile $copy
+    $state = [ordered]@{
+        schema_version = 2
+        status = "active"
+        runtime_root = [string](Get-Field $prior "runtime_root")
+        launcher_path = $launcher
+        launcher_sha256 = $launcherHash
+        launcher_kind = "trampoline"
+        hook_path = $copy
+        hook_sha256 = (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash.ToLowerInvariant()
+        data_root = $DataDir.TrimEnd("\")
+        gateway_path = (Join-Path $BinDir "defenseclaw-gateway.exe")
+        gateway_sha256 = (Get-FileHash -LiteralPath $Gateway -Algorithm SHA256).Hash.ToLowerInvariant()
+        transaction_id = $id
+    }
+    $next = "$SetupHookState.$id"
+    [IO.File]::WriteAllText($next, ($state | ConvertTo-Json -Compress))
+    Protect-SetupLauncherFile $next
+    # One rename, so the launcher reads the whole of one state or the other.
+    if (Test-Path -LiteralPath $SetupHookState) {
+        [IO.File]::Replace($next, $SetupHookState, "$next.old")
+        Remove-Item -LiteralPath "$next.old" -Force -ErrorAction SilentlyContinue
+    } else {
+        [IO.File]::Move($next, $SetupHookState)
+    }
+    foreach ($old in @(Get-ChildItem -LiteralPath $SetupDelegatedHooks -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $id })) {
+        # A copy a running call holds stays until the next install.
+        Remove-Item -LiteralPath $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $true
 }
 
 function Restore-SetupInstall([switch]$KeepStopped) {
-    $state = Join-Path $Staging "hook-runtime-state.json"
-    if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
+    Enable-SetupHooks
     if ($WasRunning -and -not $KeepStopped) { Start-SetupGateway $Setup.Root }
 }
 
@@ -1198,6 +1301,10 @@ function Remove-SetupInstall {
     }
     Invoke-Quietly {
         $state = Join-Path $Staging "hook-runtime-state.json"
+        if (-not (Test-SetupLauncherTrampoline)) {
+            # Disable-SetupHooks could not point the launcher at the staged hook.
+            Invoke-Quietly { [void](Publish-SetupLauncherTrampoline $state (Join-Path $BinDir "defenseclaw-hook.exe") (Join-Path $BinDir "defenseclaw-gateway.exe")) }
+        }
         if (Test-Path -LiteralPath $state) { Move-Path $state (Join-Path $keep "hook-runtime-state.json") }
     }
     Invoke-Quietly {
@@ -2288,6 +2395,34 @@ function Stop-HookFailModeHold {
     $hold.Process.Dispose()
 }
 
+function Start-SwapHookFailModes([string]$StagedGateway, $GatewayProcess) {
+    # Set the hooks' fail modes from the config for the swap and, for a
+    # running gateway, hold them until it exits; return the running gateway,
+    # or $null. DefenseClaw Setup's hook launcher stays at the path the agents
+    # cached, and with its state moved aside (Disable-SetupHooks) it answers
+    # every call with exit 0 and no decision. So it stays enabled while the
+    # staged gateway refreshes the modes and takes the hold (up to a minute);
+    # Invoke-Install disables it right before the stop, which an enabled
+    # launcher would undo by starting Setup's gateway again. With no gateway
+    # running it is disabled right after the refresh; a gateway it started
+    # before then is held and stopped like one that ran (GAP-0948 group).
+    # Every refusal here leaves the launcher enabled.
+    if (-not $GatewayProcess) {
+        if (-not (Update-HookFailModes $StagedGateway)) {
+            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+        }
+        if (-not $Setup) { return $null }
+        Disable-SetupHooks
+        $GatewayProcess = Get-GatewayProcess
+        if (-not $GatewayProcess) { return $null }
+        Enable-SetupHooks
+    }
+    if (-not (Start-HookFailModeHold $StagedGateway $GatewayProcess.Id)) {
+        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+    }
+    return $GatewayProcess
+}
+
 function Install-HookFirst([string]$Slot) {
     # The previous version's hook keeps answering the agents while the data
     # folder is copied and the new Python environment is built, a minute or
@@ -3109,6 +3244,8 @@ function Resume-InterruptedRun {
             }
             $keepStopped = Test-Path -LiteralPath (Join-Path $slot "GATEWAY_RESTART_UNPROVEN")
             Save-LifecycleCloser $slot
+            # Setup's own launcher state goes back with the install it ran.
+            if (Test-Path -LiteralPath (Join-Path $Staging "hook-runtime-state.json")) { Enable-SetupHooks }
             $failed = Restore-Slot $slot
             if ($manifest -and $manifest.PSObject.Properties["UnprovenReplacement"] -and $manifest.UnprovenReplacement) {
                 # The snapshot's old hook files and outage mode were moved
@@ -3355,7 +3492,12 @@ function Complete-Swap {
             Remove-Tree $Snap
         }
     }
-    if ($Setup) { Remove-SetupInstall }
+    if ($Setup) {
+        Remove-SetupInstall
+    } elseif (Test-SetupLauncherTrampoline) {
+        # A later install: Setup's launcher delegates to this release's hook.
+        Invoke-Quietly { [void](Publish-SetupLauncherTrampoline $SetupHookState (Join-Path $BinDir "defenseclaw-hook.exe") (Join-Path $BinDir "defenseclaw-gateway.exe")) }
+    }
     Save-Installer
     foreach ($leftover in @($Staging, (Join-Path $DataDir ".upgrade-recovery"), (Join-Path $DataDir ".upgrade-receipts"),
             (Join-Path $env:USERPROFILE ".defenseclaw-install-custody"),
@@ -4089,7 +4231,6 @@ function Invoke-Install {
         }
     }
     if ($Setup) {
-        Disable-SetupHooks
         if ($Setup.CodexHome -and -not $env:CODEX_HOME) { $env:CODEX_HOME = $Setup.CodexHome }
         if ($Setup.ClaudeConfigDir -and -not $env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $Setup.ClaudeConfigDir }
     }
@@ -4110,19 +4251,14 @@ function Invoke-Install {
     if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement -and $gatewayProcess) {
         Die "The unproven gateway restarted after it was stopped; the lifecycle record stays. Run: $(Get-LifecycleNextStep -Accept)"
     }
-    $WasRunning = [bool]$gatewayProcess
     if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
         # Prepare-UnprovenReplacement held the closed mode until the older
         # gateway exited. Do not restore a configured open while it is down.
-    } elseif ($WasRunning) {
-        if (-not (Start-HookFailModeHold $stagedGateway $gatewayProcess.Id)) {
-            if ($Setup) { Restore-SetupInstall }
-            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
-        }
-    } elseif (-not (Update-HookFailModes $stagedGateway)) {
-        if ($Setup) { Restore-SetupInstall }
-        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+        if ($Setup) { Disable-SetupHooks }
+    } else {
+        $gatewayProcess = Start-SwapHookFailModes $stagedGateway $gatewayProcess
     }
+    $WasRunning = [bool]$gatewayProcess
     $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
     # The lifecycle transaction starts here: the working state is on the
     # disk before the first program changes (the hook swap). The outage
@@ -4150,6 +4286,9 @@ function Invoke-Install {
     $stopRefused = $false
     try {
         if ($WasRunning) {
+            # Setup's hook launcher goes quiet only now: enabled, it would
+            # start Setup's gateway again (GAP-0948 group).
+            if ($Setup) { Disable-SetupHooks }
             Write-Info "Stopping the gateway [$(Get-UtcClock)]"
             if (-not (Stop-Gateway)) {
                 $stopRefused = $true

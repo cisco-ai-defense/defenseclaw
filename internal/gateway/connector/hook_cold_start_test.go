@@ -308,7 +308,8 @@ func TestShellHooksColdStartOrBlockAfterARefusedRequest(t *testing.T) {
 				}
 				if tc.script == "claude-code-hook.sh" {
 					_ = failClosedDenyReason(t, run)
-				} else if exitCodeOf(run.err) != 2 || run.stdout != "" || !strings.Contains(run.stderr, "this account's gateway") {
+				} else if !codexBlockedOrExit2(exitCodeOf(run.err), run.stdout) || !strings.Contains(run.stderr, "this account's gateway") {
+					// A per-user Codex block is exit 2 or its own PreToolUse deny on stdout (GAP-0949, GAP-1088).
 					t.Fatalf("Codex refusal did not fail closed: exit=%d stdout=%q stderr=%q", exitCodeOf(run.err), run.stdout, run.stderr)
 				}
 				if log := readColdStartCapture(t, run.capDir, "gateway.log"); strings.Count(log, "start --hook-cold-start") > 1 {
@@ -558,8 +559,9 @@ func TestCodexShellHookShowsTheStartStepWhenTheGatewayWasStopped(t *testing.T) {
 		func(dataDir string) {
 			_ = os.WriteFile(filepath.Join(dataDir, "gateway.stopped"), []byte("stopped\n"), 0o600)
 		}, "DEFENSECLAW_FAIL_MODE=open")
-	if code := exitCodeOf(run.err); code != 2 || !strings.Contains(run.stderr, "stopped with `defenseclaw-gateway stop`") {
-		t.Errorf("per-user open request: exit %d stderr=%q, want a closed block naming the stop", code, run.stderr)
+	// A per-user Codex block is Codex's own PreToolUse deny on stdout (GAP-0949).
+	if code := exitCodeOf(run.err); !codexBlockAnswer("PreToolUse", code, run.stdout) || !strings.Contains(run.stderr, "stopped with `defenseclaw-gateway stop`") {
+		t.Errorf("per-user open request: exit %d stdout=%q stderr=%q, want a closed block naming the stop", code, run.stdout, run.stderr)
 	}
 }
 
@@ -602,7 +604,8 @@ func TestShellHookRetriesUntilTheGatewayAnswersOrBudgetExpires(t *testing.T) {
 					}
 					if hook.script == "claude-code-hook.sh" {
 						_ = failClosedDenyReason(t, run)
-					} else if exitCodeOf(run.err) != 2 || run.stdout != "" {
+					} else if !codexBlockedOrExit2(exitCodeOf(run.err), run.stdout) {
+						// Exit 2 or Codex's own PreToolUse deny on stdout (GAP-0949, GAP-1088).
 						t.Fatalf("Codex budget expiry did not block: err=%v stdout=%q", run.err, run.stdout)
 					}
 				} else if run.err != nil || strings.Contains(run.stdout, "deny") || count != "3" {
@@ -642,7 +645,7 @@ func TestShellHookBlocksWhenTheRestartOutlastsTheBudget(t *testing.T) {
 			if log := waitColdStartCapture(t, run.capDir, "gateway.log"); strings.Count(log, "start --hook-cold-start") > 1 {
 				t.Fatalf("the refused call started the gateway more than once: %q", log)
 			}
-			if code := exitCodeOf(run.err); code != 2 || !strings.Contains(run.stderr, "blocking codex tool") ||
+			if code := exitCodeOf(run.err); !codexBlockAnswer("PreToolUse", code, run.stdout) || !strings.Contains(run.stderr, "blocking codex tool") ||
 				(!strings.Contains(run.stderr, "this account's gateway is not running") &&
 					!strings.Contains(run.stderr, "restarting or not running")) {
 				t.Fatalf("exit %d stderr %q, want a block naming this account's unavailable gateway", code, run.stderr)
@@ -699,4 +702,10 @@ func coldStartTryWindow(t *testing.T, capDir string) (time.Duration, bool) {
 		return 0, false
 	}
 	return time.Duration(last - first), true
+}
+
+// codexBlockedOrExit2 is a closed Codex PreToolUse answer: exit 2, or Codex own
+// PreToolUse deny on stdout (GAP-0949).
+func codexBlockedOrExit2(code int, stdout string) bool {
+	return codexBlockAnswer("PreToolUse", code, stdout) || (code == 2 && stdout == "")
 }

@@ -431,6 +431,14 @@ a later file that sets it to `false` turns the lock off; `policy verify` and
 `enterprise windows verify` report that file. `policy verify --live` is not
 available on Windows. To see the hooks run, make a tool call from the user's
 session and read it with `audit export`.
+
+On a managed Windows test host, a standard user could create a private DOS
+device map, but the tested map did not change a fresh read of the installed
+Codex policy. This does not establish how every agent behaves under every
+process-local view. `status` and `verify` inspect stored policy and cannot by
+themselves prove that every agent process loaded its hook; compare a native
+tool call with the gateway audit when validating this boundary ([W-63](/docs/enterprise/plan/threat-model/)).
+
 ## Recover a pending transaction
 
 A lifecycle that fails normally rolls back. If the rollback cannot finish, the
@@ -722,7 +730,7 @@ Limits:
 | OpenCode | Machine policy | `%ProgramData%\opencode` loads the managed plugin, plus a per-user hook runtime. Falls back to the per-user plugin while the managed plugin is not in force |
 | Antigravity, Devin, Hermes | Per user | The guardian registers `defenseclaw-hook.exe` in each user's agent config |
 | Amp | Per user | An in-agent plugin that calls the gateway after the listener proves it can derive the user's credential |
-| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent ([Kiro](/docs/reference/connectors/kiro#enterprise-standalone-profile)) |
+| Kiro | Per user | The guardian writes `defenseclaw-hook.exe` into each user's `%USERPROFILE%\.kiro\hooks\defenseclaw.json` (Kiro IDE 1.0.182 and later, `kiro-cli --v3`) and the CLI 2.x `defenseclaw` agent, pinned to a reviewed Windows hook contract (kiro-cli 2.27.1 and later, Kiro IDE 1.0.182 and later). A supported IDE is enrolled beside an older CLI, which is reported separately as unprotected. A user an earlier release enrolled at kiro-cli 2.24.1 to 2.26.x keeps being repaired at that version; status reports that CLI as uncovered and verify fails. A kiro-cli that has never run is not enrolled at an assumed version: status reports it as `hook_contract_unverified` until its first run names its version ([Kiro](/docs/reference/connectors/kiro#enterprise-standalone-profile)) |
 | OpenClaw, ZeptoClaw | Not managed | The enumerator writes no targets for them |
 
 See [Machine policy](/docs/enterprise/configure/machine-policy) and

@@ -13,21 +13,25 @@
 package enterpriseunix
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // Machine policy codes in the lifecycle result.
@@ -406,11 +410,28 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		}
 	}
 	covered := coveredMachinePolicy(p.intended, result)
-	if sameStrings(covered, p.machinePolicy) {
-		return nil
-	}
 	p.machinePolicy = covered
 	p.render.MachinePolicy = covered
+	policyOpts := enterprisepolicy.LayoutOptions(env.Layout, "", "")
+	policyOpts.GOOS = env.GOOS
+	policyOpts.Root = env.Root
+	policyOpts.SkipTrustChecks = env.Root != "" // rooted test host
+	p.render.PolicyViewDigests = make(map[string]string, len(covered))
+	p.render.PolicyViewUserSources = make(map[string]map[string]managed.PolicyViewFilePin)
+	for _, name := range covered {
+		digest, digestErr := enterprisepolicy.PolicyViewDigest(policyOpts, name)
+		if digestErr != nil {
+			return &codedError{code: codeMachinePolicy, err: fmt.Errorf("pin %s policy view: %w", name, digestErr)}
+		}
+		p.render.PolicyViewDigests[name] = digest
+		pins, pinErr := enterprisepolicy.PolicyViewUserPins(policyOpts, name)
+		if pinErr != nil {
+			return &codedError{code: codeMachinePolicy, err: fmt.Errorf("pin %s per-account policy view: %w", name, pinErr)}
+		}
+		if len(pins) != 0 {
+			p.render.PolicyViewUserSources[name] = pins
+		}
+	}
 	data, err := env.renderDescriptor(p.render)
 	if err != nil {
 		return &codedError{code: codeApply, err: err}
@@ -419,6 +440,9 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		file := &p.files[index]
 		if file.Path != env.Layout.DescriptorPath {
 			continue
+		}
+		if bytes.Equal(file.Data, data) {
+			return nil
 		}
 		if err := env.writeFileAtomic(env.P(file.Path), data, file.Mode, file.Owner); err != nil {
 			return &codedError{code: codeApply, err: err}
@@ -432,6 +456,54 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 		return nil
 	}
 	return &codedError{code: codeApply, err: errors.New("the plan has no runtime descriptor")}
+}
+
+// policyViewPinProblems reports why a managed hook would refuse its current
+// policy view. Ensure uses it to migrate older descriptors and repair drift;
+// status and verify report the same observed fact to the administrator.
+func (l *lifecycle) policyViewPinProblems(connectors []string) []string {
+	if len(connectors) == 0 {
+		return nil
+	}
+	env := l.env
+	path := env.P(env.Layout.DescriptorPath)
+	if err := env.Trust(path, TrustAdminFile); err != nil {
+		return []string{fmt.Sprintf("the managed runtime descriptor is not trusted: %v", err)}
+	}
+	data, err := readBounded(path, 64<<10)
+	if err != nil {
+		return []string{fmt.Sprintf("cannot read the managed runtime descriptor: %v", err)}
+	}
+	descriptor, err := managed.ParseRuntimeDescriptor(data)
+	if err != nil {
+		return []string{fmt.Sprintf("cannot parse the managed runtime descriptor: %v", err)}
+	}
+	opts := enterprisepolicy.LayoutOptions(env.Layout, "", "")
+	opts.GOOS, opts.Root, opts.SkipTrustChecks = env.GOOS, env.Root, env.Root != ""
+	var problems []string
+	for _, name := range connectors {
+		pin := descriptor.PolicyViewDigests[name]
+		observed, err := enterprisepolicy.PolicyViewDigest(opts, name)
+		switch {
+		case pin == "":
+			problems = append(problems, fmt.Sprintf("%s has no trusted policy-view digest; its managed hook refuses calls", name))
+		case err != nil:
+			problems = append(problems, fmt.Sprintf("%s policy view cannot be read: %v; its managed hook refuses calls", name, err))
+		case observed != pin:
+			problems = append(problems, fmt.Sprintf("%s policy view differs from its trusted digest; its managed hook refuses calls", name))
+		}
+		currentUsers, userErr := enterprisepolicy.PolicyViewUserPins(opts, name)
+		if userErr != nil {
+			problems = append(problems, fmt.Sprintf("%s per-account policy views cannot be attested: %v; affected managed hooks refuse calls", name, userErr))
+		} else if pinnedUsers := descriptor.PolicyViewUserSources[name]; len(currentUsers) != len(pinnedUsers) || len(currentUsers) != 0 && !reflect.DeepEqual(currentUsers, pinnedUsers) {
+			problems = append(problems, fmt.Sprintf("%s per-account policy views differ from their trusted attestations; affected managed hooks refuse calls", name))
+		}
+	}
+	return problems
+}
+
+func (l *lifecycle) policyViewPinsCurrent(connectors []string) bool {
+	return len(l.policyViewPinProblems(connectors)) == 0
 }
 
 // restoreMachinePolicy puts vendor machine policy back to the previous
@@ -658,8 +730,8 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 		}
 		if len(state.UserFileForeign) > 0 {
 			drift = append(drift, fmt.Sprintf(
-				"DefenseClaw's %s plugin holds hooks DefenseClaw did not write for %d enrolled user(s): %s; the hook guardian leaves such a file in place and the foreign-hook guard denies that user's %s calls while it is there: move the file aside, and the guardian writes DefenseClaw's plugin on its next pass",
-				state.Connector, len(state.UserFileForeign), firstPaths(state.UserFileForeign), state.Connector))
+				"DefenseClaw's %s Local hook or plugin cannot be replaced for enrolled users: %s; the hook guardian leaves it in place: move the independent handlers aside or repair the file, then the guardian can write DefenseClaw's hooks on its next pass",
+				state.Connector, firstPaths(state.UserFileForeign)))
 			r.SecurityComplete = false
 		}
 		if len(pending) > 0 {
@@ -845,10 +917,10 @@ func intersectSorted(values, allowed []string) []string {
 	return out
 }
 
-// republishMachinePolicy repairs DefenseClaw's vendor machine policy
-// entries between transactions (the reconcile action). It never rewrites
-// the descriptor or restarts services: when the covered set changed, the
-// result tells the administrator to run ensure.
+// republishMachinePolicy repairs DefenseClaw's vendor machine policy entries
+// between transactions (the reconcile action). A verified view of the same
+// covered connectors can be pinned without restarting services. A changed
+// covered set still needs ensure to apply the deployment.
 func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 	env, r := l.env, l.result
 	raw, err := readBounded(env.P(env.Layout.ConfigPath), maxInputBytes)
@@ -876,4 +948,108 @@ func (l *lifecycle) republishMachinePolicy(record *Deployment) {
 		!sameStrings(coveredMachinePolicy(intended, result), intersectSorted(record.MachinePolicyConnectors, intended)) {
 		r.AddWarning(codeMachinePolicyIncomplete, "the machine-policy connectors in place differ from the runtime descriptor; run ensure")
 	}
+	if record != nil && len(record.MachinePolicyConnectors) != 0 && publishErr == nil {
+		l.repinVerifiedMachinePolicyView(record, validated.Loaded, intended)
+	}
+}
+
+// repinVerifiedMachinePolicyView changes only the policy-view digests in the
+// committed descriptor. The root-side verifier must accept every machine
+// policy source and the covered set must still match the running deployment.
+// A partial publish, an outranking source, or a changed connector set cannot
+// become a new trusted pin through reconcile.
+func (l *lifecycle) repinVerifiedMachinePolicyView(record *Deployment, cfg *config.Config, intended []string) {
+	env, r := l.env, l.result
+	opts := enterprisepolicy.LayoutOptions(env.Layout, "", "")
+	opts.GOOS, opts.Root, opts.SkipTrustChecks = env.GOOS, env.Root, env.Root != ""
+	before := make(map[string]string, len(record.MachinePolicyConnectors))
+	beforeUsers := make(map[string]map[string]managed.PolicyViewFilePin)
+	for _, name := range record.MachinePolicyConnectors {
+		digest, err := enterprisepolicy.PolicyViewDigest(opts, name)
+		if err != nil {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot re-pin %s policy view: %v", name, err))
+			return
+		}
+		before[name] = digest
+		pins, pinErr := enterprisepolicy.PolicyViewUserPins(opts, name)
+		if pinErr != nil {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot re-pin %s per-account policy view: %v", name, pinErr))
+			return
+		}
+		beforeUsers[name] = pins
+	}
+	verified, verifyErr := env.MachinePolicy.Verify(cfg)
+	if verifyErr != nil || !verified.Complete() ||
+		!sameStrings(coveredMachinePolicy(intended, verified), record.MachinePolicyConnectors) {
+		return // describe reports any stale pin; machine-policy coverage is reported separately
+	}
+	path := env.P(env.Layout.DescriptorPath)
+	if err := env.Trust(path, TrustAdminFile); err != nil {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot re-pin the policy view: runtime descriptor is not trusted: "+err.Error())
+		return
+	}
+	previous, err := readBounded(path, 64<<10)
+	if err != nil || record.Files[env.Layout.DescriptorPath] != sha256Bytes(previous) {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot re-pin the policy view: runtime descriptor differs from the committed deployment; run ensure")
+		return
+	}
+	descriptor, err := managed.ParseRuntimeDescriptor(previous)
+	if err != nil || !sameStrings(descriptor.MachinePolicyConnectors, record.MachinePolicyConnectors) {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot re-pin the policy view: runtime descriptor connector set differs from the committed deployment; run ensure")
+		return
+	}
+	digests := make(map[string]string, len(record.MachinePolicyConnectors))
+	users := make(map[string]map[string]managed.PolicyViewFilePin)
+	for _, name := range record.MachinePolicyConnectors {
+		digest, err := enterprisepolicy.PolicyViewDigest(opts, name)
+		if err != nil {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot re-pin %s policy view: %v", name, err))
+			return
+		}
+		if digest != before[name] {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("%s policy view changed during root verification; run ensure after the policy update finishes", name))
+			return
+		}
+		digests[name] = digest
+		pins, pinErr := enterprisepolicy.PolicyViewUserPins(opts, name)
+		if pinErr != nil {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot re-pin %s per-account policy view: %v", name, pinErr))
+			return
+		}
+		if !reflect.DeepEqual(pins, beforeUsers[name]) {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("%s per-account policy view changed during root verification; run ensure after the policy update finishes", name))
+			return
+		}
+		if len(pins) != 0 {
+			users[name] = pins
+		}
+	}
+	descriptor.PolicyViewDigests = digests
+	descriptor.PolicyViewUserSources = users
+	updated, err := managed.MarshalRuntimeDescriptor(descriptor)
+	if err != nil {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot re-pin the policy view: "+err.Error())
+		return
+	}
+	if bytes.Equal(updated, previous) {
+		return
+	}
+	if err := env.writeFileAtomic(path, updated, 0o644, rootOwner()); err != nil {
+		r.AddWarning(codeMachinePolicyIncomplete, "cannot write the verified policy-view pin: "+err.Error())
+		return
+	}
+	committed := *record
+	committed.Files = copyStringMap(record.Files)
+	committed.Files[env.Layout.DescriptorPath] = sha256Bytes(updated)
+	committed.UpdatedAt = env.Now().UTC().Format(time.RFC3339)
+	if err := env.saveDeployment(&committed); err != nil {
+		if restoreErr := env.writeFileAtomic(path, previous, 0o644, rootOwner()); restoreErr != nil {
+			r.AddWarning(codeMachinePolicyIncomplete, fmt.Sprintf("cannot record the verified policy-view pin: %v; cannot restore the previous descriptor: %v", err, restoreErr))
+		} else {
+			r.AddWarning(codeMachinePolicyIncomplete, "cannot record the verified policy-view pin: "+err.Error())
+		}
+		return
+	}
+	*record = committed
+	l.noteChange("pinned the verified vendor machine-policy view in the runtime descriptor")
 }

@@ -131,7 +131,8 @@ func TestStandaloneTargetWithNoDirectoryHomeIsPending(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verify.Failures != 0 || verify.Pending != 1 || !verify.Rows[1].Pending {
+	if verify.Failures != 1 || verify.Pending != 1 || verify.Rows[0].OK ||
+		!strings.Contains(verify.Rows[0].Error, "session-only HERMES_HOME") || !verify.Rows[1].Pending {
 		t.Fatalf("verify rows=%+v failures=%d pending=%d", verify.Rows, verify.Failures, verify.Pending)
 	}
 	if got := filepath.Clean(verify.Rows[1].UserHome); got != recorded {

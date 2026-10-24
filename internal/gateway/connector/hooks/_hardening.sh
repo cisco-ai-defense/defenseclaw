@@ -167,7 +167,11 @@ defenseclaw_harden_resources() {
   # Go reserves more virtual address space than this shell budget even when
   # its resident memory is small. Keep the hook capped, and restore this
   # account's original soft limit only in the verified native POST child.
-  _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
+  # The forkless Hermes execution probe (no process may start) makes no
+  # native POST, so it skips the command substitution.
+  if [ "${_DC_FORKLESS_PROBE:-}" != "1" ]; then
+    _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
+  fi
   ulimit -S -v 524288 2>/dev/null || true
   ulimit -S -n 32    2>/dev/null || true
 }
@@ -1257,9 +1261,10 @@ defenseclaw_hook_delivery_outcome() {
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
 # installer holds its data directory DATA: DATA/.install.lock exists as any
 # file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. It is the one install
-# check of every shell hook. The native hook (installLockHeld), the in-agent
-# plugins and the Windows adapters apply the same rule (GAP-0914).
+# shown absent; no DATA to look in counts as held too. The native hook
+# (installLockHeld), the in-agent plugins and the Windows adapters apply the
+# same rule (GAP-0914). defenseclaw_install_held below, the one install check
+# of every shell hook, reads it.
 defenseclaw_install_lock_held() {
   local data="${1:-}"
   [ -n "$data" ] || return 0
@@ -1274,16 +1279,27 @@ defenseclaw_install_lock_held() {
   fi
   return 1
 }
+# defenseclaw_install_held returns 0 (true) while an installer holds either
+# data directory of this account's hook: the one DEFENSECLAW_HOME names, else
+# ~/.defenseclaw, where install.sh and install.ps1 take the lock, and the one
+# the hook was installed in (_DC_HOOK_DATA_DIR, the folder above its hooks
+# folder), which the gateway rendered it into from its resolved data
+# directory. An agent that runs the hook without DEFENSECLAW_HOME, or a
+# data_dir apart from DEFENSECLAW_HOME, still finds the lock (GAP-0948).
+defenseclaw_install_held() {
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}" && return 0
+  [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
+}
 
 # defenseclaw_install_in_progress returns 0 (true) while this account is
-# being installed or upgraded (defenseclaw_install_lock_held of its data
-# directory). Managed and Secure Client hooks use administrator-owned
+# being installed or upgraded (defenseclaw_install_held of its data
+# directories). Managed and Secure Client hooks use administrator-owned
 # delivery policy instead of this per-user marker, and return 1.
 defenseclaw_install_in_progress() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
-  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
+  defenseclaw_install_held
 }
 
 # While this account is being installed or upgraded, no failure may approve
@@ -1299,6 +1315,74 @@ defenseclaw_close_during_install() {
     FAIL_MODE=closed
   fi
   return 0
+}
+
+# defenseclaw_native_output_agrees STYLE EVENT ACTION OUTPUT returns 0 when
+# OUTPUT, the Claude Code (STYLE claudecode) or Codex (codex) object the
+# gateway rendered for EVENT, gives the agent what ACTION asks for: a deny or
+# block for block, an ask for confirm. The agent acts on that object, not on
+# the action, so one that allows would let a blocked call run beside the
+# block. It is the native hook's nativeOutputAgrees (GAP-0950).
+defenseclaw_native_output_agrees() {
+  local style="${1:-}" event="${2:-}" action="${3:-}" output="${4:-}" want=deny nested="" value=""
+  [ "$action" != "confirm" ] || want=ask
+  case "$output" in "{"*) ;; *) return 1 ;; esac
+  nested="$(printf '%s' "$output" | _dc_jq -c '.hookSpecificOutput // empty' 2>/dev/null)" || return 1
+  case "$nested" in
+    "{"*)
+      value="$(printf '%s' "$nested" | _dc_jq -r '.hookEventName // empty' 2>/dev/null)" || return 1
+      [ -z "$value" ] || [ "$value" = "$event" ] || return 1
+      case "$event" in
+        PreToolUse)
+          value="$(printf '%s' "$nested" | _dc_jq -r '.permissionDecision // empty' 2>/dev/null)" || return 1
+          [ "$value" = "$want" ]
+          return
+          ;;
+        PermissionRequest)
+          value="$(printf '%s' "$nested" | _dc_jq -c '.decision // empty' 2>/dev/null)" || return 1
+          case "$value" in "{"*) ;; *) return 1 ;; esac
+          value="$(printf '%s' "$value" | _dc_jq -r '.behavior // empty' 2>/dev/null)" || return 1
+          [ "$value" = "$want" ]
+          return
+          ;;
+        Elicitation|ElicitationResult)
+          [ "$action" = "block" ] || return 1
+          value="$(printf '%s' "$nested" | _dc_jq -r '.action // empty' 2>/dev/null)" || return 1
+          [ "$value" = "decline" ]
+          return
+          ;;
+        UserPromptSubmit)
+          # Older Codex contracts also carry a prompt denial here.
+          if [ "$style" = "codex" ]; then
+            value="$(printf '%s' "$nested" | _dc_jq -r '.permissionDecision // empty' 2>/dev/null)" || return 1
+            [ "$value" != "$want" ] || return 0
+          fi
+          ;;
+      esac
+      ;;
+  esac
+  case "$event" in
+    PreToolUse|PermissionRequest|Elicitation|ElicitationResult) return 1 ;;
+  esac
+  value="$(printf '%s' "$output" | _dc_jq -r '.decision // empty' 2>/dev/null)" || return 1
+  if [ "$action" = "confirm" ]; then
+    [ "$value" = "ask" ]
+    return
+  fi
+  if [ "$event" = "PreCompact" ] && [ "$style" = "claudecode" ]; then
+    # Claude Code stops a compaction on decision block (GAP-0326).
+    [ "$value" = "block" ]
+    return
+  fi
+  case "$event" in
+    SessionStart|PreCompact|PostCompact)
+      [ "$style" = "codex" ] || return 1
+      value="$(printf '%s' "$output" | _dc_jq -c '.continue' 2>/dev/null)" || return 1
+      [ "$value" = "false" ]
+      return
+      ;;
+  esac
+  [ "$value" = "block" ]
 }
 
 # defenseclaw_gateway_binary DATA_DIR HOME prints the per-user gateway binary

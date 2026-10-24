@@ -46,7 +46,8 @@ def test_hermes_verification_discloses_snapshot_and_checks_current_files():
     assert "last reconcile" in text
     assert "enterprise hooks verify --json" in text
     assert "current hook files" in text
-    assert "can still say `all` after hooks are removed" in text
+    assert "Managed Hermes hook coverage is reported as unknown" in text
+    assert "cannot certify a session-only `HERMES_HOME`" in text
     assert "#managed-verification" in flat("connectors/hermes.mdx")
 
 

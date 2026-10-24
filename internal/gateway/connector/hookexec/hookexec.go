@@ -83,6 +83,14 @@ var (
 	// reports it stopped). The hook fails closed, except an authenticated
 	// Secure Client hook, which follows its fail mode (managedPeerFailMode).
 	errManagedGatewayNotRunning = errors.New("enterprise managed gateway service is not running")
+	// errManagedGatewayQuiesced wraps errManagedGatewayNotRunning when the
+	// service is stopped with its start type disabled: the enterprise
+	// lifecycle (install, upgrade, repair, uninstall) disables every
+	// DefenseClaw service before it stops it and restores the start types
+	// once the new release runs, so this is a package transition, not an
+	// outage. An administrator's open is outage-only and does not apply
+	// (GAP-0993); a start type the hook cannot read counts as disabled.
+	errManagedGatewayQuiesced = errors.New("enterprise managed gateway service is disabled for an install, upgrade or repair")
 	// errManagedHookSocketSELinuxDenied wraps a Unix standalone peer failure
 	// where SELinux kept this account from the hook socket.
 	errManagedHookSocketSELinuxDenied = errors.New("SELinux denied this account access to the DefenseClaw hook socket")
@@ -143,13 +151,32 @@ const AgentSurfaceHeader = "X-DefenseClaw-Agent-Surface"
 // ClientRefusalHeader carries, on the standalone hook socket, a refusal the
 // hook made itself before it could send the event: the gateway records it
 // (audit row and log line) and answers 403. Only
-// ManagedUserNamespaceReason is accepted.
+// IsManagedProcessContextReason limits the accepted values.
 const ClientRefusalHeader = "X-DefenseClaw-Client-Refusal"
 
 // ManagedUserNamespaceReason is the refusal of a hook that runs in a private
 // user namespace (unshare -U, a sandbox tool): from there it cannot check the
 // root-owned runtime state, whose owners read as the overflow uid.
 const ManagedUserNamespaceReason = "enterprise_managed_user_namespace"
+
+const (
+	ManagedMountNamespaceReason        = "enterprise_managed_mount_namespace"
+	ManagedTracedProcessReason         = "enterprise_managed_traced_process"
+	ManagedProcessContextUnknownReason = "enterprise_managed_process_context_unverified"
+	ManagedPolicyViewReason            = "enterprise_managed_policy_view_unverified"
+)
+
+// IsManagedProcessContextReason accepts only the hook's fixed context and policy-view diagnostics,
+// never caller-supplied text, for the managed socket refusal audit.
+func IsManagedProcessContextReason(reason string) bool {
+	switch reason {
+	case ManagedUserNamespaceReason, ManagedMountNamespaceReason,
+		ManagedTracedProcessReason, ManagedProcessContextUnknownReason, ManagedPolicyViewReason:
+		return true
+	default:
+		return false
+	}
+}
 
 // AgentSurfaceHeaderValue returns surface when it is cli, desktop or
 // extension, else "".
@@ -348,6 +375,12 @@ type Options struct {
 	// ManagedRuntimeFailure is a stable, non-sensitive resolver diagnostic
 	// selected before target-owned runtime files are consulted.
 	ManagedRuntimeFailure string
+	// InvocationFailure is why a per-user hook command failed before it
+	// could check the call (an unknown flag, a malformed value, a stray
+	// argument) while its policy is closed: Run answers it with the
+	// connector's own block, never the generic status 1 most agents run the
+	// call on (GAP-0982). A managed hook sets ManagedRuntimeFailure instead.
+	InvocationFailure string
 	// ExplainUnenrolledAccount makes the refusal of an account absent from
 	// the protected target set (managedSIDUnregisteredReason), or registered
 	// but without a runtime yet (managedEnrollmentPendingReason), say so,
@@ -491,6 +524,9 @@ func runHook(ctx context.Context, opts Options) int {
 		failMode = "closed"
 		opts.FailMode = "closed"
 	}
+	if reason := strings.TrimSpace(opts.InvocationFailure); reason != "" && !opts.ManagedEnterprise {
+		return failInvocation(opts, sp, reason)
+	}
 	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
 		if code, handled := refuseClosedUnboundHook(&opts, sp, "closed"); handled {
 			return code
@@ -620,6 +656,24 @@ func runHook(ctx context.Context, opts Options) int {
 		return watchdog.finish(sendToGateway(ctx, opts, sp, failMode, payload, startedAt))
 	}
 	return sendToGateway(ctx, opts, sp, failMode, payload, startedAt)
+}
+
+// failInvocation answers a per-user hook command that failed before it
+// could check the call (Options.InvocationFailure) with the connector's
+// closed answer for that event: Codex's own block object, Claude Code's,
+// Devin's and Kiro's exit 2, Hermes' block directive, Copilot's and
+// Antigravity's deny, Cursor's. It reads the payload for the event an
+// unbound command does not name; an unbound Copilot or Antigravity command
+// gets the denies refuseClosedUnboundHook gives.
+func failInvocation(opts Options, sp spec, reason string) int {
+	opts.FailMode = "closed"
+	opts.StrictAvailability = true
+	if code, handled := refuseClosedUnboundHook(&opts, sp, "closed"); handled {
+		return code
+	}
+	payload, _, _ := readCapped(opts.Stdin, opts.MaxBody)
+	opts.Event = resolveHookEvent(strings.TrimSpace(opts.Event), payload)
+	return failResponse(opts, sp, "closed", reason)
 }
 
 // sendToGateway is Run once the call's payload and event are known: it
@@ -1595,6 +1649,15 @@ func (sp spec) decide(opts Options, body []byte) int {
 		!nativeOutputAgrees(sp, opts.Event, action, output) {
 		return failResponse(opts, sp, "closed", "native output contradicts gateway action")
 	}
+	if !opts.SecureClient && action == "confirm" && output == "" &&
+		(sp.style == styleClaudeCode || sp.style == styleCodex) &&
+		(sp.style != styleCodex || codexEventCanControl(opts.HookContractID, opts.Event)) {
+		// A confirmation is the gateway's ask; Claude Code and Codex ask only
+		// through the native object, so without one the call would run as if
+		// the gateway had allowed it. It is refused closed, in every fail
+		// mode, as an answer that contradicts its action is (GAP-0983).
+		return failResponse(opts, sp, "closed", missingNativeAskReason)
+	}
 
 	switch sp.style {
 	case styleClaudeCode:
@@ -1718,6 +1781,10 @@ func (sp spec) decide(opts Options, body []byte) int {
 		return 0
 	}
 }
+
+// missingNativeAskReason is the hook-failure reason of a confirmation that
+// carries no native ask (GAP-0983).
+const missingNativeAskReason = "confirm without native output in gateway response"
 
 // managedNativeDecision reports a managed hook outside Secure Client (the
 // standalone profile, Unix or Windows).
@@ -3129,6 +3196,10 @@ func managedPlainFailClosed(opts Options, sp spec) bool {
 // other peer failure (another process on the gateway port, a service the
 // hook cannot query) fails closed.
 func managedPeerFailMode(opts Options, failMode string, err error) string {
+	if errors.Is(err, errManagedGatewayQuiesced) && managedNativeDecision(opts) {
+		// No call runs during a package transition (GAP-0993).
+		return "closed"
+	}
 	if errors.Is(err, errManagedGatewayNotRunning) && ((opts.SecureClient && secureClientHook(opts)) || managedNativeDecision(opts)) {
 		return failMode
 	}
@@ -3152,7 +3223,7 @@ func ManagedOutageFailsOpen(opts Options, err error) bool {
 		strings.TrimSpace(opts.ManagedRuntimeFailure) != "" || normalizeFailMode(opts.FailMode) != "open" {
 		return false
 	}
-	if errors.Is(err, errManagedGatewayPortHeld) {
+	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errManagedGatewayQuiesced) {
 		return false
 	}
 	return errors.Is(err, errManagedGatewayNotRunning)
@@ -3342,6 +3413,18 @@ func managedStandaloneFailClosedText(event, layer, reason string) string {
 		// The setup is fine; the agent's process is the problem (GAP-0923).
 		cause, advice = "this agent runs in a private user namespace (for example one started with unshare or a sandbox tool), where DefenseClaw cannot check it or reach its hook socket",
 			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == ManagedMountNamespaceReason:
+		cause, advice = "this agent runs in a private mount namespace, where its view of managed machine policy may differ from the host's",
+			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == ManagedTracedProcessReason:
+		cause, advice = "this agent's hook is being traced, so another process may change the policy paths it reads",
+			"Start the agent without a tracer; if this continues, contact your administrator."
+	case reason == ManagedProcessContextUnknownReason:
+		cause, advice = "DefenseClaw cannot verify this agent's Linux process context and managed policy view",
+			"Start the agent from your normal login session; if this continues, contact your administrator."
+	case reason == ManagedPolicyViewReason:
+		cause, advice = "DefenseClaw cannot prove that this agent sees the administrator's effective managed policy",
+			"Ask your administrator to check the managed policy files and run enterprise verify."
 	case reason == managedHookSocketSELinuxDeniedReason:
 		cause, advice = "SELinux does not let your account reach the DefenseClaw gateway on this computer",
 			"Ask your administrator to run `enterprise linux repair`, which loads the DefenseClaw SELinux module that SELinux-confined accounts need."

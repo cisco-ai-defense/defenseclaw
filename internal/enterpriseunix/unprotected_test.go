@@ -214,3 +214,55 @@ func TestStaleUnprotectedRecordMakesUnixCoverageUnknown(t *testing.T) {
 		})
 	}
 }
+
+func TestEnrolledKiroCLIBelowHookFloorIsUncoveredInStatusAndVerify(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+		User: "alice", Connector: "kiro", Version: "2.24.1", Code: "kiro_cli_below_hook_floor",
+		Reason: "kiro-cli 2.24.1 is below 2.27.1: non-interactive runs do not load hooks; the earlier enrollment remains installed",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		messages := messagesOf(r.Warnings, "kiro_cli_below_hook_floor")
+		if action == ActionVerify {
+			messages = messagesOf(r.Errors, "kiro_cli_below_hook_floor")
+		}
+		if r.CoverageComplete || r.SecurityComplete ||
+			!strings.Contains(messages, "kiro 2.24.1 for user alice is not protected") ||
+			(action == ActionVerify && (r.OK || r.ExitCode == 0)) ||
+			(action == ActionStatus && (!r.OK || r.ExitCode != 0)) {
+			t.Fatalf("%s counted an unhooked Kiro CLI as covered: coverage=%t security=%t warnings=%+v",
+				action, r.CoverageComplete, r.SecurityComplete, r.Warnings)
+		}
+	}
+}
+
+func TestKiroIDEBelowGlobalHookFloorFailsVerify(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+		User: "alice", Connector: "kiro", Version: "1.0.181", Code: enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
+		Reason: "Kiro IDE 1.0.181 cannot read the global hooks file",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	verify := h.run(Options{Action: ActionVerify})
+	if status.CoverageComplete || !status.OK || verify.CoverageComplete || verify.OK || verify.ExitCode == 0 ||
+		!strings.Contains(messagesOf(verify.Errors, enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor), "Kiro IDE 1.0.181") {
+		t.Fatalf("old IDE appears covered: status=%+v verify=%+v", status, verify)
+	}
+}

@@ -408,9 +408,9 @@ the details window takes the keys of its view, and `Esc` closes it.
 | `a` / `A` / `x` | Approve the selected ask once, always approve it (asks again; every future sandbox may reach it too, and a toast confirms what was saved), or reject it. An approval applies when the agent is idle. `A` is not offered for a port on this machine, a private or IP-literal address, or a proposal with allowed IPs: those open for one sandbox only. Outside Asks, `a` switches to Asks when one waits |
 | `c` | Connect: start the sandbox if it is stopped and attach its harness |
 | `n` | New run: open the [launch dialog](#start-a-run-from-the-tui) |
-| `s` | Stop the sandbox (asks first); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
+| `s` | Save or sync accessible work first, then stop the sandbox (asks first); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
 | `d` | Delete the sandbox (asks first) with its providers, credentials and snapshot. Undo is no longer possible; your project folder keeps its current contents |
-| `U` | Undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot. For a sandbox that works on a copy, `U` reverts its last `pull --apply` instead: `defenseclaw sandbox undo <name>` previews the revert in this terminal and asks, and edits you made since stay |
+| `U` | Save work you want to keep first, then undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot. For a sandbox that works on a copy, `U` reverts its last `pull --apply` instead: `defenseclaw sandbox undo <name>` previews the revert in this terminal and asks, and edits you made since stay |
 | `R` | Review the changed files that can run code on your machine (a sandbox that mounts its folder) |
 | `P` | Pull the work of a sandbox that works on a copy: **Show what comes back** (`defenseclaw sandbox pull <name>`, which changes nothing), **Apply it to the project folder** (`--apply`, a 3-way merge that `U` reverts) or **Put it on branch** `dc/<name>` (`--branch`, which leaves your working tree alone). The command runs in this terminal: it shows the changes first and asks before it brings back a change that can run code on your machine. `p` still opens Policies |
 | `w` | Sandboxed by default: turn the shell wrapper on or off per harness (`defenseclaw sandbox enable` or `defenseclaw sandbox disable`) |
@@ -593,7 +593,7 @@ Actions for the selected sandbox:
 
 | Button | Runs |
 | --- | --- |
-| **Stop…** | `defenseclaw sandbox stop <name> --yes` after asking. `defenseclaw sandbox connect <name>` resumes it. A full-disk MicroVM with work not yet pulled keeps running and the stop exits `5`, even with `--yes`. |
+| **Stop…** | Save or sync accessible work first, then `defenseclaw sandbox stop <name> --yes` after asking. `defenseclaw sandbox connect <name>` resumes it. A full-disk MicroVM with work not yet pulled keeps running and the stop exits `5`, even with `--yes`. |
 | **Review changes** | `defenseclaw sandbox review <name>` (sandboxes that mount their folder). |
 | **Undo…** | `defenseclaw sandbox undo <name> --yes` after asking. On a mounting sandbox it restores the pre-session snapshot. On a copy-mode sandbox it reverts the last `pull --apply`; later edits stay, and if one touched the same files nothing is reverted and Activity says why. |
 | **Copy connect command** | Copies the resume command. |
@@ -612,7 +612,7 @@ The app never installs OpenShell. When OpenShell or e2fsprogs is missing, run th
 defenseclaw sandbox setup --install-openshell
 ```
 
-On OpenShell 0.1.1 to 0.1.4, which run no sandbox, the same command upgrades OpenShell to 0.1.5 in place, which restarts the gateway. Setup keeps the release you have while a MicroVM sandbox runs, so stop them first with `defenseclaw sandbox stop NAME`.
+On OpenShell 0.1.1 to 0.1.4, which run no sandbox, the same command upgrades OpenShell to 0.1.5 in place, which restarts the gateway. Setup keeps the release you have while a MicroVM sandbox runs, so save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`; a failed disk sync can lose later changes.
 
 ### Config editor
 

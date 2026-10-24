@@ -2314,7 +2314,7 @@ def _hilt_preview_lines(app: AppContext, key: str, label: str, enabled: bool, mi
         if enabled and not has_native_approval_prompt(key):
             # Whatever the mode, a connector without a native approval prompt
             # alerts instead of asking (_hilt_enable_notice).
-            lines.append(_hilt_enable_notice(key, min_severity))
+            lines.append(_hilt_enable_notice(key, min_severity, secure_client=asset_lists.is_secure_client(app.cfg)))
         return lines
     base = preview.base
     if base.mode != "action":
@@ -2324,7 +2324,7 @@ def _hilt_preview_lines(app: AppContext, key: str, label: str, enabled: bool, mi
         ]
     elif base.enabled:
         # A connector without a native approval prompt alerts instead.
-        lines = [_hilt_enable_notice(key, base.min_severity)]
+        lines = [_hilt_enable_notice(key, base.min_severity, secure_client=asset_lists.is_secure_client(app.cfg))]
     else:
         lines = [f"{label} will NOT prompt — actions resolve straight to allow/alert/block."]
     return lines + _hilt_profile_notes(preview, label)
@@ -2393,14 +2393,37 @@ def _warn_still_fail_open(gc, open_names: list[str]) -> None:
 _HILT_SEVERITIES = ("LOW", "MEDIUM", "HIGH", "CRITICAL")
 
 
-def _hilt_enable_notice(connector: str, severity: str) -> str:
+def _hilt_enable_notice(
+    connector: str, severity: str, *, mode: str = "action", secure_client: bool = False
+) -> str:
     label = _connector_label(connector)
+    observe_note = (
+        f"{label} is in observe mode; HILT at/above {severity} does not pause actions "
+        "until action mode is enabled. "
+        if mode.strip().lower() != "action"
+        else ""
+    )
+    if normalize_connector(connector) == "copilot":
+        if secure_client:
+            return (
+                observe_note +
+                f"{label} Secure Client will prompt for approval on supported confirmable "
+                f"actions at/above {severity} (CRITICAL findings still block outright)."
+            )
+        return (
+            observe_note +
+            f"{label} cannot prove an approval prompt is available; action-mode "
+            f"confirmations at/above {severity} are denied and audited as block "
+            "(raw_action=confirm). CRITICAL findings still block outright."
+        )
     if has_native_approval_prompt(connector):
         return (
+            observe_note +
             f"{label} will prompt for approval on supported confirmable actions at/above "
             f"{severity} (CRITICAL findings still block outright)."
         )
     return (
+        observe_note +
         f"{label} has no implemented native approval prompt; confirm verdicts at/above "
         f"{severity} produce alerts with raw_action=confirm preserved. CRITICAL findings still block outright."
     )
@@ -3758,6 +3781,11 @@ def _scope_key(connector_key: str | None, profile: str | None) -> str:
     return key
 
 
+def _rule_prune_scope(connector_key: str | None, profile: str | None) -> str:
+    """Keep the owning scope when its last rule override is removed."""
+    return _scope_key(None, profile) if profile else _scope_key(connector_key, None)
+
+
 def _scope_block(cfg, connector_key: str | None, profile: str | None):
     """The config block of a scope (None when it isn't written yet)."""
     block = cfg.guardrail
@@ -4736,7 +4764,12 @@ def _change_protection(
         wanted = (set(on_now) | {name}) if enable else (set(on_now) - {name})
         order = {p.name: index for index, p in enumerate(packs)}
         desired = sorted(wanted, key=lambda n: order.get(n, len(order)))
-        change = config_writer.Change(path, desired) if desired else config_writer.Change(path, unset=True)
+        change = (
+            config_writer.Change(path, desired)
+            if desired else config_writer.Change(
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+            )
+        )
         _preflight_config_write(app)
         verb = "enable" if enable else "disable"
         result = _write_guardrail_config(app, [change], f"guardrail protection {verb} {name}", _fail)
@@ -4858,14 +4891,22 @@ def _stale_rule_changes(cfg, pack_dir: str, connector_key: str | None) -> tuple[
             if len(kept) != len(ids):
                 dropped.extend(f"{key}.rules.{field}: {i}" for i in ids if i not in known)
                 path = f"{key}.rules.{field}"
-                changes.append(config_writer.Change(path, kept) if kept else config_writer.Change(path, unset=True))
+                changes.append(
+                    config_writer.Change(path, kept)
+                    if kept else config_writer.Change(
+                        path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                    )
+                )
         overrides = dict(getattr(rules, "severity_overrides", None) or {})
         kept_overrides = {i: v for i, v in overrides.items() if i in known}
         if len(kept_overrides) != len(overrides):
             dropped.extend(f"{key}.rules.severity_overrides: {i}" for i in overrides if i not in known)
             path = f"{key}.rules.severity_overrides"
             changes.append(
-                config_writer.Change(path, kept_overrides) if kept_overrides else config_writer.Change(path, unset=True)
+                config_writer.Change(path, kept_overrides)
+                if kept_overrides else config_writer.Change(
+                    path, unset=True, prune_empty_to=_rule_prune_scope(scope_connector, scope_profile)
+                )
             )
     return changes, dropped
 
@@ -4922,7 +4963,10 @@ def _change_rule_lists(
             changes.append(
                 config_writer.Change(f"{key}.rules.{remove_from}", rest)
                 if rest
-                else config_writer.Change(f"{key}.rules.{remove_from}", unset=True)
+                else config_writer.Change(
+                    f"{key}.rules.{remove_from}", unset=True,
+                    prune_empty_to=_rule_prune_scope(connector_key, profile_name),
+                )
             )
         if not changes:
             message = f"Rule {rule_id} is already turned {state} for {where}; nothing was changed."
@@ -4991,7 +5035,7 @@ def rule_severity_cmd(
     key = config_writer.format_path((*overrides, rule_id))
     level = severity.upper()
     scope_key = _scope_key(connector_key, profile_name)
-    prune_to = _scope_key(None, profile_name) if profile_name else scope_key
+    prune_to = _rule_prune_scope(connector_key, profile_name)
     change = (
         config_writer.Change(key, unset=True, prune_empty_to=prune_to)
         if level == "DEFAULT" else config_writer.Change(key, level)
@@ -5118,7 +5162,12 @@ def _change_suppression(
         else:
             updated = [s for s in current if s["id"] != sid]
         updated = [{k: v for k, v in s.items() if v} for s in updated]
-        change = config_writer.Change(path, updated) if updated else config_writer.Change(path, unset=True)
+        change = (
+            config_writer.Change(path, updated)
+            if updated else config_writer.Change(
+                path, unset=True, prune_empty_to=_rule_prune_scope(connector_key, profile_name)
+            )
+        )
         _preflight_config_write(app)
         verb = "add" if entry is not None else "remove"
         result = _write_guardrail_config(app, [change], f"guardrail suppress {verb} {sid}", _fail)

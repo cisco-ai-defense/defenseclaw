@@ -12043,7 +12043,10 @@ function New-DefenseClawTransaction {
         # 'skipped_teardown' placeholder and Restore-DefenseClaw... treats
         # it as a no-op. Every trust check downstream of the transaction
         # still runs; only the DACL preimage capture is bypassed.
-        [switch]$SkipRedactionKeySnapshot
+        [switch]$SkipRedactionKeySnapshot,
+        # Upgrade and Repair of an active deployment: the authenticated
+        # replacement hook, published before the services stop (GAP-0993).
+        [hashtable]$EarlyHookSource
     )
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'refusing to open a lifecycle transaction while protected recovery state already exists'
@@ -12171,6 +12174,24 @@ function New-DefenseClawTransaction {
             -Value $quiescingIntent `
             -Path $Layout.PendingPath
         $quiescingIntentPublished = $true
+        # GAP-0993: agents run the hook binary at its fixed path, and the
+        # release being replaced answers for it until the swap. A 1.0.2 or
+        # 1.0.3 hook lets a tool call run while its gateway service is
+        # stopped (Hermes always; every connector under an administrator's
+        # open), and the services stop below, well before the new binaries
+        # go in. Put the replacement hook in place first, while the old
+        # gateway still answers: from here on every call runs this release's
+        # hook, which answers closed while the lifecycle has the services
+        # disabled. The prior hook's bytes are kept as its preimage, recorded
+        # in the intent before the swap, so a failed snapshot, a crash
+        # (Recover-DefenseClawQuiescingIntent) and a rollback each put it
+        # back with the services it answers for.
+        $earlyHookPreimage = Publish-DefenseClawEarlyHook `
+            -Layout $Layout `
+            -Source $EarlyHookSource `
+            -TransactionDirectory $directory `
+            -Intent $quiescingIntent `
+            -PriorDeploymentActive:$PriorDeploymentActive
         Write-DefenseClawLifecyclePhase -Stage 'transaction quiesce disable services'
 
         # Disabled start neutralizes boot activation and any failure restart
@@ -12442,7 +12463,17 @@ function New-DefenseClawTransaction {
                 )
             }
             $backup = Microsoft.PowerShell.Management\Join-Path $directory ("file-{0:D2}.bak" -f $index)
-            Microsoft.PowerShell.Management\Copy-Item -LiteralPath $destination -Destination $backup -Force
+            $preimageSource = $destination
+            if (-not [string]::IsNullOrWhiteSpace([string]$earlyHookPreimage) -and
+                [string]::Equals(
+                    [IO.Path]::GetFullPath($destination),
+                    [IO.Path]::GetFullPath([string]$Layout.HookPath),
+                    [StringComparison]::OrdinalIgnoreCase)) {
+                # The live hook is already this release's (GAP-0993): its
+                # preimage is the prior release's, kept before the swap.
+                $preimageSource = $earlyHookPreimage
+            }
+            Microsoft.PowerShell.Management\Copy-Item -LiteralPath $preimageSource -Destination $backup -Force
             if ($isManagedHooksLifecycleJournal -and
                 $RecoverLegacyManagedHooksLifecycleJournal) {
                 $backupSHA256 = (
@@ -12599,6 +12630,9 @@ function New-DefenseClawTransaction {
         $restartErrors = [Collections.Generic.List[string]]::new()
         $aclRestoreFailure = ''
         try {
+            # The prior release's hook answers for the services restarted
+            # below (GAP-0993).
+            Restore-DefenseClawEarlyHook -Layout $Layout -Intent $quiescingIntent -TransactionDirectory $directory
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
                     $GatewayServiceName,
@@ -17829,6 +17863,77 @@ function Remove-DefenseClawCommittedManagedHooksTeardownJournal {
     return $true
 }
 
+function Publish-DefenseClawEarlyHook {
+    <#
+        GAP-0993: puts the replacement hook binary at the hook path before a
+        lifecycle transaction stops the services of an active deployment.
+        The prior hook is copied to <transaction>\early-hook.bak, verified,
+        and named in the quiescing intent before the swap. Returns the
+        preimage path, or '' when there is nothing to publish early (a first
+        install, no replacement hook, no installed hook).
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [AllowNull()][hashtable]$Source,
+        [Parameter(Mandatory)][string]$TransactionDirectory,
+        [Parameter(Mandatory)]$Intent,
+        [switch]$PriorDeploymentActive
+    )
+    if ($null -eq $Source -or -not $PriorDeploymentActive -or
+        -not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.HookPath -PathType Leaf)) {
+        return ''
+    }
+    Assert-DefenseClawNoReparsePath -Path $Layout.HookPath
+    $preimage = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook.bak'
+    Microsoft.PowerShell.Management\Copy-Item -LiteralPath $Layout.HookPath -Destination $preimage -Force
+    Assert-DefenseClawNoReparsePath -Path $preimage
+    $liveHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256).Hash
+    $copiedHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $preimage -Algorithm SHA256).Hash
+    if (-not [string]::Equals($liveHash, $copiedHash, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'the installed hook changed while its preimage was copied'
+    }
+    $Intent['early_hook_preimage'] = $preimage
+    Write-DefenseClawJsonAtomic -Value $Intent -Path $Layout.PendingPath
+    Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
+    return $preimage
+}
+
+function Restore-DefenseClawEarlyHook {
+    <#
+        GAP-0993: puts the prior release's hook back (Publish-DefenseClawEarlyHook)
+        before a quiescing transaction that did not reach its snapshot restarts
+        the prior services. The intent may only name early-hook.bak in its own
+        transaction directory. Nothing is done when the intent names none.
+    #>
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Intent,
+        [Parameter(Mandatory)][string]$TransactionDirectory
+    )
+    $named = if ($Intent -is [Collections.IDictionary]) {
+        if ($Intent.Contains('early_hook_preimage')) { [string]$Intent['early_hook_preimage'] } else { '' }
+    }
+    else {
+        $property = $Intent.PSObject.Properties['early_hook_preimage']
+        if ($null -eq $property) { '' } else { [string]$property.Value }
+    }
+    if ([string]::IsNullOrWhiteSpace($named)) {
+        return
+    }
+    $expected = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook.bak'
+    if (-not [string]::Equals(
+            [IO.Path]::GetFullPath($named),
+            [IO.Path]::GetFullPath($expected),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'pending lifecycle quiescing intent names an unexpected hook preimage'
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $expected -PathType Leaf)) {
+        throw 'pending lifecycle quiescing intent names a hook preimage that is missing'
+    }
+    Assert-DefenseClawNoReparsePath -Path $expected
+    Install-DefenseClawFileAtomic -Source $expected -Destination $Layout.HookPath
+}
+
 function Recover-DefenseClawQuiescingIntent {
     param(
         [Parameter(Mandatory)]$Intent,
@@ -18088,6 +18193,10 @@ function Recover-DefenseClawQuiescingIntent {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
     }
+    # An interrupted upgrade may have put its hook in place before it
+    # stopped the services: the prior release's hook answers for the
+    # services restarted below (GAP-0993).
+    Restore-DefenseClawEarlyHook -Layout $Layout -Intent $Intent -TransactionDirectory $recordedDirectory
     Set-DefenseClawServiceActivationPhase `
         -State $Intent `
         -Path $Layout.PendingPath `
@@ -32375,11 +32484,16 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             }
         }
     }
+    $earlyHookSource = $null
+    if ($Sources.ContainsKey('hook')) {
+        $earlyHookSource = $Sources['hook']
+    }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName `
         -PriorDeploymentActive:$priorDeploymentActive `
+        -EarlyHookSource $earlyHookSource `
         -IncludeCodexMachineState:$priorCodexTargetEnabled `
         -RecoverLegacyManagedHooksLifecycleJournal:$recoverCommittedManagedHooksLifecycle `
         -InstallRootCreatedForTransaction:$InstallRootCreatedForTransaction `
