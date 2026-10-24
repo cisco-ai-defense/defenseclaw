@@ -378,6 +378,29 @@ func TestR104ActionWindowsWrappedRedirectRoles(t *testing.T) {
 	}
 }
 
+func TestR104ActionWindowsKnownWrapperChildren(t *testing.T) {
+	home, cwd := `C:\Users\alice`, `C:\Users\alice\project`
+	for _, prefix := range []string{
+		`sudo -n `, `sudo -D C:\work `, `timeout 5 `, `stdbuf -o L `,
+		`setsid `, `nohup `, `ionice -c 2 `, `chroot C:\work `,
+		`flock C:\work\lock `, `time -p `, `command -p `, `exec `,
+		`busybox `, `unshare -m `, `nsenter -t 1 `,
+	} {
+		for _, tc := range []struct {
+			child string
+			block bool
+		}{
+			{`cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
+			{`cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, false},
+		} {
+			command := prefix + tc.child
+			if got := ActionCommandDecision(command, cwd, home) != ""; got != tc.block {
+				t.Errorf("protected write=%v, want %v for %q", got, tc.block, command)
+			}
+		}
+	}
+}
+
 func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 	const cwd = `C:\Users\alice\project`
 	const home = `C:\Users\alice`

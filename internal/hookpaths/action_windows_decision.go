@@ -328,7 +328,7 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 	if program == "source" || program == "." {
 		return false
 	}
-	if program == "env" || program == "nice" {
+	if actionWindowsWrapperProgram(program) {
 		return actionWindowsResolvedWrapperTarget(program, words, cwd, home, depth)
 	}
 	for _, extension := range []string{".ps1", ".psm1", ".cmd", ".bat", ".sh", ".bash", ".py", ".js", ".rb", ".pl"} {
@@ -387,12 +387,22 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 	return false
 }
 
+func actionWindowsWrapperProgram(program string) bool {
+	switch program {
+	case "env", "nice", "ionice", "timeout", "stdbuf", "setsid", "chroot", "unshare", "nsenter",
+		"flock", "sudo", "time", "nohup", "command", "exec", "busybox":
+		return true
+	}
+	return false
+}
+
 // Unwrap only known option forms. The child is inspected as its own command,
 // so a path in a wrapper option or environment assignment is never a target.
 func actionWindowsResolvedWrapperTarget(program string, words []string, cwd, home string, depth int) bool {
 	index := 1
 	for index < len(words) {
-		option := strings.ToLower(words[index])
+		rawOption := words[index]
+		option := strings.ToLower(rawOption)
 		if option == "--" {
 			index++
 			break
@@ -432,18 +442,23 @@ func actionWindowsResolvedWrapperTarget(program string, words []string, cwd, hom
 			}
 			continue
 		}
-		switch {
-		case option == "-n" || option == "--adjustment":
-			if index+1 >= len(words) {
+		if !strings.HasPrefix(option, "-") {
+			break
+		}
+		value, known := actionWindowsResolvedWrapperOption(program, rawOption)
+		if !known || value && index+1 >= len(words) {
+			return false
+		}
+		if program == "sudo" && (rawOption == "-D" || option == "--chdir") {
+			var resolved bool
+			cwd, resolved = actionWindowsPath(words[index+1], cwd, home)
+			if !resolved {
 				return false
 			}
-			index += 2
-		case strings.HasPrefix(option, "-n") && len(option) > 2 || strings.HasPrefix(option, "--adjustment="):
+		}
+		index++
+		if value {
 			index++
-		case strings.HasPrefix(option, "-"):
-			return false
-		default:
-			return actionWindowsResolvedProtectedTarget(strings.Join(words[index:], " "), cwd, home, depth+1)
 		}
 	}
 	if program == "env" {
@@ -451,7 +466,57 @@ func actionWindowsResolvedWrapperTarget(program string, words []string, cwd, hom
 			index++
 		}
 	}
+	if program == "timeout" || program == "chroot" || program == "flock" {
+		index++ // Duration, new root, or lock file is wrapper metadata.
+	}
 	return index < len(words) && actionWindowsResolvedProtectedTarget(strings.Join(words[index:], " "), cwd, home, depth+1)
+}
+
+func actionWindowsResolvedWrapperOption(program, option string) (value, known bool) {
+	if program != "sudo" {
+		option = strings.ToLower(option)
+	}
+	switch program {
+	case "nice":
+		return option == "-n" || option == "--adjustment", strings.HasPrefix(option, "-n") || strings.HasPrefix(option, "--adjustment")
+	case "ionice":
+		value = option == "-c" || option == "-n" || option == "-p" || option == "-P"
+		return value, value || option == "-t" || strings.Contains(option, "=")
+	case "timeout":
+		value = option == "-s" || option == "--signal" || option == "-k" || option == "--kill-after"
+		return value, value || option == "--foreground" || option == "--preserve-status" || option == "-v" || strings.Contains(option, "=")
+	case "stdbuf":
+		value = option == "-i" || option == "-o" || option == "-e"
+		return value, value || strings.HasPrefix(option, "-i") || strings.HasPrefix(option, "-o") || strings.HasPrefix(option, "-e")
+	case "setsid":
+		return false, strings.Contains(" -c -f -w --ctty --fork --wait ", " "+option+" ")
+	case "chroot":
+		value = option == "--userspec" || option == "--groups"
+		return value, value || strings.Contains(option, "=")
+	case "unshare", "nsenter":
+		value = program == "nsenter" && (option == "-t" || option == "--target" || option == "-s" || option == "-g")
+		return value, value || strings.Contains(" -m -u -i -n -p -c -f -r --mount --uts --ipc --net --pid --user --cgroup --fork --map-root-user ", " "+option+" ") || strings.HasPrefix(option, "--mount-proc")
+	case "flock":
+		value = option == "-w" || option == "--timeout" || option == "-e" || option == "--conflict-exit-code"
+		return value, value || strings.Contains(" -s -x -u -n -o -f --shared --exclusive --unlock --nonblock --close --no-fork ", " "+option+" ")
+	case "sudo":
+		if option == "-l" || option == "-ll" || option == "--list" {
+			return false, false
+		}
+		value = strings.Contains(" -u -g -h -p -C -D -r -t --user --group --host --prompt --close-from --chdir --role --type ", " "+option+" ")
+		return value, value || strings.Contains(" -n -E -H -S -b -k -K -v -i -s --login --shell --non-interactive --preserve-env ", " "+option+" ") ||
+			strings.HasPrefix(option, "--user=") || strings.HasPrefix(option, "--group=") || strings.HasPrefix(option, "--preserve-env=") ||
+			len(option) > 2 && (strings.HasPrefix(option, "-u") || strings.HasPrefix(option, "-g"))
+	case "time":
+		return option == "-f" || option == "--format", option == "-p" || option == "-f" || option == "--format" || strings.HasPrefix(option, "--format=")
+	case "command":
+		return false, option == "-p"
+	case "exec":
+		return option == "-a", option == "-a" || option == "-c" || option == "-l"
+	case "nohup", "busybox":
+		return false, false
+	}
+	return false, false
 }
 
 func actionWindowsWriteProgram(program string) bool {
