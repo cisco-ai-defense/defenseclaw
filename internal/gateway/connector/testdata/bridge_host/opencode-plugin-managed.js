@@ -516,15 +516,31 @@ function defenseclawCheckWindowsHelperACL(paths) {
   // owner is this account, SYSTEM, Administrators (an elevated install) or
   // TrustedInstaller, and no other principal may write it. An inherit-only
   // entry does not apply to the path itself; its children carry it.
+  // execFileSync opens the helper by this path, so every folder above a
+  // checked path, up to its volume root, must not let another principal
+  // rename or replace what it holds (a custom data root's parent, for one):
+  // a trusted owner and no delete-child, delete, change-permissions or
+  // take-ownership grant to anyone else. A volume root cannot be renamed, so
+  // delete is not checked there.
+  const checked = new Set(paths.map((path) => path.toLowerCase()));
+  const entries = paths.map((p) => ({ p, m: 0x500D0156 }));
+  for (const path of paths) {
+    for (let dir = dirname(path), top = false; !top; dir = dirname(dir)) {
+      top = dirname(dir) === dir;
+      if (checked.has(dir.toLowerCase())) continue;
+      checked.add(dir.toLowerCase());
+      entries.push({ p: dir, m: top ? 0x100C0040 : 0x100D0040 });
+    }
+  }
   const script = [
     "$ErrorActionPreference='Stop'",
     "$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
     "$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
     "$inheritOnly=[int][System.Security.AccessControl.PropagationFlags]::InheritOnly",
-    "$writeMask=[int64]0x500D0156",
-    "$paths=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())",
-    "foreach($path in $paths) {",
-    "  $acl=Get-Acl -LiteralPath $path",
+    "$entries=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())",
+    "foreach($entry in $entries) {",
+    "  $acl=Get-Acl -LiteralPath $entry.p",
+    "  $writeMask=[int64]$entry.m",
     "  if($trusted -notcontains $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value) { throw 'owner' }",
     "  foreach($ace in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) {",
     "    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
@@ -533,7 +549,7 @@ function defenseclawCheckWindowsHelperACL(paths) {
   ].join("\n");
   try {
     execFileSync("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-      input: JSON.stringify(paths), timeout: 5000, windowsHide: true, stdio: ["pipe", "ignore", "ignore"],
+      input: JSON.stringify(entries), timeout: 5000, windowsHide: true, stdio: ["pipe", "ignore", "ignore"],
     });
   } catch {
     throw new Error("per-user gateway helper path has an untrusted Windows owner or DACL");

@@ -21,7 +21,13 @@ import (
 // profile), an elevated one (owned by Administrators), OS-owned parents
 // (TrustedInstaller) and inherit-only entries that do not apply to the path
 // itself. A path another principal owns or may write is rejected, including
-// a parent of a data directory nested inside the profile.
+// a parent of a data directory nested inside the profile. Every folder above
+// the checked paths up to the volume root is checked for the rights that let
+// another principal rename or replace it (delete, delete-child, change
+// permissions, take ownership): a custom data root that holds the helper has
+// no checked parent otherwise, and swapping it after the check hands the
+// bearer to a planted helper. Create-folder rights (as C:\ grants Users)
+// are not such a right.
 func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 	node := nodeForTest(t)
 	profile, err := os.UserHomeDir()
@@ -41,7 +47,7 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 		administrators = "*S-1-5-32-544"
 		trustedInstall = "NT SERVICE\\TrustedInstaller"
 	)
-	type layout struct{ home, nest, data, hooks, record, binDir, binary string }
+	type layout struct{ grand, parent, home, nest, data, hooks, record, binDir, binary string }
 	for _, asset := range []struct{ source, file, function string }{
 		{"opencode-plugin.js", "plugin.mjs", "defenseclawPerUserNativePostBinary"},
 		{"amp-plugin.ts", "plugin.mts", "perUserNativePostBinary"},
@@ -49,6 +55,7 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 		for _, tc := range []struct {
 			name    string
 			nested  bool
+			custom  bool   // a custom data root that holds the helper (home = data root)
 			owner   string // owner of every fixture path; "" = the current user
 			changes func(l layout) [][]string
 			trusted bool
@@ -82,22 +89,44 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 				changes: func(l layout) [][]string { return [][]string{{l.hooks, "/setowner", "*" + otherUser}} }},
 			{name: "helper owned by Users",
 				changes: func(l layout) [][]string { return [][]string{{l.binary, "/setowner", users}} }},
+			{name: "custom data root holding the helper", custom: true, trusted: true},
+			{name: "elevated custom data root owned by Administrators", custom: true, owner: administrators, trusted: true},
+			{name: "custom data root parent where Users may create folders", custom: true, trusted: true,
+				changes: func(l layout) [][]string { return [][]string{{l.parent, "/grant", users + ":(AD)"}} }},
+			{name: "parent swap: custom data root parent modifiable by Users", custom: true,
+				changes: func(l layout) [][]string { return [][]string{{l.parent, "/grant", users + ":M"}} }},
+			{name: "parent swap: custom data root parent grants Users delete-child", custom: true,
+				changes: func(l layout) [][]string { return [][]string{{l.parent, "/grant", users + ":(DC)"}} }},
+			{name: "parent swap: custom data root parent permissions changeable by Users", custom: true,
+				changes: func(l layout) [][]string { return [][]string{{l.parent, "/grant", users + ":(WDAC)"}} }},
+			{name: "parent swap: custom data root grandparent under Everyone full control", custom: true,
+				changes: func(l layout) [][]string { return [][]string{{l.grand, "/grant", everyone + ":F"}} }},
+			{name: "parent swap: custom data root parent owned by another user", custom: true,
+				changes: func(l layout) [][]string { return [][]string{{l.parent, "/setowner", "*" + otherUser}} }},
 		} {
 			t.Run(asset.source+"/"+tc.name, func(t *testing.T) {
-				home, err := os.MkdirTemp(profile, "dc-helper-acl-")
+				base, err := os.MkdirTemp(profile, "dc-helper-acl-")
 				if err != nil {
 					t.Fatal(err)
 				}
-				t.Cleanup(func() { _ = os.RemoveAll(home) })
-				l := layout{home: home, nest: home, binDir: filepath.Join(home, ".local", "bin")}
+				t.Cleanup(func() { _ = os.RemoveAll(base) })
+				l := layout{grand: base, parent: filepath.Join(base, "parent"), home: base, nest: base}
 				if tc.nested {
-					l.nest = filepath.Join(home, "nest")
+					l.nest = filepath.Join(base, "nest")
 				}
 				l.data = filepath.Join(l.nest, ".defenseclaw")
+				if tc.custom {
+					// The layout setup records when a custom data root holds
+					// the gateway: <root>\.local\bin under the root itself.
+					l.home = filepath.Join(l.parent, "dcroot")
+					l.nest, l.data = l.home, l.home
+				}
+				home := l.home
+				l.binDir = filepath.Join(home, ".local", "bin")
 				l.hooks = filepath.Join(l.data, "hooks")
 				l.record = filepath.Join(l.hooks, ".gateway-helper")
 				l.binary = filepath.Join(l.binDir, "defenseclaw-gateway.exe")
-				for _, dir := range []string{l.hooks, l.binDir} {
+				for _, dir := range []string{l.parent, l.hooks, l.binDir} {
 					if err := os.MkdirAll(dir, 0o700); err != nil {
 						t.Fatal(err)
 					}
@@ -120,13 +149,13 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 				}
 				// Elevated Windows runners create files owned by the
 				// Administrators group; give each fixture its install's owner.
-				for _, path := range []string{home, l.nest, l.data, l.hooks, l.record,
+				for _, path := range []string{base, l.parent, home, l.nest, l.data, l.hooks, l.record,
 					filepath.Join(home, ".local"), l.binDir, l.binary} {
 					icacls(path, "/setowner", owner)
 				}
 				body := renderPluginAssetForTest(t, asset.source, templateData{TokenFileJS: javaScriptStringContent(filepath.Join(l.hooks, ".token"))})
 				body += "\ntry { " + asset.function + "(); console.log('trusted') } catch (error) { console.log('rejected:' + String(error)) }\n"
-				plugin := filepath.Join(home, asset.file)
+				plugin := filepath.Join(base, asset.file)
 				if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
 					t.Fatal(err)
 				}
