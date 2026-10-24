@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -304,12 +305,18 @@ func (a *fakeAccounts) Remove(_ context.Context, name string) error {
 	return nil
 }
 
+const fakeAppliedPolicyDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 // fakeRunner answers the few host commands the lifecycle runs directly.
 type fakeRunner struct {
 	mu       sync.Mutex
 	versions map[string]string // gateway path -> version
 	calls    []string
 	ps       string // what ps -axo pid=,uid=,comm= prints (macOS)
+	// A healthy installed gateway computes the generation the lifecycle
+	// recorded. Tests of a rejected digest replace this answer explicitly.
+	installedGateway string
+	policyState      func() configwrite.GenerationState
 	// replies answer a command by filepath.Base(name) and its joined args.
 	replies map[string]fakeReply
 	// acls are the macOS ACL entries of rooted paths, as ls -le prints them;
@@ -328,6 +335,11 @@ func (r *fakeRunner) Run(_ context.Context, name string, args ...string) (Comman
 	r.mu.Unlock()
 	if reply, ok := r.replies[filepath.Base(name)+" "+strings.Join(args, " ")]; ok {
 		return reply.result, reply.err
+	}
+	if name == r.installedGateway && strings.Join(args, " ") == "policy digest --json" && r.policyState != nil {
+		state := r.policyState()
+		return CommandResult{Stdout: []byte(fmt.Sprintf(`{"effective_digest":%q,"config_generation":%d}`,
+			fakeAppliedPolicyDigest, state.Generation))}, nil
 	}
 	if len(args) > 0 && args[len(args)-1] == "--check" &&
 		strings.HasPrefix(strings.Join(args, " "), "enterprise hooks remove-all ") {
@@ -448,6 +460,11 @@ func newTestHost(t *testing.T, goos string) *testHost {
 		// No guardian runs in the fake host.
 		GuardianReportTimeout: 50 * time.Millisecond,
 	}
+	h.runner.installedGateway = filepath.Join(env.P(layout.BinDir), binGateway)
+	h.runner.policyState = func() configwrite.GenerationState {
+		state, _ := configwrite.ReadGenerationState(env.P(layout.ConfigPath))
+		return state
+	}
 	env.Lchown = func(path string, uid, gid int) error {
 		h.owners[stagedFinal(path)] = [2]int{uid, gid}
 		return nil
@@ -477,7 +494,9 @@ func newTestHost(t *testing.T, goos string) *testHost {
 	// The gateway's health document on its hook socket.
 	env.HealthGet = func(context.Context) (int, []byte, error) {
 		if h.healthy && h.services.isActive(gatewayName) {
-			return 200, []byte(`{"api":{"state":"running"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
+			state := h.runner.policyState()
+			return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d,"bundle_id":%q,"bundle_version":%d},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+				fakeAppliedPolicyDigest, state.Generation, state.BundleID, state.BundleVersion)), nil
 		}
 		return 0, nil, errors.New("connection refused")
 	}
