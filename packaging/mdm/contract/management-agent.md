@@ -1003,8 +1003,13 @@ off the device. The agent does not read `/health` itself (section 7); the
   (refused `confirmed_bundle_changed`, nothing written, once another bundle
   is confirmed), and the put-back as `secret set|remove --undo-rotation
   <sha|none>`: it runs only while that bundle is still confirmed and does
-  not sign the value stored now, and `remove` then also takes a credential
-  the old config references with no value stored. Its refusal
+  not sign the value stored now. An entry for a credential that was not
+  stored also records the SHA-256 of the installed config (or `none`), and
+  its put-back `secret remove --undo-rotation <sha|none> --undo-config
+  <sha|none>` takes a credential that config references with no value
+  stored only while that same config is installed; a config installed since
+  may use the value, so the CLI refuses `credential_in_use` and the entry
+  stays. Its refusal
   `rotation_confirmed` is the only proof the rotation committed (the
   confirmed bundle uses the stored value), so only then does the new value
   stay; any other refusal (`credential_in_use`, `secret_ref_mismatch`,

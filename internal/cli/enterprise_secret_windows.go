@@ -311,11 +311,17 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 			return windowsSecretChange{}, err
 		}
 		// A put-back (--undo-rotation) removes what a failed rotation added
-		// to the config confirmed before it, which may reference the
-		// credential with no value stored (checkSecretTransaction decides).
-		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && opts.undoRotation == "" {
-			return windowsSecretChange{}, secretFailed("credential_in_use", windowsSecretExitFailure,
-				fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at))
+		// to the config installed before it, which may reference the
+		// credential with no value stored: only while that same config is
+		// installed (--undo-config, read under the lifecycle lock), and
+		// checkSecretTransaction decides the rest. A config installed since
+		// may use the stored value, so it keeps it.
+		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && !undoRotationOnConfig(opts, installedConfig) {
+			err := fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at)
+			if opts.undoRotation != "" {
+				err = fmt.Errorf("the installed config references credential %s at %s and is not the config installed before the rotation (--undo-config), so it may use the value stored now; credential %s was not removed", opts.name, at, opts.name)
+			}
+			return windowsSecretChange{}, secretFailed("credential_in_use", windowsSecretExitFailure, err)
 		}
 	}
 	// Start an independent child before changing credentials, but only arm it

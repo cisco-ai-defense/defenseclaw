@@ -15,6 +15,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1265,11 +1267,91 @@ func TestWindowsSecretUndoRotationRemovesWhatAFailedRotationAdded(t *testing.T) 
 	if !windowsSecretStored(dir, name) {
 		t.Fatal("a refused put-back removed the credential")
 	}
-	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none"}, "")
+	// Without the config from before the rotation (--undo-config), or with
+	// another one, the reference stands (loop round 1, review at b97e9ab4).
+	for _, undoConfig := range []string{"", "none", windowsTestSHA256(standaloneGatewayCheckConfig)} {
+		out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: undoConfig}, "")
+		windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
+		if !windowsSecretStored(dir, name) {
+			t.Fatalf("a put-back with --undo-config %q removed a credential the installed config references", undoConfig)
+		}
+	}
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: windowsTestSHA256(cfg)}, "")
 	if err != nil {
 		t.Fatalf("put-back: %v\n%s", err, out)
 	}
 	if windowsSecretStored(dir, name) {
 		t.Fatal("the put-back left the credential the failed rotation added")
+	}
+}
+
+func windowsTestSHA256(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
+
+// Loop round 1 (review at b97e9ab4): the wrapper journaled an absent
+// credential and stored a new value with no bundle confirmed; before its
+// lifecycle finished, another ensure installed a config that uses the
+// value; the lifecycle then failed. The put-back (remove --undo-rotation
+// none) skipped credential_in_use, deleted the credential that config needs
+// and restarted the gateway. It now takes a referenced credential only while
+// the config journaled before the rotation (--undo-config) is installed;
+// otherwise credential_in_use, and the credential stays.
+func TestWindowsSecretUndoRotationKeepsACredentialALaterConfigUses(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := bundleStore
+	t.Cleanup(func() { bundleStore = previous })
+	store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	const name = "ai-defense-api-key"
+	unused := standaloneGatewayCheckConfig
+	uses := strings.Replace(unused, "enterprise:\n  profile: standalone\n",
+		"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n", 1)
+	if uses == unused {
+		t.Fatal("the test config has no enterprise profile line to extend")
+	}
+	reapplied := uses + "# installed again by another ensure\n"
+	for _, tc := range []struct {
+		name, before, after string
+		removed             bool
+	}{
+		{"a config installed since uses it", unused, uses, false},
+		{"a config installed since still uses it", uses, reapplied, false},
+		{"the config from before uses it", uses, uses, true},
+		{"a config installed since does not use it", uses, unused, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(layout.ConfigPath, []byte(tc.before), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(layout.ConfigPath, []byte(tc.after), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: windowsTestSHA256(tc.before)}, "")
+			if tc.removed {
+				if err != nil {
+					t.Fatalf("put-back: %v\n%s", err, out)
+				}
+				if windowsSecretStored(dir, name) {
+					t.Fatal("the put-back left the credential the failed rotation added")
+				}
+				return
+			}
+			windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
+			if !strings.Contains(out, "not the config installed before the rotation") || strings.Contains(out, "new-key") {
+				t.Fatalf("refusal does not say why, or prints the value:\n%s", out)
+			}
+			if !windowsSecretStored(dir, name) {
+				t.Fatal("the put-back removed a credential a config installed since uses")
+			}
+		})
 	}
 }

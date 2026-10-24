@@ -369,9 +369,49 @@ func TestSecretTransactionArgumentsRefuseAMeaninglessCombination(t *testing.T) {
 		{enterpriseSecretOptions{undoRotation: strings.ToUpper(strings.Repeat("a", 64))}, false},
 		{enterpriseSecretOptions{undoRotation: "sha256:" + digest}, false},
 		{enterpriseSecretOptions{bundle: "b", ifConfirmed: "None"}, false},
+		// Loop round 1 (review at b97e9ab4): --undo-config names the config
+		// installed before the rotation, for a put-back only.
+		{enterpriseSecretOptions{undoRotation: digest, undoConfig: digest}, true},
+		{enterpriseSecretOptions{undoRotation: "none", undoConfig: "none"}, true},
+		{enterpriseSecretOptions{undoConfig: digest}, false},
+		{enterpriseSecretOptions{bundle: "b", ifConfirmed: digest, undoConfig: digest}, false},
+		{enterpriseSecretOptions{undoRotation: digest, undoConfig: "sha256:" + digest}, false},
+		{enterpriseSecretOptions{undoRotation: digest, undoConfig: strings.ToUpper(strings.Repeat("a", 64))}, false},
 	} {
 		if err := secretTransactionArguments(&tc.opts); (err == nil) != tc.ok {
 			t.Fatalf("%+v: %v, want ok=%v", tc.opts, err, tc.ok)
+		}
+	}
+}
+
+// Loop round 1 (review at b97e9ab4): a put-back took a credential the
+// installed config references whatever that config was, so it removed a
+// credential a config installed after the rotation uses. It takes one only
+// while the config the wrapper journaled before the rotation (--undo-config)
+// is the one installed: the exact bytes, never "none", never without
+// --undo-rotation.
+func TestUndoRotationOnConfigTakesOnlyTheConfigFromBeforeTheRotation(t *testing.T) {
+	before := []byte("config_version: 8\n# installed before the rotation\n")
+	sum := sha256.Sum256(before)
+	journaled := hex.EncodeToString(sum[:])
+	for _, tc := range []struct {
+		name      string
+		opts      enterpriseSecretOptions
+		installed []byte
+		want      bool
+	}{
+		{"the config from before, nothing confirmed", enterpriseSecretOptions{undoRotation: "none", undoConfig: journaled}, before, true},
+		{"the config from before, a bundle confirmed", enterpriseSecretOptions{undoRotation: strings.Repeat("b", 64), undoConfig: journaled}, before, true},
+		{"a config installed since", enterpriseSecretOptions{undoRotation: "none", undoConfig: journaled}, []byte("config_version: 8\n# installed since\n"), false},
+		{"the config from before, rewritten with one more byte", enterpriseSecretOptions{undoRotation: "none", undoConfig: journaled}, append(append([]byte{}, before...), '\n'), false},
+		{"no config journaled", enterpriseSecretOptions{undoRotation: "none"}, before, false},
+		{"no config installed before the rotation", enterpriseSecretOptions{undoRotation: "none", undoConfig: "none"}, before, false},
+		{"no config either time", enterpriseSecretOptions{undoRotation: "none", undoConfig: "none"}, nil, false},
+		{"not a put-back", enterpriseSecretOptions{undoConfig: journaled}, before, false},
+		{"upper-case digest", enterpriseSecretOptions{undoRotation: "none", undoConfig: strings.ToUpper(journaled)}, before, false},
+	} {
+		if got := undoRotationOnConfig(&tc.opts, tc.installed); got != tc.want {
+			t.Fatalf("%s: got %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

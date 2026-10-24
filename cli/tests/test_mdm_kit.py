@@ -329,6 +329,8 @@ function Write-WrapperLog { param([string]$Message) }
 # when set. The delivered bundle signs $script:delivered, and the installed
 # config uses the credential when $script:inUse is set. --if-confirmed and
 # --undo-rotation follow checkSecretTransaction; an empty value is invalid.
+# remove --undo-rotation takes a credential the config uses only while
+# --undo-config is the SHA-256 of the installed config (undoRotationOnConfig).
 $script:calls = @()
 $script:failNext = ''
 $script:digestA = 'a' * 64
@@ -368,7 +370,9 @@ function Invoke-DefenseClawNative {
         return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
     }
     if ($ArgumentList[2] -eq 'remove') {
-        if ($script:inUse -and -not $undo) { return (& $refuse 'credential_in_use') }
+        $undoConfig = & $flag '--undo-config'
+        $installed = if (Test-Path -LiteralPath $script:configPath) { (Get-FileHash -LiteralPath $script:configPath -Algorithm SHA256).Hash.ToLowerInvariant() } else { 'none' }
+        if ($script:inUse -and -not ($undo -and $undoConfig -cmatch '^[0-9a-f]{64}$' -and $undoConfig -eq $installed)) { return (& $refuse 'credential_in_use') }
         Remove-Item -LiteralPath $stored -Force -ErrorAction SilentlyContinue
         return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
     }
@@ -377,9 +381,15 @@ function Invoke-DefenseClawNative {
 
 __FUNCTIONS__
 
+$script:configPath = Join-Path $script:root 'ProgramData/Cisco/DefenseClaw/etc/config.yaml'
+function Set-InstalledConfig($Text) {
+    [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $script:configPath))
+    [System.IO.File]::WriteAllText($script:configPath, $Text)
+}
 function Reset-Device($Stored) {
     Remove-Item -LiteralPath (Join-Path $script:root 'ProgramData') -Recurse -Force -ErrorAction SilentlyContinue
     $script:untrusted = @()
+    Set-InstalledConfig 'config-before'
     if ($null -ne $Stored) {
         $path = Get-WrapperStoredSecretPath -Name $SecretName
         [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $path))
@@ -616,6 +626,59 @@ Microsoft.PowerShell.Management\Remove-Item -LiteralPath function:\Remove-Item
 $script:calls = @()
 $resumed = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
 $out.retireConfigOnly = "$(Get-Stored) $(Get-Journal) $(@($script:calls).Count) $($problems.Count) $($resumed.Count)"
+
+# Loop round 1 (review at b97e9ab4). 17. Nothing was stored and no bundle
+#     is confirmed; after the rotation another ensure installs a config that
+#     uses the new value; then this run's lifecycle fails, or it stops and
+#     the next ensure settles. The put-back must not remove what that config
+#     needs: the credential and the entry stay and it is reported. The same
+#     under an old bundle that does not sign the value, and a config
+#     installed since that does not use it lets the put-back remove it.
+foreach ($case in @('failed', 'resumed', 'oldBundle', 'unused')) {
+    $script:inUse = ($case -eq 'oldBundle'); Reset-Device $null
+    if ($case -eq 'oldBundle') { Use-OldBundle 'never-stored' } else { Use-OldBundle $null }
+    $failure = Rotate
+    $rotated = "$($null -eq $failure) $(Get-Stored)"
+    Set-InstalledConfig "config-installed-since-$case"
+    $script:inUse = ($case -ne 'unused')
+    if ($case -eq 'resumed') { $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore) } else {
+        $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Name $SecretName -Restore)
+    }
+    $out["laterConfig_$case"] = "$rotated $(Get-Stored) $(Get-Journal) $($problems.Count)"
+}
+
+# 18. The .absent entry holds the SHA-256 of the config installed before the
+#     rotation ('none' with no config), and the put-back passes it.
+$script:inUse = $false; Reset-Device $null; Use-OldBundle $null
+[void](Rotate)
+$entry = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File)[0]
+$expected = (Get-FileHash -LiteralPath $script:configPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$held = [System.IO.File]::ReadAllText($entry.FullName) -ceq $expected
+$script:calls = @()
+[void](Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.absentEntry = "$($entry.Name) $held $(@($script:calls | Where-Object { $_ -like "*--undo-config $expected*" }).Count)"
+Reset-Device $null; Remove-Item -LiteralPath $script:configPath
+[void](Rotate)
+$entry = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File)[0]
+$out.absentEntryNoConfig = [System.IO.File]::ReadAllText($entry.FullName)
+[void](Complete-WrapperSecretJournal -Name $SecretName)
+
+# 19. An .absent entry that names no config (as an earlier rc wrote it) is
+#     never put back or deleted, and it is reported.
+foreach ($content in @('', ('x' * 64), ($expected + "`n"))) {
+    $script:inUse = $true; Reset-Device $null; Use-OldBundle $null
+    $journal = Get-WrapperRotationJournal
+    [void][System.IO.Directory]::CreateDirectory($journal)
+    $planted = Join-Path $journal "$SecretName@none.absent"
+    [System.IO.File]::WriteAllText($planted, $content)
+    [System.IO.File]::WriteAllText($secret, 'new-key')
+    $stored = Get-WrapperStoredSecretPath -Name $SecretName
+    [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $stored))
+    [System.IO.File]::WriteAllText($stored, 'new-key')
+    $script:calls = @()
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $out["noConfigEntry_$($content.Length)"] = "$(Get-Stored) $(Test-Path -LiteralPath $planted) $(@($script:calls).Count) $($problems.Count)"
+}
 $out | ConvertTo-Json -Compress
 """
 
@@ -631,7 +694,7 @@ def _any_pwsh7() -> str | None:
 
 
 _ROTATION_FUNCTIONS = ("Get-WrapperSecretErrorCode", "Set-WrapperSecret", "Get-WrapperRotationJournal",
-                       "Get-WrapperConfirmedBundle", "Get-WrapperJournalEntryName",
+                       "Get-WrapperConfirmedBundle", "Get-WrapperJournalEntryName", "Get-WrapperInstalledConfigIdentity",
                        "Get-WrapperStoredSecretPath", "Initialize-WrapperRotationJournal", "Test-WrapperJournalEntry",
                        "Save-WrapperSecretJournal", "Remove-WrapperJournalEntry", "Complete-WrapperSecretJournal",
                        "Undo-WrapperSecretRotation")
@@ -693,6 +756,15 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "retireResumed": "new-key 0 0 0",
         "retireNext": "True newer-key new-key 0",
         "retireConfigOnly": "new-key 0 0 1 0",
+        "laterConfig_failed": "True new-key new-key 1 1",
+        "laterConfig_resumed": "True new-key new-key 1 1",
+        "laterConfig_oldBundle": "True new-key new-key 1 1",
+        "laterConfig_unused": "True new-key <none> 0 0",
+        "absentEntry": "ai-defense-api-key@none.absent True 1",
+        "absentEntryNoConfig": "none",
+        "noConfigEntry_0": "new-key True 0 1",
+        "noConfigEntry_64": "new-key True 0 1",
+        "noConfigEntry_65": "new-key True 0 1",
         "linkEntry": out["linkEntry"],
     }, out
     # Where this account can make a link, it is refused and left in place.

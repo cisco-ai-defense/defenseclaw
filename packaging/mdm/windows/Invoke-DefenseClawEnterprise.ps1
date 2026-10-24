@@ -793,8 +793,12 @@ function Set-WrapperSecret {
 # confirmed before the rotation (bundle status), and the rotation runs only
 # while that bundle is confirmed (--if-confirmed). The put-back passes it
 # too (--undo-rotation): the CLI puts the value back, or removes a credential
-# the rotation added even though the old config references it, only while
-# that bundle is still confirmed and does not sign the value stored now.
+# the rotation added, only while that bundle is still confirmed and does not
+# sign the value stored now. An .absent entry also holds the SHA-256 of the
+# config installed before the rotation (--undo-config): the CLI removes a
+# credential the installed config references only while that very config is
+# installed, so a config another ensure installed since keeps the value it
+# may use (credential_in_use, the entry stays).
 # Only its refusal rotation_confirmed proves the rotation committed (a
 # bundle confirmed since uses the stored value), so only then does the new
 # value stay. Any other refusal (credential_in_use, secret_ref_mismatch,
@@ -917,6 +921,16 @@ function Get-WrapperConfirmedBundle {
     return [string]$digest.Value
 }
 
+function Get-WrapperInstalledConfigIdentity {
+    # The SHA-256 of the installed config (managed.StandaloneLayout
+    # ConfigPath), or 'none' when no regular file is there: what an .absent
+    # journal entry holds as the config installed before its rotation.
+    $path = Join-Path (Get-WrapperProgramData) 'Cisco\DefenseClaw\etc\config.yaml'
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or $item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return 'none' }
+    return (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
+}
+
 function Get-WrapperJournalEntryName {
     # The credential and the bundle confirmed before its rotation, from a
     # journal entry name (<name>@<manifest SHA-256 | none>[.absent]), or
@@ -928,7 +942,9 @@ function Get-WrapperJournalEntryName {
 
 function Save-WrapperSecretJournal {
     # Journals credential $Name as it is stored now, with $Confirmed (the
-    # bundle confirmed now), before a rotation replaces it. Refused while
+    # bundle confirmed now), before a rotation replaces it; with nothing
+    # stored, the .absent entry holds the SHA-256 of the installed config
+    # (Get-WrapperInstalledConfigIdentity) instead. Refused while
     # the journal holds anything: an entry an earlier run could not settle
     # or one this wrapper did not write must be resolved first, so a second
     # rotation never runs over an entry it could not put back.
@@ -943,7 +959,8 @@ function Save-WrapperSecretJournal {
     $stored = Get-WrapperStoredSecretPath -Name $Name
     $item = Get-Item -LiteralPath $stored -Force -ErrorAction SilentlyContinue
     $target = "$entry.absent"
-    $bytes = [byte[]]::new(0)
+    # Nothing stored: the entry holds the config installed now instead.
+    $bytes = [System.Text.Encoding]::ASCII.GetBytes((Get-WrapperInstalledConfigIdentity))
     if ($null -ne $item) {
         $folder = Get-Item -LiteralPath (Split-Path -Parent $stored) -Force
         if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
@@ -1025,7 +1042,13 @@ function Complete-WrapperSecretJournal {
             $arguments = @('enterprise', 'secret', 'set', '--name', $entry.Name, '--from-stdin', '--json', '--undo-rotation', $entry.Confirmed)
             $standardInput = $file.FullName
             if ($entry.Absent) {
-                $arguments = @('enterprise', 'secret', 'remove', '--name', $entry.Name, '--json', '--undo-rotation', $entry.Confirmed)
+                # The config installed before the rotation (Save-WrapperSecretJournal).
+                $configBefore = if ($file.Length -le 64) { [System.IO.File]::ReadAllText($file.FullName) } else { '' }
+                if ($configBefore -cnotmatch '^(?:[0-9a-f]{64}|none)\z') {
+                    $problems += "the credential journal entry $($file.FullName) does not name the config installed before its rotation, so it was not used and was left as it is; check the credential, then delete it"
+                    continue
+                }
+                $arguments = @('enterprise', 'secret', 'remove', '--name', $entry.Name, '--json', '--undo-rotation', $entry.Confirmed, '--undo-config', $configBefore)
                 $standardInput = ''
             }
             try {
