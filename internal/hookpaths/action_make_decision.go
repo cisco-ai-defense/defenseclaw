@@ -22,6 +22,9 @@ const (
 	maxMakeSourceBytes int64 = 8 << 20
 	maxMakeFiles             = 64
 	maxMakeReachFields       = 128
+	maxMakeWork        int64 = 32 << 20
+	maxMakeQueuedGoals       = 65536
+	maxMakeGoalBytes         = 4096
 )
 
 var makeWindowsToken = regexp.MustCompile(`[^\s'"<>|;&()=,]+`)
@@ -137,6 +140,29 @@ type actionMakeCall struct {
 	simple      map[string]bool // immediately expanded make variables
 	global      []string        // executable parse-time makefile lines
 	rules       []makeRule
+	work        int64
+	overBudget  bool
+}
+
+func (c *actionMakeCall) spend(amount int64) bool {
+	if amount < 0 || c.work > maxMakeWork-amount {
+		c.overBudget = true
+		return false
+	}
+	c.work += amount
+	return true
+}
+
+func (c *actionMakeCall) expand(text string) string {
+	if !c.spend(int64(len(text))) {
+		return ""
+	}
+	expanded, ok := actionMakeExpand(text, c.variables)
+	if !ok || !c.spend(int64(len(expanded))) {
+		c.overBudget = true
+		return ""
+	}
+	return expanded
 }
 
 // options takes make's arguments. Short options may be grouped (-kf x).
@@ -268,6 +294,9 @@ func (c *actionMakeCall) decide() string {
 			return reason
 		}
 	}
+	if c.overBudget {
+		return "dynamic-argument"
+	}
 	protected := newProtectedFiles(c.home)
 	ssh := filepath.Join(c.home, ".ssh")
 	reaches := func(text string) bool {
@@ -300,15 +329,270 @@ func (c *actionMakeCall) decide() string {
 			return "dynamic-argument"
 		}
 	}
-	for _, rule := range c.selectedRules() {
+	rules, ok := c.selectedRules()
+	if !ok {
+		return "dynamic-argument"
+	}
+	for _, rule := range rules {
 		for _, line := range rule.lines {
-			text := actionMakeExpand(line, c.variables)
-			if reaches(text) && !c.recipeUsesProtectedPathAsData(text) {
+			text := c.expand(line)
+			if c.overBudget {
+				return "dynamic-argument"
+			}
+			copy, copyDir, copyKnown := c.recipeCopy(text, c.dir, 0)
+			if copyKnown {
+				for _, source := range copy.sources {
+					private := actionPrivateReadPath(source, copyDir, c.home)
+					if actionWindowsHome(c.home) {
+						private, _ = actionWindowsProtected(source, copyDir, c.home, true)
+					}
+					if private {
+						return "dynamic-argument"
+					}
+				}
+			}
+			if reaches(text) && (!copyKnown || !c.recipeCopyHasOrdinaryDestination(copy, copyDir)) &&
+				!c.recipeUsesProtectedPathAsData(text) {
 				return "dynamic-argument"
 			}
 		}
 	}
 	return ""
+}
+
+// A protected copy source is data when every source is a regular file and
+// every destination the transfer can write is ordinary. Unrecognized options
+// and launch shapes retain the reach-scan block.
+func (c *actionMakeCall) recipeCopyHasOrdinaryDestination(copy cpOperandsResult, dir string) bool {
+	if !copy.ok || copy.hard || copy.symbolic || copy.alternateTarget || len(copy.sources) == 0 {
+		return false
+	}
+	for _, source := range copy.sources {
+		info, err := os.Lstat(OperandPath(source, dir))
+		if err != nil {
+			return false
+		}
+		if info.Mode()&os.ModeSymlink != 0 && !copy.preserves {
+			info, err = os.Stat(OperandPath(source, dir))
+		}
+		if err != nil || !info.Mode().IsRegular() {
+			return false
+		}
+	}
+	destination := OperandPath(copy.destination, dir)
+	info, err := os.Stat(destination)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	isDir := copy.targetDir || err == nil && info.IsDir()
+	if !isDir && len(copy.sources) != 1 {
+		return false
+	}
+	protected := newProtectedFiles(c.home)
+	ssh := filepath.Join(c.home, ".ssh")
+	ordinary := func(path string) bool {
+		if _, ok := ResolveWriteTarget(path); !ok || protectedReachPath(path, protected, ssh) {
+			return false
+		}
+		if actionWindowsHome(c.home) {
+			blocked, resolved := actionWindowsProtected(path, dir, c.home, false)
+			return resolved && !blocked
+		}
+		return true
+	}
+	if !ordinary(destination) {
+		return false
+	}
+	for _, source := range copy.sources {
+		target := destination
+		if isDir {
+			target = OperandPath(filepath.Base(source), destination)
+		}
+		if !ordinary(target) {
+			return false
+		}
+	}
+	return true
+}
+
+// recipeCopy follows the literal launch forms the shared action decision can
+// inspect. It does not infer a copy merely because "cp" occurs in an argument.
+func (c *actionMakeCall) recipeCopy(line, dir string, depth int) (cpOperandsResult, string, bool) {
+	if depth >= 8 {
+		return cpOperandsResult{}, dir, false
+	}
+	command := strings.TrimLeft(line, " \t@-+")
+	for _, form := range []string{"$(HOME)", "${HOME}", "$$HOME", "$$(HOME)", "$${HOME}"} {
+		command = strings.ReplaceAll(command, form, filepath.ToSlash(c.home))
+	}
+	file, ok := parseShell(command)
+	if !ok || len(file.Stmts) != 1 || len(file.Stmts[0].Redirs) != 0 {
+		return cpOperandsResult{}, dir, false
+	}
+	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) == 0 {
+		return cpOperandsResult{}, dir, false
+	}
+	words := make([]string, len(call.Args))
+	for i, word := range call.Args {
+		value, static := StaticWord(word, c.home)
+		if !static {
+			return cpOperandsResult{}, dir, false
+		}
+		words[i] = value
+	}
+	for len(words) > 0 {
+		if strings.ContainsAny(words[0], `/\`) {
+			return cpOperandsResult{}, dir, false // a qualified executable may not be the named system program
+		}
+		program := programBase(words[0])
+		switch program {
+		case "cp", "gcp":
+			parsed := cpOperands(words[1:], makeStatic(len(words)-1))
+			return parsed, dir, parsed.ok
+		case "install":
+			parsed := makeInstallOperands(words[1:])
+			return parsed, dir, parsed.ok
+		case "rsync":
+			parsed := makeRsyncOperands(words[1:])
+			return parsed, dir, parsed.ok
+		case "busybox", "toybox", "command", "exec", "time", "nohup", "sudo":
+			words = words[1:]
+			if len(words) > 0 && words[0] == "--" {
+				words = words[1:]
+			}
+		case "env":
+			i := 1
+			for i < len(words) {
+				word := words[i]
+				switch {
+				case word == "--", word == "-i", word == "--ignore-environment":
+					i++
+				case word == "-C" || word == "--chdir":
+					if i+1 >= len(words) {
+						return cpOperandsResult{}, dir, false
+					}
+					dir = OperandPath(words[i+1], dir)
+					i += 2
+				case strings.HasPrefix(word, "--chdir="):
+					dir = OperandPath(strings.TrimPrefix(word, "--chdir="), dir)
+					i++
+				case word == "-S" || word == "--split-string":
+					if i+1 >= len(words) || i+2 != len(words) {
+						return cpOperandsResult{}, dir, false
+					}
+					return c.recipeCopy(words[i+1], dir, depth+1)
+				case strings.Contains(word, "=") && !strings.HasPrefix(word, "-"):
+					if strings.HasPrefix(word, "HOME=") {
+						return cpOperandsResult{}, dir, false
+					}
+					i++
+				default:
+					goto envChild
+				}
+			}
+		envChild:
+			words = words[i:]
+		case "nice":
+			i := 1
+			if i < len(words) && words[i] == "-n" {
+				i += 2
+			} else if i < len(words) && strings.HasPrefix(words[i], "-n") {
+				i++
+			}
+			if i > len(words) {
+				return cpOperandsResult{}, dir, false
+			}
+			words = words[i:]
+		case "timeout":
+			if len(words) < 3 {
+				return cpOperandsResult{}, dir, false
+			}
+			words = words[2:]
+		case "sh", "bash", "zsh", "dash":
+			if index, ok := shellCommandBodyIndex(words); ok && index < len(words) && index == len(words)-1 {
+				return c.recipeCopy(words[index], dir, depth+1)
+			}
+			return cpOperandsResult{}, dir, false
+		default:
+			return cpOperandsResult{}, dir, false
+		}
+	}
+	return cpOperandsResult{}, dir, false
+}
+
+func makeInstallOperands(args []string) cpOperandsResult {
+	var operands []string
+	var target string
+	options := true
+	for i := 0; i < len(args); i++ {
+		word := args[i]
+		if options && word == "--" {
+			options = false
+			continue
+		}
+		if !options || !strings.HasPrefix(word, "-") || word == "-" {
+			operands = append(operands, word)
+			continue
+		}
+		switch {
+		case word == "-t" || word == "--target-directory":
+			i++
+			if i >= len(args) {
+				return cpOperandsResult{}
+			}
+			target = args[i]
+		case strings.HasPrefix(word, "--target-directory="):
+			target = strings.TrimPrefix(word, "--target-directory=")
+		case word == "-m" || word == "-o" || word == "-g":
+			i++
+			if i >= len(args) {
+				return cpOperandsResult{}
+			}
+		case word == "-D" || word == "-v" || word == "-C" || word == "-p" || word == "-T" ||
+			word == "--compare" || word == "--verbose" || word == "--preserve-timestamps" ||
+			strings.HasPrefix(word, "--mode=") || strings.HasPrefix(word, "--owner=") || strings.HasPrefix(word, "--group="):
+		default:
+			return cpOperandsResult{}
+		}
+	}
+	if target != "" && len(operands) > 0 {
+		return cpOperandsResult{sources: operands, destination: target, targetDir: true, ok: true}
+	}
+	if len(operands) < 2 {
+		return cpOperandsResult{}
+	}
+	return cpOperandsResult{sources: operands[:len(operands)-1], destination: operands[len(operands)-1], ok: true}
+}
+
+func makeRsyncOperands(args []string) cpOperandsResult {
+	var operands []string
+	options := true
+	preserves := false
+	for _, word := range args {
+		if options && word == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(word, "-") {
+			if strings.Contains(" --archive --recursive --verbose --dry-run --copy-links --links --perms --times ", " "+word+" ") ||
+				len(word) > 1 && word[1] != '-' && strings.Trim(word[1:], "avrlptgoDzcunI") == "" {
+				preserves = preserves || word == "--archive" || word == "--links" ||
+					len(word) > 1 && word[1] != '-' && strings.ContainsAny(word[1:], "al")
+				continue
+			}
+			return cpOperandsResult{}
+		}
+		if strings.ContainsAny(word, "\x00\r\n") || strings.Contains(word, ":") &&
+			(len(word) < 3 || word[1] != ':' || word[2] != '/' && word[2] != '\\') {
+			return cpOperandsResult{} // remote and drive-relative destinations need a separate proof
+		}
+		operands = append(operands, word)
+	}
+	if len(operands) < 2 {
+		return cpOperandsResult{}
+	}
+	return cpOperandsResult{sources: operands[:len(operands)-1], destination: operands[len(operands)-1], preserves: preserves, ok: true}
 }
 
 // A few known readers and printers can mention a protected path as data while
@@ -352,12 +636,15 @@ type makeRule struct {
 // command-line targets, else .DEFAULT_GOAL or the first ordinary target) and
 // of their prerequisites. A pattern rule is selected only when its stem
 // matches a requested goal. A computed goal or prerequisite selects every rule.
-func (c *actionMakeCall) selectedRules() []makeRule {
+func (c *actionMakeCall) selectedRules() ([]makeRule, bool) {
 	goals := append([]string(nil), c.goals...)
 	if len(goals) == 0 {
-		if goal := strings.TrimSpace(actionMakeExpand(c.variables[".DEFAULT_GOAL"], c.variables)); goal != "" {
+		if goal := strings.TrimSpace(c.expand(c.variables[".DEFAULT_GOAL"])); goal != "" {
 			goals = strings.Fields(goal)
 		}
+	}
+	if c.overBudget {
+		return nil, false
 	}
 	if len(goals) == 0 {
 	first:
@@ -370,28 +657,65 @@ func (c *actionMakeCall) selectedRules() []makeRule {
 			}
 		}
 	}
+	if len(goals) > maxMakeQueuedGoals {
+		return nil, false
+	}
+	for _, goal := range goals {
+		if len(goal) > maxMakeGoalBytes || !c.spend(int64(len(goal)+1)) {
+			return nil, false
+		}
+	}
 	selected := make([]bool, len(c.rules))
+	explicit := make(map[string][]int, len(c.rules))
+	var patterns []int
+	var dynamic []int
+	for i, rule := range c.rules {
+		for _, target := range rule.targets {
+			switch {
+			case strings.Contains(target, "$"):
+				dynamic = append(dynamic, i)
+			case strings.Contains(target, "%"):
+				patterns = append(patterns, i)
+			default:
+				explicit[target] = append(explicit[target], i)
+			}
+		}
+	}
 	queued := map[string]bool{}
-	for len(goals) > 0 {
-		goal := goals[0]
-		goals = goals[1:]
+	for head := 0; head < len(goals); head++ {
+		goal := goals[head]
 		if queued[goal] {
 			continue
 		}
 		queued[goal] = true
 		if strings.ContainsAny(goal, "$`") {
-			return c.rules
+			return c.rules, !c.overBudget
 		}
 		explicitRecipe := false
-		for _, rule := range c.rules {
-			for _, target := range rule.targets {
-				if target == goal && len(rule.lines) > 0 {
-					explicitRecipe = true
-				}
+		for _, i := range explicit[goal] {
+			if len(c.rules[i].lines) > 0 {
+				explicitRecipe = true
 			}
 		}
-		for i, rule := range c.rules {
+		candidateCount := len(explicit[goal]) + len(dynamic)
+		if !explicitRecipe {
+			candidateCount += len(patterns)
+		}
+		if !c.spend(int64(candidateCount) * 8) {
+			return nil, false
+		}
+		candidates := make([]int, 0, candidateCount)
+		candidates = append(candidates, explicit[goal]...)
+		candidates = append(candidates, dynamic...)
+		if !explicitRecipe {
+			candidates = append(candidates, patterns...)
+		}
+		for _, i := range candidates {
+			rule := c.rules[i]
 			for _, target := range rule.targets {
+				if !c.spend(int64(len(target) + 1)) {
+					return nil, false
+				}
 				stem := ""
 				matches := target == goal
 				if prefix, suffix, pattern := strings.Cut(target, "%"); pattern && !explicitRecipe && !strings.Contains(suffix, "%") &&
@@ -401,7 +725,17 @@ func (c *actionMakeCall) selectedRules() []makeRule {
 				}
 				if matches || strings.Contains(target, "$") {
 					selected[i] = true
+					if len(goals)+len(rule.prerequisites) > maxMakeQueuedGoals {
+						return nil, false
+					}
 					for _, prerequisite := range rule.prerequisites {
+						if !c.spend(int64(len(prerequisite))) {
+							return nil, false
+						}
+						length := len(prerequisite) + strings.Count(prerequisite, "%")*(len(stem)-1)
+						if length > maxMakeGoalBytes || !c.spend(int64(length+1)) {
+							return nil, false
+						}
 						goals = append(goals, strings.ReplaceAll(prerequisite, "%", stem))
 					}
 					break
@@ -415,7 +749,7 @@ func (c *actionMakeCall) selectedRules() []makeRule {
 			rules = append(rules, rule)
 		}
 	}
-	return rules
+	return rules, !c.overBudget
 }
 
 // makefile reads one makefile and the includes it names into the call's
@@ -465,6 +799,9 @@ func actionMakeStdinName(name string) bool {
 }
 
 func (c *actionMakeCall) parseContent(content string) string {
+	if !c.spend(int64(len(content))) {
+		return "dynamic-argument"
+	}
 	content = strings.ReplaceAll(content, "\\\r\n", " ")
 	content = strings.ReplaceAll(content, "\\\n", " ")
 	rule := -1
@@ -487,12 +824,12 @@ func (c *actionMakeCall) parseContent(content string) string {
 			operator, raw := match[2], match[3]
 			if operator == "!=" || actionMakeParseTimeCode(raw) &&
 				(operator == ":=" || operator == ":::=" || operator == "+=" && c.simple[match[1]] && active) {
-				c.global = append(c.global, actionMakeExpand(line, c.variables))
+				c.global = append(c.global, c.expand(line))
 			}
 			if active {
 				value := strings.TrimSpace(match[3])
 				if operator == ":=" || operator == ":::=" {
-					value = actionMakeExpand(value, c.variables)
+					value = c.expand(value)
 				}
 				switch operator {
 				case "?=":
@@ -502,7 +839,11 @@ func (c *actionMakeCall) parseContent(content string) string {
 					}
 				case "+=":
 					if c.simple[match[1]] {
-						value = actionMakeExpand(value, c.variables)
+						value = c.expand(value)
+					}
+					combined := len(c.variables[match[1]]) + 1 + len(value)
+					if combined > int(maxMakeSourceBytes) || !c.spend(int64(combined)) {
+						return "dynamic-argument"
 					}
 					c.variables[match[1]] = strings.TrimSpace(c.variables[match[1]] + " " + value)
 				default:
@@ -515,7 +856,7 @@ func (c *actionMakeCall) parseContent(content string) string {
 		}
 		fields := strings.Fields(trimmed)
 		if len(fields) >= 2 && (fields[0] == "include" || fields[0] == "-include" || fields[0] == "sinclude") {
-			c.global = append(c.global, actionMakeExpand(line, c.variables))
+			c.global = append(c.global, c.expand(line))
 			rule = -1
 			if reason := c.includes(fields[1:]); reason != "" {
 				return reason
@@ -524,7 +865,7 @@ func (c *actionMakeCall) parseContent(content string) string {
 		}
 		if strings.HasPrefix(trimmed, "$(shell") || strings.HasPrefix(trimmed, "${shell") ||
 			strings.HasPrefix(trimmed, "$(eval") || strings.HasPrefix(trimmed, "${eval") {
-			c.global = append(c.global, actionMakeExpand(line, c.variables))
+			c.global = append(c.global, c.expand(line))
 			rule = -1
 			continue
 		}
@@ -536,8 +877,8 @@ func (c *actionMakeCall) parseContent(content string) string {
 		}
 		prerequisites = strings.TrimLeft(prerequisites, ":")
 		parsed := makeRule{
-			targets:       strings.Fields(actionMakeExpand(targets, c.variables)),
-			prerequisites: strings.Fields(strings.ReplaceAll(actionMakeExpand(prerequisites, c.variables), "|", " ")),
+			targets:       strings.Fields(c.expand(targets)),
+			prerequisites: strings.Fields(strings.ReplaceAll(c.expand(prerequisites), "|", " ")),
 			lines:         nil,
 		}
 		if recipe != "" {
@@ -545,6 +886,12 @@ func (c *actionMakeCall) parseContent(content string) string {
 		}
 		c.rules = append(c.rules, parsed)
 		rule = len(c.rules) - 1
+		if c.overBudget {
+			return "dynamic-argument"
+		}
+	}
+	if c.overBudget {
+		return "dynamic-argument"
 	}
 	return ""
 }
@@ -554,7 +901,10 @@ func (c *actionMakeCall) includes(operands []string) string {
 		if strings.HasPrefix(operand, "#") {
 			break
 		}
-		operand = actionMakeExpand(operand, c.variables)
+		operand = c.expand(operand)
+		if c.overBudget {
+			return "dynamic-argument"
+		}
 		if strings.ContainsAny(operand, "$`") {
 			continue // computed by make itself: a documented limit
 		}
@@ -581,18 +931,69 @@ func (c *actionMakeCall) includes(operands []string) string {
 
 // actionMakeExpand substitutes static make variables into an include, goal,
 // or recipe operand, a few levels deep.
-func actionMakeExpand(operand string, variables map[string]string) string {
+func actionMakeExpand(operand string, variables map[string]string) (string, bool) {
 	for range 4 {
-		before := operand
-		for name, value := range variables {
-			operand = strings.ReplaceAll(operand, "$("+name+")", value)
-			operand = strings.ReplaceAll(operand, "${"+name+"}", value)
+		var expanded strings.Builder
+		nextParen, nextBrace := -1, -1
+		noParen, noBrace := false, false
+		for i := 0; i < len(operand); {
+			if operand[i] == '$' && i+1 < len(operand) && (operand[i+1] == '(' || operand[i+1] == '{') {
+				close := byte(')')
+				if operand[i+1] == '{' {
+					close = '}'
+				}
+				end := -1
+				if close == ')' && !noParen {
+					if nextParen < i+2 {
+						nextParen = strings.IndexByte(operand[i+2:], close)
+						if nextParen >= 0 {
+							nextParen += i + 2
+						} else {
+							noParen = true
+						}
+					}
+					end = nextParen
+				} else if close == '}' && !noBrace {
+					if nextBrace < i+2 {
+						nextBrace = strings.IndexByte(operand[i+2:], close)
+						if nextBrace >= 0 {
+							nextBrace += i + 2
+						} else {
+							noBrace = true
+						}
+					}
+					end = nextBrace
+				}
+				if end >= 0 {
+					name := operand[i+2 : end]
+					if makeStaticVariableName(name) {
+						if value, found := variables[name]; found {
+							expanded.WriteString(value)
+							i = end + 1
+							if expanded.Len() > int(maxMakeSourceBytes) {
+								return "", false
+							}
+							continue
+						}
+					}
+				}
+			}
+			expanded.WriteByte(operand[i])
+			i++
+			if expanded.Len() > int(maxMakeSourceBytes) {
+				return "", false
+			}
 		}
-		if operand == before {
+		if expanded.String() == operand {
 			break
 		}
+		operand = expanded.String()
 	}
-	return operand
+	return operand, true
+}
+
+func makeStaticVariableName(name string) bool {
+	return name != "" && !strings.Contains(name, "$")
 }
 
 func actionMakeParseTimeCode(text string) bool {
