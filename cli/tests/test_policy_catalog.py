@@ -110,6 +110,30 @@ def test_active_policy_is_the_preset_the_config_holds(policy_dir: Path) -> None:
     assert compile_admission(balanced_no_bypass, "mcp").actions["HIGH"][0].install == "none"
 
 
+def test_activated_pre104_default_keeps_balanced_mcp_and_name(policy_dir: Path) -> None:
+    from defenseclaw.commands.cmd_policy import _admission_from_policy, _apply_policy_guardrail
+    from defenseclaw.enforce.admission import compile_admission
+
+    old_default = pc.load_policy_yaml(Path(__file__).resolve().parents[2] / "testdata/legacy_default_1_0_3.yaml")
+    assert old_default is not None
+    cfg = default_config()
+    cfg.policy_dir = str(policy_dir)
+    cfg.admission = _admission_from_policy(old_default)
+    _apply_policy_guardrail(cfg, old_default)
+    cfg.watch.rescan_enabled = old_default["watch"]["rescan_enabled"]
+    cfg.watch.rescan_interval_min = old_default["watch"]["rescan_interval_min"]
+
+    actions = compile_admission(cfg, "mcp").actions
+    for severity in ("HIGH", "MEDIUM", "LOW"):
+        assert (actions[severity][0].install, actions[severity][0].runtime) == ("none", "enable")
+    assert actions["CRITICAL"][0].install == "block"
+    assert pc.active_policy_name(policy_dir, cfg) == "default"
+
+    cfg.admission.mcp.actions["high"] = "quarantine"
+    assert compile_admission(cfg, "mcp").actions["HIGH"][0].install == "block"
+    assert pc.active_policy_name(policy_dir, cfg) == ""
+
+
 def test_user_policy_shadows_builtin_and_bad_yaml_skipped(policy_dir: Path) -> None:
     (policy_dir / "default.yaml").write_text("name: default\ndescription: mine\nguardrail:\n  block_threshold: 3\n")
     (policy_dir / "broken.yaml").write_text("name: [unterminated\n")

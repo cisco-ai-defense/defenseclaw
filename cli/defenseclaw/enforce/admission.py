@@ -299,6 +299,25 @@ def _legacy_strict_mcp(adm: Any) -> bool:
             and skill.get("LOW") == (_WARN, False))
 
 
+def _legacy_balanced_default_mcp(adm: Any) -> bool:
+    """Recognize only the MCP actions the pre-1.0.4 default preset stored."""
+    defaults = getattr(adm, "defaults", None)
+    if (getattr(defaults, "scan_on_install", None) is not True
+            or getattr(defaults, "allow_list_bypass_scan", None) is not True):
+        return False
+    defaults_actions = _compile_action_map(getattr(defaults, "actions", None))
+    if defaults_actions != {
+        "CRITICAL": (_QUARANTINE, False), "HIGH": (_QUARANTINE, False),
+        "MEDIUM": (_WARN, False), "LOW": (_WARN, False), "INFO": (_WARN, False),
+    }:
+        return False
+    mcp = _compile_action_map(getattr(getattr(adm, "mcp", None), "actions", None))
+    return mcp == {
+        "MEDIUM": (_QUARANTINE, False),
+        "LOW": (SeverityAction(file="none", runtime="disable", install="none"), False),
+    }
+
+
 def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     """Compile ``admission:`` for one asset type, as the gateway does (Go
     ``policy.CompileAdmission``). Each field and severity resolves, first
@@ -356,6 +375,12 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
         source = "derived:scanners.skill_scanner"
     elif "defaults" in used:
         source = "config:admission.defaults.actions"
+
+    if target_type == "mcp" and _legacy_balanced_default_mcp(adm):
+        # The selected shipped preset changed in 1.0.4. Preserve explicit
+        # actions and translate only its old stored action shape.
+        actions.update({sev: (_WARN, False) for sev in ("HIGH", "MEDIUM", "LOW")})
+        source = "compat:pre-1.0.4 default"
 
     sources["actions"] = source
     overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = {}

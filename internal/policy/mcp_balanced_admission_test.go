@@ -6,9 +6,11 @@ package policy
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"gopkg.in/yaml.v3"
 )
 
 // A completed HIGH finding is still visible to admission and audit. The
@@ -65,4 +67,82 @@ func TestBalancedMCPFindingsWarnUnlessPolicyTightens(t *testing.T) {
 	secure.DeploymentMode = "managed_enterprise"
 	secure.Enterprise.Profile = "secure_client"
 	check("Secure Client high", secure, "HIGH", "rejected")
+}
+
+func TestActivatedPre104DefaultKeepsBalancedMCPAdmission(t *testing.T) {
+	// This is the default.yaml shipped in 1.0.3. policy activate stored its
+	// skill_actions as defaults and its MCP overrides as per-type actions.
+	raw, err := os.ReadFile("../../testdata/legacy_default_1_0_3.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var preset struct {
+		Admission struct {
+			ScanOnInstall       *bool `yaml:"scan_on_install"`
+			AllowListBypassScan *bool `yaml:"allow_list_bypass_scan"`
+		} `yaml:"admission"`
+		SkillActions     map[string]config.SeverityAction            `yaml:"skill_actions"`
+		ScannerOverrides map[string]map[string]config.SeverityAction `yaml:"scanner_overrides"`
+	}
+	if err := yaml.Unmarshal(raw, &preset); err != nil {
+		t.Fatal(err)
+	}
+	actionMap := func(src map[string]config.SeverityAction) config.AdmissionActionMap {
+		var out config.AdmissionActionMap
+		for severity, triple := range src {
+			// The policy YAML predates config.yaml's runtime enable/disable
+			// spelling; policy activate normalizes block/allow on write.
+			switch triple.Runtime {
+			case "block":
+				triple.Runtime = config.RuntimeDisable
+			case "allow":
+				triple.Runtime = config.RuntimeEnable
+			}
+			action := &config.AdmissionAction{Triple: triple}
+			switch severity {
+			case "critical", "CRITICAL":
+				out.Critical = action
+			case "high", "HIGH":
+				out.High = action
+			case "medium", "MEDIUM":
+				out.Medium = action
+			case "low", "LOW":
+				out.Low = action
+			case "info", "INFO":
+				out.Info = action
+			}
+		}
+		return out
+	}
+	cfg := config.DefaultConfig()
+	cfg.Admission.Defaults.ScanOnInstall = preset.Admission.ScanOnInstall
+	cfg.Admission.Defaults.AllowListBypassScan = preset.Admission.AllowListBypassScan
+	cfg.Admission.Defaults.Actions = actionMap(preset.SkillActions)
+	cfg.Admission.Skill.Actions = actionMap(preset.SkillActions)
+	cfg.Admission.MCP.Actions = actionMap(preset.ScannerOverrides["mcp"])
+	eng := repoEngine(t)
+	for _, severity := range []string{"HIGH", "MEDIUM", "LOW", "CRITICAL"} {
+		in := AdmissionInput{
+			TargetType: config.AdmissionTypeMCP, TargetName: "context7",
+			ScanResult: &ScanResultInput{MaxSeverity: severity, TotalFindings: 1, ScannerName: "mcp-scanner"},
+			Admission:  AdmissionFor(CompileAdmission(cfg), config.AdmissionTypeMCP),
+		}
+		want := "warning"
+		if severity == "CRITICAL" {
+			want = "rejected"
+		}
+		fallback := EvaluateAdmissionFallback(in)
+		rego, err := eng.Evaluate(context.Background(), in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fallback.Verdict != want || rego.Verdict != want {
+			t.Errorf("%s: fallback=%s rego=%s, want %s", severity, fallback.Verdict, rego.Verdict, want)
+		}
+	}
+	// An admin's explicit HIGH action still wins over the compatibility shape.
+	cfg.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
+	if got := AdmissionFor(CompileAdmission(cfg), config.AdmissionTypeMCP).Actions["HIGH"]; got != actionQuarantine {
+		t.Errorf("explicit HIGH action = %+v, want quarantine", got)
+	}
 }

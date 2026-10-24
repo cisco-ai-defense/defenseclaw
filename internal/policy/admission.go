@@ -112,7 +112,16 @@ func CompileAdmission(cfg *config.Config) map[string]CompiledAdmission {
 			skill := cfg.Scanners.SkillScanner
 			derived = derivedScannerGate(skill.EffectiveFailOnSeverity(), skill.EffectiveReviewQueueMin())
 		}
-		out[assetType] = compileAssetType(assetType, own, adm.Defaults, derived, assetType == config.AdmissionTypeMCP && legacyStrictMCP(adm))
+		compiled := compileAssetType(assetType, own, adm.Defaults, derived, assetType == config.AdmissionTypeMCP && legacyStrictMCP(adm))
+		if assetType == config.AdmissionTypeMCP && legacyBalancedDefaultMCP(adm) {
+			// policy activate default on 1.0.0-1.0.3 persisted the old
+			// shipped MCP actions. Treat only that exact preset as balanced.
+			for _, severity := range []string{"HIGH", "MEDIUM", "LOW"} {
+				compiled.Actions[severity] = actionWarn
+			}
+			compiled.Source = "compat:pre-1.0.4 default"
+		}
+		out[assetType] = compiled
 	}
 	return out
 }
@@ -234,6 +243,25 @@ func legacyStrictMCP(adm config.AdmissionConfig) bool {
 	}
 	skill := compileActionMap(adm.Skill.Actions)
 	return skill["HIGH"] == actionQuarantine && skill["MEDIUM"] == actionQuarantine && skill["LOW"] == actionWarn
+}
+
+// legacyBalancedDefaultMCP recognizes the exact MCP action map that the
+// pre-1.0.4 default preset wrote to config.yaml. An explicit changed severity
+// stays an administrator choice and is never translated.
+func legacyBalancedDefaultMCP(adm config.AdmissionConfig) bool {
+	d := adm.Defaults
+	if d.ScanOnInstall == nil || !*d.ScanOnInstall || d.AllowListBypassScan == nil || !*d.AllowListBypassScan {
+		return false
+	}
+	defaults := compileActionMap(d.Actions)
+	if len(defaults) != len(AdmissionSeverities) ||
+		defaults["CRITICAL"] != actionQuarantine || defaults["HIGH"] != actionQuarantine ||
+		defaults["MEDIUM"] != actionWarn || defaults["LOW"] != actionWarn || defaults["INFO"] != actionWarn {
+		return false
+	}
+	mcp := compileActionMap(adm.MCP.Actions)
+	return len(mcp) == 2 && mcp["MEDIUM"] == actionQuarantine &&
+		mcp["LOW"] == (CompiledAction{Install: "none", File: "none", Runtime: "block"})
 }
 
 func compileAssetType(assetType string, own, defaults config.AdmissionAssetType, derived map[string]CompiledAction, legacyStrict bool) CompiledAdmission {
