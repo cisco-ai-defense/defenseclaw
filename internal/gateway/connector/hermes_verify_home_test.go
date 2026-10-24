@@ -86,6 +86,51 @@ func TestHermesVerifyFailsWhenHermesRunsANamedProfile(t *testing.T) {
 	}
 }
 
+// Hermes lists profiles/coder\n as a named profile (Python's $ matches
+// before a final newline). After it appears, Verify (per user and managed)
+// fails and Setup (the ensure, upgrade and repair path) refuses, so neither
+// reports the default profile sealed while that profile runs unhooked.
+func TestHermesVerifyAndSetupRefuseANamedProfileWithATrailingNewline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file names cannot hold a newline")
+	}
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = configPath
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	conn := NewHermesConnector()
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
+		DataDir:  filepath.Join(root, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	profile := filepath.Join(filepath.Dir(configPath), "profiles", "coder\n")
+	if err := os.MkdirAll(profile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profile, "config.yaml"), []byte("model: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, managed := range []bool{false, true} {
+		check := opts
+		check.ManagedEnterprise = managed
+		if present, err := OwnedHooksPresent(conn, check); present || err == nil {
+			t.Fatalf("managed=%v: OwnedHooksPresent with profiles/coder\\n = %v, %v; want unverified", managed, present, err)
+		}
+	}
+	if err := conn.Setup(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "named profile") {
+		t.Fatalf("Setup with profiles/coder\\n = %v; want the named profile refused", err)
+	}
+}
+
 // 'hermes profile delete' leaves profiles/.deleted behind. An intact
 // default-profile registration stays verified, per user and managed, and a
 // second Setup (the no-op ensure) succeeds without changing it.

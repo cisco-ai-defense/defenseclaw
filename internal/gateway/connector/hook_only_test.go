@@ -2224,6 +2224,11 @@ func TestHermesSingleProfileIgnoresEntriesHermesNeverRunsAsAProfile(t *testing.T
 			}
 		}},
 		{name: "named profile", make: mkdirUnder("coder"), refused: "coder"},
+		{name: "named profile with a trailing newline", make: mkdirUnderPOSIX("coder\n"), refused: "coder\n"},
+		{name: "default with a trailing newline", make: mkdirUnderPOSIX("default\n"), refused: "default\n"},
+		{name: "64-byte named profile with a trailing newline", make: mkdirUnderPOSIX(strings.Repeat("c", 64) + "\n"), refused: strings.Repeat("c", 64) + "\n"},
+		{name: "named profile with two trailing newlines", make: mkdirUnderPOSIX("coder\n\n")},
+		{name: "deleted-profile metadata with a trailing newline", make: mkdirUnderPOSIX(".deleted\n")},
 		{name: "named profile beside metadata", make: mkdirUnder(".deleted", "coder2"), refused: "coder2"},
 		{name: "upper-case named profile", make: mkdirUnder("Coder"), refused: "Coder"},
 		{name: "64-byte named profile", make: mkdirUnder(strings.Repeat("b", 64)), refused: strings.Repeat("b", 64)},
@@ -2256,6 +2261,55 @@ func TestHermesSingleProfileIgnoresEntriesHermesNeverRunsAsAProfile(t *testing.T
 				t.Fatalf("validateHermesSingleProfile = %v, want the named profile %q refused", err, tc.refused)
 			}
 		})
+	}
+}
+
+// Python's re.match, which Hermes uses for profile ids, lets $ match before
+// one final newline, so "coder\n" is a profile Hermes lists and runs. Only
+// the exact id grammar (lowercased) is a profile; the exact names "default"
+// and dot-led metadata never are.
+func TestHermesProfileEntryNameMatchesPythonProfileIDs(t *testing.T) {
+	for name, want := range map[string]bool{
+		"coder":                        true,
+		"Coder":                        true,
+		"coder\n":                      true,
+		"Coder\n":                      true,
+		"default\n":                    true,
+		"Default\n":                    true,
+		"0":                            true,
+		"0\n":                          true,
+		strings.Repeat("a", 64):        true,
+		strings.Repeat("a", 64) + "\n": true,
+		"default":                      false,
+		"Default":                      false,
+		"":                             false,
+		"\n":                           false,
+		"coder\n\n":                    false,
+		"coder\r\n":                    false,
+		"coder\r":                      false,
+		"\ncoder":                      false,
+		"co\nder":                      false,
+		"coder ":                       false,
+		".deleted":                     false,
+		".deleted\n":                   false,
+		"_scratch\n":                   false,
+		strings.Repeat("a", 65):        false,
+		strings.Repeat("a", 65) + "\n": false,
+	} {
+		if got := hermesProfileEntryName(name); got != want {
+			t.Errorf("hermesProfileEntryName(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
+
+// mkdirUnderPOSIX is mkdirUnder for names Windows cannot create (a newline).
+func mkdirUnderPOSIX(names ...string) func(t *testing.T, profiles string) {
+	return func(t *testing.T, profiles string) {
+		t.Helper()
+		if runtime.GOOS == "windows" {
+			t.Skip("Windows file names cannot hold a newline")
+		}
+		mkdirUnder(names...)(t, profiles)
 	}
 }
 
