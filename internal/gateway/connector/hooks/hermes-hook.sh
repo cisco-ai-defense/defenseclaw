@@ -333,9 +333,25 @@ if [ "$_DC_NATIVE_STATUS" -eq 0 ] && [ -z "$_DC_NATIVE_ANSWER" ]; then
   # allow result; managed failures print a block directive or exit nonzero.
   exit 0
 fi
-if [ "$_DC_NATIVE_STATUS" -eq 0 ] && printf '%s' "$_DC_NATIVE_ANSWER" | _dc_jq -e 'type == "object" and (.action == "allow" or .action == "block")' >/dev/null 2>&1; then
-  printf '%s\n' "$_DC_NATIVE_ANSWER"
-  exit 0
+if [ "$_DC_NATIVE_STATUS" -eq 0 ]; then
+  # The native hook has already validated the gateway answer. Preserve each
+  # documented Hermes output shape while rejecting an unusable nonempty
+  # result. The string-field reader validates the whole JSON, including
+  # duplicate keys, even on hosts without jq or Python.
+  _DC_NATIVE_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" hook_event_name)" ||
+    _DC_NATIVE_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" event)" || _DC_NATIVE_EVENT=""
+  _DC_NATIVE_ACTION="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" action)" || _DC_NATIVE_ACTION=""
+  _DC_NATIVE_DECISION="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" decision)" || _DC_NATIVE_DECISION=""
+  _DC_NATIVE_MESSAGE="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" message)" || _DC_NATIVE_MESSAGE=""
+  _DC_NATIVE_REASON="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" reason)" || _DC_NATIVE_REASON=""
+  _DC_NATIVE_CONTEXT="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" context)" || _DC_NATIVE_CONTEXT=""
+  if { [ "$_DC_NATIVE_ACTION" = "block" ] && [ -n "$_DC_NATIVE_MESSAGE" ]; } ||
+     { [ "$_DC_NATIVE_DECISION" = "block" ] && [ -n "$_DC_NATIVE_REASON" ]; } ||
+     { [ "$_DC_NATIVE_EVENT" = "pre_llm_call" ] && [ -n "$_DC_NATIVE_CONTEXT" ]; } ||
+     { [ "$_DC_NATIVE_EVENT" = "pre_verify" ] && [ "$_DC_NATIVE_ACTION" = "continue" ] && [ -n "$_DC_NATIVE_MESSAGE" ]; }; then
+    printf '%s\n' "$_DC_NATIVE_ANSWER"
+    exit 0
+  fi
 fi
 hermes_block response "the trusted native hook could not start"
 exit 2
