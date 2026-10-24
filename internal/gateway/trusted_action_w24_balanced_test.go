@@ -76,6 +76,7 @@ func testTrustedActionW24WindowsScriptsAndCopyLoops(t *testing.T) {
 		{"GAP-1010 call operator script", "codex", "exec_command", `& .\build.ps1 -Configuration Release`, false},
 		{"GAP-1010 Git Bash script", "claudecode", "Bash", `bash run.sh test`, false},
 		{"GAP-1012 PowerShell copy loop", "codex", "exec_command", `foreach ($f in 'regular.txt') { Copy-Item $f copy }`, false},
+		{"GAP-1012 PowerShell copy loop over a listing", "codex", "exec_command", `foreach ($f in Get-ChildItem *.txt) { Copy-Item $f out }`, false},
 		{"script with the protected file as an argument", "codex", "exec_command", `pwsh -File .\x.ps1 -Target $env:USERPROFILE\.ssh\authorized_keys`, true},
 		{"copy to a computed destination", "codex", "exec_command", `Copy-Item src $dest`, true},
 	} {

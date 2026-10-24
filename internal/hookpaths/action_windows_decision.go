@@ -630,15 +630,18 @@ func actionWindowsControlSource(command string) string {
 			continue
 		}
 		if atStart {
-			end, kind := actionWindowsControlHead(command, i)
+			end, kind, keepStart, keepEnd := actionWindowsControlHead(command, i)
 			if end <= i && len(control) != 0 && control[len(control)-1] == 's' {
 				end, kind = actionWindowsSwitchLabel(command, i), 'c'
 			}
 			if end > i {
 				for j := i; j < end; j++ {
-					if out[j] != '\r' && out[j] != '\n' {
+					if (j < keepStart || j >= keepEnd) && out[j] != '\r' && out[j] != '\n' {
 						out[j] = ' '
 					}
+				}
+				if keepEnd > keepStart {
+					out[keepEnd] = ';' // the listing collection is its own statement
 				}
 				if kind != 0 {
 					out[end-1] = ';'
@@ -659,8 +662,9 @@ func actionWindowsControlSource(command string) string {
 // actionWindowsControlHead returns the end of the control keyword and inert
 // header at start: after the { of its body, with kind 'c' ('s' for a switch
 // body), or, for the while or until of a do loop, at the end of its
-// statement, with kind 0.
-func actionWindowsControlHead(command string, start int) (end int, kind byte) {
+// statement, with kind 0. For a foreach over a listing command, keepStart and
+// keepEnd bound that command, which is judged as a statement of its own.
+func actionWindowsControlHead(command string, start int) (end int, kind byte, keepStart, keepEnd int) {
 	lower := strings.ToLower(command[start:])
 	for _, keyword := range []string{"elseif", "else", "if", "while", "until", "foreach", "switch", "try", "catch", "finally", "do"} {
 		next := start + len(keyword)
@@ -676,34 +680,67 @@ func actionWindowsControlHead(command string, start int) (end int, kind byte) {
 				option++
 			}
 			if option == index+1 {
-				return 0, 0
+				return 0, 0, 0, 0
 			}
 			index = actionWindowsSkipSpace(command, option)
 		}
 		switch keyword {
 		case "if", "elseif", "while", "until", "foreach", "switch":
 			if index >= len(command) || command[index] != '(' {
-				return 0, 0
+				return 0, 0, 0, 0
 			}
 			closing := strings.IndexByte(command[index:], ')')
-			if closing < 0 || !actionWindowsInertHeader(keyword, command[index+1:index+closing]) {
-				return 0, 0
+			if closing < 0 {
+				return 0, 0, 0, 0
+			}
+			if header := command[index+1 : index+closing]; !actionWindowsInertHeader(keyword, header) {
+				collection, ok := actionWindowsListingCollection(keyword, header)
+				if !ok {
+					return 0, 0, 0, 0
+				}
+				keepStart, keepEnd = index+1+collection, index+closing
 			}
 			index = actionWindowsSkipSpace(command, index+closing+1)
 		}
 		if index < len(command) && command[index] == '{' {
 			if keyword == "switch" {
-				return index + 1, 's'
+				return index + 1, 's', keepStart, keepEnd
 			}
-			return index + 1, 'c'
+			return index + 1, 'c', keepStart, keepEnd
 		}
 		if (keyword == "while" || keyword == "until") &&
 			(index >= len(command) || strings.ContainsRune(";\r\n}", rune(command[index]))) {
-			return index, 0
+			return index, 0, 0, 0
 		}
-		return 0, 0
+		return 0, 0, 0, 0
 	}
-	return 0, 0
+	return 0, 0, 0, 0
+}
+
+// actionWindowsListingCollection returns the offset in a foreach header of
+// its collection when that is a listing command with literal arguments
+// (foreach ($f in Get-ChildItem *.txt)). The listing runs no other command;
+// the loop variable stays unknown in the body. A listing that names the .ssh
+// directory or a key keeps the strict spelling.
+func actionWindowsListingCollection(keyword, header string) (int, bool) {
+	if keyword != "foreach" {
+		return 0, false
+	}
+	fields := strings.Fields(header)
+	if len(fields) < 3 || len(fields[0]) < 2 || fields[0][0] != '$' || !strings.EqualFold(fields[1], "in") {
+		return 0, false
+	}
+	at := strings.Index(header, fields[0]) + len(fields[0])
+	at += strings.Index(header[at:], fields[1]) + len(fields[1])
+	collection := header[at:]
+	if strings.ContainsAny(collection, "(){}[]@`<>=|;&$\r\n") || actionNamesSSH(collection) {
+		return 0, false
+	}
+	switch strings.ToLower(fields[2]) {
+	case "get-childitem", "gci", "ls", "dir", "get-item", "gi":
+		return at, true
+	}
+	return 0, false
 }
 
 // actionWindowsSwitchLabel returns the end, after the { of its body, of a

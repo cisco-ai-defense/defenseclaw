@@ -58,9 +58,6 @@ func w24BalancedHome(t *testing.T) (home, cwd string) {
 // target or the command also writes to a computed destination.
 func TestW24UnreadScriptLaunchesNeedProtectedEvidence(t *testing.T) {
 	w24POSIXRows(t, []w24Row{
-		command string
-		block   bool
-	}{
 		{`bash run.sh test`, false},
 		{`./run.sh test`, false},
 		{`sh scripts/build.sh a b`, false},
@@ -171,6 +168,11 @@ func TestW24LoopValuesAndCopySourcesNeedProtectedDestination(t *testing.T) {
 		{`Copy-Item -Path $src -Destination out`, false},
 		{`Copy-Item -Recurse -Force $src out`, false},
 		{`Move-Item $f archive\`, false},
+		{`foreach ($f in Get-ChildItem *.txt) { Copy-Item $f out }`, false},
+		{`foreach ($f in gci -Recurse src) { Copy-Item $f out }`, false},
+		{`foreach ($f in Get-ChildItem *.txt) { Set-Content $f x }`, true},
+		{`foreach ($f in Get-ChildItem *.txt) { Copy-Item $f C:\Users\alice\.ssh\authorized_keys }`, true},
+		{`foreach ($f in Get-ChildItem C:\Users\alice\.ssh) { Copy-Item $f out }`, true},
 		{`Copy-Item src $dest`, true},
 		{`Copy-Item -Destination $dest -Path a.txt`, true},
 		{`Copy-Item $f -Destination $d`, true},

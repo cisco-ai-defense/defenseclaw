@@ -274,13 +274,7 @@ func actionUncertaintyReachesDepth(command, cwd, home string, depth int) bool {
 	if depth >= 8 {
 		return true
 	}
-	lower := strings.ToLower(command)
-	for _, name := range []string{".ssh", "ssh~", "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
-		if strings.Contains(lower, name) {
-			return true
-		}
-	}
-	if actionTextDynamicWrite(command) {
+	if actionNamesSSH(command) || actionTextDynamicWrite(command) {
 		return true
 	}
 	if !actionWindowsHome(home) {
@@ -1156,6 +1150,18 @@ func actionBindLoopValue(loop *syntax.ForClause, values actionValues, cwd, home 
 	case 1:
 		values[name] = risky[0]
 	}
+}
+
+// actionNamesSSH reports text that names the .ssh directory (also as an 8.3
+// alias), an authorized_keys file or a private key file.
+func actionNamesSSH(text string) bool {
+	lower := strings.ToLower(text)
+	for _, name := range []string{".ssh", "ssh~", "authorized_keys", "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"} {
+		if strings.Contains(lower, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // actionTextDynamicWrite reports a write to a computed target in text the
