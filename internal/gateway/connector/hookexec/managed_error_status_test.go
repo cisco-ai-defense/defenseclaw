@@ -149,13 +149,13 @@ func TestStandaloneOpenBlocksAGatewayThatAnsweredAnErrorStatus(t *testing.T) {
 		for _, c := range errorStatusConnectors {
 			mutate := withConnector(standaloneOpen, c.event, c.payload)
 			t.Run(profile+"/"+c.connector, func(t *testing.T) {
-				// The control: only a proven stop (errManagedGatewayNotRunning) is
-				// the administrator's open (TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage).
-				// A gateway that took the call and gave no answer is no proven
-				// outage and blocks (faa766f38b, GAP-0518).
+				// The control: a verified gateway that took the call and gave
+				// no answer in the whole budget is the outage the administrator's
+				// open covers (managedNoAnswerOutage, benign defaults loop round
+				// 3), so every case below blocks for its error status alone.
 				shortAnswerBudget(t, 400*time.Millisecond)
-				if hung, _ := runAgainstGateway(t, c.connector, hungGateway(t), mutate); !blocked(hung) {
-					t.Fatalf("a gateway that took the call and gave no answer was allowed in fail mode open: code=%d stdout=%q stderr=%q",
+				if hung, _ := runAgainstGateway(t, c.connector, hungGateway(t), mutate); blocked(hung) {
+					t.Fatalf("a gateway that took the call and gave no answer was blocked in fail mode open: code=%d stdout=%q stderr=%q",
 						hung.code, hung.stdout, hung.stderr)
 				}
 				all := cases
