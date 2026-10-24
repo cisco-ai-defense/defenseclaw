@@ -157,7 +157,9 @@ func (m *Manager) endHarness(ctx context.Context, gw *Gateway, b *box) (harness.
 	none := harness.DetachedRun{State: sandboxapi.RunNone}
 	m.mu.Lock()
 	name, harnessName, driver := b.rec.Name, b.rec.Harness, b.rec.Driver
-	ready := b.phase == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
+	// stop has just fetched b.sb from OpenShell. A raw OpenShell client can
+	// start or stop the guest without updating the manager's cached phase.
+	ready := b.sb != nil && auditPhase(b.sb.Status.Phase) == audit.SandboxPhaseReady && !b.creating && !b.deleted && !b.retained
 	tamper := b.tamperStop
 	m.mu.Unlock()
 	if !ready {

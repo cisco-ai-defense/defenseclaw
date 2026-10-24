@@ -304,6 +304,7 @@ defenseclaw_sandbox_confirm_receipt() {
   body="$(printf '{"delivery_receipt":"%s","result":"ack"}' "$receipt")"
   reply="$(defenseclaw_sandbox_post "$path" "$body" 3 3 \
     -H "Content-Type: application/json" \
+    -H "X-DefenseClaw-Client: sandbox-hook/1.0" \
     -H "Authorization: Bearer ${DEFENSECLAW_SANDBOX_TOKEN}")" || return 1
   code="${reply##*$'\n'}"
   [ "$code" = 200 ] || return 1

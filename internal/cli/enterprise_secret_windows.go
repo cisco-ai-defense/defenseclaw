@@ -164,9 +164,14 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		// The success document (secret-result.schema.json) has no warnings.
 		layout, layoutErr := windowsSecretLayout()
 		if layoutErr == nil {
-			layoutErr = recordWindowsChange(layout, change.reservation, ev)
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsChange(layout, change.reservation, ev))
+		} else if change.changed || !change.layoutPreflightFailed {
+			// A post-change or different layout failure still names the
+			// missing audit event.
+			warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
 		}
-		warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
+		// The same unreadable layout before any change is already in the
+		// JSON refusal; retrying it cannot record another refusal event.
 	}
 	// A run that recorded nothing (the stored value, an absent credential)
 	// gives its reservation back here, durably.
@@ -240,6 +245,9 @@ type windowsSecretChange struct {
 	noop      bool
 	// changed is set when the run wrote or removed the credential.
 	changed bool
+	// layoutPreflightFailed means no change could begin because the first
+	// layout lookup failed. Its JSON refusal already names that failure.
+	layoutPreflightFailed bool
 	// reservation holds room for the change event from before the change
 	// until the caller writes the event (or releases it).
 	reservation *enterprisestatus.ChangeReservation
@@ -261,7 +269,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	layout, err := windowsSecretLayout()
 	if err != nil {
-		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		return windowsSecretChange{layoutPreflightFailed: true}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	if !managed.ValidCredentialName(opts.name) {
 		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))

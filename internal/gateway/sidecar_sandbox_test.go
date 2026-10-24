@@ -330,11 +330,13 @@ type fakeSandboxFleet struct {
 	failStops map[string]int
 	stopped   []string
 	listErr   error
+	listCalls int
 }
 
 func (f *fakeSandboxFleet) List(context.Context) ([]sandboxapi.Sandbox, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.listCalls++
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
@@ -344,6 +346,54 @@ func (f *fakeSandboxFleet) List(context.Context) ([]sandboxapi.Sandbox, error) {
 	}
 	slices.SortFunc(out, func(a, b sandboxapi.Sandbox) int { return strings.Compare(a.Name, b.Name) })
 	return out, nil
+}
+
+// The managed daemon must keep containing while a dead listener has not
+// rebound. A transient list or stop failure cannot make that one attempt
+// the only attempt. Rebinding ends the loop before another stop.
+func TestManagedListenerLossRetriesUntilRebound(t *testing.T) {
+	fleet := &fakeSandboxFleet{
+		phases:    map[string]string{"vm": "ready"},
+		listErr:   errors.New("gateway temporarily unavailable"),
+		failStops: map[string]int{"vm": 2},
+	}
+	var feed syncRecorder[sandboxapi.ActivityEvent]
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	d := &SandboxDaemon{
+		rt:        &sandboxRuntime{fleet: fleet, publish: feed.add, recheck: 5 * time.Millisecond},
+		lifecycle: make(chan struct{}, 1), runCtx: ctx,
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		d.containLostListener(ctx, "ingress")
+	}()
+	eventuallyTrue(t, func() bool {
+		fleet.mu.Lock()
+		defer fleet.mu.Unlock()
+		return fleet.listCalls >= 2
+	})
+	if got := fleet.stops(); len(got) != 0 {
+		t.Fatalf("stopped despite failed list: %v", got)
+	}
+	fleet.mu.Lock()
+	fleet.listErr = nil
+	fleet.mu.Unlock()
+	eventuallyTrue(t, func() bool { return slices.Equal(fleet.stops(), []string{"vm"}) })
+	eventuallyTrue(t, func() bool { return len(feed.snapshot()) == 2 })
+	if got := feed.snapshot(); len(got) != 2 || !strings.Contains(got[0].Message, "could not stop") ||
+		!strings.Contains(got[1].Message, "stopped it") {
+		t.Fatalf("containment events = %+v", got)
+	}
+	d.listenMu.Lock()
+	d.listenCancel = func() {}
+	d.listenMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("containment did not end after listener rebind")
+	}
 }
 
 func (f *fakeSandboxFleet) Stop(_ context.Context, name string) (*sandboxapi.Sandbox, error) {

@@ -53,6 +53,8 @@ type Client struct {
 	HTTP *http.Client
 	// UserAgent defaults to ClientName.
 	UserAgent string
+	// Only per-user CLI reads retry a transient verified connection failure.
+	retryReadTransport bool
 }
 
 // NewClient returns a client for baseURL authenticated with token.
@@ -102,6 +104,7 @@ func ClientForConfig(cfg *config.Config) (*Client, error) {
 	}
 	client := NewClient("http://"+address, token)
 	client.HTTP = httpClient
+	client.retryReadTransport = true
 	return client, nil
 }
 
@@ -227,25 +230,48 @@ func (c *Client) httpClient() *http.Client {
 	return http.DefaultClient
 }
 
-// do sends one JSON request and decodes a JSON answer into out (nil skips).
+// do sends a JSON request and decodes its answer into out (nil skips).
 func (c *Client) do(ctx context.Context, method, path string, query url.Values, body, out any) error {
-	var rdr io.Reader
+	var payload []byte
 	if body != nil {
 		buf, err := json.Marshal(body)
 		if err != nil {
 			return fmt.Errorf("sandboxapi: encode request: %w", err)
 		}
-		rdr = bytes.NewReader(buf)
+		payload = buf
 	} else if method != http.MethodGet {
-		rdr = strings.NewReader("{}")
+		payload = []byte("{}")
 	}
-	req, err := c.newRequest(ctx, method, path, query, rdr)
-	if err != nil {
-		return err
+	attempts := 1
+	if c.retryReadTransport && method == http.MethodGet {
+		attempts = 3
 	}
-	resp, err := c.httpClient().Do(req)
-	if err != nil {
-		return &Error{Code: CodeUnavailable, Message: "the DefenseClaw daemon is not reachable", Detail: err.Error()}
+	var resp *http.Response
+	for attempt := range attempts {
+		var rdr io.Reader
+		if payload != nil {
+			rdr = bytes.NewReader(payload)
+		}
+		req, err := c.newRequest(ctx, method, path, query, rdr)
+		if err != nil {
+			return err
+		}
+		resp, err = c.httpClient().Do(req)
+		if err == nil {
+			break
+		}
+		if attempt == attempts-1 || ctx.Err() != nil {
+			return &Error{Code: CodeUnavailable, Message: "the DefenseClaw daemon is not reachable", Detail: err.Error()}
+		}
+		// The verified transport checks the connected peer again on every
+		// attempt. A response or a write request is never retried here.
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
