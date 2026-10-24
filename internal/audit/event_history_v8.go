@@ -742,6 +742,10 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		}
 	}
 
+	recordDigest, err := spooledChangeFrom(ctx).recordDigest(record)
+	if err != nil {
+		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthProjectionRejected, err)
+	}
 	_, err = txExecContextObserved(ctx, tx, "v8_event_history_insert", writer.store.sqliteBusyObservabilityV8(), `
 		INSERT INTO audit_events (
 			id, timestamp, action, target, actor, details, structured_json, severity,
@@ -752,7 +756,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 			bucket, event_name, source, signal, bucket_catalog_version, payload_json, projected_record_json,
 			record_schema_version, projection_hash,
 			redaction_profile, mandatory, evaluation_id, scan_id, finding_id,
-			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id
+			enforcement_action_id, payload_hmac, integrity_algorithm, integrity_key_id, record_sha256
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -761,7 +765,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?,
 			?, ?, ?, ?, ?,
-			?, ?, ?, ?
+			?, ?, ?, ?, ?
 		)`,
 		record.RecordID(), record.Timestamp().Format(time.RFC3339Nano),
 		action, legacyTarget, legacyActor, legacyDetails, legacyStructured, legacySeverity,
@@ -778,7 +782,7 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		metadata.RedactionProfile, boolInt(record.Mandatory()),
 		nullStr(correlation.EvaluationID), nullStr(correlation.ScanID),
 		nullStr(correlation.FindingOccurrenceID), nullStr(correlation.EnforcementActionID),
-		nullStr(payloadHMAC), nullStr(integrityAlgorithm), nullStr(integrityKeyID),
+		nullStr(payloadHMAC), nullStr(integrityAlgorithm), nullStr(integrityKeyID), nullStr(recordDigest),
 	)
 	if err != nil {
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(

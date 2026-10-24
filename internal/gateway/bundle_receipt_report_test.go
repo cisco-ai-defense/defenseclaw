@@ -41,12 +41,15 @@ type fakeBundleReceiptSink struct {
 	principals []string
 	versions   []uint64
 	changes    []audit.ConfigChange
-	changeErr  error
+	// offers is every change offered, the refused offers included.
+	offers    []audit.ConfigChange
+	changeErr error
 }
 
 func (f *fakeBundleReceiptSink) LogConfigChange(
 	change audit.ConfigChange, _ *observability.RemoteDelivery, _ *audit.ConfigChangePins,
 ) error {
+	f.offers = append(f.offers, change)
 	if f.changeErr != nil {
 		return f.changeErr
 	}
@@ -292,4 +295,32 @@ func TestConfigChangeActivityNamesPolicyBundle(t *testing.T) {
 
 func configSHA256ForTest(raw []byte) string {
 	return configwrite.SHA256Hex(raw)
+}
+
+// The reported-marker folder is made durably before a marker goes in it: a
+// change's record pin is removed once its marker is on disk, so a folder a
+// power loss took back would leave the change with neither, and its next
+// offer would build another record under its id. A folder that cannot be
+// made that way writes no marker.
+func TestBundleReceiptReporterMakesItsMarkerFolderDurably(t *testing.T) {
+	r := &bundleReceiptReporter{markerPath: filepath.Join(t.TempDir(), bundleReceiptMarkerName)}
+	previous := mkdirMarkers
+	t.Cleanup(func() { mkdirMarkers = previous })
+	var made []string
+	mkdirMarkers = func(folder string) error {
+		made = append(made, folder)
+		return configwrite.MkdirDurable(folder)
+	}
+	if !r.markSeen(testBundleID) {
+		t.Fatal("the marker was not written")
+	}
+	if len(made) != 1 || made[0] != r.seenDir() || !r.reportedOnDisk(testBundleID) {
+		t.Fatalf("marker folder made by %v, marker on disk %t; want one durable make of %s",
+			made, r.reportedOnDisk(testBundleID), r.seenDir())
+	}
+	const other = "r-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"
+	mkdirMarkers = func(string) error { return os.ErrPermission }
+	if r.markSeen(other) || r.reportedOnDisk(other) {
+		t.Fatal("a marker was written although its folder could not be made durably")
+	}
 }

@@ -243,6 +243,13 @@ func (component *localLogComponent) Process(
 	return outcome, err
 }
 
+// flushed makes the records the local store keeps survive a power loss, as
+// a record held for its local write (observability.RemoteExportAfterLocalWrite)
+// must before it leaves, and reports whether they do.
+func (component *localLogComponent) flushed(ctx context.Context) bool {
+	return component.store.SyncCommittedWrites(ctx) == nil
+}
+
 func (component *localLogComponent) ProcessAtomicBatch(
 	ctx context.Context,
 	items []pipeline.AtomicBatchItem,
