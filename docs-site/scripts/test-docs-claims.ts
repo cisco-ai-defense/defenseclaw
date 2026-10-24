@@ -737,6 +737,15 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(risk, /enrollment finds an agent only through its CLI install/i);
   });
 
+  it('ties threat-model B17 to the installed hook fail mode', () => {
+    const row = source('docs/ENTERPRISE-THREAT-MODEL.md')
+      .split('\n').find((line) => line.startsWith('| B17 |')) ?? '';
+    const hook = source('internal/gateway/connector/hooks/_hardening.sh');
+    assert.match(hook, /DEFENSECLAW_FAIL_MODE in the agent's environment is not[\s\S]*?read/);
+    assert.match(row, /DEFENSECLAW_FAIL_MODE.*1\.0\.4 hooks do not read.*installed.*mode/i);
+    assert.doesNotMatch(row, /DEFENSECLAW_FAIL_MODE[^|]*honored only when stricter/i);
+  });
+
   it('does not advertise local files as MCP scan targets', () => {
     const api = page('reference/apis/gateway-api.mdx');
     assert.match(api, /`POST`\s*\|\s*`\/v1\/mcp\/scan`[^\n]*Path or JSON-file targets[^\n]*HTTP 400[^\n]*bare identifier without path or file syntax[^\n]*configured server name/i);
