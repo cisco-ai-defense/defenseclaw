@@ -3472,6 +3472,39 @@ function Save-Installer {
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $InstallerDir "install.ps1") -Force
     }
     Remove-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
+    Save-InstallerDigest
+}
+
+function Save-InstallerDigest {
+    # The SHA-256 of the saved installer, which 'defenseclaw rollback' checks
+    # before it runs that file (GAP-1067). It is kept with the data, in
+    # receipts\ (a DefenseClaw security-state folder the tamper rule
+    # watches), so it moves with the install it belongs to on every swap.
+    $receipts = Join-Path $DataDir "receipts"
+    $record = Join-Path $receipts "installer.sha256"
+    $saved = Join-Path $InstallerDir "install.ps1"
+    try {
+        Remove-Item -LiteralPath $record -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $saved -PathType Leaf)) { return }
+        New-Item -ItemType Directory -Path $receipts -Force | Out-Null
+        [IO.File]::WriteAllText("$record.new", "$(Get-Sha256 $saved)  install.ps1`n", [Text.Encoding]::ASCII)
+        Move-Item -LiteralPath "$record.new" -Destination $record -Force
+    } catch {
+        Write-Warn "Could not record the digest of the saved installer, so 'defenseclaw rollback' will not run it; record it again with: defenseclaw upgrade --version $Ver --yes"
+    }
+}
+
+function Get-OtherBuildInstalled([string]$StagedGateway) {
+    # The installed gateway reports another build of this version (its commit
+    # or build date) than the staged one (GAP-1063): the build each names, or
+    # $null. An installed gateway that does not answer is repaired, as before.
+    $installedGateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $installedGateway -PathType Leaf)) { return $null }
+    $installed = (Get-NativeOutput $installedGateway @("--version")).Trim()
+    $staged = (Get-NativeOutput $StagedGateway @("--version")).Trim()
+    if (-not $installed -or -not $installed.Contains($Ver) -or $installed -eq $staged) { return $null }
+    $name = { param($Text) if ($Text -match '\(commit=([^,)]*)') { "commit $($Matches[1])" } else { $Text } }
+    return @{ Installed = (& $name $installed); Staged = (& $name $staged) }
 }
 
 function Complete-Swap {
@@ -4199,9 +4232,18 @@ function Invoke-Install {
     # What the proof of this install compares the live binaries with.
     $stagedBinaries = Get-BinariesState (Join-Path $Staging "bin")
 
-    # Swap.
-    if ($PrevVersion -and $PrevVersion -eq $Ver) {
+    # Swap. A same-version run over the installed build is a repair:
+    # previous\ stays the rollback copy. Another build of this version (a
+    # release candidate the next one replaces) is replaced as an upgrade is:
+    # the replaced build becomes the rollback copy, and this says so before
+    # the swap (GAP-1063).
+    $otherBuild = if ($PrevVersion -and $PrevVersion -eq $Ver) { Get-OtherBuildInstalled $stagedGateway } else { $null }
+    $Repair = $PrevVersion -and $PrevVersion -eq $Ver -and -not $otherBuild
+    if ($Repair) {
         if (-not (Confirm-Step "Reinstall DefenseClaw ${Ver}?")) { Die "Cancelled; nothing was changed" }
+    } elseif ($otherBuild) {
+        Write-Info "The installed DefenseClaw $Ver is another build ($($otherBuild.Installed)) than this one ($($otherBuild.Staged)); it is kept in $Previous, so 'defenseclaw rollback' returns to it"
+        if (-not (Confirm-Step "Replace the installed build of DefenseClaw ${Ver}?")) { Die "Cancelled; nothing was changed" }
     } elseif ($PrevVersion) {
         $auditDb = Join-Path $DataDir "audit.db"
         if ([version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath $auditDb)) {
@@ -4259,11 +4301,11 @@ function Invoke-Install {
         $gatewayProcess = Start-SwapHookFailModes $stagedGateway $gatewayProcess
     }
     $WasRunning = [bool]$gatewayProcess
-    $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
+    $Snap = if ($Repair) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
     # The lifecycle transaction starts here: the working state is on the
     # disk before the first program changes (the hook swap). The outage
     # modes the hold or the refresh above set only ever tighten.
-    $operation = if ($PrevVersion -and $PrevVersion -eq $Ver) { "repair" } elseif ($PrevVersion) { "upgrade" } else { "install" }
+    $operation = if ($Repair) { "repair" } elseif ($PrevVersion) { "upgrade" } else { "install" }
     try { $Manifest = Write-LifecycleManifest $operation $PrevVersion $Ver $Snap } catch {
         Stop-HookFailModeHold
         if ($Setup) { Restore-SetupInstall }
@@ -4428,9 +4470,11 @@ function Invoke-Install {
     Write-Host "  DefenseClaw $Ver is installed." -ForegroundColor Green
     if ($Setup) {
         Write-Host "  Replaced DefenseClaw Setup $PrevVersion; your config and data were kept."
-    } elseif ($PrevVersion -and $PrevVersion -ne $Ver) {
-        $changed = if ((Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion) { "Downgraded" } else { "Upgraded" }
-        Write-Host "  $changed from $PrevVersion. Undo with: defenseclaw rollback"
+    } elseif ($PrevVersion -and -not $Repair) {
+        $changed = "Upgraded from $PrevVersion"
+        if ((Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion) { $changed = "Downgraded from $PrevVersion" }
+        if ($PrevVersion -eq $Ver) { $changed = "Replaced the other build of $Ver" }
+        Write-Host "  $changed. Undo with: defenseclaw rollback"
     }
     if ($PrevVersion -and $configured -and -not (Get-GatewayProcess)) {
         # GAP-1496: it was not running before the upgrade, so it was not started.

@@ -741,3 +741,55 @@ func TestWindowsBundleRollbackRecordsTheLastGoodBundleAgain(t *testing.T) {
 		})
 	}
 }
+
+// Review P2 (q-win-lifecycle loop round 3): a bundle-mode repair that cannot
+// prove the confirmed bundle's principal (its receipts cannot be read, or
+// they no longer bind the config) only read, so it stops with
+// bundle_restore_failed before any change: the installer does not run, a missing config.yaml stays missing and an edited
+// one stays where it is, with no rejected copy.
+func TestWindowsBundleRepairChangesNothingWhenItCannotProveTheBundlePrincipal(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		deleted bool
+		err     error
+	}{
+		{name: "config.yaml missing, receipts unreadable", deleted: true, err: errors.New("read the policy bundle receipts: Access is denied")},
+		{name: "config.yaml edited, receipts unreadable", err: errors.New("read the policy bundle receipts: Access is denied")},
+		{name: "config.yaml missing, config no longer bound", deleted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host := newWindowsBundleRestoreHost(t)
+			edited := host.tamper(t, tc.deleted)
+			stub := host.installer(t) // any installer run fails the test
+			original := windowsBundleRestoreGenerationOptions
+			t.Cleanup(func() { windowsBundleRestoreGenerationOptions = original })
+			windowsBundleRestoreGenerationOptions = func(*enterprisebundle.Driver, []byte) (configwrite.Options, bool, error) {
+				return configwrite.Options{}, false, tc.err
+			}
+			command := &cobra.Command{}
+			var stdout bytes.Buffer
+			command.SetOut(&stdout)
+			command.SetErr(&bytes.Buffer{})
+			opts := windowsBundleRestoreOptions()
+			err := runWindowsEnterpriseStandaloneAction(context.Background(), command, "repair", opts, `C:\x\install-enterprise.ps1`, windowsEnterprisePowerShellArgs("repair", opts))
+			result := windowsBundleLifecycleResult(t, &stdout)
+			if commandExitCode(err) != enterprisestatus.WindowsExitFailure || !windowsBundleHasCode(result.Errors, "bundle_restore_failed") || len(stub.calls) != 0 {
+				t.Fatalf("exit %d, errors %+v, installer runs %q", commandExitCode(err), result.Errors, stub.calls)
+			}
+			if len(result.Changes) != 0 {
+				t.Fatalf("a restore that only read reported changes %q", result.Changes)
+			}
+			installed, readErr := os.ReadFile(host.layout.ConfigPath)
+			if tc.deleted {
+				if !errors.Is(readErr, os.ErrNotExist) {
+					t.Fatalf("the failed restore wrote config.yaml (read %v)", readErr)
+				}
+			} else if readErr != nil || !bytes.Equal(installed, edited) {
+				t.Fatalf("the failed restore changed config.yaml (read %v)", readErr)
+			}
+			if _, err := os.Lstat(host.rejectedPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the failed restore kept rejected-config.yaml (%v)", err)
+			}
+		})
+	}
+}

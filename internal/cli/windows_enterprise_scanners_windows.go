@@ -307,28 +307,9 @@ var windowsScannerRuntimeTreeCheck = func(root string) error {
 // untrusted is adopted or re-protected. A certification run leaves the
 // production runtime alone, as it does after its transaction.
 func retireUntrustedWindowsScannerRuntimeBeforeStart(moduleAction string, opts *windowsEnterpriseLifecycleOptions) error {
-	switch moduleAction {
-	case "Install", "Upgrade", "Repair", "Reconcile", "Recover":
-	default:
-		return nil
-	}
-	if opts == nil || windowsScannerRuntimeCertificationRun(opts) || !windowsEnterpriseIsElevated() {
-		return nil
-	}
-	root, err := windowsScannerRuntimeDir()
-	if err != nil {
-		return nil
-	}
-	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("scanner_runtime_untrusted: read the scanner runtime folder %s before the services start: %w", root, err)
-	}
-	if windowsScannerRuntimeTreeCheck(root) == nil {
-		return nil
-	}
-	if err := checkWindowsScannerRuntimeRootForRemoval(root); err != nil {
-		return fmt.Errorf("scanner_runtime_untrusted: the scanner runtime %s fails the trust check and cannot be removed: %w", root, err)
+	root, untrusted, err := checkUntrustedWindowsScannerRuntimeBeforeStart(moduleAction, opts)
+	if err != nil || !untrusted {
+		return err
 	}
 	release, err := lockWindowsScannerRuntime(root)
 	if err != nil {
@@ -346,6 +327,45 @@ func retireUntrustedWindowsScannerRuntimeBeforeStart(moduleAction string, opts *
 	}
 	opts.scannerRuntimeRetired = fmt.Sprintf("%s (%v)", root, problem)
 	return nil
+}
+
+// checkUntrustedWindowsScannerRuntimeBeforeStart is the read-only part of
+// retireUntrustedWindowsScannerRuntimeBeforeStart: the runtime folder, and
+// whether it fails the trust check (untrusted) and can be removed. Its error
+// is the retire's refusal, which changed nothing.
+func checkUntrustedWindowsScannerRuntimeBeforeStart(moduleAction string, opts *windowsEnterpriseLifecycleOptions) (string, bool, error) {
+	switch moduleAction {
+	case "Install", "Upgrade", "Repair", "Reconcile", "Recover":
+	default:
+		return "", false, nil
+	}
+	if opts == nil || windowsScannerRuntimeCertificationRun(opts) || !windowsEnterpriseIsElevated() {
+		return "", false, nil
+	}
+	root, err := windowsScannerRuntimeDir()
+	if err != nil {
+		return "", false, nil
+	}
+	if _, err := os.Lstat(root); errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	} else if err != nil {
+		return "", false, fmt.Errorf("scanner_runtime_untrusted: read the scanner runtime folder %s before the services start: %w", root, err)
+	}
+	if windowsScannerRuntimeTreeCheck(root) == nil {
+		return "", false, nil
+	}
+	if err := checkWindowsScannerRuntimeRootForRemoval(root); err != nil {
+		return "", false, fmt.Errorf("scanner_runtime_untrusted: the scanner runtime %s fails the trust check and cannot be removed: %w", root, err)
+	}
+	return root, true, nil
+}
+
+// refuseUntrustedWindowsScannerRuntimeBeforeChange is the retire's refusal
+// (checkUntrustedWindowsScannerRuntimeBeforeStart), read before a lifecycle
+// action's first change, the removal of the session keys included.
+func refuseUntrustedWindowsScannerRuntimeBeforeChange(moduleAction string, opts *windowsEnterpriseLifecycleOptions) error {
+	_, _, err := checkUntrustedWindowsScannerRuntimeBeforeStart(moduleAction, opts)
+	return err
 }
 
 // windowsScannerRuntimeNotScoped is the warning of a certification-scope run.

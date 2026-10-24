@@ -290,6 +290,9 @@ type fakeRelay struct {
 	// fake answers model the complete floor sent by the current gateway.
 	rawCurrent bool
 	explain    func(sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
+	// explainCtx, when set, answers Explain with the caller's context, so
+	// a test can hold a view until the caller gives up on it.
+	explainCtx func(context.Context, sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error)
 	test       func(sandboxrelay.PolicyTestRequest) (sandboxapi.PolicyTestResult, error)
 	packs      func(registration, connector, name string) ([]sandboxrelay.PackView, error)
 	// decisions answers the saved-decisions list of a registration.
@@ -373,7 +376,10 @@ func (f *fakeRelay) reported() []string {
 	defer f.eventsMu.Unlock()
 	return slices.Clone(f.reports)
 }
-func (f *fakeRelay) Explain(_ context.Context, r sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+func (f *fakeRelay) Explain(ctx context.Context, r sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+	if f.explainCtx != nil {
+		return f.explainCtx(ctx, r)
+	}
 	if f.explain != nil {
 		return f.explain(r)
 	}

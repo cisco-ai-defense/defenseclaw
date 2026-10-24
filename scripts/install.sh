@@ -718,6 +718,20 @@ PY
     esac
 }
 
+# other_build_installed: the installed gateway reports another build of this
+# version (its commit or build date) than the staged one (GAP-1063). An
+# installed gateway that does not answer is repaired, as before. Sets
+# INSTALLED_BUILD and STAGED_BUILD to the commit each one names.
+other_build_installed() {
+    local installed staged
+    installed="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null)" || return 1
+    staged="$("${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null)" || return 1
+    [[ "${installed}" == *"${VERSION}"* && "${installed}" != "${staged}" ]] || return 1
+    INSTALLED_BUILD="$(sed -n 's/.*(commit=\([^,)]*\).*/commit \1/p' <<<"${installed}" | head -1)"
+    STAGED_BUILD="$(sed -n 's/.*(commit=\([^,)]*\).*/commit \1/p' <<<"${staged}" | head -1)"
+    INSTALLED_BUILD="${INSTALLED_BUILD:-${installed}}" STAGED_BUILD="${STAGED_BUILD:-${staged}}"
+}
+
 # sandbox_state_carries V1 V2: both releases keep the sandbox setup as this one does.
 sandbox_state_carries() {
     is_version "$1" && is_version "$2" \
@@ -1029,9 +1043,20 @@ ok "DefenseClaw ${VERSION} is staged and checked"
 
 # ── Swap ─────────────────────────────────────────────────────────────────────
 
+# A same-version run over the installed build is a repair: previous/ stays
+# the rollback copy. Another build of this version (a release candidate the
+# next one replaces) is replaced as an upgrade is: the replaced build becomes
+# the rollback copy, and this says so before the swap (GAP-1063).
+REPAIR=false
+if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]] && ! other_build_installed; then
+    REPAIR=true
+fi
 warn_running_sandboxes
-if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
+if [[ "${REPAIR}" == true ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
+elif [[ "${PREV_VERSION}" == "${VERSION}" ]]; then
+    info "The installed DefenseClaw ${VERSION} is another build (${INSTALLED_BUILD}) than this one (${STAGED_BUILD}); it is kept in ${PREVIOUS}, so 'defenseclaw rollback' returns to it"
+    ask_yes_no "Replace the installed build of DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
 elif [[ -n "${PREV_VERSION}" ]]; then
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${DEFENSECLAW_HOME}/audit.db" ]]; then
         # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
@@ -1077,7 +1102,7 @@ else
         || die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
 fi
 
-if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
+if [[ "${REPAIR}" == true ]]; then
     SNAP="${DEFENSECLAW_HOME}/.repair"
 else
     SNAP="${DEFENSECLAW_HOME}/previous.new"
@@ -1168,10 +1193,11 @@ fi
 rm -rf "${STAGING}"
 ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
-if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
-    changed="Upgraded"
-    version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded"
-    printf "  ${changed} from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
+    changed="Upgraded from ${PREV_VERSION}"
+    version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded from ${PREV_VERSION}"
+    [[ "${PREV_VERSION}" == "${VERSION}" ]] && changed="Replaced the other build of ${VERSION}"
+    printf "  ${changed}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi
@@ -1952,6 +1978,7 @@ finish_swap() {
         cp "${BASH_SOURCE[0]}" "${INSTALLER_DIR}/install.sh"
     fi
     rm -f "${tmp}"
+    record_saved_installer
     rm -rf "${DEFENSECLAW_HOME}/.upgrade-recovery" "${DEFENSECLAW_HOME}/.upgrade-receipts" \
         "${HOME}/.defenseclaw-install-custody" "$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
     # Pre-1.0 installers kept retired binaries in the temp folder they ran
@@ -1982,6 +2009,21 @@ finish_retired_connector_cleanup() {
         failed=1
     done
     return "${failed}"
+}
+
+# record_saved_installer: the SHA-256 of the saved installer, which
+# 'defenseclaw rollback' checks before it runs that file (GAP-1067). It is
+# kept with the data, in receipts/ (a DefenseClaw security-state folder the
+# tamper rule watches), so it moves with the install it belongs to on every
+# swap.
+record_saved_installer() {
+    local record="${DEFENSECLAW_HOME}/receipts/installer.sha256"
+    rm -f "${record}"
+    [[ -f "${INSTALLER_DIR}/install.sh" ]] || return 0
+    mkdir -p "${DEFENSECLAW_HOME}/receipts" \
+        && printf '%s  install.sh\n' "$(sha256_of "${INSTALLER_DIR}/install.sh")" > "${record}.new" \
+        && mv -f "${record}.new" "${record}" \
+        || warn "Could not record the digest of the saved installer, so 'defenseclaw rollback' will not run it; record it again with: defenseclaw upgrade --version ${VERSION} --yes"
 }
 
 # until 1.1: the removed connectors' teardown deliberately keeps vendor

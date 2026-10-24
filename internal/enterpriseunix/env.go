@@ -295,6 +295,10 @@ type Env struct {
 	// GuardianReportTimeout bounds how long a change waits for the hook
 	// guardian's report on its targets.
 	GuardianReportTimeout time.Duration
+	// ReplacedHookCallsTimeout bounds how long a run waits, before it stops
+	// the gateway, for the calls the replaced release's shell hooks already
+	// run (fenceReplacedHooks).
+	ReplacedHookCallsTimeout time.Duration
 }
 
 // lifecycleNice is the nice value of a lifecycle run. A config or bundle
@@ -440,6 +444,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.GuardianReportTimeout <= 0 {
 		e.GuardianReportTimeout = 30 * time.Second
+	}
+	if e.ReplacedHookCallsTimeout <= 0 {
+		e.ReplacedHookCallsTimeout = replacedHookCallsBudget
 	}
 }
 
