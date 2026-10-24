@@ -372,7 +372,7 @@ func TestUpgradeKeepsWindowsAgentsAssignments(t *testing.T) {
 	subject := profileSubjectFromVerified(VerifiedSubject{UserID: in.UserID, IDKind: useridentity.KindWindowsSID, UserName: `CORP\alice`,
 		Directory: useridentity.DirectoryFacts{Source: useridentity.SourceWindowsLSA, Directory: useridentity.DirectoryActiveDirectory,
 			Assurance: useridentity.AssuranceVerified}}, true)
-	got := set.matchAgent(&subject, profileSubjectVerified, "codex", nil, agent, func() (profileAgentClaim, bool) { return profileAgentClaim{}, true })
+	got := set.matchAgent(&subject, profileSubjectVerified, "codex", nil, profilePathAny, agent, func() (profileAgentClaim, bool) { return profileAgentClaim{}, true })
 	if got.Name != "relaxed" || got.Match != profileMatchAgent {
 		t.Fatalf("Windows 1.0.x agents entry: %+v; want relaxed by agent", got)
 	}

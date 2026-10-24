@@ -273,7 +273,7 @@ func TestExplainOfAnUnrecordedAgentIsNeverWeaker(t *testing.T) {
 	cfg := strictBridgeConfig(strictBridgeModes, legacy, "strict", "watch", "watch")
 	explain := func(agent, uid string) profileDecision {
 		set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
-		return set.matchAgent(&profileSubject{UserID: uid, UserName: "x"}, profileSubjectLookup, "codex", nil, agent, nil)
+		return set.matchAgent(&profileSubject{UserID: uid, UserName: "x"}, profileSubjectLookup, "codex", nil, profilePathAny, agent, nil)
 	}
 	b.ledger([]inventory.AgentIdentityRecord{})
 	if got := explain(corp, "70001"); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {

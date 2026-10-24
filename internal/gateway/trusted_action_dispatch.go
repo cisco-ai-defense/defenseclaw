@@ -53,8 +53,11 @@ var trustedActionDispatchMaxCost = uint64(24_000_000)
 // (newTrustedActionBudget(true)): together they cost no more than one
 // profile, and an expression several members have is judged once on each
 // view of the action (evals), so overlapping packs do not spend the budget
-// twice. A rule the budget does not reach keeps its fallback lane, as in one
-// profile, and a combination that reaches it says so once (noteMeetBudget).
+// twice. A judged expression stays usable once the budget is spent: it costs
+// nothing more, so a member whose rule another member already judged keeps
+// its finding however much the members before it spent. A rule the budget
+// does not reach keeps its fallback lane, as in one profile, and a
+// combination that reaches it says so once (noteMeetBudget).
 type trustedActionBudget struct {
 	consumed uint64
 	reached  bool
@@ -84,31 +87,44 @@ func newTrustedActionBudget(shared bool) *trustedActionBudget {
 	return budget
 }
 
-// spent reports whether the budget leaves no cost for another rule
-// (over: whether the last evaluation went past it).
-func (b *trustedActionBudget) spent(over bool) bool {
+// spent reports whether the budget leaves no cost for another evaluation.
+func (b *trustedActionBudget) spent() bool {
 	done := b.consumed >= trustedActionDispatchMaxCost
-	if over {
-		done = b.consumed > trustedActionDispatchMaxCost
-	}
 	b.reached = b.reached || done
 	return done
 }
 
+// judged reports whether candidate's expression has a result on the view
+// numbered view that costs nothing more (a shared budget's evals).
+func (b *trustedActionBudget) judged(candidate compiledSemanticRule, view int) bool {
+	_, ok := b.evals[trustedActionEvalKey{expression: candidate.rule.Expression, view: view}]
+	return ok
+}
+
 // eval judges candidate on projection, the view numbered view
 // (trustedActionEvalKey), and charges its cost; for a shared budget once per
-// expression and view.
-func (b *trustedActionBudget) eval(ctx context.Context, candidate compiledSemanticRule, view int, projection *semanticpb.Facts) (semantic.Result, semantic.EvalCode) {
+// expression and view, also after the budget is spent. ok is false when the
+// budget had no cost left for a new evaluation or the new evaluation went
+// past it: then the rule was not judged within the budget. A shared budget
+// keeps that last result too, already paid for, for the members after.
+func (b *trustedActionBudget) eval(ctx context.Context, candidate compiledSemanticRule, view int, projection *semanticpb.Facts) (result semantic.Result, code semantic.EvalCode, ok bool) {
 	key := trustedActionEvalKey{expression: candidate.rule.Expression, view: view}
-	if hit, ok := b.evals[key]; ok {
-		return hit.result, hit.code
+	if hit, cached := b.evals[key]; cached {
+		return hit.result, hit.code, true
 	}
-	result, code := candidate.program.EvalBool(ctx, projection)
+	if b.spent() {
+		return semantic.Result{}, code, false
+	}
+	result, code = candidate.program.EvalBool(ctx, projection)
 	b.consumed += result.Cost
 	if b.evals != nil && code == semantic.EvalOK {
 		b.evals[key] = trustedActionEval{result: result, code: code}
 	}
-	return result, code
+	if b.consumed > trustedActionDispatchMaxCost {
+		b.reached = true
+		return semantic.Result{}, code, false
+	}
+	return result, code, true
 }
 
 // noteMeetBudget says once per combination that its members' semantic rules
@@ -435,8 +451,17 @@ func dispatchTrustedActionWith(
 		enforcementProjected := false
 		projectionCode := semantic.ProjectionOK
 		for _, candidate := range generation.semanticRules {
-			if ctx.Err() != nil || budget.spent(false) {
+			if ctx.Err() != nil {
 				break
+			}
+			if budget.spent() && !budget.judged(candidate, viewID) {
+				// Past the budget, only an expression another member of a
+				// strictest combination already judged here still counts:
+				// it costs nothing more (trustedActionBudget).
+				if budget.evals == nil {
+					break
+				}
+				continue
 			}
 			if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
 				continue
@@ -454,9 +479,12 @@ func dispatchTrustedActionWith(
 			if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
 				continue
 			}
-			result, evalCode := budget.eval(ctx, candidate, viewID, projection)
-			if budget.spent(true) {
-				break
+			result, evalCode, judged := budget.eval(ctx, candidate, viewID, projection)
+			if !judged {
+				if budget.evals == nil {
+					break
+				}
+				continue
 			}
 			if evalCode != semantic.EvalOK {
 				if ctx.Err() != nil {
@@ -479,9 +507,12 @@ func dispatchTrustedActionWith(
 			if projectionCode != semantic.ProjectionOK {
 				return true
 			}
-			enforcementResult, enforcementCode := budget.eval(ctx, candidate, viewID+1, enforcementProjection)
-			if budget.spent(true) {
-				break
+			enforcementResult, enforcementCode, judged := budget.eval(ctx, candidate, viewID+1, enforcementProjection)
+			if !judged {
+				if budget.evals == nil {
+					break
+				}
+				continue
 			}
 			if enforcementCode != semantic.EvalOK {
 				if ctx.Err() != nil {

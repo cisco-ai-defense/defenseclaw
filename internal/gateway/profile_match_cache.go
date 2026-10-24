@@ -40,7 +40,7 @@ func newProfileMatchCache() *profileMatchCache {
 
 // profileMatchKey digests the inputs of match with length prefixes, so no two
 // different inputs share a key.
-func profileMatchKey(subject *profileSubject, source, connectorName string, scans []string, agent string) [sha256.Size]byte {
+func profileMatchKey(subject *profileSubject, source, connectorName string, scans []string, path profilePath, agent string) [sha256.Size]byte {
 	h := sha256.New()
 	var n [8]byte
 	put := func(s string) {
@@ -54,6 +54,8 @@ func profileMatchKey(subject *profileSubject, source, connectorName string, scan
 	for _, scan := range scans {
 		put(scan)
 	}
+	// An uncertain profile is covered per request path (provenProfileCovers).
+	put(strconv.Itoa(int(path)))
 	put(agent)
 	putSubject := func(subject *profileSubject) {
 		put("subject")
