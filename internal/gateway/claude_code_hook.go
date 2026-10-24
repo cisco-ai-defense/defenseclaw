@@ -136,6 +136,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// Keep authenticated lifecycle state current even while inspection is
 	// disabled so a live same-session re-enable cannot lose active-file authority.
 	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
+	ctx = withInstructionStartup(ctx, activeAgentContext)
 	mode := sandboxHookMode(ctx, "claudecode", a.claudeCodeMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).
 	if a.scannerCfg != nil && !sandboxHookForConnector(ctx, "claudecode") && !a.claudeCodeEnabled() {

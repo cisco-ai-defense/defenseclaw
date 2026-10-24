@@ -592,6 +592,31 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	if json.Unmarshal(payload, &envelope) != nil {
 		return ""
 	}
+	startEvent := event
+	if startEvent == "" {
+		_ = json.Unmarshal(envelope["hook_event_name"], &startEvent)
+	}
+	if IsSessionStartEvent(startEvent) {
+		var cwd string
+		_ = json.Unmarshal(envelope["cwd"], &cwd)
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		files := StartupInstructionFiles(cwd, home)
+		if files == nil {
+			return ""
+		}
+		listed, err := json.Marshal(files)
+		if err != nil || len(listed) > maxEncodedTargets {
+			return ""
+		}
+		encoded, err := json.Marshal(map[string]string{StartupFilesKey: string(listed)})
+		if err != nil || len(encoded) > maxEncodedTargets {
+			return ""
+		}
+		return base64.RawURLEncoding.EncodeToString(encoded)
+	}
 	copilot := strings.EqualFold(strings.TrimSpace(connector), "copilot")
 	if !copilot {
 		if evidence := instructionLoadEvidence(envelope); evidence != "" {
@@ -693,14 +718,22 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
 	var identities, fileIdentities []string
+	writeIdentities := make(map[string]string)
 	instructions := NewInstructionFiles(cwd, home, nil)
 	noteIdentity := func(resolved string) {
-		if instruction := instructions.Identity(resolved); filepath.IsAbs(instruction) &&
+		instruction := instructions.Identity(resolved)
+		if filepath.IsAbs(instruction) &&
 			len(instruction) <= MaxWriteTargetPathBytes && !slices.Contains(identities, instruction) {
 			identities = append(identities, instruction)
 		}
-		if identity := FileIdentity(resolved); identity != "" && !slices.Contains(fileIdentities, identity) {
-			fileIdentities = append(fileIdentities, identity)
+		if identity := FileIdentity(resolved); identity != "" {
+			if !slices.Contains(fileIdentities, identity) {
+				fileIdentities = append(fileIdentities, identity)
+			}
+			if instruction != "" {
+				writeIdentities[resolved] = identity
+				writeIdentities[instruction] = identity
+			}
 		}
 	}
 	if toolArgs != nil {
@@ -893,6 +926,16 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			size += entry
 		}
 	}
+	for _, file := range slices.Sorted(maps.Keys(writeIdentities)) {
+		key := WriteIdentityPrefix + file
+		entry := len(jsonString(key)) + 1 + len(jsonString(writeIdentities[file])) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= 2*MaxWriteTargets+5 {
+			truncated = true
+			break
+		}
+		targets[key] = writeIdentities[file]
+		size += entry
+	}
 	if truncated {
 		targets[TruncatedKey] = "1"
 	}
@@ -1057,7 +1100,7 @@ func Decode(value string) (map[string]string, bool) {
 		return nil, false
 	}
 	var targets map[string]string
-	if json.Unmarshal(data, &targets) != nil || len(targets) > MaxWriteTargets+5 ||
+	if json.Unmarshal(data, &targets) != nil || len(targets) > 2*MaxWriteTargets+6 ||
 		(targets[TruncatedKey] != "" && targets[TruncatedKey] != "1") ||
 		(targets[PatchCompleteKey] != "" && targets[PatchCompleteKey] != "1") ||
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
@@ -1077,7 +1120,17 @@ func Decode(value string) (map[string]string, bool) {
 			}
 		}
 	}
+	if _, present := targets[StartupFilesKey]; present {
+		if _, ok := StartupFiles(targets); !ok {
+			return nil, false
+		}
+	}
 	for key, value := range targets {
+		if strings.HasPrefix(key, WriteIdentityPrefix) &&
+			(!filepath.IsAbs(strings.TrimPrefix(key, WriteIdentityPrefix)) ||
+				len(key) > MaxWriteTargetPathBytes+len(WriteIdentityPrefix) || !validFileIdentity(value)) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, LoadedIdentityPrefix) &&
 			(!filepath.IsAbs(strings.TrimPrefix(key, LoadedIdentityPrefix)) || !validFileIdentity(value)) {
 			return nil, false

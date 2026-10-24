@@ -89,8 +89,9 @@ func provedHighWriteFindings(
 	for _, loaded := range request.ActiveAgentFileIdentities {
 		locations.loaded = append(locations.loaded, loaded)
 	}
+	startup := instructionStartupFromContext(ctx)
 	clientInstructions := hookpaths.InstructionIdentities(request.ResolvedWriteTargets)
-	loadedOrIdentified := func(location string, flavor actionfacts.PathFlavor) bool {
+	loadedAtRuntime := func(location string, flavor actionfacts.PathFlavor) bool {
 		normalized, ok := activeAgentInstructionPath(location, flavor)
 		if !ok {
 			return false
@@ -100,6 +101,13 @@ func provedHighWriteFindings(
 				return true
 			}
 		}
+		return false
+	}
+	clientIdentified := func(location string, flavor actionfacts.PathFlavor) bool {
+		normalized, ok := activeAgentInstructionPath(location, flavor)
+		if !ok {
+			return false
+		}
 		for _, identified := range clientInstructions {
 			if known, ok := activeAgentInstructionPath(identified, flavor); ok && known == normalized {
 				return true
@@ -107,11 +115,31 @@ func provedHighWriteFindings(
 		}
 		return false
 	}
-	provedLocation := func(location string, flavor actionfacts.PathFlavor) bool {
+	provedLocation := func(location, target string, flavor actionfacts.PathFlavor) bool {
 		if !instructionLoadLocation(location, flavor, locations) {
 			return false
 		}
-		if loadedOrIdentified(location, flavor) {
+		if loadedAtRuntime(location, flavor) {
+			return true
+		}
+		if startup.startupKnown {
+			normalized, ok := activeAgentInstructionPath(location, flavor)
+			if !ok || startup.startupFiles[normalized] == "" {
+				return false
+			}
+			identity := ""
+			if flavor == hostFlavor && !isSandboxHookRequest(ctx) {
+				identity = hookpaths.FileIdentity(filepath.FromSlash(target))
+			}
+			if identity == "" {
+				identity = request.ResolvedWriteTargets[hookpaths.WriteIdentityPrefix+target]
+			}
+			if identity == "" {
+				identity = request.ResolvedWriteTargets[hookpaths.WriteIdentityPrefix+location]
+			}
+			return identity != "" && identity == startup.startupFiles[normalized]
+		}
+		if clientIdentified(location, flavor) {
 			return true
 		}
 		// A startup location alone does not prove that its instruction file
@@ -124,7 +152,7 @@ func provedHighWriteFindings(
 		return err == nil && info.Mode().IsRegular()
 	}
 	instructionTarget := func(resolved string, flavor actionfacts.PathFlavor) bool {
-		if provedLocation(resolved, flavor) {
+		if provedLocation(resolved, resolved, flavor) {
 			return true
 		}
 		// A symlinked or case-variant spelling of a load location's
@@ -134,7 +162,7 @@ func provedHighWriteFindings(
 			return false
 		}
 		located := instructions.Located(filepath.FromSlash(resolved))
-		return located != "" && provedLocation(located, flavor)
+		return located != "" && provedLocation(located, resolved, flavor)
 	}
 	// File-identity evidence names the instruction file a target writes
 	// under its own path, so every target, however it was found, is judged

@@ -14,15 +14,13 @@ import (
 	"strings"
 )
 
-// A session's InstructionsLoaded events are the only proof that it loaded an
-// instruction file its agent does not read at every start
-// (connectorInstructionLoads), and a running agent does not send them again.
-// So that proof survives a gateway restart, the gateway keeps each session's
-// recorded loads in one small file under its data directory, which the
-// security-state rule already protects (tamper.detector_state_write covers
-// cache/), and restores them for a session it holds no state for. A record
-// only adds protection: a missing, unreadable or invalid one leaves the
-// session as a new gateway process sees it.
+// A session's authenticated InstructionsLoaded events and startup file
+// identities prove which instruction files it loaded. A running agent does
+// not send them again after a gateway restart. The gateway keeps this proof
+// in one small file under its data directory. The security-state rule
+// already protects that file (tamper.detector_state_write covers
+// cache/), and restores it for a session it holds no state for. A missing,
+// unreadable or invalid record leaves the session with no startup snapshot.
 
 const maxInstructionLoadRecordBytes = 1 << 20
 
@@ -33,6 +31,8 @@ type instructionLoadRecord struct {
 	Files                []string          `json:"files,omitempty"`
 	CaseInsensitiveFiles []string          `json:"case_insensitive_files,omitempty"`
 	Identities           map[string]string `json:"identities,omitempty"`
+	StartupFiles         map[string]string `json:"startup_files,omitempty"`
+	StartupKnown         bool              `json:"startup_known,omitempty"`
 }
 
 func (a *APIServer) instructionLoadDir() string {
@@ -47,8 +47,8 @@ func instructionLoadRecordPath(dir string, key activeAgentContextKey) string {
 	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
 }
 
-// saveInstructionLoads records the session's loads, and removes the record
-// when the session has none (SessionStart, CwdChanged, SessionEnd).
+// saveInstructionLoads records authenticated loads and the startup snapshot.
+// It removes the record after SessionEnd or without either kind of proof.
 func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 	dir := a.instructionLoadDir()
 	if dir == "" {
@@ -58,14 +58,15 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 	defer a.activeAgentContext.storeMu.Unlock()
 	record := instructionLoadRecordPath(dir, key)
 	session, ok := a.activeAgentContext.sessionKey(key)
-	if !ok || len(session.files) == 0 {
+	if !ok || len(session.files) == 0 && !session.startupKnown {
 		_ = os.Remove(record)
 		return
 	}
 	data, err := json.Marshal(instructionLoadRecord{
 		Scope: key.scope, Connector: key.connector, Session: key.sessionID,
 		Files: session.files, CaseInsensitiveFiles: session.caseInsensitiveFiles,
-		Identities: session.identities,
+		Identities: session.identities, StartupFiles: session.startupFiles,
+		StartupKnown: session.startupKnown,
 	})
 	if err != nil || len(data) > maxInstructionLoadRecordBytes || os.MkdirAll(dir, 0o700) != nil {
 		return
@@ -144,7 +145,8 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 	var record instructionLoadRecord
 	if json.Unmarshal(data, &record) != nil || record.Scope != key.scope ||
 		record.Connector != key.connector || record.Session != key.sessionID ||
-		len(record.Files) == 0 || len(record.Files) > maxActiveAgentContextFiles ||
+		!record.StartupKnown && len(record.Files) == 0 ||
+		len(record.Files) > maxActiveAgentContextFiles ||
 		len(record.Identities) > maxActiveAgentContextFiles {
 		return instructionLoadRecord{}, false
 	}
@@ -161,6 +163,15 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 	for identity, file := range record.Identities {
 		if identity == "" || len(identity) > 64 || strings.Trim(identity, "0123456789abcdef:") != "" ||
 			!slices.Contains(record.Files, file) {
+			return instructionLoadRecord{}, false
+		}
+	}
+	if len(record.StartupFiles) > 256 || len(record.StartupFiles) > 0 && !record.StartupKnown {
+		return instructionLoadRecord{}, false
+	}
+	for file, identity := range record.StartupFiles {
+		if !recordedInstructionFile(file) || len(identity) > 64 || identity == "" ||
+			strings.Trim(identity, "0123456789abcdef:") != "" {
 			return instructionLoadRecord{}, false
 		}
 	}

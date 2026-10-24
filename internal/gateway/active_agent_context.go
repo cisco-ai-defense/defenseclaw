@@ -74,6 +74,8 @@ type activeAgentContextKey struct {
 type activeAgentContextSession struct {
 	files                []string
 	caseInsensitiveFiles []string
+	startupFiles         map[string]string
+	startupKnown         bool
 	// identities maps the hook client's file identity of a loaded file
 	// (hookpaths.LoadedIdentityPrefix) to that file.
 	identities               map[string]string
@@ -85,6 +87,8 @@ type activeAgentContextSession struct {
 type activeAgentContextSnapshot struct {
 	files                    []string
 	caseInsensitiveFiles     []string
+	startupFiles             map[string]string
+	startupKnown             bool
 	identities               map[string]string
 	caseInsensitiveUncertain bool
 	uncertain                bool
@@ -552,6 +556,14 @@ func (cache *activeAgentContextCache) begin(connectorName, sessionID string) {
 }
 
 func (cache *activeAgentContextCache) beginKey(key activeAgentContextKey) {
+	cache.resetKey(key, false)
+}
+
+func (cache *activeAgentContextCache) beginKeyPreservingStartup(key activeAgentContextKey) {
+	cache.resetKey(key, true)
+}
+
+func (cache *activeAgentContextCache) resetKey(key activeAgentContextKey, preserveStartup bool) {
 	now := cache.currentTime()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -562,9 +574,30 @@ func (cache *activeAgentContextCache) beginKey(key activeAgentContextKey) {
 	if _, exists := cache.sessions[key]; !exists {
 		cache.makeRoomLocked(key)
 	}
-	// SessionStart and CwdChanged are authenticated lifecycle proof that no
-	// previously loaded instruction file remains active for this session.
-	cache.sessions[key] = activeAgentContextSession{updatedAt: now}
+	// A CwdChanged clears explicit loads but does not make a file created
+	// after SessionStart into an instruction the agent loaded at startup.
+	previous := cache.sessions[key]
+	next := activeAgentContextSession{updatedAt: now}
+	if preserveStartup {
+		next.startupFiles = maps.Clone(previous.startupFiles)
+		next.startupKnown = previous.startupKnown
+	}
+	cache.sessions[key] = next
+}
+
+func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, files map[string]string) {
+	if files == nil {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	session, ok := cache.sessions[key]
+	if !ok {
+		return
+	}
+	session.startupFiles = maps.Clone(files)
+	session.startupKnown = true
+	cache.sessions[key] = session
 }
 
 func (cache *activeAgentContextCache) end(connectorName, sessionID string) {
@@ -593,6 +626,7 @@ func (cache *activeAgentContextCache) sessionKey(key activeAgentContextKey) (act
 	session.files = slices.Clone(session.files)
 	session.caseInsensitiveFiles = slices.Clone(session.caseInsensitiveFiles)
 	session.identities = maps.Clone(session.identities)
+	session.startupFiles = maps.Clone(session.startupFiles)
 	return session, true
 }
 
@@ -617,6 +651,8 @@ func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, reco
 		files:                    slices.Clone(record.Files),
 		caseInsensitiveFiles:     slices.Clone(record.CaseInsensitiveFiles),
 		identities:               maps.Clone(record.Identities),
+		startupFiles:             maps.Clone(record.StartupFiles),
+		startupKnown:             record.StartupKnown,
 		uncertain:                uncertain,
 		caseInsensitiveUncertain: caseInsensitiveUncertain,
 		updatedAt:                now,
@@ -651,8 +687,10 @@ func (cache *activeAgentContextCache) snapshotKey(key activeAgentContextKey) act
 	session.updatedAt = now
 	cache.sessions[key] = session
 	return activeAgentContextSnapshot{
-		files:      append([]string(nil), session.files...),
-		identities: maps.Clone(session.identities),
+		files:        append([]string(nil), session.files...),
+		identities:   maps.Clone(session.identities),
+		startupFiles: maps.Clone(session.startupFiles),
+		startupKnown: session.startupKnown,
 		caseInsensitiveFiles: append(
 			[]string(nil),
 			session.caseInsensitiveFiles...,
@@ -683,8 +721,13 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 		return activeAgentContextSnapshot{}
 	}
 	switch req.HookEventName {
-	case "SessionStart", "CwdChanged":
+	case "SessionStart":
 		a.activeAgentContext.beginKey(key)
+		a.activeAgentContext.setStartupKey(key, instructionStartupFiles(ctx, connectorName, req.CWD))
+		a.saveInstructionLoads(key)
+	case "CwdChanged":
+		a.restoreInstructionLoads(key)
+		a.activeAgentContext.beginKeyPreservingStartup(key)
 		a.saveInstructionLoads(key)
 	case "SessionEnd":
 		a.activeAgentContext.endKey(key)

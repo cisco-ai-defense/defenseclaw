@@ -38,7 +38,67 @@ const InstructionIdentityKey = "\x00instruction-identity"
 const (
 	FileIdentitiesKey    = "\x00file-identities"
 	LoadedIdentityPrefix = "\x00loaded-identity:"
+	StartupFilesKey      = "\x00startup-instructions"
+	WriteIdentityPrefix  = "\x00write-identity:"
 )
+
+const maxStartupInstructionFiles = 256
+
+// IsSessionStartEvent covers the lifecycle spellings sent by the built-in
+// connectors. A reset starts a fresh instruction-file snapshot as well.
+func IsSessionStartEvent(event string) bool {
+	compact := strings.ToLower(strings.NewReplacer("_", "", "-", "").Replace(strings.TrimSpace(event)))
+	switch compact {
+	case "sessionstart", "onsessionstart", "onsessionreset", "sessioncreated":
+		return true
+	}
+	return false
+}
+
+// StartupInstructionFiles captures existing instruction file identities
+// before the agent can create another one. A missing file has no entry.
+func StartupInstructionFiles(cwd, home string) map[string]string {
+	if !filepath.IsAbs(cwd) {
+		return nil
+	}
+	files := make(map[string]string)
+	for _, directory := range instructionDirectories(cwd, home) {
+		for _, name := range InstructionFileNames {
+			candidate := filepath.Join(directory, name)
+			if identity := FileIdentity(candidate); identity != "" {
+				files[candidate] = identity
+				if len(files) > maxStartupInstructionFiles {
+					return nil
+				}
+			}
+		}
+	}
+	return files
+}
+
+// StartupFiles decodes the bounded startup identity snapshot from a hook.
+// An empty map still proves the files were absent at session start.
+func StartupFiles(targets map[string]string) (map[string]string, bool) {
+	raw, present := targets[StartupFilesKey]
+	if !present || len(raw) > maxEncodedTargets {
+		return nil, false
+	}
+	var files map[string]string
+	if json.Unmarshal([]byte(raw), &files) != nil || files == nil ||
+		len(files) > maxStartupInstructionFiles {
+		return nil, false
+	}
+	for file, identity := range files {
+		if !filepath.IsAbs(file) || len(file) > MaxWriteTargetPathBytes ||
+			filepath.Clean(file) != file || !validFileIdentity(identity) {
+			return nil, false
+		}
+		if _, named := InstructionFileName(filepath.Base(file), instructionNameFold()); !named {
+			return nil, false
+		}
+	}
+	return files, true
+}
 
 // maxFileIdentityBytes bounds one FileIdentity value.
 const maxFileIdentityBytes = 64
@@ -62,15 +122,13 @@ func FileIdentities(targets map[string]string) []string {
 }
 
 // FileIdentity is the identity of the regular file that path reaches,
-// following symlinks: its device and inode. It is empty when the file is
-// missing or not regular, and on Windows, whose gateway reads the file
-// itself and gets no client evidence.
+// following symlinks. It is empty when the file is missing or not regular.
 func FileIdentity(path string) string {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
-	return fileIdentity(info)
+	return fileIdentityForPath(path, info)
 }
 
 func validFileIdentity(identity string) bool {
@@ -89,6 +147,7 @@ func validFileIdentity(identity string) bool {
 // for the cognitive-file proof only.
 func clientIdentityFact(key string) bool {
 	return key == InstructionIdentityKey || key == FileIdentitiesKey ||
+		key == StartupFilesKey || strings.HasPrefix(key, WriteIdentityPrefix) ||
 		strings.HasPrefix(key, LoadedIdentityPrefix)
 }
 

@@ -7,12 +7,32 @@ package hookpaths
 
 import (
 	"os"
+	"strconv"
 	"syscall"
 )
 
-// fileIdentity is empty: the Windows hook sends no client evidence, and the
-// Windows gateway compares file identity itself.
-func fileIdentity(os.FileInfo) string { return "" }
+// fileIdentityForPath uses the volume and file index of the opened Windows
+// file. Its identity remains stable across edits and changes on replacement.
+func fileIdentityForPath(path string, _ os.FileInfo) string {
+	name, err := syscall.UTF16PtrFromString(path)
+	if err != nil {
+		return ""
+	}
+	handle, err := syscall.CreateFile(name, 0,
+		syscall.FILE_SHARE_READ|syscall.FILE_SHARE_WRITE|syscall.FILE_SHARE_DELETE,
+		nil, syscall.OPEN_EXISTING, 0, 0)
+	if err != nil {
+		return ""
+	}
+	defer syscall.CloseHandle(handle)
+	var data syscall.ByHandleFileInformation
+	if syscall.GetFileInformationByHandle(handle, &data) != nil {
+		return ""
+	}
+	return strconv.FormatUint(uint64(data.VolumeSerialNumber), 16) + ":" +
+		strconv.FormatUint(uint64(data.FileIndexHigh), 16) + ":" +
+		strconv.FormatUint(uint64(data.FileIndexLow), 16)
+}
 
 // linkCount returns the number of hard links to a file. An unknown count is
 // reported as more than one so the caller fails closed.

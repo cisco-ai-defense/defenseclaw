@@ -1455,7 +1455,9 @@ func (f *hookRequestFacts) set(header http.Header, opts Options, payload []byte)
 }
 
 func setHookRequestFacts(header http.Header, opts Options, payload []byte) {
-	if opts.ManagedEnterprise && !opts.SecureClient && runtime.GOOS != "windows" {
+	startupEvent := hookpaths.IsSessionStartEvent(opts.Event)
+	if opts.ManagedEnterprise && !opts.SecureClient &&
+		(runtime.GOOS != "windows" || startupEvent) {
 		// The surface and bound event are the ones this call sends the
 		// gateway (HookDialectHeader, X-DefenseClaw-Copilot-Event), so the
 		// evidence reads the body in the dialect the gateway judges.
