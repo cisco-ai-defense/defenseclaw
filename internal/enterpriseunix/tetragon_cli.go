@@ -287,7 +287,12 @@ func (l *lifecycle) waitHelperMode(ctx context.Context, unit Unit, wanted string
 			}
 		}
 		if !env.Now().Before(deadline) {
-			return fmt.Errorf("%s did not publish enterprise.tetragon mode %s within %s (%s)", unit.Name, wanted, env.ReadyTimeout, last)
+			retry := "rerun `" + env.lifecycleCommand(l.opts.Action) + "`"
+			if l.opts.FromPackage {
+				retry = "retry the package command"
+			}
+			return fmt.Errorf("%s did not publish enterprise.tetragon mode %s within %s (%s); inspect `sudo journalctl -u defenseclaw-sensor-helper.service --no-pager`, correct the helper service failure, then %s",
+				unit.Name, wanted, env.ReadyTimeout, last, retry)
 		}
 		select {
 		case <-ctx.Done():

@@ -32250,6 +32250,28 @@ function Invoke-DefenseClawPreLayoutRecovery {
     }
 }
 
+function Test-DefenseClawPreLayoutRecoveryPending {
+    <#
+        Whether a record an interrupted lifecycle left is present that
+        Invoke-DefenseClawPreLayoutRecovery recovers before the lifecycle
+        reads the deployment record: a pending transaction, a state-purge
+        intent, a self-uninstall receipt or an install-rollback intent. Their
+        recovery can change the record (a first install interrupted after it
+        wrote the installed record but before it cleared pending.json rolls
+        back to no deployment), so a refusal read from the record waits for
+        that recovery and checks after it (S2 review, loop round 2).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    foreach ($name in @('PendingPath', 'PurgeIntentPath', 'SelfUninstallReceiptPath', 'InstallRollbackIntentPath')) {
+        $path = [string]$Layout[$name]
+        if (-not [string]::IsNullOrWhiteSpace($path) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Assert-DefenseClawDeferredInstallIsFresh {
     param(
         [Parameter(Mandatory)][hashtable]$Layout
@@ -35039,6 +35061,7 @@ function Invoke-DefenseClawNuclearUninstall {
     }
 }
 
+
 function Invoke-DefenseClawUninstallLifecycle {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -36816,8 +36839,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # gateway refuses a Secure Client config with fleet.enabled when it
         # loads it (resolveEnterpriseConfig).
     }
+    # Before the lock only without a record to recover: its recovery, after
+    # the lock, can change the deployment record, and the check after it
+    # decides (Test-DefenseClawPreLayoutRecoveryPending).
     if ($Action -eq 'Install' -and $DeferredConfig -and
-        (Test-DefenseClawStandaloneProfile)) {
+        (Test-DefenseClawStandaloneProfile) -and
+        -not (Test-DefenseClawPreLayoutRecoveryPending -Layout $layout)) {
         Assert-DefenseClawDeferredInstallIsFresh -Layout $layout
     }
     Initialize-DefenseClawManagedRoot `

@@ -199,6 +199,10 @@ type windowsEnterpriseLifecycleOptions struct {
 	// scannerRuntimeRetired names the untrusted scanner runtime this run
 	// removed before the services started (GAP-0490).
 	scannerRuntimeRetired string
+	// recoveryChanges is what the recovery of a pending transaction before
+	// the check of a supplied config changed
+	// (noteWindowsEnterpriseRefusalRecovery).
+	recoveryChanges []string
 	// activationStartedAt is when a standalone change action started, and
 	// installedBeforeRun whether a deployment was installed then: a run
 	// that installs one records its activation (GAP-0967), dated when the
