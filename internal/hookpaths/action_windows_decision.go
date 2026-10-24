@@ -336,6 +336,12 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 	if program == "source" || program == "." {
 		return false
 	}
+	// Static File calls are classified above by method and argument role.
+	// Their read and incomplete forms do not prove a protected write.
+	methodCall := strings.ToLower(words[0])
+	if strings.HasPrefix(methodCall, "[system.io.file]::") || strings.HasPrefix(methodCall, "[io.file]::") {
+		return false
+	}
 	if actionWindowsWrapperProgram(program) {
 		return actionWindowsResolvedWrapperTarget(program, words, cwd, home, depth)
 	}

