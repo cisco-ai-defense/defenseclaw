@@ -451,8 +451,7 @@ func recognizeConnectionStrings(input string) ([]candidate, error) {
 	result := []candidate{}
 	uriRanges := uriRE.FindAllStringIndex(input, -1)
 	for _, uri := range uriRanges {
-		uriValue := input[uri[0]:uri[1]]
-		parsed, ok := parseHierarchicalURI(uriValue)
+		uriValue, parsed, ok := parseMatchedURI(input[uri[0]:uri[1]])
 		if !ok && containsEligibleRawQuery(uriValue) {
 			return nil, detectorError(FailureValidator)
 		}
@@ -462,7 +461,7 @@ func recognizeConnectionStrings(input string) ([]candidate, error) {
 		if parsed.passwordStart >= 0 && parsed.passwordEnd > parsed.passwordStart {
 			result = append(result, candidate{start: uri[0] + parsed.passwordStart, end: uri[0] + parsed.passwordEnd, accepted: true})
 		}
-		queryMatches, err := queryCandidates(input[uri[0]:uri[1]], uri[0], parsed)
+		queryMatches, err := queryCandidates(uriValue, uri[0], parsed)
 		if err != nil {
 			return nil, err
 		}
@@ -706,8 +705,7 @@ func validBase64Alphabet(value string) bool {
 func recognizeURLQueries(input string) ([]candidate, error) {
 	result := []candidate{}
 	for _, uri := range uriRE.FindAllStringIndex(input, -1) {
-		uriValue := input[uri[0]:uri[1]]
-		parsed, ok := parseHierarchicalURI(uriValue)
+		uriValue, parsed, ok := parseMatchedURI(input[uri[0]:uri[1]])
 		if !ok && containsEligibleRawQuery(uriValue) {
 			return nil, detectorError(FailureValidator)
 		}
@@ -955,6 +953,32 @@ type parsedURI struct {
 	scheme                     string
 	passwordStart, passwordEnd int
 	queryStart, queryEnd       int
+}
+
+func parseMatchedURI(value string) (string, parsedURI, bool) {
+	parsed, ok := parseHierarchicalURI(value)
+	if ok {
+		return value, parsed, true
+	}
+	// The URI scanner includes sentence punctuation. Retry without a
+	// trailing punctuation run, keeping offsets relative to the original text.
+	trimmed := strings.TrimRight(value, ".,;:!?)]}`")
+	if trimmed != value {
+		parsed, ok = parseHierarchicalURI(trimmed)
+		if ok {
+			return trimmed, parsed, true
+		}
+		// An IPv6 authority can end in a structural ']' immediately before
+		// the sentence punctuation. Keep that byte in the original span.
+		if len(trimmed) < len(value) && value[len(trimmed)] == ']' {
+			withBracket := value[:len(trimmed)+1]
+			parsed, ok = parseHierarchicalURI(withBracket)
+			if ok {
+				return withBracket, parsed, true
+			}
+		}
+	}
+	return value, parsedURI{}, false
 }
 
 func parseHierarchicalURI(value string) (parsedURI, bool) {

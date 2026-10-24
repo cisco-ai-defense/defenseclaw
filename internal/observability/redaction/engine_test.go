@@ -372,6 +372,31 @@ func TestSensitiveProjectionHidesHTTPUserinfoPasswordInAuditDetails(t *testing.T
 	}
 }
 
+func TestSensitiveProjectionHidesPunctuatedHTTPUserinfoInAuditDetails(t *testing.T) {
+	const password = "reserved-user-pass"
+	const details = "gateway sent (https://unit:" + password + ":@example.test)."
+	record := newTestRecord(t, observability.SignalLogs,
+		map[string]any{"details": details},
+		map[string]observability.FieldClass{"/details": observability.FieldClassContent},
+	)
+	profile, _ := BuiltInProfile(ProfileSensitive)
+	projection, _, err := newTestEngine(t).Project(record, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := projection.Payload().Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := object["details"].(string)
+	if strings.Contains(got, password) {
+		t.Fatalf("sensitive projection retained a URL password: %q", got)
+	}
+	if !strings.Contains(got, "@example.test).") {
+		t.Fatalf("projection erased benign URL and sentence context: %q", got)
+	}
+}
+
 func TestEngineCredentialsOnlyProfileFailsClosedOnAmbiguousQueryKey(t *testing.T) {
 	const sentinel = "credentials-only-secret"
 	input := "postgres://db.example.test/app?%25252574oken=" + sentinel
