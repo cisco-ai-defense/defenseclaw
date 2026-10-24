@@ -269,9 +269,10 @@ func windowsSimpleInertPipeline(runes []rune, from int) bool {
 				continue
 			}
 			if quote == '"' {
-				if char == '`' {
+				switch char {
+				case '`':
 					from++
-				} else if char == quote {
+				case quote:
 					quote = 0
 				}
 				continue
