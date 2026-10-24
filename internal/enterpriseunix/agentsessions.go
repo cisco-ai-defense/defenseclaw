@@ -139,11 +139,12 @@ type agentSession struct {
 // other than root and the service account that started before since.
 func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, serviceUID int) []agentSession {
 	var all []agentSession
-	switch e.GOOS {
-	case "linux":
-		all = e.linuxAgentSessions()
-	case "darwin":
-		all = e.darwinAgentSessions(ctx)
+	for _, process := range e.hostProcesses(ctx) {
+		if agent := agentCLIOf(process.Argv); agent != "" {
+			all = append(all, agentSession{PID: process.PID, UID: process.UID, Agent: agent, Started: process.Started, CodexServer: codexBackgroundServer(process.Argv)})
+		} else if process.ArgvUnread && psUnknownAgent(process.PSArgs) {
+			all = append(all, agentSession{PID: process.PID, UID: process.UID, Started: process.Started, Unknown: true})
+		}
 	}
 	oldServer := map[int]bool{}
 	for _, session := range all {
@@ -162,9 +163,34 @@ func (e *Env) agentSessionsStartedBefore(ctx context.Context, since time.Time, s
 	return out
 }
 
-// linuxAgentSessions reads the agent processes from /proc: the start time is
-// field 22 of /proc/<pid>/stat, in clock ticks (USER_HZ, 100) after btime.
-func (e *Env) linuxAgentSessions() []agentSession {
+// hostProcess is a running process of this computer.
+type hostProcess struct {
+	PID     int
+	UID     int
+	Started time.Time
+	Argv    []string
+	// ArgvUnread (macOS) marks a process whose kern.procargs2 could not be
+	// read: Argv is then psArgv of PSArgs, the argument text ps printed.
+	ArgvUnread bool
+	PSArgs     []string
+}
+
+// hostProcesses lists the running processes with their owner, start time
+// and arguments (agent sessions, and the replaced release's hook calls a
+// lifecycle run waits for).
+func (e *Env) hostProcesses(ctx context.Context) []hostProcess {
+	switch e.GOOS {
+	case "linux":
+		return e.linuxProcesses()
+	case "darwin":
+		return e.darwinProcesses(ctx)
+	}
+	return nil
+}
+
+// linuxProcesses reads the processes from /proc: the start time is field
+// 22 of /proc/<pid>/stat, in clock ticks (USER_HZ, 100) after btime.
+func (e *Env) linuxProcesses() []hostProcess {
 	stat, err := readBounded(e.P("/proc/stat"), 1<<20)
 	if err != nil {
 		return nil
@@ -179,7 +205,7 @@ func (e *Env) linuxAgentSessions() []agentSession {
 		return nil
 	}
 	entries, _ := os.ReadDir(e.P("/proc"))
-	var out []agentSession
+	var out []hostProcess
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
 		if err != nil {
@@ -187,14 +213,10 @@ func (e *Env) linuxAgentSessions() []agentSession {
 		}
 		dir := filepath.Join(e.P("/proc"), entry.Name())
 		cmdline, err := readBounded(filepath.Join(dir, "cmdline"), 64<<10)
-		if err != nil {
+		if err != nil || len(cmdline) == 0 {
 			continue
 		}
 		argv := strings.Split(strings.TrimRight(string(cmdline), "\x00"), "\x00")
-		agent := agentCLIOf(argv)
-		if agent == "" {
-			continue
-		}
 		data, err := readBounded(filepath.Join(dir, "stat"), 64<<10)
 		if err != nil {
 			continue
@@ -220,19 +242,19 @@ func (e *Env) linuxAgentSessions() []agentSession {
 			continue
 		}
 		started := time.Unix(boot, 0).Add(time.Duration(ticks) * time.Second / 100)
-		out = append(out, agentSession{PID: pid, UID: int(owner.Uid), Agent: agent, Started: started, CodexServer: codexBackgroundServer(argv)})
+		out = append(out, hostProcess{PID: pid, UID: int(owner.Uid), Started: started, Argv: argv})
 	}
 	return out
 }
 
-// darwinAgentSessions asks ps for every process with its elapsed time.
-func (e *Env) darwinAgentSessions(ctx context.Context) []agentSession {
+// darwinProcesses asks ps for every process with its elapsed time.
+func (e *Env) darwinProcesses(ctx context.Context) []hostProcess {
 	result, err := e.Runner.Run(ctx, "ps", "-axww", "-o", "pid=,uid=,etime=,args=")
 	if err != nil && len(result.Stdout) == 0 {
 		return nil
 	}
 	now := e.Now()
-	var out []agentSession
+	var out []hostProcess
 	for _, line := range strings.Split(string(result.Stdout), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 4 {
@@ -248,11 +270,7 @@ func (e *Env) darwinAgentSessions(ctx context.Context) []agentSession {
 		if argvErr != nil {
 			argv = psArgv(fields[3:])
 		}
-		if agent := agentCLIOf(argv); agent != "" {
-			out = append(out, agentSession{PID: pid, UID: uid, Agent: agent, Started: now.Add(-elapsed), CodexServer: codexBackgroundServer(argv)})
-		} else if argvErr != nil && psUnknownAgent(fields[3:]) {
-			out = append(out, agentSession{PID: pid, UID: uid, Started: now.Add(-elapsed), Unknown: true})
-		}
+		out = append(out, hostProcess{PID: pid, UID: uid, Started: now.Add(-elapsed), Argv: argv, ArgvUnread: argvErr != nil, PSArgs: fields[3:]})
 	}
 	return out
 }

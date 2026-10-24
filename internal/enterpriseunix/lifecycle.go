@@ -163,6 +163,9 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// replacedHooksFenced is set once the run fenced the replaced
+	// release's shell hooks (fenceReplacedHooks).
+	replacedHooksFenced bool
 	// keepThroughRollback names the units a rollback leaves running: the
 	// gateway and the sensor helper of an interrupted hot transaction
 	// (recoverInterrupted, GAP-0238).
@@ -2244,6 +2247,11 @@ func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]b
 	for _, unit := range ordered {
 		if unit.Kind == "socket" || unit.Kind == "timer" || unit.Name == l.env.SelfUnit || keep[unit.Name] {
 			continue
+		}
+		if unit.Kind == "gateway" {
+			// The guardian and the enumerator are stopped (a later stage),
+			// so nothing renders the hooks again meanwhile (GAP-1123).
+			l.fenceReplacedHooks(ctx)
 		}
 		_ = l.env.Services.Stop(ctx, unit)
 	}
