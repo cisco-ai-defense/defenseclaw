@@ -765,6 +765,43 @@ def make_multi_ctx(connectors, *, enabled: bool = True):
     return app
 
 
+def test_amp_open_preview_and_help_do_not_promise_failure_rows() -> None:
+    """Amp has no failure-file writer, including when an outage permits a call."""
+    app = make_multi_ctx({"amp": None, "codex": None})
+    app.cfg.guardrail.hook_fail_mode = "closed"
+    state = SimpleNamespace(
+        desired="closed", current=True, runtime="closed", effective="closed", drift=(), limit=None,
+    )
+    with (
+        patch.object(cmd_guardrail, "resolve_connector_fail_mode", return_value=state),
+        patch.object(cmd_guardrail, "_apply_scoped_fail_mode_transaction"),
+        patch.object(cmd_guardrail, "_apply_global_fail_mode_transaction"),
+        patch.object(cmd_guardrail, "_log_guardrail_action"),
+    ):
+        scoped = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "amp", "--yes"], obj=app)
+        global_result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
+    for result in (scoped, global_result):
+        assert result.exit_code == 0, result.output
+        assert "Amp" in result.output
+        assert "does not write" in result.output and "hook-failures.jsonl" in result.output
+        assert "no guardrail-degraded alert" in result.output
+    help_result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["--help"])
+    assert help_result.exit_code == 0, help_result.output
+    assert "Amp" in help_result.output and "does not write" in help_result.output
+    page = (Path(__file__).resolve().parents[2] / "docs-site/content/docs/reference/configuration/fail-modes.mdx")
+    page_text = page.read_text(encoding="utf-8")
+    reporting = page_text.split("## Reporting and diagnosis", 1)[1]
+    assert "Amp does not write" in reporting and "no guardrail-degraded alert" in reporting
+    for prefix in (
+        "On a per-user install the outage behavior",
+        "| `default` (balanced",
+        "| Gateway service not running",
+        "When the gateway is down or answers 5xx",
+    ):
+        line = next(line for line in page_text.splitlines() if line.startswith(prefix))
+        assert "Amp" in line, line
+
+
 class PerConnectorToggleTests(unittest.TestCase):
     """`guardrail {enable,disable} --connector X` — scoped per-connector."""
 

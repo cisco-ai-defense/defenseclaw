@@ -8,7 +8,7 @@ keywords:
   - DEFENSECLAW_FAIL_MODE
 ---
 
-On a per-user install the outage behavior follows the policy tier: with the default (balanced) or permissive rule pack a call runs with one warning and a `hook-failures.jsonl` record while this account's gateway is not running; with the strict rule pack it blocks ([Per-user installs](#per-user-installs)). Every other failure blocks in every tier, and a saved `guardrail.hook_fail_mode` does not change a per-user hook. On a managed standalone host, an administrator can choose `guardrail.hook_fail_mode: open` for a classified outage only. Secure Client has its own open default. A guarded connector (foreign-hook guard) blocks during an outage too. The effective mode is installed with the hooks so the gateway, hooks, status and doctor can agree ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
+On a per-user install the outage behavior follows the policy tier: with the default (balanced) or permissive rule pack a call runs with one warning and, except for Amp, a `hook-failures.jsonl` record while this account's gateway is not running; with the strict rule pack it blocks ([Per-user installs](#per-user-installs)). Every other failure blocks in every tier, and a saved `guardrail.hook_fail_mode` does not change a per-user hook. On a managed standalone host, an administrator can choose `guardrail.hook_fail_mode: open` for a classified outage only. Secure Client has its own open default. A guarded connector (foreign-hook guard) blocks during an outage too. The effective mode is installed with the hooks so the gateway, hooks, status and doctor can agree ([The environment does not set the fail mode](#the-environment-does-not-set-the-fail-mode)).
 
 ## Controls
 
@@ -38,7 +38,7 @@ A per-user (OSS) install takes its outage mode from the connector's policy tier,
 
 | Policy tier | Gateway not running | Every other failure |
 | --- | --- | --- |
-| `default` (balanced, the out-of-the-box policy) or `permissive` | The call runs. The hook prints one warning that names the cause and the fix (`defenseclaw-gateway start`, then `defenseclaw doctor` if it does not start) and writes a `hook-failures.jsonl` record that the gateway reports when it starts again. | Block. |
+| `default` (balanced, the out-of-the-box policy) or `permissive` | The call runs. The hook prints one warning that names the cause and the fix (`defenseclaw-gateway start`, then `defenseclaw doctor` if it does not start) and, except for Amp, writes a `hook-failures.jsonl` record that the gateway reports when it starts again. | Block. |
 | `strict` (`defenseclaw guardrail use-pack strict`) | Block, with the same cause and fix. | Block. |
 
 An outage is a call that no gateway took: this account's gateway is stopped (also with `defenseclaw-gateway stop`), crashed, not started after a reboot (the hook first tries to start it) or still restarting after about 3 seconds. These are not outages and block in every tier:
@@ -91,7 +91,7 @@ These outcomes apply to supported blocking events; a recovered evaluator panic a
 
 | Failure | Secure Client `open` | Managed standalone `open` | Per-user, default or permissive | Per-user strict and effective `closed` |
 | --- | --- | --- | --- | --- |
-| Gateway service not running, restarting or giving no answer in time | Allow. | Allow only when the hook proves an eligible service outage; an unverified peer, a port held by another process or another transport error blocks. The foreign-hook guard can also block. | Allow with a warning and a `hook-failures.jsonl` record. Another listener on the port, a gateway that took the call and did not answer, and an install in progress block. | Block. |
+| Gateway service not running, restarting or giving no answer in time | Allow. | Allow only when the hook proves an eligible service outage; an unverified peer, a port held by another process or another transport error blocks. The foreign-hook guard can also block. | Allow with a warning and a `hook-failures.jsonl` record except for Amp, which writes no record. Another listener on the port, a gateway that took the call and did not answer, and an install in progress block. | Block. |
 | Gateway 5xx, also when the body after it is cut off | Allow. | Block. | Block. | Block. |
 | Connector authentication missing | Allow where the connector supports fail-open; Amp's actionable boundaries always block a missing credential. | Block. | Block. | Block. |
 | Gateway returns 4xx (also when the body after it is cut off, and a 429 whose resend cannot be answered within the answer budget), malformed response JSON or no action | Allow where the connector supports fail-open, except a gateway refusal marked `malformed_hook_payload`, which blocks outside Secure Client. | Block. | Block. | Block. |
@@ -110,7 +110,7 @@ A block on a stop, session-end or idle event denies nothing: Codex, Claude Code,
 
 A recovered evaluator panic on one of them is audited with result `panic` and counted in `defenseclaw.panics.total`, in every fail mode. Claude Code `Stop`, `SubagentStop` and `TeammateIdle` end the turn with `continue: false` and a visible failure reason; Claude Code runs no further Stop hook. Every other connector gets its neutral allow, recorded with `would_block`, without a follow-up message. A policy block on these Claude Code events keeps its usual answer: `decision: block` on `Stop` and `SubagentStop`, and exit-2 feedback on `TeammateIdle`.
 
-When the gateway is down or answers 5xx, its answer is unusable or its token is missing, the hook gives the agent's neutral allow and says on stderr that it is not blocking. Per-user hooks also record the failure in `hook-failures.jsonl` with fail mode `open`. In an OpenShell sandbox the shell hooks write the same record inside the guest at `/sandbox/.defenseclaw/logs/hook-failures.jsonl`, and record prompt and tool outage blocks there with fail mode `closed`. The Amp and OpenCode sandbox plugins write no record. They block a tool call they cannot check and do not block prompts. The next tool call is blocked as before, and so is the next prompt where the hook can block one. This holds for per-user, OpenShell sandbox and standalone managed hooks on every OS; Secure Client hooks follow their fail mode.
+When the gateway is down or answers 5xx, its answer is unusable or its token is missing, the hook gives the agent's neutral allow and says on stderr that it is not blocking. Per-user hooks with a failure-file writer also record the failure in `hook-failures.jsonl` with fail mode `open`; Amp has no such writer. In an OpenShell sandbox the shell hooks write the same record inside the guest at `/sandbox/.defenseclaw/logs/hook-failures.jsonl`, and record prompt and tool outage blocks there with fail mode `closed`. The Amp and OpenCode sandbox plugins write no record. They block a tool call they cannot check and do not block prompts. The next tool call is blocked as before, and so is the next prompt where the hook can block one. This holds for per-user, OpenShell sandbox and standalone managed hooks on every OS; Secure Client hooks follow their fail mode.
 
 The hook has to know the event first. Codex and GitHub Copilot name it in the registered command; the others read `hook_event_name` or `event` from the payload. These cases still block: a payload too large to read or an unavailable DefenseClaw home (connectors that read the event from the payload); a missing hook token for the Devin and Kiro hooks on Linux and macOS and in the OpenShell sandbox; a payload whose event fields are not strings or name different events; a Codex payload that does not match its registered command.
 
@@ -219,11 +219,11 @@ sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --js
 & 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone --json
 ```
 
-The shell hook scripts, native hook and the OpenCode and Amp plugins record hook delivery and response failures in `$DEFENSECLAW_HOME/logs/hook-failures.jsonl` (`%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` on packaged native Windows). The file is sensitive; do not publish it whole.
+The shell hook scripts, native hook and OpenCode plugin record hook delivery and response failures in `$DEFENSECLAW_HOME/logs/hook-failures.jsonl` (`%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` on packaged native Windows). The file is sensitive; do not publish it whole.
 
 For those connectors, a per-user gateway reads the lines added since its last start. Historical fail-open lines from an earlier release can produce a `guardrail-degraded` alert; `defenseclaw alerts` lists it. Fail-closed calls and lines older than 7 days are not reported.
 
-The Amp plugin writes a record only for a call an outage let run. It blocks an actionable call when its per-user gateway cannot be verified.
+Amp does not write `hook-failures.jsonl`, even for an outage that lets a call run; no guardrail-degraded alert follows that call. It blocks an actionable call when its per-user gateway cannot be verified. Check Amp's visible hook answer and gateway health during an outage.
 
 For token, audit database, device key and observability repairs, see [Doctor](/docs/troubleshooting/doctor).
 

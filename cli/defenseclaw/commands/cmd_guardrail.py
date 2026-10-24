@@ -1598,11 +1598,18 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
             indent="    ",
         )
     else:
-        ux.subhead(
-            f"Invalid or unavailable gateway responses will now ALLOW {label} and log the failure to "
-            "~/.defenseclaw/logs/hook-failures.jsonl.",
-            indent="  ",
-        )
+        if normalize_connector(key) == "amp":
+            ux.subhead(
+                "For an eligible fail-open call, Amp does not write hook-failures.jsonl; "
+                "no guardrail-degraded alert follows that call.",
+                indent="  ",
+            )
+        else:
+            ux.subhead(
+                f"Invalid or unavailable gateway responses will now ALLOW {label} and log the failure to "
+                "~/.defenseclaw/logs/hook-failures.jsonl.",
+                indent="  ",
+            )
     click.echo()
 
     if not yes and not _confirm_proceed():
@@ -1897,8 +1904,8 @@ def fail_mode_cmd(
     an unparseable JSON body, or no ``action`` field. Two values are supported:
 
       \b
-      open   — allow the tool/prompt and log the failure.
-               A gateway outage never blocks your agent.
+      open   — allow eligible failures where the deployment permits.
+               Amp does not write hook-failures.jsonl for an allowed call.
       closed — block supported events when inspection is unavailable.
                The default on a new install: every prompt and
                tool call is inspected or blocked.
@@ -2192,6 +2199,13 @@ def fail_mode_cmd(
             indent="  ",
         )
         ux.subhead("open is saved for hook connectors you set up later.", indent="    ")
+    elif "amp" in active_names:
+        ux.subhead(
+            "For eligible fail-open calls, other hook connectors log failures to "
+            "~/.defenseclaw/logs/hook-failures.jsonl. Amp does not write "
+            "hook-failures.jsonl; no guardrail-degraded alert follows its call.",
+            indent="  ",
+        )
     else:
         ux.subhead(
             ("Once the guardrail is enabled, invalid or unavailable gateway responses will ALLOW"
