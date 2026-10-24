@@ -606,6 +606,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             # rollback. Older/unrecognized installers need this outer check.
             Wait-VenvFree
             $restartCurrent = [bool](Get-GatewayProcess)
+            Assert-NoLoadedPluginAgents
             if (-not (Stop-Gateway)) { Die "The gateway did not stop; the release installer was not started" }
             Stop-Watchdog
             Assert-GatewayQuiescent "Version change to $target"
@@ -802,6 +803,88 @@ function Get-GatewayProcess {
     $recorded = [string](Get-Field $record "executable")
     if ($recorded -and $process.Path -ne $recorded) { return $null }
     return $process
+}
+
+# A loaded 1.0.3 OpenCode or Amp plugin cannot acquire this release's lock
+# check until its agent process exits. A process is OpenCode or Amp by the
+# program file it runs, never by a name in its command line or the folder it
+# runs from (GAP-1128): its executable is the installed agent
+# (Get-InstalledAgentPrograms) or an OpenCode binary of its npm packages, or
+# Node or Bun runs a script of the agents' npm packages (opencode-ai,
+# @sourcegraph/amp). A project, script or other program that is only named
+# opencode or amp is not an agent.
+function Get-LoadedPluginAgent($Process) {
+    $program = [string]$Process.ExecutablePath
+    if (-not $program) { return "" }
+    # Read once per run: the check asks for every process of the host.
+    $installed = Get-Variable -Name InstalledAgentPrograms -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($null -eq $installed) {
+        $installed = Get-InstalledAgentPrograms
+        Set-Variable -Name InstalledAgentPrograms -Scope Script -Value $installed
+    }
+    $key = $program.ToLowerInvariant()
+    if ($installed.ContainsKey($key)) { return $installed[$key] }
+    if ($key -match '\\node_modules\\opencode-(ai|windows-[a-z0-9-]+)\\bin\\\.?opencode(\.exe)?$') { return "opencode" }
+    if ($key -notmatch '[\\/](node|bun)\.exe$') { return "" }
+    $operand = (Get-ScriptOperand ([string]$Process.CommandLine)).Replace('/', '\').ToLowerInvariant()
+    if ($operand.Contains('\node_modules\opencode-ai\')) { return "opencode" }
+    if ($operand.Contains('\node_modules\@sourcegraph\amp\')) { return "amp" }
+    return ""
+}
+
+# The installed OpenCode and Amp executables, lower-cased full path to
+# agent: the opencode.exe and amp.exe that PATH runs, and those of the
+# native installers (%USERPROFILE%\.opencode\bin, %USERPROFILE%\.amp\bin).
+function Get-InstalledAgentPrograms {
+    $installed = @{}
+    foreach ($name in @("opencode", "amp")) {
+        $paths = @(Get-Command "$name.exe" -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+        if ($env:USERPROFILE) { $paths += Join-Path $env:USERPROFILE ".$name\bin\$name.exe" }
+        foreach ($path in $paths) {
+            if ($path -and (Test-Path -LiteralPath $path -PathType Leaf)) {
+                $installed[[IO.Path]::GetFullPath($path).ToLowerInvariant()] = $name
+            }
+        }
+    }
+    return $installed
+}
+
+# The script Node or Bun runs: the first operand after the program and its
+# options in a Windows command line.
+function Get-ScriptOperand([string]$CommandLine) {
+    $words = @([regex]::Matches($CommandLine, '"[^"]*"|\S+') | ForEach-Object { $_.Value.Trim('"') })
+    foreach ($word in @($words | Select-Object -Skip 1)) {
+        if ($word -and -not $word.StartsWith("-")) { return $word }
+    }
+    return ""
+}
+
+function Assert-NoLoadedPluginAgents {
+    $loaded = @()
+    $current = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try { $currentSession = (Get-Process -Id $PID -ErrorAction Stop).SessionId } catch {
+        Die "Could not check this installer's process session; the gateway was not stopped"
+    }
+    try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
+        Die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    }
+    foreach ($process in $processes) {
+        $agent = Get-LoadedPluginAgent $process
+        if (-not $agent) { continue }
+        $owner = $null
+        try { $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop } catch { }
+        if ($null -eq $owner -or [int]$owner.ReturnValue -ne 0) {
+            # A standard user may not read another account's process owner
+            # on a shared host. Ignore that uncertainty only across sessions;
+            # a readable same-account process in any session still blocks.
+            if ($null -ne $process.SessionId -and [int]$process.SessionId -ne [int]$currentSession) { continue }
+            Die "Could not check the owner of a running $agent process; the gateway was not stopped"
+        }
+        if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }
+    }
+    if ($loaded.Count) {
+        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: $($loaded -join ', ')"
+    }
 }
 
 function Stop-Gateway {
@@ -3277,6 +3360,7 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
     $startAfter = $wasRunning -or $savedWasRunning -eq "true"
+    Assert-NoLoadedPluginAgents
     # The rollback's lifecycle transaction: the install it leaves (proven
     # back by Undo-Rollback on any failure) and the one it goes to, which
     # stays in previous\ until this rollback is proven.
@@ -3689,6 +3773,7 @@ function Invoke-Install {
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
 
     Assert-InstallRoom $FinalEnvRoom "the final Python environment"
+    Assert-NoLoadedPluginAgents
     Wait-VenvFree
     if ($Setup) {
         Disable-SetupHooks

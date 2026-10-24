@@ -3712,3 +3712,98 @@ Save-InstallerDigest
     save = text.split("function Save-Installer {", 1)[1].split("\n}\n", 1)[0]
     assert save.rstrip().endswith("Save-InstallerDigest")
     assert "    Save-Installer\n" in text.split("function Complete-Swap {", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
+    # A running 1.0.3 Amp or OpenCode process retains its old plugin even
+    # after the installer replaces the file. Keep the old gateway enforcing.
+    guard = _ps1_function("Assert-NoLoadedPluginAgents")
+    assert "Get-CimInstance Win32_Process" in guard
+    assert "GetOwner" in guard
+    install = _ps1_function("Invoke-Install")
+    rollback = _ps1_function("Invoke-Rollback")
+    handoff = _ps1_function("Invoke-ReleaseInstaller")
+    assert install.index("Assert-NoLoadedPluginAgents") < install.index("Stop-Gateway")
+    assert rollback.index("Assert-NoLoadedPluginAgents") < rollback.index("Stop-Gateway")
+    assert handoff.index("Assert-NoLoadedPluginAgents") < handoff.index("Stop-Gateway")
+
+
+# Win32_Process rows (ExecutablePath, CommandLine) and whether each is an
+# agent. The agent is told by its executable, never by a name (GAP-1128).
+_WINDOWS_AGENT_ROWS = [
+    (r"C:\Users\u\.opencode\bin\opencode.exe", "opencode.exe", "opencode"),
+    (r"C:\Users\u\scoop\shims\opencode.exe", "opencode", "opencode"),
+    (r"C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\.opencode.exe", "opencode", "opencode"),
+    (r"C:\Users\u\AppData\Roaming\npm\node_modules\opencode-windows-x64\bin\opencode.exe", "opencode", "opencode"),
+    (r"C:\Program Files\nodejs\node.exe",
+     r'"C:\Program Files\nodejs\node.exe" --no-warnings "C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode"', "opencode"),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:/Users/u/AppData/Roaming/npm/node_modules/@sourcegraph/amp/dist/main.js", "amp"),
+    (r"C:\Users\u\.bun\bin\bun.exe", r"bun C:\Users\u\.bun\install\global\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
+    (r"C:\Users\u\.amp\bin\amp.exe", "amp", "amp"),
+    # GAP-1128: a Node project, folder or program only named opencode or amp.
+    (r"C:\Program Files\nodejs\node.exe", r'"C:\Program Files\nodejs\node.exe" C:\Users\u\r31sa-work\opencode\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\Users\u\work\amp\server.js --amp", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node build.js C:\npm\node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Users\u\src\opencode\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\Users\u\src\node_modules\opencode-clone\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\Tools\amp.exe", "amp.exe", ""),
+    ("", "opencode.exe", ""),
+]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_windows_agent_is_told_by_its_executable() -> None:
+    installed = (
+        "$script:InstalledAgentPrograms = @{ "
+        "'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode'; 'c:\\users\\u\\scoop\\shims\\opencode.exe' = 'opencode'; "
+        "'c:\\users\\u\\.amp\\bin\\amp.exe' = 'amp' }\n"
+    )
+    rows = "\n".join(
+        "$p = [pscustomobject]@{{ Name = 'x.exe'; ExecutablePath = '{}'; CommandLine = '{}' }}; "
+        "'[' + (Get-LoadedPluginAgent $p) + ']'".format(program.replace("'", "''"), command.replace("'", "''"))
+        for program, command, _ in _WINDOWS_AGENT_ROWS
+    )
+    script = ("Set-StrictMode -Version Latest\n" + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Get-ScriptOperand")
+              + "function Get-InstalledAgentPrograms { " + installed.split("=", 1)[1].strip() + " }\n" + rows)
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    got = [line for line in result.stdout.splitlines() if line.startswith("[")]
+    assert got == [f"[{agent}]" for _, _, agent in _WINDOWS_AGENT_ROWS], list(zip(_WINDOWS_AGENT_ROWS, got))
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_the_installed_windows_agents_are_what_path_and_the_native_installers_run(tmp_path: Path) -> None:
+    on_path = tmp_path / "bin"
+    on_path.mkdir()
+    (on_path / "opencode.exe").write_bytes(b"MZ")
+    (on_path / "opencode.exe").chmod(0o755)
+    profile = tmp_path / "profile"
+    (profile / ".amp" / "bin").mkdir(parents=True)
+    (profile / ".amp" / "bin" / "amp.exe").write_bytes(b"MZ")
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$env:PATH = '{on_path}'\n$env:USERPROFILE = '{profile}'\n"
+        + "$i = Get-InstalledAgentPrograms\n"
+        + "foreach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    lines = sorted(line for line in result.stdout.splitlines() if "=" in line)
+    assert lines == sorted([
+        f"{str(on_path / 'opencode.exe').lower()}=opencode",
+        f"{str(profile / '.amp' / 'bin' / 'amp.exe').lower()}=amp",
+    ])
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")
+@pytest.mark.allow_subprocess
+def test_windows_process_rows_carry_the_executable_the_agent_check_reads() -> None:
+    # Get-LoadedPluginAgent reads Win32_Process.ExecutablePath: this
+    # account's own processes carry it.
+    script = "(Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\").ExecutablePath"
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().lower().endswith(".exe"), result.stdout

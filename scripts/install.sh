@@ -448,7 +448,10 @@ LOG="${DEFENSECLAW_HOME}/logs/install-$(date +%Y%m%dT%H%M%S).log"
 # tee ignores Ctrl+C: it went down with the installer's process group, and the
 # cancel message then died on a broken pipe (exit 141, GAP-1901).
 exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
-trap 'rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
+# A run that stops after it staged the release and before the swap (a
+# refusal, a failed check, a cancel) leaves nothing it staged or added for uv
+# (drop_unswapped_stage, GAP-1120).
+trap '[[ -z "${UNSWAPPED_STAGE:-}" ]] || drop_unswapped_stage; rm -rf "${LOCK_DIR}" ${SELF_TMP:+"${SELF_TMP}"}' EXIT
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 # ── Existing install ─────────────────────────────────────────────────────────
@@ -490,6 +493,101 @@ installed_version() {
         printf '%s' "${info%.dist-info}"
         return
     done
+}
+
+# Older OpenCode and Amp processes retain their plugin in memory. Releases
+# before this one do not inspect .install.lock, so stopping the gateway under
+# one would let an open-mode tool call through. Inspect this account's native
+# agent processes immediately before a gateway swap; an unreadable process
+# list cannot establish that the swap is safe.
+#
+# A process is OpenCode or Amp by the program file it runs, never by a name
+# in its command line or the folder it runs from (GAP-1128): the program
+# (agent_program) is the installed agent (installed_agent_programs) or an
+# OpenCode binary of its npm packages, or Node or Bun runs a script of the
+# agents' npm packages (opencode-ai, @sourcegraph/amp). A project, script or
+# other program that is only named opencode or amp is not an agent.
+loaded_plugin_agents() {
+    local processes installed pid args program agent
+    processes="$(ps -u "$(id -u)" -o pid= -o args= 2>/dev/null)" || return 2
+    installed="$(installed_agent_programs)"
+    while read -r pid args; do
+        [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+        program="$(agent_program "${pid}")" || continue
+        agent="$(agent_of "${program}" "${args}" "${installed}")"
+        [[ -z "${agent}" ]] || printf '%s (PID %s)\n' "${agent}" "${pid}"
+    done < <(printf '%s\n' "${processes}" | awk 'tolower($0) ~ /opencode|amp/')
+}
+
+# agent_program PID: the program file process PID runs, as the kernel found
+# it: /proc/PID/exe on Linux, lsof's first txt file on macOS. A process
+# cannot choose it, as it can its name or argv[0].
+agent_program() {
+    if [[ -d "/proc/$1" ]]; then
+        readlink "/proc/$1/exe" 2>/dev/null
+        return
+    fi
+    command -v lsof >/dev/null 2>&1 || return 1
+    lsof -nP -a -p "$1" -d txt -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); found = 1; exit } END { exit !found }'
+}
+
+# installed_agent_programs: one "<agent> <program>" line for each installed
+# OpenCode and Amp: the opencode and amp that PATH runs, and those of the
+# native installers (~/.opencode/bin, ~/.amp/bin), links resolved.
+installed_agent_programs() {
+    local agent name path
+    for agent in OpenCode:opencode Amp:amp; do
+        name="${agent#*:}"
+        for path in "$(command -v "${name}" 2>/dev/null || true)" "${HOME}/.${name}/bin/${name}"; do
+            [[ "${path}" == /* && -f "${path}" ]] || continue
+            printf '%s %s\n' "${agent%%:*}" "$(readlink -f "${path}" 2>/dev/null || printf '%s' "${path}")"
+        done
+    done
+}
+
+# agent_of PROGRAM ARGS INSTALLED: OpenCode or Amp when a process running
+# PROGRAM with the command line ARGS is that agent, else nothing.
+agent_of() {
+    local program="${1% (deleted)}" args="$2" installed="$3" agent path lower script
+    local opencode_binary='/node_modules/opencode-(ai|linux-[a-z0-9-]+|darwin-[a-z0-9-]+)/bin/\.?opencode$'
+    while read -r agent path; do
+        [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
+    done <<< "${installed}"
+    lower="$(printf '%s' "${program}" | tr '[:upper:]' '[:lower:]')"
+    if [[ "${lower}" =~ ${opencode_binary} ]]; then
+        printf 'OpenCode'
+        return 0
+    fi
+    case "${lower##*/}" in
+        node | nodejs | bun) ;;
+        *) return 0 ;;
+    esac
+    # The script Node or Bun runs: the first operand after its options.
+    set -f
+    # shellcheck disable=SC2086 # split the command line into its words
+    set -- ${args}
+    set +f
+    [[ $# -gt 0 ]] && shift
+    while [[ $# -gt 0 && "$1" == -* ]]; do shift; done
+    script="${1:-}"
+    # A script started by its #! line is named by the path PATH found (often
+    # a link into the package): resolve it as the kernel did.
+    [[ "${script}" != */* ]] || script="$(readlink -f "${script}" 2>/dev/null || printf '%s' "${script}")"
+    while read -r agent path; do
+        [[ -n "${path}" && "${script}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
+    done <<< "${installed}"
+    script="$(printf '%s' "${script}" | tr '[:upper:]' '[:lower:]')"
+    case "${script}" in
+        */node_modules/opencode-ai/*) printf 'OpenCode' ;;
+        */node_modules/@sourcegraph/amp/*) printf 'Amp' ;;
+    esac
+    return 0
+}
+
+assert_no_loaded_plugin_agents() {
+    local agents
+    agents="$(loaded_plugin_agents)" || die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
 }
 
 stop_gateway() {
@@ -726,6 +824,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     saved_was_running="$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null || true)"
     restart="${was_running}"
     [[ "${saved_was_running}" == true ]] && restart=true
+    assert_no_loaded_plugin_agents
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
         remove_connector_registrations_for_legacy
@@ -836,10 +935,18 @@ if ! has uv; then
     has uv || die "uv was installed but is not on PATH"
 fi
 
+# drop_unswapped_stage: a run that stops before the swap removes the release
+# it staged and fetched, and the uv files it added (GAP-1901, GAP-1120).
+drop_unswapped_stage() {
+    rm -rf "${STAGING:?}"
+    [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME:?}/.uv"
+    [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"
+}
 rm -rf "${STAGING}"
 mkdir -p "${STAGING}/bin"
+UNSWAPPED_STAGE=1
 # Ctrl+C before the swap: drop what this run staged and fetched (GAP-1901).
-trap 'printf "\n"; rm -rf "${STAGING}"; [[ -z "${UV_DIR_NEW}" ]] || rm -rf "${DEFENSECLAW_HOME}/.uv"; [[ -z "${UV_INSTALLED}" ]] || rm -f "${BIN_DIR}/uv" "${BIN_DIR}/uvx" "${BIN_DIR}/defenseclaw-uv.sha256"; err "Cancelled; nothing was changed"; exit 130' INT TERM
+trap 'printf "\n"; drop_unswapped_stage; err "Cancelled; nothing was changed"; exit 130' INT TERM
 ARCHIVE="defenseclaw-${VERSION}-${OS}-${ARCH}.tar.gz"
 WHEEL="defenseclaw-${VERSION}-py3-none-any.whl"
 REQUIREMENTS="defenseclaw-${VERSION}-requirements.txt"
@@ -1009,6 +1116,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
+assert_no_loaded_plugin_agents
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
 OLD_GATEWAY_PID="$(gateway_pid || true)"
@@ -1038,6 +1146,8 @@ if [[ "${REPAIR}" == true ]]; then
 else
     SNAP="${DEFENSECLAW_HOME}/previous.new"
 fi
+# From here the swap owns the staged release: its undo removes it (drop_staging).
+UNSWAPPED_STAGE=""
 trap 'warn "Interrupted; finishing or undoing the swap before exiting"' INT TERM
 trap '' HUP PIPE
 if ! snapshot; then

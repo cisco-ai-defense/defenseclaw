@@ -32,6 +32,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1396,6 +1397,229 @@ def _install_sh_functions(*names: str) -> str:
     return helpers + "".join(bodies)
 
 
+_AGENT_SCAN = ("loaded_plugin_agents", "agent_program", "installed_agent_programs", "agent_of", "assert_no_loaded_plugin_agents")
+
+
+def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str]:
+    # The installer's agent check, as the upgrade runs it before the gateway stops.
+    return subprocess.run(
+        [BASH, "-c", 'set -euo pipefail\ndie() { printf "%s\\n" "$*" >&2; exit 1; }\n'
+         + _install_sh_functions(*_AGENT_SCAN) + "assert_no_loaded_plugin_agents\necho scan-passed\n"],
+        env={"HOME": str(home), "PATH": ":".join([*map(str, path), "/usr/bin", "/bin"])},
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+
+
+def _program(path: Path, source: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, path)
+    path.chmod(0o755)
+    return path
+
+
+def _started(argv: list[str], program: Path, executable: str | None = None) -> subprocess.Popen[bytes]:
+    proc = subprocess.Popen(argv, executable=executable, start_new_session=True,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    want = os.path.realpath(program)
+    for _ in range(500):
+        try:
+            if os.readlink(f"/proc/{proc.pid}/exe").removesuffix(" (deleted)") == want:
+                return proc
+        except OSError:
+            pass
+        time.sleep(0.01)
+    os.killpg(proc.pid, signal.SIGKILL)
+    raise AssertionError(f"{argv} did not start {want}")
+
+
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="reads /proc/<pid>/exe")
+@pytest.mark.parametrize(
+    ("case", "agent"),
+    [
+        # GAP-1128: a normal Node project, folder, script or program that is
+        # only named opencode or amp is not an agent and never refuses.
+        ("node project named opencode", None),
+        ("node project named amp", None),
+        ("node with opencode words", None),
+        ("program named opencode, not installed", None),
+        ("script named opencode", None),
+        ("argv0 opencode", None),
+        # A real agent, by the program file it runs, refuses.
+        ("native installer opencode", "OpenCode"),
+        ("opencode on PATH through a link", "OpenCode"),
+        ("opencode npm binary", "OpenCode"),
+        ("opencode npm launcher through its PATH link", "OpenCode"),
+        ("opencode npm launcher under bun", "OpenCode"),
+        ("opencode replaced while running", "OpenCode"),
+        ("amp npm package", "Amp"),
+        ("native installer amp", "Amp"),
+    ],
+)
+def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path: Path, case: str, agent: str | None) -> None:
+    # A 1.0.3 plugin already loaded in an agent cannot see a new install lock.
+    # The installer must leave its gateway running until that agent exits, and
+    # tell the agent by its program file, never by a name (GAP-1128).
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    rollback = source[source.index('if [[ "${ROLLBACK}" == true ]]; then') : source.index('# ──', source.index('if [[ "${ROLLBACK}" == true ]]; then') + 1)]
+    assert rollback.index("assert_no_loaded_plugin_agents") < rollback.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"')
+    upgrade_guard = source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false")
+    assert upgrade_guard < source.index('stop_gateway "${BIN_DIR}/defenseclaw-gateway"', upgrade_guard)
+
+    sleep, home, path = shutil.which("sleep", path="/usr/bin:/bin"), tmp_path / "home", []
+    node = _program(tmp_path / "nodejs" / "bin" / "node", BASH)
+    script_body = "sleep 60\n"
+
+    def script(rel: str, body: str = script_body) -> Path:
+        target = home / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(body, encoding="utf-8")
+        return target
+
+    if case == "node project named opencode":
+        worker = script("r31sa-work/opencode/worker.js")
+        argv, program = [str(node), str(worker)], node
+    elif case == "node project named amp":
+        argv, program = [str(node), str(script("work/amp/index.js"))], node
+    elif case == "node with opencode words":
+        argv, program = [str(node), str(script("work/build.js")), "--name", "opencode", "/x/opencode/", "amp"], node
+    elif case == "program named opencode, not installed":
+        program = _program(home / "src" / "opencode" / "bin" / "opencode", sleep)
+        argv = [str(program), "60"]
+    elif case == "script named opencode":
+        program = Path("/bin/sh").resolve()
+        launcher = script("src/opencode/opencode", "#!/bin/sh\nsleep 60\n")
+        launcher.chmod(0o755)
+        argv = [str(launcher)]
+    elif case == "argv0 opencode":
+        program = Path(sleep)
+        argv = ["opencode", "60"]
+    elif case == "native installer opencode":
+        program = _program(home / ".opencode" / "bin" / "opencode", sleep)
+        argv = [str(program), "60"]
+    elif case == "opencode on PATH through a link":
+        program = _program(tmp_path / "brew" / "Cellar" / "opencode" / "1.18.34" / "bin" / "opencode", sleep)
+        link = tmp_path / "brew" / "bin" / "opencode"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(program)
+        path.append(link.parent)
+        argv = [str(link), "60"]
+    elif case == "opencode npm binary":
+        program = _program(tmp_path / "npm" / "lib" / "node_modules" / "opencode-linux-x64" / "bin" / "opencode", sleep)
+        argv = [str(program), "60"]
+    elif case in ("opencode npm launcher through its PATH link", "opencode npm launcher under bun"):
+        launcher = tmp_path / "npm" / "lib" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+        launcher.parent.mkdir(parents=True)
+        launcher.write_text(script_body, encoding="utf-8")
+        link = tmp_path / "npm" / "bin" / "opencode"
+        link.parent.mkdir(parents=True)
+        link.symlink_to(launcher)
+        if case.endswith("bun"):
+            program = _program(tmp_path / "bun" / "bin" / "bun", BASH)
+            argv = [str(program), str(launcher)]
+        else:
+            path.append(link.parent)
+            program, argv = node, [str(node), str(link)]
+    elif case == "opencode replaced while running":
+        program = _program(home / ".opencode" / "bin" / "opencode", sleep)
+        argv = [str(program), "60"]
+    elif case == "amp npm package":
+        main = tmp_path / "npm" / "lib" / "node_modules" / "@sourcegraph" / "amp" / "dist" / "main.js"
+        main.parent.mkdir(parents=True)
+        main.write_text(script_body, encoding="utf-8")
+        # An option before the script (the fake node is bash, so a bash one).
+        argv, program = [str(node), "--norc", str(main)], node
+    else:
+        program = _program(home / ".amp" / "bin" / "amp", sleep)
+        argv = [str(program), "60"]
+
+    proc = _started(argv, program, executable=sleep if case == "argv0 opencode" else None)
+    try:
+        if case == "opencode replaced while running":
+            program.unlink()
+            _program(program, sleep)
+        result = _agent_scan(home, path)
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+
+    if agent is None:
+        assert result.returncode == 0, (case, result.stdout, result.stderr)
+        assert "scan-passed" in result.stdout
+    else:
+        assert result.returncode == 1, (case, result.stdout, result.stderr)
+        assert "Close OpenCode and Amp completely" in result.stderr
+        assert f"{agent} (PID {proc.pid})" in result.stderr, result.stderr
+
+
+@pytest.mark.parametrize(
+    ("program", "args", "installed", "agent"),
+    [
+        # macOS reads the program file with lsof; the rules are the same.
+        ("/Users/u/.opencode/bin/opencode", "opencode", "OpenCode /Users/u/.opencode/bin/opencode", "OpenCode"),
+        ("/opt/homebrew/Cellar/opencode/1.18.34/bin/opencode", "opencode", "OpenCode /opt/homebrew/Cellar/opencode/1.18.34/bin/opencode", "OpenCode"),
+        ("/Users/u/.npm-global/lib/node_modules/opencode-ai/bin/.opencode", "opencode", "", "OpenCode"),
+        ("/Users/u/.npm-global/lib/node_modules/opencode-darwin-arm64/bin/opencode", "opencode", "", "OpenCode"),
+        ("/opt/homebrew/bin/node", "node /opt/homebrew/lib/node_modules/@sourcegraph/amp/dist/main.js", "", "Amp"),
+        ("/Users/u/.bun/bin/bun", "bun --smol /Users/u/.bun/install/global/node_modules/opencode-ai/bin/opencode", "", "OpenCode"),
+        ("/Users/u/.amp/bin/amp (deleted)", "amp", "Amp /Users/u/.amp/bin/amp", "Amp"),
+        # Names alone never make an agent (GAP-1128).
+        ("/opt/homebrew/bin/node", "node /Users/u/r31sa-work/opencode/worker.js", "", ""),
+        ("/opt/homebrew/bin/node", "node /Users/u/work/amp/server.js --amp", "", ""),
+        ("/opt/homebrew/bin/node", "node build.js /Users/u/lib/node_modules/opencode-ai/bin/opencode", "", ""),
+        ("/Users/u/src/opencode/bin/opencode", "opencode", "OpenCode /Users/u/.opencode/bin/opencode", ""),
+        ("/Users/u/src/node_modules/opencode-clone/bin/opencode", "opencode", "", ""),
+        ("/usr/local/bin/amp", "amp", "", ""),
+        ("/bin/sh", "/bin/sh /Users/u/src/opencode/opencode", "", ""),
+    ],
+)
+def test_an_agent_is_told_by_its_program_file(tmp_path: Path, program: str, args: str, installed: str, agent: str) -> None:
+    result = subprocess.run(
+        [BASH, "-c", _install_sh_functions("agent_of") + 'agent_of "$1" "$2" "$3"', "agent_of", program, args, installed],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == agent, (program, args)
+
+
+def test_a_refused_upgrade_leaves_no_staged_release(tmp_path: Path) -> None:
+    # GAP-1120: an upgrade the OpenCode check refused after staging left an
+    # 872 MiB .staging. Every stop between staging and the swap (a refusal, a
+    # failed check, a cancel) now drops what it staged and the uv files it
+    # added; from the swap on, its own undo does (drop_staging).
+    source = INSTALL_SH.read_text(encoding="utf-8")
+    exit_trap = next(line for line in source.splitlines() if line.startswith("trap ") and line.endswith("' EXIT") and "LOCK_DIR" in line)
+    staged = source.index('mkdir -p "${STAGING}/bin"\nUNSWAPPED_STAGE=1\n')
+    assert source.index(exit_trap) < staged
+    assert staged < source.index("assert_no_loaded_plugin_agents\nWAS_RUNNING=false") < source.index('UNSWAPPED_STAGE=""\n')
+    assert source.index('UNSWAPPED_STAGE=""\n') < source.index("if ! snapshot; then")
+    assert source.count("UNSWAPPED_STAGE=") == 2
+    for swapped in (False, True):
+        home = tmp_path / str(swapped) / ".defenseclaw"
+        (home / ".staging" / "bin").mkdir(parents=True)
+        (home / ".staging" / "bin" / "defenseclaw-gateway").write_bytes(b"x" * 4096)
+        (home / ".uv").mkdir()
+        lock = home / ".install.lock"
+        lock.mkdir()
+        script = (
+            "set -euo pipefail\n"
+            'err() { echo "x $*" >&2; }\ndie() { err "$@"; exit 1; }\n'
+            f'DEFENSECLAW_HOME="{home}" STAGING="{home}/.staging" LOCK_DIR="{lock}" BIN_DIR="{tmp_path}/bin" SELF_TMP=""\n'
+            'UV_DIR_NEW=1 UV_INSTALLED=""\n'
+            + _install_sh_functions("drop_unswapped_stage")
+            + exit_trap + "\nUNSWAPPED_STAGE=1\n"
+            + ('UNSWAPPED_STAGE=""\n' if swapped else "")
+            + 'die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: OpenCode (PID 1)"\n'
+        )
+        result = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=30, check=False)
+        assert result.returncode == 1, result.stderr
+        assert "Close OpenCode and Amp completely" in result.stderr
+        assert not lock.exists()
+        if swapped:
+            assert (home / ".staging" / "bin" / "defenseclaw-gateway").exists() and (home / ".uv").exists()
+        else:
+            assert sorted(p.name for p in home.iterdir()) == []
+
+
 def test_a_later_upgrade_keeps_the_0_x_audit_history(tmp_path: Path) -> None:
     # GAP-1360: previous/ held the only copy of the 0.x audit history, and the
     # next upgrade replaced it.
@@ -1736,7 +1960,8 @@ def test_ctrl_c_before_the_swap_says_so_and_drops_what_was_staged(tmp_path: Path
     script.write_text(
         "set -euo pipefail\nerr() { echo \"x $*\" >&2; }\n"
         f'DEFENSECLAW_HOME="{home}" STAGING="{home}/.staging" BIN_DIR="{tmp_path}/bin" UV_DIR_NEW=1 UV_INSTALLED=""\n'
-        f'LOG="{tmp_path}/install.log"\n{tee}\n{cancel}\n'
+        + _install_sh_functions("drop_unswapped_stage")
+        + f'LOG="{tmp_path}/install.log"\n{tee}\n{cancel}\n'
         'mkdir -p "${STAGING}/bin" "${DEFENSECLAW_HOME}/.uv/cache"\n'
         # Process substitution starts tee asynchronously. Wait until tee has
         # opened the log so SIGINT exercises the install trap, not tee startup.
