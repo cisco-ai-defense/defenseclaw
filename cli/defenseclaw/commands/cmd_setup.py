@@ -10498,13 +10498,18 @@ def _write_connector_identity(
             # a later `setup <it> --mode action` stay fail-open under a closed
             # global default (GAP-1109), so it inherits instead.
             seeded_mode = gc.effective_mode(existing_single)
+            # A per-user effective_hook_fail_mode is the outage mode of the
+            # policy tier, not the saved value: pin what was saved (owner
+            # decision 2026-10-23; managed configs resolve the saved value).
+            managed = cfg.managed_outside_secure_client() or gc.secure_client_hook_fail_modes()
+            pinned = (
+                gc.effective_hook_fail_mode(existing_single)
+                if managed
+                else (getattr(gc, "hook_fail_mode", "") or "").strip().lower()
+            )
             gc.connectors[existing_single] = PerConnectorGuardrailConfig(
                 mode=seeded_mode,
-                hook_fail_mode=(
-                    gc.effective_hook_fail_mode(existing_single)
-                    if str(seeded_mode).strip().lower() == "action"
-                    else ""
-                ),
+                hook_fail_mode=pinned if str(seeded_mode).strip().lower() == "action" else "",
             )
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()
