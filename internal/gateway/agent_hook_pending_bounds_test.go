@@ -98,7 +98,7 @@ func TestPendingHookRestartPublishesThePinnedVerdict(t *testing.T) {
 	f := newManagedHookAuditFixtureExportingTo(t, nil, remote)
 	const session = "pinned-then-died"
 	p := orphanPendingHook(t, f, session, pendingAllow)
-	acknowledged := f.api.deliveredHookDecision(false, "claudecode", pendingAllow, hookexec.HookDeliveryReceiptAck)
+	acknowledged := f.api.deliveredHookDecision("claudecode", pendingAllow, hookexec.HookDeliveryReceiptAck)
 	f.api.pendingHookDecidedContext(t.Context(), p, acknowledged)
 	ids := []string{p.ID, p.ID + "-decision"}
 	remote.settled(t, 0, ids...)

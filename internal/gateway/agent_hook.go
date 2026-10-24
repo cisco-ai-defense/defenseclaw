@@ -82,52 +82,54 @@ func getFallbackConnectorRegistry() *connector.Registry {
 }
 
 type agentHookRequest struct {
-	pendingOccurrenceID         string
-	pendingBodyBytes            int64
-	pendingRecovery             bool
-	pendingProvenance           *pendingHookProvenance // the journaled call was evaluated under it
-	ConnectorName               string
-	AgentID                     string
-	AgentName                   string
-	AgentType                   string
-	RootAgentID                 string
-	ParentAgentID               string
-	ChildAgentID                string
-	HookEventName               string
-	SemanticEventID             string
-	LogicalEventID              string
-	ConnectorInstanceID         string
-	SessionID                   string
-	ThreadID                    string
-	TurnID                      string
-	MessageID                   string
-	RootSessionID               string
-	ParentSessionID             string
-	ChildSessionID              string
-	ToolInvocationID            string
-	ModelRequestID              string
-	ModelResponseID             string
-	SourceEventID               string
-	SourceSequence              string
-	SourceTimestamp             string
-	SourceNamespace             string
-	SourceIDKind                string
-	ExecutionID                 string
-	StepID                      string
-	CorrelationProfileVersion   connector.CorrelationProfileVersion
-	CorrelationCompleteness     connector.CorrelationCompleteness
-	CorrelationSurface          connector.CorrelationSurface
-	CorrelationOrigins          map[connector.CorrelationTarget]connector.CorrelationOrigin
-	CorrelationValues           map[connector.CorrelationTarget]connector.CorrelationValue
-	CorrelationIdentifiers      []connector.CorrelationValue
-	SuppressCorrelationEmit     bool
-	CorrelationUnavailable      bool // correlation failed, not a replay: decision exported without join IDs, still audited
-	CorrelationReceipt          *audit.CorrelationReceiptLocator
-	CWD                         string
-	ReportedCWD                 string // the cwd as sent, before hookCWDForContext; user text only (requireSandboxHostRun)
-	ToolName                    string
-	ToolArgs                    json.RawMessage
-	ToolArgsProjectionUncertain bool
+	pendingOccurrenceID          string
+	pendingBodyBytes             int64
+	pendingRecovery              bool
+	pendingProvenance            *pendingHookProvenance
+	sandboxReceiptAcknowledgment bool
+	pendingSandboxCallRef        string
+	ConnectorName                string
+	AgentID                      string
+	AgentName                    string
+	AgentType                    string
+	RootAgentID                  string
+	ParentAgentID                string
+	ChildAgentID                 string
+	HookEventName                string
+	SemanticEventID              string
+	LogicalEventID               string
+	ConnectorInstanceID          string
+	SessionID                    string
+	ThreadID                     string
+	TurnID                       string
+	MessageID                    string
+	RootSessionID                string
+	ParentSessionID              string
+	ChildSessionID               string
+	ToolInvocationID             string
+	ModelRequestID               string
+	ModelResponseID              string
+	SourceEventID                string
+	SourceSequence               string
+	SourceTimestamp              string
+	SourceNamespace              string
+	SourceIDKind                 string
+	ExecutionID                  string
+	StepID                       string
+	CorrelationProfileVersion    connector.CorrelationProfileVersion
+	CorrelationCompleteness      connector.CorrelationCompleteness
+	CorrelationSurface           connector.CorrelationSurface
+	CorrelationOrigins           map[connector.CorrelationTarget]connector.CorrelationOrigin
+	CorrelationValues            map[connector.CorrelationTarget]connector.CorrelationValue
+	CorrelationIdentifiers       []connector.CorrelationValue
+	SuppressCorrelationEmit      bool
+	CorrelationUnavailable       bool // correlation failed, not a replay: decision exported without join IDs, still audited
+	CorrelationReceipt           *audit.CorrelationReceiptLocator
+	CWD                          string
+	ReportedCWD                  string // the cwd as sent, before hookCWDForContext; user text only (requireSandboxHostRun)
+	ToolName                     string
+	ToolArgs                     json.RawMessage
+	ToolArgsProjectionUncertain  bool
 	// ToolCallUnparsed: the connector's decoder found no tool call it can
 	// read (connector.HookProfileRequest.ToolCallUnparsed).
 	ToolCallUnparsed bool
@@ -310,6 +312,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body", "reason": hookexec.MalformedHookPayloadReason})
+			return
+		}
+		if receiptID, ok := sandboxHookReceiptID(rawBody); ok {
+			a.handleSandboxHookReceipt(w, r, connectorName, receiptID)
 			return
 		}
 		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(bytes.NewReader(rawBody)))
@@ -768,17 +774,17 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
 		}
-		if delivery != nil && (!req.SuppressCorrelationEmit || req.CorrelationUnavailable) {
+		sandboxReceipt := a.wantsSandboxHookReceipt(ctx, connectorName, req.HookEventName, resp) &&
+			(!req.SuppressCorrelationEmit || req.CorrelationUnavailable)
+		if (delivery != nil || sandboxReceipt) && (!req.SuppressCorrelationEmit || req.CorrelationUnavailable) {
 			var journalErr error
 			pending, journalErr = a.journalHookDelivery(ctx, &req, resp, rawEventIDs,
-				int64(len(b)), time.Since(t0), panicked, auditExtra)
+				int64(len(b)), time.Since(t0), panicked, auditExtra, sandboxReceipt)
 			if journalErr != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook delivery journal unavailable connector=%s: %v\n",
 					connectorName, journalErr)
-				// No answer leaves this process unjournaled. A
-				// receipt-capable managed hook resolves this 503 closed in
-				// every fail mode (only a transport outage can open), so the
-				// audit records the block it enforces.
+				// No answer leaves this process unjournaled. The 503
+				// closes the managed hook before the proposal is offered.
 				resp = pendingFailureHookDecision(resp)
 				persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 				finalization := a.finalizeAgentHook(a.pendingHookDecidedContext(persistCtx, pending, resp),
@@ -790,6 +796,26 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "hook audit is unavailable"})
 				return
 			}
+		}
+		if sandboxReceipt {
+			// A buffered sandbox relay cannot keep the original request open
+			// for the native full-duplex receipt. Its hook sends the receipt
+			// on this authenticated route after validating the proposed
+			// answer. Only that second call writes the final audit verdict.
+			if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
+				fmt.Fprintf(os.Stderr, "[gateway] sandbox tool-call chain finalization failed connector=%s event=%s: %v\n",
+					connectorName, req.HookEventName, err)
+			}
+			wire := renderAgentHookResponseForProfile(profile, wireResp)
+			wire["delivery_receipt"] = pending.ID
+			a.scheduleSandboxHookReceiptRecovery(pending.ID)
+			// The first request is done; a later authenticated receipt owns
+			// this journal row. The bounded recovery pass may now inspect it.
+			pendingHooksInFlight.Delete(pending.ID)
+			finalized = true
+			attemptedWrite = true
+			a.writeJSON(w, http.StatusOK, wire)
+			return
 		}
 		// Reading or closing the answer can cancel the HTTP request before
 		// offer returns. Only a hang-up observed before the answer was sent
@@ -803,7 +829,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			if receipt == hookexec.HookDeliveryReleased {
 				resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 			} else {
-				resp = a.deliveredHookDecision(hungUpBeforeAnswer, connectorName, resp, receipt)
+				resp = a.deliveredHookDecision(connectorName, resp, receipt)
 			}
 		} else {
 			resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
@@ -827,10 +853,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// delivery and the AID accounting all get that one.
 		resp = finalization.Response
 		if delivery == nil && finalization.AuditFailedClosed {
-			// Not delivered yet (no receipt channel): the agent gets the
-			// fail-mode verdict its audit row recorded. A delivered answer
-			// (GAP-0286 receipt) already reached the agent; its audit row
-			// and dedupe record carry the fail-mode verdict.
 			wireResp = resp
 		}
 		if !panicked && resp.Action != hookActionUnconfirmed {
@@ -940,13 +962,10 @@ func (a *APIServer) finalizeAgentHook(
 	// otherwise. If identity stamping itself panics, notification stays
 	// fail-closed behind canonical enforcement persistence.
 	result := hookFinalizationResult{Enforced: resp.Action == "block", Response: resp}
-	// live is false for a journaled call that recovery writes
-	// (agent_hook_pending.go): it writes the call's two records only, and
-	// repeats none of the live side effects (health counters, sandbox
-	// observations, the hook join ring, spans, alerts), which belong to the
-	// call when it ran and would name the state and policy of the server
-	// that recovers it.
-	live := !req.pendingRecovery
+	// A recovered journal row writes only its durable records. A sandbox
+	// acknowledgement is a live answer even though it reuses the pending
+	// occurrence IDs to deduplicate audit writes.
+	live := !req.pendingRecovery || req.sandboxReceiptAcknowledgment
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -1057,7 +1076,9 @@ func (a *APIServer) finalizeAgentHook(
 				auditErr = errors.New("the audit section panicked")
 			}
 			closed, denied := resp, false
-			if !recoverable {
+			// A pending occurrence keeps its delivery state for recovery: never
+			// report a retroactive block the agent did not receive (s2-obs).
+			if !recoverable && req.pendingOccurrenceID == "" {
 				closed, denied = a.hookAuditFailureResponse(ctx, connectorName, req, rawBody, resp)
 			}
 			if denied {
@@ -1072,6 +1093,12 @@ func (a *APIServer) finalizeAgentHook(
 			fmt.Fprintf(os.Stderr, "[gateway] hook audit persistence failed connector=%s event=%s action=%s denied_for_audit=%t: %v\n",
 				connectorName, req.HookEventName, resp.Action, denied, auditErr)
 		}
+	}
+	if req.sandboxReceiptAcknowledgment && !result.AuditPersisted {
+		// This answer has not reached its sandbox agent. Do not emit a
+		// decision or count an allow while its audit write is uncertain;
+		// the receipt handler either confirms an existing row or closes.
+		return result
 	}
 	if !replay && result.AuditPersisted && !panicked {
 		safeSection("pre_tool_audit", func() {
@@ -2860,6 +2887,26 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		findings = mergedFindings
 		if assetWouldBlock {
 			wouldBlock = true
+		}
+	}
+
+	// The managed OpenCode plugin can refuse an action after the gateway's
+	// policy answer when a later plugin may mutate its arguments, or when
+	// OpenCode cannot identify an MCP server uniquely. Fold that local
+	// refusal into the verdict before the audit and hook_decision are emitted.
+	// A missing authority claim is closed: the plugin starts unproven until
+	// its config hook has checked the final plugin order.
+	if a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() &&
+		req.ConnectorName == "opencode" && mode == "action" &&
+		req.HookEventName == "tool.execute.before" && (action != "block" || rawAction != "block") {
+		var localRefusal string
+		if status, _ := req.Payload["mcp_identity_status"].(string); status == "ambiguous" {
+			localRefusal = "DefenseClaw refused an OpenCode tool with ambiguous MCP server identity."
+		} else if authoritative, _ := req.Payload["arguments_authoritative"].(bool); !authoritative {
+			localRefusal = "DefenseClaw refused an OpenCode action because later plugin argument mutations are not observable."
+		}
+		if localRefusal != "" {
+			action, rawAction, severity, reason, wouldBlock = "block", "block", "HIGH", localRefusal, false
 		}
 	}
 

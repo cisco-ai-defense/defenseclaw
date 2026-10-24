@@ -194,6 +194,30 @@ func (s *Store) execHookDeliveryJournal(ctx context.Context, insert bool, query 
 	return result, nil
 }
 
+// HookDelivery returns the still-journaled occurrence with id. The sandbox
+// relay uses it to bind a later acknowledgement to the original hook and
+// sandbox, including when the gateway process changed between calls.
+func (s *Store) HookDelivery(ctx context.Context, id string) (HookDeliveryJournalEntry, bool, error) {
+	release, err := s.acquireReady()
+	if err != nil {
+		return HookDeliveryJournalEntry{}, false, err
+	}
+	defer release()
+	rows, err := s.queryDB(ctx, "hook_delivery_journal", `SELECT occurrence_json FROM hook_delivery_journal WHERE id = ?`, id)
+	if err != nil {
+		return HookDeliveryJournalEntry{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return HookDeliveryJournalEntry{}, false, rows.Err()
+	}
+	var occurrence string
+	if err := rows.Scan(&occurrence); err != nil {
+		return HookDeliveryJournalEntry{}, false, err
+	}
+	return HookDeliveryJournalEntry{ID: id, Occurrence: []byte(occurrence)}, true, rows.Err()
+}
+
 // ForgetHookDelivery deletes the journal row of an audited occurrence. A
 // deletion a crash undoes is harmless: the records of the occurrence carry
 // its id, so recovery finds them stored and only deletes the row again.

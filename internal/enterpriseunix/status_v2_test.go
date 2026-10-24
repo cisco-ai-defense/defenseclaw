@@ -272,6 +272,38 @@ func TestStatusV2IdentityFromGatewayHealth(t *testing.T) {
 	}
 }
 
+// A live local audit-write failure makes managed enforcement incomplete even
+// while the gateway and its hook socket remain healthy.
+func TestStatusAndVerifyReportActiveGatewayAuditWriteFailure(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		baseline := h.run(Options{Action: action})
+		if !baseline.SecurityComplete || hasWarning(baseline, codeAuditWriteFailed) {
+			t.Fatalf("%s baseline: security_complete=%t warnings=%+v", action, baseline.SecurityComplete, baseline.Warnings)
+		}
+	}
+	health := h.env.HealthGet
+	h.env.HealthGet = func(context.Context) (int, []byte, error) {
+		return 200, []byte(`{"api":{"state":"running"},"telemetry":{"state":"error","details":{"event_history_failure":"sqlite_write_failed","event_history_last_sqlite_class":"constraint_corrupt"}}}`), nil
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		result := h.run(Options{Action: action})
+		if result.SecurityComplete || !hasWarning(result, "audit_write_failed") {
+			t.Fatalf("%s: security_complete=%t warnings=%+v, want the active audit failure", action, result.SecurityComplete, result.Warnings)
+		}
+		if message := messagesOf(result.Warnings, "audit_write_failed"); !strings.Contains(message, "sqlite_write_failed") || !strings.Contains(message, "constraint_corrupt") {
+			t.Fatalf("%s: audit warning %q", action, message)
+		}
+	}
+	h.env.HealthGet = health
+	recovered := h.run(Options{Action: ActionStatus})
+	if hasWarning(recovered, "audit_write_failed") {
+		t.Fatalf("recovered status retained an active audit warning: %+v", recovered.Warnings)
+	}
+}
+
 // Every combination of sandbox rows maps to one driver and reason code;
 // details and fixes (which name paths) are never copied.
 func TestOpenShellCapabilityMapping(t *testing.T) {
