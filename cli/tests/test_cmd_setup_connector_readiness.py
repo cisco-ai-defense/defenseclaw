@@ -809,6 +809,7 @@ def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, t
         "_windows_native_hook_check",
         lambda *_args, **_kwargs: WindowsHookCheck("healthy", "registered"),
     )
+    monkeypatch.setattr(cmd_doctor, "_hermes_windows_execution_probe", lambda check: check)
     monkeypatch.setattr(
         cmd_doctor,
         "_check_hermes_hooks",
