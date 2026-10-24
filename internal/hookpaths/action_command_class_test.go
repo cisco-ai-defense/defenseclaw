@@ -612,6 +612,19 @@ func TestR104ActionWindowsIWRPrefixTargetMention(t *testing.T) {
 	}
 }
 
+func TestR104ActionWindowsSedLongAbbreviationTargetMention(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, option := range []string{"--in", "--in-pl"} {
+		command := `sed ` + option + ` s/a/b/ ` + target
+		t.Run(option, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+}
+
 func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 	const cwd = `C:\Users\alice\project`
 	const home = `C:\Users\alice`
