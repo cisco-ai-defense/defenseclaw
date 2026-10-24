@@ -455,11 +455,14 @@ func recognizeConnectionStrings(input string) ([]candidate, error) {
 		if !ok && containsEligibleRawQuery(uriValue) {
 			return nil, detectorError(FailureValidator)
 		}
-		if !ok || !supportedConnectionScheme(parsed.scheme) {
+		if !supportedConnectionScheme(parsed.scheme) {
 			continue
 		}
 		if parsed.passwordStart >= 0 && parsed.passwordEnd > parsed.passwordStart {
 			result = append(result, candidate{start: uri[0] + parsed.passwordStart, end: uri[0] + parsed.passwordEnd, accepted: true})
+		}
+		if !ok {
+			continue
 		}
 		queryMatches, err := queryCandidates(uriValue, uri[0], parsed)
 		if err != nil {
@@ -709,15 +712,15 @@ func recognizeURLQueries(input string) ([]candidate, error) {
 		if !ok && containsEligibleRawQuery(uriValue) {
 			return nil, detectorError(FailureValidator)
 		}
-		if !ok {
-			continue
-		}
 		if (parsed.scheme == "http" || parsed.scheme == "https") && parsed.passwordEnd > parsed.passwordStart {
 			result = append(result, candidate{
 				start:    uri[0] + parsed.passwordStart,
 				end:      uri[0] + parsed.passwordEnd,
 				accepted: true,
 			})
+		}
+		if !ok {
+			continue
 		}
 		queryMatches, err := queryCandidates(uriValue, uri[0], parsed)
 		if err != nil {
@@ -960,6 +963,7 @@ func parseMatchedURI(value string) (string, parsedURI, bool) {
 	if ok {
 		return value, parsed, true
 	}
+	original := parsed
 	// The URI scanner includes sentence punctuation. Retry without a
 	// trailing punctuation run, keeping offsets relative to the original text.
 	trimmed := strings.TrimRight(value, ".,;:!?)]}`")
@@ -978,13 +982,13 @@ func parseMatchedURI(value string) (string, parsedURI, bool) {
 			}
 		}
 	}
-	return value, parsedURI{}, false
+	return value, original, false
 }
 
 func parseHierarchicalURI(value string) (parsedURI, bool) {
 	result := parsedURI{passwordStart: -1, passwordEnd: -1, queryStart: -1, queryEnd: -1}
 	colon := strings.IndexByte(value, ':')
-	if colon <= 0 || colon+2 >= len(value) || value[colon+1:colon+3] != "//" || !allASCII(value) {
+	if colon <= 0 || colon+2 >= len(value) || value[colon+1:colon+3] != "//" {
 		return result, false
 	}
 	result.scheme = strings.ToLower(value[:colon])
@@ -1008,8 +1012,10 @@ func parseHierarchicalURI(value string) (parsedURI, bool) {
 			result.passwordEnd = authorityStart + at
 		}
 	}
-	if !validURIHostPart(hostpart) {
-		return parsedURI{}, false
+	// Keep the userinfo span when the matched URI has an invalid host or a
+	// non-ASCII suffix. A malformed authority must not expose its password.
+	if !allASCII(value) || !validURIHostPart(hostpart) {
+		return result, false
 	}
 	fragment := len(value)
 	if hash := strings.IndexByte(value[authorityEnd:], '#'); hash >= 0 {
@@ -1020,7 +1026,7 @@ func parseHierarchicalURI(value string) (parsedURI, bool) {
 		result.queryEnd = fragment
 	}
 	if !validPercentEscapes(value) {
-		return parsedURI{}, false
+		return result, false
 	}
 	return result, true
 }
