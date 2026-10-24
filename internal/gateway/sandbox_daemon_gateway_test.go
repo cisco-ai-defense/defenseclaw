@@ -37,9 +37,19 @@ import (
 // the linger after its last ready passed, so the next account gets the one
 // gateway port at once, not when the daemon idles out (GAP-0465). A running
 // sandbox keeps it, and another account's gateway is not this daemon's.
+//
+// GAP-1062: under the 16-shard race load the last idle pass found the
+// lifecycle still held by the daemon's own pass at start, or the gateway's
+// foreign sandbox sweep (a reconcile of the manager, which its own loop
+// may hold) cut short, and stopped nothing. The test now waits out the
+// pass at start (settle), and the sweep, which other tests cover, finds no
+// foreign sandbox.
 func TestSandboxDaemonStopsGatewayWhenNoSandboxRuns(t *testing.T) {
-	f := newSandboxDaemonFixture(t)
+	f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
+		o.sweepForeign = func(context.Context) (bool, error) { return false, nil }
+	})
 	f.run(t)
+	f.settle(t)
 	ctx := context.Background()
 	f.os.holder.Store(int64(os.Getuid()))
 	f.d.openShellUsed.Store(time.Now().Add(-2 * openShellGatewayLinger).UnixNano())

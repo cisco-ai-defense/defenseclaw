@@ -129,7 +129,7 @@ func (m *Manager) Create(ctx context.Context, req sandboxapi.CreateRequest) (*sa
 	if err := m.sandboxReleaseRefusal(gw); err != nil {
 		return nil, err
 	}
-	if err := m.legacyRunRefusal(""); err != nil {
+	if err := m.legacyRunRefusal(ctx, ""); err != nil {
 		return nil, err
 	}
 	// On a managed host the daemon chose the driver at sandbox start (its

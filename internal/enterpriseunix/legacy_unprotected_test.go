@@ -112,6 +112,28 @@ func TestAContainedSandboxIsReportedUnprotected(t *testing.T) {
 	}
 }
 
+// GAP-1085, GAP-1089: a sandbox that may be a live legacy or contained
+// one, whose gateway has not said whether it runs, is reported in its own
+// words with the daemon's way on (not as a legacy guest with an empty
+// command), and so is one on another gateway than the daemon's; the
+// deployment is not security-complete.
+func TestAnUnseenSandboxIsReportedUnprotected(t *testing.T) {
+	h := newOSHost(t, "linux")
+	h.ops.loggedIn = []SandboxAccount{h.alice}
+	h.ops.status[h.alice.UID] = SandboxStatus{Active: true, Live: 1, Unprotected: []UnprotectedSandbox{
+		{Name: "unseen", Reason: sandboxapi.UnprotectedUnknown, Detail: "it lives on gateway old, which DefenseClaw could not read"},
+		{Name: "away", Stop: "defenseclaw sandbox stop away", Detail: "it runs on gateway old: connect DefenseClaw to that gateway, then stop it"}}}
+	seeded := &enterprisestatus.Result{SecurityComplete: true}
+	(&lifecycle{env: h.env, opts: Options{Action: ActionStatus}, result: seeded}).describeLegacySandboxes(context.Background())
+	warning := messagesOf(seeded.Warnings, codeLegacySandbox)
+	if seeded.SecurityComplete ||
+		!strings.Contains(warning, "alice: "+sandboxapi.UnknownUnprotected+": unseen; as alice: it lives on gateway old, which DefenseClaw could not read. It may be") ||
+		!strings.Contains(warning, "alice: "+sandboxapi.LegacyUnprotected+": away; as alice: it runs on gateway old: connect DefenseClaw to that gateway") ||
+		strings.Contains(warning, "``") {
+		t.Fatalf("security_complete=%v warning=%q", seeded.SecurityComplete, warning)
+	}
+}
+
 // Status warns and is not security-complete while a legacy sandbox runs,
 // and verify fails on it.
 func TestVerifyFailsWhileALegacySandboxRuns(t *testing.T) {

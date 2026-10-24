@@ -68,6 +68,7 @@ on a copy instead, as every run on a Mac does. See
 | Docker | A rootful Docker Engine 28 or newer that your user can use (a member of the `docker` group), with the buildx plugin (`docker-buildx-plugin` from Docker's repository). Rootless Docker is not supported: it keeps containers off the host network, so sandboxes cannot reach DefenseClaw. Every member of the `docker` group can list and enter every container on the machine, sandboxes of other accounts included (see [one OpenShell gateway per machine](#one-openshell-gateway-per-machine)). |
 | systemd | A user session with a systemd user manager. The OpenShell gateway runs as the `openshell-gateway` user service, one per machine (see [one OpenShell gateway per machine](#one-openshell-gateway-per-machine)). |
 | Disk | At least 5 GiB free for Docker, 10 GiB recommended. The first image build downloads about 3 GB. |
+| Git | Git 2.29 or newer on the host. Every run copies the project into the sandbox, and keeps the project's pre-session snapshot, with it, so no run starts without it. `defenseclaw sandbox doctor` checks it (Host Git). |
 
 You don't need OpenShell installed first: setup offers to install it.
 

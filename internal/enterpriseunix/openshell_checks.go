@@ -222,6 +222,15 @@ func (l *lifecycle) describeLegacySandboxes(ctx context.Context) {
 		default:
 			for _, u := range st.Unprotected {
 				line := u.Name + "; as " + a.Name + ", `" + u.Stop + "` ends it"
+				if u.Detail != "" {
+					line = u.Name + "; as " + a.Name + ": " + u.Detail
+				}
+				if u.Reason == sandboxapi.UnprotectedUnknown {
+					lines = append(lines, unprotected{sandboxapi.UnknownUnprotected, line, ". It may be a legacy or contained sandbox, and its " +
+						"gateway has not said whether it runs; DefenseClaw stops no sandbox for its user, and runs no new sandbox for " + a.Name +
+						" until its gateway says"})
+					continue
+				}
 				if u.Reason == sandboxapi.UnprotectedContained {
 					lines = append(lines, unprotected{sandboxapi.ContainedUnprotected, line, ". DefenseClaw had to stop it, but its MicroVM's disk " +
 						"could not be synced first, so it keeps running with its network withdrawn; DefenseClaw stops no sandbox for its user after a " +

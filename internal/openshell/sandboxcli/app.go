@@ -47,6 +47,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/harness"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/workspace"
 )
 
 // CommandName is how messages refer to the CLI.
@@ -178,11 +179,14 @@ type App struct {
 	// Host integrations, replaceable in tests. HostDoctor runs the host
 	// checks of d (default d.Run).
 	HostDoctor func(ctx context.Context, d *openshell.Doctor) *openshell.DoctorReport
-	Images     ImageService
-	Workspace  CopyWorkspace
-	Gateway    GatewayService
-	Installer  func(consent func(*openshell.InstallPlan) (bool, error)) Installer
-	OpenShell  func(ctx context.Context) (openshell.Client, *openshell.Registration, error)
+	// HostGit is the host git's version, or why DefenseClaw cannot drive
+	// it (default workspace.HostGit).
+	HostGit   func(ctx context.Context) (string, error)
+	Images    ImageService
+	Workspace CopyWorkspace
+	Gateway   GatewayService
+	Installer func(consent func(*openshell.InstallPlan) (bool, error)) Installer
+	OpenShell func(ctx context.Context) (openshell.Client, *openshell.Registration, error)
 	// OpenShellCLI is the openshell CLI a managed computer's sandbox daemon
 	// installed for the account in setup mode ("" for none), read again
 	// after the daemon readied OpenShell for a first run.
@@ -369,6 +373,9 @@ func (a *App) defaults() {
 		}
 		if a.GitConfig == nil {
 			a.GitConfig = a.hostGitConfig
+		}
+		if a.HostGit == nil {
+			a.HostGit = workspace.HostGit
 		}
 		a.reader = bufio.NewReader(a.IO.In)
 		// The ssh shim every openshell invocation runs with falls back to

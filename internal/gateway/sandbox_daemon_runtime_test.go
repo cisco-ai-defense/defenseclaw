@@ -470,6 +470,27 @@ type sandboxDaemonFixture struct {
 	socket  string
 	running atomic.Int64
 	exe     string
+	// counted closes on the daemon's first count of its running sandboxes:
+	// its pass at start, under the lifecycle (settle).
+	counted     chan struct{}
+	countedOnce sync.Once
+}
+
+// settle waits until the daemon's pass at start (Run's look at the
+// listeners of sandboxes left running, which holds the lifecycle) is over:
+// a supervision pass the test makes meanwhile finds the lifecycle taken and
+// does nothing (GAP-1062).
+func (f *sandboxDaemonFixture) settle(t *testing.T) {
+	t.Helper()
+	select {
+	case <-f.counted:
+	case <-time.After(time.Minute):
+		t.Fatal("the daemon made no pass at start")
+	}
+	if err := f.d.lockLifecycle(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	f.d.unlockLifecycle()
 }
 
 func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)) *sandboxDaemonFixture {
@@ -487,7 +508,8 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &sandboxDaemonFixture{relay: &fakeRelay{}, os: &fakeOpenShell{}, socket: socket, exe: filepath.Join(dir, "defenseclaw-gateway")}
+	f := &sandboxDaemonFixture{relay: &fakeRelay{}, os: &fakeOpenShell{}, socket: socket, exe: filepath.Join(dir, "defenseclaw-gateway"),
+		counted: make(chan struct{})}
 	if err := os.WriteFile(f.exe, []byte("v1"), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -504,8 +526,11 @@ func newSandboxDaemonFixture(t *testing.T, mutate ...func(*SandboxDaemonOptions)
 		PollInterval:   time.Hour,
 		Executable:     f.exe,
 		Logf:           func(string, ...any) {},
-		countRunning:   func(context.Context) (int, error) { return int(f.running.Load()), nil },
-		openShell:      f.os,
+		countRunning: func(context.Context) (int, error) {
+			f.countedOnce.Do(func() { close(f.counted) })
+			return int(f.running.Load()), nil
+		},
+		openShell: f.os,
 		// The fixture runs the Linux daemon on every platform: a Mac daemon
 		// probes the account Docker and selects the MicroVM driver before
 		// a create (dockerReady, selectDriver); tests of that set goos.

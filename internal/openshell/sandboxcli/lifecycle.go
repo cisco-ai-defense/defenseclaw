@@ -304,10 +304,11 @@ func (a *App) printStatus(st *sandboxapi.Status) {
 			plural(st.TelemetryFailures, "record", "records"), truncate(sandboxapi.DisplayText(st.TelemetryError), 200)), ansiRed))
 	}
 	for _, u := range st.Unprotected {
-		// A live legacy guest (GAP-0901) or a contained one (GAP-0902), in
-		// the daemon's words for each: no new sandbox runs until it is
-		// gone, and DefenseClaw does not stop it for the user.
-		row("Unprotected", a.style(u.Name+": "+unprotectedWords(u)+"; no new sandbox runs until it is gone: `"+u.Stop+"`", ansiRed))
+		// A live legacy guest (GAP-0901), a contained one (GAP-0902) or one
+		// that may be either whose gateway has not said (GAP-1085,
+		// GAP-1089), in the daemon's words for each: no new sandbox runs
+		// until it is gone, and DefenseClaw does not stop it for the user.
+		row("Unprotected", a.style(u.Name+": "+unprotectedWords(u)+"; "+unprotectedWay(u), ansiRed))
 	}
 }
 
@@ -320,8 +321,26 @@ func unprotectedWords(u sandboxapi.UnprotectedSandbox) string {
 		return sandboxapi.LegacyUnprotected
 	case sandboxapi.UnprotectedContained:
 		return sandboxapi.ContainedUnprotected
+	case sandboxapi.UnprotectedUnknown:
+		return sandboxapi.UnknownUnprotected
 	}
 	return "running unprotected: " + u.Reason
+}
+
+// unprotectedWay is what the user of the unprotected guest u does: the
+// daemon's detail, and the command that ends it.
+func unprotectedWay(u sandboxapi.UnprotectedSandbox) string {
+	way := "no new sandbox runs until it is gone"
+	if u.Reason == sandboxapi.UnprotectedUnknown {
+		way = "no new sandbox runs until its gateway says"
+	}
+	if u.Detail != "" {
+		way += ": " + u.Detail
+	}
+	if u.Stop != "" {
+		way += ": `" + u.Stop + "`"
+	}
+	return way
 }
 
 func (a *App) printSandbox(sb *sandboxapi.Sandbox) {

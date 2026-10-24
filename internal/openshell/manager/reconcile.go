@@ -111,13 +111,23 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 		m.dropGateway(gw, err)
 		return err
 	}
+	// A sandbox under the name of a box whose recorded identity is another
+	// (a guest of another gateway, or one gone and replaced) is not that
+	// box's: it is neither adopted for it, which would take its phase and
+	// move its record here, hiding the guest where it lives, nor counted
+	// live for it (otherIdentity). The pass below asks after the box.
 	live := map[string]*openshell.Sandbox{}
 	for _, sb := range sbs {
-		live[sb.Name] = sb
+		if !m.otherIdentity(sb) {
+			live[sb.Name] = sb
+		}
 	}
 
 	// Sandboxes OpenShell has.
 	for _, sb := range sbs {
+		if live[sb.Name] != sb {
+			continue
+		}
 		b := m.adopt(sb, gw.Driver)
 		if b == nil {
 			continue
@@ -222,6 +232,7 @@ func (m *Manager) reconcile(ctx context.Context, startup bool) (err error) {
 	}
 	m.deleteExpired(ctx)
 	m.pruneApprovals()
+	m.proveGuests(ctx)
 	m.mu.Lock()
 	m.lastReconcile = m.now()
 	m.mu.Unlock()
@@ -846,6 +857,15 @@ func (m *Manager) noteGateway(b *box, gw *Gateway) bool {
 	}
 	b.rec.Gateway, b.rec.GatewayEndpoint, b.rec.GatewayWorkspace = gw.Name, gw.Endpoint, ws
 	return true
+}
+
+// otherIdentity reports a sandbox listed under the name of a settled box
+// that recorded another sandbox's ID: not that box's sandbox.
+func (m *Manager) otherIdentity(sb *openshell.Sandbox) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	b := m.boxes[sb.Name]
+	return b != nil && !b.creating && !b.retained && b.rec.ID != "" && sb.ID != "" && sb.ID != b.rec.ID
 }
 
 // current reports whether b is still the live, settled box for its name.

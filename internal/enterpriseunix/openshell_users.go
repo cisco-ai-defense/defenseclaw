@@ -95,13 +95,15 @@ type SandboxStatus struct {
 	Unprotected []UnprotectedSandbox
 }
 
-// UnprotectedSandbox is one live legacy or contained guest of an account:
-// its name, the command its user runs to end it, and why it is unprotected
-// (sandboxapi.UnprotectedSandbox.Reason).
+// UnprotectedSandbox is one live legacy or contained guest of an account,
+// or one that may be either whose gateway has not said: its name, the
+// command its user runs to end it, why it is unprotected and what else its
+// user does (sandboxapi.UnprotectedSandbox.Reason, Detail).
 type UnprotectedSandbox struct {
 	Name   string `json:"name"`
 	Stop   string `json:"stop"`
 	Reason string `json:"reason,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // daemonStop is scope for a stop of the sandbox daemon that st describes:

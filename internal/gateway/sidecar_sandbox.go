@@ -311,6 +311,8 @@ func buildSandboxRuntime(api *APIServer, deps sandboxRuntimeDeps, opts RuntimeOp
 		DiscoveryRemoved:   discoveryRemoved,
 		ManagedAccount:     opts.Managed,
 		OtherGateways:      otherGateways,
+		// A sandbox whose record names another gateway is read there.
+		GatewayAt: manager.RegistrationGateway(openshell.DiscoverOptions{}, openshell.ClientOptions{}),
 	})
 	if err != nil {
 		return nil, err

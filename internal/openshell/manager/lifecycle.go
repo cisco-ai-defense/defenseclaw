@@ -17,6 +17,7 @@
 package manager
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -111,6 +112,9 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 	} else if st.Reason == "" {
 		st.Reason = err.Error()
 	}
+	// Every guest is counted at the place its record names (proveGuests).
+	m.proveGuests(ctx)
+	here := m.lastGw.Load()
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	live := 0
@@ -125,10 +129,19 @@ func (m *Manager) Status(ctx context.Context) (*sandboxapi.Status, error) {
 		if !b.missing && holdsCompute(b.phase, b.rec.Driver, b.rec.PhaseReason) {
 			live++
 		}
-		if kind := unprotectedKind(b); kind != "" {
-			u := sandboxapi.UnprotectedSandbox{Name: b.rec.Name, Phase: string(b.phase), Stop: legacyStopCommand(b.rec.Name, b.phase)}
-			if kind == sandboxapi.UnprotectedContained {
+		if kind, phase := unprotectedKind(b, here); kind != "" {
+			u := sandboxapi.UnprotectedSandbox{Name: b.rec.Name, Phase: string(cmp.Or(phase, audit.SandboxPhaseUnknown))}
+			switch kind {
+			case sandboxapi.UnprotectedUnknown:
+				u.Reason, u.Detail = kind, unknownWhy(b, here)
+			case sandboxapi.UnprotectedContained:
 				u.Reason = kind
+				fallthrough
+			default:
+				u.Stop = legacyStopCommand(b.rec.Name, phase)
+				if !atConnectedPlace(b, here) {
+					u.Detail = unprotectedWayOn(b, here, kind, phase)
+				}
 			}
 			st.Unprotected = append(st.Unprotected, u)
 		}
@@ -598,13 +611,26 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 	name := b.rec.Name
 	m.mu.Unlock()
 	sb, err := gw.Client.GetSandbox(ctx, name)
-	if err != nil || !m.sameSandbox(b, sb) {
+	if err == nil && !m.sameSandbox(b, sb) {
 		return
 	}
-	m.mu.Lock()
-	b.sb = sb
-	m.mu.Unlock()
-	if phase := auditPhase(sb.Status.Phase); phase != pending && phase != audit.SandboxPhaseUnknown {
+	phase := audit.SandboxPhaseUnknown
+	if err == nil {
+		m.mu.Lock()
+		b.sb = sb
+		m.mu.Unlock()
+		phase = auditPhase(sb.Status.Phase)
+	}
+	if phase == audit.SandboxPhaseUnknown && pending == audit.SandboxPhaseDeleting {
+		// OpenShell refused the delete and does not say what it left: the
+		// VM may run as before. Its phase is unknown, which holds its
+		// compute, not DefenseClaw's own deleting, which does not: a stop
+		// would skip its sync, and the status would count it idle for the
+		// gateway's stop (GAP-1084).
+		m.lifecycle(ctx, b, audit.SandboxPhaseUnknown, trigger, false, nil, nil)
+		return
+	}
+	if phase != pending && phase != audit.SandboxPhaseUnknown {
 		// A failing condition explains an error phase (statusEvent), which
 		// the status then names (GAP-0297).
 		var cond *audit.SandboxCondition
@@ -875,7 +901,7 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 	}
 	// No new session while a legacy guest runs unprotected; this one's
 	// start ends it when it is an ended legacy MicroVM (--end-vm).
-	if err := m.legacyRunRefusal(rec.Name); err != nil {
+	if err := m.legacyRunRefusal(ctx, rec.Name); err != nil {
 		return err
 	}
 	// Containment may have detached providers or removed rules before an

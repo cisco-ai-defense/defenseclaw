@@ -135,9 +135,11 @@ type Status struct {
 	Managed *ManagedStatus `json:"managed,omitempty"`
 	// Unprotected names every live legacy guest (Sandbox.OldSupervisor)
 	// and every contained one (UnprotectedContained), which run unprotected
-	// until their user ends them, with the command that does: the managed
-	// lifecycle's status and verify read it. Unset by a daemon before
-	// DefenseClaw 1.0.4, whose running sandboxes all are.
+	// until their user ends them, with the command that does, and every
+	// one that may be either whose gateway has not said whether it runs
+	// (UnprotectedUnknown): the managed lifecycle's status and verify read
+	// it. Unset by a daemon before DefenseClaw 1.0.4, whose running
+	// sandboxes all are.
 	Unprotected []UnprotectedSandbox `json:"unprotected,omitempty"`
 }
 
@@ -159,6 +161,17 @@ const ContainedUnprotected = "running unprotected: contained sandbox"
 // guest (ContainedUnprotected).
 const UnprotectedContained = "contained"
 
+// UnknownUnprotected opens every account of a guest that may be a live
+// legacy or a contained one, whose gateway has not said whether it runs:
+// one the gateway has not reported since the sandbox daemon started, or one
+// on another gateway that DefenseClaw could not read. DefenseClaw creates
+// and starts no sandbox until its gateway says.
+const UnknownUnprotected = "may be running unprotected: sandbox DefenseClaw cannot see"
+
+// UnprotectedUnknown is the UnprotectedSandbox.Reason of a guest whose
+// state DefenseClaw cannot see (UnknownUnprotected).
+const UnprotectedUnknown = "unknown"
+
 // UnprotectedSandbox is one entry of Status.Unprotected.
 type UnprotectedSandbox struct {
 	Name  string `json:"name"`
@@ -166,8 +179,13 @@ type UnprotectedSandbox struct {
 	// Stop is the command its user runs to end it.
 	Stop string `json:"stop"`
 	// Reason is why it is unprotected: "" for a live legacy guest
-	// (LegacyUnprotected), UnprotectedContained for a contained one.
+	// (LegacyUnprotected), UnprotectedContained for a contained one,
+	// UnprotectedUnknown for one whose gateway has not said (with no Stop).
 	Reason string `json:"reason,omitempty"`
+	// Detail is what its user does about it when Stop alone does not say:
+	// for an unknown guest, why DefenseClaw cannot see it and what to do;
+	// for one on another gateway, that DefenseClaw connects there first.
+	Detail string `json:"detail,omitempty"`
 }
 
 // Busy is how many sandboxes may hold compute (Live, and never fewer than

@@ -127,7 +127,7 @@ func TestEveryAccountNamesAContainedVMUntilOpenShellShowsItGone(t *testing.T) {
 	} {
 		b := &box{rec: c.rec, phase: c.box.phase, missing: c.box.missing, deleted: c.box.deleted, retained: c.box.retained,
 			creating: c.box.creating, elsewhere: c.box.elsewhere}
-		if got := unprotectedKind(b); got != c.want {
+		if got, _ := unprotectedKind(b, nil); got != c.want {
 			t.Errorf("%s: unprotectedKind = %q, want %q", c.name, got, c.want)
 		}
 	}
@@ -149,15 +149,28 @@ func TestEveryAccountNamesAContainedVMUntilOpenShellShowsItGone(t *testing.T) {
 		if _, err := e.m.Delete(t.Context(), "vmdel", sandboxapi.DeleteRequest{}); err == nil {
 			t.Fatal("the delete OpenShell refused succeeded")
 		}
+		// GAP-1084: the delete OpenShell refused leaves the VM as it was,
+		// in a phase DefenseClaw does not know, which holds its compute:
+		// not DefenseClaw's own deleting, which let a stop skip the sync
+		// and the status count it idle for the gateway's stop.
 		b := e.boxOf("vmdel")
 		e.m.mu.Lock()
 		phase := b.phase
 		e.m.mu.Unlock()
-		if phase != audit.SandboxPhaseDeleting {
-			t.Fatalf("the scenario was not reached: phase %q", phase)
+		if phase != audit.SandboxPhaseUnknown {
+			t.Fatalf("after a delete OpenShell refused and cannot be asked about: phase %q", phase)
 		}
 		e.fake.Intercept(nil)
-		wantNamedUnprotected(t, e, "vmdel", audit.SandboxPhaseDeleting, sandboxapi.UnprotectedContained, "stop")
+		wantNamedUnprotected(t, e, "vmdel", audit.SandboxPhaseUnknown, sandboxapi.UnprotectedContained, "stop")
+		if st, err := e.m.Status(t.Context()); err != nil || st.Live == nil || *st.Live != 1 {
+			t.Fatalf("its VM is not counted live: %+v, %v", st, err)
+		}
+		stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+		_, err := e.m.Stop(t.Context(), "vmdel")
+		wantCode(t, err, sandboxapi.CodeUnsynced)
+		if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+			t.Fatal("a stop ended it without the sync")
+		}
 	})
 
 	t.Run("missing from another gateway", func(t *testing.T) {
@@ -261,7 +274,7 @@ func unprotectedNames(t *testing.T, e *harnessEnv, b *box) (names []string, refu
 	name := b.rec.Name
 	v := e.m.view(b)
 	e.m.mu.Unlock()
-	if err := e.m.legacyRunRefusal(""); err != nil {
+	if err := e.m.legacyRunRefusal(t.Context(), ""); err != nil {
 		refused = strings.Contains(err.Error(), name)
 	}
 	for _, w := range v.Warnings {
