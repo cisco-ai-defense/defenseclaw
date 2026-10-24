@@ -281,6 +281,42 @@ func TestManagedAskDecisionsMissingGatewayRouteReachTelemetryOnce(t *testing.T) 
 	}
 }
 
+func TestManagedAskDecisionReadsIdentityUnderManagerLock(t *testing.T) {
+	e, _ := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "askbox"})
+	e.register("askbox")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.m.refreshEgress()
+	e.propose("askbox", "locked.example.org")
+	e.draft("askbox")
+	approvalID := e.waitAsks("askbox", 1)[0].ID
+
+	e.m.mu.Lock()
+	b, a := e.m.boxes["askbox"], e.m.approvals[approvalID]
+	started, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(started)
+		e.m.recordManagedAskDecision(t.Context(), b, a, "")
+		close(finished)
+	}()
+	<-started
+	returnedWhileLocked := false
+	select {
+	case <-finished:
+		returnedWhileLocked = true
+	case <-time.After(250 * time.Millisecond):
+	}
+	e.m.mu.Unlock()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("managed ask decision did not finish after the manager lock was released")
+	}
+	if returnedWhileLocked {
+		t.Fatal("managed ask decision read the box identity without the manager lock")
+	}
+}
+
 // Re-resolving one sandbox must use its registration's floor, even while a
 // second sandbox in the same account has a different floor in force.
 func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {

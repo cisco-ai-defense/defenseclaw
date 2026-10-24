@@ -732,8 +732,11 @@ func (m *Manager) recordManagedAskDecision(ctx context.Context, b *box, a *appro
 	if m.authority() == nil {
 		return
 	}
+	m.mu.Lock()
+	identity := b.identity()
+	m.mu.Unlock()
 	m.tel.RecordManagedAskDecision(ctx, audit.SandboxAskDecidedEvent{
-		Sandbox: b.identity(), ApprovalID: a.id, Kind: audit.SandboxApprovalKind(a.decision.Kind),
+		Sandbox: identity, ApprovalID: a.id, Kind: audit.SandboxApprovalKind(a.decision.Kind),
 		Host: a.decision.Host, Port: a.decision.Port, Result: audit.SandboxApprovalDenied,
 		Reason: reason, Timestamp: m.now(),
 	})
