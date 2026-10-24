@@ -155,7 +155,7 @@ func (m *Manager) List(ctx context.Context) ([]sandboxapi.Sandbox, error) {
 			m.mu.Lock()
 			for _, sb := range sbs {
 				if b := m.boxes[sb.Name]; b != nil && !b.creating && !b.retained && m.sameSandboxLocked(b, sb) {
-					b.sb, b.missing = sb, false
+					foundOnLocked(b, gw, sb)
 				}
 			}
 			m.mu.Unlock()
@@ -203,14 +203,16 @@ func (m *Manager) Get(ctx context.Context, name string) (*sandboxapi.Sandbox, er
 	if gw, err := m.gateway(ctx); err == nil && !retained {
 		sb, err := gw.Client.GetSandbox(ctx, name)
 		m.mu.Lock()
+		report := func(context.Context) {}
 		switch {
 		case err == nil && !b.creating && m.sameSandboxLocked(b, sb):
-			b.sb, b.missing = sb, false
+			foundOnLocked(b, gw, sb)
 		case (err == nil || openshell.IsNotFound(err)) && !b.creating:
-			// Gone, or another sandbox took the name.
-			b.missing = true
+			// Gone from gw, or another sandbox took the name there.
+			report = m.missingFromLocked(gw, b)
 		}
 		m.mu.Unlock()
+		report(ctx)
 		live = err == nil || openshell.IsNotFound(err)
 		if !live {
 			m.dropGateway(gw, err)
@@ -628,12 +630,14 @@ func (m *Manager) checkSandbox(ctx context.Context, gw *Gateway, b *box) error {
 		return upstream("look up sandbox "+name, err)
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if !m.sameSandboxLocked(b, sb) {
-		b.missing = true
+		report := m.missingFromLocked(gw, b)
+		m.mu.Unlock()
+		report(ctx)
 		return errReplaced(name)
 	}
-	b.sb, b.missing = sb, false
+	foundOnLocked(b, gw, sb)
+	m.mu.Unlock()
 	return nil
 }
 
@@ -1680,8 +1684,9 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 			case err == nil:
 				// Another sandbox took the name: this one's agent is gone.
 				m.mu.Lock()
-				b.missing = true
+				report := m.missingFromLocked(gw, b)
 				m.mu.Unlock()
+				report(ctx)
 			case !openshell.IsNotFound(err):
 				if !req.Preview {
 					return nil, upstream("look up sandbox "+name, err)

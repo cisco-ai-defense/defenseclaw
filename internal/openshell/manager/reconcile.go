@@ -732,43 +732,67 @@ func (m *Manager) reconcileOne(ctx context.Context, name string) {
 	}
 }
 
-// gatewayElsewhere reports a sandbox created on another gateway
-// registration, endpoint or workspace than gw's: DefenseClaw followed the
-// CLI's active gateway to another one, say, or openshell.gateway changed.
-// Not finding it on gw proves nothing then, and releasing it would revoke
-// the binding and drop the snapshot of a sandbox that may still run. It is
-// marked missing and reported (once per place) instead. So is a sandbox
-// created on another compute driver than gw runs now: the gateway was
-// switched (docker to vm, say), and releasing it would also drop its staged
-// copy, while its unpulled work is still in the sandbox the other driver
-// keeps.
+// gatewayElsewhere marks b missing from gw, which has nothing of it (it
+// is not found there, or another sandbox has its name), and reports a
+// sandbox created on another gateway registration, endpoint or workspace
+// than gw's: DefenseClaw followed the CLI's active gateway to another one,
+// say, or openshell.gateway changed. Not finding it on gw proves nothing
+// then, and releasing it would revoke the binding and drop the snapshot of
+// a sandbox that may still run. It is reported (once per place) instead.
+// So is a sandbox created on another compute driver than gw runs now: the
+// gateway was switched (docker to vm, say), and releasing it would also
+// drop its staged copy, while its unpulled work is still in the sandbox
+// the other driver keeps.
 func (m *Manager) gatewayElsewhere(ctx context.Context, gw *Gateway, b *box) bool {
 	m.mu.Lock()
-	rec := b.rec
+	report := m.missingFromLocked(gw, b)
+	elsewhere := b.elsewhere != ""
 	m.mu.Unlock()
+	report(ctx)
+	return elsewhere
+}
+
+// missingFromLocked marks b missing from gw, whose lookup has nothing of it
+// (not found, or another sandbox under its name), and sets where it was
+// created (elsewhere, otherDriver) in the same step. Whether a missing
+// sandbox is released depends on that (unprotectedKind): a lookup on
+// another gateway than its own must not release a guest that may still
+// run there, and one on its own gateway must not keep it on a place an
+// earlier lookup elsewhere left. Every lookup that finds a sandbox missing
+// comes here; one that finds it comes to foundOnLocked. It returns the
+// report of a new place (gatewayElsewhere), to make once m.mu is released.
+// The caller holds m.mu.
+func (m *Manager) missingFromLocked(gw *Gateway, b *box) func(context.Context) {
+	rec := b.rec
 	where := gatewayMismatch(rec, gw)
 	otherDriver := where != "" && samePlace(rec, gw)
-	m.mu.Lock()
 	changed := b.elsewhere != where
-	b.elsewhere, b.otherDriver = where, otherDriver
-	if where != "" {
-		b.missing = true
+	b.missing, b.elsewhere, b.otherDriver = true, where, otherDriver
+	if where == "" || !changed {
+		return func(context.Context) {}
 	}
 	id := b.identity()
-	m.mu.Unlock()
-	if where == "" || !changed {
-		return where != ""
-	}
 	msg := "sandbox " + rec.Name + " was created on " + where + ", but DefenseClaw is connected to " +
 		gatewayPlace(gw.Name, gw.Endpoint, gw.Client.Workspace()) + "; it is not released while DefenseClaw is connected elsewhere"
 	if otherDriver {
 		msg = "sandbox " + rec.Name + " was created on " + where + "; it runs " + string(gw.Driver.Name) +
 			" now, and one gateway runs one driver: the sandbox is not released while the gateway runs another driver"
 	}
-	m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
-	m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
-		ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
-	return true
+	return func(ctx context.Context) {
+		m.logf("%s: %s", gatewaylog.ErrCodeOpenShellUnavailable, msg)
+		m.tel.RecordSandboxHealth(ctx, audit.SandboxHealthEvent{Sandbox: id, State: audit.SandboxHealthDegraded,
+			ErrorCode: errorToken(gatewaylog.ErrCodeOpenShellUnavailable), ErrorSummary: truncate(msg, 512), Timestamp: m.now()})
+	}
+}
+
+// foundOnLocked records sb, which a lookup on gw found as b's sandbox
+// (sameSandboxLocked): b is not missing, and it lives on gw's place, so
+// only a compute driver gw no longer runs is still reported (elsewhere,
+// otherDriver). The caller holds m.mu.
+func foundOnLocked(b *box, gw *Gateway, sb *openshell.Sandbox) {
+	b.sb, b.missing = sb, false
+	b.elsewhere = gatewayMismatch(record{Driver: b.rec.Driver}, gw)
+	b.otherDriver = b.elsewhere != ""
 }
 
 // gatewayMismatch describes where rec's sandbox was created when that is
@@ -816,8 +840,7 @@ func (m *Manager) noteGateway(b *box, gw *Gateway) bool {
 	ws := gw.Client.Workspace()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	b.elsewhere = gatewayMismatch(record{Driver: b.rec.Driver}, gw)
-	b.otherDriver = b.elsewhere != ""
+	foundOnLocked(b, gw, b.sb)
 	if b.rec.Gateway == gw.Name && b.rec.GatewayEndpoint == gw.Endpoint && b.rec.GatewayWorkspace == ws {
 		return false
 	}

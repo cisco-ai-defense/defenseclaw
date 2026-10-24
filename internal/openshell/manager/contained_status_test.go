@@ -20,9 +20,11 @@ package manager
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
@@ -233,5 +235,111 @@ func TestAStopOfAMicroVMThatIsNotReadySyncsItFirst(t *testing.T) {
 			e.fake.HandleExec(e.workloadChecks(nil, nil))
 			e.stopBox("vmc")
 		})
+	}
+}
+
+// awayGateway is a gateway other than e's own (another registration and
+// endpoint) running the same driver, and the fake behind it.
+func awayGateway(e *harnessEnv) (*Gateway, *openshelltest.Fake) {
+	other := openshelltest.New(openshelltest.WithDriver(e.gw.Driver.Name))
+	away := *e.gw
+	away.Client = other.Client(openshell.ClientOptions{PollInterval: time.Millisecond})
+	away.Name, away.Endpoint, away.Port = "other", "https://127.0.0.1:27670", 27670
+	return &away, other
+}
+
+// unprotectedNames is who the status names unprotected, and whether the
+// run refusal and b's view name the contained guest b too.
+func unprotectedNames(t *testing.T, e *harnessEnv, b *box) (names []string, refused, warned bool) {
+	t.Helper()
+	st, err := e.m.Status(t.Context())
+	must(t, err)
+	for _, u := range st.Unprotected {
+		names = append(names, u.Name)
+	}
+	e.m.mu.Lock()
+	name := b.rec.Name
+	v := e.m.view(b)
+	e.m.mu.Unlock()
+	if err := e.m.legacyRunRefusal(""); err != nil {
+		refused = strings.Contains(err.Error(), name)
+	}
+	for _, w := range v.Warnings {
+		warned = warned || strings.HasPrefix(w, containedUnprotected)
+	}
+	return names, refused, warned
+}
+
+// G-openshell review (loop round 2): a lookup that found a contained VM
+// missing marked it so without saying which gateway had not found it.
+// Asked on another gateway than its own (a get, or a stop that found
+// another sandbox under its name there), it was released from the status,
+// the run refusal and its view while it may still run on its own gateway;
+// asked on its own gateway after a pass elsewhere, the place that pass had
+// left kept it named, and every new run refused, though that gateway says
+// it is gone (and warned it lives elsewhere once found there again). Every
+// lookup now sets where the sandbox was created with missing, and one that
+// finds it sets its place too.
+func TestALookupOnAnotherGatewayNeitherHidesNorKeepsAContainedVM(t *testing.T) {
+	const name = "vmaway"
+	get := func(e *harnessEnv) { _, _ = e.m.Get(e.t.Context(), name) }
+	for _, away := range []struct {
+		name     string
+		replaced bool // the other gateway has another sandbox under the name
+		look     func(e *harnessEnv)
+	}{
+		{"get", false, get},
+		{"get of a name another sandbox has there", true, get},
+		{"stop of a name another sandbox has there", true, func(e *harnessEnv) { _, _ = e.m.Stop(e.t.Context(), name) }},
+		{"reconcile", false, func(e *harnessEnv) { _ = e.m.Reconcile(e.t.Context()) }},
+	} {
+		for _, home := range []string{"gone there", "still there"} {
+			t.Run(away.name+", then back where it is "+home, func(t *testing.T) {
+				e := newVMEnv(t, nil)
+				b := containedVM(t, e, name)
+				own := e.gw
+				gw, other := awayGateway(e)
+				if away.replaced {
+					_, err := other.SDK().Sandboxes().Create(t.Context(), openshell.DefaultWorkspace, name, &types.SandboxSpec{}, nil)
+					must(t, err)
+				}
+				switchGateway(t, e, gw)
+				away.look(e)
+				e.m.mu.Lock()
+				missing := b.missing
+				e.m.mu.Unlock()
+				if !missing {
+					t.Fatal("the scenario was not reached: the lookup elsewhere did not find it missing")
+				}
+				if names, refused, warned := unprotectedNames(t, e, b); !slices.Equal(names, []string{name}) || !refused || !warned {
+					t.Fatalf("missing from another gateway than its own: unprotected %q, run refused %v, view warns %v", names, refused, warned)
+				}
+
+				if home == "gone there" {
+					_, err := e.fake.Client(openshell.ClientOptions{PollInterval: time.Millisecond}).DeleteSandbox(t.Context(), name)
+					must(t, err)
+				}
+				switchGateway(t, e, own)
+				get(e)
+				names, refused, warned := unprotectedNames(t, e, b)
+				e.m.mu.Lock()
+				v := e.m.view(b)
+				e.m.mu.Unlock()
+				if home == "gone there" {
+					if len(names) != 0 || refused {
+						t.Fatalf("its own gateway says it is gone, yet: unprotected %q, run refused %v", names, refused)
+					}
+					return
+				}
+				if !slices.Equal(names, []string{name}) || !refused || !warned || v.Phase != string(audit.SandboxPhaseReady) {
+					t.Fatalf("found running on its own gateway: unprotected %q, run refused %v, view warns %v, phase %q", names, refused, warned, v.Phase)
+				}
+				for _, w := range v.Warnings {
+					if strings.Contains(w, "not the gateway DefenseClaw is connected to") {
+						t.Fatalf("found on its own gateway, the view still says it lives elsewhere: %q", w)
+					}
+				}
+			})
+		}
 	}
 }
