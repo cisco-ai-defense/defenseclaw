@@ -237,6 +237,9 @@ func actionResolvedProtectedTarget(command, cwd, home string) bool {
 		if actionOnlyReadOnlyCommands(file, home) {
 			return false
 		}
+		if actionScriptArgumentsAreData(file, cwd, home) {
+			return false
+		}
 	}
 	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, match := range unprovenPathToken.FindAllString(text, 513) {
@@ -303,6 +306,100 @@ func actionOnlyReadOnlyCommands(file *syntax.File, home string) bool {
 		return readOnly
 	})
 	return seen && readOnly
+}
+
+// A script's trailing argv is data until its body proves a write. Seeing a
+// protected pathname there does not turn an interpreter parse reason into a
+// resolved write target.
+func actionScriptArgumentsAreData(file *syntax.File, cwd, home string) bool {
+	if len(file.Stmts) != 1 {
+		return false
+	}
+	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) < 2 || len(file.Stmts[0].Redirs) != 0 {
+		return false
+	}
+	program, fixed := staticProgramWord(call.Args[0], home)
+	if !fixed {
+		return false
+	}
+	base, kind, script, scriptIndex := programBase(program), "", program, 0
+	switch filepath.Ext(base) {
+	case ".sh", ".bash", ".dash", ".zsh", ".ksh":
+		kind = "shell"
+	case ".py":
+		kind = "python"
+	case ".js", ".mjs", ".cjs":
+		kind = "node"
+	case ".rb":
+		kind = "ruby"
+	case ".pl":
+		kind = "perl"
+	default:
+		switch base {
+		case "sh", "bash", "dash", "zsh", "ksh", "mksh":
+			kind = "shell"
+		case "python", "python3":
+			kind = "python"
+		case "node", "nodejs":
+			kind = "node"
+		case "ruby", "perl":
+			kind = base
+		default:
+			return false
+		}
+		if len(call.Args) < 3 {
+			return false
+		}
+		scriptIndex = 1
+	findScript:
+		for scriptIndex < len(call.Args)-1 {
+			option, known := StaticWord(call.Args[scriptIndex], home)
+			if !known {
+				return false
+			}
+			switch option {
+			case "--":
+				scriptIndex++
+				continue
+			case "-u", "-B", "-E", "-I", "-O", "-OO":
+				scriptIndex++
+				continue
+			case "-e", "-eu":
+				if kind != "shell" {
+					return false
+				}
+				scriptIndex++
+				continue
+			case "-c", "-m", "-s":
+				return false
+			}
+			if strings.HasPrefix(option, "-") {
+				return false
+			}
+			script = option
+			break findScript
+		}
+	}
+	if scriptIndex >= len(call.Args)-1 {
+		return false
+	}
+	if content, read := readIndirectSource(script, cwd); read {
+		if kind == "shell" {
+			if shellBodyProtectedWrite(content, cwd, home) {
+				return false
+			}
+		} else {
+			protected := newProtectedFiles(home)
+			ssh := filepath.Join(home, ".ssh")
+			for _, target := range literalInterpreterWrites(content, kind, cwd, home) {
+				if protectedReachPath(OperandPath(target, cwd), protected, ssh) {
+					return false
+				}
+			}
+		}
+	}
+	return true
 }
 
 // "[" is a literal shell test builtin in program position. StaticWord

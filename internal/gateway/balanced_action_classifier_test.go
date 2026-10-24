@@ -127,6 +127,40 @@ func TestBalancedActionWindowsOrdinaryCommands(t *testing.T) {
 	}
 }
 
+func TestBalancedActionScriptArgumentsAreData(t *testing.T) {
+	home, cwd := r104ReviewHome(t)
+	for name, body := range map[string]string{
+		"build.sh": "printf ok > report.txt\n",
+		"build.py": "print('ok')\n",
+		"write.sh": "printf marker >> ~/.ssh/authorized_keys\n",
+	} {
+		if err := os.WriteFile(filepath.Join(cwd, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keyPath := filepath.Join(home, ".ssh", "authorized_keys")
+	for _, command := range []string{
+		"python build.py " + keyPath,
+		"python -u build.py " + keyPath,
+		"bash build.sh " + keyPath,
+		"./build.sh " + keyPath,
+		"source build.sh " + keyPath,
+	} {
+		t.Run(command, func(t *testing.T) {
+			for route, denied := range r104ReviewProtectedWrite(t, command, cwd, home) {
+				if denied {
+					t.Fatalf("route %d claimed a script's data argument as a write target", route)
+				}
+			}
+		})
+	}
+	for route, denied := range r104ReviewProtectedWrite(t, "bash write.sh "+keyPath, cwd, home) {
+		if !denied {
+			t.Fatalf("route %d missed the script body's protected write", route)
+		}
+	}
+}
+
 func TestBalancedActionSelectedMakeRecipes(t *testing.T) {
 	home, cwd := r104ReviewHome(t)
 	write := func(name, content string) {
