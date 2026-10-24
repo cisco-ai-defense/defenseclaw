@@ -117,4 +117,25 @@ func TestOpenWindowsPrivateWalkDirRejectsReparseAncestors(t *testing.T) {
 			t.Errorf("opened a directory through reparse path %s", dir)
 		}
 	}
+	// A substituted drive has no reparse attribute on its directory handle.
+	// The handle's final path must still match the local drive path we opened.
+	var mappedDrive string
+	for letter := 'Z'; letter >= 'P'; letter-- {
+		candidate := string(letter) + ":"
+		if err := exec.Command("subst", candidate, outside).Run(); err == nil {
+			mappedDrive = candidate
+			break
+		}
+	}
+	if mappedDrive == "" {
+		t.Skip("no free drive letter for substituted-drive check")
+	}
+	t.Cleanup(func() { _ = exec.Command("subst", mappedDrive, "/D").Run() })
+	file, err := openWindowsPrivateWalkDir(filepath.Join(mappedDrive+`\`, "nested"))
+	if file != nil {
+		_ = file.Close()
+	}
+	if err == nil {
+		t.Fatal("opened a directory through a substituted drive")
+	}
 }

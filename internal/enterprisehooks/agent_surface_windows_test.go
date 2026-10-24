@@ -159,13 +159,13 @@ func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
 	previousReadAs := windowsSurfaceReadAs
 	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
 	t.Cleanup(func() { windowsSurfaceReadAs = previousReadAs })
-	if surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode"); err != nil || len(surfaces) != 1 {
+	if surfaces, _, err := discoverWindowsAgentSurfaces(sid, home, "claudecode"); err != nil || len(surfaces) != 1 {
 		t.Fatalf("exactly %d entries: surfaces=%+v error=%v", windowsSurfaceMaxEntries, surfaces, err)
 	}
 	if err := os.Mkdir(filepath.Join(root, "one-more"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode"); err == nil {
+	if surfaces, _, err := discoverWindowsAgentSurfaces(sid, home, "claudecode"); err == nil {
 		t.Fatalf("overflow produced no incomplete error: %+v", surfaces)
 	}
 	var reported []UnprotectedAgent
@@ -175,9 +175,118 @@ func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
 	if len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
 		t.Fatalf("overflow must make signed-in coverage incomplete: %+v", reported)
 	}
+	// An incomplete root cannot enroll its visible extension, but a complete
+	// sibling root must still be inspected and can enroll its own surface.
 	reported = nil
 	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); got != "" || len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
-		t.Fatalf("only an overflowing root must not enroll a surface-only row: version=%q reported=%+v", got, reported)
+		t.Fatalf("overflow-only row: version=%q reported=%+v", got, reported)
+	}
+	old := filepath.Join(home, ".cursor", "extensions", "anthropic.claude-code-2.1.100-win32-x64")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	surfaces, _, err := discoverWindowsAgentSurfaces(sid, home, "claudecode")
+	oldObserved := false
+	for _, surface := range surfaces {
+		oldObserved = oldObserved || surface.Path == old
+	}
+	if err == nil || !oldObserved {
+		t.Fatalf("overflow and complete sibling: surfaces=%+v error=%v", surfaces, err)
+	}
+	reported = nil
+	_ = windowsStandaloneSurfaceVersion(row, nil, ctx, "2.1.300")
+	var incomplete, oldSurface bool
+	for _, agent := range reported {
+		incomplete = incomplete || agent.Code == UnprotectedCodeInstallScanIncomplete
+		oldSurface = oldSurface || agent.Code == UnprotectedCodeSurfaceUnverified && agent.Version == "2.1.100"
+	}
+	if !incomplete || !oldSurface {
+		t.Fatalf("want overflow and old sibling findings: %+v", reported)
+	}
+	known := filepath.Join(home, ".cursor", "extensions", "anthropic.claude-code-2.1.220-win32-x64")
+	if err := os.Mkdir(known, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reported = nil
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); got != "2.1.220" || len(reported) == 0 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("complete sibling row: version=%q reported=%+v", got, reported)
+	}
+}
+
+func TestWindowsClaudeDesktopVersionOverflowIsIncomplete(t *testing.T) {
+	home := t.TempDir()
+	versions := filepath.Join(home, "AppData", "Roaming", "Claude", "claude-code")
+	if err := os.MkdirAll(versions, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < windowsSurfaceMaxEntries; i++ {
+		if err := os.Mkdir(filepath.Join(versions, fmt.Sprintf("2.1.%04d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const sid = "S-1-5-21-1-2-3-1001"
+	previousReadAs := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previousReadAs })
+	if observed, complete, err := discoverWindowsAgentSurfaces(sid, home, "claudecode"); err != nil || len(observed) != 1 || len(complete) != 1 {
+		t.Fatalf("exactly %d version folders: observed=%+v complete=%+v err=%v", windowsSurfaceMaxEntries, observed, complete, err)
+	}
+	if err := os.Mkdir(filepath.Join(versions, "9.0.0"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	observed, complete, err := discoverWindowsAgentSurfaces(sid, home, "claudecode")
+	if err == nil || len(observed) != 1 || len(complete) != 0 {
+		t.Fatalf("overflow must keep a partial observation but no complete surface: observed=%+v complete=%+v err=%v", observed, complete, err)
+	}
+	var reported []UnprotectedAgent
+	row := &ManifestTarget{SID: sid, UserHome: home, Connector: "claudecode"}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+	if version := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); version != "" || len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("overflow-only row version=%q reported=%+v", version, reported)
+	}
+}
+
+func TestWindowsCodexAppPackageOverflowIsIncomplete(t *testing.T) {
+	home, programFiles := t.TempDir(), t.TempDir()
+	app := filepath.Join(home, "AppData", "Local", "Packages", "OpenAI.Codex_test")
+	packages := filepath.Join(programFiles, "WindowsApps")
+	for _, dir := range []string{app, packages} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < windowsSurfaceMaxEntries; i++ {
+		if err := os.Mkdir(filepath.Join(packages, fmt.Sprintf("OpenAI.Codex_1.0.%04d_x64__test", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const sid = "S-1-5-21-1-2-3-1001"
+	previousReadAs, previousProgramFiles := windowsSurfaceReadAs, windowsSurfaceTrustedProgramFiles
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	windowsSurfaceTrustedProgramFiles = func() (string, error) { return programFiles, nil }
+	t.Cleanup(func() {
+		windowsSurfaceReadAs, windowsSurfaceTrustedProgramFiles = previousReadAs, previousProgramFiles
+	})
+	if observed, complete, err := discoverWindowsAgentSurfaces(sid, home, "codex"); err != nil || len(observed) != 1 || len(complete) != 1 {
+		t.Fatalf("exactly %d package folders: observed=%+v complete=%+v err=%v", windowsSurfaceMaxEntries, observed, complete, err)
+	}
+	if err := os.Mkdir(filepath.Join(packages, "OpenAI.Codex_9.0.0_x64__test"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	observed, complete, err := discoverWindowsAgentSurfaces(sid, home, "codex")
+	if err == nil || len(observed) != 1 || len(complete) != 0 {
+		t.Fatalf("overflow must keep a partial observation but no complete surface: observed=%+v complete=%+v err=%v", observed, complete, err)
+	}
+	var reported []UnprotectedAgent
+	row := &ManifestTarget{SID: sid, UserHome: home, Connector: "codex"}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+	_ = windowsStandaloneSurfaceVersion(row, nil, ctx, "")
+	incomplete := false
+	for _, agent := range reported {
+		incomplete = incomplete || agent.Code == UnprotectedCodeInstallScanIncomplete
+	}
+	if !incomplete {
+		t.Fatalf("overflow-only Codex app did not report incomplete coverage: %+v", reported)
 	}
 }
 
@@ -200,7 +309,7 @@ func TestWindowsOverflowKeepsOtherExtensionRoots(t *testing.T) {
 	previous := windowsSurfaceReadAs
 	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
 	t.Cleanup(func() { windowsSurfaceReadAs = previous })
-	surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode")
+	surfaces, _, err := discoverWindowsAgentSurfaces(sid, home, "claudecode")
 	if err == nil || !strings.Contains(err.Error(), large) {
 		t.Fatalf("overflow error = %v, want %s", err, large)
 	}

@@ -210,7 +210,45 @@ func openWindowsPrivateWalkDir(dir string) (*os.File, error) {
 		_ = windows.CloseHandle(handle)
 		return nil, errPrivateWalkReparse
 	}
+	// A substituted or remapped drive can resolve to a different path without
+	// leaving a reparse attribute on the directory handle. Verify the handle
+	// we will list, rather than trusting the spelling used to open it.
+	finalPath, err := windowsPrivateWalkHandlePath(handle)
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	if !strings.EqualFold(filepath.Clean(finalPath), filepath.Clean(`\\?\`+absolute)) {
+		_ = windows.CloseHandle(handle)
+		return nil, errPrivateWalkReparse
+	}
 	return os.NewFile(uintptr(handle), absolute), nil
+}
+
+func windowsPrivateWalkHandlePath(handle windows.Handle) (string, error) {
+	var small [512]uint16
+	n, err := windows.GetFinalPathNameByHandle(handle, &small[0], uint32(len(small)), 0)
+	if err != nil {
+		return "", err
+	}
+	if n == 0 {
+		return "", errPrivateWalkReparse
+	}
+	if n < uint32(len(small)) {
+		return windows.UTF16ToString(small[:n]), nil
+	}
+	if n >= 32768 {
+		return "", errPrivateWalkReparse
+	}
+	large := make([]uint16, n+1)
+	n, err = windows.GetFinalPathNameByHandle(handle, &large[0], uint32(len(large)), 0)
+	if err != nil {
+		return "", err
+	}
+	if n == 0 || n >= uint32(len(large)) {
+		return "", errPrivateWalkReparse
+	}
+	return windows.UTF16ToString(large[:n]), nil
 }
 
 // windowsCopyIdentity names one copy: the scan refuses reparse points, so
