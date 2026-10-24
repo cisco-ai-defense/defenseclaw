@@ -215,7 +215,6 @@ func TestManagementContractWindowsSecretEveryVerbAndFailure(t *testing.T) {
 		return map[string]outcome{"set": o, "remove": o, "status": o}
 	}
 	listing := outcome{}
-	unreadable := errors.New("the standalone deployment record cannot be read")
 	for _, class := range []struct {
 		name  string
 		args  func(verb string) []string
@@ -257,8 +256,14 @@ func TestManagementContractWindowsSecretEveryVerbAndFailure(t *testing.T) {
 			want: map[string]outcome{"set": {"lifecycle_busy", enterprisestatus.WindowsExitBusy}, "remove": {"lifecycle_busy", enterprisestatus.WindowsExitBusy}, "status": listing}},
 		{name: "corrupt deployment",
 			setup: func(*testing.T, *windowsSecretLockEvents, managed.StandaloneLayout) {
-				windowsSecretLayout = func() (managed.StandaloneLayout, error) { return managed.StandaloneLayout{}, unreadable }
-				windowsSecretDeploymentInstalled = func() (bool, error) { return false, unreadable }
+				// Each path lookup makes a new error in production. A stable
+				// sentinel would hide duplicate stderr after the JSON refusal.
+				windowsSecretLayout = func() (managed.StandaloneLayout, error) {
+					return managed.StandaloneLayout{}, errors.New("the standalone deployment record cannot be read")
+				}
+				windowsSecretDeploymentInstalled = func() (bool, error) {
+					return false, errors.New("the standalone deployment record cannot be read")
+				}
 			},
 			want: every(outcome{"state_invalid", windowsSecretExitFailure})},
 		{name: "corrupt store",
