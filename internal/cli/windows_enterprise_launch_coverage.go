@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const windowsManagedLaunchUninspected = "managed_launch_uninspected"
@@ -157,9 +159,17 @@ func postWindowsManagedCoverageAlert(source, summary string, details map[string]
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
-	client := &http.Client{Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}, CheckRedirect: func(*http.Request, []*http.Request) error {
-		return http.ErrUseLastResponse
-	}}
+	// The administrator's token, the account and the install path go only
+	// to the gateway service's own socket: another account that holds the
+	// port while the service is down receives nothing (GAP-0962 class).
+	target, err := url.Parse(base)
+	if err != nil || target.Scheme != "http" || target.User != nil || target.Path != "" {
+		return errors.New("managed gateway audit endpoint is invalid")
+	}
+	client, err := managedGatewayClientFactory(2*time.Second, target.Host, managed.StandaloneWindowsGatewaySvc)
+	if err != nil {
+		return err
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		return err
