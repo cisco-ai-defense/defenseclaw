@@ -700,6 +700,12 @@ func reconcileConnectorRuntime(
 	every bool,
 	done func(connector.Connector, connector.SetupOpts) error,
 ) error {
+	// A command run outside cobra (tests, --every-connector helpers) has no
+	// context; Codex policy inspection derives a timeout from it (GAP-1282).
+	ctx := cmd.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if name == "codex" && connectorFlagConfigHome == "" {
 		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
 	}
@@ -793,15 +799,15 @@ func reconcileConnectorRuntime(
 				return fmt.Errorf("connector reconcile opencode: capture contract-lock rollback point: %w", err)
 			}
 		}
-		if err := reconcileOpenCodeRegistration(cmd.Context(), dataDir, conn, opts, lockSnapshot, previous, tokenCreated); err != nil {
+		if err := reconcileOpenCodeRegistration(ctx, dataDir, conn, opts, lockSnapshot, previous, tokenCreated); err != nil {
 			return fmt.Errorf("connector reconcile opencode: %w", err)
 		}
 	} else if name == "amp" && runtime.GOOS == "windows" {
-		if err := reconcileAmpRegistration(cmd.Context(), dataDir, conn, opts, tokenCreated); err != nil {
+		if err := reconcileAmpRegistration(ctx, dataDir, conn, opts, tokenCreated); err != nil {
 			return fmt.Errorf("connector reconcile amp: %w", err)
 		}
 	} else {
-		if err := connector.SetupRecordingCreatedDirs(cmd.Context(), conn, opts); err != nil {
+		if err := connector.SetupRecordingCreatedDirs(ctx, conn, opts); err != nil {
 			return fmt.Errorf("connector reconcile %s: %w", name, err)
 		}
 		entry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
