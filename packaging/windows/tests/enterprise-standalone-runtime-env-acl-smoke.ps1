@@ -1,9 +1,12 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-param([Parameter(Mandatory)][string]$ModulePath)
+param([string]$ModulePath)
 
 $ErrorActionPreference = 'Stop'
+if (-not $ModulePath) {
+    $ModulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1'))
+}
 $source = [IO.File]::ReadAllText($ModulePath)
 $begin = $source.IndexOf('function Set-DefenseClawManagedAcls {', [StringComparison]::Ordinal)
 $end = $source.IndexOf('function Set-DefenseClawRetainedRuntimeAcls {', $begin, [StringComparison]::Ordinal)
@@ -80,7 +83,7 @@ try {
     if (@($script:Calls | Where-Object { $_.Path -ceq $envPath }).Count -ne 0) {
         throw 'Secure Client runtime .env was changed by standalone repair'
     }
-    Write-Output 'runtime .env ACL repair: PASS'
+    Write-Output 'enterprise-standalone-runtime-env-acl-smoke: OK'
 }
 finally {
     [IO.Directory]::Delete($root, $true)
