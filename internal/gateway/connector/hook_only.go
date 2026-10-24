@@ -4270,7 +4270,10 @@ func validateHermesSingleProfile(configPath string) error {
 // HERMES_HOME; Hermes's own metadata (the .deleted 'hermes profile delete'
 // can leave, other dot directories) and any other name are never a profile.
 // The name is lowercased first: on a case-insensitive file system
-// 'hermes -p coder' opens profiles/Coder.
+// 'hermes -p coder' opens profiles/Coder. The Python CLI's preflight
+// (hermes_profile_entry_name in cli/defenseclaw/connector_paths.py) applies
+// the same rule; testdata/hermes_profile_names.json holds the cases both
+// are tested against.
 func hermesProfileEntryName(name string) bool {
 	id, newline := strings.CutSuffix(strings.ToLower(name), "\n")
 	if (id == "default" && !newline) || len(id) == 0 || len(id) > 64 {

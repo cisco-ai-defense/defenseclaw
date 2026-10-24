@@ -69,8 +69,8 @@ func TestHermesWhoseTUISkipsShellHooksIsKnownBrokenOnTheHost(t *testing.T) {
 	if got := ResolveHookContract("hermes", "0.18.2"); got.KnownBroken || got.Status != HookCompatibilityUnknown {
 		t.Errorf("Hermes 0.18.2 = %+v, want below the floor, not known broken", got)
 	}
-	// The OpenShell image pins Hermes 0.19.0; its own TUI limit (GAP-1036) is
-	// documented there and not refused here.
+	// The OpenShell image pins Hermes 0.19.0; its launcher and shim refuse
+	// that TUI (GAP-1036), so the pin is not refused here.
 	if got := ResolveSandboxHookContract("hermes", "0.19.0"); got.Status != HookCompatibilityKnown || got.Contract.ContractID != "hermes-hooks-v1" {
 		t.Errorf("sandbox Hermes 0.19.0 = %+v, want hermes-hooks-v1", got)
 	}

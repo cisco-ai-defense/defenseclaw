@@ -2267,37 +2267,26 @@ func TestHermesSingleProfileIgnoresEntriesHermesNeverRunsAsAProfile(t *testing.T
 // Python's re.match, which Hermes uses for profile ids, lets $ match before
 // one final newline, so "coder\n" is a profile Hermes lists and runs. Only
 // the exact id grammar (lowercased) is a profile; the exact names "default"
-// and dot-led metadata never are.
+// and dot-led metadata never are. The Python CLI's preflight
+// (hermes_profile_entry_name) is tested against the same list, so the two
+// cannot drift apart.
 func TestHermesProfileEntryNameMatchesPythonProfileIDs(t *testing.T) {
-	for name, want := range map[string]bool{
-		"coder":                        true,
-		"Coder":                        true,
-		"coder\n":                      true,
-		"Coder\n":                      true,
-		"default\n":                    true,
-		"Default\n":                    true,
-		"0":                            true,
-		"0\n":                          true,
-		strings.Repeat("a", 64):        true,
-		strings.Repeat("a", 64) + "\n": true,
-		"default":                      false,
-		"Default":                      false,
-		"":                             false,
-		"\n":                           false,
-		"coder\n\n":                    false,
-		"coder\r\n":                    false,
-		"coder\r":                      false,
-		"\ncoder":                      false,
-		"co\nder":                      false,
-		"coder ":                       false,
-		".deleted":                     false,
-		".deleted\n":                   false,
-		"_scratch\n":                   false,
-		strings.Repeat("a", 65):        false,
-		strings.Repeat("a", 65) + "\n": false,
-	} {
-		if got := hermesProfileEntryName(name); got != want {
-			t.Errorf("hermesProfileEntryName(%q) = %v, want %v", name, got, want)
+	raw, err := os.ReadFile(filepath.Join("testdata", "hermes_profile_names.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vectors struct {
+		Names []struct {
+			Name    string `json:"name"`
+			Profile bool   `json:"profile"`
+		} `json:"names"`
+	}
+	if err := json.Unmarshal(raw, &vectors); err != nil || len(vectors.Names) == 0 {
+		t.Fatalf("hermes_profile_names.json: %v (%d names)", err, len(vectors.Names))
+	}
+	for _, v := range vectors.Names {
+		if got := hermesProfileEntryName(v.Name); got != v.Profile {
+			t.Errorf("hermesProfileEntryName(%q) = %v, want %v", v.Name, got, v.Profile)
 		}
 	}
 }

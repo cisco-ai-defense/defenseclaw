@@ -569,6 +569,68 @@ class TestClaudeAutoMemory:
         assert needle in reason
         assert "'hermes profile " in reason  # names the Hermes command that fixes it
 
+    def test_hermes_profile_entry_name_matches_the_go_rule(self):
+        # One rule for both preflights: the gateway's Go check and this CLI
+        # check are tested against the same cases.
+        vectors_path = (
+            Path(__file__).resolve().parents[2]
+            / "internal" / "gateway" / "connector" / "testdata" / "hermes_profile_names.json"
+        )
+        vectors = json.loads(vectors_path.read_text(encoding="utf-8"))["names"]
+        assert vectors
+        mismatches = [
+            vector["name"]
+            for vector in vectors
+            if connector_paths.hermes_profile_entry_name(vector["name"]) is not vector["profile"]
+        ]
+        assert mismatches == []
+
+    @pytest.mark.parametrize("entry", [".deleted", ".trash", "default", "_scratch", "co.der", "regular-file"])
+    def test_hermes_profile_metadata_is_not_a_named_profile(self, entry, tmp_path, monkeypatch):
+        # GAP-1041: 'hermes profile delete' leaves profiles/.deleted/<name>.
+        # Hermes never runs it, or any other entry outside its id grammar, as
+        # a profile, so setup and doctor accept the default home next to it.
+        home = tmp_path / "hermes"
+        profiles = home / "profiles"
+        if entry == "regular-file":
+            profiles.mkdir(parents=True)
+            (profiles / "coder").write_text("not a profile\n", encoding="utf-8")
+        else:
+            (profiles / entry / "coder").mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        assert connector_paths.hermes_profile_unsupported_reason(str(home / "config.yaml")) == ""
+
+    @pytest.mark.parametrize(
+        ("entry", "metadata"),
+        [("coder", True), ("Coder", True), ("coder\n", True), ("linked", True), ("linked", False)],
+    )
+    def test_hermes_named_profile_is_rejected_next_to_metadata(self, entry, metadata, tmp_path, monkeypatch):
+        # A profile Hermes can run is refused whatever sits next to it,
+        # including one reached through a symbolic link (Hermes follows it).
+        home = tmp_path / "hermes"
+        profiles = home / "profiles"
+        profiles.mkdir(parents=True)
+        if metadata:
+            (profiles / ".deleted" / "old").mkdir(parents=True)
+        if entry == "linked":
+            elsewhere = tmp_path / "elsewhere"
+            elsewhere.mkdir()
+            try:
+                (profiles / "coder").symlink_to(elsewhere, target_is_directory=True)
+            except OSError as exc:
+                pytest.skip(f"symbolic links are unavailable: {exc}")
+        else:
+            if "\n" in entry and os.name == "nt":
+                pytest.skip("Windows file names cannot hold a newline")
+            (profiles / entry).mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(home))
+
+        reason = connector_paths.hermes_profile_unsupported_reason(str(home / "config.yaml"))
+
+        assert "named profile" in reason
+        assert "'hermes profile delete " in reason
+
     def test_hermes_default_multiplex_without_named_profiles_is_supported(self, tmp_path, monkeypatch):
         # Hermes writes its default gateway.multiplex_profiles: true by itself;
         # with no named profile it serves only the default home (GAP-1844).

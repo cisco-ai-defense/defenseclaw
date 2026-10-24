@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -71,6 +72,13 @@ func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts 
 	t.Helper()
 	if runtime.GOOS != "windows" {
 		return opts
+	}
+	// Verify runs the registered command's execution probe. A per-user
+	// install (no HookExecutable) registers the packaged launcher, which a
+	// test binary does not have: give it one that answers, unless the test
+	// pinned its own first (GAP-1069).
+	if strings.TrimSpace(opts.HookExecutable) == "" && os.Getenv(testHermesProbeLauncherEnv) == "" {
+		answerHermesProbeForTest(t)
 	}
 	if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
 		t.Fatalf("protect Hermes admission data directory: %v", err)

@@ -266,6 +266,12 @@ func TestLaunchersRefuseUnsafeArguments(t *testing.T) {
 			{[]string{"--safe-mode"}, "safe mode"}, {[]string{"--safe-mode=1"}, "safe mode"},
 			{[]string{"chat", "--safe", "-q", "hi"}, "safe mode"}, {[]string{"--safe", "chat"}, "safe mode"},
 			{[]string{"--s"}, ""}, {[]string{"--save"}, ""}, {[]string{"--skills", "x"}, ""}, {[]string{"chat", "-q", "be safe"}, ""},
+			// The pinned Hermes runs its TUI without the hooks (GAP-1036);
+			// its parsers resolve --tu to --tui, and --t is ambiguous there.
+			{[]string{"--tui"}, "starts Hermes' TUI"}, {[]string{"--tu"}, "starts Hermes' TUI"},
+			{[]string{"--tui=1"}, "starts Hermes' TUI"}, {[]string{"chat", "--tui"}, "starts Hermes' TUI"},
+			{[]string{"chat", "-q", "hi", "--tui"}, "starts Hermes' TUI"}, {[]string{"--cli", "--tui"}, "starts Hermes' TUI"},
+			{[]string{"--t"}, ""}, {[]string{"--toolsets", "terminal"}, ""}, {[]string{"--cli"}, ""}, {[]string{"chat", "-q", "open the tui"}, ""},
 		}},
 		{Kiro, []argCase{
 			{[]string{"--agent", "kiro_default", "hi"}, "--agent is not supported"},
