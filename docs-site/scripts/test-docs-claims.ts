@@ -587,6 +587,22 @@ describe('Windows Hermes failure guidance', () => {
   });
 });
 
+describe('Hermes process failure guidance', () => {
+  it('scopes timeout and spawn outcomes to the loaded hook contract', () => {
+    const entry = /func hermesHookEntry\([^)]*\)[^{]*\{([\s\S]*?)\n\}/
+      .exec(source('internal/gateway/connector/hook_only.go'))?.[1];
+    assert.ok(entry, 'Hermes Setup registration not found');
+    assert.match(entry, /if event == "pre_tool_call" && contractID == "hermes-hooks-v2" && !shellHookSecureClientProfile\(opts\) \{[\s\S]*?entry\["fail_closed"\] = true/);
+
+    const limits = page('connectors/hermes.mdx').split('## Limits')[1]?.split('## On a managed computer')[0] ?? '';
+    assert.match(limits, /0\.19\/0\.20.{0,150}times out or cannot start/i);
+    assert.match(limits, /reviewed 0\.21 contract.{0,200}`fail_closed: true`.{0,200}timeout or spawn error blocks/i);
+    assert.match(limits, /restart.*Hermes host/i);
+    assert.match(limits, /killed hook.{0,150}non-2 exit with empty stdout/i);
+    assert.doesNotMatch(limits, /Hermes runs the call when a hook times out or cannot start/i);
+  });
+});
+
 describe('managed-host enrollment protection', () => {
   const guides = [
     'enterprise/plan/threat-model.mdx',
