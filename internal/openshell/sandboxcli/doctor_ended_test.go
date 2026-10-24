@@ -119,9 +119,12 @@ func TestDoctorAdviceForALingeringFailedMicroVM(t *testing.T) {
 			}
 			if tc.lingering {
 				for _, want := range []string{
+					"save or sync any accessible guest work first",
 					"`defenseclaw sandbox start failed --end-vm`",
 					"what the VM has not written to its disk is lost",
-					"`defenseclaw sandbox delete failed`",
+					"`openshell sandbox start failed`",
+					"`openshell sandbox stop failed`",
+					"only if OpenShell refuses that path or still reports the VM running",
 					"deletes it and its work",
 				} {
 					if !strings.Contains(c.Fix.Summary, want) {
@@ -167,13 +170,13 @@ func TestStopOfAnEndedMicroVMSaysHowToStopIt(t *testing.T) {
 	}{
 		{"completed", "completed", "", openshell.SupportedMin,
 			"⚠ box is completed: OpenShell does not stop it, so its MicroVM may still run, and DefenseClaw stops, restarts and upgrades no OpenShell gateway under it, " +
-				"nor moves this account to another OpenShell setup, until OpenShell reports it stopped: nothing in OpenShell writes this MicroVM's disk back or stops it: " +
+				"nor moves this account to another OpenShell setup, until OpenShell reports it stopped: save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it: " +
 				"its VM still runs what its workload left running, and its start ends that VM with no flush first, so what the VM has not written to its disk is lost: " +
-				"`defenseclaw sandbox start box --end-vm` ends the VM that way, then `defenseclaw sandbox stop box` once it is ready; or `defenseclaw sandbox delete box` (DefenseClaw sandbox) or `openshell sandbox delete box` (raw OpenShell sandbox), which deletes it and its work"},
+				"`defenseclaw sandbox start box --end-vm` ends the VM that way, then `defenseclaw sandbox stop box` once it is ready; for a raw OpenShell sandbox, `openshell sandbox start box` ends its VM the same way, then `openshell sandbox stop box` (raw OpenShell sandbox) once it is ready; only if OpenShell refuses that path or still reports the VM running, `openshell sandbox delete box` deletes it and its work"},
 		{"failed", "error", "MainProcessFailed: Canonical main process exited with status 1", openshell.SupportedMin,
 			"⚠ box is in OpenShell's error state (MainProcessFailed: Canonical main process exited with status 1): OpenShell does not stop it, so its MicroVM may still run"},
 		{"completed, old gateway", "completed", "", "0.1.3",
-			"until OpenShell reports it stopped: `defenseclaw sandbox delete box` (DefenseClaw sandbox) or `openshell sandbox delete box` (raw OpenShell sandbox), which deletes it and its work (this OpenShell neither stops nor starts a completed MicroVM)"},
+			"until OpenShell reports it stopped: save or sync any accessible guest work outside the guest first; OpenShell 0.1.3 cannot stop or start a completed or error-state MicroVM: `defenseclaw sandbox delete box` (DefenseClaw sandbox) or `openshell sandbox delete box` (raw OpenShell sandbox), which deletes it and its work"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sb := sampleSandbox("box")
@@ -236,8 +239,8 @@ func TestRestartConsentRefusesWhileOpenShellDoesNotReportEveryMicroVMStopped(t *
 				Apply: func(context.Context) error { applied++; return nil }}})
 	})
 	const refused = "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, " +
-		"which it does not for these: dc-done (completed): nothing in OpenShell writes this MicroVM's disk back or stops it"
-	const ready = "dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a`"
+		"which it does not for these: dc-done (completed): save or sync any accessible guest work first; nothing in OpenShell writes this MicroVM's disk back or stops it"
+	const ready = "dc-claude-theirs-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-a`"
 
 	for _, release := range []string{openshell.SupportedMin, "0.1.3"} {
 		ta := newTestApp(t, "")

@@ -231,6 +231,60 @@ describe('recovery and repair advice', () => {
       'legacy connect advice must follow the manager behavior');
   });
 
+  it('separates raw MicroVM errors by gateway release and phase reason', () => {
+    const body = readFileSync(join(docs, 'troubleshooting/sandboxes/setup-and-gateway.mdx'), 'utf8');
+    const section = body.split('## A raw `openshell` sandbox stops a restart or rollback')[1]?.split('## ')[0];
+    assert.ok(section, 'raw sandbox restart section is missing');
+    for (const text of ['OpenShell 0.1.5', 'ProcessPollFailed', 'openshell sandbox stop NAME',
+      'MainProcessFailed', 'ProvisioningTimedOut', 'ProcessExited', 'openshell sandbox delete NAME',
+      'older or unknown', 'save its work']) {
+      assert.ok(section.includes(text), `raw restart advice must explain ${text}`);
+    }
+    assert.ok(!section.includes('one that is completed or in its error state: `openshell sandbox delete NAME`'),
+      'a stoppable raw error state must not be sent directly to deletion');
+    const recoverable = section.split('\n').find((line) => line.includes('completed, or has `MainProcessFailed` on OpenShell 0.1.5 or later'));
+    assert.ok(recoverable && recoverable.indexOf('save') < recoverable.indexOf('`openshell sandbox start NAME`') &&
+      recoverable.indexOf('`openshell sandbox start NAME`') < recoverable.indexOf('`openshell sandbox stop NAME`') &&
+      recoverable.indexOf('`openshell sandbox stop NAME`') < recoverable.indexOf('`openshell sandbox delete NAME`'),
+    'recoverable raw MicroVM needs save, start, stop before optional deletion');
+    const old = section.split('\n').find((line) => line.includes('completed, or in its error state with a VM still running on a gateway older than 0.1.5'));
+    assert.ok(old && old.indexOf('save') < old.indexOf('`openshell sandbox delete NAME`') &&
+      !old.includes('`openshell sandbox stop NAME`'),
+    'known old gateway must not suggest an impossible stop of an ended MicroVM');
+    const uncertain = section.split('\n').find((line) => line.includes('completed, or in its error state with a VM that may still run on an unknown gateway release'));
+    assert.ok(uncertain && uncertain.includes('or still does not report the VM stopped') &&
+      uncertain.indexOf('may not flush') >= 0 &&
+      uncertain.indexOf('may not flush') < uncertain.indexOf('`openshell sandbox stop NAME`') &&
+      uncertain.indexOf('`openshell sandbox stop NAME`') >= 0 &&
+      uncertain.indexOf('`openshell sandbox stop NAME`') < uncertain.indexOf('`openshell sandbox delete NAME`'),
+    'try a raw stop and save accessible work before suggesting deletion when the gateway release is unknown');
+    for (const label of ['a raw OpenShell sandbox that is ready', 'a raw OpenShell sandbox in its error state', 'a DefenseClaw sandbox:']) {
+      const line = section.split('\n').find((row) => row.startsWith('- ' + label));
+      assert.ok(line && line.indexOf('save') >= 0 && line.indexOf('save') < line.indexOf('sandbox stop NAME`'),
+        `${label} must name the save-first path before a stop command`);
+    }
+  });
+
+  it('names the save-first path before upgrade and guest stop commands', () => {
+    for (const [name, claim] of [
+      ['troubleshooting/sandboxes/setup-and-gateway.mdx', 'save or sync its work first, then `defenseclaw sandbox stop NAME`'],
+      ['reference/commands/tui.mdx', 'save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`'],
+      ['reference/sandboxes/cli.mdx', 'Save or sync accessible work first. In copy mode, pull work you need on the host; then stop the guest'],
+      ['enterprise/runtime/sandboxes.mdx', 'Users save or pull accessible work first, then stop a running sandbox with `defenseclaw sandbox stop`'],
+      ['troubleshooting/sandboxes/runs-and-sessions.mdx', 'Before following a stop step below, save or sync accessible guest work'],
+    ] as const) {
+      assert.ok(page(name).includes(claim), `${name} must give save-first advice`);
+    }
+    assert.ok(!page('troubleshooting/sandboxes/setup-and-gateway.mdx').includes('or `defenseclaw sandbox delete NAME` deletes it with its work'),
+      'do not advise deleting a DefenseClaw guest with a stop recovery path');
+    assert.ok(page('troubleshooting/sandboxes/setup-and-gateway.mdx').includes('save accessible work outside a MicroVM whose VM still runs before deleting it for the upgrade'),
+      'legacy MicroVM upgrade summary must put saving work before deletion');
+    assert.ok(!page('enterprise/runtime/sandboxes.mdx').includes('and stopped, or deleted'),
+      'do not advise deleting a managed guest with a stop recovery path');
+    assert.ok(page('reference/commands/tui.mdx').includes('| `U` | Save work you want to keep first, then undo:'),
+      'the Undo action must tell users to save work before it stops a running guest');
+  });
+
   it('keeps the saved guardrail mode', () => {
     const remediation = /recover|repair|restore|troubleshoot|turn it (?:off|back on)/i;
     const modeCommand = /defenseclaw\s+(?:setup\b[^\n`]*--mode(?:\s|=)|guardrail\s+mode\s+(?:observe|action)\b)/i;
