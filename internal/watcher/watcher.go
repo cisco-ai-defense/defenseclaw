@@ -2515,7 +2515,7 @@ const unverifiedMCPReason = "scan did not finish, kept unverified (scanners.mcp_
 
 // keepUnverifiedMCPServer keeps an MCP server whose scan did not finish: a
 // MEDIUM audit row says so, a block an earlier failed scan left is released,
-// and with no baseline the rescan scans it again, so a later verdict decides.
+// and its marked baseline makes the rescan retry admission until a scan decides.
 func (w *InstallWatcher) keepUnverifiedMCPServer(ctx context.Context, evt InstallEvent, targetType, scannerName string, err error) AdmissionResult {
 	reason := unverifiedMCPReason + err.Error()
 	w.releaseScanFailureBlock(evt, targetType)
