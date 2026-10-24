@@ -257,6 +257,41 @@ func TestBundleReceiptSessionScanWarningIsNotADigestMismatch(t *testing.T) {
 	}
 }
 
+// GAP-1013: receipt warning codes that are not about digests keep their own
+// explanation in bundle status; receipt_publish_failed said the gateway's
+// digest differed from the signed one while all three digests were equal.
+func TestBundleReceiptPublishWarningsAreNotADigestMismatch(t *testing.T) {
+	for code, want := range map[string]string{
+		enterprisebundle.WarnReceiptPublishFailed: "could not be written",
+		"receipt_events_dropped":                  "oldest were removed",
+		enterprisebundle.WarnDigestUnverifiable:   "different product version",
+	} {
+		if got := bundleReceiptWarningMessage(code, nil); strings.Contains(got, "differs from the signed expected digest") || !strings.Contains(got, want) {
+			t.Errorf("%s message = %q", code, got)
+		}
+	}
+}
+
+// GAP-1052: a standard account cannot read the bundle state. Its not_root
+// refusal, like the not_admin one, carries no device fields that look
+// inspected (bundle_mode, current, floor, applied, gateway_checked).
+func TestBundleStatusNotRootRefusalOmitsDeviceState(t *testing.T) {
+	e := newBundleCLIEnv(t)
+	bundleDevice(t, e)
+	bundleSettleStatus = func(context.Context) error {
+		return fmt.Errorf("open bundle-state.json: %w", fs.ErrPermission)
+	}
+	out, code := runBundle(t, "status", "--json")
+	if code != bundleFailureExitCode() || !strings.Contains(out, `"code": "not_root"`) {
+		t.Fatalf("not_root refusal exit=%d: %s", code, out)
+	}
+	for _, field := range []string{`"bundle_mode"`, `"current"`, `"last_good"`, `"floor"`, `"applied"`, `"gateway_checked"`, `"anchors"`} {
+		if strings.Contains(out, field) {
+			t.Fatalf("not_root refusal reports %s as device state: %s", field, out)
+		}
+	}
+}
+
 func TestConfirmedSignerRevocationIsReported(t *testing.T) {
 	e := newBundleCLIEnv(t)
 	e.writeAnchors(t, map[string]any{"k1": e.edKey.Public()})

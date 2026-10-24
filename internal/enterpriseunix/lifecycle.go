@@ -285,6 +285,10 @@ type lifecycle struct {
 	// confirmedLate are the manifest SHA-256s of the bundles this run's
 	// settle confirmed late (bundle_confirmed_after_interrupt).
 	confirmedLate map[string]bool
+	// reinstallAfterSettle, when set, installs the last good bundle again
+	// before settle records a disproved receipt. The re-settle at the end
+	// of a run sets it: no later step of that run would put it back.
+	reinstallAfterSettle func(context.Context, *Deployment) (enforcing string, ok bool)
 	// inboxProcessed are the bundle inbox files this run removes at its end.
 	inboxProcessed []string
 	// inboxSuperseded are the lower inbox versions this run did not apply,
@@ -527,8 +531,13 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeState, err.Error())
 		return 0
 	}
+	// A superseded apply run is an older binary than the deployment: the
+	// policy digest it computes is not the one the installed gateway
+	// reports, so it proves nothing about a pending receipt. It settles no
+	// receipt and reinstalls no bundle; the installed binary does that.
+	superseded := l.supersededApplyRun(record)
 	settlePending := false
-	if l.opts.Action != ActionUninstall {
+	if l.opts.Action != ActionUninstall && !superseded {
 		settlePending = l.settleBundles(ctx, record)
 	}
 	if record != nil {
@@ -538,15 +547,33 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			l.recoverInterruptedRotation(ctx, record)
 		}
 	}
-	if settlePending && l.opts.Bundle == "" {
-		// A plain ensure, repair or package upgrade would select the last
-		// confirmed bundle below. Do not replace an applied bundle while its
-		// receipt cannot be confirmed or disproved.
-		r.AddError(codeBundleNotConfirmed, "an applied policy bundle is still pending confirmation; restore the gateway or missing verification evidence and retry this command")
-		l.describe(ctx, record, false)
-		return enterprisestatus.BusyExitCode(env.GOOS)
+	if settlePending && slices.Contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, l.opts.Action) {
+		// A repair or upgrade can make the gateway available or move it to
+		// this build's digest. Recheck after the action, while still holding
+		// the lifecycle lock, so its result reports the settled receipt. A
+		// receipt the new gateway disproves gets the last good bundle back
+		// in this run.
+		defer func() {
+			if l.opts.Bundle != "" || len(r.Errors) != 0 {
+				return
+			}
+			latest, err := env.loadDeployment()
+			if err != nil {
+				r.AddWarning(codeBundleStateUnreadable, "could not recheck the pending policy bundle: "+err.Error())
+				return
+			}
+			l.reinstallAfterSettle = l.reinstallLastGoodBundle
+			stillPending := l.settleBundles(ctx, latest)
+			l.reinstallAfterSettle = nil
+			l.describeBundle()
+			if !stillPending {
+				r.Warnings = slices.DeleteFunc(r.Warnings, func(w enterprisestatus.Message) bool {
+					return w.Code == enterprisebundle.WarnBundlePending
+				})
+			}
+		}()
 	}
-	if l.supersededApplyRun(record) {
+	if superseded {
 		// A transaction leaves a queued apply run alone. When that
 		// transaction upgraded the deployment, the queued run is still the
 		// previous binary, whose rendering would undo part of the upgrade;
@@ -595,7 +622,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		}
 	}
 
-	if code, done := l.prepareBundleMode(ctx, record); done {
+	if code, done := l.prepareBundleMode(ctx, record, settlePending); done {
 		return l.requireProtectedTargetsOnChange(code)
 	}
 
@@ -845,9 +872,7 @@ const codeSuperseded = "lifecycle_superseded"
 // supersededApplyRun reports an apply-trigger ensure (--reason path) whose
 // binary is an older release than the recorded deployment.
 func (l *lifecycle) supersededApplyRun(record *Deployment) bool {
-	running := strings.TrimPrefix(l.env.ProductVersion, "v")
-	if record == nil || l.opts.Action != ActionEnsure || l.opts.Reason != "path" || l.opts.AllowDowngrade ||
-		running == "dev" || !versionPattern.MatchString(running) || compareProductVersions(running, record.ProductVersion) >= 0 {
+	if l.opts.Action != ActionEnsure || l.opts.Reason != "path" || l.opts.AllowDowngrade || !l.olderThanDeployment(record) {
 		return false
 	}
 	// Stand down only while the newer binary the record describes is the
@@ -857,6 +882,14 @@ func (l *lifecycle) supersededApplyRun(record *Deployment) bool {
 	installed := filepath.Join(l.env.Layout.BinDir, binGateway)
 	digest, err := sha256File(l.env.P(installed))
 	return err == nil && record.Files[installed] != "" && digest == record.Files[installed]
+}
+
+// olderThanDeployment reports a release binary older than the recorded
+// deployment. A development build is never older.
+func (l *lifecycle) olderThanDeployment(record *Deployment) bool {
+	running := strings.TrimPrefix(l.env.ProductVersion, "v")
+	return record != nil && running != "dev" && versionPattern.MatchString(running) &&
+		compareProductVersions(running, record.ProductVersion) < 0
 }
 
 // A package upgrade whose ensure fails rolls back to the previous
