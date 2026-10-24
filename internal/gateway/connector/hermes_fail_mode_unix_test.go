@@ -80,7 +80,13 @@ func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 // clean DEFENSECLAW_* environment.
 func runPerUserHook(t *testing.T, script, stdin string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
-	home := t.TempDir()
+	return runPerUserHookIn(t, t.TempDir(), nil, script, stdin, args...)
+}
+
+// runPerUserHookIn is runPerUserHook with HOME and DEFENSECLAW_HOME at home
+// and extraEnv added.
+func runPerUserHookIn(t *testing.T, home string, extraEnv []string, script, stdin string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
 	cmd := exec.Command("bash", append([]string{script}, args...)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var env []string
@@ -89,7 +95,7 @@ func runPerUserHook(t *testing.T, script, stdin string, args ...string) (stdout,
 			env = append(env, kv)
 		}
 	}
-	cmd.Env = append(env, "DEFENSECLAW_HOME="+home, "HOME="+home)
+	cmd.Env = append(append(env, "DEFENSECLAW_HOME="+home, "HOME="+home), extraEnv...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
@@ -161,7 +167,10 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 			{"sessionStart", "", ""},
 		} {
 			t.Run("mode "+map[string]string{"": "unset"}[mode]+mode+"/"+tc.event, func(t *testing.T) {
-				out, errOut, code := runPerUserHook(t, script,
+				// The config the outage-open hook reads gives the open tier.
+				home := t.TempDir()
+				installOutageOpenRuntimeForHookTest(t, home, home)
+				out, errOut, code := runPerUserHookIn(t, home, []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, script,
 					`{"sessionId":"s","timestamp":1,"cwd":"/tmp","toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`,
 					"--event", tc.event)
 				if code != 0 {

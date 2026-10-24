@@ -44,6 +44,8 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewCopilotConnector()); err != nil {
 				t.Fatal(err)
 			}
+			// The config the outage-open hook reads gives the open tier.
+			installOutageOpenRuntimeForHookTest(t, home, home)
 			cmd := exec.Command("bash", filepath.Join(hookDir, "copilot-hook.sh"), "--event", "preToolUse")
 			cmd.Stdin = strings.NewReader(`{"cwd":"/tmp","toolName":"bash","toolArgs":"{\"command\":\"ls\"}"}`)
 			cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + home, "DEFENSECLAW_HOME=" + home,

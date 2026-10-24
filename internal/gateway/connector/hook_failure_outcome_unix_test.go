@@ -102,9 +102,11 @@ func TestShellHookFailureRecordsNameTheOutcomeTheHookApplied(t *testing.T) {
 					if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, run.conn); err != nil {
 						t.Fatal(err)
 					}
+					// The config the outage-open hook reads gives the open tier.
+					installOutageOpenRuntimeForHookTest(t, home, home)
 					cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, run.invoke.script)}, run.invoke.args...)...)
 					cmd.Stdin = strings.NewReader(run.invoke.stdin)
-					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 					cmd.Env = append(cmd.Env, run.invoke.env...)
 					switch scenario {
 					case "strict-outage":

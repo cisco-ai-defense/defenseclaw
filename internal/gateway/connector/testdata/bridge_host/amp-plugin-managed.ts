@@ -946,7 +946,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			)
 			return
 		default:
-			// Returning void preserves Amp's original status and output.
+			// A result kept because this account's gateway is down carries the
+			// same one warning as the call. Returning void preserves Amp's
+			// original status and output.
+			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
 			return
 		}
 	})

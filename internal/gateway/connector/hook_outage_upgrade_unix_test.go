@@ -134,6 +134,8 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dataDir, "hooks"), opts, conn); err != nil {
 				t.Fatal(err)
 			}
+			// The config the outage-open hook reads gives the open tier.
+			installOutageOpenRuntimeForHookTest(t, home, dataDir)
 			blocked, detail := runOutageToolCall(t, home, dataDir, outageToolCalls[test.connector])
 			if blocked != test.block {
 				t.Fatalf("blocked = %v, want %v: %s", blocked, test.block, detail)

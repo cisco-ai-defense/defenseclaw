@@ -924,13 +924,32 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// defenseclawPerUserOutageOpen reports a per-user tool check that may run
 // unchecked: the native helper exited 7 (hookexec.PerUserPostOutageExit:
 // this account's gateway refused or dropped the connection before any
-// status), the outage mode is open, strict availability is off and no
-// install holds the data directory. An answer the gateway gave, an
-// unverified listener and every other error keep the call blocked.
+// status), the outage mode is open, strict availability is off, no
+// install holds the data directory and the config on disk still gives the
+// open outage mode. An answer the gateway gave, an unverified listener and
+// every other error keep the call blocked.
 async function defenseclawPerUserOutageOpen(err) {
   if (DC_OUTAGE_FAIL_MODE !== "open" || !err || err.status !== 7) return false;
   if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;
-  return !(await defenseclawInstallWindow());
+  return !(await defenseclawInstallWindow()) && defenseclawConfigOutageOpen();
+}
+
+// defenseclawConfigOutageOpen asks the per-user helper (`hook-outage-mode`,
+// which only reads the config.yaml of this plugin's data directory, never one
+// the agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for OpenCode's
+// outage mode now. The mode
+// baked above is the one of the last render, and a rule-pack change since
+// (strict selected while the gateway is stopped) has not reached it. A
+// helper that cannot run or answers anything but "open" keeps it closed.
+function defenseclawConfigOutageOpen() {
+  try {
+    const output = execFileSync(defenseclawPerUserNativePostBinary(), ["hook-outage-mode", "--connector", "opencode", "--hook-dir", dirname(DC_TOKEN_FILE)], {
+      timeout: 3000, maxBuffer: 4096, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    });
+    return String(output).trim() === "open";
+  } catch (_) {
+    return false;
+  }
 }
 
 // defenseclawPerUserOutageNotice is the one warning of a tool call that ran

@@ -415,15 +415,17 @@ func TestRefreshFailModesClosesEveryHookWhileAnInstallHoldsTheDataDirectory(t *t
 		lock               string // "", "data" or "home"
 		hold               bool
 		want               string
+		baked              string // the old script's baked mode; "" is want
 	}{
 		{name: "1.0.x config open, install", config: v9, read: "install", lock: "data", want: "closed"},
 		{name: "0.8.x config open, install", config: v7, read: "install", lock: "data", want: "closed"},
 		{name: "config open, install in DEFENSECLAW_HOME", config: v9, read: "install", lock: "home", want: "closed"},
 		{name: "config open, install, hold", config: v9, read: "install", lock: "data", hold: true, want: "closed"},
-		// Outside an install the runtime record holds the per-user outage mode,
-		// which follows the policy tier (owner decision 2026-10-23: default
-		// tier open); the open a released script baked is closed (TGT-0115).
-		{name: "config open, no install", config: v9, read: "loaded", want: "open"},
+		// Without the lock the record holds the policy tier's outage mode,
+		// open in the default tier (oss-outage-open), and the baked open of
+		// the old script is closed: a per-user script fails closed for every
+		// failure but an outage, which it reads from the record.
+		{name: "config open, no install", config: v9, read: "loaded", want: "open", baked: "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -464,9 +466,12 @@ func TestRefreshFailModesClosesEveryHookWhileAnInstallHoldsTheDataDirectory(t *t
 			if err != nil {
 				t.Fatal(err)
 			}
-			// A per-user script bakes closed in every tier (TGT-0115).
-			if bytes.Contains(body, []byte(`FAIL_MODE="open"`)) {
-				t.Fatal("the released Copilot hook still bakes open")
+			wantBaked := test.want
+			if test.baked != "" {
+				wantBaked = test.baked
+			}
+			if baked := bytes.Contains(body, []byte(`FAIL_MODE="open"`)); baked != (wantBaked == "open") {
+				t.Fatalf("the released Copilot hook still bakes open = %v, want %v", baked, wantBaked == "open")
 			}
 		})
 	}

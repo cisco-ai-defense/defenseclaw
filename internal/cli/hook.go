@@ -29,6 +29,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -608,8 +609,18 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 	// older registration flag or the environment cannot open them. Managed
 	// hooks take their mode from protected administrator state below.
 	outageFailMode := "closed"
+	var outageFailModeNow func() string
 	if !enterpriseManaged {
 		outageFailMode = perUserHookOutageFailMode(filepath.Join(hookDir, ".hookcfg"), connector)
+		// The record may predate a rule-pack change: the config of this
+		// runtime decides (read once, and only for an outage the record would
+		// open). Only a hook home the installed runtime names (the packaged
+		// Windows launcher's protected install state) can open one: a home
+		// taken from the agent's DEFENSECLAW_HOME is the agent's choice, so
+		// its record and config stay closed for an outage.
+		if trustedNativeState {
+			outageFailModeNow = sync.OnceValue(func() string { return hookOutageFailModeNow(connector, hookDir) })
+		}
 	}
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
 	if trustedNativeState {
@@ -624,6 +635,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		APIAddr:                   apiAddr,
 		FailMode:                  "closed",
 		OutageFailMode:            outageFailMode,
+		OutageFailModeNow:         outageFailModeNow,
 		Home:                      home,
 		HookDir:                   hookDir,
 		Token:                     token,
