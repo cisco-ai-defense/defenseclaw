@@ -127,7 +127,6 @@ const (
 	// enforces on stageRoot itself. Removed recursively before the outer
 	// stage cleanup runs.
 	enterpriseSetupScratchDirName = "scratch"
-	enterpriseBusyExitCode        = 1618 // ERROR_INSTALL_ALREADY_RUNNING
 	// enterpriseSetupStageStaleAge is the age after which a staging folder
 	// belongs to no Setup still staging: unpacking the payload takes
 	// seconds to minutes. A Setup whose lifecycle still runs holds its
@@ -151,6 +150,17 @@ func executeEnterpriseSetup(
 		return 0, err
 	}
 	standalone := payload.Standalone()
+	if standalone && opts.Action == "ensure" {
+		// Status and Verify can report a no-op before another Setup's
+		// lifecycle commits. Hold one host-wide intent from before staging
+		// through the final result (GAP-1027). The child still takes its
+		// ordinary journaled lifecycle lock for every change.
+		release, err := acquireStandaloneSetupEnsure()
+		if err != nil {
+			return 0, err
+		}
+		defer release()
+	}
 	if payload.Manifest.Unsigned && !opts.AllowUnsigned && !standalone {
 		return 0, errors.New("this enterprise Setup is unsigned and can run only with --allow-unsigned in exact disposable certification scope")
 	}
@@ -339,6 +349,60 @@ func executeEnterpriseSetup(
 	// unexpected child status to the same fatal-install code so AVC never
 	// mistakes a partial transaction for reboot-required success.
 	return enterpriseFailureExitCode, nil
+}
+
+// acquireStandaloneSetupEnsure admits one standalone Setup /ensure at a
+// time, including the read-only no-op path. A named kernel mutex has no
+// stale file after a killed Setup. The owning thread stays fixed until the
+// returned release runs; another active Setup gets MSI's retryable 1618.
+func acquireStandaloneSetupEnsure() (release func(), err error) {
+	runtime.LockOSThread()
+	defer func() {
+		if release == nil {
+			runtime.UnlockOSThread()
+		}
+	}()
+	descriptor, err := windows.SecurityDescriptorFromString("O:BAG:BAD:P(A;;GA;;;SY)(A;;GA;;;BA)")
+	if err != nil {
+		return nil, fmt.Errorf("build standalone ensure mutex ACL: %w", err)
+	}
+	attrs := &windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
+	name, err := windows.UTF16PtrFromString(`Global\Cisco-DefenseClaw-Standalone-Setup-Ensure`)
+	if err != nil {
+		return nil, err
+	}
+	handle, createErr := windows.CreateMutex(attrs, true, name)
+	if handle == 0 {
+		return nil, fmt.Errorf("create standalone ensure mutex: %w", createErr)
+	}
+	closeWith := func(err error) (func(), error) {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	if createErr != nil {
+		if !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
+			return closeWith(fmt.Errorf("open standalone ensure mutex: %w", createErr))
+		}
+		state, waitErr := windows.WaitForSingleObject(handle, 0)
+		if waitErr != nil {
+			return closeWith(fmt.Errorf("wait for standalone ensure mutex: %w", waitErr))
+		}
+		switch state {
+		case uint32(windows.WAIT_OBJECT_0), uint32(windows.WAIT_ABANDONED):
+		case uint32(windows.WAIT_TIMEOUT):
+			return closeWith(errEnterpriseSetupEnsureBusy)
+		default:
+			return closeWith(fmt.Errorf("standalone ensure mutex returned unexpected wait state %d", state))
+		}
+	}
+	return func() {
+		_ = windows.ReleaseMutex(handle)
+		_ = windows.CloseHandle(handle)
+		runtime.UnlockOSThread()
+	}, nil
 }
 
 var standaloneSetupDeployment = func() (winpath.EnterpriseDeployment, error) {
