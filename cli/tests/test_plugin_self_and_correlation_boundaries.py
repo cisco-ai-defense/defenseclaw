@@ -22,6 +22,7 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -131,6 +132,8 @@ def _render_bridge_publication(
     connector: str,
     foreign_guard: str = "",
     install_marker: str = "",
+    lifecycle_marker: str = "",
+    hook_socket: str = "",
     listener_proof: str = "",
     managed: bool = False,
 ) -> bytes:
@@ -154,10 +157,11 @@ def _render_bridge_publication(
         template.replace("{{.APIAddr}}", "127.0.0.1:18970")
         .replace("{{.TokenFileJS}}", token_path_js)
         .replace("{{.FailMode}}", "closed")
-        .replace("{{.HookSocketJS}}", "")
+        .replace("{{.HookSocketJS}}", json.dumps(hook_socket)[1:-1])
         .replace("{{.ServiceUID}}", "0")
         .replace("{{.ForeignHookGuardJS}}", json.dumps(foreign_guard)[1:-1])
         .replace("{{.InstallMarkerJS}}", json.dumps(install_marker)[1:-1])
+        .replace("{{.LifecycleMarkerJS}}", json.dumps(lifecycle_marker)[1:-1])
         .replace("{{.ListenerProofJS}}", listener_proof)
         .replace("{{.OutageFailMode}}", "open")
     )
@@ -609,6 +613,43 @@ def test_bridge_template_fingerprints_match_gateway_sources(
     assert digests == self_identity._BRIDGE_TEMPLATE_DIGESTS[connector]
 
 
+@pytest.mark.skipif(sys.platform not in {"linux", "darwin"}, reason="standalone Unix lifecycle")
+@pytest.mark.parametrize("connector", ("amp", "opencode"))
+def test_managed_bridge_identity_requires_the_native_lifecycle_marker(
+    connector: str, tmp_path: Path
+) -> None:
+    repository_root = Path(__file__).resolve().parents[2]
+    lifecycle_marker = (
+        "/var/run/defenseclaw-lifecycle.active"
+        if sys.platform == "darwin"
+        else "/run/defenseclaw-lifecycle.active"
+    )
+    hook_socket = (
+        "/opt/cisco/defenseclaw/run/hook.sock"
+        if sys.platform == "darwin"
+        else "/run/defenseclaw-hook/hook.sock"
+    )
+    data_dir = tmp_path / "home/.defenseclaw"
+    published = _render_bridge_publication(
+        repository_root, data_dir, connector=connector, managed=True,
+        hook_socket=hook_socket, lifecycle_marker=lifecycle_marker,
+    )
+    assert self_identity._matches_immutable_bridge_template(
+        connector, published, data_dir=str(data_dir)
+    )
+    for altered in (b"", b"/tmp/not-the-lifecycle.active"):
+        tampered = published.replace(lifecycle_marker.encode(), altered, 1)
+        assert not self_identity._matches_immutable_bridge_template(
+            connector, tampered, data_dir=str(data_dir)
+        )
+    bypass = published.replace(hook_socket.encode(), b"", 1).replace(
+        lifecycle_marker.encode(), b"", 1
+    )
+    assert not self_identity._matches_immutable_bridge_template(
+        connector, bypass, data_dir=str(data_dir)
+    )
+
+
 @pytest.mark.parametrize("connector", ("amp", "opencode"))
 def test_secure_client_bridge_fingerprint_includes_native_verifier(
     connector: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -664,8 +705,19 @@ def test_managed_connector_bridge_stays_first_party(
     repository_root = Path(__file__).resolve().parents[2]
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    hook_socket = (
+        "/opt/cisco/defenseclaw/run/hook.sock" if sys.platform == "darwin"
+        else "/run/defenseclaw-hook/hook.sock" if sys.platform == "linux"
+        else ""
+    )
+    lifecycle_marker = (
+        "/var/run/defenseclaw-lifecycle.active" if sys.platform == "darwin"
+        else "/run/defenseclaw-lifecycle.active" if sys.platform == "linux"
+        else ""
+    )
     published = _render_bridge_publication(
-        repository_root, data_dir, connector=connector, managed=True
+        repository_root, data_dir, connector=connector, managed=True,
+        hook_socket=hook_socket, lifecycle_marker=lifecycle_marker,
     )
     _write_bridge_publication(data_dir, target, connector=connector, payload=published)
     assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
