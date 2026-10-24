@@ -139,6 +139,7 @@ func TestHookOutageFailModeNowHonorsTheManagedHostMarker(t *testing.T) {
 	oldDescriptor := managedHostDescriptorPath
 	oldWindows := managedHostWindowsStandalone
 	oldSecureClient := secureClientHost
+	oldUncertain := managedHostWindowsMarkerUncertain
 	managedHostDescriptorPath = func() string { return marker }
 	managedHostWindowsStandalone = func() (string, bool) { return "", false }
 	secureClientHost = func() bool { return false }
@@ -146,6 +147,7 @@ func TestHookOutageFailModeNowHonorsTheManagedHostMarker(t *testing.T) {
 		managedHostDescriptorPath = oldDescriptor
 		managedHostWindowsStandalone = oldWindows
 		secureClientHost = oldSecureClient
+		managedHostWindowsMarkerUncertain = oldUncertain
 	})
 	if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "open" {
 		t.Fatalf("absent managed marker: got %q, want open", got)
@@ -178,6 +180,11 @@ func TestHookOutageFailModeNowHonorsTheManagedHostMarker(t *testing.T) {
 		}
 	}
 	marker = filepath.Join(t.TempDir(), "runtime-descriptor")
+	managedHostWindowsMarkerUncertain = func() bool { return true }
+	if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "closed" {
+		t.Fatalf("unreadable Windows managed marker: got %q, want closed", got)
+	}
+	managedHostWindowsMarkerUncertain = oldUncertain
 	managedHostWindowsStandalone = func() (string, bool) { return "HKLM managed marker", true }
 	if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "closed" {
 		t.Fatalf("Windows managed marker: got %q, want closed", got)

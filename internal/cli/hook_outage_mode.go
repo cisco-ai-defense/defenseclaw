@@ -53,6 +53,12 @@ func hookOutageFailModeNow(connectorName, hookDir string) string {
 	if _, present := managedHostWindowsStandalone(); present {
 		return "closed"
 	}
+	// A Windows machine marker that exists but cannot be verified, or whose
+	// registry key cannot be read, is not proof of an OSS host. Only a
+	// definite absence may leave the per-user outage open.
+	if managedHostWindowsMarkerUncertain() {
+		return "closed"
+	}
 	if marker := managedHostDescriptorPath(); marker != "" {
 		if _, err := os.Lstat(marker); err == nil || !errors.Is(err, os.ErrNotExist) {
 			return "closed"
