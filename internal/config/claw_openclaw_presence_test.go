@@ -55,11 +55,15 @@ func TestLoadOpenClawImpliedButNotInstalledConfiguresNoConnector(t *testing.T) {
 	}{
 		{"no claw block", "config_version: 9\n"},
 		{"claw.mode written by an older init", "config_version: 9\nclaw:\n  mode: openclaw\n"},
+		{"disabled fleet with older init", "config_version: 9\nclaw:\n  mode: openclaw\ngateway:\n  fleet_mode: disabled\n"},
+		{"off fleet with older init", "config_version: 9\nclaw:\n  mode: openclaw\ngateway:\n  fleet_mode: off\n"},
+		{"false fleet with older init", "config_version: 9\nclaw:\n  mode: openclaw\ngateway:\n  fleet_mode: false\n"},
+		{"remote disabled fleet with older init", "config_version: 9\nclaw:\n  mode: openclaw\ngateway:\n  host: 10.0.0.5\n  fleet_mode: disabled\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, _ := loadWithoutOpenClaw(t, tc.raw, false)
 			if cfg.HasConnectorConfigured() {
-				t.Fatal("HasConnectorConfigured() = true, want false without OpenClaw")
+				t.Fatalf("HasConnectorConfigured() = true, want false without OpenClaw; fleet_mode=%q", cfg.Gateway.FleetMode)
 			}
 			if got := cfg.ActiveConnectors(); len(got) != 0 {
 				t.Fatalf("ActiveConnectors() = %v, want none", got)

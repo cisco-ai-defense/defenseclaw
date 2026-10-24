@@ -34,7 +34,7 @@ from typing import Any, Protocol
 import requests
 from urllib3.exceptions import NewConnectionError
 
-from defenseclaw.gateway import OrchestratorClient
+from defenseclaw.gateway import GatewayNotRunningError, OrchestratorClient
 from defenseclaw.models import ScanResult
 
 
@@ -610,7 +610,7 @@ def _is_definite_preconnect_failure(exc: requests.RequestException) -> bool:
     already have committed the canonical record.
     """
 
-    if isinstance(exc, requests.ConnectTimeout):
+    if isinstance(exc, (requests.ConnectTimeout, GatewayNotRunningError)):
         return True
     pending: list[BaseException] = [exc]
     seen: set[int] = set()

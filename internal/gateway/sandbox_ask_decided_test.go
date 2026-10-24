@@ -20,6 +20,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"strings"
@@ -29,9 +30,92 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxreg"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
+
+func TestManagedAskDecisionsWithoutGatewayRouteCountOnce(t *testing.T) {
+	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
+	f.setGroups(sbxAlice, "dc-sbx-contractors")
+	reg := f.live(sbxAlice, 1).Registration
+	capture := &managedRefusalCounterCapture{}
+	logger := audit.NewLogger(nil)
+	logger.SetRuntimeV8Emitter(capture)
+	f.api.logger = logger
+	managedSandboxRecorders.Delete(f.api)
+	t.Cleanup(func() { managedSandboxRecorders.Delete(f.api) })
+	asks := func() []observability.Record {
+		var out []observability.Record
+		for _, metric := range capture.metrics {
+			if metric.EventName() == observability.EventName(observability.TelemetryInstrumentDefenseClawSandboxManagedAsks) {
+				out = append(out, metric)
+			}
+		}
+		return out
+	}
+	for i, tc := range []struct {
+		outcome, approvalID, wantReason string
+	}{
+		{"rejected", "ap_0e0ba4fe7acaf1f1", ""},
+		{"floor_denied", "ap_0e0ba4fe7acaf1f2", `"defenseclaw.sandbox.managed.reason":"floor_denied"`},
+	} {
+		payload, _ := json.Marshal(map[string]any{"sandbox": "dc-claude-1", "sandbox_id": "sbx-1", "host": "example.org",
+			"approval_id": tc.approvalID, "outcome": tc.outcome})
+		batch := sandboxrelay.EventBatch{V: sandboxrelay.WireVersion, Registration: reg.ID,
+			Events: []sandboxrelay.Event{{Kind: "sandbox_ask_decision", Time: time.Now(), Payload: payload}}}
+		if rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathEvents, batch, nil); rec.Code != http.StatusAccepted {
+			t.Fatalf("%s event: %d %s", tc.outcome, rec.Code, rec.Body.String())
+		}
+		if len(asks()) != i+1 {
+			t.Fatalf("%s counted %d decisions, want %d", tc.outcome, len(asks()), i+1)
+		}
+		data, ok := asks()[i].InstrumentData()
+		if !ok {
+			t.Fatalf("%s counter lacks instrument data", tc.outcome)
+		}
+		body, err := data.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		labels, _ := body["attributes"].(map[string]any)
+		if labels["defenseclaw.approval.result"] != audit.SandboxApprovalDenied {
+			t.Fatalf("%s counter labels = %+v", tc.outcome, labels)
+		}
+		encoded, _ := capture.record.MarshalJSON()
+		for _, want := range []string{`"defenseclaw.approval.result":"denied"`, `"defenseclaw.sandbox.registration.id":"` + reg.ID + `"`, tc.approvalID, tc.wantReason} {
+			if !strings.Contains(string(encoded), want) {
+				t.Errorf("%s record lacks %s: %s", tc.outcome, want, encoded)
+			}
+		}
+	}
+	tel := newDaemonRelayTelemetry(fixtureEventsRelay{f: f, peer: sbxAlice},
+		func(string) (string, bool) { return reg.ID, true }, t.Logf)
+	tel.flushEvery = time.Second
+	if err := tel.RecordManagedAskDecision(t.Context(), audit.SandboxAskDecidedEvent{
+		Sandbox:    audit.SandboxIdentity{Name: "dc-claude-1", ID: "sbx-1"},
+		ApprovalID: "ap_0e0ba4fe7acaf1f3", Host: "example.net", Result: audit.SandboxApprovalDenied,
+		Reason: sandboxAskReasonFloorDenied, Timestamp: time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tel.flush(t.Context())
+	if len(asks()) != 3 {
+		t.Fatalf("daemon relay counted %d asks, want 3", len(asks()))
+	}
+	for _, wrong := range []map[string]any{
+		{"sandbox": "another-sandbox", "outcome": "rejected"},
+		{"sandbox": "dc-claude-1", "outcome": "approved"},
+	} {
+		payload, _ := json.Marshal(wrong)
+		batch := sandboxrelay.EventBatch{V: sandboxrelay.WireVersion, Registration: reg.ID,
+			Events: []sandboxrelay.Event{{Kind: sandboxrelay.EventSandboxAskDecision, Time: time.Now(), Payload: payload}}}
+		f.do(sbxAlice, http.MethodPost, sandboxrelay.PathEvents, batch, nil)
+	}
+	if len(asks()) != 3 {
+		t.Fatalf("invalid daemon claims counted as asks: %d", len(asks()))
+	}
+}
 
 // GAP-0632: a decision on an ask (a session allow, an unblock, a user block,
 // a floor refusal) is a log.sandbox.ask.decided record of the gateway that

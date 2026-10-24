@@ -1034,14 +1034,14 @@ func (m *ConfigManager) setStartupSource(sourceName string, raw []byte) {
 		return
 	}
 	m.startupSource, m.startupKnown = sha256.Sum256(raw), true
-	// The boot bytes hold every generation recorded so far (and a hand edit
-	// made on top while the gateway was stopped); no state file yet means
-	// none was written.
+	// Only a generation whose record binds the boot bytes was applied at
+	// boot. A lifecycle write can commit a newer generation between the
+	// boot read and this state read; leave it pending for reconciliation.
 	state, err := configwrite.ReadGenerationState(m.path)
 	switch {
-	case err == nil:
+	case err == nil && strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)):
 		m.appliedGeneration, m.appliedGenerationKnown = state.Generation, true
-	case errors.Is(err, fs.ErrNotExist):
+	case err == nil || errors.Is(err, fs.ErrNotExist):
 		m.appliedGeneration, m.appliedGenerationKnown = 0, true
 	}
 }
@@ -1493,6 +1493,13 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		// swap, but an earlier rejected edit is resolved (a pack restored
 		// after a digest mismatch), so clear its last_reload_error and error
 		// state; otherwise they stay until an unrelated config write.
+		if pendingGeneration {
+			// A lifecycle write can change only comments or other saved intent.
+			// The rebuild proved its assets unchanged, so consume its record;
+			// leaving it pending would authorize a later unrecorded asset edit.
+			m.appliedRaw = source.raw
+			m.noteAppliedGeneration(source.raw)
+		}
 		m.rejected = false
 		m.rejectedAssets.Store(nil)
 		clearGenerationBuildError()

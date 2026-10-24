@@ -514,7 +514,7 @@ def _refresh_and_maybe_restart_local_observability(
         count = len(result.refreshed_paths)
         preserved_count = len(result.preserved_paths)
         click.echo(
-            f"  {ux.bold('Bundle refreshed:')} ~/.defenseclaw/observability-stack/ "
+            f"  {ux.bold('Bundle refreshed:')} {result.seeded_dest}{os.sep} "
             f"({count} file{'s' if count != 1 else ''} updated, "
             f"{preserved_count} preserved)"
         )

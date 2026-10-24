@@ -554,8 +554,12 @@ func (m *Manager) restorePhase(ctx context.Context, gw *Gateway, b *box, trigger
 		var cond *audit.SandboxCondition
 		for _, c := range sb.Status.Conditions {
 			if phase == audit.SandboxPhaseError && !strings.EqualFold(c.Status, "true") {
-				cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
-				break
+				if cond == nil || strings.EqualFold(c.Type, "Ready") {
+					cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
+				}
+				if strings.EqualFold(c.Type, "Ready") {
+					break
+				}
 			}
 		}
 		m.lifecycle(ctx, b, phase, trigger, false, cond, sb.Status.ExitCode)

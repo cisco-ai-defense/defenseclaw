@@ -57,10 +57,19 @@ type enterpriseSecretOptions struct {
 	// before that rotation still is and does not sign the value stored now
 	// (checkSecretTransaction). The Windows MDM wrapper journals the
 	// confirmed bundle before a rotation and passes it to both; a 1.0.4
-	// build reporting secret_set_bundle takes them.
+	// build reporting secret_set_bundle takes them. undoConfig (remove
+	// --undo-rotation --undo-config) is the SHA-256 of the installed config
+	// the wrapper journaled before the rotation: on Windows the put-back
+	// takes a credential the installed config references only while that
+	// very config is installed (undoRotationOnConfig).
 	ifConfirmed  string
 	undoRotation string
-	json         bool
+	undoConfig   string
+	// ifStored is the SHA-256 of the exact value a caller expects now.
+	// Windows also accepts "none" for proven absence.
+	// It is compared under the credential/lifecycle lock before a change.
+	ifStored string
+	json     bool
 	// lockWait is how long set and remove wait for another lifecycle run
 	// (Linux and macOS) or for a policy bundle run to release bundle.lock
 	// (Windows).
@@ -324,7 +333,15 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 		cmd.Flags().StringVar(&opts.ifConfirmed, "if-confirmed", "", "with --bundle: store the value only while the confirmed policy bundle has this manifest SHA-256 (none: no bundle is confirmed); else confirmed_bundle_changed and nothing is written")
 	}
 	if action == "set" || action == "remove" {
-		cmd.Flags().StringVar(&opts.undoRotation, "undo-rotation", "", "put back a credential a failed rotation changed, only while the confirmed policy bundle has this manifest SHA-256 (none: no bundle is confirmed) and does not sign the value stored now; else rotation_confirmed and nothing changes. remove then also takes a credential the installed config references")
+		cmd.Flags().StringVar(&opts.undoRotation, "undo-rotation", "", "put back a credential a failed rotation changed, only while the confirmed policy bundle has this manifest SHA-256 (none: no bundle is confirmed) and does not sign the value stored now; else rotation_confirmed and nothing changes")
+		usage := "change only when the stored credential still has this exact SHA-256; required with --undo-rotation"
+		if runtime.GOOS == "windows" {
+			usage = "change only when the stored credential still has this exact SHA-256, or none for proven absence; required with --undo-rotation"
+		}
+		cmd.Flags().StringVar(&opts.ifStored, "if-stored", "", usage)
+	}
+	if action == "remove" {
+		cmd.Flags().StringVar(&opts.undoConfig, "undo-config", "", "with --undo-rotation (Windows): the SHA-256 of the installed config before the rotation (none: no config); only while that config is still installed does remove take a credential it references, else credential_in_use and nothing is removed")
 	}
 	if action != "status" {
 		addLockWaitFlag(cmd.Flags(), &opts.lockWait)

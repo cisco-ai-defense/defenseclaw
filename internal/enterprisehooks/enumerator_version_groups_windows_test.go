@@ -31,6 +31,7 @@ const (
 // those same users (stubSignedInSessions adds a disconnected one).
 func stubActiveSessions(t *testing.T, sessions map[string][]string) {
 	t.Helper()
+	stubWindowsSurfaceReadAs(t)
 	previous := windowsActiveSessionGroups
 	t.Cleanup(func() { windowsActiveSessionGroups = previous })
 	windowsActiveSessionGroups = func() (map[string][]string, error) {
@@ -45,6 +46,15 @@ func stubActiveSessions(t *testing.T, sessions map[string][]string) {
 		sids = append(sids, sid)
 	}
 	stubSignedInSessions(t, sids...)
+}
+
+// Synthetic signed-in sessions must also be able to read their own profile.
+// Tests that exercise failed impersonation replace this stub explicitly.
+func stubWindowsSurfaceReadAs(t *testing.T) {
+	t.Helper()
+	previous := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previous })
 }
 
 // stubSignedInSessions stubs the users who have a session, active or
@@ -139,6 +149,35 @@ func TestStandaloneKnownRowReportsAnUnverifiedUpgrade(t *testing.T) {
 	}
 }
 
+func TestEnumerateWindowsInspectsStandaloneMachinePolicyExtension(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	home := t.TempDir()
+	extension := filepath.Join(home, ".vscode", "extensions", "anthropic.claude-code-2.1.100-win32-x64")
+	if err := os.MkdirAll(extension, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	stubActiveSessions(t, map[string][]string{testLocalUserSID: {}})
+	previousProcess, previousReadAs := windowsEnterpriseStandaloneProcess, windowsSurfaceReadAs
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess, windowsSurfaceReadAs = previousProcess, previousReadAs })
+	var reported []UnprotectedAgent
+	_, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range reported {
+		if agent.Connector == "claudecode" && agent.Surface == "extension" &&
+			agent.Version == "2.1.100" && agent.Code == UnprotectedCodeSurfaceUnverified {
+			return
+		}
+	}
+	t.Fatalf("old machine-policy extension was not inspected: %+v", reported)
+}
+
 // A CLI found at a version the guardian cannot admit used to be only
 // logged; it is now reported, so status and verify show the gap.
 func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
@@ -150,6 +189,7 @@ func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
 	stubCodexMachinePolicyPublished(t, true)
 	cursorHome := cursorProfile(t, "4.1.0")
 	codexHome := codexProfile(t, "0.125.0")
+	writeRunnableWindowsCodexCopy(t, filepath.Join(codexHome, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex"), "0.125.0")
 	injectWindowsProfileList(t, map[string]string{
 		testLocalUserSID: cursorHome,
 		testLocalUserTwo: codexHome,

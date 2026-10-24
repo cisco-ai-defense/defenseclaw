@@ -245,6 +245,45 @@ func TestPolicyOmittedNamesTheDigestItCouldNotCompute(t *testing.T) {
 	}
 }
 
+// The last applied digest is useful context, but it cannot prove the current
+// installed policy when a referenced asset can no longer be built (GAP-1244).
+func TestSavedPolicyDigestCannotCertifyFailedCurrentComputation(t *testing.T) {
+	const digest = "sha256:" + "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			runner := &policyDigestRunner{fakeRunner: h.runner, digest: digest}
+			h.env.Runner = runner
+			reported, reloadError := digest, ""
+			servePolicyHealth(h, &reported, &reloadError)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			if record, err := h.env.loadPolicyState(); err != nil || record == nil || record.EffectiveDigest != digest {
+				t.Fatalf("missing saved policy digest: record=%+v err=%v", record, err)
+			}
+			runner.digest = ""
+			runner.refusal = `rule pack "changed" does not match its pin`
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				r := h.run(Options{Action: action})
+				if r.SecurityComplete || r.Policy == nil || r.Policy.Applied || r.Policy.EffectiveDigest != digest {
+					t.Fatalf("%s certified saved digest: complete=%t policy=%+v", action, r.SecurityComplete, r.Policy)
+				}
+				message := messagesOf(r.Warnings, codePolicyUnverified) + messagesOf(r.Errors, codePolicyUnverified)
+				if !strings.Contains(message, "does not match its pin") {
+					t.Fatalf("%s omitted current computation cause: warnings=%+v errors=%+v", action, r.Warnings, r.Errors)
+				}
+				if action == ActionVerify && (r.OK || r.ExitCode == 0) {
+					t.Fatalf("verify accepted an uncomputed current policy: %+v", r)
+				}
+			}
+			runner.digest, runner.refusal = digest, ""
+			if r := h.run(Options{Action: ActionVerify}); !r.OK || !r.SecurityComplete || r.Policy == nil || !r.Policy.Applied {
+				t.Fatalf("restored policy did not verify: %+v", r)
+			}
+		})
+	}
+}
+
 // GAP-0133: a sandbox pack under the policies directory edited in place
 // leaves config.yaml and every installed file as applied, but the config now
 // computes to another effective policy than the running gateway reports.

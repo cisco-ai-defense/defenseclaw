@@ -16,7 +16,7 @@ import yaml
 from click.testing import CliRunner
 from defenseclaw import config as dcconfig
 from defenseclaw import fail_mode as fail_mode_runtime
-from defenseclaw.commands import cmd_guardrail
+from defenseclaw.commands import cmd_doctor, cmd_guardrail
 from defenseclaw.context import AppContext
 from defenseclaw.doctor_hooks import _HERMES_REQUIRED_HOOKS
 from defenseclaw.fail_mode import (
@@ -24,6 +24,7 @@ from defenseclaw.fail_mode import (
     connector_fail_mode_report,
     resolve_connector_fail_mode,
 )
+
 from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
@@ -394,7 +395,7 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
     assert report["note"] == ""
     assert "caller_env" not in report
 
-    # GAP-0129: closed in config.yaml with open hooks is intended in observe mode, and the report says so.
+    # The per-user default-tier outage mode can differ from the saved value.
     observe = ConnectorFailModeState(
         connector="claudecode",
         desired="open",
@@ -402,10 +403,68 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
         runtime="open",
         sources=(("config", "closed"), ("hook-script", "open"), ("claude-env", "open")),
         drift=(),
+        deployment="per-user",
+        policy_tier="default",
     ).to_report()
     assert observe["effective"] == "open" and observe["drift"] == []
     assert (
-        observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
+        observe["note"] == "the default per-user policy tier keeps gateway outages fail-open; "
+        "guardrail.hook_fail_mode=closed does not control hook failures here"
+    )
+
+
+def test_closed_per_user_hook_note_does_not_claim_observe_mode() -> None:
+    # A saved open preference on a per-user action-mode host is overridden by
+    # the closed hook rule. Status must name that rule, not observe mode.
+    state = ConnectorFailModeState(
+        connector="codex",
+        desired="closed",
+        configured="open",
+        runtime="closed",
+        sources=(("config", "open"), ("hook-script", "closed")),
+        drift=(),
+        deployment="per-user",
+    )
+    report = state.to_report()
+    assert report["effective"] == "closed"
+    assert report["note"] == (
+        "this per-user deployment keeps hooks fail-closed; "
+        "guardrail.hook_fail_mode=open does not control hook failures here"
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "tier", "configured", "desired", "reason"),
+    [
+        ("per-user", "default", "closed", "open", "the default per-user policy tier keeps gateway outages fail-open"),
+        ("per-user", "strict", "open", "closed", "the strict per-user policy tier keeps gateway outages fail-closed"),
+        ("managed", "default", "open", "closed", "managed application protection selects hooks fail-closed"),
+        ("secure-client", "default", "closed", "open", "Secure Client policy selects hooks fail-open"),
+    ],
+)
+def test_fail_mode_note_names_deployment_and_tier_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    deployment: str,
+    tier: str,
+    configured: str,
+    desired: str,
+    reason: str,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"cursor": ""})
+    cfg.guardrail.hook_fail_mode = configured
+    cfg.guardrail.effective_hook_fail_mode = lambda _name: desired
+    cfg.guardrail.hook_policy_tier = lambda _name: tier
+    cfg.managed_outside_secure_client = lambda: deployment == "managed"
+    cfg.guardrail.secure_client_hook_fail_modes = lambda: deployment == "secure-client"
+    monkeypatch.setattr(fail_mode_runtime, "_platform_runtime_source", lambda _cfg, _name: ("hook-script", desired))
+
+    state = resolve_connector_fail_mode(cfg, "cursor")
+
+    assert state.desired == desired
+    assert state.effective == desired
+    assert state.note == (
+        f"{reason}; guardrail.hook_fail_mode={configured} does not control hook failures here"
     )
 
 
@@ -1858,6 +1917,16 @@ def test_native_deny_state_reports_a_stale_lock_or_registration_next_to_a_closed
     # rendered open). Neither is current, so guardrail fail-mode closed
     # reconciles instead of saying there is nothing to do.
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {connector: "closed"})
+    if connector == "hermes":
+        # This test checks the lock and registered command. Its synthetic
+        # hook is not a containment test, and CI hosts may forbid user PID
+        # namespaces needed by Doctor's real execution probe.
+
+        def registered_hook_probe(argv: list[str]) -> tuple[int, bytes]:
+            assert argv[0] == str(Path(cfg.data_dir) / "hooks" / "hermes-hook.sh")
+            return 0, cmd_doctor._HERMES_EXECUTION_PROBE_RESPONSE
+
+        monkeypatch.setattr(cmd_doctor, "_run_hermes_execution_probe", registered_hook_probe)
     script = f"{connector}-hook.sh"
     (Path(cfg.data_dir) / "hooks" / script).write_text(
         "\n".join(_HOOK_FAIL_MODE_LINES[f"{script}/closed"]) + "\n", encoding="utf-8"

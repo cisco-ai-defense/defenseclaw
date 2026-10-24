@@ -544,6 +544,10 @@ class GatewayListenerNotOwnedError(requests.ConnectionError):
     """The local API listener was not proven to be this account's gateway."""
 
 
+class GatewayNotRunningError(GatewayListenerNotOwnedError):
+    """The verified gateway PID is absent, so no request bytes were sent."""
+
+
 def foreign_loopback_listener(host: str, port: int) -> str:
     """Explain a loopback API listener that belongs to another account, or "".
 
@@ -598,7 +602,11 @@ def _unproven_per_user_gateway_target(host: str, port: int) -> str:
             return f"{host}:{port} is not the configured gateway endpoint for this account"
         trust = _trusted_gateway_listener(cfg)
         if not trust.trusted:
+            if getattr(trust, "code", None) == "missing":
+                raise GatewayNotRunningError(trust.detail or "the gateway is not running")
             return trust.detail or "gateway listener ownership could not be verified"
+    except GatewayNotRunningError:
+        raise
     except Exception:  # noqa: BLE001 - unknown ownership fails closed.
         return "gateway listener ownership could not be verified"
     return ""

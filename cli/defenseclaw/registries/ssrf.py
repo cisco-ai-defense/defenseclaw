@@ -126,6 +126,10 @@ class SSRFError(ValueError):
     """Raised when a URL fails the SSRF guard."""
 
 
+class SSRFUnresolvableError(SSRFError):
+    """The host has no DNS answer, so its address safety is unverified."""
+
+
 # Dependency-injected resolver type so tests can avoid hitting DNS.
 Resolver = Callable[[str], list[str]]
 
@@ -248,7 +252,7 @@ def resolve_and_pin(
     resolve = resolver or _default_resolver
     addrs = resolve(host)
     if not addrs:
-        raise SSRFError(f"could not resolve host {host!r}")
+        raise SSRFUnresolvableError(f"could not resolve host {host!r}")
 
     safe_ip: str | None = None
     for addr in addrs:

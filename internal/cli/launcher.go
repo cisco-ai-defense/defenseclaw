@@ -49,7 +49,7 @@ const (
 	launcherCommand = "defenseclaw"
 
 	// launcherRefusal answers every command the launcher does not offer.
-	launcherRefusal = "This computer is managed; only `defenseclaw sandbox` commands are available here."
+	launcherRefusal = "This computer is managed; use `defenseclaw sandbox status` for your read-only status and `defenseclaw sandbox policy explain` for your policy. Other commands require an administrator."
 )
 
 // launcherArgv0 is the name the process was started under; a seam for tests.
@@ -124,6 +124,7 @@ func prepareLauncherRoot(root *cobra.Command) {
 your coding agents in sandboxes under the policy your organization set for you:
 
   defenseclaw sandbox run claude     run Claude Code in a sandbox
+  defenseclaw sandbox status         show your sandbox and managed policy state
   defenseclaw sandbox policy explain show the policy that applies to you
 
 Every other DefenseClaw command is for administrators.`

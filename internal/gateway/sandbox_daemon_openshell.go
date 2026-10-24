@@ -77,6 +77,7 @@ const (
 	openShellGatewayRepairCommand = "sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos repair"
 	daemonSystemctl               = "/usr/bin/systemctl"
 	daemonLaunchctl               = "/bin/launchctl"
+	renderedGatewayDriftField     = "gateway configuration"
 
 	// openShellPrerequisiteReason is the refusal detail of a missing
 	// OpenShell prerequisite.
@@ -110,6 +111,9 @@ type daemonOpenShell interface {
 	// differs from the rendered one, for a gateway the managed unit did not
 	// start (nil otherwise).
 	Drift(s sandboxrelay.DaemonSettings) ([]openshell.SettingDrift, error)
+	// RenderedConfigDrift is a cheap status probe of the lifecycle's pinned
+	// render; it does not inspect a running process or change readiness.
+	RenderedConfigDrift(s sandboxrelay.DaemonSettings) bool
 	// Prepare starts and registers the account's OpenShell gateway (setup
 	// mode installs it first). started reports that it started the gateway
 	// now.
@@ -273,6 +277,7 @@ func (o *accountOpenShell) Drift(s sandboxrelay.DaemonSettings) ([]openshell.Set
 	e := s.Enterprise
 	compare := e.Install != config.EnterpriseOpenShellInstallSetup && e.GatewayConfigPath != ""
 	var want openshell.RenderedGateway
+	var renderedDrift []openshell.SettingDrift
 	if compare {
 		envPath := filepath.Join(filepath.Dir(e.GatewayConfigPath), openshell.GatewayEnvFile)
 		var digest string
@@ -281,28 +286,36 @@ func (o *accountOpenShell) Drift(s sandboxrelay.DaemonSettings) ([]openshell.Set
 			return nil, err
 		}
 		if e.GatewayConfigDigest != "" && digest != e.GatewayConfigDigest {
-			// The lifecycle rendered again since the settings were read; the
-			// root-owned file is what counts.
-			o.logf("the rendered OpenShell gateway configuration changed since the managed settings were read")
+			renderedDrift = []openshell.SettingDrift{{Field: renderedGatewayDriftField, Want: "installed render", Have: "changed"}}
 		}
 	}
 	if holder, held := o.portHolder(gatewayPort(s)); !held || holder != o.uid {
-		return nil, nil
+		return renderedDrift, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if o.managedUnitActive(ctx) {
-		return o.commandDrift(ctx, s), nil
+		return append(renderedDrift, o.commandDrift(ctx, s)...), nil
 	}
 	if !compare {
-		return nil, nil
+		return renderedDrift, nil
 	}
 	want = want.ForAccount(int64(o.uid), int64(o.gid))
 	have, err := o.readUser(o.goos)
 	if err != nil {
-		return []openshell.SettingDrift{{Field: "gateway configuration", Want: "readable", Have: "unreadable"}}, nil
+		return append(renderedDrift, openshell.SettingDrift{Field: renderedGatewayDriftField, Want: "readable", Have: "unreadable"}), nil
 	}
-	return tighterDrift(have.Drift(want), want), nil
+	return append(renderedDrift, tighterDrift(have.Drift(want), want)...), nil
+}
+
+func (o *accountOpenShell) RenderedConfigDrift(s sandboxrelay.DaemonSettings) bool {
+	e := s.Enterprise
+	if e.GatewayConfigPath == "" || e.GatewayConfigDigest == "" {
+		return false
+	}
+	envPath := filepath.Join(filepath.Dir(e.GatewayConfigPath), openshell.GatewayEnvFile)
+	_, digest, err := o.readRendered(e.GatewayConfigPath, envPath)
+	return err != nil || digest != e.GatewayConfigDigest
 }
 
 // commandDrift compares the command line of the gateway on the account's
@@ -1011,10 +1024,26 @@ func (d *SandboxDaemon) readyOpenShell(ctx context.Context, s sandboxrelay.Daemo
 			d.logf("OpenShell settings drift: %s", item)
 		}
 		d.reportDrift(ctx, registration, drift)
+		drift = blockingOpenShellDrift(drift)
+	}
+	if len(drift) > 0 {
 		return &sandboxapi.Error{Code: sandboxapi.CodeUnavailable, Status: http.StatusServiceUnavailable,
 			Message: sandboxapi.SettingsDrift(driftFields(drift)), Detail: sandboxrelay.EventSettingsDrift}
 	}
 	return d.prepareOpenShell(ctx, s)
+}
+
+// A changed rendered file is reported to the organization, while a user
+// sandbox keeps its prior create/start behavior until the administrator
+// repairs that file. Other setting differences retain their existing pause.
+func blockingOpenShellDrift(drift []openshell.SettingDrift) []openshell.SettingDrift {
+	var blocking []openshell.SettingDrift
+	for _, item := range drift {
+		if item.Field != renderedGatewayDriftField || item.Have != "changed" {
+			blocking = append(blocking, item)
+		}
+	}
+	return blocking
 }
 
 // prepareOpenShell starts and registers the account's OpenShell gateway
@@ -1069,7 +1098,7 @@ func (d *SandboxDaemon) keepOpenShellLocked(ctx context.Context) {
 	if uid, held := d.openShell.PortHolder(s); !held || uid != d.uid {
 		return
 	}
-	if drift, err := d.openShell.Drift(s); err != nil || len(drift) > 0 {
+	if drift, err := d.openShell.Drift(s); err != nil || len(blockingOpenShellDrift(drift)) > 0 {
 		return
 	}
 	if _, err := d.openShell.Prepare(ctx, s); err != nil {

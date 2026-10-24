@@ -2224,6 +2224,21 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 			t.Fatalf("machine leftovers (purge %v): errors %+v warnings %+v", purge, left.Errors, left.Warnings)
 		}
 	}
+	// Two cleanup steps can report the same selector retained for another
+	// deployment. It is not a removal failure and must appear only once.
+	selector := `C:\\Program Files\\OpenAI\\Codex\\.defenseclaw-managed-runtime-selector.state: kept: it also holds runtime selections of another DefenseClaw deployment (1 target(s)); that deployment's uninstall removes them`
+	mixed := warnings(base + `,"machine_state_remaining":["` + selector + `","` + selector + `","C:\\ProgramData\\DefenseClaw-PowerShell-x: access denied"]}`)
+	if len(mixed) != 2 || mixed[0].Code != "machine_state_remaining" || mixed[1].Code != "machine_state_kept" ||
+		!strings.Contains(mixed[0].Message, "could not remove 1 DefenseClaw machine folder(s)") ||
+		strings.Contains(mixed[0].Message, "selector") ||
+		!strings.Contains(mixed[1].Message, "kept 1 DefenseClaw machine file(s) or folder(s) on purpose") ||
+		strings.Count(mixed[1].Message, "runtime-selector.state") != 1 {
+		t.Fatalf("kept selector reported twice or as a failure: %+v", mixed)
+	}
+	if only := warnings(base + `,"machine_state_remaining":["` + selector + `","` + selector + `"]}`); len(only) != 1 ||
+		only[0].Code != "machine_state_kept" || strings.Contains(only[0].Message, "could not remove") {
+		t.Fatalf("a kept selector alone: %+v", only)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}
@@ -2352,6 +2367,33 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	applyWindowsEnterpriseInstallerReport(result, opts, report, windowsEnterpriseStandaloneRun{ExitCode: 1})
 	if result.Errors[0].Message != failure {
 		t.Fatalf("verify error rewritten: %q", result.Errors[0].Message)
+	}
+}
+
+func TestWindowsNativeOTLPCaptureSkipWarning(t *testing.T) {
+	path := `C:\Users\bob\.codex\config.toml`
+	document, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"ok":             true,
+		"action":         "upgrade",
+		"user_native_otlp_capture_skipped": []string{
+			path + ": linked file was not captured",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.4")
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	if len(result.Errors) != 0 || len(result.Warnings) != 1 ||
+		result.Warnings[0].Code != "user_native_otlp_capture_skipped" ||
+		!strings.Contains(result.Warnings[0].Message, path) {
+		t.Fatalf("linked capture skip was not reported once: %+v", result)
 	}
 }
 
@@ -3052,12 +3094,63 @@ func TestWindowsEnterprisePolicyNamesADigestItCouldNotRead(t *testing.T) {
 				result := newWindowsEnterpriseStandaloneResult(action, &windowsEnterpriseLifecycleOptions{})
 				result.Installed, result.Readiness.Gateway = true, true
 				applyWindowsEnterprisePolicy(context.Background(), result)
-				if result.Policy != nil || len(result.Warnings) != 1 || result.Warnings[0].Code != c.code ||
-					!strings.Contains(result.Warnings[0].Message, c.contains) {
-					t.Fatalf("policy=%+v warnings=%+v, want only %s naming %q", result.Policy, result.Warnings, c.code, c.contains)
+				messages := result.Warnings
+				if action == "verify" {
+					messages = result.Errors
+				}
+				if result.Policy != nil || len(messages) != 1 || messages[0].Code != c.code ||
+					!strings.Contains(messages[0].Message, c.contains) {
+					t.Fatalf("policy=%+v warnings=%+v errors=%+v, want %s naming %q", result.Policy, result.Warnings, result.Errors, c.code, c.contains)
 				}
 			})
 		}
+	}
+}
+
+// A healthy installer report is only a starting point: verify must not keep
+// its security_complete claim when the installed policy cannot be checked.
+func TestWindowsEnterpriseVerifyCannotCertifyFailedPolicyCheck(t *testing.T) {
+	previous := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = previous })
+	messageOf := func(messages []enterprisestatus.Message, code string) string {
+		for _, message := range messages {
+			if message.Code == code {
+				return message.Message
+			}
+		}
+		return ""
+	}
+	for name, c := range map[string]struct {
+		out, cause string
+		err        error
+		code       string
+	}{
+		"failed":        {err: errors.New("installed policy check failed"), cause: "installed policy check failed", code: "policy_unverified"},
+		"timed out":     {err: context.DeadlineExceeded, cause: "context deadline exceeded", code: "policy_unverified"},
+		"empty":         {out: `{}`, cause: "no effective policy digest", code: "policy_unverified"},
+		"not buildable": {out: `{"error":"rule pack digest does not match"}`, cause: "rule pack digest does not match", code: "policy_not_buildable"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return []byte(c.out), c.err }
+			for _, action := range []string{"status", "verify", "ensure"} {
+				result := newWindowsEnterpriseStandaloneResult(action, &windowsEnterpriseLifecycleOptions{})
+				result.Installed, result.Readiness.Gateway, result.SecurityComplete = true, true, true
+				applyWindowsEnterprisePolicy(t.Context(), result)
+				if result.SecurityComplete || result.Policy != nil {
+					t.Fatalf("%s certified failed policy check: security=%t policy=%+v", action, result.SecurityComplete, result.Policy)
+				}
+				if action == "verify" {
+					if message := messageOf(result.Errors, c.code); !strings.Contains(message, c.cause) {
+						t.Fatalf("verify omitted %s cause: errors=%+v warnings=%+v", c.code, result.Errors, result.Warnings)
+					}
+					if result.Finish("windows", enterprisestatus.WindowsExitFailure) == 0 || result.OK {
+						t.Fatalf("verify succeeded after failed policy check: %+v", result)
+					}
+				} else if message := messageOf(result.Warnings, c.code); !strings.Contains(message, c.cause) {
+					t.Fatalf("%s omitted %s cause: warnings=%+v", action, c.code, result.Warnings)
+				}
+			}
+		})
 	}
 }
 

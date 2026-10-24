@@ -273,7 +273,9 @@ func TestSandboxClaudeAndCodexAcknowledgeTheirRelayedToolAnswer(t *testing.T) {
 				t.Fatalf("confirmed exit=%d calls=%d stdout=%q stderr=%q", run.exitCode, len(run.calls), run.stdout, run.stderr)
 			}
 			if run.calls[0].body != tc.stdin || run.calls[1].url() != run.calls[0].url() ||
-				run.calls[1].headers["authorization"] != "Bearer sandbox-token" {
+				run.calls[1].headers["authorization"] != "Bearer sandbox-token" ||
+				run.calls[0].headers["x-defenseclaw-client"] == "" ||
+				run.calls[1].headers["x-defenseclaw-client"] == "" {
 				t.Fatalf("receipt crossed the wrong binding or route: %+v", run.calls)
 			}
 			for i, call := range run.calls {

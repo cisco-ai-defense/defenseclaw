@@ -551,6 +551,24 @@ func TestSandboxDaemonCreateReadiesOpenShell(t *testing.T) {
 	}
 }
 
+func TestRenderedGatewayDriftReportsWithoutNewSandboxRefusal(t *testing.T) {
+	f := newSandboxDaemonFixture(t)
+	f.os.drift = []openshell.SettingDrift{{Field: "gateway configuration", Want: "installed render", Have: "changed"}}
+	if err := f.d.readyOpenShell(t.Context(), f.d.currentSettings(), "reg-7"); err != nil {
+		t.Fatalf("diagnostic drift refused a sandbox: %v", err)
+	}
+	if f.os.prepared.Load() != 1 {
+		t.Fatal("diagnostic drift stopped ordinary OpenShell preparation")
+	}
+	f.relay.eventsMu.Lock()
+	defer f.relay.eventsMu.Unlock()
+	if len(f.relay.events) != 1 || len(f.relay.events[0].Events) != 1 ||
+		f.relay.events[0].Events[0].Kind != sandboxrelay.EventSettingsDrift ||
+		string(f.relay.events[0].Events[0].Payload) != `{"field":"gateway_configuration"}` {
+		t.Fatalf("rendered drift report = %+v", f.relay.events)
+	}
+}
+
 // A run's preflight readies the account's OpenShell before its create
 // (POST ready): the daemon installs and starts it and answers the status; a
 // failure is the run's refusal; settings that make sandboxes unavailable

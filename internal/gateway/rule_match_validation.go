@@ -91,6 +91,12 @@ var ibanLengthsByCountry = map[string]int{
 // a rejected candidate prevents an obvious placeholder near the start of a
 // document from hiding a real value later in the same content.
 func firstAcceptedRuleMatch(rule PatternRule, text string) []int {
+	if ruleMatchValidator(rule.ID) == nil {
+		if rule.Pattern == nil || text == "" {
+			return nil
+		}
+		return rule.Pattern.FindStringIndex(text)
+	}
 	return firstAcceptedRegexMatchAt(rule.Pattern, text, func(match string, start, end int) bool {
 		return acceptedRuleMatchAt(rule.ID, text, match, start, end)
 	})
@@ -185,31 +191,55 @@ func findAcceptedRuleLoc(original, normalized, ruleID string, pattern *regexp.Re
 }
 
 func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
-	if !acceptedRuleMatch(ruleID, match) {
-		return false
-	}
+	validator := ruleMatchValidator(ruleID)
+	return validator == nil || validator(text, match, start, end)
+}
+
+// A nil validator means the regex match itself is decisive. Keep this dispatch
+// shared with firstAcceptedRuleMatch so a rule with later valid candidates can
+// never take the first-match shortcut.
+func ruleMatchValidator(ruleID string) func(text, match string, start, end int) bool {
 	switch ruleID {
 	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN":
-		return credibleSSNContext(text, start, end)
-	case "ENT-EMAIL-BULK":
-		return credibleEmailContext(text, match, start, end)
-	case "ENT-BULK-CSV-PII":
-		return credibleBulkCSVContext(text, start, end)
-	case "SEC-PRIVKEY":
-		return secretshape.ValidPrivateKeyPEMAt(text, start)
-	case "CMD-RM-RF":
-		return acceptedRecursiveRootDeleteAt(text, start, end)
-	case "CMD-WIN-REG-PERSIST":
-		for _, pattern := range windowsRegistryPersistencePatterns {
-			if pattern.MatchString(text) {
-				return true
-			}
+		return func(text, match string, start, end int) bool {
+			return validUSSSN(match) && credibleSSNContext(text, start, end)
 		}
-		return false
+	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
+		return func(_, match string, _, _ int) bool { return validPaymentCardCandidate(match) }
+	case "ENT-IBAN":
+		return func(_, match string, _, _ int) bool { return validIBAN(match) }
+	case "ENT-EMAIL-BULK":
+		return func(text, match string, start, end int) bool {
+			return credibleEmailContext(text, match, start, end)
+		}
+	case "ENT-BULK-CSV-PII":
+		return func(text, _ string, start, end int) bool {
+			return credibleBulkCSVContext(text, start, end)
+		}
+	case "SEC-PRIVKEY":
+		return func(text, match string, start, _ int) bool {
+			return acceptedCredentialMatch(ruleID, match) && secretshape.ValidPrivateKeyPEMAt(text, start)
+		}
+	case "CMD-RM-RF":
+		return func(text, _ string, start, end int) bool {
+			return acceptedRecursiveRootDeleteAt(text, start, end)
+		}
+	case "CMD-WIN-REG-PERSIST":
+		return func(text, _ string, _, _ int) bool {
+			for _, pattern := range windowsRegistryPersistencePatterns {
+				if pattern.MatchString(text) {
+					return true
+				}
+			}
+			return false
+		}
 	case "exec.remote_ip_download_execute_same_artifact":
-		return acceptedPublicIPv4Download(match)
+		return func(_, match string, _, _ int) bool { return acceptedPublicIPv4Download(match) }
 	}
-	return true
+	if strings.HasPrefix(ruleID, "SEC-") {
+		return func(_, match string, _, _ int) bool { return acceptedCredentialMatch(ruleID, match) }
+	}
+	return nil
 }
 
 // acceptedPublicIPv4Download keeps the parser-fallback rule aligned with its
@@ -461,21 +491,6 @@ func emailDomainLooksLikeNumericHost(email string) bool {
 		}
 	}
 	return numeric >= 2
-}
-
-func acceptedRuleMatch(ruleID, match string) bool {
-	switch ruleID {
-	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN":
-		return validUSSSN(match)
-	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
-		return validPaymentCardCandidate(match)
-	case "ENT-IBAN":
-		return validIBAN(match)
-	}
-	if strings.HasPrefix(ruleID, "SEC-") {
-		return acceptedCredentialMatch(ruleID, match)
-	}
-	return true
 }
 
 // acceptedLocalPIIMatch applies the same structural checks to the legacy local

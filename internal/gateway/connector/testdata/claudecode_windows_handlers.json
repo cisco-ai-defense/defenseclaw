@@ -44,6 +44,17 @@
       ")"
     ]
   },
+  "pretool_guard": {
+    "type": "command",
+    "command": "C:\\Users\\dcw-std1\\AppData\\Local\\Programs\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+    "args": [
+      "launcher-guard",
+      "C:\\Users\\dcw-std1\\.local\\bin\\defenseclaw-hook.exe",
+      "hook",
+      "--connector",
+      "claudecode"
+    ]
+  },
   "exec": {
     "type": "command",
     "command": "C:\\Users\\dcw-std1\\.local\\bin\\defenseclaw-hook.exe",

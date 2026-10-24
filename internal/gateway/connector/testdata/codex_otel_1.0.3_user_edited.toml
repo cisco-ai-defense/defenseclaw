@@ -1,0 +1,8 @@
+[otel] # retain this exact table and its comments
+# Operator replaced the earlier product exporter after setup.
+environment  = 'operator'
+log_user_prompt = false
+
+[otel.exporter.otlp-http]
+endpoint = 'https://collector.example.test/v1/logs' # operator endpoint
+protocol = 'json'

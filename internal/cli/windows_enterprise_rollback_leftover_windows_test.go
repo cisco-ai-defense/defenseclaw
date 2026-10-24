@@ -41,6 +41,32 @@ func TestWindowsEnterpriseRollbackLeftoverOfACreatedFolder(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseNativeOTLPRollbackLeftoverKeepsRestoredRelease(t *testing.T) {
+	path := `C:\Users\dcw-std2\.codex\config.toml`
+	leftover := "native OTLP user rollback: " + path + ": preimage could not be captured"
+	raw, err := json.Marshal([]string{leftover})
+	if err != nil {
+		t.Fatal(err)
+	}
+	warnings := windowsEnterpriseRollbackLeftoverWarnings(raw)
+	if len(warnings) != 1 || warnings[0].Code != "rollback_leftover" {
+		t.Fatalf("warnings = %+v", warnings)
+	}
+	message := warnings[0].Message
+	for _, want := range []string{
+		"the rollback could not restore " + path + ": preimage could not be captured",
+		"the restored release is running",
+		"inspect that link or its permissions and restore it by hand",
+	} {
+		if !strings.Contains(message, want) {
+			t.Errorf("warning %q does not contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "/uninstall") || strings.Contains(message, "failed first install") {
+		t.Errorf("native OTLP warning recommends removing the restored deployment: %q", message)
+	}
+}
+
 // GAP-0847: the targets a failed undo leaves without a hook are named: each
 // enabled target published before the apply that the targets published now
 // do not enroll, matched by SID and connector. A disabled row had no hook to

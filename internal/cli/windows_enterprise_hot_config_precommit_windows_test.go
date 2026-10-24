@@ -20,10 +20,79 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
+
+// A confirmed signed bundle is the recovery source when installed config
+// drifts from the gateway's live generation. A new delivery has no such
+// established last-good identity and keeps the prewrite proof requirement.
+func TestWindowsConfirmedBundleReplayRepairsDriftWithPriorPolicyMismatch(t *testing.T) {
+	const drifted = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 700\n"
+	const confirmed = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n"
+	const bundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"
+	for _, repeat := range []bool{false, true} {
+		name := "new delivery"
+		if repeat {
+			name = "confirmed replay"
+		}
+		t.Run(name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, drifted, confirmed)
+			host.adopted = true
+			host.bundleID, host.bundleVersion = bundleID, 4
+			if repeat {
+				opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{AlreadyApplied: true,
+					Config: []byte(confirmed), ConfigSHA256: configwrite.SHA256Hex([]byte(confirmed))}}
+			} else {
+				opts.bundle = host.bundleRun()
+			}
+			savedConfirmed, savedRestart, savedDigest := windowsHotConfirmedBundle, windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest
+			t.Cleanup(func() {
+				windowsHotConfirmedBundle, windowsEnterpriseHotConfigRestart, windowsEnterprisePolicyDigest = savedConfirmed, savedRestart, savedDigest
+			})
+			windowsHotConfirmedBundle = func(_ *enterprisebundle.Driver, _ []byte) (configwrite.Options, []byte, *enterprisebundle.Ref, error) {
+				opt, _ := enterprisebundle.GenerationOptions(&enterprisebundle.Receipt{BundleID: bundleID, Version: 4,
+					Principal: "control-plane:acme/alice", SignerKeyID: "k1"})
+				return opt, []byte(confirmed), &enterprisebundle.Ref{BundleID: bundleID, Version: 4, SignerKeyID: "k1"}, nil
+			}
+			restarts := 0
+			windowsEnterpriseHotConfigRestart = func() (bool, error) { restarts++; return true, nil }
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+			stub.install(t)
+			windowsEnterprisePolicyDigest = func(ctx context.Context) ([]byte, error) {
+				if len(host.writes) == 0 {
+					proof := []byte(`{"effective_digest":"sha256:drift","gateway_reported_digest":"sha256:live",` +
+						`"gateway_reported_bundle_id":"` + bundleID + `","gateway_reported_bundle_version":4}`)
+					var parsed policyDigestReport
+					if err := json.Unmarshal(proof, &parsed); err != nil || parsed.Digest == "" || parsed.GatewayReportedDigest == "" {
+						t.Fatalf("invalid prior proof %q: %+v, %v", proof, parsed, err)
+					}
+					return proof, nil
+				}
+				return host.digest(ctx)
+			}
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			installed, err := os.ReadFile(host.configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repeat {
+				if !applied || string(installed) != confirmed || len(host.writes) != 1 || restarts != 1 || len(result.Errors) != 0 {
+					t.Fatalf("confirmed replay: applied=%t config=%q writes=%q restarts=%d errors=%+v",
+						applied, installed, host.writes, restarts, result.Errors)
+				}
+			} else if applied || string(installed) != drifted || len(host.writes) != 0 || restarts != 0 ||
+				!windowsBundleHasCode(result.Errors, "bundle_hot_apply_unavailable") {
+				t.Fatalf("new delivery: applied=%t config=%q writes=%q restarts=%d errors=%+v",
+					applied, installed, host.writes, restarts, result.Errors)
+			}
+		})
+	}
+}
 
 // A config writer conflict occurs before publication. An MDM write made
 // after the lifecycle's snapshot belongs to that writer; undoing the old

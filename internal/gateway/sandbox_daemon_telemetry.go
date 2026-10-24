@@ -35,8 +35,8 @@ import (
 // the fleet's Sandboxes board stayed empty for them (GAP-0003).
 //
 // daemonRelayTelemetry is the daemon manager's recorder: it relays the
-// lifecycle and egress records to the managed gateway through POST
-// sandbox/events (EventSandboxLifecycle, EventSandboxEgress), which records
+// lifecycle, egress and otherwise uncounted ask decisions through POST
+// sandbox/events, which records
 // them with its own recorder, stamped with the registration's sandbox,
 // profile and person as it verified them from the hook-socket peer
 // (emitSandboxTelemetryClaim). The daemon names no person: a record only
@@ -128,6 +128,8 @@ type sandboxTelemetryClaim struct {
 	ConversationID string `json:"conversation_id,omitempty"`
 	Host           string `json:"host,omitempty"`
 	Port           int    `json:"port,omitempty"`
+	ApprovalID     string `json:"approval_id,omitempty"`
+	Outcome        string `json:"outcome,omitempty"`
 	Scheme         string `json:"scheme,omitempty"`
 	Path           string `json:"path,omitempty"`
 	ResolvedIP     string `json:"resolved_ip,omitempty"`
@@ -181,9 +183,22 @@ func (t *daemonRelayTelemetry) RecordSandboxEgress(_ context.Context, e audit.Sa
 	return nil
 }
 
-// The other sandbox records have no managed route yet: the managed gateway
-// records the approvals and policy records itself (sandbox.ask.decided,
-// sandbox.policy.*), and the rest stay in the daemon's activity feed.
+func (t *daemonRelayTelemetry) RecordManagedAskDecision(_ context.Context, e audit.SandboxAskDecidedEvent) error {
+	if e.Result != audit.SandboxApprovalDenied {
+		return nil
+	}
+	outcome := "rejected"
+	if e.Reason == sandboxAskReasonFloorDenied {
+		outcome = sandboxAskReasonFloorDenied
+	}
+	c := claimOf(e.Sandbox)
+	c.ApprovalID, c.Outcome, c.Host, c.Port = e.ApprovalID, outcome, e.Host, e.Port
+	t.queue(sandboxrelay.EventSandboxAskDecision, e.Timestamp, c)
+	return nil
+}
+
+// Other approvals already reach the gateway's decisions route. The remaining
+// sandbox records have no managed route and stay in the daemon's feed.
 func (*daemonRelayTelemetry) RecordSandboxApproval(context.Context, audit.SandboxApprovalEvent) error {
 	return nil
 }

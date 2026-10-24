@@ -958,7 +958,6 @@ foreach ($legacySetup in @($false, $true)) {
 def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
     # A running 1.0.3 Amp or OpenCode process retains its old plugin even
     # after the installer replaces the file. Keep the old gateway enforcing.
-    classifier = _ps1_function("Get-LoadedPluginAgent")
     guard = _ps1_function("Assert-NoLoadedPluginAgents")
     assert "Get-CimInstance Win32_Process" in guard
     assert "GetOwner" in guard
@@ -978,68 +977,37 @@ def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
     )
     assert rollback.index("Assert-NoLoadedPluginAgents") < rollback.index("Stop-Gateway")
     assert handoff.index("Assert-NoLoadedPluginAgents") < handoff.index("Stop-Gateway")
-    if not POWERSHELL:
-        return
-    script = classifier + "\n" + "\n".join(
-        f'$p = [pscustomobject]@{{ Name = "{name}"; CommandLine = "{command}" }}; '
-        "Get-LoadedPluginAgent $p"
-        for name, command in [
-            ("opencode.exe", "opencode.exe"),
-            ("amp.exe", "amp.exe"),
-            ("node.exe", "node.exe C:/node_modules/@sourcegraph/amp/cli.js"),
-            ("node.exe", "node.exe unrelated.js"),
-        ]
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows identity required")
+@pytest.mark.allow_subprocess
+def test_windows_agent_scan_audits_owner_denial_and_refuses_the_same_account() -> None:
+    # An unreadable owner (another account on a shared host) cannot prove a
+    # live agent of this account: audit it and go on. A readable owner that is
+    # this account refuses the swap in any session (w25-setup + GAP-1128).
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        "function Get-InstalledAgentPrograms { return @{ 'c:\\agent.exe' = 'opencode' } }\n"
+        "$script:row = [pscustomobject]@{ ProcessId = 7001; ExecutablePath = 'C:\\agent.exe'; CommandLine = 'agent'; SessionId = 9 }\n"
+        "function Get-CimInstance { param($Class, $Filter, $ErrorAction) return $script:row }\n"
+        "function Get-LoadedPluginAgent($Process) { return 'opencode' }\n"
+        "$script:owner = [pscustomobject]@{ ReturnValue = 2; Domain = ''; User = '' }\n"
+        "function Invoke-CimMethod { param($InputObject, $MethodName, $ErrorAction) return $script:owner }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Output \"audit: $Reason\" }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        + _ps1_function("Assert-NoLoadedPluginAgents")
+        + "Assert-NoLoadedPluginAgents\n'owner-denied-audited'\n"
+        "$parts = [Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\\\', 2\n"
+        "$script:owner = [pscustomobject]@{ ReturnValue = 0; Domain = $parts[0]; User = $parts[1] }\n"
+        "try { Assert-NoLoadedPluginAgents; throw 'same-account-was-ignored' } "
+        "catch { if ($_.Exception.Message -notlike 'Close OpenCode and Amp*') { throw } }\n"
+        "'same-account-refused'\n"
     )
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
-    assert result.returncode == 0, result.stderr
-    assert [line for line in result.stdout.splitlines() if line] == ["opencode", "amp", "amp"]
-
-
-@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")
-def test_windows_agent_scan_ignores_other_session_owner_denial() -> None:
-    guard = _ps1_function("Assert-NoLoadedPluginAgents")
-    script = guard + r'''
-function Die($Message) { throw $Message }
-$session = (Get-Process -Id $PID).SessionId
-$script:scanSession = $session + 1
-$script:ownerReturn = 2
-$script:ownerDomain = ''
-$script:ownerUser = ''
-function Get-CimInstance($ClassName) {
-    [pscustomobject]@{ Name = 'opencode.exe'; CommandLine = 'opencode.exe'; ProcessId = 7001; SessionId = $script:scanSession }
-}
-function Invoke-CimMethod($InputObject, $MethodName) {
-    [pscustomobject]@{ ReturnValue = $script:ownerReturn; Domain = $script:ownerDomain; User = $script:ownerUser }
-}
-function Get-LoadedPluginAgent($Process) { return 'opencode' }
-Assert-NoLoadedPluginAgents
-"other-session-owner-denied-ok"
-$script:scanSession = $session
-try {
-    Assert-NoLoadedPluginAgents
-    throw 'same-session-owner-denial-was-ignored'
-} catch {
-    if ($_.Exception.Message -notlike 'Could not check the owner*') { throw }
-}
-"same-session-owner-denied-closed"
-$parts = [Security.Principal.WindowsIdentity]::GetCurrent().Name -split '\\', 2
-$script:ownerDomain = $parts[0]
-$script:ownerUser = $parts[1]
-$script:ownerReturn = 0
-$script:scanSession = $session + 1
-try {
-    Assert-NoLoadedPluginAgents
-    throw 'same-account-other-session-was-ignored'
-} catch {
-    if ($_.Exception.Message -notlike 'Close OpenCode and Amp*') { throw }
-}
-"same-account-other-session-denied-closed"
-'''
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=30)
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "other-session-owner-denied-ok" in result.stdout
-    assert "same-session-owner-denied-closed" in result.stdout
-    assert "same-account-other-session-denied-closed" in result.stdout
+    assert "audit: process owner unreadable" in result.stdout
+    assert "owner-denied-audited" in result.stdout
+    assert "same-account-refused" in result.stdout
 
 
 def test_refused_late_swap_restores_setup_hooks_without_restarting_gateway(tmp_path: Path) -> None:
@@ -6395,3 +6363,291 @@ def test_the_windows_stopped_upgrade_reconcile_names_the_cause(
         ), text
     if not binary:
         assert "defenseclaw-gateway.exe is missing" in text, text
+
+
+# Win32_Process rows (ExecutablePath, CommandLine) and whether each is an
+# agent. The agent is told by its executable, never by a name (GAP-1128).
+_WINDOWS_AGENT_ROWS = [
+    (r"C:\Users\u\.opencode\bin\opencode.exe", "opencode.exe", "opencode"),
+    (r"C:\Tools\opencode.exe", "opencode.exe", ""),
+    (r"C:\work\node_modules\opencode-ai\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node "C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode"', "opencode"),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node --conditions C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode C:\work\worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node --conditions="dev C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode" C:\work\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\work\worker.js C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\Users\u\AppData\Roaming\npm\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
+    (r"C:\Users\u\.bun\bin\bun.exe", r"bun C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Users\u\.amp\bin\amp.exe", "amp.exe", "amp"),
+    ("", "opencode.exe", ""),
+]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_windows_agent_is_told_only_by_its_recorded_entry() -> None:
+    # Fake WMI rows retain exact Windows command-line boundaries. The map is
+    # what the agent installer recorded, independent of names and manifests.
+    installed = (
+        "$script:InstalledAgentPrograms = @{ "
+        "'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode'; "
+        "'c:\\users\\u\\.amp\\bin\\amp.exe' = 'amp'; "
+        "'c:\\users\\u\\appdata\\roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode' = 'opencode'; "
+        "'c:\\users\\u\\appdata\\roaming\\npm\\node_modules\\@sourcegraph\\amp\\dist\\main.js' = 'amp' }\n"
+    )
+    rows = "\n".join(
+        "$p = [pscustomobject]@{{ ProcessId = {}; ExecutablePath = '{}'; CommandLine = '{}' }}; "
+        "'[' + (Get-LoadedPluginAgent $p) + ']'".format(
+            index + 1, program.replace("'", "''"), command.replace("'", "''")
+        )
+        for index, (program, command, _) in enumerate(_WINDOWS_AGENT_ROWS)
+    )
+    resolver = (
+        "function Resolve-AgentPath([string]$Path) { if (-not $Path) { return '' }; "
+        "return $Path.Replace('/', '\\').ToLowerInvariant() }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: PID $ProcessId $Reason\" }\n"
+    )
+    script = ("Set-StrictMode -Version Latest\n" + resolver + _ps1_function("Get-LoadedPluginAgent")
+              + _ps1_function("Split-CommandLine") + installed + rows)
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    got = [line for line in result.stdout.splitlines() if line.startswith("[")]
+    assert got == [f"[{agent}]" for _, _, agent in _WINDOWS_AGENT_ROWS], list(zip(_WINDOWS_AGENT_ROWS, got))
+    assert "audit: PID 13" not in result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_agent_scan_with_no_installed_entry_skips_process_rows() -> None:
+    script = (
+        "function Get-InstalledAgentPrograms { return @{} }\n"
+        "function Get-CimInstance { param($Class, $ErrorAction) "
+        "return @([pscustomobject]@{ ProcessId = 1; ExecutablePath = $null; CommandLine = '' }, "
+        "[pscustomobject]@{ ProcessId = 2; ExecutablePath = 'C:\\Windows\\notepad.exe'; CommandLine = '' }) }\n"
+        "function Get-LoadedPluginAgent($Process) { Write-Host 'scanned'; return '' }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        + _ps1_function("Assert-NoLoadedPluginAgents")
+        + "Assert-NoLoadedPluginAgents\n'scan-passed'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "scan-passed", result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_unrelated_executable_needs_no_path_resolution() -> None:
+    script = (
+        "function Resolve-AgentPath([string]$Path) { Write-Host 'resolved'; return $Path }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Split-CommandLine")
+        + "$script:InstalledAgentPrograms = @{ 'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode' }\n"
+        + "$p = [pscustomobject]@{ ProcessId = 1; ExecutablePath = 'C:\\Windows\\notepad.exe'; CommandLine = 'notepad.exe' }\n"
+        + "'[' + (Get-LoadedPluginAgent $p) + ']'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]", result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(("name", "package", "entry_name", "shim", "want"), [
+    ("opencode", "opencode-ai", "bin/opencode", True, "opencode"),
+    ("amp", "@sourcegraph/amp", "dist/main.js", True, "amp"),
+    ("opencode", "opencode-ai", "bin/opencode", False, ""),
+    ("opencode", "opencode-ai", "bin/worker.js", True, ""),
+])
+def test_windows_node_adjacent_npm_entry_counts_without_appdata(
+    tmp_path: Path, name: str, package: str, entry_name: str, shim: bool, want: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    node = runtime / "node.exe"
+    node.write_bytes(b"MZ")
+    if shim:
+        (runtime / f"{name}.cmd").write_text("@echo off", encoding="utf-8")
+    entry = runtime / "node_modules" / package / entry_name
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    data = tmp_path / "data"
+    data.mkdir()
+    script = (
+        _ps1_function("Resolve-AgentPath") + _ps1_function("Get-InstalledAgentPrograms")
+        + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Split-CommandLine")
+        + "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + f"$env:USERPROFILE = '{tmp_path / 'profile'}'\n$env:APPDATA = '{tmp_path / 'roaming'}'\n"
+        + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n$DataDir = '{data}'\n"
+        + f"$p = [pscustomobject]@{{ ProcessId = 1; ExecutablePath = '{node}'; CommandLine = 'node " +
+          f'"{entry}"' + "' }\n"
+        + "$script:InstalledAgentPrograms = Get-InstalledAgentPrograms @($p)\n"
+        + f"$script:InstalledAgentPrograms.ContainsKey((Resolve-AgentPath '{entry}').ToLowerInvariant())\n"
+        + ("'[' + (Get-LoadedPluginAgent $p) + ']'\n" if os.name == "nt" else "")
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    expected = [str(bool(want))] + ([f"[{want}]"] if os.name == "nt" else [])
+    assert result.stdout.strip().splitlines() == expected, (result.stdout, result.stderr)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_installed_entries_are_exact_files(tmp_path: Path) -> None:
+    profile, roaming, local, data = (tmp_path / name for name in ("profile", "roaming", "local", "data"))
+    data.mkdir()
+    native = profile / ".amp" / "bin" / "amp.exe"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"MZ")
+    entry = roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("node entry", encoding="utf-8")
+    (roaming / "npm" / "opencode.cmd").write_text("@echo off", encoding="utf-8")
+    unrecorded = roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "worker.js"
+    unrecorded.write_text("worker", encoding="utf-8")
+    (entry.parent.parent / "package.json").write_text('{"author":{"name":"opencode-ai"},"name":"other"}', encoding="utf-8")
+    on_path = tmp_path / "tools" / "opencode.exe"
+    on_path.parent.mkdir()
+    on_path.write_bytes(b"MZ")
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        + _ps1_function("Resolve-AgentPath") + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$env:USERPROFILE = '{profile}'\n$env:APPDATA = '{roaming}'\n$env:LOCALAPPDATA = '{local}'\n$env:PATH = '{on_path.parent}'\n$DataDir = '{data}'\n"
+        + "$i = Get-InstalledAgentPrograms\nforeach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    lines = sorted(line for line in result.stdout.splitlines() if "=" in line)
+    assert lines == sorted([f"{str(native).lower()}=amp", f"{str(entry).lower()}=opencode"]), result.stdout
+    assert str(on_path).lower() not in result.stdout and str(unrecorded).lower() not in result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(("selected", "want"), [
+    ("relative/opencode.exe", "0"),
+    ("C:/scratch/opencode.exe", "1"),
+])
+def test_windows_hook_lock_entry_requires_an_absolute_path(tmp_path: Path, selected: str, want: str) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "hook_contract_lock.json").write_text(json.dumps({"connectors": {
+        "opencode": {"agent_executable_source": "setup-selected", "agent_executable": selected},
+        "amp": {},
+    }}), encoding="utf-8")
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        "function Resolve-AgentPath([string]$Path) { "
+        "if ($Path -eq 'relative\\opencode.exe' -or $Path -eq 'C:\\scratch\\opencode.exe') { "
+        "return 'C:\\scratch\\opencode.exe' }; return '' }\n"
+        + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$DataDir = '{data}'\n"
+        + f"$env:USERPROFILE = '{tmp_path / 'profile'}'\n"
+        + f"$env:APPDATA = '{tmp_path / 'roaming'}'\n"
+        + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n"
+        + "(Get-InstalledAgentPrograms).Count\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0 and result.stdout.strip() == want, (result.stdout, result.stderr)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_entry_resolution_follows_a_parent_link(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    entry = real / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory links require a Windows developer token")
+    script = (_ps1_function("Resolve-AgentPath")
+              + f"Resolve-AgentPath '{alias / 'bin' / 'opencode'}'")
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().lower() == str(entry.resolve()).lower(), result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None or shutil.which("node") is None, reason="native Windows Node required")
+@pytest.mark.allow_subprocess
+def test_windows_relative_node_entry_does_not_use_the_installers_cwd(tmp_path: Path) -> None:
+    entry = tmp_path / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    node = Path(shutil.which("node")).resolve()
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        + _ps1_function("Resolve-AgentPath") + _ps1_function("Get-LoadedPluginAgent")
+        + _ps1_function("Split-CommandLine")
+        + "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + f"$script:InstalledAgentPrograms = @{{ '{str(entry).lower()}' = 'opencode' }}\n"
+        + f"$p = [pscustomobject]@{{ ProcessId = 1; ExecutablePath = '{node}'; CommandLine = 'node node_modules\\opencode-ai\\bin\\opencode' }}\n"
+        + "'[' + (Get-LoadedPluginAgent $p) + ']'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "[]" in result.stdout and "audit: relative Node script cwd unreadable" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows identity required")
+@pytest.mark.allow_subprocess
+def test_windows_vanished_agent_process_is_audited_without_refusal() -> None:
+    # A PID can exit between the first WMI enumeration and the ownership
+    # check. Its old row cannot establish that an agent is still live.
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        "function Get-InstalledAgentPrograms { return @{ 'c:\\agent.exe' = 'opencode' } }\n"
+        "function Get-CimInstance { param($Class, $Filter, $ErrorAction) "
+        "if ($Filter) { return $null }; "
+        "return [pscustomobject]@{ ProcessId = 123; ExecutablePath = 'C:\\agent.exe'; CommandLine = 'agent' } }\n"
+        "function Get-LoadedPluginAgent($Process) { return 'opencode' }\n"
+        "function Invoke-CimMethod { throw 'owner query must not run for a vanished PID' }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Output \"audit: $Reason\" }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        + _ps1_function("Assert-NoLoadedPluginAgents")
+        + "Assert-NoLoadedPluginAgents\n'scan-passed'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "audit: process vanished or changed during lookup" in result.stdout
+    assert "scan-passed" in result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_windows_command_line_splits_as_node_reads_it() -> None:
+    # Review loop 2: Split-CommandLine follows CommandLineToArgvW and the C
+    # runtime, which Node and Bun use for their arguments.
+    rows = [
+        (r'"C:\Program Files\nodejs\node.exe" a "b c" d', [r"C:\Program Files\nodejs\node.exe", "a", "b c", "d"]),
+        (r'node --x="a b" c', ["node", "--x=a b", "c"]),
+        (r'node a\\\"b "c\\" d', ["node", 'a\\"b', "c\\", "d"]),
+        (r'node "a""b" c', ["node", 'a"b', "c"]),
+        (r"node a\b\\c	 x", ["node", r"a\b\\c", "x"]),
+        (r'node "" x', ["node", "", "x"]),
+        (r'C:\a"b c', ['C:\\a"b', "c"]),
+        ("", []),
+    ]
+    script = "Set-StrictMode -Version Latest\n" + _ps1_function("Split-CommandLine") + "\n".join(
+        "ConvertTo-Json -Compress -InputObject @(Split-CommandLine '{}')".format(line.replace("'", "''")) for line, _ in rows
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert [json.loads(line) for line in result.stdout.splitlines() if line.strip()] == [words for _, words in rows]
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")
+@pytest.mark.allow_subprocess
+def test_windows_process_rows_carry_the_executable_the_agent_check_reads() -> None:
+    # Get-LoadedPluginAgent reads Win32_Process.ExecutablePath: this
+    # account's own processes carry it.
+    script = "(Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\").ExecutablePath"
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().lower().endswith(".exe"), result.stdout

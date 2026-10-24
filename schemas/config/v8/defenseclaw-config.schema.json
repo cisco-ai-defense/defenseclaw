@@ -725,6 +725,14 @@
         "scan_instructions": {
           "type": "boolean"
         },
+        "unverified_server": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "block"
+          ],
+          "description": "What defenseclaw mcp set and the gateway's install admission do with a server they could not verify (its scan did not finish, including DNS failure, or an OpenCode command outside the trusted install prefixes): warn adds or keeps it with a warning and an audit record, block refuses it (the strict setting). Unset is warn on managed standalone and per-user hosts; Secure Client uses separate closed admission."
+        },
         "judge_source": {
           "$ref": "#/$defs/scannerJudgeSource"
         },

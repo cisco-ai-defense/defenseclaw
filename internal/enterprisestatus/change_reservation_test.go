@@ -918,6 +918,11 @@ func TestChangeSpoolWritesARefusalUnderItsReservation(t *testing.T) {
 			return
 		}
 		held = changeReservationHeld(reservation)
+		if runtime.GOOS == "windows" {
+			// Windows' exclusive lock covers byte zero, so a second handle
+			// cannot read the JSON while the writer holds the reservation.
+			return
+		}
 		file, err := os.Open(reservation)
 		if err != nil {
 			t.Errorf("no reservation while the refusal is written: %v", err)
@@ -1059,9 +1064,15 @@ func TestChangeSpoolFlushesAKeptEventBeforeItRemovesTheReservation(t *testing.T)
 		}
 		return nil
 	})
-	if _, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, ""); err != nil {
+	next, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, "")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() {
+		if err := next.Release(); err != nil {
+			t.Error(err)
+		}
+	})
 	if !flushedFirst {
 		t.Fatal("the reservation went before the kept event was flushed")
 	}

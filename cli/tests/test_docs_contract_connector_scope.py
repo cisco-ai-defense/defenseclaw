@@ -71,3 +71,20 @@ def test_turn_off_lists_only_commands_the_cli_runs(page):
             assert connector not in _MANAGED_BRIDGES, (
                 f"{page.name}: {command!r} is refused by the CLI (managed {connector} bridge)"
             )
+
+
+def test_kiro_setup_discloses_the_cli_setting_it_writes(capsys):
+    from defenseclaw.commands import cmd_setup
+
+    source = (DOCS.parents[2] / "internal/gateway/connector/kiro.go").read_text()
+    assert "patchKiroDefaultAgentSetting(settingsPath" in source
+    cmd_setup._print_connector_mutation_notice("kiro")
+    notice = capsys.readouterr().out
+    assert "~/.kiro/settings/cli.json" in notice
+    assert "chat.defaultAgent" in notice
+    assert "~/.kiro/settings/mcp.json is discovery-only" in notice
+    assert "cli.json and ~/.kiro/settings/mcp.json are discovery-only" not in notice
+
+    page = (DOCS / "connectors/kiro.mdx").read_text().split("## Files it changes", 1)[1].split("## Limits", 1)[0]
+    assert "~/.kiro/settings/cli.json" in page and "chat.defaultAgent" in page
+    assert "unset or built-in" in page and "custom default" in page
