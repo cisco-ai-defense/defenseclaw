@@ -268,6 +268,7 @@ func TestCodexReleasedOtelUpgradePreservesOperatorBytes(t *testing.T) {
 					if err != nil {
 						t.Fatal(err)
 					}
+					fixture = []byte(strings.ReplaceAll(string(fixture), "\r\n", "\n"))
 					fixture = []byte(strings.ReplaceAll(string(fixture), "fixture-os", goos))
 					productBearer := ""
 					if strings.HasSuffix(owner, "_markerless") || owner == "product_bearer_operator_endpoint" {
