@@ -599,6 +599,19 @@ func TestR104ActionWindowsLaterOperandTargetMention(t *testing.T) {
 	}
 }
 
+func TestR104ActionWindowsIWRPrefixTargetMention(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, option := range []string{"-Out", "-Ou", "-O"} {
+		command := `Invoke-WebRequest https://example.com/a.pub ` + option + ` ` + target
+		t.Run(option, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+}
+
 func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 	const cwd = `C:\Users\alice\project`
 	const home = `C:\Users\alice`
