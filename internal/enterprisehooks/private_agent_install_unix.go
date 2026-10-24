@@ -58,8 +58,8 @@ func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []Privat
 	scan := newPrivateInstallScan()
 	roots := []string{home}
 	if connectorListed(wanted, "claudecode") {
-		// The vendor's local installer keeps a runnable copy two levels
-		// below the home; the one-child prefix scan cannot reach it.
+		// Keep the vendor's known root even if the bounded deep walk cannot
+		// finish listing the rest of the home.
 		roots = append(roots, filepath.Join(home, ".claude", "local"))
 	}
 	prefixes, truncated := userNodePrefixesBounded(home, privateAgentInstallMaxVersionDirs)
