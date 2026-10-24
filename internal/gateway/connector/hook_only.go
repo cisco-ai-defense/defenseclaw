@@ -1412,14 +1412,13 @@ func managedPluginInstallMarker(opts SetupOpts) string {
 	return filepath.Clean(marker)
 }
 
-// pluginOutageFailMode is the outage mode a per-user in-agent plugin bakes
-// (OutageHookFailMode): open in the default and permissive tiers, closed in
-// strict. Managed and Secure Client plugins bake "" and keep FailMode.
+// pluginOutageFailMode is the outage mode a per-user in-agent plugin bakes.
+// Managed and Secure Client plugins bake "" and keep FailMode.
 func pluginOutageFailMode(opts SetupOpts) string {
 	if !perUserOutageRender(opts) {
 		return ""
 	}
-	return normalizeHookFailMode(opts.HookFailMode)
+	return defaultHookFailMode
 }
 
 // renderPluginArtifact is shared by Setup and standalone verification so

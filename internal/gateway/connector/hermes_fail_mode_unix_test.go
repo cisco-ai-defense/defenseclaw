@@ -24,8 +24,7 @@ import (
 )
 
 // A per-user Copilot CLI, Antigravity or Hermes hook bakes closed for every
-// failure and records the outage mode of its policy tier: closed when unset
-// or strict, open in the default and permissive tiers (oss-outage-open). No
+// failure and records closed with unset or predecessor-open settings. No
 // hook reads DEFENSECLAW_FAIL_MODE (GAP-0315).
 func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 	scripts := map[string]string{"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh", "hermes": "hermes-hook.sh"}
@@ -35,7 +34,7 @@ func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 		}{
 			{name: "unset", mode: "", want: "closed"},
 			{name: "closed", mode: "closed", want: "closed"},
-			{name: "outage open tier", mode: "open", want: "open"},
+			{name: "predecessor open", mode: "open", want: "closed"},
 		} {
 			t.Run(conn.Name()+"/"+tc.name, func(t *testing.T) {
 				dir := t.TempDir()
@@ -129,9 +128,9 @@ func TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown(t *testing.T) {
 }
 
 // With the gateway down, the per-user Copilot CLI hook rendered with an unset
-// or closed (strict tier) outage mode denies preToolUse and permissionRequest
-// with Copilot's native deny and a reason that names the next step; the
-// outage-open tier lets the call run with a warning that names the fix.
+// or closed outage mode denies preToolUse and permissionRequest with
+// Copilot's native deny and a reason that names the next step. An older open
+// option also renders closed on a per-user install.
 // Copilot's other events cannot block and stay neutral.
 func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -167,13 +166,9 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 				if code != 0 {
 					t.Fatalf("exit %d, want 0 (stdout %q stderr %q)", code, out, errOut)
 				}
-				if tc.deny == "" || mode == "open" {
+				if tc.deny == "" {
 					if strings.TrimSpace(out) != "" {
 						t.Fatalf("stdout %q, want no decision (stderr %q)", out, errOut)
-					}
-					if mode == "open" && tc.deny != "" &&
-						(!strings.Contains(errOut, "defenseclaw-gateway start") || !strings.Contains(errOut, "defenseclaw doctor")) {
-						t.Fatalf("stderr %q, want the outage warning with its fix", errOut)
 					}
 					return
 				}

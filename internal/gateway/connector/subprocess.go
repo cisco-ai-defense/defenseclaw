@@ -1597,14 +1597,11 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 }
 
 // OutageHookFailMode is the fail mode conn's hooks follow while the gateway
-// is down. A per-user render takes the outage mode its caller resolved
-// (opts.HookFailMode from config.HookOutageFailMode: open in the default and
-// permissive policy tiers, closed in strict); every other per-user hook
-// failure stays closed (resolveHookFailMode). Managed and Secure Client
-// renders keep their resolved mode.
+// is down. Per-user hooks stay closed even when an older config or lock
+// supplies open. Managed and Secure Client renders keep their resolved mode.
 func OutageHookFailMode(opts SetupOpts, conn Connector) string {
 	if perUserOutageRender(opts) {
-		return normalizeHookFailMode(opts.HookFailMode)
+		return defaultHookFailMode
 	}
 	return resolveHookFailMode(opts, conn)
 }

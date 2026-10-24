@@ -65,15 +65,15 @@ def test_the_persisted_fail_mode_example_is_the_command_output(monkeypatch: pyte
     assert _lines(_run(cfg, [])) == _page_example()
 
 
-def test_a_per_user_value_the_tier_does_not_give_is_refused_as_the_page_says(
+def test_per_user_open_is_refused_as_the_page_says(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
-    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--connector", "codex", "--yes"], obj=app)
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--connector", "codex", "--yes"], obj=app)
     assert result.exit_code == 1, result.output
-    assert "use-pack strict" in result.output
+    assert "hooks fail closed during a gateway outage" in result.output
     page = " ".join(PAGE.read_text(encoding="utf-8").split())
-    assert "Another value changes nothing, explains the rule and exits 1." in page
+    assert "A per-user `open` choice changes nothing, explains the rule and exits 1." in page

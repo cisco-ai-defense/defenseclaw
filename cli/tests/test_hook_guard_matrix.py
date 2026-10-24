@@ -48,7 +48,6 @@ from defenseclaw.context import AppContext
 from defenseclaw.hook_guard_matrix import ANTIGRAVITY, KIRO, TOOL_GUARD_HOOKS, _entries, antigravity_hook_key
 
 from tests.test_hook_registration_every_connector import _CASES, _case_id, _install
-from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 _GUARDED = [case for case in _CASES if case["connector"] in TOOL_GUARD_HOOKS]
 

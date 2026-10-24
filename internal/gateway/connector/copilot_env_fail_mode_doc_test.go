@@ -34,7 +34,7 @@ func TestPerUserCopilotHookFailModeIsTheInstalledOne(t *testing.T) {
 	}{
 		{installed: "closed", env: "open", deny: true},
 		{installed: "closed", env: "", deny: true},
-		{installed: "open", env: "closed", deny: false}, // the outage-open tier: the environment cannot close it
+		{installed: "open", env: "closed", deny: true}, // a predecessor's saved open mode cannot open this render
 		{installed: "open", env: "", strict: "1", deny: true},
 	} {
 		t.Run("installed="+tc.installed+"/env="+tc.env+"/strict="+tc.strict, func(t *testing.T) {

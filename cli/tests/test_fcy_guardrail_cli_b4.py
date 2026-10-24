@@ -12,7 +12,6 @@ from tests.test_cmd_judge import invoke as judge_invoke
 from tests.test_cmd_judge import make_ctx
 from tests.test_cmd_setup_fu_phase2 import _BaseSetup, _invoke, _stub_side_effects
 from tests.test_fcux_cli_messages_b11 import _fail_mode, _roster
-from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 
 def _judge_ctx(modes: dict[str, str], gate: list[str] | None = None):

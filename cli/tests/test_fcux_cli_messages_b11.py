@@ -20,7 +20,6 @@ from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context
 from tests.test_fail_mode_runtime import _runtime_cfg
-from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 
 def _app(cfg) -> AppContext:
@@ -97,7 +96,7 @@ def test_fail_mode_closed_lists_the_observe_connector_it_closes(monkeypatch: pyt
     result = _fail_mode(cfg, "closed")
     assert result.exit_code == 0, result.output
     assert "stays fail-open while in observe mode" not in result.output
-    assert "Codex (codex): open → closed" in result.output
+    assert "Codex (codex):" in result.output
     assert "Cursor (cursor): " in result.output
     assert "global default + 3 connector overrides = closed)" in result.output
     assert cfg.guardrail.effective_hook_fail_mode("codex") == "closed"

@@ -97,13 +97,8 @@ func runOutageToolCall(t *testing.T, home, dataDir string, call outageToolCall) 
 	return code == 2 || strings.Contains(out, `"deny"`), fmt.Sprintf("exit %d stdout=%q stderr=%q", code, out, stderr.String())
 }
 
-// The per-user hooks of agents without a fail-closed hook contract of their
-// own, and Cursor, follow the outage mode of their policy tier
-// (oss-outage-open, owner decision 2026-10-23): with the gateway down, an
-// unset or strict (closed) mode blocks the tool call and the default or
-// permissive (open) mode lets it run, in observe and action mode alike.
-// Before r104 W3 G3-upg the Copilot and Antigravity renders were lowered to
-// open for an unset mode, which they no longer are.
+// Per-user hooks block tool calls while the gateway is down in every policy
+// tier, even when a predecessor saved an open outage mode.
 func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	requireShellHookToolsForTest(t)
 	addr := closedLoopbackAddrForTest(t)
@@ -114,13 +109,13 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	}{
 		{"copilot unset", "copilot", SetupOpts{}, true},
 		{"copilot closed", "copilot", SetupOpts{HookFailMode: "closed"}, true},
-		{"copilot open", "copilot", SetupOpts{HookFailMode: "open"}, false},
+		{"copilot open", "copilot", SetupOpts{HookFailMode: "open"}, true},
 		{"antigravity unset", "antigravity", SetupOpts{}, true},
-		{"antigravity open", "antigravity", SetupOpts{HookFailMode: "open"}, false},
+		{"antigravity open", "antigravity", SetupOpts{HookFailMode: "open"}, true},
 		{"cursor observe unset", "cursor", SetupOpts{GuardrailMode: "observe"}, true},
-		{"cursor observe open", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, false},
+		{"cursor observe open", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, true},
 		{"cursor action strict", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "closed"}, true},
-		{"cursor action open", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, false},
+		{"cursor action open", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conn, ok := NewDefaultRegistry().Get(test.connector)

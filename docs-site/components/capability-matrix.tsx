@@ -193,8 +193,7 @@ export function SandboxHarnessTable() {
 type ManagedOpen = 'blocks' | 'runs' | 'blocks-linux-macos' | 'per-user-route-blocks-linux-macos' | 'per-user-route-blocks';
 
 interface OutageRow {
-  // The per-user strict policy tier (outage mode closed) and the default or
-  // permissive tier (outage mode open), Go config.HookOutageFailMode.
+  // Per-user outages block in every policy tier, Go config.HookOutageFailMode.
   perUserClosed: 'blocks' | 'runs';
   perUserOpen: 'blocks' | 'runs';
   // The administrator's open with the default machine policy

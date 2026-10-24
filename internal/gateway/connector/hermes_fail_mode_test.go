@@ -26,7 +26,7 @@ func nativeDenyConnectors() []Connector {
 // A per-user Copilot CLI, Antigravity or Hermes render keeps the resolved
 // outage mode. The Windows native hook reads it from .hookcfg, so a closed or
 // unset mode must be recorded as closed there, not downgraded to open; the
-// outage-open tier is recorded open. Secure Client keeps these connectors
+// a predecessor's open setting is recorded closed. Secure Client keeps these connectors
 // open (TestManagedStandaloneRenderKeepsClosed).
 func TestPerUserNativeDenyRenderRecordsTheResolvedFailMode(t *testing.T) {
 	for _, conn := range nativeDenyConnectors() {
@@ -35,7 +35,7 @@ func TestPerUserNativeDenyRenderRecordsTheResolvedFailMode(t *testing.T) {
 		}{
 			{name: "unset", mode: "", want: "closed"},
 			{name: "closed", mode: "closed", want: "closed"},
-			{name: "outage open tier", mode: "open", want: "open"},
+			{name: "predecessor open", mode: "open", want: "closed"},
 		} {
 			t.Run(conn.Name()+"/"+tc.name, func(t *testing.T) {
 				dir := t.TempDir()

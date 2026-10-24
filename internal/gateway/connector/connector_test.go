@@ -10019,12 +10019,11 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 		}{
 			{"closed", "open", true},
 			{"closed", "OPEN", true},
-			// Installed outage open (the default and permissive tiers): the
-			// environment cannot close it either; the outage runs the call.
-			{"open", "closed", false},
-			{"open", "Closed", false},
-			{"open", " CLOSED ", false},
-			{"open", "", false},
+			// A predecessor's saved open mode cannot reopen the new render.
+			{"open", "closed", true},
+			{"open", "Closed", true},
+			{"open", " CLOSED ", true},
+			{"open", "", true},
 			{"closed", "", true},
 		} {
 			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {

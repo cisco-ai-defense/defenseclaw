@@ -136,7 +136,6 @@ def migrate_cmd(check, from_version, data_dir, openclaw_home, gateway_binary, as
     else:
         ux.ok(f"Migrated to config_version {result.to_config_version} ({len(result.applied)} step(s)).")
     if not check and not as_json and _upgraded_from_0x(result):
-        _report_hook_fail_mode_changes(data_dir or _default_data_dir())
         _report_ignored_dotenv_keys(data_dir or _default_data_dir())
 
 
@@ -160,46 +159,6 @@ _FIRST_1X_CONFIG_VERSION = 8
 
 
 def _upgraded_from_0x(result) -> bool:
-    """Whether this run migrated a 0.x config, the one upgrade that changes the fail mode.
-
-    A same-release reinstall or a 1.x upgrade printed the fail-open notice
-    too, about a connector already in action mode (GAP-0276): the gateway had
-    rewritten its hooks since, and this check reads the config by Python's
-    rules, not the gateway's.
-    """
+    """Whether this run migrated a 0.x config that may contain ignored .env keys."""
     source = result.from_config_version
     return bool(result.applied) and source is not None and source < _FIRST_1X_CONFIG_VERSION
-
-
-def _report_hook_fail_mode_changes(data_dir: str) -> None:
-    """Name each connector whose hooks change from blocking to running a call during a gateway outage.
-
-    An earlier release sealed closed into the hooks. In 1.0.4 a per-user
-    hook's outage mode follows the policy tier (default and permissive run the
-    call with a warning, strict blocks it), so say so before the gateway
-    rewrites the hooks.
-    """
-    try:
-        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as stream:
-            lock = json.load(stream)
-        from defenseclaw.config import load
-
-        cfg = load(data_dir=data_dir)
-        guardrail = cfg.guardrail
-    except Exception:  # noqa: BLE001 - a notice must never fail the migration
-        return
-    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
-        # A managed host keeps its administrator's mode.
-        return
-    connectors = lock.get("connectors") if isinstance(lock, dict) else None
-    if not isinstance(connectors, dict):
-        return
-    for name, entry in sorted(connectors.items()):
-        sealed = str(entry.get("hook_fail_mode", "")).strip().lower() if isinstance(entry, dict) else ""
-        if sealed != "closed" or guardrail.effective_hook_fail_mode(name) != "open":
-            continue
-        ux.warn(
-            f"{name} hooks now let a call run with a warning while the gateway is not running "
-            "(default policy), where the previous release blocked it. Every other hook failure still blocks."
-        )
-        ux.subhead("To block calls during an outage: defenseclaw guardrail use-pack strict", indent="    ")

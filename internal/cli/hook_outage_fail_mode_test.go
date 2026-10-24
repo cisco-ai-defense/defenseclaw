@@ -10,14 +10,12 @@ import (
 	"testing"
 )
 
-// The per-user native hook takes its outage mode only from the sidecar entry
-// Setup wrote for the connector from its policy tier (config source); any
-// other entry, a managed or malformed sidecar, or a link keeps it closed.
-func TestPerUserHookOutageFailModeComesFromTheConnectorEntry(t *testing.T) {
+// A predecessor's open sidecar cannot reopen a new per-user hook binary.
+func TestPerUserHookOutageFailModeIgnoresPredecessorEntry(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, want string
 	}{
-		{"open entry", `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`, "open"},
+		{"open entry", `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open"},"fail_mode_sources":{"codex":"config"}}`, "closed"},
 		{"closed entry (strict tier)", `{"version":2,"fail_modes":{"codex":"closed"},"fail_mode_sources":{"codex":"config"}}`, "closed"},
 		{"open entry without its source", `{"version":2,"fail_modes":{"codex":"open"}}`, "closed"},
 		{"another connector open", `{"version":2,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"}}`, "closed"},

@@ -67,12 +67,10 @@ describe('Cursor observe outage mode', () => {
     assert.match(hooks, /func renderedHookFailMode\([\s\S]*?OutageHookFailMode\(opts, conn\)/);
     const failModes = page('reference/configuration/fail-modes.mdx').split('## Controls')[0] ?? '';
     const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
-    // Owner decision 2026-10-23 (oss-outage-open): a per-user outage follows the
-    // policy tier; every other failure blocks.
-    assert.match(failModes, /On a per-user install the outage behavior follows the policy tier.{0,600}Every other failure blocks in every tier/i);
-    assert.match(cursor, /A per-user Cursor hook makes the outage decision of its policy tier in observe and action mode/i);
+    assert.match(failModes, /On a per-user install hooks fail closed during a gateway outage in every policy tier/i);
+    assert.match(cursor, /A per-user Cursor hook blocks a gateway outage in every policy tier and guardrail mode/i);
     const coverage = page('appendix/coverage-by-layer.mdx');
-    assert.match(coverage, /On a per-user install the policy tier decides, in observe and action mode alike/i);
+    assert.match(coverage, /Per-user hooks fail closed during a gateway outage in every policy tier/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
     assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
@@ -390,8 +388,8 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     }
   });
 
-  it('says an upgrade gives per-user hooks the outage mode of their tier', () => {
-    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks take the outage mode of their policy tier'));
+  it('says an upgrade closes per-user hooks in every tier', () => {
+    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks fail closed during a gateway outage in every policy tier'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user install ignores a saved value'));
   });

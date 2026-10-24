@@ -21,29 +21,22 @@ import (
 	"time"
 )
 
-// oss-outage-open (owner decision 2026-10-23): a per-user shell hook in the
-// default or permissive policy tier (outage mode open) lets a call run with
-// one warning and a hook-failures.jsonl row only while this account's gateway
-// is not running. The strict tier (outage mode closed) blocks it. In every
-// tier an answer the gateway gave (malformed, cut off, an error status), a
-// gateway that took the call and did not answer, strict availability and the
-// install window block. The real native helper (hook-post) carries every
-// call, as on an installed host.
-func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
+// Per-user shell hooks block an outage in every policy tier, including when
+// an older config supplies open. The real native helper (hook-post) carries
+// every call, as on an installed host.
+func TestPerUserShellHookOutageFailsClosed(t *testing.T) {
 	type scenario struct {
 		name    string
 		handler http.HandlerFunc // nil: no gateway listens
 		env     []string
 		lock    bool
-		// opens reports whether the outage-open tier lets this call run.
-		opens bool
 	}
 	allow := func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"action":"allow","raw_action":"allow","severity":"NONE","hook_output":{}}`))
 	}
 	scenarios := []scenario{
-		{name: "gateway up", handler: allow, opens: true},
-		{name: "gateway down", opens: true},
+		{name: "gateway up", handler: allow},
+		{name: "gateway down"},
 		{name: "gateway down, strict availability", env: []string{"DEFENSECLAW_STRICT_AVAILABILITY=1"}},
 		{name: "gateway down, install in progress", lock: true},
 		{name: "gateway took the call and did not answer", handler: func(_ http.ResponseWriter, r *http.Request) {
@@ -107,7 +100,7 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 					cmd.Env = append(cmd.Env, sc.env...)
 					output, err := cmd.CombinedOutput()
 					blocked := hookCallBlocked(err, string(output))
-					wantRun := sc.name == "gateway up" || (sc.opens && tier.mode == "open")
+					wantRun := sc.name == "gateway up"
 					if blocked == wantRun {
 						t.Fatalf("blocked=%v, want %v (exit %v):\n%s", blocked, !wantRun, err, output)
 					}
@@ -119,23 +112,8 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 						t.Fatalf("no hook-failures.jsonl row for the outage:\n%s", output)
 					}
 					last := records[len(records)-1]
-					if tier.mode == "closed" {
-						if last["outcome"] != "fail_closed" {
-							t.Fatalf("strict tier outage row = %+v, want fail_closed", last)
-						}
-						return
-					}
-					if last["outcome"] != "fail_open" || last["fail_mode"] != "open" || last["category"] != "transport" {
-						t.Fatalf("outage row = %+v, want a fail_open transport row with fail mode open", last)
-					}
-					text := string(output)
-					for _, want := range []string{"defenseclaw-gateway start", "defenseclaw doctor", "fail mode open for an outage"} {
-						if !strings.Contains(text, want) {
-							t.Fatalf("the warning does not name %q:\n%s", want, text)
-						}
-					}
-					if strings.Contains(text, "WARNING hook fail-open") {
-						t.Fatalf("the outage gave a second, generic warning:\n%s", text)
+					if last["outcome"] != "fail_closed" {
+						t.Fatalf("per-user outage row = %+v, want fail_closed", last)
 					}
 				})
 			}
@@ -145,7 +123,7 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 
 // An outage record the hook cannot trust (a record without the config
 // source, one that names another connector or is malformed, or none) keeps
-// the open tier's outage closed.
+// the outage closed.
 func TestPerUserShellHookOutageNeedsItsOwnRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
