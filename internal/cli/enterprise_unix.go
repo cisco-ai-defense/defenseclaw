@@ -66,6 +66,7 @@ type enterpriseSecretOptions struct {
 	undoRotation string
 	undoConfig   string
 	// ifStored is the SHA-256 of the exact value a caller expects now.
+	// Windows also accepts "none" for proven absence.
 	// It is compared under the credential/lifecycle lock before a change.
 	ifStored string
 	json     bool
@@ -333,7 +334,11 @@ func newEnterpriseSecretCommand(action, summary string) *cobra.Command {
 	}
 	if action == "set" || action == "remove" {
 		cmd.Flags().StringVar(&opts.undoRotation, "undo-rotation", "", "put back a credential a failed rotation changed, only while the confirmed policy bundle has this manifest SHA-256 (none: no bundle is confirmed) and does not sign the value stored now; else rotation_confirmed and nothing changes")
-		cmd.Flags().StringVar(&opts.ifStored, "if-stored", "", "change only when the stored credential still has this exact SHA-256; required with --undo-rotation")
+		usage := "change only when the stored credential still has this exact SHA-256; required with --undo-rotation"
+		if runtime.GOOS == "windows" {
+			usage = "change only when the stored credential still has this exact SHA-256, or none for proven absence; required with --undo-rotation"
+		}
+		cmd.Flags().StringVar(&opts.ifStored, "if-stored", "", usage)
 	}
 	if action == "remove" {
 		cmd.Flags().StringVar(&opts.undoConfig, "undo-config", "", "with --undo-rotation (Windows): the SHA-256 of the installed config before the rotation (none: no config); only while that config is still installed does remove take a credential it references, else credential_in_use and nothing is removed")

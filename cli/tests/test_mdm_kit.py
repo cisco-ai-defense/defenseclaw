@@ -278,7 +278,7 @@ def test_unix_wrapper_stores_a_credential_with_the_bundle_it_delivers(tmp_path: 
 
 def test_windows_wrapper_stores_a_bundled_credential_before_the_apply() -> None:
     text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
-    first = text.index("Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)")
+    first = text.index("Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle, '--if-stored', $preimage)")
     guard = text.rindex("if ($secret -and $bundle -and -not $SetupPath", 0, first)
     # Only a CLI that reports secret_set_bundle (1.0.4 and later) gets --bundle.
     probe = text.rindex("(Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)", guard, first)
@@ -364,8 +364,9 @@ function Invoke-DefenseClawNative {
         ($ArgumentList[2] -eq 'remove' -and $null -eq $current))) {
         return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
     }
-    if ($expectedValue -and ($null -eq $current -or
-        (Get-FileHash -LiteralPath $stored -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedValue)) {
+    if ($expectedValue -and (($expectedValue -eq 'none' -and $null -ne $current) -or
+        ($expectedValue -ne 'none' -and ($null -eq $current -or
+        (Get-FileHash -LiteralPath $stored -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedValue)))) {
         return (& $refuse 'credential_changed')
     }
     if ($undo -and ($undo -ne $script:digest -or ($null -ne $current -and $null -ne $script:confirmed -and $current -eq $script:confirmed))) {
@@ -425,10 +426,16 @@ function Use-OldBundle($Signs) { $script:confirmed = $Signs; $script:digest = if
 # The lifecycle confirmed the delivered bundle (manifest B).
 function Confirm-Delivered { $script:confirmed = $script:delivered; $script:digest = $script:digestB }
 # Rotate is the wrapper's step before the lifecycle; it returns the failure.
-function Rotate {
+function Rotate($AfterJournal = $null) {
     $confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
-    Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
-    return (Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle))
+    $preimage = ''
+    Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle -Preimage ([ref]$preimage)
+    if ($null -ne $AfterJournal) {
+        $stored = Get-WrapperStoredSecretPath -Name $SecretName
+        [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $stored))
+        [System.IO.File]::WriteAllText($stored, $AfterJournal)
+    }
+    return (Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle, '--if-stored', $preimage))
 }
 $out = [ordered]@{}
 
@@ -515,6 +522,42 @@ $failure = Rotate
 [void](Complete-WrapperSecretJournal -Name $SecretName)
 $out.changedUnderneath = "$($failure.Code) $(Get-Stored) $(Get-Journal)"
 
+# A separate administrator write after journaling is a pre-write refusal.
+# The wrapper may retire its unused entry without putting stale A back.
+foreach ($previous in @('old-key', '<none>')) {
+    $script:inUse = $false
+    if ($previous -eq '<none>') { Reset-Device $null; Use-OldBundle $null }
+    else { Reset-Device 'old-key'; Use-OldBundle 'old-key' }
+    $failure = Rotate 'administrator-value'
+    $beforeRetire = "$(Get-Stored) $(Get-Journal)"
+    [void](Complete-WrapperSecretJournal -Name $SecretName)
+    $out["adminBeforeForward_$previous"] = "$($failure.Code) $beforeRetire $(Get-Stored) $(Get-Journal)"
+}
+
+# Older rc entries lack B's digest. They can settle only when their
+# before-state is already present; an ambiguous current value stays.
+foreach ($kind in @('bare', 'bundle', 'absent', 'changed')) {
+    $script:inUse = $false
+    if ($kind -eq 'absent') { Reset-Device $null; Use-OldBundle $null }
+    else { Reset-Device 'old-key'; Use-OldBundle 'old-key' }
+    $confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
+    Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
+    $entry = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File)[0]
+    $oldName = switch ($kind) {
+        'bare' { $SecretName }
+        'bundle' { "$SecretName@$confirmedBundle" }
+        'absent' { "$SecretName.absent" }
+        'changed' { $SecretName }
+    }
+    Move-Item -LiteralPath $entry.FullName -Destination (Join-Path (Get-WrapperRotationJournal) $oldName)
+    if ($kind -eq 'changed') {
+        [System.IO.File]::WriteAllText((Get-WrapperStoredSecretPath -Name $SecretName), 'administrator-value')
+    }
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $out["oldFormat_$kind"] = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+    if ($kind -eq 'changed') { [void](Complete-WrapperSecretJournal -Name $SecretName) }
+}
+
 # 7. A put-back the CLI cannot do now stays journaled, and the next ensure
 #    finishes it.
 Reset-Device 'old-key'; Use-OldBundle 'old-key'
@@ -596,10 +639,9 @@ $linked = try { [void](New-Item -ItemType SymbolicLink -Path $link -Target $targ
 $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
 $out.linkEntry = "$linked $(Get-Stored) $([System.IO.File]::ReadAllText($target)) $(@($script:calls).Count) $($problems.Count) $(Test-Path -LiteralPath $link)"
 
-# Loop round 2 (rc.7), finding 2. 15. A trusted file whose name this wrapper
-#     does not write (an entry an earlier build left, zeroed by a cleanup
-#     that stopped before its delete) is never put back or deleted, and no
-#     rotation runs beside it.
+# Loop round 2 (rc.7), finding 2. 15. A zeroed earlier name does not
+#     match the credential's before-state. It stays for administrator
+#     review and blocks another rotation.
 Reset-Device 'old-key'; Use-OldBundle 'old-key'
 $journal = Get-WrapperRotationJournal
 [void][System.IO.Directory]::CreateDirectory($journal)
@@ -822,6 +864,8 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "refusedPutBack_credential_in_use": "new-key 1 1",
         "redelivered": "new-key 0",
         "changedUnderneath": "confirmed_bundle_changed old-key 0",
+        "adminBeforeForward_old-key": "credential_changed administrator-value 1 administrator-value 0",
+        "adminBeforeForward_<none>": "credential_changed administrator-value 1 administrator-value 0",
         "busy": "new-key 1 1",
         "busyRetried": "old-key 0 0",
         "twice": "refused new-key old-key 0",
@@ -832,7 +876,7 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "untrusted_parent": "old-key attacker-key 0 1 refused",
         "untrusted_entry": "old-key attacker-key 0 1 refused",
         "folderEntry": "old-key True 0 1 refused",
-        "foreignEntry": "old-key 7 0 1 refused",
+        "foreignEntry": "old-key 7 1 1 refused",
         "retireStopped": f"new-key ai-defense-api-key@{a}+{value}.retired:0 1",
         "retireResumed": "new-key 0 0 0",
         "retireNext": "True newer-key new-key 0",
@@ -855,9 +899,13 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "beforeWrite_<none>_elevation_required": "<none> 0 0 True new-key",
         "beforeWrite_<none>_throw": "<none> 0 0 True new-key",
         "beforeWrite_<none>_interrupted": "<none> 0 0 True new-key",
-        "noConfigEntry_0": "new-key True 0 1",
-        "noConfigEntry_64": "new-key True 0 1",
-        "noConfigEntry_65": "new-key True 0 1",
+        "oldFormat_bare": "old-key 0 0",
+        "oldFormat_bundle": "old-key 0 0",
+        "oldFormat_absent": "<none> 0 0",
+        "oldFormat_changed": "administrator-value 1 1",
+        "noConfigEntry_0": "new-key True 1 1",
+        "noConfigEntry_64": "new-key True 1 1",
+        "noConfigEntry_65": "new-key True 1 1",
         "linkEntry": out["linkEntry"],
     }, out
     # Where this account can make a link, it is refused and left in place.
@@ -879,13 +927,14 @@ def test_windows_wrapper_settles_the_credential_journal_around_the_lifecycle() -
     # journaled with the old value, and guards the rotation (--if-confirmed).
     confirmed = main.index("$confirmedBundle = Get-WrapperConfirmedBundle -Cli $installedDeployment.Cli", lock)
     journal = main.index("Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle", confirmed)
-    rotate = main.index("$failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)")
+    rotate = main.index("$failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle, '--if-stored', $preimage)")
     armed = main.index("$script:RotationCli = $installedDeployment.Cli")
     lifecycle = main.index("$arguments = @('enterprise', 'windows', $normalizedAction")
     disarmed = main.index("$script:RotationCli = ''", lifecycle)
     settle = main.index("[void](Complete-WrapperSecretJournal -Name $SecretName)", disarmed)
     undo = main.index("Undo-WrapperSecretRotation -Cli $installedDeployment.Cli", settle)
     assert resume < lock < confirmed < journal < rotate < armed < lifecycle < disarmed < settle < undo
+    assert "'confirmed_bundle_changed', 'credential_changed'" in main
     body = main[main.index("function Resume-WrapperSecretJournal {"):]
     body = body[: body.index("\n}\n")]
     assert body.index("Enter-WrapperRotationLock") < body.index("Complete-WrapperSecretJournal -Cli $cli -Restore")
