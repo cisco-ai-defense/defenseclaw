@@ -76,15 +76,15 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-With the default gateway restart, disabling removes DefenseClaw's plugin file
-when it is unchanged since setup. An edited plugin is left in place to preserve
-your edits; `defenseclaw doctor` reports it. This preserves your other OpenCode
-settings. `defenseclaw guardrail enable` reinstalls DefenseClaw's plugin. To
-remove the connector, run `defenseclaw setup remove opencode --yes` (add
-`--force` if it is the last one). If you modified the plugin, removal refuses
-before saving configuration. Preserve your edits, run
+With the default gateway restart, disabling removes DefenseClaw's plugin file.
+This preserves your other OpenCode settings. `defenseclaw guardrail enable`
+reinstalls DefenseClaw's plugin. To remove the connector, run
+`defenseclaw setup remove opencode --yes` (add `--force` if it is the last
+one). If you modified the plugin, `guardrail disable` and `setup remove` refuse
+before saving configuration, and the gateway is left as it was;
+`defenseclaw doctor` reports the change. Preserve your edits, run
 `defenseclaw setup opencode --yes --restart` to restore the managed plugin,
-then retry removal. Restart OpenCode afterwards.
+then retry. Restart OpenCode afterwards.
 
 On a multi-connector install, add `--connector opencode` to `guardrail disable` and `guardrail enable` to change only this agent.
 

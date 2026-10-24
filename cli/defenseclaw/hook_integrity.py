@@ -429,17 +429,53 @@ CLAUDE_LAUNCHER_GUARD_WORDS = (
 ).split()
 
 
-def claude_launcher_guard_view(handler: Any) -> Any:
-    """The exec-form handler a generated cmd.exe launcher guard runs, else *handler* unchanged.
+# The per-user Windows PreToolUse handler runs the installed full hook as this
+# guard instead of cmd.exe, which Cursor's argument-free import of the hook
+# could not run (GAP-1011). Keep it identical to ClaudeCodeLauncherGuardArgv.
+CLAUDE_LAUNCHER_GUARD_SUBCOMMAND = "launcher-guard"
 
-    Doctor's hook matrix and the status registration check both read a
-    Claude Code handler through this view (GAP-0463).
+
+def _claude_guardable_hook_executable(path: str) -> bool:
+    return (
+        path.strip() == path
+        and path != ""
+        and not any(ch in path for ch in '"%!\r\n')
+        and (ntpath.isabs(path) or os.path.isabs(path))
+        and ntpath.basename(path).lower() == "defenseclaw-hook.exe"
+    )
+
+
+def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> dict | None:
+    if len(args) != 5 or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
+        return None
+    if args[2:] != ["hook", "--connector", "claudecode"]:
+        return None
+    launcher = args[1]
+    if not _claude_guardable_hook_executable(command) or not _claude_guardable_hook_executable(launcher):
+        return None
+    if ntpath.normcase(ntpath.normpath(command)) == ntpath.normcase(ntpath.normpath(launcher)):
+        return None
+    view = dict(handler)
+    view["command"] = launcher
+    view["args"] = list(args[2:])
+    return view
+
+
+def claude_launcher_guard_view(handler: Any) -> Any:
+    """The exec-form handler a generated launcher guard runs, else *handler* unchanged.
+
+    The guard is the cmd.exe launcher guard or the PreToolUse guard. Doctor's
+    hook matrix and the status registration check both read a Claude Code
+    handler through this view (GAP-0463).
     """
     if not isinstance(handler, dict):
         return handler
     command, args = handler.get("command"), handler.get("args")
     if not isinstance(command, str) or not isinstance(args, list) or not all(isinstance(a, str) for a in args):
         return handler
+    pretool = _claude_pretool_guard_view(handler, command, args)
+    if pretool is not None:
+        return pretool
     system_root = os.environ.get("SystemRoot") or "C:\\Windows"
     processor = ntpath.join(system_root, "System32", "cmd.exe")
     if ntpath.normcase(ntpath.normpath(command)) != ntpath.normcase(ntpath.normpath(processor)):

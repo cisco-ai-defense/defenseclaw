@@ -29,8 +29,8 @@ Global setup governs tool calls and inventories user and managed surfaces.
 
 The plugin is owner-only (private permissions, or the Windows user-only ACL) and
 holds a connector-scoped token. Setup preserves an existing file, teardown restores
-it, and a user-modified managed file is never silently removed. Connector removal refuses before saving while the bridge is modified;
-preserve your edits, run `defenseclaw setup amp --yes --restart`, then retry removal.
+it, and a user-modified managed file is never silently removed. `guardrail disable` and connector removal refuse before saving while the bridge is modified;
+preserve your edits, run `defenseclaw setup amp --yes --restart`, then retry.
 
 Plugin lists, scans and the AIBOM treat the file as connector configuration. `defenseclaw plugin remove`, `disable`, `block` and `quarantine` refuse `defenseclaw --connector amp`, because Amp runs unguarded without it. The built-in `admission.plugin.first_party_allow_list` entry for `defenseclaw` matches the Amp bridge only at `.config/amp/plugins/defenseclaw.ts` ([first-party assets](/docs/reference/scanning/admission/#first-party-assets)).
 

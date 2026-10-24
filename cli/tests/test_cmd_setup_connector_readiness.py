@@ -119,11 +119,17 @@ def test_contract_lock_accepts_kiro_not_gated_without_hook_paths() -> None:
 
 
 @pytest.mark.parametrize("mode", ("observe", "action"))
-def test_kiro_cli_below_hook_floor_is_refused_by_setup_and_its_lock(mode: str, tmp_path: Path) -> None:
+@pytest.mark.parametrize("allow_drift", (False, True))
+def test_kiro_cli_below_hook_floor_is_refused_by_setup_and_its_lock(
+    mode: str, allow_drift: bool, tmp_path: Path, monkeypatch,
+) -> None:
     """GAP-0227: before kiro-cli 2.27.1 a non-interactive ``--v3`` run loads no
     hooks, so setup refuses that kiro-cli in both modes and its registration
     lock no longer counts as a supported not-gated one. The Kiro IDE launcher's
     bare version is not a kiro-cli version and is not gated."""
+
+    if allow_drift:
+        monkeypatch.setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
 
     def setup_accepts(version: str) -> bool:
         signal = SimpleNamespace(version=version, installed=True, error="", binary_path="")
@@ -803,6 +809,7 @@ def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, t
         "_windows_native_hook_check",
         lambda *_args, **_kwargs: WindowsHookCheck("healthy", "registered"),
     )
+    monkeypatch.setattr(cmd_doctor, "_hermes_windows_execution_probe", lambda check: check)
     monkeypatch.setattr(
         cmd_doctor,
         "_check_hermes_hooks",
