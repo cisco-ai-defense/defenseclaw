@@ -16,7 +16,12 @@ import (
 
 // A writable record, hook directory or helper can redirect the plugin's
 // bearer-bearing native POST. Exercise the rendered plugins on Windows so
-// POSIX mode bits cannot stand in for the actual DACL.
+// POSIX mode bits cannot stand in for the actual DACL. A real install is
+// trusted: a per-user install (owned by the user, under a SYSTEM-owned
+// profile), an elevated one (owned by Administrators), OS-owned parents
+// (TrustedInstaller) and inherit-only entries that do not apply to the path
+// itself. A path another principal owns or may write is rejected, including
+// a parent of a data directory nested inside the profile.
 func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 	node := nodeForTest(t)
 	profile, err := os.UserHomeDir()
@@ -27,49 +32,99 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Another local account (the built-in Guest, RID 501) of this machine.
+	otherUser := current.Uid[:strings.LastIndex(current.Uid, "-")] + "-501"
+	const (
+		users          = "*S-1-5-32-545"
+		everyone       = "*S-1-1-0"
+		system         = "*S-1-5-18"
+		administrators = "*S-1-5-32-544"
+		trustedInstall = "NT SERVICE\\TrustedInstaller"
+	)
+	type layout struct{ home, nest, data, hooks, record, binDir, binary string }
 	for _, asset := range []struct{ source, file, function string }{
 		{"opencode-plugin.js", "plugin.mjs", "defenseclawPerUserNativePostBinary"},
 		{"amp-plugin.ts", "plugin.mts", "perUserNativePostBinary"},
 	} {
-		for _, hazard := range []struct{ name, target, mutation string }{
-			{"record writable", "record", "grant"},
-			{"hook directory writable", "hook directory", "grant"},
-			{"helper writable", "helper", "grant"},
-			{"record wrong owner", "record", "owner"},
-			{"hook directory wrong owner", "hook directory", "owner"},
-			{"helper wrong owner", "helper", "owner"},
+		for _, tc := range []struct {
+			name    string
+			nested  bool
+			owner   string // owner of every fixture path; "" = the current user
+			changes func(l layout) [][]string
+			trusted bool
+		}{
+			{name: "per-user install", trusted: true},
+			{name: "per-user install under a SYSTEM-owned profile", trusted: true,
+				changes: func(l layout) [][]string { return [][]string{{l.home, "/setowner", system}} }},
+			{name: "elevated install owned by Administrators", owner: administrators, trusted: true},
+			{name: "TrustedInstaller-owned bin directory", trusted: true,
+				changes: func(l layout) [][]string { return [][]string{{l.binDir, "/setowner", trustedInstall}} }},
+			{name: "inherit-only grant on the bin directory", trusted: true,
+				changes: func(l layout) [][]string { return [][]string{{l.binDir, "/grant", users + ":(CI)(IO)W"}} }},
+			{name: "nested data directory", nested: true, trusted: true},
+			{name: "record writable by Users",
+				changes: func(l layout) [][]string { return [][]string{{l.record, "/grant", users + ":W"}} }},
+			{name: "hook directory writable by Users",
+				changes: func(l layout) [][]string { return [][]string{{l.hooks, "/grant", users + ":W"}} }},
+			{name: "planted helper writable by Users",
+				changes: func(l layout) [][]string { return [][]string{{l.binary, "/grant", users + ":W"}} }},
+			{name: "planted helper modifiable by Everyone",
+				changes: func(l layout) [][]string { return [][]string{{l.binary, "/grant", everyone + ":M"}} }},
+			{name: "planted helper writable by another user",
+				changes: func(l layout) [][]string { return [][]string{{l.binary, "/grant", "*" + otherUser + ":W"}} }},
+			{name: "bin directory writable by Users",
+				changes: func(l layout) [][]string { return [][]string{{l.binDir, "/grant", users + ":W"}} }},
+			{name: "nested data parent writable by Users", nested: true,
+				changes: func(l layout) [][]string { return [][]string{{l.nest, "/grant", users + ":W"}} }},
+			{name: "record owned by Users",
+				changes: func(l layout) [][]string { return [][]string{{l.record, "/setowner", users}} }},
+			{name: "hook directory owned by another user",
+				changes: func(l layout) [][]string { return [][]string{{l.hooks, "/setowner", "*" + otherUser}} }},
+			{name: "helper owned by Users",
+				changes: func(l layout) [][]string { return [][]string{{l.binary, "/setowner", users}} }},
 		} {
-			t.Run(asset.source+"/"+hazard.name, func(t *testing.T) {
+			t.Run(asset.source+"/"+tc.name, func(t *testing.T) {
 				home, err := os.MkdirTemp(profile, "dc-helper-acl-")
 				if err != nil {
 					t.Fatal(err)
 				}
 				t.Cleanup(func() { _ = os.RemoveAll(home) })
-				hooks := filepath.Join(home, ".defenseclaw", "hooks")
-				binDir := filepath.Join(home, ".local", "bin")
-				for _, dir := range []string{hooks, binDir} {
+				l := layout{home: home, nest: home, binDir: filepath.Join(home, ".local", "bin")}
+				if tc.nested {
+					l.nest = filepath.Join(home, "nest")
+				}
+				l.data = filepath.Join(l.nest, ".defenseclaw")
+				l.hooks = filepath.Join(l.data, "hooks")
+				l.record = filepath.Join(l.hooks, ".gateway-helper")
+				l.binary = filepath.Join(l.binDir, "defenseclaw-gateway.exe")
+				for _, dir := range []string{l.hooks, l.binDir} {
 					if err := os.MkdirAll(dir, 0o700); err != nil {
 						t.Fatal(err)
 					}
 				}
-				record := filepath.Join(hooks, ".gateway-helper")
-				binary := filepath.Join(binDir, "defenseclaw-gateway.exe")
-				if err := os.WriteFile(binary, []byte("test helper"), 0o700); err != nil {
+				if err := os.WriteFile(l.binary, []byte("test helper"), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.WriteFile(record, []byte(binary+"\n"), 0o600); err != nil {
+				if err := os.WriteFile(l.record, []byte(l.binary+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
-				// Elevated Windows runners can create files owned by the
-				// Administrators group. Give this private fixture the actual
-				// account owner that a per-user install has.
-				for _, path := range []string{home, filepath.Join(home, ".defenseclaw"), hooks, record,
-					filepath.Join(home, ".local"), binDir, binary} {
-					if out, err := exec.Command("icacls", path, "/setowner", "*"+current.Uid).CombinedOutput(); err != nil {
-						t.Fatalf("set fixture owner: %v\n%s", err, out)
+				owner := tc.owner
+				if owner == "" {
+					owner = "*" + current.Uid
+				}
+				icacls := func(args ...string) {
+					t.Helper()
+					if out, err := exec.Command("icacls", args...).CombinedOutput(); err != nil {
+						t.Fatalf("icacls %v: %v\n%s", args, err, out)
 					}
 				}
-				body := renderPluginAssetForTest(t, asset.source, templateData{TokenFileJS: javaScriptStringContent(filepath.Join(hooks, ".token"))})
+				// Elevated Windows runners create files owned by the
+				// Administrators group; give each fixture its install's owner.
+				for _, path := range []string{home, l.nest, l.data, l.hooks, l.record,
+					filepath.Join(home, ".local"), l.binDir, l.binary} {
+					icacls(path, "/setowner", owner)
+				}
+				body := renderPluginAssetForTest(t, asset.source, templateData{TokenFileJS: javaScriptStringContent(filepath.Join(l.hooks, ".token"))})
 				body += "\ntry { " + asset.function + "(); console.log('trusted') } catch (error) { console.log('rejected:' + String(error)) }\n"
 				plugin := filepath.Join(home, asset.file)
 				if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
@@ -84,18 +139,19 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 					return strings.TrimSpace(string(out))
 				}
 				if got := check(); got != "trusted" {
-					t.Fatalf("private paths: %q", got)
+					t.Fatalf("private fixture: %q", got)
 				}
-				target := map[string]string{"record": record, "hook directory": hooks, "helper": binary}[hazard.target]
-				args := []string{target, "/grant", "*S-1-5-32-545:W"}
-				if hazard.mutation == "owner" {
-					args = []string{target, "/setowner", "*S-1-5-32-544"}
+				if tc.changes != nil {
+					for _, args := range tc.changes(l) {
+						icacls(args...)
+					}
 				}
-				if out, err := exec.Command("icacls", args...).CombinedOutput(); err != nil {
-					t.Fatalf("change fixture ACL: %v\n%s", err, out)
+				got := check()
+				if tc.trusted && got != "trusted" {
+					t.Fatalf("%s: %q, want trusted", tc.name, got)
 				}
-				if got := check(); !strings.HasPrefix(got, "rejected:") {
-					t.Fatalf("%s: %q", hazard.name, got)
+				if !tc.trusted && !strings.HasPrefix(got, "rejected:") {
+					t.Fatalf("%s: %q, want rejected", tc.name, got)
 				}
 			})
 		}

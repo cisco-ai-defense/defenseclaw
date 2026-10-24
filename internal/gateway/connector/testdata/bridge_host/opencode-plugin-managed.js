@@ -500,24 +500,34 @@ function defenseclawPerUserNativePostBinary() {
     if (info.isSymbolicLink() || ([2, 6].includes(index) ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted");
     if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account");
   };
-  if (process.platform === "win32") defenseclawCheckWindowsHelperACL(paths);
+  if (process.platform === "win32") {
+    // A data directory nested deeper in the profile has its parents up to
+    // the profile checked too.
+    const root = home.toLowerCase() + "\\";
+    for (let dir = dirname(dirname(hookDir)); dir.toLowerCase().startsWith(root); dir = dirname(dir)) paths.push(dir);
+    defenseclawCheckWindowsHelperACL(paths);
+  }
   return binary;
 }
 
 function defenseclawCheckWindowsHelperACL(paths) {
   // Windows stat mode bits do not represent the DACL. The OS-owned
-  // PowerShell checks every path before a bearer-bearing helper launch.
+  // PowerShell checks every path before a bearer-bearing helper launch: its
+  // owner is this account, SYSTEM, Administrators (an elevated install) or
+  // TrustedInstaller, and no other principal may write it. An inherit-only
+  // entry does not apply to the path itself; its children carry it.
   const script = [
     "$ErrorActionPreference='Stop'",
     "$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
-    "$trusted=@($current,'S-1-5-18','S-1-5-32-544')",
+    "$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
+    "$inheritOnly=[int][System.Security.AccessControl.PropagationFlags]::InheritOnly",
     "$writeMask=[int64]0x500D0156",
     "$paths=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())",
     "foreach($path in $paths) {",
     "  $acl=Get-Acl -LiteralPath $path",
-    "  if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $current) { throw 'owner' }",
+    "  if($trusted -notcontains $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value) { throw 'owner' }",
     "  foreach($ace in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) {",
-    "    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
+    "    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
     "  }",
     "}",
   ].join("\n");
