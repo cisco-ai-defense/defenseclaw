@@ -273,6 +273,12 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	case "PreToolUse", "PermissionRequest":
 		toolName := codexToolName(req)
 		toolArgs := codexToolArgs(req)
+		toolCWD := req.CWD
+		if codexShellExecutionTool(toolName) {
+			if workdir, ok := req.ToolInput["workdir"].(string); ok && workdir != "" {
+				toolCWD = agentHookTrustedActionCWD(ctx, req.CWD, workdir)
+			}
+		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, "codex", toolName, toolName,
 		)
@@ -282,7 +288,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Direction:     "tool_call",
 			Connector:     "codex",
 			MCPServerName: a.codexMCPServerName(ctx, req),
-			callerCWD:     req.CWD,
+			callerCWD:     toolCWD,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		if command == nil {
@@ -291,7 +297,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
 			Args:                     toolArgs,
-			CWD:                      req.CWD,
+			CWD:                      toolCWD,
 			ActiveHome:               hookActiveHome(ctx),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,

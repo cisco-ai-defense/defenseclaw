@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 
@@ -294,8 +293,8 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 			hookpaths.CWDKey: cwd, hookpaths.DirectoryFactPrefix + cwd: cwd,
 			hookpaths.TruncatedKey: "1", os.DevNull: os.DevNull,
 		}}
-	if trustedExistingAuthorizedKeysSymlinkWrite(temporaryRequest, actionfacts.Analyze(temporaryInput)) {
-		t.Fatal("device redirect made an unrelated dynamic output unsafe")
+	if !trustedExistingAuthorizedKeysSymlinkWrite(temporaryRequest, actionfacts.Analyze(temporaryInput)) {
+		t.Fatal("mktemp output cannot certify a later write target")
 	}
 	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)
@@ -427,6 +426,15 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"true redirect", "true > ~/.ssh/authorized_keys", project, true},
 		{"absolute keys", "hostname > " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"normalized keys", "hostname > " + filepath.Join(project, "..", ".ssh", "authorized_keys"), project, true},
+		{"find fprint output", "find . -fprint " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"find fprintf output", "find . -fprintf " + filepath.Join(home, ".ssh", "authorized_keys") + " %p", project, true},
+		{"git config file output", "git config -f " + filepath.Join(home, ".ssh", "authorized_keys") + " verifier.value x", project, true},
+		{"git config environment output", "GIT_CONFIG_GLOBAL=" + filepath.Join(home, ".ssh", "authorized_keys") + " git config --global verifier.value x", project, true},
+		{"gawk inplace output", "gawk -i inplace '{print}' " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
+		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,
@@ -1203,29 +1211,34 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a tree copy && echo k >> copy/k`,
 		`cd -P ~/.ssh && echo k >> authorized_keys`,
 		`cd ~/.ssh || exit 1; echo k >> authorized_keys`,
+		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
+		`cp --archive disklink notes.txt`,
+		`cp -a -t copy tree`,
+		`tar "$o" xenial.tar > log`,
+		`"$PY" x.py > "$OUT"`,
 	}
 	allowed := []string{
+		// A computed program is uncertainty, not persistence evidence
+		// (W24 loop round 2); its literal ordinary redirect is allowed.
+		`"$PY" x.py > out.txt`,
 		`cd build && echo ok >> notes.txt`,
 		`cd build && echo ok > notes.txt; tar xf keys.tar`,
 		`cd dirlink && cat authorized_keys`,
 		`cd dirlink && cd .. && echo ok >> notes.txt`,
 		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
-		// Reads, unrelated targets and sed's default link replacement are safe.
+		// Ordinary targets and sed's default link replacement remain safe.
 		`python3 -c 'open("disklink","r").read()'`,
 		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
 		`python3 -c 'open("report.txt","a").write("k")'`,
 		`python3 -c 'open("reportlink","a").write("k")'`,
 		`awk 'BEGIN {print "k" >> "reportlink"}'`,
 		`sed -i 's/marker/k/' disklink`,
-		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`sed -i --follow-symlinks 's/marker/k/' reportlink`,
 		// GAP-1549: the copy's own destination is an allowed write.
 		`cp -r big copy3`,
 		`cp -a tree copy4`,
 		`cp -r big copy6 && echo done > report.txt`,
-		`cp --archive disklink notes.txt`,
 		`cp --recursive tree copy`,
-		`cp -a -t copy tree`,
 		// Ordinary ".." and a link without a following ".." stay resolvable.
 		`cd build && cat ../README.md > ../out.txt`,
 		`ln -s ../shared lib && cat lib/x`,
@@ -1255,15 +1268,14 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`pax -w -f archive.pax > listing.txt`,
 		`unzip -l keys.zip > listing.txt`,
 		`7z l keys.7z > listing.txt`,
-		`tar "$o" xenial.tar > log`,
 		`tar -C unpack -xf keys.tar; echo hi > report.txt`,
 		`7z x keys.7z -o../outside; echo hi > report.txt`,
 		`cp -a src dst && echo hi > report.txt`,
 		`grep -rn "os.symlink(" src | head -5 > hits.txt`,
 	}
-	// The managed gateway also fails closed on a program word that is not
-	// static, which this change leaves as it is.
-	allowedPerUser := []string{`"$PY" x.py > out.txt`, `bash -lc "cp a b" > out.txt`}
+	// Login startup input can change the directory, so the child walk cannot
+	// assert a protected write through this ordinary relative redirect.
+	const uncertainLoginShell = `bash -lc "cp a b" > out.txt`
 	// "action" (not "raw_action") is the enforced decision.
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
@@ -1308,14 +1320,13 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 						t.Errorf("%s = %.300s, want archive chain guidance", command, got)
 					}
 				}
-				expectAllowed := allowed
-				if !managed {
-					expectAllowed = append(slices.Clone(allowed), allowedPerUser...)
-				}
-				for _, command := range expectAllowed {
+				for _, command := range allowed {
 					if got := post(t, command); !strings.HasPrefix(got, allow) {
 						t.Errorf("%s = %.300s, want allow", command, got)
 					}
+				}
+				if got := post(t, uncertainLoginShell); !strings.HasPrefix(got, allow) {
+					t.Errorf("%s = %.300s, want allow for ordinary write", uncertainLoginShell, got)
 				}
 			})
 		}
@@ -1360,6 +1371,9 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 			request := trustedActionRequest{Input: input}
+			// FP-0004/0005 have unknown copy source operands. A source names
+			// no destination, so they stay allowed as in 1.0.3 (W24 loop
+			// round 2); a protected destination still blocks below.
 			if trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)) {
 				t.Fatalf("%s classified as an SSH-key write", tc.command)
 			}

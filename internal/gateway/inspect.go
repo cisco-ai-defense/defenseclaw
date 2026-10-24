@@ -545,8 +545,9 @@ func inspectToolTrustedShellCWD(dir string) string {
 func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRequest) *ToolInspectVerdict {
 	action := trustedActionRequest{
 		Input: actionfacts.Input{
-			Tool: req.Tool,
-			Args: req.Args,
+			Tool:       req.Tool,
+			Args:       req.Args,
+			ActiveHome: hookActiveHome(ctx),
 		},
 		LegacyText:         string(req.Args),
 		Connector:          req.Connector,
@@ -750,6 +751,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 	}
 	ruleFindings := dispatchTrustedAction(ctx, action)
+	ruleFindings, provedHighWrite := provedHighWriteFindings(ctx, action, ruleFindings)
 
 	// CodeGuard: scan file content for any file-write tool.
 	//
@@ -790,6 +792,9 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		runtimeAction := guardrailActionForConnectorFindings(
 			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
 		)
+		if provedHighWrite {
+			runtimeAction = guardrailActionBlock
+		}
 		if enforceableSeverity != "NONE" {
 			codeGuardAction := guardrailActionForConnector(
 				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,

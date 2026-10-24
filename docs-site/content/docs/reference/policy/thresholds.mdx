@@ -57,6 +57,13 @@ tool findings include `attack.http_command_injection`,
 `attack.http_sql_injection`, and `exec.postgresql_copy_program`. See
 [CEL rule authoring](/docs/reference/policy/cel/authoring) for the proof boundary.
 
+`ACTION-POSSIBLE-EXECUTION` is a `MEDIUM` tool-call finding. It names a
+command that may run only through a choice made at run time, such as the body
+of a PowerShell `if (Test-Path x) { ... }` or a shell function called through
+a variable (`x=f; $x`), when that command matches a blocking rule on its own.
+The default and permissive packs alert on it. The strict pack blocks it, and
+so does `block_at: MEDIUM` with any pack.
+
 A preset (`defenseclaw policy activate`), `defenseclaw guardrail block-at` and a hand edit of `config.yaml` all change the same two keys.
 
 ## Scopes and precedence

@@ -33,6 +33,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"mvdan.cc/sh/v3/expand"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
@@ -77,8 +78,17 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
-	record               func(actionfacts.Facts, []RuleFinding)
-	recordTelemetry      func(trustedActionTelemetry)
+	// Hermes' native patch parser can reinterpret a symlink target containing
+	// a line break as another file directive. Its write views require the
+	// narrower patch-target proof, including in guest-directory views.
+	patchTarget bool
+	// Sandbox absolute targets are guest names; their host-directory views
+	// carry the filesystem proof.
+	patchHostView   bool
+	record          func(actionfacts.Facts, []RuleFinding)
+	recordTelemetry func(trustedActionTelemetry)
+	// Prevent recursive standalone evaluation of an already flattened command.
+	simpleCommandPass bool
 	// SandboxGuestCWD is a sandbox call's working directory in the guest's
 	// namespace (sandboxHookGuestCWD); Input.CWD is its host mount. Only
 	// the authorized-keys proofs read it, and only to add a match.
@@ -159,6 +169,81 @@ func dispatchTrustedAction(
 	defer func() {
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
+	if !request.simpleCommandPass {
+		defer func() {
+			checkedWholeWrite := false
+			wholeWriteSafe := false
+			wholeCommand, wholeCommandKnown := trustedBashCommandInput(request.Input)
+			for _, simple := range actionfacts.SimpleCommands(request.Input, facts) {
+				if simple.EvaluationFailure != "" {
+					if simple.EvaluationFailure != "limit" {
+						// A parser gap is already represented by the whole-action
+						// evaluation. It is not itself an enforcement finding.
+						continue
+					}
+					const ruleID = "ACTION-COMPOUND-LIMIT"
+					failure := RuleFinding{
+						RuleID: ruleID, Title: "Shell command exceeds policy evaluation limit",
+						Severity: "CRITICAL", Confidence: 1,
+						enforcement: findingEnforcementAllowed,
+					}.withTrustedActionProof(newEvaluationFailureFindingProof(ruleID))
+					findings = withSimpleCommandFindings(findings,
+						applyTrustedActionProofBoundary([]RuleFinding{failure}, request.EnforcementCapable))
+					break
+				}
+				child := request
+				child.Input.Command = simple.Text
+				child.Input.CWD = simple.CWD
+				// The managed hook has already walked a static cd. Its write
+				// targets are keyed in that physical directory, which may
+				// differ from the shell's logical PWD through a symlink.
+				// Judge the standalone child in the same directory as the
+				// hook's target evidence.
+				if request.ProtectedHomeHook {
+					if physical := request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+simple.CWD]; filepath.IsAbs(physical) {
+						child.Input.CWD = physical
+					}
+				}
+				child.Input.Args, child.Input.Argv = nil, nil
+				child.LegacyText = simple.Text
+				child.conflictSource = nil
+				child.record, child.recordTelemetry = nil, nil
+				child.simpleCommandPass = true
+				childFindings := dispatchTrustedAction(parent, child)
+				if simple.ZshHistoryBuiltin {
+					// Zsh's history builtin lists events (fc -l). The Bash-only
+					// history -c clear rule does not apply inside that shell.
+					childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+						return f.RuleID == "integrity.history_tamper"
+					})
+				}
+				if simple.UnresolvedBoundVariable {
+					if !checkedWholeWrite {
+						checkedWholeWrite = true
+						wholeWriteSafe = wholeCommandKnown &&
+							hookpaths.ActionCommandDecision(wholeCommand,
+								request.Input.CWD, request.Input.ActiveHome) == ""
+					}
+					if wholeWriteSafe {
+						// A child with a missing action-local value cannot prove a
+						// protected write by itself. The full action's class resolver
+						// has already judged that binding; retain every other rule.
+						childFindings = slices.DeleteFunc(childFindings, func(f RuleFinding) bool {
+							return f.RuleID == "persistence.ssh_authorized_keys_command"
+						})
+					}
+				}
+				if simple.Possible {
+					// The child runs only through a runtime choice the walk
+					// did not decide. Its blocking matches become one MEDIUM
+					// finding: an alert in the default and permissive tiers,
+					// a block in strict (block_at MEDIUM).
+					childFindings = possibleExecutionFindings(childFindings, request.EnforcementCapable)
+				}
+				findings = withSimpleCommandFindings(findings, childFindings)
+			}
+		}()
+	}
 	options := ruleScanOptions{
 		includeToolCallOnly: true,
 		excludeTrustExploit: true,
@@ -229,6 +314,14 @@ func dispatchTrustedAction(
 			semanticFacts, staticTargetTwin, viewCandidate = view, &twin, redirectReductionCandidate
 		} else if view, ok := actionfacts.ShortCircuitListReduction(request.Input, facts); ok {
 			semanticFacts, viewCandidate = view, listReductionCandidate
+		} else if view, ok := actionfacts.CompoundCommandReduction(request.Input, facts); ok {
+			// A simple command in a subshell, group, if, loop or case body,
+			// or a negated or background statement, is judged as if it ran
+			// alone: `(rm -rf /)` as `rm -rf /`. The view has every command
+			// of the action, as a list read as a sequence does, but not the
+			// scope of a subshell or the count of a loop, so only a match
+			// counts.
+			semanticFacts, viewCandidate, subsetView = view, listReductionCandidate, true
 		} else if view, ok := actionfacts.PowerShellProfileWrapperReduction(request.Input, facts); ok {
 			// pwsh -Command "<body>" without -NoProfile, alone or first in a
 			// list: a profile only runs more commands before the body, so a
@@ -485,8 +578,11 @@ func dispatchTrustedAction(
 		legacyFindings = withSequenceProvenFindings(legacyFindings, viewFindings)
 	}
 	findings = append(semanticFindings, legacyFindings...)
-	finalized := finalizeTrustedActionFindings(generation, request, contextFacts, findings)
+	finalized := finalizeTrustedActionFindings(
+		generation, request, contextFacts, findings,
+	)
 	finalized = appendTrustedWriteTargetFindings(finalized, generation, request, facts)
+	finalized = appendTrustedPrivateKeyReaderFinding(finalized, generation, request, facts)
 	if staticTargetTwin == nil {
 		return finalized
 	}
@@ -586,14 +682,16 @@ func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) [
 		texts = append(texts, request.Input.Argv...)
 		texts = appendJSONStrings(texts, request.Input.Args)
 	}
-	files := literalStdinFilesOf(request, facts)
 	for _, command := range facts.Commands {
 		texts = append(texts, command.Argv...)
-		// The quoted heredoc a command reads (cat > file <<'EOF') is data
-		// the command acts on, so a migrated literal in it counts in a
-		// script body too, unless the command is known never to read it.
-		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous &&
-			!literalStdinUnread(command, files) {
+		// The quoted heredoc fed to a command (cat > file <<'EOF') is data
+		// the command may act on, so a migrated literal in it counts in a
+		// script body too, whatever the command's name. No name proves that
+		// stdin goes unread: the shell that runs the script may bind any
+		// name, true, cat or /bin/cat alike, to a function that reads it
+		// (exported to the shell, or defined by BASH_ENV or a profile), and
+		// the gateway sees none of that shell's state.
+		if command.LiteralStdinComplete && !command.LiteralStdinAmbiguous {
 			texts = append(texts, command.LiteralStdin)
 		}
 		for _, argument := range command.Arguments {
@@ -613,250 +711,6 @@ func trustedActionTexts(request trustedActionRequest, facts actionfacts.Facts) [
 		texts = append(texts, network.Host)
 	}
 	return texts
-}
-
-// stdinIgnoringPrograms never read stdin, whatever their arguments (no
-// prompt, no "-" operand): a heredoc fed to one is not data it acts on.
-var stdinIgnoringPrograms = map[string]bool{
-	":": true, "true": true, "false": true, "echo": true, "printf": true,
-	"test": true, "[": true, "sleep": true, "pwd": true, "cd": true,
-	"export": true, "unset": true, "exit": true, "return": true, "shift": true,
-	"umask": true, "mkdir": true, "rmdir": true, "touch": true, "ls": true,
-	"chmod": true, "chown": true, "chgrp": true, "basename": true,
-	"dirname": true, "readlink": true, "realpath": true, "stat": true,
-	"uname": true, "whoami": true, "id": true, "hostname": true,
-}
-
-// stdinFileReader is the option grammar of a program that reads its file
-// operands, and stdin only when it has none or one names stdin.
-type stdinFileReader struct {
-	flags   string // short options without an argument
-	args    string // short options that take one
-	pattern bool   // the first operand is a pattern, unless patternArgs gave one
-	// patternArgs are the short options whose argument is a pattern (grep -e).
-	patternArgs string
-	// fileArgs are the short options whose argument is a file the program
-	// reads (grep -f), stdin when it is "-".
-	fileArgs string
-	// long maps a long option to whether it takes an argument (--name=value
-	// or the next word); longPattern and longFile mark the ones whose
-	// argument is a pattern or a file the program reads.
-	long        map[string]bool
-	longPattern map[string]bool
-	longFile    map[string]bool
-	anyFlag     bool // every option is a flag without an argument (cat)
-}
-
-// checksumReader leaves out -c (--check): a checksum list may name "-" or
-// /dev/stdin, which the tool then reads.
-var checksumReader = stdinFileReader{flags: "btwz",
-	long: map[string]bool{"binary": false, "text": false, "tag": false, "zero": false}}
-
-var grepReader = stdinFileReader{
-	flags: "EFGPiyvwxcLloqsbHhnTZzrRaIUuVJOSpM", args: "efmABCdD",
-	pattern: true, patternArgs: "ef", fileArgs: "f",
-	long: map[string]bool{
-		"extended-regexp": false, "fixed-strings": false, "basic-regexp": false, "perl-regexp": false,
-		"ignore-case": false, "no-ignore-case": false, "invert-match": false, "word-regexp": false,
-		"line-regexp": false, "count": false, "files-with-matches": false, "files-without-match": false,
-		"only-matching": false, "quiet": false, "silent": false, "no-messages": false, "byte-offset": false,
-		"with-filename": false, "no-filename": false, "line-number": false, "initial-tab": false,
-		"null": false, "null-data": false, "text": false, "recursive": false, "dereference-recursive": false,
-		"color": false, "colour": false, "regexp": true, "file": true, "max-count": true,
-		"after-context": true, "before-context": true, "context": true, "label": true,
-	},
-	longPattern: map[string]bool{"regexp": true, "file": true},
-	longFile:    map[string]bool{"file": true},
-}
-
-// stdinFileReaders are the programs whose heredoc is unread when they have a
-// file operand. A program whose script may run a command or name stdin in
-// its own syntax (sed's e and r, awk's getline and system) is not here.
-var stdinFileReaders = map[string]stdinFileReader{
-	"cat":       {anyFlag: true},
-	"tac":       {flags: "br", args: "s"},
-	"nl":        {flags: "p", args: "bdfhilnsvw"},
-	"head":      {flags: "qvz", args: "nc"},
-	"tail":      {flags: "fFqvzr", args: "ncsb"},
-	"wc":        {flags: "clmwL"},
-	"sort":      {flags: "bdfghiMnRrVcCmsuz", args: "ktoST"},
-	"uniq":      {flags: "cdDiuz", args: "fsw"},
-	"cut":       {flags: "nswz", args: "bcdf"},
-	"grep":      grepReader,
-	"egrep":     grepReader,
-	"fgrep":     grepReader,
-	"md5sum":    checksumReader,
-	"sha1sum":   checksumReader,
-	"sha224sum": checksumReader,
-	"sha256sum": checksumReader,
-	"sha384sum": checksumReader,
-	"sha512sum": checksumReader,
-	"b2sum":     checksumReader,
-}
-
-// literalStdinFiles proves that a file word of a reader is not its stdin.
-type literalStdinFiles struct {
-	// cwd is the directory a relative word is opened from, "" when unknown.
-	cwd string
-	// inspect is set when the gateway sees the filesystem the command runs
-	// in, as it is when the command reads the word: no command of the
-	// action before the read can make the word a link, a FIFO or another
-	// directory's entry.
-	inspect bool
-}
-
-// literalStdinFilesOf is the view of request's filesystem for its facts. A
-// sandbox's guest filesystem is not the gateway's, and a parse that is not
-// complete, a wrapper, or a command that may create or replace a file or
-// change the directory (anything but the programs of stdinIgnoringPrograms
-// other than cd, and of stdinFileReaders) may change what a word names before
-// the read.
-func literalStdinFilesOf(request trustedActionRequest, facts actionfacts.Facts) literalStdinFiles {
-	files := literalStdinFiles{inspect: !request.SkipLocalFilesystemResolution &&
-		request.SandboxGuestCWD == "" && facts.Authoritative()}
-	if filepath.IsAbs(facts.CWD) {
-		files.cwd = facts.CWD
-	}
-	for _, command := range facts.Commands {
-		_, reader := stdinFileReaders[command.Program]
-		if len(command.Wrappers) != 0 || !command.ArgvComplete || command.Program == "cd" ||
-			!stdinIgnoringPrograms[command.Program] && !reader {
-			files.inspect = false
-		}
-	}
-	return files
-}
-
-// notStdin reports whether word, a file a reader opens, cannot be its stdin:
-// the null device, an empty name (it fails to open), or, where the gateway
-// sees the command's filesystem, an existing regular file. Anything else may be stdin or become it: "-", a
-// /dev/stdin, /dev/fd or /proc fd path however it is spelled (/dev/./stdin,
-// a linked directory, ../ after a link), a link to one, a device, a FIFO, or
-// a name that does not exist yet. The word is looked up as the kernel opens
-// it, not cleaned first.
-func (files literalStdinFiles) notStdin(word string) bool {
-	if word == "/dev/null" { // the shell's null device; not a link
-		return true
-	}
-	if word == "" {
-		return true // opening "" fails; nothing is read
-	}
-	if word == "-" || !files.inspect {
-		return false
-	}
-	name := word
-	if !filepath.IsAbs(name) {
-		if files.cwd == "" {
-			return false
-		}
-		name = files.cwd + string(filepath.Separator) + word
-	}
-	info, err := os.Lstat(name)
-	return err == nil && info.Mode().IsRegular()
-}
-
-// literalStdinUnread reports whether command, fed a quoted heredoc, is known
-// never to read it: a program of stdinIgnoringPrograms, or a reader of
-// stdinFileReaders with a file operand whose every file word files proves is
-// not stdin (literalStdinFiles.notStdin). Each word is classified first: an
-// option, an option's value (a file it reads, as grep -f, or data such as a
-// pattern, a count or a delimiter), the pattern operand, or a file operand;
-// only a file word can name stdin, so grep -e - file reads file. With
-// POSIXLY_CORRECT set, options end at the first operand, so every later word
-// may be a file operand too. A wrapper, an argument the parse did not
-// resolve, an option the grammar does not know, a missing option value, or
-// any other program may read it (fail closed).
-func literalStdinUnread(command actionfacts.CommandFact, files literalStdinFiles) bool {
-	if len(command.Wrappers) != 0 || !command.ArgvComplete || len(command.Argv) == 0 {
-		return false
-	}
-	if stdinIgnoringPrograms[command.Program] {
-		return true
-	}
-	reader, ok := stdinFileReaders[command.Program]
-	if !ok {
-		return false
-	}
-	var operands []string
-	firstOperand, patternGiven, options := -1, false, true
-	args := command.Argv[1:]
-	// next takes the next word as the value of an option.
-	next := func(i *int) (string, bool) {
-		if *i+1 >= len(args) {
-			return "", false
-		}
-		*i++
-		return args[*i], true
-	}
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		switch {
-		case !options || arg == "-" || !strings.HasPrefix(arg, "-"):
-			if firstOperand < 0 {
-				firstOperand = i
-			}
-			operands = append(operands, arg)
-		case arg == "--":
-			options = false
-		case reader.anyFlag:
-		case strings.HasPrefix(arg, "--"):
-			name, attached, hasValue := strings.Cut(arg[2:], "=")
-			takesArg, known := reader.long[name]
-			if !known {
-				return false
-			}
-			if !takesArg {
-				continue // a flag; --color=auto has an optional value
-			}
-			word := attached
-			if !hasValue {
-				if word, ok = next(&i); !ok {
-					return false
-				}
-			}
-			patternGiven = patternGiven || reader.longPattern[name]
-			if reader.longFile[name] && !files.notStdin(word) {
-				return false
-			}
-		default:
-			for j := 1; j < len(arg); j++ {
-				letter := arg[j]
-				if strings.IndexByte(reader.flags, letter) >= 0 {
-					continue
-				}
-				if strings.IndexByte(reader.args, letter) < 0 {
-					return false
-				}
-				word := arg[j+1:]
-				if word == "" {
-					if word, ok = next(&i); !ok {
-						return false
-					}
-				}
-				patternGiven = patternGiven || strings.IndexByte(reader.patternArgs, letter) >= 0
-				if strings.IndexByte(reader.fileArgs, letter) >= 0 && !files.notStdin(word) {
-					return false
-				}
-				break
-			}
-		}
-	}
-	if firstOperand >= 0 && !allNotStdin(args[firstOperand+1:], files) {
-		return false
-	}
-	if reader.pattern && !patternGiven && len(operands) > 0 {
-		operands = operands[1:] // the pattern
-	}
-	return len(operands) > 0 && allNotStdin(operands, files)
-}
-
-func allNotStdin(words []string, files literalStdinFiles) bool {
-	for _, word := range words {
-		if !files.notStdin(word) {
-			return false
-		}
-	}
-	return true
 }
 
 // appendJSONStrings appends every string of the JSON value raw, object keys
@@ -896,6 +750,37 @@ func withTwinProvenBlocks(findings, twin []RuleFinding) []RuleFinding {
 			findings = append(findings, proven)
 		case !findings[index].contributesToEnforcement():
 			findings[index] = proven
+		}
+	}
+	return findings
+}
+
+// withSimpleCommandFindings adds each command's ordinary standalone result
+// beside the whole action's result. An enforcing or alert-only proof replaces
+// a weaker finding for the same rule; a sibling removes nothing.
+func withSimpleCommandFindings(findings, alone []RuleFinding) []RuleFinding {
+	rank := func(finding RuleFinding) int {
+		switch {
+		case finding.contributesToEnforcement() && finding.proof.authorizes(finding.RuleID):
+			return 3
+		case finding.contributesToAlertOnly():
+			return 2
+		default:
+			return 1
+		}
+	}
+	for _, finding := range alone {
+		key := trustedActionFindingKey(finding.RuleID)
+		index := slices.IndexFunc(findings, func(existing RuleFinding) bool {
+			return trustedActionFindingKey(existing.RuleID) == key
+		})
+		if index < 0 {
+			findings = append(findings, finding)
+		} else if rank(finding) > rank(findings[index]) ||
+			(rank(finding) == rank(findings[index]) &&
+				canonicalTrustedRuleID(finding.RuleID) == key &&
+				canonicalTrustedRuleID(findings[index].RuleID) != key) {
+			findings[index] = finding
 		}
 	}
 	return findings
@@ -2408,7 +2293,8 @@ func dispatchTrustedFallback(
 		findings = withSequenceProvenFindings(findings, viewFindings)
 	}
 	findings = finalizeTrustedActionFindings(generation, request, contextFacts, findings)
-	return appendTrustedWriteTargetFindings(findings, generation, request, facts), fallbackTelemetry
+	findings = appendTrustedWriteTargetFindings(findings, generation, request, facts)
+	return appendTrustedPrivateKeyReaderFinding(findings, generation, request, facts), fallbackTelemetry
 }
 
 // trustedFallbackLanes runs the recovery lanes over findings, the legacy scan
@@ -2652,11 +2538,7 @@ func finalizeTrustedActionFindings(
 	findings []RuleFinding,
 ) []RuleFinding {
 	findings = deduplicateTrustedActionFindings(findings)
-	findings = applyTrustedActionContextDisposition(
-		generation,
-		facts,
-		findings,
-	)
+	findings = applyTrustedActionContextDisposition(generation, facts, findings)
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 

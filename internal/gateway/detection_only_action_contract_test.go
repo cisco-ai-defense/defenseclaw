@@ -226,6 +226,8 @@ func TestPythonInlineSpecificOwnersRemainDetectionOnlyWithoutTypedProof(t *testi
 	}
 }
 
+// A computed executable is parser uncertainty: it stays detection only, as
+// in 1.0.3, and is not SSH persistence evidence (W24 loop round 2).
 func TestEvaluateCodexHook_DynamicExecutablesRemainDetectionOnly(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
@@ -262,7 +264,8 @@ func TestEvaluateCodexHook_DynamicExecutablesRemainDetectionOnly(t *testing.T) {
 			})
 			if response.Action != guardrailActionAllow ||
 				response.RawAction != guardrailActionAllow || response.WouldBlock ||
-				findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) {
+				findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) ||
+				findingStringHasRuleID(response.Findings, "persistence.ssh_authorized_keys_command") {
 				t.Fatalf("hook response = %+v, want parser uncertainty excluded from findings", response)
 			}
 		})
@@ -294,11 +297,11 @@ func TestArtifactPromotion_AllDetectionOnlyAllows(t *testing.T) {
 	installDefaultProfileConnector(t, connectorName)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "unreachable.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nrm -rf /\n"), 0o700); err != nil {
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\nrm -rf /\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
-		Tool: "shell", Command: fmt.Sprintf("false && bash %q", path), CWD: dir,
+		Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: dir,
 	})
 	capture := &toolChainHookCapture{}
 	capture.recordTrustedAction(facts, nil)

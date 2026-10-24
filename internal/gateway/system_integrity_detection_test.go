@@ -70,7 +70,7 @@ func TestPOSIXSystemInterpreterWrapperProfilePosture(t *testing.T) {
 	}
 }
 
-func TestPOSIXSystemInterpreterWrapperPartialShellRetainsDetectionOnly(t *testing.T) {
+func TestPOSIXSystemInterpreterWrapperPartialShellKeepsRuleDisposition(t *testing.T) {
 	const command = "if [ ! -e /usr/bin/python3.12.real ]; then mv /usr/bin/python3.12 /usr/bin/python3.12.real; fi\n" +
 		"cat >/usr/bin/.python3.12.wrap <<'EOF'\n" +
 		"#!/bin/sh.real\n" +
@@ -91,9 +91,18 @@ func TestPOSIXSystemInterpreterWrapperPartialShellRetainsDetectionOnly(t *testin
 	)
 	if result.Action != "allow" || result.ParseStatus != string(actionfacts.StatusPartial) ||
 		!slices.Contains(result.RuleIDs, posixSystemInterpreterWrapperID) ||
-		len(result.Findings) != 1 || result.Findings[0].Disposition != "detect_only" ||
-		result.Findings[0].ContributesToEnforcement {
-		t.Fatalf("result=%+v, want partial detection-only finding", result)
+		len(result.Findings) != 1 {
+		t.Fatalf("result=%+v, want the rule's detection-only disposition", result)
+	}
+	for _, finding := range result.Findings {
+		switch finding.RuleID {
+		case posixSystemInterpreterWrapperID:
+			if finding.Disposition != "detect_only" || finding.ContributesToEnforcement {
+				t.Fatalf("interpreter wrapper unexpectedly enforceable: %+v", finding)
+			}
+		default:
+			t.Fatalf("unexpected finding: %+v", finding)
+		}
 	}
 }
 

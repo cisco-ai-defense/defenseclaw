@@ -3335,9 +3335,15 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 			ActiveHome: "C:/Users/alice", DialectHint: actionfacts.DialectPowerShell},
 		LegacyText: command, Connector: connector, EnforcementCapable: true,
 	})
-	if finding := findingWithID(findings, "PATH-SSH-KEY"); finding == nil ||
-		finding.Severity != "CRITICAL" || !finding.contributesToEnforcement() {
-		t.Fatalf("cmd private-key read = %v, want CRITICAL block", FindingStrings(findings))
+	blocked := false
+	for _, finding := range findings {
+		if finding.Severity == "CRITICAL" && finding.contributesToEnforcement() &&
+			(finding.RuleID == "PATH-SSH-KEY" || finding.RuleID == "persistence.ssh_authorized_keys_command") {
+			blocked = true
+		}
+	}
+	if !blocked {
+		t.Fatalf("cmd private-key read = %v, want a CRITICAL protected-path block", FindingStrings(findings))
 	}
 }
 

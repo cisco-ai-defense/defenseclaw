@@ -770,7 +770,12 @@ func TestHookPanicResponseFailModeMatrix(t *testing.T) {
 							continue
 						}
 						isLifecycle := hookexec.NeutralLifecycleEvent(connectorName, event)
-						capable, _ := mapHookActionForProfile("block", "action", event, profile.Capabilities, profile, nil)
+						// Each fixture uses its own data directory. Its cached agent
+						// contract may differ from the host profile that supplied the
+						// candidate event list (notably Claude PostToolBatch).
+						effectiveProfile := api.hookProfileForRequest(t.Context(), connectorName)
+						capable, _ := mapHookActionForProfile("block", "action", event,
+							effectiveProfile.Capabilities, effectiveProfile, nil)
 						wantAction, wantMode := "allow", mode
 						switch {
 						case isLifecycle:

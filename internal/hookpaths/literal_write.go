@@ -12,16 +12,16 @@ import (
 )
 
 var (
-	literalOpenCall    = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
-	literalWriteCall   = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
-	literalNodeStream  = regexp.MustCompile(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
-	literalPathWrite   = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
-	literalPathOpen    = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
-	literalPerlOpen    = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
-	literalAwkRedirect = regexp.MustCompile(`(?:>>|>)\s*['"]([^'"]+)['"]`)
-	literalCopyCall    = regexp.MustCompile(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|(?:File::Copy::)?copy)\s*\(`)
-	literalPerlCopy    = regexp.MustCompile(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
-	literalPerlImport  = regexp.MustCompile(`\buse\s+File::Copy\b`)
+	literalOpenCall         = regexp.MustCompile(`\b(?:open|File\.open|fs\.openSync|os\.open|(?:io\.)?FileIO)\s*\(`)
+	literalWriteCall        = regexp.MustCompile(`\b(?:appendFileSync|writeFileSync|File\.write|File\.binwrite)\s*\(`)
+	literalNodeStream       = regexp.MustCompile(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
+	literalPathWrite        = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
+	literalPathOpen         = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
+	literalPerlOpen         = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
+	literalCopyCall         = regexp.MustCompile(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|copyfile|copy2|(?:File::Copy::)?copy)\s*\(`)
+	literalPythonCopyImport = regexp.MustCompile(`\bfrom\s+shutil\s+import\s+copyfile\b`)
+	literalPerlCopy         = regexp.MustCompile(`\b(?:File::Copy::)?copy\s+['"][^'"]+['"]\s*,\s*(['"][^'"]+['"])`)
+	literalPerlImport       = regexp.MustCompile(`\buse\s+File::Copy\b`)
 )
 
 // LiteralWriteOperands lists fixed write paths inside a directly invoked
@@ -283,6 +283,15 @@ func literalInterpreterWrites(code, language string) []string {
 		}
 	}
 	perlCopyImported := false
+	pythonCopyfileImported := false
+	if language == "python" {
+		for _, loc := range literalPythonCopyImport.FindAllStringIndex(code, -1) {
+			if literalCodePosition(code, loc[0], language) {
+				pythonCopyfileImported = true
+				break
+			}
+		}
+	}
 	if language == "perl" {
 		for _, loc := range literalPerlImport.FindAllStringIndex(code, -1) {
 			if literalCodePosition(code, loc[0], language) {
@@ -296,7 +305,8 @@ func literalInterpreterWrites(code, language string) []string {
 			continue
 		}
 		name := strings.TrimSpace(code[loc[0] : loc[1]-1])
-		if !literalCopyAPI(language, name, perlCopyImported) {
+		if !literalCopyAPI(language, name, perlCopyImported) &&
+			(language != "python" || name != "copyfile" || !pythonCopyfileImported) {
 			continue
 		}
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
@@ -416,7 +426,7 @@ func literalString(arg string) (string, bool) {
 		return "", false
 	}
 	value := arg[1 : len(arg)-1]
-	if strings.Contains(value, "\\") {
+	if strings.Contains(value, "\\") || strings.ContainsRune(value, rune(arg[0])) {
 		return "", false
 	}
 	return value, true
