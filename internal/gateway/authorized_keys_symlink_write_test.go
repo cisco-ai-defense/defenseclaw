@@ -417,7 +417,7 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"absolute project", "hostname > " + filepath.Join(project, "h1.txt"), project, false},
 		{"project tee", "echo hi | tee ~/proj/t2.txt", project, false},
 		{"external redirect", "hostname > /tmp/x", project, false},
-		{"read keys", "hostname < ~/.ssh/authorized_keys", project, false},
+		{"read keys", "hostname < ~/.ssh/authorized_keys", project, true},
 		{"keys redirect", "hostname > ~/.ssh/authorized_keys", project, true},
 		{"home variable keys", "hostname > $HOME/.ssh/authorized_keys", project, true},
 		{"keys append", "uptime >> ~/.ssh/authorized_keys", project, true},
@@ -433,8 +433,8 @@ func TestClaudeWriteTargetMarkerRule(t *testing.T) {
 		{"gawk inplace output", "gawk -i inplace '{print}' " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"uniq second operand output", "uniq input.txt " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 		{"unknown output option", "fixture-tool --output=" + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
-		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
-		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, false},
+		{"find name is data", "find . -name " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
+		{"uniq first operand input", "uniq " + filepath.Join(home, ".ssh", "authorized_keys"), project, true},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: row.command, CWD: row.cwd,
@@ -1068,6 +1068,14 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		}
 	}
 	blocked := []string{
+		// TGT-0194: a compound command or script argument names the active
+		// protected target even when its eventual write goes elsewhere.
+		`cd dirlink && cat authorized_keys`,
+		`cd dirlink && cd .. && echo ok >> notes.txt`,
+		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
+		`python3 -c 'open("disklink","r").read()'`,
+		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
+		`sed -i 's/marker/k/' disklink`,
 		// GAP-1567: a relative write after a logical directory link lands in its physical target.
 		`cd dirlink && echo k >> authorized_keys`,
 		`cd ~/proj/dirlink && tee -a authorized_keys < x`,
@@ -1220,16 +1228,10 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`"$PY" x.py > out.txt`,
 		`cd build && echo ok >> notes.txt`,
 		`cd build && echo ok > notes.txt; tar xf keys.tar`,
-		`cd dirlink && cat authorized_keys`,
-		`cd dirlink && cd .. && echo ok >> notes.txt`,
-		`cd -P dirlink && cd .. && echo ok >> notes.txt`,
-		// Ordinary targets and sed's default link replacement remain safe.
-		`python3 -c 'open("disklink","r").read()'`,
-		`python3 -c 'import os; os.open("disklink",os.O_RDONLY)'`,
+		// Ordinary project targets remain allowed.
 		`python3 -c 'open("report.txt","a").write("k")'`,
 		`python3 -c 'open("reportlink","a").write("k")'`,
 		`awk 'BEGIN {print "k" >> "reportlink"}'`,
-		`sed -i 's/marker/k/' disklink`,
 		`sed -i --follow-symlinks 's/marker/k/' reportlink`,
 		// GAP-1549: the copy's own destination is an allowed write.
 		`cp -r big copy3`,

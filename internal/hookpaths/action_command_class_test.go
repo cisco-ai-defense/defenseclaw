@@ -290,7 +290,7 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 		blocked bool
 	}{
 		{`$output = Join-Path $HOME 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, false},
-		{`$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath $target -Value 'dummy-key'`, true},
+		{`$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath $target -Value 'dummy-key'`, false},
 		{`$output = Join-Path $unknown 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, true},
 	} {
 		if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.blocked {
@@ -306,12 +306,12 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 		t.Fatal("resolved Windows authorized-keys positional target allowed after -Value")
 	}
 	data := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath report.txt -Value $target`
-	if got := ActionCommandDecision(data, cwd, home); got != "" {
-		t.Fatalf("protected path used only as data blocked: %q", got)
+	if got := ActionCommandDecision(data, cwd, home); got != "protected-target" {
+		t.Fatalf("protected data mention decision = %q", got)
 	}
 	positionalData := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -Value $target report.txt`
-	if got := ActionCommandDecision(positionalData, cwd, home); got != "" {
-		t.Fatalf("protected path used only as positional data blocked: %q", got)
+	if got := ActionCommandDecision(positionalData, cwd, home); got != "protected-target" {
+		t.Fatalf("protected positional data mention decision = %q", got)
 	}
 	for _, command := range []string{
 		`Add-Content -Value marker -Path report.txt, C:\Users\alice\.ssh\authorized_keys`,
@@ -331,8 +331,8 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 		`Set-Content -Val C:\Users\alice\.ssh\authorized_keys report.txt`,
 		`Out-File -Inp C:\Users\alice\.ssh\authorized_keys -FilePath report.txt`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
-			t.Errorf("protected path used only as data blocked: %q, reason=%q", command, got)
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("protected option value decision = %q for %q", got, command)
 		}
 	}
 	for _, command := range []string{
@@ -348,8 +348,8 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 		command string
 		block   bool
 	}{
-		{`Copy-Item C:\Users\alice\.ssh\authorized_keys report.txt`, false},
-		{`Copy-Item -Path C:\Users\alice\.ssh\authorized_keys -Destination report.txt`, false},
+		{`Copy-Item C:\Users\alice\.ssh\authorized_keys report.txt`, true},
+		{`Copy-Item -Path C:\Users\alice\.ssh\authorized_keys -Destination report.txt`, true},
 		{`Copy-Item report.txt C:\Users\alice\.ssh\authorized_keys`, true},
 		{`Copy-Item -Path report.txt -Destination C:\Users\alice\.ssh\authorized_keys`, true},
 	} {
@@ -368,9 +368,9 @@ func TestR104ActionWindowsWrappedRedirectRoles(t *testing.T) {
 		{`env -S "cmd /c echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
 		{`env -- BUILD=1 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
 		{`nice -n 5 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
-		{`env -S "cmd /c echo %USERPROFILE%\.ssh\authorized_keys"`, false},
-		{`env -- BUILD=1 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, false},
-		{`nice -n 5 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, false},
+		{`env -S "cmd /c echo %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`env -- BUILD=1 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, true},
+		{`nice -n 5 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, true},
 	} {
 		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.block {
 			t.Errorf("protected write=%v, want %v for %q", got, tc.block, tc.command)
@@ -391,7 +391,7 @@ func TestR104ActionWindowsKnownWrapperChildren(t *testing.T) {
 			block bool
 		}{
 			{`cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, true},
-			{`cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, false},
+			{`cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`, true},
 		} {
 			command := prefix + tc.child
 			if got := ActionCommandDecision(command, cwd, home) != ""; got != tc.block {
@@ -456,6 +456,13 @@ func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
 		`Resolve-Path ` + target,
 		`Test-Path ` + target,
 		`git status --short ` + target,
+		`[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("read-only Windows command blocked: %q: %q", command, got)
+		}
+	}
+	for _, command := range []string{
 		`echo ` + target,
 		`cp ` + target + ` report.pub`,
 		`cp -a ` + target + ` report.pub`,
@@ -467,7 +474,6 @@ func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
 		`dd if=` + target + ` of=report.pub`,
 		`sed s/a/b/ ` + target,
 		`iwr https://example.com/a.pub -Body ` + target + ` -OutFile report.pub`,
-		`[System.IO.File]::ReadAllText('C:/Users/Alice/.ssh/authorized_keys')`,
 		`[System.IO.File]::AppendAllText('C:/Users/Alice/.ssh/authorized_keys')`,
 		`Copy-Item -Verbose ` + target + ` report.pub`,
 		`Copy-Item -Container ` + target + ` report.pub`,
@@ -479,8 +485,8 @@ func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
 		`sudo -nE cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`,
 		`ionice -c2 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
-			t.Errorf("Windows path used only as data blocked: %q: %q", command, got)
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("protected Windows mention decision = %q for %q", got, command)
 		}
 	}
 }
@@ -511,10 +517,6 @@ func TestR104ActionWindowsRedirectAfterProtectedDestination(t *testing.T) {
 	for _, program := range []string{"cp", "mv", "ln", "rsync", "install", "xcopy"} {
 		for _, redirect := range []string{`2>&1`, `2>/dev/null`, `> nul`, `> out.log`} {
 			command := program + ` report.pub ` + target + ` ` + redirect
-			words, ok := actionWindowsWords(command)
-			if !ok || !actionWindowsPathPosition(program, 2, words) {
-				t.Errorf("destination lost after redirect: %q (words %q)", command, words)
-			}
 			if got := ActionCommandDecision(command, cwd, home); got == "" {
 				t.Errorf("protected destination allowed after redirect: %q", command)
 			}
@@ -522,12 +524,12 @@ func TestR104ActionWindowsRedirectAfterProtectedDestination(t *testing.T) {
 	}
 	for _, program := range []string{"cp", "ln", "rsync", "install", "xcopy"} {
 		command := program + ` ` + target + ` report.pub 2>&1`
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
-			t.Errorf("protected copy source blocked after redirect: %q: %q", command, got)
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("protected source mention decision = %q for %q", got, command)
 		}
 	}
-	if got := ActionCommandDecision(`cp `+target+` 2 > out.log`, cwd, home); got != "" {
-		t.Errorf("numeric destination before a spaced redirect blocked: %q", got)
+	if got := ActionCommandDecision(`cp `+target+` 2 > out.log`, cwd, home); got != "protected-target" {
+		t.Errorf("protected source before spaced redirect decision = %q", got)
 	}
 	for _, command := range []string{
 		`cp report.pub report.txt 2>` + target,
@@ -557,8 +559,8 @@ func TestR104ActionWindowsSedInPlaceSpellings(t *testing.T) {
 		`sed -finput.sed ~/.ssh/authorized_keys`,
 		`sed -E s/a/b/ ~/.ssh/authorized_keys`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
-			t.Errorf("read-only sed blocked: %q: %q", command, got)
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("sed protected mention decision = %q for %q", got, command)
 		}
 	}
 }
@@ -576,8 +578,24 @@ func TestR104ActionWindowsWebRequestOutputSpellings(t *testing.T) {
 			t.Errorf("protected web request output allowed: %q", command)
 		}
 	}
-	if got := ActionCommandDecision(`iwr https://example.com/a.pub -Body `+target+` -OutF report.pub`, cwd, home); got != "" {
-		t.Errorf("web request body data blocked: %q", got)
+	if got := ActionCommandDecision(`iwr https://example.com/a.pub -Body `+target+` -OutF report.pub`, cwd, home); got != "protected-target" {
+		t.Errorf("web request protected body mention decision = %q", got)
+	}
+}
+
+// A later redirect or option value cannot hide an earlier protected target.
+func TestR104ActionWindowsLaterOperandTargetMention(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, command := range []string{
+		`cp report.pub ` + target + ` *> out.log`,
+		`cp report.pub ` + target + ` --future-value report.pub`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
 	}
 }
 

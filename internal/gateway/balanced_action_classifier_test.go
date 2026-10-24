@@ -40,11 +40,7 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		"echo \"$(id)\" > report.txt", "for f in regular.txt; do cp \"$f\" copy/; done; echo ok > second-report.txt",
 		"git -C sub pull --ff-only && echo benign > notes.txt",
 		"cat ~/.ssh/authorized_keys", "grep marker ~/.ssh/authorized_keys",
-		"echo " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
-		"printf '%s\\n' " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
-		"cat " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
-		"grep marker " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
-		"rg marker " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"cd ~/.ssh", "pushd ~/.ssh", "ls ~/.ssh", "stat ~/.ssh",
 		"f=report.txt; echo marker >> \"${f:-alias}\"",
 		"out=report-0509.txt; awk \"BEGIN {print \\\"marker\\\" >> \\\"$out\\\"}\"",
 	} {
@@ -60,7 +56,13 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, command := range []string{
+		"echo " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"printf '%s\\n' " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"cat " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"grep marker " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"rg marker " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
 		"echo marker >> ~/.ssh/authorized_keys",
+		"cd ~/.ssh && cat authorized_keys",
 		"echo marker >> alias",
 		"cp payload alias",
 		"f=other; unset f; echo marker >> \"${f:-alias}\"",
@@ -87,10 +89,10 @@ func TestBalancedActionEffectRolesIndependent(t *testing.T) {
 		name, command string
 		protected     bool
 	}{
-		{"unbound output with path data", `echo marker >> "$out"; printf '%s' ` + key, false},
-		{"build with path data", `npm test; printf '%s' ` + key, false},
-		{"read with uncertain neighbor", `cat ` + key + `; npm test`, false},
-		{"script argument with neighbor", `python build.py ` + key + `; git status`, false},
+		{"unbound output with path data", `echo marker >> "$out"; printf '%s' ` + key, true},
+		{"build with path data", `npm test; printf '%s' ` + key, true},
+		{"read with uncertain neighbor", `cat ` + key + `; npm test`, true},
+		{"script argument with neighbor", `python build.py ` + key + `; git status`, true},
 		{"literal destination after build", `npm test; echo marker >> ` + key, true},
 		{"alias destination after build", `npm test; echo marker >> effect-alias`, true},
 		{"literal destination after data", `printf '%s' ` + key + `; echo marker >> ` + key, true},
@@ -134,22 +136,29 @@ func TestBalancedActionUncertaintyIsAuditOnly(t *testing.T) {
 }
 
 func TestBalancedActionWindowsOrdinaryCommands(t *testing.T) {
-	for _, command := range []string{
-		"Write-Output ok; Start-Sleep -Seconds 70",
-		"py -m unittest -q",
-		"make safe", "npm test", "go test ./...", "cargo test", "pip install -e .", "gradle test",
-		"pwsh.exe -NoProfile -File C:/work/build.ps1",
-		"pwsh.exe -NoProfile -File C:/work/build.ps1 C:/Users/alice/.ssh/authorized_keys",
-		"python C:/work/build.py C:/Users/alice/.ssh/authorized_keys",
-		"Write-Output C:/Users/alice/.ssh/authorized_keys; pwsh -File C:/work/build.ps1",
-		".\\gradlew.bat test",
-		"cmd.exe /c \"echo hello > benign.txt\" && type benign.txt",
+	for _, tc := range []struct {
+		command string
+		blocked bool
+	}{
+		{"Write-Output ok; Start-Sleep -Seconds 70", false},
+		{"py -m unittest -q", false},
+		{"make safe", false}, {"npm test", false}, {"go test ./...", false}, {"cargo test", false}, {"pip install -e .", false}, {"gradle test", false},
+		{"pwsh.exe -NoProfile -File C:/work/build.ps1", false},
+		{"Set-Location C:/Users/alice/.ssh", false},
+		{"Push-Location C:/Users/alice/.ssh", false},
+		{"Get-ChildItem C:/Users/alice/.ssh", false},
+		{"Test-Path C:/Users/alice/.ssh", false},
+		{"pwsh.exe -NoProfile -File C:/work/build.ps1 C:/Users/alice/.ssh/authorized_keys", true},
+		{"python C:/work/build.py C:/Users/alice/.ssh/authorized_keys", true},
+		{"Write-Output C:/Users/alice/.ssh/authorized_keys; pwsh -File C:/work/build.ps1", true},
+		{".\\gradlew.bat test", false},
+		{"cmd.exe /c \"echo hello > benign.txt\" && type benign.txt", false},
 	} {
-		t.Run(command, func(t *testing.T) {
-			input := actionfacts.Input{Tool: "exec_command", Command: command,
+		t.Run(tc.command, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "exec_command", Command: tc.command,
 				CWD: "C:/work", ActiveHome: "C:/Users/alice", DialectHint: actionfacts.DialectPowerShell}
-			if trustedWindowsLocationAuthorizedKeysWrite(input) {
-				t.Fatal("ordinary Windows command classified as authorized-keys write")
+			if got := trustedWindowsLocationAuthorizedKeysWrite(input); got != tc.blocked {
+				t.Fatalf("protected target = %t, want %t", got, tc.blocked)
 			}
 		})
 	}
@@ -201,8 +210,8 @@ func TestBalancedActionScriptArgumentsAreData(t *testing.T) {
 	} {
 		t.Run(command, func(t *testing.T) {
 			for route, denied := range r104ReviewProtectedWrite(t, command, cwd, home) {
-				if denied {
-					t.Fatalf("route %d claimed a script's data argument as a write target", route)
+				if !denied {
+					t.Fatalf("route %d missed a protected target argument", route)
 				}
 			}
 		})
@@ -247,7 +256,7 @@ func TestBalancedActionSelectedMakeRecipes(t *testing.T) {
 		{"include", "include ../writer.mk\n", "make write-key", true},
 		{"MAKEFLAGS", "safe:\n\tprintf ok > report.txt\n", "MAKEFLAGS=-f../writer.mk make write-key", true},
 		{"eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' x", true},
-		{"unselected eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", false},
+		{"unselected eval", "safe:\n\tprintf ok > report.txt\n", "make --eval='x: ; printf marker >> ~/.ssh/authorized_keys' safe", true},
 		{"pattern", "%.key:\n\tprintf marker >> ~/.ssh/authorized_keys\n", "make token.key", true},
 		{"pattern prerequisite", "%.key: %.prep\n\t@true\na.prep:\n\t@true\nb.prep:\n\tprintf marker >> ~/.ssh/authorized_keys\n", "make a.key b.key", true},
 		{"stdin", "safe:\n\tprintf ok > report.txt\n", "make -f - safe <<'EOF'\nsafe:\n\tprintf marker >> ~/.ssh/authorized_keys\nEOF", true},
