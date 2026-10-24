@@ -21,6 +21,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -374,8 +375,16 @@ func TestWindowsManagedLaunchCoverageJudgesOnlyEnrolledProfiles(t *testing.T) {
 }
 
 func TestWindowsManagedLaunchCoverageWritesCanonicalGatewayAuditWithoutArguments(t *testing.T) {
-	priorEndpoint := windowsManagedLaunchAuditEndpoint
-	t.Cleanup(func() { windowsManagedLaunchAuditEndpoint = priorEndpoint })
+	priorEndpoint, priorFactory := windowsManagedLaunchAuditEndpoint, managedGatewayClientFactory
+	t.Cleanup(func() { windowsManagedLaunchAuditEndpoint, managedGatewayClientFactory = priorEndpoint, priorFactory })
+	// The connected-socket check has its own tests; here the audit must ask
+	// it for the gateway service.
+	managedGatewayClientFactory = func(timeout time.Duration, _ string, peer hookexec.ManagedGatewayPeer) (*http.Client, error) {
+		if peer.ServiceName != managed.StandaloneWindowsGatewaySvc {
+			t.Fatalf("audit checked the socket against %q", peer.ServiceName)
+		}
+		return &http.Client{Timeout: timeout}, nil
+	}
 	bodies := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/observability/cli" || r.Header.Get("Authorization") != "Bearer managed-token" {
@@ -431,5 +440,36 @@ func TestWindowsManagedLaunchCoverageWritesCanonicalGatewayAuditWithoutArguments
 	details, ok = alert["details"].(map[string]any)
 	if !ok || details["agent_install_path"] != install.InstallPath || details["agent_version"] != "2.0.77" || details["actor_id"] != process.OwnerSID {
 		t.Fatalf("private install audit lost copy identity: %+v", details)
+	}
+}
+
+// Status and verify audit an uninspected launch or an unprotected install
+// with the administrator's bearer, the account SID and the install path.
+// Another account that holds the gateway port while the service is down
+// must receive none of it, for either alert.
+func TestWindowsManagedCoverageAuditSendsNothingToAnUnverifiedListener(t *testing.T) {
+	priorEndpoint := windowsManagedLaunchAuditEndpoint
+	t.Cleanup(func() { windowsManagedLaunchAuditEndpoint = priorEndpoint })
+	var received []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		received = append(received, r.Header.Get("Authorization")+" "+string(body))
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	windowsManagedLaunchAuditEndpoint = func() (string, string, bool, error) {
+		return server.URL, "managed-admin-token", true, nil
+	}
+	process := inventory.AgentProcess{PID: 7133, Connector: "opencode", OwnerSID: "S-1-5-21-1234"}
+	if err := reportWindowsManagedLaunchCoverage(process, "opencode", "opencode_pure"); err == nil {
+		t.Fatal("the launch audit reported success to a listener that is not the gateway service")
+	}
+	install := enterprisehooks.UnprotectedAgent{SID: process.OwnerSID, Connector: "claudecode",
+		InstallPath: `C:\Users\alice\private\node_modules\@anthropic-ai\claude-code`}
+	if err := reportWindowsManagedInstallCoverage(install); err == nil {
+		t.Fatal("the install audit reported success to a listener that is not the gateway service")
+	}
+	if len(received) != 0 {
+		t.Fatalf("an unverified listener received %q", received)
 	}
 }

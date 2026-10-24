@@ -14,7 +14,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"strconv"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
@@ -22,8 +21,10 @@ import (
 )
 
 // Read the gateway's live policy without executing the installed CLI. The
-// token comes from protected managed host state, and the service must own the
-// listener before any token is sent to it.
+// token comes from protected managed host state. The gateway service must own
+// the connected socket before the token is sent and before its answer counts:
+// a listener check before the dial could pass while the service releases the
+// port to another account (GAP-0962 class).
 var windowsEnterpriseHotConfigGatewayPolicy = func(ctx context.Context, layout managed.StandaloneLayout) (gateway.PolicyHealth, error) {
 	base, token, managedHost, err := managedScanGatewayEndpoint()
 	if err != nil || !managedHost || token == "" {
@@ -37,35 +38,15 @@ var windowsEnterpriseHotConfigGatewayPolicy = func(ctx context.Context, layout m
 	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" || parsed.User != nil || parsed.Path != "" {
 		return gateway.PolicyHealth{}, errors.New("the managed gateway endpoint is not loopback HTTP")
 	}
-	port, err := strconv.Atoi(parsed.Port())
-	if err != nil || port < 1 || port > 65535 {
-		return gateway.PolicyHealth{}, errors.New("the managed gateway endpoint has no valid port")
-	}
-	listeners, err := windowsEnterpriseAPIListeners("127.0.0.1", port)
+	client, err := managedGatewayClientForURL(base, 2*time.Second)
 	if err != nil {
 		return gateway.PolicyHealth{}, err
-	}
-	servicePID := windowsEnterpriseServicePID(managed.StandaloneWindowsGatewaySvc)
-	owned := servicePID > 0 && len(listeners) > 0
-	for _, listener := range listeners {
-		if listener.PID != servicePID {
-			owned = false
-			break
-		}
-	}
-	if !owned {
-		return gateway.PolicyHealth{}, errors.New("the managed gateway service does not own its API listener")
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+"/health", nil)
 	if err != nil {
 		return gateway.PolicyHealth{}, err
 	}
 	req.Header.Set("X-DefenseClaw-Token", token)
-	client := &http.Client{
-		Timeout:       2 * time.Second,
-		Transport:     &http.Transport{Proxy: nil, DisableKeepAlives: true},
-		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return gateway.PolicyHealth{}, err
