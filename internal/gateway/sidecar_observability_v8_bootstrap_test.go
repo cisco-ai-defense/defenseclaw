@@ -2258,7 +2258,7 @@ func TestSidecarConfigReloadRebindsDestinationRedactionProfiles(t *testing.T) {
 		if err := os.WriteFile(fixture.configPath, configFor(profile), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := mgr.reload(t.Context(), "test", false); err != nil {
+		if err := mgr.reload(t.Context(), "test", false, nil); err != nil {
 			t.Fatalf("reload to %s: %v", profile, err)
 		}
 		recordID := emit("gap-0552-" + profile)

@@ -709,6 +709,109 @@ func TestStandaloneConfigManagerAppliesOnlyRecordedNoAnchorLifecycleGenerations(
 	}
 }
 
+// The Windows lifecycle asks /policy/reload to load the generation it just
+// recorded, because the watcher can miss the atomic config replacement. The
+// managed reload loads that recorded generation (unsigned before trust
+// anchors, signed after), answers nil once it is applied, and refuses a hand
+// edit or an unsigned record without touching the manager's state.
+func TestStandaloneConfigManagerAPIReloadLoadsOnlyTheRecordedGeneration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	writeConfigForManagerTest(t, path, dir, "observe")
+	initialRaw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial.DeploymentMode = "managed_enterprise"
+	initial.Enterprise.Profile = "standalone"
+	applied := 0
+	boot := true
+	mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(context.Context, *config.Config, *config.Config, ConfigDiff, configReloadSource) error {
+		if boot {
+			boot = false
+			return errGenerationUnchanged
+		}
+		applied++
+		return nil
+	})
+	loader := mgr.loadSnapshot
+	mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+		candidate, err := loader(source, raw)
+		if err == nil {
+			candidate.DeploymentMode = "managed_enterprise"
+			candidate.Enterprise.Profile = "standalone"
+		}
+		return candidate, err
+	}
+	mgr.setStartupSource(path, initialRaw)
+	if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); !errors.Is(err, errNoRecordedGeneration) || applied != 0 {
+		t.Fatalf("reload with nothing recorded = %v (applies %d), want errNoRecordedGeneration", err, applied)
+	}
+	write := func(raw []byte, opt configwrite.Options) uint64 {
+		t.Helper()
+		result, err := configwrite.ReplaceDocument(t.Context(), path, raw, opt)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Generation
+	}
+	lifecycle := configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise ensure"}
+	// No watcher event is delivered: the API request alone loads it.
+	action := bytes.Replace(initialRaw, []byte("mode: observe"), []byte("mode: action"), 1)
+	actionGeneration := write(action, lifecycle)
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil {
+		t.Fatalf("recorded lifecycle generation refused: %v", err)
+	}
+	if applied != 1 || mgr.appliedGeneration != actionGeneration || mgr.Current().Guardrail.Mode != "action" {
+		t.Fatalf("recorded generation: applies=%d recorded=%d mode=%q", applied, mgr.appliedGeneration, mgr.Current().Guardrail.Mode)
+	}
+	// The watcher may load it first, and the lifecycle may ask twice.
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil || applied != 1 {
+		t.Fatalf("applied generation reload = %v (applies %d), want nil without a rebuild", err, applied)
+	}
+	refused := func(label string) {
+		t.Helper()
+		err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload")
+		if !errors.Is(err, errNoRecordedGeneration) || applied != 1 || mgr.rejected ||
+			mgr.appliedGeneration != actionGeneration || mgr.Current().Guardrail.Mode != "action" {
+			t.Fatalf("%s: reload = %v, applies=%d rejected=%t recorded=%d mode=%q", label, err, applied, mgr.rejected,
+				mgr.appliedGeneration, mgr.Current().Guardrail.Mode)
+		}
+	}
+	if err := os.WriteFile(path, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	refused("hand edit")
+	if err := os.WriteFile(path, action, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	anchorDir := filepath.Join(dir, "trust")
+	if err := os.MkdirAll(anchorDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(anchorDir, "bundle-anchors.json"), []byte("present"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	write(append([]byte("# unsigned\n"), action...), lifecycle)
+	refused("unsigned record with trust anchors")
+	signed := bytes.Replace(action, []byte("mode: action"), []byte("mode: observe"), 1)
+	signedGeneration := write(signed, configwrite.Options{Actor: "control-plane:t1/alice", Reason: "bundle", Lifecycle: true,
+		Bundle: configwrite.BundleRef{ID: "b-01J9ZZZZZZZZZZZZZZZZZZZZZZ", Version: 7, SignerKeyID: "k1"}})
+	if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil {
+		t.Fatalf("signed bundle generation refused: %v", err)
+	}
+	if applied != 2 || mgr.appliedGeneration != signedGeneration || mgr.Current().Guardrail.Mode != "observe" {
+		t.Fatalf("signed generation: applies=%d recorded=%d mode=%q", applied, mgr.appliedGeneration, mgr.Current().Guardrail.Mode)
+	}
+}
+
 func TestStandaloneConfigManagerProvesStartupAssetReload(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)

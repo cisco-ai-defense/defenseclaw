@@ -782,7 +782,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 				pendingGeneration := m.pendingManagedGeneration(nil)
 				m.mu.Unlock()
 				if pendingGeneration {
-					if err := m.reload(ctx, reason, false); err != nil && ctx.Err() == nil {
+					if err := m.reload(ctx, reason, false, nil); err != nil && ctx.Err() == nil {
 						fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 					}
 				} else {
@@ -793,7 +793,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			}
 			// A reload the gateway's own stop or restart cancelled is not a
 			// failure; the restart applies the new config (GAP-1698).
-			if err := m.reload(ctx, reason, kinds[configDiffAssets]); err != nil && ctx.Err() == nil {
+			if err := m.reload(ctx, reason, kinds[configDiffAssets], nil); err != nil && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 			}
 			configReloadInFlight.settle()
@@ -1128,17 +1128,59 @@ func signalConfigStartupReady(ready chan<- error, err error) {
 }
 
 func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
-	return m.reload(ctx, reason, false)
+	return m.reload(ctx, reason, false, nil)
 }
 
 // ReloadAssets is Reload that rebuilds the generation even when config.yaml
 // is unchanged, because a referenced asset may have changed
 // (/policy/reload).
 func (m *ConfigManager) ReloadAssets(ctx context.Context, reason string) error {
-	return m.reload(ctx, reason, true)
+	return m.reload(ctx, reason, true, nil)
 }
 
-func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) error {
+// errNoRecordedGeneration refuses a managed /policy/reload when config.yaml
+// carries no generation the lifecycle recorded and the gateway has not
+// applied.
+var errNoRecordedGeneration = errors.New("no lifecycle-recorded generation is waiting to load")
+
+// ReloadRecordedGeneration is the managed /policy/reload: it rebuilds the
+// generation, assets included, only when the lifecycle recorded one for the
+// installed config.yaml that the gateway has not applied
+// (pendingManagedGeneration). A generation the watcher already applied
+// answers nil. Anything else, such as a hand edit or an unsigned asset
+// change, is refused with errNoRecordedGeneration before any state changes.
+func (m *ConfigManager) ReloadRecordedGeneration(ctx context.Context, reason string) error {
+	if m == nil {
+		return errNoRecordedGeneration
+	}
+	return m.reload(ctx, reason, true, m.recordedGenerationAdmission)
+}
+
+// recordedGenerationAdmission reports whether the installed config.yaml
+// holds a recorded generation to load (load), one already applied (nil
+// error, no load), or neither. Callers hold mu.
+func (m *ConfigManager) recordedGenerationAdmission() (load bool, err error) {
+	if m.readSnapshot == nil {
+		return false, errNoRecordedGeneration
+	}
+	snapshot, err := m.readSnapshot(m.path)
+	if err != nil {
+		return false, fmt.Errorf("%w: config.yaml could not be read: %v", errNoRecordedGeneration, err)
+	}
+	if m.pendingManagedGeneration(snapshot.raw) {
+		return true, nil
+	}
+	if state, err := configwrite.ReadGenerationState(m.path); err == nil && !m.rejected &&
+		m.appliedGenerationKnown && state.Generation == m.appliedGeneration && bytes.Equal(m.appliedRaw, snapshot.raw) {
+		return false, nil
+	}
+	return false, errNoRecordedGeneration
+}
+
+// reload rebuilds the generation from config.yaml. admit, when set, runs
+// under mu before anything is read into the manager; it can refuse the
+// reload or report that there is nothing to load.
+func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, admit func() (bool, error)) error {
 	if m == nil {
 		return nil
 	}
@@ -1153,6 +1195,13 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	}()
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if admit != nil {
+		load, err := admit()
+		if err != nil || !load {
+			hot = false
+			return err
+		}
+	}
 
 	oldCfg := m.Current()
 	next, source, err := m.loadStableCandidate(ctx)

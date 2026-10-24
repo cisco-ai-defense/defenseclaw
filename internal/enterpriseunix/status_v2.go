@@ -32,8 +32,9 @@ import (
 
 // The status v2 blocks (enterprisestatus connector_block.go,
 // openshell_block.go, identity_block.go) on Linux and macOS appear on status
-// and verify only. Hermes session-home attestation also runs for lifecycle
-// changes, so those actions cannot claim coverage that verify cannot prove.
+// and verify only. Hermes session-home attestation and the hook-process
+// failure limit also run for lifecycle changes, so those actions cannot claim
+// coverage or security that verify cannot prove.
 
 // statusV2 reports whether this run prints the status v2 blocks.
 func (l *lifecycle) statusV2() bool {
@@ -48,7 +49,6 @@ func (l *lifecycle) describeStatusV2(record *Deployment) {
 	}
 	r := l.result
 	l.describeConnectors(record)
-	r.AddHookProcessFailureWarnings()
 	if r.Identity == nil {
 		r.Identity = enterprisestatus.IdentityGatewayNotReady()
 	}
@@ -57,7 +57,8 @@ func (l *lifecycle) describeStatusV2(record *Deployment) {
 // describeConnectors builds the connectors block from the installed config,
 // the enumerator's manifest and unprotected-agents record, and the guardian
 // state the attestation vouches for. Only status/verify publish the block;
-// every lifecycle action uses its Hermes coverage verdict. The fail mode is
+// every lifecycle action uses its Hermes coverage verdict and hook-process
+// failure limit. The fail mode is
 // the hook renderer's (enterprisehooks.ManagedHookFailMode).
 func (l *lifecycle) describeConnectors(record *Deployment) {
 	env, r := l.env, l.result
@@ -125,6 +126,7 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 			}
 		}
 	}
+	r.AddHookProcessFailureWarnings(block)
 	if l.statusV2() {
 		r.Connectors = block
 		if hidden > 0 {
