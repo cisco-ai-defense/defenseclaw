@@ -4037,7 +4037,7 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 			if _, ok := seen[expanded]; ok {
 				continue
 			}
-			if s.scanRootPrivacySkipped(expanded) {
+			if s.macOSPrivacyPathSkipped(expanded) {
 				continue
 			}
 			if st, err := os.Stat(expanded); err == nil && st.IsDir() {

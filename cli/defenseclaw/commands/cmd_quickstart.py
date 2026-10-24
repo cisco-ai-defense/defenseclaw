@@ -63,13 +63,12 @@ from defenseclaw import ux
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'closed' (the default on a new install) blocks where the hook supports it, "
-        "so the agent's tools are blocked while the gateway is down; 'open' allows + logs. "
-        "Omit it to keep the current setting. "
+        "Saved as guardrail.hook_fail_mode. Per-user hooks do not read it: while the "
+        "gateway is not running they follow the policy tier (default and permissive let "
+        "calls run with a warning, strict blocks them: `defenseclaw guardrail use-pack strict`), "
+        "and every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
-        "missing-token failures closed. "
-        "Change it later with `defenseclaw guardrail fail-mode open|closed`."
+        "missing-token failures closed."
     ),
 )
 @click.option(
@@ -122,8 +121,7 @@ from defenseclaw import ux
     default=None,
     help="Agent framework connector (alias: --agent). "
     "Quickstart configures one connector: an explicit value wins, otherwise "
-    "the single configured/detected connector is used. A picked_connector hint "
-    "is used only when no configured/detected connector exists. Bare quickstart "
+    "the single configured/detected connector is used. Bare quickstart "
     "errors when the connector choice is ambiguous.",
 )
 @click.option(
@@ -155,21 +153,17 @@ def quickstart_cmd(
     from defenseclaw import platform_support
     from defenseclaw.bootstrap import FirstRunOptions, run_first_run
     from defenseclaw.commands.cmd_init import _render_first_run_report, refuse_first_run_when_managed
-    from defenseclaw.commands.cmd_setup import (
-        _detect_installed_connectors,
-        _read_picked_connector,
-    )
+    from defenseclaw.commands.cmd_setup import _detect_installed_connectors
     from defenseclaw.ux import CLIRenderer
 
     refuse_first_run_when_managed()
-    connector_source: dict[str, str] = {}
     if agent_name:
         connector = agent_name
         _refuse_roster_narrowing(cfg_mod, connector, mode)
     else:
-        data_dir = str(cfg_mod.default_data_path())
-        picked_path = os.path.join(data_dir, "picked_connector")
-        picked = _read_picked_connector(data_dir)
+        # The installer's picked_connector hint is not read: an installed
+        # agent it names is detected, and one the machine does not have is
+        # never set up (GAP-0568).
         detected = _detect_installed_connectors()
         configured = _configured_quickstart_connectors(cfg_mod)
         candidates = sorted({name for name in [*configured, *detected] if name})
@@ -219,21 +213,6 @@ def quickstart_cmd(
             sys.exit(2)
         if len(candidates) == 1:
             connector = candidates[0]
-            if picked and picked != connector:
-                ux.echo(
-                    "  ✗ Connector choice is ambiguous.\n"
-                    f"    picked_connector says {picked}, but the active/detected connector is {connector}.\n"
-                    "    Re-run with --connector <name>.",
-                    err=True,
-                )
-                sys.exit(2)
-        elif picked:
-            connector = picked
-            connector_source = {
-                "type": "picked_connector",
-                "connector": connector,
-                "path": picked_path,
-            }
         else:
             ux.echo(
                 "  ✗ Could not detect an agent framework on this host.\n"
@@ -307,15 +286,8 @@ def quickstart_cmd(
         gateway_requested=not skip_gateway,
     )
     if json_summary:
-        payload = report.to_dict()
-        if connector_source:
-            payload["connector_source"] = connector_source
-        click.echo(json.dumps(payload, indent=2))
+        click.echo(json.dumps(report.to_dict(), indent=2))
     else:
-        if connector_source:
-            click.echo(
-                f"  Using picked connector hint: {connector} from {connector_source['path']}"
-            )
         _render_first_run_report(report, CLIRenderer())
     if report.status == "needs_attention":
         sys.exit(1)
@@ -450,6 +422,8 @@ def _configured_quickstart_connectors(cfg_mod) -> list[str]:
             return list(cfg.active_connectors())
         active = cfg.active_connector()
     except Exception:
+        return []
+    if not active:
         return []
     if active == "openclaw" and not (
         getattr(cfg.guardrail, "enabled", False) and (cfg.guardrail.connector or "").strip()

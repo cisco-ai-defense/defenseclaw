@@ -9,6 +9,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -108,5 +109,33 @@ func TestEnterprisePolicyTargetResolvesAnEntraIDAccount(t *testing.T) {
 	delete(homes, sid)
 	if _, err := enterprisePolicyTarget(`AzureAD\EntraAlice`); err == nil || !strings.Contains(err.Error(), "no profile on this computer") {
 		t.Fatalf("an account without a profile = %v", err)
+	}
+}
+
+func TestEnterprisePolicyShowReportsMissingInstallScan(t *testing.T) {
+	ctx := withEnterprisePolicyTree(t)
+	ctx.layout.ManifestPath = filepath.Join(t.TempDir(), "targets.yaml")
+	previous := standaloneEnterprisePolicyOptions
+	standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return ctx, nil }
+	t.Cleanup(func() { standaloneEnterprisePolicyOptions = previous })
+	out, _ := runPolicyCommand(t, runEnterprisePolicyShow)
+	if !strings.Contains(out, enterprisehooks.UnprotectedCodeInstallScanIncomplete) {
+		t.Fatalf("policy show hid the missing protected install scan:\n%s", out)
+	}
+}
+
+func TestEnterprisePolicyShowReportsStaleInstallScan(t *testing.T) {
+	ctx := withEnterprisePolicyTree(t)
+	previousOptions, previousAgents := standaloneEnterprisePolicyOptions, enterprisePolicyUnprotectedAgents
+	standaloneEnterprisePolicyOptions = func() (enterprisePolicyContext, error) { return ctx, nil }
+	enterprisePolicyUnprotectedAgents = func(string) ([]enterprisehooks.UnprotectedAgent, error) {
+		return nil, errors.New("unprotected-agents record is stale")
+	}
+	t.Cleanup(func() {
+		standaloneEnterprisePolicyOptions, enterprisePolicyUnprotectedAgents = previousOptions, previousAgents
+	})
+	out, err := runPolicyCommand(t, runEnterprisePolicyShow)
+	if err != nil || !strings.Contains(out, enterprisehooks.UnprotectedCodeInstallScanIncomplete) || !strings.Contains(out, "stale") {
+		t.Fatalf("policy show hid the stale protected install scan: %v\n%s", err, out)
 	}
 }

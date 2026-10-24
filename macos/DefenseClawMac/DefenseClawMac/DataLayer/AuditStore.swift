@@ -182,6 +182,17 @@ actor AuditStore {
         return rows
     }
 
+    /// A native v8 row keeps its structured fields only in payload_json and
+    /// leaves structured_json NULL (GAP-0614); legacy and legacy.audit.*
+    /// compatibility rows keep their own structured_json.
+    static func structuredJSON(_ r: [String: Any]) -> String {
+        if let structured = r["structured_json"] as? String, !structured.isEmpty { return structured }
+        guard let eventName = r["event_name"] as? String, !eventName.lowercased().hasPrefix("legacy.audit.") else {
+            return ""
+        }
+        return (r["payload_json"] as? String) ?? ""
+    }
+
     private func decodeAuditEvent(_ r: [String: Any]) -> AuditEvent {
         let details = (r["details"] as? String) ?? ""
         let target = (r["target"] as? String) ?? ""
@@ -201,7 +212,7 @@ actor AuditStore {
             target: target,
             actor: (r["actor"] as? String) ?? "",
             details: details,
-            structuredJSON: (r["structured_json"] as? String) ?? "",
+            structuredJSON: Self.structuredJSON(r),
             severity: Severity.parse(r["severity"] as? String),
             runID: (r["run_id"] as? String) ?? ""
         )

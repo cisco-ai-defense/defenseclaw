@@ -215,7 +215,14 @@ The authoritative schema is
 
 Store organization rules in a uniquely named category so omitted bundled components keep the compiled baseline. Run `defenseclaw guardrail validate-pack PATH` to check schema, required metadata, regex fallback, CEL typing and admission, and cost limits ([validate a rule pack](/docs/how-to/policies/validate-a-rule-pack)). Compilation does not prove every connector projects the facts your expression reads, so run positive and near-miss calls through each target connector in observe mode, and check the [tool-surface matrix](/docs/reference/policy/cel/tool-call-state#tool-surface-matrix) first. No public CLI injects synthetic `ActionFacts` into one expression.
 
-For repository contributors: add Go fixtures and run `go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway` (the gateway package outlasts the default deadline). When the compiled default catalog changes, also run `make generate-guardrail-catalog` and `make check-guardrail-catalog`.
+For repository contributors: add Go fixtures and use Go 1.26.4, the CI toolchain. Run the gateway suite through the shard runner with an explicit timeout:
+
+```bash
+go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
+```
+
+When the compiled default catalog changes, also run `make generate-guardrail-catalog` and `make check-guardrail-catalog`.
 
 ## Authoring checklist
 

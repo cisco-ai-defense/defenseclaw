@@ -288,6 +288,11 @@ type Config struct {
 	legacyOpenShellPackDir   string
 	// offlineInspection never probes a signer's filesystem for a device default.
 	offlineInspection bool
+	// openClawNotInstalled records that an implied OpenClaw has no local
+	// installation or remote fleet host, so HasConnectorConfigured reports no
+	// connector (GAP-0568). Set only by the loader, on a device load outside
+	// a managed enterprise service.
+	openClawNotInstalled bool
 	// offlineVendorPolicyDir and offlineVendorPolicyRoot redirect rule packs
 	// under the target layout's shipped policy folder to a private copy of
 	// the policies this binary embeds (UseOfflineVendorPolicies).
@@ -2522,14 +2527,15 @@ func LoadFromFile(configFile string) (*Config, error) {
 }
 
 // LoadManagedFileForLifecycleRecovery loads a managed config like
-// LoadFromFile, without publishing provenance and without requiring the
+// LoadFromFile, without publishing provenance, without requiring the
 // standalone policy inputs (policy_dir, rule-pack dirs) to be readable by
-// the gateway service. The Windows managed-hook lifecycle snapshot and
-// teardown read only listener settings from it, and they run during the
-// rollback of an install whose new config the services could not load:
-// refusing that config there failed the rollback too, and left every
-// service stopped (GAP-1291). The gateway and every activation keep the
-// strict loaders.
+// the gateway service, and without the loopback API bind check. The Windows
+// managed-hook lifecycle snapshot and teardown read only the API port (the
+// hooks always dial 127.0.0.1) and the connectors from it, and they run
+// during the rollback of an install whose new config the services could not
+// load: refusing that config there failed the rollback too, and left every
+// service stopped (GAP-1291, GAP-0647). The gateway and every activation
+// keep the strict loaders.
 func LoadManagedFileForLifecycleRecovery(configFile string) (*Config, error) {
 	return loadFromFile(configFile, false, false)
 }
@@ -2961,34 +2967,9 @@ func loadConfigSourceCheckedWithLayout(
 				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
 		}
-		if err := managed.ValidateTrustedServiceRuntimeDir(
-			cfg.DataDir,
-			"managed data_dir",
-			os.Getenv(managed.WindowsServiceAccountEnv),
-		); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
-			}
-			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
-		}
-		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
-			}
-			return nil, err
-		}
-		if checkPolicyInputs {
-			if err := validateManagedStandalonePolicyInputs(&cfg); err != nil {
-				if ReportConfigLoadError != nil {
-					ReportConfigLoadError(context.Background(), "managed_policy_input_untrusted")
-				}
-				return nil, err
-			}
-		}
-		if err := validateManagedEnterpriseWindowsPeerAuthKnobs(&cfg); err != nil {
-			if ReportConfigLoadError != nil {
-				ReportConfigLoadError(context.Background(), "managed_ipc_peer_auth_unsupported_on_windows")
-			}
+		// The recovery loader (checkPolicyInputs false) also skips the
+		// loopback listener check (GAP-1291, GAP-0647).
+		if err := validateManagedEnterpriseRuntime(&cfg, checkPolicyInputs, true, checkPolicyInputs); err != nil {
 			return nil, err
 		}
 	}
@@ -3111,6 +3092,12 @@ func loadConfigSourceCheckedWithLayout(
 
 	if home, err := os.UserHomeDir(); err == nil {
 		cfg.Gateway.ClawHome = home
+	}
+
+	if !inspection && !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		// Older installs can use OpenClaw only through a remote fleet gateway.
+		// A remote host or explicit fleet mode must keep that connector on upgrade.
+		cfg.openClawNotInstalled = cfg.OpenClawImpliedButNotInstalled()
 	}
 
 	warnPlaintextSecrets(&cfg)
@@ -3416,12 +3403,12 @@ func applyManagedEnterpriseListenerDefault(cfg *Config) {
 	}
 }
 
-// validateManagedEnterpriseListenerBindings keeps every inbound enterprise
+// ValidateManagedEnterpriseListenerBindings keeps every inbound enterprise
 // surface on loopback. The managed hook transport is intentionally pinned to
 // canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
 // than another loopback spelling or address. This is enterprise-only:
 // unmanaged/BYOD deployments retain their existing remote-bind behavior.
-func validateManagedEnterpriseListenerBindings(cfg *Config) error {
+func ValidateManagedEnterpriseListenerBindings(cfg *Config) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
@@ -3453,7 +3440,7 @@ func validateManagedEnterpriseListenerBindings(cfg *Config) error {
 	return nil
 }
 
-// validateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
+// ValidateManagedEnterpriseWindowsPeerAuthKnobs refuses to load a
 // managed_enterprise config on Windows that carries non-empty
 // AllowedTeamIDs / AllowedSigningIDs / AllowedBundleIDs. Those allowlists
 // only take effect on macOS / linux, where LOCAL_PEERCRED-style peer
@@ -3472,7 +3459,7 @@ func validateManagedEnterpriseListenerBindings(cfg *Config) error {
 // unmanaged/BYOD contract (unmanaged doesn't ship the IPC surface at
 // all outside dev rigs), so this validator is scoped to
 // managed_enterprise on Windows.
-func validateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
+func ValidateManagedEnterpriseWindowsPeerAuthKnobs(cfg *Config) error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}

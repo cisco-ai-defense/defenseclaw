@@ -393,9 +393,10 @@ func (a *APIServer) requireSandboxDecision(ctx context.Context, connectorName, e
 	case requireSandboxExempt:
 		return requireSandboxOutcome{Outcome: requireSandboxExempt}
 	}
-	// A floor from the default profile only because the directory lookup
-	// failed or was slow is provisional: the refusal says so and to retry,
-	// as the person's own profile may not require a sandbox (GAP-0293).
+	// When no assignment needs the missing directory fact, the default
+	// profile can be provisional: this sandbox refusal says so and to retry.
+	// A request whose assignment needs that fact is refused earlier and
+	// names it (GAP-0293).
 	provisional := decision.Match == profileMatchDefaultLookupFailed
 	word := func(message string) string {
 		if provisional {

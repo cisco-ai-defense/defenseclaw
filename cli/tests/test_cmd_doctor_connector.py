@@ -247,11 +247,11 @@ class TestActiveConnectorResolver(unittest.TestCase):
         cfg.guardrail.connector = "claudecode"
         self.assertEqual(_active_connector(cfg), "claudecode")
 
-    def test_active_connector_defaults_to_openclaw_when_unset(self) -> None:
+    def test_active_connector_names_no_agent_when_unset(self) -> None:
         cfg = MagicMock(spec=["guardrail"])
         cfg.guardrail = MagicMock()
         cfg.guardrail.connector = ""
-        self.assertEqual(_active_connector(cfg), "openclaw")
+        self.assertEqual(_active_connector(cfg), "")
 
     def test_active_connector_lowercases_method_result(self) -> None:
         """ZeptoClaw, OpenClaw, etc. — display casing varies, but the
@@ -567,7 +567,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg, hooks_path, runtime = self._cursor_runtime_case(
             tmp,
             mode="observe",
-            fail_closed=False,
+            fail_closed=True,
         )
         cfg.data_dir = tmp
         with open(hooks_path, encoding="utf-8") as fh:
@@ -596,7 +596,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             cfg, hooks_path, runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=False,
+                fail_closed=True,
             )
             # Cursor has no approval prompt: an inherited human_approval is
             # the Human approval row's warning, not an inconsistent posture.
@@ -614,7 +614,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertIn(runtime, r.checks[-1]["detail"])
         self.assertIn("mode=observe", r.checks[-1]["detail"])
-        self.assertIn("failClosed=false", r.checks[-1]["detail"])
+        self.assertIn("failClosed=true", r.checks[-1]["detail"])
         self.assertIn("enforcement=observe-only", r.checks[-1]["detail"])
         self.assertIn("higher-priority conflict detection=unavailable (none inferred)", r.checks[-1]["detail"])
         self.assertNotIn("inspect-tool.sh", r.checks[-1]["detail"])
@@ -678,7 +678,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             cfg, hooks_path, _runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=False,
+                fail_closed=True,
             )
             r = _DoctorResult()
             _check_cursor_configured_runtime(
@@ -698,7 +698,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             cfg, hooks_path, _runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=False,
+                fail_closed=True,
                 legacy_native=True,
             )
             r = _DoctorResult()
@@ -714,12 +714,14 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn("PowerShell input adapter", r.checks[-1]["detail"])
 
-    def test_cursor_doctor_rejects_fail_closed_observe_hook(self) -> None:
+    def test_cursor_doctor_rejects_fail_open_observe_hook(self) -> None:
+        # A per-user Cursor registration has failClosed: true in observe mode
+        # too (Setup), so a fail-open one is drift (oss-outage-open).
         with tempfile.TemporaryDirectory() as tmp:
             cfg, hooks_path, _runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=True,
+                fail_closed=False,
             )
             cfg.guardrail.effective_hook_fail_mode.return_value = "open"
             r = _DoctorResult()
@@ -733,7 +735,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             )
 
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("failClosed=false", r.checks[-1]["detail"])
+        self.assertIn("failClosed=true", r.checks[-1]["detail"])
 
     def test_cursor_doctor_accepts_fail_closed_action_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -771,7 +773,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             cfg, hooks_path, _runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=False,
+                fail_closed=True,
             )
             with open(hooks_path, encoding="utf-8") as fh:
                 hooks = json.load(fh)
@@ -1971,7 +1973,7 @@ class TestCheckHookHealth(unittest.TestCase):
         )
 
 
-    def test_lock_path_with_marker_requires_hermes_reload(self) -> None:
+    def test_marker_only_never_proves_hermes_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hook = os.path.join(tmp, "config.yaml")
             with open(hook, "w", encoding="utf-8") as fh:
@@ -1979,17 +1981,38 @@ class TestCheckHookHealth(unittest.TestCase):
             results = {}
             for running in (True, False):
                 r = _DoctorResult()
-                with patch("defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running):
+                with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook), patch(
+                    "defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running
+                ):
                     _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
                 results[running] = r.checks[-1]
         self.assertEqual(results[True]["status"], "fail")
         self.assertEqual(results[True]["label"], _HERMES_HOOKS_LABEL)
-        self.assertIn(hook, results[True]["detail"])
-        self.assertIn("live=false", results[True]["detail"])
+        self.assertIn("sealed hook script", results[True]["detail"])
+        # An idle host cannot make an unproven on-disk registration healthy.
+        self.assertEqual(results[False]["status"], "fail", results[False])
+
+    def test_proven_hermes_registration_with_a_running_host_names_the_close_step(self) -> None:
+        # The registration is proven (execution probe passes): a running host
+        # may still hold the old hooks, so doctor cannot verify them and says
+        # to close every host; with no host running the check passes.
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "config.yaml")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write("hooks:\n  - command: /x/hooks/hermes-hook.sh\n")
+            results = {}
+            for running in (True, False):
+                r = _DoctorResult()
+                with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook), patch(
+                    "defenseclaw.commands.cmd_doctor._hermes_host_running", return_value=running
+                ), patch("defenseclaw.commands.cmd_doctor._hermes_registered_execution_problem", return_value=""):
+                    _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+                results[running] = r.checks[-1]
+        self.assertEqual(results[True]["status"], "fail", results[True])
         self.assertIn("cannot verify", results[True]["detail"])
+        self.assertIn("live=false", results[True]["detail"])
         self.assertIn("close", results[True]["remediation"].lower())
         self.assertIn("defenseclaw doctor", results[True]["remediation"])
-        # With no Hermes host running there is nothing to reload.
         self.assertEqual(results[False]["status"], "pass", results[False])
 
     def test_hermes_host_running_treats_wrapped_hosts_as_unknown(self) -> None:
@@ -2042,20 +2065,20 @@ class TestCheckHookHealth(unittest.TestCase):
             with open(hook, "w", encoding="utf-8") as fh:
                 fh.write("hooks: []\n")
             r = _DoctorResult()
-            _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
+            with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=hook):
+                _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("does not reference", r.checks[-1]["detail"])
+        self.assertIn("sealed hook script", r.checks[-1]["detail"])
 
     def test_missing_hook_file_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
-            _check_hook_health(
-                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]),
-                "hermes",
-                r,
-            )
+            missing = os.path.join(tmp, "nope.yaml")
+            with patch("defenseclaw.commands.cmd_doctor.hermes_config_path", return_value=missing):
+                _check_hook_health(self._cfg(tmp, "hermes", [missing]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("not found", r.checks[-1]["detail"])
+        self.assertIn("active hook registration is missing", r.checks[-1]["detail"])
+        self.assertIn("setup hermes --yes --restart", r.checks[-1]["remediation"])
 
     @patch("defenseclaw.commands.cmd_doctor._check_cursor_configured_runtime")
     def test_passive_cursor_health_disables_runtime_probe(self, configured_runtime) -> None:

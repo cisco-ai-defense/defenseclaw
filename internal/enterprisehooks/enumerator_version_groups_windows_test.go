@@ -167,15 +167,26 @@ func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
 	if len(manifest.Targets) != 0 {
 		t.Fatalf("targets = %+v, want none", manifest.Targets)
 	}
+	// The row decisions name each user's selected install; the
+	// separate-copy scan also lists the old codex copy by its path.
 	codes := map[string]string{}
+	var rows, copies []UnprotectedAgent
 	for _, agent := range reported {
+		if agent.InstallPath != "" {
+			copies = append(copies, agent)
+			continue
+		}
+		rows = append(rows, agent)
 		codes[agent.Connector+"/"+agent.SID] = agent.Code
 	}
 	if codes["cursor/"+testLocalUserSID] != UnprotectedCodeHookContractUnverified ||
-		codes["codex/"+testLocalUserTwo] != UnprotectedCodeAgentUnprotected || len(reported) != 2 {
+		codes["codex/"+testLocalUserTwo] != UnprotectedCodeAgentUnprotected || len(rows) != 2 {
 		t.Fatalf("reported = %+v", reported)
 	}
-	for _, agent := range reported {
+	if len(copies) != 1 || copies[0].Connector != "codex" || copies[0].SID != testLocalUserTwo || copies[0].Version != "0.125.0" {
+		t.Fatalf("separate copies = %+v", copies)
+	}
+	for _, agent := range rows {
 		if agent.User != filepath.Base(cursorHome) && agent.User != filepath.Base(codexHome) {
 			t.Fatalf("reported user %q is not the profile directory name", agent.User)
 		}

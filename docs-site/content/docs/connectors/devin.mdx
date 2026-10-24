@@ -17,10 +17,15 @@ DefenseClaw registers hooks in Devin's own config for Devin CLI and the Devin Lo
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector devin` first. Until DefenseClaw is initialized, `defenseclaw setup devin` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup devin --mode observe
 defenseclaw setup devin --mode action
 ```
+
+A first setup without `--mode` defaults to observe; a re-run without `--mode`
+keeps the current mode.
 
 On Windows, run the same commands in PowerShell. Review observed events before you use action mode. Restart open Devin CLI sessions and reopen Devin Desktop tabs afterwards.
 
@@ -68,7 +73,11 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Devin's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove devin --yes` (add `--force` if it is the last one).
+With the default gateway restart, disabling removes DefenseClaw's hooks from
+Devin's user and configured project files and preserves your other Devin
+settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
+remove the connector, run `defenseclaw setup remove devin --yes` (add
+`--force` if it is the last one).
 
 On a multi-connector install, add `--connector devin` to `guardrail disable` and `guardrail enable` to change only this agent.
 

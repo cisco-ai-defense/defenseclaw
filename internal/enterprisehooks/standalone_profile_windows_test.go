@@ -6,15 +6,27 @@
 
 package enterprisehooks
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+)
 
 // setStandaloneProfileForTest switches this process between the standalone
-// and Secure Client profiles for one test.
+// and Secure Client profiles for one test. The Secure Client profile is an
+// authenticated Secure Client install (connector.SecureClientDeploymentVerified,
+// which only binaries that link internal/cli's host classifier set), so its
+// delivery defaults apply; a test of an unverified install sets it false
+// itself.
 func setStandaloneProfileForTest(t *testing.T, standalone bool) {
 	t.Helper()
-	previous := windowsEnterpriseStandaloneProcess
+	previous, verified := windowsEnterpriseStandaloneProcess, connector.SecureClientDeploymentVerified
 	windowsEnterpriseStandaloneProcess = func() bool { return standalone }
-	t.Cleanup(func() { windowsEnterpriseStandaloneProcess = previous })
+	connector.SecureClientDeploymentVerified = func() bool { return !standalone }
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneProcess = previous
+		connector.SecureClientDeploymentVerified = verified
+	})
 }
 
 // useWindowsSecureClientForTest runs a test as a verified Secure Client host

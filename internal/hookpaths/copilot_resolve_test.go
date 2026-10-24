@@ -87,7 +87,7 @@ func TestResolveConnectorReadsTheGatewayProjection(t *testing.T) {
 		{"decoy snake arguments", "copilot", "", "preToolUse", map[string]any{"toolName": "bash", "toolArgs": shell,
 			"tool_input": map[string]any{"command": "true"}}, true, true},
 		{"decoy args alias", "copilot", "", "preToolUse", map[string]any{"toolName": "bash", "toolArgs": shell, "args": map[string]any{"command": "true"}}, true, true},
-		{"same tool name twice", "copilot", "", "preToolUse", map[string]any{"toolName": "apply_patch", "tool_name": " apply_patch", "toolArgs": patch}, true, false},
+		{"same tool name twice", "copilot", "", "preToolUse", map[string]any{"toolName": "apply_patch", "tool_name": " apply_patch", "toolArgs": patch}, true, true},
 		{"null alias is absent", "copilot", "", "preToolUse", map[string]any{"toolName": "apply_patch", "tool_name": nil, "toolArgs": patch, "tool_input": nil}, true, false},
 		// No projection the gateway reads: nothing to describe, but the
 		// disagreement still leaves it incomplete.
@@ -99,9 +99,9 @@ func TestResolveConnectorReadsTheGatewayProjection(t *testing.T) {
 		{"claude decoy camel tool name", "claudecode", "", "", map[string]any{"tool_name": "Bash", "toolName": "Write",
 			"tool_input": shell}, true, true},
 		{"claude one spelling", "claudecode", "", "", map[string]any{"tool_name": "Bash", "tool_input": shell}, true, false},
-		// The CLI hook file run by the Local harness reads the Local body
-		// (GAP-1903), unless the body also carries a CLI field.
-		{"local body from the CLI hook file", "copilot", "", "preToolUse", localBody("b", nil), true, false},
+		// A CLI-registered hook cannot be switched to Local by body fields.
+		// The mismatched schema is incomplete and its target is not trusted.
+		{"local body from the CLI hook file", "copilot", "", "preToolUse", localBody("b", nil), false, true},
 		{"local body from the CLI hook file with a CLI field", "copilot", "", "preToolUse",
 			localBody("b", map[string]any{"toolName": "view"}), false, true},
 		// The vscode-local surface reads tool_name and tool_input: CLI-shaped
@@ -114,7 +114,7 @@ func TestResolveConnectorReadsTheGatewayProjection(t *testing.T) {
 		{"local surface over-limit create_file", "copilot", local, "PreToolUse", localBody(big, nil), true, false},
 		{"local surface over-limit create_file with CLI decoys", "copilot", local, "PreToolUse",
 			localBody(big, cliDecoys), true, true},
-		{"CLI hook file over-limit local body", "copilot", "", "preToolUse", localBody(big, nil), true, false},
+		{"CLI hook file over-limit local body", "copilot", "", "preToolUse", localBody(big, nil), false, true},
 		{"cli over-limit create", "copilot", "", "preToolUse", map[string]any{"toolName": "create",
 			"toolArgs": jsonText(map[string]any{"path": target, "file_text": big})}, true, false},
 		{"cli over-limit create with a decoy tool_name", "copilot", "", "preToolUse", map[string]any{"toolName": "create",

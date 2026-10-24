@@ -236,10 +236,11 @@ func TestMCPServerRuntimeBlock_URLRule(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{}
+	cfg.Claw.Mode = config.ClawOpenClaw
 	cfg.Claw.ConfigFile = path
 	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{Name: "https://server.example/mcp"}}
 	pe := configPolicy(store, cfg)
-	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__filesystem__read", "", ""); !deny {
+	if deny, _, _ := mcpServerRuntimeBlock(pe, "mcp__filesystem__read", "openclaw", ""); !deny {
 		t.Fatal("URL block did not deny the configured server tool")
 	}
 }

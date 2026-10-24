@@ -53,6 +53,13 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 		return InstallResult{}, true, err
 	}
 	defer unlockRuntime()
+	if opts.WindowsTargetLogon != WindowsTargetLogonActive {
+		sid, err := validateWindowsEnterpriseTargetSID(opts.OwnerSID)
+		if err != nil {
+			return InstallResult{}, true, err
+		}
+		defer useWindowsEnterpriseInstallLogon(sid.String(), opts.WindowsTargetLogon)()
+	}
 	var result InstallResult
 	switch strings.ToLower(strings.TrimSpace(opts.ConnectorName)) {
 	case "claudecode":

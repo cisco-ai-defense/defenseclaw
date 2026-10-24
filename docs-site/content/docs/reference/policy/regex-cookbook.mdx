@@ -63,11 +63,27 @@ What makes this work:
 
 | ID | Pattern | Catches |
 | --- | --- | --- |
-| `SEC-AWS-KEY` | `\b(?:AKIA\|ASIA)[0-9A-Z]{16}\b` | AWS access key IDs |
+| `SEC-AWS-KEY` | `\b(?:AKIA\|ASIA)[0-9A-Z]{16}\b` | AWS access key IDs, except the AWS documentation example `AKIAIOSFODNN7EXAMPLE` |
 | `SEC-GITHUB-TOKEN` | `(?:ghp_\|gho_\|ghu_\|ghs_\|ghr_)[a-zA-Z0-9]{36,}` | GitHub personal, OAuth, user, server and refresh tokens |
-| `SEC-PRIVKEY` | `-----BEGIN (?:RSA \|EC \|OPENSSH \|PGP \|DSA )?PRIVATE KEY-----` | PEM and OpenSSH private keys; public keys and certificates don't match |
+| `SEC-PRIVKEY` | `-----BEGIN (?:RSA \|EC \|OPENSSH \|PGP \|DSA )?PRIVATE KEY-----` | Complete PEM and OpenSSH private keys: the header, a key body that parses and the footer. A header line alone, public keys and certificates don't match |
 | `SEC-OPENAI` | `sk-proj-[a-zA-Z0-9]{20,}` | OpenAI project keys |
 | `SEC-SLACK-WEBHOOK` | `https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+` | Slack incoming-webhook URLs, which carry their own secret |
+
+A match is a finding only when the matched text can be a real secret. The gateway drops
+documented public examples, such as the AWS sample key, and filler such as `placeholder` or
+`changeme`. `SEC-PRIVKEY` matches only a whole key block. So a quick test with the AWS sample
+key or a bare `-----BEGIN RSA PRIVATE KEY-----` line gets no finding. These are Claude Code
+Bash tool calls against the shipped default pack. A regex match in a tool call is reported as
+an alert and does not block the call:
+
+{/* Run by TestRegexCookbookSamplesMatchTheShippedRules (internal/gateway). */}
+
+| Bash tool call | Finding |
+| --- | --- |
+| `echo AKIA3FKJ2M5NQ7XZ8BWV` | `SEC-AWS-KEY` |
+| `echo AKIAIOSFODNN7EXAMPLE` | none: the AWS documentation example key |
+| `echo -----BEGIN RSA PRIVATE KEY-----` | none: a header line with no key |
+| `cat` of a key that `ssh-keygen -t ed25519` wrote, in the tool output | `SEC-PRIVKEY` |
 
 ### Prompt injection
 

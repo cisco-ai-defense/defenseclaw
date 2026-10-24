@@ -279,10 +279,10 @@ func removedConnectorsUnderTest() []removedOnlyConnector {
 // Review fixes (G-deadcode loop round 1, simplified teardown): the teardown
 // put back, removed or deleted agent configs, import paths, policy modules,
 // runtime records (.hookcfg, even one that was not DefenseClaw's), backups
-// and records. It now changes only the script, which becomes the stub, and
-// the tokens; every other file, link and folder of the host stays byte for
-// byte, in both modes and on a second run.
-func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
+// and records. It now changes only the script, the tokens, and a private
+// saved copy of a marked OpenHands hook; every other file, link and folder
+// stays byte for byte in both modes and on a second run.
+func TestRemovedTeardownChangesOnlyTheScriptTokensAndSavedHook(t *testing.T) {
 	runtimeRecords := map[string]func(t *testing.T, path string){
 		"DefenseClaw's runtime record": func(*testing.T, string) {},
 		"a user file":                  func(t *testing.T, path string) { writeRemovedFile(t, path, "my settings\n", 0o600) },
@@ -316,7 +316,14 @@ func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
 						plant(t, filepath.Join(h.dataDir, "hooks", hookConfigSidecarName+".openhands"))
 					}
 					h.opts.ManagedEnterprise = managed
-					skip := append([]string{h.script(c)}, h.tokens(c)...)
+					// The lock changes only to seal the stub (requireSealed). A
+					// managed Windows lock keeps its owner-stamped .lock file
+					// (filelock_windows.go), as every managed writer of it does.
+					lock := filepath.Join(h.dataDir, hookContractLockFile)
+					skip := append([]string{h.script(c), lock, lock + ".lock"}, h.tokens(c)...)
+					if c.name == removedOpenHandsID {
+						skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
+					}
 					before := h.snapshot(t, skip...)
 					conn, _ := RetiredConnector(c.name)
 					for run := 1; run <= 2; run++ {
@@ -325,7 +332,11 @@ func TestRemovedTeardownChangesOnlyTheScriptAndTokens(t *testing.T) {
 						}
 						requireRemovedSame(t, "teardown", h.snapshot(t, skip...), before)
 						h.requireStub(t, c)
+						h.requireSealed(t, c, removedStubDigest(c))
 						h.requireRevoked(t, c)
+						if c.name == removedOpenHandsID {
+							h.requireEditedSaved(t, c, removedOpenHands103Script)
+						}
 					}
 					if err := conn.VerifyClean(h.opts); err != nil {
 						t.Fatalf("VerifyClean after the teardown: %v", err)
@@ -373,9 +384,10 @@ func TestRemovedConnectorLockEntryIsNeverCleared(t *testing.T) {
 	}
 }
 
-// A known token-path refusal is found before the stub changes anything. Once
-// the stub is written, a later failure keeps it in place so a retry can finish
-// without putting an old hook back. VerifyClean fails until cleanup finishes.
+// A known token-path refusal is found before the stub changes anything. A
+// failed OpenHands publication keeps the in-place stub; a failed OmniGent
+// publication keeps the old complete module for a retry. VerifyClean fails
+// until cleanup finishes.
 func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
 		t.Run(c.name+"/a token cannot be revoked", func(t *testing.T) {
@@ -415,7 +427,11 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			h := newRemovedHost(t)
 			h.stage(t, c)
 			hooks := filepath.Join(h.dataDir, "hooks")
-			before := h.snapshot(t)
+			skip := []string{}
+			if c.name == removedOpenHandsID {
+				skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
+			}
+			before := h.snapshot(t, skip...)
 			if err := os.Chmod(h.script(c), 0o400); err != nil {
 				t.Fatal(err)
 			}
@@ -433,36 +449,46 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			if err := os.Chmod(h.script(c), c.mode); err != nil {
 				t.Fatal(err)
 			}
-			requireRemovedSame(t, "a teardown that could not write the stub", h.snapshot(t), before)
+			requireRemovedSame(t, "a teardown that could not write the stub", h.snapshot(t, skip...), before)
 			if err := conn.VerifyClean(h.opts); err == nil {
 				t.Fatal("VerifyClean passed with the old hook in place")
 			}
 		})
-		// The stub is written into the script, but its copy cannot be
-		// renamed over it: the script blocks already, the tokens stay until
-		// the next start, which revokes them.
-		t.Run(c.name+"/the stub's copy cannot be renamed", func(t *testing.T) {
+		// A failed publication leaves OpenHands' in-place stub or OmniGent's
+		// complete old module, with tokens kept for a retry.
+		t.Run(c.name+"/the stub's copy cannot be published", func(t *testing.T) {
 			if runtime.GOOS == "windows" || os.Geteuid() == 0 {
 				t.Skip("directory modes do not stop writes here")
 			}
 			h := newRemovedHost(t)
 			h.stage(t, c)
+			beforeBody, readErr := os.ReadFile(h.script(c))
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
 			hooks := filepath.Join(h.dataDir, "hooks")
 			skip := append([]string{h.script(c)}, h.tokens(c)...)
+			if c.name == removedOpenHandsID {
+				skip = append(skip, c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script)))
+			}
 			before := h.snapshot(t, skip...)
 			if err := os.Chmod(hooks, 0o500); err != nil {
 				t.Fatal(err)
 			}
 			t.Cleanup(func() { _ = os.Chmod(hooks, 0o700) })
 			conn, _ := RetiredConnector(c.name)
-			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "could not be renamed over it") {
-				t.Fatalf("Teardown = %v, want the rename failure", err)
+			if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "its tokens were kept") {
+				t.Fatalf("Teardown = %v, want the publication failure", err)
 			}
 			if err := os.Chmod(hooks, 0o700); err != nil {
 				t.Fatal(err)
 			}
-			if data, err := os.ReadFile(h.script(c)); err != nil || string(data) != c.tombstone {
-				t.Fatalf("%s = %q, %v; want the stub written into it", h.script(c), data, err)
+			want := c.tombstone
+			if c.name == removedOmnigentID {
+				want = string(beforeBody)
+			}
+			if data, err := os.ReadFile(h.script(c)); err != nil || string(data) != want {
+				t.Fatalf("%s = %q, %v; want complete prior or stub bytes", h.script(c), data, err)
 			}
 			for _, token := range h.tokens(c) {
 				if _, err := os.Lstat(token); err != nil {
@@ -472,13 +498,100 @@ func TestRemovedTeardownFailuresRemainRetryable(t *testing.T) {
 			if err := conn.VerifyClean(h.opts); err == nil {
 				t.Fatal("VerifyClean passed with the tokens left")
 			}
-			requireRemovedSame(t, "a teardown whose rename failed", h.snapshot(t, skip...), before)
+			requireRemovedSame(t, "a teardown whose publication failed", h.snapshot(t, skip...), before)
 			if err := conn.Teardown(context.Background(), h.opts); err != nil {
 				t.Fatalf("retry: %v", err)
 			}
 			h.requireStub(t, c)
 			h.requireRevoked(t, c)
 		})
+	}
+}
+
+func TestRemovedTeardownRecoversInterruptedStubPublication(t *testing.T) {
+	for _, c := range removedConnectorsUnderTest() {
+		for _, replacePath := range []bool{false, true} {
+			name := "retry"
+			if replacePath {
+				name = "foreign_path"
+			}
+			t.Run(c.name+"/"+name, func(t *testing.T) {
+				h := newRemovedHost(t)
+				h.stage(t, c)
+				path := h.script(c)
+				conn, _ := RetiredConnector(c.name)
+				var crashState atomicTransformPhaseState
+				restore := setAtomicTransformPhaseHookForTest(path, func(phase atomicTransformPhase, state atomicTransformPhaseState) error {
+					if phase == atomicTransformPhaseDetached {
+						crashState = state
+						return errAtomicTransformSimulatedCrash
+					}
+					return nil
+				})
+				err := conn.Teardown(context.Background(), h.opts)
+				restore()
+				if !errors.Is(err, errAtomicTransformSimulatedCrash) {
+					t.Fatalf("interrupted Teardown = %v, want simulated crash", err)
+				}
+				if crashState.IntentPath == "" {
+					t.Fatal("the detached publication has no recovery intent")
+				}
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("detached module path = %v, want absent", err)
+				}
+				if _, err := os.Lstat(crashState.IntentPath); err != nil {
+					t.Fatalf("recovery intent: %v", err)
+				}
+				leftovers, _ := RemovedConnectorLeftovers(c.name, h.opts)
+				if !removedListsPath(leftovers, crashState.IntentPath) {
+					t.Fatalf("leftovers do not name the interrupted publication receipt: %+v", leftovers)
+				}
+				backups := filepath.Join(h.dataDir, "connector_backups", c.name)
+				listedBackups := false
+				for _, item := range leftovers {
+					if item.Path == backups {
+						listedBackups = true
+						if !strings.Contains(item.Step, "do not delete") || !strings.Contains(item.Step, "teardown") {
+							t.Fatalf("pending publication backup guidance permits deletion: %+v", item)
+						}
+					}
+				}
+				if !listedBackups {
+					t.Fatalf("leftovers do not preserve the backup folder %s: %+v", backups, leftovers)
+				}
+				if err := conn.VerifyClean(h.opts); err == nil || !strings.Contains(err.Error(), "interrupted") {
+					t.Fatalf("VerifyClean with pending publication = %v, want interrupted-publication refusal", err)
+				}
+				if replacePath {
+					writeRemovedFile(t, path, "operator module\n", 0o600)
+					if err := conn.Teardown(context.Background(), h.opts); err == nil || !strings.Contains(err.Error(), "recover") {
+						t.Fatalf("Teardown with a foreign replacement = %v, want recovery refusal", err)
+					}
+					if got, err := os.ReadFile(path); err != nil || string(got) != "operator module\n" {
+						t.Fatalf("foreign replacement = %q, %v", got, err)
+					}
+					for _, token := range h.tokens(c) {
+						if _, err := os.Lstat(token); err != nil {
+							t.Fatalf("token revoked during refused recovery: %s: %v", token, err)
+						}
+					}
+					if err := os.Remove(path); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := conn.Teardown(context.Background(), h.opts); err != nil {
+					t.Fatalf("retry after detached publication: %v", err)
+				}
+				h.requireStub(t, c)
+				h.requireRevoked(t, c)
+				if err := conn.VerifyClean(h.opts); err != nil {
+					t.Fatalf("VerifyClean after retry: %v", err)
+				}
+				if _, err := os.Lstat(crashState.IntentPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("recovery intent survived retry: %v", err)
+				}
+			})
+		}
 	}
 }
 
@@ -542,12 +655,12 @@ func TestRemovedTeardownReplacesOnlyScriptsDefenseClawWrote(t *testing.T) {
 	}
 	cases := map[string][]variant{
 		removedOpenHandsID: append([]variant{
-			{name: "the 1.0.3 hook", plant: write(removedOpenHands103Script), replace: true},
-			{name: "the hook edited, marker kept", plant: write(removedOpenHands103Script + "echo edited\n"), replace: true},
-			{name: "the hook with CRLF lines", plant: write(strings.ReplaceAll(removedOpenHands103Script, "\n", "\r\n")), replace: true},
-			{name: "the 1.0.x stub that exits 0", plant: write(disabledHookTombstone(removedOpenHandsID)), replace: true},
-			{name: "an earlier 1.0.4 stub that exits 0", plant: write(disabledHookTombstone("OpenHands")), replace: true},
-			{name: "an earlier 1.0.4 stub without -p", plant: write(strings.Replace(removedOpenHandsTombstone, "#!/bin/sh -p\n", "#!/bin/sh\n", 1)), replace: true},
+			{name: "the 1.0.3 hook", plant: write(removedOpenHands103Script), replace: true, saved: removedOpenHands103Script},
+			{name: "the hook edited, marker kept", plant: write(removedOpenHands103Script + "echo edited\n"), replace: true, saved: removedOpenHands103Script + "echo edited\n"},
+			{name: "the hook with CRLF lines", plant: write(strings.ReplaceAll(removedOpenHands103Script, "\n", "\r\n")), replace: true, saved: strings.ReplaceAll(removedOpenHands103Script, "\n", "\r\n")},
+			{name: "the 1.0.x stub that exits 0", plant: write(disabledHookTombstone(removedOpenHandsID)), replace: true, saved: disabledHookTombstone(removedOpenHandsID)},
+			{name: "an earlier 1.0.4 stub that exits 0", plant: write(disabledHookTombstone("OpenHands")), replace: true, saved: disabledHookTombstone("OpenHands")},
+			{name: "an earlier 1.0.4 stub without -p", plant: write(strings.Replace(removedOpenHandsTombstone, "#!/bin/sh -p\n", "#!/bin/sh\n", 1)), replace: true, saved: strings.Replace(removedOpenHandsTombstone, "#!/bin/sh -p\n", "#!/bin/sh\n", 1)},
 		}, common("# defenseclaw-managed-hook v")...),
 		removedOmnigentID: append([]variant{
 			{name: "the 1.0.3 module", plant: setup(""), replace: true},
@@ -765,6 +878,7 @@ func TestRemovedConnectorLeftoversListWhatIsLeft(t *testing.T) {
 			}
 			if c.name == removedOpenHandsID {
 				want[filepath.Join(h.dataDir, "hooks", hookConfigSidecarName+".openhands")] = "delete it"
+				want[c.editedCopyPath(h.dataDir, []byte(removedOpenHands103Script))] = "copy back what you need"
 				// The hook token stays (keepHookToken), with when it may go.
 				want[removedTokenPath(t, h.dataDir, c.name)] = c.keptTokenStep()
 			} else {

@@ -12,10 +12,12 @@ from types import SimpleNamespace
 
 import click
 import pytest
+import yaml
 from click.testing import CliRunner
-from defenseclaw.commands import cmd_edge_install, cmd_setup_edge_connector, cmd_setup_mqtt
+from defenseclaw.commands import cmd_config, cmd_edge_connector_cli, cmd_edge_install, cmd_setup_edge_connector, cmd_setup_mqtt
 from defenseclaw.context import AppContext
 from defenseclaw.dotenv_utils import persist_env_var
+from defenseclaw.file_permissions import make_private_directory
 from defenseclaw.gateway import GatewayListenerNotOwnedError
 
 
@@ -63,9 +65,30 @@ def test_edge_install_help_and_missing_source_name_fleet_archive(tmp_path, monke
 
 
 def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    install_guide = (
+        Path(__file__).resolve().parents[2]
+        / "docs-site/content/docs/how-to/install-the-edge-connector.mdx"
+    ).read_text(encoding="utf-8")
+    assert "defenseclaw edge-connector register 1001" not in install_guide
+    assert "--endpoint https://fleet.example.com/api/v1/fleet" in install_guide
+    assert "--target DEVICE --user USER" in install_guide
+    assert "automatically registers" in install_guide
+    assert "defenseclaw config set fleet.trust_proxy_headers true" in install_guide
+    assert "defenseclaw-gateway restart" in install_guide
+    assert "X-Forwarded-Proto: https" in install_guide
+    assert "defenseclaw config set fleet.allow_key_over_http true" in install_guide
+    reference = (
+        Path(__file__).resolve().parents[2]
+        / "docs-site/content/docs/reference/edge-connector/configuration.mdx"
+    ).read_text(encoding="utf-8")
+    assert "fleet.trust_proxy_headers" in reference
+    assert "fleet.allow_key_over_http" in reference
+    private_home = tmp_path / "fleet-home"
+    make_private_directory(private_home)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(private_home))
     monkeypatch.delenv("DCLAW_FLEET_API_URL", raising=False)
     monkeypatch.setattr(cmd_setup_edge_connector, "_persist_svc_env_var", lambda *_args: True)
+    monkeypatch.setattr(cmd_setup_edge_connector, "_install_fleet_compiler", lambda *_args: private_home)
     endpoint = "http://127.0.0.1:19999/api/v1/fleet"
     enabled = []
 
@@ -76,10 +99,13 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
     result = CliRunner().invoke(
         cmd_setup_edge_connector.edge_connector,
         ["--non-interactive", "--token", "test-token", "--endpoint", endpoint],
-        obj=_app(tmp_path),
+        obj=_app(private_home),
     )
     assert result.exit_code == 0, result.output
     assert enabled == [endpoint]
+    assert "loopback-only test mode" in result.output
+    assert "HTTPS" in result.output
+    assert "Fleet CLI commands use this endpoint" in result.output
 
     calls = []
 
@@ -90,6 +116,110 @@ def test_edge_setup_persists_endpoint_for_device_installer(tmp_path, monkeypatch
     monkeypatch.setattr(cmd_edge_install, "_fleet_api_request", fake_request)
     assert cmd_edge_install._register_device_via_api("1", "1", "42") == "12" * 32
     assert calls[0][:3] == (endpoint, "POST", "/devices")
+
+
+def test_documented_proxy_trust_command_writes_fleet_setting(tmp_path, monkeypatch) -> None:
+    make_private_directory(tmp_path)
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    result = CliRunner().invoke(
+        cmd_config.config_cmd,
+        ["set", "fleet.trust_proxy_headers", "true"],
+        obj=AppContext(),
+    )
+    assert result.exit_code == 0, result.output
+    written = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert written["fleet"]["trust_proxy_headers"] is True
+
+
+def test_edge_register_uses_saved_https_endpoint_without_redirects(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DCLAW_FLEET_API_TOKEN", raising=False)
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+    (tmp_path / ".env").write_text(
+        "DCLAW_FLEET_API_URL=https://fleet.example.com/api/v1/fleet\n"
+        "DCLAW_FLEET_API_TOKEN=fixture-token\n"
+    )
+    calls = []
+
+    class FakeSession:
+        def __init__(self):
+            self.headers = {}
+            self.trust_env = True
+            self.verify = False
+
+        def post(self, url, *, json, timeout, allow_redirects):
+            calls.append((url, json, timeout, allow_redirects, dict(self.headers), self.trust_env, self.verify))
+            return SimpleNamespace(status_code=201, content=b"{}", json=lambda: {"device_key": "12" * 32})
+
+    class FakeLocalGateway:
+        def __init__(self, *, host, port, token, timeout):
+            self._session = FakeSession()
+            self.base_url = f"http://{host}:{port}"
+            self.timeout = timeout
+
+    monkeypatch.setattr(cmd_edge_connector_cli.req_lib, "Session", FakeSession)
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", FakeLocalGateway)
+    app = _app(tmp_path)
+    app.cfg.gateway = SimpleNamespace(api_port=18970, token="", resolved_token=lambda: "")
+    result = CliRunner().invoke(
+        cmd_edge_connector_cli.edge_connector_group,
+        ["register", "1001", "--json"], obj=app,
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    url, body, timeout, redirects, headers, trust_env, verify = calls[0]
+    assert url == "https://fleet.example.com/api/v1/fleet/devices"
+    assert body["device_id"] == 1001
+    assert timeout <= 10 and redirects is False
+    assert headers["Authorization"] == "Bearer fixture-token"
+    assert headers["X-DefenseClaw-Client"] == "python-cli"
+    assert trust_env is False
+    assert verify is True
+
+
+@pytest.mark.parametrize("ca_variable", ["REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE"])
+def test_edge_https_client_honors_custom_ca_and_proxy(tmp_path, monkeypatch, ca_variable) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DCLAW_FLEET_API_TOKEN", raising=False)
+    (tmp_path / ".env").write_text(
+        "DCLAW_FLEET_API_URL=https://fleet.example.com/api/v1/fleet\n"
+        "DCLAW_FLEET_API_TOKEN=fixture-token\n"
+    )
+    ca_bundle = tmp_path / "fleet-ca.pem"
+    ca_bundle.write_text("fixture CA bundle", encoding="utf-8")
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.delenv("CURL_CA_BUNDLE", raising=False)
+    monkeypatch.setenv(ca_variable, str(ca_bundle))
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:3128")
+    monkeypatch.setenv("NO_PROXY", "")
+    netrc = tmp_path / "ignored.netrc"
+    netrc.write_text("machine fleet.example.com login unrelated password unrelated\n", encoding="utf-8")
+    monkeypatch.setenv("NETRC", str(netrc))
+    app = _app(tmp_path)
+    app.cfg.gateway = SimpleNamespace(api_port=18970, token="", resolved_token=lambda: "")
+
+    client = cmd_edge_connector_cli._client(app)
+    settings = client._s.merge_environment_settings(
+        "https://fleet.example.com/api/v1/fleet/devices", {}, None, client._s.verify, None,
+    )
+    assert settings["verify"] == str(ca_bundle)
+    assert settings["proxies"]["https"] == "http://127.0.0.1:3128"
+    assert client._s.trust_env is False
+    prepared = client._s.prepare_request(
+        cmd_edge_connector_cli.req_lib.Request("POST", "https://fleet.example.com/api/v1/fleet/devices")
+    )
+    assert prepared.headers["Authorization"] == "Bearer fixture-token"
+
+
+def test_edge_register_https_refuses_gateway_token_fallback(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
+    monkeypatch.delenv("DCLAW_FLEET_API_TOKEN", raising=False)
+    (tmp_path / ".env").write_text("DCLAW_FLEET_API_URL=https://fleet.example.com/api/v1/fleet\n")
+    app = _app(tmp_path)
+    app.cfg.gateway = SimpleNamespace(api_port=18970, token="gateway-token")
+    with pytest.raises(click.ClickException, match="DCLAW_FLEET_API_TOKEN is required"):
+        cmd_edge_connector_cli._client(app)
 
 
 @pytest.mark.parametrize("platform", ["darwin", "win32"])
@@ -243,7 +373,7 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
     (source / "CMakeLists.txt").write_text("project(edge)\n", encoding="utf-8")
     (source / "src/main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
     unit = source / "packaging/edge-connector.service"
-    unit.write_text("[Unit]\nDescription=Edge Connector\n", encoding="utf-8")
+    unit.write_text("[Service]\nUser=defenseclaw\nGroup=defenseclaw\n", encoding="utf-8")
 
     # A wheel cannot fall back to an adjacent source checkout.
     find_source = cmd_edge_install._find_edge_connector_source
@@ -252,6 +382,7 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
         lambda source_dir=None: find_source(source_dir) if source_dir is not None else None,
     )
     copied = []
+    commands = []
     if remote:
         monkeypatch.setattr(cmd_edge_install, "_check_remote_prereqs", lambda *_args: True)
         monkeypatch.setattr(cmd_edge_install, "_copy_source", lambda *_args: "/tmp/edge-source")
@@ -261,6 +392,7 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
         monkeypatch.setattr(cmd_edge_install, "_verify_remote_daemon", lambda *_args: True)
 
         def fake_run(argv, **_kwargs):
+            commands.append(argv)
             if argv[0] == "scp":
                 copied.append(argv[3])
             return subprocess.CompletedProcess(argv, 0, stderr="")
@@ -273,8 +405,20 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
         monkeypatch.setattr(cmd_edge_install, "_provision_local_service_env", lambda *_args: True)
         monkeypatch.setattr(cmd_edge_install, "_verify_local_service", lambda: True)
         monkeypatch.setattr(
+            cmd_edge_install.subprocess,
+            "run",
+            lambda argv, **_kwargs: subprocess.CompletedProcess(argv, 1),
+        )
+
+        def fake_local_run(argv):
+            commands.append(argv)
+            if argv[:2] == ["sudo", "cp"]:
+                copied.append(argv[2])
+            return subprocess.CompletedProcess(argv, 0)
+
+        monkeypatch.setattr(
             cmd_edge_install, "_run",
-            lambda argv: copied.append(argv[2]) if argv[:2] == ["sudo", "cp"] else None,
+            fake_local_run,
         )
         monkeypatch.setattr("platform.system", lambda: "Linux")
         args = []
@@ -286,6 +430,15 @@ def test_edge_install_source_dir_supplies_systemd_unit_without_checkout_fallback
     )
     assert result.exit_code == 0, result.output
     assert copied == [str(unit)]
+    if remote:
+        account = next(i for i, argv in enumerate(commands) if "useradd" in argv[-1])
+        enabled = next(i for i, argv in enumerate(commands) if "systemctl enable" in argv[-1])
+        assert "groupadd" in commands[account][-1]
+    else:
+        account = next(i for i, argv in enumerate(commands) if "useradd" in argv)
+        enabled = next(i for i, argv in enumerate(commands) if "enable" in argv)
+        assert any("groupadd" in argv for argv in commands[:account])
+    assert account < enabled
 
 
 def test_wheel_setup_without_fleet_assets_leaves_fleet_off(tmp_path, monkeypatch) -> None:

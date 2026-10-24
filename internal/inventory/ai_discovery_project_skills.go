@@ -50,22 +50,11 @@ func (s *ContinuousDiscoveryService) detectClaudeProjectSkills() ([]AISignal, er
 			skipped = true
 			continue
 		}
-		// Check each ancestor before EvalSymlinks: a link in an otherwise
+		// Check each element before EvalSymlinks: a link in an otherwise
 		// readable project can resolve into a TCC-protected home folder.
-		if !s.claudeProjectExplicit(path) {
-			blocked := false
-			ancestor := home
-			for _, part := range strings.Split(rel, string(filepath.Separator)) {
-				ancestor = filepath.Join(ancestor, part)
-				if s.macOSTCCSkipped(ancestor) || s.modelLinkPrivacySkipped(ancestor) {
-					blocked = true
-					break
-				}
-			}
-			if blocked {
-				skipped = true
-				continue
-			}
+		if !s.claudeProjectExplicit(path) && s.macOSPrivacyPathSkipped(path) {
+			skipped = true
+			continue
 		}
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {

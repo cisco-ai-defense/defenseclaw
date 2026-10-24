@@ -18,6 +18,7 @@
 
 import json
 import os
+import subprocess
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -1329,6 +1330,13 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self._v8_status.start()
         self.addCleanup(self._v8_status.stop)
+        # Local setup records the container it started; no Docker here.
+        self._container = patch(
+            "defenseclaw.commands.cmd_setup._local_splunk_container_id",
+            return_value="0123456789abcdef" * 4,
+        )
+        self._container.start()
+        self.addCleanup(self._container.stop)
 
     def _operator_status(self, data_dir: str) -> SimpleNamespace:
         destinations = self._v8_destinations(data_dir)
@@ -1403,7 +1411,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
                 signals=None,
                 target=None,
             )
-            # As the local Splunk setup writes it (GAP-0208).
+            # A pre-1.0.4 local setup left this sink without a local_stack record.
             local_destination["network_safety"] = {"allow_private_networks": True}
             destinations.append(local_destination)
         self._write_v8_destinations(destinations)
@@ -1532,17 +1540,19 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertTrue(destination["enabled"])
         self.assertEqual(destination["endpoint"], endpoint)
-        self.assertEqual(destination["token_env"], "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        # Each remote Splunk destination keeps its credential under its own reference.
+        own_reference = "DEFENSECLAW_SPLUNK_HEC_TOKEN" + "_SPLUNK_ENTERPRISE_SPLUNK_EXAMPLE_COM"
+        self.assertEqual(destination["token_env"], own_reference)
 
         with open(os.path.join(self.tmp_dir, ".env")) as f:
             dotenv = f.read()
-        self.assertIn("DEFENSECLAW_SPLUNK_HEC_TOKEN=hec-token", dotenv)
+        self.assertIn(f"{own_reference}=hec-token", dotenv)
 
         with open(os.path.join(self.tmp_dir, "config.yaml")) as f:
             cfg = f.read()
         self.assertIn("name: splunk-enterprise-splunk-example-com", cfg)
         self.assertIn("kind: splunk_hec", cfg)
-        self.assertIn("token_env: DEFENSECLAW_SPLUNK_HEC_TOKEN", cfg)
+        self.assertIn(f"token_env: {own_reference}", cfg)
         # production preset relies on the Go sink's secure
         # default (TLS verification ON) and must not emit any
         # insecure_skip_verify opt-out. The legacy verify_tls flag is
@@ -1700,7 +1710,7 @@ class TestSetupSplunkCommand(unittest.TestCase):
         )
         self.assertTrue(destination["enabled"])
         self.assertEqual(destination["endpoint"], "http://127.0.0.1:8088/services/collector/event")
-        self.assertEqual(destination["token_env"], "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+        self.assertEqual(destination["token_env"], "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN")
         self.assertIn("Local Splunk is ready", result.output)
         self.assertIn("License: Free", result.output)
         self.assertIn("Splunk Web login:", result.output)
@@ -1874,13 +1884,31 @@ class TestSetupSplunkCommand(unittest.TestCase):
         kwargs = bridge_call.kwargs
         self.assertEqual(kwargs["capture_output"], True)
         self.assertEqual(kwargs["text"], True)
-        self.assertEqual(kwargs["timeout"], 300)
+        self.assertGreaterEqual(kwargs["timeout"], 7200)
         self.assertEqual(kwargs["env"]["S3_EXPORT_ENABLED"], "true")
         self.assertEqual(kwargs["env"]["S3_BUCKET"], "agentwatch-demo")
         self.assertEqual(kwargs["env"]["S3_PREFIX"], "agentwatch/defenseclaw")
         self.assertEqual(kwargs["env"]["AWS_REGION"], "us-west-2")
         self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", kwargs["env"])
         self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", kwargs["env"])
+
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.commands.cmd_setup.splunk_bridge_bin", return_value="/tmp/fake-splunk-claw-bridge")
+    def test_bootstrap_bridge_streams_pull_progress_in_terminal(self, _mock_bridge_bin, mock_run):
+        from defenseclaw.commands.cmd_setup import _bootstrap_bridge
+
+        mock_run.return_value = MagicMock(returncode=1, stdout="", stderr=None)
+        with patch(
+            "defenseclaw.commands.cmd_setup.click.get_text_stream",
+            return_value=SimpleNamespace(isatty=lambda: True),
+        ):
+            assert _bootstrap_bridge(self.tmp_dir, refresh_bundle=False) is None
+
+        kwargs = mock_run.call_args.kwargs
+        self.assertNotIn("capture_output", kwargs)
+        self.assertEqual(kwargs["stdout"], subprocess.PIPE)
+        self.assertIsNone(kwargs["stderr"])
+        self.assertGreaterEqual(kwargs["timeout"], 7200)
 
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))
@@ -2126,7 +2154,9 @@ class TestSetupSplunkCommand(unittest.TestCase):
             catch_exceptions=False,
         )
         self.assertEqual(result.exit_code, 0)
-        self.assertIn("HEC): disabled", result.output)
+        self.assertIn("Local Splunk (HEC): no active recorded sink found", result.output)
+        self.assertIn("Local Splunk was not stopped", result.output)
+        self.assertTrue(self._v8_destinations()[0]["enabled"])
 
     def test_setup_splunk_disable_logs_without_docker_on_windows(self):
         from defenseclaw.commands.cmd_setup import setup
@@ -2137,6 +2167,8 @@ class TestSetupSplunkCommand(unittest.TestCase):
         destinations[0]["name"] = "local-splunk"
         self._write_v8_destinations(destinations)
         with (
+            # The train records the local sink; this one was recorded by local setup.
+            patch("defenseclaw.commands.cmd_setup._recorded_local_splunk_names", return_value={"local-splunk"}),
             patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True),
             patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
             patch(

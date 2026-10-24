@@ -109,10 +109,15 @@ func TestDirectoryCredentialSplitIsTotalAndExclusive(t *testing.T) {
 	}
 }
 
-func TestDirectoryCredentialAcquisitionBashLoginWrapperDetectionOnly(t *testing.T) {
+func TestDirectoryCredentialAcquisitionBashLoginWrapperKeepsInnerRule(t *testing.T) {
 	t.Parallel()
 	command := `bash -lc 'mkdir -p /tmp/enum && impacket-GetUserSPNs -dc-ip 192.0.2.10 -request corp.example/user; cat /tmp/enum/out'`
+	const inner = `impacket-GetUserSPNs -dc-ip 192.0.2.10 -request corp.example/user`
 	for _, profile := range []string{"default", "permissive", "strict"} {
+		alone := EvaluateDeterministicAction(
+			context.Background(), actionfacts.Input{Tool: "execute_command", Command: inner},
+			inner, "benchmark-"+profile, profile,
+		)
 		evaluation := EvaluateDeterministicAction(
 			context.Background(),
 			actionfacts.Input{Tool: "execute_command", Command: command},
@@ -120,13 +125,15 @@ func TestDirectoryCredentialAcquisitionBashLoginWrapperDetectionOnly(t *testing.
 			"benchmark-"+profile,
 			profile,
 		)
-		if len(evaluation.Findings) != 1 ||
-			evaluation.Findings[0].RuleID != directoryTicketRequestRuleID ||
-			evaluation.Findings[0].ContributesToEnforcement ||
-			evaluation.Route != "fallback" || evaluation.Authoritative ||
-			evaluation.EnforcementEligible || evaluation.Action == guardrailActionBlock ||
-			evaluation.Action == guardrailActionConfirm {
-			t.Fatalf("profile=%s escaped detection-only boundary: %+v", profile, evaluation)
+		findings := make(map[string]DeterministicActionFinding, len(evaluation.Findings))
+		for _, finding := range evaluation.Findings {
+			findings[finding.RuleID] = finding
+		}
+		request, hasRequest := findings[directoryTicketRequestRuleID]
+		if len(evaluation.Findings) != 1 || !hasRequest ||
+			request.ContributesToEnforcement != alone.Findings[0].ContributesToEnforcement ||
+			evaluation.Action != alone.Action {
+			t.Fatalf("profile=%s lost the inner rule's disposition: compound=%+v alone=%+v", profile, evaluation, alone)
 		}
 	}
 }

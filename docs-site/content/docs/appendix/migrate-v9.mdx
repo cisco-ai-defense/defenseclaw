@@ -39,7 +39,7 @@ An unmodified 0.8.x install moves one value (`scanners.skill_scanner.policy: qui
 | --- | --- |
 | `defenseclaw upgrade` | The installer checks, before it changes anything, that your configuration can be migrated, then runs `defenseclaw migrate` after the swap. If the migration fails, the installer puts the previous install back. |
 | `defenseclaw migrate` | Brings configuration and data to this release's schema, including the v9 step. `--check` lists the pending steps without changing anything. |
-| `defenseclaw config migrate [--dry-run] [--ack] [--json]` | Runs only the v9 step. `--dry-run` writes nothing. `--ack` marks `migration-v9.json` as read. `--json` prints the whole record. |
+| `defenseclaw config migrate [--dry-run] [--ack] [--json]` | Runs only the v9 step. `--dry-run` writes nothing. `--ack` marks `migration-v9.json` as read; it is refused together with `--dry-run`. `--json` prints the whole record. |
 | `defenseclaw-gateway config migrate [--dry-run] [--ack] [--json]` | The same implementation, which `defenseclaw config migrate` calls. Its output also lists the removed keys and the audit entries it moved. |
 | The gateway, at start and on a reload | A `config_version: 8` file is migrated in memory, read-only. The file on disk is not touched. If the in-memory migration fails, the gateway refuses the file: at start it exits with an error that tells you to run `defenseclaw migrate`, and on a reload the previous configuration keeps running. |
 
@@ -563,7 +563,7 @@ rows you wrote:
 | `r1` | skill | `acme-notes` (connector `claudecode`) | `install: block` | vendor not reviewed |
 | `r2` | skill | `acme-lint` | `install: allow` | reviewed by security |
 | `r3` | mcp | `acme-wiki` | `install: block` | sends data to an unknown host |
-| `r4` | skill | `scratch-tool` | `install: block`, `file: quarantine` | `auto-block: HIGH findings` |
+| `r4` | skill | `scratch-tool` | `install: block`, `file: quarantine` | `auto-block: watch detected HIGH findings` |
 | `r5` | tool | `@claudecode/WebFetch` | `install: block` | no web fetch in CI |
 
 ```yaml title="config.yaml (v9, excerpt)"
@@ -588,10 +588,15 @@ asset_policy:
         reason: no web fetch in CI
 ```
 
-- Row `r4` stays in `audit.db`. A block that a scan verdict wrote (a reason
-  that starts `auto-block`, `post-scan:`, `post-install scan:` or `scan:`) is the
-  enforcement journal, not an operator decision. Quarantine and runtime-disable
-  state is unchanged.
+- Row `r4` stays in `audit.db` as it is. Its reason is one the scanners
+  write, so it is the enforcement journal, not an operator decision. The
+  scanner reasons are `auto-block: watch detected <SEV> findings` (it may go on
+  with ` (scanner=<name>)`, `: ` or `; `), `post-scan: <N> findings, max=<SEV>`,
+  `post-install scan: <N> findings, max=<SEV>`, `scan: <N> findings, max=<SEV>`
+  and `scan clean or within policy`, and reasons that start
+  `scanner failure (fail-closed): `, `quarantine failed: ` or `link removed: `.
+  Any other reason is moved, even one that starts `auto-block`. Quarantine and
+  runtime-disable state is unchanged.
 - A moved row loses its `install` field after `config.yaml` is committed, and a
   row left with no state is deleted. If anything fails first, the row is still
   in the table: an entry is never lost.

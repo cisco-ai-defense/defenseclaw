@@ -69,14 +69,14 @@ func TestRenderWindowsCursorEnterpriseAdapterUsesSharedLauncherStdinAndClosedMod
 	}
 }
 
-func TestRenderCursorAdapterFailsOpenOnlyWhenExplicitlyConfigured(t *testing.T) {
+func TestRenderCursorAdapterClosesLocalFailureWithOpenOutageMode(t *testing.T) {
 	openAdapter, err := renderWindowsCursorAdapter(testWindowsHookBinary, "open", false, 1_000)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(openAdapter, []byte(`{"continue":true}`)) ||
-		bytes.Contains(openAdapter, []byte(`{"continue":false,"permission":"deny"`)) {
-		t.Fatalf("explicit-open adapter has wrong fallback:\n%s", openAdapter)
+	if bytes.Contains(openAdapter, []byte(`{"continue":true}`)) ||
+		!bytes.Contains(openAdapter, []byte(`{"continue":false,"permission":"deny"`)) {
+		t.Fatalf("explicit-open outage mode weakened local adapter failure:\n%s", openAdapter)
 	}
 	if bytes.Contains(openAdapter, []byte("--enterprise-managed")) {
 		t.Fatalf("unmanaged adapter contains enterprise flag:\n%s", openAdapter)
@@ -91,8 +91,8 @@ func TestRenderCursorAdapterFailsOpenOnlyWhenExplicitlyConfigured(t *testing.T) 
 		t.Fatalf("invalid fail mode did not collapse closed:\n%s", closedAdapter)
 	}
 
-	if adapter, err := RenderWindowsCursorEnterpriseAdapter(testWindowsHookBinary, "open"); err != nil || !bytes.Contains(adapter, []byte(`{"continue":true}`)) {
-		t.Fatalf("enterprise adapter did not honor fail-open mode: %v", err)
+	if adapter, err := RenderWindowsCursorEnterpriseAdapter(testWindowsHookBinary, "open"); err != nil || bytes.Contains(adapter, []byte(`{"continue":true}`)) {
+		t.Fatalf("enterprise adapter left local failure open: %v", err)
 	}
 }
 
@@ -479,6 +479,67 @@ func TestIsBuiltinCursorConnector(t *testing.T) {
 	}
 	if IsBuiltinCursorConnector(NewDevinConnector()) || IsBuiltinCursorConnector(nil) {
 		t.Fatal("non-Cursor connector was recognized as built-in Cursor")
+	}
+}
+
+func TestWindowsCursorProcessFailureBlocksWithOpenGatewayOutage(t *testing.T) {
+	body, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := decodeCursorHooksJSON(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, err := cursorHooksObject(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range cursorEnterpriseHookEvents {
+		entries, ok := cursorHookEntryList(hooks[event])
+		if !ok || len(entries) != 1 {
+			t.Fatalf("Cursor %s entries = %#v", event, hooks[event])
+		}
+		entry, ok := entries[0].(map[string]interface{})
+		if !ok || entry["failClosed"] != true {
+			t.Fatalf("Cursor %s process failure can run a tool: %#v", event, entries[0])
+		}
+	}
+}
+
+func TestWindowsCursorUpgradeRepairsOpenProcessFailureContract(t *testing.T) {
+	current, err := MergeWindowsCursorEnterpriseHooks(nil, testWindowsCursorAdapter, "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := decodeCursorHooksJSON(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, err := cursorHooksObject(cfg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, event := range cursorEnterpriseHookEvents {
+		entries, _ := cursorHookEntryList(hooks[event])
+		entries[0].(map[string]interface{})["failClosed"] = false
+	}
+	previous, err := encodeCursorHooksJSON(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyWindowsCursorEnterpriseHooksForMigration(previous, testWindowsCursorAdapter, "open"); err != nil {
+		t.Fatalf("previous 1.0.x policy must remain upgrade-readable: %v", err)
+	}
+	if err := VerifyWindowsCursorEnterpriseHooks(previous, testWindowsCursorAdapter, "open"); err == nil {
+		t.Fatal("current verify accepted the old fail-open process contract")
+	}
+	repaired, err := MergeWindowsCursorEnterpriseHooks(previous, testWindowsCursorAdapter, "open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyWindowsCursorEnterpriseHooks(repaired, testWindowsCursorAdapter, "open"); err != nil {
+		t.Fatalf("reconciled policy is not current: %v", err)
 	}
 }
 

@@ -247,14 +247,19 @@ def test_macos_pkg_payload_carries_the_launcher_and_the_launch_agents(tmp_path: 
     assert launcher.is_symlink()
     assert os.readlink(launcher) == "/opt/cisco/defenseclaw/bin/defenseclaw-gateway"
 
+    gateway = root / "opt" / "cisco" / "defenseclaw" / "bin" / "defenseclaw-gateway"
+    digest = hashlib.sha256(gateway.read_bytes()).hexdigest()
+    # Each label carries the gateway's tag (GAP-0206), as the lifecycle
+    # names it (openshell.LaunchAgentLabel); no bare-label plist is shipped.
+    assert sorted(p.name for p in (root / "Library" / "LaunchAgents").iterdir()) == sorted(
+        f"{label}.{digest[:12]}.plist" for label in LAUNCH_AGENTS
+    )
     for label in LAUNCH_AGENTS:
-        agent = root / "Library" / "LaunchAgents" / f"{label}.plist"
+        agent = root / "Library" / "LaunchAgents" / f"{label}.{digest[:12]}.plist"
         assert agent.is_file() and not agent.is_symlink(), label
         assert _mode(agent) == 0o644, label
         launchd = plistlib.loads(agent.read_bytes())
-        assert launchd["Label"] == label
-        gateway = root / "opt" / "cisco" / "defenseclaw" / "bin" / "defenseclaw-gateway"
-        digest = hashlib.sha256(gateway.read_bytes()).hexdigest()
+        assert launchd["Label"] == f"{label}.{digest[:12]}"
         program = f"/opt/cisco/defenseclaw/bin/launch-agents/{digest}/defenseclaw-gateway"
         assert launchd["ProgramArguments"][0] == program
         agent_binary = root / program.lstrip("/")

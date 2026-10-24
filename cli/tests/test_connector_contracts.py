@@ -37,6 +37,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
     _load_contracts_from_manifest,
+    has_native_approval_prompt,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
@@ -46,6 +47,11 @@ from defenseclaw.platform_support import ACP_ONLY_CONNECTORS
 from tests.helpers import cleanup_app, make_app_context
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_copilot_cli_does_not_claim_a_native_approval_prompt():
+    assert has_native_approval_prompt("claudecode")
+    assert not has_native_approval_prompt("copilot")
 
 
 def _discovery(connector: str, *, installed: bool, version: str, error: str = ""):

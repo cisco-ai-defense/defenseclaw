@@ -273,6 +273,12 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	case "PreToolUse", "PermissionRequest":
 		toolName := codexToolName(req)
 		toolArgs := codexToolArgs(req)
+		toolCWD := req.CWD
+		if codexShellExecutionTool(toolName) {
+			if workdir, ok := req.ToolInput["workdir"].(string); ok && workdir != "" {
+				toolCWD = agentHookTrustedActionCWD(ctx, req.CWD, workdir)
+			}
+		}
 		actionTool, resourceIdentity := trustedToolActionFromContext(
 			ctx, "codex", toolName, toolName,
 		)
@@ -282,7 +288,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 			Direction:     "tool_call",
 			Connector:     "codex",
 			MCPServerName: a.codexMCPServerName(ctx, req),
-			callerCWD:     req.CWD,
+			callerCWD:     toolCWD,
 		}
 		command, commandTool := sandboxShellCommand(ctx, "codex", req.HookEventName, toolName, actionTool, toolArgs)
 		if command == nil {
@@ -291,7 +297,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		actionInput := actionfacts.Input{
 			Tool:                     actionTool,
 			Args:                     toolArgs,
-			CWD:                      req.CWD,
+			CWD:                      toolCWD,
 			ActiveHome:               hookActiveHome(ctx),
 			ToolResourceIdentity:     resourceIdentity,
 			CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
@@ -545,7 +551,7 @@ func (a *APIServer) codexEnabled() bool {
 func (a *APIServer) codexMode(ctx context.Context) string {
 	// The request's guardrail profile, when one applies, replaces the live
 	// configuration (see guardrail_profile.go).
-	return hookModeForConfig(a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()), "codex")
+	return a.decisionConfigFrom(ctx, a.runtimeConfigSnapshot()).HookModeForConnector("codex")
 }
 
 func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) codexHookResponse {

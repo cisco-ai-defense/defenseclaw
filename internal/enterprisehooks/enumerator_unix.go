@@ -81,9 +81,10 @@ type UnixDiscoverFunc func(ctx context.Context, account unixidentity.Account, co
 // reasons for connectors without one, and the connector's app and
 // extension installs.
 type UnixDiscovery struct {
-	Versions map[string]string
-	Reasons  map[string]string
-	Surfaces map[string][]connector.AgentSurface
+	Versions        map[string]string
+	Reasons         map[string]string
+	Surfaces        map[string][]connector.AgentSurface
+	PrivateInstalls []PrivateAgentInstall
 }
 
 // UnixDiscoverSurfacesFunc is UnixDiscoverFunc plus the app and extension
@@ -315,12 +316,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	// discovered, so the gateway can refuse a user whose only installs are
 	// refused surfaces.
 	var surfaceOnly []string
+	var machineInspect []string
 	for _, name := range connectors {
 		if _, off := ownershipOff[name]; off || connectorListed(perUser, name) {
 			continue
 		}
 		if _, isMachine := machinePolicy[name]; isMachine && enrollment.UnverifiedVersionsFor(name) == config.EnterpriseUnverifiedRefuse {
 			surfaceOnly = append(surfaceOnly, name)
+		} else if isMachine {
+			machineInspect = append(machineInspect, name)
 		}
 	}
 
@@ -367,6 +371,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	// row is only dropped by a filter decision or repeated definitive
 	// "no such user" answers — never by an incomplete listing.
 	keep := map[string]struct{}{}
+	// inspected names the accounts this cycle inspected (or found nothing to
+	// inspect for); notInspected why an enrolled account was not.
+	inspected := map[string]bool{}
+	notInspected := map[string]string{}
 	missing := map[string]struct{}{}
 	listed := map[string]struct{}{}
 	previousUsers := map[string]struct{}{}
@@ -415,6 +423,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			missing[userName] = struct{}{}
 		default:
 			keep[userName] = struct{}{}
+			notInspected[userName] = "its account lookup failed"
 			logfSafely(opts.Logger, userName, fmt.Sprintf("directory lookup failed; keeping known rows unchanged: %v", err))
 		}
 	}
@@ -442,6 +451,12 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	exclude := stringSet(enrollment.ExcludeUsers)
 	exempt := stringSet(enrollment.ExemptUsers)
 	addQualifiedSpellings(ctx, opts.Resolver, exempt)
+	// Under enrollment.mode: manifest the administrator's enabled targets
+	// are the enrollment, whatever the automatic filters say: their agent
+	// launches count toward managed coverage, so they are the accounts
+	// whose installs are inspected, and no one else is (GAP-0906).
+	manifestMode := strings.EqualFold(strings.TrimSpace(enrollment.Mode), config.EnterpriseEnrollmentManifest)
+	authored := unixEnrolledSubjects(previous)
 
 	var targets []ManifestTarget
 	emitted := map[string]struct{}{}
@@ -477,7 +492,15 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			skip("nobody is never a guardian target")
 			continue
 		}
-		if !explicitlyIncluded {
+		authoredTarget := false
+		if manifestMode {
+			if !authored.names(name, account.UID) {
+				skip("not an enabled target of the administrator's manifest (enterprise.enrollment.mode: manifest)")
+				continue
+			}
+			authoredTarget = true
+		}
+		if !explicitlyIncluded && !authoredTarget {
 			if reason := unixReservedUID(account.UID); reason != "" {
 				skip(reason)
 				continue
@@ -491,28 +514,32 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				continue
 			}
 		}
-		if _, nologin := unixNologinShells[filepath.Clean(account.Shell)]; nologin && !explicitlyIncluded {
+		if _, nologin := unixNologinShells[filepath.Clean(account.Shell)]; nologin && !explicitlyIncluded && !authoredTarget {
 			skip("non-interactive login shell " + account.Shell)
 			continue
 		}
-		if ok, transientErr, counted, reason := groupFilterAllows(opts.Resolver, account, enrollment); !ok {
-			if transientErr {
-				keep[name] = struct{}{}
-			} else if _, enrolled := previousUsers[name]; enrolled && counted {
-				// A missing include-group membership can be a partial
-				// answer from a degraded directory: revoke only after
-				// repeated answers, like a missing account.
-				filtered[name] = struct{}{}
+		if !authoredTarget {
+			if ok, transientErr, counted, reason := groupFilterAllows(opts.Resolver, account, enrollment); !ok {
+				if transientErr {
+					keep[name] = struct{}{}
+					notInspected[name] = "its group membership could not be read: " + reason
+				} else if _, enrolled := previousUsers[name]; enrolled && counted {
+					// A missing include-group membership can be a partial
+					// answer from a degraded directory: revoke only after
+					// repeated answers, like a missing account.
+					filtered[name] = struct{}{}
+				}
+				skip(reason)
+				continue
 			}
-			skip(reason)
-			continue
 		}
 		home := filepath.Clean(account.Home)
-		if !homeUnderRoots(home, homeRoots) {
+		if !homeUnderRoots(home, homeRoots) && !authoredTarget {
 			skip(fmt.Sprintf("home %s is outside the guardian-writable home roots %v", home, homeRoots))
 			continue
 		}
 		check := checkHome(home, account.UID)
+		inspected[name] = true
 		if check.State == HomeUntrusted {
 			// The mode of a home is the user's to change: it must not
 			// change the identity, and so the profile, the gateway gives
@@ -525,6 +552,8 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				// own home's mode: keep the rows so the guardian reports
 				// the trust failure instead of silently dropping them.
 				keep[name] = struct{}{}
+				delete(inspected, name)
+				notInspected[name] = check.Reason
 				skip(check.Reason + "; keeping the existing enrollment")
 				continue
 			}
@@ -552,19 +581,53 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		}
 		var versions, reasons map[string]string
 		var surfaces map[string][]connector.AgentSurface
+		var privateInstalls []PrivateAgentInstall
+		discoveryFailed := false
 		surfacesKnown := false
 		if check.State == HomeAvailable && opts.DiscoverSurfaces != nil {
-			found, err := opts.DiscoverSurfaces(ctx, account, append(append([]string{}, perUser...), surfaceOnly...))
+			all := append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...)
+			found, err := opts.DiscoverSurfaces(ctx, account, all)
 			if err != nil {
+				discoveryFailed = true
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
 			}
 			versions, reasons, surfaces = found.Versions, found.Reasons, found.Surfaces
+			privateInstalls = found.PrivateInstalls
 			surfacesKnown = err == nil
 		} else if check.State == HomeAvailable && opts.Discover != nil {
 			var err error
-			versions, reasons, err = opts.Discover(ctx, account, perUser)
+			all := append(append(append([]string{}, perUser...), surfaceOnly...), machineInspect...)
+			versions, reasons, err = opts.Discover(ctx, account, all)
 			if err != nil {
+				discoveryFailed = true
 				logfSafely(opts.Logger, name, fmt.Sprintf("version discovery failed; keeping known rows: %v", err))
+			}
+		}
+		if discoveryFailed {
+			// The worker also owns the private-install scan for per-user
+			// connectors. A failed worker cannot prove any of its agents absent.
+			for _, conn := range append(append([]string{}, machineInspect...), perUser...) {
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+					Code:   UnprotectedCodeInstallScanIncomplete,
+					Reason: "the account's agent versions and private installs could not be inspected this cycle"})
+			}
+		}
+		for _, conn := range machineInspect {
+			if version := versions[conn]; version != "" {
+				if refused := unixNewRowVersionRefused(conn, version); refused != "" {
+					report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+						Version: version, Code: UnprotectedCodeHookContractUnverified,
+						Reason: refused + "; this installed copy may ignore managed hooks and the version floor, so its tool calls are not protected"})
+				}
+			} else if reason := reasons[conn]; UnixAgentInstalledWithoutVersion(reason) {
+				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+					Code: UnprotectedCodeHookContractUnverified, Reason: reason + "; its managed hook contract cannot be verified"})
+			}
+		}
+		for _, install := range privateInstalls {
+			if agent, ok := privateInstallUnprotected(install); ok {
+				agent.User, agent.UID = name, intPointer(account.UID)
+				report.Unprotected = append(report.Unprotected, agent)
 			}
 		}
 		report.Unprotected = append(report.Unprotected, applyKiroIDESurface(name, account.UID, versions, reasons)...)
@@ -789,6 +852,31 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 	for key := range opts.State.Misses {
 		if _, known := previous[key]; !known {
 			delete(opts.State.Misses, key)
+		}
+	}
+	// An enrolled account whose installs this cycle could not inspect is
+	// incomplete, never silently clean: under manifest enrollment every
+	// enabled target (an unresolved or renumbered account included),
+	// otherwise a known account kept through a failed lookup or an
+	// untrusted home.
+	for _, user := range authored.users() {
+		if inspected[user] || hasKey(exclude, user) || hasKey(exempt, user) || authored.excludedByUID(exclude, exempt, user) {
+			continue
+		}
+		if _, gone := missing[user]; gone {
+			continue // no such account: nothing it could run
+		}
+		why, kept := notInspected[user]
+		if !manifestMode && !kept {
+			continue
+		}
+		if why == "" {
+			why = "the account does not resolve to the uid the manifest names"
+		}
+		for _, conn := range authored.connectors(user) {
+			report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: user, UID: authored.uid(user), Connector: conn,
+				Code:   UnprotectedCodeInstallScanIncomplete,
+				Reason: "this enrolled account's agent installs could not be inspected this cycle (" + why + "), so an unsupported copy it runs would go unreported"})
 		}
 	}
 	withRows := map[string]struct{}{}
@@ -1720,4 +1808,89 @@ func SaveUnixEnumeratorState(path string, state *UnixEnumeratorState) error {
 		return err
 	}
 	return os.Rename(tmpPath, path)
+}
+
+// unixEnrolledSubjectSet holds the accounts a manifest enrolls: the users of
+// its enabled rows, with the uid each row names and its connectors.
+type unixEnrolledSubjectSet map[string]*unixEnrolledSubject
+
+type unixEnrolledSubject struct {
+	uids       map[int]bool
+	connectors []string
+}
+
+func unixEnrolledSubjects(previous map[string]ManifestTarget) unixEnrolledSubjectSet {
+	out := unixEnrolledSubjectSet{}
+	for _, target := range previous {
+		user := strings.TrimSpace(target.User)
+		if user == "" || !target.IsEnabled() {
+			continue
+		}
+		subject := out[user]
+		if subject == nil {
+			subject = &unixEnrolledSubject{uids: map[int]bool{}}
+			out[user] = subject
+		}
+		if target.UID != nil {
+			subject.uids[*target.UID] = true
+		}
+		if conn := strings.ToLower(strings.TrimSpace(target.Connector)); conn != "" && !connectorListed(subject.connectors, conn) {
+			subject.connectors = append(subject.connectors, conn)
+		}
+	}
+	for _, subject := range out {
+		sort.Strings(subject.connectors)
+	}
+	return out
+}
+
+// names reports whether an enabled row enrolls account name with uid. A
+// row that names no uid enrolls the name.
+func (s unixEnrolledSubjectSet) names(name string, uid int) bool {
+	subject := s[name]
+	return subject != nil && (len(subject.uids) == 0 || subject.uids[uid])
+}
+
+func (s unixEnrolledSubjectSet) users() []string {
+	out := make([]string, 0, len(s))
+	for user := range s {
+		out = append(out, user)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (s unixEnrolledSubjectSet) connectors(user string) []string {
+	if subject := s[user]; subject != nil {
+		return subject.connectors
+	}
+	return nil
+}
+
+// uid is the uid the rows of user name when they all name the same one.
+func (s unixEnrolledSubjectSet) uid(user string) *int {
+	subject := s[user]
+	if subject == nil || len(subject.uids) != 1 {
+		return nil
+	}
+	for uid := range subject.uids {
+		return intPointer(uid)
+	}
+	return nil
+}
+
+// excludedByUID reports whether exclude_users or exempt_users names a uid
+// the rows of user enroll.
+func (s unixEnrolledSubjectSet) excludedByUID(exclude, exempt map[string]struct{}, user string) bool {
+	subject := s[user]
+	if subject == nil {
+		return false
+	}
+	for uid := range subject.uids {
+		text := strconv.Itoa(uid)
+		if hasKey(exclude, text) || hasKey(exempt, text) {
+			return true
+		}
+	}
+	return false
 }

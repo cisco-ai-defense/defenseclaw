@@ -119,7 +119,7 @@ def test_doctor_failure_for_a_removed_destination_is_not_a_current_failure() -> 
     model.set_observability_status(_status(_export("local-sqlite", "sqlite")))
     messages = [notice.message for notice in model.build_notices(now=NOW)]
     assert not any("Doctor found" in message or "failed outcome" in message for message in messages)
-    assert any("no longer exist - press [d] to refresh" in message for message in messages)
+    assert any("1 removed destination(s) - press [d] to refresh" in message for message in messages)
     box = model.doctor_box(now=NOW)
     assert "1 stale" in box.summary_parts
     assert box.checks[0].badge == "STALE" and "destination removed" in box.checks[0].detail

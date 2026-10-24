@@ -36,7 +36,7 @@ Paths are under `/opt/cisco/defenseclaw` unless shown in full.
 | Logs | `/Library/Logs/Cisco/DefenseClaw`, gateway logs in `gateway/` | `root`, `0755`; `gateway/` is `_defenseclaw`, `0750` |
 | LaunchDaemons | `/Library/LaunchDaemons/com.cisco.defenseclaw.*.plist` | `root`, `0644` |
 | Sandbox launcher | `/usr/local/bin/defenseclaw`, a link to `defenseclaw-gateway` that offers users only the `sandbox` commands | `root`, `0755` |
-| Sandbox LaunchAgents | `/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.plist` and `com.cisco.defenseclaw.openshell-gateway.plist`, run as each signed-in user ([Sandboxes](/docs/enterprise/runtime/sandboxes)) | `root`, `0644` |
+| Sandbox LaunchAgents | `/Library/LaunchAgents/com.cisco.defenseclaw.sandbox.<tag>.plist` and `com.cisco.defenseclaw.openshell-gateway.<tag>.plist`, run as each signed-in user. `<tag>` is the first 12 digits of the gateway binary's SHA-256, so each upgrade installs both agents under new labels and removes the plists of the earlier labels; releases before 1.0.4 used the labels without a tag ([Sandboxes](/docs/enterprise/runtime/sandboxes)) | `root`, `0644` |
 | Sandbox state | `runtime/sandbox/`, and `etc/openshell/gateway.toml` when `enterprise.openshell` is set | `_defenseclaw`, `0600` files; `root` |
 
 The gateway runs as `_defenseclaw`, a hidden account and group the lifecycle

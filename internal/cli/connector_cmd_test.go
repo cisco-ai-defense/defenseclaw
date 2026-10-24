@@ -401,6 +401,8 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 		err = runConnectorPruneOrphans(cmd, nil)
 	case "reconcile":
 		err = runConnectorReconcile(cmd, nil)
+	case "check-agent-settings":
+		err = runConnectorCheckAgentSettings(cmd, nil)
 	default:
 		t.Fatalf("unknown subcommand for harness: %s", sub)
 	}
@@ -522,7 +524,9 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	}
 	stdout, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
 	assertConnectorReconcileStderr(t, "codex", stderr)
-	if !strings.Contains(stdout, `"fail_mode":"closed"`) {
+	// A per-user outage mode follows the policy tier (default: open), not
+	// the saved hook_fail_mode (oss-outage-open).
+	if !strings.Contains(stdout, `"fail_mode":"open"`) {
 		t.Fatalf("reconcile output = %s", stdout)
 	}
 	if _, err := os.Stat(codexPath); err != nil {
@@ -556,9 +560,10 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	if !bytes.Equal(claudeAfter, claudeBefore) {
 		t.Fatalf("peer Claude registration changed: %s", claudeAfter)
 	}
+	// The lock records the outage mode: the default tier's open.
 	lock := connector.LoadHookContractLockEntry(dataDir, "codex")
-	if lock.HookFailMode != "closed" {
-		t.Fatalf("lock fail mode = %q, want closed", lock.HookFailMode)
+	if lock.HookFailMode != "open" {
+		t.Fatalf("lock fail mode = %q, want open", lock.HookFailMode)
 	}
 }
 
@@ -743,8 +748,8 @@ func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh
 			t.Fatalf("%s parse shared runtime state: %v", stage, err)
 		}
 		if runtimeState.Version != 2 ||
-			runtimeState.FailModes["claudecode"] != "closed" ||
-			runtimeState.FailModes["codex"] != "closed" {
+			runtimeState.FailModes["claudecode"] != "open" ||
+			runtimeState.FailModes["codex"] != "open" {
 			t.Fatalf("%s lost Claude runtime state: %+v", stage, runtimeState)
 		}
 		assertMixedHookContractsCurrent(t, dataDir, home)
@@ -1168,7 +1173,9 @@ func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *test
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	closed := assertMixedHookContractsCurrent(t, dataDir, home)
-	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "closed" {
+	// The saved value does not move a per-user outage mode: both stay in
+	// the default tier's open (oss-outage-open).
+	if closed.Connectors["claudecode"].HookFailMode != "open" || closed.Connectors["codex"].HookFailMode != "open" {
 		t.Fatalf("per-user lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
 	}
 	codexAfter, err := os.ReadFile(codexPath)
@@ -1217,8 +1224,9 @@ func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *test
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	assertMixedHookContractsCurrent(t, dataDir, home)
 
-	// Repeatedly edit legacy open values on one connector. Every resulting
-	// lock must still validate both registrations with effective closed mode.
+	// Repeatedly edit saved values on one connector. Every resulting lock
+	// must still validate both registrations with the default tier's outage
+	// mode, which no saved value moves (oss-outage-open).
 	claudeMode = cfg.Guardrail.Connectors["claudecode"]
 	claudeMode.HookFailMode = "open"
 	cfg.Guardrail.Connectors["claudecode"] = claudeMode
@@ -1230,8 +1238,8 @@ func TestConnectorReconcileLegacyOpenEditsKeepBothClosedContractsCurrent(t *test
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
 	assertConnectorReconcileStderr(t, "codex", stderr)
 	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
-	if reverse.Connectors["claudecode"].HookFailMode != "closed" || reverse.Connectors["codex"].HookFailMode != "closed" {
-		t.Fatalf("legacy open edit escaped per-user close: %+v", reverse.Connectors)
+	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "open" {
+		t.Fatalf("a saved value moved the per-user outage mode: %+v", reverse.Connectors)
 	}
 	for _, mode := range []string{"closed", "open", "closed", "open"} {
 		claudeMode = cfg.Guardrail.Connectors["claudecode"]

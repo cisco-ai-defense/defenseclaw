@@ -99,6 +99,12 @@ def validate_destination(dest: str) -> str:
     """The local SSRF guard can enforce only explicit public IP literals."""
     if not isinstance(dest, str):
         raise ValueError("destination allowlist entries must be strings")
+    if dest.startswith('[') and dest.endswith(']'):
+        # dclaw_policy_check_destination compares the destination host with
+        # brackets removed, so a bracketed entry would never match.
+        raise ValueError(f"Destination '{dest}': write the IPv6 literal without brackets "
+                         f"('{dest[1:-1]}'); the device compares each destination's host "
+                         "with its brackets removed")
     try:
         address = ipaddress.ip_address(dest)
     except ValueError as exc:

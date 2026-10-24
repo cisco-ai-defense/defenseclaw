@@ -32,7 +32,7 @@ func RemoveUnusedSharedHookRuntime(dataDir string) error {
 		return nil
 	}
 	lockPath := filepath.Join(dataDir, hookContractLockFile)
-	if data, err := os.ReadFile(lockPath); err == nil {
+	if data, err := readConnectorStateFile(lockPath); err == nil {
 		var lock hookContractLock
 		if json.Unmarshal(data, &lock) != nil || len(lock.Connectors) > 0 {
 			return nil
@@ -50,11 +50,13 @@ func RemoveUnusedSharedHookRuntime(dataDir string) error {
 			return nil // a connector's runtime record: still in use
 		}
 	}
-	if data, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName)); err == nil {
+	if data, err := readConnectorStateFile(filepath.Join(hookDir, hookConfigSidecarName)); err == nil {
 		var state hookConfigSidecar
 		if json.Unmarshal(data, &state) != nil || len(state.FailModes) > 0 {
 			return nil
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read hook config sidecar: %w", err)
 	}
 	names := append(append([]string{hookConfigSidecarName}, genericHookScripts...), hookHelperScripts...)
 	var errs []error

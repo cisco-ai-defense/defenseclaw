@@ -33,9 +33,15 @@ const derivedHookHeader = "# defenseclaw-derived:"
 
 // derivedHookLine is the header line for a connector script rendered from data.
 func derivedHookLine(data templateData) string {
+	// A per-user script bakes closed for every failure; the mode its config
+	// chose is its outage mode (OutageFailMode), which doctor compares.
+	mode := data.FailMode
+	if data.OutageFailMode != "" {
+		mode = data.OutageFailMode
+	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("defenseclaw-hook-render-v1\nconnector=%s\nfail_mode=%s\napi_addr=%s\n",
-		data.ConnectorName, data.FailMode, data.APIAddr)))
-	return fmt.Sprintf("%s sha256=%s fail_mode=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]), data.FailMode)
+		data.ConnectorName, mode, data.APIAddr)))
+	return fmt.Sprintf("%s sha256=%s fail_mode=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]), mode)
 }
 
 // withDerivedHeader inserts the derived-from line after the shebang and the
@@ -74,9 +80,22 @@ func renderHookTemplate(name string, data templateData) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read hook template %s: %w", name, err)
 	}
+	if data.Managed && !data.SecureClient && !data.Sandbox {
+		data.ManagedHTTPFailureSH = managedShellHTTPFailure
+	}
 	rendered, err := renderTemplate(string(content), data)
 	if err != nil {
 		return nil, fmt.Errorf("render hook %s: %w", name, err)
+	}
+	if !data.Managed && !data.Sandbox && !data.SecureClient && strings.HasSuffix(name, ".sh") && !strings.HasPrefix(name, "_") {
+		// Only a managed render may select the hook socket or managed fail mode.
+		// Clear agent-inherited markers before any per-user bootstrap branch;
+		// the managed and Secure Client render bytes stay unchanged.
+		lines := strings.SplitN(rendered, "\n", 3)
+		if len(lines) != 3 || !strings.HasPrefix(lines[1], hookSchemaVersionMarker) {
+			return nil, fmt.Errorf("render hook %s: missing schema marker", name)
+		}
+		rendered = lines[0] + "\n" + lines[1] + "\nunset DEFENSECLAW_MANAGED_HOOK DEFENSECLAW_HOOK_SOCKET DEFENSECLAW_HOOK_SOCKET_UID\n" + lines[2]
 	}
 	return []byte(rendered), nil
 }

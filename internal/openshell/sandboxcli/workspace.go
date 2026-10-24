@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -673,10 +674,27 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 	base := a.copyBaseOf(sb)
 	switch {
 	case res != nil:
-		// The copy of the stopped sandbox, as its last stop left it: a
-		// session or `sandbox start` may have started it during this pull,
-		// so it is checked again under the sandbox's exclusive gate.
-		defer func() { a.markStillStopped(context.WithoutCancel(ctx), api, sb, base, handedOver, res.Result) }()
+		defer func() {
+			// A connect may start the copy while this pull applies a saved
+			// read. Do not record it as stopped or omit the attached session.
+			// This check is bounded because the gateway can go away too.
+			checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			defer cancel()
+			now, err := api.Get(checkCtx, o.Name)
+			if err != nil {
+				return
+			}
+			if now.Phase == "ready" {
+				if n, err := a.attachedSessions(o.Name); err == nil && n > 0 {
+					a.note(o.Name + " keeps running: " + attachedText(o.Name, n) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[n == 1] + ": " + CommandName + " stop " + o.Name)
+				}
+				return
+			}
+			// The copy of the stopped sandbox, as its last stop left it: a
+			// session or `sandbox start` may have started it during this pull,
+			// so it is checked again under the sandbox's exclusive gate.
+			a.markStillStopped(context.WithoutCancel(ctx), api, sb, base, handedOver, res.Result)
+		}()
 	case sb.Phase != "ready":
 		a.note("starting " + o.Name + " to read its work…")
 		a.forgetStoppedCopy(o.Name)

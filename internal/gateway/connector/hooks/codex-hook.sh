@@ -12,7 +12,40 @@
 # (the hook still posts to the gateway, it just starts a new root
 # span).
 set -euo pipefail
-
+{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# A failure before the helpers load (a hook path that does not resolve, a
+# missing or broken _hardening.sh, a set -e error) blocks with exit 2
+# in fail mode closed, under strict availability and while this account's
+# installer holds its data directory; fail mode open keeps the exit status.
+# The installed mode decides (GAP-0315).
+# defenseclaw_harden_env replaces this trap with the hook's own.
+_DC_BOOT_FAIL_MODE="{{.FailMode}}"
+defenseclaw_boot_fails_closed() {
+  [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then exit 2; fi' EXIT
+{{end}}
 # Windows: HOME may be unset when agents spawn hooks. Fall back to USERPROFILE.
 HOME="${HOME:-${USERPROFILE:-$(cd ~ 2>/dev/null && pwd)}}"
 export HOME
@@ -60,6 +93,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage.
   _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || _DC_HOME_FAIL_MODE="closed"
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
   if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
@@ -109,7 +143,8 @@ BOUND_EVENT=
 BOUND_CONTRACT=
 
 fail_binding() {
-  local reason="$1"
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  local reason="$1"
 {{if and .Managed (not .SecureClient)}}  # A managed binding error is integrity, not an outage: closed in every
   # fail mode, as in the native runner.
   defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response closed
@@ -155,13 +190,14 @@ DEFENSECLAW_HOOK_CONNECTOR="codex"
 DEFENSECLAW_HOOK_NAME="codex-hook"
 export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 
-PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
-{{end}}
-  [ "$FAIL_MODE" = "open" ] ||
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
+# fail mode: the agent chooses the size.
+{{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
-  if [ "$FAIL_MODE" != "open" ]; then
+  if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     printf '{"decision":"block","reason":"DefenseClaw hook payload too large"}\n'
     exit 2
   fi
@@ -214,7 +250,8 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 # refused, the request timed out, or the gateway answered with 5xx.
 # Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
-  # A blocked Stop only keeps Codex running the turn (#1140).
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  # A blocked Stop only keeps Codex running the turn (#1140).
   if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "$1" transport
   fi
@@ -239,11 +276,13 @@ fail_unreachable() {
 {{end}}  exit 0
 }
 
-# Response-layer failure: gateway answered but the answer was bad
-# (auth failure, malformed JSON, missing action). A managed standalone
-# administrator's open choice covers an outage only.
+# A gateway response that cannot be used is a failed check, not an outage.
 fail_response() {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and (not .SecureClient) (not .Sandbox)}}  # Outside Secure Client the open fail mode covers a gateway outage only
+  # (the service not running, restarting or giving no answer in time). A
+  # refusal, an error status or an unusable answer blocks.
+  FAIL_MODE="closed"
 {{end}}  local reason
   reason="$(defenseclaw_response_failure_reason "$1")"
   [ "$FAIL_MODE" = "open" ] ||
@@ -316,7 +355,7 @@ unset API_TOKEN PAYLOAD{{else}}HOOK_MAX_TIME=10
   HOOK_MAX_TIME=2
 fi
 
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
   # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
@@ -359,7 +398,11 @@ codex_gateway_post_response() {
 }
 CURL_STATUS=0
 RESPONSE=$(codex_gateway_post) || CURL_STATUS=$?
-# A refused or dropped connection means this account's gateway is restarting
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}if [ "$CURL_STATUS" -ne 0 ]; then
+  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+fi
+{{end}}# A refused or dropped connection means this account's gateway is restarting
 # or not running (after a reboot, for example): send the call again for up to
 # 3 seconds, starting the gateway after a refusal. SessionEnd has no time for
 # it. See defenseclaw_await_gateway in _hardening.sh.
@@ -371,21 +414,28 @@ if [ "$CURL_STATUS" -ne 0 ] && [ "$BOUND_EVENT" != "SessionEnd" ]; then
   fi
 fi
 if [ "$CURL_STATUS" -eq 0 ]; then
-  defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
-fi
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # The gateway answered 429, so it is up: a resend that fails after it is
+  # no outage in a standalone managed hook.
+  defenseclaw_retry_busy codex_gateway_post_response || fail_response "gateway returned HTTP 429"
+{{else}}  defenseclaw_retry_busy codex_gateway_post_response || CURL_STATUS=$?
+{{end}}fi
 API_TOKEN=
 PAYLOAD=
 AUTH_HEADER_ARGS=()
 unset API_TOKEN PAYLOAD
 if [ "$CURL_STATUS" -ne 0 ]; then
-  fail_unreachable "gateway unreachable"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+{{end}}  fail_unreachable "gateway unreachable"
 fi{{end}}
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
 
-# A managed standalone hook treats any HTTP error status as an unusable
-# answer. Other deliveries keep their 5xx transport failure handling.
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
+{{else}}# 5xx (server error) is treated as transport — the gateway hit an
+# infrastructure problem, not a policy verdict. 4xx falls through to
+# response-layer handling so auth/payload bugs surface loudly.
 if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
@@ -394,7 +444,7 @@ elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/nul
 {{end}}
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
-fi
+fi{{end}}
 
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"

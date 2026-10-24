@@ -746,13 +746,18 @@ func claudeCodeToolCallLifecycle() ToolCallLifecycleContract {
 
 func hermesToolCallLifecycle() ToolCallLifecycleContract {
 	return ToolCallLifecycleContract{
-		Version:                           ToolCallLifecycleContractVersion,
-		PreProposalEvents:                 []string{"pre_tool_call"},
-		AuthoritativeSuccessEvents:        []string{"post_tool_call"},
-		AuthoritativeFailureEvents:        []string{"post_tool_call"},
-		AuthoritativeDenialEvents:         []string{"post_tool_call"},
-		AuthoritativePendingDiscardEvents: []string{},
-		AuthoritativeTerminalEvents:       []string{"on_session_end", "on_session_finalize", "on_session_reset"},
+		Version:                    ToolCallLifecycleContractVersion,
+		PreProposalEvents:          []string{"pre_tool_call"},
+		AuthoritativeSuccessEvents: []string{"post_tool_call"},
+		AuthoritativeFailureEvents: []string{"post_tool_call"},
+		AuthoritativeDenialEvents:  []string{"post_tool_call"},
+		// Hermes sends on_session_end when each turn ends; the session goes on
+		// in the next prompt with no on_session_start. Like Claude Code's
+		// Stop it discards only unfinished proposals, so a reviewed chain can
+		// span turns (rel-1-0-4 GAP-0599). on_session_finalize and
+		// on_session_reset end the session.
+		AuthoritativePendingDiscardEvents: []string{"on_session_end"},
+		AuthoritativeTerminalEvents:       []string{"on_session_finalize", "on_session_reset"},
 		InvocationIDAuthority:             ToolInvocationIDPairedID,
 		OutcomeAuthority:                  ToolOutcomeResultPayload,
 		StatefulEnforcementLevel:          StatefulToolPairedOutcomes,
@@ -776,7 +781,7 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 		},
 		Limitations: []string{
 			"Only pre_tool_call can block, and hook subprocess errors, timeouts, or malformed output fail open upstream.",
-			"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
+			"A post_tool_call commits success only when its documented extra.status is ok; error and blocked statuses must not advance state.",
 		},
 	}
 }
@@ -788,8 +793,8 @@ func hermesToolCallLifecycleV2() ToolCallLifecycleContract {
 		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/hermes_cli/plugins.py",
 	}
 	contract.Limitations = []string{
-		"Only pre_tool_call can block. Exit code 2 now blocks pre_tool_call; other non-zero exits still parse stdout. Timeouts and spawn errors fail open unless the hook spec sets fail_closed.",
-		"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
+		"Only pre_tool_call can block. Exit code 2 blocks pre_tool_call; Setup sets fail_closed on its v2 pre_tool_call entry outside Secure Client, so timeouts and spawn errors block. A killed hook can still fail open with a non-2 exit and empty stdout. Other events cannot block.",
+		"A post_tool_call commits success only when its documented extra.status is ok; error and blocked statuses must not advance state.",
 	}
 	return contract
 }

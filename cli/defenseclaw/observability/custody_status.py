@@ -655,12 +655,51 @@ def _verify_managed_backup(path: Path, connector: str, api_addr: str = "") -> st
             return "unverifiable"
     if actual == expected:
         return "verified"
+    if actual != "missing" and connector == "claudecode" and _managed_claude_env_intact(target, path.parents[2]):
+        return "verified"
     if actual != "missing" and _managed_otel_block_intact(target, connector, api_addr):
         # Codex itself writes to config.toml (a folder-trust decision adds
         # [projects."<dir>"]). Only DefenseClaw's exporter block matters
         # here, and it still has the shape DefenseClaw writes (GAP-1330).
         return "verified"
     return "drifted"
+
+
+def _managed_claude_env_intact(target: Path, data_dir: Path) -> bool:
+    """Compare exporter custody with the exact values Setup recorded.
+
+    Claude writes unrelated settings during ordinary sessions. A whole-file
+    hash change is harmless only while every managed value and intentional
+    absence, including the credential helper, still matches its snapshot.
+    """
+    if target.suffix.lower() != ".json":
+        return False
+    snapshot = data_dir / "claudecode_backup.json"
+    try:
+        info = snapshot.lstat()
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= _MAX_BACKUP_BYTES:
+            return False
+        backup = json.loads(snapshot.read_text(encoding="utf-8"))
+        settings = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError, TypeError):
+        return False
+    if not isinstance(backup, dict) or not isinstance(settings, dict):
+        return False
+    managed = backup.get("managed_env")
+    absent = backup.get("managed_absent_env", [])
+    env = settings.get("env")
+    if (backup.get("env_backup_captured") is not True or not isinstance(managed, dict) or not managed
+            or not isinstance(env, dict) or not isinstance(absent, list)):
+        return False
+    if any(not isinstance(value, str) or env.get(key) != value for key, value in managed.items()):
+        return False
+    if any(not isinstance(key, str) or key in env for key in absent):
+        return False
+    if backup.get("otlp_headers_helper_captured") is True:
+        helper = backup.get("managed_otlp_headers_helper")
+        if not isinstance(helper, str) or (helper and settings.get("otelHeadersHelper") != helper):
+            return False
+    return True
 
 
 _OTEL_EXPORTERS = {"exporter": "logs", "trace_exporter": "traces", "metrics_exporter": "metrics"}

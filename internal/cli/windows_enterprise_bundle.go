@@ -56,10 +56,8 @@ const (
 	windowsBundleConfigName   = "bundle-config.yaml"
 	windowsBundleRollbackName = "bundle-rollback-config.yaml"
 	windowsBundleLockName     = "bundle.lock"
-	// windowsBundleStagedAnchorsName is the private stage, under the
-	// lifecycle directory, of the TRUSTANCHORS= of a BUNDLE= run: the bundle
-	// is verified against it, and finish commits it over the installed
-	// anchor file only once the bundle is confirmed (GAP-0106).
+	// windowsBundleStagedAnchorsName is the private verification stage.
+	// Before the config is installed, it moves to a receipt-specific path.
 	windowsBundleStagedAnchorsName = "bundle-staged-anchors.json"
 	windowsBundleMaxConfig         = 4 << 20
 	windowsBundleMaxAnchors        = 256 << 10
@@ -78,6 +76,16 @@ const (
 	// gateway policy after a successful transaction (a hot reload lags).
 	windowsBundlePolicyWaits = 4
 )
+
+func windowsBundlePendingReportMessage(report enterprisebundle.SettleReport) string {
+	for _, id := range report.Pending {
+		if reason := report.PendingReasons[id]; reason != "" {
+			return fmt.Sprintf("%d policy bundle(s) remain applied and pending; receipt %s cannot be sealed because %s; repair the missing confirmation prerequisite with a signed bundle delivery",
+				len(report.Pending), id, boundedPolicyMessage(reason))
+		}
+	}
+	return fmt.Sprintf(windowsBundlePendingMessage, len(report.Pending))
+}
 
 var errWindowsBundleStoreBusy = errors.New("another policy bundle run holds the bundle store; retry when it ends")
 
@@ -173,7 +181,7 @@ func settleWindowsBundleStatusLocked(ctx context.Context, layout managed.Standal
 		}
 	}
 	if !pending {
-		return syncWindowsBundleMarker(driver.Store)
+		return windowsBundleSyncMarker(driver.Store)
 	}
 	installed, err := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig)
 	if err != nil {
@@ -183,7 +191,7 @@ func settleWindowsBundleStatusLocked(ctx context.Context, layout managed.Standal
 	if err != nil || !confirmed {
 		return err
 	}
-	return syncWindowsBundleMarker(driver.Store)
+	return windowsBundleSyncMarker(driver.Store)
 }
 
 // A crash between confirming the receipt and updating the MDM marker is
@@ -227,6 +235,11 @@ func settleWindowsAppliedBundle(driver *enterprisebundle.Driver, installed []byt
 		}
 		if err := enterprisebundle.ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err == nil {
 			_, err = driver.Store.Confirm(rc)
+			if errors.Is(err, enterprisebundle.ErrConfirmationPrerequisiteMissing) {
+				// The gateway proves the config, but a legacy receipt may have
+				// lost its trust anchors. Status still reports it as applied.
+				continue
+			}
 			return err == nil, err
 		}
 	}
@@ -266,12 +279,13 @@ type windowsBundleRun struct {
 	sessions *enterprisestatus.SessionRestartStatus
 	// previous is the installed config.yaml before the run: the last good
 	// config while no bundle is current.
-	previous       []byte
-	warnings       []enterprisebundle.Warning
-	anchorStage    string
-	anchorPath     string
-	anchorPrevious []byte
-	anchorExisted  bool
+	previous         []byte
+	rollbackWriteErr error
+	warnings         []enterprisebundle.Warning
+	anchorStage      string
+	anchorPath       string
+	anchorPrevious   []byte
+	anchorExisted    bool
 	// previousGeneration is config.generation.json as the run found it.
 	previousGeneration configwrite.GenerationState
 	// anchorOnly records the anchor file a TRUSTANCHORS= run without
@@ -323,19 +337,48 @@ func windowsStagedAnchorsRefusalCode(result *enterprisestatus.Result, p *enterpr
 }
 
 func (run *windowsBundleRun) release() {
-	// A run that returned after prepare without finish installed none of
-	// the anchors it staged.
-	_ = run.refuseStagedAnchors(string(enterprisebundle.CodeInterrupted))
+	// A transaction can commit its config before Finish advances the receipt
+	// from staged to applied. Preserve its anchors until settle classifies
+	// the committed receipt, even when this run exits before Finish.
+	pending := run.anchorReceiptPending()
+	if !pending {
+		_ = run.refuseStagedAnchors(string(enterprisebundle.CodeInterrupted))
+	}
 	warnChangeReleaseUnflushed(run.stderr, run.anchorReservation.Release())
 	run.anchorReservation = nil
-	if run.anchorStage != "" {
+	if run.anchorStage != "" && !pending {
 		_ = os.Remove(run.anchorStage)
 		run.anchorStage = ""
+		if run.prepared != nil && run.prepared.Receipt != nil {
+			_ = cleanupWindowsReceiptAnchors(run.layout, run.prepared.Receipt)
+		}
 	}
 	if run.unlock != nil {
 		run.unlock()
 		run.unlock = nil
 	}
+}
+
+func (run *windowsBundleRun) anchorReceiptPending() bool {
+	if run.prepared == nil || run.prepared.Receipt == nil || run.anchorStage == "" {
+		return false
+	}
+	rc := run.prepared.Receipt
+	if rc.State == enterprisebundle.StateApplied {
+		return true
+	}
+	if rc.State != enterprisebundle.StateStaged {
+		return false
+	}
+	installed, err := safefile.ReadRegularFileBounded(run.layout.ConfigPath, windowsBundleMaxConfig)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if err != nil || run.driver == nil {
+		return true
+	}
+	committed, err := run.driver.CommittedPendingConfig(installed)
+	return err != nil || committed != nil && committed.ReceiptID == rc.ReceiptID
 }
 
 func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.Driver {
@@ -350,6 +393,13 @@ func newWindowsBundleDriver(layout managed.StandaloneLayout) *enterprisebundle.D
 	store.EnsurePrivateDirectory = windowsBundleEnsurePrivateDirectory
 	store.PublishPrivateFile = windowsBundlePublishPrivateFile
 	store.ReceiptEventReported = func(id string) bool { return enterprisestatus.ReceiptEventReported(layout.DataDir, id) }
+	store.BeforeConfirm = func(rc *enterprisebundle.Receipt) error {
+		_, err := commitWindowsReceiptAnchors(layout, rc, nil)
+		return err
+	}
+	store.AfterConfirm = func(rc *enterprisebundle.Receipt) error { return cleanupWindowsReceiptAnchors(layout, rc) }
+	store.BeforeFail = func(rc *enterprisebundle.Receipt) error { return restoreFailedWindowsReceiptAnchors(layout, rc) }
+	store.AfterFail = func(rc *enterprisebundle.Receipt) error { return cleanupWindowsReceiptAnchors(layout, rc) }
 	return &enterprisebundle.Driver{
 		Store:      store,
 		ConfigPath: layout.ConfigPath,
@@ -720,16 +770,25 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		recordWindowsEarlyAnchorsRefusal(cmd, opts, code)
 		return refuse(code, message)
 	}
-	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
-		return refuseArguments("invalid_arguments", "--refuse-capability-loss requires --bundle")
+	if opts.refuseCapabilityLoss && action != "ensure" {
+		if opts.bundlePath == "" {
+			return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle) and is valid only with Setup /ensure; nothing was changed: deliver both with Setup /ensure (defenseclaw enterprise windows ensure)")
+		}
+		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) is valid only with Setup /ensure; nothing was changed: deliver BUNDLE= and REFUSECAPABILITYLOSS=1 with Setup /ensure (defenseclaw enterprise windows ensure)")
 	}
 	if requested && action != "ensure" {
-		return refuseArguments("invalid_arguments", "--bundle and --trust-anchors are valid only with ensure")
+		return refuseArguments("invalid_arguments", "BUNDLE= (--bundle) and TRUSTANCHORS= (--trust-anchors) are valid only with ensure; nothing was changed: deliver them with Setup /ensure (defenseclaw enterprise windows ensure)")
 	}
-	if opts.bundlePath != "" && strings.TrimSpace(opts.configPath) != "" {
+	if opts.refuseCapabilityLoss && opts.bundlePath == "" {
+		return refuseArguments("invalid_arguments", "REFUSECAPABILITYLOSS=1 (--refuse-capability-loss) requires BUNDLE= (--bundle); nothing was changed: deliver both with Setup /ensure (defenseclaw enterprise windows ensure)")
+	}
+	// --mode/--connector is the QA shorthand the installer renders a
+	// config from: a config all the same (Setup refused it with these too).
+	configGiven := strings.TrimSpace(opts.configPath) != "" || opts.mode != "" || opts.connector != ""
+	if opts.bundlePath != "" && configGiven {
 		return refuseArguments("invalid_arguments", "BUNDLE= (--bundle) cannot be combined with CONFIG= (--config): the signed bundle carries the config")
 	}
-	if opts.trustAnchors != "" && strings.TrimSpace(opts.configPath) != "" {
+	if opts.trustAnchors != "" && configGiven {
 		// Installing the anchors puts the computer in bundle mode, which
 		// refuses CONFIG=; installing them first would let this one run
 		// apply an unsigned config past that check.
@@ -792,7 +851,11 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	}
 	unlock, err := lockWindowsBundleStoreWithin(ctx, layout.LifecycleDir, opts.bundleLockWait)
 	if err != nil {
-		return refuseAnchors("lifecycle_busy", err.Error())
+		if errors.Is(err, errWindowsBundleStoreBusy) {
+			return refuseAnchors("lifecycle_busy", err.Error())
+		}
+		failure := enterprisebundle.StateWriteError("cannot prepare the policy bundle lock", err)
+		return refuseAnchors(string(failure.Code), failure.Detail)
 	}
 	run = &windowsBundleRun{ctx: ctx, layout: layout, driver: driver, unlock: unlock, stderr: cmd.ErrOrStderr()}
 	opts.bundle = run
@@ -805,7 +868,8 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		}
 	}()
 	if err := windowsBundleEnsureDirectory(layout); err != nil {
-		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot protect the policy bundle directory: "+err.Error())
+		failure := enterprisebundle.StateWriteError("cannot protect the policy bundle directory", err)
+		return refuseAnchors(string(failure.Code), failure.Detail)
 	}
 	if opts.trustAnchors != "" {
 		// An install this computer could not audit is not made: the spool
@@ -813,7 +877,8 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		// until the event is written.
 		reservation, err := reserveWindowsChange(layout, enterprisestatus.ChangeKindTrustAnchors, enterprisestatus.ChangeActionInstall, "")
 		if err != nil {
-			return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot record the trust anchor change: "+err.Error())
+			failure := enterprisebundle.StateWriteError("cannot record the trust anchor change", err)
+			return refuseAnchors(string(failure.Code), failure.Detail)
 		}
 		run.anchorReservation = reservation
 		if opts.bundlePath != "" {
@@ -836,7 +901,8 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		installed, replaced, err := installWindowsBundleAnchors(opts.trustAnchors, driver.AnchorsPath)
 		if err != nil {
 			code := string(windowsBundleCode(err, enterprisebundle.CodeAnchorInsecure))
-			failed := code == string(enterprisebundle.CodeStateInvalid)
+			// A write that failed (on a full volume too) is a failed change.
+			failed := code == string(enterprisebundle.CodeStateInvalid) || code == string(enterprisebundle.CodeDiskFull)
 			message := "the trust anchors were not installed: " + err.Error()
 			if replaced && run.anchorOnly != nil {
 				// The installed file was replaced and then failed its
@@ -845,8 +911,9 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 				// left installed, never as refused.
 				failed = true
 				if restoreErr := restoreWindowsBundleAnchors(anchorPath, run.anchorOnly.existed, run.anchorOnly.previous); restoreErr != nil {
-					code = "anchor_restore_failed"
-					message += "; the previous trust anchors could not be put back: " + restoreErr.Error()
+					restoreCode, detail := windowsBundleAnchorRestoreFailure(restoreErr)
+					code = restoreCode
+					message += "; the previous trust anchors could not be put back: " + detail
 				} else {
 					message += "; the previous trust anchors were put back"
 				}
@@ -884,12 +951,16 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 	driver.DeliveryID = opts.bundleDeliveryID
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(ctx))
 	if err != nil {
-		return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot settle the earlier bundle receipts: "+err.Error()+
-			"; nothing was failed or rolled back: run the same command again")
+		failure := enterprisebundle.StateWriteError("cannot settle the earlier bundle receipts", err)
+		message := failure.Detail
+		if failure.Code != enterprisebundle.CodeDiskFull {
+			message += "; nothing was failed or rolled back: run the same command again"
+		}
+		return refuseAnchors(string(failure.Code), message)
 	}
 	if n := len(report.Pending); n > 0 {
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: enterprisebundle.WarnBundlePending,
-			Message: fmt.Sprintf(windowsBundlePendingMessage, n)})
+			Message: windowsBundlePendingReportMessage(report)})
 	}
 	if len(report.Interrupted) > 0 {
 		run.warnings = append(run.warnings, enterprisebundle.Warning{Code: string(enterprisebundle.CodeInterrupted),
@@ -910,14 +981,33 @@ func prepareWindowsEnterpriseBundle(ctx context.Context, cmd *cobra.Command, act
 		run.warnings = append(run.warnings, prepared.Warnings...)
 	}
 	if err != nil {
-		return refuseAnchors(string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
+		return refuseAnchors(string(enterprisebundle.FailureCode(err)), windowsBundleNotApplied(prepared, err.Error(), windowsBundleHasCurrent(driver.Store)))
+	}
+	if prepared.Receipt != nil && run.anchorStage != "" {
+		if err := run.bindReceiptAnchors(); err != nil {
+			_ = driver.Store.Fail(prepared.Receipt, enterprisebundle.CodeStateInvalid, "cannot retain the verified trust anchors for this receipt")
+			return refuseAnchors(string(enterprisebundle.CodeStateInvalid), "cannot retain the verified trust anchors for this receipt: "+err.Error())
+		}
+		id := prepared.Receipt.ReceiptID
+		driver.Store.BeforeConfirm = func(rc *enterprisebundle.Receipt) error {
+			reservation := (*enterprisestatus.ChangeReservation)(nil)
+			if rc.ReceiptID == id {
+				reservation = run.anchorReservation
+			}
+			change, err := commitWindowsReceiptAnchors(layout, rc, reservation)
+			if err == nil && rc.ReceiptID == id {
+				run.anchorCommit = change
+			}
+			return err
+		}
 	}
 	path := filepath.Join(layout.LifecycleDir, windowsBundleConfigName)
 	if err := writeWindowsBundleAdminFile(path, prepared.Config); err != nil {
+		failure := enterprisebundle.StateWriteError("cannot write the rendered bundle config", err)
 		if prepared.Receipt != nil {
-			_ = driver.Store.Fail(prepared.Receipt, enterprisebundle.CodeApplyFailed, "cannot write the rendered bundle config")
+			_ = driver.Store.Fail(prepared.Receipt, failure.Code, "cannot write the rendered bundle config")
 		}
-		return refuseAnchors(string(enterprisebundle.CodeApplyFailed), "cannot write the rendered bundle config: "+err.Error())
+		return refuseAnchors(string(failure.Code), failure.Detail)
 	}
 	opts.configPath = path
 	// finish (or release) records the staged anchors from here.
@@ -993,7 +1083,11 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 	unlock, err := lockWindowsBundleStoreWithin(settle.ctx, layout.LifecycleDir, wait)
 	if err != nil {
 		if !errors.Is(err, errWindowsBundleStoreBusy) {
-			settle.warn(windowsBundleStateUnreadableWarning, "could not lock the policy bundle store to settle the receipts a killed run left: "+err.Error())
+			if failure := enterprisebundle.StateWriteError("could not lock the policy bundle store to settle the receipts a killed run left", err); failure.Code == enterprisebundle.CodeDiskFull {
+				settle.warn(string(failure.Code), failure.Detail)
+			} else {
+				settle.warn(windowsBundleStateUnreadableWarning, "could not lock the policy bundle store to settle the receipts a killed run left: "+err.Error())
+			}
 		}
 		return
 	}
@@ -1005,6 +1099,10 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 	}
 	report, rollback, err := driver.SettleRun(installed, windowsBundlePolicy(settle.ctx))
 	if err != nil {
+		if failure := enterprisebundle.StateWriteError("could not settle the policy bundle receipts a killed run left", err); failure.Code == enterprisebundle.CodeDiskFull {
+			settle.warn(string(failure.Code), failure.Detail)
+			return
+		}
 		settle.warn(windowsBundleStateUnreadableWarning, "could not settle the policy bundle receipts a killed run left: "+err.Error())
 		return
 	}
@@ -1013,7 +1111,7 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
 	}
 	if n := len(report.Pending); n > 0 {
-		settle.warn(enterprisebundle.WarnBundlePending, fmt.Sprintf(windowsBundlePendingMessage, n))
+		settle.warn(enterprisebundle.WarnBundlePending, windowsBundlePendingReportMessage(report))
 	}
 	if n := len(report.Completed); n > 0 {
 		settle.warn(enterprisebundle.WarnConfirmedAfterInterrupt, fmt.Sprintf(
@@ -1035,7 +1133,11 @@ func settleWindowsInterruptedBundles(settle *windowsBundleSettle, layout managed
 		settle.warn(windowsBundleUnconfirmedWarning, message)
 	}
 	if err := windowsBundleSyncMarker(driver.Store); err != nil {
-		settle.warn(windowsBundleMarkerFailedWarning, "the policy bundle receipts were settled, but the enterprise marker was not updated: "+err.Error())
+		if failure := enterprisebundle.StateWriteError("update the enterprise bundle marker", err); failure.Code == enterprisebundle.CodeDiskFull {
+			settle.warn(string(failure.Code), failure.Detail)
+		} else {
+			settle.warn(windowsBundleMarkerFailedWarning, "the policy bundle receipts were settled, but the enterprise marker was not updated: "+err.Error())
+		}
 	}
 }
 
@@ -1068,7 +1170,12 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 	if strings.TrimSpace(opts.configPath) == "" {
 		return false, nil
 	}
-	if _, err := os.Lstat(driver.AnchorsPath); err != nil {
+	bundleMode, modeErr := windowsBundleMode(driver)
+	if modeErr != nil {
+		return true, writeWindowsBundleRefusal(cmd, action, opts, string(enterprisebundle.CodeStateInvalid),
+			"cannot read policy bundle state before applying CONFIG=: "+modeErr.Error(), "")
+	}
+	if !bundleMode {
 		return false, nil
 	}
 	current, _, err := driver.CurrentConfig()
@@ -1077,8 +1184,25 @@ func refuseWindowsBundleRequired(cmd *cobra.Command, action string, opts *window
 		return false, nil
 	}
 	return true, writeWindowsBundleRefusal(cmd, action, opts, string(enterprisebundle.CodeBundleRequired), fmt.Sprintf(
-		"this device takes its policy from signed bundles (a trust anchor file is installed at %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
+		"this device takes its policy from signed bundles (trust anchors are held at %s), so CONFIG= is not applied; deliver a signed bundle with /ensure BUNDLE=<file>",
 		driver.AnchorsPath), "")
+}
+
+func windowsBundleMode(driver *enterprisebundle.Driver) (bool, error) {
+	if _, err := os.Lstat(driver.AnchorsPath); err == nil {
+		return true, nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	state, err := driver.Store.LoadState()
+	if err != nil {
+		return false, err
+	}
+	if state.Current != nil {
+		return true, nil
+	}
+	unsettled, err := driver.Store.Unsettled()
+	return len(unsettled) != 0, err
 }
 
 // writeWindowsBundleRefusal answers a bundle run that ended before the
@@ -1128,7 +1252,8 @@ func windowsBundleNotApplied(p *enterprisebundle.Prepared, message string, hasCu
 // finishWindowsEnterpriseBundle settles the bundle of a run once its ensure
 // ended, before the result is recorded and printed: the bundle is confirmed
 // when the transaction installed its config and the gateway enforces it;
-// otherwise the last good config goes back and the receipt fails. Every
+// a committed config whose gateway cannot answer stays applied and pending;
+// a rejected or uncommitted candidate is restored and failed. Every
 // standalone result then carries the bundle block.
 func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, result *enterprisestatus.Result) {
 	if opts == nil || opts.bundleRollback {
@@ -1177,23 +1302,32 @@ func finishWindowsEnterpriseBundle(cmd *cobra.Command, opts *windowsEnterpriseLi
 			return rollbackWindowsBundle(cmd, opts, run)
 		})
 		if err != nil {
-			code := string(windowsBundleCode(err, enterprisebundle.CodeApplyFailed))
+			code := string(enterprisebundle.FailureCode(err))
 			switch {
 			case windowsBundleHasCode(result.Errors, code):
 			case p.Receipt.State == enterprisebundle.StateApplied:
-				// Proven and enforcing; only its confirmation record failed
-				// (GAP-0485). The receipt stays applied for the next run.
+				// A proven live policy whose confirmation record failed, or a
+				// committed config whose gateway is down, stays applied for the
+				// next run. Neither is a failed delivery.
 				result.AddError(code, fmt.Sprintf("policy bundle %s version %d: %s", p.Receipt.BundleID, p.Receipt.Version, err.Error()))
 			default:
 				result.AddError(code, windowsBundleNotApplied(p, err.Error(), windowsBundleHasCurrent(run.driver.Store)))
 			}
 		}
-		// The delivered anchors are committed only once the bundle they
-		// verified is confirmed, so a run killed while Finish waits for the
-		// gateway leaves the previous anchors installed (GAP-0106). Finish
-		// verifies from the private stage, never from the installed file.
-		if p.Receipt.State == enterprisebundle.StateConfirmed && run.anchorStage != "" {
-			run.commitAnchors(result)
+		if run.rollbackWriteErr != nil {
+			writeErr := enterprisebundle.StateWriteError("stage the last good config for rollback", run.rollbackWriteErr)
+			if writeErr.Code == enterprisebundle.CodeDiskFull {
+				result.AddError(string(writeErr.Code), writeErr.Detail)
+			}
+		}
+		if p.Receipt.State == enterprisebundle.StateApplied {
+			result.AddWarning(enterprisebundle.WarnBundlePending,
+				"the signed bundle config is installed but its receipt is not confirmed yet; retry ensure to finish confirmation")
+		}
+		// An applied receipt retains its private anchors for the next settle.
+		// The store commits them before writing a confirmed state.
+		if p.Receipt.State == enterprisebundle.StateApplied || p.Receipt.State == enterprisebundle.StateConfirmed {
+			run.anchorStaged = false
 		}
 	}
 	if p != nil && p.AlreadyApplied && len(result.Errors) == 0 && run.anchorStage != "" {
@@ -1236,11 +1370,15 @@ func (run *windowsBundleRun) commitAnchors(result *enterprisestatus.Result) {
 	run.anchorStaged = false // The commit records its own outcome.
 	installed, _, err := installWindowsBundleAnchors(run.anchorStage, run.anchorPath)
 	if err != nil {
-		result.AddError("anchor_install_failed", "could not commit the verified trust anchors: "+err.Error())
 		code := "anchor_install_failed"
+		if enterprisebundle.CodeOf(err) == enterprisebundle.CodeDiskFull {
+			code = string(enterprisebundle.CodeDiskFull)
+		}
+		result.AddError(code, "could not commit the verified trust anchors: "+err.Error())
 		if restoreErr := restoreWindowsBundleAnchors(run.anchorPath, run.anchorExisted, run.anchorPrevious); restoreErr != nil {
-			result.AddError("anchor_restore_failed", "could not restore the previous trust anchors: "+restoreErr.Error())
-			code = "anchor_restore_failed"
+			restoreCode, detail := windowsBundleAnchorRestoreFailure(restoreErr)
+			code = restoreCode
+			result.AddError(code, "could not restore the previous trust anchors: "+detail)
 		}
 		current, _ := safefile.ReadRegularFileBounded(run.anchorPath, windowsBundleMaxAnchors)
 		if err := recordWindowsAnchorsFailure(run.layout, run.anchorReservation, code, true, current); err != nil {
@@ -1270,6 +1408,14 @@ func restoreWindowsBundleAnchors(path string, existed bool, previous []byte) err
 		return err
 	}
 	return nil
+}
+
+func windowsBundleAnchorRestoreFailure(err error) (code, detail string) {
+	failure := enterprisebundle.StateWriteError("restore the previous trust anchor file", err)
+	if failure.Code == enterprisebundle.CodeDiskFull {
+		return string(failure.Code), failure.Detail
+	}
+	return "anchor_restore_failed", err.Error()
 }
 
 func windowsBundleRollbackDeadlineExpired(ctx context.Context, receipt *enterprisebundle.Receipt, result *enterprisestatus.Result) bool {
@@ -1342,6 +1488,7 @@ func (t *windowsBundleRollbackTarget) writeOptions(expectSHA string) (configwrit
 // this run reports the failed bundle. It returns the digest the gateway then
 // enforces and whether the last good config is installed.
 func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleOptions, run *windowsBundleRun) (string, bool) {
+	run.rollbackWriteErr = nil
 	last, ref, err := run.driver.CurrentConfig()
 	if err != nil {
 		return "", false
@@ -1353,10 +1500,11 @@ func rollbackWindowsBundle(cmd *cobra.Command, opts *windowsEnterpriseLifecycleO
 		return "", false
 	}
 	path := filepath.Join(run.layout.LifecycleDir, windowsBundleRollbackName)
+	defer os.Remove(path)
 	if err := writeWindowsBundleAdminFile(path, last); err != nil {
+		run.rollbackWriteErr = err
 		return "", false
 	}
-	defer os.Remove(path)
 	rollback := *opts
 	rollback.bundle, rollback.bundleRollback, rollback.bundleRollbackTo = nil, true, nil
 	if ref != nil {
@@ -1648,14 +1796,14 @@ func installWindowsBundleAnchors(src, dst string) (installed []byte, replaced bo
 		return nil, false, err
 	}
 	if err := windowsBundleEnsurePrivateDirectory(filepath.Dir(dst)); err != nil {
-		return nil, false, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, false, enterprisebundle.StateWriteError("prepare the trust anchor folder", err)
 	}
 	// writeWindowsBundleFile replaces dst by a rename, its last step.
 	if err := writeWindowsBundleFile(dst, raw); err != nil {
-		return nil, false, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, false, enterprisebundle.StateWriteError("write the trust anchor file", err)
 	}
 	if err := windowsBundlePublishPrivateFile(dst); err != nil {
-		return nil, true, &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
+		return nil, true, enterprisebundle.StateWriteError("protect the trust anchor file", err)
 	}
 	if _, err := enterprisebundle.LoadAnchors(dst, bundleAnchorTrust); err != nil {
 		return nil, true, err

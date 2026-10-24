@@ -89,6 +89,50 @@ func TestWindowsGatewayRestartTreatsAStartingGatewayAsLive(t *testing.T) {
 	}
 }
 
+func TestWindowsGatewayRecoveryArmsOnlyForAStopAttempt(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		states    []windowsServiceState
+		wantCalls string
+		wantArmed bool
+	}{
+		{name: "intentionally stopped", states: []windowsServiceState{windowsServiceStopped}},
+		{name: "stopping independently", states: []windowsServiceState{windowsServiceStopPending, windowsServiceStopped}},
+		{name: "running", states: []windowsServiceState{windowsServiceRunning}, wantCalls: "stop,start", wantArmed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			service := &fakeWindowsGatewayService{
+				states:    tc.states,
+				afterStop: []windowsServiceState{windowsServiceStopped},
+			}
+			armed := false
+			_, err := restartWindowsGatewayServiceBeforeStop(service, "DefenseClawGateway", time.Second, time.Millisecond, func() error {
+				if len(service.calls) != 0 {
+					t.Fatal("recovery armed after service state changed")
+				}
+				armed = true
+				return nil
+			})
+			if err != nil || armed != tc.wantArmed || strings.Join(service.calls, ",") != tc.wantCalls {
+				t.Fatalf("armed=%t SCM calls=%v error=%v", armed, service.calls, err)
+			}
+		})
+	}
+	service := &fakeWindowsGatewayService{states: []windowsServiceState{windowsServiceRunning}}
+	if _, err := restartWindowsGatewayServiceBeforeStop(service, "DefenseClawGateway", time.Second, time.Millisecond,
+		func() error { return errors.New("helper died") }); err == nil || len(service.calls) != 0 {
+		t.Fatalf("failed recovery arm still stopped the gateway: calls=%v err=%v", service.calls, err)
+	}
+	service = &fakeWindowsGatewayService{
+		states:  []windowsServiceState{windowsServiceRunning},
+		stopErr: errors.New("service stopped independently"),
+	}
+	if _, err := restartWindowsGatewayServiceBeforeStop(service, "DefenseClawGateway", time.Second, time.Millisecond,
+		func() error { return nil }); !errors.Is(err, errWindowsGatewayStopRefused) {
+		t.Fatalf("SCM stop refusal was not distinguished from an interrupted restart: %v", err)
+	}
+}
+
 // A gateway that stays in StartPending, or does not stop, is restart_failed:
 // never a success with no restart.
 func TestWindowsGatewayRestartFailsWhenItCannotRestart(t *testing.T) {

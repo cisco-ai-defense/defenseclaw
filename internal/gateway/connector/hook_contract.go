@@ -694,7 +694,7 @@ var builtinHookContracts = map[string][]HookContract{
 			ContentEnvelope:     hermesContentEnvelope(),
 			Notes: []string{
 				"Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. The payload shape is unchanged: the prompt, tool result and model response are under extra (verified on v0.21.5).",
-				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Exit code 2 now blocks pre_tool_call. Timeouts and spawn errors still fail open unless the hook spec sets fail_closed, so SupportsFailClosed stays false. Bounded to >=0.21.0,<0.22.0.",
+				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Setup sets fail_closed on the pre_tool_call entry, so a spawn error, timeout or unparseable nonempty stdout blocks in the reviewed >=0.21.0,<0.22.0 range. A killed hook can still fail open because Hermes treats its non-2 exit and empty stdout as no decision, so SupportsFailClosed remains false. Secure Client keeps its existing registration. Other events cannot block.",
 				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
 				"The v2 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
 			},
@@ -796,8 +796,7 @@ var builtinHookContracts = map[string][]HookContract{
 			AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
 			Capabilities: HookCapability{
 				CanBlock:     true,
-				CanAskNative: true,
-				AskEvents:    []string{"preToolUse"},
+				CanAskNative: false,
 				BlockEvents: []string{
 					"preToolUse",
 					"permissionRequest",
@@ -811,7 +810,7 @@ var builtinHookContracts = map[string][]HookContract{
 			ToolCallLifecycle:   copilotToolCallLifecycle(),
 			Notes: []string{
 				"GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
-				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
 			},
 		},
@@ -827,8 +826,7 @@ var builtinHookContracts = map[string][]HookContract{
 			AIDSurfaces:             []string{"prompt", "tool_call", "tool_result"},
 			Capabilities: HookCapability{
 				CanBlock:     true,
-				CanAskNative: true,
-				AskEvents:    []string{"preToolUse"},
+				CanAskNative: false,
 				BlockEvents: []string{
 					"preToolUse",
 					"permissionRequest",
@@ -843,7 +841,7 @@ var builtinHookContracts = map[string][]HookContract{
 			Notes: []string{
 				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification, except that the Windows Secure Client profile replaces a prompt the guardrail blocks.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
-				"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+				"Copilot CLI can ask on preToolUse, but its hook input does not prove prompt availability; DefenseClaw denies confirms there until the vendor exposes it.",
 				"postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
 				"Copilot documents optional native OpenTelemetry metrics and traces on POSIX hosts. DefenseClaw records that upstream surface but does not configure, launch, or certify the exporter; every DefenseClaw contract remains hook-only.",
 			},

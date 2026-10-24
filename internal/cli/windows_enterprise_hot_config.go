@@ -37,6 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -78,12 +79,15 @@ var (
 	// (ValidateTrustedFilePath). The hot path checks the same, so whether a
 	// standard user's edit is installed does not depend on which keys it
 	// changed (GAP-0312).
-	windowsEnterpriseHotConfigSourceCheck = managed.ValidateTrustedConfigPath
-	windowsEnterpriseHotConfigRestart     = restartWindowsStandaloneGateway
-	windowsEnterpriseHotConfigRecover     = startWindowsStandaloneGatewayIfStopped
-	windowsEnterpriseHotBundleReload      = reloadWindowsStandaloneBundlePolicy
+	windowsEnterpriseHotConfigSourceCheck  = managed.ValidateTrustedConfigPath
+	windowsEnterpriseHotConfigRestart      = restartWindowsStandaloneGateway
+	windowsEnterpriseHotConfigRecover      = startWindowsStandaloneGatewayIfStopped
+	windowsEnterpriseHotBundleReload       = reloadWindowsStandaloneBundlePolicy
+	windowsEnterpriseHotConfigCloseHooks   = enterprisehooks.CloseWindowsStandaloneHooksForUnprovenUndo
+	windowsEnterpriseHotConfigHooksHeld    = enterprisehooks.WindowsStandaloneHooksHeldClosed
+	windowsEnterpriseHotConfigReleaseHooks = enterprisehooks.ReleaseWindowsStandaloneHookClosure
 	// windowsEnterpriseHotConfigFailClosed stops the gateway after an undo
-	// that could not be proven, and returns nil only once it is stopped.
+	// that could not be proven, once its hooks are durably closed.
 	windowsEnterpriseHotConfigFailClosed = stopWindowsStandaloneGatewayFailClosed
 )
 
@@ -316,7 +320,6 @@ func windowsEnterpriseHotConfigApply(
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
 	defer restoreEnvironment()
 
-	kept := keepWindowsEnterpriseEditedConfig(layout, previous)
 	generationPath := configwrite.GenerationPath(layout.ConfigPath)
 	_, generationErr := os.Stat(generationPath)
 	state, stateErr := configwrite.ReadGenerationState(layout.ConfigPath)
@@ -330,6 +333,20 @@ func windowsEnterpriseHotConfigApply(
 		failBundle("bundle_state_invalid", "cannot prove the signed config principal: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		return false, nil
 	}
+	// Adoption and undo both depend on the installed CLI's policy report.
+	// Check that it can run and prove the policy currently enforced before
+	// changing config.yaml. A missing or untrusted CLI is then repaired by
+	// Setup's transaction, while a payload-less bundle is refused intact.
+	proof, err := windowsEnterprisePolicyDigest(ctx)
+	if err != nil {
+		return unavailable("the installed CLI cannot prove the running gateway's policy: " + err.Error())
+	}
+	var priorPolicy policyDigestReport
+	if json.Unmarshal(proof, &priorPolicy) != nil || priorPolicy.Digest == "" ||
+		priorPolicy.Digest != priorPolicy.GatewayReportedDigest {
+		return unavailable("the installed CLI did not prove that the gateway enforces the installed config")
+	}
+	kept := keepWindowsEnterpriseEditedConfig(layout, previous)
 	// Undoing puts the config back. A config the record named is recorded
 	// again as a new generation: the counter never goes back, because the
 	// gateway may already have reported the number the attempt took. A hand
@@ -412,8 +429,29 @@ func windowsEnterpriseHotConfigApply(
 			} else {
 				_ = windowsEnterpriseHotBundleReload(restoreCtx, layout)
 			}
-			if targetsErr == nil && !windowsEnterpriseHotConfigEnforcesInstalled(restoreCtx, wait) {
-				gatewayErr = errors.New("the gateway did not report the restored config's policy before the deadline")
+			if targetsErr == nil {
+				proven, cliUnavailable := windowsEnterpriseHotConfigEnforcesInstalled(restoreCtx, wait)
+				if !proven && cliUnavailable {
+					// The CLI was available before publication but can vanish
+					// while undo runs. The service's authenticated /health still
+					// reports its live policy. If it has not taken the old
+					// config, restart that service on the restored bytes and prove
+					// the old policy there. A missing CLI alone is not an outage.
+					proven = windowsEnterpriseHotConfigPriorPolicyLive(restoreCtx, layout, priorPolicy)
+					if !proven {
+						restarted, restartErr := windowsEnterpriseHotConfigRestart()
+						if restartErr != nil || !restarted {
+							restarted, _ = windowsEnterpriseHotConfigRecover()
+						}
+						if restarted && opts.bundle != nil {
+							opts.bundle.gatewayRestarted = true
+						}
+						proven = windowsEnterpriseHotConfigWaitForPriorPolicy(restoreCtx, layout, priorPolicy, windowsEnterpriseHotConfigRestartTimeout)
+					}
+				}
+				if !proven {
+					gatewayErr = errors.New("the gateway did not report the restored config's policy before the deadline")
+				}
 			}
 		}
 		if restoreErr == nil && targetsErr == nil && gatewayErr == nil {
@@ -421,11 +459,13 @@ func windowsEnterpriseHotConfigApply(
 		}
 		opts.hotConfigRestoreFailed = true
 		installed := windowsEnterpriseHotConfigUndoState(layout.ConfigPath, previous, next, targetsRefreshed, targetsRepublished)
-		gateway := "the gateway service was stopped, so no hook is decided by a policy that was not verified: " +
-			"every enrolled user's hook fails closed (or as the administrator's outage setting says) until a repair starts it on a verified config"
-		if err := windowsEnterpriseHotConfigFailClosed(); err != nil {
-			gateway = "the gateway service could not be stopped (" + windowsEnterpriseBoundedDiagnostic(err.Error()) +
-				"), so it may still enforce the config that was not applied"
+		gateway := "the gateway service was stopped after every standalone hook was durably forced closed; rerun ensure after repair to prove the live policy and release that closure"
+		if err := windowsEnterpriseHotConfigCloseHooks(layout); err != nil {
+			gateway = "the gateway service was left running because its hooks could not be durably forced closed (" +
+				windowsEnterpriseBoundedDiagnostic(err.Error()) + "); it may still enforce an unproven config"
+		} else if err := windowsEnterpriseHotConfigFailClosed(); err != nil {
+			gateway = "the hooks remain forced closed, but the gateway service could not be stopped (" +
+				windowsEnterpriseBoundedDiagnostic(err.Error()) + "); it may still enforce an unproven config"
 		}
 		switch {
 		case restoreErr != nil:
@@ -441,10 +481,20 @@ func windowsEnterpriseHotConfigApply(
 		}
 	}
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, next, writeOptions); err != nil {
-		// Publication can precede a failed generation write and failed writer
-		// restore. Even unchanged bytes may have been restored after the gateway
-		// loaded the candidate. Inspect, undo, and prove the running policy on
-		// every write error before a transaction can use these bytes as preimage.
+		if !configwrite.PublicationOccurred(err) {
+			// Locks, reads, validation, permission checks and the final CAS
+			// all fail before publication. Only the new candidate's rename
+			// crosses the boundary at which the gateway might load it.
+			message := "the bundle config could not be installed before publication: " + windowsEnterpriseBoundedDiagnostic(err.Error())
+			if errors.Is(err, configwrite.ErrConflict) {
+				message = "the installed config changed before the bundle write; retry with a fresh policy bundle: " + windowsEnterpriseBoundedDiagnostic(err.Error())
+			}
+			failBundle("bundle_config_write_failed", message)
+			return false, nil
+		}
+		// A failed generation write or directory sync may follow publication.
+		// Even if the writer restored old bytes, the watcher may have loaded
+		// the candidate. Prove the previous policy is live before fallback.
 		undo()
 		failBundle("bundle_config_write_failed", "the bundle config could not be installed: "+windowsEnterpriseBoundedDiagnostic(err.Error()))
 		return false, nil
@@ -487,6 +537,27 @@ func windowsEnterpriseHotConfigApply(
 		adoptionWait = windowsEnterpriseHotConfigRestartTimeout
 	}
 	if !windowsEnterpriseHotConfigAdopted(ctx, adoptionWait, adoptedBundle) {
+		// A new delivery cannot be left applied when the gateway never
+		// reported its policy. A repeat repairs the already confirmed signed
+		// config without a new receipt; if the gateway is down, keep those
+		// signed bytes and require a retry after it returns.
+		if bundleChange && opts.bundle.prepared.AlreadyApplied && windowsBundlePolicy(ctx).Unavailable() {
+			if refreshTargets {
+				targetsRefreshed = true
+				if err := windowsEnterpriseHotConfigRefreshTargets(ctx, layout); err != nil {
+					undo()
+					failBundle("bundle_targets_refresh_failed", "the bundle's enrolled targets could not be refreshed")
+					return false, nil
+				}
+			}
+			result.Readiness.Gateway = false
+			result.SecurityComplete = false
+			result.Policy = nil
+			result.Changes = append(result.Changes, "restored the current signed bundle config; gateway adoption is unconfirmed")
+			result.AddError(string(enterprisebundle.CodeNotConfirmed),
+				"the repeated signed bundle config is installed, but the gateway is unavailable; retry the same bundle once the gateway runs")
+			return true, nil
+		}
 		undo()
 		failBundle("bundle_policy_not_adopted", "the gateway did not report the bundle policy, generation and identity before the apply deadline")
 		return false, nil
@@ -605,20 +676,23 @@ func windowsEnterpriseHotConfigAdopted(ctx context.Context, wait time.Duration, 
 // gateway that rejected the undone config and still runs the restored
 // policy is proven, while one that runs the undone policy never reports
 // the restored digest, whatever its reload error says.
-func windowsEnterpriseHotConfigEnforcesInstalled(ctx context.Context, wait time.Duration) bool {
+func windowsEnterpriseHotConfigEnforcesInstalled(ctx context.Context, wait time.Duration) (enforced, cliUnavailable bool) {
 	deadline := time.Now().Add(wait)
 	for {
-		out, _ := windowsEnterprisePolicyDigest(ctx)
+		out, err := windowsEnterprisePolicyDigest(ctx)
 		var report policyDigestReport
-		if json.Unmarshal(out, &report) == nil && report.Digest != "" && report.Digest == report.GatewayReportedDigest {
-			return true
+		if err != nil || json.Unmarshal(out, &report) != nil || report.Digest == "" {
+			return false, true
+		}
+		if report.Digest == report.GatewayReportedDigest {
+			return true, false
 		}
 		if ctx.Err() != nil || !time.Now().Before(deadline) {
-			return false
+			return false, false
 		}
 		select {
 		case <-ctx.Done():
-			return false
+			return false, false
 		case <-time.After(windowsEnterpriseHotConfigPoll):
 		}
 	}

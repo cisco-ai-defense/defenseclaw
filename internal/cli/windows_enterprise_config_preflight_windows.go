@@ -11,9 +11,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -22,6 +26,7 @@ import (
 
 // windowsEnterpriseStandaloneLayoutForPreflight is replaceable in tests.
 var windowsEnterpriseStandaloneLayoutForPreflight = managed.StandaloneWindowsLayout
+var windowsEnterpriseStandaloneRuntimeCandidateCheck = config.ValidateManagedStandaloneRuntimeCandidate
 
 // windowsEnterpriseStandaloneConfigSource refuses an administrator config
 // that a standard user could change before the lifecycle reads it, naming
@@ -57,6 +62,9 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 	// failed to start and the rollback ended with 1603 after almost five
 	// minutes, advising the per-user `defenseclaw keys set` (GAP-0966).
 	if raw, err := os.ReadFile(configPath); err == nil {
+		if err := refuseUnsupportedWindowsGuardrailConnectors(raw); err != nil {
+			return fmt.Errorf("%s: %w; nothing was changed", configPath, err)
+		}
 		if refusal, found := config.ScanManagedEnvSecretReferences(raw).Refusal(configPath,
 			"from an elevated prompt with `defenseclaw.exe enterprise secret set --name <name> --from-file <key file>`",
 			config.EnterpriseSettingsReferenceURL); found {
@@ -69,6 +77,37 @@ func windowsEnterpriseStandaloneConfigPreflight(configPath string) error {
 		}
 	}
 	return windowsEnterpriseStandaloneConfigCompile(configPath)
+}
+
+// The generic config decoder accepts proxy-only and retired connector names.
+// On a managed Windows host the enumerator drops those names, so accepting
+// them as installed hooks would report a protected deployment that has none.
+// Inspect the source before migration can discard a removed connector key.
+func refuseUnsupportedWindowsGuardrailConnectors(raw []byte) error {
+	var document map[string]any
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return nil // the normal config compiler reports the syntax error
+	}
+	guardrail, ok := document["guardrail"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	var names []string
+	if connector, ok := guardrail["connector"].(string); ok && strings.TrimSpace(connector) != "" {
+		names = append(names, connector)
+	}
+	if connectors, ok := guardrail["connectors"].(map[string]any); ok {
+		for name := range connectors {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if !enterprisehooks.WindowsStandaloneHookConnectorSupported(name) {
+			return fmt.Errorf("guardrail connector %q is not supported by managed Windows hooks; remove it or select a supported Windows connector", name)
+		}
+	}
+	return nil
 }
 
 // windowsEnterpriseStandaloneConfigCompile proves the gateway service can
@@ -96,6 +135,32 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 	if err := validateStandaloneGatewayConfig(configPath, layout.DataDir, layout.SecretsDir); err != nil {
 		return fmt.Errorf("%v; fix it and run again (nothing was changed)", err)
 	}
+	// The generic compiler accepts settings that the installed service rejects
+	// against the fixed Windows layout. Check the exact candidate bytes as if
+	// they were at config.yaml before the transaction can replace that file.
+	raw, err := readConfigV8Source(configPath)
+	if err != nil {
+		return err
+	}
+	if layout.GOOS == "" {
+		layout.GOOS = "windows"
+	}
+	// Resolve omitted paths with the service's installed config identity,
+	// rather than the arbitrary directory holding CONFIG=.
+	restoreCandidate := setTemporaryEnvironment(map[string]string{
+		managed.ConfigPathEnv: layout.ConfigPath,
+	})
+	defer restoreCandidate()
+	candidate, err := config.LoadRuntimeV8InspectionCandidateFromBytes(layout.ConfigPath, raw)
+	if err == nil {
+		err = config.ValidateManagedStandaloneConfig(raw, candidate, nil, layout)
+	}
+	if err == nil {
+		err = windowsEnterpriseStandaloneRuntimeCandidateCheck(candidate)
+	}
+	if err != nil {
+		return fmt.Errorf("%v; fix it and run again (nothing was changed)", err)
+	}
 	return nil
 }
 
@@ -108,6 +173,12 @@ func windowsEnterpriseStandaloneConfigCompile(configPath string) error {
 // the transaction, which migrates it (writing its pins with this release's
 // digest) and then runs the same check.
 func windowsEnterpriseStandaloneKeptConfigPreflight() error {
+	// An interrupted transaction may have left the candidate in config.yaml
+	// while its services are stopped. The lifecycle must restore its recorded
+	// preimage before this release inspects the kept config.
+	if windowsEnterpriseStandaloneTransactionPending() {
+		return nil
+	}
 	layout, err := windowsEnterpriseStandaloneLayoutForPreflight()
 	if err != nil {
 		return nil

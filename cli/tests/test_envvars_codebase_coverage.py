@@ -123,6 +123,10 @@ _ALLOWLIST_PATHS: tuple[str, ...] = (
     # configuration, not env vars DefenseClaw itself reads.
     "cli/tests/test_cmd_registry.py",
     "cli/tests/test_cmd_keys.py",
+    # hooks/.hookcfg bodies the native hook and the status reader share as
+    # test vectors; the 0.8.x sidecar keys in them are file content, not
+    # environment variables.
+    "internal/cli/testdata/windows_hook_sidecar_vectors.json",
     # End-to-end harness scripts (developer-run, not shipped). They define
     # DEFENSECLAW_E2E_* knobs to drive throwaway stacks against real
     # providers; none are consumed by the gateway or CLI at runtime.

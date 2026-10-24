@@ -577,6 +577,11 @@ func (s *MCPScanner) Scan(ctx context.Context, target string) (*ScanResult, erro
 			scanErr = scannerNotFound(s.Name(), s.Config.Binary, "MCP scanning requires a Python 3.11+ runtime with cisco-ai-mcp-scanner; on 3.11+ repair the managed installation, or run uv sync in a source checkout")
 			return nil, scanErr
 		}
+		if !errors.As(err, &exitErr) {
+			result.ExitCode = -1
+			result.ScanError = err.Error()
+			return result, fmt.Errorf("scanner: %s could not complete: %w", s.Name(), err)
+		}
 		if stdout.Len() == 0 {
 			scanErr = fmt.Errorf("scanner: %s exited %d: %s%s", s.Name(), exitCode, s.workDirNote(), scannerFailureText(stderrStr))
 			return nil, scanErr

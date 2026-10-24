@@ -38,20 +38,20 @@ import (
 // fails CI.
 //
 // The contract we assert: an empty POST body reaches the unified handler.
-// Most connectors then produce its generic "hook event name is required"
-// error. Codex and Copilot first enforce their installer-bound event
+// Most connectors then produce the shared malformed-event refusal.
+// Codex and Copilot first enforce their installer-bound event
 // registrations inside that same unified handler, so their connector-specific
 // trust errors are pinned separately.
 func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 	api := &APIServer{}
 	connectors := map[string]string{
 		"codex":      "installer-bound Codex hook event is required",
-		"claudecode": "hook event name is required",
-		"hermes":     "hook event name is required",
-		"cursor":     "hook event name is required",
-		"devin":      "hook event name is required",
+		"claudecode": "malformed hook event: missing_event",
+		"hermes":     "malformed hook event: missing_event",
+		"cursor":     "malformed hook event: missing_event",
+		"devin":      "malformed hook event: missing_event",
 		"copilot":    "Copilot hook event registration is required",
-		"made-up":    "hook event name is required",
+		"made-up":    "malformed hook event: missing_event",
 	}
 	for name, wantError := range connectors {
 		t.Run(name, func(t *testing.T) {

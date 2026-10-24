@@ -876,9 +876,10 @@ type GatewayPlan struct {
 // gateway on the MicroVM driver that no gateway service runs (a Manual
 // plan): the restart stops its sandboxes, which DefenseClaw's own restarts
 // refuse to do unless OpenShell reports them stopped (CheckStopped), and
-// `sandbox stop` flushes.
-const manualRestartFlushFirst = "first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes, which flushes their disks, " +
-	"or what they wrote since their last sync is lost"
+// DefenseClaw's stop requests a disk sync; raw OpenShell stop requests a
+// guest flush starting with OpenShell 0.1.5.
+const manualRestartFlushFirst = "first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; " +
+	"DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop, but on an older gateway save its work first; if a flush fails, changes after the last successful disk sync may be lost"
 
 // switchesDriver reports whether the plan moves the gateway to another
 // compute driver.

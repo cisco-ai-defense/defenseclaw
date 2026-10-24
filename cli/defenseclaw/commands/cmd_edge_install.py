@@ -315,6 +315,44 @@ def _find_service_file(source: Path) -> Path | None:
     return candidate if candidate.is_file() else None
 
 
+def _ensure_local_service_account() -> bool:
+    """Create the identity required by the shipped unit on a fresh Linux host."""
+    try:
+        group = subprocess.run(["getent", "group", "defenseclaw"], capture_output=True, timeout=10)
+        if group.returncode != 0:
+            _run(["sudo", "groupadd", "--system", "defenseclaw"])
+        account = subprocess.run(["id", "-u", "defenseclaw"], capture_output=True, timeout=10)
+        if account.returncode != 0:
+            _run([
+                "sudo", "useradd", "--system", "--gid", "defenseclaw",
+                "--home-dir", "/var/lib/defenseclaw", "--shell", "/usr/sbin/nologin", "defenseclaw",
+            ])
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        ux.err(f"Could not provision defenseclaw service account: {exc}")
+        return False
+    return True
+
+
+def _ensure_remote_service_account(target: str, user: str) -> bool:
+    """Provision the unit identity on the device before enabling its service."""
+    script = (
+        "set -e; "
+        "getent group defenseclaw >/dev/null || sudo groupadd --system defenseclaw; "
+        "id -u defenseclaw >/dev/null 2>&1 || "
+        "sudo useradd --system --gid defenseclaw --home-dir /var/lib/defenseclaw "
+        "--shell /usr/sbin/nologin defenseclaw"
+    )
+    try:
+        result = subprocess.run(_ssh_cmd(target, user, script), text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        ux.err(f"Could not provision defenseclaw service account on {target}: {exc}")
+        return False
+    if result.returncode != 0:
+        ux.err(f"Could not provision defenseclaw service account on {target}")
+        return False
+    return True
+
+
 def _install_systemd_unit(source: Path, target: str, user: str) -> bool:
     """Install the systemd unit file and enable/start the service on the remote device."""
     service_file = _find_service_file(source)
@@ -324,6 +362,9 @@ def _install_systemd_unit(source: Path, target: str, user: str) -> bool:
 
     ux.echo()
     ux.section("Installing systemd service")
+
+    if not _ensure_remote_service_account(target, user):
+        return False
 
     # Copy the unit file to the remote device
     remote_unit = "/etc/systemd/system/edge-connector.service"
@@ -369,6 +410,8 @@ def _install_local_systemd_unit(source: Path) -> bool:
 
     ux.echo()
     ux.section("Installing systemd service (local)")
+    if not _ensure_local_service_account():
+        return False
     target_path = Path("/etc/systemd/system/edge-connector.service")
     try:
         _run(["sudo", "cp", str(service_file), str(target_path)])

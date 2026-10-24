@@ -8,7 +8,7 @@ keywords:
   - confirm verdict
 ---
 
-Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, GitHub Copilot CLI, Antigravity, Amp and OpenClaw ([the list](/docs/features/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
+Human approval (HITL) pauses a risky call and asks you instead of silently allowing or hard-blocking it. It works in action mode, on agents that can ask: Claude Code, Antigravity, Amp and OpenClaw ([the list](/docs/features/guardrail#which-agents-can-ask)). CRITICAL findings still block without asking, and alert-only rules never ask.
 
 <DefenseClawDemo scenario="hitl-native-approval" variant="approve" />
 
@@ -16,6 +16,8 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
 
 - The agent is in action mode ([Turn on blocking](/docs/how-to/guardrail/turn-on-blocking)).
 - This page uses Claude Code. Other agents differ only in where the prompt appears.
+
+On a managed computer, these per-user `guardrail` and `alerts` commands refuse. The administrator sets `guardrail.connectors.<id>.hilt` in the managed config, applies it through the [enterprise lifecycle](/docs/enterprise/operate/lifecycle#change-the-config), and checks the result through the managed policy and audit tools. The steps below are for a per-user install.
 
 ## Steps
 
@@ -55,13 +57,23 @@ Human approval (HITL) pauses a risky call and asks you instead of silently allow
 
 ## Check it worked
 
+List Claude Code's latest alerts, newest first:
+
 ```bash
-defenseclaw alerts --show 1
+defenseclaw alerts --connector claudecode --limit 3
+```
+
+Each time Claude Code asked, the list has a `claudecode:PreToolUse` row with `decision=confirm`. Find the newest such row and note its number. The confirm row is not always #1. When Claude Code's reply after you approve quotes the URL, that reply is a newer `claudecode:MessageDisplay` row with `decision=alert`. Show the confirm row by its number, with the same `--connector`, so the number refers to the list above. In this example you approved, the reply quoted the URL, and the confirm row is #2. After a deny it is usually #1.
+
+```bash
+defenseclaw alerts --connector claudecode --show 2
 ```
 
 ```text
-Alert #1
+Alert #2
+  ID:        01a16527-4f2e-7a7d-9c1b-5d0e8c2f6a31
   Severity:  HIGH
+  Timestamp: 2026-10-22 19:47:02
   Action:    scan-finding
   Target:    claudecode:PreToolUse
   Decision:  confirm
@@ -70,7 +82,7 @@ Alert #1
   …
 ```
 
-`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI and Antigravity deny a confirm without asking in a non-interactive run (`-p`); their audit still shows `confirm`.
+`Decision: confirm` means the gateway asked. Your approve or deny answer is handled inside Claude Code, so DefenseClaw records the finding and the verdict, not who approved. Outside Manual mode, the decision is `block`. Copilot CLI blocks an action-mode confirmation because its hook does not prove that an approval prompt is available; the audit records `block` with raw action `confirm`. Antigravity can deny a confirm without asking in a non-interactive run (`-p`); its audit still shows `confirm`.
 
 ## When the agent cannot ask
 

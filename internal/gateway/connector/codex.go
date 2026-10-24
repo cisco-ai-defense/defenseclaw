@@ -334,6 +334,9 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return errors.New("managed Windows Codex hooks require the administrator-owned machine requirements installer")
 	}
 	return withCodexLifecycleTransaction(opts, func() error {
+		if err := c.checkAgentSettings(opts); err != nil {
+			return err
+		}
 		if previous, err := codexPreviousSetupRoot(opts.DataDir); err != nil {
 			return err
 		} else if previous != "" {
@@ -361,6 +364,63 @@ func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 		return c.setupLocked(ctx, opts)
 	})
+}
+
+// checkAgentSettings refuses, before Setup changes anything, a per-user
+// config.toml that Setup must not rewrite: one that turns Codex hooks off
+// (the user's choice, GAP-1094) or that does not parse. The earlier hooks and
+// the user's setting stay as they are, and a gateway start keeps the other
+// connectors (GAP-0578). Managed installs keep their hooks in protected
+// requirements, so their patch decides.
+func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
+	if opts.ManagedEnterprise {
+		return nil
+	}
+	path := codexConfigPath()
+	// Match the writer's boundary: an OSS account may keep its dotfiles on a
+	// user-owned volume, while an enterprise per-user home binding is confined.
+	if home := activeUserHomeOverride(); home != "" && runtime.GOOS != "windows" {
+		target, outside, err := AgentConfigOutsideHome(home, path)
+		if err != nil {
+			return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+		}
+		if outside {
+			return refuseForAgentConfig(&AgentConfigOutsideHomeError{Path: path, Target: target})
+		}
+	}
+	if _, err := userOwnedSettingsReadPath(path); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the link, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
+	_, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil // only an absent config can be created by Setup
+	}
+	if err != nil {
+		return refuseForAgentConfig(fmt.Errorf("inspect Codex config %s: %w; fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s cannot be read: %w; fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+	}
+	cfg := map[string]interface{}{}
+	if err := parseCodexTOML(data, &cfg); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	if raw, exists := cfg["hooks"]; exists {
+		if _, ok := raw.(map[string]interface{}); !ok {
+			return refuseForAgentConfig(fmt.Errorf("Codex hooks configuration in %s has unsupported type %T; refusing to replace it; fix the file, then run: defenseclaw-gateway restart", path, raw)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+		}
+	}
+	features, _ := cfg["features"].(map[string]interface{})
+	for _, key := range []string{"hooks", "codex_hooks"} {
+		if enabled, ok := features[key].(bool); ok && !enabled {
+			return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+				"Codex hooks are turned off in %s ([features] %s = false), so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks, then run: defenseclaw-gateway restart",
+				path, key,
+			))
+		}
+	}
+	return nil
 }
 
 func codexPreviousSetupRoot(dataDir string) (string, error) {
@@ -524,6 +584,9 @@ func (c *CodexConnector) teardownLocked(ctx context.Context, opts SetupOpts) err
 	}
 	if err := c.VerifyClean(opts); err != nil {
 		return fmt.Errorf("codex teardown: verify clean before token revocation: %w", err)
+	}
+	if err := revokePerUserHookAPIToken(opts, c.Name()); err != nil {
+		return fmt.Errorf("codex teardown: %w", err)
 	}
 	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeCodex); err != nil {
 		return fmt.Errorf("codex teardown: revoke scoped OTLP token: %w", err)
@@ -2896,7 +2959,9 @@ func restoreOwnedCodexConfigFromTOML(
 		return atomicTransformResult{}, fmt.Errorf("snapshot restored codex config shape: %w", err)
 	}
 	if bytes.Equal(originalShape, restoredShape) {
-		return atomicTransformResult{Data: append([]byte(nil), raw...)}, nil
+		// Nothing of DefenseClaw's was in the file: keep its bytes and mode
+		// (GAP-0650).
+		return atomicTransformResult{Data: append([]byte(nil), raw...), Keep: true}, nil
 	}
 	if len(cfg) == 0 {
 		return atomicTransformResult{Remove: true}, nil

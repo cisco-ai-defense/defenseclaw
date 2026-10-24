@@ -38,8 +38,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 105533,
-      "sha256": "0ab9c68f73fa2816455428a5fe434883c3ce6f7b3378cff5f763fae7139a8837"
+      "size": 121547,
+      "sha256": "20815799cb73318c3f25d9e608bab230062505a95751a46e2eafb3fa499eb5e0"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -50,8 +50,8 @@
     "/usr/local/lib/defenseclaw/hooks/devin-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 7468,
-      "sha256": "b2e7d202deed687e2b2a48b95cab9adc7df0a144278217f72405edd92ca6920d"
+      "size": 7469,
+      "sha256": "5067904f984e740dd6c810e0df7b012b51b375c8eeab70d8b72e3527eb021f45"
     },
     "/usr/local/lib/defenseclaw/hooks/inspect-request.sh": {
       "mode": "-rwxr-xr-x",

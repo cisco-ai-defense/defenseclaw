@@ -2002,6 +2002,9 @@ type machineVersionReport struct {
 	// ManagementContract is the management agent contract the gateway
 	// implements; accepted, not checked.
 	ManagementContract int `json:"management_contract,omitempty"`
+	// SecretSetBundle is optional for older gateway versions. Its type is
+	// checked while unknown identity members remain refused.
+	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
 }
 
 func validateMachineVersion(output []byte, expectedName, expectedVersion, expectedCommit string) error {

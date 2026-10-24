@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"bufio"
-	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -16,8 +15,8 @@ import (
 
 // hookDeliveryReceipt keeps the managed hook's request open until the hook
 // commits its answer to the agent. The response is a proposal; only the
-// receipt proves which proposal the hook gave. The hook's timeout closes its
-// request and the gateway records the fail-closed result instead.
+// receipt proves which proposal the hook gave. Without a receipt the gateway
+// records only the result it can establish from the proposal and connection.
 type hookDeliveryReceipt struct {
 	reader *bufio.Reader
 	length string
@@ -92,30 +91,35 @@ const hookActionUnconfirmed = "unconfirmed"
 
 // deliveredHookDecision is the decision of a call that asked for a delivery
 // receipt: the offered answer once the hook acknowledged it, and the hook's
-// own block when it refused it. Without a receipt the hook's answer watchdog
-// won or the connection was lost: a closed hook blocked the call, and an
-// administrator-selected open outage leaves it unconfirmed.
-func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookResponse, receipt string) agentHookResponse {
+// own block when it refused it. A missing receipt after the answer was offered
+// cannot prove whether the hook emitted that answer. A hang-up observed before
+// the offer proves the hook took its fallback; a policy block remains a block
+// either way.
+func (a *APIServer) deliveredHookDecision(hungUpBeforeAnswer bool, connectorName string, resp agentHookResponse, receipt string) agentHookResponse {
 	switch receipt {
 	case hookexec.HookDeliveryReceiptAck:
 		return resp
 	case hookexec.HookDeliveryReceiptBlock:
 		return failedClosedHookDelivery(resp, "managed hook rejected the proposed answer")
 	}
-	switch {
-	case a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open":
+	if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
+		// An outage can allow even if the offered policy answer blocked.
 		return unconfirmedHookDelivery(resp)
-	case resp.Action == "block":
-		// The policy block and the fallback have the same result.
+	}
+	if resp.Action == "block" {
+		// The policy block and the closed fallback have the same result.
 		return resp
 	}
-	return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+	if hungUpBeforeAnswer {
+		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
+	}
+	return unconfirmedHookDelivery(resp)
 }
 
 // unreceiptedHookDecision is the decision of a standalone managed call that
 // sent no delivery receipt.
-//   - A caller that hung up before the decision was recorded never got it: a
-//     closed hook blocked the call.
+//   - A caller that hung up before the answer was sent never got it: a closed
+//     hook blocked the call. A later hang-up cannot prove that.
 //   - A native hook's tool call without a receipt comes from an earlier hook
 //     binary (a package upgrade in flight) or a connection without full
 //     duplex. Its answer watchdog may have blocked after the gateway decided,
@@ -124,21 +128,32 @@ func (a *APIServer) deliveredHookDecision(connectorName string, resp agentHookRe
 //     took the answer without a receipt, the same as an earlier binary.
 //   - Every other call keeps its evaluated decision. In-agent plugins, policy
 //     bridges and events without an answer deadline send no receipt.
-func (a *APIServer) unreceiptedHookDecision(ctx context.Context, connectorName, event string, resp agentHookResponse) agentHookResponse {
+func (a *APIServer) unreceiptedHookDecision(hungUpBeforeAnswer bool, connectorName, event string, resp agentHookResponse) agentHookResponse {
 	if a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() || hookexec.NeutralLifecycleEvent(connectorName, event) {
 		return resp
 	}
 	closed := a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) != "open"
-	gone := ctx.Err() != nil
 	switch {
 	case closed && resp.Action == "block":
 		return resp
-	case closed && gone:
+	case closed && hungUpBeforeAnswer:
 		return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
-	case gone, hookexec.DeliveryReceiptEvent(connectorName, event):
+	case hungUpBeforeAnswer, hookexec.DeliveryReceiptEvent(connectorName, event):
 		return unconfirmedHookDelivery(resp)
 	}
 	return resp
+}
+
+// pendingFailureHookDecision is the decision of a receipt-capable call whose
+// pending occurrence could not be made durable. The gateway answers 503
+// without offering the evaluated answer, and a managed standalone hook takes
+// an error answer closed even under the administrator's open outage mode. A
+// policy block keeps its own reason; it is the same result.
+func pendingFailureHookDecision(resp agentHookResponse) agentHookResponse {
+	if resp.Action == "block" {
+		return resp
+	}
+	return failedClosedHookDelivery(resp, hookexec.ManagedGatewayNoAnswerReason)
 }
 
 func failedClosedHookDelivery(resp agentHookResponse, reason string) agentHookResponse {

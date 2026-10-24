@@ -560,7 +560,7 @@ def assess_connector_health(
                     reason_code="connector-version-unparseable",
                     summary=f"{public_name} agent version could not be verified",
                     supported_agent_ranges=ranges,
-                    remediations=_untested_connector_remediations(public_name),
+                    remediations=_unreadable_connector_version_remediations(public_name, ranges),
                 )
             )
     return tuple(findings)
@@ -883,6 +883,15 @@ def _untested_connector_remediations(connector: str) -> tuple[RemediationChoice,
         _refresh_discovery_choice(),
         _interactive_setup_choice(connector, experimental=True),
     )
+
+
+def _unreadable_connector_version_remediations(
+    connector: str,
+    ranges: tuple[VersionRange, ...],
+) -> tuple[RemediationChoice, ...]:
+    # Setup refuses a version it cannot read in observe and action mode, so
+    # setup is not a next step: read it again, or install a covered version.
+    return (_refresh_discovery_choice(), *_unsupported_connector_remediations(connector, ranges)[:1])
 
 
 def _unavailable_connector_remediations(connector: str) -> tuple[RemediationChoice, ...]:

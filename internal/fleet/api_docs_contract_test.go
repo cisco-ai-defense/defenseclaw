@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -87,4 +88,59 @@ func TestDocumentedDeviceCompositeIDs(t *testing.T) {
 func fmtCompositeID(tenant, fleet uint16, device uint32) string {
 	encoded, _ := json.Marshal(manager.ComposeID(tenant, fleet, device))
 	return string(encoded)
+}
+
+// commonStatusCodes returns the codes in the page's "Common status codes" table.
+func commonStatusCodes(t *testing.T) map[int]bool {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "docs-site", "content", "docs", "reference", "edge-connector", "api.mdx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, table, ok := strings.Cut(string(raw), "## Common status codes")
+	if !ok {
+		t.Fatal("api.mdx has no Common status codes section")
+	}
+	codes := map[int]bool{}
+	for _, m := range regexp.MustCompile("(?m)^\\| `([0-9]{3})` \\|").FindAllStringSubmatch(table, -1) {
+		code, _ := strconv.Atoi(m[1])
+		codes[code] = true
+	}
+	return codes
+}
+
+// GAP-0569: every status the fleet handlers write, and the 405 its router
+// returns, is in the common table.
+func TestCommonStatusCodesListEveryFleetStatus(t *testing.T) {
+	names := map[string]int{}
+	for code := 100; code < 600; code++ {
+		if text := http.StatusText(code); text != "" {
+			names["Status"+strings.NewReplacer(" ", "", "-", "").Replace(text)] = code
+		}
+	}
+	src, err := os.ReadFile("api.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	documented := commonStatusCodes(t)
+	seen := map[string]bool{}
+	for _, m := range regexp.MustCompile(`http\.(Status[A-Za-z]+)\b`).FindAllStringSubmatch(string(src), -1) {
+		code, ok := names[m[1]]
+		if !ok {
+			t.Fatalf("cannot resolve http.%s", m[1])
+		}
+		if !documented[code] && !seen[m[1]] {
+			t.Errorf("api.go writes %d (http.%s); the Common status codes table omits it", code, m[1])
+		}
+		seen[m[1]] = true
+	}
+
+	recorder := httptest.NewRecorder()
+	setupAPIWithPolicyT(t).Handler().ServeHTTP(recorder, authedRequest(http.MethodPut, "/devices", nil))
+	if recorder.Code != http.StatusMethodNotAllowed || strings.TrimSpace(recorder.Body.String()) != "Method Not Allowed" {
+		t.Fatalf("PUT /devices: status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if !documented[http.StatusMethodNotAllowed] {
+		t.Error("the router returns 405; the Common status codes table omits it")
+	}
 }

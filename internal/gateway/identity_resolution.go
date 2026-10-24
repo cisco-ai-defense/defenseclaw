@@ -29,16 +29,16 @@ import (
 //     LDAP, winbind or Windows token chain, an ambiguous name or uid, a
 //     pre-1.0.4 agents entry the upgrade did not bind, a group fact newer
 //     than the last macOS account listing).
-//   - A maybe whose profile the proven facts already give (a yes
-//     assignment's, or with no yes the default) changes nothing. Otherwise
-//     the request is refused, naming the facts those maybes need
+//   - A maybe changes nothing when the proven assignments' profile covers
+//     its profile, or when it names the default and no assignment is proven.
+//     Otherwise the request is refused, naming the facts those maybes need
 //     (profileDecision.Refused); Name is then the strictest combination of
 //     default_profile and every profile that matches or could match, for
 //     the administrator's explain, and authorizes nothing.
 //   - Else the profiles of the yes assignments apply, or default_profile
 //     when none matches: the one that enforces at least what each of the
 //     others does (profileCovers), otherwise their meet, the strictest
-//     combination field by field (guardrail_profile_meet_gw.go).
+//     combination field by field (guardrail_profile_meet.go).
 //
 // This replaces the earlier special cases (matchWithFailedLookup,
 // matchWithUnknownGroups, matchWithUnconfirmedGroups, and the legacy agent
@@ -141,6 +141,12 @@ func resolveIdentity(subject *profileSubject, agentUnresolved func(string) bool)
 		if subject.upnUnproven {
 			res.UPN = proofUnknown
 		}
+		if subject.holderUnproven {
+			// The groups are the account's own (its process credentials);
+			// which account holds the uid, its names and UPN, are not
+			// known (GAP-0653).
+			res.Account, res.UPN = proofUnknown, proofUnknown
+		}
 		if subject.GroupsUnknown {
 			res.Groups = proofUnknown
 		} else if len(subject.unconfirmedGroups) > 0 {
@@ -229,7 +235,9 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 					userState = matchYes
 				}
 			case res.Account == proofProven:
-				if userEntryMatches(subject, entry) {
+				if ambiguousBareUserEntry(subject, entry) {
+					userState, userNeed = max(userState, matchMaybe), "account:ambiguous_short_name"
+				} else if userEntryMatches(subject, entry) {
 					userState = matchYes
 				} else if res.UPN != proofProven && strings.ContainsAny(entry, `@\`) && !strings.HasPrefix(entry, `.\`) {
 					// A UPN or DOMAIN\name entry may name the account
@@ -367,13 +375,22 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		}
 		return profileDecision{}, false
 	}
-	// An assignment that may apply changes nothing when its profile is one
-	// the proven facts already give: a matching assignment's, or with none
-	// matching, the default. The decision needs the unproven facts of the
-	// others only.
+	// An assignment that may apply changes nothing when the profile selected
+	// by proven assignments already covers it. With no proven assignment,
+	// only an uncertain assignment naming the default changes nothing.
+	// The decision needs only facts that could change the selected profile.
+	proven := set.defaultProfile
+	if len(yes) > 0 {
+		matched := make([]string, 0, len(yes))
+		for _, h := range yes {
+			matched = append(matched, h.profile)
+		}
+		proven, _ = set.meetOf(compactProfiles(matched), connectorName)
+	}
+	connectors := set.profileCoverConnectors(connectorName)
 	var needed []string
 	for i, name := range maybe {
-		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && slices.ContainsFunc(yes, func(h hit) bool { return h.profile == name }) {
+		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, connectors) {
 			continue
 		}
 		for _, fact := range maybeNeeds[i] {
@@ -441,7 +458,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
-	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName)
+	decision.Refused = set.identityUncertaintyReason(subject, decision.Unproven, connectorName, agent)
 	return decision
 }
 
@@ -464,12 +481,14 @@ func orderedFacts(facts []string) []string {
 // identityUncertaintyReason names each missing fact without naming a group,
 // another account or a candidate profile. The same text is used by hooks,
 // inspect, ACP, proxy, sandbox and the administrator's explain response.
-func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName string) string {
+func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubject, facts []string, connectorName, agent string) string {
 	why := make([]string, 0, len(facts))
 	for _, fact := range facts {
 		switch fact {
 		case "account:failed":
 			why = append(why, "the account holder is ambiguous")
+		case "account:ambiguous_short_name":
+			why = append(why, "a bare users entry may name accounts in more than one trusted domain; use a qualified name or uid")
 		case "account:unknown":
 			why = append(why, "the account holder is unconfirmed")
 		case "upn:unknown":
@@ -488,12 +507,13 @@ func (set *guardrailProfileSet) identityUncertaintyReason(subject *profileSubjec
 		why = append(why, subject.tokenGroupsCause)
 	}
 	return "DefenseClaw refused this request: " + strings.Join(why, "; ") +
-		"; run `" + set.profileExplainCommand(subject, connectorName) + "` to inspect the identity decision"
+		"; run `" + set.profileExplainCommand(subject, connectorName, agent, slices.Contains(facts, "agent:unknown")) + "` to inspect the identity decision"
 }
 
 // profileExplainCommand names the installed administrator command for the
-// verified ID. Only a numeric uid or SID and a safe connector are included.
-func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName string) string {
+// verified ID. A missing agent ownership fact includes the current verified
+// agent ID so explain checks the same assignment as the refused hook.
+func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, connectorName, agent string, agentNeeded bool) string {
 	if subject == nil || subject.UserID != strings.TrimSpace(subject.UserID) || useridentity.KindForID(subject.UserID) == "" {
 		return "defenseclaw guardrail profile list"
 	}
@@ -510,6 +530,9 @@ func (set *guardrailProfileSet) profileExplainCommand(subject *profileSubject, c
 	}
 	if profileCommandToken(connectorName) {
 		command += " --connector " + connectorName
+	}
+	if agentNeeded && profileCommandToken(agent) {
+		command += " --agent " + agent
 	}
 	return command
 }
@@ -547,7 +570,7 @@ func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName s
 	if len(candidates) == 0 {
 		return set.defaultProfile, true
 	}
-	connectors := profileCoverConnectors(connectorName)
+	connectors := set.profileCoverConnectors(connectorName)
 	for _, candidate := range candidates {
 		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(candidate, other, connectors) }) {
 			return candidate, true
@@ -659,39 +682,60 @@ func (s *provenProfileStore) forgetLocked(key string) {
 	s.order = slices.DeleteFunc(s.order, func(k string) bool { return k == key })
 }
 
-// profileCoverConnectors are the connectors the decisions of a request of
-// connectorName read: its own, and the global settings for a decision
-// taken without one.
-func profileCoverConnectors(connectorName string) []string {
+// profileCoverConnectors includes the gateway connector for an unscoped
+// inspect request: its profile is selected before the scan uses that scope.
+func (set *guardrailProfileSet) profileCoverConnectors(connectorName string) []string {
 	if connectorName == "" {
-		return []string{""}
+		return []string{"", config.NormalizeConnectorName(connectorNameForConfig(set.base))}
 	}
 	return []string{connectorName, ""}
 }
 
-// profileCovers reports whether profile a enforces at least what profile b
-// enforces for a request decided for connectors: the same sandbox section,
-// and wherever b blocks (action, by the hook mode or by the inspect and
-// proxy mode) a blocks too, with b's rule pack and rules, from a block
-// level at or below b's, and with a HILT that asks wherever b's asks. Where
-// b only observes it blocks nothing, so a's guardrail settings there do not
-// matter. A name that is not a profile is the base configuration. alert_at
-// and block_message enforce nothing and are not compared.
+// profileCovers compares candidates when choosing a profile. Equal sandbox
+// sections keep an unproven fallback under a combined name instead of
+// disclosing one candidate's profile as if its assignment were proven.
 func (set *guardrailProfileSet) profileCovers(a, b string, connectors []string) bool {
+	return set.profileCoverage(a, b, connectors, false)
+}
+
+// provenProfileCovers asks whether an already proven selection covers an
+// uncertain assignment. Its effective sandbox floor may be stricter than the
+// uncertain profile's floor, including when it is a combination of profiles.
+func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []string) bool {
+	if members, ok := config.ProfileMeetMembers(a); ok && slices.Contains(members, b) && set.meet(a) != nil {
+		return true
+	}
+	return set.profileCoverage(a, b, connectors, true)
+}
+
+// profileCoverage checks sandbox enforcement and wherever b blocks by hook,
+// inspect or proxy mode: a blocks there too, with b's rule pack and rules,
+// from a block level at or below b's and a HILT that asks wherever b's asks.
+// Where b only observes, its guardrail settings do not matter. A name that
+// is not a profile is the base configuration. alert_at and block_message do
+// not enforce anything and are not compared.
+func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string, effectiveSandbox bool) bool {
 	a, b = strings.TrimSpace(a), strings.TrimSpace(b)
 	if a == b {
 		return true
 	}
 	ca, cb := set.profileConfig(a), set.profileConfig(b)
-	if ca == nil || cb == nil || !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
+	if ca == nil || cb == nil {
+		return false
+	}
+	if effectiveSandbox {
+		if !set.sandboxFloorCovers(a, b) {
+			return false
+		}
+	} else if !reflect.DeepEqual(set.profileSandbox(a), set.profileSandbox(b)) {
 		return false
 	}
 	for _, name := range connectors {
-		hookB, inspectB := hookModeForConfig(cb, name) == "action", inspectMode(cb, name) == "action"
+		hookB, inspectB := cb.HookModeForConnector(name) == "action", inspectMode(cb, name) == "action"
 		if !hookB && !inspectB {
 			continue
 		}
-		if (hookB && hookModeForConfig(ca, name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
+		if (hookB && ca.HookModeForConnector(name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
 			return false
 		}
 		if effectiveRulePackKey(ca, name) != effectiveRulePackKey(cb, name) ||
@@ -720,8 +764,32 @@ func hiltCovers(enabledA bool, minA int, enabledB bool, minB int) bool {
 	return !enabledB || (enabledA && minA <= minB)
 }
 
-// profileSandbox is the sandbox section of profile name; nil for the base
-// configuration.
+// sandboxFloorCovers compares the effective floors, including all members of
+// a combined profile. Reapplying b's floor to a must change nothing; a pack
+// conflict or any incomparable setting keeps the assignment uncertain.
+func (set *guardrailProfileSet) sandboxFloorCovers(a, b string) bool {
+	floor := func(name string) (config.OpenShellAdminConfig, bool) {
+		if name == "" {
+			base, err := config.TightenOpenShellAdmin(set.base.OpenShell.Admin, nil)
+			return base, err == nil
+		}
+		derived, ok := set.derivedProfile(name)
+		return derived.Sandbox, ok
+	}
+	fa, ok := floor(a)
+	if !ok {
+		return false
+	}
+	fb, ok := floor(b)
+	if !ok {
+		return false
+	}
+	tightened, err := config.TightenOpenShellAdmin(fa, &fb)
+	return err == nil && reflect.DeepEqual(tightened, fa)
+}
+
+// profileSandbox is the raw sandbox section of a named profile. A combined
+// profile has no raw section; its effective floor is checked separately.
 func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdminConfig {
 	if set.base == nil {
 		return nil
@@ -735,7 +803,7 @@ func (set *guardrailProfileSet) profileSandbox(name string) *config.OpenShellAdm
 // configuration.
 func (set *guardrailProfileSet) profileStricter(a, b, connectorName string) bool {
 	ca, cb := set.profileConfig(a), set.profileConfig(b)
-	modeA, modeB := hookModeForConfig(ca, connectorName), hookModeForConfig(cb, connectorName)
+	modeA, modeB := ca.HookModeForConnector(connectorName), cb.HookModeForConnector(connectorName)
 	if modeA != modeB {
 		return modeA == "action"
 	}

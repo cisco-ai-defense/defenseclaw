@@ -17,14 +17,21 @@ DefenseClaw adds hooks to the default profile's `config.yaml` and approves exact
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector hermes` first. Until DefenseClaw is initialized, `defenseclaw setup hermes` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
-defenseclaw setup hermes                # observe (default)
+defenseclaw setup hermes                # first setup defaults to observe
 defenseclaw setup hermes --mode action  # block on policy hits
 ```
 
-On Windows, run the same commands in PowerShell. Interactive setup asks for the mode, whether to add to or replace an existing connector roster, and whether to add an LLM judge. For scripts, pass `--yes --mode observe` (or `--mode action`).
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Interactive setup asks for the mode, whether to add to
+or replace an existing connector roster, and whether to add an LLM judge. For
+scripts, pass `--yes --mode observe` (or `--mode action`).
 
-Then reload or restart every Hermes host. Hermes registers hooks in each running process, so restarting the DefenseClaw gateway does not reload them. Until you reload, setup and doctor report `pending_reload`.
+On macOS and Linux, setup registers the portable `hermes-hook.sh` in Hermes's `config.yaml`; macOS and Linux do not write `hermes-direct-native-state.json`. On Windows, setup registers `defenseclaw-hook.exe` directly and writes `hooks/hermes-direct-native-state.json` under the DefenseClaw data directory with `"status": "pending_reload"`. That file records a staged registration, not proof that a running Hermes host loaded it.
+
+Then reload or restart every Hermes host. Hermes registers hooks in each running process, so restarting the DefenseClaw gateway does not reload them. If a Hermes host is running when setup checks the hooks, setup ends that line with `! (restart any open Hermes session so it loads the DefenseClaw hooks)`. Doctor cannot tell when a host has reloaded; see [Check it](#check-it).
 
 ## Check it
 
@@ -32,10 +39,21 @@ Then reload or restart every Hermes host. Hermes registers hooks in each running
 defenseclaw status
 ```
 
-The agent appears under **Agents** with its mode. `defenseclaw doctor` reports no failed check for it.
+The agent appears under **Agents** with its mode.
 
+`defenseclaw doctor` cannot see which hooks a running Hermes loaded. On macOS and Linux it checks the portable hook registration in `config.yaml` and whether a Hermes host is running. While any host runs, the **Hermes hooks** row fails, also after a restart. For a Linux account with home `/home/alice`, the row is:
+
+```text
+[FAIL] Hermes hooks [hermes]  —  on-disk registration is present at /home/alice/.hermes/config.yaml, but running Hermes hosts are unverified: doctor cannot verify which hooks an already running host loaded, even after a restart or successful hook traffic; live=false
+```
+
+On Windows, doctor checks the native registration in `config.yaml`, its exact approvals, the hook executable and `hooks/hermes-direct-native-state.json`. A valid registration is `pending-reload`; while a Hermes host runs, the **Hermes hooks** row fails with `live=false`. macOS and Linux have no direct-native state file to check.
+
+Close every Hermes host and run `defenseclaw doctor` again. With a valid registration and no Hermes running, the row passes on every OS. For that Linux account its detail is `registered at /home/alice/.hermes/config.yaml; no Hermes host is running, so the next one starts with the DefenseClaw hooks`. On macOS the same check prints the resolved absolute config path; on Windows the pass detail includes the native registration checks. Doctor does not clear the Windows state file. Then start Hermes.
 
 ## What it can block or ask
+
+What a gateway outage does to a Hermes call, per install and fail mode, is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 
 <HookEventsList connector="hermes" />
 
@@ -75,7 +93,12 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Hermes's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove hermes --yes` (add `--force` if it is the last one). Then reload every Hermes host.
+With the default gateway restart, disabling removes DefenseClaw's hooks and
+their approvals from Hermes's config and allowlist. It preserves your other
+Hermes settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks
+and approvals. To remove the connector, run
+`defenseclaw setup remove hermes --yes` (add `--force` if it is the last one).
+Then reload every Hermes host.
 
 On a multi-connector install, add `--connector hermes` to `guardrail disable` and `guardrail enable` to change only this agent.
 

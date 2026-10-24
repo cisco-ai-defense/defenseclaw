@@ -652,12 +652,11 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
     assert "amp" in win_options
     assert wizard_field_value(win_fields, "Connector") not in {"openclaw", "zeptoclaw"}
 
-    # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) is
-    # rewritten to the first supported connector rather than seeding an
-    # unusable default the operator would have to notice and change.
+    # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) leaves
+    # the choice empty so no unsupported agent is selected automatically.
     proxy_cfg = {"claw": {"mode": "openclaw"}}
     seeded = wizard_field_value(connector_setup_wizard_fields(proxy_cfg, os_name="windows"), "Connector")
-    assert seeded == win_options[0]
+    assert seeded == ""
 
     # macOS/Linux keep active connectors while hiding global retirements.
     mac_options = _wizard_options(connector_setup_wizard_fields({}, os_name="darwin"), "Connector")
@@ -674,7 +673,12 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
 def test_setup_wizards_keep_connector_scope_inside_the_form() -> None:
     model = SetupPanelModel({})
     model.open_wizard_form(SetupWizard.CONNECTOR_SETUP)
-    assert wizard_field_value(model.form_fields, "Connector")
+    assert wizard_field_value(model.form_fields, "Connector") == ""
+    assert model.missing_required_fields() == ("Connector",)
+    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, model.form_fields) == ()
+    blocked = model.submit_wizard_form()
+    assert blocked.handled
+    assert "Connector" in model.form_error
     model.close_wizard_form()
 
     model.open_wizard_form(SetupWizard.GUARDRAIL)
@@ -1853,14 +1857,14 @@ def test_cli_choices_roles_auth_modes_match_cli_source_of_truth() -> None:
     assert AZURE_AUTH_MODES == _choices(setup_guardrail, "judge_azure_auth_mode")
 
 
-def test_every_wizard_arg_builder_returns_non_empty_argv_for_defaults() -> None:
+def test_wizard_arg_builders_require_connector_choice_before_setup() -> None:
     """Regression guard for every wizard's ``build_wizard_args``.
 
     The hook-connector ``--mode`` bug slipped in because the arg builder
     silently swallowed a field; this test exercises every registered
     wizard with its default form so we catch the next class of silent
-    drops. The assertion is intentionally weak (argv non-empty + base
-    command prefix correct) so adding new fields doesn't churn it.
+    drops. Connector Setup is the exception: an empty connector must not
+    turn into a command for an agent that may be absent.
     """
 
     from defenseclaw.tui.panels.setup import WIZARD_COMMANDS
@@ -1868,6 +1872,10 @@ def test_every_wizard_arg_builder_returns_non_empty_argv_for_defaults() -> None:
     for wizard in SetupWizard:
         fields = wizard_form_defs(wizard)
         argv = build_wizard_args(wizard, fields)
+        if wizard == SetupWizard.CONNECTOR_SETUP:
+            assert argv == ()
+            assert missing_required_fields(wizard, fields) == ("Connector",)
+            continue
         assert argv, f"{wizard.name}: build_wizard_args returned empty argv for defaults"
         prefix = WIZARD_COMMANDS.get(wizard)
         if prefix is not None and prefix:
@@ -2581,6 +2589,8 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
                 "codex": PerConnectorGuardrailConfig(
                     enabled=False,
                     hook_fail_mode="closed",
+                    # The strict tier: its outage mode is closed (oss-outage-open).
+                    rule_pack="strict",
                     block_message="codex blocked",
                     hilt=HILTConfig(enabled=True, min_severity="LOW"),
                 ),
@@ -2607,9 +2617,9 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     assert fields["guardrail.judge.hook_connectors.codex"].value == "true"
     assert fields["guardrail.judge.hook_connectors.hermes"].value == "false"
 
-    # Hermes has no override; a per-user global open still resolves closed.
+    # Hermes has no override: its outage mode is the default tier's open.
     assert fields["guardrail.connectors.hermes.enabled"].value == "true"
-    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "closed"
+    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
     assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"
     assert fields["guardrail.connectors.hermes.hilt.enabled"].value == "false"
     assert fields["guardrail.connectors.hermes.hilt.min_severity"].value == "HIGH"

@@ -30,6 +30,8 @@ internal/winsession/
 internal/posixacl/
 internal/build-repro/
 internal/observability/destinations/managedaid/
+internal/gateway/agent_hook_pending.go
+internal/audit/hook_delivery_journal.go
 cmd/defenseclaw-enterprise-setup/
 cmd/defenseclaw-cmid-broker/
 cmd/windows-avc-assembler/

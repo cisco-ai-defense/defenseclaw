@@ -97,6 +97,11 @@ func (s WindowsMCPAsUserStarter) Start(_ context.Context, request mcpasuser.Requ
 	if err != nil {
 		return nil, fmt.Errorf("read the MCP servers published for %s: %w", account, err)
 	}
+	if unreadable != nil && unreadable.SignedOut {
+		// The enumerator could not read the servers as the user: the user
+		// signed out after the gateway saw the server (GAP-0643).
+		return nil, mcpAsUserSignedOut(account, request.Name)
+	}
 	if unreadable != nil {
 		return nil, fmt.Errorf("the MCP servers of %s are unknown: %s (%s)", account, unreadable.Path, unreadable.Reason)
 	}
@@ -116,10 +121,8 @@ func (s WindowsMCPAsUserStarter) Start(_ context.Context, request mcpasuser.Requ
 	}
 	impersonation, err := windowsMCPAsUserSessionToken(sid)
 	if err != nil {
-		var signedOut *WindowsTargetSessionUnavailableError
-		if errors.As(err, &signedOut) {
-			return nil, fmt.Errorf("%s is not signed in, so their MCP server %q cannot be started as them; "+
-				"it is scanned again once they sign in", account, entry.Name)
+		if IsWindowsTargetSessionUnavailable(err) {
+			return nil, mcpAsUserSignedOut(account, entry.Name)
 		}
 		return nil, fmt.Errorf("get the session token of %s: %w", account, err)
 	}
@@ -167,6 +170,12 @@ func (s WindowsMCPAsUserStarter) Start(_ context.Context, request mcpasuser.Requ
 		return nil, fmt.Errorf("MCP server %q is not started: %w", entry.Name, err)
 	}
 	return windowsMCPAsUserStartProcess(primary, argv, env, workDir)
+}
+
+// mcpAsUserSignedOut is the refusal for an account that is not signed in.
+func mcpAsUserSignedOut(account, server string) error {
+	return fmt.Errorf("%s is not signed in, so their MCP server %q cannot be started as them; "+
+		"it is scanned again once they sign in", account, server)
 }
 
 // mcpAsUserTarget is the enabled manifest row of the request's account and

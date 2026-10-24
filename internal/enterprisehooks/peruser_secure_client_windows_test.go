@@ -17,7 +17,7 @@ import (
 
 func pinWindowsPerUserRuntimeStandaloneForTest(t *testing.T, standalone bool) {
 	t.Helper()
-	pinWindowsStandaloneProfileForTest(t, standalone)
+	setStandaloneProfileForTest(t, standalone)
 	original := windowsPerUserRuntimeStandalone
 	windowsPerUserRuntimeStandalone = func() bool { return standalone }
 	t.Cleanup(func() { windowsPerUserRuntimeStandalone = original })

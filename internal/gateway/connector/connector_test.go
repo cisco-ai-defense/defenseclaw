@@ -3126,8 +3126,14 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			if !strings.Contains(content, "disabled tombstone") {
 				t.Errorf("tombstone missing operator-visible 'disabled tombstone' tag:\n%s", content)
 			}
-			if !strings.Contains(content, "exit 0") {
-				t.Errorf("tombstone does not exit 0 — cached PIDs will not fail-safe:\n%s", content)
+			wantExit := "exit 0"
+			if c.name == "devin" {
+				// A cached Devin session can still invoke its old hook path
+				// after teardown. Keep that invocation closed.
+				wantExit = "exit 2"
+			}
+			if !strings.Contains(content, wantExit) {
+				t.Errorf("tombstone does not use %s for %s:\n%s", wantExit, c.name, content)
 			}
 			if strings.Contains(content, c.hookAPI) {
 				t.Errorf("tombstone still forwards stale payloads to %s:\n%s", c.hookAPI, content)
@@ -4588,7 +4594,7 @@ hooks = false
 	c := NewCodexConnector()
 	opts := SetupOpts{DataDir: dir, ProxyAddr: "127.0.0.1:4000", APIAddr: "127.0.0.1:18970"}
 	err := c.Setup(context.Background(), opts)
-	if err == nil || !strings.Contains(err.Error(), "hooks are disabled") {
+	if err == nil || !strings.Contains(err.Error(), "hooks are turned off") {
 		t.Fatalf("Setup error = %v, want explicit disabled-hooks error", err)
 	}
 }
@@ -10024,10 +10030,12 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 		}{
 			{"closed", "open", true},
 			{"closed", "OPEN", true},
-			{"open", "closed", true},
-			{"open", "Closed", true},
-			{"open", " CLOSED ", true},
-			{"open", "", true},
+			// Installed outage open (the default and permissive tiers): the
+			// environment cannot close it either; the outage runs the call.
+			{"open", "closed", false},
+			{"open", "Closed", false},
+			{"open", " CLOSED ", false},
+			{"open", "", false},
 			{"closed", "", true},
 		} {
 			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
@@ -10095,7 +10103,8 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			// Cursor's observe registration is fail-open (failClosed false),
+			// Cursor's observe verdicts are nonblocking, but its host
+			// registration closes an unanswered hook process.
 			// but no operator chose an open for its outages: the hook blocks
 			// while the gateway is down (OutageHookFailMode).
 			name:         "cursor_empty_opts_close_outages",
@@ -10106,21 +10115,21 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 		},
 		{
 			name:         "cursor_observe_with_an_inherited_closed_closes_outages",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "closed", ConfiguredHookFailMode: "closed"},
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "closed"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
 			wantFailMode: "closed",
 		},
 		{
 			name:         "cursor_observe_legacy_open_closes",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"},
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "open"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
 			wantFailMode: "closed",
 		},
 		{
 			name:         "cursor_action_closes_an_explicit_open",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "action", HookFailMode: "closed", ConfiguredHookFailMode: "open"},
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "action", HookFailMode: "closed"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
 			wantFailMode: "closed",

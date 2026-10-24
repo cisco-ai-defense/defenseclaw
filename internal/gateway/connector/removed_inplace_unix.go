@@ -27,7 +27,7 @@ import (
 
 // removedSavedCopyPrivate refuses a saved copy of an edited module that
 // the group or other accounts may read or change.
-func removedSavedCopyPrivate(info os.FileInfo) error {
+func removedSavedCopyPrivate(_ *os.File, info os.FileInfo) error {
 	if perm := info.Mode().Perm(); perm&0o077 != 0 {
 		return fmt.Errorf("its mode is %o, not private (600)", perm)
 	}
@@ -54,4 +54,23 @@ func removedInPlaceRefusal(file, folder os.FileInfo) error {
 		return errors.New("another account than the hooks folder's owner owns it")
 	}
 	return nil
+}
+
+// removedStubMetadataRefusal says why the agent may not run or load a removed
+// connector's stub, or why another account may change it (nil when neither):
+// its owner cannot read it, an executable stub (mode, the one the teardown
+// writes, has the owner execute bit) is not executable by its owner, others
+// may write it, or another account than the hooks folder's owner owns it.
+// until 1.1, with removed.go.
+func removedStubMetadataRefusal(file, folder os.FileInfo, mode os.FileMode) error {
+	perm := file.Mode().Perm()
+	switch {
+	case perm&0o400 == 0:
+		return fmt.Errorf("its mode is %o, so its owner cannot read it (the teardown writes %o)", perm, mode)
+	case mode&0o100 != 0 && perm&0o100 == 0:
+		return fmt.Errorf("its mode is %o, so its owner cannot run it (the teardown writes %o)", perm, mode)
+	case perm&0o022 != 0:
+		return fmt.Errorf("its mode is %o, so other accounts may change it (the teardown writes %o)", perm, mode)
+	}
+	return removedInPlaceRefusal(file, folder)
 }

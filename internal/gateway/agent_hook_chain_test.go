@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -2129,6 +2130,10 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 		{name: "Claude SessionEnd clears state", connector: "claudecode", boundary: "SessionEnd", clears: true},
 		{name: "OpenCode idle preserves cross-turn state", connector: "opencode", boundary: "session.idle"},
 		{name: "OpenCode deletion clears state", connector: "opencode", boundary: "session.deleted", clears: true},
+		// rel-1-0-4 GAP-0599: Hermes sends on_session_end after every turn.
+		{name: "Hermes per-turn session end preserves cross-turn state", connector: "hermes", boundary: "on_session_end"},
+		{name: "Hermes finalize clears state", connector: "hermes", boundary: "on_session_finalize", clears: true},
+		{name: "Hermes reset clears state", connector: "hermes", boundary: "on_session_reset", clears: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			installToolCallCorpusProfileConnector(t, test.connector, "strict")
@@ -2141,14 +2146,25 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 			handler := http.HandlerFunc(api.handleAgentHook(test.connector))
 			session := "session-boundary-" + test.connector + "-" + test.boundary
 
-			if test.connector == "opencode" {
+			switch test.connector {
+			case "opencode":
 				callAgentHookForTest(t, handler, openCodeToolEvent(
 					"tool.execute.before", session, "discover", "sudo -l",
 				))
 				callAgentHookForTest(t, handler, openCodeToolResult(
 					session, "discover", "sudo -l",
 				))
-			} else {
+			case "hermes":
+				// No cwd: under the hooks class rule a cwd-bound `sudo -l` from
+				// Hermes reads as a dynamic command that can write a protected
+				// file and blocks (T9 integration, gap filed); this test is
+				// about the chain across turn boundaries.
+				discover, result := hermesToolCall(session, "discover", "sudo -l"), hermesToolResult(session, "discover", "sudo -l", "ok")
+				delete(discover, "cwd")
+				delete(result, "cwd")
+				callAgentHookForTest(t, handler, discover)
+				callAgentHookForTest(t, handler, result)
+			default:
 				callAgentHookForTest(t, handler, claudeToolEvent(
 					"PreToolUse", session, "discover", "sudo -l",
 				))
@@ -2162,11 +2178,16 @@ func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 			})
 
 			var got agentHookResponse
-			if test.connector == "opencode" {
+			switch test.connector {
+			case "opencode":
 				got = callAgentHookForTest(t, handler, openCodeToolEvent(
 					"tool.execute.before", session, "elevate", "sudo -u root /bin/sh",
 				))
-			} else {
+			case "hermes":
+				elevate := hermesToolCall(session, "elevate", "sudo -u root /bin/sh")
+				delete(elevate, "cwd")
+				got = callAgentHookForTest(t, handler, elevate)
+			default:
 				got = callAgentHookForTest(t, handler, claudeToolEvent(
 					"PreToolUse", session, "elevate", "sudo -u root /bin/sh",
 				))
@@ -2320,6 +2341,34 @@ func openCodeToolResult(session, invocation, command string) map[string]interfac
 	return payload
 }
 
+// hermesToolCall is a Hermes 0.21 terminal pre_tool_call as shell_hooks.py
+// sends it: hook_event_name, tool_name, tool_input, session_id, cwd and
+// profile at the top, every other field under extra.
+func hermesToolCall(session, invocation, command string) map[string]interface{} {
+	return map[string]interface{}{
+		"hook_event_name": "pre_tool_call",
+		"tool_name":       "terminal",
+		"tool_input":      map[string]interface{}{"command": command},
+		"session_id":      session,
+		"cwd":             "/tmp",
+		"profile":         "default",
+		"extra": map[string]interface{}{
+			"task_id": "", "tool_call_id": invocation, "turn_id": "", "api_request_id": "",
+		},
+	}
+}
+
+// hermesToolResult is the post_tool_call of hermesToolCall with its status.
+func hermesToolResult(session, invocation, command, status string) map[string]interface{} {
+	payload := hermesToolCall(session, invocation, command)
+	payload["hook_event_name"] = "post_tool_call"
+	extra := payload["extra"].(map[string]interface{})
+	extra["result"] = `{"output": "", "exit_code": 0, "error": null}`
+	extra["duration_ms"] = 12
+	extra["status"] = status
+	return payload
+}
+
 func ampToolCall(session, invocation, command string) map[string]interface{} {
 	return map[string]interface{}{
 		"hook_event_name": "tool.call",
@@ -2376,52 +2425,73 @@ func callAgentHookForTest(
 	return decoded
 }
 
-func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *testing.T) {
+type panicOnceHookContext struct {
+	context.Context
+	panicked bool
+}
+
+func (ctx *panicOnceHookContext) Value(key any) any {
+	if !ctx.panicked {
+		ctx.panicked = true
+		panic("injected hook context panic")
+	}
+	return ctx.Context.Value(key)
+}
+
+func TestSafeApplyAgentHookToolChainsPanicBeforeCommitUsesFailMode(t *testing.T) {
 	req := agentHookRequest{
-		ConnectorName: "test", HookEventName: "ConfigChange",
-		Payload: map[string]interface{}{
-			"kind": "guardrail_config_change", "effect": "execute",
-			"previous_state": map[string]interface{}{"enforcement_enabled": true},
-			"new_state":      map[string]interface{}{"enforcement_enabled": false},
-		},
+		ConnectorName: "claudecode", HookEventName: "PreToolUse",
 		toolChain: &toolChainHookCapture{},
 	}
-	profile := connector.HookProfile{
-		ToolCallLifecycle: connector.ResolveHookContract(
-			"claudecode",
-			"2.1.152",
-		).Contract.ToolCallLifecycle,
-		Respond: func(connector.HookRespondInput) connector.HookRespondOutput {
-			panic("chain response shaper panic")
-		},
-	}
-
-	for _, original := range []agentHookResponse{
-		{
+	for _, tc := range []struct {
+		name       string
+		original   agentHookResponse
+		failMode   string
+		want       string
+		wouldBlock bool
+	}{
+		{name: "closed original allow", original: agentHookResponse{
 			Action: "allow", RawAction: "allow", Severity: "NONE",
 			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
-		},
-		{
+		}, want: "block"},
+		{name: "closed observed block", original: agentHookResponse{
+			Action: "allow", RawAction: "block", Severity: "HIGH",
+			Reason: "observed policy block", Mode: "observe", WouldBlock: true,
+		}, want: "block"},
+		{name: "open original allow", original: agentHookResponse{
+			Action: "allow", RawAction: "allow", Severity: "NONE",
+			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
+		}, failMode: "open", want: "allow", wouldBlock: true},
+		{name: "closed original block", original: agentHookResponse{
 			Action: "block", RawAction: "block", Severity: "CRITICAL",
 			Reason: "standalone block", Findings: []string{"standalone"},
 			Mode: "action", EvaluationID: "existing-evaluation",
 			RuleIDs: []string{"existing.rule"},
-		},
+		}, want: "block"},
 	} {
-		t.Run(original.Action, func(t *testing.T) {
-			got, finalization := (&APIServer{}).safeApplyAgentHookToolChains(
-				t.Context(), profile, req, nil, original, 0,
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.HookFailMode = tc.failMode
+			api := &APIServer{scannerCfg: cfg}
+			profile := api.hookProfileForConnector("claudecode")
+			ctx := &panicOnceHookContext{Context: t.Context()}
+			got, finalization := api.safeApplyAgentHookToolChains(
+				ctx, profile, req, nil, tc.original, 0,
 			)
-			if got.Action != original.Action || got.RawAction != original.RawAction ||
-				got.Reason != original.Reason ||
-				got.EvaluationID != original.EvaluationID ||
-				got.SuppressNotification != original.SuppressNotification ||
-				!slices.Equal(got.Findings, original.Findings) ||
-				!slices.Equal(got.RuleIDs, original.RuleIDs) {
+			if !ctx.panicked || got.Action != tc.want || got.Mode != "action" || got.WouldBlock != tc.wouldBlock {
+				t.Fatalf("chain panic response=%+v, want %s", got, tc.want)
+			}
+			if tc.original.Action == "block" && (got.RawAction != tc.original.RawAction ||
+				got.Reason != tc.original.Reason ||
+				got.EvaluationID != tc.original.EvaluationID ||
+				got.SuppressNotification != tc.original.SuppressNotification ||
+				!slices.Equal(got.Findings, tc.original.Findings) ||
+				!slices.Equal(got.RuleIDs, tc.original.RuleIDs)) {
 				t.Fatalf(
-					"standalone response changed after chain panic: got=%+v want=%+v",
+					"standalone block changed after chain panic: got=%+v want=%+v",
 					got,
-					original,
+					tc.original,
 				)
 			}
 			if finalization.repository != nil ||
@@ -2435,7 +2505,7 @@ func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *tes
 	}
 }
 
-func TestSafeApplyAgentHookToolChainsDoesNotInventDenyForDetectionOnlyChainOnPanic(t *testing.T) {
+func TestSafeApplyAgentHookToolChainsPanicAfterDetectionOnlyChainFailsClosed(t *testing.T) {
 	installCorrelationHMACForTest()
 	installDefaultProfileConnector(t, "claudecode")
 	store, logger := testStoreAndV8Logger(t)
@@ -2535,13 +2605,13 @@ func TestSafeApplyAgentHookToolChainsDoesNotInventDenyForDetectionOnlyChainOnPan
 		original,
 		0,
 	)
-	if got.Action != "allow" || got.RawAction != "allow" || got.WouldBlock ||
-		len(got.RuleIDs) != 0 {
+	if got.Action != "block" || got.RawAction != "block" || got.Mode != "action" ||
+		got.WouldBlock || len(got.RuleIDs) != 0 {
 		t.Fatalf("post-commit panic response=%+v", got)
 	}
 	hookSpecific, ok := got.HookOutput["hookSpecificOutput"].(map[string]interface{})
-	if ok && hookSpecific["permissionDecision"] == "deny" {
-		t.Fatalf("post-commit panic unexpectedly denied: %+v", got.HookOutput)
+	if !ok || hookSpecific["permissionDecision"] != "deny" {
+		t.Fatalf("post-commit panic did not answer native denial: %+v", got.HookOutput)
 	}
 	if finalization.repository != nil || len(finalization.receiptIDs) != 0 {
 		t.Fatalf(

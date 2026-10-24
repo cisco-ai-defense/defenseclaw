@@ -53,6 +53,40 @@ func TestNeutralLifecycleEventsExactSets(t *testing.T) {
 	}
 }
 
+// LifecycleEvent adds the looping stop events to the neutral set and nothing
+// else: Antigravity's Stop veto re-enters the agent loop, its tool events stay
+// enforcement events.
+func TestLifecycleEventAddsLoopingStopEvents(t *testing.T) {
+	if !reflect.DeepEqual(loopingStopEvents, map[string][]string{"antigravity": {"Stop"}}) {
+		t.Fatalf("looping stop events = %v", loopingStopEvents)
+	}
+	for connector, events := range neutralLifecycleSets {
+		if got := LifecycleEvents(connector); !reflect.DeepEqual(got, events) {
+			t.Errorf("%s lifecycle events = %v, want the neutral set %v", connector, got, events)
+		}
+		for _, event := range events {
+			if !LifecycleEvent(connector, event) {
+				t.Errorf("%s/%s missing from LifecycleEvent", connector, event)
+			}
+		}
+	}
+	if got := LifecycleEvents("antigravity"); !reflect.DeepEqual(got, []string{"Stop"}) {
+		t.Errorf("antigravity lifecycle events = %v", got)
+	}
+	if !LifecycleEvent("antigravity", "Stop") || NeutralLifecycleEvent("antigravity", "Stop") {
+		t.Error("antigravity Stop must be a lifecycle event outside the neutral runner set")
+	}
+	for _, tc := range []struct{ connector, event string }{
+		{"antigravity", "PreToolUse"}, {"antigravity", "PostToolUse"}, {"antigravity", "stop"},
+		{"claudecode", "PostToolBatch"}, {"claudecode", "PreToolUse"}, {"codex", "PreToolUse"},
+		{"amp", "agent.end"}, {"hermes", "on_session_end"},
+	} {
+		if LifecycleEvent(tc.connector, tc.event) {
+			t.Errorf("%s/%s unexpectedly a lifecycle event", tc.connector, tc.event)
+		}
+	}
+}
+
 // TestInvalidActionOnLifecycleEventsAllowsBothStandaloneShapes covers every
 // lifecycle event, Claude Code and Codex included, on the Unix standalone and
 // the Windows standalone shapes: a missing or unknown action is a neutral

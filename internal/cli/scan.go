@@ -20,12 +20,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
 )
@@ -121,7 +123,7 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 			// projection must not open the service account's correlation key.
 			redactor, err = scanoutput.NewEphemeralRedactor()
 		} else {
-			redactor, err = scanoutput.LoadRedactor(dataDir)
+			redactor, err = loadCodeScanRedactor(dataDir)
 		}
 		if err != nil {
 			return fmt.Errorf("initialize scan output redaction: %w", err)
@@ -158,6 +160,28 @@ func runScanCode(cmd *cobra.Command, args []string) error {
 
 	printCodeScanResults(result)
 	return nil
+}
+
+func loadCodeScanRedactor(dataDir string) (*scanoutput.Redactor, error) {
+	// An administrator's in-process scan uses the service's existing key.
+	// Its owner is trusted only through the installed runtime descriptor and
+	// its fixed data directory; a per-user scan keeps the ordinary trust rule.
+	if managedHostCallerUID() == 0 {
+		layout, descriptor, err := managedStandaloneAdminDeployment()
+		if layout.DataDir != "" && filepath.Clean(dataDir) == filepath.Clean(layout.DataDir) {
+			if err != nil || descriptor == nil || descriptor.ServiceUID < 0 || uint64(descriptor.ServiceUID) > math.MaxUint32 {
+				return nil, fmt.Errorf("managed redaction key owner is unproven; run sudo %s enterprise %s repair", managedHostGatewayCommand(), managedHostPlatform())
+			}
+			// The raw spelling can traverse a symlink before a trailing "..".
+			// Open the verified layout path used by the identity comparison.
+			key, err := observabilityredaction.LoadExistingCorrelationKeyForOwner(layout.DataDir, uint32(descriptor.ServiceUID))
+			if err != nil {
+				return nil, fmt.Errorf("%w; run sudo %s enterprise %s repair", err, managedHostGatewayCommand(), managedHostPlatform())
+			}
+			return scanoutput.NewRedactor(key), nil
+		}
+	}
+	return scanoutput.LoadRedactor(dataDir)
 }
 
 func scanNeedsRedactor(persistProtectedCopy bool) bool {

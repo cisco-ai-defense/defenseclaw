@@ -256,6 +256,50 @@ def test_codex_folder_trust_write_is_not_exporter_drift(tmp_path: Path) -> None:
     assert inspect_connector_custody(db_path, tmp_path, now=NOW).instances[0].managed_config_state == "drifted"
 
 
+@pytest.mark.parametrize("edit", ["ordinary", "managed", "absent", "helper", "missing-key", "missing-snapshot", "corrupt-snapshot"])
+def test_claude_settings_drift_checks_the_exact_managed_environment(tmp_path: Path, edit: str) -> None:
+    db_path = tmp_path / "audit.db"
+    db = _database(db_path)
+    _instance(db, "019b0000-0000-7000-8000-000000000001", "claudecode", "defenseclaw")
+    db.commit()
+    db.close()
+    managed = {
+        "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        "OTEL_LOGS_EXPORTER": "otlp",
+        "OTEL_METRICS_EXPORTER": "otlp",
+        "OTEL_EXPORTER_OTLP_ENDPOINT": "http://127.0.0.1:18970",
+        "OTEL_EXPORTER_OTLP_HEADERS": "x-defenseclaw-source=claudecode",
+    }
+    target = tmp_path / "settings.json"
+    settings = {"env": dict(managed), "otelHeadersHelper": "managed credential helper"}
+    target.write_text(json.dumps(settings))
+    _managed_backup(tmp_path, "claudecode", target)
+    snapshot = tmp_path / "claudecode_backup.json"
+    snapshot.write_text(json.dumps({"env_backup_captured": True, "managed_env": managed,
+                                    "managed_absent_env": ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"],
+                                    "otlp_headers_helper_captured": True,
+                                    "managed_otlp_headers_helper": "managed credential helper"}))
+    settings["model"] = "operator-model"
+    settings["env"]["UNRELATED_SETTING"] = "retained"
+    if edit == "managed":
+        settings["env"]["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://127.0.0.1:19999"
+    elif edit == "absent":
+        settings["env"]["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] = "http://127.0.0.1:19999"
+    elif edit == "helper":
+        settings["otelHeadersHelper"] = "operator changed helper"
+    elif edit == "missing-key":
+        del settings["env"]["OTEL_EXPORTER_OTLP_HEADERS"]
+    elif edit == "missing-snapshot":
+        snapshot.unlink()
+    elif edit == "corrupt-snapshot":
+        snapshot.write_text("null")
+    target.write_text(json.dumps(settings))
+    before = target.read_bytes()
+    state = inspect_connector_custody(db_path, tmp_path, now=NOW, api_addr="127.0.0.1:18970")
+    assert state.instances[0].managed_config_state == ("verified" if edit == "ordinary" else "drifted")
+    assert target.read_bytes() == before
+
+
 def _codex_otel_block(port: int = 18970, trace_port: int | None = None) -> str:
     headers = '{ x-defenseclaw-source = "codex", x-defenseclaw-client = "codex-otel/1.0" }'
     return "".join(

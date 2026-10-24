@@ -591,7 +591,7 @@ func inspectRulePackDirectory(dir string) (*rulePackInventory, error) {
 
 		fileInfo, infoErr := entry.Info()
 		if infoErr != nil {
-			return rulePackErr(rel, "file_unreadable", "component cannot be inspected")
+			return rulePackFileUnreadable(rel, "inspected", infoErr)
 		}
 		if entry.Type()&os.ModeSymlink != 0 || !fileInfo.Mode().IsRegular() {
 			return rulePackErr(rel, "file_type", "component must be a regular file")
@@ -658,12 +658,15 @@ func readRulePackFile(file diskRulePackFile) ([]byte, error) {
 		if errors.Is(err, errRulePackFileType) {
 			return nil, rulePackErr(file.relPath, "file_type", "component must be a regular file")
 		}
-		return nil, rulePackErr(file.relPath, "file_unreadable", "component cannot be read")
+		return nil, rulePackFileUnreadable(file.relPath, "read", err)
 	}
 	defer handle.Close()
 
 	info, err := handle.Stat()
-	if err != nil || !info.Mode().IsRegular() {
+	if err != nil {
+		return nil, rulePackFileUnreadable(file.relPath, "inspected", err)
+	}
+	if !info.Mode().IsRegular() {
 		return nil, rulePackErr(file.relPath, "file_type", "component must be a regular file")
 	}
 	if info.Size() > maxRulePackFileBytes {
@@ -671,12 +674,20 @@ func readRulePackFile(file diskRulePackFile) ([]byte, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(handle, maxRulePackFileBytes+1))
 	if err != nil {
-		return nil, rulePackErr(file.relPath, "file_unreadable", "component cannot be read")
+		return nil, rulePackFileUnreadable(file.relPath, "read", err)
 	}
 	if len(data) > maxRulePackFileBytes {
 		return nil, rulePackErr(file.relPath, "file_size_limit", "component exceeds the per-file byte limit")
 	}
 	return data, nil
+}
+
+func rulePackFileUnreadable(rel, action string, err error) *RulePackError {
+	reason := "component cannot be " + action
+	if errors.Is(err, fs.ErrPermission) {
+		reason += " by this account (access denied)"
+	}
+	return rulePackErr(rel, "file_unreadable", reason)
 }
 
 func decodeStrictYAML(data []byte, rel string, out any) error {

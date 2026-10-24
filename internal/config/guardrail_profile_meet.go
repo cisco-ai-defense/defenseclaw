@@ -182,11 +182,11 @@ func closedMeetSandboxFloor(f OpenShellAdminConfig, overlay *OpenShellAdminConfi
 
 // DeriveGuardrailProfileMeet derives the meet of members (ProfileMeetName)
 // whose guardrail settings are profile: the gateway computes them as the
-// strictest of the members' effective settings for every connector, since
-// those depend on rule pack postures and hook modes it resolves. The sandbox
-// floor is the members' meet (meetSandboxFloor). Every member must be a
-// profile of c or "" (the base configuration).
-func (c *Config) DeriveGuardrailProfileMeet(members []string, profile GuardrailProfile) (DerivedGuardrailProfile, error) {
+// strictest of the members' effective inspect settings for every connector.
+// hookModes contains the hook modes that differ from those inspect settings.
+// The sandbox floor is the members' meet (meetSandboxFloor). Every member
+// must be a profile of c or "" (the base configuration).
+func (c *Config) DeriveGuardrailProfileMeet(members []string, profile GuardrailProfile, hookModes map[string]string) (DerivedGuardrailProfile, error) {
 	if c == nil {
 		return DerivedGuardrailProfile{}, fmt.Errorf("guardrail profile meet: configuration is unavailable")
 	}
@@ -205,6 +205,27 @@ func (c *Config) DeriveGuardrailProfileMeet(members []string, profile GuardrailP
 	}
 	profile.Sandbox = nil
 	derived := deriveProfileFrom(base, profile)
+	for name, mode := range hookModes {
+		// A profile's explicit guardrail mode clears inherited hook modes.
+		// Restore only overrides that differ from the meet's inspect mode,
+		// preserving the other fields of each connector's hook config.
+		if hook, ok := derived.ConnectorHooks[name]; ok {
+			hook.Mode = mode
+			derived.ConnectorHooks[name] = hook
+			continue
+		}
+		switch name {
+		case "codex":
+			derived.Codex.Mode = mode
+		case "claudecode":
+			derived.ClaudeCode.Mode = mode
+		default:
+			if derived.ConnectorHooks == nil {
+				derived.ConnectorHooks = make(map[string]AgentHookConfig)
+			}
+			derived.ConnectorHooks[name] = AgentHookConfig{Mode: mode}
+		}
+	}
 	digest, err := guardrailPolicyDigest(derived, floorDigest, nil)
 	if err != nil {
 		return DerivedGuardrailProfile{}, fmt.Errorf("guardrail profile meet %s: %w", name, err)

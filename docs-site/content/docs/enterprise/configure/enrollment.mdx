@@ -31,7 +31,7 @@ An agent reads its hooks when it starts. A session that started before DefenseCl
   <Edge from="grd" to="cfg" label="writes as the user" />
 </Flow>
 
-Machine-policy agents (Codex, Claude Code, Cursor, Copilot, and OpenCode through its managed plugin) run DefenseClaw's hooks for every user on the machine; see [Machine policy](/docs/enterprise/configure/machine-policy). On Linux and macOS, enrollment therefore matters most for per-user agents and for how the gateway treats users it has not enrolled. On Windows every user must be enrolled. Terms are in [Concepts](/docs/enterprise/plan/concepts).
+Published machine policy runs DefenseClaw's hooks for every user of that agent on the machine (Codex, Claude Code, Cursor, Copilot, and OpenCode through its managed plugin); see [Machine policy](/docs/enterprise/configure/machine-policy). On Linux and macOS, enrollment therefore matters most for per-user agents and for how the gateway treats users it has not enrolled. On Windows every user must be enrolled for hook calls to be accepted. Terms are in [Concepts](/docs/enterprise/plan/concepts).
 
 ## Choose who is enrolled
 
@@ -50,7 +50,7 @@ enterprise:
 ```
 
 - `exclude_users` always wins. `exempt_users` skips enrollment but not inspection: the account's guardrail profile still applies.
-- `unenrolled_users` (Linux and macOS) decides what happens to a machine-policy agent for a user with no enrollment: `inspect` (default) still inspects, `deny` refuses. On Windows an unenrolled user always fails closed.
+- `unenrolled_users` (Linux and macOS) decides what happens to a machine-policy agent for a user with no enrollment: `inspect` (default) still inspects, `deny` refuses. On managed Windows, Claude Code, Codex and Cursor must refuse an unenrolled user's calls even with zero enrolled users for that agent. Keep each enabled agent's machine policy in force; treat a missing policy as a protection failure and stop agent use until it is repaired.
 - With `mode: manifest` you publish the target list yourself. The format is in the [detail page](/docs/enterprise/configure/reference#publish-the-target-list-yourself).
 - Linux and macOS also take `root`, `uid_min`, `uid_max`, `home_roots` and `agent_prefixes`. Windows does not apply them.
 
@@ -60,7 +60,7 @@ The filters, their order and the keys each OS ignores are in [Enrollment detail]
 
 ## How users and agents are found
 
-The enumerator adds a row for a user and an agent only when it finds that agent installed for the user and can read its version. Windows reads the profile list; Linux uses NSS, logged-in sessions and the home roots; macOS uses local accounts, the console user and `/Users`. An agent installed in an unusual place is generally not found. On Linux and macOS, install shared agents under an `agent_prefixes` path. [Enrollment detail](/docs/enterprise/configure/reference#how-users-and-agents-are-found) lists every place searched.
+The enumerator adds a row for a user and an agent only when it finds that agent installed for the user and can read its version. Windows reads the profile list; Linux uses NSS, logged-in sessions and the home roots; macOS uses local accounts, the console user and `/Users`. It also checks private npm prefixes one directory below each enrolled user's home, the version managers' installed Nodes, the machine npm prefixes and native installer releases for unsupported Claude Code, Codex and Copilot CLI copies and reports each one as unprotected. A Claude Code `cli.js` or `bin/claude.exe` found without readable version metadata is reported as unverified. An agent installed deeper or copied to an arbitrary location is generally not found. On Linux and macOS, install shared agents under an `agent_prefixes` path. [Enrollment detail](/docs/enterprise/configure/reference#how-users-and-agents-are-found) lists every place searched.
 
 ## Agents that cannot be enrolled
 
@@ -77,7 +77,7 @@ A per-user agent in this state runs without DefenseClaw hooks. Lowest supported 
 
 ## Desktop apps and editor extensions
 
-Some agents also ship as a desktop app or editor extension that reads the same hook settings. A user who has only the app or extension is enrolled at the engine version it runs. `unverified_versions: report` (default) enrolls it; `refuse` does not enroll it and the gateway refuses its hook calls. See [Enrollment detail](/docs/enterprise/configure/reference#desktop-apps-and-editor-extensions).
+Some agents also ship as a desktop app or editor extension that reads the same hook settings. A user with only that surface is enrolled under `unverified_versions: report` (the default) only when discovery finds an admitted engine version and a hook contract for it. An extension with no engine version is reported as `surface_unverified`, not enrolled. For example, a Codex extension-only user on Windows is reported, not enrolled: Windows discovery has no static source for its bundled engine version. Under `unverified_versions: refuse`, an unverified surface-only user is not enrolled and the gateway refuses its hook calls. See [Enrollment detail](/docs/enterprise/configure/reference#desktop-apps-and-editor-extensions).
 
 ## Linux and macOS
 
@@ -91,7 +91,7 @@ Accounts pass a fixed filter order: `exclude_users`, uid and login-shell checks,
 
 - Only accounts with a profile on the machine can be enrolled, so a user is enrolled after their first sign-in.
 - The guardian enrolls an account only while it has an interactive desktop session (console or Remote Desktop). An SSH session, scheduled task or `runas` window does not count.
-- A hook call from a user who is not enrolled is refused with `enterprise_managed_sid_unregistered`.
+- A machine-policy hook call from a user who is not enrolled must be refused with `enterprise_managed_sid_unregistered`. Claude Code, Codex and Cursor must refuse unenrolled and cut-off users even with zero enrolled users for that agent. Check `enterprise policy verify` before permitting use; if a policy is missing, stop the agent with application control and repair the deployment.
 - The guardian writes into a user's agent config only while that user has a connected session; otherwise the row stays pending.
 
 ### Group filters on Windows
@@ -102,7 +102,7 @@ A group name that resolved before but does not resolve now (the directory is unr
 
 ## New, changed and removed users
 
-- **New user.** Enrolled on the next enumerator cycle, within five minutes once the account is signed in and the agent is installed. On Windows, Claude Code must also start once so its build can be verified; if that happens later, the five-minute wait starts then. Machine-policy agents run DefenseClaw hooks from the first call and block until enrollment.
+- **New user.** Enrolled on the next enumerator cycle, within five minutes once the account is signed in and the agent is installed. On Windows, Claude Code must also start once so its build can be verified; if that happens later, the five-minute wait starts then. A new user's first Claude Code tool call must be refused until enrollment, including when no previous user was enrolled for Claude Code. Machine-policy agents must run their hooks from the first call. On Windows, Claude Code, Codex and Cursor must refuse the new user even with zero enrolled users for that agent. Per-user agents are covered once the guardian has written the registration.
 - **Excluded user or agent removed from the config.** Rows are removed on the next cycle, and the guardian removes DefenseClaw's own hook registration from that user's agent config. The user's own hooks stay.
 - **Deleted user (Linux and macOS).** Rows are removed after three consecutive definitive "no such user" cycles, 10 to 15 minutes. A directory outage never removes anyone. Run `enterprise linux repair` or `enterprise macos repair` as root to remove them at once.
 

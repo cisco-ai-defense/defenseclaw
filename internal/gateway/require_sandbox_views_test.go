@@ -147,7 +147,7 @@ func TestUnixDirectoryExemptionMatchesTheHookAndViews(t *testing.T) {
 		Assurance: useridentity.AssuranceVerified, ResolvedAt: now}
 	facts := map[int]useridentity.DirectoryFacts{2202: ad, 2203: mac, 2500: local}
 	previousFacts := managedHookExemptFacts
-	managedHookExemptFacts = func(uid int) (useridentity.DirectoryFacts, bool) { f, ok := facts[uid]; return f, ok }
+	managedHookExemptFacts = func(uid int, _ bool) (useridentity.DirectoryFacts, bool) { f, ok := facts[uid]; return f, ok }
 	t.Cleanup(func() { managedHookExemptFacts = previousFacts })
 	enrollment := config.EnterpriseEnrollmentConfig{ExemptUsers: []string{`CORP\alice`}}
 	z := &managedHookAuthorizer{enrollment: enrollment}

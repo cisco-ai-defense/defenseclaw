@@ -91,10 +91,10 @@ Compilation does not prove a connector supplies the facts your expression reads.
 
 ```bash
 defenseclaw alerts --limit 25 --connector claudecode
-defenseclaw alerts --show 1
+defenseclaw alerts --connector claudecode --show 1
 ```
 
-Use the connector you tested and the alert number from the list. Secret findings hide rule IDs and titles in both alert views: this rule can appear as `redacted.secret.id-…` with the title `Secret finding`. Searching alerts for `ORG-PAYMENTS-SECRETS` will not find that redacted entry. Correlate the alert's connector, time and session with your test turn. For direct verification of the original ID, use the connector's native action verdict on a harmless matching test; observe-mode alert views cannot recover it. The pack path and files digest above establish which reviewed rules are configured; they do not prove a hook exercised this rule. No CLI injects synthetic facts.
+Use the connector you tested in both commands and the alert number from the list, so `--show` numbers the list you just read. Secret findings hide rule IDs and titles in both alert views: this rule can appear as `redacted.secret.id-…` with the title `Secret finding`. Searching alerts for `ORG-PAYMENTS-SECRETS` will not find that redacted entry. Correlate the alert's connector, time and session with your test turn. For direct verification of the original ID, use the connector's native action verdict on a harmless matching test; observe-mode alert views cannot recover it. The pack path and files digest above establish which reviewed rules are configured; they do not prove a hook exercised this rule. No CLI injects synthetic facts.
 
 With the default pack's levels, this CRITICAL rule can block in action mode when the facts are complete. A HIGH rule would alert only.
 

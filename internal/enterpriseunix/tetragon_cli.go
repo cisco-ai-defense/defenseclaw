@@ -266,9 +266,44 @@ func (l *lifecycle) helperModeDrift(ctx context.Context, p *plan) bool {
 	return string(state.Intent.Mode) != p.config.Tetragon.helperMode()
 }
 
+// waitHelperMode checks the helper's new published state before a package
+// upgrade reports success. systemctl accepts a restart before the helper has
+// read its drop-in and written its state; the prior process's state is not
+// evidence that the new process applied the requested mode.
+func (l *lifecycle) waitHelperMode(ctx context.Context, unit Unit, wanted string, previous kernelpolicy.State) error {
+	env := l.env
+	deadline := env.Now().Add(env.ReadyTimeout)
+	var last string
+	for {
+		state, err := kernelpolicy.ReadState(env.sensorDirs())
+		if err != nil {
+			last = err.Error()
+		} else {
+			last = fmt.Sprintf("published Tetragon mode %s", state.Intent.Mode)
+			fresh := state.UpdatedAt.After(previous.UpdatedAt) ||
+				(previous.HelperPID != 0 && state.HelperPID != 0 && state.HelperPID != previous.HelperPID)
+			if fresh && string(state.Intent.Mode) == wanted && env.Services.Active(ctx, unit) {
+				return nil
+			}
+		}
+		if !env.Now().Before(deadline) {
+			return fmt.Errorf("%s did not publish enterprise.tetragon mode %s within %s (%s)", unit.Name, wanted, env.ReadyTimeout, last)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(env.PollInterval):
+		}
+	}
+}
+
 // sensorDirs are the helper's state and runtime directories on this host.
 func (e *Env) sensorDirs() kernelpolicy.Dirs {
 	return kernelpolicy.Dirs{State: e.P(kernelpolicy.DefaultStateDir), Run: e.P(kernelpolicy.DefaultRunDir)}
+}
+
+func (e *Env) sensorState() (kernelpolicy.State, error) {
+	return kernelpolicy.ReadState(e.sensorDirs())
 }
 
 // recordedKernelPolicies are the names the helper recorded loading.

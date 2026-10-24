@@ -1026,7 +1026,7 @@ def sync_cmd(  # noqa: PLR0913
         for r in reports:
             audit.log_action(
                 "registry-sync", r.source_id,
-                f"sync id={r.source_id} fetched={r.fetched} scanned={r.scanned} "
+                f"sync id={r.source_id} fetched={r.fetched} scanned={r.scanned} skipped={r.skipped} "
                 f"promoted_skills={r.promoted_skills} promoted_mcps={r.promoted_mcps} "
                 f"blocked={r.blocked} errors={len(r.errors)} promote={'off' if no_promote else 'on'}",
             )
@@ -1103,22 +1103,24 @@ def _print_sync_reports(reports: list[SyncReport]) -> None:
     # Size SOURCE to the longest id so later columns stay under their headers (GAP-2424).
     id_w = max([24] + [len(r.source_id) for r in reports])
     click.echo(
-        f"  {'SOURCE':<{id_w}} {'FETCHED':<8} {'SCANNED':<8} {'PROMOTED':<20} {'STATUS'}"
+        f"  {'SOURCE':<{id_w}} {'FETCHED':<8} {'SCANNED':<8} {'SKIPPED':<8} {'PROMOTED':<20} {'STATUS'}"
     )
     click.echo(
-        f"  {'-' * id_w} {'-' * 8} {'-' * 8} {'-' * 20} {'-' * 32}"
+        f"  {'-' * id_w} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 20} {'-' * 32}"
     )
     for r in reports:
         promoted = _promoted_label(r.promoted_skills, r.promoted_mcps)
-        status = "error" if not r.ok() else ("partial" if getattr(r, "partial", ()) else "ok")
+        status = "error" if not r.ok() else ("partial" if r.skipped or r.partial else "ok")
         click.echo(
-            f"  {r.source_id:<{id_w}} {r.fetched:<8} {r.scanned:<8} {promoted:<20} {status}"
+            f"  {r.source_id:<{id_w}} {r.fetched:<8} {r.scanned:<8} {r.skipped:<8} {promoted:<20} {status}"
         )
     for r in reports:
         for err in r.errors:
             click.echo(f"  {ux.dim('!')} {r.source_id}: {err}")
         for note in getattr(r, "partial", ()):
             click.echo(f"  {ux.dim('!')} {r.source_id}: {note}")
+        for reason in r.skip_reasons:
+            click.echo(f"  {ux.dim('!')} {r.source_id}: {reason}")
     click.echo()
 
 

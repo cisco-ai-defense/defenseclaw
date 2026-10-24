@@ -97,25 +97,31 @@ func TestActiveConnectors_Precedence(t *testing.T) {
 	}
 }
 
-// TestActiveConnector_UnchangedByMap proves activeConnector() keeps its
-// original precedence (guardrail.connector → claw.mode → "openclaw") and
-// is NOT influenced by the new guardrail.connectors map: the plural
-// activeConnectors() is purely additive on top of the untouched singular
-// reader, so legacy single-connector call sites behave exactly as before.
-func TestActiveConnector_UnchangedByMap(t *testing.T) {
+// With a roster and no singular selection, the first configured connector
+// is the primary; an OpenClaw default must not be invented.
+func TestActiveConnector_UsesRosterWhenSingularUnset(t *testing.T) {
 	cfg := &Config{}
 	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{
 		"codex":       {},
 		"antigravity": {},
 	}
-	// Map present but no singular connector / mode → singular reader
-	// falls back to "openclaw" exactly like before multi-connector.
-	if got := cfg.activeConnector(); got != "openclaw" {
-		t.Errorf("activeConnector() = %q, want openclaw (map must not affect singular reader)", got)
+	if got := cfg.activeConnector(); got != "antigravity" {
+		t.Errorf("activeConnector() = %q, want antigravity", got)
 	}
-	// The plural reader is the additive surface that sees the map.
 	if got := cfg.activeConnectors(); !reflect.DeepEqual(got, []string{"antigravity", "codex"}) {
 		t.Errorf("activeConnectors() = %v, want [antigravity codex]", got)
+	}
+}
+
+func TestActiveConnector_SecureClientRosterDoesNotInventOpenClaw(t *testing.T) {
+	cfg := &Config{
+		DeploymentMode: "managed_enterprise",
+		Enterprise:     EnterpriseConfig{Profile: "secure_client"},
+		Claw:           ClawConfig{Mode: ClawOpenClaw},
+	}
+	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{"codex": {}}
+	if got := cfg.activeConnector(); got != "codex" {
+		t.Errorf("secure client activeConnector() = %q, want codex", got)
 	}
 }
 

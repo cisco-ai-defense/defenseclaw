@@ -212,6 +212,14 @@ Administrator prompt (or as LocalSystem from an MDM script) on Windows.`,
 					query.Set("caller_facts", facts)
 				}
 			}
+			if view.use == "agent-identities" && query.Get("user") != "" {
+				// root's proof of the account's home tells an account deleted
+				// and created again under the same name and uid from the one
+				// before it, also before the guardian's next pass (GAP-0422).
+				if proof := enterpriseIdentityViewHolderProof(query.Get("user")); proof != "" {
+					query.Set("holder_proof", proof)
+				}
+			}
 			if aiOnly {
 				query.Set("ai_only", "true")
 			}
@@ -325,15 +333,17 @@ func enterpriseIdentityViewError(err error) error {
 }
 
 // unresolvedProfileExplainAccount returns the gateway's lookup_error when
-// the account it was asked about did not resolve (no subject.user_id).
+// the account it was asked about did not resolve. A numeric uid may still
+// appear in subject.user_id for comparison with a hook call from that uid.
 func unresolvedProfileExplainAccount(answer json.RawMessage) string {
 	var resolved struct {
-		LookupError string `json:"lookup_error"`
-		Subject     struct {
+		LookupError       string `json:"lookup_error"`
+		AccountUnresolved bool   `json:"account_unresolved"`
+		Subject           struct {
 			UserID string `json:"user_id"`
 		} `json:"subject"`
 	}
-	if json.Unmarshal(answer, &resolved) != nil || resolved.Subject.UserID != "" {
+	if json.Unmarshal(answer, &resolved) != nil || resolved.Subject.UserID != "" && !resolved.AccountUnresolved {
 		return ""
 	}
 	return resolved.LookupError

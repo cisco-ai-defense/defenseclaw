@@ -142,18 +142,15 @@ func (c *ClaudeCodeConnector) ToolInspectionMode() ToolInspectionMode { return T
 func (c *ClaudeCodeConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
+	if err := c.checkAgentSettings(opts); err != nil {
+		return err
+	}
 	if opts.ManagedEnterprise {
 		otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeClaude, opts.OTLPPathToken)
 		if err != nil {
 			return fmt.Errorf("claudecode scoped OTLP token: %w", err)
 		}
 		opts.OTLPPathToken = otlpToken
-	}
-	if !opts.ManagedEnterprise {
-		// Managed installs, Secure Client included, keep their setup path.
-		if err := claudeCodeSettingsParseable(claudeCodeSettingsPath()); err != nil {
-			return setupRefusedUnchanged{err: err}
-		}
 	}
 
 	hookDir := filepath.Join(opts.DataDir, "hooks")
@@ -199,6 +196,40 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return nil
 }
 
+// checkAgentSettings refuses, before Setup changes anything, user
+// settings Setup must not rewrite: a settings link the gateway cannot
+// inspect (GAP-1062), a settings file that does not parse, or a
+// disableAllHooks=true that switches every hook off (the user's choice,
+// GAP-1066). The registration verifier rejects the last after Setup, and
+// rolling back then removed the hooks an earlier setup installed. A gateway
+// start keeps the other connectors (GAP-0578), and `defenseclaw setup`
+// refuses before it restarts the gateway: a link out of the home left the
+// gateway stopped after the rollback (GAP-0634). Managed installs, Secure
+// Client included, keep their setup path.
+func (c *ClaudeCodeConnector) checkAgentSettings(opts SetupOpts) error {
+	if opts.ManagedEnterprise {
+		return nil
+	}
+	settingsPath := claudeCodeSettingsPath()
+	if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
+		return refuseForAgentConfig(fmt.Errorf("Claude Code user settings %s: %w; then run: defenseclaw-gateway restart", settingsPath, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+	}
+	if err := claudeCodeSettingsParseable(settingsPath); err != nil {
+		return refuseForAgentConfig(err)
+	}
+	sources, err := inspectClaudeCodeUserSources(opts)
+	if err != nil {
+		return refuseForAgentConfig(err)
+	}
+	if disabled, source, err := effectiveClaudeCodeUserHooksDisabled(sources); err == nil && disabled {
+		return refuseForAgentConfig(fmt.Errorf( //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
+			"Claude Code %s sets disableAllHooks=true, so Claude Code runs none of its hooks and DefenseClaw is not guarding its tool calls; remove disableAllHooks (or set it to false), then run: defenseclaw-gateway restart",
+			source.label(),
+		))
+	}
+	return nil
+}
+
 // claudeCodeSettingsParseable refuses a settings file that is not a JSON
 // object before Setup changes anything. A hand-edit slip in settings.json
 // failed the hooks patch after the hook scripts were rewritten, the rollback
@@ -208,7 +239,7 @@ func (c *ClaudeCodeConnector) Setup(ctx context.Context, opts SetupOpts) error {
 func claudeCodeSettingsParseable(path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil || len(bytes.TrimSpace(data)) == 0 {
-		return nil // a missing or unreadable file is reported by the patch
+		return nil // inspectClaudeCodeUserSources handles unreadable files
 	}
 	var settings map[string]interface{}
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -259,6 +290,11 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 		}
 	}
 	if len(errs) == 0 {
+		if err := revokePerUserHookAPIToken(opts, c.Name()); err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+	if len(errs) == 0 {
 		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeClaude); err != nil {
 			errs = append(errs, fmt.Sprintf("revoke scoped OTLP token: %v", err))
 		}
@@ -278,8 +314,12 @@ func (c *ClaudeCodeConnector) Teardown(ctx context.Context, opts SetupOpts) erro
 func (c *ClaudeCodeConnector) VerifyClean(opts SetupOpts) error {
 	var residual []string
 
-	// Check for owned hooks still present in settings.json
+	// Check for owned hooks still present in settings.json. A file that does
+	// not parse cannot show they are gone.
 	settingsPath := claudeCodeSettingsPath()
+	if err := claudeCodeSettingsParseable(settingsPath); err != nil {
+		return fmt.Errorf("verify claudecode cleanup: %w", err)
+	}
 	if data, err := os.ReadFile(settingsPath); err == nil {
 		var settings map[string]interface{}
 		if json.Unmarshal(data, &settings) == nil {
@@ -1490,14 +1530,6 @@ func (c *ClaudeCodeConnector) patchClaudeCodeHooks(opts SetupOpts, hookScript st
 	// spaces. Older shell-form commands are still recognized during migration.
 	hookCommand, hookArgs := claudeCodeHookInvocation(opts, hookScript)
 	settingsPath := claudeCodeSettingsPath()
-	if !opts.ManagedEnterprise {
-		// Refuse a link the gateway cannot inspect before any hook is
-		// written, so a refusal never leaves fail-closed hooks behind (GAP-1062).
-		if _, err := claudeCodeUserSettingsReadPath(settingsPath); err != nil {
-			return fmt.Errorf("Claude Code user settings %s: %w", settingsPath, err) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
-		}
-	}
-
 	return withFileLock(settingsPath, func() error {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "settings.json", settingsPath); err != nil {
 			return fmt.Errorf("capture claude settings backup: %w", err)
@@ -2591,6 +2623,11 @@ func (c *ClaudeCodeConnector) restoreClaudeCodeHooks(opts SetupOpts) error {
 				return atomicTransformResult{}, fmt.Errorf("canonicalize restored settings: %w", err)
 			}
 			if bytes.Equal(canonical, originalCanonical) {
+				if !exactRestore {
+					// Nothing of DefenseClaw's was in the file: leave its bytes
+					// and mode as the user has them (GAP-0650).
+					return atomicTransformResult{Data: data, Keep: true}, nil
+				}
 				// Reconciliation may tear down an already-clean connector after
 				// uninstall restored and discarded its backup. Keep those bytes
 				// as well as a pristine backup's original formatting.

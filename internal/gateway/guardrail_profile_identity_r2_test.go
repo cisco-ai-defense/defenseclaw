@@ -30,10 +30,10 @@ func r2BridgeConfig(assignments ...config.ProfileAssignment) *config.Config {
 // Loop round 2, finding 2: no ledger record, a sole one included, proves
 // whose agent a 1.0.3 agents entry names (GAP-0337), and such an unproven
 // entry never resolves to a weaker default_profile. The account the sole
-// record names, whose strict 1.0.3 assignment the release matched, gets the
-// strictest profile that may apply (strict, as default_lookup_failed);
-// before, it fell to the weaker default. A namesake the record names gets
-// it too, and an account the entry cannot name keeps its own match.
+// record names, whose strict 1.0.3 assignment the release matched, is
+// refused with the unproven fact named; strict is only a diagnostic candidate.
+// Before, it fell to the weaker default. A namesake the record names is
+// refused too, and an account the entry cannot name keeps its own match.
 func TestSoleLegacyRowNeverResolvesToAWeakerDefault(t *testing.T) {
 	stubProfileSources(t)
 	legacy := agentidentity.LegacyAgentID(legacyBridgeInputs("alice@corp.example"))

@@ -3,7 +3,40 @@
 # DefenseClaw native Devin CLI hook. Devin blocks only on exit 2; all other
 # failures intentionally fail open unless the operator selected strict mode.
 set -euo pipefail
-
+{{if and (not .Managed) (not .Sandbox)}}# defenseclaw_install_lock_held DATA returns 0 (true) while this account's
+# installer holds its data directory DATA: DATA/.install.lock exists as any
+# file type, or DATA exists but cannot be searched, so the lock cannot be
+# shown absent; no DATA to look in counts as held too. It is the one install
+# check of every shell hook. The native hook (installLockHeld), the in-agent
+# plugins and the Windows adapters apply the same rule (GAP-0914).
+defenseclaw_install_lock_held() {
+  local data="${1:-}"
+  [ -n "$data" ] || return 0
+  if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    return 0
+  fi
+  if [ -e "$data" ] || [ -L "$data" ]; then
+    if [ -d "$data" ] && [ -x "$data" ]; then
+      return 1
+    fi
+    return 0
+  fi
+  return 1
+}
+# A failure before the helpers load (a hook path that does not resolve, a
+# missing or broken _hardening.sh, a set -e error) blocks with exit 2
+# in fail mode closed, under strict availability and while this account's
+# installer holds its data directory; fail mode open keeps the exit status.
+# The installed mode decides (GAP-0315).
+# defenseclaw_harden_env replaces this trap with the hook's own.
+_DC_BOOT_FAIL_MODE="{{.FailMode}}"
+defenseclaw_boot_fails_closed() {
+  [ "$_DC_BOOT_FAIL_MODE" = "open" ] || return 0
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) return 0 ;; esac
+  defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME:+${HOME}/.defenseclaw}}"
+}
+trap '_dc_boot_rc=$?; if [ "$_dc_boot_rc" -ne 0 ] && defenseclaw_boot_fails_closed; then exit 2; fi' EXIT
+{{end}}
 HOOK_SOURCE="${BASH_SOURCE[0]:-$0}"
 HOOK_LINK_DEPTH=0
 while [ -L "$HOOK_SOURCE" ]; do
@@ -47,6 +80,7 @@ if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; the
   # The installed mode decides; strict availability tightens this exit as it
   # tightens every later outage.
   _DC_HOME_FAIL_MODE="{{.FailMode}}"
+  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME}" || _DC_HOME_FAIL_MODE="closed"
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-}" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE="closed" ;; esac
   if [ "$_DC_HOME_FAIL_MODE" != "open" ]; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2
@@ -102,7 +136,8 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{if .Sandbox}}defenseclaw_sandbox_require_token devin devin-hook "devin tool"
 
 PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
 {{end}}
   echo "defenseclaw: devin hook refusing oversized payload, blocking devin tool (sandbox hooks fail closed)" >&2
   printf 'DefenseClaw hook payload too large\n'
@@ -114,7 +149,8 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 API_TOKEN="${DEFENSECLAW_SANDBOX_TOKEN}"
 
 fail_unreachable() {
-  defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" transport
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" transport
   defenseclaw_log_hook_failure devin devin-hook "$1" transport "$FAIL_MODE" fail_closed
   echo "defenseclaw: sandbox ingress unreachable, blocking devin tool (sandbox hooks fail closed): $1" >&2
   printf 'DefenseClaw hook failed closed\n'
@@ -122,7 +158,8 @@ fail_unreachable() {
 }
 
 fail_response() {
-  defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" response
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" response
   defenseclaw_log_hook_failure devin devin-hook "$1" response "$FAIL_MODE" fail_closed
   echo "defenseclaw: devin hook error, blocking devin tool (sandbox hooks fail closed): $1" >&2
   printf 'DefenseClaw hook failed closed\n'
@@ -135,9 +172,9 @@ fi
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the administrator's open covers a gateway outage only.
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
-{{end}}
-  echo "defenseclaw: devin hook refusing oversized payload" >&2
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  FAIL_MODE=closed
+{{end}}  echo "defenseclaw: devin hook refusing oversized payload" >&2
   if [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" != "open" ]; then
     printf 'DefenseClaw hook payload too large\n'
     exit 2
@@ -160,7 +197,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN
 
 fail_unreachable() {
-  if defenseclaw_should_fail_closed_on_unreachable; then
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}  if defenseclaw_should_fail_closed_on_unreachable; then
     defenseclaw_allow_failed_stop_event devin devin-hook "" "${PAYLOAD:-}" "$1" transport
   fi
   defenseclaw_log_hook_delivery_failure devin devin-hook "$1" transport "$FAIL_MODE"
@@ -173,7 +211,8 @@ fail_unreachable() {
 }
 
 fail_response() {
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
+{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+{{end}}{{if and .Managed (not .SecureClient) (not .Sandbox)}}  # A standalone managed hook: the administrator's open covers a gateway
   # outage only (the service not running, restarting or giving no answer
   # in time). A refusal, an error status or an unusable answer blocks.
   FAIL_MODE="closed"
@@ -188,7 +227,7 @@ fail_response() {
   exit 2
 }
 {{end}}
-{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
@@ -243,7 +282,15 @@ defenseclaw_hook_post() {
     --unix-socket "${DEFENSECLAW_HOOK_SOCKET}"{{end}}
 }
 RESPONSE=$(defenseclaw_hook_post) || {
-  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  DC_POST_STATUS=$?
+  defenseclaw_split_response
+  defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+  defenseclaw_await_gateway "$DC_POST_STATUS" _dc_hook_post_response || {
+    defenseclaw_split_response
+    defenseclaw_managed_http_result "$HTTP_CODE" incomplete
+    fail_unreachable "gateway unreachable"
+  }
+{{else}}  defenseclaw_await_gateway "$?" _dc_hook_post_response || fail_unreachable "gateway unreachable"{{end}}
 }
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# The gateway answered 429, so it is up: a resend that fails after it is no
 # outage in a standalone managed hook.
@@ -260,13 +307,16 @@ devin_block() {
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
-if [ -z "$HTTP_CODE" ]; then
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}defenseclaw_managed_http_result "$HTTP_CODE"
+{{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  {{if and .Managed (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}  fail_response "gateway returned HTTP ${HTTP_CODE}"
+{{else}}  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
+{{end}}
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
-fi
+fi{{end}}
 
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"

@@ -115,7 +115,7 @@ Kiro has no native ask verdict. Policy confirms are recorded and downgraded to a
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. A hook that fails closed exits 2, the only non-zero status Kiro treats as a block. Kiro runs the tool when a hook has not answered within its timeout. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed while the hook runs: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. A hook that fails closed exits 2, the only non-zero status Kiro treats as a block. Kiro CLI 2.x was measured running the tool when a hook had not answered within its timeout. Standalone status and verify warn `hook_process_fail_open` and set `security_complete: false` while Kiro is enabled. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

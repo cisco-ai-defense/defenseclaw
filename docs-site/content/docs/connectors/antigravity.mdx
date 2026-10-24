@@ -17,15 +17,19 @@ DefenseClaw registers five hook handlers in Antigravity's global `hooks.json`. T
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector antigravity` first. Until DefenseClaw is initialized, `defenseclaw setup antigravity` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 Install `agy` from Google's [install guide](https://antigravity.google/docs/cli/install) and sign in. Then run:
 
 ```bash
 agy --version
-defenseclaw setup antigravity                 # observe (default)
+defenseclaw setup antigravity                 # first setup defaults to observe
 defenseclaw setup antigravity --mode action   # deny or ask at PreToolUse
 ```
 
-On Windows, run the same commands in PowerShell. Sign-in still goes through Windows Credential Manager or Google's browser flow.
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Sign-in still goes through Windows Credential Manager
+or Google's browser flow.
 
 ## Check it
 
@@ -42,7 +46,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 
 - In action mode `PreToolUse` can deny a tool call or ask you first, using Antigravity's own `decision` field. The ask always prompts, even when you chose "Always Allow" before.
 - `PreInvocation` and `PostInvocation` can only add context. `PostToolUse` only observes. `Stop` is always allowed.
-- Observe mode never blocks.
+- Observe mode records policy findings without blocking on those findings. By default the running hook denies `PreToolUse` when the gateway is unreachable ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)).
 
 ## Files it changes
 
@@ -70,7 +74,12 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Antigravity's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove antigravity --yes` (add `--force` if it is the last one).
+With the default gateway restart, disabling removes DefenseClaw's hook
+registrations from Antigravity's global file and preserves your other
+Antigravity settings. `defenseclaw guardrail enable` restores DefenseClaw's
+hooks. To remove the connector, run
+`defenseclaw setup remove antigravity --yes` (add `--force` if it is the last
+one).
 
 On a multi-connector install, add `--connector antigravity` to `guardrail disable` and `guardrail enable` to change only this agent.
 

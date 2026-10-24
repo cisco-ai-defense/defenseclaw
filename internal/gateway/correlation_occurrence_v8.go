@@ -403,7 +403,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		}
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleToolStart && req.ToolInvocationID != "" {
-		identity := hookOperationIdentityForValue(instance.ConnectorInstanceID,
+		identity := hookSessionOperationIdentityForValue(instance.ConnectorInstanceID, req.SessionID,
 			req.CorrelationValues[connector.CorrelationTargetTool], connector.CorrelationTargetTool)
 		if !identity.valid() {
 			return ctx, req, errors.New("tool start is missing a typed pending-operation identity")
@@ -421,7 +421,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		}
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleModelStart && req.ModelRequestID != "" {
-		identity := hookOperationIdentityForValue(instance.ConnectorInstanceID,
+		identity := hookSessionOperationIdentityForValue(instance.ConnectorInstanceID, req.SessionID,
 			req.CorrelationValues[connector.CorrelationTargetModelRequest], connector.CorrelationTargetModelRequest)
 		if !identity.valid() {
 			return ctx, req, errors.New("model start is missing a typed pending-operation identity")
@@ -610,12 +610,11 @@ func (identity hookOperationIdentity) locator(
 	}
 }
 
-// Pending-operation identity is always scoped by the authenticated connector
-// instance in addition to the provider namespace and canonical ID kind. This
-// permits an exact terminal ID to recover its start even when the terminal
-// hook omits session/turn context, while a provider reusing the same ID in a
-// second session fails closed as an identity collision instead of merging two
-// operations.
+// The connector instance, provider namespace and canonical ID kind scope
+// every pending operation. Hook starts with a session add that recorded
+// session to the key: a provider may reuse a tool ID in another session.
+// A terminal lacking its session may recover a start only when the exact ID
+// names one active operation across those sessions.
 func hookOperationIdentityForValue(
 	instance audit.ConnectorInstanceID,
 	value connector.CorrelationValue,
@@ -640,6 +639,20 @@ func hookOperationIdentityForValue(
 	}
 }
 
+func hookSessionOperationIdentityForValue(
+	instance audit.ConnectorInstanceID,
+	sessionID string,
+	value connector.CorrelationValue,
+	target connector.CorrelationTarget,
+) hookOperationIdentity {
+	identity := hookOperationIdentityForValue(instance, value, target)
+	if identity.valid() && sessionID != "" {
+		identity.scopeKind = audit.CorrelationOperationScopeSession
+		identity.scopeID = sessionID
+	}
+	return identity
+}
+
 func hookOperationIdentityCandidates(
 	instance audit.ConnectorInstanceID,
 	req agentHookRequest,
@@ -648,7 +661,9 @@ func hookOperationIdentityCandidates(
 	exactOperationID string,
 ) []hookOperationIdentity {
 	if exactOperationID != "" {
-		return []hookOperationIdentity{hookOperationIdentityForValue(instance, req.CorrelationValues[target], target)}
+		return []hookOperationIdentity{hookSessionOperationIdentityForValue(
+			instance, req.SessionID, req.CorrelationValues[target], target,
+		)}
 	}
 	values := make([]connector.CorrelationValue, 0, len(spec.HookBindings)+1)
 	for _, binding := range spec.HookBindings {
@@ -664,16 +679,21 @@ func hookOperationIdentityCandidates(
 	values = append(values, connector.CorrelationValue{
 		Target: target, Namespace: "defenseclaw", IDKind: string(target),
 	})
-	identities := make([]hookOperationIdentity, 0, len(values))
+	identities := make([]hookOperationIdentity, 0, 2*len(values))
 	seen := make(map[string]bool, len(values))
 	for _, value := range values {
-		identity := hookOperationIdentityForValue(instance, value, target)
-		key := identity.namespace + "\x00" + string(identity.kind) + "\x00" + identity.scopeID
-		if !identity.valid() || seen[key] {
-			continue
+		for _, identity := range []hookOperationIdentity{
+			hookSessionOperationIdentityForValue(instance, req.SessionID, value, target),
+			hookOperationIdentityForValue(instance, value, target),
+		} {
+			key := identity.namespace + "\x00" + string(identity.kind) + "\x00" +
+				string(identity.scopeKind) + "\x00" + identity.scopeID
+			if !identity.valid() || seen[key] {
+				continue
+			}
+			seen[key] = true
+			identities = append(identities, identity)
 		}
-		seen[key] = true
-		identities = append(identities, identity)
 	}
 	return identities
 }
@@ -696,18 +716,55 @@ func findHookPendingOperation(
 	var matched audit.CorrelationPendingOperation
 	var matchedIdentity hookOperationIdentity
 	found := false
+	if exactOperationID != "" {
+		// An exact provider ID is sufficient only when it identifies one
+		// active operation. A reported session must match a recorded session,
+		// or a start with no recorded session. A terminal that omits its
+		// session may still recover a unique start across all sessions.
+		seen := make(map[string]bool, len(identities))
+		for _, identity := range identities {
+			key := identity.namespace + "\x00" + string(identity.kind)
+			if !identity.valid() || seen[key] {
+				continue
+			}
+			seen[key] = true
+			query := audit.CorrelationPendingQuery{
+				ConnectorInstanceID: instance, Namespace: identity.namespace, Kind: identity.kind,
+				OperationID: exactOperationID, Type: operationType,
+				SessionID: req.SessionID, SessionIDOrAbsent: req.SessionID != "",
+				Status: audit.CorrelationOperationActive, Limit: 2,
+			}
+			operations, err := repo.ListPendingOperations(ctx, query)
+			if err != nil {
+				return audit.CorrelationPendingOperation{}, identity, false, err
+			}
+			if len(operations) > 1 {
+				return audit.CorrelationPendingOperation{}, identity, false, audit.ErrCorrelationConflict
+			}
+			if len(operations) == 0 {
+				continue
+			}
+			operation := operations[0]
+			if found {
+				return audit.CorrelationPendingOperation{}, identity, false, audit.ErrCorrelationConflict
+			}
+			matched = operation
+			matchedIdentity = hookOperationIdentity{namespace: operation.Namespace, kind: operation.Kind,
+				scopeKind: operation.ScopeKind, scopeID: operation.ScopeID}
+			found = true
+		}
+		if found {
+			return matched, matchedIdentity, true, nil
+		}
+		return audit.CorrelationPendingOperation{}, identities[0], false, audit.ErrCorrelationNotFound
+	}
 	for _, identity := range identities {
 		query := audit.CorrelationPendingQuery{
 			ConnectorInstanceID: instance, Namespace: identity.namespace, Kind: identity.kind,
-			OperationID: exactOperationID, Type: operationType,
+			Type:      operationType,
 			ScopeKind: identity.scopeKind, ScopeID: identity.scopeID,
-		}
-		if exactOperationID == "" {
-			query.Name = name
-			query.SessionID = req.SessionID
-			query.TurnID = req.TurnID
-			query.AgentID = req.AgentID
-			query.ExecutionID = req.ExecutionID
+			Name: name, SessionID: req.SessionID, TurnID: req.TurnID,
+			AgentID: req.AgentID, ExecutionID: req.ExecutionID,
 		}
 		operation, err := repo.FindUniquePendingOperation(ctx, query)
 		if errors.Is(err, audit.ErrCorrelationNotFound) {
@@ -726,11 +783,6 @@ func findHookPendingOperation(
 	}
 	if found {
 		return matched, matchedIdentity, true, nil
-	}
-	// Retain an exact provider identity as unresolved evidence. Crucially, it
-	// never falls through to the current cursor or a name/time-only operation.
-	if exactOperationID != "" {
-		return audit.CorrelationPendingOperation{}, identities[0], false, audit.ErrCorrelationNotFound
 	}
 	return audit.CorrelationPendingOperation{}, hookOperationIdentity{}, false, audit.ErrCorrelationNotFound
 }

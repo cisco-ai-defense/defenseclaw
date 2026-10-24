@@ -3,6 +3,8 @@
 
 package enterprisehooks
 
+import "errors"
+
 // TargetCredentials identifies one exact interactive user for a bounded
 // privileged mutation. ACP enrollment reuses the hook guardian's hardened
 // setuid/impersonation boundary rather than granting the gateway user-home
@@ -28,3 +30,11 @@ type TargetCredentials struct {
 func RunAsTarget(target TargetCredentials, fn func() error) error {
 	return runAsTarget(target, fn)
 }
+
+// ErrEnrolledUserSignedOut is RemoveEnrolledUserAsset, or an install under
+// WindowsTargetLogonAnyWithS4U, finding no token to act as the user: no
+// session, and Windows refused an S4U logon too, as it does for a Microsoft
+// Entra ID account ("No credentials are available in the security
+// package"). RemoveEnrolledUserAssetInSession succeeds once the user signs in
+// (GAP-0414).
+var ErrEnrolledUserSignedOut = errors.New("the user is signed out and Windows gave no S4U logon for the account")

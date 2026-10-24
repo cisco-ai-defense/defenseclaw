@@ -369,8 +369,8 @@ func TestRefusedEnsureLabelsTheRunningDeploymentAdvisories(t *testing.T) {
 
 // Enabled AI Defense that fails (a rejected key) leaves the local engine
 // deciding, so status stays ok, but it must say so. So must directory lookups
-// that fail, which leave the accounts without cached facts on the default
-// guardrail profile (GAP-0216).
+// that fail, which refuse requests whose assignments need the missing facts
+// once the accounts have no cached facts (GAP-0216).
 func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
@@ -386,7 +386,10 @@ func TestStatusWarnsWhenAIDefenseIsUnavailable(t *testing.T) {
 	}
 	// The warning names the failing accounts (GAP-0696).
 	if got := messagesOf(status.Warnings, codeDirectoryLookups); !strings.Contains(got, "failing for 2 account(s) (uid 1001, uid 1002) since 2026-10-07T00:05:54Z") ||
-		!strings.Contains(got, "enterprise linux profile-explain --user") {
+		!strings.Contains(got, "enterprise linux profile-explain --user") ||
+		!strings.Contains(got, "requests whose assignments need missing identity facts are refused") ||
+		!strings.Contains(got, "refusal names the missing fact") ||
+		strings.Contains(got, "accounts without cached facts get the default") {
 		t.Fatalf("failing directory lookups must warn without failing status: ok=%t %+v", status.OK, status.Warnings)
 	}
 	// An assignment group the host no longer knows selects nobody (GAP-0704).

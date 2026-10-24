@@ -21,6 +21,22 @@ async def test_config_editor_keeps_health_visible(tmp_path):
         assert all(name in status for name in ("Gateway", "Watchdog", "Guardrail")), status
 
 
+async def test_config_editor_and_palette_status_labels_fit_at_80_columns(tmp_path):
+    app = snapshot_app(tmp_path, setup_config=default_config())
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.press("0", "c")
+        await pilot.pause()
+        status = screen_text(app).splitlines()[-1]
+        assert "Config editor" in status and app.status_text in status, status
+        assert all(name in status for name in ("Gateway", "Watchdog", "Guardrail")), status
+
+        await pilot.press("escape", ":", *"zzqq")
+        await pilot.pause()
+        status = screen_text(app).splitlines()[-1]
+        assert "Command palette" in status and app.status_text in status, status
+        assert all(name in status for name in ("Gateway", "Watchdog", "Guardrail")), status
+
+
 async def test_doctor_failure_notice_keeps_the_remediation_command(tmp_path):
     app = snapshot_app(tmp_path)
     async with app.run_test(size=(80, 24)) as pilot:

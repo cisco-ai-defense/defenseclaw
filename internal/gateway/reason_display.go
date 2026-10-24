@@ -23,11 +23,16 @@ import (
 	"strings"
 	"sync/atomic"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
 
 const builtInMatchReasonPrefix = "matched: "
+
+// A period keeps this fixed title inside one finding label. Semicolons split
+// independent verdicts in agentMatchedRules.
+const unprovenWriteGuidance = ". Use a literal path or split the command"
 
 // trustedBuiltInMatchReason reports whether reason consists exclusively of
 // exact rule ID/title pairs from the compiled-in catalog. The equality check
@@ -83,6 +88,12 @@ func trustedBuiltInFindingLabel(label string) bool {
 	// The authorized-keys block after an archive extraction (GAP-1555).
 	if label == "persistence.ssh_authorized_keys_command:"+archiveBeforeWriteTitle {
 		return true
+	}
+	if title, ok := strings.CutPrefix(label, "persistence.ssh_authorized_keys_command:"); ok {
+		if classTitle, hasGuidance := strings.CutSuffix(title, unprovenWriteGuidance); hasGuidance &&
+			hookpaths.IsUnprovenWriteTitle(classTitle) {
+			return true
+		}
 	}
 	// A built-in CodeGuard rule on a file write (GAP-2029).
 	for _, rule := range scanner.BuiltinRulesMeta() {

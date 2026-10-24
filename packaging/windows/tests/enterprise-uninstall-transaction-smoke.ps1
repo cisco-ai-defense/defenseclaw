@@ -1489,6 +1489,21 @@ targets:
         function script:Assert-DefenseClawManagedInstallTree {
             param([Parameter(Mandatory)][hashtable]$Layout)
         }
+        function script:Assert-DefenseClawStandaloneInstallTreeNotInUse {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [int]$SelfUninstallCallerPID
+            )
+            if ($script:HarnessState.crash_at -ceq 'install-holder-refusal') {
+                throw 'uninstall_in_use: an outside program holds an installed file; nothing was changed'
+            }
+        }
+        function script:Remove-DefenseClawStandaloneInstallTreeReplacementBackups {
+            param([Parameter(Mandatory)][hashtable]$Layout)
+            $script:HarnessState.events.Add('replacement-backups-retired')
+        }
         function script:Assert-DefenseClawRecordedArtifactHashes {
             param(
                 [Parameter(Mandatory)]$Metadata,
@@ -2425,12 +2440,20 @@ targets:
                 [bool]$DeferredConfigPending = $false,
                 [bool]$Installed = $true,
                 [string]$InstallRootIdentity = '',
-                [string]$StateRootIdentity = ''
+                [string]$StateRootIdentity = '',
+                [bool]$UninstallPurgeRequested = $false,
+                [bool]$UninstallPurgeUserStateRequested = $false
             )
             if ($null -eq $ManagedHooksActivation) {
                 throw 'deployment metadata fixture lost managed-hook activation evidence'
             }
             $script:HarnessState.installed = [bool]$Installed
+            if (-not $Installed) {
+                $script:HarnessState.tombstone_purge_requested =
+                    [bool]$UninstallPurgeRequested
+                $script:HarnessState.tombstone_purge_user_state_requested =
+                    [bool]$UninstallPurgeUserStateRequested
+            }
             if ($null -ne $ManagedHooksActivation) {
                 $script:HarnessState.managed_hooks_activation =
                     $ManagedHooksActivation
@@ -3284,6 +3307,20 @@ targets:
                 sha256 = ('a' * 64)
             }
         }
+        function script:Assert-DefenseClawInstallRootNameReserved {
+            param([Parameter(Mandatory)][string]$InstallRoot)
+            # The fixture's disposable parent has the runner's ordinary
+            # inherited ACL. Model the trusted parent boundary here; the
+            # production ACL guard has its own dedicated tests.
+            if (-not [string]::Equals(
+                    $InstallRoot,
+                    [string]$script:HarnessState.layout.InstallRoot,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "install-root check crossed the fixture scope: $InstallRoot"
+            }
+            $script:HarnessState.events.Add('install-root-name-reserved')
+        }
         function script:Set-DefenseClawInstallTreeRetirementAcls {
             param([Parameter(Mandatory)][hashtable]$Layout)
             if ([bool]$script:HarnessState.active_references) {
@@ -3506,6 +3543,23 @@ targets:
             Assert-Harness `
                 -Condition ($failed -ne $ExpectSuccess) `
                 -Message "$Name success result did not match expectation"
+            if ($ExpectSuccess -and
+                $script:HarnessState.ContainsKey('tombstone_purge_requested')) {
+                # Recovery of an interrupted uninstall replays the mode
+                # the tombstone this case wrote recorded at commit.
+                Assert-Harness `
+                    -Condition (
+                        [bool]$script:HarnessState.tombstone_purge_requested -eq [bool]$Purge
+                    ) `
+                    -Message "$Name tombstone did not record its uninstall mode"
+                # The per-user purge request is the run's own (Setup PURGE=1).
+                Assert-Harness `
+                    -Condition (
+                        [bool]$script:HarnessState.tombstone_purge_user_state_requested -eq
+                            [bool]$script:DefenseClawUninstallPurgeUserState
+                    ) `
+                    -Message "$Name tombstone did not record its per-user purge request"
+            }
 
             if ($ExpectSuccess) {
                 Assert-Harness `
@@ -3537,16 +3591,21 @@ targets:
                     ) `
                     -Message "$Name did not preserve exact purge retry semantics"
             }
-            elseif ($CrashAt -eq 'service-drift-preflight') {
+            elseif ($CrashAt -in @('service-drift-preflight', 'install-holder-refusal')) {
                 Assert-Harness `
                     -Condition ($script:HarnessState.transaction_calls -eq 0) `
-                    -Message "$Name mutated lifecycle state after service drift"
+                    -Message "$Name mutated lifecycle state after a precommit refusal"
                 Assert-Harness `
                     -Condition ($script:HarnessState.prepare_calls -eq 0) `
-                    -Message "$Name began hook teardown after service drift"
+                    -Message "$Name began hook teardown after a precommit refusal"
                 Assert-Harness `
                     -Condition ([bool]$script:HarnessState.binary_present) `
-                    -Message "$Name removed a binary after service drift"
+                    -Message "$Name removed a binary after a precommit refusal"
+                if ($CrashAt -ceq 'install-holder-refusal') {
+                    Assert-Harness `
+                        -Condition ($script:HarnessState.events.IndexOf('replacement-backups-retired') -lt 0) `
+                        -Message "$Name removed replacement backups before refusing an install-root holder"
+                }
             }
             elseif ($CrashAt -ceq 'post-binary-delete') {
                 Assert-Harness `
@@ -3673,6 +3732,15 @@ targets:
                     -Message "$Name did not quiesce transactionally before prepare"
             }
             if ($SelfUninstall -and $ExpectSuccess) {
+                $rootGuardIndex = $script:HarnessState.events.IndexOf(
+                    'install-root-name-reserved'
+                )
+                Assert-Harness `
+                    -Condition (
+                        $rootGuardIndex -ge 0 -and
+                        $rootGuardIndex -lt $transactionIndex
+                    ) `
+                    -Message "$Name crossed the transaction boundary before the install-root name guard"
                 $verifyIndex = $script:HarnessState.events.IndexOf(
                     'teardown:verify'
                 )
@@ -7188,6 +7256,11 @@ targets:
             -Name 'quiesce-prevents-reheal' `
             -CrashAt '' `
             -ExpectSuccess:$true
+        Invoke-HarnessUninstallCase `
+            -Name 'install-holder-refusal-before-backup-retirement' `
+            -CrashAt 'install-holder-refusal' `
+            -ExpectSuccess:$false `
+            -Purge:$true
         Invoke-HarnessUninstallCase `
             -Name 'crash-after-complete-retry-retirement' `
             -CrashAt '' `

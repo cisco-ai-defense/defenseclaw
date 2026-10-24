@@ -131,13 +131,13 @@ Codex has no native ask surface (Can ask is 0 on every contract). A confirm verd
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed when the running hook cannot reach the gateway: yes. The default is `closed`; a managed administrator can select `open` for a gateway outage. Codex itself treats a hook process failure or timeout as non-blocking. Setup registers `PreToolUse` with a 30-second timeout, but Codex has no reviewed on-timeout deny setting. A standard user who kills or stops the hook before it sends a request can make a tool run without a pre-tool audit row. Managed `status` and `verify` warn `hook_process_fail_open` and set `security_complete: false`; OS application control or EDR that protects the hook process is needed to prevent it. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 When a hook fails closed because DefenseClaw cannot decide, `Stop`, `SubagentStop` and `SessionEnd` are not blocked. A blocked stop would only make Codex try again. Codex ends the turn, and the next prompt or tool call is blocked until the gateway is back ([Stop and session-end events](/docs/reference/configuration/fail-modes#stop-and-session-end-events)).
 
 ## Limits
 
-- A `PostToolUse` block cannot undo the finished tool, and `SessionEnd` is observation only.
+- A `PostToolUse` block cannot undo the finished tool, and `SessionEnd` is observation only. A post-tool hook may still record a call after a missed `PreToolUse`, but it may itself be stopped or absent.
 - Controls marked v3 or v4 need Codex 0.133 or later.
 - Codex activates project `.codex/` layers only for trusted projects. Inventory reports project entries as `trust_required` and does not infer the trust decision.
 

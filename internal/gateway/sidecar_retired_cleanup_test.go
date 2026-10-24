@@ -180,9 +180,11 @@ func (h retiredOmnigentHost) token(t *testing.T) string {
 }
 
 // snapshot is everything on the host but the module and the token.
+// snapshot is every file but the module, the token and the hook contract
+// lock, whose omnigent entry the teardown seals (requireStub checks it).
 func (h retiredOmnigentHost) snapshot(t *testing.T) map[string]string {
 	t.Helper()
-	return retiredSnapshot(t, []string{h.home}, h.modulePath, h.token(t))
+	return retiredSnapshot(t, []string{h.home}, h.modulePath, h.token(t), filepath.Join(h.dataDir, "hook_contract_lock.json"))
 }
 
 func (h retiredOmnigentHost) requireStub(t *testing.T) {
@@ -193,6 +195,10 @@ func (h retiredOmnigentHost) requireStub(t *testing.T) {
 	}
 	if _, err := os.Lstat(h.token(t)); !os.IsNotExist(err) {
 		t.Fatalf("omnigent token survived: %v", err)
+	}
+	sum := sha256.Sum256(data)
+	if sealed := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); sealed.HookScriptDigests[retiredOmnigentModule+".py"] != "sha256:"+hex.EncodeToString(sum[:]) {
+		t.Fatalf("the lock does not seal the stub: %+v", sealed)
 	}
 }
 
@@ -230,7 +236,7 @@ func TestRetiredConnectorCleanupFailureIsKeptForRetry(t *testing.T) {
 		h := stageRetiredOmnigent(t)
 		before := retiredSnapshot(t, []string{h.home})
 		restore := readOnlyRetiredHooks(t, h)
-		err := retireOrDropUnregisteredConnector(ctx, registry, h.dataDir, "omnigent", "removed", nil)
+		err := retireOrDropUnregisteredConnector(ctx, registry, connector.SetupOpts{DataDir: h.dataDir}, "omnigent", "removed", nil)
 		if err == nil || !strings.Contains(err.Error(), "omnigent") {
 			t.Fatalf("retire = %v, want the cleanup failure", err)
 		}
@@ -239,7 +245,7 @@ func TestRetiredConnectorCleanupFailureIsKeptForRetry(t *testing.T) {
 			t.Fatalf("a failed cleanup changed files:\n got %v\nwant %v", got, before)
 		}
 		kept := h.snapshot(t)
-		if err := retireOrDropUnregisteredConnector(ctx, registry, h.dataDir, "omnigent", "removed", nil); err != nil {
+		if err := retireOrDropUnregisteredConnector(ctx, registry, connector.SetupOpts{DataDir: h.dataDir}, "omnigent", "removed", nil); err != nil {
 			t.Fatalf("retry: %v", err)
 		}
 		h.requireStub(t)
@@ -251,7 +257,7 @@ func TestRetiredConnectorCleanupFailureIsKeptForRetry(t *testing.T) {
 	t.Run("removed from the roster", func(t *testing.T) {
 		h := stageRetiredOmnigent(t)
 		readOnlyRetiredHooks(t, h)
-		failed, dropped := teardownRemovedConnectorsReport(registry, []string{"omnigent"}, nil, connector.SetupOpts{DataDir: h.dataDir}, ctx)
+		failed, dropped := teardownRemovedConnectorsReport(registry, []string{"omnigent"}, nil, connector.SetupOpts{DataDir: h.dataDir}, "", ctx)
 		if !reflect.DeepEqual(failed, []string{"omnigent"}) || len(dropped) != 0 {
 			t.Fatalf("failed=%v dropped=%v, want omnigent kept for retry", failed, dropped)
 		}
@@ -313,12 +319,12 @@ func TestRemovedConnectorBootChangesOnlyTheScriptAndTokens(t *testing.T) {
 		run  func(t *testing.T, h retiredOmnigentHost)
 	}{
 		{"direct", func(t *testing.T, h retiredOmnigentHost) {
-			if err := retireOrDropUnregisteredConnector(ctx, registry, h.dataDir, "omnigent", "removed", nil); err != nil {
+			if err := retireOrDropUnregisteredConnector(ctx, registry, connector.SetupOpts{DataDir: h.dataDir}, "omnigent", "removed", nil); err != nil {
 				t.Fatalf("retire: %v", err)
 			}
 		}},
 		{"removed from the roster", func(t *testing.T, h retiredOmnigentHost) {
-			failed, dropped := teardownRemovedConnectorsReport(registry, []string{"omnigent", "codex"}, []string{"codex"}, connector.SetupOpts{DataDir: h.dataDir}, ctx)
+			failed, dropped := teardownRemovedConnectorsReport(registry, []string{"omnigent", "codex"}, []string{"codex"}, connector.SetupOpts{DataDir: h.dataDir}, "", ctx)
 			if len(failed) != 0 || !reflect.DeepEqual(dropped, []string{"omnigent"}) {
 				t.Fatalf("failed=%v dropped=%v, want omnigent dropped", failed, dropped)
 			}
@@ -365,6 +371,22 @@ func TestRemovedConnectorBootChangesOnlyTheScriptAndTokens(t *testing.T) {
 			rosterFile := filepath.Join(h.dataDir, "active_connector.json")
 			delete(before, rosterFile)
 			delete(after, rosterFile)
+			// The lock: only the omnigent entry changes, to seal the stub
+			// and the config that runs it (T8 smoke loop rounds 2 and 3).
+			lockFile := filepath.Join(h.dataDir, "hook_contract_lock.json")
+			delete(before, lockFile)
+			delete(after, lockFile)
+			if got := connector.LoadHookContractLockEntry(h.dataDir, "codex"); got.ContractID != "codex-hooks-v1" || got.UpdatedAt != "2026-10-01T00:00:00Z" || len(got.HookScriptDigests) != 0 {
+				t.Fatalf("the codex lock entry changed: %+v", got)
+			}
+			sealed := connector.LoadHookContractLockEntry(h.dataDir, "omnigent")
+			stub, _ := os.ReadFile(h.modulePath)
+			stubSum := sha256.Sum256(stub)
+			if sealed.HookScriptDigests[retiredOmnigentModule+".py"] != "sha256:"+hex.EncodeToString(stubSum[:]) ||
+				len(sealed.Locations.HookConfigPaths) != 1 || filepath.FromSlash(sealed.Locations.HookConfigPaths[0]) != h.configPath ||
+				sealed.ContractID != "omnigent-policy-v1" {
+				t.Fatalf("the omnigent lock entry does not seal the stub and its config: %+v", sealed)
+			}
 			if !reflect.DeepEqual(after, before) {
 				for file, body := range before {
 					if after[file] != body {
@@ -381,5 +403,74 @@ func TestRemovedConnectorBootChangesOnlyTheScriptAndTokens(t *testing.T) {
 				t.Fatalf("the omnigent lock entry was cleared: %+v", got)
 			}
 		})
+	}
+}
+
+// GAP-0564: the upgrade cleanup of a removed connector logs each file it
+// leaves for the user, with the step: an OmniGent config.yaml that still
+// names the policy module, here with a second handler key the user added
+// under DefenseClaw's policy (so it is not valid YAML any more).
+func TestRetiredConnectorCleanupLogsTheConfigItLeaves(t *testing.T) {
+	h := stageRetiredOmnigent(t)
+	writeRetiredFile(t, h.configPath, retiredPatchedConfig+"    handler: corp_policy.check\n")
+	var err error
+	out := captureStderr(t, func() {
+		err = retireOrDropUnregisteredConnector(context.Background(), connector.NewDefaultRegistry(), connector.SetupOpts{DataDir: h.dataDir}, "omnigent", "removed", nil)
+	})
+	if err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "removed connector omnigent left "+h.configPath+":") &&
+			strings.Contains(line, "defenseclaw_guardrail") {
+			return
+		}
+	}
+	t.Fatalf("no log line names %s and the defenseclaw_guardrail policy:\n%s", h.configPath, out)
+}
+
+// rel-1-0-4 GAP-0661 (the T7 live cell L7-dead-ro): with ~/.omnigent
+// read-only the first 1.0.4 start still finishes the cleanup, which never
+// writes the agent's config: the module becomes the stub, the token goes, the
+// lock entry stays, and one line names config.yaml with its step. Making the
+// folder writable and starting again changes nothing: what is left is the
+// user's to remove (the leftover list), never DefenseClaw's to delete.
+func TestRetiredConnectorCleanupNeverWritesAReadOnlyAgentConfig(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory modes do not stop writes here")
+	}
+	h := stageRetiredOmnigent(t)
+	configDir := filepath.Dir(h.configPath)
+	if err := os.Chmod(configDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configDir, 0o755) })
+	before := h.snapshot(t)
+	var err error
+	out := captureStderr(t, func() {
+		err = retireOrDropUnregisteredConnector(context.Background(), connector.NewDefaultRegistry(), connector.SetupOpts{DataDir: h.dataDir}, "omnigent", "removed", nil)
+	})
+	if err != nil {
+		t.Fatalf("retire with a read-only config folder: %v", err)
+	}
+	h.requireStub(t)
+	if got := h.snapshot(t); !reflect.DeepEqual(got, before) {
+		t.Fatalf("the cleanup changed more than the module and the token:\n got %v\nwant %v", got, before)
+	}
+	if got := connector.LoadHookContractLockEntry(h.dataDir, "omnigent"); got.Connector != "omnigent" {
+		t.Fatalf("lock entry = %+v, want it kept", got)
+	}
+	if n := strings.Count(out, "removed connector omnigent left "+h.configPath+":"); n != 1 {
+		t.Fatalf("%d log lines name %s, want 1:\n%s", n, h.configPath, out)
+	}
+	if err := os.Chmod(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	after := retiredSnapshot(t, []string{h.home})
+	if err := retireOrDropUnregisteredConnector(context.Background(), connector.NewDefaultRegistry(), connector.SetupOpts{DataDir: h.dataDir}, "omnigent", "removed", nil); err != nil {
+		t.Fatalf("second start: %v", err)
+	}
+	if got := retiredSnapshot(t, []string{h.home}); !reflect.DeepEqual(got, after) {
+		t.Fatalf("the second start changed files:\n got %v\nwant %v", got, after)
 	}
 }

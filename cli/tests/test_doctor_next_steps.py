@@ -78,7 +78,10 @@ def test_claude_code_without_hooks_names_setup(tmp_path) -> None:
     assert "defenseclaw setup claude-code --yes" in r.checks[-1]["remediation"]
 
 
-def test_passive_doctor_does_not_fail_an_idle_hermes(tmp_path) -> None:
+def test_passive_doctor_fails_an_unproven_idle_hermes(tmp_path, monkeypatch) -> None:
+    # The lock binds the current effective config, so the check reaches the
+    # missing sealed hook script on any host, whatever its ~/.hermes holds.
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     hook = tmp_path / "config.yaml"
     hook.write_text("hooks:\n  - command: /x/hooks/hermes-hook.sh\n", encoding="utf-8")
     cfg = mock.MagicMock()
@@ -87,17 +90,15 @@ def test_passive_doctor_does_not_fail_an_idle_hermes(tmp_path) -> None:
         passive = _DoctorResult(passive=True)
         cmd_doctor._check_hook_health(cfg, "hermes", passive)
     row = passive.checks[-1]
-    assert row["status"] == "warn"
-    # Setup readiness still reads it as pending reload.
-    assert "running hermes" in row["detail"].casefold() and "live=false" in row["detail"]
-    assert "without --passive" in row["remediation"]
-    # GAP-0100: --fix --dry-run is passive but still lists processes, so it
-    # reports an idle Hermes as the plain doctor does.
+    assert row["status"] == "fail"
+    assert "no exact sealed hook script" in row["detail"] and "live=false" in row["detail"]
+    assert "defenseclaw setup hermes" in row["remediation"]
+    # Even an idle host cannot prove a registration that has no sealed hook.
     with mock.patch.object(cmd_doctor, "_hook_health_paths_from_lock", return_value=[str(hook)]), \
             mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
         dry_run = _DoctorResult(mode="plan", passive=True, list_processes=True)
         cmd_doctor._check_hook_health(cfg, "hermes", dry_run)
-    assert dry_run.checks[-1]["status"] == "pass"
+    assert dry_run.checks[-1]["status"] == "fail"
 
 
 def test_codex_plugin_cache_missing_is_not_a_warning() -> None:
@@ -501,7 +502,8 @@ def test_windows_hermes_idle_is_healthy_not_pending_reload() -> None:
     pending = WindowsHookCheck(
         "pending-reload",
         "on-disk Windows-native executable registration is valid; hook_entries=23; running Hermes "
-        "CLI/TUI/gateway/desktop/service hosts are unverified and must be reloaded or restarted; live=false",
+        "CLI/TUI/gateway/desktop/service hosts are unverified: doctor cannot verify which hooks "
+        "an already running host loaded; live=false",
     )
     with mock.patch.object(cmd_doctor, "_hermes_host_running", return_value=False):
         idle = cmd_doctor._hermes_idle_native_check(pending, _DoctorResult())

@@ -86,20 +86,24 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 	oldToken := strings.Repeat("a", 64)
 	newToken := strings.Repeat("b", 64)
 
-	// Without the relax step: the owner cannot republish over the hardened shape.
-	lockedDir := testenv.PrivateTempDir(t)
-	if err := connector.PublishHookAPIToken(lockedDir, "amp", oldToken); err != nil {
-		t.Fatalf("seed hook token: %v", err)
-	}
-	lockedPath, err := connector.HookAPITokenFilePath(lockedDir, "amp")
-	if err != nil {
-		t.Fatal(err)
-	}
-	owner := windowsRelaxTestOwner(t, lockedPath)
-	windowsRelaxTestSetDACL(t, lockedPath, windowsRelaxTestFormat(windowsRelaxTestOwnerViewHardenedFile, owner))
-	err = connector.PublishHookAPIToken(lockedDir, "amp", newToken)
-	if err == nil || !strings.Contains(err.Error(), "bound staged file") {
-		t.Fatalf("republish over the hardened token: err = %v, want the bound staged file refusal", err)
+	// Without the relax step: the owner cannot republish over the hardened
+	// shape. Run as LocalSystem, the owner is LocalSystem, which that shape
+	// grants full control, so there is no refusal to show (GAP-0606).
+	if !windowsTestRunsAsLocalSystem(t) {
+		lockedDir := testenv.PrivateTempDir(t)
+		if err := connector.PublishHookAPIToken(lockedDir, "amp", oldToken); err != nil {
+			t.Fatalf("seed hook token: %v", err)
+		}
+		lockedPath, err := connector.HookAPITokenFilePath(lockedDir, "amp")
+		if err != nil {
+			t.Fatal(err)
+		}
+		owner := windowsRelaxTestOwner(t, lockedPath)
+		windowsRelaxTestSetDACL(t, lockedPath, windowsRelaxTestFormat(windowsRelaxTestOwnerViewHardenedFile, owner))
+		err = connector.PublishHookAPIToken(lockedDir, "amp", newToken)
+		if err == nil || !strings.Contains(err.Error(), "bound staged file") {
+			t.Fatalf("republish over the hardened token: err = %v, want the bound staged file refusal", err)
+		}
 	}
 
 	// With the relax step (run by the guardian as LocalSystem, which the
@@ -112,6 +116,7 @@ func TestRelaxedScopedHookTokenCanBeRepublishedByItsOwner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	owner := windowsRelaxTestOwner(t, tokenPath)
 	windowsRelaxTestSetDACL(t, tokenPath, windowsRelaxTestFormat(windowsRelaxTestHardenedFile, owner))
 	target := windowsGenericManagedTarget{home: filepath.Dir(dataDir), sid: owner, dataDir: dataDir}
 	changed, err := relaxWindowsStandalonePerUserFile(target, tokenPath)

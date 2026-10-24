@@ -12,6 +12,7 @@ package enterprisepolicy
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -76,6 +77,61 @@ func (h *sessionHarness) record(kind, id string) SessionRecord {
 		h.t.Fatal(err)
 	}
 	return record
+}
+
+// An unreadable removal ledger or account lock denies this call, but a
+// session start that found a hook must still record the block. The block
+// remains after the removal error clears and follows a resumed process.
+func TestApplyForeignHookSessionRecordsABlockWhileTheRemovalsCannotBeRead(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		removalErr error
+		reason     string
+	}{
+		{"removal pending", ErrForeignHookRemovalPending, "is removing"},
+		{"untrusted ledger", errors.New("removal ledger failed its trust check"), "cannot verify"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newSessionHarness(t)
+			h.stateDir = t.TempDir()
+			apply := func(session, process string, start bool, decision GuardDecision, removalErr error) GuardDecision {
+				t.Helper()
+				h.now = h.now.Add(time.Second)
+				return ApplyForeignHookSession(SessionUpdate{
+					StateDir: h.stateDir, Key: SessionKey{Connector: "claudecode", Session: session, Process: process},
+					SessionStart: start, Decision: decision, RemovalsErr: removalErr, Now: h.now,
+				})
+			}
+			if got := apply("s-1", "p-1", false, GuardDecision{}, tc.removalErr); !got.Deny || !strings.Contains(got.Reason, tc.reason) {
+				t.Fatalf("unreadable removals must deny: %+v", got)
+			}
+			if entries, err := os.ReadDir(h.stateDir); err != nil || len(entries) != 0 {
+				t.Fatalf("a denial from removals alone must write nothing: %v, %v", entries, err)
+			}
+			blocked := sessionDeny("/repo/.claude/settings.json", "aa11")
+			if got := apply("s-1", "p-1", true, blocked, tc.removalErr); !got.Deny {
+				t.Fatalf("session start with a hook must deny: %+v", got)
+			}
+			for _, entry := range []struct{ kind, id string }{{sessionKindProcess, "p-1"}, {sessionKindSession, "s-1"}} {
+				record := h.record(entry.kind, entry.id)
+				if !record.Blocked || record.Path != blocked.Findings[0].Path {
+					t.Fatalf("the hook block was not recorded for %s %s: %+v", entry.kind, entry.id, record)
+				}
+			}
+			if got := apply("s-1", "p-1", false, GuardDecision{}, nil); !got.Deny || !strings.Contains(got.Reason, blocked.Findings[0].Path) {
+				t.Fatalf("the block must survive readable removals: %+v", got)
+			}
+			if got := apply("s-1", "p-2", false, GuardDecision{}, tc.removalErr); !got.Deny || !strings.Contains(got.Reason, blocked.Findings[0].Path) {
+				t.Fatalf("the resumed process must inherit the block: %+v", got)
+			}
+			if record := h.record(sessionKindProcess, "p-2"); !record.Blocked {
+				t.Fatalf("the resumed process has no block: %+v", record)
+			}
+			if got := apply("s-2", "p-2", false, GuardDecision{}, nil); !got.Deny || !strings.Contains(got.Reason, blocked.Findings[0].Path) {
+				t.Fatalf("the resumed process's other sessions must stay blocked: %+v", got)
+			}
+		})
+	}
 }
 
 // A session that started with a foreign hook keeps being denied after the

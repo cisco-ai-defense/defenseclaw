@@ -9,7 +9,7 @@ import { TypeTable as FumadocsTypeTable } from 'fumadocs-ui/components/type-tabl
 import Link from 'fumadocs-core/link';
 import type { MDXComponents } from 'mdx/types';
 import { Flow, Node, Edge, Zone, Sequence, Message } from '@/components/diagram';
-import { CapabilityMatrix, HookEventsList, SandboxHarnessTable } from '@/components/capability-matrix';
+import { CapabilityMatrix, HookEventsList, OutageMatrix, SandboxHarnessTable } from '@/components/capability-matrix';
 import { CommandGenerator } from '@/components/command-generator';
 import PolicyCreator from '@/components/policy-creator';
 import { RecipeCatalog } from '@/components/policy-creator/recipe-catalog';
@@ -134,6 +134,7 @@ export const mdxComponents: MDXComponents = {
   CapabilityMatrix,
   HookEventsList,
   SandboxHarnessTable,
+  OutageMatrix,
   CommandGenerator,
   PolicyCreator,
   RecipeCatalog,

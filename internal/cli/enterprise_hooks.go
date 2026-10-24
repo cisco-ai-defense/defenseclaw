@@ -604,6 +604,16 @@ var (
 	// release whose hook-contract lock a target still carries. Tests
 	// replace it.
 	enterpriseHookReconcileTargetRelease = enterprisehooks.WindowsProtectedTargetFromOtherRelease
+	// enterpriseHookReconcileTargetFailModeChange returns the hook fail mode
+	// a target's lock records and the one the config asks for. Tests
+	// replace it.
+	enterpriseHookReconcileTargetFailModeChange = enterprisehooks.WindowsProtectedTargetHookFailModeChange
+	// enterpriseHookReconcileClosingLogon proves a logon the guardian can
+	// close a target's hook fail mode under while its account has no active
+	// session (enterprisehooks.WindowsTargetLogonAnyWithS4U), without acting
+	// as the account; ErrEnrolledUserSignedOut when Windows gives none.
+	// Tests replace it.
+	enterpriseHookReconcileClosingLogon = enterpriseHookTargetClosingLogon
 	// enterpriseHookReconcileSecureClient reports a Secure Client guardian.
 	// Tests replace it.
 	enterpriseHookReconcileSecureClient = enterprisehooks.WindowsSecureClientProfileProcess
@@ -633,6 +643,35 @@ const enterpriseHookAwaitingSignInPrefix = "enterprise hooks: protected target w
 // target, so the reconcile counts exactly the rows it left waiting.
 var errEnterpriseHookAwaitingSignIn = errors.New(enterpriseHookAwaitingSignInPrefix)
 
+// The causes of a sign-in wait start the error after the prefix, so status
+// and verify say why the target waits (enterpriseHookAwaitingSignInCause):
+// another release protected it (GAP-0644), or a hook fail mode change left
+// its hooks failing closed or open until the guardian renders the new mode
+// (GAP-0585).
+const (
+	enterpriseHookAwaitingSignInFailClosed = "its hooks fail closed"
+	enterpriseHookAwaitingSignInFailOpen   = "its hooks keep hook fail mode open"
+)
+
+// enterpriseHookAwaitingSignInCause words, for status and verify, why a
+// guardian row that waits for its account's next sign-in (its error) is not
+// in its configured state yet.
+func enterpriseHookAwaitingSignInCause(guardianErr string) string {
+	cause := strings.TrimPrefix(strings.TrimSpace(guardianErr), enterpriseHookAwaitingSignInPrefix+": ")
+	switch {
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailClosed):
+		return "its hooks still fail closed, and the guardian renders hook fail mode open in the account's own " +
+			"Windows session at its next sign-in"
+	case strings.HasPrefix(cause, enterpriseHookAwaitingSignInFailOpen):
+		return "Windows gave no S4U logon to close its hooks while the account is signed out, so they keep hook " +
+			"fail mode open, allowing calls during a gateway outage, until the guardian closes them at the " +
+			"account's next sign-in"
+	default:
+		return "an earlier DefenseClaw release protected it, and the guardian installs this release's hooks only " +
+			"in the account's own Windows session, at its next sign-in; it is not protected until then"
+	}
+}
+
 // errEnterpriseHookProtectionRetired marks a Secure Client deferred target a
 // committed non-purge uninstall retired: its protected records survived in
 // the retained StateRoot, but its machine enrollment and runtime selector
@@ -642,8 +681,9 @@ var errEnterpriseHookProtectionRetired = errors.New("enterprise hooks: protected
 
 // enterpriseHookVerifyOrRepairTarget keeps repair classification adjacent to
 // the operation that proves it. A target is repaired only when it was already
-// protected, verification failed, its authenticated session was available,
-// and the subsequent install completed successfully.
+// protected, verification failed, its authenticated session was available
+// (for a change that closes the hook fail mode, a disconnected session or an
+// S4U logon also serves), and the subsequent install completed successfully.
 func enterpriseHookVerifyOrRepairTarget(
 	ctx context.Context,
 	target enterprisehooks.ManifestTarget,
@@ -663,8 +703,10 @@ func enterpriseHookVerifyOrRepairTarget(
 		return enterprisehooks.InstallResult{}, false, err
 	}
 	if !available {
-		// Only a deferred target whose lock another release wrote waits for
-		// the sign-in. One this release protected that no longer verifies
+		// Only a deferred target whose lock another release wrote, or one a
+		// hook fail mode change alone made fail, waits for the sign-in (a
+		// change to closed is rendered now when Windows gives a logon for
+		// it). One this release protected that no longer verifies
 		// was changed while its account was signed out, and stays a failure,
 		// unless on Secure Client a committed non-purge uninstall retired it:
 		// a reinstall over the retained StateRoot then found every
@@ -690,6 +732,14 @@ func enterpriseHookVerifyOrRepairTarget(
 					)
 				}
 			}
+			if locked, wanted, modeErr := enterpriseHookReconcileTargetFailModeChange(opts); modeErr == nil &&
+				locked != "" && locked != wanted {
+				if result, repaired, handled, err := enterpriseHookFailModeChangeWithoutSession(
+					ctx, target, opts, locked, wanted, verifyErr,
+				); handled {
+					return result, repaired, err
+				}
+			}
 		}
 		return enterprisehooks.InstallResult{}, false, fmt.Errorf(
 			"enterprise hooks: protected target requires repair but its exact active Windows session is unavailable (verification: %v)",
@@ -698,6 +748,54 @@ func enterpriseHookVerifyOrRepairTarget(
 	}
 	result, err = enterpriseHookReconcileInstaller(ctx, opts)
 	return result, err == nil, err
+}
+
+// enterpriseHookFailModeChangeWithoutSession handles a deferred target an
+// administrator's hook fail mode change (from locked to wanted) made fail
+// verification while its account has no active session (rel-1-0-4
+// GAP-0585). A Setup that failed it rolled the whole host back to the old
+// mode. A change to open waits for the account's next sign-in while the
+// fail mode is the only drift: its hooks fail closed until then. A change
+// to closed is rendered now, under the account's disconnected session or an
+// S4U logon; only when Windows gives neither, and the fail mode is the only
+// drift, does it wait for the sign-in, the change committed for everyone
+// else. Any other drift is not handled here and stays a failure.
+func enterpriseHookFailModeChangeWithoutSession(
+	ctx context.Context,
+	target enterprisehooks.ManifestTarget,
+	opts enterprisehooks.InstallOptions,
+	locked, wanted string,
+	verifyErr error,
+) (result enterprisehooks.InstallResult, repaired, handled bool, err error) {
+	var signedOut error
+	if wanted == "closed" {
+		signedOut = enterpriseHookReconcileClosingLogon(target)
+		if signedOut == nil {
+			closing := opts
+			closing.WindowsTargetLogon = enterprisehooks.WindowsTargetLogonAnyWithS4U
+			result, err = enterpriseHookReconcileInstaller(ctx, closing)
+			return result, err == nil, true, err
+		}
+		if !errors.Is(signedOut, enterprisehooks.ErrEnrolledUserSignedOut) {
+			return enterprisehooks.InstallResult{}, false, true, signedOut
+		}
+	}
+	rendered := opts
+	rendered.HookFailMode = locked
+	if _, renderedErr := enterpriseHookReconcileVerifier(ctx, rendered); renderedErr != nil {
+		return enterprisehooks.InstallResult{}, false, false, nil
+	}
+	if wanted == "closed" {
+		return enterprisehooks.InstallResult{}, false, true, fmt.Errorf(
+			"%w: %s until the account's next sign-in, when the guardian closes them; %v (verification: %v)",
+			errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInFailOpen, signedOut, verifyErr,
+		)
+	}
+	return enterprisehooks.InstallResult{}, false, true, fmt.Errorf(
+		"%w: %s, and hook fail mode open installs only in the account's own Windows session; its exact active "+
+			"Windows session is unavailable, so the guardian repairs it at the account's next sign-in (verification: %v)",
+		errEnterpriseHookAwaitingSignIn, enterpriseHookAwaitingSignInFailClosed, verifyErr,
+	)
 }
 
 func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
@@ -1166,11 +1264,8 @@ func enterpriseHookGuardianFailureIssue(row enterpriseHookReconcileRow) string {
 		if account == "" {
 			account = enterpriseHookTargetLabel(row)
 		}
-		return fmt.Sprintf(
-			"%s for %s is pending until that account signs in: an earlier DefenseClaw release protected it, and "+
-				"the guardian installs this release's hooks only in the account's own Windows session, at its next "+
-				"sign-in; it is not protected until then",
-			strings.TrimSpace(row.Connector), account)
+		return fmt.Sprintf("%s for %s is pending until that account signs in: %s",
+			strings.TrimSpace(row.Connector), account, enterpriseHookAwaitingSignInCause(row.Error))
 	}
 	if account != "" {
 		// The same next step the refused repair gives: nothing an
@@ -1490,26 +1585,21 @@ type enterpriseHookVerifyRun struct {
 	// row of the last guardian reconcile qualifies
 	// (enterpriseHookExcusedFailures). They count in Failures, so the
 	// dispositions still match the guardian's records, and verify reports
-	// them as warnings, as status does. AwaitingSignIn are those of Excused
-	// that wait for a sign-in.
-	Excused          []enterpriseHookReconcileRow
-	AwaitingSignIn   []enterpriseHookReconcileRow
+	// them as warnings, as status does.
+	Excused []enterpriseHookReconcileRow
+	// AwaitingSignIn maps the key of each excused row that waits for a
+	// sign-in to the error of the guardian row that records the wait.
+	AwaitingSignIn   map[string]string
 	AuthorizationErr error
 }
 
-// enterpriseHookAwaitingSignInNote follows a verify row that waits for its
-// signed-out account's next sign-in.
-const enterpriseHookAwaitingSignInNote = " (pending until the account signs in: an earlier DefenseClaw release " +
-	"protected it, and the guardian repairs it in the account's own Windows session at its next sign-in; " +
-	"it is not protected until then)"
-
-// enterpriseHookVerifyExcusedNote is the note of one of run.Excused.
+// enterpriseHookVerifyExcusedNote is the note of one of run.Excused: for a
+// row that waits for its signed-out account's next sign-in, why, from the
+// guardian row that records the wait.
 func enterpriseHookVerifyExcusedNote(run enterpriseHookVerifyRun, row enterpriseHookReconcileRow) string {
 	key := enterpriseHookProtectedTargetKey(row)
-	for _, awaiting := range run.AwaitingSignIn {
-		if key != "" && enterpriseHookProtectedTargetKey(awaiting) == key {
-			return enterpriseHookAwaitingSignInNote
-		}
+	if guardianErr, ok := run.AwaitingSignIn[key]; ok && key != "" {
+		return " (pending until the account signs in: " + enterpriseHookAwaitingSignInCause(guardianErr) + ")"
 	}
 	return enterpriseHookRemovedAccountNote
 }
@@ -1530,7 +1620,7 @@ func enterpriseHookVerifyRowExcused(run enterpriseHookVerifyRun, row enterpriseH
 // sign-in, while that account is still signed out. Once the account signs
 // in, the row fails verify until the guardian has repaired it.
 func enterpriseHookVerifyAwaitingSignIn(
-	awaiting map[string]struct{},
+	awaiting map[string]string,
 	target enterprisehooks.ManifestTarget,
 	row enterpriseHookReconcileRow,
 ) bool {
@@ -1811,13 +1901,13 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 	// release protected fail until their signed-out account signs in again;
 	// verify accepts exactly those failures, as status does.
 	excused := 0
-	awaitingSignIn := map[string]struct{}{}
+	awaitingSignIn := map[string]string{}
 	if guardianStateErr == nil && guardianStateExists {
 		removed, awaiting := enterpriseHookExcusedFailures(guardianState)
 		excused = removed + awaiting
 		for _, row := range guardianState.Results {
 			if awaiting > 0 && enterpriseHookAwaitingSignInRow(row) {
-				awaitingSignIn[enterpriseHookProtectedTargetKey(row)] = struct{}{}
+				awaitingSignIn[enterpriseHookProtectedTargetKey(row)] = row.Error
 			}
 		}
 	}
@@ -1982,7 +2072,10 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 				run.Excused = append(run.Excused, row)
 			} else if excused > 0 && enterpriseHookVerifyAwaitingSignIn(awaitingSignIn, target, row) {
 				run.Excused = append(run.Excused, row)
-				run.AwaitingSignIn = append(run.AwaitingSignIn, row)
+				if run.AwaitingSignIn == nil {
+					run.AwaitingSignIn = map[string]string{}
+				}
+				run.AwaitingSignIn[enterpriseHookProtectedTargetKey(row)] = awaitingSignIn[enterpriseHookProtectedTargetKey(row)]
 			}
 		}
 		run.Rows = append(run.Rows, row)

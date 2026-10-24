@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -194,10 +195,19 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 		}
 		return ""
 	}
-	list := func(uid int, user string) {
+	// A key names the account's home inode where the enumerator gives one:
+	// an account deleted and created again under the same name and uid gets
+	// another home, and its record, whose home proof tells the gateway it is
+	// another account (GAP-0422), is rewritten at the next tick instead of
+	// after the interval.
+	list := func(uid int, user string, homeInode uint64) {
 		seen[uid] = true
 		accounts = append(accounts, enterprisehooks.IdentitySpoolAccount{UID: uid, User: user})
-		keys = append(keys, strconv.Itoa(uid)+":"+user)
+		key := strconv.Itoa(uid) + ":" + user
+		if homeInode != 0 {
+			key += ":" + strconv.FormatUint(homeInode, 10)
+		}
+		keys = append(keys, key)
 	}
 	for _, row := range run.Rows {
 		// A pending row with a resolved uid (its home is not available, or
@@ -214,7 +224,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			leave(row.UID)
 			continue
 		}
-		list(row.UID, user)
+		list(row.UID, user, row.HomeInode)
 	}
 	// Eligible accounts without rows, and accounts whose home is untrusted,
 	// keep their identity record too: a standard user who makes his home
@@ -252,7 +262,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 				leave(account.UID)
 				continue
 			}
-			list(account.UID, user)
+			list(account.UID, user, account.HomeInode)
 		}
 	}
 	// An account the guardian authorization still accepts hook calls from
@@ -260,7 +270,19 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 	// reconcile could not rewrite the authorization).
 	for _, uid := range accepted.listedUIDs() {
 		if !seen[uid] {
-			list(uid, canonicalUser(uid))
+			list(uid, canonicalUser(uid), 0)
+		}
+	}
+	// A machine-policy connector under inspect accepts every account, and an
+	// unreadable authorization may still accept any account. Neither state
+	// names its callers in listedUIDs. Refresh the records they already hold
+	// so a UPN assignment does not disappear at the record's one-hour limit
+	// while the gateway continues to inspect that caller (T7-07).
+	if accepted.everyone || accepted.unknown {
+		for _, uid := range enterpriseHookRecordedCallerUIDs(dir) {
+			if !seen[uid] {
+				list(uid, canonicalUser(uid), 0)
+			}
 		}
 	}
 	// A caller the gateway accepts by name only (an exempt_users entry, or
@@ -281,7 +303,7 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 			leave(uid)
 			continue
 		}
-		list(uid, user)
+		list(uid, user, 0)
 	}
 	// The accounts the enrollment settings leave out (excluded, out of the
 	// manifest) lose their record at once. A directory account the pass
@@ -323,8 +345,8 @@ func enterpriseHookIdentitySpoolAccounts(ctx context.Context, stderr io.Writer, 
 // inspects that connector's hook calls from every account, enrolled or not
 // (managedHookAuthorizer.decide). unknown marks an authorization or a
 // descriptor that could not be read. Either way every account is taken as
-// accepted, so no record is withdrawn at once (an omitted record still
-// ages out under enterprisehooks.WriteIdentitySpool's rules).
+// accepted, so no record is withdrawn. Existing records are listed for
+// refresh even when the authorization names no individual caller.
 type enterpriseHookAcceptedAccounts struct {
 	unknown  bool
 	everyone bool
@@ -398,9 +420,18 @@ func (a enterpriseHookAcceptedAccounts) has(uid int, names ...string) bool {
 // enterpriseHookNameCallerUIDs lists, in order, the uids of the callers the
 // gateway accepts by name only: exempt_users entries (a uid entry as
 // written) and protected targets without a uid. A name resolves through a
-// bounded lookup (enterprisehooks.LookupStandaloneUserBounded); a name whose
-// lookup does not answer keeps the uid of the identity record that names
-// it, so its last proven record keeps being refreshed.
+// bounded lookup (enterprisehooks.LookupStandaloneUserBounded). A name the
+// lookup does not resolve to an account, because it does not answer or
+// answers not found, keeps the uid of each identity record that spells it
+// by its verified facts (enterpriseHookRecordSpells), while no other
+// account holds that uid now. The account database often has no entry for
+// the spellings the gateway matches an exemption by (a UPN, a principal,
+// DOMAIN\name, a bare name where SSSD names accounts fully qualified), and
+// SSSD answers not found while its backend is offline. Comparing only the
+// record's account name, and skipping the records after a not-found answer,
+// left such a caller's record unrefreshed: it aged out after an hour while
+// the gateway still exempted the caller, which then lost the profile its UPN
+// selects (GAP-0881).
 func enterpriseHookNameCallerUIDs(ctx context.Context, dir string, leftOut *enterpriseHookLeftOutAccounts,
 	accepted enterpriseHookAcceptedAccounts) []int {
 	var names []string
@@ -429,21 +460,59 @@ func enterpriseHookNameCallerUIDs(ctx context.Context, dir string, leftOut *ente
 				uids = append(uids, account.UID)
 				continue
 			}
-			if unixidentity.IsNotFound(err) {
-				continue
-			}
 			if records == nil {
 				records = enterprisehooks.ReadIdentitySpoolRecords(dir, nil, enterpriseHookNameCallerRecordLimit)
 			}
 			for _, record := range records {
-				if uid, convErr := strconv.Atoi(record.Key); convErr == nil && uid > 0 && strings.EqualFold(strings.TrimSpace(record.User), name) {
-					uids = append(uids, uid)
+				uid, convErr := strconv.Atoi(record.Key)
+				if convErr != nil || uid <= 0 || !enterpriseHookRecordSpells(record, name) {
+					continue
 				}
+				// The record is the account's last proven identity; the uid is
+				// refreshed only while the account database does not give it to
+				// another account (a reused uid is its new owner's to scan).
+				if holder := leftOut.accountAt(uid); holder.answered && holder.name != strings.TrimSpace(record.User) {
+					continue
+				}
+				uids = append(uids, uid)
 			}
 		}
 	}
 	slices.Sort(uids)
 	return slices.Compact(uids)
+}
+
+// enterpriseHookRecordSpells reports whether name spells the account of
+// record by the facts the guardian verified for it, the spellings the
+// gateway's exempt_users matcher accepts for the account
+// (managedHookAuthorizer.exempt, userEntryMatches): its account name, its
+// UPN or principal, DOMAIN\name with a domain its facts give it (the
+// record's NetBIOS account domain, its DNS domain or SSSD domain, or .\ for
+// a local account), and, for a directory account, its name without the
+// domain. Names compare without regard to case.
+func enterpriseHookRecordSpells(record enterprisehooks.IdentitySpoolRecord, name string) bool {
+	name, user := strings.TrimSpace(name), strings.TrimSpace(record.User)
+	if name == "" || user == "" {
+		return false
+	}
+	if useridentity.EqualFold(name, user) || useridentity.PrincipalsEqual(name, record.Facts.UPN) ||
+		useridentity.PrincipalsEqual(name, record.Facts.Principal) {
+		return true
+	}
+	bare := useridentity.BareAccountName(user)
+	if domain, account, qualified := strings.Cut(name, `\`); qualified {
+		if strings.TrimSpace(domain) == "." {
+			// .\name, the Windows form for an account of this computer,
+			// names a local account (subjectInDomain).
+			return account != "" && record.AccountIncarnation == "files" && useridentity.EqualFold(account, bare)
+		}
+		return account != "" && useridentity.EqualFold(account, bare) && slices.ContainsFunc(
+			[]string{record.AccountDomain, record.Facts.Domain, record.SSSDDomain}, func(own string) bool {
+				own = strings.TrimSpace(own)
+				return own != "" && useridentity.EqualFold(own, domain)
+			})
+	}
+	return !strings.Contains(name, "@") && record.AccountIncarnation != "files" && useridentity.EqualFold(name, bare)
 }
 
 // enterpriseHookNameCallerRecordLimit bounds the records
@@ -459,6 +528,31 @@ func (a enterpriseHookAcceptedAccounts) listedUIDs() []int {
 		}
 	}
 	slices.Sort(uids)
+	return uids
+}
+
+// enterpriseHookRecordedCallerUIDs lists every existing uid record when the
+// authorization accepts callers without listing their uids. It reads names
+// only; WriteIdentitySpool resolves the uid again before publishing facts.
+func enterpriseHookRecordedCallerUIDs(dir string) []int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	uids := make([]int, 0, len(entries))
+	for _, entry := range entries {
+		key, ok := strings.CutSuffix(entry.Name(), ".json")
+		if !ok || !entry.Type().IsRegular() {
+			continue
+		}
+		uid, err := strconv.Atoi(key)
+		if err != nil || uid <= 0 || strconv.Itoa(uid) != key {
+			continue
+		}
+		if _, err := enterprisehooks.ReadIdentitySpoolRecord(dir, key, nil); err == nil {
+			uids = append(uids, uid)
+		}
+	}
 	return uids
 }
 

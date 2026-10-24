@@ -127,6 +127,21 @@ def policy_reload_rejection(policy: dict) -> str:
     return "" if fallback and error == f"opa: {fallback}" else error
 
 
+def applied_config_generation(policy: dict) -> int:
+    """The config generation the gateway built its policy from, 0 when unknown.
+
+    ``policy.config_generation`` is the writer counter of config.generation.json,
+    the number ``config set`` prints, and it survives a gateway restart.
+    ``policy.generation`` only counts the rebuilds of the running gateway and
+    starts again at 1 when it restarts, so status, doctor and the TUI name the
+    config generation (GAP-0642).
+    """
+    try:
+        return max(int(policy.get("config_generation") or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 def gateway_reload_notice(cfg: Any, *, timeout: float = 3) -> str:
     """Say when the running gateway has not applied config.yaml as written, or "".
 
@@ -166,9 +181,11 @@ def _gateway_reload_notice(cfg: Any, timeout: float) -> str:
         return ""
     error = policy_reload_rejection(policy)
     if error:
+        generation = applied_config_generation(policy)
+        enforced = f"config generation {generation}" if generation else "the previous policy"
         return (
             f"The running gateway has NOT applied this config.yaml: it rejected the last reload ({error}) "
-            f"and still enforces generation {policy.get('generation')}. Fix the file; the gateway reloads it "
+            f"and still enforces {enforced}. Fix the file; the gateway reloads it "
             "when it is saved."
         )
     pending = [str(key) for key in policy.get("pending_restart") or [] if str(key).strip()]

@@ -17,12 +17,14 @@ DefenseClaw rewrites the provider `api_base` values in `~/.zeptoclaw/config.json
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector zeptoclaw` first. Until DefenseClaw is initialized, `defenseclaw setup zeptoclaw` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
 defenseclaw setup zeptoclaw --mode observe --restart
 defenseclaw setup zeptoclaw --mode action --rule-pack default --restart
 ```
 
-The proxy is in the data path in both modes. Observe records and never blocks. Action enforces. Run `defenseclaw doctor` to check the result.
+The proxy is in the data path in both modes. Observe records policy findings without blocking on those findings; a gateway outage still stops proxied requests. Action enforces policy. Run `defenseclaw doctor` to check the result.
 
 ## Check it
 
@@ -64,11 +66,15 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-To drop the connector from the configuration, run `defenseclaw setup remove zeptoclaw --yes`.
+To drop the connector from the configuration, run `defenseclaw setup remove zeptoclaw --yes`. If ZeptoClaw is the last connector, removal refuses because the gateway would enforce nothing. To deliberately remove that last connector, run:
 
-Turn it back on with `defenseclaw guardrail enable`.
+```bash
+defenseclaw setup remove zeptoclaw --yes --force
+```
 
-On a multi-connector install, add `--connector zeptoclaw` to `guardrail disable` and `guardrail enable` to change only this agent.
+Turn it back on by running the Set up command again, for example `defenseclaw setup zeptoclaw --restart`. Leaving out `--mode` keeps the mode you saved before disabling the guardrail. `defenseclaw guardrail enable` turns ZeptoClaw back on only when `guardrail.model` is set (`defenseclaw setup guardrail`); otherwise it stops with `Cannot enable: guardrail.model is not set.`
+
+ZeptoClaw is proxy-backed and cannot run next to hook connectors. While any hook connector is configured, `defenseclaw setup zeptoclaw` refuses and changes nothing; `defenseclaw setup zeptoclaw --replace` removes the hook connectors and sets up ZeptoClaw in their place.
 
 ## Details
 

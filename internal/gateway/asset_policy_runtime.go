@@ -145,8 +145,7 @@ func (a *APIServer) mcpStateUnreadableDecision(ctx context.Context, connectorNam
 	if connectorName == "kiro" {
 		label, source = "Kiro", "kiro-mcp-unreadable"
 	}
-	reason := fmt.Sprintf("the %s MCP servers of %s are blocked: DefenseClaw could not read %s (%s), so it cannot admit them; "+
-		"give SYSTEM read access to the file again or repair its JSON", label, state.Account(), state.Path, state.Reason)
+	reason := state.Blocked(label)
 	decision := runtimeAssetDisableBlockDecision("mcp", probe.ServerName, connectorName, "hook", reason, source)
 	decision.RegistryStatus = "unknown"
 	a.logAssetPolicyAudit(ctx, connectorName, "mcp:"+probe.ServerName, fmt.Sprintf(

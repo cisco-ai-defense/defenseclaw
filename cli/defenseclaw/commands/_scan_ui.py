@@ -189,7 +189,7 @@ class ScanContext:
     def __post_init__(self) -> None:
         # Normalize. Operators routinely paste connector names with
         # weird casing or trailing whitespace.
-        self.connector = (self.connector or "openclaw").strip().lower() or "openclaw"
+        self.connector = (self.connector or "").strip().lower()
         if not self.categories:
             self.categories = _DEFAULT_CATEGORIES.get(self.component, ())
 
@@ -257,10 +257,9 @@ def render_preamble(ctx: ScanContext, target_count: int) -> None:
     if ctx.as_json:
         return
     label = ctx.label(plural=target_count != 1)
+    scope = ctx.where or (f"on {ctx.connector}" if ctx.connector else "with no configured connector")
     click.echo()
-    click.echo(
-        f"  Scanning {target_count} {label} {ctx.where or 'on ' + ctx.connector} for:"
-    )
+    click.echo(f"  Scanning {target_count} {label} {scope} for:")
     for cat in ctx.categories:
         click.echo(f"    - {cat}")
     if ctx.paths:

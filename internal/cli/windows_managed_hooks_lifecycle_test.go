@@ -246,6 +246,170 @@ func TestValidateWindowsManagedHooksLifecycleJournalRequiresExactTransaction(t *
 	}
 }
 
+func TestWindowsManagedHooksLifecycleAcceptsGuardWithNoEnrolledAccounts(t *testing.T) {
+	identity, journal, _ := windowsManagedHooksLifecycleJournalTestIdentity(t)
+	journal.PriorClaudeTargetSIDs = []string{}
+	journal.PriorCursorTargets = []enterprisehooks.WindowsCursorManagedRuntimeTarget{}
+	journal.Cursor.PolicyActive = true
+	journal.Cursor.HooksExisted = true
+	journal.Cursor.AdapterExisted = true
+	journal.Cursor.StateExisted = true
+	journal.Cursor.ReceiptExisted = true
+	journal.Cursor.HooksSecurityDescriptor = "protected"
+	journal.Cursor.AdapterSecurityDescriptor = "protected"
+	journal.Cursor.StateSecurityDescriptor = "protected"
+	journal.Cursor.ReceiptSecurityDescriptor = "protected"
+	journal.Cursor.HooksAttributes = 1
+	journal.Cursor.AdapterAttributes = 1
+	journal.Cursor.StateAttributes = 1
+	journal.Cursor.ReceiptAttributes = 1
+	if err := validateWindowsManagedHooksLifecycleJournal(journal, identity); err != nil {
+		t.Fatalf("active zero-target policies rejected during upgrade: %v", err)
+	}
+	if _, err := windowsManagedHooksPartialClaudeTargets(nil, nil, true); err != nil {
+		t.Fatalf("active empty Claude policy rejected during capture: %v", err)
+	}
+	if _, err := windowsManagedHooksPartialCursorTargets(nil, nil, true); err != nil {
+		t.Fatalf("active empty Cursor policy rejected during capture: %v", err)
+	}
+	journal.Claude.PolicyExisted = false
+	journal.Claude.StateExisted = false
+	journal.Claude.Policy = nil
+	journal.Claude.State = nil
+	journal.Cursor = enterprisehooks.WindowsCursorManagedPolicyTeardownSnapshot{}
+	if err := validateWindowsManagedHooksLifecycleJournal(journal, identity); err != nil {
+		t.Fatalf("legacy inactive zero-target policies rejected during upgrade: %v", err)
+	}
+}
+
+func TestLegacyWindowsManagedHooksPreactivationAcceptsOnlyConfiguredEmptyGuards(t *testing.T) {
+	originalClaudeAbsent := windowsManagedHooksLifecycleClaudePreactivation
+	originalClaudeTargets := windowsManagedHooksLifecycleClaudeTargets
+	originalClaudeIdentity := windowsManagedHooksLifecycleClaudeIdentity
+	originalCursorTargets := windowsManagedHooksPreactivationCursorTargets
+	originalCursorIdentity := windowsManagedHooksLifecycleCursorIdentity
+	t.Cleanup(func() {
+		windowsManagedHooksLifecycleClaudePreactivation = originalClaudeAbsent
+		windowsManagedHooksLifecycleClaudeTargets = originalClaudeTargets
+		windowsManagedHooksLifecycleClaudeIdentity = originalClaudeIdentity
+		windowsManagedHooksPreactivationCursorTargets = originalCursorTargets
+		windowsManagedHooksLifecycleCursorIdentity = originalCursorIdentity
+	})
+
+	const sid = "S-1-5-21-111-222-333-1001"
+	for _, test := range []struct {
+		name               string
+		secureClient       bool
+		claudeConfigured   bool
+		cursorConfigured   bool
+		claudeActive       bool
+		cursorActive       bool
+		claudeTargets      []string
+		cursorTargets      []enterprisehooks.WindowsCursorManagedRuntimeTarget
+		manifestClaude     bool
+		manifestCursor     bool
+		claudeReadErr      bool
+		cursorReadErr      bool
+		claudeIdentityErr  bool
+		cursorIdentityErr  bool
+		claudeOrphan       bool
+		wantAccepted       bool
+		wantClaudeIdentity bool
+		wantCursorIdentity bool
+	}{
+		{name: "legacy absent guards", wantAccepted: true},
+		{name: "configured empty Claude guard", claudeConfigured: true, claudeActive: true,
+			wantAccepted: true, wantClaudeIdentity: true},
+		{name: "configured empty Cursor guard", cursorConfigured: true, cursorActive: true,
+			wantAccepted: true, wantCursorIdentity: true},
+		{name: "both configured empty guards", claudeConfigured: true, cursorConfigured: true,
+			claudeActive: true, cursorActive: true, wantAccepted: true,
+			wantClaudeIdentity: true, wantCursorIdentity: true},
+		{name: "unconfigured Claude guard", claudeActive: true},
+		{name: "unconfigured Cursor guard", cursorActive: true},
+		{name: "Secure Client Claude guard keeps prior classification", secureClient: true,
+			claudeConfigured: true, claudeActive: true},
+		{name: "Secure Client Cursor guard keeps prior classification", secureClient: true,
+			cursorConfigured: true, cursorActive: true},
+		{name: "enrolled Claude policy", claudeConfigured: true, claudeActive: true,
+			claudeTargets: []string{sid}},
+		{name: "enrolled Cursor policy", cursorConfigured: true, cursorActive: true,
+			cursorTargets: []enterprisehooks.WindowsCursorManagedRuntimeTarget{{SID: sid}}},
+		{name: "Claude manifest enrollment", claudeConfigured: true, claudeActive: true,
+			manifestClaude: true},
+		{name: "Cursor manifest enrollment", cursorConfigured: true, cursorActive: true,
+			manifestCursor: true},
+		{name: "unowned Claude policy", claudeConfigured: true, claudeReadErr: true},
+		{name: "unowned Cursor policy", cursorConfigured: true, cursorReadErr: true},
+		{name: "foreign Claude guard", claudeConfigured: true, claudeActive: true,
+			claudeIdentityErr: true, wantClaudeIdentity: true},
+		{name: "foreign Cursor guard", cursorConfigured: true, cursorActive: true,
+			cursorIdentityErr: true, wantCursorIdentity: true},
+		{name: "orphan Claude policy", claudeOrphan: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := windowsManagedHooksLifecycleContext{}
+			ctx.opts.HookBinary = `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`
+			ctx.opts.GatewayAddr = "127.0.0.1:18970"
+			ctx.opts.GatewayServiceName = "DefenseClawGateway"
+			ctx.opts.SecureClient = test.secureClient
+			ctx.opts.ClaudeTargetEnabled = test.claudeConfigured
+			ctx.opts.CursorTargetEnabled = test.cursorConfigured
+			if test.manifestClaude {
+				ctx.claudeTargets = []string{sid}
+			}
+			if test.manifestCursor {
+				ctx.cursorTargets = []enterprisehooks.WindowsCursorManagedRuntimeTarget{{SID: sid}}
+			}
+			windowsManagedHooksLifecycleClaudePreactivation = func() error {
+				if test.claudeActive || test.claudeOrphan {
+					return errors.New("Claude policy files are present")
+				}
+				return nil
+			}
+			windowsManagedHooksLifecycleClaudeTargets = func() ([]string, bool, error) {
+				if test.claudeReadErr {
+					return nil, false, errors.New("Claude ownership is invalid")
+				}
+				return test.claudeTargets, test.claudeActive, nil
+			}
+			windowsManagedHooksPreactivationCursorTargets = func() (
+				[]enterprisehooks.WindowsCursorManagedRuntimeTarget, bool, error,
+			) {
+				if test.cursorReadErr {
+					return nil, false, errors.New("Cursor ownership is invalid")
+				}
+				return test.cursorTargets, test.cursorActive, nil
+			}
+			claudeIdentity, cursorIdentity := false, false
+			windowsManagedHooksLifecycleClaudeIdentity = func(hook, addr, service string) error {
+				claudeIdentity = true
+				if hook != ctx.opts.HookBinary || addr != ctx.opts.GatewayAddr ||
+					service != ctx.opts.GatewayServiceName || test.claudeIdentityErr {
+					return errors.New("Claude guard belongs to another deployment")
+				}
+				return nil
+			}
+			windowsManagedHooksLifecycleCursorIdentity = func(hook, addr, service string) error {
+				cursorIdentity = true
+				if hook != ctx.opts.HookBinary || addr != ctx.opts.GatewayAddr ||
+					service != ctx.opts.GatewayServiceName || test.cursorIdentityErr {
+					return errors.New("Cursor guard belongs to another deployment")
+				}
+				return nil
+			}
+			err := validateLegacyWindowsManagedHooksMachinePolicyPreactivation(ctx)
+			if (err == nil) != test.wantAccepted {
+				t.Fatalf("preactivation error = %v, accepted = %t", err, test.wantAccepted)
+			}
+			if claudeIdentity != test.wantClaudeIdentity || cursorIdentity != test.wantCursorIdentity {
+				t.Fatalf("identity checks: Claude=%t Cursor=%t, want Claude=%t Cursor=%t",
+					claudeIdentity, cursorIdentity, test.wantClaudeIdentity, test.wantCursorIdentity)
+			}
+		})
+	}
+}
+
 func TestValidateWindowsManagedHooksLifecycleRecoveryBindingIsExact(t *testing.T) {
 	transactionID := strings.Repeat("a", 32)
 	directory := `C:\ProgramData\DefenseClaw\install\transactions\` + transactionID

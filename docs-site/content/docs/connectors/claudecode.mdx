@@ -17,10 +17,15 @@ DefenseClaw adds hooks to Claude Code's settings. Per-user host setup disables n
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector claude-code` first. Until DefenseClaw is initialized, `defenseclaw setup claude-code` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
-defenseclaw setup claude-code                # observe (default): record only
+defenseclaw setup claude-code                # first setup defaults to observe: record only
 defenseclaw setup claude-code --mode action  # block on policy hits
 ```
+
+A re-run without `--mode` keeps the current mode, including with `--yes`.
+Use `--mode observe` or `--mode action` to choose a mode explicitly.
 
 On Windows, run the same commands in PowerShell. Quit and reopen Claude Code afterwards so it loads the hooks.
 After upgrading from an earlier per-user release, quit all running Claude Code processes and reopen them so they stop using the old exporter settings.
@@ -41,7 +46,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 - In action mode `PreToolUse` can deny a tool call or ask you first. The question appears inside Claude Code in Manual mode, its default; in any other permission mode the call is blocked with a note to switch to Manual mode and ask again.
 - The prompt, permission, task, stop, compaction, config and elicitation events can also block.
 - Events that carry a tool's result (`PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) are advisory. DefenseClaw scans them and records findings, but the tool has already run.
-- Observe mode never blocks. It records what action mode would have blocked.
+- Observe mode records policy findings without blocking on those findings. By default the running hook blocks supported events when the gateway is unreachable ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Settings and limits are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Files it changes
 
@@ -58,7 +63,7 @@ DefenseClaw backs up `settings.json` first. Teardown restores the backup, or rem
 - `disableAllHooks: true` in any Claude Code settings file turns every hook off. The gateway raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED, and `defenseclaw doctor` fails the **Claude Code hooks** row. Remove the key and restart Claude Code.
 - A project's `.claude/settings.json`, or a file passed with `claude --settings`, can do the same for its sessions. DefenseClaw cannot see a `--settings` file.
 - Commands you type in Claude Code's own bash mode are your input, not an agent action. They are not checked.
-- Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event and fail closed during an outage.
+- Keep the gateway running while Claude Code runs. Give each account on a shared computer its own gateway port. Per-user hooks verify the connected gateway account before sending an event. During an outage the default and permissive policies let the call run with a warning, strict blocks it.
 - Per-user hooks live in a file you own. The [enterprise standalone profile](/docs/enterprise/configure/machine-policy) puts them in machine policy instead.
 
 ## On a managed computer
@@ -75,7 +80,14 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Claude Code's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one).
+With the default restart, disabling removes DefenseClaw hooks and OpenTelemetry
+settings from Claude Code's settings file. It preserves your other Claude Code
+settings. `defenseclaw guardrail enable` restores DefenseClaw hooks and telemetry
+settings. For a whole-guardrail disable with `--no-restart`, removal takes effect
+when you restart the gateway. With `--connector claudecode` and `--no-restart`,
+a running gateway removes the connector's entries at once.
+To remove the connector from DefenseClaw's configuration, run
+`defenseclaw setup remove claudecode --yes` (add `--force` if it is the last one).
 
 On a multi-connector install, add `--connector claudecode` to `guardrail disable` and `guardrail enable` to change only this agent.
 

@@ -122,7 +122,8 @@ func TestR103B36RealBoundedHeaderKeepsTruncation(t *testing.T) {
 		header := f.clientHeader(t, payload)
 		targets, ok := hookpaths.Decode(header)
 		if !ok || targets[hookpaths.TruncatedKey] != "1" {
-			t.Fatalf("%s: real client header is not a bounded map", name)
+			t.Fatalf("%s: real client header is not a bounded map: decoded=%t targets=%d truncated=%q reason=%q header_bytes=%d",
+				name, ok, len(targets), targets[hookpaths.TruncatedKey], targets[hookpaths.UnprovenReasonKey], len(header))
 		}
 		if _, listed := targets[hookpaths.OperandPath(last, f.project)]; listed {
 			t.Fatalf("%s: the bounded map lists the last operand; the proof needs it omitted", name)

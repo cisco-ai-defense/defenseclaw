@@ -94,7 +94,12 @@ const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST = "{{if and (not .Managed) (not .SecureClient)}}1{{end}}";
-const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
+{{if and (not .Managed) (not .SecureClient)}}// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
+// in the default and permissive policy tiers lets a tool call run with a
+// warning and a hook-failures.jsonl row while this account's gateway is not
+// running; "closed" (strict) blocks it. Every other failure blocks.
+const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";
+{{end}}const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
@@ -679,11 +684,46 @@ async function defenseclawLogFailOpen(reason, category) {
   }
 }
 
-{{end}}
+{{end}}{{if and (not .Managed) (not .SecureClient)}}// The installer holds this data-directory lock while it replaces this
+// account's stopped gateway. An open outage mode cannot bypass that upgrade.
+const DC_INSTALL_WINDOW_TEXT = "DefenseClaw blocked this tool call: DefenseClaw is being installed or upgraded for this account, " +
+  "and its gateway starts again when that is done. Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install. `defenseclaw-gateway status` shows its state.";
+
+async function defenseclawInstallWindow() {
+  try {
+    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
+    return true;
+  } catch (err) {
+    // Only a missing lock ends the install window. An unreadable lock must
+    // never turn an upgrade into a fail-open outage.
+    return !(err && err.code === "ENOENT");
+  }
+}
+
+{{end}}async function defenseclawPerUserInstallInProgress() {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  if (DC_FAIL_MODE !== "open") return false;
+  try {
+    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), ".install.lock"));
+    return true;
+  } catch (err) {
+    return !err || err.code !== "ENOENT";
+  }
+{{else}}  return false;
+{{end}}}
+
+// defenseclawFailModeNow is the fail mode a failed tool check answers with,
+// read when it answers: closed while this account's installer holds its
+// data directory (.install.lock). A call that was waiting for the gateway
+// when an install or upgrade began answers closed too; a mode read when the
+// call started let it run (GAP-0893).
+async function defenseclawFailModeNow(mode, actionable) {
+  if (mode !== "open" || !actionable) return mode;
+  return await defenseclawPerUserInstallInProgress() ? "closed" : mode;
+}
+
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
-  const failMode = DC_FAIL_MODE;
-  const transportFailMode = DC_TRANSPORT_FAIL_MODE;
-  let token;
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}  let token;
   try {
     token = DC_HOOK_SOCKET ? "" : await defenseclawToken();
   } catch (_) {
@@ -725,16 +765,20 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       body: JSON.stringify(payload),
       signal: controller.signal,
     }, token), controller.signal);{{end}}
-    if (!res.ok) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}    if (!res.ok) {
       // Gateway answered with a bad status (auth/5xx). Honor fail mode. A 5xx
       // is an outage, as in the shell hooks, so strict availability closes it.
-      if ((res.status >= 500 ? transportFailMode : failMode) === "closed") {
-        return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
+      if (await defenseclawFailModeNow(res.status >= 500 ? DC_TRANSPORT_FAIL_MODE : DC_FAIL_MODE, actionable) === "closed") {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}        if (res.status >= 500) return { reason: await defenseclawPerUserGatewayDownText(null, res.status) };
+{{end}}        return { reason: "DefenseClaw hook failed closed (HTTP " + res.status + ")" };
       }
 {{if not .Sandbox}}      if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
 {{end}}      return null;
     }
     const data = await res.json();
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}
 {{if .Sandbox}}    // A reply without a known verdict is as untrustworthy as no reply.
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {
       return { reason: "DefenseClaw hook failed closed (invalid gateway verdict)" };
@@ -754,14 +798,24 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
 {{end}}{{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
-{{if not .Sandbox}}    if (DC_PER_USER_NATIVE_POST) return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (DC_PER_USER_NATIVE_POST) {
+      if (await defenseclawPerUserOutageOpen(err)) {
+        if (actionable) await defenseclawLogFailOpen("gateway unreachable", "transport");
+        return { reason: "", notice: actionable ? await defenseclawPerUserOutageNotice() : "" };
+      }
+      if (err && err.status === 7) return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
+      return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
+    }
+{{else if not .Sandbox}}    if (DC_PER_USER_NATIVE_POST) return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
 {{end}}    // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
-    if (transportFailMode === "closed") {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
+{{end}}    if (await defenseclawFailModeNow(DC_TRANSPORT_FAIL_MODE, actionable) === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
-      return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
-    }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}      return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
+{{else}}      return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
+{{end}}    }
 {{if not .Sandbox}}    if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");
 {{end}}    return null;
   } finally {
@@ -769,7 +823,78 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
   }
 }
 
-// DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}// defenseclawPerUserOutageOpen reports a per-user tool check that may run
+// unchecked: the native helper exited 7 (hookexec.PerUserPostOutageExit:
+// this account's gateway refused or dropped the connection before any
+// status), the outage mode is open, strict availability is off and no
+// install holds the data directory. An answer the gateway gave, an
+// unverified listener and every other error keep the call blocked.
+async function defenseclawPerUserOutageOpen(err) {
+  if (DC_OUTAGE_FAIL_MODE !== "open" || !err || err.status !== 7) return false;
+  if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;
+  return !(await defenseclawInstallWindow());
+}
+
+// defenseclawPerUserOutageNotice is the one warning of a tool call that ran
+// because this account's gateway is down: the cause and the fix.
+async function defenseclawPerUserOutageNotice() {
+  let stopped = false;
+  try {
+    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), "gateway.stopped"));
+    stopped = true;
+  } catch (_) {
+    // No marker: the gateway is down for another reason.
+  }
+  const cause = stopped
+    ? "this account's gateway was stopped with `defenseclaw-gateway stop`"
+    : "this account's gateway is not running";
+  return "DefenseClaw is not checking this session: " + cause + ", so tool calls run unchecked (fail mode open for an outage). " +
+    "Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state. " +
+    "If it does not start, run `defenseclaw doctor`.";
+}
+
+// defenseclawPerUserGatewayDownText is what a per-user install that fails
+// closed says when its gateway gave no usable answer: why (an install or
+// upgrade, a `defenseclaw-gateway stop`, a stopped, busy or failing gateway)
+// and what brings it back, in the words of the native and shell hooks.
+// OpenCode shows only this reason, and the runtime's network error ("fetch
+// failed", "Unable to connect") named neither the gateway nor the fix
+// (GAP-0850). The runtime's own error stays at the end for diagnosis.
+async function defenseclawPerUserGatewayDownText(err, status) {
+  const data = dirname(dirname(DC_TOKEN_FILE));
+  const present = async (name) => {
+    try {
+      await lstat(join(data, name));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+  let text;
+  if (await present(".install.lock")) {
+    text = "DefenseClaw is being installed or upgraded for this account, and its gateway starts again when that is done (fail mode closed). " +
+      "Try again in a moment; if the installer has stopped, run the installer again to finish or undo the interrupted install.";
+  } else if (await present("gateway.stopped")) {
+    text = "the DefenseClaw gateway was stopped with `defenseclaw-gateway stop` (fail mode closed). " +
+      "Start it with `defenseclaw-gateway start`, then try again.";
+  } else if (status) {
+    text = "this account's DefenseClaw gateway answered HTTP " + status + " (fail mode closed); it may be starting or overloaded. " +
+      "Try again in a moment.";
+  } else if (defenseclawGatewayStopped(err)) {
+    text = "this account's DefenseClaw gateway is not running (fail mode closed). " +
+      "Start it with `defenseclaw-gateway start`, then try again.";
+  } else if (err && (err.name === "AbortError" || err.name === "TimeoutError")) {
+    text = "this account's DefenseClaw gateway did not answer in time (fail mode closed); it may be restarting or busy. " +
+      "Try again in a moment.";
+  } else {
+    text = "the DefenseClaw gateway is not running or not answering (fail mode closed). " +
+      "Start it with `defenseclaw-gateway start`, then try again.";
+  }
+  const detail = status ? "HTTP " + status : (err && err.message ? err.message : String(err));
+  return "DefenseClaw blocked this tool call: " + text + " `defenseclaw-gateway status` shows its state. (" + detail + ")";
+}
+
+{{end}}// DC_GATEWAY_STOPPED_TEXT is what a managed install says when its gateway
 // service is stopped, in the words of the native hook (GAP-0578).
 const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the DefenseClaw gateway service is not running on this computer. " +
   "Try again in a moment; if this continues, ask your administrator to start the DefenseClaw gateway service. " +
@@ -779,7 +904,9 @@ const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the Defense
 // gateway is not running: its hook socket is missing, or nothing accepts
 // the connection.
 function defenseclawGatewayStopped(err) {
-  const codes = [err && err.code, err && err.cause && err.cause.code];
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  // The per-user native helper exits 7 for a gateway that is not running.
+  if (err && err.status === 7) return true;
+{{end}}  const codes = [err && err.code, err && err.cause && err.cause.code];
   return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused");
 }
 

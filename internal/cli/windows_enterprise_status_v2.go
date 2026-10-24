@@ -120,6 +120,7 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 	result.OpenShell = enterprisestatus.OpenShellUnsupportedCapability()
 	in := windowsEnterpriseStatusV2Read()
 	result.Connectors = windowsEnterpriseConnectorsBlock(result, in)
+	result.AddHookProcessFailureWarnings()
 	result.Identity = enterprisestatus.IdentityGatewayNotReady()
 	if result.Readiness.Gateway && in.gatewayHealth != nil {
 		// A failed read is a gateway that did not report.

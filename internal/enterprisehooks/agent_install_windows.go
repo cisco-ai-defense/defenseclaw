@@ -528,11 +528,11 @@ func windowsStandaloneInstallFix(connectorName string) string {
 
 // windowsCodexUnpublishedConsequence is the unprotected-agent consequence
 // for Codex while the machine requirements.toml is not published.
-const windowsCodexUnpublishedConsequence = "no user is enrolled for Codex, so Codex's machine requirements.toml is not published and it runs without DefenseClaw hooks"
+const windowsCodexUnpublishedConsequence = "Codex's configured machine requirements.toml is missing; the guardian must restore it, and Codex runs without DefenseClaw hooks until then"
 
 // windowsCodexMachinePolicyPublished reports whether Codex's machine
-// requirements.toml is in force. The guardian publishes it only while a user
-// is enrolled for Codex; with none, nothing refuses an unregistered user. A
+// requirements.toml is in force. The guardian keeps it published for a
+// configured Codex connector even when no user is enrolled. A
 // path that cannot be resolved or inspected counts as published, as for
 // Cursor. Replaced in tests.
 var windowsCodexMachinePolicyPublished = func() bool {

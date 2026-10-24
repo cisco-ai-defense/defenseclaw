@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import click
 import pytest
-from defenseclaw import agent_selection, fail_mode
+from defenseclaw import agent_selection, fail_mode, hook_integrity
 from defenseclaw.commands import cmd_doctor, cmd_setup
 from defenseclaw.connector_contracts import (
     connector_lock_contract_invariant,
@@ -162,6 +162,20 @@ def test_contract_lock_rejects_noncanonical_location(tmp_path: Path) -> None:
     assert connector_lock_contract_invariant("amp", entry) == "location"
 
 
+class _WindowsOs:
+    """The os module as one module sees it on Windows; pathlib and every other module keep the host's os."""
+
+    name = "nt"
+
+    def __getattr__(self, attr: str) -> object:
+        return getattr(os, attr)
+
+
+def _fake_windows(monkeypatch: pytest.MonkeyPatch, module: object) -> None:
+    # Setting os.name globally turns every Path into an uninstantiable WindowsPath on this host.
+    monkeypatch.setattr(module, "os", _WindowsOs())
+
+
 def test_protected_executable_reports_identity_location_and_digest(monkeypatch, tmp_path: Path) -> None:
     executable = tmp_path / "amp.exe"
     executable.write_bytes(b"MZamp")
@@ -171,7 +185,7 @@ def test_protected_executable_reports_identity_location_and_digest(monkeypatch, 
         "agent_executable": str(executable),
         "agent_executable_sha256": digest,
     }
-    monkeypatch.setattr(agent_selection.os, "name", "nt")
+    _fake_windows(monkeypatch, agent_selection)
     monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args: True)
     assert agent_selection.setup_agent_lock_executable_invariant(str(tmp_path), "amp", entry) == ""
 
@@ -195,7 +209,7 @@ def test_opencode_protected_executable_requires_exact_sst_location(monkeypatch, 
         "agent_executable": str(executable),
         "agent_executable_sha256": digest,
     }
-    monkeypatch.setattr(agent_selection.os, "name", "nt")
+    _fake_windows(monkeypatch, agent_selection)
     monkeypatch.setattr(
         agent_selection,
         "is_setup_trusted_binary",
@@ -839,7 +853,7 @@ def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_pa
     cfg = _config(tmp_path)
     entry = _entry("copilot", tmp_path)
     _patch_registration_ready(monkeypatch, entry)
-    monkeypatch.setattr(cmd_doctor.os, "name", "nt")
+    _fake_windows(monkeypatch, cmd_doctor)
     (tmp_path / "hook_contract_lock.json").write_text(
         json.dumps({"version": 2, "connectors": {"copilot": entry}}),
         encoding="utf-8",
@@ -854,7 +868,7 @@ def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_pa
         "_windows_native_hook_check",
         lambda *_args, **_kwargs: WindowsHookCheck("stale", "registered launcher executable is stale"),
     )
-    # os.name is faked: the Windows .hookcfg path cannot be built on this host.
+    # fail_mode keeps the host's os, so supply the mode the Windows .hookcfg would render.
     monkeypatch.setattr("defenseclaw.fail_mode._platform_runtime_source", lambda *_args: ("windows-sidecar", "open"))
     monkeypatch.setattr("defenseclaw.fail_mode._shared_hook_sidecar_drift", lambda *_args: None)
     readiness = cmd_doctor.connector_setup_readiness(cfg, "copilot")
@@ -1021,10 +1035,9 @@ def test_kiro_setup_readiness_accepts_installed_native_hooks(
     cfg = _config(tmp_path)
     hook_path = tmp_path / "kiro-hooks" / "defenseclaw.json"
     hook_path.parent.mkdir(parents=True)
-    hook_path.write_text(
-        '{"version":"v1","hooks":[{"name":"defenseclaw-pre-tool","trigger":"PreToolUse"}]}\n',
-        encoding="utf-8",
-    )
+    script = str(tmp_path / "hooks" / "kiro-hook.sh")
+    hooks = list(hook_integrity._owned_file_renders(cfg, "kiro", script).values())
+    hook_path.write_text(json.dumps({"version": "v1", "hooks": hooks}) + "\n", encoding="utf-8")
     (tmp_path / "hook_contract_lock.json").write_text(
         json.dumps(
             {
@@ -1083,6 +1096,109 @@ class TestLockContractFailureDetail:
         detail = cmd_setup._lock_contract_failure_detail("devin", newer, invariant)
         assert "predates" in detail and "defenseclaw-gateway restart" in detail
 
+    @pytest.mark.parametrize("removed", ["omni" + "gent", "open" + "hands"])
+    def test_removed_connector_in_old_lock_names_cleanup_without_setup_advice(
+        self, removed: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        assert cmd_setup.removed_connectors.is_removed(removed)
+        assert cmd_setup.removed_connectors.is_removed("open-hands")
+        assert cmd_setup.removed_connectors.is_removed("open_hands")
+        assert not cmd_setup.removed_connectors.is_removed("devin")
+        entry = {
+            "connector": removed,
+            "raw_agent_version": "0.10.0",
+            "normalized_agent_version": "0.10.0",
+            "compatibility_status": "unknown",
+            "hook_fail_mode": "closed",
+        }
+        invariant = connector_lock_contract_invariant(removed, entry)
+        assert invariant
+        detail = cmd_setup._lock_contract_failure_detail(removed, entry, invariant)
+        assert "removed in 1.0.4" in detail
+        assert "defenseclaw doctor" in detail
+        assert "Install a supported" not in detail
+        assert "guardrail disable" not in detail
+
+        lock = tmp_path / "hook_contract_lock.json"
+        lock.write_text(json.dumps({"version": 2, "connectors": {removed: entry}}), encoding="utf-8")
+        keep, skipped = cmd_setup._partition_unconvergeable_peers(
+            str(lock), {"kiro", removed}, required={"kiro"}
+        )
+        output = capsys.readouterr().out
+        assert keep == {"kiro"} and skipped == frozenset({removed})
+        assert "removed in 1.0.4" in output
+        assert "Re-run setup for" not in output
+        assert "guardrail disable" not in output
+
+        lock.write_text(
+            json.dumps({"version": 2, "connectors": {removed: entry, "devin": {**entry, "connector": "devin"}}}),
+            encoding="utf-8",
+        )
+        cmd_setup._partition_unconvergeable_peers(
+            str(lock), {"kiro", removed, "devin"}, required={"kiro"}
+        )
+        mixed_output = capsys.readouterr().out
+        assert "Re-run setup for devin" in mixed_output
+        assert f"Re-run setup for {removed}" not in mixed_output
+
+    def test_refused_retired_peer_never_gets_setup_advice(self, monkeypatch, tmp_path: Path, capsys) -> None:
+        cfg = _config(tmp_path)
+        (tmp_path / "hook_contract_lock.json").write_text(
+            json.dumps({"version": 2, "connectors": {"amp": _entry("amp", tmp_path)}}),
+            encoding="utf-8",
+        )
+        (tmp_path / "active_connector.json").write_text(
+            json.dumps({"version": 3, "names": ["amp"], "inactive_names": []}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+        monkeypatch.setattr(
+            cmd_doctor,
+            "connector_setup_readiness",
+            lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready"),
+        )
+        result = cmd_setup._wait_for_connector_runtime(
+            str(tmp_path), ["amp", "omnigent"], None, None, timeout=0.5, required={"amp"}
+        )
+        assert result and result.skipped == frozenset({"omnigent"})
+        output = capsys.readouterr().out
+        assert "removed in 1.0.4" in output
+        assert "defenseclaw doctor" in output
+        assert "defenseclaw setup omnigent" not in output
+
+    def test_retired_peer_with_readiness_failure_never_gets_retry_advice(
+        self, monkeypatch, tmp_path: Path, capsys
+    ) -> None:
+        cfg = _config(tmp_path)
+        (tmp_path / "hook_contract_lock.json").write_text(
+            json.dumps({"version": 2, "connectors": {"amp": _entry("amp", tmp_path), "omnigent": {}}}),
+            encoding="utf-8",
+        )
+        (tmp_path / "active_connector.json").write_text(
+            json.dumps({"version": 3, "names": ["amp", "omnigent"], "inactive_names": []}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+        monkeypatch.setattr(
+            cmd_setup, "_partition_unconvergeable_peers", lambda _path, expected, **_kwargs: (expected, frozenset())
+        )
+        monkeypatch.setattr(cmd_setup, "_connector_runtime_snapshot_ready", lambda *_args, **_kwargs: True)
+
+        def readiness(_cfg, name):
+            if name == "omnigent":
+                return cmd_doctor.ConnectorSetupReadiness(False, name, "version", "install a supported version")
+            return cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+
+        monkeypatch.setattr(cmd_doctor, "connector_setup_readiness", readiness)
+        result = cmd_setup._wait_for_connector_runtime(
+            str(tmp_path), ["amp", "omnigent"], None, None, timeout=0.5, required={"amp"}
+        )
+        assert result
+        output = capsys.readouterr().out
+        assert "removed in 1.0.4" in output
+        assert "Re-run setup for omnigent" not in output
+        assert "install a supported version" not in output
+
     def test_unversioned_agent_names_a_missing_install(self) -> None:
         # GAP-1285: OpenCode not installed for the account reports no version.
         entry = {"connector": "opencode", "compatibility_status": "unversioned", "hook_fail_mode": "open"}
@@ -1133,13 +1249,16 @@ class TestUnconvergeablePeersAreSkipped:
             "hook_fail_mode": "open",
         }
 
-    def test_peer_with_no_contract_is_skipped(self, tmp_path: Path) -> None:
+    def test_peer_with_no_contract_is_skipped(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         lock = self._lock(tmp_path, {"devin": self._ungated_entry("devin")})
         keep, tolerated = cmd_setup._partition_unconvergeable_peers(
             lock, {"kiro", "devin"}, required={"kiro"}
         )
         assert keep == {"kiro"}
         assert tolerated == frozenset({"devin"})
+        assert "skipping devin" in capsys.readouterr().out
 
     def test_removed_peer_is_skipped_without_rerun_advice(self, tmp_path: Path, capsys) -> None:
         lock = self._lock(tmp_path, {"omnigent": self._ungated_entry("omnigent")})
@@ -1148,7 +1267,8 @@ class TestUnconvergeablePeersAreSkipped:
         )
         output = capsys.readouterr().out
         assert keep == {"codex"} and tolerated == frozenset({"omnigent"})
-        assert "removed in DefenseClaw 1.0.4" in output
+        # The train words it "was removed in 1.0.4" (w25-retired).
+        assert "removed in 1.0.4" in output
         assert "guardrail disable --connector omnigent" not in output
         assert "Re-run setup for omnigent" not in output
 
@@ -1193,7 +1313,9 @@ class TestUnconvergeablePeersAreSkipped:
             lock, {"kiro"}, set(), frozenset({"devin"})
         )
 
-    def test_departed_peer_left_in_the_lock_is_also_skipped(self, tmp_path: Path) -> None:
+    def test_departed_peer_left_in_the_lock_is_tolerated_without_remediation(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         # `guardrail disable --connector devin` drops devin from the roster
         # but its lock entry survives until teardown reclaims it. Without
         # this, disabling the broken connector turned an expected-peer
@@ -1204,6 +1326,19 @@ class TestUnconvergeablePeersAreSkipped:
         )
         assert keep == {"kiro"}
         assert tolerated == frozenset({"devin"})
+        assert "devin" not in capsys.readouterr().out
+
+    def test_retired_connector_lock_does_not_appear_in_hermes_setup(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        retired = "open" + "hands"
+        lock = self._lock(tmp_path, {retired: self._ungated_entry(retired)})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"hermes"}, required={"hermes"}
+        )
+        assert keep == {"hermes"}
+        assert tolerated == frozenset({retired})
+        assert retired not in capsys.readouterr().out
 
 
 def test_hermes_summary_skips_reload_advice_when_no_host_runs(monkeypatch, capsys) -> None:
@@ -1222,3 +1357,365 @@ def test_hermes_summary_skips_reload_advice_when_no_host_runs(monkeypatch, capsy
     running = summary()
     assert "unverified; reload/restart required" in running
     assert "Reload/restart every running Hermes" in running
+
+
+def _agent_settings_refusal_runtime(monkeypatch, tmp_path: Path) -> str:
+    """Codex refused by its own settings, Claude Code running (GAP-0578)."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("claudecode", "codex")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["claudecode"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    reason = (
+        "Codex hooks are turned off in /home/u/.codex/config.toml ([features] hooks = false), "
+        "so Codex runs no DefenseClaw hook; turn them back on with: codex features enable hooks"
+    )
+    health = {
+        "started_at": "2026-10-22T18:22:00Z",
+        "guardrail": {"state": "running", "details": {
+            "connectors": ["claudecode"],
+            "connectors_not_started": ["codex"],
+            "connectors_refused_by_agent_settings": {"codex": reason},
+        }},
+    }
+    monkeypatch.setattr(cmd_setup, "_read_gateway_health", lambda *_args, **_kwargs: health)
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        cmd_doctor, "connector_setup_readiness", lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+    )
+    return reason
+
+
+def test_setup_wait_fails_at_once_with_the_agent_settings_reason(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0578: `setup codex` with Codex hooks off fails with the fix, not a timeout."""
+    reason = _agent_settings_refusal_runtime(monkeypatch, tmp_path)
+    started = time.monotonic()
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"codex"},
+    )
+    assert not result
+    assert (result.connector, result.invariant, result.detail) == ("codex", "agent-settings", reason)
+    assert time.monotonic() - started < 1.5
+
+
+def test_setup_wait_skips_a_peer_with_the_agent_settings_reason(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-0578: `setup claude-code` while Codex hooks are off converges for Claude Code."""
+    _agent_settings_refusal_runtime(monkeypatch, tmp_path)
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"claudecode"},
+    )
+    assert result
+    assert result.skipped == frozenset({"codex"})
+    assert "skipping codex: Codex hooks are turned off" in capsys.readouterr().out
+
+
+def test_rollback_wait_accepts_a_connector_its_agent_settings_refused(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-0578: the rollback restart restores that exact registration, so the
+    gateway that runs the other connectors is not reported as down."""
+    _agent_settings_refusal_runtime(monkeypatch, tmp_path)
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"codex"}, accept_agent_settings_refusals=True,
+    )
+    assert result
+    assert result.skipped == frozenset({"codex"})
+    assert "skipping codex: Codex hooks are turned off" in capsys.readouterr().out
+
+
+def test_only_the_rollback_restart_accepts_agent_settings_refusals(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0578: a forward setup still fails for the connector it sets up."""
+    seen: list[bool] = []
+    monkeypatch.setattr(cmd_setup, "_restart_defense_gateway", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(cmd_setup, "_hook_runtime_wait_targets", lambda *_args: ["claudecode", "codex"])
+    monkeypatch.setattr(cmd_setup, "_unverified_setup_peers", frozenset)
+    monkeypatch.setattr(cmd_setup, "_wait_for_defense_gateway_api", lambda *_args, **_kwargs: True)
+
+    def wait(*_args, **kwargs):
+        seen.append(kwargs.get("accept_agent_settings_refusals", False))
+        return cmd_setup._ConnectorRuntimeReadiness(True)
+
+    monkeypatch.setattr(cmd_setup, "_wait_for_connector_runtime", wait)
+    cmd_setup._restart_services(str(tmp_path), connector="codex", wait_for_connector_ready=True)
+    cmd_setup._restart_services(
+        str(tmp_path), connector="codex", wait_for_connector_ready=True, title=cmd_setup._ROLLBACK_RESTART_TITLE
+    )
+    assert seen == [False, True]
+
+
+def _not_started_runtime(monkeypatch, tmp_path: Path, reason: str) -> None:
+    """Codex skipped by the restarted gateway with *reason*, Claude Code running (GAP-0620)."""
+    cfg = _config(tmp_path)
+    entries = {name: _entry(name, tmp_path) for name in ("claudecode", "codex")}
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": entries}),
+        encoding="utf-8",
+    )
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps({"version": 3, "names": ["claudecode"], "inactive_names": []}),
+        encoding="utf-8",
+    )
+    health = {
+        "started_at": "2026-10-22T19:52:00Z",
+        "guardrail": {"state": "running", "details": {
+            "connectors": ["claudecode"],
+            "connectors_not_started": ["codex"],
+            "connectors_not_started_reasons": {"codex": reason},
+        }},
+    }
+    monkeypatch.setattr(cmd_setup, "_read_gateway_health", lambda *_args, **_kwargs: health)
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        cmd_doctor, "connector_setup_readiness", lambda _cfg, name: cmd_doctor.ConnectorSetupReadiness(True, name, "ready")
+    )
+
+
+def test_setup_wait_names_why_the_gateway_did_not_start_the_added_connector(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0620: `setup codex` (Add) with Codex not on PATH failed with only
+    "roster: active=claudecode; expected=claudecode,codex" after the whole wait."""
+    reason = (
+        "inspect effective Codex managed requirements: exec: \"codex\": executable file not found in $PATH"
+    )
+    _not_started_runtime(monkeypatch, tmp_path, reason)
+    monkeypatch.setattr(cmd_setup.agent_discovery, "_binary_path_for_agent", lambda *_args: "")
+    started = time.monotonic()
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"codex"},
+    )
+    assert not result
+    assert (result.connector, result.invariant) == ("codex", "not-started")
+    assert "Codex (codex) is not on PATH" in result.detail
+    assert reason in result.detail
+    assert time.monotonic() - started < 1.5
+
+
+def test_setup_wait_names_a_peer_the_gateway_did_not_start(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-0620: a skipped peer is named with the gateway's reason, not only "gateway.log"."""
+    _not_started_runtime(monkeypatch, tmp_path, "connector codex agent version \"\" is not verified")
+    monkeypatch.setattr(cmd_setup.agent_discovery, "_binary_path_for_agent", lambda *_args: "/usr/bin/codex")
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["claudecode", "codex"], None, None, timeout=2.0,
+        require_gateway_health=True, required={"claudecode"},
+    )
+    assert result
+    out = capsys.readouterr().out
+    assert "skipping codex" in out
+    assert 'connector codex agent version "" is not verified' in out
+    assert "not on PATH" not in out
+
+
+def test_roster_failure_names_an_agent_that_is_not_on_path(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0620: without a gateway reason, the roster mismatch still names the missing agent."""
+    monkeypatch.setattr(cmd_setup.agent_discovery, "_binary_path_for_agent", lambda *_args: "")
+    failure = cmd_setup._connector_runtime_snapshot_failure(
+        {"version": 3, "names": ["claudecode"], "inactive_names": []}, 1, {"connectors": {}}, 1,
+        expected={"claudecode", "codex"}, previous_state_marker=None, previous_lock_marker=None,
+    )
+    assert (failure.connector, failure.invariant) == ("codex", "roster")
+    assert failure.detail.startswith("Codex (codex) is not on PATH")
+    assert "active=claudecode; expected=claudecode,codex" in failure.detail
+
+
+def test_setup_wait_names_the_gateway_error_when_the_guardrail_stopped(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0620: "restarted gateway guardrail is error" now carries the gateway's error."""
+    cfg = _config(tmp_path)
+    health = {
+        "started_at": "2026-10-22T19:52:00Z",
+        "guardrail": {"state": "error", "last_error": "connector codex setup failed: codex not found"},
+    }
+    monkeypatch.setattr(cmd_setup, "_read_gateway_health", lambda *_args, **_kwargs: health)
+    monkeypatch.setattr(cmd_setup, "load_config", lambda **_kwargs: cfg)
+    result = cmd_setup._wait_for_connector_runtime(
+        str(tmp_path), ["codex"], None, None, timeout=2.0, require_gateway_health=True, required={"codex"},
+    )
+    assert not result
+    assert result.invariant == "gateway-state"
+    assert result.detail == "restarted gateway guardrail is error: connector codex setup failed: codex not found"
+
+
+def _gateway_check_agent_settings(monkeypatch, payload: dict) -> list[list[str]]:
+    calls: list[list[str]] = []
+
+    def run(argv, **_kwargs):
+        calls.append(list(argv))
+        return SimpleNamespace(returncode=1 if payload.get("refused") else 0, stdout=json.dumps(payload) + "\n",
+                               stderr="")
+
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "/opt/dc/defenseclaw-gateway")
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", run)
+    return calls
+
+
+def test_setup_refuses_agent_settings_before_it_changes_anything(monkeypatch, tmp_path: Path, capsys) -> None:
+    """GAP-0615: `setup codex --restart` with a config.toml that does not parse
+    restarted the gateway, which could not start Codex, and the rollback left
+    the gateway stopped. Setup now asks the gateway's check first and stops
+    before it changes anything or restarts the gateway."""
+    reason = (
+        "Codex config C:\\Users\\u\\.codex\\config.toml does not parse (toml: line 180 (last key \"t6z2_broken\"): "
+        "expected character ]); fix the file, then run: defenseclaw-gateway restart"
+    )
+    calls = _gateway_check_agent_settings(
+        monkeypatch, {"connector": "codex", "action": "check-agent-settings", "refused": True, "reason": reason}
+    )
+    touched: list[str] = []
+    monkeypatch.setattr(
+        cmd_setup, "_check_connector_version_supported_for_setup", lambda *_a, **_k: touched.append("version")
+    )
+    monkeypatch.setattr(cmd_setup, "_capture_setup_config_snapshot", lambda *_a, **_k: touched.append("snapshot"))
+    monkeypatch.setattr(cmd_setup, "_restart_services", lambda *_a, **_k: touched.append("restart"))
+    app = SimpleNamespace(cfg=_config(tmp_path))
+    ok = cmd_setup._apply_hook_connector_setup(app, connector="codex", mode="action", restart=True)
+    assert ok is False
+    assert touched == []
+    assert calls and calls[0][1:5] == ["connector", "check-agent-settings", "--connector", "codex"]
+    err = capsys.readouterr().err
+    assert "config.toml does not parse" in err
+    assert "Setup changed nothing and the gateway keeps running as it was" in err
+    assert "defenseclaw-gateway restart" not in err
+
+
+@pytest.mark.parametrize("connector", ("claudecode", "copilot"))
+@pytest.mark.parametrize("requested_scope", ("new", "global"))
+def test_setup_prechecks_the_requested_workspace_when_switching_away_from_refusal(
+    monkeypatch, tmp_path: Path, connector: str, requested_scope: str,
+) -> None:
+    old_workspace = tmp_path / "old-workspace"
+    new_workspace = tmp_path / "new-workspace"
+    old_workspace.mkdir()
+    new_workspace.mkdir()
+    cfg = _config(tmp_path)
+    cfg.claw = SimpleNamespace(workspace_dir=str(old_workspace))
+    seen: list[list[str]] = []
+    touched: list[str] = []
+
+    def check(argv, **_kwargs):
+        seen.append(list(argv))
+        scope = argv[argv.index("--workspace-dir") + 1] if "--workspace-dir" in argv else str(old_workspace)
+        refused = scope == str(old_workspace)
+        payload = {
+            "connector": connector, "action": "check-agent-settings", "refused": refused,
+            "reason": "old workspace sets disableAllHooks=true" if refused else "",
+        }
+        return SimpleNamespace(returncode=1 if refused else 0, stdout=json.dumps(payload) + "\n", stderr="")
+
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "/opt/dc/defenseclaw-gateway")
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", check)
+    monkeypatch.setattr(
+        cmd_setup, "_check_connector_version_supported_for_setup",
+        lambda *_args, **_kwargs: touched.append("version") or False,
+    )
+    monkeypatch.setattr(cmd_setup, "_capture_setup_config_snapshot", lambda *_a, **_k: touched.append("snapshot"))
+    requested = str(new_workspace) if requested_scope == "new" else None
+    assert cmd_setup._apply_hook_connector_setup(
+        SimpleNamespace(cfg=cfg), connector=connector, restart=True, workspace_dir=requested,
+    ) is False
+    assert seen and seen[0][seen[0].index("--workspace-dir") + 1] == (str(new_workspace) if requested else "")
+    assert touched == ["version"]
+    assert cfg.claw.workspace_dir == str(old_workspace)
+
+
+def test_setup_codex_precheck_uses_selected_root_before_migrating(monkeypatch, tmp_path: Path) -> None:
+    old_root = tmp_path / "old-codex"
+    new_root = tmp_path / "new-codex"
+    old_root.mkdir()
+    new_root.mkdir()
+    (old_root / "config.toml").write_text("[features]\nhooks = false\n", encoding="utf-8")
+    (new_root / "config.toml").write_text("[features]\nhooks = true\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(new_root))
+    monkeypatch.setenv("DEFENSECLAW_EXPLICIT_CODEX_SETUP", str(old_root))
+    cfg = _config(tmp_path)
+    touched: list[str] = []
+    seen_env: list[dict[str, str]] = []
+
+    def check(_argv, **kwargs):
+        env = kwargs["env"]
+        seen_env.append(env)
+        # The gateway pins an existing registration to the old root unless
+        # the explicit setup marker matches the selected CODEX_HOME.
+        root = new_root if env.get("DEFENSECLAW_EXPLICIT_CODEX_SETUP") == str(new_root) else old_root
+        refused = "hooks = false" in (root / "config.toml").read_text(encoding="utf-8")
+        payload = {
+            "connector": "codex", "action": "check-agent-settings", "refused": refused,
+            "reason": f"Codex config {root / 'config.toml'} turns hooks off" if refused else "",
+        }
+        return SimpleNamespace(returncode=1 if refused else 0, stdout=json.dumps(payload) + "\n", stderr="")
+
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "/opt/dc/defenseclaw-gateway")
+    monkeypatch.setattr(cmd_setup, "run_pinned_executable", check)
+    monkeypatch.setattr(
+        cmd_setup, "_check_connector_version_supported_for_setup",
+        lambda *_args, **_kwargs: touched.append("version") or False,
+    )
+    assert cmd_setup._apply_hook_connector_setup(
+        SimpleNamespace(cfg=cfg), connector="codex", restart=True,
+    ) is False
+    assert seen_env and seen_env[0]["DEFENSECLAW_EXPLICIT_CODEX_SETUP"] == str(new_root)
+    assert seen_env[0]["CODEX_HOME"] == str(new_root)
+    assert touched == ["version"]
+
+
+@pytest.mark.parametrize(
+    ("connector", "reason", "cause"),
+    [
+        (
+            "claudecode",
+            "inspect Claude Code user settings /home/u/.claude/settings.json: settings source is a link "
+            "to /private/tmp/x.json, outside your home folder; replace the link",
+            "outside your home folder",
+        ),
+        (
+            "claudecode",
+            "inspect Claude Code user settings /home/u/.claude/settings.json: settings source is a link "
+            "that cannot be followed: no such file or directory",
+            "cannot be followed",
+        ),
+        (
+            "codex",
+            "Codex config /home/u/.codex/config.toml cannot be read: permission denied; fix the file",
+            "permission denied",
+        ),
+    ],
+)
+def test_setup_preserves_unreadable_settings_cause_without_restarting(
+    monkeypatch, tmp_path: Path, capsys, connector: str, reason: str, cause: str,
+) -> None:
+    calls = _gateway_check_agent_settings(
+        monkeypatch,
+        {"connector": connector, "action": "check-agent-settings", "refused": True, "reason": reason},
+    )
+    touched: list[str] = []
+    monkeypatch.setattr(
+        cmd_setup, "_check_connector_version_supported_for_setup", lambda *_a, **_k: touched.append("version")
+    )
+    monkeypatch.setattr(cmd_setup, "_capture_setup_config_snapshot", lambda *_a, **_k: touched.append("snapshot"))
+    monkeypatch.setattr(cmd_setup, "_restart_services", lambda *_a, **_k: touched.append("restart"))
+
+    app = SimpleNamespace(cfg=_config(tmp_path))
+    assert cmd_setup._apply_hook_connector_setup(app, connector=connector, mode="action", restart=True) is False
+    assert touched == []
+    assert calls and calls[0][1:5] == ["connector", "check-agent-settings", "--connector", connector]
+    message = capsys.readouterr().err
+    assert reason in message
+    assert cause in message
+    assert "Setup changed nothing and the gateway keeps running as it was" in message
+
+
+def test_setup_continues_when_the_agent_settings_let_hooks_run(monkeypatch, tmp_path: Path) -> None:
+    """GAP-0615: usable settings, an older gateway without the check, or a
+    connector without such settings change nothing about setup."""
+    _gateway_check_agent_settings(monkeypatch, {"connector": "codex", "refused": False})
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "codex") == ""
+    calls = _gateway_check_agent_settings(monkeypatch, {})
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "codex") == ""
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "cursor") == ""
+    assert len(calls) == 1
+    monkeypatch.setattr(cmd_setup, "_gateway_lifecycle_executable", lambda: "")
+    assert cmd_setup._agent_settings_refusal(_config(tmp_path), "claudecode") == ""

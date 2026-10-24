@@ -24,9 +24,9 @@ var releasedAdapterOpens = map[string][]string{
 // swaps defenseclaw-hook.exe and the new hook waits for the install. The
 // released per-user adapters then let the call run: Cursor's printed
 // {"continue":true} (every 0.8.10 render, and 1.0.x observe), Copilot's
-// printed nothing. A refresh to closed gives them their closed answers, CRLF
-// files too, and a refresh that keeps the operator's open leaves them as
-// they are.
+// printed nothing. A launcher that fails is no gateway outage, so a refresh
+// gives them their closed answers in every tier, CRLF files too: the
+// outage-open tier (oss-outage-open) opens only the native hook's outage.
 func TestRefreshClosesTheReleasedWindowsAdapters(t *testing.T) {
 	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
 		for adapter, opens := range releasedAdapterOpens {
@@ -58,12 +58,6 @@ func TestRefreshClosesTheReleasedWindowsAdapters(t *testing.T) {
 						after, err := os.ReadFile(path)
 						if err != nil {
 							t.Fatal(err)
-						}
-						if mode == "open" {
-							if !bytes.Equal(after, before) || len(result.Scripts) != 0 {
-								t.Fatalf("a refresh to the operator's open changed the adapter (%v)", result.Scripts)
-							}
-							return
 						}
 						for _, open := range opens {
 							if bytes.Contains(after, []byte(open)) {
@@ -118,8 +112,10 @@ func TestRefreshOfThisReleasesOpenAdapterIsItsClosedRender(t *testing.T) {
 		t.Run(adapter, func(t *testing.T) {
 			open, closed := render(t, adapter, "open"), render(t, adapter, "closed")
 			if adapter == "copilot-hook.ps1" {
+				// Outside an install it fails open; an install is denied in
+				// every fail mode before this fallback (w25-setup GAP-0649).
 				if !bytes.Contains(open, []byte(copilotAdapterOpenFailure)) || bytes.Contains(open, []byte(copilotAdapterClosedFailure)) {
-					t.Fatalf("the open Copilot adapter does not fail open:\n%s", open)
+					t.Fatalf("the open Copilot adapter does not fail open outside an install:\n%s", open)
 				}
 				if !bytes.Contains(closed, []byte(copilotAdapterClosedFailure)) || bytes.Contains(closed, []byte(copilotAdapterOpenFailure)) {
 					t.Fatalf("the closed Copilot adapter does not deny on a failure:\n%s", closed)

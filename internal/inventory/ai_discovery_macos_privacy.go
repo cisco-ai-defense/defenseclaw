@@ -38,7 +38,7 @@ var macOSTCCHomeFolders = []string{
 // macOSTCCHomeFolders of the given homes. APFS is case-insensitive by
 // default, so the match ignores case.
 func macOSTCCProtectedPath(path string, homes []string) bool {
-	path = filepath.Clean(path)
+	path = macOSWithoutDataVolume(filepath.Clean(path))
 	for _, home := range homes {
 		rel, err := filepath.Rel(filepath.Clean(home), path)
 		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -53,6 +53,21 @@ func macOSTCCProtectedPath(path string, homes []string) bool {
 		}
 	}
 	return false
+}
+
+// macOSDataVolume is where the Data volume is mounted; its firmlinks make
+// /System/Volumes/Data/Users/<name>/Documents the same folder as
+// /Users/<name>/Documents.
+const macOSDataVolume = "/System/Volumes/Data"
+
+// macOSWithoutDataVolume returns path as it is seen through the firmlink, if
+// it names something on the Data volume by its mount point.
+func macOSWithoutDataVolume(path string) string {
+	if len(path) > len(macOSDataVolume) && path[len(macOSDataVolume)] == '/' &&
+		strings.EqualFold(path[:len(macOSDataVolume)], macOSDataVolume) {
+		return path[len(macOSDataVolume):]
+	}
+	return path
 }
 
 // discoveryGOOS is the system the scans run on; tests replace it.
@@ -176,29 +191,48 @@ func (s *ContinuousDiscoveryService) privacyScopeKnown(sig AISignal) bool {
 	return true
 }
 
-// scanRootPrivacySkipped reports a configured scan root that lies in a
-// prompting home folder, or is reached through a link (at or above it) that
-// leads into one, on macOS without Full Disk Access. Each element is checked
-// before the root is opened, so a work alias of ~/Documents is not walked
-// (GAP-1201).
-func (s *ContinuousDiscoveryService) scanRootPrivacySkipped(root string) bool {
-	if s == nil || s.opts.SecureClient || discoveryGOOS != "darwin" {
-		return false
-	}
-	root = filepath.Clean(root)
-	if !filepath.IsAbs(root) {
+// macOSPrivacyPathSkipped reports a path that lies in a prompting home
+// folder, or is reached through links that lead into one, on macOS without
+// Full Disk Access. It resolves the path as the kernel would, one element at
+// a time, and checks each element, before and after a link, before it reads
+// the element's link, so nothing in such a folder is touched: a work alias
+// of ~/Documents is not walked (GAP-1201), and a relative link resolves from
+// the folder the links before it lead to, not from its lexical parent
+// (GAP-0637).
+func (s *ContinuousDiscoveryService) macOSPrivacyPathSkipped(path string) bool {
+	if s == nil || s.opts.SecureClient || discoveryGOOS != "darwin" || !filepath.IsAbs(path) {
 		return false
 	}
 	sep := string(filepath.Separator)
-	ancestor := sep
-	for _, part := range strings.Split(strings.TrimPrefix(root, sep), sep) {
-		if part == "" {
+	pending := strings.Split(filepath.Clean(path), sep)
+	resolved := sep
+	for links := 0; len(pending) > 0; {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			resolved = filepath.Dir(resolved)
 			continue
 		}
-		ancestor = filepath.Join(ancestor, part)
-		if s.macOSTCCSkipped(ancestor) || s.modelLinkPrivacySkipped(ancestor) {
+		next := filepath.Join(resolved, part)
+		if s.macOSTCCSkipped(next) {
 			return true
 		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			resolved = next
+			continue
+		}
+		if links++; links > 40 {
+			// The kernel refuses the path (ELOOP), so nothing is read.
+			return false
+		}
+		if filepath.IsAbs(target) {
+			resolved = sep
+		}
+		pending = append(strings.Split(target, sep), pending...)
 	}
 	return false
 }

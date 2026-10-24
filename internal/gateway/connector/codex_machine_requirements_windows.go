@@ -104,16 +104,13 @@ func ReconcileWindowsCodexMachineRequirements(
 		return report, err
 	}
 	report := windowsCodexMachineReport("reconcile", opts)
-	err := withWindowsCodexMachineMutation(opts, func() error {
-		requirements, err := readWindowsCodexMachineFile(
-			opts.RequirementsPath,
-			windowsCodexMachineRequirementsLimit,
-			true,
-			"Codex machine requirements",
-		)
+	reconcile := func() error {
+		report = windowsCodexMachineReport("reconcile", opts)
+		requirementsFile, err := readWindowsCodexSharedRequirements(opts.RequirementsPath)
 		if err != nil {
 			return err
 		}
+		requirements := windowsCodexStableFile{data: requirementsFile.Data, existed: requirementsFile.Exists}
 		ownership, err := readWindowsCodexMachineFile(
 			opts.OwnershipPath,
 			windowsCodexMachineOwnershipLimit,
@@ -241,7 +238,10 @@ func ReconcileWindowsCodexMachineRequirements(
 		if err != nil {
 			return err
 		}
-		requirementsChanged := !bytes.Equal(requirements.data, rendered)
+		// A file ordinary users cannot read leaves their Codex without the
+		// managed hooks: it is published again with the read restored.
+		requirementsChanged := !bytes.Equal(requirements.data, rendered) ||
+			windowsCodexRequirementsUnreadable(requirementsFile)
 		postHash := windowsCodexMachineHash(rendered)
 		report.PostimageSHA256 = postHash
 
@@ -298,12 +298,28 @@ func ReconcileWindowsCodexMachineRequirements(
 			return err
 		}
 		if requirementsChanged {
-			if err := writeWindowsCodexMachineFile(
-				opts.RequirementsPath,
-				rendered,
-				windowsCodexMachineRequirementsLimit,
-				"Codex machine requirements",
-			); err != nil {
+			// An administrator does not take the DefenseClaw lock. Publish the
+			// merge only over the file it was made from; a newer save is kept,
+			// the ownership record goes back to what this pass read, and the
+			// merge runs again on the newer file.
+			if err := publishWindowsCodexRequirements(requirementsFile, rendered, false); err != nil {
+				if !errors.Is(err, errWindowsCodexMachineFileChanged) {
+					return err
+				}
+				var restoreErr error
+				if ownership.existed {
+					restoreErr = writeWindowsCodexMachineFile(
+						opts.OwnershipPath,
+						ownership.data,
+						windowsCodexMachineOwnershipLimit,
+						"Codex requirements ownership",
+					)
+				} else {
+					restoreErr = deleteWindowsCodexMachineFile(opts.OwnershipPath, "Codex requirements ownership")
+				}
+				if restoreErr != nil {
+					return fmt.Errorf("%v (restore Codex requirements ownership: %w)", err, restoreErr)
+				}
 				return err
 			}
 		}
@@ -325,6 +341,21 @@ func ReconcileWindowsCodexMachineRequirements(
 		); err != nil {
 			return err
 		}
+		// A save that lands after the publication is newer and is kept: the
+		// pass runs again and merges the guard into it, instead of leaving an
+		// ownership record that no longer describes the file.
+		published, err := readWindowsCodexMachineFile(
+			opts.RequirementsPath,
+			windowsCodexMachineRequirementsLimit,
+			false,
+			"Codex machine requirements",
+		)
+		if err != nil {
+			return err
+		}
+		if windowsCodexMachineHash(published.data) != postHash {
+			return windowsCodexMachineFileChanged("Codex machine requirements")
+		}
 
 		report.Changed = true
 		if !requirements.existed {
@@ -333,6 +364,14 @@ func ReconcileWindowsCodexMachineRequirements(
 			report.Disposition = "reconciled"
 		}
 		return verifyWindowsCodexMachineRequirementsLocked(opts, nil)
+	}
+	err := withWindowsCodexMachineMutation(opts, func() error {
+		for attempt := 1; ; attempt++ {
+			err := reconcile()
+			if !errors.Is(err, errWindowsCodexMachineFileChanged) || attempt == windowsCodexMachineReconcileAttempts {
+				return err
+			}
+		}
 	})
 	if err != nil {
 		report.Error = err.Error()
@@ -468,6 +507,9 @@ func VerifyWindowsCodexMachineRequirements(
 		if err := verifyWindowsCodexRequirementsBytes(requirements.data, opts); err != nil {
 			return err
 		}
+		if err := verifyWindowsCodexRequirementsUsersCanRead(opts.RequirementsPath); err != nil {
+			return err
+		}
 		if state.Pending {
 			return errors.New("Codex requirements ownership contains an incomplete transaction")
 		}
@@ -503,7 +545,10 @@ func VerifyWindowsCodexMachineRequirements(
 // RemoveWindowsCodexMachineRequirements restores an exact preimage when the
 // requirements still equal the protected postimage. If unrelated administrator
 // edits landed later, it removes only DefenseClaw-owned additions and preserves
-// those edits.
+// those edits. An administrator does not take the DefenseClaw lock, so the
+// requirements write or deletion is a compare-and-swap against the file the
+// removal was computed from: a save made in between is kept, and the removal
+// is computed again from it, up to windowsCodexMachineReconcileAttempts times.
 func RemoveWindowsCodexMachineRequirements(
 	opts WindowsCodexMachineRequirementsOptions,
 ) (WindowsCodexMachineRequirementsReport, error) {
@@ -530,16 +575,13 @@ func RemoveWindowsCodexMachineRequirements(
 		report.ManagedStateRemovedOrAbsent = true
 		return report, nil
 	}
-	err = withWindowsCodexMachineMutation(opts, func() error {
-		requirements, err := readWindowsCodexMachineFile(
-			opts.RequirementsPath,
-			windowsCodexMachineRequirementsLimit,
-			true,
-			"Codex machine requirements",
-		)
+	remove := func() error {
+		report = windowsCodexMachineReport("remove", opts)
+		requirementsFile, err := readWindowsCodexSharedRequirements(opts.RequirementsPath)
 		if err != nil {
 			return err
 		}
+		requirements := windowsCodexStableFile{data: requirementsFile.Data, existed: requirementsFile.Exists}
 		ownership, err := readWindowsCodexMachineFile(
 			opts.OwnershipPath,
 			windowsCodexMachineOwnershipLimit,
@@ -654,26 +696,18 @@ func RemoveWindowsCodexMachineRequirements(
 		}
 
 		if report.Changed {
-			if candidateExists {
-				if err := writeWindowsCodexMachineFile(
-					opts.RequirementsPath,
-					candidate,
-					windowsCodexMachineRequirementsLimit,
-					"Codex machine requirements",
-				); err != nil {
-					return err
-				}
-			} else if err := deleteWindowsCodexMachineFile(
-				opts.RequirementsPath,
-				"Codex machine requirements",
-			); err != nil {
+			// Publish the candidate, or delete the file, only over the file
+			// the candidate was computed from. A newer save is kept and the
+			// removal is computed again from it.
+			if err := publishWindowsCodexRequirements(requirementsFile, candidate, !candidateExists); err != nil {
 				return err
 			}
 		}
 
-		// Re-read before dropping rollback metadata. If an administrator raced
-		// our candidate publication, ownership remains available and the
-		// installer must not remove the binary.
+		// Re-read before dropping rollback metadata. A save made after the
+		// candidate was published keeps the ownership record, so the removal
+		// is computed again from the newer file and the installer does not
+		// remove the binary meanwhile.
 		remaining, err := readWindowsCodexMachineFile(
 			opts.RequirementsPath,
 			windowsCodexMachineRequirementsLimit,
@@ -685,7 +719,7 @@ func RemoveWindowsCodexMachineRequirements(
 		}
 		if remaining.existed != candidateExists ||
 			(candidateExists && !bytes.Equal(remaining.data, candidate)) {
-			return errors.New("Codex requirements changed before removal could commit")
+			return fmt.Errorf("%s %w before removal could commit", "Codex machine requirements", errWindowsCodexMachineFileChanged)
 		}
 		if managedState.existed {
 			if err := deleteWindowsCodexMachineFile(opts.ManagedStatePath, "Codex managed runtime state"); err != nil {
@@ -701,6 +735,14 @@ func RemoveWindowsCodexMachineRequirements(
 		report.SafeToRemoveBinary = true
 		report.ManagedStateRemovedOrAbsent = true
 		return nil
+	}
+	err = withWindowsCodexMachineMutation(opts, func() error {
+		for attempt := 1; ; attempt++ {
+			err := remove()
+			if !errors.Is(err, errWindowsCodexMachineFileChanged) || attempt == windowsCodexMachineReconcileAttempts {
+				return err
+			}
+		}
 	})
 	if err != nil {
 		report.Error = err.Error()
@@ -1046,6 +1088,9 @@ func verifyWindowsCodexMachineRequirementsLocked(
 		return err
 	}
 	if err := verifyWindowsCodexRequirementsBytes(requirements.data, opts); err != nil {
+		return err
+	}
+	if err := verifyWindowsCodexRequirementsUsersCanRead(opts.RequirementsPath); err != nil {
 		return err
 	}
 	ownership, err := readWindowsCodexMachineFile(
@@ -1597,6 +1642,202 @@ func readWindowsCodexMachineFile(
 	return result, nil
 }
 
+// windowsCodexMachineReconcileAttempts bounds how often a reconcile merges, or
+// a removal computes its candidate, again after an administrator changed the
+// requirements under it.
+const windowsCodexMachineReconcileAttempts = 4
+
+// errWindowsCodexMachineFileChanged reports that a file changed after the
+// caller read it; the newer file is kept.
+var errWindowsCodexMachineFileChanged = errors.New("changed concurrently")
+
+// windowsCodexMachineBeforeConditionalSwap runs just before a conditional
+// write swaps its file in; tests replace it to interleave a save.
+var windowsCodexMachineBeforeConditionalSwap = func(string) {}
+
+// windowsCodexMachineFileChanged reports a file another writer changed after
+// DefenseClaw read it. It wraps safefile.ErrSwapRaced too, as the shared
+// writer reports a newer file.
+func windowsCodexMachineFileChanged(label string) error {
+	return fmt.Errorf("%s %w (%w)", label, errWindowsCodexMachineFileChanged, safefile.ErrSwapRaced)
+}
+
+// readWindowsCodexSharedRequirements reads requirements.toml for the shared
+// writer: its bytes, as readWindowsCodexMachineFile reads them, and its
+// owner, access list and attributes.
+func readWindowsCodexSharedRequirements(path string) (safefile.SharedFile, error) {
+	file, err := readWindowsCodexMachineFile(path, windowsCodexMachineRequirementsLimit, true, "Codex machine requirements")
+	if err != nil {
+		return safefile.SharedFile{}, err
+	}
+	shared := safefile.SharedFile{Path: path, Exists: file.existed, Data: file.data}
+	if file.existed {
+		if shared.Metadata, err = safefile.ReadPathMetadata(path); err != nil {
+			return safefile.SharedFile{}, fmt.Errorf("read Codex machine requirements metadata: %w", err)
+		}
+	}
+	return shared, nil
+}
+
+// windowsCodexRequirementsWriter is the shared writer
+// (safefile.SharedFileWriter) for the machine requirements.toml, the file the
+// Cursor hooks.json writer also uses. Each write is published only over the
+// file it was computed from, its bytes, owner, access list and attributes,
+// and the file keeps its own metadata; a new file gets DefenseClaw's
+// protection. One attempt: reconcile and removal compute the ownership record
+// from the file they read, so a newer file runs the whole pass again.
+func windowsCodexRequirementsWriter() safefile.SharedFileWriter {
+	return safefile.SharedFileWriter{
+		Attempts: 1,
+		Read:     readWindowsCodexSharedRequirements,
+		Write:    writeWindowsCodexSharedRequirements,
+	}
+}
+
+// publishWindowsCodexRequirements publishes candidate, or removes the file,
+// only over base, the file the candidate was computed from. A newer file is
+// kept, and the error wraps errWindowsCodexMachineFileChanged. A file that
+// ordinary users cannot read is published even when candidate is its
+// content, so that it gets the read back.
+func publishWindowsCodexRequirements(base safefile.SharedFile, candidate []byte, remove bool) error {
+	_, err := windowsCodexRequirementsWriter().Update(base, func(current safefile.SharedFile) (safefile.SharedEdit, error) {
+		return safefile.SharedEdit{
+			Data: candidate, Remove: remove,
+			Rewrite: !remove && windowsCodexRequirementsUnreadable(current),
+		}, nil
+	})
+	return err
+}
+
+// windowsCodexRequirementsUnreadable reports a requirements.toml that is
+// present and that ordinary users cannot read (safefile.UsersCanRead).
+func windowsCodexRequirementsUnreadable(file safefile.SharedFile) bool {
+	return file.Exists && safefile.UsersCanRead(file.Metadata) != nil
+}
+
+// windowsCodexRequirementsUsersCanRead reports, as an error, when ordinary
+// users cannot read the requirements.toml at path.
+func windowsCodexRequirementsUsersCanRead(path string) error {
+	metadata, err := safefile.ReadPathMetadata(path)
+	if err != nil {
+		return err
+	}
+	return safefile.UsersCanRead(metadata)
+}
+
+// verifyWindowsCodexRequirementsUsersCanRead is the verification's check
+// that ordinary users can read the requirements. Verification reads the file
+// elevated, which proves nothing for the users: Codex reads it with each
+// user's own token.
+func verifyWindowsCodexRequirementsUsersCanRead(path string) error {
+	if err := windowsCodexRequirementsUsersCanRead(path); err != nil {
+		return fmt.Errorf("ordinary users cannot read the Codex machine requirements: %w", err)
+	}
+	return nil
+}
+
+// protectWindowsCodexSharedRequirements gives a requirements.toml about to
+// be published its access, before it is published: keep, the metadata of the
+// file it replaces, or DefenseClaw's protection for a new file. Codex reads
+// the file with each user's own token, so the result must let every
+// ordinary user read it. A kept access list that does not gets the
+// BUILTIN\Users read entry added and keeps every other entry; one that still
+// refuses a user the read (a deny entry) gets DefenseClaw's protection.
+func protectWindowsCodexSharedRequirements(path string, keep *safefile.FileMetadata) error {
+	if keep == nil {
+		if err := setWindowsCodexMachineFileProtection(path, true); err != nil {
+			return err
+		}
+	} else if err := safefile.ApplyFileMetadata(path, *keep); err != nil {
+		return err
+	}
+	if windowsCodexRequirementsUsersCanRead(path) == nil {
+		return nil
+	}
+	if err := safefile.GrantUsersRead(path); err != nil {
+		return err
+	}
+	if windowsCodexRequirementsUsersCanRead(path) == nil {
+		return nil
+	}
+	if err := setWindowsCodexMachineFileProtection(path, true); err != nil {
+		return err
+	}
+	if err := windowsCodexRequirementsUsersCanRead(path); err != nil {
+		return fmt.Errorf("ordinary users cannot read the protected Codex machine requirements: %w", err)
+	}
+	return nil
+}
+
+func writeWindowsCodexSharedRequirements(base safefile.SharedFile, edit safefile.SharedEdit) (safefile.SharedWriteResult, error) {
+	const label = "Codex machine requirements"
+	const limit = windowsCodexMachineRequirementsLimit
+	path := base.Path
+	if len(edit.Data) > limit {
+		return safefile.SharedWriteResult{}, fmt.Errorf("%s exceeds %d bytes", label, limit)
+	}
+	if err := windowsCodexMachineTrustedDirCheck(filepath.Dir(path), label+" parent"); err != nil {
+		return safefile.SharedWriteResult{}, err
+	}
+	existing, err := readWindowsCodexSharedRequirements(path)
+	if err != nil {
+		return safefile.SharedWriteResult{}, err
+	}
+	if !existing.Same(base) {
+		return safefile.SharedWriteResult{}, windowsCodexMachineFileChanged(label)
+	}
+	windowsCodexMachineBeforeConditionalSwap(path)
+	if edit.Remove {
+		if err := safefile.RemoveSharedFile(base, true, limit, windowsCodexMachineSingleLinkCheck); err != nil {
+			if errors.Is(err, safefile.ErrSwapRaced) {
+				return safefile.SharedWriteResult{}, windowsCodexMachineFileChanged(label)
+			}
+			return safefile.SharedWriteResult{}, fmt.Errorf("delete %s: %w", label, err)
+		}
+		return safefile.SharedWriteResult{Published: true, Left: safefile.SharedFile{Path: path}}, nil
+	}
+	keep := edit.Metadata
+	if keep == nil && base.Exists {
+		keep = &base.Metadata
+	}
+	published, swapped, err := safefile.PublishSharedFile(safefile.SharedPublish{
+		Base: base, CompareMetadata: true, Data: edit.Data, Limit: limit,
+		Inspect: windowsCodexMachineSingleLinkCheck, TempPattern: ".defenseclaw-codex-*",
+		Protect: func(temp string) error { return protectWindowsCodexSharedRequirements(temp, keep) },
+	})
+	if !swapped {
+		if errors.Is(err, safefile.ErrSwapRaced) {
+			return safefile.SharedWriteResult{}, windowsCodexMachineFileChanged(label)
+		}
+		return safefile.SharedWriteResult{}, fmt.Errorf("publish %s: %w", label, err)
+	}
+	result := safefile.SharedWriteResult{
+		Published: true,
+		Left:      safefile.SharedFile{Path: path, Exists: true, Data: edit.Data, Metadata: published},
+	}
+	if err != nil {
+		return result, fmt.Errorf("publish %s: %w", label, err)
+	}
+	persisted, err := readWindowsCodexMachineFile(path, limit, false, label)
+	if err != nil {
+		return result, err
+	}
+	if !bytes.Equal(persisted.data, edit.Data) {
+		// Another writer saved right after the swap. Its file is newer and is
+		// kept; the caller computes its edit again from it.
+		return result, fmt.Errorf("%s %w after publication", label, errWindowsCodexMachineFileChanged)
+	}
+	if err := windowsCodexRequirementsUsersCanRead(path); err != nil {
+		// An access list change landed with the swap and took the read from
+		// ordinary users. The caller publishes again over it, with the read.
+		return result, fmt.Errorf("%s %w after publication: %v", label, errWindowsCodexMachineFileChanged, err)
+	}
+	return result, nil
+}
+
+// writeWindowsCodexMachineFile atomically replaces one of DefenseClaw's own
+// Codex files (ownership, runtime state) with data and DefenseClaw's
+// protection, under the Codex machine lock.
 func writeWindowsCodexMachineFile(path string, data []byte, limit int, label string) error {
 	if len(data) > limit {
 		return fmt.Errorf("%s exceeds %d bytes", label, limit)
@@ -1649,6 +1890,19 @@ func writeWindowsCodexMachineFile(path string, data []byte, limit int, label str
 	}
 	if !bytes.Equal(persisted.data, data) {
 		return fmt.Errorf("%s changed during atomic publication", label)
+	}
+	return nil
+}
+
+// windowsCodexMachineSingleLinkCheck refuses a file with other hard links,
+// as readWindowsCodexMachineFile does.
+func windowsCodexMachineSingleLinkCheck(file *os.File) error {
+	var info windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info); err != nil {
+		return err
+	}
+	if info.NumberOfLinks != 1 {
+		return fmt.Errorf("%s has %d hardlinks", file.Name(), info.NumberOfLinks)
 	}
 	return nil
 }

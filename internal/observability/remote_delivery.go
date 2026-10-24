@@ -174,3 +174,43 @@ func (delivery *RemoteDelivery) Settled() (settled, delivered bool) {
 	}
 	return true, !delivery.failed
 }
+
+type remoteExportKey struct{}
+
+// RemoteExport says when the runtime sends a record of this gateway to the
+// remote destinations.
+type RemoteExport uint8
+
+const (
+	// RemoteExportDefault sends the record once the local store keeps it,
+	// and also when the local write fails, so a decision stays visible
+	// remotely while the local store is down (GAP-1536).
+	RemoteExportDefault RemoteExport = iota
+	// RemoteExportAfterLocalWrite sends the record only once the local store
+	// keeps it. A producer that writes the occurrence again after a failed
+	// write, under the same id, uses it: the remote destinations get the
+	// record once, and never one the producer later writes differently.
+	RemoteExportAfterLocalWrite
+	// RemoteExportNone writes the record to the local store only. A producer
+	// uses it for a record the remote destinations already got.
+	RemoteExportNone
+)
+
+// WithRemoteExport sets when the runtime sends the records emitted with ctx
+// to the remote destinations. Imported records ignore it.
+func WithRemoteExport(ctx context.Context, export RemoteExport) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, remoteExportKey{}, export)
+}
+
+// RemoteExportFrom returns the RemoteExport of ctx, RemoteExportDefault if
+// none is set.
+func RemoteExportFrom(ctx context.Context) RemoteExport {
+	if ctx == nil {
+		return RemoteExportDefault
+	}
+	export, _ := ctx.Value(remoteExportKey{}).(RemoteExport)
+	return export
+}

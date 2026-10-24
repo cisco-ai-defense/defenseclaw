@@ -85,14 +85,22 @@ var windowsManagedClaudeSettingsRemover = removeWindowsManagedClaudeUserSettings
 
 // The current Claude enrollment uses machine policy. An older per-user hook
 // warrants a pending warning only when its exact launcher is still present.
-func windowsManagedClaudeRegistrationPresent(home, sid string) (bool, error) {
-	raw, err := readWindowsManagedClaudeUserSettings(home, sid)
+// When none is, it also returns, read-only, each hook command that still
+// names a DefenseClaw launcher (an edited guard, another form of the profile
+// path, defenseclaw-gateway), so a file holding only hooks the remover keeps
+// is reported rather than passed over.
+func windowsManagedClaudeRegistrationPresent(home, sid string) (bool, []string, error) {
+	raw, err := windowsManagedClaudeUserSettingsReader(home, sid)
 	if err != nil || raw == nil {
-		return false, err
+		return false, nil, err
 	}
 	launcher := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
 	_, count, err := removeWindowsManagedClaudeCommands(raw, launcher)
-	return count > 0, err
+	if err != nil || count > 0 {
+		return count > 0, nil, err
+	}
+	left, err := windowsClaudeHooksNamingDefenseClaw(raw)
+	return false, left, err
 }
 
 var windowsManagedClaudeRegistrationProbe = windowsManagedClaudeRegistrationPresent
@@ -114,6 +122,8 @@ func readWindowsManagedClaudeUserSettings(home, sid string) ([]byte, error) {
 	}
 	return raw, err
 }
+
+var windowsManagedClaudeUserSettingsReader = readWindowsManagedClaudeUserSettings
 
 // An elevated Setup can edit its own Claude settings without impersonating
 // another account. All other user profiles still require LocalSystem.
@@ -443,12 +453,16 @@ func removeWindowsManagedHooksStandalonePerUserRegistrations(
 		if identityErr != nil {
 			callerSID, callerErr := windowsManagedClaudeCurrentUserSID()
 			if callerErr != nil || !strings.EqualFold(callerSID, target.SID) {
-				present, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
+				present, left, err := windowsManagedClaudeRegistrationProbe(target.UserHome, target.SID)
 				if err != nil {
 					result.Failed = append(result.Failed, "claudecode/"+target.SID+": "+boundedEnterpriseHookUserCleanupText(err.Error()))
 				} else if present {
 					result.Pending = append(result.Pending, "claudecode/"+target.SID)
 					blockedClaude = true
+				}
+				settings := filepath.Join(target.UserHome, ".claude", "settings.json")
+				for _, hook := range left {
+					result.SettingsLeft = append(result.SettingsLeft, settings+": "+boundedEnterpriseHookUserCleanupText(hook))
 				}
 				continue
 			}

@@ -84,7 +84,7 @@ defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
 | Claude Code hooks freshness, Codex hooks freshness | WARN | A hook script is from an older build, or bakes a different fail mode. The line names the command that regenerates it. |
 | Orphaned hook entries | FAIL or WARN | Entries remain for a connector that is no longer configured. Run `defenseclaw setup remove CONNECTOR`. |
 
-`defenseclaw status` prints the policy generation and digest. Compare it with what the files compute to: `defenseclaw-gateway policy digest`.
+`defenseclaw status` prints the config generation the gateway applied (the number `config set` prints, from `config.generation.json`) and the policy digest. Compare it with what the files compute to: `defenseclaw-gateway policy digest`.
 
 ## What `--fix` repairs
 

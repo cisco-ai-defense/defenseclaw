@@ -500,7 +500,13 @@ func patchTargetPaths(path, cwd, home string) ([]string, bool) {
 			literal = filepath.Join(cwd, literal)
 		}
 	}
-	return append(paths, filepath.Clean(literal)), true
+	paths = append(paths, filepath.Clean(literal))
+	for _, candidate := range paths {
+		if _, known := ResolvePatchWriteTarget(candidate); !known {
+			return nil, false
+		}
+	}
+	return paths, true
 }
 
 // trimHomePrefix strips a leading home form: ~, $HOME, ${HOME}, $env:HOME,

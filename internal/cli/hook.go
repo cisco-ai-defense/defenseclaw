@@ -33,6 +33,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/envvars"
+	gwconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
@@ -61,6 +62,7 @@ func newHookCmd() *cobra.Command {
 		inputFile         string
 		enterpriseManaged bool
 		foreignHookCheck  bool
+		executionProbe    bool
 	)
 
 	cmd := &cobra.Command{
@@ -79,6 +81,16 @@ func newHookCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateHookSurface(connector, hookSurface); err != nil {
 				return hookFailure(hookFailureContext{connector}, err)
+			}
+			if executionProbe {
+				if connector != "hermes" || event != "" || hookContractID != "" || hookSurface != "" ||
+					apiAddr != "" || failMode != "" || inputFile != "" || enterpriseManaged || foreignHookCheck {
+					return fmt.Errorf("hermes execution probe requires the exact registered command")
+				}
+				// cmd/defenseclaw-hook reaches this only after the protected
+				// runtime is active. A disabled stable launcher returns no proof.
+				_, err := io.WriteString(cmd.OutOrStdout(), "defenseclaw-execution-probe-ok\n")
+				return err
 			}
 			if foreignHookCheck {
 				// The standalone Amp and OpenCode plugins ask for the
@@ -161,8 +173,10 @@ func newHookCmd() *cobra.Command {
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
 	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
 	cmd.Flags().BoolVar(&foreignHookCheck, "foreign-hook-check", false, "print the standalone foreign-hook guard decision as JSON (in-agent plugins)")
+	cmd.Flags().BoolVar(&executionProbe, "defenseclaw-execution-probe", false, "prove the registered Hermes command reaches the active hook runtime")
 	_ = cmd.Flags().MarkHidden("input-file")
 	_ = cmd.Flags().MarkHidden("foreign-hook-check")
+	_ = cmd.Flags().MarkHidden("defenseclaw-execution-probe")
 	_ = cmd.Flags().MarkHidden("hook-contract")
 	_ = cmd.Flags().MarkHidden("hook-surface")
 	_ = cmd.Flags().MarkHidden("enterprise-managed")
@@ -229,6 +243,10 @@ func armHookAnswerWatchdog(connectorName, event, failMode, surface string, manag
 		Exit:              exit,
 	}
 	if !managed {
+		// The data directory whose install lock closes the call's early
+		// answer (GAP-0862); Run's own home replaces it when Run adopts the
+		// watchdog. DEFENSECLAW_HOME counts, as for Run.
+		opts.Home = config.DefaultDataPath()
 		// The registered command may still carry --fail-mode open from an
 		// earlier release. A per-user timeout must never allow the event.
 		opts.FailMode = "closed"
@@ -522,9 +540,15 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
-	// Per-user native hooks always fail closed. An older registration flag or
-	// sidecar cannot open them. Managed hooks take their mode from protected
-	// administrator state below.
+	// Per-user native hooks fail closed for every failure but a gateway
+	// outage. Their outage mode is the one Setup recorded for the connector
+	// in hooks/.hookcfg from its policy tier (config.HookOutageFailMode); an
+	// older registration flag or the environment cannot open them. Managed
+	// hooks take their mode from protected administrator state below.
+	outageFailMode := "closed"
+	if !enterpriseManaged {
+		outageFailMode = perUserHookOutageFailMode(filepath.Join(hookDir, ".hookcfg"), connector)
+	}
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
 	if trustedNativeState {
 		// Connector-scoped token sidecars are ACL-protected installer state.
@@ -537,6 +561,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		Event:                     event,
 		APIAddr:                   apiAddr,
 		FailMode:                  "closed",
+		OutageFailMode:            outageFailMode,
 		Home:                      home,
 		HookDir:                   hookDir,
 		Token:                     token,
@@ -612,8 +637,14 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 // exception. Malformed JSON is never retried as KEY=value lines.
 func readHookSidecar(path string) map[string]string {
 	out := map[string]string{}
+	// A link, another file type or a file past the writers' bound
+	// (gwconnector.HookSidecarMaxBytes) supplies no address.
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > gwconnector.HookSidecarMaxBytes {
+		return out
+	}
 	data, err := os.ReadFile(path)
-	if err != nil {
+	if err != nil || len(data) > gwconnector.HookSidecarMaxBytes {
 		return out
 	}
 	var current struct {
@@ -652,6 +683,40 @@ func readHookSidecar(path string) map[string]string {
 		}
 	}
 	return out
+}
+
+// perUserHookOutageFailMode is connector's outage mode in the per-user hook
+// sidecar at path: "open" only when the sidecar is a regular, bounded v2+
+// JSON document of a per-user install whose fail_modes entry for the
+// connector is "open" with the config source (Setup's record of
+// config.HookOutageFailMode). Anything else (no entry, another value, no
+// source, a managed or malformed sidecar, a link) is "closed".
+func perUserHookOutageFailMode(path, connector string) string {
+	name := strings.ToLower(strings.TrimSpace(connector))
+	if name == "" {
+		return "closed"
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > hookConfigMaxBytes {
+		return "closed"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "closed"
+	}
+	var state struct {
+		Version   int               `json:"version"`
+		FailModes map[string]string `json:"fail_modes"`
+		Sources   map[string]string `json:"fail_mode_sources"`
+		Managed   bool              `json:"managed_enterprise"`
+	}
+	if json.Unmarshal(data, &state) != nil || state.Version < 2 || state.Managed {
+		return "closed"
+	}
+	if state.FailModes[name] == "open" && state.Sources[name] == gwconnector.HookFailModeSourceConfig {
+		return "open"
+	}
+	return "closed"
 }
 
 // hookConfigMaxBytes bounds the config.yaml read of readHookConfigDocument.

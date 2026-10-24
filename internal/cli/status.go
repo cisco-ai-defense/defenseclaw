@@ -682,8 +682,15 @@ func printConnectors(snap *gateway.HealthSnapshot) {
 		printConnectorBody(&c)
 	}
 	// A connector whose setup failed at start is not enforced (GAP-1714).
+	// When its agent's own settings refused the hooks, rerunning setup cannot
+	// help; the gateway's reason names the fix (GAP-0578).
+	refusedByAgentSettings := guardrailAgentSettingsRefusals(snap.Guardrail.Details)
 	for _, name := range notStarted {
 		fmt.Printf("             %s (%s)%s\n", friendlyConnectorName(name), name, styledConnectorStateVerb("NOT RUNNING"))
+		if reason := refusedByAgentSettings[name]; reason != "" {
+			fmt.Printf("               %s\n", Dim("not enforced: "+reason))
+			continue
+		}
 		fmt.Printf("               %s\n", Dim("setup failed when the gateway started, so it is not enforced; "+
 			"see gateway.log, then run: defenseclaw setup "+name))
 	}
@@ -728,6 +735,26 @@ func guardrailConnectorsNotStarted(details map[string]interface{}) []string {
 		}
 	}
 	return names
+}
+
+// guardrailAgentSettingsRefusals reads the guardrail's
+// connectors_refused_by_agent_settings detail, a map[string]string in process
+// and a map[string]interface{} after a JSON round trip.
+func guardrailAgentSettingsRefusals(details map[string]interface{}) map[string]string {
+	refused := map[string]string{}
+	switch raw := details[gateway.GuardrailAgentSettingsRefused].(type) {
+	case map[string]string:
+		for name, reason := range raw {
+			refused[name] = reason
+		}
+	case map[string]interface{}:
+		for name, value := range raw {
+			if reason, ok := value.(string); ok && strings.TrimSpace(reason) != "" {
+				refused[name] = reason
+			}
+		}
+	}
+	return refused
 }
 
 // printConnectorBody renders the per-connector since/mode/counter lines

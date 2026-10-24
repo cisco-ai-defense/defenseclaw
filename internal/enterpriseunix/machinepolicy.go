@@ -18,7 +18,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -94,17 +96,99 @@ func (m *policyManager) options(cfg *config.Config) (enterprisepolicy.Options, e
 	opts.SkipTrustChecks = m.skipTrust
 	opts.Now = env.Now
 	if cfg != nil {
-		opts.CopilotUserHomes = m.enrolledHomes()
+		var err error
+		opts.CopilotUserHomes, opts.CopilotOutOfScopeHomes, err = m.copilotAccountHomes(cfg)
+		if err != nil {
+			return enterprisepolicy.Options{}, err
+		}
 	}
 	return opts, opts.Validate()
 }
 
-// enrolledHomes are the eligible accounts' homes from the enumerator's
-// root-only record (under Root in tests); the Copilot VS Code lock gate
-// checks each for DefenseClaw's plugin. An unreadable record is no homes,
-// which keeps the lock off.
-func (m *policyManager) enrolledHomes() []string {
-	return m.env.accountHomes(enterprisehooks.UnixEligibleAccountsPath(m.env.Layout.ManifestPath))
+// copilotAccountHomes applies the current Copilot enrollment to the
+// enumerator's eligible-accounts record. That record can predate a manifest
+// or exclude_users edit. The guardian's own record also names old homes that
+// need removal, so verify can report a still-active hook outside scope.
+func (m *policyManager) copilotAccountHomes(cfg *config.Config) ([]string, []string, error) {
+	if !slices.Contains(enterprisepolicy.StandaloneConnectors(cfg), enterprisepolicy.ConnectorCopilot) {
+		return nil, nil, nil
+	}
+	env := m.env
+	data, err := readBounded(env.P(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)), maxInputBytes)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, nil, fmt.Errorf("read Copilot eligible accounts: %w", err)
+	}
+	var record struct {
+		Accounts []enterprisehooks.UnixEligibleAccount `json:"accounts"`
+	}
+	if err == nil {
+		if err := json.Unmarshal(data, &record); err != nil {
+			return nil, nil, fmt.Errorf("parse Copilot eligible accounts: %w", err)
+		}
+	}
+	eligible := record.Accounts
+	accounts := eligible
+	enrollment := cfg.Enterprise.Enrollment
+	if strings.EqualFold(strings.TrimSpace(enrollment.Mode), config.EnterpriseEnrollmentManifest) ||
+		strings.EqualFold(strings.TrimSpace(enrollment.UnenrolledUsers), config.EnterpriseUnenrolledDeny) {
+		manifest, err := enterprisehooks.LoadStandaloneManifest(env.P(env.Layout.ManifestPath))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, nil, fmt.Errorf("read Copilot enrollment manifest: %w", err)
+		}
+		var targets []enterprisehooks.ManifestTarget
+		for _, target := range manifest.Targets {
+			if strings.EqualFold(strings.TrimSpace(target.Connector), enterprisepolicy.ConnectorCopilot) &&
+				(target.Enabled == nil || *target.Enabled) {
+				targets = append(targets, target)
+			}
+		}
+		allowed := enterprisehooks.ManifestEnrolledAccounts(accounts, enterprisehooks.Manifest{Targets: targets})
+		inManifest := make(map[int]bool, len(allowed))
+		for _, account := range allowed {
+			inManifest[account.UID] = true
+		}
+		filtered := accounts[:0:0]
+		for _, account := range accounts {
+			if inManifest[account.UID] {
+				filtered = append(filtered, account)
+			}
+		}
+		accounts = filtered
+	}
+	leftOut := make(map[string]bool, len(enrollment.ExcludeUsers)+len(enrollment.ExemptUsers))
+	for _, entry := range append(append([]string{}, enrollment.ExcludeUsers...), enrollment.ExemptUsers...) {
+		leftOut[strings.TrimSpace(entry)] = true
+	}
+	var scoped, outOfScope []string
+	seen := map[string]bool{}
+	for _, account := range accounts {
+		home := env.P(account.Home)
+		if leftOut[account.User] || leftOut[strconv.Itoa(account.UID)] {
+			outOfScope = append(outOfScope, home)
+		} else {
+			scoped = append(scoped, home)
+		}
+		seen[home] = true
+	}
+	for _, account := range eligible {
+		home := env.P(account.Home)
+		if !seen[home] {
+			outOfScope = append(outOfScope, home)
+			seen[home] = true
+		}
+	}
+	for _, recordPath := range []string{
+		filepath.Join(env.Layout.GuardianAuthDir, enterprisehooks.UnixCopilotVSCodeAccountsFileName),
+		enterprisehooks.UnixCopilotVSCodeAccountsPath(env.Layout.ManifestPath),
+	} {
+		for _, home := range env.accountHomes(recordPath) {
+			if !seen[home] {
+				outOfScope = append(outOfScope, home)
+				seen[home] = true
+			}
+		}
+	}
+	return scoped, outOfScope, nil
 }
 
 // accountHomes are the homes (under Root) in a root-only record in the
@@ -540,7 +624,8 @@ func (l *lifecycle) describeMachinePolicy(record *Deployment) []string {
 	// the guardian has not written the file for yet (a fresh install or a
 	// newly enrolled user; GAP-1267), which is a warning until its pass.
 	homeOf := map[string]string{}
-	for _, home := range env.accountHomes(enterprisehooks.UnixEligibleAccountsPath(env.Layout.ManifestPath)) {
+	homes, _, _ := (&policyManager{env: env}).copilotAccountHomes(validated.Loaded)
+	for _, home := range homes {
 		homeOf[enterprisepolicy.CopilotVSCodeLocalHookFilePath(home)] = home
 		homeOf[enterprisepolicy.CopilotPluginHooksPath(home)] = home
 	}

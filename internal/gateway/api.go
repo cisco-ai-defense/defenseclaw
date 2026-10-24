@@ -74,6 +74,13 @@ type APIServer struct {
 	client *Client
 	store  *audit.Store
 	logger *audit.Logger
+	// Both API listeners start one background recovery of the hook delivery
+	// journal rows earlier gateway processes left (startPendingHookRecovery);
+	// neither waits for it.
+	pendingHookRecoveryOnce sync.Once
+	// hookDeliveryProcessID, when set, replaces this process's journal
+	// identity (deliveryProcessID): tests start a server as the next process.
+	hookDeliveryProcessID string
 	// sandboxAuthority is owned by this server and initialized on first use.
 	sandboxAuthority sandboxAuthorityHolder
 
@@ -103,6 +110,9 @@ type APIServer struct {
 	// hermesTasks gives a Hermes hook that names only its task the session
 	// of that task.
 	hermesTasks hermesTaskSessions
+	// preToolDecisions pairs audited Claude Code/Codex PreToolUse decisions
+	// with later post-tool observations, without a background worker.
+	preToolDecisions preToolDecisionTracker
 
 	// mcpAdmissionPending names an MCP server the install watcher admits
 	// but has not admitted yet (GAP-0112). Set once before serving.
@@ -1155,6 +1165,7 @@ func (a *APIServer) apiPortHeld(hasHookSocket bool, err error) bool {
 }
 
 func (a *APIServer) Run(ctx context.Context) error {
+	a.startPendingHookRecovery(ctx)
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
 	mux.HandleFunc("/health", a.handleHealth)
@@ -2063,7 +2074,9 @@ func connectorModeForDecision(cfg, decisionCfg *config.Config, name string) map[
 		if decisionCfg != nil {
 			guardrailMode = decisionCfg.EffectiveGuardrailModeForConnector(name)
 		}
-		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		// What the installed hooks do while the gateway is down
+		// (config.HookOutageFailMode); every other per-user failure closes.
+		hookFailMode = cfg.EffectiveHookOutageFailModeForConnector(name)
 		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)
@@ -3224,12 +3237,26 @@ func (a *APIServer) handlePluginScan(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/mcp/scan — run MCP scanner on a URL or configured server name
+// POST /v1/mcp/scan — run MCP scanner on a URL or configured server name.
 // ---------------------------------------------------------------------------
 
 type mcpScanRequest struct {
 	Target string `json:"target"`
 	Name   string `json:"name"`
+}
+
+func mcpScanLocalPath(target string) bool {
+	lower := strings.ToLower(target)
+	windowsDrive := len(target) >= 2 && target[1] == ':' &&
+		(target[0] >= 'A' && target[0] <= 'Z' || target[0] >= 'a' && target[0] <= 'z')
+	if strings.HasPrefix(lower, "file:") || windowsDrive || filepath.IsAbs(target) {
+		return true
+	}
+	if strings.Contains(target, "://") {
+		return false
+	}
+	return target == "." || target == ".." || strings.ContainsAny(target, `/\`) ||
+		strings.HasPrefix(target, "~") || strings.HasSuffix(lower, ".json")
 }
 
 func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
@@ -3247,9 +3274,18 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "target is required"})
 		return
 	}
-	if mcpScanLocalPathTarget(req.Target) {
+	if mcpScanLocalPath(req.Target) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": "local path MCP scan targets are not supported; use a configured MCP server name or its URL",
+			"error": "local path targets are not supported by the MCP scan API; use a configured MCP server name or an MCP URL",
+		})
+		return
+	}
+	lowerTarget := strings.ToLower(req.Target)
+	if strings.Contains(req.Target, "://") && !strings.HasPrefix(lowerTarget, "http://") &&
+		!strings.HasPrefix(lowerTarget, "https://") && !strings.HasPrefix(lowerTarget, "ws://") &&
+		!strings.HasPrefix(lowerTarget, "wss://") && !strings.HasPrefix(lowerTarget, "sse://") {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "unsupported MCP scan URL scheme; use http, https, ws, wss or sse",
 		})
 		return
 	}
@@ -3290,26 +3326,6 @@ func (a *APIServer) handleMCPScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	a.writeJSON(w, http.StatusOK, withScannerSettings(cfg, "mcp", scanAPIResponseEnvelope(result)))
-}
-
-func mcpScanLocalPathTarget(target string) bool {
-	lower := strings.ToLower(target)
-	if strings.HasPrefix(lower, "file:") {
-		return true
-	}
-	for _, scheme := range []string{"http://", "https://", "ws://", "wss://", "sse://"} {
-		if strings.HasPrefix(lower, scheme) {
-			return false
-		}
-	}
-	// A drive-relative path has no slash, and filepath cannot recognize it
-	// when a Linux gateway validates a Windows target.
-	if len(target) >= 2 && target[1] == ':' &&
-		(target[0] >= 'a' && target[0] <= 'z' || target[0] >= 'A' && target[0] <= 'Z') {
-		return true
-	}
-	return target == "." || target == ".." || filepath.IsAbs(target) || strings.ContainsAny(target, `/\`) ||
-		strings.HasSuffix(lower, ".json") || strings.HasPrefix(target, "~")
 }
 
 // ---------------------------------------------------------------------------

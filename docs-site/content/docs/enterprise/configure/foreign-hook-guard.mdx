@@ -15,7 +15,7 @@ Most agents run every hook they find, and several let any hook change a tool cal
 
 | Connector | Covered | Why |
 | --- | --- | --- |
-| Cursor, Copilot, Devin, OpenCode, Amp | Always, unless `foreign_hooks: allow` | These agents have no vendor lock. |
+| Cursor, Copilot, Devin, OpenCode, Amp | Every OS, unless `foreign_hooks: allow` | These agents have no vendor lock. Windows Amp keeps its guard's session record locally. |
 | Hermes | On Linux and macOS, unless `foreign_hooks: allow` | Hermes has no vendor lock and no way to order hooks. The Windows Hermes registration does not run the guard. |
 | Codex, Claude Code | Only with `managed_hooks_only: preserve` | By default the vendor lock already stops user and project hooks. |
 | Antigravity | Not covered | No vendor lock and no guard. Hooks a user or project adds run next to DefenseClaw's. |
@@ -44,9 +44,11 @@ changes, so DefenseClaw blocks tool calls for the rest of this session: after
 removing the hook, restart the agent.
 ```
 
-The last sentence appears only when the hook was present at session start. With `foreign_hooks: report`, the agent runs and the hook prints a warning that names the file and digest. An approval you add while a session is blocked applies to the next agent session.
+The last sentence appears only when the hook was present at session start. With `foreign_hooks: report`, the agent runs; `enterprise policy show` lists the finding as `reported` with its file and digest. For Cursor, Copilot and Devin, `defenseclaw-hook` prints a warning that names the file and digest to stderr. Codex and Claude Code use that native-hook warning when `managed_hooks_only: preserve` makes the guard active. On Linux and macOS, Hermes prints a generic stderr warning without the file and digest; use `enterprise policy show` for those details. For OpenCode and Amp, use `enterprise policy show` to see the file and digest. An approval you add while a session is blocked applies to the next agent session.
 
 ## Session records and gateway outages
+
+The [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) gives the result of an outage per connector and OS, with this guard and without it.
 
 The gateway keeps each agent session's hook snapshot in its private data directory. A session that loaded an unapproved hook stays blocked after the guardian removes the file, because the agent may still run its loaded copy. Restart the agent after removing or approving the hook. The guardian records removals so agent processes that started before a removal cannot use a stale allow.
 

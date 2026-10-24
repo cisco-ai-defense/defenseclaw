@@ -175,6 +175,8 @@ const (
 	// TrustRulePack is an administrator rule pack: its folders above, and
 	// every folder and file in it (see rulePackTrust).
 	TrustRulePack
+	// TrustRuntimeFile is a policy-tree file the service account may own.
+	TrustRuntimeFile
 )
 
 // Env binds the lifecycle to one host. Zero values are replaced by
@@ -220,6 +222,9 @@ type Env struct {
 	// HookSocketPeer connects to the hook socket and returns the kernel
 	// credentials of the process serving it.
 	HookSocketPeer func(ctx context.Context) (peercred.Credentials, error)
+	// ReportLaunchCoverage sends a root-only, content-free observation to the
+	// gateway audit when a running agent can omit its managed plugin.
+	ReportLaunchCoverage func(context.Context, managed.LaunchCoverageReport) error
 	// ListenerProof asks the gateway's loopback API to prove it accepts the
 	// per-user hook credential named by keyID (its SHA-256) for
 	// connectorName, over the route the standalone plugins use, and returns
@@ -231,6 +236,9 @@ type Env struct {
 	// ProcessExecPath returns the executable path the kernel recorded when
 	// process pid started (macOS only; see gatewayProcesses).
 	ProcessExecPath func(pid int) (string, error)
+	// ProcessImagePath returns the kernel's absolute path of the image
+	// process pid runs (macOS only; see absoluteExecPath).
+	ProcessImagePath func(pid int) (string, error)
 	// DockerEngine connects to the Docker engine socket at the rooted path
 	// and returns nil when the engine accepts the connection (see
 	// dockerEngineAnswers); status and verify use it for the openshell block
@@ -243,6 +251,10 @@ type Env struct {
 	// SandboxUsers is how the lifecycle acts in user accounts for the sandbox
 	// subsystem (default: commands run as the user); tests replace it.
 	SandboxUsers SandboxUserOps
+	// agentDigest is the SHA-256 of the gateway the plan being applied
+	// installs, which tags the macOS LaunchAgent labels (launchAgentLabel);
+	// "" outside a plan, where the installed gateway is read.
+	agentDigest string
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
@@ -260,7 +272,9 @@ type Env struct {
 	// bundleFault is a test seam: it runs at each named phase of a bundle
 	// apply (received, verified, staged, transaction, applied, committed)
 	// and an error fails the apply there; at committed the run stops before
-	// the swap, as a crash after the commit would. Production leaves it nil.
+	// the swap, as a crash after the commit would; "private-dir <name>"
+	// runs before the bundle store creates its private directory <name>
+	// (receipts). Production leaves it nil.
 	bundleFault func(phase string) error
 
 	// SelfUnit names the service unit or launchd job this lifecycle run
@@ -372,6 +386,12 @@ func (e *Env) fillDefaults() {
 		path := e.P(e.Layout.HookSocketPath)
 		e.HookSocketPeer = func(ctx context.Context) (peercred.Credentials, error) { return hookSocketPeer(ctx, path) }
 	}
+	if e.ReportLaunchCoverage == nil {
+		path := e.P(e.Layout.HookSocketPath)
+		e.ReportLaunchCoverage = func(ctx context.Context, report managed.LaunchCoverageReport) error {
+			return managed.ReportLaunchCoverage(ctx, path, report)
+		}
+	}
 	if e.ListenerProof == nil {
 		addr := e.Layout.APIAddr
 		e.ListenerProof = func(ctx context.Context, connectorName, keyID, nonce string) (string, error) {
@@ -380,6 +400,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.ProcessExecPath == nil {
 		e.ProcessExecPath = processExecPath
+	}
+	if e.ProcessImagePath == nil {
+		e.ProcessImagePath = processImagePath
 	}
 	if e.DiskSpace == nil {
 		e.DiskSpace = diskSpace
@@ -465,6 +488,8 @@ func defaultTrust(path string, kind TrustKind) error {
 		return managed.ValidateTrustedFilePath(path, "managed file")
 	case TrustRuntimeDir:
 		return managed.ValidateTrustedRuntimeDir(path, "managed runtime directory")
+	case TrustRuntimeFile:
+		return managed.ValidateTrustedServiceRuntimeFilePath(path, "managed runtime file", "")
 	case TrustRulePack:
 		return rulePackTrust(path)
 	}

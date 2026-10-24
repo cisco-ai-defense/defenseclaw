@@ -145,9 +145,15 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	if err != nil || !current {
 		t.Fatalf("OpenCode registration publication = %v, %v; want plugin plus custody receipt", current, err)
 	}
+	if _, err := EnsureHookAPIToken(opts.DataDir, conn.Name()); err != nil {
+		t.Fatalf("issue scoped plugin credential: %v", err)
+	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
+	}
+	if token, err := LoadHookAPIToken(opts.DataDir, conn.Name()); err != nil || token != "" {
+		t.Fatalf("removed OpenCode plugin still authenticates: %q, %v", token, err)
 	}
 	if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
 		t.Fatalf("plugin still present after teardown (err=%v)", err)
@@ -1150,5 +1156,45 @@ func TestPluginTemplatesRenderTheManagedOnlySafeguards(t *testing.T) {
 	}
 	if got := managedPluginForeignHookGuard(SetupOpts{ManagedEnterprise: true, ForeignHookGuardBinary: guard}); got != guard {
 		t.Fatalf("managed guard binary = %q", got)
+	}
+}
+
+// GAP-0635: the plugin reads no shell hook runtime record, so Setup removes
+// a stale one of its own (here still open after the mode became closed) and
+// keeps the other connectors' records.
+func TestOpenCodeSetupRemovesItsStaleHookRuntimeRecord(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	pluginPath := filepath.Join(dir, ".config", "opencode", "plugins", "defenseclaw.js")
+	prev := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = prev })
+	opts := prepareOpenCodeSetupOptsForTest(t, SetupOpts{
+		DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok", HookFailMode: "closed",
+	})
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"opencode", "codex"} {
+		mode := map[string]string{"opencode": "open", "codex": "closed"}[name]
+		if err := writeHookConfigSidecar(hookDir, opts.APIAddr, name, mode, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := NewOpenCodeConnector().Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(hookDir, ".hookcfg.opencode")); !os.IsNotExist(err) {
+		t.Fatalf(".hookcfg.opencode still there after Setup (%v)", err)
+	}
+	var state hookConfigSidecar
+	if raw, err := os.ReadFile(filepath.Join(hookDir, ".hookcfg")); err != nil || json.Unmarshal(raw, &state) != nil {
+		t.Fatalf("read .hookcfg: %v", err)
+	}
+	if _, ok := state.FailModes["opencode"]; ok || state.FailModes["codex"] != "closed" {
+		t.Fatalf(".hookcfg fail_modes = %v; want no opencode entry and codex kept closed", state.FailModes)
+	}
+	if body, err := os.ReadFile(filepath.Join(hookDir, ".hookcfg.codex")); err != nil || !strings.Contains(string(body), "DEFENSECLAW_FAIL_MODE=closed") {
+		t.Fatalf(".hookcfg.codex = %q (%v); want it kept", body, err)
 	}
 }

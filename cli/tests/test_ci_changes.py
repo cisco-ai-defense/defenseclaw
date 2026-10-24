@@ -354,6 +354,15 @@ def _workflow(name: str) -> dict:
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
 
 
+def test_windows_native_ci_runs_standalone_transaction_recovery_smoke() -> None:
+    steps = _workflow("windows-native.yml")["jobs"]["powershell-static"]["steps"]
+    smoke = "./packaging/windows/tests/enterprise-standalone-recovery-gateway-smoke.ps1"
+    assert any(
+        smoke in str(step.get("run", "")) and step.get("if") == "${{ !cancelled() }}"
+        for step in steps
+    )
+
+
 def _check_names(job: dict) -> set[str]:
     name = job.get("name", "")
     matrix = job.get("strategy", {}).get("matrix", {})

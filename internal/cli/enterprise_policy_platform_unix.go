@@ -101,7 +101,7 @@ func enterprisePolicyLiveAvailable() error { return nil }
 
 // enterprisePolicyUnprotectedAgents is the Windows unprotected-agents
 // listing of policy show; Linux and macOS status and verify report them.
-var enterprisePolicyUnprotectedAgents = func(string) []enterprisehooks.UnprotectedAgent { return nil }
+var enterprisePolicyUnprotectedAgents = func(string) ([]enterprisehooks.UnprotectedAgent, error) { return nil, nil }
 
 // enterprisePolicyTarget resolves the account through the platform resolver
 // profile-explain uses (NSS on Linux, Open Directory on macOS): os/user in

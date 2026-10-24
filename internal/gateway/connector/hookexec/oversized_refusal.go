@@ -21,6 +21,10 @@ const HookRefusalHeader = "X-DefenseClaw-Hook-Refusal"
 // hook refused because its payload is over the hook's cap.
 const HookRefusalPayloadTooLarge = "payload_too_large"
 
+// MalformedHookPayloadReason marks a gateway parser refusal. The native hook
+// closes this failure outside Secure Client, including in per-user open mode.
+const MalformedHookPayloadReason = "malformed_hook_payload"
+
 // oversizedRefusalReportTimeout bounds the report, so a slow gateway never
 // delays the refusal the agent is waiting for.
 var oversizedRefusalReportTimeout = 2 * time.Second

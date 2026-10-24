@@ -339,10 +339,45 @@ func TestConfigV8ValidateNamesTheUnknownProfile(t *testing.T) {
 	}
 }
 
+func TestConfigV8BlankProfileSelectorNamesThePathOnce(t *testing.T) {
+	for _, selector := range []string{"groups", "users"} {
+		t.Run(selector, func(t *testing.T) {
+			directory := t.TempDir()
+			path := filepath.Join(directory, "config.yaml")
+			source := "config_version: 9\ndata_dir: " + directory + "\nguardrail:\n  profiles:\n    contractors: {mode: action}\n" +
+				"  profile_assignments:\n    - profile: contractors\n      match: {" + selector + ": [\" \" ]}\n"
+			if err := os.WriteFile(path, []byte(source), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previousPath, previousDataDir := configV8ConfigPath, configV8DataDir
+			previousOutput := configV8ValidateCmd.OutOrStdout()
+			configV8ConfigPath, configV8DataDir = path, directory
+			output := &strings.Builder{}
+			configV8ValidateCmd.SetOut(output)
+			t.Cleanup(func() {
+				configV8ConfigPath, configV8DataDir = previousPath, previousDataDir
+				configV8ValidateCmd.SetOut(previousOutput)
+			})
+			err := configV8ValidateCmd.RunE(configV8ValidateCmd, nil)
+			setting := "guardrail.profile_assignments[0].match." + selector
+			if err == nil || strings.Count(err.Error(), setting) != 1 || !strings.Contains(err.Error(), "an entry is empty") {
+				t.Fatalf("plain selector refusal: %v", err)
+			}
+			var failure configV8WireFailure
+			if err := json.Unmarshal([]byte(output.String()), &failure); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(failure.Reason, setting) > 0 || failure.Path != "$."+setting {
+				t.Fatalf("structured selector refusal repeats or loses the setting: %+v", failure)
+			}
+		})
+	}
+}
+
 // GAP-0553: a standalone config whose default OpenShell gateway port collides
 // with gateway.api_port was refused only as "configuration could not be
 // compiled safely" at "$". It names enterprise.openshell.gateway_port and the
-// port it collides with, and the same file with another API port validates.
+// port it collides with, and the same file with the managed API port validates.
 func TestConfigV8ValidateNamesTheOpenShellPortCollision(t *testing.T) {
 	validate := func(apiPort int) (configV8WireFailure, error) {
 		directory := t.TempDir()
@@ -376,8 +411,10 @@ func TestConfigV8ValidateNamesTheOpenShellPortCollision(t *testing.T) {
 		!strings.Contains(failure.Reason, strconv.Itoa(config.DefaultEnterpriseOpenShellGatewayPort)) {
 		t.Fatalf("structured validation failure = %+v", failure)
 	}
-	if _, err := validate(config.DefaultEnterpriseOpenShellGatewayPort + 1); err != nil {
-		t.Fatalf("the control with another API port does not validate: %v", err)
+	// The control is the managed API port, the only one ensure accepts
+	// (GAP-0601).
+	if _, err := validate(18970); err != nil {
+		t.Fatalf("the control with the managed API port does not validate: %v", err)
 	}
 }
 

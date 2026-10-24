@@ -86,9 +86,9 @@ cmd.exe asks this whenever Ctrl+C reaches a batch file. This happens when you ru
 
 ## Connector hooks, policy plugin or enforcement do not appear
 
-**Fix.** Confirm the agent runs natively as the same Windows user. Run `defenseclaw guardrail status` and `defenseclaw doctor`, then re-run the connector's setup in observe mode. Restart the agent if its connector page says so; fully exit and relaunch Amp, and add `--plugin-ready-timeout 30` to `amp -x`. Do not copy hook entries between agent files by hand, edit OpenCode's `plugins\defenseclaw.js` or Amp's `defenseclaw.ts`, or add PowerShell or Bash syntax to Hermes `config.yaml`.
+**Fix.** Confirm the agent runs natively as the same Windows user. Run `defenseclaw guardrail status` and `defenseclaw doctor`, then re-run the connector's setup without `--mode` so it uses the saved mode; keep that mode if prompted. If action setup refuses an unsupported agent version, update the agent and retry. Restart the agent if its connector page says so; fully exit and relaunch Amp, and add `--plugin-ready-timeout 30` to `amp -x`. Do not copy hook entries between agent files by hand, edit OpenCode's `plugins\defenseclaw.js` or Amp's `defenseclaw.ts`, or add PowerShell or Bash syntax to Hermes `config.yaml`.
 
-**Check.** `defenseclaw doctor` shows the connector's hooks row as `[PASS]`. For Hermes it shows the direct hook command and the fail-open setting.
+**Check.** `defenseclaw doctor` shows the connector's hooks row as `[PASS]`. For Hermes, confirm the native hook check passes in doctor and inspect its effective fail mode with `defenseclaw guardrail status`.
 
 ## A connector is disabled or status disagrees with configuration
 
@@ -106,7 +106,7 @@ Disabling stops only what the agent loads by that exact name (Codex `$skill` sel
 
 ## Native OTLP authentication fails
 
-**Fix.** Native OTLP is enabled only on managed hosts and in OpenShell. For a managed install, run `defenseclaw doctor` and `defenseclaw-gateway status`, run the connector's setup again, then restart the agent. A per-user upgrade removes native OTLP settings and tokens; restart the agent to drop settings already loaded by its process. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --mode observe` again and relaunch Amp.
+**Fix.** Native OTLP is enabled only on managed hosts and in OpenShell. For a managed install, run `defenseclaw doctor` and `defenseclaw-gateway status`, run the connector's setup again, then restart the agent. A per-user upgrade removes native OTLP settings and tokens; restart the agent to drop settings already loaded by its process. Never print, copy or replace token files or OTLP headers by hand. Hermes and Amp have no native OTLP export; for Amp run `defenseclaw setup amp --yes` again and relaunch Amp. Omitting `--mode` keeps Amp's saved mode.
 
 **Check.** The doctor authentication row is `[PASS]`.
 
@@ -131,7 +131,7 @@ Use harmless prompts only: no real secrets or customer data.
 - `defenseclaw version`: the CLI and the gateway report the same release.
 - `defenseclaw migrate --check` and `defenseclaw config validate` pass (after an upgrade).
 - `defenseclaw-gateway status` and `defenseclaw doctor` pass.
-- `defenseclaw guardrail status` lists each agent you set up with the mode, fail mode and enabled state you chose (the same as before an upgrade). Hermes always shows failures as open.
+- `defenseclaw guardrail status` lists each agent you set up with the mode, fail mode and enabled state you chose (the same as before an upgrade). Hermes follows its effective fail mode on Windows: closed by default outside Secure Client, and open only when explicitly chosen. On a managed host, the administrator may choose open for a gateway outage; unusable answers still block. Under Secure Client, open is the default.
 - Restart each agent where its connector page says to, send a harmless prompt in each one, and look for the event in `defenseclaw tui` or `defenseclaw-gateway audit export --output -`. A harmless prompt creates an audit event, not an alert.
 - Leave the `previous` and `backups` folders alone until the gateway and every agent work.
 

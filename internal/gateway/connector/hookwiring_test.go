@@ -749,8 +749,10 @@ func TestUnmanagedHookRuntimeContractRetainsUnboundedLegacyReads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A record the shared hooks read (KEY=value lines only, 1.0.4 loop
+	// round 3 of G-hooks-upg), padded past the enterprise limit.
 	flat = append(
-		[]byte("# "+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
+		[]byte("PAD="+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
 		flat...,
 	)
 	if err := os.WriteFile(flatPath, flat, 0o600); err != nil {

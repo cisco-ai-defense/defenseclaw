@@ -1912,7 +1912,7 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		r.client = client
 		r.gateway, err = client.Health(ctx)
 	}
-	if err != nil || !r.gateway.Healthy {
+	if err != nil || r.gateway == nil || !r.gateway.Healthy {
 		if err == nil || !credentialFailure(err) {
 			r.forgetReleaseRestart()
 		}

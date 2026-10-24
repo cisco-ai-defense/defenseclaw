@@ -20,9 +20,13 @@ import (
 	"testing"
 )
 
-// One inspect-* script serves every connector of a per-user data directory.
-// Its fail mode stays closed for all stored modes, selectors and parsers,
-// including older open records left by an upgrade.
+// 1.0.4 review (loop round 2): one inspect-* script serves every connector of
+// a per-user data directory and nothing authenticates which one an
+// invocation runs for. Its fail mode stays closed for every stored mode,
+// selector and parser (jq, the python3 fallback, neither), including older
+// open records left by an upgrade (sa-port-peer: a per-user open is never
+// an outage exception); the malformed-state rows keep the reader's
+// hardening on every parser path.
 func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 	helper, err := filepath.Abs(filepath.Join("hooks", "_hardening.sh"))
 	if err != nil {
@@ -45,12 +49,22 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 	malformedMap := func(value string) string {
 		return `{"version":2,"gateway_addr":"127.0.0.1:1","fail_modes":` + value + `,"legacy_fail_mode":"open","legacy_fail_mode_source":"config"}`
 	}
+	// sizedJSON and sizedFlat pad the writers' open state to exactly size
+	// bytes.
+	sizedJSON := func(connector string, size int) string {
+		prefix := `{"version":2,"fail_modes":{"` + connector + `":"open"},"fail_mode_sources":{"` + connector + `":"config"},"pad":"`
+		return prefix + strings.Repeat("x", size-len(prefix)-2) + `"}`
+	}
+	sizedFlat := func(connector string, size int) string {
+		prefix := flat(connector, "open") + "PAD="
+		return prefix + strings.Repeat("x", size-len(prefix)-1) + "\n"
+	}
 	type state map[string]string
 	for _, tc := range []struct {
 		name     string
 		files    state
 		selector string
-		// want per parser: jq, python3, none (flat records only).
+		// want per parser: jq, python3, none.
 		want [3]string
 	}{
 		{"mixed/selector-open-peer", state{".hookcfg.codex": flat("codex", "closed"), ".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": mixedJSON},
@@ -70,6 +84,9 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 			"cursor", [3]string{"closed", "closed", "closed"}},
 		{"upgrade/legacy-open-json-closed-entry-no-flat", state{".hookcfg": closedLegacyOpenJSON},
 			"", [3]string{"closed", "closed", "closed"}},
+		// The loop round 2 review scenario: codex closed only in the JSON and
+		// no parser to read it (TestSharedHookFailModeWithoutAParser covers
+		// the managed render markers).
 		{"json-closed-entry-flat-open", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": mixedJSON},
 			"claudecode", [3]string{"closed", "closed", "closed"}},
 		{"malformed-flat-mode", state{".hookcfg.codex": flat("codex", "OPEN "), ".hookcfg.claudecode": flat("claudecode", "open")},
@@ -78,7 +95,10 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 			"claudecode", [3]string{"closed", "closed", "closed"}},
 		{"json-fail-modes-not-a-map", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":["open"]}`},
 			"claudecode", [3]string{"closed", "closed", "closed"}},
-		// Even all-open records and an old legacy open are closed.
+		// The modes the shared hooks keep: a selected connector's own open
+		// record when every record is open, and the legacy mode for a call
+		// no single connector owns (an install no connector refresh has
+		// rewritten yet, or several open records), as before 1.0.4.
 		{"all-open/no-selector", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": openJSON},
 			"", [3]string{"closed", "closed", "closed"}},
 		{"all-open/no-selector-legacy-open", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open"),
@@ -121,14 +141,14 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		// lowered for a vendor): closed on every parser path (G3-upg).
 		{"unsourced/single-open-record", state{".hookcfg.codex": unsourced("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"}}`},
 			"codex", [3]string{"closed", "closed", "closed"}},
+		// No parser: JSON state that cannot be read is closed (G-hooks-upg R2-1).
 		{"unsourced/json-open-flat-sourced", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"}}`},
 			"codex", [3]string{"closed", "closed", "closed"}},
 		{"unsourced/legacy-only-open", state{".hookcfg.legacy": unsourced("", "open"), ".hookcfg": `{"version":2,"legacy_fail_mode":"open"}`},
 			"", [3]string{"closed", "closed", "closed"}},
 		// Loop round 3: a v2 JSON whose fail_modes is present but not an
 		// object never reaches the legacy mode, with or without the flat
-		// legacy record. Only the no-parser path, which cannot read the
-		// JSON, follows the flat legacy record.
+		// legacy record, on every parser path.
 		{"fail-modes-missing-no-flat", state{".hookcfg": legacyOpenJSON}, "", [3]string{"closed", "closed", "closed"}},
 		{"fail-modes-null-no-flat", state{".hookcfg": malformedMap("null")}, "", [3]string{"closed", "closed", "closed"}},
 		{"fail-modes-null", state{".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("null")}, "", [3]string{"closed", "closed", "closed"}},
@@ -139,6 +159,182 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 		{"fail-modes-null-selector", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": malformedMap("null")},
 			"claudecode", [3]string{"closed", "closed", "closed"}},
 		{"fail-modes-null-single-flat-record", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg.legacy": flat("", "open"), ".hookcfg": malformedMap("null")},
+			"", [3]string{"closed", "closed", "closed"}},
+		// 1.0.4 review (loop round 2 of G-hooks-upg): a flat record that is
+		// not a regular file or does not name its own connector is malformed,
+		// with or without JSON state.
+		{"flat-record-names-another-connector", state{".hookcfg.codex": flat("claudecode", "open"), ".hookcfg.claudecode": flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-without-connector-line", state{".hookcfg.codex": "DEFENSECLAW_FAIL_MODE=open\n", ".hookcfg.claudecode": flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-empty", state{".hookcfg.codex": "", ".hookcfg.claudecode": flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-link", state{".hookcfg.codex": "@link:" + flat("codex", "open"), ".hookcfg.claudecode": flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-dangling-link", state{".hookcfg.codex": "@dangling", ".hookcfg.claudecode": flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-directory", state{".hookcfg.codex": "@dir", ".hookcfg.claudecode": flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-state-directory", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "@dir"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-state-dangling-link", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "@dangling"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		// 1.0.4 review (loop round 3 of G-hooks-upg): JSON state that is not
+		// the one document the writers make is malformed on every parser
+		// path, and so is a flat record that is not their KEY=value lines.
+		// Before, jq read empty or blank text, a fractional version, a field
+		// of another type, a key given twice, two documents and a byte-order
+		// mark as open, both parsers followed a link to open JSON, and a
+		// flat record giving its mode twice took the first.
+		{"json-empty", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": ""},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-blank", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": " \n\t\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-fractional-version", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2.5,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-string", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":"2","fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-bool", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":true,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-legacy-mode-not-a-string", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"legacy_fail_mode":5}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-gateway-not-a-string", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"gateway_addr":["x"],"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-entry-not-a-string", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open","codex":1}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-field-in-another-case", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"FAIL_MODES":{"codex":"closed"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-key-twice", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"closed"},"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-entry-twice", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"closed","claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-two-documents", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"}} {"version":2,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-byte-order-mark", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "\ufeff" + `{"version":2,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-link-to-open-state", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "@link:" + `{"version":2,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-mode-twice", state{".hookcfg.claudecode": flat("claudecode", "open") + "DEFENSECLAW_FAIL_MODE=closed\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-connector-twice", state{".hookcfg.claudecode": flat("claudecode", "open") + "DEFENSECLAW_CONNECTOR=claudecode\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-extra-line", state{".hookcfg.claudecode": flat("claudecode", "open") + "{\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-blank-line", state{".hookcfg.claudecode": "\n" + flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-lower-case-key", state{".hookcfg.claudecode": "x=1\n" + flat("claudecode", "open")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-cut-short", state{".hookcfg.claudecode": strings.TrimSuffix(flat("claudecode", "open"), "\n")},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-nul", state{".hookcfg.claudecode": "DEFENSECLAW_CONNECTOR=claudecode\nDEFENSECLAW_FAIL_MODE=op\x00en\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"legacy-flat-mode-twice", state{".hookcfg.legacy": flat("", "closed") + "DEFENSECLAW_FAIL_MODE=open\n"},
+			"", [3]string{"closed", "closed", "closed"}},
+		// 1.0.4 review (loop round 4 of G-hooks-upg): jq reads number tokens
+		// no other reader takes (nan, Infinity, +2, 02, .5, 1.) and reads 2e0
+		// as the integer 2, so with an open entry the jq path ran open where
+		// the python3 path, the native hook and the writers close. A version
+		// past 2^63-1 opened both paths, and an escaped key or value was read
+		// decoded. Both paths now read the raw text alike: no backslash,
+		// every number as JSON writes it, at most 32 levels of nesting, and
+		// a version written as an integer from 2 to 2^63-1.
+		{"json-version-exponent", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2e0,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-exponent-upper", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2E+0,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-scaled-fraction", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":0.2e1,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-leading-zero", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":02,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-plus", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":+2,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-past-int64", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":9223372036854775808,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-long", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":99999999999999999999,"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-escaped-key", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"\u0076ersion":2e0,"x":{"version":2},"fail_modes":{"claudecode":"open"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-nan", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"x":nan}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-infinity", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"x":[Infinity]}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-fraction-without-integer", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"x":.5}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-trailing-dot", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"x":1.}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-leading-zero", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"x":{"y":-01}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-escaped-entry", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"\u006fpen"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-escaped-backslash", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"x":"a\\b"}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-form-feed", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "{\"version\":2,\f\"fail_modes\":{\"claudecode\":\"open\"}}"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-deeper-than-32", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"x":` + strings.Repeat("[", 32) + strings.Repeat("]", 32) + `}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-far-deeper", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"x":` + strings.Repeat("[", 2000) + strings.Repeat("]", 2000) + `}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		// Controls: numbers as JSON writes them, a nested 2e0, the largest
+		// version, 32 levels and a document split across lines stay open.
+		{"json-strict-numbers", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"},"x":[1e5,-0.5,0,1E-2,true,false,null],"y":{"version":2e0},"z":"version"}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-version-int64-max", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": `{"version":9223372036854775807,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-32-levels", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"},"x":` + strings.Repeat("[", 31) + strings.Repeat("]", 31) + `}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-split-across-lines", state{".hookcfg.claudecode": flat("claudecode", "open"), ".hookcfg": "{\n\"version\"\n:\n 2\n,\"fail_modes\":{\"claudecode\":\"open\"},\"fail_mode_sources\":{\"claudecode\":\"config\"}}\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		// Controls: the writers' JSON, null fields and nested objects with
+		// unique keys stay readable.
+		{"json-writer-shape", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": "{\n  \"version\": 2,\n  \"gateway_addr\": \"127.0.0.1:1\",\n  \"fail_modes\": {\n    \"claudecode\": \"open\"\n  },\n  \"fail_mode_sources\": {\n    \"claudecode\": \"config\"\n  },\n  \"managed_enterprise\": true\n}\n"},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-null-fields", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": `{"version":3,"gateway_addr":null,"legacy_fail_mode":null,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		{"json-nested-unique-keys", state{".hookcfg.claudecode": flat("claudecode", "open"),
+			".hookcfg": `{"version":2,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"},"extra":{"a":{"a":1},"b":[{"a":1},{"a":2}]}}`},
+			"claudecode", [3]string{"closed", "closed", "closed"}},
+		// 1.0.4 review (loop round 2 after round 4 of G-hooks-upg): the
+		// writers refuse a sidecar larger than 64 KiB (HookSidecarMaxBytes),
+		// so a refresh that would close it is not applied, while the shared
+		// hooks still read the open mode in it. Every record the shared hooks
+		// read (the JSON, a connector's flat record, the legacy record) is
+		// malformed past 64 KiB, and so is JSON holding a NUL byte; exactly
+		// 64 KiB stays readable.
+		{"json-larger-than-64-KiB", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": sizedJSON("codex", 70<<10)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"json-64-KiB-plus-one", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": sizedJSON("codex", 64<<10+1)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"json-exactly-64-KiB", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": sizedJSON("codex", 64<<10)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"json-multibyte-past-64-KiB", state{".hookcfg.codex": flat("codex", "open"),
+			".hookcfg": `{"version":2,"fail_modes":{"codex":"open"},"pad":"` + strings.Repeat("\u00e9", 35<<10) + `"}`},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"json-nul-in-a-string", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg": `{"version":2,"fail_modes":{"codex":"open"},"pad":"a` + "\x00" + `b"}`},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-larger-than-64-KiB", state{".hookcfg.codex": sizedFlat("codex", 70<<10)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-64-KiB-plus-one", state{".hookcfg.codex": sizedFlat("codex", 64<<10+1)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"flat-record-exactly-64-KiB", state{".hookcfg.codex": sizedFlat("codex", 64<<10)},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"legacy-flat-larger-than-64-KiB", state{".hookcfg.legacy": sizedFlat("", 70<<10)},
+			"", [3]string{"closed", "closed", "closed"}},
+		{"legacy-flat-larger-than-64-KiB-with-json", state{".hookcfg.legacy": sizedFlat("", 70<<10), ".hookcfg": legacyOpenJSON},
+			"", [3]string{"closed", "closed", "closed"}},
+		// Controls: names the writers use for other files never count as
+		// records, and an install with no JSON state opens from its flat
+		// records on every parser path.
+		{"flat-only/single-open-record", state{".hookcfg.codex": flat("codex", "open")},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"flat-only/open-record-and-writer-files", state{".hookcfg.codex": flat("codex", "open"), ".hookcfg.lock": "", ".hookcfg.codex.tmp-1": flat("codex", "closed")},
+			"codex", [3]string{"closed", "closed", "closed"}},
+		{"flat-only/legacy-open", state{".hookcfg.legacy": flat("", "open")},
 			"", [3]string{"closed", "closed", "closed"}},
 	} {
 		for i, parser := range []string{"jq", "python3", "none"} {
@@ -152,7 +348,22 @@ func TestSharedHookFailModeIsTheStrictestRecordedMode(t *testing.T) {
 					}
 				}
 				for name, body := range tc.files {
-					if err := os.WriteFile(filepath.Join(hookDir, name), []byte(body), 0o600); err != nil {
+					path := filepath.Join(hookDir, name)
+					var err error
+					switch {
+					case body == "@dir":
+						err = os.Mkdir(path, 0o700)
+					case body == "@dangling":
+						err = os.Symlink(filepath.Join(root, "missing"), path)
+					case strings.HasPrefix(body, "@link:"):
+						target := filepath.Join(root, name+".target")
+						if err = os.WriteFile(target, []byte(strings.TrimPrefix(body, "@link:")), 0o600); err == nil {
+							err = os.Symlink(target, path)
+						}
+					default:
+						err = os.WriteFile(path, []byte(body), 0o600)
+					}
+					if err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -306,6 +517,55 @@ func TestSharedInspectHooksNeverTakeAPeersOpenMode(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// The 64 KiB bound of the shared hooks' sidecar reads is in bytes in every
+// locale: in a UTF-8 locale bash's read -n counts characters, so 70 KiB of
+// two-byte characters (35 Ki characters) would read as within the bound.
+func TestSharedHookSidecarBoundIsBytesInEveryLocale(t *testing.T) {
+	helper, err := filepath.Abs(filepath.Join("hooks", "_hardening.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := strings.Repeat("\u00e9", 35<<10)
+	for _, tc := range []struct {
+		name, file, body string
+	}{
+		{"json", ".hookcfg", `{"version":2,"fail_modes":{"codex":"open"},"pad":"` + pad + `"}`},
+		{"flat-record", ".hookcfg.codex", "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\nPAD=" + pad + "\n"},
+	} {
+		for _, locale := range []string{"C", "C.UTF-8", "en_US.UTF-8"} {
+			t.Run(tc.name+"/"+locale, func(t *testing.T) {
+				hookDir := filepath.Join(t.TempDir(), "hooks")
+				if err := os.MkdirAll(hookDir, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if tc.file == ".hookcfg" {
+					if err := os.WriteFile(filepath.Join(hookDir, ".hookcfg.codex"), []byte("DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(hookDir, tc.file), []byte(tc.body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command(bash, "-c", `. "$1"; defenseclaw_shared_runtime_fail_mode "$2" codex`, "probe", helper, hookDir)
+				cmd.Env = append(sanitizedTestEnv(), "PATH="+os.Getenv("PATH"), "HOME="+t.TempDir(), "LC_ALL="+locale, "LANG="+locale)
+				// Stdout only: bash warns on stderr for a locale the host
+				// does not have, and then reads bytes anyway.
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("helper failed: %v\n%s", err, out)
+				}
+				if got := strings.TrimSpace(string(out)); got != "closed" {
+					t.Fatalf("fail mode %q for %d bytes in locale %s, want closed", got, len(tc.body), locale)
+				}
+			})
 		}
 	}
 }

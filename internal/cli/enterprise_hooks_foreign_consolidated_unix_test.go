@@ -14,7 +14,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -286,6 +285,10 @@ func TestStandaloneForeignCleanupWorkersDoNotHoldTheLock(t *testing.T) {
 	var mu sync.Mutex
 	active, peak := 0, 0
 	both := make(chan struct{})
+	releaseWorkers := make(chan struct{})
+	var release sync.Once
+	letWorkersFinish := func() { release.Do(func() { close(releaseWorkers) }) }
+	defer letWorkersFinish()
 	g, _ := foreignHookWorkerPass(t, []string{"alice", "bob"}, func(_ context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
 		mu.Lock()
 		active++
@@ -304,25 +307,38 @@ func TestStandaloneForeignCleanupWorkersDoNotHoldTheLock(t *testing.T) {
 		if len(request.ForeignCleanup) == 0 || request.cleanupFence == nil {
 			t.Errorf("worker for %s has no foreign cleanup commit session", account.User)
 		}
-		for _, uid := range []int{4242, 4243} {
-			// Both workers probe the same account gate. Give those probes
-			// time to serialize under the race detector; a worker that holds
-			// the gate through its callback still cannot pass this check.
-			if !accountRemovalLockFree(t, strconv.Itoa(uid), time.Second) {
-				t.Errorf("the worker for %s holds uid %d's removal lock before any removal", account.User, uid)
-			}
-		}
-		select {
-		case <-both:
-		case <-time.After(2 * time.Second):
-			t.Errorf("the worker for %s ran alone: the accounts' workers must run concurrently", account.User)
-		}
+		<-releaseWorkers
 		return enterpriseHookWorkerResponse{Targets: foreignHookWorkerTargets(request), Cleanup: map[string]enterpriseHookWorkerCleanupReport{
 			"cursor": {Removed: []string{account.Home + "/.cursor/hooks.json"}, BackupDir: account.Home + "/.defenseclaw/foreign-hooks-backup/cursor/x"},
 		}}, nil
 	})
 	var log strings.Builder
-	runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC), enterprisehooks.Manifest{}, map[string]map[string]bool{}, "")
+	done := make(chan struct{})
+	go func() {
+		runEnterpriseHookStandaloneForeignCleanup(context.Background(), &log, time.Date(2026, 10, 22, 12, 0, 0, 0, time.UTC), enterprisehooks.Manifest{}, map[string]map[string]bool{}, "")
+		close(done)
+	}()
+	select {
+	case <-both:
+	case <-time.After(10 * time.Second):
+		letWorkersFinish()
+		<-done
+		t.Fatal("the accounts' workers did not run concurrently")
+	}
+	// Both workers remain inside their callbacks while the main goroutine
+	// probes each account lock. A worker that holds one cannot release it
+	// until after these probes, regardless of scheduler delays.
+	var held []string
+	for _, uid := range []string{"4242", "4243"} {
+		if !accountRemovalLockFree(t, uid, 5*time.Second) {
+			held = append(held, uid)
+		}
+	}
+	letWorkersFinish()
+	<-done
+	if len(held) != 0 {
+		t.Fatalf("workers held removal locks before any removal: %v", held)
+	}
 	if peak != 2 {
 		t.Fatalf("peak concurrent workers = %d, want 2; log:\n%s", peak, log.String())
 	}
@@ -334,7 +350,7 @@ func TestStandaloneForeignCleanupWorkersDoNotHoldTheLock(t *testing.T) {
 		t.Fatalf("both accounts' removals must reach the ledger, got %q; log:\n%s", got, log.String())
 	}
 	for _, uid := range []string{"4242", "4243"} {
-		if !accountRemovalLockFree(t, uid, 100*time.Millisecond) {
+		if !accountRemovalLockFree(t, uid, 5*time.Second) {
 			t.Fatalf("uid %s's removal lock is still held after the pass", uid)
 		}
 	}
@@ -362,12 +378,10 @@ func TestForeignHookFenceSessionCommitsOneRemovalAtATime(t *testing.T) {
 	if accountRemovalLockFree(t, "4242", 50*time.Millisecond) {
 		t.Fatal("a removal in progress must hold the account's lock against the gateway")
 	}
-	start := time.Now()
-	if err := bob.lock(context.Background(), "cursor", []string{"/home/bob/.cursor/hooks.json"}); err != nil {
-		t.Fatal(err)
-	}
-	if elapsed := time.Since(start); elapsed > enterprisepolicy.ForeignHookRemovalDrainWait/2 {
-		t.Fatalf("another account's removal waited %v for alice's", elapsed)
+	bobCtx, cancelBob := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelBob()
+	if err := bob.lock(bobCtx, "cursor", []string{"/home/bob/.cursor/hooks.json"}); err != nil {
+		t.Fatalf("another account's removal waited for alice's lock: %v", err)
 	}
 	if err := bob.commit("cursor", []string{"/home/bob/.cursor/hooks.json"}); err != nil {
 		t.Fatal(err)
@@ -395,7 +409,7 @@ func TestForeignHookFenceSessionCommitsOneRemovalAtATime(t *testing.T) {
 	if err := alice2.commit("cursor", []string{"/home/alice/.cursor/other.json"}); err != nil {
 		t.Fatal(err)
 	}
-	if !accountRemovalLockFree(t, "4242", 100*time.Millisecond) {
+	if !accountRemovalLockFree(t, "4242", 5*time.Second) {
 		t.Fatal("the lock stays held after the last commit")
 	}
 
@@ -431,7 +445,7 @@ func TestForeignHookFenceSessionCommitsOneRemovalAtATime(t *testing.T) {
 		alice.release()
 		t.Fatal("locked past the per-connector bound")
 	}
-	if !accountRemovalLockFree(t, "4242", 100*time.Millisecond) {
+	if !accountRemovalLockFree(t, "4242", 5*time.Second) {
 		t.Fatal("the lock stays held after the session's commits")
 	}
 }

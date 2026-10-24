@@ -2512,7 +2512,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     self.app.cfg = copy.deepcopy(original_cfg)
                     gc = self.app.cfg.guardrail
                     gc.enabled = True
-                    # A guarded OpenClaw refuses --connector opencode first (GAP-2452).
+                    # An older install may have saved OpenClaw before the
+                    # operator picked an installed OpenCode connector.
                     gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "openclaw")
                     if target_case == "explicit":
                         # Both connectors are registered; explicit selection
@@ -2571,6 +2572,10 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         patch(
                             "defenseclaw.commands.cmd_setup.platform_support.host_os",
                             return_value="windows",
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+                            return_value=["opencode"],
                         ),
                         patch(
                             "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",

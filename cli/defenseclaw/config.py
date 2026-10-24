@@ -80,7 +80,9 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
     read_regular_file_no_follow,
+    tracked_host_owner_uid,
 )
+from defenseclaw.openclaw_presence import openclaw_implied_but_not_installed, openclaw_only_implied
 
 # libyaml parses a 150 KB policy config in tens of milliseconds where the
 # pure-Python SafeLoader takes 2 s, and every command parses config.yaml more
@@ -764,7 +766,7 @@ def _managed_config_trust_problem(path: str) -> str | None:
         if acl_problem is not None:
             return acl_problem
 
-        owner_uid = getattr(info, "st_uid", None)
+        owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
         if owner_uid != 0:
@@ -2655,7 +2657,13 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - per-user hosts always fail closed, including old explicit opens.
+        - a per-user host reports its gateway-outage mode, which follows the
+          connector's policy tier (Go ``config.HookOutageFailMode``, owner
+          decision 2026-10-23): ``closed`` for a strict rule pack, ``open``
+          for default (balanced) and permissive. A saved per-user
+          ``hook_fail_mode`` does not change it, and every failure that is
+          not an outage (an answer the gateway gave, a malformed or partial
+          one, a missing token, the install window) blocks in every tier.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
@@ -2675,7 +2683,25 @@ class GuardrailConfig:
             if self.hook_fail_mode.strip():
                 return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
-        return "closed"
+        return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
+
+    def hook_policy_tier(self, connector: str = "") -> str:
+        """The connector's policy tier: its rule pack's posture (strict, default or permissive).
+
+        Mirrors Go ``Config.HookPolicyTierForConnector``: the pack manifest's
+        posture, else the pack folder's name (``policy_catalog.pack_profile``).
+        """
+        from defenseclaw import policy_catalog
+
+        name = self.effective_rule_pack(connector)
+        if name in {"default", "strict", "permissive"} and name not in (getattr(self, "custom_packs", None) or {}):
+            # A built-in pack's tier is its name, also where its folder is not
+            # installed (Go: a built-in name without a manifest posture).
+            return name
+        try:
+            return policy_catalog.pack_profile(self.effective_rule_pack_dir(connector))
+        except Exception:  # noqa: BLE001 - an unresolvable pack is the default tier, as in Go
+            return "default"
 
     def secure_client_hook_fail_modes(self) -> bool:
         """Whether this guardrail belongs to a Secure Client config.
@@ -4040,7 +4066,7 @@ class Config:
             self.active_connector(),
             openclaw_home=self.claw.home_dir,
             workspace_dir=self.connector_workspace_dir(),
-        ) or _expand(self.claw.home_dir)
+        )
 
     def connector_workspace_dir(self) -> str:
         """Return the explicitly pinned connector workspace, if any."""
@@ -4067,16 +4093,26 @@ class Config:
         """Return the canonical connector name for this config.
 
         Mirrors ``Config.activeConnector`` in claw.go: precedence is
-        ``guardrail.connector`` → ``claw.mode`` → ``"openclaw"``,
-        whitespace-trimmed and lowercased. Public so cmd_doctor /
+        ``guardrail.connector`` → configured ``claw.mode`` → the roster,
+        whitespace-trimmed and lowercased. An unconfigured install returns
+        ``""``. Public so cmd_doctor /
         cmd_uninstall can answer "which framework is this install
         running against?" without recomputing the rule.
         """
+        if not self.has_connector_configured():
+            return ""
         if self.guardrail.connector.strip():
             return connector_paths.normalize(self.guardrail.connector)
+        if self.guardrail.connectors:
+            roster = sorted(
+                {connector_paths.normalize(name) for name in self.guardrail.connectors if name.strip()}
+            )
+            if roster:
+                mode = connector_paths.normalize(self.claw.mode)
+                return mode if mode in roster else roster[0]
         if self.claw.mode.strip():
             return connector_paths.normalize(self.claw.mode)
-        return "openclaw"
+        return ""
 
     def effective_webhooks(self, connector: str = "") -> list[WebhookConfig]:
         """Resolve which webhooks ``connector``'s events route to (D5b).
@@ -4089,22 +4125,26 @@ class Config:
         return self.observability.effective_webhooks(connector, self.webhooks)
 
     def has_connector_configured(self) -> bool:
-        """Return True when the operator has explicitly configured a connector.
+        """Return True when the config selects a connector.
 
         Distinguishes a genuinely unconfigured install — every connector
         marker empty, e.g. after ``setup remove`` clears the last one
-        (which persists ``claw.mode: ''``) — from a real single-connector
-        openclaw install, which pins ``claw.mode``/``guardrail.connector``
-        to ``openclaw`` (see ``cmd_setup``). :meth:`active_connectors` and
-        the shared list/scan resolver use this to avoid fabricating a
-        phantom ``openclaw`` when nothing is set up.
+        (which persists ``claw.mode: ''``) — from a single-connector
+        OpenClaw install or a legacy remote OpenClaw fleet. The shared
+        list/scan resolver uses this to avoid fabricating a phantom agent
+        when nothing is set up.
 
-        NOTE: a *missing* config file still loads ``claw.mode`` as the
-        ``"openclaw"`` default (``config.load``), so this reports True
-        there — the unconfigured signal is the explicit empty marker
-        written on removal, not file absence.
+        A *missing* config file or claw block loads ``claw.mode`` as the
+        ``"openclaw"`` default (``config.load``). With a loopback gateway,
+        that reports True only where OpenClaw is installed. A remote fleet
+        host also keeps the legacy connector (GAP-0568,
+        :func:`_mark_openclaw_not_installed`).
         """
-        return bool(self.guardrail.connectors or self.guardrail.connector.strip() or self.claw.mode.strip())
+        if any(name.strip() for name in self.guardrail.connectors) or self.guardrail.connector.strip():
+            return True
+        if getattr(self, "_openclaw_not_installed", False) and openclaw_only_implied(self):
+            return False
+        return bool(self.claw.mode.strip())
 
     def active_connectors(self) -> list[str]:
         """Return the full resolved set of connector names, sorted.
@@ -4122,9 +4162,8 @@ class Config:
         ``["openclaw"]`` — callers that fan out over connectors (``status``,
         ``aibom``, the shared list/scan resolver) then render an explicit
         "no connector configured" empty state instead of a phantom
-        openclaw. :meth:`active_connector` keeps its singular ``"openclaw"``
-        default untouched, so path resolution and other single-connector
-        callers are unaffected.
+        openclaw. :meth:`active_connector` also returns ``""`` so path
+        resolution does not invent an agent.
         """
         if self.guardrail.connectors:
             # Dedupe after normalization so two alias keys (e.g. "claude-code"
@@ -4161,8 +4200,7 @@ class Config:
         Polymorphic — when ``guardrail.connector`` is set, the
         connector-specific layout (for Codex, project and personal
         ``.agents/skills`` layers) is
-        returned; otherwise falls back to OpenClaw paths derived
-        from ``claw.home_dir`` and ``claw.config_file``.
+        returned; an unconfigured install has no agent paths.
 
         ``connector`` overrides the resolved connector so multi-connector
         callers (e.g. the TUI catalog focus selector via
@@ -6310,6 +6348,22 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     return "closed"
 
 
+def _mark_openclaw_not_installed(cfg: Config) -> None:
+    """Record that a claw.mode which only implies OpenClaw has no OpenClaw behind it.
+
+    A config.yaml without a claw block loads ``claw.mode: openclaw``, and init
+    wrote that default before 1.0.4. With a loopback gateway and no local
+    OpenClaw, :meth:`Config.has_connector_configured` reports no connector,
+    so status and the TUI name none (GAP-0568). An explicit fleet mode keeps
+    the legacy connector. Mirrors the Go loader, which leaves a managed
+    enterprise service as it was.
+    """
+    if _is_managed_enterprise_mode(cfg.deployment_mode):
+        return
+    if openclaw_implied_but_not_installed(cfg):
+        object.__setattr__(cfg, "_openclaw_not_installed", True)
+
+
 def _apply_secure_client_hook_fail_default(cfg: Config, raw: dict[str, Any]) -> None:
     """Secure Client exception to the fail-closed hook default (#1163).
 
@@ -7506,6 +7560,7 @@ def load(
     cfg._source_config_version = source_config_version
     cfg._loaded_generation = _generation_of_loaded_text(cfg_file, loaded_text)
     _apply_secure_client_hook_fail_default(cfg, raw)
+    _mark_openclaw_not_installed(cfg)
     _migrate_llm_fields(cfg)
     _warn_plaintext_secrets(cfg)
     # Fail loud on invalid guardrail value invariants, mirroring the Go

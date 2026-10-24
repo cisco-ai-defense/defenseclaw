@@ -179,7 +179,9 @@ func TestMacOSConsoleSessionFollowsFastUserSwitching(t *testing.T) {
 	alice, bob := h.alice.UID, h.alice.UID+1
 	h.ops.accounts = append(h.ops.accounts, SandboxAccount{Name: "bob", UID: bob, GID: h.alice.GID, Home: "/Users/bob"})
 	f.domains[bob] = true
-	f.jobs[bob] = map[string]*launchdJobFixture{labelOpenShellGateway: {loaded: true, state: "running", runs: 1}}
+	// The installed (tagged) label: an untagged job is an earlier DefenseClaw's (GAP-0206).
+	gw := h.env.launchAgentLabel(labelOpenShellGateway)
+	f.jobs[bob] = map[string]*launchdJobFixture{gw: {loaded: true, state: "running", runs: 1}}
 	check := func(wantAlice, wantBob bool) {
 		t.Helper()
 		for uid, want := range map[int]bool{alice: wantAlice, bob: wantBob} {
@@ -206,8 +208,8 @@ func TestMacOSConsoleSessionFollowsFastUserSwitching(t *testing.T) {
 	if !r.SecurityComplete || len(r.Errors) != 0 {
 		t.Fatalf("logged-out Alice affected Bob's healthy session: %+v", r)
 	}
-	f.jobs[bob][labelOpenShellGateway].state = "not running"
-	f.jobs[bob][labelOpenShellGateway].reason = "OS_REASON_CODESIGNING"
+	f.jobs[bob][gw].state = "not running"
+	f.jobs[bob][gw].reason = "OS_REASON_CODESIGNING"
 	r = &enterprisestatus.Result{SecurityComplete: true}
 	(&lifecycle{env: h.env, opts: Options{Action: ActionStatus}, result: r}).describeMacOSAgents(context.Background())
 	if r.SecurityComplete || !strings.Contains(messagesOf(r.Errors, codeSandboxUserState), "of bob") {

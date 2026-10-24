@@ -39,6 +39,11 @@ const codePolicyNotApplied = "policy_not_applied"
 // its last policy reload and keeps enforcing the previous policy.
 const codePolicyReloadRejected = "policy_reload_rejected"
 
+// codePolicyUnverified warns, on every action, that the installed gateway
+// could not compute the effective policy and no applied record stands in, so
+// the result carries no policy object.
+const codePolicyUnverified = "policy_unverified"
+
 // The effective policy (spec P0 section 5) is reported on every lifecycle
 // result: the digest the committed config computes to, its
 // config_generation, and whether the running gateway reports the same
@@ -102,25 +107,34 @@ func gatewayPolicyHealth(body []byte) (digest, reloadError string) {
 
 // computePolicy runs the installed gateway's `policy digest` with the
 // service environment, so the digest is computed by the binary the gateway
-// runs, from the config and assets it loads. ok is false when that binary
+// runs, from the config and assets it loads. err says why that binary
 // cannot (an earlier release, or a status run that cannot read the inputs).
-func (l *lifecycle) computePolicy(ctx context.Context) (digest string, configGeneration uint64, ok bool) {
+func (l *lifecycle) computePolicy(ctx context.Context) (digest string, configGeneration uint64, err error) {
 	if c := l.noopPolicy; c != nil {
 		l.noopPolicy = nil
-		return c.digest, c.generation, true
+		return c.digest, c.generation, nil
 	}
 	out, err := l.env.runGatewayCLI(ctx, "policy", "digest", "--json")
-	if err != nil || out.ExitCode != 0 {
-		return "", 0, false
+	if err == nil && out.ExitCode != 0 {
+		err = fmt.Errorf("exit status %d", out.ExitCode)
+	}
+	if err != nil {
+		if reason := firstLine(string(out.Stderr)); reason != "" {
+			if len(reason) > 300 {
+				reason = reason[:300]
+			}
+			err = fmt.Errorf("%w: %s", err, reason)
+		}
+		return "", 0, fmt.Errorf("policy digest: %w", err)
 	}
 	var report struct {
 		EffectiveDigest  string `json:"effective_digest"`
 		ConfigGeneration uint64 `json:"config_generation"`
 	}
 	if json.Unmarshal(out.Stdout, &report) != nil || report.EffectiveDigest == "" {
-		return "", 0, false
+		return "", 0, errors.New("policy digest reported no effective policy digest")
 	}
-	return report.EffectiveDigest, report.ConfigGeneration, true
+	return report.EffectiveDigest, report.ConfigGeneration, nil
 }
 
 // computedPolicy is one computePolicy answer.
@@ -170,8 +184,11 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 			}
 		}
 	}
+	var computeErr error
 	if !computed {
-		if digest, generation, ok := l.computePolicy(ctx); ok {
+		var digest string
+		var generation uint64
+		if digest, generation, computeErr = l.computePolicy(ctx); computeErr == nil {
 			state.EffectiveDigest, state.ConfigGeneration, computed = digest, generation, true
 		}
 	}
@@ -185,6 +202,11 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds")
 	}
 	if state.EffectiveDigest == "" {
+		// Name the check that did not run instead of omitting the policy
+		// block silently (rel-1-0-4 GAP-0594).
+		if computeErr != nil {
+			r.AddWarning(codePolicyUnverified, "the effective policy the gateway enforces could not be checked: "+computeErr.Error())
+		}
 		return
 	}
 	state.Applied = state.EffectiveDigest == reported && reloadError == ""
@@ -209,7 +231,7 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 		ConfigGeneration: state.ConfigGeneration,
 		AppliedAt:        env.Now().UTC().Format(time.RFC3339),
 	})); err != nil {
-		r.AddWarning(codeState, "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
+		r.AddWarning(stateWriteCode(err, codeState), "could not record "+enterprisestatus.PolicyStateFileName+": "+err.Error())
 	}
 }
 

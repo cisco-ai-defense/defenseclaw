@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/legacyconnector"
 )
 
 func readHookConfigSidecarForTest(t *testing.T, hookDir string) hookConfigSidecar {
@@ -134,13 +136,14 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 		wantMode, wantSource, wantOut string
 	}{
 		{"copilot unset", NewCopilotConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"copilot old explicit open", NewCopilotConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"copilot outage open tier", NewCopilotConnector(), SetupOpts{HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
 		{"antigravity unset", NewAntigravityConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor observe unset", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor observe old explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor action explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"cursor observe unset", NewCursorConnector(), SetupOpts{GuardrailMode: "observe"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"cursor observe outage open tier", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"cursor action outage open tier", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"cursor action strict tier", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "closed"}, "closed", HookFailModeSourceConfig, "closed"},
 		{"limited vendor unset", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"limited vendor old explicit open", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"limited vendor outage open tier", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -168,9 +171,10 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 	}
 }
 
-// A per-user Cursor's runtime stays closed even when an older config asked
-// for open. A closed contract validates that state; an open contract is stale.
-func TestCursorRuntimeIsClosedUnderOldOpenConfig(t *testing.T) {
+// A per-user Cursor's runtime records hold its outage mode whatever its
+// guardrail mode, and bake closed for every other failure: the contract of
+// the same outage mode validates them, another one is stale.
+func TestCursorRuntimeRecordsTheOutageMode(t *testing.T) {
 	cursor := NewCursorConnector()
 	for _, test := range []struct {
 		name     string
@@ -178,9 +182,11 @@ func TestCursorRuntimeIsClosedUnderOldOpenConfig(t *testing.T) {
 		contract string
 		ok       bool
 	}{
-		{"observe, old open config", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", true},
-		{"observe, old explicit open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", true},
-		{"stale open contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", false},
+		{"observe, outage open tier", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", true},
+		{"action, outage open tier", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, "open", true},
+		{"observe, strict tier", SetupOpts{GuardrailMode: "observe", HookFailMode: "closed"}, "closed", true},
+		{"stale closed contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", false},
+		{"stale open contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "closed"}, "open", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -225,8 +231,8 @@ func TestRefreshHookFailModesRendersAnEarlierReleasesSidecar(t *testing.T) {
 	}
 	for name, want := range modes {
 		flat := readFlatHookRecordForTest(t, hookDir, name)
-		if legacyHookConfigValue([]byte(flat), "DEFENSECLAW_FAIL_MODE") != want ||
-			legacyHookConfigValue([]byte(flat), "FAIL_MODE_SOURCE") != HookFailModeSourceConfig {
+		if flatRecordValueForTest([]byte(flat), "DEFENSECLAW_FAIL_MODE") != want ||
+			flatRecordValueForTest([]byte(flat), "FAIL_MODE_SOURCE") != HookFailModeSourceConfig {
 			t.Fatalf("%s flat record %q, want %s from the config", name, flat, want)
 		}
 	}
@@ -263,7 +269,8 @@ func TestRefreshHookFailModesRendersAnEarlierReleasesSidecar(t *testing.T) {
 // no JSON entry, and the open a connector hook script bakes (0.8.10 to 1.0.2
 // let the environment open it; 1.0.3 bakes it, and its missing-home check).
 // While the gateway is down for the swap, the old hook scripts allow a call
-// before the refresh and block it after; an open the config sets stays.
+// before the refresh and block it after, in every tier: a per-user script
+// reads its outage mode from its runtime record, never from a baked open.
 func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 	hookDir := t.TempDir()
 	write := func(name, body string, perm os.FileMode) {
@@ -318,7 +325,7 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(refreshed.Sidecar, []string{"kiro", "legacy"}) ||
-		!reflect.DeepEqual(refreshed.Scripts, []string{"claude-code-hook.sh", "codex-hook.sh", "cursor-hook.sh"}) {
+		!reflect.DeepEqual(refreshed.Scripts, []string{"claude-code-hook.sh", "codex-hook.sh", "copilot-hook.sh", "cursor-hook.sh"}) {
 		t.Fatalf("refreshed %+v", refreshed)
 	}
 	state := readHookConfigSidecarForTest(t, hookDir)
@@ -326,13 +333,13 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 		state.LegacySource != HookFailModeSourceConfig || state.FailModes["kiro"] != "closed" {
 		t.Fatalf("sidecar after refresh: %+v", state)
 	}
-	if got := readFlatHookRecordForTest(t, hookDir, "kiro"); legacyHookConfigValue([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
+	if got := readFlatHookRecordForTest(t, hookDir, "kiro"); flatRecordValueForTest([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
 		t.Fatalf("kiro flat record %q", got)
 	}
-	if got := readFlatHookRecordForTest(t, hookDir, "legacy"); legacyHookConfigValue([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
+	if got := readFlatHookRecordForTest(t, hookDir, "legacy"); flatRecordValueForTest([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
 		t.Fatalf("legacy flat record %q", got)
 	}
-	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "cursor-hook.sh"} {
+	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "copilot-hook.sh", "cursor-hook.sh"} {
 		body, err := os.ReadFile(filepath.Join(hookDir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -344,17 +351,11 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 			t.Fatalf("%s mode %v (%v)", name, info.Mode(), err)
 		}
 	}
-	if body, _ := os.ReadFile(filepath.Join(hookDir, "copilot-hook.sh")); string(body) != scripts["copilot-hook.sh"] {
-		t.Fatalf("the operator's open copilot hook was changed:\n%s", body)
-	}
 	if canRun {
-		for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "cursor-hook.sh"} {
+		for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "copilot-hook.sh", "cursor-hook.sh"} {
 			if got := run(name); got != 2 {
 				t.Fatalf("%s after the refresh exits %d, want 2 (fail closed)", name, got)
 			}
-		}
-		if got := run("copilot-hook.sh"); got != 0 {
-			t.Fatalf("the operator's open copilot hook exits %d, want 0", got)
 		}
 	}
 	// A second pass (after the gateway stopped) changes no script again.
@@ -553,6 +554,9 @@ func TestSharedShellReaderFollowsAManagedSidecarsOpen(t *testing.T) {
 					t.Fatal(err)
 				}
 				test.setup(t, hookDir)
+				if noParserReadsJSONClosed(t, hookDir, tools.json) {
+					want = "closed"
+				}
 				cmd := exec.Command(bash, "-c", `. "$1/_hardening.sh"; defenseclaw_shared_runtime_fail_mode "$1" "$2"`, "test", hookDir, test.connector)
 				cmd.Env = []string{"PATH=" + tools.path, "HOME=" + t.TempDir()}
 				if test.managed {
@@ -644,6 +648,9 @@ func TestManagedSharedHookCombinesSeveralConnectorRecordsToTheStrictest(t *testi
 						}
 					}
 				}
+				if noParserReadsJSONClosed(t, hookDir, tools.json) {
+					want = "closed"
+				}
 				run := func(env ...string) (connector, mode string) {
 					t.Helper()
 					cmd := exec.Command(bash, "-c", `. "$1/_hardening.sh"; c="$(defenseclaw_shared_runtime_connector "$1")"; printf '%s|' "$c"; defenseclaw_shared_runtime_fail_mode "$1" "$c"`, "test", hookDir)
@@ -677,10 +684,8 @@ func TestManagedSharedHookCombinesSeveralConnectorRecordsToTheStrictest(t *testi
 
 // The combined managed open covers a gateway outage only, in every shared
 // inspect script. A managed host whose records are all open allows a call
-// when the gateway is unreachable or answers 5xx, but a refusal (400, 429)
-// or a 200 without a usable action blocks: the agent can force a 400 with
-// an input whose escaped body passes the gateway's limit and a 429 by
-// flooding its own hook budget. Before, the combined open allowed all four.
+// when the gateway is unreachable. Every answered error and unusable verdict
+// blocks, including 5xx: an answered error is not an outage.
 func TestManagedSharedHookOpenCoversOutagesOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
@@ -689,23 +694,33 @@ func TestManagedSharedHookOpenCoversOutagesOnly(t *testing.T) {
 		t.Skip("bash is not installed")
 	}
 	for _, reply := range []struct {
-		name   string
-		status int
-		body   string
-		want   int
+		name      string
+		status    int
+		body      string
+		truncated bool
+		want      int
 	}{
-		{"allow", http.StatusOK, `{"action":"allow"}`, 0},
-		{"HTTP 400", http.StatusBadRequest, `{"error":"request body too large"}`, 2},
-		{"HTTP 429", http.StatusTooManyRequests, `{"error":"rate limited"}`, 2},
-		{"HTTP 404", http.StatusNotFound, ``, 2},
-		{"missing action", http.StatusOK, `{}`, 2},
-		{"invalid action", http.StatusOK, `{"action":"unrecognized"}`, 2},
-		{"unparseable reply", http.StatusOK, `garbage`, 2},
-		{"HTTP 503", http.StatusServiceUnavailable, ``, 0},
-		{"gateway unreachable", 0, ``, 0},
+		{name: "allow", status: http.StatusOK, body: `{"action":"allow"}`, want: 0},
+		{name: "HTTP 400", status: http.StatusBadRequest, body: `{"error":"request body too large"}`, want: 2},
+		{name: "HTTP 401", status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, want: 2},
+		{name: "HTTP 403", status: http.StatusForbidden, body: `{"error":"forbidden"}`, want: 2},
+		{name: "HTTP 429", status: http.StatusTooManyRequests, body: `{"error":"rate limited"}`, want: 2},
+		{name: "HTTP 404", status: http.StatusNotFound, want: 2},
+		{name: "missing action", status: http.StatusOK, body: `{}`, want: 2},
+		{name: "invalid action", status: http.StatusOK, body: `{"action":"unrecognized"}`, want: 2},
+		{name: "unparseable reply", status: http.StatusOK, body: `garbage`, want: 2},
+		{name: "HTTP 500", status: http.StatusInternalServerError, want: 2},
+		{name: "HTTP 502", status: http.StatusBadGateway, want: 2},
+		{name: "HTTP 503", status: http.StatusServiceUnavailable, want: 2},
+		{name: "HTTP 400 truncated", status: http.StatusBadRequest, body: `{"error":"bad"}`, truncated: true, want: 2},
+		{name: "HTTP 503 truncated", status: http.StatusServiceUnavailable, body: `{"error":"unavailable"}`, truncated: true, want: 2},
+		{name: "gateway unreachable", want: 0},
 	} {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
+			if reply.truncated {
+				w.Header().Set("Content-Length", "128")
+			}
 			w.WriteHeader(reply.status)
 			_, _ = io.WriteString(w, reply.body)
 		}))
@@ -740,6 +755,42 @@ func TestManagedSharedHookOpenCoversOutagesOnly(t *testing.T) {
 			})
 		}
 		server.Close()
+	}
+
+	// Missing local parser is an unusable inspection path, not a gateway
+	// outage, even when the administrator opened the outage mode.
+	noParser := t.TempDir()
+	for _, entry := range []string{"bash", "curl", "mktemp", "tr", "sed", "tail", "dirname", "pwd", "readlink"} {
+		binary, err := exec.LookPath(entry)
+		if err != nil {
+			continue
+		}
+		if err := os.Symlink(binary, filepath.Join(noParser, entry)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"inspect-request.sh", "inspect-tool.sh", "inspect-response.sh", "inspect-tool-response.sh"} {
+		t.Run("missing JSON parser/"+name, func(t *testing.T) {
+			dir := t.TempDir()
+			const unusedAddr = "127.0.0.1:1"
+			if err := writeHookScriptsCommonWithOptions(dir, unusedAddr, "test-token", "open", nil, true, "codex", false); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeHookConfigSidecar(dir, unusedAddr, "claudecode", "open", true); err != nil {
+				t.Fatal(err)
+			}
+			bakeHookPathForTest(t, filepath.Join(dir, name), noParser)
+			cmd := exec.Command("bash", filepath.Join(dir, name))
+			cmd.Env = append(os.Environ(), "PATH="+noParser, "HOME="+t.TempDir(), "DEFENSECLAW_HOME="+t.TempDir(), "DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_CONNECTOR=codex")
+			cmd.Stdin = strings.NewReader(`{"tool":"Bash","input":"echo marker","content":"marker"}`)
+			output, err := cmd.CombinedOutput()
+			if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 2 {
+				t.Fatalf("missing parser did not fail closed: err=%v output=%q", err, output)
+			}
+			if !strings.Contains(string(output), "needs jq or python3") {
+				t.Fatalf("hook failed before parser check: %q", output)
+			}
+		})
 	}
 
 	// Nor does a body the hook cannot encode open it: on a host without jq,
@@ -821,4 +872,64 @@ func readerToolSets(t *testing.T) []struct {
 		}{name: "python3 only", path: bin, json: true})
 	}
 	return sets
+}
+
+// flatRecordValueForTest is one key of a well-formed connector record
+// (flatHookRecordValue), or "".
+func flatRecordValueForTest(data []byte, key string) string {
+	value, _ := flatHookRecordValue(data, key)
+	return value
+}
+
+// noParserReadsJSONClosed reports a reader without jq or python3 beside a
+// hooks/.hookcfg JSON: it cannot read the JSON, which may record a connector
+// no flat record names, so the shared hooks run closed (G-hooks-upg R2-1;
+// only Secure Client delivery keeps its flat-record reading).
+func noParserReadsJSONClosed(t *testing.T, hookDir string, parser bool) bool {
+	t.Helper()
+	if parser {
+		return false
+	}
+	_, err := os.Lstat(filepath.Join(hookDir, hookConfigSidecarName))
+	return err == nil
+}
+
+// GAP-0610: the upgrade's refresh rewrote .hookcfg.openhands of the removed
+// OpenHands connector (adding FAIL_MODE_SOURCE). A retired connector's
+// records, flat and in the shared sidecar, are left byte for byte; the live
+// connectors beside them are refreshed.
+func TestRefreshHookFailModesLeavesRetiredConnectorsUntouched(t *testing.T) {
+	hookDir := t.TempDir()
+	shared := `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","openhands":"open","omnigent":"open"}}` + "\n"
+	desktop := legacyconnector.RetiredDesktopID
+	files := map[string]string{
+		hookConfigSidecarName:                 shared,
+		hookConfigSidecarName + ".openhands":  "DEFENSECLAW_CONNECTOR=openhands\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".omnigent":   "DEFENSECLAW_CONNECTOR=omnigent\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + "." + desktop: "DEFENSECLAW_CONNECTOR=" + desktop + "\nDEFENSECLAW_FAIL_MODE=open\n",
+		hookConfigSidecarName + ".codex":      "DEFENSECLAW_CONNECTOR=codex\nDEFENSECLAW_FAIL_MODE=open\n",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(hookDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refreshed, err := RefreshHookFailModes(hookDir, func(string) string { return "closed" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(refreshed.Sidecar, []string{"codex"}) {
+		t.Fatalf("refreshed %+v, want codex only", refreshed)
+	}
+	for _, retired := range []string{"openhands", "omnigent", desktop} {
+		name := hookConfigSidecarName + "." + retired
+		if body, _ := os.ReadFile(filepath.Join(hookDir, name)); string(body) != files[name] {
+			t.Fatalf("%s rewritten: %q", name, body)
+		}
+	}
+	state := readHookConfigSidecarForTest(t, hookDir)
+	if state.FailModes["openhands"] != "open" || state.FailModes["omnigent"] != "open" ||
+		state.FailModeSources["openhands"] != "" || state.FailModeSources["omnigent"] != "" || state.FailModes["codex"] != "closed" {
+		t.Fatalf("shared sidecar after refresh: %+v", state)
+	}
 }

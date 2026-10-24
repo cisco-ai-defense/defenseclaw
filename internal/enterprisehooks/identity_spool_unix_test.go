@@ -799,9 +799,8 @@ const (
 // this account.
 //
 // r104 identity: a directory that does not answer proves nothing, so the
-// UPN goes (GAP-0384) and the account takes the unproven-identity path,
-// which selects the strictest profile that could apply, never a weaker
-// default.
+// UPN goes (GAP-0384). A request whose assignment needs it is refused,
+// naming the missing UPN; a request that does not need it uses proven facts.
 func TestIdentitySpoolKeepsAnInfoPipeUPNOnlyForTheSameAccount(t *testing.T) {
 	record := func(sid string, upn bool) IdentitySpoolRecord {
 		// One incarnation on both sides, so the SID alone decides here.

@@ -69,8 +69,8 @@ func (g *undoProofGateway) load() bool {
 // check asked nothing of the gateway, so the candidate policy stayed live
 // and the run reported a clean undo.
 func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
-	const policyPrevious = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n"
-	const policyNext = "config_version: 9\nguardrail:\n  block_at: LOW\n"
+	const policyPrevious = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_fail_mode: open\n"
+	const policyNext = "config_version: 9\nguardrail:\n  block_at: LOW\n  hook_fail_mode: open\n"
 	const startPrevious = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 500\n"
 	const startNext = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_self_heal_debounce_ms: 600\n"
 	const bundleID = "b-01JAZ3Y8Q2K7V4N6M5P0R9S8T8"
@@ -129,7 +129,11 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 				}
 				gw := &undoProofGateway{host: host, loaded: []byte(tc.previous), stuck: stuck, restartFails: tc.restartFails}
 				if tc.bundle {
-					opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{BundleID: bundleID, Version: 2}}}
+					// A staged bundle needs its signer and policy principal before
+					// this test can exercise the config publication and undo.
+					opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
+						BundleID: bundleID, Version: 2, Principal: "control-plane:acme/alice", SignerKeyID: "k1",
+					}}}
 				}
 				write := windowsEnterpriseHotConfigWrite
 				windowsEnterpriseHotConfigWrite = func(ctx context.Context, path string, raw []byte, opt configwrite.Options) error {
@@ -146,7 +150,7 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 								return err
 							}
 						}
-						return errors.New("generation write and writer restore failed after config publication")
+						return configwrite.AfterPublication(errors.New("generation write and writer restore failed after config publication"))
 					}
 					return nil
 				}
@@ -248,7 +252,7 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 					if !bytes.Equal(gw.loaded, []byte(tc.previous)) || gw.loadsOfRestore == 0 {
 						t.Fatalf("the gateway runs %q, want the restored config", gw.loaded)
 					}
-					if host.stops != 0 || opts.hotConfigRestoreFailed || windowsBundleHasCode(result.Errors, "config_restore_failed") {
+					if host.stops != 0 || host.closes != 0 || opts.hotConfigRestoreFailed || windowsBundleHasCode(result.Errors, "config_restore_failed") {
 						t.Fatalf("a proven undo: stops=%d restoreFailed=%t errors %s", host.stops, opts.hotConfigRestoreFailed, message)
 					}
 					if tc.restartsTheUndo && !opts.bundle.gatewayRestarted {
@@ -256,8 +260,8 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 					}
 					return
 				}
-				if host.stops != 1 || !opts.hotConfigRestoreFailed || !windowsBundleHasCode(result.Errors, "config_restore_failed") {
-					t.Fatalf("an unproven undo: stops=%d restoreFailed=%t errors %s", host.stops, opts.hotConfigRestoreFailed, message)
+				if host.stops != 1 || host.closes != 1 || !host.closureHeld || !opts.hotConfigRestoreFailed || !windowsBundleHasCode(result.Errors, "config_restore_failed") {
+					t.Fatalf("an unproven undo: stops=%d closes=%d held=%t restoreFailed=%t errors %s", host.stops, host.closes, host.closureHeld, opts.hotConfigRestoreFailed, message)
 				}
 				for _, want := range []string{"did not report the restored config's policy", "holds the previous config", "gateway service was stopped"} {
 					if !strings.Contains(message, want) {
@@ -266,5 +270,28 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestWindowsEnterpriseHotConfigDoesNotStopWithUnclosedHooks(t *testing.T) {
+	const previous = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  hook_fail_mode: open\n"
+	const next = "config_version: 9\nguardrail:\n  block_at: LOW\n  hook_fail_mode: open\n"
+	host, opts := newHotConfigHost(t, previous, next)
+	windowsEnterpriseHotConfigCloseHooks = func(managed.StandaloneLayout) error {
+		return errors.New("managed hook closure could not be published")
+	}
+	stub := &ensureStub{t: t}
+	stub.install(t)
+	windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) {
+		return nil, errors.New("policy digest readback unavailable")
+	}
+	result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+	applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+		&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+	if applied || host.stops != 0 || !opts.hotConfigRestoreFailed || !windowsBundleHasCode(result.Errors, "config_restore_failed") {
+		t.Fatalf("applied=%t stops=%d restoreFailed=%t errors=%+v", applied, host.stops, opts.hotConfigRestoreFailed, result.Errors)
+	}
+	if message := fmt.Sprint(result.Errors); !strings.Contains(message, "gateway service was left running because its hooks could not be durably forced closed") {
+		t.Fatalf("closure failure was not reported: %s", message)
 	}
 }

@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -271,6 +272,9 @@ type lifecycle struct {
 	osPlan *openshellPlan
 	// bundle is the signed policy bundle this run applies (nil for none).
 	bundle *bundleRun
+	// currentBundleGeneration attributes a plain ensure or repeat that
+	// applies the current confirmed bundle's config.
+	currentBundleGeneration *configwrite.Options
 	// confirmedLate are the manifest SHA-256s of the bundles this run's
 	// settle confirmed late (bundle_confirmed_after_interrupt).
 	confirmedLate map[string]bool
@@ -345,6 +349,7 @@ type plannedInputs struct {
 // ExitCode is set.
 func Run(ctx context.Context, env *Env, opts Options) *enterprisestatus.Result {
 	env.fillDefaults()
+	env.agentDigest = "" // set by this run's plan, if it plans
 	if env.Yield != nil {
 		env.Yield()
 	}
@@ -575,7 +580,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			r.AddError(codeAlreadyInstalled, "DefenseClaw enterprise is already installed; use upgrade, repair or ensure")
 			return 0
 		}
-		return l.settleInputChanges(ctx, l.freshInstall(ctx))
+		return l.requireProtectedTargets(l.settleInputChanges(ctx, l.freshInstall(ctx)))
 	case ActionUpgrade:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
@@ -585,7 +590,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			r.AddError(codeInvalidArguments, "upgrade needs --payload or --from-package")
 			return enterprisestatus.InvalidArgsExitCode(env.GOOS)
 		}
-		return l.settleInputChanges(ctx, l.apply(ctx, record))
+		return l.requireProtectedTargets(l.settleInputChanges(ctx, l.apply(ctx, record)))
 	case ActionRepair:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed; use install or ensure")
@@ -596,15 +601,15 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		l.restoreTamperedHookBinary(ctx, record)
 		code := l.settleInputChanges(ctx, l.apply(ctx, record))
 		l.summarizeRepair()
-		return code
+		return l.requireProtectedTargets(code)
 	case ActionEnsure:
 		if record == nil {
-			return l.settleInputChanges(ctx, l.freshInstall(ctx))
+			return l.requireProtectedTargets(l.settleInputChanges(ctx, l.freshInstall(ctx)))
 		}
 		if l.opts.Bundle != "" {
-			return l.applyBundle(ctx, record)
+			return l.requireProtectedTargets(l.applyBundle(ctx, record))
 		}
-		return l.ensureInstalled(ctx, record, l.apply)
+		return l.requireProtectedTargets(l.ensureInstalled(ctx, record, l.apply))
 	case ActionReconcile:
 		if record == nil {
 			r.AddError(codeNotInstalled, "DefenseClaw enterprise is not installed")
@@ -1385,6 +1390,9 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 	if err := env.checkCandidateAssets(validated); err != nil {
 		return nil, &codedError{code: codeConfig, err: err}
 	}
+	if err := env.checkRequiredSandboxPacks(validated.Loaded); err != nil {
+		return nil, &codedError{code: codeConfig, err: err}
+	}
 	p.configFromInstalled = fromInstalled
 	p.configWritable = writable
 	p.config = validated
@@ -1471,11 +1479,11 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 		}
 	}
 	// Files the previous deployment wrote that this one no longer does.
+	want := map[string]bool{}
+	for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
+		want[file.Path] = true
+	}
 	if record != nil {
-		want := map[string]bool{}
-		for _, file := range append(append([]desiredFile{}, p.files...), p.binaries...) {
-			want[file.Path] = true
-		}
 		for path := range record.Files {
 			if !want[path] {
 				if p.channel == ChannelPackage && env.packageOwns(path) {
@@ -1484,8 +1492,17 @@ func (l *lifecycle) buildPlan(ctx context.Context, record *Deployment, account A
 				p.stale = append(p.stale, path)
 			}
 		}
-		sort.Strings(p.stale)
 	}
+	if env.GOOS == "darwin" {
+		// The LaunchAgents of an earlier label, also the ones a package put
+		// there that no record names.
+		for _, path := range env.strayLaunchAgents(want) {
+			if !slices.Contains(p.stale, path) {
+				p.stale = append(p.stale, path)
+			}
+		}
+	}
+	sort.Strings(p.stale)
 	return p, nil
 }
 
@@ -1756,6 +1773,9 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	}
 	if err != nil {
 		code := errorCode(err, codeApply)
+		// A plan that failed before commit must never supply prerequisite
+		// settings to describe; the prior applied record remains in force.
+		l.osPlan = nil
 		if committedConfig == nil && code == codeConfig {
 			// An edit written after the check above, while this run planned
 			// (a standard user writing a config.yaml whose mode was just
@@ -2042,7 +2062,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 		return failAndRollback(errorCode(err, codeMachinePolicy), err)
 	}
 	restartSockets := socketsToRestart(env, units, record, p, changed)
-	if err := env.initialManifest(account); err != nil {
+	if err := env.initialManifest(); err != nil {
 		return failAndRollback(codeApply, err)
 	}
 	if l.opts.Action == ActionRepair {
@@ -2078,7 +2098,7 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 	l.generationExposed = true
 	activationStarted := env.Now()
 	if !l.opts.NoStart {
-		if err := l.activate(ctx, units, restartSockets, hot); err != nil {
+		if err := l.activate(ctx, units, restartSockets, hot, p); err != nil {
 			// A readiness failure on the API port already names the holder.
 			if named := (*apiPortHeldError)(nil); !errors.As(err, &named) {
 				if held := l.portHeldProblem(ctx, account.UID, false); held != "" {
@@ -2337,16 +2357,19 @@ func (l *lifecycle) applyDirs(p *plan) ([]string, error) {
 func (l *lifecycle) applyFilesRecorded(ctx context.Context, p *plan, account Account) (map[string]bool, error) {
 	env := l.env
 	configPath := env.P(env.Layout.ConfigPath)
+	writeOptions := l.configWriteOptions()
 	var changed map[string]bool
-	_, err := configwrite.Locked(ctx, configPath, l.configWriteOptions(), func() (bool, error) {
+	_, err := configwrite.Locked(ctx, configPath, writeOptions, func() (bool, error) {
 		var err error
 		if changed, err = l.applyFiles(p); err != nil {
 			return false, err
 		}
 		state, stateErr := configwrite.ReadGenerationState(configPath)
-		// A bundle whose config is already installed is still recorded as
-		// the generation its principal installed.
-		bundleUnrecorded := l.bundle != nil && (state.BundleID != l.bundle.receipt.BundleID || state.BundleVersion != l.bundle.receipt.Version)
+		// Equal bytes still need a generation naming the current signed
+		// bundle. This also repairs records left by older lifecycle builds.
+		bundleUnrecorded := writeOptions.Bundle.ID != "" &&
+			(state.BundleID != writeOptions.Bundle.ID || state.BundleVersion != writeOptions.Bundle.Version ||
+				state.SignerKeyID != writeOptions.Bundle.SignerKeyID || state.Actor != writeOptions.Actor)
 		return changed[env.Layout.ConfigPath] || stateErr != nil || state.ConfigSHA256 != p.config.SHA || bundleUnrecorded || l.policyAssetsEdited, nil
 	})
 	if err != nil {
@@ -2534,12 +2557,12 @@ func (e *Env) fixMetadata(path string, mode os.FileMode, owner fileOwner) error 
 // initialManifest seeds an empty guardian manifest so the guardian and the
 // sensor helper start before the enumerator has published its first rows.
 // An existing manifest (enumerator- or administrator-written) is kept.
-func (e *Env) initialManifest(account Account) error {
+func (e *Env) initialManifest() error {
 	path := e.P(e.Layout.ManifestPath)
 	if exists(path) {
 		return nil
 	}
-	return e.writeFileAtomic(path, []byte("version: 1\ntargets: []\n"), 0o640, fileOwner{UID: 0, GID: account.GID})
+	return e.writeFileAtomic(path, []byte("version: 1\ntargets: []\n"), 0o640, rootOwner())
 }
 
 // packageUnitDir is where the Linux package installs its units.
@@ -2599,7 +2622,7 @@ func socketsToRestart(env *Env, units []Unit, record *Deployment, p *plan, chang
 // restarted in one service-manager job, so the port is unbound only for
 // the moment the listener is replaced. With hot, a gateway that kept running
 // is not started again: it is waited for until it has applied the config.
-func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool, hot bool) error {
+func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets map[string]bool, hot bool, p *plan) error {
 	env := l.env
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage < ordered[j].Stage })
@@ -2650,6 +2673,25 @@ func (l *lifecycle) activate(ctx context.Context, units []Unit, restartSockets m
 		if hot && unit.Kind == "gateway" && env.Services.Active(ctx, unit) {
 			if err := l.settleHotGateway(ctx, unit); err != nil {
 				return err
+			}
+			continue
+		}
+		if env.GOOS == "linux" && unit.Kind == "sensor_helper" {
+			previous, _ := env.sensorState()
+			// A stop during an RPM handoff can leave the old helper active.
+			// systemctl start then succeeds without applying the new drop-in.
+			if env.Services.Active(ctx, unit) {
+				if err := restartUnit(ctx, env.Services, unit); err != nil {
+					return &unitActivationError{unit: unit, err: fmt.Errorf("restart %s: %w", unit.Name, err)}
+				}
+			} else if err := env.Services.Start(ctx, unit); err != nil {
+				return &unitActivationError{unit: unit, err: fmt.Errorf("start %s: %w", unit.Name, err)}
+			}
+			if previous.Intent.Mode != "" && string(previous.Intent.Mode) != p.config.Tetragon.helperMode() {
+				if err := l.waitHelperMode(ctx, unit, p.config.Tetragon.helperMode(), previous); err != nil {
+					return &unitActivationError{unit: unit, err: err}
+				}
+				l.helperModeRestart = true
 			}
 			continue
 		}
@@ -2915,19 +2957,9 @@ func (l *lifecycle) recordRestoredGeneration(ctx context.Context) error {
 			if err != nil || !bytes.Equal(restored, raw) {
 				return fmt.Errorf("restored config does not match confirmed bundle %s version %d: %v", ref.BundleID, ref.Version, err)
 			}
-			receipts, err := env.bundleStore().Receipts()
+			opt, err = currentBundleGenerationOptions(env.bundleStore(), ref)
 			if err != nil {
-				return fmt.Errorf("read confirmed bundle receipt: %w", err)
-			}
-			found := false
-			for _, rc := range receipts {
-				if rc.State == enterprisebundle.StateConfirmed && rc.BundleID == ref.BundleID && rc.Version == ref.Version && rc.ManifestSHA256 == ref.ManifestSHA256 {
-					opt, found = enterprisebundle.GenerationOptions(rc)
-					break
-				}
-			}
-			if !found {
-				return fmt.Errorf("no confirmed receipt can attribute bundle %s version %d", ref.BundleID, ref.Version)
+				return fmt.Errorf("read confirmed bundle attribution: %w", err)
 			}
 		}
 	}
@@ -3176,8 +3208,8 @@ func (l *lifecycle) policyAssetsChanged(ctx context.Context, record *Deployment,
 	if reported == "" || reloadError != "" {
 		return false
 	}
-	digest, generation, ok := l.computePolicy(ctx)
-	if !ok {
+	digest, generation, err := l.computePolicy(ctx)
+	if err != nil {
 		// A policy that does not build is no change ensure applies: the
 		// running gateway keeps the policy it loaded, and the run fails
 		// with the reason instead of restarting into a policy that does not
@@ -3270,10 +3302,10 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 			return 0
 		}
 	}
-	if !l.opts.Purge {
-		// Read before the machine state, and the accounts record with it, go.
-		l.keptPerUser, l.keptKnown = env.perUserLeftovers()
-	}
+	// Read before the machine state, and the accounts record with it, go.
+	// A Unix purge also needs this snapshot to report enrolled OSS data that
+	// the per-user worker leaves untouched (GAP-0727).
+	l.keptPerUser, l.keptKnown = env.perUserLeftovers()
 	ordered := append([]Unit{}, units...)
 	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].Stage > ordered[j].Stage })
 	// stopUnits stops a group of units and returns the ones still running.
@@ -3379,6 +3411,9 @@ func (l *lifecycle) uninstall(ctx context.Context, record *Deployment) int {
 		l.purgeSessionFactsCaches(cacheAccounts)
 	} else if record == nil && l.opts.Purge {
 		l.warnUnpurgedPerUser(ctx)
+	}
+	if l.opts.Purge {
+		l.reportRetainedEnrolledUserData()
 	}
 	// The sandbox subsystem goes before the binaries it runs: a non-purge
 	// uninstall stops and keeps each account's sandboxes, then its daemon
@@ -3911,7 +3946,7 @@ func (l *lifecycle) recordPackageResult(failure int) {
 	}
 	path := filepath.Join(env.P(env.Layout.LifecycleDir), lastPackageResultFile)
 	if err := env.writeFileAtomic(path, append(data, '\n'), 0o600, rootOwner()); err != nil {
-		l.result.AddWarning(codeState, "could not record this run in "+filepath.Join(env.Layout.LifecycleDir, lastPackageResultFile)+": "+err.Error())
+		l.result.AddWarning(stateWriteCode(err, codeState), "could not record this run in "+filepath.Join(env.Layout.LifecycleDir, lastPackageResultFile)+": "+err.Error())
 	}
 }
 

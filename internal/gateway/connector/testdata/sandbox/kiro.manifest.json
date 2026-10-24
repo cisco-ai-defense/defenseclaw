@@ -34,8 +34,8 @@
     "/usr/local/lib/defenseclaw/hooks/_hardening.sh": {
       "mode": "-rw-r--r--",
       "owner": "root",
-      "size": 105533,
-      "sha256": "0ab9c68f73fa2816455428a5fe434883c3ce6f7b3378cff5f763fae7139a8837"
+      "size": 121547,
+      "sha256": "20815799cb73318c3f25d9e608bab230062505a95751a46e2eafb3fa499eb5e0"
     },
     "/usr/local/lib/defenseclaw/hooks/_sandbox.sh": {
       "mode": "-rw-r--r--",
@@ -70,8 +70,8 @@
     "/usr/local/lib/defenseclaw/hooks/kiro-hook.sh": {
       "mode": "-rwxr-xr-x",
       "owner": "root",
-      "size": 8218,
-      "sha256": "858a83adaea37f97f975b7bd43308e8e02e8fcc4a39630c1e00b7145d6c52fde"
+      "size": 8219,
+      "sha256": "93bbce4de4140b3fc0a465b972e02e17f1a677b3d0d8d234030f2cd637576b47"
     },
     "/usr/local/lib/defenseclaw/kiro/defenseclaw.json": {
       "mode": "-rw-r--r--",

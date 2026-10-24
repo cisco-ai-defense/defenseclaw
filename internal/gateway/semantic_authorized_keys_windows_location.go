@@ -22,6 +22,9 @@ func trustedWindowsLocationAuthorizedKeysWrite(input actionfacts.Input) bool {
 		!windowsLocationAbsolute(input.ActiveHome) || !windowsLocationAbsolute(input.CWD) {
 		return false
 	}
+	if hookpaths.ActionCommandDecision(input.Command, input.CWD, input.ActiveHome) != "" {
+		return true
+	}
 	return trustedWindowsPOSIXLocationWrite(input) ||
 		trustedWindowsNativeLocationWrite(input, actionfacts.DialectPowerShell) ||
 		trustedWindowsNativeLocationWrite(input, actionfacts.DialectCMD) ||
@@ -329,7 +332,9 @@ func windowsLocationSegments(command string) ([][]windowsLocationToken, bool) {
 			} else {
 				tokens = append(tokens, windowsLocationToken{text: ">"})
 			}
-		case '<', '\r', '\n', '`':
+		case '\r', '\n':
+			finish()
+		case '<', '`':
 			return nil, false
 		default:
 			word.WriteByte(c)
@@ -411,18 +416,46 @@ func windowsLocationWriteTarget(tokens []windowsLocationToken, dialect actionfac
 }
 
 func trustedWindowsNativeLocationWrite(input actionfacts.Input, dialect actionfacts.Dialect) bool {
-	if input.DialectHint != dialect {
+	if input.DialectHint != dialect &&
+		(dialect != actionfacts.DialectPowerShell || input.DialectHint != "") {
 		return false
 	}
 	segments, ok := windowsLocationSegments(input.Command)
-	if !ok || len(segments) < 2 {
+	if !ok {
 		return false
 	}
 	current := windowsLocationCanonical(input.CWD)
+	variables := make(map[string]string)
 	var stack []string
 	changed := false
 	for _, tokens := range segments {
 		program := strings.ToLower(tokens[0].text)
+		if dialect == actionfacts.DialectPowerShell && len(tokens) >= 3 &&
+			strings.HasPrefix(program, "$") && tokens[1].text == "=" {
+			name := strings.ToLower(tokens[0].text)
+			delete(variables, name)
+			if len(tokens) == 5 && strings.EqualFold(tokens[2].text, "Join-Path") {
+				base := tokens[3].text
+				if resolved, ok := variables[strings.ToLower(base)]; ok {
+					base = resolved
+				}
+				if root, ok := windowsLocationResolve(base, current, input, dialect); ok &&
+					!strings.ContainsAny(tokens[4].text, "$%*?[]") {
+					if joined, ok := windowsLocationResolve(tokens[4].text, root, input, dialect); ok {
+						variables[name] = joined
+					}
+				}
+			} else if len(tokens) == 3 {
+				value := tokens[2].text
+				if resolved, ok := variables[strings.ToLower(value)]; ok {
+					value = resolved
+				}
+				if resolved, ok := windowsLocationResolve(value, current, input, dialect); ok {
+					variables[name] = resolved
+				}
+			}
+			continue
+		}
 		switch program {
 		case "cd", "set-location", "push-location", "pushd", "pop-location", "popd":
 			if dialect == actionfacts.DialectCMD &&
@@ -451,12 +484,22 @@ func trustedWindowsNativeLocationWrite(input actionfacts.Input, dialect actionfa
 			current, changed = next, true
 			continue
 		}
-		if !changed {
-			continue
-		}
 		target, ok := windowsLocationWriteTarget(tokens, dialect)
 		if !ok {
 			continue
+		}
+		if !changed && dialect == actionfacts.DialectCMD {
+			continue
+		}
+		if dialect == actionfacts.DialectPowerShell && strings.HasPrefix(target, "$") {
+			if resolved, ok := variables[strings.ToLower(target)]; ok {
+				target = resolved
+			} else if _, builtIn := windowsLocationResolve(target, current, input, dialect); !builtIn {
+				// A computed destination without a bounded assignment can name
+				// the protected file. The data and other command operands do not
+				// participate in this decision.
+				return true
+			}
 		}
 		resolved, ok := windowsLocationResolve(target, current, input, dialect)
 		if ok && windowsLocationAuthorizedKeys(resolved, input) {

@@ -49,13 +49,11 @@ func TestShellExtraArgumentKeysWindowsDialect(t *testing.T) {
 				t.Fatalf("%s: no verdict", command)
 			}
 			blocked := verdict.Action == guardrailActionBlock && verdictHasFinding(verdict, "persistence.ssh_authorized_keys_command")
-			if inferred && !blocked {
-				t.Errorf("%s with an extra key: verdict %s %v, want block with the authorized-keys finding", command, verdict.Action, verdict.Findings)
-			}
-			if !inferred && blocked {
-				// Without an inferred hint (Claude Code, Linux and macOS
-				// hosts) the command keeps the dialect it came with.
-				t.Errorf("%s with no inferred hint: verdict %s %v; want the call's own dialect", command, verdict.Action, verdict.Findings)
+			if !blocked {
+				// A missing hint leaves a file effect whose destination
+				// cannot be proved ordinary. The protected-write class rule
+				// closes that route as well as the inferred PowerShell route.
+				t.Errorf("%s with an extra key (inferred=%v): verdict %s %v, want block", command, inferred, verdict.Action, verdict.Findings)
 			}
 		}
 	}
