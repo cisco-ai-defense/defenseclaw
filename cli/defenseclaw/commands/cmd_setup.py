@@ -18139,6 +18139,7 @@ def _apply_v8_observability_preset(
     signals: tuple[str, ...] | None = None,
     secret_value: str | None = None,
     local_stack: dict[str, str] | None = None,
+    legacy_local_destination: tuple[dict[str, Any], str] | None = None,
     allow_private_networks: bool = False,
 ) -> str:
     """Write one setup alias through the canonical v8 destination writer.
@@ -18170,6 +18171,7 @@ def _apply_v8_observability_preset(
         dry_run=False,
         allow_private_networks=allow_private_networks,
         local_stack=local_stack,
+        legacy_local_destination=legacy_local_destination,
     )
     return resolved_name
 
@@ -18250,10 +18252,14 @@ def _apply_logs_config(
         )
         return
 
-    # Refuse a destination local setup did not record before the stack is
-    # refreshed, restarted or started. The name comes from the address the
-    # bridge will report, which a custom bridge env file can change.
-    _local_splunk_sink_name_or_exit(app, local_splunk_destination_name(_planned_local_splunk_hec_url(app.cfg.data_dir)))
+    # Prove an unrecorded legacy sink belongs to this exact bridge before the
+    # stack is refreshed or stopped. A matching name or loopback URL alone is
+    # also possible for a remote destination reached through a tunnel.
+    preferred = local_splunk_destination_name(_planned_local_splunk_hec_url(app.cfg.data_dir))
+    legacy_local_destination = _verified_legacy_local_splunk_destination(
+        app.cfg.data_dir, preferred, native_windows=False, gateway_token_env=gateway_token_env,
+    )
+    _local_splunk_sink_name_or_exit(app, preferred, legacy_local_destination=legacy_local_destination)
     contract = _bootstrap_bridge(
         app.cfg.data_dir,
         gateway_token_env=gateway_token_env,
@@ -18290,9 +18296,12 @@ def _apply_logs_config(
             "sourcetype": sourcetype,
             "verify_tls": "false",
         },
-        name=_local_splunk_sink_name_or_exit(app, local_splunk_destination_name(hec_url)),
+        name=_local_splunk_sink_name_or_exit(
+            app, local_splunk_destination_name(hec_url), legacy_local_destination=legacy_local_destination,
+        ),
         secret_value=hec_token or None,
         local_stack=record,
+        legacy_local_destination=legacy_local_destination,
         # The local Splunk container listens on this computer.
         allow_private_networks=True,
     )
@@ -18312,15 +18321,107 @@ def _planned_local_splunk_hec_url(data_dir: str) -> str:
     return entries.get("DEFENSECLAW_HEC_URL") or _SPLUNK_BRIDGE_DEFAULT_HEC_URL
 
 
-def _local_splunk_sink_name_or_exit(app: AppContext, preferred: str) -> str:
+def _local_splunk_sink_name_or_exit(
+    app: AppContext, preferred: str, *, legacy_local_destination: tuple[dict[str, Any], str] | None = None,
+) -> str:
     """The destination local setup writes; refuse one it did not record."""
 
     from defenseclaw.commands.cmd_setup_observability import _local_splunk_sink_name, _v8_authored_destinations
 
     try:
-        return _local_splunk_sink_name(_v8_authored_destinations(app.cfg.data_dir), preferred)
+        return _local_splunk_sink_name(
+            _v8_authored_destinations(app.cfg.data_dir), preferred,
+            legacy_local_destination=legacy_local_destination[0] if legacy_local_destination else None,
+        )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _verified_legacy_local_splunk_destination(
+    data_dir: str, preferred: str, *, native_windows: bool, gateway_token_env: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Identify a pre-record sink only with its bridge contract and exact Docker ownership."""
+    from defenseclaw.commands.cmd_setup_observability import _stored_secret, _v8_authored_destination_snapshot
+    from defenseclaw.observability.local_splunk import COMPOSE_PROJECT, LOCAL_TOKEN_ENV
+    from defenseclaw.observability.local_stack import CommandRunner, LocalStackError
+    from defenseclaw.observability.v8_config import load_masked_v8_with_source
+    from defenseclaw.observability.v8_presets import is_recorded_local_splunk
+
+    authored, source_sha256 = _v8_authored_destination_snapshot(data_dir)
+    masked_existing = next((item for item in authored if item.get("name") == preferred), None)
+    if masked_existing is None:
+        return None
+    source_bytes = config_path_for_data_dir(data_dir).read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != source_sha256:
+        return None
+    _, source = load_masked_v8_with_source(source_bytes)
+    destinations = source.get("observability", {}).get("destinations", [])
+    existing = next((item for item in destinations if isinstance(item, dict) and item.get("name") == preferred), None)
+    expected_ref = LOCAL_TOKEN_ENV if native_windows else "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+    if (
+        existing is None or is_recorded_local_splunk(existing) or "local_stack" in existing
+        or existing.get("kind") != "splunk_hec" or existing.get("token_env") != expected_ref
+    ):
+        return None
+    stack_dir = Path(data_dir) / "splunk-bridge"
+    bin_dir = stack_dir / "bin"
+    compose_dir = stack_dir / "compose"
+    env_dir = stack_dir / "env"
+    bridge = bin_dir / "splunk-claw-bridge"
+    compose = compose_dir / "docker-compose.local.yml"
+    env_file = env_dir / ".env"
+    try:
+        for path in (stack_dir, bin_dir, compose_dir, env_dir, bridge, compose, env_file):
+            reject_symlink(path, what="local Splunk bridge ownership path")
+            if not path.exists():
+                return None
+        if not all(path.is_dir() for path in (stack_dir, bin_dir, compose_dir, env_dir)):
+            return None
+        if not all(path.is_file() for path in (bridge, compose, env_file)):
+            return None
+        contract = _load_dotenv(str(env_file))
+        credential = _stored_secret(data_dir, expected_ref)
+        if (
+            not credential or contract.get("DEFENSECLAW_HEC_TOKEN") != credential
+            or existing.get("endpoint") != contract.get("DEFENSECLAW_HEC_URL")
+        ):
+            return None
+        docker = shutil.which("docker")
+        if not docker:
+            return None
+        runner = CommandRunner()
+        environment = _splunk_bridge_child_env(gateway_token_env, platform_name="nt" if native_windows else None)
+        listed = runner.run(
+            [docker, "ps", "--all", "--no-trunc", "--filter", f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+             "--filter", "label=com.docker.compose.service=splunk", "--format", "{{.ID}}"],
+            timeout=10, env=environment,
+        )
+        ids = listed.stdout.splitlines() if listed.returncode == 0 else []
+        if len(ids) != 1 or not re.fullmatch(r"[0-9a-f]{64}", ids[0]):
+            return None
+        inspected = runner.run(
+            [docker, "inspect", "--format", "{{json .Config.Labels}}", ids[0]],
+            timeout=8, env=environment,
+        )
+        labels = _json.loads(inspected.stdout) if inspected.returncode == 0 else None
+        if not isinstance(labels, dict):
+            return None
+        def same_path(raw: str, expected: Path) -> bool:
+            return os.path.normcase(os.path.abspath(raw)) == os.path.normcase(os.path.abspath(expected))
+        config_files = str(labels.get("com.docker.compose.project.config_files", ""))
+        if (
+            labels.get("com.docker.compose.project") != COMPOSE_PROJECT
+            or labels.get("com.docker.compose.service") != "splunk"
+            or not same_path(
+                str(labels.get("com.docker.compose.project.working_dir", "")),
+                stack_dir if native_windows else compose_dir,
+            )
+            or not any(same_path(item.strip(), compose) for item in config_files.split(",") if item.strip())
+        ):
+            return None
+    except (OSError, ValueError, LocalStackError):
+        return None
+    return masked_existing, source_sha256
 
 
 def _local_splunk_container_id(gateway_token_env: str) -> str:
@@ -18383,7 +18484,13 @@ def _apply_native_windows_logs_config(
     contract = None
     config_mutated = False
     # Refuse a destination local setup did not record before the stack starts.
-    sink_name = _local_splunk_sink_name_or_exit(app, NATIVE_LOCAL_SPLUNK_DESTINATION)
+    legacy_local_destination = _verified_legacy_local_splunk_destination(
+        app.cfg.data_dir, NATIVE_LOCAL_SPLUNK_DESTINATION,
+        native_windows=True, gateway_token_env=gateway_token_env,
+    )
+    sink_name = _local_splunk_sink_name_or_exit(
+        app, NATIVE_LOCAL_SPLUNK_DESTINATION, legacy_local_destination=legacy_local_destination,
+    )
     click.echo("  Pre-flight checks:")
     try:
         transaction = start_native_local_splunk(
@@ -18426,6 +18533,7 @@ def _apply_native_windows_logs_config(
             name=sink_name,
             secret_value=contract.hec_token,
             local_stack=record,
+            legacy_local_destination=legacy_local_destination,
             allow_private_networks=True,
         )
         _reload_cfg_from_data_dir(app)
@@ -18666,33 +18774,46 @@ def _splunk_bridge_child_env(
     return child_env
 
 
+def _preflight_splunk_bridge_image(
+    env_file: str,
+    child_env: dict[str, str],
+    *,
+    image_override: str | None = None,
+) -> None:
+    """Resolve an image before changing the private env or running Compose stack."""
+    preflight = str(bundled_splunk_bridge_dir() / "bin" / "splunk-claw-bridge")
+    preflight_args = [preflight, "preflight-image", "--env-file", env_file]
+    if image_override:
+        preflight_args.extend(["--image", image_override])
+    try:
+        preflight_kwargs = {
+            "capture_output": True, "text": True, "timeout": 10800, "check": False,
+            "env": child_env,
+        }
+        if click.get_text_stream("stderr").isatty():
+            # A registry download may take hours; show daemon progress.
+            preflight_kwargs.pop("capture_output")
+            preflight_kwargs.update(stdout=subprocess.PIPE, stderr=None)
+        checked = subprocess.run(preflight_args, **preflight_kwargs)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise click.ClickException(
+            f"Local Splunk image preflight failed; local stack was left untouched: {exc}"
+        ) from exc
+    if checked.returncode != 0:
+        _echo_bridge_output_tail(checked)
+        raise click.ClickException("Local Splunk image is unavailable; local stack was left untouched")
+
+
 def _refresh_and_maybe_restart_splunk_bridge(
     data_dir: str,
     *,
     env_file: str | None = None,
     child_env: dict[str, str] | None = None,
     gateway_token_env: str = "",
+    image_override: str | None = None,
+    image_preflighted: bool = False,
 ) -> RefreshResult:
-    """Refresh the seeded Splunk bridge, stopping any running stack first.
-
-    Sequence (all best-effort — refresh failures don't abort the parent
-    setup flow because the operator can still run with a stale bundle):
-
-    1. Detect a running ``defenseclaw-splunk-local`` compose project.
-    2. If running and a bridge binary exists, invoke ``bridge down``
-       to release the compose project (named volumes survive, so user
-       data is preserved across the bounce).
-    3. Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundle. The
-       refresh preserves operator secrets (``env/.env``) and the
-       generated app tarball (``splunk/build/``).
-    4. The caller then runs ``bridge up`` so the freshly refreshed
-       bundle (compose, bin, s3_exporter Dockerfile, app source) is
-       what materializes the next stack.
-
-    Surface every step inline so an operator sees exactly what
-    happened and never has to wonder why a previously-running stack
-    came back up on a different image.
-    """
+    """Resolve the image before stopping a running stack, then refresh its bundle."""
     effective_child_env = _splunk_bridge_child_env(
         gateway_token_env,
         environment=child_env,
@@ -18703,6 +18824,12 @@ def _refresh_and_maybe_restart_splunk_bridge(
     )
     stopped = False
     if was_running:
+        if not image_preflighted:
+            _preflight_splunk_bridge_image(
+                env_file or os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL),
+                effective_child_env,
+                image_override=image_override,
+            )
         ux.echo(f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle...")
         bridge = _resolve_bridge_bin(data_dir)
         if bridge:
@@ -18772,12 +18899,17 @@ def _bootstrap_bridge(
     """
     env = _splunk_bridge_child_env(gateway_token_env)
     env_file = _ensure_private_splunk_bridge_env(data_dir)
+    replacement_image = _replacement_splunk_image(env_file)
+    if replacement_image:
+        _preflight_splunk_bridge_image(env_file, env, image_override=replacement_image)
     if refresh_bundle:
         _refresh_and_maybe_restart_splunk_bridge(
             data_dir,
             env_file=env_file,
             child_env=env,
             gateway_token_env=gateway_token_env,
+            image_override=replacement_image,
+            image_preflighted=bool(replacement_image),
         )
     _migrate_retired_splunk_image(env_file)
 
@@ -18908,17 +19040,26 @@ def _ensure_private_splunk_bridge_env(data_dir: str) -> str:
 
 def _migrate_retired_splunk_image(env_file: str) -> None:
     """Upgrade 0.8.10 and 1.0.0-1.0.3 private envs; remove after the 1.0.x bridge."""
+    image = _replacement_splunk_image(env_file)
+    if image is None:
+        return
+    entries = _load_dotenv(env_file)
+    entries["SPLUNK_IMAGE"] = image
+    _write_dotenv(env_file, entries)
+
+
+def _replacement_splunk_image(env_file: str) -> str | None:
+    """Find the retired image's replacement without changing the private env."""
     from defenseclaw.observability.local_splunk import RETIRED_SPLUNK_IMAGE
 
     entries = _load_dotenv(env_file)
     if entries.get("SPLUNK_IMAGE") != RETIRED_SPLUNK_IMAGE:
-        return
+        return None
     current_template = _load_dotenv(str(bundled_splunk_bridge_dir() / "env" / ".env.example"))
     image = current_template.get("SPLUNK_IMAGE", "")
     if not image or image == RETIRED_SPLUNK_IMAGE:
         raise click.ClickException("Bundled Splunk image reference is unavailable")
-    entries["SPLUNK_IMAGE"] = image
-    _write_dotenv(env_file, entries)
+    return image
 
 
 def _load_splunk_bridge_example_env(data_dir: str) -> dict[str, str]:
