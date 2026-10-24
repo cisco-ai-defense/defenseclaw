@@ -200,10 +200,16 @@ func TestInstructionProtectionPOSIXCaseRequiresExactInstructionName(t *testing.T
 	}
 }
 
+// A case alias on a case-insensitive volume is the instruction file: the
+// project CLAUDE.md Claude Code reads at every start, and a SOUL.md the
+// session loaded.
 func TestInstructionProtectionCaseInsensitivePOSIXAlias(t *testing.T) {
-	for _, tc := range []struct{ canonical, alias, rule string }{
-		{"CLAUDE.md", "claude.md", "COG-CLAUDE-MD"},
-		{"openclaw.json", "openclaw.JSON", "COG-OPENCLAW-JSON"},
+	for _, tc := range []struct {
+		canonical, alias, rule string
+		loaded                 bool
+	}{
+		{"CLAUDE.md", "claude.md", "COG-CLAUDE-MD", false},
+		{"SOUL.md", "soul.MD", "COG-SOUL", true},
 	} {
 		t.Run(tc.canonical, func(t *testing.T) {
 			root := t.TempDir()
@@ -221,7 +227,13 @@ func TestInstructionProtectionCaseInsensitivePOSIXAlias(t *testing.T) {
 			ctx := withAuthenticatedHookConnector(
 				instructionResolvedWriteContext(t, root, "Bash", input), "claudecode",
 			)
-			response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
+			api := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH")
+			if tc.loaded {
+				api.evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), claudeCodeHookRequest{
+					HookEventName: "InstructionsLoaded", SessionID: "case-alias", FilePath: canonical,
+				})
+			}
+			response := api.evaluateClaudeCodeHook(
 				ctx, claudeCodeHookRequest{
 					HookEventName: "PreToolUse", SessionID: "case-alias", CWD: root,
 					ToolName: "Bash", ToolInput: input,
