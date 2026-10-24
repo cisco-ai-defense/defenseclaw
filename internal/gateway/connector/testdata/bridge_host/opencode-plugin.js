@@ -69,11 +69,6 @@ const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST = "1";
-// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
-// in the default and permissive policy tiers lets a tool call run with a
-// warning and a hook-failures.jsonl row while this account's gateway is not
-// running; "closed" (strict) blocks it. Every other failure blocks.
-const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
@@ -846,15 +841,14 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
   }
 }
 
-// defenseclawPerUserOutageOpen reports a per-user tool check that may run
+// defenseclaw-call-time-outage-v1: defenseclawPerUserOutageOpen reports a per-user tool check that may run
 // unchecked: the native helper exited 7 (hookexec.PerUserPostOutageExit:
 // this account's gateway refused or dropped the connection before any
-// status), the outage mode is open, strict availability is off, no
-// install holds the data directory and the config on disk still gives the
-// open outage mode. An answer the gateway gave, an unverified listener and
+// status), strict availability is off, no install holds the data directory,
+// and the config on disk gives the open outage mode. An answer the gateway gave, an unverified listener and
 // every other error keep the call blocked.
 async function defenseclawPerUserOutageOpen(err) {
-  if (DC_OUTAGE_FAIL_MODE !== "open" || !err || err.status !== 7) return false;
+  if (!err || err.status !== 7) return false;
   if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;
   return !(await defenseclawInstallWindow()) && defenseclawConfigOutageOpen();
 }
@@ -862,10 +856,8 @@ async function defenseclawPerUserOutageOpen(err) {
 // defenseclawConfigOutageOpen asks the per-user helper (`hook-outage-mode`,
 // which only reads the config.yaml of this plugin's data directory, never one
 // the agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for OpenCode's
-// outage mode now. The mode
-// baked above is the one of the last render, and a rule-pack change since
-// (strict selected while the gateway is stopped) has not reached it. A
-// helper that cannot run or answers anything but "open" keeps it closed.
+// outage mode now. A helper that cannot run or answers anything but "open"
+// keeps it closed.
 function defenseclawConfigOutageOpen() {
   try {
     const output = execFileSync(defenseclawPerUserNativePostBinary(), ["hook-outage-mode", "--connector", "opencode", "--hook-dir", dirname(DC_TOKEN_FILE)], {

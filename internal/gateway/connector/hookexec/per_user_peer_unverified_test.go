@@ -103,7 +103,6 @@ func TestPerUserNativeHookBlocksAnUnverifiedListenerInTheOpenTier(t *testing.T) 
 			result := run(t, "codex", &stubRT{}, func(opts *Options) {
 				opts.APIAddr = address
 				opts.FailMode = "closed"
-				opts.OutageFailMode = "open"
 				opts.OutageFailModeNow = func() string { return "open" }
 				opts.Event = "PreToolUse"
 				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"}}`)

@@ -80,12 +80,7 @@ const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST: string = "{{if and (not .Managed) (not .SecureClient)}}1{{end}}"
-{{if and (not .Managed) (not .SecureClient)}}// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
-// in the default and permissive policy tiers lets a tool call or result run
-// with a warning and a hook-failures.jsonl row while this account's gateway
-// is not running; "closed" (strict) blocks it. Every other failure blocks.
-const DC_OUTAGE_FAIL_MODE: string = "{{.OutageFailMode}}"
-{{end}}const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
+const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
 const DC_MAX_TOKEN_FILE_BYTES = 4096
@@ -666,26 +661,23 @@ async function installWindow(): Promise<boolean> {
 // `defenseclaw-gateway stop`, a stopped, busy or failing gateway) and what
 // brings it back, in the words of the native and shell hooks, instead of the
 // runtime's network error alone (GAP-0850).
-// perUserOutageOpen reports a per-user call that may run unchecked: the
+// defenseclaw-call-time-outage-v1: perUserOutageOpen reports a per-user call that may run unchecked: the
 // native helper exited 7 (hookexec.PerUserPostOutageExit: this account's
 // gateway refused or dropped the connection before any status), the outage
-// mode is open, no install holds the data directory and the config on disk
-// still gives the open outage mode. An answer the gateway gave, an
+// mode in the config on disk is open and no install holds the data directory.
+// An answer the gateway gave, an
 // unverified listener and every other error keep the call blocked. Like the
 // rest of this plugin it reads no environment, so strict availability does
 // not apply (the strict policy tier closes it).
 async function perUserOutageOpen(error: unknown): Promise<boolean> {
-	if (DC_OUTAGE_FAIL_MODE !== "open" || (error as { status?: unknown } | null)?.status !== 7) return false
+	if ((error as { status?: unknown } | null)?.status !== 7) return false
 	return !(await installWindow()) && configOutageOpen()
 }
 
 // configOutageOpen asks the per-user helper (`hook-outage-mode`, which only
 // reads the config.yaml of this plugin's data directory, never one the
 // agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for Amp's outage mode
-// now. The mode baked above is the
-// one of the last render, and a rule-pack change since (strict selected
-// while the gateway is stopped) has not reached it. A helper that cannot run
-// or answers anything but "open" keeps it closed.
+// now. A helper that cannot run or answers anything but "open" keeps it closed.
 function configOutageOpen(): boolean {
 	try {
 		const output = execFileSync(perUserNativePostBinary(), ["hook-outage-mode", "--connector", "amp", "--hook-dir", dirname(DC_TOKEN_FILE)], {

@@ -134,10 +134,9 @@ func TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	}
 }
 
-// With the gateway down, the per-user Copilot CLI hook rendered with an unset
-// or closed (strict tier) outage mode denies preToolUse and permissionRequest
-// with Copilot's native deny and a reason that names the next step; the
-// outage-open tier lets the call run with a warning that names the fix.
+// With the gateway down, the per-user Copilot CLI hook follows the current
+// config tier. Strict denies preToolUse and permissionRequest with Copilot's
+// native deny; default lets the call run with a warning that names the fix.
 // Copilot's other events cannot block and stay neutral.
 func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -160,6 +159,12 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewCopilotConnector()); err != nil {
 			t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 		}
+		// The fixture keeps hooks under dir/hooks, so place the trusted
+		// helper binary next to that runtime's config once per mode.
+		installOutageOpenRuntimeForHookTest(t, dir, dir)
+		if mode == "closed" {
+			writeOutageTierConfig(t, dir, outageStrictTierConfig)
+		}
 		script := filepath.Join(hookDir, "copilot-hook.sh")
 		for _, tc := range []struct{ event, field, deny string }{
 			{"preToolUse", "permissionDecisionReason", `"permissionDecision":"deny"`},
@@ -167,21 +172,18 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 			{"sessionStart", "", ""},
 		} {
 			t.Run("mode "+map[string]string{"": "unset"}[mode]+mode+"/"+tc.event, func(t *testing.T) {
-				// The config the outage-open hook reads gives the open tier:
-				// its runtime's config.yaml, in dir above the hooks folder.
 				home := t.TempDir()
-				installOutageOpenRuntimeForHookTest(t, home, dir)
 				out, errOut, code := runPerUserHookIn(t, home, []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, script,
 					`{"sessionId":"s","timestamp":1,"cwd":"/tmp","toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`,
 					"--event", tc.event)
 				if code != 0 {
 					t.Fatalf("exit %d, want 0 (stdout %q stderr %q)", code, out, errOut)
 				}
-				if tc.deny == "" || mode == "open" {
+				if tc.deny == "" || mode != "closed" {
 					if strings.TrimSpace(out) != "" {
 						t.Fatalf("stdout %q, want no decision (stderr %q)", out, errOut)
 					}
-					if mode == "open" && tc.deny != "" &&
+					if mode != "closed" && tc.deny != "" &&
 						(!strings.Contains(errOut, "defenseclaw-gateway start") || !strings.Contains(errOut, "defenseclaw doctor")) {
 						t.Fatalf("stderr %q, want the outage warning with its fix", errOut)
 					}

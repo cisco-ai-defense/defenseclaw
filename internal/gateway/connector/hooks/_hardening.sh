@@ -1216,16 +1216,14 @@ defenseclaw_log_hook_delivery_failure() {
 # the call through because this account's gateway is down (owner decision
 # 2026-10-23, config.HookOutageFailMode): the call's last transport status
 # (_DC_TRANSPORT_STATUS, defenseclaw_await_gateway) is 7, no gateway took the
-# connection after the cold-start retries, and the connector's runtime record
-# (hooks/.hookcfg.<connector>, written by Setup from the policy tier) says
-# open with its config source. Strict availability, this account's install
+# connection after the cold-start retries, and the connector's current config
+# selects an open tier. Strict availability, this account's install
 # window, an answer the gateway gave (any HTTP status, a cut-off or
-# malformed body), another program on the port, a missing token and every
-# record that is missing, malformed or closed keep the call closed. Managed,
+# malformed body), another program on the port, a missing token and a
+# config that is missing, malformed or strict keep the call closed. Managed,
 # socket, Secure Client and shared inspect-* hooks never take this path. The
-# record is what the gateway or the last refresh wrote, so the config on disk
-# has the last word (defenseclaw_config_outage_open): a rule-pack change
-# since, such as strict selected while the gateway is stopped, closes it.
+# defenseclaw-call-time-outage-v1: the config in this hook's own data
+# directory alone decides the tier.
 defenseclaw_per_user_outage_open() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
@@ -1238,32 +1236,52 @@ defenseclaw_per_user_outage_open() {
   esac
   # Either data folder an installer may hold (GAP-0914, defenseclaw_install_held).
   ! defenseclaw_install_held || return 1
-  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}"
   case "$connector" in
     ""|inspect|*[!a-z0-9_-]*) return 1 ;;
   esac
   [ -n "${HOOK_DIR:-}" ] || return 1
-  record="${HOOK_DIR}/.hookcfg.${connector}"
-  recorded="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_CONNECTOR 2>/dev/null)" || return 1
-  mode="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_FAIL_MODE 2>/dev/null)" || return 1
-  source="$(defenseclaw_flat_hookcfg_value "$record" FAIL_MODE_SOURCE 2>/dev/null)" || return 1
-  [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ] || return 1
   defenseclaw_config_outage_open "$connector"
 }
 
-# defenseclaw_config_outage_open CONNECTOR returns 0 (true) when the config of
-# this hook's runtime gives CONNECTOR's per-user hooks the open outage mode
-# now: this account's gateway binary (`hook-outage-mode`, which only reads
-# config.yaml in the data directory above HOOK_DIR) prints "open". The binary
-# is looked up from that data directory too, never from the agent's
-# DEFENSECLAW_HOME, and the agent's DEFENSECLAW_CONFIG does not choose the
-# config. No binary, a config it cannot load, a strict rule pack and any other
-# answer return 1, and the outage stays closed.
+# Resolve the account home from the hook's data directory or the OS account
+# record. The agent's inherited HOME cannot choose the outage-mode binary.
+defenseclaw_outage_account_home() {
+  local data="$1" home=""
+  # These two layouts are derived from the hook's own data directory. The
+  # first also covers an explicitly selected data directory with its own
+  # per-user binary; the second is the normal ~/.defenseclaw layout.
+  if [ -x "${data}/.local/bin/defenseclaw-gateway" ]; then
+    printf '%s' "$data"
+    return 0
+  fi
+  if [ -x "${data}/../.local/bin/defenseclaw-gateway" ]; then
+    printf '%s' "${data}/.."
+    return 0
+  fi
+  # A custom data directory may be elsewhere. Resolve the account's home
+  # from the OS, with a clean environment; the agent's HOME cannot select
+  # the binary that answers this security decision.
+  home="$(env -i PATH=/usr/bin:/bin LC_ALL=C getent passwd "$UID" 2>/dev/null | cut -d: -f6 | head -n 1)" || true
+  if [ -z "$home" ]; then
+    home="$(env -i PATH=/usr/bin:/bin LC_ALL=C dscacheutil -q user -a uid "$UID" 2>/dev/null | sed -n 's/^dir: //p' | head -n 1)" || true
+  fi
+  case "$home" in
+    /*) [ -d "$home" ] && printf '%s' "$home" ;;
+  esac
+}
+
+# defenseclaw_config_outage_open CONNECTOR returns 0 only when this hook's
+# runtime config gives CONNECTOR the open outage mode now. The selected
+# gateway binary runs `hook-outage-mode`, which reads config.yaml next to the
+# hook's own data directory. Agent environment cannot select the config or
+# binary. A missing binary, unreadable config, or other answer stays closed.
 defenseclaw_config_outage_open() {
-  local home="${DEFENSECLAW_AGENT_HOME:-}" hook_dir="${HOOK_DIR:-}" bin=""
+  local home="" hook_dir="${HOOK_DIR:-}" bin=""
   if [ -z "$_DC_CONFIG_OUTAGE_MODE" ]; then
     _DC_CONFIG_OUTAGE_MODE=closed
-    if [ -n "$home" ] && [ -d "$home" ] && [ "${hook_dir#/}" != "$hook_dir" ] &&
+    if [ "${hook_dir#/}" != "$hook_dir" ] &&
+      home="$(defenseclaw_outage_account_home "${hook_dir}/..")" && [ -n "$home" ] &&
       bin="$(defenseclaw_gateway_binary "${hook_dir}/.." "$home")"; then
       # The Go runtime cannot start under the hook's address-space limit.
       _DC_CONFIG_OUTAGE_MODE="$(
@@ -1810,7 +1828,7 @@ defenseclaw_should_fail_closed_on_unreachable() {
   # An install that started since the hook selected its mode closes it.
   defenseclaw_close_during_install
   # A per-user hook bakes closed for every failure (an older script's baked
-  # open included); only an outage its runtime record opens lets the call
+  # open included); only an outage its current config opens lets the call
   # through (defenseclaw_per_user_outage_open).
   if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" != 1 ]; then
     if defenseclaw_per_user_outage_open; then

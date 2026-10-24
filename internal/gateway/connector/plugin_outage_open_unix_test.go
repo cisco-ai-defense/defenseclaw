@@ -115,7 +115,7 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 						}
 					}
 					body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: addr, TokenFileJS: javaScriptStringContent(token),
-						FailMode: "closed", OutageFailMode: tier.mode})
+						FailMode: "closed"})
 					path := filepath.Join(home, plugin.name)
 					if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 						t.Fatal(err)
@@ -162,10 +162,10 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 	}
 }
 
-// A plugin's baked outage mode is the one of its last render. A rule-pack
-// change made since (strict selected while the gateway is stopped, for every
-// connector or for this one) and a config this release cannot read close the
-// outage; the default pack leaves it open.
+// The current runtime config decides a plugin's outage, even when the last
+// render recorded a different tier. A strict pack or a config this release
+// cannot read closes it; the default pack opens it with one warning and one
+// audit row.
 func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
 	nodeForTest(t)
 	for _, plugin := range []struct{ asset, name, connector, harness string }{
@@ -176,7 +176,7 @@ func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
 			name, config string
 			opens        bool
 		}{
-			{"default pack", outageDefaultTierConfig, true},
+			{"default pack after a strict render", outageDefaultTierConfig, true},
 			{"strict pack", outageStrictTierConfig, false},
 			{"strict pack for this connector", outageDefaultTierConfig + "  connectors:\n    " + plugin.connector + ":\n      rule_pack: strict\n", false},
 			{"no config", "", false},
@@ -195,9 +195,9 @@ func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
 					t.Fatal(err)
 				}
 				writeOutageTierConfig(t, dataDir, tc.config)
-				// Rendered in the default tier: the plugin bakes open.
+				// A strict render can remain installed when the gateway is stopped.
 				body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
-					TokenFileJS: javaScriptStringContent(token), FailMode: "closed", OutageFailMode: "open"})
+					TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
 				path := filepath.Join(home, plugin.name)
 				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 					t.Fatal(err)
@@ -209,7 +209,8 @@ func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
 					t.Fatalf("node: %v\n%s", err, out)
 				}
 				var result struct {
-					Verdict string `json:"verdict"`
+					Verdict string   `json:"verdict"`
+					Notices []string `json:"notices"`
 				}
 				if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
 					t.Fatalf("harness output %q: %v", out, err)
@@ -217,7 +218,13 @@ func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
 				if (result.Verdict == "allow") != tc.opens {
 					t.Fatalf("verdict %q, want run=%v", result.Verdict, tc.opens)
 				}
-				if rows := hookFailureRecords(t, dataDir); !tc.opens && len(rows) != 0 {
+				rows := hookFailureRecords(t, dataDir)
+				if tc.opens {
+					if len(rows) != 1 || rows[0]["fail_mode"] != "open" || rows[0]["category"] != "transport" || len(result.Notices) != 1 ||
+						!strings.Contains(result.Notices[0], "fail mode open for an outage") {
+						t.Fatalf("open outage rows=%+v notices=%q, want one audit row and one warning", rows, result.Notices)
+					}
+				} else if len(rows) != 0 {
 					t.Fatalf("a closed outage wrote fail-open rows %+v", rows)
 				}
 			})

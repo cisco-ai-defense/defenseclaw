@@ -68,9 +68,9 @@ func TestPerUserPluginOutageReadsOnlyItsRuntimesConfig(t *testing.T) {
 				token := writePluginOutageTokenForTest(t, dataDir, plugin.connector)
 				writeOutageTierConfig(t, dataDir, tc.runtime)
 				writeOutageTierConfig(t, other, tc.agent)
-				// Rendered in the default tier: the plugin bakes open.
+				// The plugin asks this runtime's config on each outage.
 				body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
-					TokenFileJS: javaScriptStringContent(token), FailMode: "closed", OutageFailMode: "open"})
+					TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
 				path := filepath.Join(home, plugin.name)
 				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 					t.Fatal(err)
@@ -149,7 +149,7 @@ func TestAmpToolResultAfterTheGatewayStopsCarriesTheOutageWarning(t *testing.T) 
 			server.Start()
 			defer server.Close()
 			body := renderPluginAssetForTest(t, "amp-plugin.ts", templateData{APIAddr: strings.TrimPrefix(server.URL, "http://"),
-				TokenFileJS: javaScriptStringContent(token), FailMode: "closed", OutageFailMode: tier.mode})
+				TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
 			path := filepath.Join(home, "defenseclaw.mts")
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)

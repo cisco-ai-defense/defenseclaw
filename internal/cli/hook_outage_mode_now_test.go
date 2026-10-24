@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -129,6 +130,65 @@ func TestHookOutageFailModeNowReadsOnlyTheRuntimesConfig(t *testing.T) {
 	}
 }
 
+// A host's managed installation marker is independent of a per-user-looking
+// config. A stale per-user hook cannot reopen a managed host's outage.
+func TestHookOutageFailModeNowHonorsTheManagedHostMarker(t *testing.T) {
+	home := t.TempDir()
+	writeOutageNowConfig(t, home, outageNowDefaultConfig)
+	marker := filepath.Join(t.TempDir(), "runtime-descriptor")
+	oldDescriptor := managedHostDescriptorPath
+	oldWindows := managedHostWindowsStandalone
+	oldSecureClient := secureClientHost
+	managedHostDescriptorPath = func() string { return marker }
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	secureClientHost = func() bool { return false }
+	t.Cleanup(func() {
+		managedHostDescriptorPath = oldDescriptor
+		managedHostWindowsStandalone = oldWindows
+		secureClientHost = oldSecureClient
+	})
+	if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "open" {
+		t.Fatalf("absent managed marker: got %q, want open", got)
+	}
+	if err := os.WriteFile(marker, []byte("managed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "closed" {
+		t.Fatalf("present managed marker: got %q, want closed", got)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(home, "missing-target"), marker); err == nil {
+		if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "closed" {
+			t.Fatalf("broken managed marker link: got %q, want closed", got)
+		}
+		if err := os.Remove(marker); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runtime.GOOS != "windows" {
+		parent := filepath.Join(t.TempDir(), "not-a-directory")
+		if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		marker = filepath.Join(parent, "runtime-descriptor")
+		if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "closed" {
+			t.Fatalf("unreadable managed marker path: got %q, want closed", got)
+		}
+	}
+	marker = filepath.Join(t.TempDir(), "runtime-descriptor")
+	managedHostWindowsStandalone = func() (string, bool) { return "HKLM managed marker", true }
+	if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "closed" {
+		t.Fatalf("Windows managed marker: got %q, want closed", got)
+	}
+	managedHostWindowsStandalone = func() (string, bool) { return "", false }
+	secureClientHost = func() bool { return true }
+	if got := hookOutageFailModeNow("codex", filepath.Join(home, "hooks")); got != "closed" {
+		t.Fatalf("Secure Client marker: got %q, want closed", got)
+	}
+}
+
 // A per-user native hook whose home comes from the agent's DEFENSECLAW_HOME
 // (not the packaged launcher's protected install state) reads that home's
 // record for its status, but the agent chose it, so nothing there can open an
@@ -155,6 +215,6 @@ func TestPerUserNativeHookOnAnAgentChosenHomeNeverOpensAnOutage(t *testing.T) {
 	}
 	opts := buildHookOptions("codex", "PreToolUse", "", "")
 	if opts.OutageFailModeNow != nil && opts.OutageFailModeNow() == "open" {
-		t.Fatalf("an agent-chosen DEFENSECLAW_HOME opened the outage (record %q)", opts.OutageFailMode)
+		t.Fatal("an agent-chosen DEFENSECLAW_HOME opened the outage")
 	}
 }

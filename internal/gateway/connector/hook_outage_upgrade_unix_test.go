@@ -98,12 +98,10 @@ func runOutageToolCall(t *testing.T, home, dataDir string, call outageToolCall) 
 }
 
 // The per-user hooks of agents without a fail-closed hook contract of their
-// own, and Cursor, follow the outage mode of their policy tier
-// (oss-outage-open, owner decision 2026-10-23): with the gateway down, an
-// unset or strict (closed) mode blocks the tool call and the default or
-// permissive (open) mode lets it run, in observe and action mode alike.
-// Before r104 W3 G3-upg the Copilot and Antigravity renders were lowered to
-// open for an unset mode, which they no longer are.
+// own, and Cursor, follow the outage mode of their current policy tier
+// (oss-outage-open, owner decision 2026-10-23): with the gateway down, the
+// strict tier blocks the tool call and the default or permissive tier lets it
+// run, in observe and action mode alike. The rendered mode does not decide.
 func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	requireShellHookToolsForTest(t)
 	addr := closedLoopbackAddrForTest(t)
@@ -136,13 +134,15 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 			}
 			// The config the outage-open hook reads gives the open tier.
 			installOutageOpenRuntimeForHookTest(t, home, dataDir)
+			if test.block {
+				writeOutageTierConfig(t, dataDir, outageStrictTierConfig)
+			}
 			blocked, detail := runOutageToolCall(t, home, dataDir, outageToolCalls[test.connector])
 			if blocked != test.block {
 				t.Fatalf("blocked = %v, want %v: %s", blocked, test.block, detail)
 			}
-			// What the hook does is what its sidecar entry records, with the
-			// config as its source: the native hook and the shared shell
-			// readers follow the same mode.
+			// The setup sidecar keeps the rendered metadata; the hook reads
+			// the current config at call time for the outage decision.
 			want := "open"
 			if test.block {
 				want = "closed"
