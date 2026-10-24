@@ -1070,10 +1070,10 @@ func (w *InstallWatcher) rescanTarget(ctx context.Context, evt InstallEvent, fpC
 		}
 		return rescanSkipped
 	}
-	if evt.Type == InstallMCP && w.hasWatcherMCPRejection(evt) && !w.secureClientActive() {
+	if evt.Type == InstallMCP && w.hasRecoverableMCPBlock(evt) && !w.secureClientActive() {
 		// A clean recovery scan must run admission so its completed verdict
-		// can release this watcher's earlier block. Drift-only scanning
-		// recorded the clean finding but left the server disabled.
+		// can release this watcher's earlier rejection or scanner-failure block.
+		// Drift-only scanning recorded the clean finding but left it disabled.
 		return w.readmitChanged(ctx, evt, baseline, currentSnap, deltas, fingerprint, "rescan")
 	}
 

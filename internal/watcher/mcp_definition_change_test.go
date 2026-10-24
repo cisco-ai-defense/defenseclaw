@@ -215,6 +215,42 @@ func TestMCPRecoveryRescanReleasesOnlyItsOwnRejection(t *testing.T) {
 	}
 }
 
+// GAP-1365 also starts with an unfinished scan under the explicit block
+// setting. Its empty-scan baseline must retry admission until a completed
+// scan can release that scan-failure block for this definition alone.
+func TestMCPFailedScanRecoveryReadmitsUnchangedDefinition(t *testing.T) {
+	base := t.TempDir()
+	h := newDefinitionChangeHarness(t, enrolledMCPServer(base, "1001", "."), enrolledMCPServer(base, "1002", "."))
+	h.w.cfg.Scanners.MCPScanner.UnverifiedServer = "block"
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner {
+		return &failingScanner{countingScanner{name: "mcp-scanner"}}
+	}
+	if got := h.poll(); len(got) != 2 || got[0].Verdict != VerdictBlocked || got[1].Verdict != VerdictBlocked {
+		t.Fatalf("initial scanner failures admitted %+v, want two blocks", got)
+	}
+	if h.journal(h.servers[0]).Runtime != "disable" || h.journal(h.servers[1]).Runtime != "disable" {
+		t.Fatal("initial scanner failures did not disable both servers")
+	}
+	evt := InstallEvent{Type: InstallMCP, Name: h.servers[0].Name, Path: MCPEventPath(h.servers[0]), Connector: h.servers[0].Connector}
+	if got := h.w.rescanTarget(context.Background(), evt, nil); got != rescanScanned {
+		t.Fatalf("repeated failure recovery scan = %v, want scanned", got)
+	}
+	if h.journal(h.servers[0]).Runtime != "disable" {
+		t.Fatalf("repeated failure released the server: %+v", h.journal(h.servers[0]))
+	}
+	h.w.scannerFactory = func(InstallEvent) scanner.Scanner { return &countingScanner{name: "mcp-scanner"} }
+	before := len(h.admitted)
+	if got := h.w.rescanTarget(context.Background(), evt, nil); got != rescanScanned {
+		t.Fatalf("clean recovery scan = %v, want scanned", got)
+	}
+	if len(h.admitted) != before+1 || h.admitted[before].Verdict != VerdictClean || !h.journal(h.servers[0]).IsEmpty() {
+		t.Fatalf("clean recovery admission %+v, journal %+v; want restored", h.admitted[before:], h.journal(h.servers[0]))
+	}
+	if h.journal(h.servers[1]).Runtime != "disable" {
+		t.Fatalf("another account's failed server was released: %+v", h.journal(h.servers[1]))
+	}
+}
+
 // A per-user gateway journals a project server under its bare name, so two
 // projects' servers of one name share a row. Restoring one of them must not
 // free the other's rejection.
