@@ -135,7 +135,7 @@ func TestGAP0996MakeInspectionDecision(t *testing.T) {
 		{"MAKEFLAGS shell assignment", `MAKEFLAGS=-f../writer.mk make write-key`, true},
 		{"MAKEFLAGS command-line override", `make MAKEFLAGS=-f../writer.mk write-key`, true},
 		{"eval text", `make --eval='x: ; printf k >> ~/.ssh/authorized_keys' x`, true},
-		{"variable override recipe", `make safe CC='sh -c "cat k >> ~/.ssh/authorized_keys"'`, true},
+		{"unused variable override", `make safe CC='sh -c "cat k >> ~/.ssh/authorized_keys"'`, false},
 		{"make through nice", `nice -n 5 make -f ../writer.mk write-key`, true},
 		{"make through timeout", `timeout 5 make -C ../evil write-key`, true},
 		{"make through shell", `sh -c 'make -f ../writer.mk write-key'`, true},

@@ -26,7 +26,7 @@ const (
 
 var makeWindowsToken = regexp.MustCompile(`[^\s'"<>|;&()=,]+`)
 
-var makeVariableDefinition = regexp.MustCompile(`^(?:override\s+|export\s+)?([A-Za-z_.][A-Za-z0-9_.]*)\s*(?:::=|:=|\?=|\+=|!=|=)\s*(.*)$`)
+var makeVariableDefinition = regexp.MustCompile(`^(?:override\s+|export\s+)?([A-Za-z_.][A-Za-z0-9_.]*)\s*(:::=|:=|\?=|\+=|!=|=)\s*(.*)$`)
 
 func actionMakeProgram(word string) bool {
 	program := programBase(word)
@@ -68,17 +68,17 @@ func actionMakeAssignments(stmt *syntax.Stmt, home string) []string {
 // --makefile operands, else the default GNUmakefile, makefile or Makefile of
 // the -C directory, the MAKEFILES list, and the includes they name (searched
 // in the make directory, then the -I directories). Makefile text, --eval
-// text and command-line variable overrides that reach a protected file or a
-// link to one block in action mode. A makefile name the hook cannot resolve
-// (an expansion, stdin), or a makefile it cannot read whole (not a regular
+// text and selected recipes that reach a protected file or a link to one block
+// in action mode. A makefile name or stdin source the hook cannot resolve,
+// or a makefile it cannot read whole (not a regular
 // file, unreadable, over maxMakeSourceBytes, more than maxMakeFiles), is an
 // unresolved construct of a write-capable call and blocks too. Ordinary
 // builds pass: a readable makefile without protected reach, inside or
 // outside the work directory, and a missing makefile, which runs no recipe.
 // An include name that only make can compute ($(shell ...), a pattern
 // substitution) is not followed: a known limit of reading make statically.
-func actionMakeDecision(words, env []string, cwd, home string) string {
-	call := actionMakeCall{home: home, dir: cwd}
+func actionMakeDecision(words, env []string, cwd, home string, stdin *string) string {
+	call := actionMakeCall{home: home, dir: cwd, stdin: stdin}
 	for _, assignment := range env {
 		if reason := call.variable(assignment, true); reason != "" {
 			return reason
@@ -94,7 +94,7 @@ func actionMakeDecision(words, env []string, cwd, home string) string {
 
 // variable takes one NAME=value from the environment or the command line.
 // MAKEFILES (environment only) adds makefiles; MAKEFLAGS adds options. A
-// command-line value is also text make runs, so its reach is checked.
+// command-line value is expanded only where a selected recipe uses it.
 func (c *actionMakeCall) variable(assignment string, environment bool) string {
 	name, value, _ := strings.Cut(assignment, "=")
 	switch name {
@@ -115,7 +115,10 @@ func (c *actionMakeCall) variable(assignment string, environment bool) string {
 		}
 	}
 	if !environment {
-		c.texts = append(c.texts, assignment)
+		if c.overrides == nil {
+			c.overrides = make(map[string]string)
+		}
+		c.overrides[name] = value
 	}
 	return ""
 }
@@ -125,11 +128,14 @@ type actionMakeCall struct {
 	files       []string // -f operands, read in order
 	extra       []string // MAKEFILES entries, read first; a missing one is skipped
 	includeDirs []string
-	texts       []string // --eval text and variable overrides
+	evals       []string // --eval text, parsed before makefiles
+	overrides   map[string]string
 	goals       []string // command-line targets
 	read        int
+	stdin       *string
 	variables   map[string]string
-	global      []string // makefile lines outside rules
+	simple      map[string]bool // immediately expanded make variables
+	global      []string        // executable parse-time makefile lines
 	rules       []makeRule
 }
 
@@ -141,7 +147,9 @@ func (c *actionMakeCall) options(args []string, flags bool) string {
 		if word == "--" {
 			for _, rest := range args[i+1:] {
 				if strings.Contains(rest, "=") {
-					c.texts = append(c.texts, rest)
+					if reason := c.variable(rest, false); reason != "" {
+						return reason
+					}
 				} else if !flags {
 					c.goals = append(c.goals, rest)
 				}
@@ -196,7 +204,11 @@ func (c *actionMakeCall) options(args []string, flags bool) string {
 			}
 			value = args[i]
 		}
-		if actionMakeDynamic(value) {
+		if option == "E" {
+			if value == "" || strings.ContainsAny(value, "\x00\r$`") {
+				return "dynamic-argument"
+			}
+		} else if actionMakeDynamic(value) {
 			return "dynamic-argument"
 		}
 		switch option {
@@ -211,7 +223,7 @@ func (c *actionMakeCall) options(args []string, flags bool) string {
 		case "I":
 			c.includeDirs = append(c.includeDirs, value)
 		case "E":
-			c.texts = append(c.texts, value)
+			c.evals = append(c.evals, value)
 		}
 	}
 	return ""
@@ -219,6 +231,18 @@ func (c *actionMakeCall) options(args []string, flags bool) string {
 
 func (c *actionMakeCall) decide() string {
 	c.variables = map[string]string{}
+	c.simple = map[string]bool{}
+	for name, value := range c.overrides {
+		c.variables[name] = value
+	}
+	for _, eval := range c.evals {
+		if int64(len(eval)) > maxMakeSourceBytes {
+			return "dynamic-argument"
+		}
+		if reason := c.parseContent(eval); reason != "" {
+			return reason
+		}
+	}
 	for _, name := range c.extra {
 		if reason := c.makefile(name, false); reason != "" {
 			return reason
@@ -240,9 +264,6 @@ func (c *actionMakeCall) decide() string {
 		}
 	}
 	for _, name := range c.files {
-		if name == "-" {
-			return "dynamic-argument" // a makefile on stdin
-		}
 		if reason := c.makefile(name, false); reason != "" {
 			return reason
 		}
@@ -274,28 +295,63 @@ func (c *actionMakeCall) decide() string {
 		}
 		return false
 	}
-	texts := append(append([]string(nil), c.texts...), c.global...)
-	for _, rule := range c.selectedRules() {
-		texts = append(texts, rule.lines...)
-	}
-	for _, text := range texts {
+	for _, text := range c.global {
 		if reaches(text) {
 			return "dynamic-argument"
+		}
+	}
+	for _, rule := range c.selectedRules() {
+		for _, line := range rule.lines {
+			text := actionMakeExpand(line, c.variables)
+			if reaches(text) && !c.recipeUsesProtectedPathAsData(text) {
+				return "dynamic-argument"
+			}
 		}
 	}
 	return ""
 }
 
-// makeRule is one rule of the makefiles a call reads: its header and recipe
-// lines, which run only when make builds one of its targets.
+// A few known readers and printers can mention a protected path as data while
+// writing an ordinary target. The shared shell decision proves their effects.
+func (c *actionMakeCall) recipeUsesProtectedPathAsData(line string) bool {
+	command := strings.TrimLeft(line, " \t@-+")
+	if strings.ContainsAny(command, "$`") {
+		return false
+	}
+	file, ok := parseShell(command)
+	if !ok || len(file.Stmts) != 1 {
+		return false
+	}
+	call, ok := file.Stmts[0].Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Args) == 0 {
+		return false
+	}
+	program, fixed := StaticWord(call.Args[0], c.home)
+	if !fixed || !strings.Contains(" echo printf cat head tail grep sort wc ", " "+programBase(program)+" ") {
+		return false
+	}
+	for _, redirect := range file.Stmts[0].Redirs {
+		switch redirect.Op {
+		case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			target, known := StaticWord(redirect.Word, c.home)
+			if !known || protectedReachPath(OperandPath(target, c.dir), newProtectedFiles(c.home), filepath.Join(c.home, ".ssh")) {
+				return false
+			}
+		}
+	}
+	return ActionCommandDecision(command, c.dir, c.home) == ""
+}
+
+// makeRule is one rule of the makefiles a call reads. Its recipe lines run
+// only when make builds one of its targets.
 type makeRule struct {
 	targets, prerequisites, lines []string
 }
 
 // selectedRules returns the rules the call can run: those of the goals (the
 // command-line targets, else .DEFAULT_GOAL or the first ordinary target) and
-// of their prerequisites, plus every pattern or computed rule, which can
-// build any of them. A computed goal or prerequisite selects every rule.
+// of their prerequisites. A pattern rule is selected only when its stem
+// matches a requested goal. A computed goal or prerequisite selects every rule.
 func (c *actionMakeCall) selectedRules() []makeRule {
 	goals := append([]string(nil), c.goals...)
 	if len(goals) == 0 {
@@ -326,12 +382,27 @@ func (c *actionMakeCall) selectedRules() []makeRule {
 		if strings.ContainsAny(goal, "$`") {
 			return c.rules
 		}
+		explicitRecipe := false
+		for _, rule := range c.rules {
+			for _, target := range rule.targets {
+				if target == goal && len(rule.lines) > 0 {
+					explicitRecipe = true
+				}
+			}
+		}
 		for i, rule := range c.rules {
 			for _, target := range rule.targets {
-				if target == goal || strings.ContainsAny(target, "%$") {
-					if !selected[i] {
-						selected[i] = true
-						goals = append(goals, rule.prerequisites...)
+				stem := ""
+				matches := target == goal
+				if prefix, suffix, pattern := strings.Cut(target, "%"); pattern && !explicitRecipe && !strings.Contains(suffix, "%") &&
+					strings.HasPrefix(goal, prefix) && strings.HasSuffix(goal, suffix) && len(goal) >= len(prefix)+len(suffix) {
+					matches = true
+					stem = goal[len(prefix) : len(goal)-len(suffix)]
+				}
+				if matches || strings.Contains(target, "$") {
+					selected[i] = true
+					for _, prerequisite := range rule.prerequisites {
+						goals = append(goals, strings.ReplaceAll(prerequisite, "%", stem))
 					}
 					break
 				}
@@ -352,6 +423,13 @@ func (c *actionMakeCall) selectedRules() []makeRule {
 // such file. Lines outside rules (variables, conditionals, $(shell ...))
 // always run; a rule's lines run when make builds one of its targets.
 func (c *actionMakeCall) makefile(name string, include bool) string {
+	if actionMakeStdinName(name) {
+		c.read++
+		if c.stdin == nil || c.read > maxMakeFiles || int64(len(*c.stdin)) > maxMakeSourceBytes {
+			return "dynamic-argument"
+		}
+		return c.parseContent(*c.stdin)
+	}
 	path, ok := c.path(name, c.dir)
 	if !ok {
 		return "dynamic-argument"
@@ -378,6 +456,15 @@ func (c *actionMakeCall) makefile(name string, include bool) string {
 	if !readable || c.read > maxMakeFiles {
 		return "dynamic-argument"
 	}
+	return c.parseContent(content)
+}
+
+func actionMakeStdinName(name string) bool {
+	return name == "-" || name == "/dev/stdin" || name == "/dev/fd/0" ||
+		name == "/proc/self/fd/0" || strings.EqualFold(name, "CONIN$")
+}
+
+func (c *actionMakeCall) parseContent(content string) string {
 	content = strings.ReplaceAll(content, "\\\r\n", " ")
 	content = strings.ReplaceAll(content, "\\\n", " ")
 	rule := -1
@@ -395,24 +482,55 @@ func (c *actionMakeCall) makefile(name string, include bool) string {
 			continue
 		}
 		if match := makeVariableDefinition.FindStringSubmatch(trimmed); match != nil {
-			c.variables[match[1]] = strings.TrimSpace(match[2])
-			c.global = append(c.global, line)
+			_, override := c.overrides[match[1]]
+			active := !override || strings.HasPrefix(trimmed, "override ")
+			operator, raw := match[2], match[3]
+			if operator == "!=" || actionMakeParseTimeCode(raw) &&
+				(operator == ":=" || operator == ":::=" || operator == "+=" && c.simple[match[1]] && active) {
+				c.global = append(c.global, actionMakeExpand(line, c.variables))
+			}
+			if active {
+				value := strings.TrimSpace(match[3])
+				if operator == ":=" || operator == ":::=" {
+					value = actionMakeExpand(value, c.variables)
+				}
+				switch operator {
+				case "?=":
+					if _, defined := c.variables[match[1]]; !defined {
+						c.variables[match[1]] = value
+						c.simple[match[1]] = false
+					}
+				case "+=":
+					if c.simple[match[1]] {
+						value = actionMakeExpand(value, c.variables)
+					}
+					c.variables[match[1]] = strings.TrimSpace(c.variables[match[1]] + " " + value)
+				default:
+					c.simple[match[1]] = operator == ":=" || operator == ":::="
+					c.variables[match[1]] = value
+				}
+			}
 			rule = -1
 			continue
 		}
 		fields := strings.Fields(trimmed)
 		if len(fields) >= 2 && (fields[0] == "include" || fields[0] == "-include" || fields[0] == "sinclude") {
-			c.global = append(c.global, line)
+			c.global = append(c.global, actionMakeExpand(line, c.variables))
 			rule = -1
 			if reason := c.includes(fields[1:]); reason != "" {
 				return reason
 			}
 			continue
 		}
+		if strings.HasPrefix(trimmed, "$(shell") || strings.HasPrefix(trimmed, "${shell") ||
+			strings.HasPrefix(trimmed, "$(eval") || strings.HasPrefix(trimmed, "${eval") {
+			c.global = append(c.global, actionMakeExpand(line, c.variables))
+			rule = -1
+			continue
+		}
 		header, recipe, _ := strings.Cut(trimmed, ";")
 		targets, prerequisites, isRule := strings.Cut(header, ":")
 		if !isRule {
-			c.global = append(c.global, line) // a directive or conditional
 			rule = -1
 			continue
 		}
@@ -420,7 +538,7 @@ func (c *actionMakeCall) makefile(name string, include bool) string {
 		parsed := makeRule{
 			targets:       strings.Fields(actionMakeExpand(targets, c.variables)),
 			prerequisites: strings.Fields(strings.ReplaceAll(actionMakeExpand(prerequisites, c.variables), "|", " ")),
-			lines:         []string{header},
+			lines:         nil,
 		}
 		if recipe != "" {
 			parsed.lines = append(parsed.lines, recipe)
@@ -461,8 +579,8 @@ func (c *actionMakeCall) includes(operands []string) string {
 	return ""
 }
 
-// actionMakeExpand substitutes the makefile's own static variables into an
-// include operand, a few levels deep.
+// actionMakeExpand substitutes static make variables into an include, goal,
+// or recipe operand, a few levels deep.
 func actionMakeExpand(operand string, variables map[string]string) string {
 	for range 4 {
 		before := operand
@@ -475,6 +593,11 @@ func actionMakeExpand(operand string, variables map[string]string) string {
 		}
 	}
 	return operand
+}
+
+func actionMakeParseTimeCode(text string) bool {
+	return strings.Contains(text, "$(shell") || strings.Contains(text, "${shell") ||
+		strings.Contains(text, "$(eval") || strings.Contains(text, "${eval")
 }
 
 func actionMakeDynamic(value string) bool {

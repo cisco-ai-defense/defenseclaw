@@ -89,3 +89,30 @@ func TestGAP0996MakeDispatch(t *testing.T) {
 		}
 	}
 }
+
+func TestGAP0996MakeRefixDispatch(t *testing.T) {
+	home, cwd := r104ReviewHome(t)
+	makefile := "TARGET := ~/.ssh/authorized_keys\n%.key:\n\tprintf ok >> ~/.ssh/authorized_keys\nsafe:\n\t@true\n"
+	if err := os.WriteFile(filepath.Join(cwd, "Makefile"), []byte(makefile), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, connector := range []string{"claudecode", "codex"} {
+		installToolCallCorpusProfileConnector(t, connector, "default")
+		for _, tc := range []struct {
+			name, command string
+			block         bool
+		}{
+			{"inert makefile text", "make safe", false},
+			{"matching pattern", "make token.key", true},
+			{"visible stdin", "make -f - safe <<'EOF'\nsafe:\n\t@true\nEOF", false},
+			{"hidden stdin", "make -f - safe", true},
+		} {
+			t.Run(connector+"/"+tc.name, func(t *testing.T) {
+				got := gap0994And0996Dispatch(t, connector, tc.command, cwd, home, actionfacts.DialectPOSIX)
+				if got != tc.block {
+					t.Fatalf("blocked=%t, want %t", got, tc.block)
+				}
+			})
+		}
+	}
+}

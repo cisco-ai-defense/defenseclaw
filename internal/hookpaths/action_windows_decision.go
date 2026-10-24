@@ -135,7 +135,7 @@ func actionWindowsWords(command string) ([]string, bool) {
 	return words, quote == 0
 }
 
-func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
+func actionWindowsCommandDecisionInput(command, cwd, home string, depth int, inherited *string) string {
 	if command == "" || depth >= 8 || len(command) > MaxPayloadBytes {
 		return "dynamic-command"
 	}
@@ -144,6 +144,7 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 		return "shell-parse"
 	}
 	values := make(map[string]string)
+	input := inherited
 	for start := 0; start < len(words); {
 		end := start
 		for end < len(words) && words[end] != ";" && words[end] != "|" && words[end] != "||" && words[end] != "&" && words[end] != "&&" {
@@ -180,8 +181,18 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 					statement[i] = value
 				}
 			}
-			if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
+			if reason := actionWindowsStatement(statement, cwd, home, depth, input); reason != "" {
 				return reason
+			}
+			input = nil
+			if end < len(words) && words[end] == "|" {
+				fixed := true
+				for _, word := range statement {
+					fixed = fixed && !strings.ContainsAny(word, "$%`!")
+				}
+				if fixed {
+					input = actionMakeProducerWords(statement, cwd, home)
+				}
 			}
 		}
 		start = end + 1
@@ -189,7 +200,7 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	return ""
 }
 
-func actionWindowsStatement(words []string, cwd, home string, depth int) string {
+func actionWindowsStatement(words []string, cwd, home string, depth int, input *string) string {
 	if depth >= 8 {
 		return "dynamic-command"
 	}
@@ -197,11 +208,11 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	for first < len(words) && strings.Contains(words[first], "=") && !strings.HasPrefix(words[first], "-") {
 		first++
 	}
-	if first < len(words) && actionMakeProgram(words[first]) {
-		return actionMakeDecision(words[first:], words[:first], cwd, home)
-	}
 	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[0], `\`, "/")), ".exe"))
 	for i := 1; i < len(words); i++ {
+		if words[i] == "<" && i+1 < len(words) && strings.HasPrefix(words[i+1], "(") {
+			return "dynamic-argument"
+		}
 		if words[i] != ">" && words[i] != ">>" && words[i] != "<" && words[i] != "<<" {
 			continue
 		}
@@ -212,6 +223,14 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 			!resolved && (words[i] != "<" || actionProgramMayWrite(program)) {
 			return "dynamic-argument"
 		}
+	}
+	if first < len(words) && actionMakeProgram(words[first]) {
+		makeWords, source := actionWindowsMakeInput(words, cwd, home, input)
+		return actionMakeDecision(makeWords[first:], makeWords[:first], cwd, home, source)
+	}
+	wrapper := strings.Contains(" env nice ionice timeout stdbuf setsid chroot unshare nsenter flock sudo su script xargs find parallel busybox time nohup command exec ", " "+program+" ")
+	if wrapper || program == "cmd" || program == "pwsh" || program == "powershell" || posixShellProgram(program) {
+		_, input = actionWindowsMakeInput(words, cwd, home, input)
 	}
 	if strings.ContainsAny(program, "$%`") || strings.HasPrefix(program, "(") {
 		return "dynamic-command"
@@ -242,7 +261,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 				if i+2 >= len(words) {
 					return "nested-shell"
 				}
-				return actionWindowsCommandDecision(strings.Join(words[i+2:], " "), cwd, home, depth+1)
+				return actionWindowsCommandDecisionInput(strings.Join(words[i+2:], " "), cwd, home, depth+1, input)
 			}
 		}
 		return "nested-shell"
@@ -254,7 +273,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 				if i+2 >= len(words) {
 					return "nested-shell"
 				}
-				return actionWindowsCommandDecision(strings.Join(words[i+2:], " "), cwd, home, depth+1)
+				return actionWindowsCommandDecisionInput(strings.Join(words[i+2:], " "), cwd, home, depth+1, input)
 			case "-encodedcommand", "-enc":
 				if i+2 >= len(words) {
 					return "nested-shell"
@@ -267,7 +286,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 				for j := range letters {
 					letters[j] = uint16(encoded[j*2]) | uint16(encoded[j*2+1])<<8
 				}
-				return actionWindowsCommandDecision(string(utf16.Decode(letters)), cwd, home, depth+1)
+				return actionWindowsCommandDecisionInput(string(utf16.Decode(letters)), cwd, home, depth+1, input)
 			case "-file":
 				return "nested-shell" // file and arguments may contain commands
 			}
@@ -280,7 +299,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 				if i+2 >= len(words) {
 					return "nested-shell"
 				}
-				return actionWindowsCommandDecision(strings.Join(words[i+2:], " "), cwd, home, depth+1)
+				return actionWindowsCommandDecisionInput(strings.Join(words[i+2:], " "), cwd, home, depth+1, input)
 			}
 		}
 		return "nested-shell"
@@ -288,8 +307,8 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	if program == "git" {
 		return actionGitDecision(words, cwd, home, depth+1)
 	}
-	if strings.Contains(" env nice ionice timeout stdbuf setsid chroot unshare nsenter flock sudo su script xargs find parallel busybox time nohup command exec ", " "+program+" ") {
-		return actionWindowsWrapperDecision(program, words, cwd, home, depth+1)
+	if wrapper {
+		return actionWindowsWrapperDecision(program, words, cwd, home, depth+1, input)
 	}
 	writeCapable := actionProgramMayWrite(program) || strings.Contains(commandLike(words), ">")
 	for i, word := range words[1:] {
@@ -352,7 +371,7 @@ func actionWindowsBoundedSourceGlob(program string, index int, words []string, w
 
 func commandLike(words []string) string { return strings.Join(words, " ") }
 
-func actionWindowsWrapperDecision(program string, words []string, cwd, home string, depth int) string {
+func actionWindowsWrapperDecision(program string, words []string, cwd, home string, depth int, input *string) string {
 	if depth >= 8 {
 		return "dynamic-command"
 	}
@@ -367,7 +386,7 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 			if i+1 >= len(words) || strings.Contains(strings.Join(words[i+1:], " "), "{}") {
 				return "dynamic-command"
 			}
-			return actionWindowsStatement(words[i+1:], cwd, home, depth+1)
+			return actionWindowsStatement(words[i+1:], cwd, home, depth+1, input)
 		}
 		return ""
 	}
@@ -388,13 +407,13 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 					return "dynamic-argument"
 				}
 			}
-			return actionWindowsCommandDecision(words[index+1], cwd, home, depth+1)
+			return actionWindowsCommandDecisionInput(words[index+1], cwd, home, depth+1, input)
 		}
 		if program == "env" && (option == "-s" || option == "--split-string") {
 			if index+1 >= len(words) {
 				return "dynamic-command"
 			}
-			return actionWindowsCommandDecision(words[index+1], cwd, home, depth+1)
+			return actionWindowsCommandDecisionInput(words[index+1], cwd, home, depth+1, input)
 		}
 		value := false
 		known := false
@@ -488,7 +507,39 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 		return "dynamic-command"
 	}
 	if len(env) > 0 && actionMakeProgram(words[index]) {
-		return actionMakeDecision(words[index:], env, cwd, home)
+		makeWords, source := actionWindowsMakeInput(words[index:], cwd, home, input)
+		return actionMakeDecision(makeWords, env, cwd, home, source)
 	}
-	return actionWindowsStatement(words[index:], cwd, home, depth+1)
+	return actionWindowsStatement(words[index:], cwd, home, depth+1, input)
+}
+
+func actionWindowsMakeInput(words []string, cwd, home string, input *string) ([]string, *string) {
+	redirected := false
+	for _, word := range words {
+		redirected = redirected || word == "<" || word == "<<" || word == ">" || word == ">>"
+	}
+	if !redirected {
+		return words, input
+	}
+	clean := make([]string, 0, len(words))
+	for i := 0; i < len(words); i++ {
+		switch words[i] {
+		case "<":
+			input = nil
+			if i+1 < len(words) {
+				input = actionMakeFileInput(words[i+1], cwd, home)
+				i++
+			}
+		case ">", ">>", "<<":
+			if words[i] == "<<" {
+				input = nil
+			}
+			if i+1 < len(words) {
+				i++
+			}
+		default:
+			clean = append(clean, words[i])
+		}
+	}
+	return clean, input
 }

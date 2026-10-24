@@ -47,8 +47,12 @@ func staticProgramWord(word *syntax.Word, home string) (string, bool) {
 }
 
 func actionCommandDecision(command, cwd, home string, depth int) string {
-	if actionWindowsHome(home) {
-		return actionWindowsCommandDecision(command, cwd, home, depth)
+	return actionCommandDecisionInput(command, cwd, home, depth, nil)
+}
+
+func actionCommandDecisionInput(command, cwd, home string, depth int, inherited *string) string {
+	if actionWindowsHome(home) && !strings.Contains(command, "<<") && !strings.Contains(command, "<(") {
+		return actionWindowsCommandDecisionInput(command, cwd, home, depth, inherited)
 	}
 	if command == "" || !filepath.IsAbs(cwd) || home == "" {
 		return ""
@@ -161,10 +165,22 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 		}
 		words := make([]string, len(call.Args))
 		words[0] = program
+		var processInput *string
 		for i, arg := range call.Args[1:] {
 			value, static := StaticWord(arg, home)
 			if !static {
 				value, static = actionWordValue(arg, values, cwd, home)
+			}
+			if !static && i > 0 && actionMakeFileOption(words[i]) {
+				makeCall := actionMakeProgram(program)
+				for _, prior := range words[1:i] {
+					makeCall = makeCall || actionMakeProgram(prior)
+				}
+				if makeCall {
+					if source := actionMakeProcessInput(arg, cwd, home); source != nil && processInput == nil {
+						value, static, processInput = "-", true, source
+					}
+				}
 			}
 			if !static {
 				safeProcess := actionKnownReadOnlyProcessSubstitution(arg, home)
@@ -197,7 +213,15 @@ func actionCommandDecision(command, cwd, home string, depth int) string {
 			}
 		}
 		if reason == "" {
-			reason = actionChildDecision(words, stmt, cwd, home, depth)
+			input := inherited
+			if processInput != nil {
+				if actionMakeInput(stmt, file, cwd, home, nil) != nil {
+					reason = "dynamic-argument" // two different input sources have no shared proof
+					return false
+				}
+				input = processInput
+			}
+			reason = actionChildDecision(words, stmt, file, cwd, home, depth, input)
 		}
 		return reason == ""
 	})
@@ -434,7 +458,7 @@ func actionUnresolvedReadPathArgument(program string) bool {
 	return false
 }
 
-func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, depth int) string {
+func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, cwd, home string, depth int, inherited *string) string {
 	if len(words) == 0 || words[0] == "" {
 		return ""
 	}
@@ -462,7 +486,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 	}
 	if interpreter != "" {
 		child := append([]string{interpreter}, words...)
-		return actionChildDecision(child, stmt, cwd, home, depth+1)
+		return actionChildDecision(child, stmt, file, cwd, home, depth+1, inherited)
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
@@ -515,7 +539,8 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		return "eval-source"
 	}
 	if program == "make" || program == "gmake" {
-		return actionMakeDecision(words, actionMakeAssignments(stmt, home), cwd, home)
+		return actionMakeDecision(words, actionMakeAssignments(stmt, home), cwd, home,
+			actionMakeInput(stmt, file, cwd, home, inherited))
 	}
 	if program == "rsync" && len(words) >= 3 && strings.Contains(strings.Join(words[1:len(words)-1], " "), "-a") {
 		protected := newProtectedFiles(home)
@@ -534,7 +559,8 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if index >= len(words) || words[index] == "" {
 				return "nested-shell"
 			}
-			return actionCommandDecision(words[index], cwd, home, depth+1)
+			return actionCommandDecisionInput(words[index], cwd, home, depth+1,
+				actionMakeInput(stmt, file, cwd, home, inherited))
 		}
 		for _, word := range words[1:] {
 			if word == "-c" || strings.Contains(word, "c") && strings.HasPrefix(word, "-") && len(word) <= 4 {
@@ -549,7 +575,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			if !read {
 				return "nested-shell"
 			}
-			return actionCommandDecision(content, cwd, home, depth+1)
+			return actionCommandDecisionInput(content, cwd, home, depth+1, inherited)
 		}
 		return "nested-shell" // stdin, -s or an unrecognized option.
 	}
@@ -615,7 +641,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		if !read {
 			return "eval-source"
 		}
-		return actionCommandDecision(content, cwd, home, depth+1)
+		return actionCommandDecisionInput(content, cwd, home, depth+1, inherited)
 	case "git":
 		return actionGitDecision(words, cwd, home, depth+1)
 	case "command", "exec", "busybox", "time", "nohup":
@@ -645,7 +671,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 		if index >= len(words) {
 			return "dynamic-command"
 		}
-		return actionWordsDecision(words[index:], cwd, home, depth+1)
+		return actionWordsDecision(words[index:], stmt, file, cwd, home, depth+1, inherited)
 	case "env":
 		index := 1
 		env := actionMakeAssignments(stmt, home)
@@ -666,7 +692,8 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 				if index+1 >= len(words) || words[index+1] == "" {
 					return "dynamic-command"
 				}
-				return actionCommandDecision(words[index+1], cwd, home, depth+1)
+				return actionCommandDecisionInput(words[index+1], cwd, home, depth+1,
+					actionMakeInput(stmt, file, cwd, home, inherited))
 			case strings.HasPrefix(w, "--chdir="):
 				cwd = OperandPath(strings.TrimPrefix(w, "--chdir="), cwd)
 				index++
@@ -679,14 +706,15 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 				return "dynamic-command"
 			default:
 				if actionMakeProgram(words[index]) {
-					return actionMakeDecision(words[index:], env, cwd, home)
+					return actionMakeDecision(words[index:], env, cwd, home,
+						actionMakeInput(stmt, file, cwd, home, inherited))
 				}
-				return actionWordsDecision(words[index:], cwd, home, depth+1)
+				return actionWordsDecision(words[index:], stmt, file, cwd, home, depth+1, inherited)
 			}
 		}
 		return ""
 	case "nice", "ionice", "timeout", "stdbuf", "setsid", "chroot", "unshare", "nsenter", "flock", "sudo", "parallel", "xargs", "find", "script", "su":
-		return actionWrappedDecision(program, words, cwd, home, depth+1)
+		return actionWrappedDecision(program, words, stmt, file, cwd, home, depth+1, inherited)
 	}
 	return ""
 }
@@ -825,7 +853,7 @@ func actionLiteralHereDocument(stmt *syntax.Stmt) (string, bool) {
 	return "", false
 }
 
-func actionWordsDecision(words []string, cwd, home string, depth int) string {
+func actionWordsDecision(words []string, stmt *syntax.Stmt, file *syntax.File, cwd, home string, depth int, inherited *string) string {
 	if len(words) == 0 || words[0] == "" {
 		return "dynamic-command"
 	}
@@ -835,7 +863,7 @@ func actionWordsDecision(words []string, cwd, home string, depth int) string {
 			return "dynamic-argument"
 		}
 	}
-	return actionChildDecision(words, nil, cwd, home, depth)
+	return actionChildDecision(words, stmt, file, cwd, home, depth, inherited)
 }
 
 func actionScriptInsideCWD(script, cwd string) bool {
@@ -844,7 +872,7 @@ func actionScriptInsideCWD(script, cwd string) bool {
 	return ok && (resolved == cwd || strings.HasPrefix(resolved, cwd+string(filepath.Separator)))
 }
 
-func actionWrappedDecision(program string, words []string, cwd, home string, depth int) string {
+func actionWrappedDecision(program string, words []string, stmt *syntax.Stmt, file *syntax.File, cwd, home string, depth int, inherited *string) string {
 	if depth >= 8 {
 		return "dynamic-command"
 	}
@@ -864,7 +892,8 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 				protectedReachPath(OperandPath(words[len(words)-1], cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 				return "dynamic-argument"
 			}
-			return actionCommandDecision(words[index+1], cwd, home, depth+1)
+			return actionCommandDecisionInput(words[index+1], cwd, home, depth+1,
+				actionMakeInput(stmt, file, cwd, home, inherited))
 		}
 		if (program == "find" || program == "xargs") && strings.HasPrefix(word, "-exec") {
 			break
@@ -955,7 +984,7 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 	case "find":
 		for i := index; i < len(words); i++ {
 			if words[i] == "-exec" || words[i] == "-execdir" || words[i] == "-ok" {
-				return actionWordsDecision(words[i+1:], cwd, home, depth+1)
+				return actionWordsDecision(words[i+1:], stmt, file, cwd, home, depth+1, inherited)
 			}
 		}
 		return ""
@@ -979,5 +1008,5 @@ func actionWrappedDecision(program string, words []string, cwd, home string, dep
 	if index >= len(words) {
 		return "dynamic-command"
 	}
-	return actionWordsDecision(words[index:], cwd, home, depth+1)
+	return actionWordsDecision(words[index:], stmt, file, cwd, home, depth+1, inherited)
 }
