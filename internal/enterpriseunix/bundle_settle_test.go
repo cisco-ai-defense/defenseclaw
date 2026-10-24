@@ -176,9 +176,9 @@ func TestPendingBundleDoesNotBlockGatewayRepair(t *testing.T) {
 	}
 }
 
-// Losing trust anchors while a receipt is applied leaves that receipt open.
-// Lifecycle work can still repair or upgrade the host, but an unsigned
-// --config must not become a way to replace the pending signed policy.
+// Losing trust anchors while a receipt is applied leaves that receipt open
+// with its reason. Lifecycle work still repairs or upgrades the host with
+// the pending signed config, and the receipt confirms once anchors return.
 func TestPendingBundleWithMissingAnchorsKeepsSignedConfig(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -192,12 +192,10 @@ func TestPendingBundleWithMissingAnchorsKeepsSignedConfig(t *testing.T) {
 			if err := os.Remove(anchorPath); err != nil {
 				t.Fatal(err)
 			}
-			v1, _, _ := bundleConfigs(b.testHost)
-			requireError(t, b.run(Options{Action: ActionEnsure, ConfigFile: writeTempConfig(t, []byte(v1))}), codeBundleRequired)
 			ensure := b.run(Options{Action: ActionEnsure})
 			requireOK(t, ensure)
-			if !hasWarning(ensure, enterprisebundle.WarnBundlePending) {
-				t.Fatalf("missing anchors were not reported as pending: %+v", ensure.Warnings)
+			if !hasPendingReason(ensure, "trust anchors are unavailable") {
+				t.Fatalf("missing anchors were not reported as pending with their reason: %+v", ensure.Warnings)
 			}
 			if got := b.receipt(bundleID(2)); got.State != enterprisebundle.StateApplied || b.read(b.env.Layout.ConfigPath) != installed {
 				t.Fatalf("ensure replaced the pending signed policy: %+v", got)
@@ -214,6 +212,120 @@ func TestPendingBundleWithMissingAnchorsKeepsSignedConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Without trust anchors the device is not in bundle mode: the base config
+// an administrator delivers with --config (the management contract's anchor
+// removal after a failed first apply) is applied, never refused because a
+// receipt is pending. The receipt it replaced is failed with a truthful
+// message: no transaction was rolled back.
+func TestPendingBundleWithMissingAnchorsTakesTheDeliveredConfig(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, action := range []string{ActionEnsure, ActionRepair} {
+			t.Run(goos+"/"+action, func(t *testing.T) {
+				b := pendingBundleHost(t, goos, "1.0.3")
+				if err := os.Remove(b.env.bundleAnchorsPath()); err != nil {
+					t.Fatal(err)
+				}
+				base := append(DefaultConfig(b.env.Layout), []byte("# base config\n")...)
+				result := b.run(Options{Action: action, ConfigFile: writeTempConfig(t, base)})
+				requireOK(t, result)
+				if b.read(b.env.Layout.ConfigPath) != string(base) {
+					t.Fatalf("the delivered config was not applied without anchors")
+				}
+				got := b.receipt(bundleID(2))
+				if got.State != enterprisebundle.StateFailed || !got.RolledBack || strings.Contains(got.ErrorMessage, "the transaction was rolled back") {
+					t.Fatalf("replaced receipt = %+v", got)
+				}
+				if hasWarning(result, enterprisebundle.WarnBundlePending) {
+					t.Fatalf("a replaced receipt is still reported pending: %+v", result.Warnings)
+				}
+			})
+		}
+	}
+}
+
+// The re-settle after an upgrade checks the carried receipt against the new
+// gateway. When that gateway proves another policy, the run installs the
+// last good bundle again before the receipt says rolled_back.
+func TestDeferredResettleRestoresLastGoodBundle(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, sourceVersion := range []string{"1.0.2", "1.0.3"} {
+			for _, channel := range []string{"package", "payload"} {
+				t.Run(goos+"/"+sourceVersion+"/"+channel, func(t *testing.T) {
+					b := pendingBundleHost(t, goos, sourceVersion)
+					before := b.receipt(bundleID(2))
+					pendingConfig := b.read(b.env.Layout.ConfigPath)
+					lastGood, _, err := b.env.currentBundleConfig(b.env.bundleStore())
+					if err != nil || lastGood == nil || string(lastGood) == pendingConfig {
+						t.Fatalf("last good config: %v", err)
+					}
+					upgradeBundleHostDigest(b)
+					gateway := unitGateway
+					if goos == "darwin" {
+						gateway = labelGateway
+					}
+					// The old gateway reports the historical digest; once
+					// restarted on 1.0.4 it enforces another policy for the
+					// pending config and the real one for any other config.
+					const disproved = "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+					originalHealth := b.env.HealthGet
+					callsBefore := len(b.services.calls)
+					b.env.HealthGet = func(ctx context.Context) (int, []byte, error) {
+						restarted := false
+						for _, call := range b.services.calls[callsBefore:] {
+							restarted = restarted || call == "start "+gateway || call == "restart "+gateway
+						}
+						switch {
+						case !restarted:
+							b.frozen = before.EffectivePolicyDigest
+						case b.read(b.env.Layout.ConfigPath) == pendingConfig:
+							b.frozen = disproved
+						default:
+							b.frozen = ""
+						}
+						return originalHealth(ctx)
+					}
+					options := Options{Action: ActionUpgrade, PayloadDir: b.payload("1.0.4")}
+					if channel == "package" {
+						if goos == "linux" {
+							stagePackage(t, b.testHost, "1.0.4")
+						} else {
+							stageDarwinBundlePackage(t, b, "1.0.4")
+						}
+						options = Options{Action: ActionEnsure, FromPackage: true, Reason: "package"}
+					}
+					result := b.run(options)
+					requireOK(t, result)
+					if result.InstalledVersion != "1.0.4" {
+						t.Fatalf("upgrade did not finish: %s", result.InstalledVersion)
+					}
+					got := b.receipt(bundleID(2))
+					if got.State != enterprisebundle.StateFailed || !got.RolledBack {
+						t.Fatalf("disproved receipt = %+v", got)
+					}
+					if b.read(b.env.Layout.ConfigPath) != string(lastGood) || b.state().Current.BundleID != bundleID(1) {
+						t.Fatalf("receipt says rolled_back but the last good bundle is not installed: receipt=%+v state=%+v", got, b.state())
+					}
+					if want, _ := installedPolicy(b); got.EnforcingDigest != want {
+						t.Fatalf("enforcing digest %s, want the last good bundle's %s", got.EnforcingDigest, want)
+					}
+					if hasWarning(result, enterprisebundle.WarnBundlePending) {
+						t.Fatalf("a disproved receipt is still reported pending: %+v", result.Warnings)
+					}
+				})
+			}
+		}
+	}
+}
+
+func hasPendingReason(r *enterprisestatus.Result, reason string) bool {
+	for _, w := range r.Warnings {
+		if w.Code == enterprisebundle.WarnBundlePending && strings.Contains(w.Message, reason) {
+			return true
+		}
+	}
+	return false
 }
 
 func pendingBundleHost(t *testing.T, goos, sourceVersion string) *bundleHost {

@@ -281,6 +281,10 @@ type lifecycle struct {
 	// confirmedLate are the manifest SHA-256s of the bundles this run's
 	// settle confirmed late (bundle_confirmed_after_interrupt).
 	confirmedLate map[string]bool
+	// reinstallAfterSettle, when set, installs the last good bundle again
+	// before settle records a disproved receipt. The re-settle at the end
+	// of a run sets it: no later step of that run would put it back.
+	reinstallAfterSettle func(context.Context, *Deployment) (enforcing string, ok bool)
 	// inboxProcessed are the bundle inbox files this run removes at its end.
 	inboxProcessed []string
 	// inboxSuperseded are the lower inbox versions this run did not apply,
@@ -536,10 +540,12 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 			l.recoverInterruptedRotation(ctx, record)
 		}
 	}
-	if settlePending {
+	if settlePending && slices.Contains([]string{ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure}, l.opts.Action) {
 		// A repair or upgrade can make the gateway available or move it to
 		// this build's digest. Recheck after the action, while still holding
-		// the lifecycle lock, so its result reports the settled receipt.
+		// the lifecycle lock, so its result reports the settled receipt. A
+		// receipt the new gateway disproves gets the last good bundle back
+		// in this run.
 		defer func() {
 			if l.opts.Bundle != "" || len(r.Errors) != 0 {
 				return
@@ -549,7 +555,9 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 				r.AddWarning(codeBundleStateUnreadable, "could not recheck the pending policy bundle: "+err.Error())
 				return
 			}
+			l.reinstallAfterSettle = l.reinstallLastGoodBundle
 			stillPending := l.settleBundles(ctx, latest)
+			l.reinstallAfterSettle = nil
 			l.describeBundle()
 			if !stillPending {
 				r.Warnings = slices.DeleteFunc(r.Warnings, func(w enterprisestatus.Message) bool {
