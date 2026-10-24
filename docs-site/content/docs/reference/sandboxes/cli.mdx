@@ -1936,7 +1936,7 @@ Either have the owner give you write access, or install a Homebrew of your own i
 | Disk use | About 5 GB per image the driver has started, in `~/.local/state/openshell/vm-driver`. `defenseclaw sandbox image prune` and `image rm` remove unused images and their disks. |
 | Per-run settings | Claude Code and Codex settings are baked, root-owned and read-only, into a small run image for each sandbox. A run with other `--env`, credentials or model provider prepares another disk. |
 | Stopping | Save or sync accessible work first, then `defenseclaw sandbox stop NAME` on a running MicroVM; it requests a disk sync before the stop; a failed sync may lose changes since the last successful one. A gateway restart stops every MicroVM on it, so setup asks before it restarts a gateway with sandboxes running. |
-| Disk full | DefenseClaw warns once when a MicroVM's overlay disk reaches 90% use. `defenseclaw sandbox status NAME` shows the warning while it runs. |
+| Disk full | The live session checks overlay use every two minutes and warns once if a check finds at least 90% use. A rapidly filling disk can reach full before that check; the warning cannot prevent a write from failing. Run `defenseclaw sandbox status NAME` for a current check or `defenseclaw sandbox exec NAME -- df -h /` to inspect space in the guest. If it fills, free space in the guest and pull the work before stopping it. |
 
 Limits on a Mac: there is no live mount and no pre-session snapshot, `sandbox undo` reverts the last `pull --apply`, `--context` is refused, the copy has no Git LFS, and OpenShell calls the driver experimental. A harness runs only after its image proves its hooks fire in a MicroVM ([which agents run](/docs/features/sandbox-details#which-agents-run)).
 
