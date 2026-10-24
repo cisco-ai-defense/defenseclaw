@@ -46,7 +46,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 
 - In action mode `PreToolUse` can deny a tool call or ask you first, using Antigravity's own `decision` field. The ask always prompts, even when you chose "Always Allow" before.
 - `PreInvocation` and `PostInvocation` can only add context. `PostToolUse` only observes. `Stop` is always allowed.
-- Observe mode records policy findings without blocking on those findings. When the gateway is not running, the default and permissive policies let the call run with one warning and strict denies `PreToolUse`; every other hook failure denies it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)).
+- Observe mode records policy findings without blocking on those findings. See the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) for hook failure behavior.
 
 ## Files it changes
 
@@ -61,7 +61,7 @@ Setup backs up `hooks.json` and keeps unrelated hooks. It writes only the global
 
 ## Limits
 
-- Only the synchronous `PreToolUse` decision is a hard block. Antigravity does not document a non-zero hook exit as enforcement, so there is no connector-wide fail-closed. A gateway that is not running follows the policy tier on a per-user install and the administrator's fail mode on a managed host ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)); every other gateway failure denies `PreToolUse`. Antigravity itself still runs a call when the hook times out or cannot start.
+- Only the synchronous `PreToolUse` decision is a hard block. Antigravity does not document a non-zero hook exit as enforcement, so there is no connector-wide fail-closed. The [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage) states the per-user and managed outcomes. Antigravity itself still runs a call when the hook times out or cannot start.
 - DefenseClaw cannot override Antigravity's own permission bypass.
 - Windows ARM64 is not supported.
 - Enterprise, Team and organization policy surfaces are outside this connector.
