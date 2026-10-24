@@ -201,7 +201,7 @@ func blocksOn(path profilePath, hook, inspect bool) bool {
 
 // configBlocksOn reports whether cfg blocks on connectorName on path.
 func configBlocksOn(cfg *config.Config, connectorName string, path profilePath) bool {
-	return blocksOn(path, hookModeForConfig(cfg, connectorName) == "action", inspectMode(cfg, connectorName) == "action")
+	return blocksOn(path, cfg.HookModeForConnector(connectorName) == "action", inspectMode(cfg, connectorName) == "action")
 }
 
 // meetMembers expands meets among names into their members.

@@ -145,7 +145,7 @@ func TestEveryCandidateProfileIsEnforcedInItsOwnModePerConnector(t *testing.T) {
 								candidate := !scoped || r.rq.hook != "" || r.rq.inspect != ""
 								blocks := false
 								for _, on := range r.scopes {
-									hookB, inspectB := hookModeForConfig(cb, on) == "action", inspectMode(cb, on) == "action"
+									hookB, inspectB := cb.HookModeForConnector(on) == "action", inspectMode(cb, on) == "action"
 									if !candidate || !hookB && !inspectB {
 										continue
 									}
@@ -155,7 +155,7 @@ func TestEveryCandidateProfileIsEnforcedInItsOwnModePerConnector(t *testing.T) {
 									}
 									// Not refused: the decision enforces b there.
 									cd := set.profileConfig(decision.Name)
-									if hookB && hookModeForConfig(cd, on) != "action" || inspectB && inspectMode(cd, on) != "action" {
+									if hookB && cd.HookModeForConnector(on) != "action" || inspectB && inspectMode(cd, on) != "action" {
 										t.Errorf("%s: %s observes on %q where b blocks", r.rq.name, decision.Name, on)
 									}
 									have := rulesOf(decision.Name, on)

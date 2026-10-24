@@ -192,7 +192,7 @@ func TestObserveOnlyProfileAddsNoBlockingRulesToItsConnector(t *testing.T) {
 					t.Fatalf("fixture: %s inspect blocks on %q = %v", fixture.profile, fixture.connector, got)
 				}
 				if fixture.connector != "" {
-					if got := hookModeForConfig(m, fixture.connector) == "action"; got != fixture.blocks {
+					if got := m.HookModeForConnector(fixture.connector) == "action"; got != fixture.blocks {
 						t.Fatalf("fixture: %s hook blocks on %q = %v", fixture.profile, fixture.connector, got)
 					}
 				}

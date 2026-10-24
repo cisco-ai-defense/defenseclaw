@@ -117,7 +117,7 @@ func TestMeetEnforcesEachMemberInItsOwnModeOnEachPath(t *testing.T) {
 					if got := hiltEnabledForConfig(resolved.derived, "codex"); got != wantHILT {
 						t.Errorf("%s: HILT %v; want %v", path.name, got, wantHILT)
 					}
-					if mode := map[string]string{"hook": hookModeForConfig(resolved.derived, "codex"), "inspect": inspectMode(resolved.derived, "codex")}[path.name]; mode != "action" {
+					if mode := map[string]string{"hook": resolved.derived.HookModeForConnector("codex"), "inspect": inspectMode(resolved.derived, "codex")}[path.name]; mode != "action" {
 						t.Errorf("%s: mode %s; want action (b acts on both paths)", path.name, mode)
 					}
 					for _, rule := range []struct {

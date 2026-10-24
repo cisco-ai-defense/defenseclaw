@@ -204,12 +204,12 @@ func TestProfileMeetModesPerConnector(t *testing.T) {
 	} {
 		for _, member := range []string{"a", "b"} {
 			m := set.profileConfig(member)
-			if hookModeForConfig(m, tc.connector) != tc.hook || inspectMode(m, tc.connector) != tc.inspect {
+			if m.HookModeForConnector(tc.connector) != tc.hook || inspectMode(m, tc.connector) != tc.inspect {
 				t.Fatalf("fixture: member %s on %s hook %q inspect %q", member, tc.connector,
-					hookModeForConfig(m, tc.connector), inspectMode(m, tc.connector))
+					m.HookModeForConnector(tc.connector), inspectMode(m, tc.connector))
 			}
 		}
-		if got := hookModeForConfig(derived.Config, tc.connector); got != tc.hook {
+		if got := derived.Config.HookModeForConnector(tc.connector); got != tc.hook {
 			t.Errorf("%s hook mode under the meet = %q, want %q", tc.connector, got, tc.hook)
 		}
 		if got := inspectMode(derived.Config, tc.connector); got != tc.inspect {

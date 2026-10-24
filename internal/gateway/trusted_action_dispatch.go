@@ -339,7 +339,10 @@ func dispatchTrustedActionWith(
 				child.conflictSource = nil
 				child.record, child.recordTelemetry = nil, nil
 				child.simpleCommandPass = true
-				childFindings := dispatchTrustedAction(parent, child)
+				// The child is judged by this generation (a meet member) within
+				// the call budget, like its parent.
+				child.generation, child.budget = generation, budget
+				childFindings := dispatchTrustedAction(ctx, child)
 				if simple.ZshHistoryBuiltin {
 					// Zsh's history builtin lists events (fc -l). The Bash-only
 					// history -c clear rule does not apply inside that shell.
