@@ -452,6 +452,7 @@ def test_fail_mode_note_names_deployment_and_tier_override(
     cfg.guardrail.hook_policy_tier = lambda _name: tier
     cfg.managed_outside_secure_client = lambda: deployment == "managed"
     cfg.guardrail.secure_client_hook_fail_modes = lambda: deployment == "secure-client"
+    monkeypatch.setattr(fail_mode_runtime, "_platform_runtime_source", lambda _cfg, _name: ("hook-script", desired))
 
     state = resolve_connector_fail_mode(cfg, "cursor")
 
