@@ -216,10 +216,9 @@ func TestBuildHookOptionsPackagedWindowsIgnoresLooseningProjectEnv(t *testing.T)
 	}
 }
 
-// The packaged hook keeps its installed fail mode: DEFENSECLAW_FAIL_MODE in
-// the agent's environment is not read, so status, which reads the same
-// sidecar, reports what runs (1.0.4 lead directive). Strict availability and
-// a lower body cap still tighten.
+// The packaged per-user hook closes a predecessor's open sidecar:
+// DEFENSECLAW_FAIL_MODE in the agent's environment cannot loosen it. Strict
+// availability and a lower body cap still tighten.
 func TestBuildHookOptionsPackagedWindowsTakesItsInstalledModeAndTighteningKnobs(t *testing.T) {
 	_, trustedHome := stageTrustedNativeHookForTest(t, "open")
 	t.Setenv("DEFENSECLAW_HOME", filepath.Join(t.TempDir(), "attacker-home"))
@@ -228,9 +227,7 @@ func TestBuildHookOptionsPackagedWindowsTakesItsInstalledModeAndTighteningKnobs(
 	t.Setenv("DEFENSECLAW_HOOK_MAX_BODY", "4096")
 
 	opts := buildHookOptions("claudecode", "PreToolUse", "", "")
-	// The installed record is the outage mode (oss-outage-open); every other
-	// per-user failure stays closed.
-	if opts.Home != trustedHome || opts.FailMode != "closed" || opts.OutageFailMode != "open" ||
+	if opts.Home != trustedHome || opts.FailMode != "closed" || opts.OutageFailMode != "closed" ||
 		!opts.StrictAvailability || opts.MaxBody != 4096 {
 		t.Fatalf("the installed mode or a tightening knob was not honored: %+v", opts)
 	}

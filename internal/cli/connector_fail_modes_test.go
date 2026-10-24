@@ -122,18 +122,15 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 	}
 }
 
-// A loaded config: an earlier render recorded Copilot's unset mode as open
-// (lowered because its vendor hook surface cannot fail closed) without a
-// source. The native hook does not trust that open; the refresh writes the
-// outage mode of the policy tier with its config source (oss-outage-open):
-// open for the default tier, also when a saved per-user value says something
-// else, closed for strict. Every other native hook failure stays closed.
-func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
+// An earlier render could record Copilot's unset mode as open without a
+// source. The refresh closes it in every per-user policy tier, even when
+// a saved value says open.
+func TestRefreshFailModesClosesPerUserOutages(t *testing.T) {
 	for _, test := range []struct {
 		name, config, want string
 	}{
-		{name: "default tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n", want: "open"},
-		{name: "default tier, saved closed", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  connectors:\n    copilot:\n      hook_fail_mode: closed\n", want: "open"},
+		{name: "default tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n", want: "closed"},
+		{name: "default tier, saved closed", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  connectors:\n    copilot:\n      hook_fail_mode: closed\n", want: "closed"},
 		{name: "strict tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n", want: "closed"},
 		{name: "strict tier, saved open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "closed"},
 	} {
@@ -162,17 +159,16 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 }
 
 // Cursor: a 1.0.x refresh recorded its observe mode open whatever the
-// config said. The refresh now writes the policy tier's outage mode in
-// observe and action mode alike; a 0.8.x document the release cannot load
-// yet is closed until the migrated config renders the hooks.
-func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
+// config said. The refresh now closes the per-user outage mode in observe
+// and action mode alike, including an older document it cannot load yet.
+func TestRefreshFailModesClosesCursorPerUserOutages(t *testing.T) {
 	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n"
 	const v7 = "config_version: 7\nguardrail:\n"
 	for _, test := range []struct {
 		name, config, read, want string
 	}{
-		{"1.0.x observe, default tier", v9 + "  mode: observe\n", "loaded", "open"},
-		{"1.0.x action, default tier, cursor closed", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: closed\n", "loaded", "open"},
+		{"1.0.x observe, default tier", v9 + "  mode: observe\n", "loaded", "closed"},
+		{"1.0.x action, default tier, cursor closed", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: closed\n", "loaded", "closed"},
 		{"1.0.x action, strict tier", v9 + "  mode: action\n  rule_pack: strict\n", "loaded", "closed"},
 		{"0.8.x observe, unset", v7 + "  mode: observe\n", "document", "closed"},
 		{"0.8.x observe, cursor open", v7 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "closed"},
@@ -343,7 +339,7 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 	previous := refreshFailModesClosed
 	t.Cleanup(func() { refreshFailModesClosed = previous })
 	for _, test := range []struct{ name, doc, tier string }{
-		{"loaded config, default tier", "config_version: 9\nguardrail:\n  mode: action\n  hook_fail_mode: open\n", "open"},
+		{"loaded config, default tier", "config_version: 9\nguardrail:\n  mode: action\n  hook_fail_mode: open\n", "closed"},
 		{"0.8.x document open", "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n", "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -355,10 +351,9 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","claudecode":"open"}}`)
 			refreshFailModesClosed = false
 			runRefreshFailModesForTest(t, home)
-			// Without --closed the refresh writes the policy tier's outage
-			// mode (oss-outage-open); an unloadable 0.8.x document is closed.
+			// A per-user refresh closes the outage mode even without --closed.
 			if got := oldHookFailMode(t, home, "codex"); got != test.tier {
-				t.Fatalf("per-user refresh wrote %q, want the tier's %q", got, test.tier)
+				t.Fatalf("per-user refresh wrote %q, want %q", got, test.tier)
 			}
 			refreshFailModesClosed = true
 			if result := runRefreshFailModesForTest(t, home); !reflect.DeepEqual(result.Refreshed, []string{"claudecode", "codex"}) {
@@ -397,9 +392,9 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 // open the config sets let a call run while the gateway was down for the
 // swap. With the lock held every hook is closed, the config's open included,
 // in the sidecar the old native hooks read and in the open an old script
-// bakes; the hold refreshes the same way. Without the lock the operator's
-// open stays open (control). The lock in DEFENSECLAW_HOME counts too, for
-// a refresh whose --data-dir names the gateway's data_dir.
+// bakes; the hold refreshes the same way. Without the lock this release
+// also closes per-user outages. The lock in DEFENSECLAW_HOME counts too,
+// for a refresh whose --data-dir names the gateway's data_dir.
 func TestRefreshFailModesClosesEveryHookWhileAnInstallHoldsTheDataDirectory(t *testing.T) {
 	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"
 	const v7 = "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"
@@ -420,10 +415,9 @@ func TestRefreshFailModesClosesEveryHookWhileAnInstallHoldsTheDataDirectory(t *t
 		{name: "0.8.x config open, install", config: v7, read: "install", lock: "data", want: "closed"},
 		{name: "config open, install in DEFENSECLAW_HOME", config: v9, read: "install", lock: "home", want: "closed"},
 		{name: "config open, install, hold", config: v9, read: "install", lock: "data", hold: true, want: "closed"},
-		// Outside an install the runtime record holds the per-user outage mode,
-		// which follows the policy tier (owner decision 2026-10-23: default
-		// tier open); the open a released script baked is closed (TGT-0115).
-		{name: "config open, no install", config: v9, read: "loaded", want: "open"},
+		// Outside an install the runtime record still closes per-user outages;
+		// the open a released script baked is closed too (TGT-0115).
+		{name: "config open, no install", config: v9, read: "loaded", want: "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()

@@ -325,7 +325,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 		t.Fatalf("Codex re-addition did not publish registration: present=%v err=%v", present, err)
 	}
 	locked := connector.LoadHookContractLockEntry(dataDir, "codex")
-	if locked.Connector != "codex" || locked.HookFailMode != "open" {
+	if locked.Connector != "codex" || locked.HookFailMode != "closed" {
 		t.Fatalf("Codex re-addition did not publish its hook-contract lock: %+v", locked)
 	}
 
@@ -333,7 +333,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	// Connector.Teardown restores the operator's managed_config.toml and leaves
 	// the already-published contract lock/shared runtime state behind. A stale
 	// connector-flat runtime record models the captured partial teardown state:
-	// status still resolves windows-sidecar=open from the shared JSON, but the
+	// status still resolves windows-sidecar=closed from the shared JSON, but the
 	// real managed hook matrix is registration-missing.
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("late stale Codex teardown: %v", err)
@@ -348,11 +348,11 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	if present, err := connector.OwnedHooksPresent(conn, opts); err != nil || present {
 		t.Fatalf("late teardown did not remove managed registration: present=%v err=%v", present, err)
 	}
-	if got := connector.LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" || got.HookFailMode != "open" {
+	if got := connector.LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" || got.HookFailMode != "closed" {
 		t.Fatalf("late teardown unexpectedly removed Codex lock evidence: %+v", got)
 	}
 	sharedRuntime, err := os.ReadFile(filepath.Join(dataDir, "hooks", ".hookcfg"))
-	if err != nil || !bytes.Contains(sharedRuntime, []byte(`"codex": "open"`)) {
+	if err != nil || !bytes.Contains(sharedRuntime, []byte(`"codex": "closed"`)) {
 		t.Fatalf("late teardown unexpectedly removed shared Codex runtime mode: err=%v body=%q", err, sharedRuntime)
 	}
 
@@ -413,7 +413,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	// lane finishes Setup and registers its exact hook guard. An authenticated
 	// SessionStart arriving in that bounded startup window must hand off to the
 	// subsequently registered current owner instead of returning an internal
-	// 503 that Codex's fail-open UI renders as a successful hook.
+	// 503 that Codex could render as a successful hook.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	replacementGuard := NewHookConfigGuard(nil, nil, time.Hour)
@@ -490,7 +490,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 		t.Fatalf("registration-missing persisted after authenticated SessionStart: present=%v err=%v", present, err)
 	}
 	repairedLock := connector.LoadHookContractLockEntry(dataDir, "codex")
-	if repairedLock.Connector != "codex" || repairedLock.HookFailMode != "open" {
+	if repairedLock.Connector != "codex" || repairedLock.HookFailMode != "closed" {
 		t.Fatalf("authenticated SessionStart did not republish Codex contract evidence: %+v", repairedLock)
 	}
 	if repairedLock.UpdatedAt == locked.UpdatedAt {
@@ -498,7 +498,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	}
 	runtimeBody, err := os.ReadFile(filepath.Join(dataDir, "hooks", ".hookcfg.codex"))
 	if err != nil || !bytes.Contains(runtimeBody, []byte("DEFENSECLAW_CONNECTOR=codex")) ||
-		!bytes.Contains(runtimeBody, []byte("DEFENSECLAW_FAIL_MODE=open")) {
+		!bytes.Contains(runtimeBody, []byte("DEFENSECLAW_FAIL_MODE=closed")) {
 		t.Fatalf("authenticated SessionStart did not republish Codex runtime evidence: err=%v body=%q", err, runtimeBody)
 	}
 
@@ -532,7 +532,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	if lockRepairRecorder.Code != http.StatusOK {
 		t.Fatalf("authenticated SessionStart did not repair missing ready lock: status=%d body=%s", lockRepairRecorder.Code, lockRepairRecorder.Body.String())
 	}
-	if got := connector.LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" || got.HookFailMode != "open" {
+	if got := connector.LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" || got.HookFailMode != "closed" {
 		t.Fatalf("authenticated SessionStart did not republish missing ready lock: %+v", got)
 	}
 
@@ -816,8 +816,8 @@ cfg.has_connector_configured = lambda: True
 cfg.connector_workspace_dir = lambda: ""
 report = connector_fail_mode_report(cfg, "codex")
 print(json.dumps(report, sort_keys=True))
-if report["effective"] != "open" or report["runtime"] != "open":
-    raise SystemExit("Codex runtime fail-mode report is not open")
+if report["effective"] != "closed" or report["runtime"] != "closed":
+    raise SystemExit("Codex runtime fail-mode report is not closed")
 if report["current"] is not True or report["drift"]:
     raise SystemExit("Codex runtime fail-mode report is not current: " + ", ".join(report["drift"]))
 `
@@ -862,10 +862,10 @@ if report["current"] is not True or report["drift"]:
 		}
 		t.Fatalf("Python Codex fail-mode report acceptance failed: %v\n%s", err, output)
 	}
-	if !bytes.Contains(output, []byte(`"effective": "open"`)) ||
-		!bytes.Contains(output, []byte(`"runtime": "open"`)) ||
+	if !bytes.Contains(output, []byte(`"effective": "closed"`)) ||
+		!bytes.Contains(output, []byte(`"runtime": "closed"`)) ||
 		!bytes.Contains(output, []byte(`"current": true`)) {
-		t.Fatalf("Python Codex fail-mode report omitted current open runtime state:\n%s", output)
+		t.Fatalf("Python Codex fail-mode report omitted current closed runtime state:\n%s", output)
 	}
 	if !bytes.Contains(output, []byte(`"drift": []`)) || bytes.Contains(output, []byte("registration-missing")) {
 		t.Fatalf("Python Codex fail-mode report retained registration drift:\n%s", output)

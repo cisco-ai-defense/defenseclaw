@@ -2589,7 +2589,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
                 "codex": PerConnectorGuardrailConfig(
                     enabled=False,
                     hook_fail_mode="closed",
-                    # The strict tier: its outage mode is closed (oss-outage-open).
+                    # The strict tier's outage mode is closed.
                     rule_pack="strict",
                     block_message="codex blocked",
                     hilt=HILTConfig(enabled=True, min_severity="LOW"),
@@ -2617,9 +2617,9 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     assert fields["guardrail.judge.hook_connectors.codex"].value == "true"
     assert fields["guardrail.judge.hook_connectors.hermes"].value == "false"
 
-    # Hermes has no override: its outage mode is the default tier's open.
+    # Hermes has no override: its per-user outage mode stays closed.
     assert fields["guardrail.connectors.hermes.enabled"].value == "true"
-    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "open"
+    assert fields["guardrail.connectors.hermes.hook_fail_mode"].value == "closed"
     assert fields["guardrail.connectors.hermes.block_message"].value == "global blocked"
     assert fields["guardrail.connectors.hermes.hilt.enabled"].value == "false"
     assert fields["guardrail.connectors.hermes.hilt.min_severity"].value == "HIGH"

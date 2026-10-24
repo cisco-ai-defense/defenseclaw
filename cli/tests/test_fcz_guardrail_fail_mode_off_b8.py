@@ -35,7 +35,8 @@ def test_fail_mode_while_off_counts_every_saved_connector(monkeypatch: pytest.Mo
 
     again = _fail_mode(cfg, "closed")
     assert again.exit_code == 0, again.output
-    assert "Hook fail mode is already 'closed' for configured connectors - nothing to do." in again.output
+    assert "Hook fail mode is already 'closed' for configured connectors" in again.output
+    assert "nothing to do." in again.output
 
 
 def test_fail_mode_open_on_per_user_openclaw_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
