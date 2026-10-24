@@ -584,7 +584,7 @@ func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code s
 		}
 	}
 	allowed := map[string]bool{"elevation_required": true, "invalid_arguments": true, "not_installed": true, "lifecycle_busy": true,
-		"credential_in_use": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true,
+		"credential_in_use": true, "credential_changed": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true,
 		"rotation_confirmed": true, "confirmed_bundle_changed": true}
 	exit := commandExitCode(err)
 	if doc.SchemaVersion != 1 || doc.OK || doc.Action != action || doc.GatewayRestarted || len(doc.Errors) != 1 ||
@@ -1262,7 +1262,7 @@ func TestWindowsSecretUndoRotationRemovesWhatAFailedRotationAdded(t *testing.T) 
 	}
 	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
 	windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
-	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: other}, "")
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: other, ifStored: windowsTestSHA256("new-key")}, "")
 	windowsSecretFailureDoc(t, out, err, "remove", "rotation_confirmed")
 	if !windowsSecretStored(dir, name) {
 		t.Fatal("a refused put-back removed the credential")
@@ -1270,13 +1270,13 @@ func TestWindowsSecretUndoRotationRemovesWhatAFailedRotationAdded(t *testing.T) 
 	// Without the config from before the rotation (--undo-config), or with
 	// another one, the reference stands (loop round 1, review at b97e9ab4).
 	for _, undoConfig := range []string{"", "none", windowsTestSHA256(standaloneGatewayCheckConfig)} {
-		out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: undoConfig}, "")
+		out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: undoConfig, ifStored: windowsTestSHA256("new-key")}, "")
 		windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
 		if !windowsSecretStored(dir, name) {
 			t.Fatalf("a put-back with --undo-config %q removed a credential the installed config references", undoConfig)
 		}
 	}
-	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: windowsTestSHA256(cfg)}, "")
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none", undoConfig: windowsTestSHA256(cfg), ifStored: windowsTestSHA256("new-key")}, "")
 	if err != nil {
 		t.Fatalf("put-back: %v\n%s", err, out)
 	}
@@ -1344,7 +1344,7 @@ func TestWindowsSecretUndoRotationKeepsACredentialALaterConfigUses(t *testing.T)
 			if strings.HasPrefix(tc.name, "a bundle confirmed since") {
 				undoRotation, code = strings.Repeat("a", 64), "rotation_confirmed"
 			}
-			out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: undoRotation, undoConfig: windowsTestSHA256(tc.before)}, "")
+			out, err := runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: undoRotation, undoConfig: windowsTestSHA256(tc.before), ifStored: windowsTestSHA256("new-key")}, "")
 			if tc.removed {
 				if err != nil {
 					t.Fatalf("put-back: %v\n%s", err, out)

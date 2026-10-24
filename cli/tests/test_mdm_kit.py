@@ -354,6 +354,11 @@ function Invoke-DefenseClawNative {
     $ifConfirmed = & $flag '--if-confirmed'
     if ($ifConfirmed -and $ifConfirmed -ne $script:digest) { return (& $refuse 'confirmed_bundle_changed') }
     $undo = & $flag '--undo-rotation'
+    $expectedValue = & $flag '--if-stored'
+    if ($expectedValue -and ($null -eq $current -or
+        (Get-FileHash -LiteralPath $stored -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedValue)) {
+        return (& $refuse 'credential_changed')
+    }
     if ($undo -and ($undo -ne $script:digest -or ($null -ne $current -and $null -ne $script:confirmed -and $current -eq $script:confirmed))) {
         return (& $refuse 'rotation_confirmed')
     }
@@ -647,6 +652,18 @@ foreach ($case in @('failed', 'resumed', 'oldBundle', 'unused')) {
     $out["laterConfig_$case"] = "$rotated $(Get-Stored) $(Get-Journal) $($problems.Count)"
 }
 
+# A direct administrator save after the rotation belongs to that later
+# change. Neither an immediate failure nor interrupted-run replay may put
+# the earlier value over it, even when the old bundle signs that value.
+foreach ($case in @('failed', 'resumed')) {
+    $script:inUse = $false; Reset-Device 'old-key'; Use-OldBundle 'old-key'
+    [void](Rotate)
+    $stored = Get-WrapperStoredSecretPath -Name $SecretName
+    [System.IO.File]::WriteAllText($stored, 'admin-new-key')
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $out["adminChanged_$case"] = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+}
+
 # 18. The .absent entry holds the SHA-256 of the config installed before the
 #     rotation ('none' with no config), and the put-back passes it.
 $script:inUse = $false; Reset-Device $null; Use-OldBundle $null
@@ -695,6 +712,7 @@ def _any_pwsh7() -> str | None:
 
 _ROTATION_FUNCTIONS = ("Get-WrapperSecretErrorCode", "Set-WrapperSecret", "Get-WrapperRotationJournal",
                        "Get-WrapperConfirmedBundle", "Get-WrapperJournalEntryName", "Get-WrapperInstalledConfigIdentity",
+                       "Get-WrapperRotatedValueDigest",
                        "Get-WrapperStoredSecretPath", "Initialize-WrapperRotationJournal", "Test-WrapperJournalEntry",
                        "Save-WrapperSecretJournal", "Remove-WrapperJournalEntry", "Complete-WrapperSecretJournal",
                        "Undo-WrapperSecretRotation")
@@ -707,6 +725,31 @@ def _rotation_functions(*names: str) -> str:
         start = text.index(f"function {name} {{")
         functions.append(text[start : text.index("\n}\n", start) + 3])
     return "\n".join(functions)
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+@pytest.mark.parametrize(("raw", "stored"), [
+    (b" \tnew-key\r\n", b"new-key"),
+    ("\u00a0new-key\u202f".encode(), b"new-key"),
+    (b"\xff \tkey \x80", b"\xff \tkey \x80"),
+    (b"\xe2\x80\x8bkey", b"\xe2\x80\x8bkey"),
+])
+def test_windows_journal_records_the_exact_cli_stored_value_digest(tmp_path: Path, raw: bytes, stored: bytes) -> None:
+    staged = tmp_path / "secret"
+    staged.write_bytes(raw)
+    probe = tmp_path / "digest.ps1"
+    quoted = str(staged).replace("'", "''")
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + f"$secret = '{quoted}'\n"
+        + _rotation_functions("Get-WrapperRotatedValueDigest")
+        + "\nGet-WrapperRotatedValueDigest\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run([_any_pwsh7(), "-NoProfile", "-NonInteractive", "-File", str(probe)],
+                            capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip() == hashlib.sha256(stored).hexdigest()
 
 
 @pytest.mark.skipif(_any_pwsh7() is None and os.name != "nt", reason="needs PowerShell 7")
@@ -726,6 +769,7 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
     assert result.returncode == 0, result.stdout + result.stderr
     out = json.loads(result.stdout.strip().splitlines()[-1])
     a = "a" * 64
+    value = hashlib.sha256(b"new-key").hexdigest()
     assert out == {
         "rotated": "True new-key",
         "failed": "old-key 0",
@@ -752,7 +796,7 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "untrusted_entry": "old-key attacker-key 0 1 refused",
         "folderEntry": "old-key True 0 1 refused",
         "foreignEntry": "old-key 7 0 1 refused",
-        "retireStopped": f"new-key ai-defense-api-key@{a}.retired:0 1",
+        "retireStopped": f"new-key ai-defense-api-key@{a}+{value}.retired:0 1",
         "retireResumed": "new-key 0 0 0",
         "retireNext": "True newer-key new-key 0",
         "retireConfigOnly": "new-key 0 0 1 0",
@@ -760,7 +804,9 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "laterConfig_resumed": "True new-key new-key 1 1",
         "laterConfig_oldBundle": "True new-key new-key 1 1",
         "laterConfig_unused": "True new-key <none> 0 0",
-        "absentEntry": "ai-defense-api-key@none.absent True 1",
+        "adminChanged_failed": "admin-new-key 1 1",
+        "adminChanged_resumed": "admin-new-key 1 1",
+        "absentEntry": f"ai-defense-api-key@none+{value}.absent True 1",
         "absentEntryNoConfig": "none",
         "noConfigEntry_0": "new-key True 0 1",
         "noConfigEntry_64": "new-key True 0 1",
@@ -949,6 +995,15 @@ printf '%s\n' "$*" >>"$FAKE/calls"
 if [ "$1" = --version-json ]; then echo '{"secret_set_bundle":true}'; exit 0; fi
 store="$SECRETS/$5"
 refuse() { printf '{"schema_version":2,"ok":false,"errors":[{"code":"%s","message":"%s refused"}]}\n' "$1" "$1"; exit 1; }
+expect="" next=0
+for arg do
+    if [ "$next" = 1 ]; then expect=$arg; break; fi
+    [ "$arg" != --if-stored ] || next=1
+done
+if [ -n "$expect" ]; then
+    [ -f "$store" ] || refuse credential_changed
+    [ "$(sha256sum "$store" | awk '{print $1}')" = "$expect" ] || refuse credential_changed
+fi
 case "$3" in
 set)
     value=$(cat)
@@ -960,7 +1015,7 @@ set)
         case " $* " in *" --bundle "*) [ "$value" != "$(cat "$FAKE/delivered")" ] || signed=1 ;; esac
         [ "$signed" = 1 ] || refuse secret_ref_mismatch
         mkdir -p "$SECRETS"
-        printf '%s\n' "$value" >"$store"
+        printf '%s' "$value" >"$store"
     fi
     echo '{"schema_version":2,"ok":true,"errors":[]}'
     exit 0 ;;
@@ -973,7 +1028,7 @@ esac
 exit 2
 """
 
-_SECRET_ROTATION_FUNCTIONS = ("dc_secret_json_error", "dc_secret_set_bundle", "dc_read_stored_secret",
+_SECRET_ROTATION_FUNCTIONS = ("dc_sha256", "dc_secret_json_error", "dc_secret_set_bundle", "dc_read_stored_secret",
                               "dc_save_secret_previous", "dc_restore_secret", "dc_store_secret",
                               "dc_restore_anchors", "dc_cleanup")
 
@@ -991,6 +1046,9 @@ _SECRET_ROTATION_FUNCTIONS = ("dc_secret_json_error", "dc_secret_set_bundle", "d
         ("applied", "old-key", "old-key", "new-key", False, "applied", "new-key", ""),
         # The run failed after the new bundle was confirmed: the gateway refuses the old value.
         ("confirmed", "old-key", "old-key", "new-key", False, "echo new-key >\"$FAKE/confirmed\"; exit 1", "new-key", "set"),
+        # An administrator's direct save after rotation must survive cleanup.
+        ("admin-changed", "old-key", "old-key", "new-key", False,
+         'printf "admin-new-key\\n" >"$DC_SECRETS_DIR/ai-key"; exit 1', "admin-new-key", "set"),
         # No credential was stored before: a failed run removes it again ...
         ("absent", None, None, "new-key", False, "exit 1", None, "remove"),
         # ... unless the installed config now uses it.
@@ -1021,7 +1079,7 @@ def test_unix_wrapper_puts_back_a_rotated_credential_unless_its_bundle_applies(
     after = 'DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS=""; exit 0' if then == "applied" else then
     script = f"""set -eu
 DC_ACTION=ensure DC_STAGE="{stage}" DC_LOG="{tmp_path / 'kit.log'}" DC_EXIT_FAILURE=1 DC_MAX_SECRET_BYTES=16384
-DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
+DC_SCRIPT_OS={"darwin" if os_dir == "macos" else "linux"} DC_SECRETS_DIR="{secrets}" DC_SECRET_NAME=ai-key DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0
 DC_SECRET_GATEWAY="" DC_CHILD="" DC_ANCHORS_SOURCE="" DC_ANCHORS_CHANGED=0
 dc_log() {{ printf '%s\\n' "$1" >>"$DC_LOG"; }}
 dc_fail_result() {{ echo "fail $1 $2 $3"; exit "$1"; }}

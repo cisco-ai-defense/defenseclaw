@@ -351,7 +351,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
-	if opts.ifConfirmed != "" || opts.undoRotation != "" {
+	if opts.ifConfirmed != "" || opts.undoRotation != "" || opts.ifStored != "" {
 		var stored []byte
 		entry, raw, readErr := store.openCredential(opts.name)
 		if readErr == nil {

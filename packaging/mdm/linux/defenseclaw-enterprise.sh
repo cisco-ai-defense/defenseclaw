@@ -1652,6 +1652,20 @@ dc_save_secret_previous() {
             dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the stored credential $DC_SECRETS_DIR/$DC_SECRET_NAME is a link, not a regular file, or cannot be read, so it was not rotated and the config was not applied"
             ;;
     esac
+    # ParseSecretValue in the CLI strips one trailing LF and then one CR.
+    # Hash those exact bytes now; the put-back compares the stored file
+    # under the lifecycle lock, so a later administrator save is retained.
+    dc_rotated_value=$secret_data
+    dc_lf='
+'
+    case "$dc_rotated_value" in *"$dc_lf") dc_rotated_value=${dc_rotated_value%"$dc_lf"} ;; esac
+    dc_cr=$(printf '\r')
+    case "$dc_rotated_value" in *"$dc_cr") dc_rotated_value=${dc_rotated_value%"$dc_cr"} ;; esac
+    printf '%s' "$dc_rotated_value" >"$DC_STAGE/rotation-value"
+    DC_SECRET_ROTATED_DIGEST=$(dc_sha256 "$DC_STAGE/rotation-value") ||
+        dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "cannot record the value the credential rotation will store; nothing was rotated"
+    rm -f "$DC_STAGE/rotation-value"
+    dc_rotated_value=""
     DC_SECRET_GATEWAY=$1
     DC_SECRET_ROTATED=1
 }
@@ -1679,9 +1693,9 @@ dc_restore_secret() {
     set +e
     if [ "$DC_SECRET_PREVIOUS_SET" = 1 ]; then
         printf '%s' "$DC_SECRET_PREVIOUS" |
-            "$DC_SECRET_GATEWAY" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret-restore.json" 2>"$DC_STAGE/secret-restore.err"
+            "$DC_SECRET_GATEWAY" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json --if-stored "$DC_SECRET_ROTATED_DIGEST" >"$DC_STAGE/secret-restore.json" 2>"$DC_STAGE/secret-restore.err"
     else
-        "$DC_SECRET_GATEWAY" enterprise secret remove --name "$DC_SECRET_NAME" --lock-wait 10m --json </dev/null >"$DC_STAGE/secret-restore.json" 2>"$DC_STAGE/secret-restore.err"
+        "$DC_SECRET_GATEWAY" enterprise secret remove --name "$DC_SECRET_NAME" --lock-wait 10m --json --if-stored "$DC_SECRET_ROTATED_DIGEST" </dev/null >"$DC_STAGE/secret-restore.json" 2>"$DC_STAGE/secret-restore.err"
     fi
     dc_restore_status=$?
     set -e

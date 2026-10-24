@@ -94,6 +94,12 @@ func secretTransactionArguments(opts *enterpriseSecretOptions) error {
 			return errors.New("--undo-config belongs to a put-back: pass it with --undo-rotation")
 		}
 	}
+	if opts.ifStored != "" && !lowerSHA256Hex.MatchString(opts.ifStored) {
+		return fmt.Errorf("--if-stored takes the SHA-256 of the expected stored value (64 lowercase hex digits), not %q", opts.ifStored)
+	}
+	if opts.undoRotation != "" && opts.ifStored == "" {
+		return errors.New("--undo-rotation requires --if-stored to protect a credential changed after the rotation")
+	}
 	if opts.ifConfirmed != "" && opts.bundle == "" {
 		return errors.New("--if-confirmed guards a rotation: pass it with --bundle")
 	}
@@ -115,6 +121,13 @@ func secretTransactionArguments(opts *enterpriseSecretOptions) error {
 // secret_ref_mismatch) says nothing about it. The caller holds the lock
 // bundle apply takes, so the confirmed bundle cannot change in between.
 func checkSecretTransaction(name string, opts *enterpriseSecretOptions, stored []byte, storedOK bool) error {
+	if opts.ifStored != "" {
+		sum := sha256.Sum256(stored)
+		if !storedOK || hex.EncodeToString(sum[:]) != opts.ifStored {
+			return &enterprisebundle.Error{Code: "credential_changed", Detail: fmt.Sprintf(
+				"credential %s no longer holds the expected stored value; it was not changed", name)}
+		}
+	}
 	want, code := opts.ifConfirmed, codeConfirmedBundleChanged
 	if opts.undoRotation != "" {
 		want, code = opts.undoRotation, codeRotationConfirmed

@@ -931,13 +931,31 @@ function Get-WrapperInstalledConfigIdentity {
     return (Get-FileHash -LiteralPath $path -Algorithm SHA256 -ErrorAction Stop).Hash.ToLowerInvariant()
 }
 
+function Get-WrapperRotatedValueDigest {
+    # Match Go's bytes.TrimSpace in readWindowsSecretValue before naming the
+    # journal entry. Work on bytes so even an invalid UTF-8 API key has the
+    # same digest as the value the CLI stores.
+    $bytes = [System.IO.File]::ReadAllBytes($secret)
+    $hex = [System.BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()
+    $space = '(?:09|0a|0b|0c|0d|20|c285|c2a0|e19a80|e2808[0-9a]|e280a[89]|e280af|e2819f|e38080)'
+    while ($hex -cmatch ('^' + $space)) { $hex = $hex.Substring($Matches[0].Length) }
+    while ($hex -cmatch ($space + '$')) { $hex = $hex.Substring(0, $hex.Length - $Matches[0].Length) }
+    $normalized = [byte[]]::new($hex.Length / 2)
+    for ($i = 0; $i -lt $normalized.Length; $i++) {
+        $normalized[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16)
+    }
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try { return [System.BitConverter]::ToString($sha.ComputeHash($normalized)).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose(); [Array]::Clear($bytes, 0, $bytes.Length); [Array]::Clear($normalized, 0, $normalized.Length) }
+}
+
 function Get-WrapperJournalEntryName {
     # The credential and the bundle confirmed before its rotation, from a
-    # journal entry name (<name>@<manifest SHA-256 | none>[.absent]), or
+    # journal entry name (<name>@<manifest SHA-256 | none>+<stored SHA-256>[.absent]), or
     # $null for a name this wrapper does not write.
     param([Parameter(Mandatory = $true)][string]$FileName)
-    if ($FileName -cnotmatch '^(?<name>[a-z0-9][a-z0-9-]{0,62})@(?<confirmed>[0-9a-f]{64}|none)(?<absent>\.absent)?$') { return $null }
-    return [pscustomobject]@{ Name = $Matches.name; Confirmed = $Matches.confirmed; Absent = $Matches.ContainsKey('absent') }
+    if ($FileName -cnotmatch '^(?<name>[a-z0-9][a-z0-9-]{0,62})@(?<confirmed>[0-9a-f]{64}|none)\+(?<stored>[0-9a-f]{64})(?<absent>\.absent)?$') { return $null }
+    return [pscustomobject]@{ Name = $Matches.name; Confirmed = $Matches.confirmed; Stored = $Matches.stored; Absent = $Matches.ContainsKey('absent') }
 }
 
 function Save-WrapperSecretJournal {
@@ -955,7 +973,7 @@ function Save-WrapperSecretJournal {
     if ($left.Count -gt 0) {
         throw "an earlier credential rotation is not settled ($(@($left | ForEach-Object { $_.Name }) -join ', ') in $journal): each ensure tries to settle it first and logs why it could not; no credential is rotated until it is"
     }
-    $entry = Join-Path $journal ($Name + '@' + $Confirmed)
+    $entry = Join-Path $journal ($Name + '@' + $Confirmed + '+' + (Get-WrapperRotatedValueDigest))
     $stored = Get-WrapperStoredSecretPath -Name $Name
     $item = Get-Item -LiteralPath $stored -Force -ErrorAction SilentlyContinue
     $target = "$entry.absent"
@@ -1039,7 +1057,7 @@ function Complete-WrapperSecretJournal {
         }
         if ($Name -and $entry.Name -ne $Name) { continue }
         if ($Restore -and $Cli) {
-            $arguments = @('enterprise', 'secret', 'set', '--name', $entry.Name, '--from-stdin', '--json', '--undo-rotation', $entry.Confirmed)
+            $arguments = @('enterprise', 'secret', 'set', '--name', $entry.Name, '--from-stdin', '--json', '--undo-rotation', $entry.Confirmed, '--if-stored', $entry.Stored)
             $standardInput = $file.FullName
             if ($entry.Absent) {
                 # The config installed before the rotation (Save-WrapperSecretJournal).
@@ -1048,7 +1066,7 @@ function Complete-WrapperSecretJournal {
                     $problems += "the credential journal entry $($file.FullName) does not name the config installed before its rotation, so it was not used and was left as it is; check the credential, then delete it"
                     continue
                 }
-                $arguments = @('enterprise', 'secret', 'remove', '--name', $entry.Name, '--json', '--undo-rotation', $entry.Confirmed, '--undo-config', $configBefore)
+                $arguments = @('enterprise', 'secret', 'remove', '--name', $entry.Name, '--json', '--undo-rotation', $entry.Confirmed, '--undo-config', $configBefore, '--if-stored', $entry.Stored)
                 $standardInput = ''
             }
             try {
