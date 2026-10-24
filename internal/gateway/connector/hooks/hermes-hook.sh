@@ -12,6 +12,7 @@ if [ "${1:-}" = "--defenseclaw-execution-probe" ] && [ "${2:-}" = "--forkless" ]
   . "${_DC_PROBE_HOOK_DIR}/_hardening.sh"
   declare -F defenseclaw_harden_resources >/dev/null || exit 125
   declare -F defenseclaw_harden_env >/dev/null || exit 125
+  _DC_FORKLESS_PROBE=1
   defenseclaw_harden_resources
   printf '%s\n' 'defenseclaw-execution-probe-ok'
   exit 0

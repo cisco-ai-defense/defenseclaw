@@ -164,7 +164,11 @@ defenseclaw_harden_resources() {
   # Go reserves more virtual address space than this shell budget even when
   # its resident memory is small. Keep the hook capped, and restore this
   # account's original soft limit only in the verified native POST child.
-  _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
+  # The forkless Hermes execution probe (no process may start) makes no
+  # native POST, so it skips the command substitution.
+  if [ "${_DC_FORKLESS_PROBE:-}" != "1" ]; then
+    _DC_HOOK_NATIVE_VMEM_LIMIT="$(ulimit -S -v 2>/dev/null)"
+  fi
   ulimit -S -v 524288 2>/dev/null || true
   ulimit -S -n 32    2>/dev/null || true
 }
