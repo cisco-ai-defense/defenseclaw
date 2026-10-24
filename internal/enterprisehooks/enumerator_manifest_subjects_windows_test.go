@@ -7,6 +7,7 @@ package enterprisehooks
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -24,7 +25,15 @@ func TestEnumerateWindowsManifestSubjectsAreTheInspectedAccounts(t *testing.T) {
 	stubActiveSessions(t, map[string][]string{testDomainUserA: {testDomainGroupSID}})
 	withOldCodex := func() string {
 		home := codexProfile(t, "0.150.0")
-		writeWindowsAgentPackageJSON(t, filepath.Join(home, "private", "node_modules", "@openai", "codex"), "0.0.1")
+		pkg := filepath.Join(home, "private", "node_modules", "@openai", "codex")
+		writeWindowsAgentPackageJSON(t, pkg, "0.0.1")
+		// A copy needs its entry point; metadata alone is a leftover.
+		if err := os.MkdirAll(filepath.Join(pkg, "bin"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(pkg, "bin", "codex.js"), []byte("fixture"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 		return home
 	}
 	homeA, homeB, homeC, homeD := withOldCodex(), withOldCodex(), withOldCodex(), withOldCodex()
