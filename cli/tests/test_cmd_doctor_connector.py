@@ -84,6 +84,10 @@ from defenseclaw.commands.cmd_doctor import (
 )
 
 
+# The exporter DefenseClaw writes into a sandboxed Codex config.
+_DEFENSECLAW_CODEX_EXPORTER = '[otel.exporter.otlp-http]\nendpoint = "http://127.0.0.1:18970/otlp/codex/logs"\n'
+
+
 class TestCodexOtelAlignment(unittest.TestCase):
     def setUp(self) -> None:
         trusted = patch(
@@ -116,7 +120,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
         ):
-            self._write_codex_config(home, '[otel]\nenvironment = "windows"\n')
+            self._write_codex_config(home, '[otel]\nenvironment = "windows"\n' + _DEFENSECLAW_CODEX_EXPORTER)
             result = _DoctorResult()
             _check_codex_otel_alignment(self._cfg(), result)
 
@@ -137,13 +141,36 @@ class TestCodexOtelAlignment(unittest.TestCase):
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
         ):
-            self._write_codex_config(home, "[otel]\nlog_user_prompt = true\n")
+            self._write_codex_config(home, "[otel]\nlog_user_prompt = true\n" + _DEFENSECLAW_CODEX_EXPORTER)
             result = _DoctorResult()
             _check_codex_otel_alignment(self._cfg(), result)
 
         self.assertEqual(result.checks[0]["status"], "fail")
         self.assertIn("Codex would use 'dev'", result.checks[0]["detail"])
         self.assertEqual(result.checks[1]["status"], "pass")
+
+    def test_host_codex_without_a_defenseclaw_exporter_needs_no_environment(self) -> None:
+        # GAP-1101: host Codex sends no native OTLP to DefenseClaw since 1.0.4,
+        # and the upgrade puts the user's own [otel] back; Doctor then failed
+        # on the missing otel.environment and setup refused Codex.
+        payload = {
+            "runtime": {"environment": "windows"},
+            "health": {"telemetry": {"state": "running"}},
+        }
+        for body in ("", "[otel]\nlog_user_prompt = true\n"):
+            with tempfile.TemporaryDirectory() as home, patch.dict(
+                os.environ,
+                {"CODEX_HOME": home},
+                clear=False,
+            ), patch(
+                "defenseclaw.commands.cmd_doctor._http_probe",
+                return_value=(200, json.dumps(payload)),
+            ):
+                self._write_codex_config(home, "[features]\nhooks = true\n" + body)
+                result = _DoctorResult()
+                _check_codex_otel_alignment(self._cfg(), result)
+            self.assertEqual([check["status"] for check in result.checks], ["pass", "pass"], result.checks)
+            self.assertIn("no native OTLP", result.checks[0]["detail"])
 
     def test_stale_runtime_environment_fails_authenticated_status(self) -> None:
         payload = {
@@ -158,7 +185,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
         ):
-            self._write_codex_config(home, '[otel]\nenvironment = "windows"\n')
+            self._write_codex_config(home, '[otel]\nenvironment = "windows"\n' + _DEFENSECLAW_CODEX_EXPORTER)
             result = _DoctorResult()
             _check_codex_otel_alignment(self._cfg(), result)
 
@@ -179,7 +206,7 @@ class TestCodexOtelAlignment(unittest.TestCase):
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
         ):
-            self._write_codex_config(home, '[otel]\nenvironment = "windows"\n')
+            self._write_codex_config(home, '[otel]\nenvironment = "windows"\n' + _DEFENSECLAW_CODEX_EXPORTER)
             result = _DoctorResult()
             _check_codex_otel_alignment(self._cfg(), result)
 
