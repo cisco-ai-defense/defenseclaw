@@ -1134,7 +1134,7 @@ func directoryHealthView(h identityCacheHealth, now time.Time) (view map[string]
 		return nil, ""
 	}
 	message = fmt.Sprintf("directory lookups are failing for %d account(s) since %s (last error: %s); requests whose assignments need missing facts "+
-		"are refused (default_lookup_failed), and each refusal names the missing fact", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
+		"use the strictest of the profiles that may apply, in its own mode, and name the missing fact (default_lookup_failed; refused only under strict)", h.Failing, h.Since.UTC().Format("15:04:05Z"), h.LastError)
 	if h.Stale > 0 {
 		message += fmt.Sprintf(", and %d account(s) are served facts up to %s old, which are dropped at %s",
 			h.Stale, h.OldestAge.Round(time.Minute), identityDirectoryMaxAge)

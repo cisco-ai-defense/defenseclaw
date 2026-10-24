@@ -20,17 +20,25 @@ import (
 )
 
 // Privacy (decision 4 of the 1.0.4 identity design). A caller whose facts
-// are unproven is refused. Settings, policy/explain, policy/test and
-// policy/packs must name the missing fact without showing a candidate
-// profile, its description or its egress policy. A live registration keeps
-// its last proven profile during a re-match and stays live.
+// are unproven is refused under strict. Settings, policy/explain, policy/test
+// and policy/packs must name the missing fact without showing a candidate
+// profile, its description or its egress policy; outside strict they answer
+// under the strictest combination, and still show none of them. A live
+// registration keeps its last proven profile during a re-match and stays
+// live.
 func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) {
+	for _, tier := range []string{"strict", "action"} {
+		t.Run(tier, func(t *testing.T) { sandboxPolicyViewsOfAnUnprovenDecision(t, tier) })
+	}
+}
+
+func sandboxPolicyViewsOfAnUnprovenDecision(t *testing.T, tier string) {
 	const secret = "bob-internal.example"
 	setup := func(t *testing.T) *sandboxFixture {
 		t.Helper()
 		f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
-		f.cfg.Guardrail.Profiles["bob-only"] = config.GuardrailProfile{Description: "Bob private profile", Mode: "action",
-			Sandbox: &config.OpenShellAdminConfig{EgressAllowOnly: []string{secret}}}
+		f.cfg.Guardrail.Profiles["bob-only"] = strictTier(t, f.cfg, config.GuardrailProfile{Description: "Bob private profile",
+			Sandbox: &config.OpenShellAdminConfig{EgressAllowOnly: []string{secret}}}, tier)
 		f.cfg.Guardrail.ProfileAssignments = append([]config.ProfileAssignment{
 			{Profile: "bob-only", Match: config.ProfileMatch{Users: []string{sbxBob.Name}}},
 			{Profile: "bob-only", Match: config.ProfileMatch{Groups: []string{"dc-sbx-bob-team"}}},
@@ -61,8 +69,11 @@ func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) 
 			{"packs", http.MethodGet, sandboxrelay.PathPolicyPacks, nil},
 		} {
 			rec := f.do(sbxAlice, call.method, call.path, call.body, header)
-			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), missingFact) {
+			if tier == "strict" && (rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), missingFact)) {
 				t.Errorf("%s: %d %s; want refusal naming %s", call.name, rec.Code, rec.Body.String(), missingFact)
+			}
+			if tier != "strict" && rec.Code != http.StatusOK {
+				t.Errorf("%s: %d %s; want an answer under the strictest combination", call.name, rec.Code, rec.Body.String())
 			}
 			if leaks(rec.Body.String()) {
 				t.Errorf("%s: %d %s names another account's profile", call.name, rec.Code, rec.Body.String())
@@ -95,8 +106,9 @@ func TestSandboxPolicyViewsOfAnUnprovenDecisionNameNoOtherProfile(t *testing.T) 
 			V: 1, Registration: resp.Registration.ID, Kind: sandboxrelay.DecisionEgressBlock, Host: "example.org",
 			Scope: sandboxrelay.DecisionScopeAlways,
 		}, nil)
-		if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "group membership is unconfirmed") || leaks(rec.Body.String()) {
-			t.Errorf("decision: %d %s; want a refusal naming the group fact", rec.Code, rec.Body.String())
+		if tier == "strict" && (rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "group membership is unconfirmed")) ||
+			leaks(rec.Body.String()) {
+			t.Errorf("decision: %d %s; want a refusal naming the group fact under strict, and no other profile", rec.Code, rec.Body.String())
 		}
 		auth, _ := f.api.sandboxAuth()
 		reg, ok, err := auth.store.Get(sbxAlice.UID, resp.Registration.ID)

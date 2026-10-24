@@ -274,8 +274,8 @@ func TestIdentityDirectoryFailureMessagesDescribeRefusal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			message := cache.noteResultLocked("1201", &tc.entry, errors.New("directory unavailable"), now)
 			for _, want := range []string{"directory lookup for 1201 failed", tc.want,
-				"requests whose assignments need missing identity facts are refused",
-				"refusal names the missing fact"} {
+				"requests whose assignments need missing identity facts use the strictest of the profiles that may apply, in its own mode",
+				"name the missing fact", "refused only under strict"} {
 				if !strings.Contains(message, want) {
 					t.Errorf("message %q lacks %q", message, want)
 				}
@@ -290,7 +290,7 @@ func TestIdentityDirectoryFailureMessagesDescribeRefusal(t *testing.T) {
 	cache.logf = func(format string, args ...any) { expired = fmt.Sprintf(format, args...) }
 	entry := &identityCacheEntry[useridentity.DirectoryFacts]{ok: true, fetchedAt: now.Add(-identityDirectoryMaxAge)}
 	cache.dropAgedLocked("1201", entry, now)
-	for _, want := range []string{"no longer used", "requests whose assignments need missing identity facts are refused", "refusal names the missing fact"} {
+	for _, want := range []string{"no longer used", "requests whose assignments need missing identity facts use the strictest of the profiles", "refused only under strict"} {
 		if !strings.Contains(expired, want) {
 			t.Errorf("expiry message %q lacks %q", expired, want)
 		}
@@ -404,7 +404,7 @@ func TestDirectoryHealthViewNamesTheFailingLookups(t *testing.T) {
 	}
 	since := time.Date(2026, 10, 6, 21, 4, 8, 0, time.UTC)
 	view, message := directoryHealthView(identityCacheHealth{Failing: 3, Since: since, LastError: "getent timed out", Stale: 2, OldestAge: 25 * time.Minute}, since)
-	for _, want := range []string{"failing for 3 account(s) since 21:04:08Z", "getent timed out", "default_lookup_failed", "each refusal names the missing fact", "2 account(s) are served facts up to 25m0s old"} {
+	for _, want := range []string{"failing for 3 account(s) since 21:04:08Z", "getent timed out", "default_lookup_failed", "name the missing fact", "refused only under strict", "2 account(s) are served facts up to 25m0s old"} {
 		if !strings.Contains(message, want) {
 			t.Errorf("message %q lacks %q", message, want)
 		}

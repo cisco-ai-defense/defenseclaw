@@ -254,7 +254,7 @@ defenseclaw guardrail profile explain --user alice --connector claudecode
 sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux profile-explain --user alice --connector claudecode
 ```
 
-A match of `group` with the group name shows the assignment worked. `default` means no assignment matched. `default_lookup_failed` means an identity fact was not confirmed. When an assignment needs it, the request is refused and names that fact; otherwise the proven or default profile applies. Run `profile-explain --user` for the decision and reason.
+A match of `group` with the group name shows the assignment worked. `default` means no assignment matched. `default_lookup_failed` means an identity fact was not confirmed. When an assignment needs it, the strictest profile that may apply decides the request, in its own mode, and names that fact (refused only under strict); otherwise the proven or default profile applies. Run `profile-explain --user` for the decision and reason.
 
 </Step>
 
@@ -298,7 +298,7 @@ This kit covers Linux hosts. For the other platforms DefenseClaw reports what th
 | An SSH sign-in with the Okta password is refused | The user is not in the allowed group (`simple_allow_groups` and the sshd `Match Group`), the password is wrong, or the sign-on policy refuses the user. Read `journalctl -u sshd -u sssd`. |
 | An Okta group change is not in `profile explain` yet | SSSD caches for `entry_cache_timeout` (600 seconds). Run `sudo sss_cache -E` and ask again. |
 | An Okta group change is in `explain` but not in live requests | Run `explain` for that account again: it refreshes the cache the next hook uses, and its `cache` object shows the age of the facts. Otherwise the gateway keeps directory facts for up to 15 minutes; wait or restart the gateway. |
-| A request is refused with `default_lookup_failed` | An assignment needs an identity fact DefenseClaw could not confirm. The refusal names that fact. Time `getent passwd alice`; check `sssctl domain-status okta -o`. |
+| A request shows `default_lookup_failed` (or, under strict, is refused with it) | An assignment needs an identity fact DefenseClaw could not confirm. The strictest profile that may apply decided the request, and `unproven_reason` (or the refusal) names that fact. Time `getent passwd alice`; check `sssctl domain-status okta -o`. |
 | `verify-okta-identity.sh` says `DefenseClaw could not explain` | The gateway is not running, or you ran it as a user without a gateway. Run it as root on a managed host, or as the user who owns the per-user gateway. |
 
 ### Undo

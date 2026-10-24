@@ -290,10 +290,10 @@ func TestPendingWindowsGroupNameIsACandidate(t *testing.T) {
 				t.Fatalf("%+v; want %s", got, tc.want)
 			}
 			if tc.err != errProfileGroupUnknown &&
-				(got.Refused == "" || !strings.Contains(got.Refused, "assignment group SID is unconfirmed")) {
+				!strings.Contains(unprovenReason(got), "assignment group SID is unconfirmed") {
 				t.Fatalf("pending SID lookup did not refuse with its missing fact: %+v", got)
 			}
-			if tc.err == errProfileGroupUnknown && got.Refused != "" {
+			if tc.err == errProfileGroupUnknown && unprovenReason(got) != "" {
 				t.Fatalf("proven absent group refused: %+v", got)
 			}
 		})

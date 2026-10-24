@@ -116,7 +116,7 @@ FACTS = [
         (('enterprise/runtime/sandbox-reference.mdx',),
          "This isn't your organization's sandbox policy."),
         (('enterprise/runtime/sandbox-reference.mdx',),
-         'If a profile assignment needs the unanswered identity fact, the create and hooks are refused with that fact named.'),
+         'If a profile assignment needs the unanswered identity fact, the create and hooks get the strictest profile that may apply, in its own mode, with that fact named; they are refused only under strict.'),
     ]),
     ('managed_start_session_rule_row', [
         (('troubleshooting/sandboxes/runs-and-sessions.mdx',),

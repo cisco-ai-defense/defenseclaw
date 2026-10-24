@@ -71,8 +71,9 @@ const (
 	identityDirectoryMaxAge = 4 * identityDirectoryTTL
 )
 
-const directoryLookupFailureOutcome = "requests whose assignments need missing identity facts are refused (default_lookup_failed), " +
-	"and the refusal names the missing fact; other requests use their proven or default profile until a lookup succeeds"
+const directoryLookupFailureOutcome = "requests whose assignments need missing identity facts use the strictest of the profiles that may apply, " +
+	"in its own mode, and name the missing fact (default_lookup_failed; refused only under strict); " +
+	"other requests use their proven or default profile until a lookup succeeds"
 
 // identityDirectoryCache caches directory facts per uid or SID.
 type identityDirectoryCache = identityCache[useridentity.DirectoryFacts]

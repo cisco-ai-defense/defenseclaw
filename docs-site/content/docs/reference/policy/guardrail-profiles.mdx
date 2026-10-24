@@ -117,8 +117,9 @@ On Linux, a group ID with no name counts as unnamed only when every NSS
 group provider the system asks shows that it has no name for it. A provider
 DefenseClaw cannot check (Himmelblau, aad) leaves the name unknown. The
 account is still in the group, so a `groups` entry with the number can
-match. An assignment whose `groups` entry may name that group makes the
-request refuse with the missing group fact named (`default_lookup_failed`).
+match. An assignment whose `groups` entry may name that group gives the
+request the strictest profile that may apply, with the missing group fact
+named (`default_lookup_failed`; refused only under strict).
 
 After upgrading from 1.0.0–1.0.3 on Linux or macOS, an `agents` entry written
 for a 1.0.x agent ID keeps applying, with no rebind step, to the account that
@@ -130,9 +131,10 @@ other spool files and never changes afterwards.
 
 An account the map does not record (a later account given the UID, a namesake
 from another domain, an account created again) does not get the entry as a
-match. The request is refused until ownership of the entry is proven, unless
-every profile that may apply only observes; its profile is listed as a
-candidate for diagnosis. Windows needs nothing: the 1.0.x agent
+match. Until ownership of the entry is proven, the request gets the strictest
+combination of the entry's profile and the others that may apply, in its own
+mode, and the entry's profile is listed as a candidate (refused only under
+strict). Windows needs nothing: the 1.0.x agent
 IDs of a SID are unchanged. A per-user (non-managed) gateway keeps its own
 account's entries.
 
@@ -162,18 +164,19 @@ How the keys combine:
   `candidate_profiles`. A user sees "strictest combination" and never the
   names of the other profiles: `explain` and `status` show a user only their
   own effective policy.
-- **Unproven facts refuse a decision that needs them.** When a fact an
+- **Unproven facts get the strictest candidate, not a refusal.** When a fact an
   assignment needs is not proven in this pass (the directory lookup failed or
   timed out, a group name no provider confirms, a UPN the guardian has not
   written yet, a Windows group name whose SID lookup is pending, a uid more
   than one account holds, or a pre-1.0.4 `agents` entry the upgrade did not
-  bind), the request is refused with the missing fact named. `profile explain`
-  shows `refused`, `refused_reason`, `unproven_facts` and the candidate profiles
-  (`default_lookup_failed`). When every profile that may apply only observes
-  (observe mode for the hooks and for inspect and the proxy) and they have the
-  same `sandbox` section, no answer could block the request: it is observed
-  under their strictest combination, and `explain` shows `unproven_facts` and
-  `unproven_reason` instead of a refusal. A fact no assignment needs does not make the
+  bind), the strictest combination of `default_profile` and every profile that
+  may apply decides the request in its own mode: an observe combination
+  observes, an action combination blocks only what its rules block. The missing
+  fact is named in the audit and `profile explain` shows `unproven_facts`,
+  `unproven_reason` and the candidate profiles (`default_lookup_failed`). Under
+  strict, when a profile that may apply is in action mode with the `strict`
+  rule pack, the request is refused instead, and `explain` shows `refused` and
+  `refused_reason`. A fact no assignment needs does not make the
   decision uncertain. An account is recognized by its SID (SSSD or
   Windows) or by its macOS local record; for an account that has neither (a
   local or LDAP Linux account, a macOS directory account with no local record)
@@ -219,8 +222,9 @@ How the keys combine:
   answer (stopped,
   restarting, or no answer within 2 seconds) the lookup fails and the account
   keeps its last facts for up to an hour; with none, a principal-dependent
-  assignment refuses the request (`default_lookup_failed`) and names the
-  missing account fact. Add the uid to the assignment when the
+  assignment gives the request the strictest profile that may apply
+  (`default_lookup_failed`; refused only under strict) and names the missing
+  account fact. Add the uid to the assignment when the
   account must match regardless. Groups follow the same rule: an account keeps
   only the groups inside the domain of its SID (an LDAP `carol` next to an AD
   `carol` does not get the AD `carol`'s groups), and an account whose
@@ -290,7 +294,7 @@ than one key, the reason names the most specific key, in the order
 | `connector` | Only a `connectors` entry matched. |
 | `default` | The user is verified, but no assignment matched, so `default_profile` applied. |
 | `default_unverified` | No verified user reached the gateway, so only assignments that match on `connectors` alone could apply. |
-| `default_lookup_failed` | An identity fact was not proven in this pass (a failed or slow directory lookup, a group name no provider confirms, a UPN the guardian has not written yet, a Windows group name whose SID lookup is pending, a uid more than one account holds, a pre-1.0.4 `agents` entry the upgrade did not bind). A request whose assignment needs the fact is refused and names it, unless every profile that may apply only observes (then it is observed and `explain` lists `unproven_reason`); otherwise the proven or default profile applies. On refusal, `explain` lists `refused_reason`, `unproven_facts` and `candidate_profiles`; the candidate profile is diagnostic and does not authorize the request. |
+| `default_lookup_failed` | An identity fact was not proven in this pass (a failed or slow directory lookup, a group name no provider confirms, a UPN the guardian has not written yet, a Windows group name whose SID lookup is pending, a uid more than one account holds, a pre-1.0.4 `agents` entry the upgrade did not bind). A request whose assignment needs the fact gets the strictest combination of the profiles that may apply, in its own mode, and `explain` lists `unproven_reason`; under strict (a candidate in action mode with the `strict` rule pack) it is refused and names the fact; otherwise the proven or default profile applies. On refusal, `explain` lists `refused_reason`, `unproven_facts` and `candidate_profiles`; the candidate profile is diagnostic and does not authorize the request. |
 
 ## Only verified facts select a profile
 
@@ -323,7 +327,8 @@ What follows when the identity is missing:
   matches. One that names groups, or lists users by name but not this uid or
   SID, may match. One that lists only other uids or SIDs, or another agent or
   connector, does not. If an assignment may match on the missing facts, the
-  request is refused and names them (`default_lookup_failed`). If no
+  strictest profile that may apply decides the request and names them
+  (`default_lookup_failed`; refused only under strict). If no
   assignment needs them, the proven match or default applies. The lookup is retried 15 seconds later. Later
   requests use the cached answer. A lookup counts as failed unless every part
   of it finished: an account whose group list timed out, or that is in more
@@ -342,7 +347,7 @@ What follows when the identity is missing:
   groups per account within the two-second lookup budget. Additional groups
   remain as SIDs. Use a group SID in the assignment when the named group may
   be beyond that limit; `profile explain` warns about unresolved names.
-- **macOS group facts must be newer than the account listing.** A group fact newer than the last account listing is not proven. A request that finds the listing expired waits up to 250 ms for a new one. Until a listing confirms the account, or after the account's own record changed since the listing, its groups are unproven and a group-dependent assignment refuses the request with the missing group fact named.
+- **macOS group facts must be newer than the account listing.** A group fact newer than the last account listing is not proven. A request that finds the listing expired waits up to 250 ms for a new one. Until a listing confirms the account, or after the account's own record changed since the listing, its groups are unproven and a group-dependent assignment gives the request the strictest profile that may apply, with the missing group fact named (refused only under strict).
 - **Managed macOS hooks check secondary groups on each call.** The gateway
   waits up to two seconds for a current Open Directory answer. If it cannot
   obtain one, a group-dependent assignment is unproven and the hook refuses

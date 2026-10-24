@@ -137,7 +137,7 @@ func TestSandboxForeignRecordOfARefusedDecisionNamesNoCandidateProfile(t *testin
 	// refused; one among profiles that only observe is observed and records
 	// no candidate either (TestSandboxAuthorityColdCacheAmongObserveProfilesIsProvisional).
 	f.cfg.Guardrail.Profiles["bob-only"] = config.GuardrailProfile{Description: "Bob private profile", Mode: "action"}
-	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors", Mode: "action"}
+	f.cfg.Guardrail.Profiles["contractors"] = strictTier(t, f.cfg, config.GuardrailProfile{Description: "Contractors"}, "strict")
 	f.cfg.Guardrail.ProfileAssignments = append([]config.ProfileAssignment{
 		{Profile: "bob-only", Match: config.ProfileMatch{Groups: []string{"dc-sbx-bob-team"}}},
 	}, f.cfg.Guardrail.ProfileAssignments...)

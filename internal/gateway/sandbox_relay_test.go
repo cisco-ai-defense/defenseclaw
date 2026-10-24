@@ -1150,10 +1150,11 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 // now is answered by the hook handler with its native block, which names
 // the missing fact and no profile (GAP-0522, record, never infer): the
 // registration's last proven profile is not the caller's policy now. Where
-// every profile it may get only observes, the hook is observed, as a host
-// hook is (review of r104 Q-identity, continuation 3, loop round 3).
+// no profile it may get is strict, the hook is decided under the strictest
+// of them in its own mode, as a host hook is (review of r104 Q-identity,
+// continuation 3, loop round 3, and continuation 4).
 func TestSandboxRelayRefusesAnUnprovenIdentity(t *testing.T) {
-	for _, contractorsMode := range []string{"action", "observe"} {
+	for _, contractorsMode := range []string{"strict", "action", "observe"} {
 		t.Run(contractorsMode, func(t *testing.T) { sandboxRelayUnprovenIdentity(t, contractorsMode) })
 	}
 }
@@ -1181,7 +1182,7 @@ func sandboxRelayUnprovenIdentity(t *testing.T, contractorsMode string) {
 	f := newRelayFixture(t, func(c *config.Config) {
 		c.Guardrail.Connector = "claudecode"
 		c.Guardrail.Profiles = map[string]config.GuardrailProfile{
-			"contractors":   {Description: "Contractors", Mode: contractorsMode},
+			"contractors":   strictTier(t, c, config.GuardrailProfile{Description: "Contractors"}, contractorsMode),
 			"offline-floor": {Description: "Offline floor", Mode: "observe"},
 		}
 		c.Guardrail.ProfileAssignments = []config.ProfileAssignment{
@@ -1195,10 +1196,10 @@ func sandboxRelayUnprovenIdentity(t *testing.T, contractorsMode string) {
 	resp, body := f.post(t, sandboxrelay.PathHookPrefix+"claudecode", reg.ID,
 		`{"hook_event_name":"UserPromptSubmit","session_id":"u1","prompt":"hello"}`)
 	d, ok := relayTrailer(t, resp)
-	if contractorsMode == "observe" {
+	if contractorsMode != "strict" {
 		if resp.StatusCode != http.StatusOK || !ok || d.Action == "block" || d.WouldBlock ||
 			strings.Contains(body, "refused") || strings.Contains(body, "contractors") {
-			t.Fatalf("relayed hook among observe profiles: %d %s trailer %+v; want observed, not refused", resp.StatusCode, body, d)
+			t.Fatalf("relayed hook, contractors %s: %d %s trailer %+v; want decided by its rules, not refused", contractorsMode, resp.StatusCode, body, d)
 		}
 		return
 	}

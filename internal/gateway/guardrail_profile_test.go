@@ -1790,9 +1790,9 @@ func TestSSSDQualifiedNamesDoNotGrantBareNamesakeProfile(t *testing.T) {
 			Directory: useridentity.DirectoryFacts{Directory: useridentity.DirectoryActiveDirectory,
 				Source: tc.source, Domain: tc.domain, ResolvedAt: time.Now()},
 		}, true)
-		if got := set.match(&subject, profileSubjectVerified, "claudecode", ""); got.Name != "strict" || got.Refused == "" ||
+		if got := set.match(&subject, profileSubjectVerified, "claudecode", ""); got.Name != "strict" || unprovenReason(got) == "" ||
 			got.Match != profileMatchDefaultLookupFailed {
-			t.Errorf("%s: bare namesake decision %+v; want strict refusal", tc.domain, got)
+			t.Errorf("%s: bare namesake decision %+v; want strict, naming the ambiguous name", tc.domain, got)
 		} else if warning := ambiguousShortNameUserNote(set, got, &subject); !strings.Contains(warning, "uid "+tc.uid) {
 			t.Errorf("%s: ambiguous decision did not name an exact replacement: %q", tc.domain, warning)
 		}
@@ -1904,7 +1904,7 @@ func TestBareUsersEntrySkipsLocalNamesake(t *testing.T) {
 			local := profileSubjectFromVerified(tc.local, true)
 			got := set.match(&domain, profileSubjectVerified, "claudecode", "")
 			if tc.name == "linux" {
-				if got.Refused == "" || got.Match != profileMatchDefaultLookupFailed ||
+				if unprovenReason(got) == "" || got.Match != profileMatchDefaultLookupFailed ||
 					!slices.Contains(got.Unproven, "account:ambiguous_short_name") {
 					t.Fatalf("qualified directory account: %+v, want ambiguous short-name refusal", got)
 				}

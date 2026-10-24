@@ -211,7 +211,7 @@ func (b *profileAgentBridge) resolve(agent string, claim profileAgentClaim, know
 	if !b.noted["?"+legacy] {
 		b.note("?" + legacy)
 		fmt.Fprintf(os.Stderr, "[guardrail] profile assignment agent %s: the upgrade did not record the account holding uid %s now as the "+
-			"one 1.0.3 derived it for; agent %s is refused until ownership is proven (default_lookup_failed)\n",
+			"one 1.0.3 derived it for; until ownership is proven, agent %s gets the strictest profile that may apply (default_lookup_failed; refused only under strict)\n",
 			legacy, claim.UserID, agent)
 	}
 	return func(entry string) bool { return entry == legacy }, nil

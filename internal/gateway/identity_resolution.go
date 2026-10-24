@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"slices"
@@ -33,13 +34,13 @@ import (
 //     assignment's, or with no yes the default) changes nothing. Otherwise
 //     Name is the strictest combination of default_profile and every
 //     profile that matches or could match, and the decision names the facts
-//     those maybes need (profileDecision.Unproven). When any of those
-//     profiles may block the request (candidatesMayBlock) it is refused
-//     (profileDecision.Refused), and Name, for the administrator's explain,
-//     authorizes nothing. When every one of them only observes it with the
-//     same sandbox section, no answer of the missing facts could block it:
-//     it is observed as each of them would observe it, and the missing facts
-//     stay named (profileDecision.Uncertain), never refused in action mode.
+//     those maybes need (profileDecision.Unproven). Name applies with its
+//     own mode (observe observes, action blocks only what its rules block)
+//     and the missing facts are named and audited (profileDecision.Uncertain).
+//     Only under strict, where one of those profiles blocks with the strict
+//     rule pack (unprovenRefuses), is the request refused
+//     (profileDecision.Refused); Name then authorizes nothing and is shown
+//     in the administrator's explain.
 //   - Else the profiles of the yes assignments apply, or default_profile
 //     when none matches: the one that enforces at least what each of the
 //     others does (profileCovers), otherwise their meet, the strictest
@@ -449,44 +450,44 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
 	why := set.identityUncertainty(subject, decision.Unproven, connectorName)
-	if set.candidatesMayBlock(candidates, connectorName) {
+	if set.unprovenRefuses(candidates, connectorName) {
 		decision.Refused = "DefenseClaw refused this request: " + why
 	} else {
-		// Every profile the missing facts could give only observes: a
-		// refusal would block a request no answer of them blocks, which an
-		// observe-mode 1.0.3 upgrade allowed (review of r104 Q-identity,
-		// continuation 3, loop round 3).
-		decision.Uncertain = "DefenseClaw observed this request under every profile that may apply: " + why
+		// The strictest combination of every profile that may apply, in
+		// its own mode, as 1.0.3 applied it: a directory outage, a laptop
+		// off VPN or a pending upgrade owner map never turns observe into
+		// a block (OVERTIGHT-AUDIT item 11, GAP-0653).
+		decision.Uncertain = "DefenseClaw applied the strictest of every profile that may apply: " + why
 	}
 	return decision
 }
 
-// candidatesMayBlock reports whether a profile among candidates may block a
-// request of connectorName, so a decision that cannot tell which of them
-// applies must refuse it: one blocks (action) by its hook mode or by its
-// inspect and proxy mode for the connector or the global settings
-// (profileCoverConnectors), its configuration is unknown, or the
-// candidates' sandbox sections differ (one may require a sandbox or limit
-// it where another does not). Where every candidate only observes with the
-// same sandbox section, none blocks anything (profileCovers), and their
-// other settings (rule packs, block_at, HILT) change only what is observed.
-func (set *guardrailProfileSet) candidatesMayBlock(candidates []string, connectorName string) bool {
-	connectors := profileCoverConnectors(connectorName)
+// unprovenRefuses reports whether a decision that cannot tell which of
+// candidates applies refuses the request (strict only): a candidate blocks
+// (action by its hook mode, or by its inspect and proxy mode, for the
+// connector or the global settings, profileCoverConnectors) with the
+// built-in strict rule pack, or its configuration is unknown. Anywhere else
+// their meet applies in its own mode, sandbox section included.
+func (set *guardrailProfileSet) unprovenRefuses(candidates []string, connectorName string) bool {
 	for _, candidate := range candidates {
-		if !reflect.DeepEqual(set.profileSandbox(candidate), set.profileSandbox(candidates[0])) {
-			return true
-		}
 		cfg := set.profileConfig(candidate)
 		if cfg == nil {
 			return true
 		}
-		for _, name := range connectors {
-			if hookModeForConfig(cfg, name) == "action" || inspectMode(cfg, name) == "action" {
+		for _, name := range profileCoverConnectors(connectorName) {
+			if (hookModeForConfig(cfg, name) == "action" || inspectMode(cfg, name) == "action") && strictRulePack(cfg, name) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// strictRulePack reports whether cfg's rule pack for connectorName is the
+// built-in strict pack, by name or as a v8 rule_pack_dir .../strict.
+func strictRulePack(cfg *config.Config, connectorName string) bool {
+	ref := cfg.EffectiveRulePackRefForConnector(connectorName)
+	return ref.Name == "strict" || ref.Name == "" && ref.Dir != "" && filepath.Base(filepath.Clean(ref.Dir)) == "strict"
 }
 
 // orderedFacts is facts in a fixed order: account, upn, groups, the

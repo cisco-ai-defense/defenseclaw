@@ -87,7 +87,7 @@ A guardrail profile is a named set of guardrail settings. You assign profiles to
 
 ## Good to know
 
-- Set a strict `default_profile` for accounts no assignment selects. While a directory lookup fails, a request whose assignment needs the missing fact is refused (`default_lookup_failed`) and names that fact.
+- Set a strict `default_profile` for accounts no assignment selects. While a directory lookup fails, a request whose assignment needs the missing fact gets the strictest profile that may apply, in its own mode, and names that fact (`default_lookup_failed`). It is refused only under strict (a candidate in action mode with the `strict` rule pack).
 - On a per-user install the user owns `config.yaml` and can change their own profile. On a managed host the profile lives in the machine config.
 
 ## Undo

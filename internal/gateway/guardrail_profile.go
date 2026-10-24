@@ -188,14 +188,14 @@ type profileDecision struct {
 	MatchedGroup  string
 	SubjectSource string
 	// Refused names an unproven identity fact the decision depends on
-	// where a profile that may apply blocks (candidatesMayBlock).
-	// Enforcement surfaces block it; Name remains diagnostic context.
+	// under strict (unprovenRefuses). Enforcement surfaces block it; Name
+	// remains diagnostic context.
 	Refused string
 	// Uncertain names the unproven identity facts of a decision that
-	// depends on them where every profile that may apply only observes:
-	// Name, their strictest combination, applies (it blocks nothing) and
-	// explain shows why. Exactly one of Refused and Uncertain is set when
-	// Unproven is.
+	// depends on them anywhere else: Name, the strictest combination of
+	// every profile that may apply, applies in its own mode and explain
+	// shows why. Exactly one of Refused and Uncertain is set when Unproven
+	// is.
 	Uncertain string
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
@@ -1774,8 +1774,8 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	}
 	if decision.Uncertain != "" {
 		out["unproven_reason"] = decision.Uncertain
-		warnings = append(warnings, "identity facts this decision needs are unconfirmed, and every profile that may apply only observes: "+
-			"requests are observed, not refused, until the facts are confirmed")
+		warnings = append(warnings, "identity facts this decision needs are unconfirmed: requests use the strictest of every profile "+
+			"that may apply, in its own mode, until the facts are confirmed")
 	}
 	if len(decision.Candidates) > 0 {
 		// An administrator view: the profiles that may apply, and the

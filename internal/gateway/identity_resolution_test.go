@@ -113,8 +113,10 @@ func identityTestSet(t *testing.T, p identityTestPlatform, defaultProfile string
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
-		"strict":  {Mode: "action", BlockAt: "LOW"},
-		"tooling": {Mode: "action", BlockAt: "HIGH"},
+		// strict and tooling are under strict (the strict rule pack): a
+		// decision that may give one of them refuses (unprovenRefuses).
+		"strict":  strictTier(t, cfg, config.GuardrailProfile{BlockAt: "LOW"}, "strict"),
+		"tooling": strictTier(t, cfg, config.GuardrailProfile{BlockAt: "HIGH"}, "strict"),
 		"watch":   {Mode: "observe"},
 	}
 	cfg.Guardrail.ProfileAssignments = assignments
@@ -158,8 +160,9 @@ func TestGAP0522UncertainIdentityNamesTheMissingFact(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			set := identityTestSet(t, p, "watch", config.ProfileAssignment{Profile: "strict", Match: tc.assignment})
 			got := set.selectProfile(&tc.subject, resolveIdentity(&tc.subject, tc.unresolved), profileSubjectVerified, "hermes", "agt-00000000000000bb")
-			if got.Refused == "" || !strings.Contains(got.Refused, tc.fact) ||
-				strings.Contains(got.Refused, ": ,") || !strings.Contains(got.Refused, "explain --user 501 --connector hermes") {
+			why := unprovenReason(got)
+			if why == "" || !strings.Contains(why, tc.fact) ||
+				strings.Contains(why, ": ,") || !strings.Contains(why, "explain --user 501 --connector hermes") {
 				t.Fatalf("uncertain %s decision: %+v", tc.name, got)
 			}
 			if name, present := guardrailProfileTelemetryFromDecision(got).Name.Get(); present {
@@ -223,8 +226,8 @@ func TestGAP0522UncertainIdentityNamesTheMissingFact(t *testing.T) {
 			set := identityTestSet(t, p, tc.def, tc.assignments...)
 			got := set.selectProfile(&unknownGroups, resolveIdentity(&unknownGroups, nil), profileSubjectVerified, "hermes", "")
 			if tc.refused {
-				if got.Refused == "" || !strings.Contains(got.Refused, "group membership is unconfirmed") {
-					t.Fatalf("%+v; want a refusal naming the group fact", got)
+				if !strings.Contains(unprovenReason(got), "group membership is unconfirmed") {
+					t.Fatalf("%+v; want the group fact named", got)
 				}
 				return
 			}
@@ -337,8 +340,8 @@ func TestGAP0323LookupFailureNeverSelectsAWeakerDefault(t *testing.T) {
 		config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Groups: []string{p.group}}})
 	failed := profileSubject{UserID: p.id, IDKind: p.kind, LookupFailed: true}
 	if got := set.match(&failed, profileSubjectVerified, "codex", ""); got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed ||
-		!strings.Contains(got.Refused, "group membership is unconfirmed") {
-		t.Fatalf("failed lookup selected %+v; want refusal naming group membership, with strict only as candidate", got)
+		!strings.Contains(unprovenReason(got), "group membership is unconfirmed") {
+		t.Fatalf("failed lookup selected %+v; want strict naming group membership", got)
 	}
 	// A uid assignment needs no directory and still applies; the failed
 	// lookup cannot make the account weaker than it either.
@@ -452,7 +455,7 @@ func TestUnresolvedLegacyAgentEntryIsStrictestInEitherOrder(t *testing.T) {
 			if entryProfile == "watch" && (got.Name != "watch" || got.Match != profileMatchConnector || got.Refused != "") {
 				t.Fatalf("legacyFirst=%v, entry watch: %+v; want watch by connector, not refused", legacyFirst, got)
 			}
-			if entryProfile == "strict" && (!strings.Contains(got.Refused, "pre-upgrade agent identity") ||
+			if entryProfile == "strict" && (!strings.Contains(unprovenReason(got), "pre-upgrade agent identity") ||
 				!slices.Equal(got.Unproven, []string{"agent:unknown"})) {
 				t.Fatalf("legacyFirst=%v, entry strict: %+v; want a refusal naming the agent fact", legacyFirst, got)
 			}
@@ -509,8 +512,8 @@ func TestUncertainIdentityRefusalNamesOnlyWhatTheDecisionNeeds(t *testing.T) {
 	byUPN := config.ProfileAssignment{Profile: "strict", Match: config.ProfileMatch{Users: []string{"alice@corp.example"}}}
 	set := identityTestSet(t, mac, "watch", byUPN)
 	awaiting := local(false)
-	if got := set.match(&awaiting, profileSubjectVerified, "codex", ""); !strings.Contains(got.Refused, "UPN is unconfirmed") {
-		t.Fatalf("before the guardian's record: %+v; want a refusal naming the UPN", got)
+	if got := set.match(&awaiting, profileSubjectVerified, "codex", ""); !strings.Contains(unprovenReason(got), "UPN is unconfirmed") {
+		t.Fatalf("before the guardian's record: %+v; want the UPN named", got)
 	}
 	recorded := local(true)
 	if got := set.match(&recorded, profileSubjectVerified, "codex", ""); got.Refused != "" || got.Name != "watch" {

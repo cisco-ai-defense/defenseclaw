@@ -476,9 +476,9 @@ func TestSandboxAuthorityPendingExpires(t *testing.T) {
 // proven group's profile (GAP-0022).
 func TestSandboxAuthorityColdCacheRefusesUntilIdentityConfirmed(t *testing.T) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
-	// contractors blocks: a create that may get it is refused until the
-	// groups are proven.
-	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors", Mode: "action"}
+	// contractors blocks under strict: a create that may get it is refused
+	// until the groups are proven.
+	f.cfg.Guardrail.Profiles["contractors"] = strictTier(t, f.cfg, config.GuardrailProfile{Description: "Contractors"}, "strict")
 	f.publishFirstGeneration()
 	f.coldCache(sbxAlice)
 	start := time.Now()
@@ -515,8 +515,10 @@ func TestSandboxAuthorityColdCacheRefusesUntilIdentityConfirmed(t *testing.T) {
 // profile a cold create may get only observes with the same sandbox
 // section, no answer of the groups could change what the sandbox enforces,
 // and the create is not refused: it gets a provisional registration under
-// default_profile, and its stamp records no candidate profile. A profile
-// with its own sandbox section among them refuses the create.
+// default_profile, and its stamp records no candidate profile. With a
+// profile whose own sandbox section is among them, the provisional create
+// gets their strictest combination, that section included (continuation 4:
+// only strict refuses).
 func TestSandboxAuthorityColdCacheAmongObserveProfilesIsProvisional(t *testing.T) {
 	for _, sandboxed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "observe only", true: "a sandbox section"}[sandboxed], func(t *testing.T) {
@@ -529,13 +531,18 @@ func TestSandboxAuthorityColdCacheAmongObserveProfilesIsProvisional(t *testing.T
 			f.coldCache(sbxAlice)
 			rec := f.do(sbxAlice, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
 				map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
+			var resp sandboxrelay.ResolveResponse
 			if sandboxed {
-				if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "group membership is unconfirmed") {
-					t.Fatalf("cold create with a sandboxed candidate: %d %s; want refused naming the group fact", rec.Code, rec.Body.String())
+				if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil || !resp.Registration.Provisional ||
+					resp.Banner.Profile == "offline-floor" {
+					t.Fatalf("cold create with a sandboxed candidate: %d %s; want provisional under the strictest combination", rec.Code, rec.Body.String())
+				}
+				name := f.api.sandboxMatchPeer(context.Background(), sbxAlice, "claudecode", 0).decision.Name
+				if floor, _, err := sandboxFloorFor(f.cfg, name); err != nil || !slices.Contains(floor.RequiredFor, "claudecode") {
+					t.Fatalf("the strictest combination %q dropped the candidate's sandbox section: %+v (%v)", name, floor, err)
 				}
 				return
 			}
-			var resp sandboxrelay.ResolveResponse
 			if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil {
 				t.Fatalf("cold create among observe profiles: %d %s; want a provisional registration", rec.Code, rec.Body.String())
 			}
@@ -555,19 +562,19 @@ func TestSandboxAuthorityColdCacheAmongObserveProfilesIsProvisional(t *testing.T
 // account holder, so both a named and a nameless request refuse. Once the
 // directory answers, the run can bind to the proven account.
 //
-// The named run is refused when a profile it may get blocks (contractors in
-// action mode). Where every one only observes with the same sandbox section,
-// it gets a provisional offline-floor registration, as 1.0.3 gave (review of
-// r104 Q-identity, continuation 3, loop round 3).
+// The named run is refused only under strict (contractors in action mode
+// with the strict rule pack). Otherwise it gets a provisional registration
+// under the strictest profile it may get, as 1.0.3 gave (review of r104
+// Q-identity, continuation 3, loop round 3, and continuation 4).
 func TestSandboxAuthorityResolveDuringDirectoryOutage(t *testing.T) {
-	for _, contractorsMode := range []string{"action", "observe"} {
+	for _, contractorsMode := range []string{"strict", "action", "observe"} {
 		t.Run(contractorsMode, func(t *testing.T) { sandboxResolveDuringDirectoryOutage(t, contractorsMode) })
 	}
 }
 
 func sandboxResolveDuringDirectoryOutage(t *testing.T, contractorsMode string) {
 	f := newSandboxFixture(t, config.EnterpriseEnrollmentConfig{}, nil)
-	f.cfg.Guardrail.Profiles["contractors"] = config.GuardrailProfile{Description: "Contractors", Mode: contractorsMode}
+	f.cfg.Guardrail.Profiles["contractors"] = strictTier(t, f.cfg, config.GuardrailProfile{Description: "Contractors"}, contractorsMode)
 	f.publishFirstGeneration()
 	f.coldCache(sbxAlice)
 	nameless := managedHookPeer{UID: sbxAlice.UID}
@@ -586,11 +593,12 @@ func sandboxResolveDuringDirectoryOutage(t *testing.T, contractorsMode string) {
 	}
 	rec = f.do(nameless, http.MethodPost, sandboxrelay.PathPolicyResolve, claudeResolve(),
 		map[string]string{sandboxrelay.ConnectorHeader: "claudecode"})
-	if contractorsMode == "observe" {
+	if contractorsMode != "strict" {
 		var resp sandboxrelay.ResolveResponse
+		want := map[string]string{"observe": "offline-floor", "action": "strictest combination"}[contractorsMode]
 		if rec.Code != http.StatusOK || json.Unmarshal(rec.Body.Bytes(), &resp) != nil ||
-			!resp.Registration.Provisional || resp.Banner.Profile != "offline-floor" {
-			t.Fatalf("run during an outage among observe profiles: %d %s; want provisional offline-floor", rec.Code, rec.Body.String())
+			!resp.Registration.Provisional || resp.Banner.Profile != want {
+			t.Fatalf("run during an outage, contractors %s: %d banner %+v registration %+v; want provisional %s", contractorsMode, rec.Code, resp.Banner, resp.Registration, want)
 		}
 	} else if rec.Code != http.StatusServiceUnavailable || errorReason(t, rec) != sandboxrelay.ReasonUnavailable ||
 		!strings.Contains(rec.Body.String(), "group membership is unconfirmed") {

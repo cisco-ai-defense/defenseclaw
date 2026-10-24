@@ -130,8 +130,8 @@ func TestUpgradeKeepsAgentsAssignmentAfterHomeRemount(t *testing.T) {
 			if tc.bound && (got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "") {
 				t.Fatalf("%+v, mode %q; want the prior agents assignment", got, mode)
 			}
-			if !tc.bound && (got.Match != profileMatchDefaultLookupFailed || got.Refused == "") {
-				t.Fatalf("%+v, mode %q; want the unbound entry refused", got, mode)
+			if !tc.bound && (got.Match != profileMatchDefaultLookupFailed || unprovenReason(got) == "") {
+				t.Fatalf("%+v, mode %q; want the unbound entry named as unproven", got, mode)
 			}
 		})
 	}
@@ -152,8 +152,12 @@ func TestUpgradeBindsAPendingAccountOnceProven(t *testing.T) {
 	}
 	cfg := legacyConfig(legacy, upgradeProfiles)
 	subject := profileSubject{UserID: "70001", UserName: "alice"}
-	if got, _ := b.hook(cfg, 70001, subject); got.Match != profileMatchDefaultLookupFailed || got.Refused == "" {
-		t.Fatalf("pending alice: %+v; want the entry refused until she is proven", got)
+	// Balanced defaults: the account works while the map is pending, under
+	// the strictest of her 1.0.x entry's profile and the default, in its
+	// own mode, with the pending ownership named (continuation 4).
+	if got, mode := b.hook(cfg, 70001, subject); got.Match != profileMatchDefaultLookupFailed || got.Refused != "" ||
+		got.Name != "strict" || mode != "action" || !strings.Contains(got.Uncertain, "agent identity") {
+		t.Fatalf("pending alice: %+v, mode %q; want strict applied in action mode, not refused, naming the agent fact", got, mode)
 	}
 	if written, err := enterprisehooks.WriteLegacyAgentOwners(b.dir, map[int]enterprisehooks.LegacyAgentOwner{
 		70001: {User: "alice", Token: enterprisehooks.LegacyAgentOwnerToken("files", b.homes[70001])}}, time.Now(), nil); err != nil || !written {
@@ -299,8 +303,8 @@ func TestUnboundLegacyAgentsEntryIsACandidate(t *testing.T) {
 			tc.migrate(b)
 			got, mode := b.hook(legacyConfig(legacy, tc.profiles), 70001, profileSubject{UserID: "70001", UserName: "alice@corp.example"})
 			if got.Name != tc.want || got.Match != profileMatchDefaultLookupFailed || mode != "action" ||
-				got.Refused == "" || !strings.Contains(got.Refused, "agent identity") {
-				t.Fatalf("%+v, mode %q; want refused candidate %s as default_lookup_failed", got, mode, tc.want)
+				!strings.Contains(unprovenReason(got), "agent identity") {
+				t.Fatalf("%+v, mode %q; want candidate %s as default_lookup_failed, naming the agent fact", got, mode, tc.want)
 			}
 		})
 	}
@@ -378,8 +382,8 @@ func TestUpgradeFromAMapWithTheSymlinkProofBeforeTheFix(t *testing.T) {
 			if !after && (got.Name != "relaxed" || got.Match != profileMatchAgent || mode != "observe" || got.Refused != "") {
 				t.Fatalf("%+v, mode %q; want the prior agents assignment", got, mode)
 			}
-			if after && (got.Match != profileMatchDefaultLookupFailed || got.Refused == "") {
-				t.Fatalf("%+v, mode %q; want the unbound entry refused", got, mode)
+			if after && (got.Match != profileMatchDefaultLookupFailed || unprovenReason(got) == "") {
+				t.Fatalf("%+v, mode %q; want the unbound entry named as unproven", got, mode)
 			}
 		})
 	}
