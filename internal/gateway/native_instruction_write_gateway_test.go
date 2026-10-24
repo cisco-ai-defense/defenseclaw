@@ -53,6 +53,7 @@ func TestR104GAP0768NativeHighSeverityWrites(t *testing.T) {
 					ActiveAgentFiles: []string{tc.active}, DialectHint: tc.dialect},
 				LegacyText: string(args), Connector: tc.connector, EnforcementCapable: true,
 			}
+			action.ResolvedWriteTargets = syntheticExistingInstructionEvidence(t, action.Input, tc.rule)
 			verdict := (&APIServer{scannerCfg: cfg}).inspectTrustedToolPolicyCtx(t.Context(), request, action)
 			if (verdict.Action == guardrailActionBlock) != tc.block ||
 				tc.rule != "" && !findingStringHasRuleID(verdict.Findings, tc.rule) {
@@ -125,12 +126,15 @@ func TestR104GAP0777ExistingSessionAfterGatewayRestart(t *testing.T) {
 
 func TestR104GAP0768NativePOSIXHookRoutes(t *testing.T) {
 	for _, tc := range []struct {
-		connector, command, rule, blockAt string
+		connector, file, rule, blockAt string
 	}{
-		{"claudecode", "printf changed > /repo/CLAUDE.md", "COG-CLAUDE-MD", "HIGH"},
-		{"codex", "printf changed > /repo/AGENTS.md", "COG-AGENTS-MD", "HIGH"},
+		{"claudecode", "CLAUDE.md", "COG-CLAUDE-MD", "HIGH"},
+		{"codex", "AGENTS.md", "COG-AGENTS-MD", "HIGH"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
+			root := t.TempDir()
+			file := writeActiveAgentTestFile(t, root, tc.file)
+			command := "printf changed > '" + file + "'"
 			installToolCallCorpusProfileConnector(t, tc.connector, "default")
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
@@ -142,14 +146,14 @@ func TestR104GAP0768NativePOSIXHookRoutes(t *testing.T) {
 			var findings []string
 			if tc.connector == "claudecode" {
 				response := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
-					HookEventName: "PreToolUse", ToolName: "Bash", CWD: "/repo",
-					ToolInput: map[string]interface{}{"command": tc.command},
+					HookEventName: "PreToolUse", ToolName: "Bash", CWD: root,
+					ToolInput: map[string]interface{}{"command": command},
 				})
 				action, raw, findings = response.Action, response.RawAction, response.Findings
 			} else {
 				response := api.evaluateCodexHook(t.Context(), codexHookRequest{
-					HookEventName: "PreToolUse", ToolName: "Bash", CWD: "/repo",
-					ToolInput: map[string]interface{}{"command": tc.command},
+					HookEventName: "PreToolUse", ToolName: "Bash", CWD: root,
+					ToolInput: map[string]interface{}{"command": command},
 				})
 				action, raw, findings = response.Action, response.RawAction, response.Findings
 			}

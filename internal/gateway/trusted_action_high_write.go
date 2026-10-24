@@ -89,8 +89,42 @@ func provedHighWriteFindings(
 	for _, loaded := range request.ActiveAgentFileIdentities {
 		locations.loaded = append(locations.loaded, loaded)
 	}
+	clientInstructions := hookpaths.InstructionIdentities(request.ResolvedWriteTargets)
+	loadedOrIdentified := func(location string, flavor actionfacts.PathFlavor) bool {
+		normalized, ok := activeAgentInstructionPath(location, flavor)
+		if !ok {
+			return false
+		}
+		for _, loaded := range locations.loaded {
+			if known, ok := activeAgentInstructionPath(loaded, flavor); ok && known == normalized {
+				return true
+			}
+		}
+		for _, identified := range clientInstructions {
+			if known, ok := activeAgentInstructionPath(identified, flavor); ok && known == normalized {
+				return true
+			}
+		}
+		return false
+	}
+	provedLocation := func(location string, flavor actionfacts.PathFlavor) bool {
+		if !instructionLoadLocation(location, flavor, locations) {
+			return false
+		}
+		if loadedOrIdentified(location, flavor) {
+			return true
+		}
+		// A startup location alone does not prove that its instruction file
+		// existed for this call. The hook client's identity above is the
+		// proof when a managed gateway cannot read the user's files.
+		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
+			return false
+		}
+		info, err := os.Stat(filepath.FromSlash(location))
+		return err == nil && info.Mode().IsRegular()
+	}
 	instructionTarget := func(resolved string, flavor actionfacts.PathFlavor) bool {
-		if instructionLoadLocation(resolved, flavor, locations) {
+		if provedLocation(resolved, flavor) {
 			return true
 		}
 		// A symlinked or case-variant spelling of a load location's
@@ -100,7 +134,7 @@ func provedHighWriteFindings(
 			return false
 		}
 		located := instructions.Located(filepath.FromSlash(resolved))
-		return located != "" && instructionLoadLocation(located, flavor, locations)
+		return located != "" && provedLocation(located, flavor)
 	}
 	// File-identity evidence names the instruction file a target writes
 	// under its own path, so every target, however it was found, is judged

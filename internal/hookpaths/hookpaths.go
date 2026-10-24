@@ -690,12 +690,12 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	opaqueFacts := map[string]string{}
 	var unprovenReason string
 	// identities is the file-identity evidence for InstructionIdentityKey:
-	// every instruction file that a write target names under another name.
+	// every existing instruction file a write target names.
 	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
 	var identities, fileIdentities []string
 	instructions := NewInstructionFiles(cwd, home, nil)
 	noteIdentity := func(resolved string) {
-		if instruction := instructions.Alias(resolved); filepath.IsAbs(instruction) &&
+		if instruction := instructions.Identity(resolved); filepath.IsAbs(instruction) &&
 			len(instruction) <= MaxWriteTargetPathBytes && !slices.Contains(identities, instruction) {
 			identities = append(identities, instruction)
 		}

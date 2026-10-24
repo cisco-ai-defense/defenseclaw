@@ -161,6 +161,7 @@ func TestInstructionProtectionRelativeWindowsShellsAndThreshold(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: `C:\Repo`, ActiveHome: `C:\Users\alice`, DialectHint: tc.dialect}
 			verdict := api.inspectTrustedToolPolicyCtx(t.Context(), &ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: tc.connector}, trustedActionRequest{
 				Input: input, LegacyText: tc.command, Connector: tc.connector, EnforcementCapable: true,
+				ResolvedWriteTargets: syntheticExistingInstructionEvidence(t, input, tc.rule),
 			})
 			if verdict.Action != guardrailActionBlock || !findingStringHasRuleID(verdict.Findings, tc.rule) {
 				t.Fatalf("%s relative write: action=%q findings=%v; facts=%+v", tc.name, verdict.Action, verdict.Findings, actionfacts.Analyze(input))
@@ -179,20 +180,23 @@ func TestInstructionProtectionRelativeWindowsShellsAndThreshold(t *testing.T) {
 
 func TestInstructionProtectionPOSIXCaseRequiresExactInstructionName(t *testing.T) {
 	for _, tc := range []struct {
-		name, connector, command string
-		blocked                  bool
+		name, connector, command, rule string
+		blocked                        bool
 	}{
-		{"canonical", "codex", "printf changed > /repo/AGENTS.md", true},
-		{"distinct lowercase file", "codex", "printf changed > /repo/agents.md", false},
-		{"OpenClaw canonical", "openclaw", "printf changed > /repo/openclaw.json", true},
-		{"OpenClaw distinct case", "openclaw", "printf changed > /repo/openclaw.JSON", false},
+		{"canonical", "codex", "printf changed > /repo/AGENTS.md", "COG-AGENTS-MD", true},
+		{"distinct lowercase file", "codex", "printf changed > /repo/agents.md", "", false},
+		{"OpenClaw canonical", "openclaw", "printf changed > /repo/openclaw.json", "COG-OPENCLAW-JSON", true},
+		{"OpenClaw distinct case", "openclaw", "printf changed > /repo/openclaw.JSON", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := instructionProtectionTestAPI(t, tc.connector, "action", "HIGH")
+			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: "/repo"}
 			verdict := api.inspectTrustedToolPolicyCtx(t.Context(),
 				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: tc.connector},
-				trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: "/repo"},
-					LegacyText: tc.command, Connector: tc.connector, EnforcementCapable: true})
+				trustedActionRequest{Input: input,
+					LegacyText: tc.command, Connector: tc.connector, EnforcementCapable: true,
+					ResolvedWriteTargets: syntheticExistingInstructionEvidence(t, input, tc.rule),
+				})
 			if got := verdict.Action == guardrailActionBlock; got != tc.blocked {
 				t.Fatalf("command=%q blocked=%t, want %t; findings=%v", tc.command, got, tc.blocked, verdict.Findings)
 			}
@@ -279,10 +283,12 @@ func TestInstructionProtectionSharedConnectorAndFileMatrix(t *testing.T) {
 				file, rule = "CLAUDE.md", "COG-CLAUDE-MD"
 			}
 			command := "printf changed > " + file
+			input := actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"}
 			verdict := api.inspectTrustedToolPolicyCtx(t.Context(),
 				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: connectorName},
-				trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"},
-					LegacyText: command, Connector: connectorName, EnforcementCapable: true})
+				trustedActionRequest{Input: input,
+					LegacyText: command, Connector: connectorName, EnforcementCapable: true,
+					ResolvedWriteTargets: syntheticExistingInstructionEvidence(t, input, rule)})
 			if verdict.Action != guardrailActionBlock || !findingStringHasRuleID(verdict.Findings, rule) {
 				t.Fatalf("connector=%q action=%q findings=%v", connectorName, verdict.Action, verdict.Findings)
 			}
@@ -297,10 +303,11 @@ func TestInstructionProtectionSharedConnectorAndFileMatrix(t *testing.T) {
 	} {
 		t.Run(tc.file, func(t *testing.T) {
 			command := "printf changed > " + tc.file
+			input := actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"}
 			verdict := api.inspectTrustedToolPolicyCtx(t.Context(),
 				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: "openclaw"},
-				trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"},
-					LegacyText: command, Connector: "openclaw", EnforcementCapable: true})
+				trustedActionRequest{Input: input, LegacyText: command, Connector: "openclaw", EnforcementCapable: true,
+					ResolvedWriteTargets: syntheticExistingInstructionEvidence(t, input, tc.rule)})
 			if verdict.Action != guardrailActionBlock || !findingStringHasRuleID(verdict.Findings, tc.rule) {
 				t.Fatalf("file=%q action=%q findings=%v", tc.file, verdict.Action, verdict.Findings)
 			}

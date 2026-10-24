@@ -23,10 +23,10 @@ var InstructionFileNames = [...]string{
 }
 
 // InstructionIdentityKey carries the hook client's file-identity check of a
-// call's write targets: the paths of the protected instruction files that
-// they write under other names, every one of them (GAP-1065), separated by
-// NUL. A gateway that cannot read the user's files (ProtectHome) judges the
-// call from it.
+// call's write targets: the paths of the existing instruction files they
+// write, under their own names or other names (GAP-1065), separated by NUL.
+// A gateway that cannot read the user's files (ProtectHome) judges the call
+// from it. A missing instruction-named file has no identity fact.
 const InstructionIdentityKey = "\x00instruction-identity"
 
 // FileIdentitiesKey carries the file identities (FileIdentity) of a call's
@@ -182,16 +182,10 @@ func (f *InstructionFiles) identify() {
 	}
 }
 
-// Alias reports the protected instruction file that an existing write target
-// is under another name: a symlink or hard link to one of the call's
-// instruction files (whatever the link is named), the physical file a
-// symlinked one reaches, a path through a symlinked or case-variant
-// directory, or a case, short-name or stream variant of one. Only the call's
-// instruction files count: an instruction-named file in no load location
-// that the session did not load is ordinary, and so is every other name of
-// it. A missing file, one that is not regular and an instruction file named
-// as the call names it report nothing: the name rules judge the last.
-func (f *InstructionFiles) Alias(path string) string {
+// Identity reports the existing instruction file a write target names, by
+// file identity, whether through its own name or an alias. A missing target
+// never supplies an identity fact to the gateway.
+func (f *InstructionFiles) Identity(path string) string {
 	if f == nil || !filepath.IsAbs(path) {
 		return ""
 	}
@@ -207,13 +201,31 @@ func (f *InstructionFiles) Alias(path string) string {
 	f.identify()
 	for _, file := range f.files {
 		if os.SameFile(info, file.info) {
-			if file.path == path || instructionNameFold() && strings.EqualFold(file.path, path) {
-				return ""
-			}
 			return file.path
 		}
 	}
 	return ""
+}
+
+// Alias reports the protected instruction file that an existing write target
+// is under another name: a symlink or hard link to one of the call's
+// instruction files (whatever the link is named), the physical file a
+// symlinked one reaches, a path through a symlinked or case-variant
+// directory, or a case, short-name or stream variant of one. Only the call's
+// instruction files count: an instruction-named file in no load location
+// that the session did not load is ordinary, and so is every other name of
+// it. A missing file, one that is not regular and an instruction file named
+// as the call names it report nothing: the name rules judge the last.
+func (f *InstructionFiles) Alias(path string) string {
+	if f == nil || !filepath.IsAbs(path) {
+		return ""
+	}
+	path = filepath.Clean(path)
+	instruction := f.Identity(path)
+	if instruction == path || instructionNameFold() && strings.EqualFold(instruction, path) {
+		return ""
+	}
+	return instruction
 }
 
 // Located returns the spelling of path that names it in the directory of a

@@ -110,6 +110,7 @@ func TestInstructionProtectionOnlyTheAgentsLoadedFiles(t *testing.T) {
 						ActiveAgentFiles: tc.loaded, DialectHint: tc.dialect},
 					LegacyText: string(args), Connector: tc.connector, EnforcementCapable: true,
 				}
+				action.ResolvedWriteTargets = syntheticExistingInstructionEvidence(t, action.Input, tc.rule)
 				if tc.loadedIdentity != "" {
 					action.ActiveAgentFileIdentities = map[string]string{"1:2": tc.loadedIdentity}
 				}

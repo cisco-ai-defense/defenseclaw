@@ -360,6 +360,22 @@ func TestResolveReportsSymlinkedInstructionTarget(t *testing.T) {
 	}
 }
 
+func TestResolveReportsExistingStartupFileAndNotCreation(t *testing.T) {
+	root := instructionIdentityRoot(t)
+	project := filepath.Join(root, "project")
+	file := instructionIdentityFile(t, project, "AGENTS.md")
+	input := map[string]any{"file_path": file, "content": "updated"}
+	if got := instructionResolve(t, project, "Write", input)[InstructionIdentityKey]; got != file {
+		t.Fatalf("existing startup file identity = %q, want %q", got, file)
+	}
+	if err := os.Remove(file); err != nil {
+		t.Fatal(err)
+	}
+	if got := instructionResolve(t, project, "Write", input)[InstructionIdentityKey]; got != "" {
+		t.Fatalf("absent startup file had identity evidence %q", got)
+	}
+}
+
 // A file with several hard links is not an instruction file because of its
 // link count: pnpm and uv stores hard-link package files into node_modules
 // and .venv. Writing, editing or linking one again carries no identity fact,

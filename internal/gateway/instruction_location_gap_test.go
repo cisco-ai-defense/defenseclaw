@@ -122,6 +122,7 @@ func TestInstructionProtectionOnlyInLoadLocations(t *testing.T) {
 					LegacyText: string(args), Connector: tc.connector, EnforcementCapable: true,
 					SandboxGuestCWD: tc.guestCWD,
 				}
+				action.ResolvedWriteTargets = syntheticExistingInstructionEvidence(t, action.Input, tc.rule)
 				if tc.loadedIdentity != "" {
 					action.ActiveAgentFileIdentities = map[string]string{"1:2": tc.loadedIdentity}
 				}
