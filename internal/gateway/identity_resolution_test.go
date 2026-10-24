@@ -114,7 +114,7 @@ func identityTestSet(t *testing.T, p identityTestPlatform, defaultProfile string
 	cfg.Guardrail.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
 		// strict and tooling are under strict (the strict rule pack): a
-		// decision that may give one of them refuses (unprovenRefuses).
+		// decision that may give one of them refuses (unprovenRefusal).
 		"strict":  strictTier(t, cfg, config.GuardrailProfile{BlockAt: "LOW"}, "strict"),
 		"tooling": strictTier(t, cfg, config.GuardrailProfile{BlockAt: "HIGH"}, "strict"),
 		"watch":   {Mode: "observe"},

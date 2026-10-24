@@ -202,7 +202,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	ctx = a.withGuardrailProfileDecision(ctx, agent.ConnectorID)
 	// Identity uncertainty refuses in every mode; an ACP method denial
 	// continues to use the mode's normal observe/action behavior.
-	blockReason, refused := "", profileRefusal(ctx)
+	blockReason, refused := "", profileRefusal(ctx, profileSurfacesAll)
 	if refused != "" {
 		blockReason = refused
 	} else if slices.Contains(profile.DeniedMethods, req.Method) {

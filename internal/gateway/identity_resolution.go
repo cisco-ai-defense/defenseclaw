@@ -37,10 +37,12 @@ import (
 //     those maybes need (profileDecision.Unproven). Name applies with its
 //     own mode (observe observes, action blocks only what its rules block)
 //     and the missing facts are named and audited (profileDecision.Uncertain).
-//     Only under strict, where one of those profiles blocks with the strict
-//     rule pack (unprovenRefuses), is the request refused
-//     (profileDecision.Refused); Name then authorizes nothing and is shown
-//     in the administrator's explain.
+//     Only under strict, where one of those profiles blocks the request's
+//     surface (its hooks by the hook mode, inspect and the proxy by the
+//     inspect mode, for the request's connector) with the strict rule pack
+//     (unprovenRefusal), is the request refused there
+//     (profileDecision.Refused, RefusedOn); Name then authorizes nothing on
+//     that surface and is shown in the administrator's explain.
 //   - Else the profiles of the yes assignments apply, or default_profile
 //     when none matches: the one that enforces at least what each of the
 //     others does (profileCovers), otherwise their meet, the strictest
@@ -450,9 +452,11 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
 	why := set.identityUncertainty(subject, decision.Unproven, connectorName)
-	if set.unprovenRefuses(candidates, connectorName) {
+	decision.RefusedOn = set.unprovenRefusal(candidates, connectorName)
+	if decision.RefusedOn != 0 {
 		decision.Refused = "DefenseClaw refused this request: " + why
-	} else {
+	}
+	if decision.RefusedOn != profileSurfacesAll {
 		// The strictest combination of every profile that may apply, in
 		// its own mode, as 1.0.3 applied it: a directory outage, a laptop
 		// off VPN or a pending upgrade owner map never turns observe into
@@ -462,25 +466,35 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	return decision
 }
 
-// unprovenRefuses reports whether a decision that cannot tell which of
-// candidates applies refuses the request (strict only): a candidate blocks
-// (action by its hook mode, or by its inspect and proxy mode, for the
-// connector or the global settings, profileCoverConnectors) with the
-// built-in strict rule pack, or its configuration is unknown. Anywhere else
-// their meet applies in its own mode, sandbox section included.
-func (set *guardrailProfileSet) unprovenRefuses(candidates []string, connectorName string) bool {
+// unprovenRefusal is where a decision that cannot tell which of candidates
+// applies is refused (strict only): the agent hooks where a candidate's hook
+// mode for the request's connector is action with the built-in strict rule
+// pack, inspect and the LLM proxy where its inspect mode for it is; every
+// surface when a candidate's configuration is unknown. The connector's own
+// effective settings decide (they inherit the global ones it does not set);
+// only a request without a connector reads the global settings. So a global
+// strict action never refuses a connector a candidate sets to observe, and
+// an inspect mode never refuses hooks, nor a hook mode inspect (review of
+// r104 Q-identity, continuation 4, loop round 2). Anywhere else their meet
+// applies in its own mode, sandbox section included.
+func (set *guardrailProfileSet) unprovenRefusal(candidates []string, connectorName string) profileSurfaces {
+	var on profileSurfaces
 	for _, candidate := range candidates {
 		cfg := set.profileConfig(candidate)
 		if cfg == nil {
-			return true
+			return profileSurfacesAll
 		}
-		for _, name := range profileCoverConnectors(connectorName) {
-			if (hookModeForConfig(cfg, name) == "action" || inspectMode(cfg, name) == "action") && strictRulePack(cfg, name) {
-				return true
-			}
+		if !strictRulePack(cfg, connectorName) {
+			continue
+		}
+		if hookModeForConfig(cfg, connectorName) == "action" {
+			on |= profileSurfaceHooks
+		}
+		if inspectMode(cfg, connectorName) == "action" {
+			on |= profileSurfaceInspect
 		}
 	}
-	return false
+	return on
 }
 
 // strictRulePack reports whether cfg's rule pack for connectorName is the

@@ -354,9 +354,12 @@ func TestLegacyAgentOwnersBoundIsTheLargestWritableMap(t *testing.T) {
 			}
 			return len(data)
 		}
-		if one := size(1, 1); one != legacyAgentOwnersHeaderBytes+legacyAgentOwnerEntryBytes-1+legacyAgentPendingEntryBytes-1 {
+		// No pending account is unnamed here, so the map has no
+		// pending_homes (TestUnnamedAccountEntryIsWithinTheBound).
+		header := legacyAgentOwnersHeaderBytes - len(`"pending_homes":{},`)
+		if one := size(1, 1); one != header+legacyAgentOwnerEntryBytes-1+legacyAgentPendingEntryBytes-1 {
 			t.Fatalf("worst one-owner, one-pending map is %d bytes; the bound allows %d", one,
-				legacyAgentOwnersHeaderBytes+legacyAgentOwnerEntryBytes-1+legacyAgentPendingEntryBytes-1)
+				header+legacyAgentOwnerEntryBytes-1+legacyAgentPendingEntryBytes-1)
 		}
 		if step := size(2, 1) - size(1, 1); step != legacyAgentOwnerEntryBytes {
 			t.Fatalf("worst owner adds %d bytes; the bound allows %d", step, legacyAgentOwnerEntryBytes)

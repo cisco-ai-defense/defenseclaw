@@ -12,28 +12,73 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
-// A profile decision that depends on an unproven identity fact is refused
-// on every blocking surface. Name remains the meet of possible profiles for
-// diagnostics and for surfaces whose events cannot be blocked.
+// A profile decision that depends on an unproven identity fact is refused,
+// under strict, on the surfaces a candidate blocks (unprovenRefusal). Name
+// remains the meet of possible profiles for diagnostics there, and applies
+// in its own mode on every other surface.
 
-func profileRefusal(ctx context.Context) string {
+// profileSurfaces are request surfaces a refused decision blocks
+// (profileDecision.RefusedOn).
+type profileSurfaces uint8
+
+const (
+	// profileSurfaceHooks are agent hook events, which the hook mode
+	// decides.
+	profileSurfaceHooks profileSurfaces = 1 << iota
+	// profileSurfaceInspect are /api/v1/inspect and the LLM proxy, which
+	// the inspect (guardrail) mode decides.
+	profileSurfaceInspect
+)
+
+// profileSurfacesAll is every surface: ACP and sandboxes, which neither
+// mode alone decides, are refused on a refusal of any surface.
+const profileSurfacesAll = profileSurfaceHooks | profileSurfaceInspect
+
+// names lists the surfaces for explain; none set is every surface.
+func (s profileSurfaces) names() []string {
+	if s == 0 {
+		s = profileSurfacesAll
+	}
+	var out []string
+	if s&profileSurfaceHooks != 0 {
+		out = append(out, "hooks")
+	}
+	if s&profileSurfaceInspect != 0 {
+		out = append(out, "inspect")
+	}
+	return out
+}
+
+// refusedOn is why d is refused on any of surfaces, or "". A refusal with
+// no surfaces set covers every surface.
+func (d profileDecision) refusedOn(surfaces profileSurfaces) string {
+	if d.Refused == "" || d.RefusedOn != 0 && d.RefusedOn&surfaces == 0 {
+		return ""
+	}
+	return d.Refused
+}
+
+// profileRefusal is why ctx's profile decision is refused on any of
+// surfaces, or "".
+func profileRefusal(ctx context.Context, surfaces profileSurfaces) string {
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
-		return resolved.decision.Refused
+		return resolved.decision.refusedOn(surfaces)
 	}
 	return ""
 }
 
-// profileRefused is why ctx's profile decision is Refused, or "".
-func (a *APIServer) profileRefused(ctx context.Context) string {
+// profileRefused is why ctx's profile decision is refused on any of
+// surfaces, or "".
+func (a *APIServer) profileRefused(ctx context.Context, surfaces profileSurfaces) string {
 	if resolved := a.resolvedProfile(ctx); resolved != nil {
-		return resolved.decision.Refused
+		return resolved.decision.refusedOn(surfaces)
 	}
 	return ""
 }
 
-// refuseProfileHook answers a hook whose profile decision is Refused with a
-// block, rendered for the agent. Whether a connector honours a block for
-// that event is reported separately as WouldBlock.
+// refuseProfileHook answers a hook whose profile decision is refused on
+// hooks with a block, rendered for the agent. Whether a connector honours a
+// block for that event is reported separately as WouldBlock.
 func (a *APIServer) refuseProfileHook(
 	ctx context.Context,
 	profile connector.HookProfile,
@@ -42,7 +87,7 @@ func (a *APIServer) refuseProfileHook(
 	rawBody []byte,
 	payload map[string]interface{},
 ) (resp agentHookResponse, refused bool) {
-	reason := a.profileRefused(ctx)
+	reason := a.profileRefused(ctx, profileSurfaceHooks)
 	if reason == "" {
 		return agentHookResponse{}, false
 	}
@@ -63,11 +108,11 @@ func (a *APIServer) refuseProfileHook(
 }
 
 // refuseProfileInspect answers an inspect request whose profile decision is
-// Refused with a block verdict, audited as action on route, and reports
+// refused on inspect with a block verdict, audited as action on route, and reports
 // whether it did. Each inspect handler calls it, so a sandbox relay of the
 // request, which does not pass the inspect middleware, is refused too.
 func (a *APIServer) refuseProfileInspect(w http.ResponseWriter, r *http.Request, route, action, target string) bool {
-	reason := a.profileRefused(r.Context())
+	reason := a.profileRefused(r.Context(), profileSurfaceInspect)
 	if reason == "" {
 		return false
 	}
@@ -84,9 +129,9 @@ func (a *APIServer) refuseProfileInspect(w http.ResponseWriter, r *http.Request,
 }
 
 // refuseProfileProxy answers a proxied model request whose profile decision
-// is Refused and reports whether it did.
+// is refused on inspect and reports whether it did.
 func refuseProfileProxy(w http.ResponseWriter, r *http.Request) bool {
-	reason := profileRefusal(r.Context())
+	reason := profileRefusal(r.Context(), profileSurfaceInspect)
 	if reason == "" {
 		return false
 	}

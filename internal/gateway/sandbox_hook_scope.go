@@ -109,7 +109,12 @@ func sandboxHookMode(ctx context.Context, connectorName, hostMode string) string
 // sandbox call sets itself for connectorName (profile.connectors[c].mode,
 // else profile.mode), or "" when the call is not relay-verified, its profile
 // was not selected by a verified subject, or the profile inherits its mode.
-// An inherited mode is the host default, which never relaxes a sandbox.
+// An inherited mode is the host default, which never relaxes a sandbox. For
+// the strictest combination of profiles it is observe only where every
+// member sets observe itself: the combination's own modes are its members'
+// effective ones, so a member that inherits (action in a sandbox) or sets
+// action makes it action (review of r104 Q-identity, continuation 4, loop
+// round 2).
 func sandboxProfileHookMode(ctx context.Context, connectorName string) string {
 	if !isRelayVerifiedSandboxRequest(ctx) {
 		return ""
@@ -118,7 +123,20 @@ func sandboxProfileHookMode(ctx context.Context, connectorName string) string {
 	if resolved == nil || resolved.derived == nil || resolved.decision.SubjectSource == "" {
 		return ""
 	}
-	mode := resolved.derived.Guardrail.ProfileModeForConnector(config.NormalizeConnectorName(connectorName))
+	connectorName = config.NormalizeConnectorName(connectorName)
+	if members, ok := config.ProfileMeetMembers(resolved.decision.Name); ok && resolved.set != nil {
+		for _, member := range members {
+			cfg := resolved.set.profileConfig(member)
+			if cfg == nil {
+				return ""
+			}
+			if mode := cfg.Guardrail.ProfileModeForConnector(connectorName); mode == "" || normalizeAgentHookMode(mode) == "action" {
+				return ""
+			}
+		}
+		return "observe"
+	}
+	mode := resolved.derived.Guardrail.ProfileModeForConnector(connectorName)
 	if mode == "" {
 		return ""
 	}

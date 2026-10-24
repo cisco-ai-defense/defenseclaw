@@ -163,6 +163,40 @@ func (c *Config) meetSandboxFloor(members []string) (OpenShellAdminConfig, strin
 	return f, digest, nil
 }
 
+// setConnectorHookMode sets the hook mode of connector (a normalized
+// name) on out, wherever ConnectorHookConfig reads it: every
+// connector_hooks entry of the connector, the legacy claude_code or codex
+// block, or, with neither, a new connector_hooks entry with only the mode
+// set (ConnectorHookConfig gave the zero settings).
+func setConnectorHookMode(out *Config, connector, mode string) {
+	connector = normalizeConnectorKey(connector)
+	if connector == "" {
+		return
+	}
+	set := false
+	for name, hook := range out.ConnectorHooks {
+		if normalizeConnectorKey(name) == connector {
+			hook.Mode = mode
+			out.ConnectorHooks[name] = hook
+			set = set || name == connector
+		}
+	}
+	switch connector {
+	case "claudecode":
+		out.ClaudeCode.Mode = mode
+		return
+	case "codex":
+		out.Codex.Mode = mode
+		return
+	}
+	if !set {
+		if out.ConnectorHooks == nil {
+			out.ConnectorHooks = map[string]AgentHookConfig{}
+		}
+		out.ConnectorHooks[connector] = AgentHookConfig{Mode: mode}
+	}
+}
+
 // closedMeetSandboxFloor is f with no sandbox allowed: the strictest floor,
 // keeping the agents f and overlay require in a sandbox, which then run
 // nowhere.
@@ -181,12 +215,17 @@ func closedMeetSandboxFloor(f OpenShellAdminConfig, overlay *OpenShellAdminConfi
 }
 
 // DeriveGuardrailProfileMeet derives the meet of members (ProfileMeetName)
-// whose guardrail settings are profile: the gateway computes them as the
-// strictest of the members' effective settings for every connector, since
-// those depend on rule pack postures and hook modes it resolves. The sandbox
-// floor is the members' meet (meetSandboxFloor). Every member must be a
-// profile of c or "" (the base configuration).
-func (c *Config) DeriveGuardrailProfileMeet(members []string, profile GuardrailProfile) (DerivedGuardrailProfile, error) {
+// whose guardrail settings are profile, and whose hook mode for each
+// connector hookModes names is the one it gives: the gateway computes them
+// as the strictest of the members' effective settings for every connector,
+// since those depend on rule pack postures and hook modes it resolves. A
+// profile mode replaces the hook modes (applyGuardrailProfile), so the
+// meet's hook modes are set after it: a meet whose inspect mode is action
+// keeps the observe hook mode its members share (review of r104
+// Q-identity, continuation 4, loop round 2). The sandbox floor is the
+// members' meet (meetSandboxFloor). Every member must be a profile of c or
+// "" (the base configuration).
+func (c *Config) DeriveGuardrailProfileMeet(members []string, profile GuardrailProfile, hookModes map[string]string) (DerivedGuardrailProfile, error) {
 	if c == nil {
 		return DerivedGuardrailProfile{}, fmt.Errorf("guardrail profile meet: configuration is unavailable")
 	}
@@ -205,6 +244,9 @@ func (c *Config) DeriveGuardrailProfileMeet(members []string, profile GuardrailP
 	}
 	profile.Sandbox = nil
 	derived := deriveProfileFrom(base, profile)
+	for name, mode := range hookModes {
+		setConnectorHookMode(derived, name, mode)
+	}
 	digest, err := guardrailPolicyDigest(derived, floorDigest, nil)
 	if err != nil {
 		return DerivedGuardrailProfile{}, fmt.Errorf("guardrail profile meet %s: %w", name, err)

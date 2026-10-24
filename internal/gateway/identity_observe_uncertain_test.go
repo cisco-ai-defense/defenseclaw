@@ -231,7 +231,7 @@ func TestUnresolvedLegacyAgentEntryHookUsesTheStrictestCandidateMode(t *testing.
 			profileAgentSource = func(context.Context) (string, bool) { return corp, true }
 			ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, profileSubject{UserID: "70001", UserName: "alice"})
 			ctx = api.withGuardrailProfileDecision(ctx, "codex")
-			got, mode, refused := api.resolveProfile(ctx), api.agentHookMode(ctx, "codex"), api.profileRefused(ctx)
+			got, mode, refused := api.resolveProfile(ctx), api.agentHookMode(ctx, "codex"), api.profileRefused(ctx, profileSurfacesAll)
 			if !slices.Equal(got.Unproven, []string{"agent:unknown"}) {
 				t.Fatalf("unproven %v; want the agent fact named: %+v", got.Unproven, got)
 			}

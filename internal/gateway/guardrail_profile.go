@@ -188,14 +188,16 @@ type profileDecision struct {
 	MatchedGroup  string
 	SubjectSource string
 	// Refused names an unproven identity fact the decision depends on
-	// under strict (unprovenRefuses). Enforcement surfaces block it; Name
-	// remains diagnostic context.
-	Refused string
+	// under strict (unprovenRefusal), and RefusedOn the surfaces it is
+	// refused on (none set: every surface). Those surfaces block it
+	// (refusedOn); Name remains diagnostic context there.
+	Refused   string
+	RefusedOn profileSurfaces
 	// Uncertain names the unproven identity facts of a decision that
-	// depends on them anywhere else: Name, the strictest combination of
-	// every profile that may apply, applies in its own mode and explain
-	// shows why. Exactly one of Refused and Uncertain is set when Unproven
-	// is.
+	// depends on them on any other surface: Name, the strictest combination
+	// of every profile that may apply, applies there in its own mode and
+	// explain shows why. When Unproven is set, Refused, Uncertain or both
+	// (a refusal on some surfaces only) are.
 	Uncertain string
 	// Assignment is the 1-based index of the assignment that matched, 0 for
 	// the default.
@@ -1771,6 +1773,7 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 	if decision.Refused != "" {
 		out["refused"] = true
 		out["refused_reason"] = decision.Refused
+		out["refused_surfaces"] = decision.RefusedOn.names()
 	}
 	if decision.Uncertain != "" {
 		out["unproven_reason"] = decision.Uncertain
@@ -1783,9 +1786,11 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["candidate_profiles"] = decision.Candidates
 		if config.IsProfileMeet(decision.Name) {
 			if decision.Refused != "" {
-				warnings = append(warnings, fmt.Sprintf("more than one profile may apply (%s): their strictest combination is diagnostic; "+
-					"requests are refused until identity facts are confirmed", strings.Join(decision.Candidates, ", ")))
-			} else {
+				warnings = append(warnings, fmt.Sprintf("more than one profile may apply (%s): their strictest combination is diagnostic "+
+					"on %s, where requests are refused until identity facts are confirmed", strings.Join(decision.Candidates, ", "),
+					strings.Join(decision.RefusedOn.names(), " and ")))
+			}
+			if decision.Refused == "" || decision.Uncertain != "" {
 				warnings = append(warnings, fmt.Sprintf("more than one profile may apply (%s): their strictest combination applies, "+
 					"with every block, rule pack and sandbox limit of each and only the allows they share", strings.Join(decision.Candidates, ", ")))
 			}

@@ -126,8 +126,16 @@ for a 1.0.x agent ID keeps applying, with no rebind step, to the account that
 held the UID at the upgrade. At its first identity pass after the upgrade, the
 root hook guardian records, once, which account held each enrolled UID (its
 name and its SID, or the identity of its home directory) in a migration map in
-the identity spool, `legacy-agent-owners.json`. The file is owned like the
-other spool files and never changes afterwards.
+the identity spool, `legacy-agent-owners.map`. The file is owned like the
+other spool files. It changes only to add an account it lists as pending: one
+whose lookup failed at the upgrade, added once a later pass proves it under the
+recorded name. An account no lookup could name at all is added once its home is
+proven to be the one it had at the upgrade: a home created before the map, or,
+where the file system keeps no creation time (NFS, tmpfs), a home directory
+its UID owned under a home root (`/home`, `/Users`, or the parent of other
+accounts' homes) when the map was written. The hook guardian logs an account it
+cannot prove; replace its `agents` entry with a `users` entry or its current
+`agt-` ID.
 
 An account the map does not record (a later account given the UID, a namesake
 from another domain, an account created again) does not get the entry as a
@@ -151,7 +159,9 @@ How the keys combine:
   two give the same profile. Different proven profiles do not cause a refusal.
 - **The strictest combination.** Every block of any candidate applies: the
   action applies wherever one blocks, with the lowest `block_at` of those that
-  block. The strictest HILT applies. The rules of every rule pack are
+  block. Hook and inspect modes combine apart: hooks block where a candidate's
+  hook mode does, and inspect where its guardrail mode does, so a candidate
+  that inspects in action mode does not make an observe hook block. The strictest HILT applies. The rules of every rule pack are
   enforced; suppressions apply only when all packs share them (allows are the
   intersection). Every sensitive tool any pack inspects is inspected. The
   sandbox limits of all candidates are combined: requirements and blocks are
@@ -174,9 +184,14 @@ How the keys combine:
   observes, an action combination blocks only what its rules block. The missing
   fact is named in the audit and `profile explain` shows `unproven_facts`,
   `unproven_reason` and the candidate profiles (`default_lookup_failed`). Under
-  strict, when a profile that may apply is in action mode with the `strict`
-  rule pack, the request is refused instead, and `explain` shows `refused` and
-  `refused_reason`. A fact no assignment needs does not make the
+  strict, when a profile that may apply blocks the request with the `strict`
+  rule pack, the request is refused instead, and `explain` shows `refused`,
+  `refused_reason` and `refused_surfaces`. The connector's own settings decide
+  (the global ones only for a request without a connector), and each surface
+  is refused only where that profile blocks it: hooks by the hook mode
+  (`codex.mode`, `connector_hooks`, else the guardrail mode), inspect and the
+  LLM proxy by the guardrail mode. So a strict profile whose global mode is
+  action does not refuse a connector it sets to observe. A fact no assignment needs does not make the
   decision uncertain. An account is recognized by its SID (SSSD or
   Windows) or by its macOS local record; for an account that has neither (a
   local or LDAP Linux account, a macOS directory account with no local record)

@@ -570,7 +570,7 @@ live request does. With no `user`, no subject is resolved, so only
 
 `match` is `agent`, `user`, `group`, `connector`, `default`,
 `default_unverified` or `default_lookup_failed`. When the directory lookup
-failed, the answer adds `lookup_error`. If an assignment depends on the missing fact, `unproven_facts` and `unproven_reason` name it and the strictest profile that may apply is the answer; under strict (a candidate in action mode with the `strict` rule pack) `refused` is true and `refused_reason` names it instead. `profiles` lists every configured
+failed, the answer adds `lookup_error`. If an assignment depends on the missing fact, `unproven_facts` and `unproven_reason` name it and the strictest profile that may apply is the answer; under strict (a candidate that blocks the connector's hooks or inspect with the `strict` rule pack) `refused` is true, `refused_reason` names it instead and `refused_surfaces` lists where (`hooks`, `inspect`). `profiles` lists every configured
 profile with its digest. With no profiles configured the answer is
 `"profiles_configured": false` with an empty `profile` and the global
 settings under `effective`; `subject` is still resolved when `user` is given.

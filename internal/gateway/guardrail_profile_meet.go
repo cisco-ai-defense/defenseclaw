@@ -21,12 +21,14 @@ import (
 
 // The meet of guardrail profiles: what applies when several profiles may.
 //
-// When proven assignments select different profiles, their meet applies.
-// For an unproven identity fact, the meet is diagnostic context and the
-// request is refused. When one candidate enforces at least what each of the
+// When proven assignments select different profiles, their meet applies,
+// and so it does for an unproven identity fact, on every surface strict
+// does not refuse (unprovenRefusal). When one candidate enforces at least what each of the
 // others does (profileCovers), it has its own name. Otherwise their meet
 // is config.ProfileMeetName, "strictest.<members>": for every
-// connector, action wherever a member blocks, the lowest block level and
+// connector, its hook mode action wherever a member's hook mode is and its
+// inspect mode action wherever a member's inspect mode is (each apart), the
+// lowest block level and
 // the strictest HILT of the members that block, the lowest alert level, the
 // rules of every member's rule pack (a rule any member enforces is enforced),
 // the suppressions all members share (allows are the intersection), every
@@ -97,7 +99,8 @@ func (set *guardrailProfileSet) meet(name string) *profileMeet {
 	value, _ := set.meets.LoadOrStore(name, &profileMeet{members: members})
 	meet := value.(*profileMeet)
 	meet.once.Do(func() {
-		derived, err := set.base.DeriveGuardrailProfileMeet(members, set.meetProfile(members))
+		profile, hookModes := set.meetProfile(members)
+		derived, err := set.base.DeriveGuardrailProfileMeet(members, profile, hookModes)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles %s: %v\n", strings.Join(members, ", "), err)
 			return
@@ -145,7 +148,8 @@ func (set *guardrailProfileSet) meetOf(names []string, connectorName string) (na
 }
 
 // meetConnectors are the connectors a meet sets explicitly: every built-in
-// one, and every one the configuration or a profile names. Any other
+// one, and every one the configuration (its guardrail and hook settings) or
+// a profile names. Any other
 // connector takes the meet's global settings.
 func (set *guardrailProfileSet) meetConnectors() []string {
 	seen := map[string]bool{}
@@ -160,6 +164,11 @@ func (set *guardrailProfileSet) meetConnectors() []string {
 	for _, name := range thresholdConnectorNamesWith(set.base, profileConnectorNames(set.base)) {
 		add(name)
 	}
+	// A connector whose hook mode is set (claude_code.mode, codex.mode,
+	// connector_hooks) gets its own hook mode in the meet too.
+	for name := range set.base.ConnectorHooks {
+		add(name)
+	}
 	names := make([]string, 0, len(seen))
 	for name := range seen {
 		names = append(names, name)
@@ -168,18 +177,24 @@ func (set *guardrailProfileSet) meetConnectors() []string {
 	return names
 }
 
-// meetSettings are the guardrail settings of a meet for one connector.
+// meetSettings are the guardrail settings of a meet for one connector:
+// mode is its inspect (guardrail) mode and hookMode its hook mode.
 type meetSettings struct {
-	mode, block, alert string
-	hilt               config.HILTConfig
+	mode, hookMode, block, alert string
+	hilt                         config.HILTConfig
 }
 
 // meetSettingsFor is the meet of members' effective settings for
-// connectorName ("" for the global settings): action wherever a member
-// blocks (by its hook mode or its inspect mode), the lowest block level and
-// the strictest HILT of the members that block, and the lowest alert level.
+// connectorName ("" for the global settings): the hook mode is action
+// wherever a member's hook mode is, and the inspect mode wherever a
+// member's inspect mode is, each apart, so a member that inspects in action
+// mode never makes an observe hook block (review of r104 Q-identity,
+// continuation 4, loop round 2); the global mode, which every connector the
+// meet does not name inherits for both, is action wherever either is. The
+// lowest block level and the strictest HILT of the members that block, and
+// the lowest alert level.
 func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName string) meetSettings {
-	out := meetSettings{mode: "observe"}
+	out := meetSettings{mode: "observe", hookMode: "observe"}
 	blockRank, alertRank, hiltRank := 0, 0, 0
 	for _, member := range members {
 		cfg := set.profileConfig(member)
@@ -192,7 +207,12 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 		if !hookBlock && !inspectBlock {
 			continue
 		}
-		out.mode = "action"
+		if hookBlock {
+			out.hookMode = "action"
+		}
+		if inspectBlock || connectorName == "" {
+			out.mode = "action"
+		}
 		block, _ := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
 		proxy, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cfg.Guardrail, connectorName))
 		for _, rank := range []int{block, proxy} {
@@ -225,21 +245,25 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 }
 
 // meetProfile is the guardrail profile whose settings are the meet of
-// members for every connector (meetSettingsFor). Its rule pack is the base
+// members for every connector (meetSettingsFor), and the hook mode of each
+// connector it names, which the meet sets apart from its inspect mode
+// (config.Config.DeriveGuardrailProfileMeet). Its rule pack is the base
 // configuration's: the meet's rules are merged from every member
 // (meetRuleGeneration), and its block levels are explicit, so no pack
 // posture decides them.
-func (set *guardrailProfileSet) meetProfile(members []string) config.GuardrailProfile {
+func (set *guardrailProfileSet) meetProfile(members []string) (config.GuardrailProfile, map[string]string) {
 	global := set.meetSettingsFor(members, "")
 	hilt := global.hilt
 	profile := config.GuardrailProfile{Mode: global.mode, BlockAt: global.block, AlertAt: global.alert, HILT: &hilt,
 		Connectors: map[string]config.PerConnectorGuardrailConfig{}}
+	hookModes := map[string]string{}
 	for _, name := range set.meetConnectors() {
 		s := set.meetSettingsFor(members, name)
 		connectorHILT := s.hilt
 		profile.Connectors[name] = config.PerConnectorGuardrailConfig{Mode: s.mode, BlockAt: s.block, AlertAt: s.alert, HILT: &connectorHILT}
+		hookModes[name] = s.hookMode
 	}
-	return profile
+	return profile, hookModes
 }
 
 // memberRuleGeneration is the rule generation member scans connectorName

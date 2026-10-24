@@ -248,7 +248,7 @@ func WriteIdentitySpool(ctx context.Context, dir string, accounts []IdentitySpoo
 		}
 	}
 	if !ownersUnrecorded || unnamedLegacyAgentOwners(ctx, dir, owners, unnamed, logf) {
-		if _, err := WriteLegacyAgentOwners(dir, owners, time.Now(), setOwnership); err != nil {
+		if _, err := writeLegacyAgentOwners(dir, owners, time.Now(), setOwnership, logf); err != nil {
 			passErr = errors.Join(passErr, fmt.Errorf("record the agent identity migration map: %w", err))
 		}
 	}
