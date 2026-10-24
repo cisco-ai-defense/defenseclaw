@@ -334,16 +334,20 @@ func windowsEnterpriseHotConfigApply(
 		return false, nil
 	}
 	// Adoption and undo both depend on the installed CLI's policy report.
-	// Check that it can run and prove the policy currently enforced before
-	// changing config.yaml. A missing or untrusted CLI is then repaired by
-	// Setup's transaction, while a payload-less bundle is refused intact.
+	// Check that it can run and report the policy currently enforced before
+	// changing config.yaml. A confirmed bundle replay repairs config drift,
+	// so its installed digest can differ from the live one; its signed bundle
+	// identity and post-write adoption are still proved below. Other changes
+	// require the installed and live policies to agree before publication.
 	proof, err := windowsEnterprisePolicyDigest(ctx)
 	if err != nil {
 		return unavailable("the installed CLI cannot prove the running gateway's policy: " + err.Error())
 	}
 	var priorPolicy policyDigestReport
+	confirmedReplay := bundleChange && opts.bundle.prepared != nil && opts.bundle.prepared.AlreadyApplied
 	if json.Unmarshal(proof, &priorPolicy) != nil || priorPolicy.Digest == "" ||
-		priorPolicy.Digest != priorPolicy.GatewayReportedDigest {
+		priorPolicy.GatewayReportedDigest == "" ||
+		(priorPolicy.Digest != priorPolicy.GatewayReportedDigest && !confirmedReplay) {
 		return unavailable("the installed CLI did not prove that the gateway enforces the installed config")
 	}
 	kept := keepWindowsEnterpriseEditedConfig(layout, previous)
