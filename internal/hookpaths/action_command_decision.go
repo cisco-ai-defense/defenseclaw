@@ -35,6 +35,9 @@ func ActionCommandDecision(command, cwd, home string) string {
 	if actionConcreteProtectedWrite(command, cwd, home) {
 		return "protected-target"
 	}
+	if actionWindowsHome(home) && actionWindowsDotNetFileCommand(command, cwd, home, 0) {
+		return "protected-target"
+	}
 	if ActionCommandAuditReason(command, cwd, home) != "" {
 		if actionWindowsHome(home) && actionWindowsResolvedProtectedTarget(command, cwd, home, 0) ||
 			!actionWindowsHome(home) && actionResolvedProtectedTarget(command, cwd, home) {

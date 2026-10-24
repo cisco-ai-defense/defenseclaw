@@ -87,6 +87,130 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 	return false, true
 }
 
+// PowerShell's static File writers take the destination as their first
+// argument. Inspect only executable statements and that destination: a
+// protected path in the content argument or quoted command text is data.
+func actionWindowsDotNetFileWrite(command, cwd, home string) bool {
+	if command == "" || len(command) > MaxPayloadBytes {
+		return false
+	}
+	start := 0
+	var quote byte
+	for i := 0; i <= len(command); i++ {
+		if i == len(command) || quote == 0 && strings.ContainsRune(";|&\r\n", rune(command[i])) {
+			if quote == 0 && actionWindowsDotNetFileStatement(command[start:i], cwd, home) {
+				return true
+			}
+			start = i + 1
+			continue
+		}
+		if command[i] == '`' && i+1 < len(command) {
+			i++ // PowerShell's escape also keeps a separator inside this statement.
+			continue
+		}
+		if quote != 0 {
+			if command[i] == quote {
+				quote = 0
+			}
+		} else if command[i] == '\'' || command[i] == '"' {
+			quote = command[i]
+		}
+	}
+	return false
+}
+
+func actionWindowsDotNetFileCommand(command, cwd, home string, depth int) bool {
+	if depth >= 8 || len(command) > MaxPayloadBytes {
+		return false
+	}
+	if actionWindowsDotNetFileWrite(command, cwd, home) {
+		return true
+	}
+	words, ok := actionWindowsWords(command)
+	if !ok || len(words) < 3 {
+		return false
+	}
+	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
+	if program != "pwsh" && program != "powershell" {
+		return false
+	}
+	for i := 1; i+1 < len(words); i++ {
+		switch strings.ToLower(words[i]) {
+		case "-command", "-c":
+			return actionWindowsDotNetFileCommand(strings.Join(words[i+1:], " "), cwd, home, depth+1)
+		case "-encodedcommand", "-enc":
+			encoded, err := base64.StdEncoding.DecodeString(words[i+1])
+			if err != nil || len(encoded) == 0 || len(encoded)%2 != 0 {
+				return false
+			}
+			letters := make([]uint16, len(encoded)/2)
+			for j := range letters {
+				letters[j] = uint16(encoded[2*j]) | uint16(encoded[2*j+1])<<8
+			}
+			return actionWindowsDotNetFileCommand(string(utf16.Decode(letters)), cwd, home, depth+1)
+		}
+	}
+	return false
+}
+
+func actionWindowsDotNetFileStatement(statement, cwd, home string) bool {
+	statement = strings.TrimSpace(statement)
+	if !strings.HasSuffix(statement, ")") {
+		return false
+	}
+	lower := strings.ToLower(statement)
+	for _, prefix := range []string{"[system.io.file]::", "[io.file]::"} {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		call := statement[len(prefix):]
+		open := strings.IndexByte(call, '(')
+		if open < 0 {
+			return false
+		}
+		method := strings.ToLower(strings.TrimSpace(call[:open]))
+		switch method {
+		case "appendalltext", "writealltext", "appendalllines", "writealllines",
+			"writeallbytes", "appendtext", "createtext", "openwrite", "create":
+		default:
+			return false
+		}
+		args := strings.TrimSpace(call[open+1:])
+		if args == "" {
+			return false
+		}
+		var target string
+		quoted := byte(0)
+		if args[0] == '\'' || args[0] == '"' {
+			quoted = args[0]
+			end := 1
+			for end < len(args) && args[end] != quoted && args[end] != '`' {
+				end++
+			}
+			if end >= len(args) || args[end] != quoted {
+				return false
+			}
+			target, args = args[1:end], strings.TrimSpace(args[end+1:])
+		} else {
+			end := strings.IndexAny(args, ",)")
+			if end < 0 {
+				return false
+			}
+			target, args = strings.TrimSpace(args[:end]), args[end:]
+		}
+		if args == "" || args[0] != ',' && args[0] != ')' ||
+			(method == "appendalltext" || method == "writealltext" || method == "appendalllines" ||
+				method == "writealllines" || method == "writeallbytes") && args[0] != ',' ||
+			quoted == '\'' && strings.ContainsAny(target, "$%") ||
+			quoted == '"' && strings.Contains(target, "%") {
+			return false
+		}
+		protected, _ := actionWindowsProtected(target, cwd, home, false)
+		return protected
+	}
+	return false
+}
+
 // A quoted nested command is one outer argument but contains its own target
 // words. Inspect those words as paths; encoded PowerShell bodies are decoded
 // with the same bounded UTF-16 form as the action parser.
