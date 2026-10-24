@@ -14,9 +14,9 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// UnprovenReasonKey is positive evidence that a command can reach a protected
-// file through a construct whose write target the bounded proof cannot name.
-// The value is a short, fixed class name, never command or filesystem data.
+// UnprovenReasonKey carries a bounded parser uncertainty class to the audit
+// record. The value is a short, fixed class name, never command or filesystem
+// data. It is not positive evidence of a protected write.
 const UnprovenReasonKey = "\x00unproven-write"
 
 var unprovenReasonTitles = map[string]string{
@@ -238,7 +238,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 					set(class, dynamic)
 					return true
 				}
-				for _, destination := range literalInterpreterWrites(code, language) {
+				for _, destination := range literalInterpreterWrites(code, language, home) {
 					if protectedReachPath(OperandPath(destination, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 						set("dynamic-argument", true)
 						return true
@@ -881,6 +881,7 @@ func awkOutputProof(code, cwd, home string) (output, unsafe bool, literals []str
 		if code[i+1] == '"' || code[i+1] == '\'' {
 			quote := code[i+1]
 			end := i + 2
+			value := ""
 			for end < len(code) && code[end] != quote {
 				if code[end] == '\\' {
 					return output, true, literals // Escape semantics need an interpreter proof.
@@ -890,10 +891,35 @@ func awkOutputProof(code, cwd, home string) (output, unsafe bool, literals []str
 			if end >= len(code) {
 				return output, true, literals
 			}
-			if quote == '"' {
-				literals = append(literals, code[i+2:end])
+			value = code[i+2 : end]
+			// AWK concatenates adjacent quoted literals before opening the
+			// redirection target. Keep the whole target as one proof operand.
+			for quote == '"' {
+				next := end + 1
+				for next < len(code) && (code[next] == ' ' || code[next] == '\t') {
+					next++
+				}
+				if next >= len(code) || code[next] != '"' {
+					break
+				}
+				start := next + 1
+				next = start
+				for next < len(code) && code[next] != '"' {
+					if code[next] == '\\' {
+						return output, true, literals
+					}
+					next++
+				}
+				if next >= len(code) {
+					return output, true, literals
+				}
+				value += code[start:next]
+				end = next
 			}
-			if quote == '"' && protectedReachPath(OperandPath(code[i+2:end], cwd),
+			if quote == '"' {
+				literals = append(literals, value)
+			}
+			if quote == '"' && protectedReachPath(OperandPath(value, cwd),
 				newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 				return output, true, literals
 			}
@@ -1226,7 +1252,7 @@ func functionBodyMayWrite(body *syntax.Stmt, cwd, home string) bool {
 			if program == "python" || strings.HasPrefix(program, "python3") ||
 				program == "node" || program == "nodejs" || program == "ruby" || program == "perl" {
 				code, _, fixed := interpreterCodeOperand(call, program, home)
-				if !fixed || len(literalInterpreterWrites(code, program)) > 0 {
+				if !fixed || len(literalInterpreterWrites(code, program, home)) > 0 {
 					mayWrite = true
 				} else if class, _ := unprovenInterpreterCode(code, program, cwd, home, !pythonCallSetsImportPath(call)); class != "" {
 					mayWrite = true
@@ -1281,7 +1307,7 @@ func pythonStringWriterText(code string) bool {
 // a literal Path("..."). Any other statement (a call, a link, a chdir, a
 // compound statement) can change what the name or a relative path refers
 // to, so the receiver stays unresolved.
-func pythonReboundReceiver(code string, call int) (string, bool) {
+func pythonReboundReceiver(code string, call int, home string) (string, bool) {
 	receiver := pythonReceiverName.FindStringSubmatchIndex(code[:call])
 	if receiver == nil {
 		return "", false
@@ -1293,18 +1319,83 @@ func pythonReboundReceiver(code string, call int) (string, bool) {
 	destination, bound := "", false
 	for _, statement := range strings.Split(prefix, ";") {
 		switch statement = strings.TrimSpace(statement); statement {
-		case "", "from pathlib import Path", "import pathlib":
+		case "", "from pathlib import Path", "import pathlib", `f"""{`:
 		default:
 			match := pythonPathAssignment.FindStringSubmatch(statement)
-			if match == nil {
+			if match != nil {
+				if match[1] == name {
+					destination, bound = match[2], match[2] != ""
+					if !bound {
+						destination, bound = pythonHomePathAssignment(statement, home)
+					}
+				}
+				continue
+			}
+			variable, expression, assigned := strings.Cut(statement, "=")
+			if !assigned || strings.TrimSpace(variable) != name {
 				return "", false
 			}
-			if match[1] == name {
-				destination, bound = match[2], match[2] != ""
+			expression = strings.TrimSpace(expression)
+			if !strings.HasPrefix(expression, "Path(") && !strings.HasPrefix(expression, "pathlib.Path(") {
+				return "", false
+			}
+			open := strings.IndexByte(expression, '(')
+			call, ok := literalBoundedCall(expression, open)
+			if !ok || call != expression[open:] {
+				return "", false
+			}
+			args := literalCallArgs(call)
+			if len(args) != 1 {
+				return "", false
+			}
+			if destination, bound = literalPythonString(args[0]); !bound {
+				return "", false
 			}
 		}
 	}
 	return destination, bound
+}
+
+func pythonHomePathAssignment(statement, home string) (string, bool) {
+	if home == "" {
+		return "", false
+	}
+	_, expression, assigned := strings.Cut(statement, "=")
+	if !assigned {
+		return "", false
+	}
+	expression = strings.TrimSpace(expression)
+	for _, prefix := range []string{"Path.home()", "pathlib.Path.home()"} {
+		if !strings.HasPrefix(expression, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(expression, prefix))
+		path := home
+		parts := 0
+		for rest != "" {
+			if rest[0] != '/' {
+				return "", false
+			}
+			rest = strings.TrimSpace(rest[1:])
+			if len(rest) < 2 || rest[0] != '\'' && rest[0] != '"' {
+				return "", false
+			}
+			quote := rest[0]
+			end := strings.IndexByte(rest[1:], quote)
+			if end < 0 {
+				return "", false
+			}
+			part := rest[1 : end+1]
+			if part == "" || filepath.IsAbs(part) || strings.ContainsAny(part, "\\\x00") || part == ".." || strings.HasPrefix(part, "../") {
+				return "", false
+			}
+			path = filepath.Join(path, part)
+			parts++
+			rest = strings.TrimSpace(rest[end+2:])
+		}
+		return path, parts > 0
+	}
+	return "", false
 }
 
 // PythonInertTextMasked is supplied by guardrail, which imports hookpaths.
@@ -1419,7 +1510,7 @@ func unprovenInterpreterCode(code, language, cwd, home string, maskInert bool) (
 					}
 				}
 				if !fixedReceiver {
-					destination, bound := pythonReboundReceiver(code, location[1])
+					destination, bound := pythonReboundReceiver(code, location[1], home)
 					if !bound || protectedReachPath(OperandPath(destination, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 						return "interpreter-path", true
 					}
@@ -1575,16 +1666,8 @@ func shellBodyProtectedWrite(code, cwd, home string) bool {
 }
 
 func protectedReachFromText(command, cwd, home string) bool {
-	return protectedReachFromTextWithFiles(command, cwd, home, newProtectedFiles(home), filepath.Join(home, ".ssh"), true)
-}
-
-func protectedReachFromTextWithFiles(command, cwd, home string, protected protectedFiles, ssh string, includeHome bool) bool {
-	reaches := func(path string) bool {
-		if includeHome {
-			return protectedReachTextPath(path, protected, ssh)
-		}
-		return protectedReachPath(path, protected, ssh)
-	}
+	protected := newProtectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
 	seen := map[string]bool{}
 	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, quoted := range unprovenQuotedPath {
@@ -1600,7 +1683,7 @@ func protectedReachFromTextWithFiles(command, cwd, home string, protected protec
 			if candidate == "~" || strings.HasPrefix(candidate, "~/") {
 				candidate = filepath.Join(home, strings.TrimPrefix(candidate, "~/"))
 			}
-			if reaches(OperandPath(candidate, cwd)) {
+			if protectedReachTextPath(OperandPath(candidate, cwd), protected, ssh) {
 				return true
 			}
 		}
@@ -1623,7 +1706,7 @@ func protectedReachFromTextWithFiles(command, cwd, home string, protected protec
 		if token == "~" || strings.HasPrefix(token, "~/") {
 			token = filepath.Join(home, strings.TrimPrefix(token, "~/"))
 		}
-		if reaches(OperandPath(token, cwd)) {
+		if protectedReachTextPath(OperandPath(token, cwd), protected, ssh) {
 			return true
 		}
 	}

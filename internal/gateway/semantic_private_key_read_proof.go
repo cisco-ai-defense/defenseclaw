@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // appendTrustedPrivateKeyReaderFinding carries a complete reader proof across
@@ -33,6 +34,14 @@ func appendTrustedPrivateKeyReaderFinding(
 			matchesSSHPrivateKey(path) && request.Input.ActiveHome != "" {
 			proved = true
 		}
+	}
+	if !proved {
+		command := request.Input.Command
+		if command == "" {
+			command, _ = trustedBashCommandInput(request.Input)
+		}
+		proved = hookpaths.ActionPrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome) ||
+			hookpaths.ActionMakePrivateKeyRead(command, request.Input.CWD, request.Input.ActiveHome)
 	}
 	if !proved {
 		return findings

@@ -95,7 +95,7 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 				}
 			case *syntax.ParamExp:
 				if part.Param == nil || part.Excl || part.Length || part.Width || part.IsSet || part.Slice != nil ||
-					part.Repl != nil || part.Exp != nil || part.NestedParam != nil || part.Flags != nil || len(part.Modifiers) != 0 {
+					part.Repl != nil || part.NestedParam != nil || part.Flags != nil || len(part.Modifiers) != 0 {
 					return false
 				}
 				name := part.Param.Value
@@ -107,6 +107,14 @@ func actionWordValue(word *syntax.Word, values actionValues, cwd, home string) (
 					name += "[0]"
 				}
 				value, ok := values[name]
+				if part.Exp != nil {
+					if part.Exp.Op != syntax.DefaultUnset && part.Exp.Op != syntax.DefaultUnsetOrNull {
+						return false
+					}
+					if !ok || part.Exp.Op == syntax.DefaultUnsetOrNull && value == "" {
+						value, ok = actionWordValue(part.Exp.Word, values, cwd, home)
+					}
+				}
 				if !ok {
 					return false
 				}
@@ -222,6 +230,15 @@ func actionSubstitutionValue(sub *syntax.CmdSubst, values actionValues, cwd, hom
 		}
 	}
 	switch programBase(words[0]) {
+	case "cat":
+		if len(words) == 2 {
+			if content, ok := readIndirectSource(words[1], cwd); ok {
+				value := strings.TrimSuffix(content, "\n")
+				if value != "" && !strings.ContainsAny(value, "\x00\r\n\t ") {
+					return value, true
+				}
+			}
+		}
 	case "pwd":
 		if len(words) == 1 {
 			return cwd, true

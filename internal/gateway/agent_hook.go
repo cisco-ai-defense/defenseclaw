@@ -144,6 +144,18 @@ type agentHookRequest struct {
 	alertOnlySQLNotice bool
 }
 
+func hookActionCommandAuditExtra(req agentHookRequest, home string) map[string]string {
+	command, ok := trustedBashCommandInput(actionfacts.Input{Tool: req.ToolName, Args: req.ToolArgs})
+	if !ok {
+		return nil
+	}
+	reason := hookpaths.ActionCommandAuditReason(command, req.CWD, home)
+	if hookpaths.UnprovenWriteTitle(reason) == "" {
+		return nil
+	}
+	return map[string]string{"unresolved_command": reason}
+}
+
 type agentHookResponse struct {
 	Action            string                 `json:"action"`
 	RawAction         string                 `json:"raw_action,omitempty"`
@@ -732,6 +744,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 		defer cancelPersist()
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
+		auditExtra = mergeHookEnvelopeExtra(auditExtra, hookActionCommandAuditExtra(req, hookActiveHome(ctx)))
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
 		}

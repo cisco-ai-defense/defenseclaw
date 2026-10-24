@@ -13,22 +13,199 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
-// ActionCommandDecision is the shared action-mode proof for command hooks and
-// gateway routes. A nonempty reason means that an executed write can reach a
-// protected file, or that a write-capable command has an unresolved program or
-// target. The caller must enforce the same result with and without client
-// resolved-write evidence.
+// ActionCommandDecision returns an enforcement reason only when the command
+// names a target that resolves to a protected file. Parse uncertainty alone
+// is reported by ActionCommandAuditReason and never proves persistence.
 //
 // A call with no command text (a subagent delegation, a file or MCP tool)
 // runs no shell, so there is nothing for this proof to decide on any OS: its
 // own path facts judge it. The Windows grammar used to read such a call as a
 // dynamic command and blocked every one of them (GAP-0958). A launcher with
-// an empty child (cmd /c, pwsh -Command) still fails closed below.
+// an empty child has an audit reason but no resolved protected target.
 func ActionCommandDecision(command, cwd, home string) string {
+	reason := ActionCommandAuditReason(command, cwd, home)
+	if actionPureMake(command, home) {
+		if actionMakeProtectedRecipe(command, cwd, home) {
+			return "protected-target"
+		}
+		return ""
+	}
+	if actionMakeProtectedRecipe(command, cwd, home) {
+		return "protected-target"
+	}
+	if actionConcreteProtectedWrite(command, cwd, home) {
+		return "protected-target"
+	}
+	if reason == "" || !actionResolvedProtectedTarget(command, cwd, home) {
+		return ""
+	}
+	return reason
+}
+
+func actionConcreteProtectedWrite(command, cwd, home string) bool {
+	if command == "" || home == "" || actionWindowsHome(home) || !filepath.IsAbs(cwd) {
+		return false
+	}
+	protected := newProtectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
+	writes, _, _ := ShellWriteOperands(command, cwd, home)
+	writes = append(writes, LiteralWriteOperands(command, cwd, home)...)
+	bounded, _ := BoundedShellWriteOperands(command, cwd, home)
+	writes = append(writes, bounded...)
+	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
+	writes = append(writes, patches...)
+	for _, target := range writes {
+		if protectedReachPath(OperandPath(target, cwd), protected, ssh) {
+			return true
+		}
+	}
+	return false
+}
+
+// ActionCommandAuditReason keeps the bounded parser's uncertainty class for
+// the hook audit header. It must not be used as a deny decision.
+func ActionCommandAuditReason(command, cwd, home string) string {
 	if strings.TrimSpace(command) == "" {
 		return ""
 	}
 	return actionCommandDecision(command, cwd, home, 0)
+}
+
+// ActionPrivateKeyRead recognizes a command that reads an active SSH private
+// key. It is separate from the authorized-keys persistence decision.
+func ActionPrivateKeyRead(command, cwd, home string) bool {
+	if command == "" || home == "" {
+		return false
+	}
+	reader := func(program string) bool {
+		switch strings.ToLower(programBase(program)) {
+		case "cat", "head", "tail", "type", "get-content", "gc", "base64", "env", "sudo":
+			return true
+		}
+		return false
+	}
+	if actionWindowsHome(home) {
+		words, ok := actionWindowsWords(command)
+		if !ok {
+			return false
+		}
+		active := false
+		for _, word := range words {
+			switch word {
+			case ";", "&", "&&", "|", "||":
+				active = false
+				continue
+			}
+			active = active || reader(word)
+			if active {
+				if protected, _ := actionWindowsProtected(word, cwd, home, true); protected {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	file, ok := parseShell(command)
+	if !ok {
+		return false
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return !found
+		}
+		program, fixed := staticProgramWord(call.Args[0], home)
+		if !fixed {
+			return !found
+		}
+		if base := programBase(program); base == "cp" || base == "gcp" {
+			args := make([]string, 0, len(call.Args)-1)
+			for _, arg := range call.Args[1:] {
+				value, known := StaticWord(arg, home)
+				if !known {
+					return !found
+				}
+				args = append(args, value)
+			}
+			copy := cpOperands(args, makeStatic(len(args)))
+			if !copy.ok {
+				return !found
+			}
+			for _, source := range copy.sources {
+				if actionPrivateReadPath(source, cwd, home) {
+					found = true
+					break
+				}
+			}
+			return !found
+		}
+		if !reader(program) {
+			return !found
+		}
+		for _, arg := range call.Args[1:] {
+			if value, fixed := StaticWord(arg, home); fixed && actionPrivateReadPath(value, cwd, home) {
+				found = true
+				break
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+func actionResolvedProtectedTarget(command, cwd, home string) bool {
+	if actionWindowsHome(home) {
+		words, ok := actionWindowsWords(command)
+		if !ok {
+			return false
+		}
+		for _, word := range words {
+			if protected, _ := actionWindowsProtected(word, cwd, home, false); protected {
+				return true
+			}
+		}
+		return false
+	}
+	if home == "" || !filepath.IsAbs(cwd) {
+		return false
+	}
+	protected := newProtectedFiles(home)
+	ssh := filepath.Join(home, ".ssh")
+	if file, ok := parseShell(command); ok {
+		values := actionValues{"HOME": home, "PWD": cwd}
+		for _, stmt := range file.Stmts {
+			actionUpdateValues(stmt, values, cwd, home)
+			for _, redirect := range stmt.Redirs {
+				if redirect.Word == nil || redirect.Op == syntax.RdrIn {
+					continue
+				}
+				if value, known := actionWordValue(redirect.Word, values, cwd, home); known &&
+					protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+					return true
+				}
+			}
+		}
+	}
+	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
+	for _, match := range unprovenPathToken.FindAllString(text, 513) {
+		if len(match) > MaxWriteTargetPathBytes || match == "~" || match == "." || match == ".." {
+			continue
+		}
+		if strings.HasPrefix(match, "~/") {
+			match = filepath.Join(home, strings.TrimPrefix(match, "~/"))
+		}
+		if strings.ContainsAny(match, "*?[]") {
+			if boundedProtectedGlobReach(match, cwd, protected, ssh) {
+				return true
+			}
+			continue
+		}
+		if protectedReachPath(OperandPath(match, cwd), protected, ssh) {
+			return true
+		}
+	}
+	return false
 }
 
 // "[" is a literal shell test builtin in program position. StaticWord
@@ -47,12 +224,8 @@ func staticProgramWord(word *syntax.Word, home string) (string, bool) {
 }
 
 func actionCommandDecision(command, cwd, home string, depth int) string {
-	return actionCommandDecisionInput(command, cwd, home, depth, nil)
-}
-
-func actionCommandDecisionInput(command, cwd, home string, depth int, inherited *string) string {
-	if actionWindowsHome(home) && !strings.Contains(command, "<<") && !strings.Contains(command, "<(") {
-		return actionWindowsCommandDecisionInput(command, cwd, home, depth, inherited)
+	if actionWindowsHome(home) {
+		return actionWindowsCommandDecision(command, cwd, home, depth)
 	}
 	if command == "" || !filepath.IsAbs(cwd) || home == "" {
 		return ""
@@ -165,22 +338,10 @@ func actionCommandDecisionInput(command, cwd, home string, depth int, inherited 
 		}
 		words := make([]string, len(call.Args))
 		words[0] = program
-		var processInput *string
 		for i, arg := range call.Args[1:] {
 			value, static := StaticWord(arg, home)
 			if !static {
 				value, static = actionWordValue(arg, values, cwd, home)
-			}
-			if !static && i > 0 && actionMakeFileOption(words[i]) {
-				makeCall := actionMakeProgram(program)
-				for _, prior := range words[1:i] {
-					makeCall = makeCall || actionMakeProgram(prior)
-				}
-				if makeCall {
-					if source := actionMakeProcessInput(arg, cwd, home); source != nil && processInput == nil {
-						value, static, processInput = "-", true, source
-					}
-				}
 			}
 			if !static {
 				safeProcess := actionKnownReadOnlyProcessSubstitution(arg, home)
@@ -213,15 +374,7 @@ func actionCommandDecisionInput(command, cwd, home string, depth int, inherited 
 			}
 		}
 		if reason == "" {
-			input := inherited
-			if processInput != nil {
-				if actionMakeInput(stmt, file, cwd, home, nil) != nil {
-					reason = "dynamic-argument" // two different input sources have no shared proof
-					return false
-				}
-				input = processInput
-			}
-			reason = actionChildDecision(words, stmt, file, cwd, home, depth, input)
+			reason = actionChildDecision(words, stmt, cwd, home, depth)
 		}
 		return reason == ""
 	})
@@ -375,19 +528,6 @@ func actionPrivateReadPath(value, cwd, home string) bool {
 	return false
 }
 
-// Keep the common reader set identical in POSIX shells and on a Windows home.
-// The Windows branch also has native readers; POSIX type is only a name lookup.
-// Identity use by ssh and ssh-keygen does not emit key bytes.
-func actionPrivateKeyReader(program string, windows bool) bool {
-	switch program {
-	case "cat", "head", "tail", "sort", "wc", "grep":
-		return true
-	case "type", "get-content", "get-childitem":
-		return windows
-	}
-	return false
-}
-
 // A generated basename is safe only when its parent is an ordinary resolved
 // directory and no existing name it might select aliases a protected file.
 // This retains ordinary log/date/temp names without claiming an invented
@@ -458,7 +598,7 @@ func actionUnresolvedReadPathArgument(program string) bool {
 	return false
 }
 
-func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, cwd, home string, depth int, inherited *string) string {
+func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, depth int) string {
 	if len(words) == 0 || words[0] == "" {
 		return ""
 	}
@@ -486,7 +626,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 	}
 	if interpreter != "" {
 		child := append([]string{interpreter}, words...)
-		return actionChildDecision(child, stmt, file, cwd, home, depth+1, inherited)
+		return actionChildDecision(child, stmt, cwd, home, depth+1)
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
@@ -527,7 +667,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 			}
 		}
 	}
-	if actionPrivateKeyReader(program, false) {
+	if program == "cat" || program == "head" || program == "tail" || program == "sort" || program == "wc" || program == "grep" {
 		for _, source := range words[1:] {
 			if source != "" && !strings.HasPrefix(source, "-") &&
 				actionPrivateReadPath(source, cwd, home) {
@@ -537,10 +677,6 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 	}
 	if program == "eval" {
 		return "eval-source"
-	}
-	if program == "make" || program == "gmake" {
-		return actionMakeDecision(words, actionMakeAssignments(stmt, home), cwd, home,
-			actionMakeInput(stmt, file, cwd, home, inherited))
 	}
 	if program == "rsync" && len(words) >= 3 && strings.Contains(strings.Join(words[1:len(words)-1], " "), "-a") {
 		protected := newProtectedFiles(home)
@@ -559,8 +695,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 			if index >= len(words) || words[index] == "" {
 				return "nested-shell"
 			}
-			return actionCommandDecisionInput(words[index], cwd, home, depth+1,
-				actionMakeInput(stmt, file, cwd, home, inherited))
+			return actionCommandDecision(words[index], cwd, home, depth+1)
 		}
 		for _, word := range words[1:] {
 			if word == "-c" || strings.Contains(word, "c") && strings.HasPrefix(word, "-") && len(word) <= 4 {
@@ -575,7 +710,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 			if !read {
 				return "nested-shell"
 			}
-			return actionCommandDecisionInput(content, cwd, home, depth+1, inherited)
+			return actionCommandDecision(content, cwd, home, depth+1)
 		}
 		return "nested-shell" // stdin, -s or an unrecognized option.
 	}
@@ -599,7 +734,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 				if class, _ := unprovenInterpreterCode(code, program, cwd, home, true); class != "" {
 					return class
 				}
-				for _, target := range literalInterpreterWrites(code, program) {
+				for _, target := range literalInterpreterWrites(code, program, home) {
 					if protectedReachPath(OperandPath(target, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 						return "interpreter-path"
 					}
@@ -641,7 +776,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 		if !read {
 			return "eval-source"
 		}
-		return actionCommandDecisionInput(content, cwd, home, depth+1, inherited)
+		return actionCommandDecision(content, cwd, home, depth+1)
 	case "git":
 		return actionGitDecision(words, cwd, home, depth+1)
 	case "command", "exec", "busybox", "time", "nohup":
@@ -671,10 +806,9 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 		if index >= len(words) {
 			return "dynamic-command"
 		}
-		return actionWordsDecision(words[index:], stmt, file, cwd, home, depth+1, inherited)
+		return actionWordsDecision(words[index:], cwd, home, depth+1)
 	case "env":
 		index := 1
-		env := actionMakeAssignments(stmt, home)
 		for index < len(words) {
 			w := words[index]
 			switch {
@@ -692,29 +826,23 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 				if index+1 >= len(words) || words[index+1] == "" {
 					return "dynamic-command"
 				}
-				return actionCommandDecisionInput(words[index+1], cwd, home, depth+1,
-					actionMakeInput(stmt, file, cwd, home, inherited))
+				return actionCommandDecision(words[index+1], cwd, home, depth+1)
 			case strings.HasPrefix(w, "--chdir="):
 				cwd = OperandPath(strings.TrimPrefix(w, "--chdir="), cwd)
 				index++
 			case strings.HasPrefix(w, "--unset=") || strings.HasPrefix(w, "-u") && len(w) > 2:
 				index++
 			case strings.Contains(w, "=") && !strings.HasPrefix(w, "-"):
-				env = append(env, w)
 				index++
 			case strings.HasPrefix(w, "-"):
 				return "dynamic-command"
 			default:
-				if actionMakeProgram(words[index]) {
-					return actionMakeDecision(words[index:], env, cwd, home,
-						actionMakeInput(stmt, file, cwd, home, inherited))
-				}
-				return actionWordsDecision(words[index:], stmt, file, cwd, home, depth+1, inherited)
+				return actionWordsDecision(words[index:], cwd, home, depth+1)
 			}
 		}
 		return ""
 	case "nice", "ionice", "timeout", "stdbuf", "setsid", "chroot", "unshare", "nsenter", "flock", "sudo", "parallel", "xargs", "find", "script", "su":
-		return actionWrappedDecision(program, words, stmt, file, cwd, home, depth+1, inherited)
+		return actionWrappedDecision(program, words, cwd, home, depth+1)
 	}
 	return ""
 }
@@ -853,7 +981,7 @@ func actionLiteralHereDocument(stmt *syntax.Stmt) (string, bool) {
 	return "", false
 }
 
-func actionWordsDecision(words []string, stmt *syntax.Stmt, file *syntax.File, cwd, home string, depth int, inherited *string) string {
+func actionWordsDecision(words []string, cwd, home string, depth int) string {
 	if len(words) == 0 || words[0] == "" {
 		return "dynamic-command"
 	}
@@ -863,7 +991,7 @@ func actionWordsDecision(words []string, stmt *syntax.Stmt, file *syntax.File, c
 			return "dynamic-argument"
 		}
 	}
-	return actionChildDecision(words, stmt, file, cwd, home, depth, inherited)
+	return actionChildDecision(words, nil, cwd, home, depth)
 }
 
 func actionScriptInsideCWD(script, cwd string) bool {
@@ -872,7 +1000,7 @@ func actionScriptInsideCWD(script, cwd string) bool {
 	return ok && (resolved == cwd || strings.HasPrefix(resolved, cwd+string(filepath.Separator)))
 }
 
-func actionWrappedDecision(program string, words []string, stmt *syntax.Stmt, file *syntax.File, cwd, home string, depth int, inherited *string) string {
+func actionWrappedDecision(program string, words []string, cwd, home string, depth int) string {
 	if depth >= 8 {
 		return "dynamic-command"
 	}
@@ -892,8 +1020,7 @@ func actionWrappedDecision(program string, words []string, stmt *syntax.Stmt, fi
 				protectedReachPath(OperandPath(words[len(words)-1], cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 				return "dynamic-argument"
 			}
-			return actionCommandDecisionInput(words[index+1], cwd, home, depth+1,
-				actionMakeInput(stmt, file, cwd, home, inherited))
+			return actionCommandDecision(words[index+1], cwd, home, depth+1)
 		}
 		if (program == "find" || program == "xargs") && strings.HasPrefix(word, "-exec") {
 			break
@@ -984,7 +1111,7 @@ func actionWrappedDecision(program string, words []string, stmt *syntax.Stmt, fi
 	case "find":
 		for i := index; i < len(words); i++ {
 			if words[i] == "-exec" || words[i] == "-execdir" || words[i] == "-ok" {
-				return actionWordsDecision(words[i+1:], stmt, file, cwd, home, depth+1, inherited)
+				return actionWordsDecision(words[i+1:], cwd, home, depth+1)
 			}
 		}
 		return ""
@@ -1008,5 +1135,5 @@ func actionWrappedDecision(program string, words []string, stmt *syntax.Stmt, fi
 	if index >= len(words) {
 		return "dynamic-command"
 	}
-	return actionWordsDecision(words[index:], stmt, file, cwd, home, depth+1, inherited)
+	return actionWordsDecision(words[index:], cwd, home, depth+1)
 }

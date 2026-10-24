@@ -137,9 +137,14 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 			words = words[index:]
 		case "nice":
 			index := 1
-			if index < len(words) && words[index] == "-n" {
+			if index < len(words) && (words[index] == "-n" || words[index] == "--adjustment") {
 				index++
 				if index >= len(words) || !literalInteger(words[index]) {
+					return nil
+				}
+				index++
+			} else if index < len(words) && strings.HasPrefix(words[index], "--adjustment=") {
+				if !literalInteger(strings.TrimPrefix(words[index], "--adjustment=")) {
 					return nil
 				}
 				index++
@@ -234,7 +239,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 	case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node" || program == "nodejs":
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if code, ok := pythonLiteralCode(words); ok {
-				return add(literalInterpreterWrites(code, "python"))
+				return add(literalInterpreterWrites(code, "python", home))
 			}
 		}
 		if len(words) >= 3 && (program == "perl" || program == "ruby" || program == "node" || program == "nodejs") && words[1] == "-e" {
@@ -242,13 +247,13 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			if language == "nodejs" {
 				language = "node"
 			}
-			return add(literalInterpreterWrites(words[2], language))
+			return add(literalInterpreterWrites(words[2], language, home))
 		}
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if len(words) >= 2 && words[1] == "-" && stmt != nil {
 				for _, redirect := range stmt.Redirs {
 					if code, ok := literalQuotedHereDocument(redirect); ok {
-						return add(literalInterpreterWrites(code, "python"))
+						return add(literalInterpreterWrites(code, "python", home))
 					}
 				}
 			}

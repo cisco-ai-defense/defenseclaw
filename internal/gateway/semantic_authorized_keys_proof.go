@@ -987,9 +987,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	if facts.ActiveHome == "" || !filepath.IsAbs(facts.ActiveHome) {
 		return false
 	}
-	if hookpaths.UnprovenWriteTitle(request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]) != "" {
-		return true
-	}
 	// One list for the path, hard-link and missing-final-file checks, the
 	// same files the direct-write rule protects (GAP-1370).
 	protectedPaths := hookpaths.ProtectedAuthorizedKeysPaths(facts.ActiveHome)
@@ -1010,12 +1007,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	// the client did describe, and does not make them omitted.
 	clientTargets := request.ResolvedWriteTargets
 	truncated := clientTargets[hookpaths.TruncatedKey] == "1"
-	// Whether an incomplete map also leaves an unlisted or dynamic redirect
-	// unknown (GAP-1395). For a managed Claude Code call that holds only for
-	// a map with no listed operand or a dynamic redirect next to a listed
-	// external operand; other dynamic redirects keep the header-free walk
-	// decision below.
-	unknownRedirects := truncated
 	if request.Connector == "claudecode" && request.ProtectedHomeHook &&
 		len(request.ResolvedWriteTargets) != 0 {
 		// Keep the client's positive protected-path evidence and inspected copy
@@ -1036,20 +1027,10 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 		if command == "" {
 			command, _ = trustedBashCommandInput(request.Input)
 		}
-		_, _, dynamicRedirect := hookpaths.ShellWriteOperands(command, facts.CWD, facts.ActiveHome)
 		home := filepath.Clean(facts.ActiveHome)
 		external := func(target string) bool {
 			return filepath.IsAbs(target) && filepath.Clean(target) != os.DevNull && target != home &&
 				!strings.HasPrefix(filepath.Clean(target), home+string(filepath.Separator))
-		}
-		unknownRedirects = truncated && len(request.ResolvedWriteTargets) <= 2
-		if truncated && dynamicRedirect {
-			for operand := range request.ResolvedWriteTargets {
-				if external(operand) {
-					unknownRedirects = true
-					break
-				}
-			}
 		}
 		// An incomplete map keeps its marker and the client's cwd, so an
 		// operand the client omitted is placed and denied as it is for Codex.
@@ -1225,17 +1206,8 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 	replacedBySed := hookpaths.SedReplacedOperands(input.Command, input.CWD, facts.ActiveHome)
 	var operands []string
 	if input.Command != "" {
-		var parsed, dynamic bool
-		operands, parsed, dynamic = hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
-		// A truncated client map is not complete, so a nonempty target in it
-		// proves only its own operand. When the gateway cannot list every
-		// redirect target either (the command does not parse, or a target is
-		// not a static word) and cannot resolve one itself, the protected-path
-		// decision is unknown: fail closed (GAP-1395). Every write redirect
-		// operator contains a greater-than sign.
-		if unknownRedirects && cannotResolveLocally && strings.Contains(input.Command, ">") && (!parsed || dynamic) {
-			return true
-		}
+		var dynamic bool
+		operands, _, dynamic = hookpaths.ShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
 		if dynamic && request.Connector == "claudecode" && request.ProtectedHomeHook &&
 			request.ResolvedWriteTargets != nil {
 			// A physical-directory fact can resolve a static write after cd,

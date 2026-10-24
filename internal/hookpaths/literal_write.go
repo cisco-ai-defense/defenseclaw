@@ -17,6 +17,7 @@ var (
 	literalNodeStream       = regexp.MustCompile(`\brequire\s*\(\s*['"]fs['"]\s*\)\s*\.createWriteStream\s*\(`)
 	literalPathWrite        = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.write_(?:text|bytes)\s*\(`)
 	literalPathOpen         = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(\s*['"]([^'"]+)['"]\s*\)\s*\.open\s*\(\s*['"]([waxr][waxr+bt]*)['"]\s*\)`)
+	literalPythonPathCall   = regexp.MustCompile(`\b(?:pathlib\.)?Path\s*\(`)
 	literalPerlOpen         = regexp.MustCompile(`\bopen\s+(?:my\s+)?(?:\$?\w+)\s*,\s*['"](?:>>|>)['"]\s*,\s*['"]([^'"]+)['"]`)
 	literalCopyCall         = regexp.MustCompile(`\b(?:shutil\.(?:copyfile|copy|copy2)|copyFileSync|copyFile|copyfile|copy2|(?:File::Copy::)?copy)\s*\(`)
 	literalPythonCopyImport = regexp.MustCompile(`\bfrom\s+shutil\s+import\s+copyfile\b`)
@@ -206,9 +207,13 @@ func sedInPlaceFiles(words []string) []string {
 	return files
 }
 
-func literalInterpreterWrites(code, language string) []string {
+func literalInterpreterWrites(code, language, home string) []string {
 	if len(code) > 16<<10 {
 		return nil
+	}
+	pathString := literalString
+	if language == "python" || strings.HasPrefix(language, "python3") {
+		pathString = literalPythonString
 	}
 	var paths []string
 	for _, loc := range literalOpenCall.FindAllStringIndex(code, -1) {
@@ -226,12 +231,12 @@ func literalInterpreterWrites(code, language string) []string {
 		}
 		switch {
 		case name == "os.open" && len(args) >= 2 && literalOSWriteFlags(args[1]):
-			if path, ok := literalString(args[0]); ok {
+			if path, ok := pathString(args[0]); ok {
 				paths = append(paths, path)
 			}
 		case name == "open" && len(args) >= 3 && perlRedirectMode(args[1]):
 			if mode, ok := literalString(args[1]); ok && (mode == ">" || mode == ">>") {
-				if path, ok := literalString(args[2]); ok {
+				if path, ok := pathString(args[2]); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -250,7 +255,7 @@ func literalInterpreterWrites(code, language string) []string {
 				}
 			}
 			if mode, ok := literalString(modeArg); ok && literalWriteMode(mode) {
-				if path, ok := literalString(pathArg); ok {
+				if path, ok := pathString(pathArg); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -263,7 +268,7 @@ func literalInterpreterWrites(code, language string) []string {
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
 			args := literalCallArgs(call)
 			if len(args) > 0 {
-				if path, ok := literalString(args[0]); ok {
+				if path, ok := pathString(args[0]); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -276,7 +281,7 @@ func literalInterpreterWrites(code, language string) []string {
 		if call, ok := literalBoundedCall(code, loc[1]-1); ok {
 			args := literalCallArgs(call)
 			if len(args) > 0 {
-				if path, ok := literalString(args[0]); ok {
+				if path, ok := pathString(args[0]); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -316,7 +321,7 @@ func literalInterpreterWrites(code, language string) []string {
 				if language == "python" {
 					destination = literalCallArgument(args, 1, "dst")
 				}
-				if path, ok := literalString(destination); ok {
+				if path, ok := pathString(destination); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -330,7 +335,7 @@ func literalInterpreterWrites(code, language string) []string {
 			}
 			if literalCodePosition(code, match[0], language) &&
 				literalCopyAPI(language, name, perlCopyImported) {
-				if path, ok := literalString(code[match[2]:match[3]]); ok {
+				if path, ok := pathString(code[match[2]:match[3]]); ok {
 					paths = append(paths, path)
 				}
 			}
@@ -347,6 +352,74 @@ func literalInterpreterWrites(code, language string) []string {
 				strings.Contains(code[:match[0]], "from pathlib import Path")) &&
 			validPythonWriteMode(code[match[4]:match[5]]) {
 			paths = append(paths, code[match[2]:match[3]])
+		}
+	}
+	if language == "python" || strings.HasPrefix(language, "python3") {
+		for _, loc := range unprovenWriter.FindAllStringIndex(code, -1) {
+			name := strings.TrimSpace(code[loc[0] : loc[1]-1])
+			if (name != "write_text" && name != "write_bytes") || !pythonExecutableCodePosition(code, loc[0]) {
+				continue
+			}
+			if destination, fixed := pythonReboundReceiver(code, loc[1], home); fixed {
+				paths = append(paths, destination)
+			}
+		}
+		for _, match := range literalPathHomeJoinOpen.FindAllStringSubmatchIndex(code, -1) {
+			if !pythonExecutableCodePosition(code, match[0]) {
+				continue
+			}
+			call, fixed := literalBoundedCall(code, match[1]-1)
+			if !fixed {
+				continue
+			}
+			args := literalCallArgs(call)
+			if len(args) == 0 {
+				continue
+			}
+			if mode, fixed := literalString(args[0]); fixed && literalWriteMode(mode) {
+				paths = append(paths, filepath.Join(home, code[match[2]:match[3]]))
+			}
+		}
+		for _, loc := range literalPythonPathCall.FindAllStringIndex(code, -1) {
+			if !pythonExecutableCodePosition(code, loc[0]) {
+				continue
+			}
+			call, fixed := literalBoundedCall(code, loc[1]-1)
+			if !fixed {
+				continue
+			}
+			end := loc[1] - 1 + len(call)
+			if end > len(code) {
+				continue
+			}
+			suffix := code[end:]
+			if !strings.HasPrefix(suffix, ".write_text(") && !strings.HasPrefix(suffix, ".write_bytes(") &&
+				!strings.HasPrefix(suffix, ".open(") {
+				continue
+			}
+			args := literalCallArgs(call)
+			if len(args) != 1 {
+				continue
+			}
+			path, fixed := literalPythonString(args[0])
+			if !fixed {
+				continue
+			}
+			if strings.HasPrefix(suffix, ".open(") {
+				open, known := literalBoundedCall(suffix, len(".open"))
+				if !known {
+					continue
+				}
+				arguments := literalCallArgs(open)
+				if len(arguments) == 0 {
+					continue
+				}
+				mode, known := literalString(arguments[0])
+				if !known || !literalWriteMode(mode) {
+					continue
+				}
+			}
+			paths = append(paths, path)
 		}
 	}
 	for _, match := range literalPerlOpen.FindAllStringSubmatchIndex(code, -1) {
@@ -430,6 +503,53 @@ func literalString(arg string) (string, bool) {
 		return "", false
 	}
 	return value, true
+}
+
+// Python folds adjacent literal strings and literal + literal at compile
+// time. Accept only those bounded forms when proving a path argument.
+func literalPythonString(arg string) (string, bool) {
+	if value, ok := literalString(arg); ok {
+		return value, true
+	}
+	arg = strings.TrimSpace(arg)
+	if len(arg) > MaxWriteTargetPathBytes || len(arg) < 4 {
+		return "", false
+	}
+	var out strings.Builder
+	segments := 0
+	for pos := 0; pos < len(arg); {
+		quote := arg[pos]
+		if quote != '\'' && quote != '"' {
+			return "", false
+		}
+		pos++
+		start := pos
+		for pos < len(arg) && arg[pos] != quote {
+			if arg[pos] == '\\' {
+				return "", false
+			}
+			pos++
+		}
+		if pos == len(arg) {
+			return "", false
+		}
+		out.WriteString(arg[start:pos])
+		segments++
+		pos++
+		for pos < len(arg) && (arg[pos] == ' ' || arg[pos] == '\t') {
+			pos++
+		}
+		if pos < len(arg) && arg[pos] == '+' {
+			pos++
+			for pos < len(arg) && (arg[pos] == ' ' || arg[pos] == '\t') {
+				pos++
+			}
+			if pos == len(arg) {
+				return "", false
+			}
+		}
+	}
+	return out.String(), segments > 1
 }
 
 func literalBoundedCall(code string, open int) (string, bool) {

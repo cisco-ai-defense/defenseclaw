@@ -696,7 +696,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			var command string
 			if json.Unmarshal(toolArgs[key], &command) == nil && command != "" {
 				if !isApplyPatchToolName(tool) && unprovenReason == "" {
-					unprovenReason = ActionCommandDecision(command, cwd, home)
+					unprovenReason = ActionCommandAuditReason(command, cwd, home)
 				}
 				fallback := input
 				fallback.Tool, fallback.Args, fallback.Command = "Bash", nil, command
@@ -1313,16 +1313,10 @@ func commandLinksWithFacts(command, cwd, home string, facts map[string]string, r
 				}
 			}
 		case program == "git":
-			if destination, materializes := gitMaterializationScope(words[1:], static[1:], cwd); materializes {
-				for _, assignment := range call.Assigns {
-					if assignment.Name == nil {
-						continue
-					}
-					switch assignment.Name.Value {
-					case "GIT_WORK_TREE", "GIT_DIR", "GIT_COMMON_DIR":
-						destination = ""
-					}
-				}
+			// A materializing Git command alone does not prove that a later
+			// ordinary project write reaches a protected target.
+			if destination, materializes := gitMaterializationScope(words[1:], static[1:], cwd); materializes &&
+				destination != "" && protectedReachPath(destination, newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 				links.unknownIn(destination)
 			}
 		case slices.Contains(renamePrograms, program):
@@ -1996,15 +1990,14 @@ func gitWorktreeRoot(working string) string {
 // cpOperands reads the options that can change source and destination
 // positions. Unknown or dynamic options make the destination unbounded.
 type cpOperandsResult struct {
-	sources         []string
-	destination     string
-	preserves       bool
-	hard            bool
-	symbolic        bool
-	alternateTarget bool
-	noTargetDir     bool
-	targetDir       bool
-	ok              bool
+	sources     []string
+	destination string
+	preserves   bool
+	hard        bool
+	symbolic    bool
+	noTargetDir bool
+	targetDir   bool
+	ok          bool
 }
 
 func cpOperands(args []string, static []bool) cpOperandsResult {
@@ -2034,8 +2027,6 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 			switch option {
 			case "archive", "recursive", "no-dereference":
 				result.preserves = true
-			case "parents":
-				result.alternateTarget = true
 			case "link":
 				if joined {
 					return cpOperandsResult{preserves: true}
@@ -2056,9 +2047,6 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 					result.preserves = true
 				}
 			case "target-directory", "suffix":
-				if option == "suffix" {
-					result.alternateTarget = true
-				}
 				if !joined {
 					i++
 					if i >= len(args) || !static[i] {
@@ -2072,9 +2060,7 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 				if option == "target-directory" {
 					targetDir = value
 				}
-			case "backup":
-				result.alternateTarget = true
-			case "no-preserve", "sparse", "reflink", "update", "context":
+			case "no-preserve", "sparse", "reflink", "backup", "update", "context":
 				// These take only an optional joined value.
 			default:
 				if joined {
@@ -2093,12 +2079,7 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 				result.symbolic = true
 			case 'T':
 				result.noTargetDir = true
-			case 'b':
-				result.alternateTarget = true
 			case 't', 'S':
-				if arg[j] == 'S' {
-					result.alternateTarget = true
-				}
 				value := arg[j+1:]
 				if value == "" {
 					i++
@@ -2114,7 +2095,7 @@ func cpOperands(args []string, static []bool) cpOperandsResult {
 					targetDir = value
 				}
 				j = len(arg)
-			case 'c', 'f', 'H', 'i', 'L', 'n', 'N', 'p', 'u', 'v', 'x', 'X', 'Z':
+			case 'b', 'c', 'f', 'H', 'i', 'L', 'n', 'N', 'p', 'u', 'v', 'x', 'X', 'Z':
 			default:
 				return cpOperandsResult{preserves: true}
 			}

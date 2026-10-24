@@ -10,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
-	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
 // provedHighWriteFindings joins a native action's resolved write target to a
@@ -36,11 +35,8 @@ func provedHighWriteFindings(
 	for _, target := range facts.Paths {
 		if target.Access != actionfacts.PathAccessWrite &&
 			target.Access != actionfacts.PathAccessAppend &&
-			target.Access != actionfacts.PathAccessDelete {
-			continue
-		}
-		resolved := highWriteTargetPath(target, request.Input)
-		if resolved == "" {
+			target.Access != actionfacts.PathAccessDelete ||
+			!target.Absolute || target.Resolved == "" {
 			continue
 		}
 		command, found := integrityCommandByID(facts, target.CommandID)
@@ -49,7 +45,7 @@ func provedHighWriteFindings(
 		}
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
-				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved) {
+				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, target.Resolved) {
 					continue
 				}
 				proof := newActionFactsSubgraphFindingProof(rule.ID, true, true)
@@ -63,7 +59,7 @@ func provedHighWriteFindings(
 					proved[index].enforcement = findingEnforcementAllowed
 					proved[index].proof = proof
 				} else {
-					name := path.Base(strings.ReplaceAll(resolved, `\`, "/"))
+					name := path.Base(strings.ReplaceAll(target.Resolved, `\`, "/"))
 					proved = append(proved, adjustConfidence(request.Input.Tool, RuleFinding{
 						RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
 						Confidence: rule.Confidence, Evidence: name,
@@ -77,28 +73,6 @@ func provedHighWriteFindings(
 		}
 	}
 	return proved, blocked
-}
-
-// highWriteTargetPath is the file a proved write lands on, relative operands
-// included: ActionFacts resolves them against the CWD, so printf >> CLAUDE.md
-// is proved like its absolute spelling. ActionFacts resolves a POSIX-dialect
-// operand only against a POSIX CWD, while Git Bash on Windows runs in a drive
-// CWD and also takes C:\ and C:/ operands; the shared Windows resolver gives
-// those the target the Windows action decision uses. Without a loaded-file
-// snapshot (a gateway restart) these spellings otherwise carried no proof and
-// the write was allowed (GAP-0995).
-func highWriteTargetPath(target actionfacts.PathFact, input actionfacts.Input) string {
-	if target.Resolved != "" {
-		return target.Resolved
-	}
-	if target.Flavor == actionfacts.PathFlavorRegistry {
-		return ""
-	}
-	resolved, ok := hookpaths.WindowsOperandPath(target.Value, input.CWD, input.ActiveHome)
-	if !ok {
-		return ""
-	}
-	return resolved
 }
 
 // An active instruction file may be loaded by a session that predates this

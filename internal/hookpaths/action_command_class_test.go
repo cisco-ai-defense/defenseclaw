@@ -10,6 +10,7 @@ import (
 	"time"
 )
 
+// These parser cases preserve audit classifications; enforcement requires a resolved protected target.
 func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
@@ -20,7 +21,7 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 		"sudo -l", "sudo -ll", "sudo --list", "sudo -n -l",
 		"sudo -u root -l", "sudo -l /bin/sh", "sudo -l /bin/r*",
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got != "" {
+		if got := ActionCommandAuditReason(command, cwd, home); got != "" {
 			t.Errorf("%q: decision = %q, want allow", command, got)
 		}
 	}
@@ -29,7 +30,7 @@ func TestGAP0870SudoListDoesNotExecuteAChild(t *testing.T) {
 		`sudo --future-option sh -c 'echo marker >> "$destination"'`,
 		`sudo -l $(sh -c 'echo marker >> "$destination"')`,
 	} {
-		if got := ActionCommandDecision(command, cwd, home); got == "" {
+		if got := ActionCommandAuditReason(command, cwd, home); got == "" {
 			t.Errorf("%q: decision = allow, want block", command)
 		}
 	}
@@ -96,7 +97,7 @@ func TestR104ActionClassUnknownShellAndInterpreter(t *testing.T) {
 		{"ordinary redirect", `echo marker >> report.txt`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.block {
+			if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.block {
 				t.Fatalf("unknown write = %t, want %t", got, tc.block)
 			}
 		})
@@ -138,7 +139,7 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 		{`if test "$COND"; then v=report.txt; fi; echo ok > "$v"`, true},
 	} {
 		t.Run(tc.command, func(t *testing.T) {
-			if reason := ActionCommandDecision(tc.command, cwd, home); (reason != "") != tc.block {
+			if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.block {
 				t.Fatalf("reason=%q, want block=%t", reason, tc.block)
 			}
 		})
@@ -184,7 +185,7 @@ func TestR104ActionClassWrapperRecursion(t *testing.T) {
 		{"exec named child", `exec -a chosen sh -c 'echo marker >> alias'`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if reason := ActionCommandDecision(tc.command, cwd, home); reason == "" {
+			if reason := ActionCommandAuditReason(tc.command, cwd, home); reason == "" {
 				t.Fatal("write-capable wrapper hid an unresolved child target")
 			}
 		})
@@ -212,7 +213,7 @@ func TestR104LeadGapCorpusPOSIX(t *testing.T) {
 		{"GAP-0659 computed program", `$(printf ln) -s report.txt alias`},
 	} {
 		t.Run(row.gap, func(t *testing.T) {
-			if reason := ActionCommandDecision(row.command, cwd, home); reason == "" {
+			if reason := ActionCommandAuditReason(row.command, cwd, home); reason == "" {
 				t.Fatalf("allowed %q", row.command)
 			}
 		})
@@ -239,7 +240,7 @@ func TestR104ActionClassGeneratedTargetAlias(t *testing.T) {
 		`x=$(date +%Y%m%d); echo marker > "build/$x.log"`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if reason := ActionCommandDecision(command, cwd, home); reason == "" {
+			if reason := ActionCommandAuditReason(command, cwd, home); reason == "" {
 				t.Fatal("a generated name can select an existing protected alias")
 			}
 		})
@@ -260,7 +261,7 @@ func TestR104ActionGitArchiveReadOnly(t *testing.T) {
 		{"git archive --output=" + filepath.Join(home, ".ssh", "authorized_keys") + " HEAD", true},
 		{"git archive --exec=unknown HEAD", true},
 	} {
-		if reason := ActionCommandDecision(tc.command, cwd, home); (reason != "") != tc.blocked {
+		if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.blocked {
 			t.Errorf("%q reason=%q, want blocked=%t", tc.command, reason, tc.blocked)
 		}
 	}
@@ -277,7 +278,7 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 		{`$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath $target -Value 'dummy-key'`, true},
 		{`$output = Join-Path $unknown 'report.txt'; Add-Content -LiteralPath $output -Value 'dummy-key'`, true},
 	} {
-		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.blocked {
+		if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.blocked {
 			t.Errorf("%q blocked=%t, want %t", tc.command, got, tc.blocked)
 		}
 	}
@@ -300,7 +301,7 @@ func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 		{`node C:\Users\alice\outside.js`, true},
 		{`Get-Content C:\Users\alice\project\report.txt`, false},
 	} {
-		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.blocked {
+		if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.blocked {
 			t.Errorf("%q blocked=%t, want %t", tc.command, got, tc.blocked)
 		}
 	}
@@ -328,7 +329,7 @@ func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
 		{`cat <(sh -c 'echo marker >> "$destination"') > merged.txt`, true},
 		{`cat <(sort -o alias docs/a.txt) > merged.txt`, true},
 	} {
-		if reason := ActionCommandDecision(tc.command, cwd, home); (reason != "") != tc.blocked {
+		if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.blocked {
 			t.Errorf("%q reason=%q, want blocked=%t", tc.command, reason, tc.blocked)
 		}
 	}

@@ -70,12 +70,7 @@ func TestR104GAP0777ExistingSessionAfterGatewayRestart(t *testing.T) {
 	cfg.Guardrail.Connector = "claudecode"
 	cfg.Guardrail.BlockAt = "HIGH"
 	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "default")
-	// The physical directory: macOS authenticates a loaded file only by its
-	// real path, and t.TempDir is under the /var symlink there.
-	root, err := filepath.EvalSymlinks(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := t.TempDir()
 	for _, tc := range []struct{ name, rule string }{
 		{"CLAUDE.md", "COG-CLAUDE-MD"},
 		{"SOUL.md", "COG-SOUL"},
@@ -100,9 +95,7 @@ func TestR104GAP0777ExistingSessionAfterGatewayRestart(t *testing.T) {
 				response := after.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
 					HookEventName: "PreToolUse", SessionID: session, CWD: root,
 					ToolName: "Bash", ToolInput: map[string]interface{}{
-						// Quoted, so Git Bash on Windows keeps the
-						// backslashes of the native path (GAP-0995).
-						"command": "printf changed >> '" + file + "'",
+						"command": "printf changed >> " + file,
 					},
 				})
 				if response.Action != guardrailActionBlock ||

@@ -1492,13 +1492,6 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 				}
 			}
 			title := rule.Title
-			reason := request.ResolvedWriteTargets[hookpaths.UnprovenReasonKey]
-			if reason == "" {
-				reason = hookpaths.ActionCommandDecision(input.Command, input.CWD, input.ActiveHome)
-			}
-			if unproven := hookpaths.UnprovenWriteTitle(reason); unproven != "" {
-				title = unproven + unprovenWriteGuidance
-			}
 			if hookpaths.ArchiveBeforeWrite(input.Command, input.ActiveHome) {
 				title = archiveBeforeWriteTitle
 			}

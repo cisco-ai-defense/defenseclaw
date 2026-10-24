@@ -23,16 +23,7 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	release := make(chan struct{})
 	var mu sync.Mutex
 	var rows []unenrolledRefusalRow
-	// The queue merges a row into one still waiting for its key, so the
-	// first row must reach the writer before the stop drains the open
-	// window. Otherwise the scheduler decides whether the first row and the
-	// drained count are one row or two (GAP-0991).
-	taken := make(chan struct{}, 1)
 	write := func(ctx context.Context, row unenrolledRefusalRow) {
-		select {
-		case taken <- struct{}{}:
-		default:
-		}
 		<-release // a slow account lookup holds the writer past the stop
 		if ctx.Err() != nil {
 			t.Errorf("row written with a canceled context: %+v", row)
@@ -45,9 +36,7 @@ func TestUnenrolledRefusalStopWritesQueuedRowsAndOpenWindowCounts(t *testing.T) 
 	go func() {
 		defer close(done)
 		runUnenrolledRefusalAudit(ctx, func(ctx context.Context, auditor *unenrolledRefusalAuditor) {
-			auditor.record(sid, report)
-			<-taken // the writer holds the first row
-			for range 49 {
+			for range 50 {
 				auditor.record(sid, report)
 			}
 			auditor.record(sid, refusalpipe.Report{Connector: "codex", Reason: refusalpipe.ReasonSIDUnregistered})

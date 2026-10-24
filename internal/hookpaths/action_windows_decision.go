@@ -30,13 +30,13 @@ func actionWindowsPath(value, cwd, home string) (string, bool) {
 			break
 		}
 	}
+	if strings.ContainsAny(value, "$%*?[]") {
+		return "", false
+	}
 	if strings.HasPrefix(lower, "//?/unc/") {
 		value = "//" + value[len("//?/unc/"):]
 	} else if strings.HasPrefix(lower, "//?/") {
 		value = value[len("//?/"):]
-	}
-	if strings.ContainsAny(value, "$%*?[]") {
-		return "", false
 	}
 	if strings.HasPrefix(strings.ToLower(value), "/cygdrive/") && len(value) >= 12 && value[11] == '/' {
 		value = value[10:11] + ":" + value[11:]
@@ -135,7 +135,7 @@ func actionWindowsWords(command string) ([]string, bool) {
 	return words, quote == 0
 }
 
-func actionWindowsCommandDecisionInput(command, cwd, home string, depth int, inherited *string) string {
+func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	if command == "" || depth >= 8 || len(command) > MaxPayloadBytes {
 		return "dynamic-command"
 	}
@@ -144,7 +144,6 @@ func actionWindowsCommandDecisionInput(command, cwd, home string, depth int, inh
 		return "shell-parse"
 	}
 	values := make(map[string]string)
-	input := inherited
 	for start := 0; start < len(words); {
 		end := start
 		for end < len(words) && words[end] != ";" && words[end] != "|" && words[end] != "||" && words[end] != "&" && words[end] != "&&" {
@@ -181,18 +180,8 @@ func actionWindowsCommandDecisionInput(command, cwd, home string, depth int, inh
 					statement[i] = value
 				}
 			}
-			if reason := actionWindowsStatement(statement, cwd, home, depth, input); reason != "" {
+			if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
 				return reason
-			}
-			input = nil
-			if end < len(words) && words[end] == "|" {
-				fixed := true
-				for _, word := range statement {
-					fixed = fixed && !strings.ContainsAny(word, "$%`!")
-				}
-				if fixed {
-					input = actionMakeProducerWords(statement, cwd, home)
-				}
 			}
 		}
 		start = end + 1
@@ -200,19 +189,12 @@ func actionWindowsCommandDecisionInput(command, cwd, home string, depth int, inh
 	return ""
 }
 
-func actionWindowsStatement(words []string, cwd, home string, depth int, input *string) string {
+func actionWindowsStatement(words []string, cwd, home string, depth int) string {
 	if depth >= 8 {
 		return "dynamic-command"
 	}
-	first := 0
-	for first < len(words) && strings.Contains(words[first], "=") && !strings.HasPrefix(words[first], "-") {
-		first++
-	}
 	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[0], `\`, "/")), ".exe"))
 	for i := 1; i < len(words); i++ {
-		if words[i] == "<" && i+1 < len(words) && strings.HasPrefix(words[i+1], "(") {
-			return "dynamic-argument"
-		}
 		if words[i] != ">" && words[i] != ">>" && words[i] != "<" && words[i] != "<<" {
 			continue
 		}
@@ -223,14 +205,6 @@ func actionWindowsStatement(words []string, cwd, home string, depth int, input *
 			!resolved && (words[i] != "<" || actionProgramMayWrite(program)) {
 			return "dynamic-argument"
 		}
-	}
-	if first < len(words) && actionMakeProgram(words[first]) {
-		makeWords, source := actionWindowsMakeInput(words, cwd, home, input)
-		return actionMakeDecision(makeWords[first:], makeWords[:first], cwd, home, source)
-	}
-	wrapper := strings.Contains(" env nice ionice timeout stdbuf setsid chroot unshare nsenter flock sudo su script xargs find parallel busybox time nohup command exec ", " "+program+" ")
-	if wrapper || program == "cmd" || program == "pwsh" || program == "powershell" || posixShellProgram(program) {
-		_, input = actionWindowsMakeInput(words, cwd, home, input)
 	}
 	if strings.ContainsAny(program, "$%`") || strings.HasPrefix(program, "(") {
 		return "dynamic-command"
@@ -261,7 +235,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int, input *
 				if i+2 >= len(words) {
 					return "nested-shell"
 				}
-				return actionWindowsCommandDecisionInput(strings.Join(words[i+2:], " "), cwd, home, depth+1, input)
+				return actionWindowsCommandDecision(strings.Join(words[i+2:], " "), cwd, home, depth+1)
 			}
 		}
 		return "nested-shell"
@@ -273,7 +247,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int, input *
 				if i+2 >= len(words) {
 					return "nested-shell"
 				}
-				return actionWindowsCommandDecisionInput(strings.Join(words[i+2:], " "), cwd, home, depth+1, input)
+				return actionWindowsCommandDecision(strings.Join(words[i+2:], " "), cwd, home, depth+1)
 			case "-encodedcommand", "-enc":
 				if i+2 >= len(words) {
 					return "nested-shell"
@@ -286,7 +260,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int, input *
 				for j := range letters {
 					letters[j] = uint16(encoded[j*2]) | uint16(encoded[j*2+1])<<8
 				}
-				return actionWindowsCommandDecisionInput(string(utf16.Decode(letters)), cwd, home, depth+1, input)
+				return actionWindowsCommandDecision(string(utf16.Decode(letters)), cwd, home, depth+1)
 			case "-file":
 				return "nested-shell" // file and arguments may contain commands
 			}
@@ -299,7 +273,7 @@ func actionWindowsStatement(words []string, cwd, home string, depth int, input *
 				if i+2 >= len(words) {
 					return "nested-shell"
 				}
-				return actionWindowsCommandDecisionInput(strings.Join(words[i+2:], " "), cwd, home, depth+1, input)
+				return actionWindowsCommandDecision(strings.Join(words[i+2:], " "), cwd, home, depth+1)
 			}
 		}
 		return "nested-shell"
@@ -307,8 +281,8 @@ func actionWindowsStatement(words []string, cwd, home string, depth int, input *
 	if program == "git" {
 		return actionGitDecision(words, cwd, home, depth+1)
 	}
-	if wrapper {
-		return actionWindowsWrapperDecision(program, words, cwd, home, depth+1, input)
+	if strings.Contains(" env nice ionice timeout stdbuf setsid chroot unshare nsenter flock sudo su script xargs find parallel busybox time nohup command exec ", " "+program+" ") {
+		return actionWindowsWrapperDecision(program, words, cwd, home, depth+1)
 	}
 	writeCapable := actionProgramMayWrite(program) || strings.Contains(commandLike(words), ">")
 	for i, word := range words[1:] {
@@ -330,7 +304,8 @@ func actionWindowsStatement(words []string, cwd, home string, depth int, input *
 			continue
 		}
 		if strings.ContainsAny(word, "/\\$%") || len(word) >= 2 && word[1] == ':' {
-			readOnly := actionPrivateKeyReader(program, true)
+			readOnly := program == "cat" || program == "type" || program == "get-content" ||
+				program == "get-childitem" || program == "grep"
 			protected, resolved := actionWindowsProtected(word, cwd, home, readOnly)
 			if protected || !resolved && writeCapable && actionWindowsPathPosition(program, i+1, words) &&
 				!actionWindowsBoundedSourceGlob(program, i+1, words, word, cwd, home) {
@@ -371,7 +346,7 @@ func actionWindowsBoundedSourceGlob(program string, index int, words []string, w
 
 func commandLike(words []string) string { return strings.Join(words, " ") }
 
-func actionWindowsWrapperDecision(program string, words []string, cwd, home string, depth int, input *string) string {
+func actionWindowsWrapperDecision(program string, words []string, cwd, home string, depth int) string {
 	if depth >= 8 {
 		return "dynamic-command"
 	}
@@ -386,7 +361,7 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 			if i+1 >= len(words) || strings.Contains(strings.Join(words[i+1:], " "), "{}") {
 				return "dynamic-command"
 			}
-			return actionWindowsStatement(words[i+1:], cwd, home, depth+1, input)
+			return actionWindowsStatement(words[i+1:], cwd, home, depth+1)
 		}
 		return ""
 	}
@@ -407,13 +382,13 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 					return "dynamic-argument"
 				}
 			}
-			return actionWindowsCommandDecisionInput(words[index+1], cwd, home, depth+1, input)
+			return actionWindowsCommandDecision(words[index+1], cwd, home, depth+1)
 		}
 		if program == "env" && (option == "-s" || option == "--split-string") {
 			if index+1 >= len(words) {
 				return "dynamic-command"
 			}
-			return actionWindowsCommandDecisionInput(words[index+1], cwd, home, depth+1, input)
+			return actionWindowsCommandDecision(words[index+1], cwd, home, depth+1)
 		}
 		value := false
 		known := false
@@ -484,13 +459,10 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 			index++
 		}
 	}
-	var env []string
 	if program == "env" {
-		start := index
 		for index < len(words) && strings.Contains(words[index], "=") && !strings.HasPrefix(words[index], "-") {
 			index++
 		}
-		env = words[start:index]
 	}
 	if program == "flock" && index < len(words) {
 		if protected, resolved := actionWindowsProtected(words[index], cwd, home, false); protected || !resolved {
@@ -506,40 +478,5 @@ func actionWindowsWrapperDecision(program string, words []string, cwd, home stri
 	if index >= len(words) || words[index] == "" {
 		return "dynamic-command"
 	}
-	if len(env) > 0 && actionMakeProgram(words[index]) {
-		makeWords, source := actionWindowsMakeInput(words[index:], cwd, home, input)
-		return actionMakeDecision(makeWords, env, cwd, home, source)
-	}
-	return actionWindowsStatement(words[index:], cwd, home, depth+1, input)
-}
-
-func actionWindowsMakeInput(words []string, cwd, home string, input *string) ([]string, *string) {
-	redirected := false
-	for _, word := range words {
-		redirected = redirected || word == "<" || word == "<<" || word == ">" || word == ">>"
-	}
-	if !redirected {
-		return words, input
-	}
-	clean := make([]string, 0, len(words))
-	for i := 0; i < len(words); i++ {
-		switch words[i] {
-		case "<":
-			input = nil
-			if i+1 < len(words) {
-				input = actionMakeFileInput(words[i+1], cwd, home)
-				i++
-			}
-		case ">", ">>", "<<":
-			if words[i] == "<<" {
-				input = nil
-			}
-			if i+1 < len(words) {
-				i++
-			}
-		default:
-			clean = append(clean, words[i])
-		}
-	}
-	return clean, input
+	return actionWindowsStatement(words[index:], cwd, home, depth+1)
 }

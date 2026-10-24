@@ -31,7 +31,10 @@ func TestGAP0781ConditionalProjectPatches(t *testing.T) {
 	if _, ok := ApplyPatchWriteTargets("exec_command", nil, unknown, cwd, home); ok {
 		t.Fatal("computed patch target was treated as resolved")
 	}
-	if got := ActionCommandDecision(unknown, cwd, home); got == "" {
-		t.Fatal("conditional patch with a computed target allowed")
+	if got := ActionCommandDecision(unknown, cwd, home); got != "" {
+		t.Fatalf("computed patch target is not a resolved protected target: %q", got)
+	}
+	if got := ActionCommandAuditReason(unknown, cwd, home); got == "" {
+		t.Fatal("computed patch uncertainty was not recorded for audit")
 	}
 }

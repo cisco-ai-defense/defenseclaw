@@ -32,15 +32,15 @@ func TestGAP0655InterpreterWriteGuidanceReachesAgent(t *testing.T) {
 		if finding.RuleID != "persistence.ssh_authorized_keys_command" {
 			continue
 		}
-		if !strings.Contains(finding.Title, "Interpreter") || !strings.Contains(finding.Title, unprovenWriteGuidance) {
-			t.Fatalf("unexpected interpreter write title %q", finding.Title)
+		if finding.Title != "SSH authorized keys mutation" {
+			t.Fatalf("protected write title = %q", finding.Title)
 		}
 		source := "matched: " + finding.RuleID + ":" + finding.Title
 		profile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{})
 		resp := agentHookResponseForProfile(profile,
 			agentHookRequest{ConnectorName: "hermes", HookEventName: "pre_tool_call"},
 			"block", "block", "CRITICAL", source, nil, "action", true, connector.HookCapability{})
-		if !strings.Contains(resp.Reason, unprovenWriteGuidance) ||
+		if strings.Contains(resp.Reason, unprovenWriteGuidance) ||
 			strings.Contains(resp.Reason, "<redacted") || !strings.Contains(resp.Reason, agentBlockNoRetry) {
 			t.Fatalf("agent received %q for %q", resp.Reason, source)
 		}
@@ -186,8 +186,8 @@ func TestR104UnprovenProtectedReachExplainsBlock(t *testing.T) {
 	findings := appendTrustedHomeResolvedSSHKeyWriteFinding(nil, generation, request, actionfacts.Analyze(input))
 	for _, finding := range findings {
 		if finding.RuleID == "persistence.ssh_authorized_keys_command" {
-			if !strings.Contains(finding.Title, "called function") || !strings.Contains(finding.Title, "literal path") {
-				t.Fatalf("unproven block title = %q", finding.Title)
+			if finding.Title != "SSH authorized keys mutation" {
+				t.Fatalf("protected write title = %q", finding.Title)
 			}
 			return
 		}
