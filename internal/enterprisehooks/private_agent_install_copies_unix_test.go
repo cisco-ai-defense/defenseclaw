@@ -387,38 +387,56 @@ func TestDiscoverUnixPrivateInstallsReportsTheFindingLimit(t *testing.T) {
 	}
 }
 
-// A root-owned folder may grant the enrolled user search but not listing.
-// The account can run a known copy below it, so its inventory is incomplete.
+// Another account's folder can be unlistable with or without search access.
+// Only the searchable one can hide a runnable copy from the enrolled user.
 func TestPrivateInstallWalkReportsSearchableUnlistableOtherOwner(t *testing.T) {
 	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
 		t.Skip("requires a non-root Linux account and a distinct directory owner")
 	}
-	withPrivateInstallMachinePrefixes(t)
-	home := makeHome(t, trustedTestDir(t), "alice")
-	opaque := filepath.Join(home, "opaque")
-	npmCopy(t, claudePackage(filepath.Join(opaque, "nested"), false), "@anthropic-ai/claude-code", "2.0.77", "cli.js")
-	if err := os.Chmod(opaque, 0o711); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct {
+		name           string
+		mode           os.FileMode
+		wantIncomplete bool
+	}{
+		{"searchable 0711", 0o711, true},
+		{"unsearchable 0700", 0o700, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withPrivateInstallMachinePrefixes(t)
+			home := makeHome(t, trustedTestDir(t), "alice")
+			opaque := filepath.Join(home, "opaque")
+			npmCopy(t, claudePackage(filepath.Join(opaque, "nested"), false), "@anthropic-ai/claude-code", "2.0.77", "cli.js")
+			if err := os.Chmod(opaque, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := exec.Command("sudo", "-n", "chown", "0", opaque).Run(); err != nil {
+				t.Skipf("cannot create a distinct-owner directory: %v", err)
+			}
+			t.Cleanup(func() {
+				_ = exec.Command("sudo", "-n", "chown", fmt.Sprint(os.Geteuid()), opaque).Run()
+				_ = os.Chmod(opaque, 0o700)
+			})
+			_, searchErr := os.Stat(filepath.Join(opaque, "nested"))
+			if tc.wantIncomplete && searchErr != nil || !tc.wantIncomplete && !os.IsPermission(searchErr) {
+				t.Fatalf("search access = %v, want incomplete %t", searchErr, tc.wantIncomplete)
+			}
+			if _, err := os.ReadDir(opaque); !os.IsPermission(err) {
+				t.Fatalf("opaque directory must be unlistable, got %v", err)
+			}
+			found := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+			if tc.wantIncomplete {
+				for _, install := range found {
+					if install.Connector == "claudecode" && install.Incomplete && install.Skipped == PrivateInstallSkippedHome {
+						return
+					}
+				}
+				t.Fatal("searchable, unlistable directory was silently treated as fully scanned")
+			}
+			if len(found) != 0 {
+				t.Fatalf("unsearchable other-owner directory cannot hide a runnable copy: %+v", found)
+			}
+		})
 	}
-	if err := exec.Command("sudo", "-n", "chown", "0", opaque).Run(); err != nil {
-		t.Skipf("cannot create a distinct-owner directory: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = exec.Command("sudo", "-n", "chown", fmt.Sprint(os.Geteuid()), opaque).Run()
-		_ = os.Chmod(opaque, 0o700)
-	})
-	if _, err := os.Stat(filepath.Join(opaque, "nested")); err != nil {
-		t.Fatalf("enrolled user must be able to traverse the opaque directory: %v", err)
-	}
-	if _, err := os.ReadDir(opaque); !os.IsPermission(err) {
-		t.Fatalf("opaque directory must be unlistable, got %v", err)
-	}
-	for _, install := range DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"}) {
-		if install.Connector == "claudecode" && install.Incomplete && install.Skipped == PrivateInstallSkippedHome {
-			return
-		}
-	}
-	t.Fatal("searchable, unlistable directory was silently treated as fully scanned")
 }
 
 // The worker's machine-prefix findings pass the parent's path check; a

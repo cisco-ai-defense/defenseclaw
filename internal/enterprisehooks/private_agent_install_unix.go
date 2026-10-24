@@ -154,8 +154,9 @@ func unixEntryAbsent(err error) bool {
 // hides nothing the account can run: the folder is gone or is no folder, or
 // macOS privacy protection (EPERM) keeps the account's own tools out too,
 // a documented limit. A searchable folder the account cannot list still
-// lets it start a copy whose path it knows, regardless of the owner, so it
-// leaves the scan incomplete.
+// lets it start a copy whose path it knows, regardless of the owner. An
+// unsearchable folder the account owns can be made searchable by that account.
+// Both leave the scan incomplete.
 func unixPrivateWalkUnreachable(dir string, err error) bool {
 	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EPERM) {
 		return true
@@ -164,10 +165,18 @@ func unixPrivateWalkUnreachable(dir string, err error) bool {
 		return false
 	}
 	// Looking up "." requires search permission on dir but not permission
-	// to list its entries. An EACCES from that lookup proves the enrolled
-	// account cannot launch a known path inside it.
-	_, statErr := os.Stat(filepath.Join(dir, "."))
-	return errors.Is(statErr, fs.ErrPermission)
+	// to list its entries. Preserve the final component: filepath.Join
+	// would clean it away and only check the searchable parent.
+	_, statErr := os.Stat(dir + string(os.PathSeparator) + ".")
+	if !errors.Is(statErr, fs.ErrPermission) {
+		return false
+	}
+	info, statErr := os.Stat(dir)
+	if statErr != nil {
+		return false
+	}
+	owner, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(owner.Uid) != os.Geteuid()
 }
 
 // readBoundedUnixFile reads a regular file of at most

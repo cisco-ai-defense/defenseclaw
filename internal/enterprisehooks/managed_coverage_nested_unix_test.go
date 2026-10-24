@@ -129,6 +129,21 @@ func TestDiscoverUnixPrivateInstallsFindCopiesAtAnyDepth(t *testing.T) {
 			},
 			want: []string{"claudecode incomplete " + PrivateInstallSkippedHome, "codex incomplete " + PrivateInstallSkippedHome},
 		},
+		{
+			name: "a folder the account owns but made unsearchable is incomplete",
+			build: func(t *testing.T, home string) {
+				if os.Geteuid() == 0 {
+					t.Skip("root can search every folder")
+				}
+				hidden := filepath.Join(home, "hide")
+				old(t, claudePackage(filepath.Join(hidden, "secret"), false))
+				if err := os.Chmod(hidden, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(hidden, 0o755) })
+			},
+			want: []string{"claudecode incomplete " + PrivateInstallSkippedHome, "codex incomplete " + PrivateInstallSkippedHome},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
