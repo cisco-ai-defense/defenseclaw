@@ -27,7 +27,7 @@ import (
 // name is a valid telemetry profile name. A name that would be longer than
 // profileMeetNameMax is "strictest.x" plus a digest of the members, which
 // only this process can resolve (ProfileMeetMembers). Sandbox registrations
-// store the name, so a meet of short names resolves after a restart.
+// also store the members, so a hashed meet resolves after a restart.
 
 // ProfileMeetPrefix starts the name of a meet of guardrail profiles.
 const ProfileMeetPrefix = "strictest."

@@ -107,26 +107,13 @@ func TestMeetOverOneGenerationsLimitKeepsEveryRuleAndNeverRefuses(t *testing.T) 
 						t.Errorf("scope %q: proxy refused", scope)
 					}
 				}
-				// Every member that blocks here is scanned with its own rules,
-				// and one that only observes here adds none. Where none blocks,
-				// the selected profile observes.
-				blocks := func(m modes) bool {
-					if scope == "" {
-						return m.global == "action"
-					}
-					return m.codex == "action" || tc.hookMode == "action"
-				}
-				anyBlocks := blocks(tc.a) || blocks(tc.b)
-				for _, member := range []struct {
-					prefix string
-					m      modes
-				}{{"LIM-A", tc.a}, {"LIM-B", tc.b}} {
-					if !anyBlocks {
-						continue
-					}
-					got := findingWithID(scanAllRulesForConnectorFor(scoped, scope, meetPlainMarker(member.prefix), "message"), member.prefix+"-PLAIN")
-					if want := blocks(member.m); (got != nil) != want || (got != nil && !got.contributesToEnforcement()) {
-						t.Errorf("scope %q: %s finding %+v; want an enforcing finding %v", scope, member.prefix, got, want)
+				// Every member is scanned for audit, including an observer.
+				selected := resolvedGuardrailProfileFrom(scoped).decision.Name
+				for _, prefix := range []string{"LIM-A", "LIM-B"} {
+					got := findingWithID(scanAllRulesForConnectorFor(scoped, scope, meetPlainMarker(prefix), "message"), prefix+"-PLAIN")
+					member := strings.ToLower(strings.TrimPrefix(prefix, "LIM-"))
+					if got == nil || got.profile != member {
+						t.Errorf("scope %q, selected %q: %s finding %+v; want finding audited for %s", scope, selected, prefix, got, member)
 					}
 				}
 			}
@@ -259,7 +246,7 @@ func TestMeetCollidingRuleIDNeverHidesAStrongerMembersFinding(t *testing.T) {
 						(assigned[0] != assigned[1]) != config.IsProfileMeet(decision.Name) {
 						t.Fatalf("assigned %v: decision %+v", assigned, decision)
 					}
-					return findingWithID(l.run(t, api, ctx), ruleID)
+					return strongestMeetFinding(l.run(t, api, ctx), ruleID)
 				}
 				alone := findingOf([2]string{names[1], names[1]})
 				if alone == nil || alone.Severity != "HIGH" || (l.enforcing && !alone.contributesToEnforcement()) {

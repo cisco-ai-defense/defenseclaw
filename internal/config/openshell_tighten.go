@@ -652,8 +652,24 @@ func minResources(a, b OpenShellResourcesConfig) OpenShellResourcesConfig {
 // its digest ("sha256:..." of F's canonical JSON and the content of the pack
 // it references).
 func (c *Config) SandboxFloor(profile string) (OpenShellAdminConfig, string, error) {
+	return c.sandboxFloor(profile, nil)
+}
+
+// SandboxFloorWithMembers resolves a saved meet even when its telemetry name
+// was shortened to a hash and the process that created it has restarted.
+func (c *Config) SandboxFloorWithMembers(profile string, storedMembers []string) (OpenShellAdminConfig, string, error) {
+	return c.sandboxFloor(profile, storedMembers)
+}
+
+func (c *Config) sandboxFloor(profile string, storedMembers []string) (OpenShellAdminConfig, string, error) {
 	if c == nil {
 		return OpenShellAdminConfig{}, "", errors.New("sandbox floor: configuration is unavailable")
+	}
+	if len(storedMembers) != 0 {
+		if !IsProfileMeet(profile) || ProfileMeetName(storedMembers) != profile {
+			return OpenShellAdminConfig{}, "", fmt.Errorf("sandbox floor: stored members do not match profile %q", profile)
+		}
+		return c.meetSandboxFloor(storedMembers)
 	}
 	if members, ok := ProfileMeetMembers(profile); ok {
 		return c.meetSandboxFloor(members)
@@ -687,7 +703,17 @@ func (c *Config) SandboxFloor(profile string) (OpenShellAdminConfig, string, err
 // the run matches the gateway's: a locked deny pack ran the default
 // balanced pack in the sandbox (GAP-0675).
 func (c *Config) SandboxManagedFloor(profile string) (OpenShellAdminConfig, string, error) {
-	f, digest, err := c.SandboxFloor(profile)
+	return c.sandboxManagedFloor(profile, nil)
+}
+
+// SandboxManagedFloorWithMembers is the managed floor for a saved meet whose
+// member names were stored with its sandbox registration.
+func (c *Config) SandboxManagedFloorWithMembers(profile string, members []string) (OpenShellAdminConfig, string, error) {
+	return c.sandboxManagedFloor(profile, members)
+}
+
+func (c *Config) sandboxManagedFloor(profile string, members []string) (OpenShellAdminConfig, string, error) {
+	f, digest, err := c.sandboxFloor(profile, members)
 	if err != nil {
 		return f, digest, err
 	}

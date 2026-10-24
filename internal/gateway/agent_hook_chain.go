@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,7 +75,7 @@ func toolChainRecorderFromContext(
 		return nil
 	}
 	capture, _ := ctx.Value(toolChainHookCaptureContextKey{}).(*toolChainHookCapture)
-	return toolChainRecorder(capture)
+	return toolChainRecorder(ctx, profileRequestConnector(ctx), capture)
 }
 
 // toolChainHookCapture receives the exact ActionFacts and owner decisions from
@@ -111,12 +112,33 @@ func (capture *toolChainHookCapture) recordArtifactTrustedAction(
 }
 
 func toolChainRecorder(
+	ctx context.Context,
+	connectorName string,
 	capture *toolChainHookCapture,
 ) func(actionfacts.Facts, []RuleFinding) {
 	if capture == nil {
 		return nil
 	}
-	return capture.recordTrustedAction
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	if resolved == nil || resolved.set == nil {
+		return capture.recordTrustedAction
+	}
+	meet := resolved.evaluationMeet()
+	if meet == nil {
+		return capture.recordTrustedAction
+	}
+	return func(facts actionfacts.Facts, findings []RuleFinding) {
+		// Keep the full member list for the caller's verdict and audit. Only
+		// findings from members that enforce this hook may seed chain steps.
+		chainFindings := make([]RuleFinding, 0, len(findings))
+		for _, finding := range findings {
+			if finding.profile == "" || !slices.Contains(meet.members, finding.profile) ||
+				configBlocksOn(resolved.set.profileConfig(finding.profile), connectorName, profilePathHook) {
+				chainFindings = append(chainFindings, finding)
+			}
+		}
+		capture.recordTrustedAction(facts, chainFindings)
+	}
 }
 
 func (capture *toolChainHookCapture) recordTrustedAction(

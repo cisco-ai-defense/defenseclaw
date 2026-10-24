@@ -194,7 +194,9 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	ctx := acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration())
+	// ACP frames are judged by inspectMessageContent, so profile selection
+	// must use that same path when an identity assignment is uncertain.
+	ctx := withProfilePath(acpEvaluationContext(r.Context(), req, agent.ConnectorID, cfg.SecureClientIntegration()), profilePathInspect)
 	// Resolve the identity-based guardrail profile once, with the ACP
 	// agent's connector, as the hook, proxy and inspect paths do: resolved
 	// lazily, the request had no connector, so a connectors assignment never

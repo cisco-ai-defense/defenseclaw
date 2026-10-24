@@ -2847,7 +2847,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			patchTarget:          hermesV4APatch,
 			SandboxGuestCWD:      sandboxHookGuestCWD(ctx, req.ReportedCWD, toolCWD),
 			windowsShellDialect:  dialectHint,
-			record:               toolChainRecorder(req.toolChain),
+			record:               toolChainRecorder(ctx, req.ConnectorName, req.toolChain),
 		}, command, commandTool, hermesWriteViews)
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}

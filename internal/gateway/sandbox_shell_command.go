@@ -113,7 +113,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		// keys, and invalid or not applicable when the command key is
 		// missing or holds no command string (a number, null, blank text,
 		// an object).
-		return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), connectorName, verdict,
+		return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict,
 			[]RuleFinding{unverifiedShellCommandFinding(action.EnforcementCapable)})
 	}
 	if commandTool == action.Input.Tool && bytes.Equal(command, action.Input.Args) {
@@ -138,7 +138,7 @@ func (a *APIServer) inspectSandboxShellToolPolicyCtx(
 		ResolvedWriteTargets:          action.ResolvedWriteTargets,
 		SandboxGuestCWD:               action.SandboxGuestCWD,
 	})
-	return mergeSandboxShellCommandVerdict(a.decisionConfig(ctx), connectorName, verdict, findings)
+	return mergeSandboxShellCommandVerdict(ctx, a.decisionConfig(ctx), connectorName, verdict, findings)
 }
 
 const (
@@ -174,8 +174,8 @@ func unverifiedShellCommandFinding(enforcementCapable bool) RuleFinding {
 // is stronger. The deciding findings replace the call's findings of the same
 // rules (there only candidates) and name the reason. A verdict at least as
 // strong is returned unchanged.
-func mergeSandboxShellCommandVerdict(cfg *config.Config, connectorName string, verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
-	action := guardrailActionForConnectorFindings(cfg, connectorName, findings, true)
+func mergeSandboxShellCommandVerdict(ctx context.Context, cfg *config.Config, connectorName string, verdict *ToolInspectVerdict, findings []RuleFinding) *ToolInspectVerdict {
+	action := profileMeetActionForFindings(ctx, cfg, connectorName, findings, true, false)
 	if strongerGuardrailAction(verdict.Action, action) == verdict.Action {
 		return verdict
 	}

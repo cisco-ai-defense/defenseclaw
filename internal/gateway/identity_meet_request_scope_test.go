@@ -141,13 +141,12 @@ func TestConnectorAliasScansTheGenerationItsMeetChecked(t *testing.T) {
 	}
 }
 
-// A request compares profiles on the scopes it scans, and a meet adds only
-// the rules of members that block on the scanned connector. a blocks on
+// A request compares profiles on the scopes it scans, and a meet audits
+// every member's rules on the scanned connector. a blocks on
 // Codex and observes elsewhere; b observes on Codex and blocks elsewhere.
 // Neither turns the other's observation into a block: a Codex request
 // gets a, a Claude Code or global request gets b, and the meet an unscoped
-// decision takes (it may scan either scope) scans Codex with a's rules
-// only and the global scope with b's only.
+// decision takes (it may scan either scope) scans both members.
 func TestObserveOnlyProfileAddsNoBlockingRulesToItsConnector(t *testing.T) {
 	stubProfileSources(t)
 	for _, order := range [][2]string{{"a", "b"}, {"b", "a"}} {
@@ -217,14 +216,14 @@ func TestObserveOnlyProfileAddsNoBlockingRulesToItsConnector(t *testing.T) {
 				}
 			}
 			for _, tc := range []struct {
-				members         []string
-				connector       string
-				want, forbidden []string
+				members   []string
+				connector string
+				want      []string
 			}{
-				{[]string{"a", "b"}, "codex", []string{"OBS-A-CODEX-PLAIN"}, []string{"OBS-B-PLAIN"}},
-				{[]string{"a", "b"}, "", []string{"OBS-B-PLAIN"}, []string{"OBS-A-GLOBAL-PLAIN"}},
-				{[]string{"a", "b", "c"}, "codex", []string{"OBS-A-CODEX-PLAIN", "OBS-C-CODEX-PLAIN"}, []string{"OBS-B-PLAIN"}},
-				{[]string{"a", "b", "c"}, "claudecode", []string{"OBS-B-PLAIN"}, []string{"OBS-A-GLOBAL-PLAIN"}},
+				{[]string{"a", "b"}, "codex", []string{"OBS-A-CODEX-PLAIN", "OBS-B-PLAIN"}},
+				{[]string{"a", "b"}, "", []string{"OBS-B-PLAIN", "OBS-A-GLOBAL-PLAIN"}},
+				{[]string{"a", "b", "c"}, "codex", []string{"OBS-A-CODEX-PLAIN", "OBS-C-CODEX-PLAIN", "OBS-B-PLAIN"}},
+				{[]string{"a", "b", "c"}, "claudecode", []string{"OBS-B-PLAIN", "OBS-A-GLOBAL-PLAIN"}},
 			} {
 				meet := set.meet(config.ProfileMeetName(tc.members))
 				if meet == nil {
@@ -237,20 +236,23 @@ func TestObserveOnlyProfileAddsNoBlockingRulesToItsConnector(t *testing.T) {
 						t.Errorf("meet of %v on %q scans %v; want %s", tc.members, tc.connector, ids, id)
 					}
 				}
-				for _, id := range tc.forbidden {
-					if slices.Contains(ids, id) {
-						t.Errorf("meet of %v on %q scans %v; %s only observes there", tc.members, tc.connector, ids, id)
-					}
-				}
 			}
-			// The B-only match on a Codex request is observed, as b observes
-			// there, never blocked.
+			// Coverage retains a's decision name, while b's observing rule
+			// still reaches the hook audit with b's provenance.
 			hook := api.withGuardrailProfileDecision(withAuthenticatedHookConnector(ctx, "codex"), "codex")
-			if findings := scanAllRulesForConnectorFor(hook, "codex", meetPlainMarker("OBS-B"), "message"); len(findings) != 0 {
-				t.Errorf("Codex hook scan found b's observe-only rule: %+v", findings)
-			}
 			if findings := scanAllRulesForConnectorFor(hook, "codex", meetPlainMarker("OBS-A-CODEX"), "message"); len(findings) == 0 {
 				t.Error("Codex hook scan missed a's blocking rule")
+			}
+			observed := scanAllRulesForConnectorFor(hook, "codex", meetPlainMarker("OBS-B"), "message")
+			if len(observed) != 1 || observed[0].RuleID != "OBS-B-PLAIN" || observed[0].profile != "b" {
+				t.Errorf("Codex hook lost b's observe finding: %+v", observed)
+			} else {
+				if audit := ruleFindingsToInspect(observed, "message"); len(audit) != 1 || !slices.Contains(audit[0].Tags, "profile:b") {
+					t.Errorf("Codex hook audit lost b's profile tag: %+v", audit)
+				}
+				if action := profileMeetActionForFindings(hook, api.decisionConfig(hook), "codex", observed, true, false); action == guardrailActionBlock || action == guardrailActionConfirm {
+					t.Errorf("b's observe finding enforced on the Codex hook: %s", action)
+				}
 			}
 		})
 	}
