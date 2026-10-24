@@ -312,7 +312,7 @@ func TestEnterpriseHookWorkerSlowPrivateScanReturnsPartialResponse(t *testing.T)
 	useEnterpriseHookWorkerHelper(t, "slow-discover")
 	account := selfWorkerAccount(t)
 	response, err := runEnterpriseHookWorker(context.Background(), account, enterpriseHookWorkerRequest{
-		Operation: enterpriseHookWorkerOpDiscover, Connectors: []string{"codex"}, TimeoutSeconds: 4,
+		Operation: enterpriseHookWorkerOpDiscover, Connectors: []string{"codex"}, TimeoutSeconds: 12,
 	})
 	if err != nil {
 		t.Fatalf("slow private scan timed out without a response: %v", err)

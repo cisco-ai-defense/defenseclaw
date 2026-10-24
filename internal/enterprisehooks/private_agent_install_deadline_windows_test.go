@@ -167,14 +167,21 @@ func TestWindowsUnenrolledRunningAgentIsReportedBeforeAndAfterDeadline(t *testin
 	stubMachineWinGet(t, nil)
 	home := t.TempDir()
 	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	previousLookup := windowsEnrollmentLookupAccountSID
+	t.Cleanup(func() { windowsEnrollmentLookupAccountSID = previousLookup })
+	windowsEnrollmentLookupAccountSID = func(string) (string, string, error) { return "alice", "CONTOSO", nil }
 	for _, tc := range []struct {
 		name     string
 		deadline bool
 		excluded bool
+		byName   bool
 	}{
 		{name: "normal cycle"},
 		{name: "no profile time left", deadline: true},
+		{name: "explicitly excluded in normal cycle", excluded: true},
 		{name: "explicitly excluded", deadline: true, excluded: true},
+		{name: "name excluded in normal cycle", excluded: true, byName: true},
+		{name: "name excluded after deadline", deadline: true, excluded: true, byName: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -191,6 +198,9 @@ func TestWindowsUnenrolledRunningAgentIsReportedBeforeAndAfterDeadline(t *testin
 			}
 			if tc.excluded {
 				opts.ExcludeUsers = []string{testLocalUserSID}
+				if tc.byName {
+					opts.ExcludeUsers = []string{`CONTOSO\alice`}
+				}
 			}
 			manifest, err := EnumerateWindows(ctx, standaloneEnumeratorConfig("codex"), opts)
 			if err != nil || len(manifest.Targets) != 0 {
