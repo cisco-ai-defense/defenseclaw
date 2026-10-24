@@ -923,11 +923,13 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
               json_error_sink: list[dict] | None = None,
               audit_target: str = "",
               pack_cache: RulePackOverlayCache | None = None,
-              connect_hint: str = "") -> ScanResult | None:
+              connect_hint: str = "",
+              failures: list[Exception] | None = None) -> ScanResult | None:
     """Run the MCP scanner on *target*.  Returns None on fatal error.
 
     *connect_hint* replaces the default "then scan again" line printed after a
     connection error (``mcp set`` says what to run instead, GAP-2398).
+    *failures*, when given, receives the exception of a failed scan.
     """
     from dataclasses import replace
 
@@ -991,6 +993,8 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
     except SystemExit:
         raise
     except Exception as exc:
+        if failures is not None:
+            failures.append(exc)
         if quiet and captured_stdout is not None:
             _emit_captured_stdout(captured_stdout.getvalue())
         if app.logger:
@@ -2525,6 +2529,33 @@ def _validate_opencode_write(name: str, cmd: str, url: str) -> str | None:
     return None
 
 
+UNVERIFIED_SERVER_KEY = "scanners.mcp_scanner.unverified_server"
+
+
+def _unverified_server_blocks(cfg) -> bool:
+    """Whether ``mcp set`` refuses a server it could not verify (GAP-1195, GAP-1210).
+
+    A server is unverified when its pre-add scan did not finish (a timeout, a
+    launcher that exited, an unreachable URL) or, for OpenCode, when its
+    command is outside the trusted install prefixes. ``warn`` adds it with a
+    warning and an audit record; ``block`` refuses it. Unset is ``warn``, and
+    ``block`` on a managed standalone device.
+    """
+    scanners = getattr(cfg, "scanners", None)
+    value = str(getattr(getattr(scanners, "mcp_scanner", None), "unverified_server", "") or "").strip().lower()
+    if value:
+        return value == "block"
+    return asset_lists.is_managed_standalone(cfg)
+
+
+def _scan_did_not_finish(failures: list[Exception]) -> bool:
+    """A failed pre-add scan that did not reach a verdict for reasons outside
+    the server definition (a timeout, a launcher that exited, a connection).
+    The scanner's own refusals (an unsupported launcher, a private URL
+    without --allow-private) are ValueError and still refuse the server."""
+    return bool(failures) and not any(isinstance(exc, ValueError) for exc in failures)
+
+
 def _opencode_command_trust_error(cmd: str) -> str | None:
     """Return a refusal reason when an opencode command is not trusted.
 
@@ -2603,7 +2634,10 @@ def _echo_scan_rejected_next_steps(
 @click.option(
     "--force-untrusted-command",
     is_flag=True,
-    help="For opencode only: write a command outside trusted install prefixes.",
+    help=(
+        "For opencode only: write a command outside trusted install prefixes "
+        "when scanners.mcp_scanner.unverified_server is block."
+    ),
 )
 @click.option(
     "--connector", "connector_flag", default="",
@@ -2629,7 +2663,10 @@ def set_server(
     with --connector) — not a single shared config.
 
     Scans the server before adding unless --skip-scan is set.
-    Rejects servers with HIGH/CRITICAL findings.
+    Rejects servers with HIGH/CRITICAL findings. A server whose scan cannot
+    finish (a timeout, an unreachable URL) is added with a warning and an
+    audit record; set scanners.mcp_scanner.unverified_server to block to
+    refuse it instead.
 
     A local (stdio) server is scanned only when it starts with npx or uvx:
     the scan never runs another program. Add other servers by URL, or review
@@ -2724,6 +2761,7 @@ def set_server(
     # not passed. Findings are connector-independent, so a single scan serves
     # the whole fan-out.
     result = None
+    unverified: list[str] = []  # why a written server is unverified (audited)
     if (not skip_scan) and any(d.verdict == "scan" for d in pre.values()):
         # Propagate entry["env"] into the install-time scan entry. The
         # scanner spawns the local MCP subprocess to probe it; building
@@ -2742,13 +2780,17 @@ def set_server(
             if len(connectors) == 1
             else ""
         )
+        scan_failures: list[Exception] = []
         result = _run_scan(
             app, url or name, "", False, False, False,
             server_entry=scan_entry, audit_target=audit_target,
             allow_private=allow_private,
             connect_hint="  Check that the server is running and reachable.",
+            failures=scan_failures,
         )
-        if result is None:
+        if result is None and (
+            not _scan_did_not_finish(scan_failures) or _unverified_server_blocks(app.cfg)
+        ):
             # GAP-2398: say the server was not added and what to run next.
             click.secho(
                 f"{name!r} was not added. Run 'defenseclaw mcp set' again once the "
@@ -2756,7 +2798,18 @@ def set_server(
                 fg="yellow",
             )
             raise SystemExit(1)
-        _print_scan_result(result, as_json=False)
+        if result is None:
+            # GAP-1195: a scan that could not finish (a slow first npx
+            # download, a server that is not up yet) has no finding, so the
+            # default adds the server with a warning; the failed scan is
+            # already in the audit log.
+            unverified.append("scan-did-not-finish")
+            ux.warn(
+                f"{name!r} could not be scanned, so it is added unscanned. Scan it once it "
+                f"can start; to refuse such servers instead, set {UNVERIFIED_SERVER_KEY} to block."
+            )
+        else:
+            _print_scan_result(result, as_json=False)
 
     applied: list[str] = []
     skipped: list[str] = []          # connector has no writable MCP surface
@@ -2796,6 +2849,16 @@ def set_server(
                         f"{trust_err}. Proceeding because "
                         "--force-untrusted-command was supplied."
                     )
+                    unverified.append("opencode-command-untrusted")
+                elif not _unverified_server_blocks(app.cfg):
+                    # GAP-1210: a Node or uv install outside the system
+                    # prefixes (nvm, /opt/node22, Volta) is ordinary; the
+                    # default writes it with a warning and an audit record.
+                    ux.warn(
+                        f"{trust_err}. Writing it anyway; to refuse such commands, "
+                        f"set {UNVERIFIED_SERVER_KEY} to block."
+                    )
+                    unverified.append("opencode-command-untrusted")
                 else:
                     click.secho(
                         f"  refused [{c}]: {trust_err}. Add the directory to "
@@ -2918,8 +2981,9 @@ def set_server(
         )
 
     if app.logger:
+        unverified_note = f" unverified={','.join(sorted(set(unverified)))}" if unverified else ""
         saved_change_audit(app.logger).log_action(
-            "mcp-set", name, f"command={cmd} url={url} connectors={','.join(applied)}"
+            "mcp-set", name, f"command={cmd} url={url} connectors={','.join(applied)}{unverified_note}"
         )
 
     # An unexpected per-connector write failure (not the benign "no write

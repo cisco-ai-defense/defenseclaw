@@ -725,6 +725,14 @@
         "scan_instructions": {
           "type": "boolean"
         },
+        "unverified_server": {
+          "type": "string",
+          "enum": [
+            "warn",
+            "block"
+          ],
+          "description": "What defenseclaw mcp set does with a server it could not verify (its scan did not finish, or an OpenCode command outside the trusted install prefixes): warn adds it with a warning and an audit record, block refuses it (the strict setting). Unset is warn, and block on a managed standalone device."
+        },
         "judge_source": {
           "$ref": "#/$defs/scannerJudgeSource"
         },

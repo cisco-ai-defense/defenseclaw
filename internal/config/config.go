@@ -1494,6 +1494,10 @@ type MCPScannerConfig struct {
 	// JudgeSource is "inherit" (top-level llm:) or "override" (LLM above).
 	JudgeSource string               `mapstructure:"judge_source" yaml:"judge_source,omitempty"`
 	YARA        MCPScannerYARAConfig `mapstructure:"yara"         yaml:"yara,omitempty"`
+	// UnverifiedServer is what `defenseclaw mcp set` does with a server it
+	// could not verify: "warn" (unset) adds it with a warning and an audit
+	// record, "block" refuses it. Only the CLI reads it.
+	UnverifiedServer string `mapstructure:"unverified_server" yaml:"unverified_server,omitempty"`
 }
 
 // AnalyzersArg renders EffectiveAnalyzers as the scanner's comma-separated
