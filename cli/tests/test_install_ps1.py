@@ -19,7 +19,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import json
 import re
 import shutil
 import subprocess
@@ -3946,6 +3945,10 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
         + _ps1_function("Enable-SetupHooks")
         + _ps1_function("Restore-SetupInstall")
         + _ps1_function("Start-SwapHookFailModes")
+        # This test exercises handoff timing; the publisher's byte and digest
+        # contract has its own test below. Model a valid atomic publisher.
+        + "function Publish-SetupLauncherTrampoline { [IO.File]::WriteAllText($SetupHookState, 'delegated'); return $true }\n"
+        + "function Test-SetupLauncherTrampoline { return (Test-Path -LiteralPath $SetupHookState) -and ([IO.File]::ReadAllText($SetupHookState) -eq 'delegated') }\n"
         + "try { $was = [bool](Start-SwapHookFailModes 'staged-gateway.exe' (Get-GatewayProcess)); Write-Host \"was=$was\" } "
         + "catch { Write-Host \"thrown=$($_.Exception.Message)\" }\n"
         + "foreach ($e in $events) { Write-Host \"event $e\" }\n"
@@ -3965,11 +3968,10 @@ def test_setup_hook_launcher_answers_until_the_fail_mode_hold_is_ready(
     lines = completed.stdout.splitlines()
     assert [line[len("event ") :] for line in lines if line.startswith("event ")] == want_events, (case, completed.stdout)
     assert any(line.startswith(want_out) for line in lines), (case, completed.stdout)
-    # The launcher is disabled here only when the swap goes on with Setup's
-    # gateway down; with one running Invoke-Install disables it right before the stop.
-    want_end = "disabled" if setup and want_out == "was=False" else "enabled"
-    assert f"end={want_end}" in lines, (case, completed.stdout)
-    assert not (staging / "hook-runtime-state.json").exists() or want_end == "disabled", (case, completed.stdout)
+    # With no gateway running, the launcher delegates to the staged hook;
+    # its state remains present throughout the swap.
+    assert "end=enabled" in lines, (case, completed.stdout)
+    assert not (staging / "hook-runtime-state.json").exists() or setup, (case, completed.stdout)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -5712,6 +5714,44 @@ function Write-Warn([string]$m) {{ Write-Host "warn $m" }}
 """
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("publication", ["success", "refused", "throws"])
+def test_setup_launcher_state_stays_active_until_atomic_handoff(tmp_path: Path, publication: str) -> None:
+    # GAP-1071: a cached Setup launcher must never observe a missing state
+    # while the installer prepares the replacement, including on errors.
+    state = tmp_path / "hook-runtime-state.json"
+    state.write_text("original", encoding="utf-8")
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    publish = {
+        "success": "[IO.File]::WriteAllText($SetupHookState, 'delegated'); return $true",
+        "refused": "return $false",
+        "throws": "throw 'publication failed'",
+    }[publication]
+    script = (
+        "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        f"$SetupHookState = '{state}'\n$Staging = '{staging}'\n"
+        "function Move-Path([string]$From, [string]$To) { [IO.File]::Move($From, $To) }\n"
+        "function Protect-SetupLauncherFile([string]$Path) { }\n"
+        "function Invoke-Quietly([scriptblock]$Action) { try { & $Action } catch { } }\n"
+        "function Publish-SetupLauncherTrampoline([string]$Template, [string]$Hook, [string]$Gateway) {\n"
+        "  if (-not (Test-Path -LiteralPath $SetupHookState)) { throw 'cached launcher saw missing state' }\n"
+        f"  {publish}\n"
+        "}\n"
+        + _ps1_function("Disable-SetupHooks")
+        + "try { Disable-SetupHooks; Write-Host 'result=ok' } catch { Write-Host \"result=error:$($_.Exception.Message)\" }\n"
+        + "Write-Host \"state=$(if (Test-Path -LiteralPath $SetupHookState) { [IO.File]::ReadAllText($SetupHookState) } else { 'missing' })\"\n"
+    )
+    result = _run_powershell(script)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    if publication == "success":
+        assert "result=ok" in output and "state=delegated" in output, output
+        assert (staging / "hook-runtime-state.json").read_text(encoding="utf-8") == "original"
+    else:
+        assert "result=error:" in output and "state=original" in output, output
+
+
 def _sha256(path: Path) -> str:
     import hashlib
 
@@ -5793,14 +5833,17 @@ def test_setup_launcher_delegates_to_this_releases_hook(tmp_path: Path, shell: s
         [shell, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
         capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120, check=False,
     )
-    assert completed.returncode == 0, completed.stdout + completed.stderr
-    assert "warn" not in completed.stdout, completed.stdout
     kept = staging / "hook-runtime-state.json"
     if case in ("full-launcher", "launcher-changed"):
-        # Nothing to delegate to: Setup's state is set aside, as before.
-        assert not state.exists() and kept.read_text(encoding="utf-8") == original_text, completed.stdout
+        # An old or changed launcher cannot be delegated. Abort with its
+        # original state still active, before the gateway is stopped.
+        assert completed.returncode != 0, completed.stdout + completed.stderr
+        assert state.read_text(encoding="utf-8") == original_text, completed.stdout
+        assert kept.read_text(encoding="utf-8") == original_text, completed.stdout
         assert not delegated.exists() or not any(delegated.iterdir()), completed.stdout
         return
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert "warn" not in completed.stdout, completed.stdout
     if case == "enable":
         assert state.read_text(encoding="utf-8") == original_text, completed.stdout
         assert not kept.exists(), completed.stdout

@@ -1189,14 +1189,16 @@ function Find-SetupInstall {
 
 function Disable-SetupHooks {
     # Setup's hook launcher runs Setup's hook and restarts Setup's gateway on
-    # demand; without its state file it does nothing. Its state is set aside
-    # and the launcher delegates to this release's staged hook instead, which
-    # answers closed while this install holds the data directory (GAP-1000).
+    # demand; without its state file it does nothing. Keep that state live
+    # until the trampoline atomically replaces it with this release's staged
+    # hook. A cached launcher must never see the state missing (GAP-1071).
     if (-not (Test-Path -LiteralPath $SetupHookState)) { return }
     $state = Join-Path $Staging "hook-runtime-state.json"
-    Move-Path $SetupHookState $state
-    Invoke-Quietly {
-        [void](Publish-SetupLauncherTrampoline $state (Join-Path $Staging "bin\defenseclaw-hook.exe") (Join-Path $Staging "bin\defenseclaw-gateway.exe"))
+    if (Test-Path -LiteralPath $state) { throw "The earlier Setup hook state backup still exists at $state; finish that install before starting another" }
+    Copy-Item -LiteralPath $SetupHookState -Destination $state -ErrorAction Stop
+    Protect-SetupLauncherFile $state
+    if (-not (Publish-SetupLauncherTrampoline $state (Join-Path $Staging "bin\defenseclaw-hook.exe") (Join-Path $Staging "bin\defenseclaw-gateway.exe"))) {
+        throw "Could not delegate the cached DefenseClaw Setup hook launcher; the gateway was not stopped"
     }
 }
 
@@ -1204,8 +1206,16 @@ function Enable-SetupHooks {
     # Undo Disable-SetupHooks: Setup's hook launcher answers again.
     $state = Join-Path $Staging "hook-runtime-state.json"
     if (-not (Test-Path -LiteralPath $state)) { return }
-    if (Test-SetupLauncherTrampoline) { Remove-Item -LiteralPath $SetupHookState -Force }
-    if (-not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
+    if (-not (Test-Path -LiteralPath $SetupHookState)) {
+        Move-Path $state $SetupHookState
+    } elseif (Test-SetupLauncherTrampoline) {
+        $restore = "$SetupHookState.restore-$([guid]::NewGuid().ToString('N'))"
+        Copy-Item -LiteralPath $state -Destination $restore -ErrorAction Stop
+        Protect-SetupLauncherFile $restore
+        [IO.File]::Replace($restore, $SetupHookState, "$restore.old")
+        Remove-Item -LiteralPath "$restore.old" -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $state -Force
+    }
 }
 
 function Test-SetupLauncherTrampoline {
@@ -1239,8 +1249,7 @@ function Protect-SetupLauncherFile([string]$Path) {
 function Publish-SetupLauncherTrampoline([string]$Template, [string]$Hook, [string]$Gateway) {
     # GAP-1000: an agent session started before the upgrade keeps running
     # Setup's stable launcher (%LOCALAPPDATA%\DefenseClaw\HookRuntime) until
-    # it restarts, and with its state set aside that launcher answers every
-    # call with exit 0 and no decision. Setup 0.8.10's launcher is a
+    # it restarts. Setup 0.8.10's launcher is a
     # trampoline to the hook its state names: point it at a private copy of
     # this release's hook (Hook), under the launcher identity Template
     # records, so those sessions stay guarded. The state names the gateway
@@ -2446,8 +2455,8 @@ function Start-SwapHookFailModes([string]$StagedGateway, $GatewayProcess) {
     # Set the hooks' fail modes from the config for the swap and, for a
     # running gateway, hold them until it exits; return the running gateway,
     # or $null. DefenseClaw Setup's hook launcher stays at the path the agents
-    # cached, and with its state moved aside (Disable-SetupHooks) it answers
-    # every call with exit 0 and no decision. So it stays enabled while the
+    # cached. Its active state is atomically replaced with a staged-hook
+    # delegation by Disable-SetupHooks. It stays on Setup's hook while the
     # staged gateway refreshes the modes and takes the hold (up to a minute);
     # Invoke-Install disables it right before the stop, which an enabled
     # launcher would undo by starting Setup's gateway again. With no gateway
