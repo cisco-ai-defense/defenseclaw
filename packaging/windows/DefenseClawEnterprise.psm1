@@ -12184,8 +12184,8 @@ function New-DefenseClawTransaction {
         # hook, which answers closed while the lifecycle has the services
         # disabled. The prior hook's bytes are kept as its preimage, recorded
         # in the intent before the swap, so a failed snapshot, a crash
-        # (Recover-DefenseClawQuiescingIntent) and a rollback each put it
-        # back with the services it answers for.
+        # (Recover-DefenseClawQuiescingIntent) and a rollback keep the
+        # replacement hook until the prior gateway passes readiness.
         $earlyHookPreimage = Publish-DefenseClawEarlyHook `
             -Layout $Layout `
             -Source $EarlyHookSource `
@@ -12575,6 +12575,9 @@ function New-DefenseClawTransaction {
         )
         managed_hooks_lifecycle_legacy_preimage =
             $legacyManagedHooksLifecyclePreimage
+        early_hook_guard_copy = [string]$quiescingIntent['early_hook_guard_copy']
+        early_hook_guard_sha256 = [string]$quiescingIntent['early_hook_guard_sha256']
+        early_hook_preimage_sha256 = [string]$quiescingIntent['early_hook_preimage_sha256']
         redaction_key_security = $redactionKeySecurity
         files = $files
         services = $services
@@ -12630,9 +12633,17 @@ function New-DefenseClawTransaction {
         $restartErrors = [Collections.Generic.List[string]]::new()
         $aclRestoreFailure = ''
         try {
-            # The prior release's hook answers for the services restarted
-            # below (GAP-0993).
-            Restore-DefenseClawEarlyHook -Layout $Layout -Intent $quiescingIntent -TransactionDirectory $directory
+            if (-not (Test-DefenseClawStandaloneProfile)) {
+                Restore-DefenseClawEarlyHook `
+                    -Layout $Layout `
+                    -Intent $quiescingIntent `
+                    -TransactionDirectory $directory
+            }
+            [void](Hold-DefenseClawEarlyHookGuard `
+                -Layout $Layout `
+                -TransactionDirectory $directory `
+                -GuardCopy ([string]$quiescingIntent['early_hook_guard_copy']) `
+                -GuardSHA256 ([string]$quiescingIntent['early_hook_guard_sha256']))
             if ([string]::IsNullOrWhiteSpace($servicesQuiescedAt)) {
                 foreach ($name in @(
                     $GatewayServiceName,
@@ -12702,6 +12713,13 @@ function New-DefenseClawTransaction {
                 -TrustInProcessQuiescence `
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName
+            if ((Test-DefenseClawStandaloneProfile) -and
+                -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Restore-DefenseClawEarlyHook `
+                    -Layout $Layout `
+                    -Intent $quiescingIntent `
+                    -TransactionDirectory $directory
+            }
         }
         catch {
             $restartErrors.Add($_.Exception.Message)
@@ -14461,6 +14479,14 @@ function Restore-DefenseClawTransaction {
                 ) -and [bool]$_.existed
             }
     ).Count -eq 1
+    # Reassert the protected replacement hook before the first rollback
+    # service mutation. The snapshot's old hook is restored only after the
+    # prior gateway and managed target set have passed activation readiness.
+    $transitionHookSHA256 = Hold-DefenseClawEarlyHookGuard `
+        -Layout $Layout `
+        -TransactionDirectory ([string]$snapshot.directory) `
+        -GuardCopy ([string]$snapshot.early_hook_guard_copy) `
+        -GuardSHA256 ([string]$snapshot.early_hook_guard_sha256)
     if (Test-DefenseClawServiceExists -Name $standaloneSensorHelper) {
         Assert-DefenseClawStandaloneSensorHelperOwned `
             -Name $standaloneSensorHelper `
@@ -14649,6 +14675,14 @@ function Restore-DefenseClawTransaction {
         $isSharedCodexFile = $isCodexMachinePolicy -or $isCodexManagedState
         if (-not $inInstall -and -not $inState -and -not $isSharedCodexFile) {
             throw "transaction contains path outside managed roots: $destination"
+        }
+        if ($transitionHookSHA256 -ne '' -and [string]::Equals(
+                $destination,
+                [IO.Path]::GetFullPath([string]$Layout.HookPath),
+                [StringComparison]::OrdinalIgnoreCase)) {
+            # The prior binary can answer open when its gateway is stopped.
+            # Its authenticated backup is installed after activation below.
+            continue
         }
         if ($isSharedCodexFile) {
             $policyDirectoryExists = Microsoft.PowerShell.Management\Test-Path `
@@ -14956,6 +14990,11 @@ function Restore-DefenseClawTransaction {
                     -Name $standaloneSensorHelper `
                     -StartMode ([int]$gatewayStartMode)
             }
+            if (-not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Restore-DefenseClawSnapshotHookAfterActivation `
+                    -Snapshot $snapshot `
+                    -Layout $Layout
+            }
         }
     }
 }
@@ -15009,6 +15048,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
         -ServicingTransaction `
+        -TransitionHookSHA256 ([string]$Snapshot.early_hook_guard_sha256) `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
         -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
         -ExpectedGatewayAccount @(
@@ -15577,6 +15617,11 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                 Set-DefenseClawRestoredStandaloneSensorHelperBootPolicy `
                     -Snapshot $snapshot `
                     -Name $restoredSensorHelper
+            }
+            if (-not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+                Restore-DefenseClawSnapshotHookAfterActivation `
+                    -Snapshot $snapshot `
+                    -Layout $Layout
             }
         }
     }
@@ -17894,7 +17939,19 @@ function Publish-DefenseClawEarlyHook {
     if (-not [string]::Equals($liveHash, $copiedHash, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'the installed hook changed while its preimage was copied'
     }
+    # Keep a protected copy of this release's standalone hook for in-process
+    # and crash recovery. Restoring the 1.0.2/1.0.3 image while SCM is down
+    # would turn this transition into an open outage answer.
     $Intent['early_hook_preimage'] = $preimage
+    if (Test-DefenseClawStandaloneProfile) {
+        $guardCopy = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook-closed.exe'
+        Install-DefenseClawSourceDescriptor -Source $Source -Destination $guardCopy
+        $Intent['early_hook_preimage_sha256'] = $copiedHash.ToLowerInvariant()
+        $Intent['early_hook_guard_copy'] = $guardCopy
+        $Intent['early_hook_guard_sha256'] = (
+            Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $guardCopy -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+    }
     Write-DefenseClawJsonAtomic -Value $Intent -Path $Layout.PendingPath
     Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
     # GAP-1070: a call the replaced release's hook took before the swap (one
@@ -17968,10 +18025,10 @@ function Wait-DefenseClawPriorHookCalls {
 
 function Restore-DefenseClawEarlyHook {
     <#
-        GAP-0993: puts the prior release's hook back (Publish-DefenseClawEarlyHook)
-        before a quiescing transaction that did not reach its snapshot restarts
-        the prior services. The intent may only name early-hook.bak in its own
-        transaction directory. Nothing is done when the intent names none.
+        GAP-0993: puts the prior release's hook back after the restored
+        standalone gateway passes readiness, or before Secure Client's
+        original service restart. The intent may only name early-hook.bak in
+        its own transaction directory. Nothing is done when it names none.
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -17999,7 +18056,102 @@ function Restore-DefenseClawEarlyHook {
         throw 'pending lifecycle quiescing intent names a hook preimage that is missing'
     }
     Assert-DefenseClawNoReparsePath -Path $expected
-    Install-DefenseClawFileAtomic -Source $expected -Destination $Layout.HookPath
+    $digest = if ($Intent -is [Collections.IDictionary]) {
+        [string]$Intent['early_hook_preimage_sha256']
+    }
+    else {
+        [string]$Intent.early_hook_preimage_sha256
+    }
+    Install-DefenseClawFileAtomic `
+        -Source $expected `
+        -Destination $Layout.HookPath `
+        -ExpectedSHA256 $digest `
+        -SkipIfContentMatches
+}
+
+function Hold-DefenseClawEarlyHookGuard {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$TransactionDirectory,
+        [AllowEmptyString()][string]$GuardCopy,
+        [AllowEmptyString()][string]$GuardSHA256
+    )
+    if ([string]::IsNullOrWhiteSpace($GuardCopy) -and
+        [string]::IsNullOrWhiteSpace($GuardSHA256)) {
+        return ''
+    }
+    if (-not (Test-DefenseClawStandaloneProfile) -or
+        $GuardSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]::IsNullOrWhiteSpace($GuardCopy)) {
+        throw 'pending lifecycle has an invalid closed hook guard'
+    }
+    $expected = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook-closed.exe'
+    if (-not [string]::Equals(
+            [IO.Path]::GetFullPath($GuardCopy),
+            [IO.Path]::GetFullPath($expected),
+            [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'pending lifecycle names an unexpected closed hook guard'
+    }
+    Assert-DefenseClawNoReparsePath -Path $expected
+    $digest = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $expected -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($digest -cne $GuardSHA256) {
+        throw 'pending lifecycle closed hook guard changed'
+    }
+    Install-DefenseClawFileAtomic `
+        -Source $expected `
+        -Destination $Layout.HookPath `
+        -ExpectedSHA256 $GuardSHA256 `
+        -SkipIfContentMatches
+    $live = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($live -cne $GuardSHA256) {
+        throw 'pending lifecycle closed hook guard was not published'
+    }
+    return $GuardSHA256
+}
+
+function Restore-DefenseClawSnapshotHookAfterActivation {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if ([string]::IsNullOrWhiteSpace([string]$Snapshot.early_hook_guard_copy)) {
+        return
+    }
+    # The restored service set has passed Start-DefenseClawTransactionServices
+    # by this point. The old hook may again answer its administrator's outage
+    # setting only now, after the rollback's readiness and boot policy proof.
+    $oldDigest = [string]$Snapshot.early_hook_preimage_sha256
+    if ($oldDigest -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'pending lifecycle has an invalid previous hook digest'
+    }
+    $rows = @($Snapshot.files | Microsoft.PowerShell.Core\Where-Object {
+        [string]::Equals(
+            [IO.Path]::GetFullPath([string]$_.path),
+            [IO.Path]::GetFullPath([string]$Layout.HookPath),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    })
+    if ($rows.Count -ne 1 -or -not [bool]$rows[0].existed) {
+        throw 'pending lifecycle has no unique prior hook preimage'
+    }
+    $backup = [string]$rows[0].backup
+    Assert-DefenseClawDescendant -Path $backup -Root $Layout.StateRoot -Label 'transaction hook backup' |
+        Microsoft.PowerShell.Core\Out-Null
+    Install-DefenseClawFileAtomic `
+        -Source $backup `
+        -Destination $Layout.HookPath `
+        -ExpectedSHA256 $oldDigest `
+        -SkipIfContentMatches
+    $live = (
+        Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $Layout.HookPath -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($live -cne $oldDigest) {
+        throw 'restored prior hook digest does not match its transaction preimage'
+    }
 }
 
 function Recover-DefenseClawQuiescingIntent {
@@ -18193,6 +18345,11 @@ function Recover-DefenseClawQuiescingIntent {
                     -GatewayServiceName $GatewayServiceName)
         }
     }
+    [void](Hold-DefenseClawEarlyHookGuard `
+        -Layout $Layout `
+        -TransactionDirectory $recordedDirectory `
+        -GuardCopy ([string]$Intent.early_hook_guard_copy) `
+        -GuardSHA256 ([string]$Intent.early_hook_guard_sha256))
     # A process/reboot recovery never trusts elapsed wall time from the prior
     # process. Reestablish both disabled+stopped, publish a fresh durable
     # quiescence point, and drain the complete failure-action window.
@@ -18261,10 +18418,12 @@ function Recover-DefenseClawQuiescingIntent {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
     }
-    # An interrupted upgrade may have put its hook in place before it
-    # stopped the services: the prior release's hook answers for the
-    # services restarted below (GAP-0993).
-    Restore-DefenseClawEarlyHook -Layout $Layout -Intent $Intent -TransactionDirectory $recordedDirectory
+    if (-not (Test-DefenseClawStandaloneProfile)) {
+        Restore-DefenseClawEarlyHook `
+            -Layout $Layout `
+            -Intent $Intent `
+            -TransactionDirectory $recordedDirectory
+    }
     Set-DefenseClawServiceActivationPhase `
         -State $Intent `
         -Path $Layout.PendingPath `
@@ -18275,6 +18434,13 @@ function Recover-DefenseClawQuiescingIntent {
         -ServicesQuiescedAt $recoveryQuiescedAt `
         -GatewayServiceName $GatewayServiceName `
         -GuardianServiceName $GuardianServiceName
+    if ((Test-DefenseClawStandaloneProfile) -and
+        -not [bool]$script:DefenseClawRecoveryActivationDeferred) {
+        Restore-DefenseClawEarlyHook `
+            -Layout $Layout `
+            -Intent $Intent `
+            -TransactionDirectory $recordedDirectory
+    }
     $rollbackIntent = Publish-DefenseClawInstallRollbackIntent `
         -Snapshot $Intent `
         -Layout $Layout
@@ -23458,8 +23624,13 @@ function Assert-DefenseClawInstalledArtifacts {
     #>
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
-        [Parameter(Mandatory)]$Metadata
+        [Parameter(Mandatory)]$Metadata,
+        [string]$TransitionHookSHA256 = ''
     )
+    if ($TransitionHookSHA256 -ne '' -and
+        $TransitionHookSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'servicing transition hook digest is invalid'
+    }
     foreach ($property in $Metadata.hashes.PSObject.Properties) {
         # Must cover every key the hash writer emits.
         $path = switch ($property.Name) {
@@ -23478,7 +23649,14 @@ function Assert-DefenseClawInstalledArtifacts {
             throw "installed artifact recorded in metadata is missing: $($property.Name)"
         }
         $actualHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actualHash -cne ([string]$property.Value).ToLowerInvariant()) {
+        $expectedHash = if ($property.Name -ceq 'hook' -and
+            $TransitionHookSHA256 -ne '') {
+            $TransitionHookSHA256
+        }
+        else {
+            ([string]$property.Value).ToLowerInvariant()
+        }
+        if ($actualHash -cne $expectedHash) {
             throw "installed artifact hash drift: $($property.Name)"
         }
     }
@@ -23492,6 +23670,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         [switch]$RequireReadiness,
         [switch]$PendingTransaction,
         [switch]$ServicingTransaction,
+        [string]$TransitionHookSHA256 = '',
         # Restore-only: an authenticated servicing preimage that predates the
         # Broker or Enumerator. Ordinary callers keep the full service set.
         [switch]$AllowTransactionRecordedBrokerAbsence,
@@ -23507,6 +23686,10 @@ function Assert-DefenseClawEnterpriseDeployment {
     }
     if ($RequireReadiness -and $ServicingTransaction) {
         throw 'disabled servicing state cannot satisfy live readiness'
+    }
+    if ($TransitionHookSHA256 -ne '' -and
+        (-not $ServicingTransaction -or -not (Test-DefenseClawStandaloneProfile))) {
+        throw 'a transition hook is valid only for standalone transaction restoration'
     }
     if (($AllowTransactionRecordedBrokerAbsence -or
             $AllowTransactionRecordedEnumeratorAbsence) -and
@@ -24147,7 +24330,10 @@ function Assert-DefenseClawEnterpriseDeployment {
         $null -eq $metadata.hashes.PSObject.Properties['cli']) {
         throw 'deployment metadata is missing the installed CLI artifact hash'
     }
-    Assert-DefenseClawInstalledArtifacts -Layout $Layout -Metadata $metadata
+    Assert-DefenseClawInstalledArtifacts `
+        -Layout $Layout `
+        -Metadata $metadata `
+        -TransitionHookSHA256 $TransitionHookSHA256
 
     $gatewayEnvironment = [Collections.Generic.List[string]]::new()
     foreach ($value in @(
