@@ -71,7 +71,6 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "b2a14b5ef81d670ca65b74e965fbf8c68a218286406f5de1748427260e99cf19",  # hooks/amp-plugin.ts
             "53ac71698b6135e04d218a6fb061ee13f2822945498bacffddd77ecd7d418f53",  # amp-plugin.ts
             "343c033f526f50147f008a15008e6f0388ea0c113be9f1f4d54484f8557974f1",  # amp-plugin-managed.ts
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
@@ -79,7 +78,6 @@ _BRIDGE_TEMPLATE_DIGESTS = {
     ),
     "opencode": frozenset(
         {
-            "6fdaab62ba79421d7980d408c3daea0311c2a5f40ae32b4d2a0cec066bd8ddca",  # hooks/opencode-plugin.js
             "e90790483f6c5b9c39a6d21e9baf98e931f44e3834233988f5ad93a4a4f94bfe",  # opencode-plugin.js
             "66bf5fa7ac6fe310aad85e92a72fe1b420c70c741a02b97d417be3ef54980dfa",  # opencode-plugin-managed.js
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
