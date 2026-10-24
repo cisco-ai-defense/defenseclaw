@@ -99,3 +99,38 @@ func TestLockFileTakesThePythonSentinelByte(t *testing.T) {
 		t.Fatalf("sentinel = %v, %v; want an empty file", info, err)
 	}
 }
+
+// A new folder is a temp folder moved into place with
+// MOVEFILE_WRITE_THROUGH, which returns once the move is on disk: a folder
+// made in place has no flush of its own. A folder already there is kept,
+// and a failed move leaves no temp folder.
+func TestMkdirDurableMovesANewFolderIntoPlaceWriteThrough(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "pins")
+	previous := moveFileEx
+	t.Cleanup(func() { moveFileEx = previous })
+	var flags []uint32
+	moveFileEx = func(from, to *uint16, flag uint32) error {
+		if _, err := os.Stat(dir); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("the folder was there before the move: %v", err)
+		}
+		flags = append(flags, flag)
+		return previous(from, to, flag)
+	}
+	for range 2 {
+		if err := MkdirDurable(dir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(flags) != 1 || flags[0]&windows.MOVEFILE_WRITE_THROUGH == 0 {
+		t.Fatalf("move flags %v, want one write-through move", flags)
+	}
+	moveFileEx = func(*uint16, *uint16, uint32) error { return windows.ERROR_ACCESS_DENIED }
+	if err := MkdirDurable(filepath.Join(parent, "other")); err == nil {
+		t.Fatal("a folder was made although its move failed")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 1 || entries[0].Name() != "pins" {
+		t.Fatalf("beside the folder: %v (%v), want only pins", entries, err)
+	}
+}

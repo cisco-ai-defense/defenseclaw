@@ -571,7 +571,7 @@ func (a *APIServer) pendingHookDecidedContext(ctx context.Context, p *pendingHoo
 // settlePendingHook deletes the journal row once both records of the call
 // are settled. Otherwise the row stays, and the recovery loop of the
 // running server takes it once this handler is done
-// (pendingHookRecoveryWake).
+// (wakePendingHookRecovery).
 func (a *APIServer) settlePendingHook(ctx context.Context, p *pendingHookOccurrence, result hookFinalizationResult) {
 	if p == nil {
 		return
@@ -613,7 +613,7 @@ var (
 // pendingHookRecoveryRetryInterval is how long the recovery loop waits
 // before it tries again a row it could not audit (the store refused its
 // records or its deletion, or the journal could not be read), and before
-// it takes a row that was left for it (pendingHookRecoveryWake). While
+// it takes a row that was left for it (wakePendingHookRecovery). While
 // passes keep leaving such a row, each wait doubles, up to
 // pendingHookRecoveryRetryMaxFactor intervals, so the tries of a row span
 // minutes of a store outage before it is evicted.
@@ -621,16 +621,27 @@ var pendingHookRecoveryRetryInterval = time.Minute
 
 const pendingHookRecoveryRetryMaxFactor = 16
 
-// pendingHookRecoveryWake tells the recovery loop that a row was left for
-// it: a handler could not settle its call, or a full-journal drain pass
-// left rows. It is process-wide, so the loop of the server that runs now
-// also takes a row a handler of a server a config reload replaced left.
-var pendingHookRecoveryWake = make(chan struct{}, 1)
+// pendingHookRecoveryLoops holds the wake channel of each recovery loop
+// running in this process.
+var pendingHookRecoveryLoops = struct {
+	sync.Mutex
+	wakes map[chan struct{}]struct{}
+}{wakes: map[chan struct{}]struct{}{}}
 
+// wakePendingHookRecovery tells every running recovery loop that a row was
+// left for it: a handler could not settle its call, or a full-journal
+// drain pass left rows. Each loop has its own wake, so the loop of the
+// server that runs now also takes a row a handler of a server a config
+// reload replaced left, and the canceled loop of that server cannot take
+// the wake from it.
 func wakePendingHookRecovery() {
-	select {
-	case pendingHookRecoveryWake <- struct{}{}:
-	default:
+	pendingHookRecoveryLoops.Lock()
+	defer pendingHookRecoveryLoops.Unlock()
+	for wake := range pendingHookRecoveryLoops.wakes {
+		select {
+		case wake <- struct{}{}:
+		default:
+		}
 	}
 }
 
@@ -665,7 +676,15 @@ func (a *APIServer) startPendingHookRecovery(ctx context.Context) {
 		return
 	}
 	retry := pendingHookRecoveryRetryInterval
-	a.pendingHookRecoveryOnce.Do(func() { go a.runPendingHookRecovery(ctx, retry) })
+	a.pendingHookRecoveryOnce.Do(func() {
+		// Its wake is registered before its first pass reads the journal,
+		// so a row left after that read wakes it.
+		wake := make(chan struct{}, 1)
+		pendingHookRecoveryLoops.Lock()
+		pendingHookRecoveryLoops.wakes[wake] = struct{}{}
+		pendingHookRecoveryLoops.Unlock()
+		go a.runPendingHookRecovery(ctx, retry, wake)
+	})
 }
 
 // runPendingHookRecovery audits the journal for as long as ctx lives, one
@@ -673,11 +692,16 @@ func (a *APIServer) startPendingHookRecovery(ctx context.Context) {
 // processes left; the next pass at once after a pass that stopped at its
 // bound; a pass retry later after a pass that left a row it could not
 // audit, or could not read the journal, the wait doubling while passes
-// keep leaving one; and a pass retry after a row was left for it
-// (pendingHookRecoveryWake). A row leaves the journal within
+// keep leaving one; and a pass retry after a row was left for it (wake,
+// wakePendingHookRecovery). A row leaves the journal within
 // pendingHookRecoveryAttempts tries, so the loop goes idle once the
 // journal holds only rows of running handlers.
-func (a *APIServer) runPendingHookRecovery(ctx context.Context, retry time.Duration) {
+func (a *APIServer) runPendingHookRecovery(ctx context.Context, retry time.Duration, wake chan struct{}) {
+	defer func() {
+		pendingHookRecoveryLoops.Lock()
+		delete(pendingHookRecoveryLoops.wakes, wake)
+		pendingHookRecoveryLoops.Unlock()
+	}()
 	next := time.NewTimer(0)
 	defer next.Stop()
 	armed, wait := true, retry
@@ -685,7 +709,7 @@ func (a *APIServer) runPendingHookRecovery(ctx context.Context, retry time.Durat
 		select {
 		case <-ctx.Done():
 			return
-		case <-pendingHookRecoveryWake:
+		case <-wake:
 			if !armed {
 				next.Reset(retry)
 				armed = true

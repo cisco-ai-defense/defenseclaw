@@ -417,6 +417,24 @@ func SyncDir(dir string) error { return syncDir(dir) }
 // SyncFile flushes path, its owner and access included.
 func SyncFile(path string) error { return syncFile(path) }
 
+// MkdirDurable makes dir, whose parent exists, a folder whose entry
+// survives a power loss before it returns: on POSIX a mkdir and an fsync
+// of the parent, which a folder already there gets too; on Windows, where
+// a folder has no flush of its own (syncDir), a temp folder beside it moved
+// into place with MOVEFILE_WRITE_THROUGH (mkdirDurable). Anything else at
+// dir is an error.
+func MkdirDurable(dir string) error {
+	if err := mkdirDurable(dir); err != nil {
+		if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+			return fmt.Errorf("configwrite: make folder %s: %w", dir, err)
+		}
+	}
+	if err := syncDir(filepath.Dir(dir)); err != nil {
+		return fmt.Errorf("configwrite: fsync directory %s: %w", filepath.Dir(dir), err)
+	}
+	return nil
+}
+
 // syncPublished flushes the temp file again after publish changed its
 // owner and access, so the rename never makes durable a file whose access
 // a power loss can take back. A test replaces it.
