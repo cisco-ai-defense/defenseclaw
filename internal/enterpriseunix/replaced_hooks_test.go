@@ -117,12 +117,45 @@ fail_response "gateway returned HTTP 418"
 HOOK_DIR="$(cd -P -- "${0%/*}" && pwd)"
 . "${HOOK_DIR}/_hardening.sh"
 FAIL_MODE="open"
+COPILOT_HOOK_EVENT="${2:-preToolUse}"
 fail_unreachable() {
   defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
   exit 0
 }
+
 fail_unreachable "gateway unreachable"
 `,
+}
+
+// The 1.0.2 Copilot hook puts its registered event in COPILOT_HOOK_EVENT.
+// permissionRequest needs a different native deny body from preToolUse.
+func TestFencedReplacedCopilotAnswersBothNativeEvents(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("no /bin/bash")
+	}
+	home := t.TempDir()
+	folder := filepath.Join(home, ".defenseclaw", "hooks")
+	writeReplacedHooks(t, folder, replacedHardening103)
+	marker := filepath.Join(t.TempDir(), "lifecycle.active")
+	if err := os.WriteFile(marker, []byte("1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if replaced, err := fenceHardening(home, filepath.Join(".defenseclaw", "hooks"), os.Getuid(), lifecycleFence(marker)); err != nil || !replaced {
+		t.Fatalf("fence = %v, %v", replaced, err)
+	}
+	for _, tc := range []struct{ event, want, other string }{
+		{"preToolUse", `"permissionDecision":"deny"`, `"behavior":"deny"`},
+		{"permissionRequest", `"behavior":"deny"`, `"permissionDecision":"deny"`},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			cmd := exec.Command("/bin/bash", filepath.Join(folder, "copilot-hook.sh"), "--event", tc.event)
+			cmd.Env = []string{"PATH=/usr/bin:/bin"}
+			out, err := cmd.Output()
+			if err != nil || !strings.Contains(string(out), tc.want) || strings.Contains(string(out), tc.other) {
+				t.Fatalf("event %s: output %q, error %v; want %s only", tc.event, out, err, tc.want)
+			}
+		})
+	}
 }
 
 func writeReplacedHooks(t *testing.T, folder, hardening string) {

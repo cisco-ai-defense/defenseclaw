@@ -104,7 +104,10 @@ if declare -F defenseclaw_log_hook_failure >/dev/null 2>&1; then
       set -- "$1" "$2" "$3" "$4" closed "${@:6}"
       if [ "$1" = copilot ]; then
         _dc_unfenced_defenseclaw_log_hook_failure "$@"
-        printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw is being installed or upgraded on this computer; try again in a moment"}'
+        case "${COPILOT_HOOK_EVENT:-}" in
+          preToolUse) printf '%s\n' '{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw is being installed or upgraded on this computer; try again in a moment"}' ;;
+          permissionRequest) printf '%s\n' '{"behavior":"deny","message":"DefenseClaw is being installed or upgraded on this computer; try again in a moment"}' ;;
+        esac
         exit 0
       fi
     fi
