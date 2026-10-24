@@ -1173,7 +1173,7 @@ func actionTextDynamicWrite(command string) bool {
 		for index < len(command) && strings.ContainsRune(" \t\\\"'", rune(command[index])) {
 			index++
 		}
-		return index < len(command) && (command[index] == '$' || command[index] == '`')
+		return index < len(command) && (command[index] == '`' || command[index] == '$' && !actionHomeReference(command[index:]))
 	}
 	for index := 0; index < len(command); index++ {
 		if command[index] != '>' {
@@ -1200,10 +1200,22 @@ func actionTextDynamicWrite(command string) bool {
 				if strings.ContainsAny(operand, "<>") {
 					break // a redirection, judged above
 				}
-				if operand = strings.TrimLeft(operand, `"'\`); strings.HasPrefix(operand, "$") || strings.HasPrefix(operand, "`") {
+				if operand = strings.TrimLeft(operand, `"'\`); strings.HasPrefix(operand, "$") && !actionHomeReference(operand) ||
+					strings.HasPrefix(operand, "`") {
 					return true
 				}
 			}
+		}
+	}
+	return false
+}
+
+// actionHomeReference reports text that starts with $HOME or ${HOME} as a
+// whole parameter: the known home, not a computed target.
+func actionHomeReference(text string) bool {
+	for _, prefix := range []string{"${HOME}", "$HOME"} {
+		if rest, ok := strings.CutPrefix(text, prefix); ok {
+			return rest == "" || !(rest[0] == '_' || asciiLetter(rest[0]) || rest[0] >= '0' && rest[0] <= '9')
 		}
 	}
 	return false
