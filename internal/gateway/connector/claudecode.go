@@ -1814,6 +1814,57 @@ func applyClaudeCodeManagedOtelEnv(existing map[string]interface{}, managed map[
 	}
 }
 
+// A retained operator endpoint needs its signal's enablement and protocol.
+// The native exporter cleanup owns product routes; this map prevents the host
+// Setup writer from disabling the unrelated collector it leaves in place.
+func claudeCodeOperatorOtelSettings(existing map[string]interface{}, previous map[string]string) map[string]bool {
+	ownedEndpoint := func(key, endpoint string) bool {
+		if endpoint == previous[key] && previous[key] != "" {
+			return true
+		}
+		headers, _ := existing[strings.TrimSuffix(key, "_ENDPOINT")+"_HEADERS"].(string)
+		_, marked := claudeCodeWithoutDefenseClawHeaders(headers, "")
+		return claudeCodeScopedLoopbackOTLPEndpoint(endpoint) ||
+			(claudeCodeLoopbackGatewayEndpoint(endpoint) && marked)
+	}
+	operatorEndpoint := func(key string) bool {
+		endpoint, _ := existing[key].(string)
+		return endpoint != "" && !claudeCodeEnvValueDisablesExport(endpoint) && !ownedEndpoint(key, endpoint)
+	}
+	keep := map[string]bool{}
+	if operatorEndpoint("OTEL_EXPORTER_OTLP_ENDPOINT") {
+		keep["OTEL_EXPORTER_OTLP_ENDPOINT"] = true
+		keep["OTEL_EXPORTER_OTLP_PROTOCOL"] = true
+		for _, signal := range AllNativeOTLPSignals() {
+			upper := strings.ToUpper(string(signal))
+			keep["OTEL_"+upper+"_EXPORTER"] = true
+			keep["OTEL_EXPORTER_OTLP_"+upper+"_PROTOCOL"] = true
+		}
+	}
+	for _, signal := range AllNativeOTLPSignals() {
+		upper := strings.ToUpper(string(signal))
+		endpointKey := "OTEL_EXPORTER_OTLP_" + upper + "_ENDPOINT"
+		if operatorEndpoint(endpointKey) {
+			keep[endpointKey] = true
+			keep["OTEL_"+upper+"_EXPORTER"] = true
+			keep["OTEL_EXPORTER_OTLP_"+upper+"_PROTOCOL"] = true
+		}
+	}
+	if len(keep) == 0 {
+		return keep
+	}
+	keep["CLAUDE_CODE_ENABLE_TELEMETRY"] = true
+	for key, value := range existing {
+		if (strings.HasPrefix(key, "OTEL_EXPORTER_OTLP_") && strings.HasSuffix(key, "_HEADERS") ||
+			key == "OTEL_RESOURCE_ATTRIBUTES" || key == "OTEL_SERVICE_NAME" ||
+			strings.HasPrefix(key, "OTEL_LOG_")) &&
+			!claudeCodeOtelValueLooksManaged(key, value, previous[key]) {
+			keep[key] = true
+		}
+	}
+	return keep
+}
+
 // patchClaudeCodeOtelEnv merges OpenTelemetry env vars into
 // ~/.claude/settings.json's `env` block. Claude Code reads this
 // block at startup and exports it into the CLI process environment
@@ -1914,6 +1965,13 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			}
 			hadManagedPolicy := len(previousManaged) > 0 || len(previousAbsent) > 0
 			managedEnv := buildClaudeCodeOtelEnv(opts)
+			operatorSettings := map[string]bool{}
+			if !opts.sandboxNativeOTLP {
+				operatorSettings = claudeCodeOperatorOtelSettings(existing, previousManaged)
+				for key := range operatorSettings {
+					delete(managedEnv, key)
+				}
+			}
 			backup.ManagedEnv = make(map[string]string, len(managedEnv))
 			for key, value := range managedEnv {
 				backup.ManagedEnv[key] = value
@@ -1926,6 +1984,9 @@ func (c *ClaudeCodeConnector) patchClaudeCodeOtelEnv(opts SetupOpts) error {
 			// already owned. A newly-added operator value transfers ownership.
 			backup.ManagedAbsentEnv = nil
 			for _, key := range claudeCodeOtelEnvKeys {
+				if operatorSettings[key] {
+					continue
+				}
 				if _, rendered := managedEnv[key]; rendered {
 					continue
 				}

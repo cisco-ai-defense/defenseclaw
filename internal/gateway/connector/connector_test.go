@@ -9096,15 +9096,13 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, _ := settings["env"].(map[string]interface{})
-	managedEnv := buildClaudeCodeOtelEnv(opts)
-	for _, key := range claudeCodeOtelEnvKeys {
-		got, present := env[key]
-		want, managed := managedEnv[key]
-		if managed && (!present || got != want) {
-			t.Errorf("managed %s = %v, want %q", key, got, want)
-		}
-		if !managed && present {
-			t.Errorf("disabled managed %s survived setup with value %v", key, got)
+	var originalSettings map[string]interface{}
+	if err := json.Unmarshal([]byte(pristine), &originalSettings); err != nil {
+		t.Fatal(err)
+	}
+	for key, want := range originalSettings["env"].(map[string]interface{}) {
+		if env[key] != want {
+			t.Errorf("operator %s changed during setup", key)
 		}
 	}
 	if env["PATH"] != "/custom/bin:/usr/bin" {
