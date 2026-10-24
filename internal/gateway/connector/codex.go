@@ -1865,7 +1865,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 					return fmt.Errorf("load original Codex OTel config: %w", err)
 				}
 			}
-			restoreCodexOtelEntries(cfg, original, opts)
+			if err := restoreCodexOtelEntries(cfg, original, opts); err != nil {
+				return fmt.Errorf("restore Codex OTel entries: %w", err)
+			}
 		}
 
 		// Codex hands its notify program the turn record (prompt, reply and
@@ -2959,7 +2961,9 @@ func restoreOwnedCodexConfigFromTOML(
 	// their saved value (or are deleted if Setup added them), while current
 	// operator-owned exporters/subtables survive verbatim. Ownership detection is
 	// structural and never loads or mints the scoped credential.
-	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexOtelEntries(cfg, backup, opts); err != nil {
+		return atomicTransformResult{}, fmt.Errorf("restore Codex OTel entries: %w", err)
+	}
 
 	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
 		return atomicTransformResult{}, err
@@ -4388,12 +4392,12 @@ func codexValueMatches(a, b interface{}) bool {
 
 var codexOtelExporterKeys = [...]string{"exporter", "trace_exporter", "metrics_exporter"}
 
-func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) {
+func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBackup, opts SetupOpts) error {
 	current, ok := cfg["otel"].(map[string]interface{})
 	if !ok {
 		// A missing or non-table value is a current operator edit. It cannot
 		// contain one of our exporter endpoints, so preserve it.
-		return
+		return nil
 	}
 
 	currentLooksManaged := codexOtelBlockLooksManaged(current, opts)
@@ -4414,7 +4418,7 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	// anything, their current table wins and only managed entries are removed.
 	if originalDecoded && original == nil && codexOtelTableIsEntirelyManaged(current, opts) {
 		cfg["otel"] = originalValue
-		return
+		return nil
 	}
 
 	for _, key := range codexOtelExporterKeys {
@@ -4435,7 +4439,9 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 			// A single marker is deliberately not mutation authority; VerifyClean
 			// reports it as residue so uninstall remains fail-closed.
 			if codexExporterHasManagedHeaderPair(value) {
-				restoreCodexOwnedExporterHeaders(value, saved, hadSaved)
+				if err := restoreCodexOwnedExporterHeaders(value, saved, hadSaved, opts); err != nil {
+					return err
+				}
 			}
 			continue
 		}
@@ -4520,6 +4526,7 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 	} else {
 		cfg["otel"] = current
 	}
+	return nil
 }
 
 func codexOtelExporterKey(key string) bool {
@@ -4632,25 +4639,35 @@ func codexExporterHasManagedHeaderPair(v interface{}) bool {
 	return hasSource && hasClient
 }
 
-func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool) {
+func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool, opts SetupOpts) error {
 	headers := codexExporterHeaders(current)
 	if headers == nil || !codexExporterHasManagedHeaderPair(current) {
-		return
+		return nil
+	}
+	productToken := strings.TrimSpace(opts.OTLPPathToken)
+	if productToken == "" && opts.DataDir != "" {
+		var err error
+		productToken, err = LoadOTLPPathToken(opts.DataDir, OTLPScopeCodex)
+		if err != nil {
+			return fmt.Errorf("inspect Codex native OTLP credential: %w", err)
+		}
 	}
 	delete(headers, "x-defenseclaw-source")
 	delete(headers, "x-defenseclaw-client")
 
-	// The product-namespaced pair above is ownership authority and must never
-	// survive cleanup. Authorization is generic, so restore it only from a
-	// saved exporter that was not itself a stale managed snapshot.
+	// The pair proves only its own namespaced headers. A generic Authorization
+	// value can be the operator's newer collector credential; remove it only
+	// when it equals the scoped product credential recorded for this install.
 	savedHeaders := map[string]interface{}(nil)
 	if hadSaved && !codexExporterHasManagedHeaderResidue(saved) {
 		savedHeaders = codexExporterHeaders(saved)
 	}
-	if value, exists := savedHeaders["authorization"]; exists {
-		headers["authorization"] = value
-	} else {
-		delete(headers, "authorization")
+	if productToken != "" && headers["authorization"] == "Bearer "+productToken {
+		if value, exists := savedHeaders["authorization"]; exists && value != headers["authorization"] {
+			headers["authorization"] = value
+		} else {
+			delete(headers, "authorization")
+		}
 	}
 	exporter := current.(map[string]interface{})
 	otlpHTTP := exporter["otlp-http"].(map[string]interface{})
@@ -4659,6 +4676,7 @@ func restoreCodexOwnedExporterHeaders(current, saved interface{}, hadSaved bool)
 	} else {
 		otlpHTTP["headers"] = headers
 	}
+	return nil
 }
 
 func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {

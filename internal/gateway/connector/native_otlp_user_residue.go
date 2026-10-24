@@ -258,7 +258,9 @@ func codexWithoutUserNativeOTLP(raw []byte, backup codexConfigBackup, opts Setup
 		}
 		before[key] = string(encoded)
 	}
-	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexOtelEntries(cfg, backup, opts); err != nil {
+		return nil, nil, err
+	}
 	after, _ := cfg["otel"].(map[string]interface{})
 	var removed []string
 	for key, previous := range before {
