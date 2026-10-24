@@ -244,11 +244,14 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 		report(codePolicyReloadRejected, message)
 	}
 	if state.EffectiveDigest == "" {
-		// Name the check that did not run instead of omitting the policy
-		// block silently (rel-1-0-4 GAP-0594).
+		// Without a computed digest or an applied record, no action can
+		// certify the policy the gateway enforces. Verify and a committed
+		// change fail with the cause; status and a no-op ensure warn.
+		reason := "no effective policy digest or applied policy record is available"
 		if computeErr != nil {
-			r.AddWarning(codePolicyUnverified, "the effective policy the gateway enforces could not be checked: "+computeErr.Error())
+			reason = computeErr.Error()
 		}
+		report(codePolicyUnverified, "the effective policy the gateway enforces could not be checked: "+reason)
 		return
 	}
 	generation := l.installedGenerationMismatch(gateway)

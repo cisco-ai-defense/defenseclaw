@@ -1127,7 +1127,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
 		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure && reloadError == "" &&
-		(r.Policy == nil || r.Policy.Applied)
+		r.Policy != nil && r.Policy.Applied
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()

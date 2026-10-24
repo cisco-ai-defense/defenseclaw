@@ -201,38 +201,45 @@ func TestPolicyOmittedWhenTheDigestIsUnknown(t *testing.T) {
 }
 
 // Status and verify name the policy digest they could not compute instead of
-// omitting the policy block silently (rel-1-0-4 GAP-0594, the Unix side): the
-// warning carries the installed gateway's reason.
+// omitting the policy block silently (rel-1-0-4 GAP-0594, the Unix side).
+// Neither may certify security, and verify must fail with that cause when no
+// applied policy record can stand in (GAP-1168).
 func TestPolicyOmittedNamesTheDigestItCouldNotCompute(t *testing.T) {
 	const computed = "sha256:" + "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
-	for name, c := range map[string]struct {
-		refusal, want string
-	}{
-		"exit status": {want: "pack digest mismatch"},
-		"refused":     {refusal: "rule pack \"p\" does not match its pin", want: "does not match its pin"},
-	} {
-		t.Run(name, func(t *testing.T) {
-			h := newTestHost(t, "linux")
-			runner := &policyDigestRunner{fakeRunner: h.runner, digest: computed}
-			h.env.Runner = runner
-			reported, reloadError := computed, ""
-			servePolicyHealth(h, &reported, &reloadError)
-			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
-			if err := os.Remove(h.env.policyStatePath()); err != nil {
-				t.Fatal(err)
-			}
-			runner.digest, runner.refusal = "", c.refusal
-			for _, action := range []string{ActionStatus, ActionVerify} {
-				r := h.run(Options{Action: action})
-				var message string
-				for _, w := range r.Warnings {
-					if w.Code == codePolicyUnverified {
-						message = w.Message
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			for name, c := range map[string]struct {
+				refusal, want string
+			}{
+				"exit status": {want: "pack digest mismatch"},
+				"refused":     {refusal: "rule pack \"p\" does not match its pin", want: "does not match its pin"},
+			} {
+				t.Run(name, func(t *testing.T) {
+					h := newTestHost(t, goos)
+					runner := &policyDigestRunner{fakeRunner: h.runner, digest: computed}
+					h.env.Runner = runner
+					reported, reloadError := computed, ""
+					servePolicyHealth(h, &reported, &reloadError)
+					requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+					writeFreshLedger(t, h)
+					if err := os.Remove(h.env.policyStatePath()); err != nil {
+						t.Fatal(err)
 					}
-				}
-				if r.Policy != nil || !strings.Contains(message, c.want) {
-					t.Fatalf("%s: policy = %+v, warnings = %+v, want %s naming %q", action, r.Policy, r.Warnings, codePolicyUnverified, c.want)
-				}
+					runner.digest, runner.refusal = "", c.refusal
+					for _, action := range []string{ActionStatus, ActionVerify} {
+						r := h.run(Options{Action: action})
+						message := messagesOf(r.Warnings, codePolicyUnverified) + messagesOf(r.Errors, codePolicyUnverified)
+						if r.Policy != nil || !strings.Contains(message, c.want) {
+							t.Errorf("%s: policy = %+v, warnings = %+v, errors = %+v, want %s naming %q", action, r.Policy, r.Warnings, r.Errors, codePolicyUnverified, c.want)
+						}
+						if r.SecurityComplete {
+							t.Errorf("%s certified security without an effective policy: warnings=%+v errors=%+v", action, r.Warnings, r.Errors)
+						}
+						if action == ActionVerify && (r.OK || r.ExitCode == 0 || !strings.Contains(messagesOf(r.Errors, codePolicyUnverified), c.want)) {
+							t.Errorf("verify did not fail with the policy-unverified cause: exit=%d ok=%t errors=%+v", r.ExitCode, r.OK, r.Errors)
+						}
+					}
+				})
 			}
 		})
 	}
