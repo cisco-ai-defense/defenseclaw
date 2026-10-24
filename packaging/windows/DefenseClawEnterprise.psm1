@@ -503,6 +503,23 @@ namespace $nativeNamespace
             }
         }
 
+        public sealed class UserFileSnapshot
+        {
+            public byte[] Content { get; private set; }
+            public string SecurityDescriptor { get; private set; }
+            public DateTime CreationTimeUtc { get; private set; }
+            public DateTime LastWriteTimeUtc { get; private set; }
+
+            internal UserFileSnapshot(byte[] content, string securityDescriptor,
+                DateTime creationTimeUtc, DateTime lastWriteTimeUtc)
+            {
+                Content = content;
+                SecurityDescriptor = securityDescriptor;
+                CreationTimeUtc = creationTimeUtc;
+                LastWriteTimeUtc = lastWriteTimeUtc;
+            }
+        }
+
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         private struct STARTUPINFO
         {
@@ -600,6 +617,14 @@ namespace $nativeNamespace
         private static extern bool GetFileInformationByHandle(
             IntPtr file,
             out BY_HANDLE_FILE_INFORMATION information);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetFileTime(
+            IntPtr file,
+            ref System.Runtime.InteropServices.ComTypes.FILETIME creationTime,
+            IntPtr lastAccessTime,
+            ref System.Runtime.InteropServices.ComTypes.FILETIME lastWriteTime);
 
         [DllImport("advapi32.dll", SetLastError = true)]
         private static extern uint GetSecurityInfo(
@@ -1536,6 +1561,271 @@ namespace $nativeNamespace
         {
             if (handle != IntPtr.Zero && handle != new IntPtr(-1))
                 CloseHandle(handle);
+        }
+
+        // Pin every ancestor before opening the next one. Neither an ancestor
+        // nor the leaf can be exchanged for a junction while a user file is
+        // read or restored by SYSTEM.
+        private static List<IntPtr> PinUserFileParent(string path)
+        {
+            string full = Path.GetFullPath(path);
+            string root = Path.GetPathRoot(full);
+            if (root == null || root.Length != 3 || root[1] != ':' ||
+                root[2] != '\\' || !Char.IsLetter(root[0]) ||
+                !String.Equals(full, path, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("user file path is not canonical");
+            List<IntPtr> pins = new List<IntPtr>();
+            try
+            {
+                string current = root;
+                pins.Add(OpenDirectoryPinNoFollow(current));
+                string parent = Path.GetDirectoryName(full);
+                foreach (string part in parent.Substring(root.Length).Split('\\'))
+                {
+                    if (part.Length == 0)
+                        continue;
+                    current = Path.Combine(current, part);
+                    pins.Add(OpenDirectoryPinNoFollow(current));
+                }
+                return pins;
+            }
+            catch
+            {
+                CloseUserFilePins(pins);
+                throw;
+            }
+        }
+
+        private static void CloseUserFilePins(List<IntPtr> pins)
+        {
+            for (int i = pins.Count - 1; i >= 0; i--)
+                CloseDirectoryPin(pins[i]);
+        }
+
+        private static BY_HANDLE_FILE_INFORMATION CheckUserFileHandle(
+            IntPtr handle, string path)
+        {
+            BY_HANDLE_FILE_INFORMATION information;
+            if (!GetFileInformationByHandle(handle, out information))
+                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                    "query user file failed: " + path);
+            if ((information.FileAttributes & 0x00000410) != 0 ||
+                information.NumberOfLinks != 1)
+                throw new InvalidOperationException(
+                    "user file is a link, directory or multiply linked file: " + path);
+            ulong size = ((ulong)information.FileSizeHigh << 32) |
+                information.FileSizeLow;
+            if (size > 4194304)
+                throw new InvalidOperationException("user file exceeds capture limit: " + path);
+            return information;
+        }
+
+        private static string UserFileSddl(IntPtr handle, string path)
+        {
+            return new System.Security.AccessControl.RawSecurityDescriptor(
+                GetFileSecurityDescriptorFromHandle(handle, path), 0).GetSddlForm(
+                    System.Security.AccessControl.AccessControlSections.All);
+        }
+
+        public static UserFileSnapshot CaptureUserFileNoFollowIfExists(string path)
+        {
+            const uint GENERIC_READ = 0x80000000;
+            const uint READ_CONTROL = 0x00020000;
+            const uint FILE_READ_ATTRIBUTES = 0x00000080;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint OPEN_EXISTING = 3;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            List<IntPtr> pins;
+            try { pins = PinUserFileParent(path); }
+            catch (Win32Exception error)
+            {
+                // An absent agent directory is a captured absent file, not
+                // an unreadable file whose preimage must be skipped.
+                if (error.NativeErrorCode == 2 || error.NativeErrorCode == 3)
+                    return null;
+                throw;
+            }
+            try
+            {
+                IntPtr handle = CreateFileW(path,
+                    GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES,
+                    FILE_SHARE_READ, IntPtr.Zero, OPEN_EXISTING,
+                    FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero);
+                if (handle == new IntPtr(-1))
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    if (error == 2 || error == 3)
+                        return null;
+                    throw new Win32Exception(error, "open user file failed: " + path);
+                }
+                try
+                {
+                    BY_HANDLE_FILE_INFORMATION information =
+                        CheckUserFileHandle(handle, path);
+                    int length = checked((int)(((ulong)information.FileSizeHigh << 32) |
+                        information.FileSizeLow));
+                    byte[] content = new byte[length];
+                    using (var stream = new FileStream(
+                        new Microsoft.Win32.SafeHandles.SafeFileHandle(handle, false),
+                        FileAccess.Read))
+                    {
+                        int read = 0;
+                        while (read < length)
+                        {
+                            int count = stream.Read(content, read, length - read);
+                            if (count == 0)
+                                throw new IOException("user file changed during capture: " + path);
+                            read += count;
+                        }
+                    }
+                    return new UserFileSnapshot(content, UserFileSddl(handle, path),
+                        File.GetCreationTimeUtc(path), File.GetLastWriteTimeUtc(path));
+                }
+                finally { CloseHandle(handle); }
+            }
+            finally { CloseUserFilePins(pins); }
+        }
+
+        public static string RestoreUserFileNoFollow(string path, byte[] content,
+            string sddl, DateTime creationTimeUtc, DateTime lastWriteTimeUtc)
+        {
+            if (content == null || content.Length > 4194304)
+                throw new InvalidOperationException("user file restore size is invalid");
+            const uint GENERIC_READ = 0x80000000;
+            const uint GENERIC_WRITE = 0x40000000;
+            const uint READ_CONTROL = 0x00020000;
+            const uint WRITE_DAC = 0x00040000;
+            const uint WRITE_OWNER = 0x00080000;
+            const uint FILE_SHARE_READ = 0x00000001;
+            const uint OPEN_ALWAYS = 4;
+            const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+            const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+            const int SE_FILE_OBJECT = 1;
+            const uint OWNER_SECURITY_INFORMATION = 0x00000001;
+            const uint GROUP_SECURITY_INFORMATION = 0x00000002;
+            const uint DACL_SECURITY_INFORMATION = 0x00000004;
+            const uint PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000;
+            const uint UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000;
+            IntPtr descriptor;
+            SECURITY_ATTRIBUTES ignored = SecurityAttributes(sddl, out descriptor);
+            try
+            {
+                IntPtr owner, group, dacl;
+                bool ownerDefaulted, groupDefaulted, daclPresent, daclDefaulted;
+                if (!GetSecurityDescriptorOwner(descriptor, out owner, out ownerDefaulted) ||
+                    !GetSecurityDescriptorGroup(descriptor, out group, out groupDefaulted) ||
+                    !GetSecurityDescriptorDacl(descriptor, out daclPresent, out dacl,
+                        out daclDefaulted) || !daclPresent || dacl == IntPtr.Zero)
+                    throw new InvalidOperationException("user file descriptor is invalid");
+                var saved = new System.Security.AccessControl.RawSecurityDescriptor(sddl);
+                uint protection = (saved.ControlFlags &
+                    System.Security.AccessControl.ControlFlags.DiscretionaryAclProtected) != 0
+                    ? PROTECTED_DACL_SECURITY_INFORMATION
+                    : UNPROTECTED_DACL_SECURITY_INFORMATION;
+                using (new UninstallFilePrivilegeScope())
+                {
+                    List<IntPtr> pins = PinUserFileParent(path);
+                    try
+                    {
+                        IntPtr handle = CreateFileW(path,
+                            GENERIC_READ | GENERIC_WRITE | READ_CONTROL |
+                                WRITE_DAC | WRITE_OWNER,
+                            FILE_SHARE_READ, IntPtr.Zero, OPEN_ALWAYS,
+                            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                            IntPtr.Zero);
+                        if (handle == new IntPtr(-1))
+                            throw new Win32Exception(Marshal.GetLastWin32Error(),
+                                "open user file for restore failed: " + path);
+                        try
+                        {
+                            CheckUserFileHandle(handle, path);
+                            using (var stream = new FileStream(
+                                new Microsoft.Win32.SafeHandles.SafeFileHandle(handle, false),
+                                FileAccess.ReadWrite))
+                            {
+                                stream.Position = 0;
+                                stream.Write(content, 0, content.Length);
+                                stream.SetLength(content.Length);
+                                stream.Flush(true);
+                            }
+                            uint result = SetSecurityInfo(handle, SE_FILE_OBJECT,
+                                OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+                                    DACL_SECURITY_INFORMATION | protection,
+                                owner, group, dacl, IntPtr.Zero);
+                            if (result != 0)
+                                throw new Win32Exception(checked((int)result),
+                                    "restore user file descriptor failed: " + path);
+                            if (protection == UNPROTECTED_DACL_SECURITY_INFORMATION)
+                            {
+                                // A second handle-based update is needed to
+                                // clear a previously protected DACL on Windows.
+                                result = SetSecurityInfo(handle, SE_FILE_OBJECT,
+                                    UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                    IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                                if (result != 0)
+                                    throw new Win32Exception(checked((int)result),
+                                        "restore user file inheritance failed: " + path);
+                            }
+                            long creation = creationTimeUtc.ToFileTimeUtc();
+                            long modified = lastWriteTimeUtc.ToFileTimeUtc();
+                            var creationFileTime = new System.Runtime.InteropServices.ComTypes.FILETIME();
+                            creationFileTime.dwLowDateTime = (int)creation;
+                            creationFileTime.dwHighDateTime = (int)(creation >> 32);
+                            var modifiedFileTime = new System.Runtime.InteropServices.ComTypes.FILETIME();
+                            modifiedFileTime.dwLowDateTime = (int)modified;
+                            modifiedFileTime.dwHighDateTime = (int)(modified >> 32);
+                            if (!SetFileTime(handle, ref creationFileTime,
+                                    IntPtr.Zero, ref modifiedFileTime))
+                                throw new Win32Exception(Marshal.GetLastWin32Error(),
+                                    "restore user file times failed: " + path);
+                            return UserFileSddl(handle, path);
+                        }
+                        finally { CloseHandle(handle); }
+                    }
+                    finally { CloseUserFilePins(pins); }
+                }
+            }
+            finally { LocalFree(descriptor); }
+        }
+
+        public static void RemoveEmptyUserCasStateNoFollow(string path)
+        {
+            List<IntPtr> pins;
+            try { pins = PinUserFileParent(path); }
+            catch (Win32Exception error)
+            {
+                if (error.NativeErrorCode == 2 || error.NativeErrorCode == 3)
+                    return;
+                throw;
+            }
+            try
+            {
+                IntPtr state;
+                try { state = OpenDirectoryPinNoFollow(path); }
+                catch (Win32Exception error)
+                {
+                    if (error.NativeErrorCode == 2 || error.NativeErrorCode == 3)
+                        return;
+                    throw;
+                }
+                try
+                {
+                    string[] children = Directory.GetFileSystemEntries(path);
+                    string expected = Path.Combine(path,
+                        ".defenseclaw-v2-protocol.lock");
+                    if (children.Length != 1 ||
+                        !String.Equals(children[0], expected,
+                            StringComparison.OrdinalIgnoreCase) ||
+                        (File.GetAttributes(expected) & FileAttributes.ReparsePoint) != 0 ||
+                        new FileInfo(expected).Length != 0)
+                        throw new InvalidOperationException(
+                            "native OTLP rollback found unexpected compare-and-swap state");
+                    File.Delete(expected);
+                }
+                finally { CloseDirectoryPin(state); }
+                Directory.Delete(path, false);
+            }
+            finally { CloseUserFilePins(pins); }
         }
 
         public static byte[] GetFileSecurityDescriptor(string path)
@@ -14349,54 +14639,57 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
         foreach ($agent in @('.codex', '.claude')) {
             $statePath = [IO.Path]::Combine(
                 $userHome, $agent, '.defenseclaw-cas-state')
-            Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
-            $states.Add([ordered]@{
-                existed = [bool](Microsoft.PowerShell.Management\Test-Path `
+            $stateCaptured = $true
+            $stateExisted = $false
+            try {
+                Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
+                $stateExisted = [bool](Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $statePath -PathType Container)
+            }
+            catch {
+                $stateCaptured = $false
+            }
+            $states.Add([ordered]@{
+                captured = $stateCaptured
+                existed = $stateExisted
             })
         }
         foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
                     -UserHome $userHome)) {
-            Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
-            $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
-                $path)
+            $captured = $true
+            $before = $null
+            try {
+                $before = $nativeSecurity::CaptureUserFileNoFollowIfExists($path)
+            }
+            catch {
+                # Guardian Verify also skips linked or unreadable user files.
+                # A user path must not block the whole machine upgrade.
+                $captured = $false
+            }
             $exists = $null -ne $before
             $hash = ''
             $sddl = ''
             if ($exists) {
-                $item = Microsoft.PowerShell.Management\Get-Item `
-                    -LiteralPath $path -Force
-                if ([int64]$item.Length -gt 4194304) {
-                    throw 'user native OTLP preimage exceeds the 4194304-byte check limit'
-                }
-                $hash = (Microsoft.PowerShell.Utility\Get-FileHash `
-                    -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
-                $sddl = (Microsoft.PowerShell.Security\Get-Acl `
-                    -LiteralPath $path).GetSecurityDescriptorSddlForm(
-                    [Security.AccessControl.AccessControlSections]::All)
+                $hash = Get-DefenseClawNuclearSHA256 -Bytes $before.Content
+                $sddl = [string]$before.SecurityDescriptor
                 $backup = [IO.Path]::Combine(
                     $directory, ('native-otlp-{0:D3}.bak' -f $index))
                 if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
                     throw 'native OTLP transaction backup already exists'
                 }
-                Microsoft.PowerShell.Management\Copy-Item `
-                    -LiteralPath $path -Destination $backup
+                [IO.File]::WriteAllBytes($backup, $before.Content)
+                [IO.File]::SetCreationTimeUtc($backup, $before.CreationTimeUtc)
+                [IO.File]::SetLastWriteTimeUtc($backup, $before.LastWriteTimeUtc)
                 Set-DefenseClawPathAcl -Path $backup -Kind AdminFile `
                     -GatewayServiceSID $script:AdministratorsSID
-                Assert-DefenseClawNoReparsePath -Path $path
                 Assert-DefenseClawNoReparsePath -Path $backup
-                $after = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
-                    $path)
-                if ($null -eq $after -or
-                    [string]$after.Identity -cne [string]$before.Identity -or
-                    (Microsoft.PowerShell.Utility\Get-FileHash `
-                        -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash -or
-                    (Microsoft.PowerShell.Utility\Get-FileHash `
+                if ((Microsoft.PowerShell.Utility\Get-FileHash `
                         -LiteralPath $backup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash) {
-                    throw 'user native OTLP preimage changed during transaction capture'
+                    throw 'user native OTLP backup changed during transaction capture'
                 }
             }
             $files.Add([ordered]@{
+                captured = $captured
                 existed = $exists
                 sha256 = $hash
                 security_descriptor = $sddl
@@ -14414,6 +14707,17 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
             state_directories = @($states)
         }) -Force
     Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
+}
+
+function Add-DefenseClawUserNativeOTLPRollbackLeftover {
+    param([Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Reason)
+    $message = $Path + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic `
+        -Value $Reason -MaxLength 512)
+    if (@($script:DefenseClawRollbackLeftovers).Count -lt 256) {
+        $script:DefenseClawRollbackLeftovers += $message
+    }
+    Write-DefenseClawLifecyclePhase -Stage ('native OTLP rollback left ' + $message)
 }
 
 function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
@@ -14459,74 +14763,67 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
             $agent = @('.codex', '.claude')[$agentOffset]
             $statePath = [IO.Path]::Combine(
                 $userHome, $agent, '.defenseclaw-cas-state')
-            Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
-            $restoreAgent += [bool](
-                [bool]$saved.state_directories[$stateIndex + $agentOffset].existed -or
-                (Microsoft.PowerShell.Management\Test-Path `
-                    -LiteralPath $statePath -PathType Container))
+            $state = $saved.state_directories[$stateIndex + $agentOffset]
+            $stateCaptured = $state.PSObject.Properties['captured']
+            if ($null -ne $stateCaptured -and -not [bool]$stateCaptured.Value) {
+                $restoreAgent += $false
+                continue
+            }
+            try {
+                Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
+                $restoreAgent += [bool](
+                    [bool]$state.existed -or
+                    (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $statePath -PathType Container))
+            }
+            catch {
+                Add-DefenseClawUserNativeOTLPRollbackLeftover `
+                    -Path $statePath -Reason $_.Exception.Message
+                $restoreAgent += $false
+            }
         }
         foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
                     -UserHome $userHome)) {
             $entry = $saved.files[$index]
-            if ($entry.existed -isnot [bool] -or
-                [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$' -and
-                [bool]$entry.existed) {
-                throw 'invalid user native OTLP rollback file record'
-            }
-            Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
-            # Guardian can revoke an orphaned scoped credential without
-            # editing the agent config, so that path has no CAS witness.
-            # It only deletes the credential; a still-present token is a
-            # concurrent user change and is left alone.
-            $restoreThisFile = $restoreAgent[$index % 2]
-            if ($index % 4 -ge 2) {
-                $restoreThisFile = -not (Microsoft.PowerShell.Management\Test-Path `
-                    -LiteralPath $path -PathType Leaf)
-            }
-            if ([bool]$entry.existed -and $restoreThisFile) {
-                $current = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
-                    $path)
-                $backup = [IO.Path]::Combine(
-                    $directory, ('native-otlp-{0:D3}.bak' -f $index))
-                Assert-DefenseClawDescendant -Path $backup `
-                    -Root $Layout.StateRoot -Label 'native OTLP rollback backup' |
-                    Microsoft.PowerShell.Core\Out-Null
-                Assert-DefenseClawNoReparsePath -Path $backup
-                if ((Microsoft.PowerShell.Utility\Get-FileHash `
-                        -LiteralPath $backup -Algorithm SHA256).Hash.ToLowerInvariant() -cne
-                    [string]$entry.sha256) {
-                    throw 'user native OTLP rollback backup digest mismatch'
+            $capture = $entry.PSObject.Properties['captured']
+            if ($null -eq $capture -or [bool]$capture.Value) {
+                try {
+                    if ($entry.existed -isnot [bool] -or
+                        ([bool]$entry.existed -and
+                            [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$')) {
+                        throw 'invalid user native OTLP rollback file record'
+                    }
+                    # Guardian can revoke a token without changing its agent
+                    # config. A still-present token is a concurrent user edit.
+                    $restoreThisFile = $restoreAgent[$index % 2]
+                    if ($index % 4 -ge 2) {
+                        $restoreThisFile = -not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $path -PathType Leaf)
+                    }
+                    if ([bool]$entry.existed -and $restoreThisFile) {
+                        $backup = [IO.Path]::Combine(
+                            $directory, ('native-otlp-{0:D3}.bak' -f $index))
+                        Assert-DefenseClawDescendant -Path $backup `
+                            -Root $Layout.StateRoot -Label 'native OTLP rollback backup' |
+                            Microsoft.PowerShell.Core\Out-Null
+                        Assert-DefenseClawNoReparsePath -Path $backup
+                        $bytes = [IO.File]::ReadAllBytes($backup)
+                        if ((Get-DefenseClawNuclearSHA256 -Bytes $bytes) -cne
+                            [string]$entry.sha256) {
+                            throw 'user native OTLP rollback backup digest mismatch'
+                        }
+                        $actualSDDL = $nativeSecurity::RestoreUserFileNoFollow(
+                            $path, $bytes, [string]$entry.security_descriptor,
+                            [IO.File]::GetCreationTimeUtc($backup),
+                            [IO.File]::GetLastWriteTimeUtc($backup))
+                        if ($actualSDDL -cne [string]$entry.security_descriptor) {
+                            throw 'user native OTLP rollback did not restore exact ACL'
+                        }
+                    }
                 }
-                $contentMatches = $null -ne $current -and
-                    (Microsoft.PowerShell.Utility\Get-FileHash `
-                        -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
-                    [string]$entry.sha256
-                if (-not $contentMatches) {
-                    Microsoft.PowerShell.Management\Copy-Item `
-                        -LiteralPath $backup -Destination $path -Force
-                }
-                $actualSDDL = (Microsoft.PowerShell.Security\Get-Acl `
-                    -LiteralPath $path).GetSecurityDescriptorSddlForm(
-                    [Security.AccessControl.AccessControlSections]::All)
-                if ($actualSDDL -cne [string]$entry.security_descriptor) {
-                    $security = [Security.AccessControl.FileSecurity]::new()
-                    $security.SetSecurityDescriptorSddlForm(
-                        [string]$entry.security_descriptor,
-                        [Security.AccessControl.AccessControlSections]::All)
-                    Microsoft.PowerShell.Security\Set-Acl `
-                        -LiteralPath $path -AclObject $security
-                }
-                Assert-DefenseClawNoReparsePath -Path $path
-                if ($null -eq $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
-                        $path) -or
-                    (Microsoft.PowerShell.Utility\Get-FileHash `
-                        -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne
-                    [string]$entry.sha256 -or
-                    (Microsoft.PowerShell.Security\Get-Acl `
-                        -LiteralPath $path).GetSecurityDescriptorSddlForm(
-                        [Security.AccessControl.AccessControlSections]::All) -cne
-                    [string]$entry.security_descriptor) {
-                    throw 'user native OTLP rollback did not restore exact bytes and ACL'
+                catch {
+                    Add-DefenseClawUserNativeOTLPRollbackLeftover `
+                        -Path $path -Reason $_.Exception.Message
                 }
             }
             $index++
@@ -14534,29 +14831,22 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
         foreach ($agent in @('.codex', '.claude')) {
             $state = $saved.state_directories[$stateIndex]
             $stateIndex++
-            if ($state.existed -isnot [bool]) {
-                throw 'invalid user native OTLP rollback state record'
-            }
-            if ([bool]$state.existed) { continue }
+            $captured = $state.PSObject.Properties['captured']
+            if ($null -ne $captured -and -not [bool]$captured.Value) { continue }
             $statePath = [IO.Path]::Combine(
                 $userHome, $agent, '.defenseclaw-cas-state')
-            Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
-            if (-not (Microsoft.PowerShell.Management\Test-Path `
-                    -LiteralPath $statePath -PathType Container)) {
-                continue
+            try {
+                if ($state.existed -isnot [bool]) {
+                    throw 'invalid user native OTLP rollback state record'
+                }
+                if (-not [bool]$state.existed) {
+                    $nativeSecurity::RemoveEmptyUserCasStateNoFollow($statePath)
+                }
             }
-            $children = @(Microsoft.PowerShell.Management\Get-ChildItem `
-                -LiteralPath $statePath -Force)
-            if ($children.Count -ne 1 -or
-                [string]$children[0].Name -cne '.defenseclaw-v2-protocol.lock' -or
-                [int64]$children[0].Length -ne 0) {
-                throw 'native OTLP rollback found unexpected compare-and-swap state'
+            catch {
+                Add-DefenseClawUserNativeOTLPRollbackLeftover `
+                    -Path $statePath -Reason $_.Exception.Message
             }
-            Assert-DefenseClawNoReparsePath -Path ([string]$children[0].FullName)
-            Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath ([string]$children[0].FullName) -Force
-            Microsoft.PowerShell.Management\Remove-Item `
-                -LiteralPath $statePath -Force
         }
     }
 }
