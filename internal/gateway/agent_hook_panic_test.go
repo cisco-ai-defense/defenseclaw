@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -435,6 +436,51 @@ func TestHandleAgentHook_NotificationPanicDoesNotFinalizeTwice(t *testing.T) {
 	}
 	if decisions != 1 {
 		t.Fatalf("notification panic persisted %d connector decisions, want one", decisions)
+	}
+}
+
+func TestHandleAgentHook_AntigravityConfirmSurvivesOutputEncodingFailure(t *testing.T) {
+	previous, had := hookProfileRuntimes["antigravity"]
+	hookProfileRuntimes["antigravity"] = func(profile connector.HookProfile) hookProfileRuntime {
+		runtime := defaultHookProfileRuntime(profile)
+		runtime.Evaluate = func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+			return agentHookResponse{
+				Action: "confirm", RawAction: "confirm", Mode: "action", Reason: "review this command",
+				HookOutput: map[string]interface{}{"decision": "force_ask", "bad": math.NaN()},
+			}
+		}
+		return runtime
+	}
+	t.Cleanup(func() {
+		if had {
+			hookProfileRuntimes["antigravity"] = previous
+		} else {
+			delete(hookProfileRuntimes, "antigravity")
+		}
+	})
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/antigravity/hook", strings.NewReader(
+		`{"hook_event_name":"PreToolUse","session_id":"encoding-confirm","toolCall":{"name":"run_command","args":{"CommandLine":"echo ok"}}}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Antigravity-Event", "PreToolUse")
+	w := httptest.NewRecorder()
+	api.handleAgentHook("antigravity").ServeHTTP(w, req)
+	var answer struct {
+		Action string `json:"action"`
+		Output struct {
+			Decision string `json:"decision"`
+		} `json:"hook_output"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("native hook cannot decode finalized confirmation: status=%d body=%q: %v", w.Code, w.Body.String(), err)
+	}
+	if answer.Action != "confirm" || answer.Output.Decision != "force_ask" {
+		t.Fatalf("native answer=%+v, want audited confirm with force_ask", answer)
+	}
+	row := soleHookDecisionForTest(t, store)
+	if row.Structured["action"] != "confirm" || row.Enforced {
+		t.Fatalf("audit row=%+v, want confirmation matching native answer", row)
 	}
 }
 
