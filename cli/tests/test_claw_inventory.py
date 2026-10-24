@@ -3021,7 +3021,7 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         for stem, size in (("near", cap - 64), ("over", cap + 64)):
             text = header.format(name=stem)
             text += "d" * (size - len(text) - 2) + '"\n'
-            (agents_dir / f"{stem}.toml").write_text(text)
+            (agents_dir / f"{stem}.toml").write_bytes(text.encode("utf-8"))
             self.assertEqual((agents_dir / f"{stem}.toml").stat().st_size, size)
 
         agents = {row["id"]: row for row in _agents_from_codex_toml_dirs([str(agents_dir)])}
