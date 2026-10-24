@@ -5733,6 +5733,9 @@ def _check_connector_version_supported_for_setup(
             )
         elif emit:
             ux.ok(f"{label}: version {version_display} is supported by {contract}.")
+        if emit and compatibility.warning:
+            # Hermes 0.19.0-0.21.0: guarded, except their TUI and dashboard chat.
+            ux.warn(f"{label} {version_display}: {compatibility.warning}.")
         return True
 
     if compatibility.status == STATUS_NOT_GATED:

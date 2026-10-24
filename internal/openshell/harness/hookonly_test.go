@@ -51,7 +51,9 @@ func writeFile(t *testing.T, path string, data []byte) {
 // yamlCheckStub stands in for a harness interpreter's `-I -c <script> FILE`
 // YAML check: it exits 3 for a file with a non-empty secrets or a non-local
 // server key on one line, as the real check does for the parsed document.
-const yamlCheckStub = "#!/bin/sh\n/usr/bin/grep -qE '^secrets: *[^ ]|^server: *[^ l]' \"$4\" && exit 3\nexit 0\n"
+// The Hermes .env assignment check (FILE then a pattern) runs on the system
+// Python: it needs nothing but the standard library.
+const yamlCheckStub = "#!/bin/sh\n[ $# -eq 5 ] && exec /usr/bin/python3 \"$@\"\n/usr/bin/grep -qE '^secrets: *[^ ]|^server: *[^ l]' \"$4\" && exit 3\nexit 0\n"
 
 // launcher's pinned interpreter, which runs its YAML checks, replaced by py
 // (yamlCheckStub when empty). Other launchers are left as they are.
@@ -146,6 +148,25 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 		"op env pytest switch":      {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ".op.env sets PYTEST_CURRENT_TEST"},
 		"profile env pytest switch": {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), "profiles/work/.env sets PYTEST_CURRENT_TEST"},
 		"env glued pytest value":    {".env", []byte("OPENAI_API_KEY=sk-xPYTEST_CURRENT_TEST=1\n"), ""},
+		// Only a real assignment, as python-dotenv reads it, sets one of
+		// these; a comment or a value that mentions one does not (1.0.4
+		// review). Each case was checked against Hermes 0.19.0's loader.
+		"env commented pytest switch": {".env", []byte("# PYTEST_CURRENT_TEST=1\n"), ""},
+		"env indented comment":        {".env", []byte("   #PYTEST_CURRENT_TEST=1\n"), ""},
+		"env inline comment":          {".env", []byte("OPENAI_API_KEY=sk-x # PYTEST_CURRENT_TEST=1\n"), ""},
+		"env value names pytest":      {".env", []byte("NOTE=\"set PYTEST_CURRENT_TEST=1 to test\"\n"), ""},
+		"env spaced value":            {".env", []byte("OPENAI_API_KEY=sk-x PYTEST_CURRENT_TEST=1\n"), ""},
+		"env double-quoted key":       {".env", []byte("\"PYTEST_CURRENT_TEST\"=1\n"), ""},
+		"env bare pytest name":        {".env", []byte("PYTEST_CURRENT_TEST\n"), ""},
+		"env utf-16 comment":          {".env", utf16LE("# PYTEST_CURRENT_TEST=1\n"), ""},
+		"env commented loader path":   {".env", []byte("# LD_PRELOAD=/tmp/x.so\n# PYTHONPATH=/tmp/x\n"), ""},
+		"env spaced pytest switch":    {".env", []byte("  PYTEST_CURRENT_TEST = 1\n"), "sets PYTEST_CURRENT_TEST"},
+		"env pytest after a comment":  {".env", []byte("# note\nPYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
+		"env pytest after a value":    {".env", []byte("A=\"x\ny\"\nPYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
+		"env cr line ends":            {".env", []byte("A=1\rPYTEST_CURRENT_TEST=1\r"), "sets PYTEST_CURRENT_TEST"},
+		"env unicode space":           {".env", utf16LE("\u3000PYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
+		"env latin-1 space":           {".env", []byte("A=\xff\n\xa0PYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
+		"env utf-8 space":             {".env", []byte("\u00a0PYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
 		// The managed .env pins HERMES_TUI=0 over these (GAP-1036 review);
 		// HERMES_TUI_DIR still moves the code the TUI runs.
 		"env tui":                {".env", []byte("export HERMES_TUI = 1\n"), ""},

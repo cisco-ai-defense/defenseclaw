@@ -230,11 +230,11 @@ func TestHermesHookContractResolvesReleasesAndReleaseDates(t *testing.T) {
 		{version: "2026.7.7"},
 		{version: "2026.8.29"},
 		{version: "vunknown"},
-		// Known broken on the host (GAP-0978), in both contracts' ranges.
-		{version: "0.19.0"},
-		{version: "2026.7.20"},
-		{version: "2026.8.27"},
-		{version: "2026.8.31"},
+		// GAP-0978: a warning on the host, not a refusal (1.0.4 review).
+		{version: "0.19.0", contract: "hermes-hooks-v1"},
+		{version: "2026.7.20", contract: "hermes-hooks-v1"},
+		{version: "2026.8.27", contract: "hermes-hooks-v1"},
+		{version: "2026.8.31", contract: "hermes-hooks-v2"},
 		{version: "2026.9.7", contract: "hermes-hooks-v2"},
 		{version: "2026.9.24", contract: "hermes-hooks-v2"},
 		{version: "0.21.5+4977.g12e4d3e", contract: "hermes-hooks-v2"},
@@ -492,15 +492,15 @@ func TestHermesHookContractV019V020ClassifiesAllValidEventsWithoutInventingBlock
 		t.Fatalf("Hermes 0.18 compatibility = %q, want unknown for the v0.19 event contract", got)
 	}
 	// hermes-hooks-v1 is the pinned OpenShell image's contract; on the host
-	// its releases (and 0.21.0) are known broken (GAP-0978).
+	// its releases (and 0.21.0) carry the TUI warning (GAP-0978).
 	resolution := ResolveSandboxHookContract("hermes", "0.19.0")
 	if resolution.Status != HookCompatibilityKnown || resolution.Contract.ContractID != "hermes-hooks-v1" {
 		t.Fatalf("sandbox Hermes 0.19 = %+v, want hermes-hooks-v1", resolution)
 	}
 	contract := resolution.Contract
 	for _, version := range []string{"0.19.0", "Hermes Agent v0.20.0 (2026.8.3)", "0.21.0"} {
-		if got := ResolveHookContract("hermes", version); got.Status != HookCompatibilityUnknown || !got.KnownBroken {
-			t.Fatalf("host Hermes %s = %+v, want known broken", version, got)
+		if got := ResolveHookContract("hermes", version); got.Status != HookCompatibilityKnown || got.Warning == "" {
+			t.Fatalf("host Hermes %s = %+v, want its contract with the TUI warning", version, got)
 		}
 	}
 	if got := ResolveHookContract("hermes", "0.21.1"); got.Status != HookCompatibilityKnown || got.Contract.ContractID != "hermes-hooks-v2" {
@@ -623,6 +623,7 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		Reason       string `json:"reason"`
 		Issue        string `json:"issue"`
 		HostOnly     bool   `json:"host_only"`
+		WarnOnly     bool   `json:"warn_only"`
 	}
 	type manifestConnector struct {
 		Kind                string                `json:"kind"`
@@ -684,7 +685,7 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 	for name, spec := range gotManifest.Connectors {
 		var wantBroken []manifestKnownBroken
 		for _, entry := range knownBrokenAgentVersions[name] {
-			wantBroken = append(wantBroken, manifestKnownBroken{entry.Exact, entry.Min, entry.Max, entry.Reason, entry.Issue, entry.HostOnly})
+			wantBroken = append(wantBroken, manifestKnownBroken{entry.Exact, entry.Min, entry.Max, entry.Reason, entry.Issue, entry.HostOnly, entry.WarnOnly})
 		}
 		if len(spec.KnownBrokenVersions) != 0 || len(wantBroken) != 0 {
 			if !reflect.DeepEqual(spec.KnownBrokenVersions, wantBroken) {

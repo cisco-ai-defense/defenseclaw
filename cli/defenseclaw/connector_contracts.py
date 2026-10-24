@@ -98,6 +98,10 @@ class ConnectorCompatibility:
     # known-broken entry matches, so the newest contract applies.
     untested: bool = False
     newest_tested: str = ""
+    # The reason and issue of the warn_only known_broken_versions entry a
+    # known version falls in: it keeps its contract, and setup and doctor say
+    # what its hooks miss (mirrors Go HookContractResolution.Warning).
+    warning: str = ""
 
     @property
     def supported(self) -> bool:
@@ -305,7 +309,7 @@ HOOK_CONTRACT_MANIFEST = hook_contract_manifest()
 PROXY_CONNECTORS, HOOK_CONTRACTS = _load_contracts_from_manifest(HOOK_CONTRACT_MANIFEST)
 
 
-def _load_known_broken(manifest: dict[str, Any]) -> dict[str, tuple[dict[str, str], ...]]:
+def _load_known_broken(manifest: dict[str, Any]) -> dict[str, tuple[dict[str, Any], ...]]:
     out: dict[str, tuple[dict[str, str], ...]] = {}
     for raw_name, raw_spec in (manifest.get("connectors", {}) or {}).items():
         entries = raw_spec.get("known_broken_versions", []) if isinstance(raw_spec, dict) else []
@@ -316,12 +320,16 @@ def _load_known_broken(manifest: dict[str, Any]) -> dict[str, tuple[dict[str, st
             if not isinstance(entry, dict):
                 raise ValueError(f"hook_contracts.json connector {raw_name!r} has a malformed known-broken entry")
             keys = ("exact", "min_inclusive", "max_exclusive", "reason", "issue")
-            item = {key: str(entry.get(key, "") or "") for key in keys}
+            item: dict[str, Any] = {key: str(entry.get(key, "") or "") for key in keys}
             has_version = item["exact"] or item["min_inclusive"] or item["max_exclusive"]
             if not item["reason"] or not item["issue"] or not has_version:
                 raise ValueError(
                     f"hook_contracts.json connector {raw_name!r} known-broken entry needs a version, reason and issue"
                 )
+            # A warn_only entry is not refused: its hooks still guard the
+            # agent's main interface (Hermes 0.19.0-0.21.0 run them everywhere
+            # but in their TUI and dashboard chat).
+            item["warn_only"] = entry.get("warn_only") is True
             parsed.append(item)
         if parsed:
             out[normalize_connector(str(raw_name))] = tuple(parsed)
@@ -445,6 +453,7 @@ def resolve_connector_contract(
             reason=f"agent version {broken_version} is known broken: {broken['reason']} ({broken['issue']})",
             contract=None,
         )
+    warning = known_version_warning(name, raw)
     for contract in contracts:
         if _contract_matches_agent_version(contract, raw, normalized):
             return ConnectorCompatibility(
@@ -454,6 +463,7 @@ def resolve_connector_contract(
                 status=STATUS_KNOWN,
                 reason=f"matched hook contract {contract.contract_id}",
                 contract=contract,
+                warning=warning,
             )
     newest = _newest_contract_below(contracts, normalized)
     if newest is not None:
@@ -470,6 +480,7 @@ def resolve_connector_contract(
             contract=contract,
             untested=True,
             newest_tested=label,
+            warning=warning,
         )
     return ConnectorCompatibility(
         connector=name,
@@ -611,11 +622,31 @@ def _contract_matches_agent_version(
     return False
 
 
-def known_broken_entry(connector: str, raw_version: str | None) -> tuple[dict[str, str] | None, str]:
-    """The known_broken_versions entry raw_version falls in, and the version
-    it was matched as; mirrors Go knownBrokenAgentVersion for the agent on
-    the host. A source build is matched by the release date it prints."""
+def known_broken_entry(connector: str, raw_version: str | None) -> tuple[dict[str, Any] | None, str]:
+    """The refusing (not warn_only) known_broken_versions entry raw_version
+    falls in, and the version it was matched as; mirrors Go
+    knownBrokenAgentVersion for the agent on the host. A source build is
+    matched by the release date it prints."""
 
+    return _known_broken_match(connector, raw_version, warn_only=False)
+
+
+def known_warning_entry(connector: str, raw_version: str | None) -> dict[str, Any] | None:
+    """The warn_only known_broken_versions entry raw_version falls in, matched
+    like a refusing one; mirrors Go knownVersionWarning."""
+
+    entry, _ = _known_broken_match(connector, raw_version, warn_only=True)
+    return entry
+
+
+def known_version_warning(connector: str, raw_version: str | None) -> str:
+    entry = known_warning_entry(connector, raw_version)
+    return f"{entry['reason']} ({entry['issue']})" if entry is not None else ""
+
+
+def _known_broken_match(
+    connector: str, raw_version: str | None, *, warn_only: bool
+) -> tuple[dict[str, Any] | None, str]:
     name = normalize_connector(connector)
     raw = (raw_version or "").strip()
     normalized = normalize_agent_version(raw)
@@ -625,6 +656,8 @@ def known_broken_entry(connector: str, raw_version: str | None) -> tuple[dict[st
     if not normalized:
         return None, ""
     for entry in KNOWN_BROKEN_VERSIONS.get(name, ()):
+        if entry["warn_only"] != warn_only:
+            continue
         if (entry["exact"] and _exact_agent_version_match(raw, (entry["exact"],))) or (
             not entry["exact"]
             and _version_in_range(normalized, entry["min_inclusive"], entry["max_exclusive"])

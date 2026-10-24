@@ -561,7 +561,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             "claudecode-hooks-v2": "2.1.219",
             "devin-hooks-v1": "3000.4.25",
             "hermes-hooks-v1": "0.19.0",
-            # 0.19.0-0.21.0 are known broken on the host (GAP-0978).
+            # 0.19.0-0.21.0 carry the TUI warning on the host (GAP-0978).
             "hermes-hooks-v2": "0.21.1",
             "antigravity-hooks-v2": "1.1.8",
         }[contract]

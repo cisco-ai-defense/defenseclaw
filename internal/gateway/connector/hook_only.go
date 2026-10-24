@@ -1027,6 +1027,10 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	return caps
 }
 
+// hermesSetupWarningOutput receives Setup's warning about a Hermes release
+// whose TUI runs tools without the hooks (the gateway's log).
+var hermesSetupWarningOutput io.Writer = os.Stderr
+
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if c.name == "copilot" {
 		// disableAllHooks is the operator's choice and Setup never overrides
@@ -1043,12 +1047,12 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 	}
 	if c.name == "hermes" {
-		// A Hermes whose TUI runs tools without the shell hooks is refused in
-		// every guardrail mode, before anything is written: the hooks would
-		// look registered while that interface ran unguarded (GAP-0978). The
-		// contract-drift override does not apply; it is no unknown version.
-		if resolution := ResolveHookContract(c.name, opts.AgentVersion); resolution.KnownBroken {
-			return setupRefusedUnchanged{err: fmt.Errorf("hermes %s is not supported: %s; no changes made", resolution.NormalizedVersion, resolution.Reason)}
+		// A Hermes whose TUI and dashboard chat run tools without the shell
+		// hooks (GAP-0978) still runs them in its classic interface, cron,
+		// ACP and messaging gateway: Setup registers them and says what they
+		// miss. Refusing the release left every session unguarded.
+		if warning := ResolveHookContract(c.name, opts.AgentVersion).Warning; warning != "" {
+			fmt.Fprintf(hermesSetupWarningOutput, "[guardrail] WARNING: hermes %s: %s\n", strings.TrimSpace(opts.AgentVersion), warning)
 		}
 		configPath, err := hermesResolvedConfigPath(opts)
 		if err != nil {

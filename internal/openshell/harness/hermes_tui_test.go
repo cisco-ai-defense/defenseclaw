@@ -31,10 +31,10 @@ import (
 // GAP-1036 / GAP-1078: the pinned Hermes builds the agent of its TUI,
 // dashboard chat and serve backend without the shell hooks. The image keeps
 // the refusal, the managed TUI pins and the shim only while its pin is such
-// a release: the host refuses the same releases, and a pin past them must
-// drop them.
+// a release: the host warns about the same releases, and a pin past them
+// must drop them.
 func TestHermesImageRefusesTheUnhookedTUIOfItsPin(t *testing.T) {
-	if got := connector.ResolveHookContract("hermes", Hermes.DefaultVersion); !got.KnownBroken {
+	if got := connector.ResolveHookContract("hermes", Hermes.DefaultVersion); !strings.Contains(got.Warning, "hermes --tui") {
 		t.Fatalf("the image pins Hermes %s, whose TUI runs the hooks (%+v): remove hermesUnhookedAgentModule, the launcher's --tui refusal "+
 			"and the managed layer's TUI pins (HERMES_TUI=0, display.interface: cli in internal/gateway/connector/hermes_sandbox.go)",
 			Hermes.DefaultVersion, got)

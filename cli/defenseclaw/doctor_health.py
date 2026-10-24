@@ -43,6 +43,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNVERSIONED,
     ConnectorContract,
     known_broken_entry,
+    known_warning_entry,
     normalize_agent_version,
     normalize_connector,
     resolve_connector_contract,
@@ -483,6 +484,27 @@ def assess_connector_health(
             )
             continue
 
+        warned = known_warning_entry(connector, raw_version) if compatibility.warning else None
+        if compatibility.status == STATUS_KNOWN and compatibility.contract is not None and warned is not None:
+            # Hermes 0.19.0-0.21.0 are guarded except in their TUI and
+            # dashboard chat, which run tools without the hooks: a warning
+            # that points past those releases, not a failure.
+            contract = compatibility.contract
+            findings.append(
+                ConnectorHealthFinding(
+                    connector=public_name,
+                    status=HealthStatus.UNTESTED,
+                    reason_code="connector-version-partly-guarded",
+                    summary=f"{public_name} is guarded, but {warned['reason']}",
+                    installed_version=_safe_semver_from_agent(raw_version),
+                    contract_id=_safe_token(contract.contract_id),
+                    supported_agent_ranges=ranges,
+                    capabilities=_contract_capabilities(contract),
+                    remediations=_known_broken_connector_remediations(public_name, warned),
+                )
+            )
+            continue
+
         if compatibility.status == STATUS_KNOWN and compatibility.contract is not None and compatibility.untested:
             contract = compatibility.contract
             newest = _safe_token(compatibility.newest_tested.lstrip("<"))
@@ -539,8 +561,7 @@ def assess_connector_health(
         normalized = _safe_semver_from_agent(raw_version)
         broken, _ = known_broken_entry(connector, raw_version)
         if normalized or broken is not None:
-            # A known-broken version (Hermes 0.19.0-0.21.0, whose TUI runs
-            # tools without the hooks) says why, and points past the broken
+            # A known-broken version says why, and points past the broken
             # releases instead of at a range that holds them.
             findings.append(
                 ConnectorHealthFinding(
@@ -935,7 +956,7 @@ def _unsupported_connector_remediations(
     )
 
 
-def _known_broken_connector_remediations(connector: str, broken: dict[str, str]) -> tuple[RemediationChoice, ...]:
+def _known_broken_connector_remediations(connector: str, broken: dict[str, Any]) -> tuple[RemediationChoice, ...]:
     return (
         RemediationChoice(
             choice_id="install-supported-connector-version",

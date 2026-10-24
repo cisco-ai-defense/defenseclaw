@@ -276,8 +276,15 @@ func TestLaunchersRefuseUnsafeArguments(t *testing.T) {
 			// its parsers resolve --tu to --tui, and --t is ambiguous there.
 			{[]string{"--tui"}, "starts Hermes' TUI"}, {[]string{"--tu"}, "starts Hermes' TUI"},
 			{[]string{"--tui=1"}, "starts Hermes' TUI"}, {[]string{"chat", "--tui"}, "starts Hermes' TUI"},
-			{[]string{"chat", "-q", "hi", "--tui"}, "starts Hermes' TUI"}, {[]string{"--cli", "--tui"}, "starts Hermes' TUI"},
+			{[]string{"chat", "-q", "hi", "--tui"}, "starts Hermes' TUI"},
 			{[]string{"--t"}, ""}, {[]string{"--toolsets", "terminal"}, ""}, {[]string{"--cli"}, ""}, {[]string{"chat", "-q", "open the tui"}, ""},
+			// --cli (or --cl) wins over --tui in Hermes' _resolve_use_tui, in
+			// any order and at either level (1.0.4 review); after "--" it is
+			// no option, and --c is ambiguous there.
+			{[]string{"--cli", "--tui"}, ""}, {[]string{"--tui", "--cli"}, ""}, {[]string{"--tu", "--cl"}, ""},
+			{[]string{"chat", "--tui", "--cli"}, ""}, {[]string{"--cli", "chat", "--tui"}, ""}, {[]string{"--tui", "chat", "--cl"}, ""},
+			{[]string{"--tui", "--", "--cli"}, "starts Hermes' TUI"}, {[]string{"chat", "--tui", "--", "--cl"}, "starts Hermes' TUI"},
+			{[]string{"--c", "--tui"}, "starts Hermes' TUI"}, {[]string{"--tui", "--clip"}, "starts Hermes' TUI"},
 		}},
 		{Kiro, []argCase{
 			{[]string{"--agent", "kiro_default", "hi"}, "--agent is not supported"},
