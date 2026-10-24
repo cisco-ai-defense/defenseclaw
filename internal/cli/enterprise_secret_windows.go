@@ -319,8 +319,8 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		// The wrapper writes its journal before secret set. If that set
 		// never wrote its value, the old value (or absence) is already
 		// restored. Check through the pinned store under both locks; no
-		// credential or gateway change is needed. Every other value still
-		// has to pass --if-stored below, including a later admin value.
+		// credential write is needed. A live gateway may still hold the
+		// rotated value, so reload it before retiring the journal.
 		prior, err := openWindowsSecretStore(layout.SecretsDir, false)
 		if err != nil {
 			return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
@@ -331,8 +331,8 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		}
 		prior.close()
 		if (action == "set" && readErr == nil && bytes.Equal(bytes.TrimSpace(stored), value)) ||
-			(action == "remove" && (errors.Is(readErr, os.ErrNotExist) || errors.Is(readErr, windows.STATUS_OBJECT_NAME_NOT_FOUND))) {
-			return windowsSecretChange{noop: true}, nil
+			(action == "remove" && windowsSecretAbsentRead(readErr)) {
+			return reloadAlreadyRestoredWindowsSecret(opts.name)
 		}
 	}
 	var installedConfig []byte
@@ -389,6 +389,9 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 			_ = windows.CloseHandle(entry)
 			stored = raw
 		}
+		if opts.ifStored == "none" && readErr != nil && !windowsSecretAbsentRead(readErr) {
+			return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, readErr)
+		}
 		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
 			return windowsSecretChange{}, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
 		}
@@ -444,6 +447,35 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	}
 	change.restarted, change.noop, change.changed = restarted, unchanged && !restarted, !unchanged
 	return change, nil
+}
+
+func windowsSecretAbsentRead(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND)
+}
+
+// An interrupted rotation can find its before-value already on disk while a
+// live gateway still uses the delivered value. Settle the journal only after
+// the gateway has loaded that before-state. A refused restart leaves it for
+// the next ensure, and the recovery child covers a stop that already began.
+func reloadAlreadyRestoredWindowsSecret(name string) (windowsSecretChange, error) {
+	recovery, err := prepareWindowsSecretRecovery()
+	if err != nil {
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("cannot prepare gateway reload for already-restored credential %s: %w", name, err))
+	}
+	recoverOnExit := false
+	defer func() { _ = recovery.finish(recoverOnExit) }()
+	restarted, err := windowsSecretRestartGateway(recovery.arm)
+	if err != nil {
+		recoverOnExit = !errors.Is(err, errWindowsGatewayStopRefused)
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("credential %s is restored on disk, but restarting the gateway failed: %w", name, err))
+	}
+	if err := recovery.finish(false); err != nil {
+		return windowsSecretChange{}, secretFailed("restart_failed", windowsSecretExitFailure,
+			fmt.Errorf("credential %s is restored on disk, but cancelling gateway restart recovery failed: %w", name, err))
+	}
+	return windowsSecretChange{restarted: restarted, noop: !restarted}, nil
 }
 
 // keepIdenticalWindowsSecret reports whether credential name already holds

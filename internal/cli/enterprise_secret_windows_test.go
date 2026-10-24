@@ -1494,10 +1494,8 @@ func TestWindowsSecretUndoRotationAlreadyRestoredBeforeSet(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			windowsSecretRestartGateway = func(func() error) (bool, error) {
-				t.Fatal("an already-undone replay restarted the gateway")
-				return false, nil
-			}
+			windowsSecretGatewayLive = func() (bool, error) { return false, nil }
+			windowsSecretRestartGateway = func(func() error) (bool, error) { return false, nil }
 			opts := enterpriseSecretOptions{name: name, json: true, undoRotation: "none", ifStored: windowsTestSHA256("new-key")}
 			action, input := "remove", ""
 			if oldPresent {
@@ -1518,5 +1516,87 @@ func TestWindowsSecretUndoRotationAlreadyRestoredBeforeSet(t *testing.T) {
 				t.Fatal("replay created a credential that was absent before the rotation")
 			}
 		})
+	}
+}
+
+func TestWindowsSecretUndoRotationAlreadyRestoredReloadsLiveGateway(t *testing.T) {
+	for _, oldPresent := range []bool{true, false} {
+		for _, restartFails := range []bool{true, false} {
+			t.Run(fmt.Sprintf("old-present=%t/restart-fails=%t", oldPresent, restartFails), func(t *testing.T) {
+				dir := windowsSecretTestHarness(t)
+				previous := bundleStore
+				t.Cleanup(func() { bundleStore = previous })
+				store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+				bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+				const name = "ai-defense-api-key"
+				if oldPresent {
+					if err := os.MkdirAll(dir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(dir, name), []byte("old-key"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				restarts := 0
+				windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+					restarts++
+					if restartFails {
+						return false, errWindowsGatewayStopRefused
+					}
+					if err := beforeStop(); err != nil {
+						return false, err
+					}
+					return true, nil
+				}
+				opts := enterpriseSecretOptions{name: name, json: true, undoRotation: "none", ifStored: windowsTestSHA256("new-key")}
+				action, input := "remove", ""
+				if oldPresent {
+					action, input, opts.fromStdin = "set", "old-key\n", true
+				} else {
+					opts.undoConfig = "none"
+				}
+				out, err := runWindowsSecretCommand(t, action, opts, input)
+				if restartFails {
+					windowsSecretFailureDoc(t, out, err, action, "restart_failed")
+				} else if err != nil || !strings.Contains(out, `"gateway_restarted":true`) {
+					t.Fatalf("restored replay did not reload the gateway: %v\n%s", err, out)
+				}
+				if restarts != 1 {
+					t.Fatalf("gateway restart calls = %d, want 1", restarts)
+				}
+				if oldPresent {
+					raw, readErr := os.ReadFile(filepath.Join(dir, name))
+					if readErr != nil || string(raw) != "old-key" {
+						t.Fatalf("old value changed: %q, %v", raw, readErr)
+					}
+				} else if windowsSecretStored(dir, name) {
+					t.Fatal("absent credential was created")
+				}
+			})
+		}
+	}
+}
+
+func TestWindowsSecretSetIfStoredProvesAbsence(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	const name = "ai-defense-api-key"
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("administrator-value"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := enterpriseSecretOptions{name: name, fromStdin: true, json: true, ifStored: "none"}
+	out, err := runWindowsSecretCommand(t, "set", opts, "delivered-value\n")
+	windowsSecretFailureDoc(t, out, err, "set", "credential_changed")
+	raw, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil || string(raw) != "administrator-value" {
+		t.Fatalf("administrator value changed: %q, %v", raw, err)
+	}
+	if err := os.Remove(filepath.Join(dir, name)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runWindowsSecretCommand(t, "set", opts, "delivered-value\n"); err != nil {
+		t.Fatalf("proven absence refused: %v", err)
 	}
 }

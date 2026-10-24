@@ -94,8 +94,11 @@ func secretTransactionArguments(opts *enterpriseSecretOptions) error {
 			return errors.New("--undo-config belongs to a put-back: pass it with --undo-rotation")
 		}
 	}
-	if opts.ifStored != "" && !lowerSHA256Hex.MatchString(opts.ifStored) {
-		return fmt.Errorf("--if-stored takes the SHA-256 of the expected stored value (64 lowercase hex digits), not %q", opts.ifStored)
+	if opts.ifStored != "" && opts.ifStored != "none" && !lowerSHA256Hex.MatchString(opts.ifStored) {
+		return fmt.Errorf("--if-stored takes the SHA-256 of the expected stored value (64 lowercase hex digits) or none for proven absence, not %q", opts.ifStored)
+	}
+	if opts.ifStored == "none" && runtime.GOOS != "windows" {
+		return errors.New("--if-stored none is available only on Windows")
 	}
 	if opts.undoRotation != "" && opts.ifStored == "" {
 		return errors.New("--undo-rotation requires --if-stored to protect a credential changed after the rotation")
@@ -123,7 +126,8 @@ func secretTransactionArguments(opts *enterpriseSecretOptions) error {
 func checkSecretTransaction(name string, opts *enterpriseSecretOptions, stored []byte, storedOK bool) error {
 	if opts.ifStored != "" {
 		sum := sha256.Sum256(stored)
-		if !storedOK || hex.EncodeToString(sum[:]) != opts.ifStored {
+		if (opts.ifStored == "none" && storedOK) ||
+			(opts.ifStored != "none" && (!storedOK || hex.EncodeToString(sum[:]) != opts.ifStored)) {
 			return &enterprisebundle.Error{Code: "credential_changed", Detail: fmt.Sprintf(
 				"credential %s no longer holds the expected stored value; it was not changed", name)}
 		}

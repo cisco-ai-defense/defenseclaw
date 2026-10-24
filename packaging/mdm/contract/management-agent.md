@@ -1000,15 +1000,20 @@ off the device. The agent does not read `/health` itself (section 7); the
   Each entry also records the bundle confirmed before the rotation (the
   manifest SHA-256 `bundle status --json` reports as `current`, or `none`),
   and the SHA-256 of the exact value the rotation will store.
-  The rotation passes it as `secret set --bundle B --if-confirmed <sha|none>`
-  (refused `confirmed_bundle_changed`, nothing written, once another bundle
-  is confirmed), and the put-back as `secret set|remove --undo-rotation
+  The rotation passes `secret set --bundle B --if-confirmed <sha|none>
+  --if-stored <old-value-sha256|none>`. The last guard compares the current
+  credential with the journaled value or proven absence under the credential
+  and lifecycle locks. A different value returns `credential_changed` before
+  any write; the wrapper retires that unused entry and preserves the
+  administrator's value. A changed confirmed bundle returns
+  `confirmed_bundle_changed` before a write. The put-back passes `secret set|remove --undo-rotation
   <sha|none> --if-stored <value-sha256>`: it changes the credential only while
   the credential still holds the rotation's value and that bundle is still
   confirmed and does not sign the value stored now. On Windows, if the
   journaled old value is still stored, or a journaled absence is still absent, replay
-  succeeds without changing the credential or restarting the gateway and
-  retires the entry. A later direct credential change
+  changes no credential but restarts a live gateway before retiring the entry;
+  a failed restart keeps it for the next ensure. A stopped gateway reads the
+  stored value when it starts. A later direct credential change
   returns `credential_changed`; the journal and that later value stay.
   Linux and macOS also use `--if-stored` on their in-run put-back under the
   lifecycle lock. An entry for a credential that was not
@@ -1023,7 +1028,12 @@ off the device. The agent does not read `/health` itself (section 7); the
   confirmed bundle uses the stored value), so only then does the new value
   stay; any other refusal (`credential_in_use`, `secret_ref_mismatch`,
   `secret_ref_unbound`, `credential_changed`) keeps the entry, is reported, and no other rotation
-  runs until it is settled. A settled entry is renamed `.retired` in one
+  runs until it is settled. Earlier rc journal names without the new-value
+  digest may settle only when the old value or absence is already on disk:
+  replay uses that before-state as its compare-and-swap expectation and
+  reloads a live gateway. If another value is present, replay retains the
+  entry for administrator review because that format cannot prove whether
+  the value came from the rotation or a later write. A settled entry is renamed `.retired` in one
   step before it is overwritten and deleted, so a cleanup that stops never
   leaves an entry a later run would put back.
   `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
