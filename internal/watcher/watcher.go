@@ -1362,6 +1362,15 @@ func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
 		if len(out) > 0 {
 			return out
 		}
+		// Hermes stores install locks directly under skills/.locks. Discovery
+		// found no skill there; do not turn that metadata into a fallback skill.
+		if sameWatcherPath(filepath.Dir(path), root) && filepath.Base(path) == ".locks" {
+			if info, statErr := os.Lstat(path); statErr == nil && info.IsDir() {
+				if _, skillErr := os.Lstat(filepath.Join(path, "SKILL.md")); errors.Is(skillErr, os.ErrNotExist) {
+					return nil
+				}
+			}
+		}
 		return []InstallEvent{fallback}
 	}
 	if fallback.Type == InstallSkill && w.isDirectChildDir(path) {
@@ -2480,8 +2489,7 @@ func (w *InstallWatcher) mcpNameSharedByAnotherServer(evt InstallEvent) bool {
 // set adds it (GAP-1195): the scan did not finish (a timeout, a launcher or
 // scanner that exited, an unreachable server) and reported no finding, the
 // scanner did not refuse the server's definition, and the live policy
-// neither refuses unverified servers (block, or unset on a managed
-// standalone deployment) nor blocks this server. Secure Client keeps its
+// neither refuses unverified servers (explicit block) nor blocks this server. Secure Client keeps its
 // fail-closed admission.
 func (w *InstallWatcher) keepsUnverifiedMCPServer(evt InstallEvent, targetType, connector string, result *scanner.ScanResult, err error) bool {
 	if evt.Type != InstallMCP || w.secureClientActive() || scanner.MCPScanRefused(err) ||
