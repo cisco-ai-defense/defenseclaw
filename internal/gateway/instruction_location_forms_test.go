@@ -74,7 +74,7 @@ func TestInstructionProtectionUnloadedNameEveryWriteForm(t *testing.T) {
 							}
 							continue
 						}
-						if !(response.Action == guardrailActionBlock || response.WouldBlock) || !findingStringHasRuleID(response.Findings, target.rule) {
+						if response.Action != guardrailActionBlock && !response.WouldBlock || !findingStringHasRuleID(response.Findings, target.rule) {
 							t.Errorf("%s: action=%q findings=%v, want a %s block", label, response.Action, response.Findings, target.rule)
 						}
 					}
