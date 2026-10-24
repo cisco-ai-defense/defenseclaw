@@ -120,7 +120,7 @@ func TestManagedACPInitializeAgainstTheVerifiedGatewayService(t *testing.T) {
 		server := &http.Server{Handler: managedACPGateway(&evaluated), ReadHeaderTimeout: 5 * time.Second}
 		go func() { _ = server.Serve(listener) }()
 		t.Cleanup(func() { _ = server.Close() })
-		hookexec.UseManagedLinuxGatewayUnitForTest(t, os.Getpid())
+		hookexec.UseManagedLinuxGatewayUnitForTest(t, os.Getpid(), os.Geteuid())
 		assertInitialized(t, initializeThroughManagedGuard(t, "http://"+listener.Addr().String()), &evaluated)
 	})
 	t.Run("gateway in the service account", func(t *testing.T) {
@@ -153,14 +153,15 @@ func TestManagedACPInitializeAgainstTheVerifiedGatewayService(t *testing.T) {
 			t.Fatalf("service-account gateway did not start: %q, stderr=%q", reader.Text(), stderr.String())
 		}
 		fields := strings.Fields(strings.TrimPrefix(reader.Text(), "GATEWAY="))
-		if len(fields) != 2 {
+		if len(fields) != 3 {
 			t.Fatalf("service-account gateway line = %q", reader.Text())
 		}
-		pid, err := strconv.Atoi(fields[1])
-		if err != nil {
+		pid, pidErr := strconv.Atoi(fields[1])
+		uid, uidErr := strconv.Atoi(fields[2])
+		if pidErr != nil || uidErr != nil {
 			t.Fatalf("service-account gateway line = %q", reader.Text())
 		}
-		hookexec.UseManagedLinuxGatewayUnitForTest(t, pid)
+		hookexec.UseManagedLinuxGatewayUnitForTest(t, pid, uid)
 		editor := initializeThroughManagedGuard(t, "http://"+fields[0])
 		_ = stdin.Close()
 		var counted string
@@ -188,7 +189,7 @@ func serveManagedACPGatewayHelper(t *testing.T) {
 	var evaluated atomic.Int32
 	server := &http.Server{Handler: managedACPGateway(&evaluated), ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = server.Serve(listener) }()
-	fmt.Printf("GATEWAY=%s %d\n", listener.Addr(), os.Getpid())
+	fmt.Printf("GATEWAY=%s %d %d\n", listener.Addr(), os.Getpid(), os.Geteuid())
 	done := make(chan struct{})
 	go func() {
 		_, _ = io.Copy(io.Discard, os.Stdin)

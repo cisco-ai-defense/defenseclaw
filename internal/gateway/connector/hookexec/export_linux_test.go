@@ -7,17 +7,18 @@ package hookexec
 
 import (
 	"context"
+	"strconv"
 	"testing"
 )
 
 // UseManagedLinuxGatewayUnitForTest makes systemd report pid as the main
-// process of the packaged gateway unit. The socket and service account
-// checks still read the real /proc.
-func UseManagedLinuxGatewayUnitForTest(t testing.TB, pid int) {
+// process of the packaged gateway unit, running as uid. The socket check
+// still reads the real /proc/net.
+func UseManagedLinuxGatewayUnitForTest(t testing.TB, pid, uid int) {
 	t.Helper()
 	previous := managedLinuxServiceShow
 	managedLinuxServiceShow = func(context.Context) ([]byte, error) {
-		return []byte(managedGatewayShow(pid, managedLinuxGatewayExecutable)), nil
+		return []byte(managedGatewayShowAs(pid, managedLinuxGatewayExecutable, strconv.Itoa(uid), strconv.Itoa(uid))), nil
 	}
 	t.Cleanup(func() { managedLinuxServiceShow = previous })
 }
