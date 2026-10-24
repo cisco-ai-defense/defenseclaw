@@ -31,6 +31,9 @@ const (
 	managedACPFixtureToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	managedACPServerNonce  = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 	managedACPHelperEnv    = "DC_TEST_MANAGED_ACP_GATEWAY"
+	// managedACPProcHiddenEnv tells a run under a /proc mounted hidepid=2
+	// to prove that the service account's process is hidden from it.
+	managedACPProcHiddenEnv = "DC_TEST_MANAGED_ACP_PROC_HIDDEN"
 )
 
 // managedACPGateway answers the ACP challenge and evaluation the way the
@@ -71,7 +74,18 @@ func managedACPGateway(evaluated *atomic.Int32) http.Handler {
 // would read.
 func initializeThroughManagedGuard(t *testing.T, gatewayURL string) string {
 	t.Helper()
-	evaluator, err := acp.NewManagedHTTPEvaluator(gatewayURL, managedACPFixtureToken)
+	return initializeThroughGuard(t, gatewayURL, true)
+}
+
+// initializeThroughGuard is initializeThroughManagedGuard for the managed
+// guard (managed) or the per-user one.
+func initializeThroughGuard(t *testing.T, gatewayURL string, managed bool) string {
+	t.Helper()
+	newEvaluator := acp.NewHTTPEvaluator
+	if managed {
+		newEvaluator = acp.NewManagedHTTPEvaluator
+	}
+	evaluator, err := newEvaluator(gatewayURL, managedACPFixtureToken)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +95,7 @@ func initializeThroughManagedGuard(t *testing.T, gatewayURL string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	err = acp.Run(ctx, acp.ProxyOptions{
-		AgentID: "copilot", ClientID: "zed", Profile: "p-obs", Mode: acp.ModeObserve, Managed: true,
+		AgentID: "copilot", ClientID: "zed", Profile: "p-obs", Mode: acp.ModeObserve, Managed: managed,
 		Command: "/bin/sh", Args: []string{"-c", agent},
 		Stdin: strings.NewReader(initialize), Stdout: &stdout, Stderr: &stderr, Evaluator: evaluator,
 	})
@@ -123,6 +137,17 @@ func TestManagedACPInitializeAgainstTheVerifiedGatewayService(t *testing.T) {
 		hookexec.UseManagedLinuxGatewayUnitForTest(t, os.Getpid(), os.Geteuid())
 		assertInitialized(t, initializeThroughManagedGuard(t, "http://"+listener.Addr().String()), &evaluated)
 	})
+	t.Run("per user gateway in this account", func(t *testing.T) {
+		listener, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var evaluated atomic.Int32
+		server := &http.Server{Handler: managedACPGateway(&evaluated), ReadHeaderTimeout: 5 * time.Second}
+		go func() { _ = server.Serve(listener) }()
+		t.Cleanup(func() { _ = server.Close() })
+		assertInitialized(t, initializeThroughGuard(t, "http://"+listener.Addr().String(), false), &evaluated)
+	})
 	t.Run("gateway in the service account", func(t *testing.T) {
 		if os.Geteuid() == 0 {
 			t.Skip("root reads every process; this case proves an ordinary user")
@@ -161,6 +186,11 @@ func TestManagedACPInitializeAgainstTheVerifiedGatewayService(t *testing.T) {
 		if pidErr != nil || uidErr != nil {
 			t.Fatalf("service-account gateway line = %q", reader.Text())
 		}
+		if os.Getenv(managedACPProcHiddenEnv) == "1" {
+			if _, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid))); err == nil {
+				t.Fatalf("/proc/%d of the service account is visible: /proc is not mounted hidepid=2", pid)
+			}
+		}
 		hookexec.UseManagedLinuxGatewayUnitForTest(t, pid, uid)
 		editor := initializeThroughManagedGuard(t, "http://"+fields[0])
 		_ = stdin.Close()
@@ -176,6 +206,57 @@ func TestManagedACPInitializeAgainstTheVerifiedGatewayService(t *testing.T) {
 			t.Fatalf("service-account gateway evaluated no frame (%q): the session was not governed", counted)
 		}
 	})
+}
+
+// Managed and per-user ACP initialize, governed, when /proc hides other
+// accounts' processes: hidepid=2, and with subset=pid as well, which also
+// hides /proc/net (only /proc/<pid> and /proc/self are left). The guard
+// runs as this ordinary account in a private mount and PID namespace with
+// that /proc, and the managed gateway in a second account. Before GAP-1138
+// the managed check read the gateway's /proc/<pid>/exe and status, and both
+// checks read /proc/net/tcp, so every initialize failed here.
+func TestManagedACPInitializeWhenProcHidesOtherAccounts(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root sees every process; this proves an ordinary user")
+	}
+	for _, tool := range []string{"/usr/bin/unshare", "/usr/bin/setpriv", "/usr/bin/timeout"} {
+		if _, err := os.Stat(tool); err != nil {
+			t.Skipf("%s is unavailable: %v", tool, err)
+		}
+	}
+	if err := exec.Command("sudo", "-n", "-u", "nobody", "true").Run(); err != nil {
+		t.Skipf("passwordless second-account execution is unavailable: %v", err)
+	}
+	if err := exec.Command("sudo", "-n", "/usr/bin/unshare", "--mount", "--propagation", "private", "true").Run(); err != nil {
+		t.Skipf("a private mount namespace is unavailable: %v", err)
+	}
+	binary, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const parent = "TestManagedACPInitializeAgainstTheVerifiedGatewayService"
+	cases := []string{"gateway_in_the_service_account", "per_user_gateway_in_this_account"}
+	pattern := "^" + parent + "$/^(" + strings.Join(cases, "|") + ")$"
+	script := `mount -t proc -o "$1" proc /proc && /usr/bin/setpriv --reuid="$2" --regid="$3" --init-groups -- ` +
+		`/usr/bin/env ` + managedACPProcHiddenEnv + `=1 "$4" -test.run="$5" -test.v -test.count=1`
+	for _, options := range []string{"hidepid=2", "hidepid=2,subset=pid"} {
+		t.Run(options, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+			defer cancel()
+			run := exec.CommandContext(ctx, "sudo", "-n", "/usr/bin/timeout", "-k", "5", "100",
+				"/usr/bin/unshare", "--mount", "--propagation", "private", "--pid", "--fork", "--kill-child",
+				"/bin/sh", "-c", script, "sh", options, strconv.Itoa(os.Geteuid()), strconv.Itoa(os.Getegid()), binary, pattern)
+			output, err := run.CombinedOutput()
+			if err != nil {
+				t.Fatalf("guard under /proc %s: %v\n%s", options, err, output)
+			}
+			for _, name := range cases {
+				if !strings.Contains(string(output), "--- PASS: "+parent+"/"+name+" ") {
+					t.Fatalf("%s did not pass under /proc %s:\n%s", name, options, output)
+				}
+			}
+		})
+	}
 }
 
 // serveManagedACPGatewayHelper is the gateway in the second account. It

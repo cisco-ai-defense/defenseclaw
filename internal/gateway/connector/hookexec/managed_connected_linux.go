@@ -40,7 +40,7 @@ func trustedSystemctlEnv() []string { return []string{"LC_ALL=C", "SYSTEMD_PAGER
 var (
 	managedLinuxServiceShow = systemctlShowManagedGateway
 	managedLinuxLookupUser  = user.Lookup
-	managedLinuxProcNet     = "/proc/net"
+	managedLinuxProcNet     = procSelfNet
 	managedLinuxAcceptPoll  = 5 * time.Millisecond
 	managedLinuxUnitPoll    = 50 * time.Millisecond
 )
