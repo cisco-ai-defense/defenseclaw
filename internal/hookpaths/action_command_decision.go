@@ -122,33 +122,22 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 	if command == "" || home == "" {
 		return false
 	}
-	reader := func(program string) bool {
-		switch strings.ToLower(programBase(program)) {
-		case "cat", "head", "tail", "type", "get-content", "gc", "base64", "env", "sudo":
-			return true
-		}
-		return false
-	}
 	if actionWindowsHome(home) {
 		words, ok := actionWindowsWords(command)
 		if !ok {
 			return false
 		}
-		active := false
-		for _, word := range words {
+		start := 0
+		for i, word := range words {
 			switch word {
 			case ";", "&", "&&", "|", "||":
-				active = false
-				continue
-			}
-			active = active || reader(word)
-			if active {
-				if protected, _ := actionWindowsProtected(word, cwd, home, true); protected {
+				if actionPrivateKeyReadWords(words[start:i], cwd, home, true, 0) {
 					return true
 				}
+				start = i + 1
 			}
 		}
-		return false
+		return actionPrivateKeyReadWords(words[start:], cwd, home, true, 0)
 	}
 	file, ok := parseShell(command)
 	if !ok {
@@ -160,58 +149,124 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		if !ok || len(call.Args) == 0 {
 			return !found
 		}
-		program, fixed := staticProgramWord(call.Args[0], home)
-		if !fixed {
-			return !found
-		}
-		if posixShellProgram(programBase(program)) {
-			words := make([]string, len(call.Args))
-			for i, arg := range call.Args {
-				value, known := StaticWord(arg, home)
-				if !known {
-					return !found
-				}
-				words[i] = value
-			}
-			if body, known := shellCommandBodyIndex(words); known && body < len(words) &&
-				ActionPrivateKeyRead(words[body], cwd, home) {
-				found = true
-			}
-			return !found
-		}
-		if base := programBase(program); base == "cp" || base == "gcp" {
-			args := make([]string, 0, len(call.Args)-1)
-			for _, arg := range call.Args[1:] {
-				value, known := StaticWord(arg, home)
-				if !known {
-					return !found
-				}
-				args = append(args, value)
-			}
-			copy := cpOperands(args, makeStatic(len(args)))
-			if !copy.ok {
+		words := make([]string, len(call.Args))
+		for i, arg := range call.Args {
+			value, known := StaticWord(arg, home)
+			if !known {
 				return !found
 			}
-			for _, source := range copy.sources {
-				if actionPrivateReadPath(source, cwd, home) {
-					found = true
-					break
-				}
-			}
-			return !found
+			words[i] = value
 		}
-		if !reader(program) {
-			return !found
-		}
-		for _, arg := range call.Args[1:] {
-			if value, fixed := StaticWord(arg, home); fixed && actionPrivateReadPath(value, cwd, home) {
-				found = true
-				break
-			}
-		}
+		found = actionPrivateKeyReadWords(words, cwd, home, false, 0)
 		return !found
 	})
 	return found
+}
+
+// Wrapper arguments are not file reads. Resolve a bounded, literal child
+// before attributing a private-key content read to its program.
+func actionPrivateKeyReadWords(words []string, cwd, home string, windows bool, depth int) bool {
+	if depth >= 8 || len(words) == 0 {
+		return false
+	}
+	program := programBase(words[0])
+	switch program {
+	case "cmd":
+		if windows && len(words) > 2 && strings.EqualFold(words[1], "/c") {
+			return actionPrivateKeyReadWords(words[2:], cwd, home, windows, depth+1)
+		}
+		return false
+	case "env", "sudo":
+		index := 1
+		for index < len(words) {
+			word := words[index]
+			if word == "--" {
+				index++
+				break
+			}
+			if program == "env" {
+				switch {
+				case word == "-i" || word == "--ignore-environment" || word == "-v" || word == "-0":
+					index++
+				case word == "-u" || word == "--unset" || word == "-C" || word == "--chdir":
+					if index+1 >= len(words) {
+						return false
+					}
+					if word == "-C" || word == "--chdir" {
+						cwd = OperandPath(words[index+1], cwd)
+					}
+					index += 2
+				case word == "-S" || word == "--split-string":
+					return index+1 < len(words) && ActionPrivateKeyRead(words[index+1], cwd, home)
+				case strings.HasPrefix(word, "--chdir="):
+					cwd = OperandPath(strings.TrimPrefix(word, "--chdir="), cwd)
+					index++
+				case strings.HasPrefix(word, "--unset=") || strings.HasPrefix(word, "-u") && len(word) > 2 ||
+					strings.Contains(word, "=") && !strings.HasPrefix(word, "-"):
+					index++
+				case strings.HasPrefix(word, "-"):
+					return false
+				default:
+					return actionPrivateKeyReadWords(words[index:], cwd, home, windows, depth+1)
+				}
+				continue
+			}
+			if word == "-l" || word == "-ll" || word == "--list" {
+				return false
+			}
+			switch {
+			case strings.Contains(" -u -g -h -p -C -r -t --user --group --host --prompt --close-from --role --type ", " "+word+" "):
+				if index+1 >= len(words) {
+					return false
+				}
+				index += 2
+			case strings.Contains(" -n -E -H -S -b -k -K -v -i -s --login --shell --non-interactive --preserve-env ", " "+word+" ") ||
+				strings.HasPrefix(word, "--user=") || strings.HasPrefix(word, "--group=") ||
+				strings.HasPrefix(word, "--preserve-env=") ||
+				len(word) > 2 && (strings.HasPrefix(word, "-u") || strings.HasPrefix(word, "-g")):
+				index++
+			case strings.HasPrefix(word, "-"):
+				return false
+			default:
+				return actionPrivateKeyReadWords(words[index:], cwd, home, windows, depth+1)
+			}
+		}
+		return actionPrivateKeyReadWords(words[index:], cwd, home, windows, depth+1)
+	}
+	if posixShellProgram(program) {
+		if body, known := shellCommandBodyIndex(words); known && body < len(words) {
+			return ActionPrivateKeyRead(words[body], cwd, home)
+		}
+		return false
+	}
+	readPath := func(value string) bool {
+		if windows {
+			protected, _ := actionWindowsProtected(value, cwd, home, true)
+			return protected
+		}
+		return actionPrivateReadPath(value, cwd, home)
+	}
+	if program == "cp" || program == "gcp" {
+		copy := cpOperands(words[1:], makeStatic(len(words)-1))
+		if !copy.ok {
+			return false
+		}
+		for _, source := range copy.sources {
+			if readPath(source) {
+				return true
+			}
+		}
+		return false
+	}
+	switch program {
+	case "cat", "head", "tail", "type", "get-content", "gc", "base64":
+		for _, arg := range words[1:] {
+			if readPath(arg) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func actionResolvedProtectedTarget(command, cwd, home string) bool {
