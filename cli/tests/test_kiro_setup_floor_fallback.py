@@ -26,12 +26,21 @@ from unittest.mock import patch
 
 import click
 import pytest
+from defenseclaw import config_writer
 from defenseclaw.commands import cmd_setup
 from defenseclaw.config import PerConnectorGuardrailConfig
 
 from tests.helpers import cleanup_app, make_app_context, record_test_setup_agent_selections
 
 OLD_CLI = "kiro-cli 2.26.1"
+
+
+@pytest.fixture(autouse=True)
+def _per_user_host(monkeypatch):
+    # These cases check per-user setup, even on a managed Windows test lane.
+    # The machine writer gate is covered by its own tests.
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
 
 
 def _kiro_discovery(version: str = OLD_CLI) -> SimpleNamespace:
