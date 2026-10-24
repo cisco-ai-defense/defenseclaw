@@ -495,10 +495,10 @@ func trustedWindowsNativeLocationWrite(input actionfacts.Input, dialect actionfa
 			if resolved, ok := variables[strings.ToLower(target)]; ok {
 				target = resolved
 			} else if _, builtIn := windowsLocationResolve(target, current, input, dialect); !builtIn {
-				// A computed destination without a bounded assignment can name
-				// the protected file. The data and other command operands do not
-				// participate in this decision.
-				return true
+				// An unbound destination, including PowerShell's $null sink,
+				// does not prove a write to an authorized-keys file. Keep any
+				// uncertainty in the audit note, not the persistence finding.
+				continue
 			}
 		}
 		resolved, ok := windowsLocationResolve(target, current, input, dialect)

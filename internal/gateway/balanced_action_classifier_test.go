@@ -127,6 +127,29 @@ func TestBalancedActionWindowsOrdinaryCommands(t *testing.T) {
 	}
 }
 
+func TestBalancedActionWindowsUnboundRedirectIsAuditOnly(t *testing.T) {
+	for _, command := range []string{
+		"git status --short --branch 2>$null",
+		"Get-ChildItem -Force | Select-Object Mode,Length,LastWriteTime,Name; git status --short --branch 2>$null",
+		"git status --short --branch 2>$unbound",
+		"node --version; npm --version",
+	} {
+		t.Run(command, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "exec_command", Command: command,
+				CWD: "C:/work", ActiveHome: "C:/Users/alice", DialectHint: actionfacts.DialectPowerShell}
+			if trustedWindowsLocationAuthorizedKeysWrite(input) {
+				t.Fatal("unresolved redirect became a protected-target proof")
+			}
+			request := trustedActionRequest{Input: input, Connector: "codex", EnforcementCapable: true}
+			for _, finding := range dispatchTrustedAction(t.Context(), request) {
+				if finding.RuleID == "persistence.ssh_authorized_keys_command" {
+					t.Fatalf("ordinary Windows command became SSH persistence: %+v", finding)
+				}
+			}
+		})
+	}
+}
+
 func TestBalancedActionScriptArgumentsAreData(t *testing.T) {
 	home, cwd := r104ReviewHome(t)
 	for name, body := range map[string]string{
