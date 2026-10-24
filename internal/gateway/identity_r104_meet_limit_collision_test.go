@@ -112,9 +112,8 @@ func TestMeetOverOneGenerationsLimitKeepsEveryRuleAndNeverRefuses(t *testing.T) 
 				for _, prefix := range []string{"LIM-A", "LIM-B"} {
 					got := findingWithID(scanAllRulesForConnectorFor(scoped, scope, meetPlainMarker(prefix), "message"), prefix+"-PLAIN")
 					member := strings.ToLower(strings.TrimPrefix(prefix, "LIM-"))
-					want := config.IsProfileMeet(selected) || selected == member
-					if (got != nil) != want {
-						t.Errorf("scope %q, selected %q: %s finding %+v; want %v", scope, selected, prefix, got, want)
+					if got == nil || got.profile != member {
+						t.Errorf("scope %q, selected %q: %s finding %+v; want finding audited for %s", scope, selected, prefix, got, member)
 					}
 				}
 			}
