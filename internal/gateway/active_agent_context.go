@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"io"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -27,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 )
 
@@ -70,8 +72,11 @@ type activeAgentContextKey struct {
 }
 
 type activeAgentContextSession struct {
-	files                    []string
-	caseInsensitiveFiles     []string
+	files                []string
+	caseInsensitiveFiles []string
+	// identities maps the hook client's file identity of a loaded file
+	// (hookpaths.LoadedIdentityPrefix) to that file.
+	identities               map[string]string
 	caseInsensitiveUncertain bool
 	uncertain                bool
 	updatedAt                time.Time
@@ -80,6 +85,7 @@ type activeAgentContextSession struct {
 type activeAgentContextSnapshot struct {
 	files                    []string
 	caseInsensitiveFiles     []string
+	identities               map[string]string
 	caseInsensitiveUncertain bool
 	uncertain                bool
 }
@@ -356,10 +362,13 @@ func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath st
 	if !ok {
 		return
 	}
-	cache.seedKey(key, filePath)
+	cache.seedKey(key, filePath, "")
 }
 
-func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePath string) {
+// seedKey records a loaded instruction file. identity is the hook client's
+// file identity of it, read as the user (hookpaths.LoadedIdentityPrefix), or
+// empty.
+func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePath, identity string) {
 	canonicalPath, caseInsensitive, valid := exactActiveAgentFile(filePath)
 	if !valid {
 		if syntacticActiveAgentFileCandidate(filePath) {
@@ -368,8 +377,11 @@ func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePat
 			// A symlinked instruction file is the file it reaches: keep the
 			// loaded name too, so a write to that file under another name is
 			// judged by its identity (GAP-0971, hookpaths.InstructionFiles).
-			if info, err := os.Stat(filePath); err == nil && info.Mode().IsRegular() {
+			// A gateway that cannot read the file (ProtectHome) keeps the
+			// identity the hook client read (GAP-1064).
+			if info, err := os.Stat(filePath); err == nil && info.Mode().IsRegular() || identity != "" {
 				cache.seedLoadedFile(key, filePath, false, now)
+				cache.seedLoadedIdentity(key, filePath, identity)
 			}
 		}
 		return
@@ -380,6 +392,28 @@ func (cache *activeAgentContextCache) seedKey(key activeAgentContextKey, filePat
 		caseInsensitive,
 		cache.currentTime(),
 	)
+	cache.seedLoadedIdentity(key, canonicalPath, identity)
+}
+
+// seedLoadedIdentity keeps the hook client's identity of a recorded loaded
+// file, so a gateway that cannot read the user's files matches a write
+// target's identity (hookpaths.FileIdentitiesKey) with it.
+func (cache *activeAgentContextCache) seedLoadedIdentity(key activeAgentContextKey, filePath, identity string) {
+	if identity == "" {
+		return
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	session, ok := cache.sessions[key]
+	if !ok || !slices.Contains(session.files, filePath) ||
+		len(session.identities) >= maxActiveAgentContextFiles {
+		return
+	}
+	if session.identities == nil {
+		session.identities = make(map[string]string)
+	}
+	session.identities[identity] = filePath
+	cache.sessions[key] = session
 }
 
 // seedSandboxKey records an instruction file a sandboxed Claude Code loaded.
@@ -573,7 +607,8 @@ func (cache *activeAgentContextCache) snapshotKey(key activeAgentContextKey) act
 	session.updatedAt = now
 	cache.sessions[key] = session
 	return activeAgentContextSnapshot{
-		files: append([]string(nil), session.files...),
+		files:      append([]string(nil), session.files...),
+		identities: maps.Clone(session.identities),
 		caseInsensitiveFiles: append(
 			[]string(nil),
 			session.caseInsensitiveFiles...,
@@ -586,7 +621,9 @@ func (cache *activeAgentContextCache) snapshotKey(key activeAgentContextKey) act
 // applyClaudeCodeActiveAgentContext consumes only authenticated, typed Claude
 // Code lifecycle fields. It never reads req.Payload or ToolInput, preventing a
 // generic payload, command mention, or tool argument from manufacturing trusted
-// instruction-file context.
+// instruction-file context. The managed hook client's identity of a loaded
+// file (hookpaths.LoadedIdentityPrefix) only adds protection: it makes more
+// writes writes to that file, never fewer.
 func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req claudeCodeHookRequest) activeAgentContextSnapshot {
 	const connectorName = "claudecode"
 	if a == nil || authenticatedHookConnector(ctx) != connectorName {
@@ -610,7 +647,8 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 		if sandboxed {
 			a.activeAgentContext.seedSandboxKey(key, view, req.FilePath)
 		} else {
-			a.activeAgentContext.seedKey(key, req.FilePath)
+			a.activeAgentContext.seedKey(key, req.FilePath,
+				resolvedWritesFromContext(ctx)[hookpaths.LoadedIdentityPrefix+req.FilePath])
 		}
 	case "PreToolUse", "PermissionRequest":
 		return a.activeAgentContext.snapshotKey(key)

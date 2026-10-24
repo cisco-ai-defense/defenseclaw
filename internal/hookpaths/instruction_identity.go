@@ -4,6 +4,8 @@
 package hookpaths
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -21,10 +23,97 @@ var InstructionFileNames = [...]string{
 }
 
 // InstructionIdentityKey carries the hook client's file-identity check of a
-// call's write targets: the path of the protected instruction file that one
-// of them writes under another name. A gateway that cannot read the user's
-// files (ProtectHome) judges the call from it.
+// call's write targets: the paths of the protected instruction files that
+// they write under other names, every one of them (GAP-1065), separated by
+// NUL. A gateway that cannot read the user's files (ProtectHome) judges the
+// call from it.
 const InstructionIdentityKey = "\x00instruction-identity"
+
+// FileIdentitiesKey carries the file identities (FileIdentity) of a call's
+// existing write targets, comma separated. LoadedIdentityPrefix keys the
+// identity of the instruction file an InstructionsLoaded event names. The
+// hook client reads both as the user, so a gateway that cannot read the
+// user's files (ProtectHome) still knows a write under any name to a file
+// the session loaded as a write to that file (GAP-1064).
+const (
+	FileIdentitiesKey    = "\x00file-identities"
+	LoadedIdentityPrefix = "\x00loaded-identity:"
+)
+
+// maxFileIdentityBytes bounds one FileIdentity value.
+const maxFileIdentityBytes = 64
+
+// InstructionIdentities returns the instruction files of a decoded map's
+// InstructionIdentityKey.
+func InstructionIdentities(targets map[string]string) []string {
+	if value := targets[InstructionIdentityKey]; value != "" {
+		return strings.Split(value, "\x00")
+	}
+	return nil
+}
+
+// FileIdentities returns the write-target identities of a decoded map's
+// FileIdentitiesKey.
+func FileIdentities(targets map[string]string) []string {
+	if value := targets[FileIdentitiesKey]; value != "" {
+		return strings.Split(value, ",")
+	}
+	return nil
+}
+
+// FileIdentity is the identity of the regular file that path reaches,
+// following symlinks: its device and inode. It is empty when the file is
+// missing or not regular, and on Windows, whose gateway reads the file
+// itself and gets no client evidence.
+func FileIdentity(path string) string {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return ""
+	}
+	return fileIdentity(info)
+}
+
+func validFileIdentity(identity string) bool {
+	if identity == "" || len(identity) > maxFileIdentityBytes {
+		return false
+	}
+	for _, c := range []byte(identity) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && c != ':' {
+			return false
+		}
+	}
+	return true
+}
+
+// clientIdentityFact reports a key of the identity evidence above, which is
+// for the cognitive-file proof only.
+func clientIdentityFact(key string) bool {
+	return key == InstructionIdentityKey || key == FileIdentitiesKey ||
+		strings.HasPrefix(key, LoadedIdentityPrefix)
+}
+
+// instructionLoadEvidence is the client evidence of an InstructionsLoaded
+// event: the identity of the instruction file it names.
+func instructionLoadEvidence(envelope map[string]json.RawMessage) string {
+	var event, path string
+	if json.Unmarshal(envelope["hook_event_name"], &event) != nil || event != "InstructionsLoaded" ||
+		json.Unmarshal(envelope["file_path"], &path) != nil ||
+		!filepath.IsAbs(path) || len(path) > MaxWriteTargetPathBytes {
+		return ""
+	}
+	if _, named := InstructionFileName(filepath.Base(path), instructionNameFold()); !named {
+		return ""
+	}
+	identity := FileIdentity(path)
+	if identity == "" {
+		return ""
+	}
+	encoded, err := json.Marshal(map[string]string{LoadedIdentityPrefix + path: identity})
+	if err != nil {
+		return ""
+	}
+	return base64.RawURLEncoding.EncodeToString(encoded)
+}
 
 // InstructionFileName returns the protected name that base spells: exactly,
 // or without case when foldCase (Windows, where the file system ignores it).

@@ -435,3 +435,123 @@ func TestInstructionProtectionObservesHardLinkWrite(t *testing.T) {
 		t.Fatalf("observe mode hard-link write: %+v", response)
 	}
 }
+
+// protectHomeEvidence resolves each call as the managed hook client does, as
+// the user, and then removes root. The gateway, like one behind ProtectHome,
+// reads none of those files and judges from the client evidence alone.
+func protectHomeEvidence(t *testing.T, root, cwd string, calls []instructionIdentityCall) []context.Context {
+	t.Helper()
+	contexts := make([]context.Context, len(calls))
+	for i, call := range calls {
+		contexts[i] = withAuthenticatedHookConnector(instructionResolvedWriteContext(t, cwd, call.tool, call.input), "claudecode")
+	}
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatal(err)
+	}
+	return contexts
+}
+
+// GAP-1064: behind ProtectHome, a loaded SOUL.md outside the load locations
+// is a symlink to soul.txt. The hook client sends the loaded file's identity
+// and each write target's, so a write to soul.txt under any name is a write
+// to SOUL.md: blocked in action mode and reported in observe mode. Without
+// that load, or with identity evidence for another file, and for every
+// other file, nothing is blocked.
+func TestInstructionProtectionLoadedFileBehindProtectHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows gateway reads the user's files and gets no client evidence")
+	}
+	root := instructionIdentityTestRoot(t)
+	project := filepath.Join(root, "project")
+	writeActiveAgentTestFile(t, project, "main.go")
+	persona := writeActiveAgentTestFile(t, filepath.Join(root, "persona-src"), "soul.txt")
+	neighbor := writeActiveAgentTestFile(t, filepath.Join(root, "persona-src"), "other.txt")
+	soul := instructionIdentityTestSymlink(t, persona, filepath.Join(root, "persona", "SOUL.md"))
+	hard := instructionIdentityTestLink(t, persona, filepath.Join(root, "scratch", "hard.txt"))
+	via := instructionIdentityTestSymlink(t, persona, filepath.Join(root, "scratch", "via.txt"))
+	loadEvidence, ok := hookpaths.Decode(hookpaths.Resolve(mustJSON(t, map[string]interface{}{
+		"hook_event_name": "InstructionsLoaded", "session_id": "protect-home", "cwd": project, "file_path": soul,
+	})))
+	if !ok {
+		t.Fatal("no InstructionsLoaded evidence")
+	}
+	protected := append(instructionIdentityWrites(persona), instructionIdentityWrites(hard)...)
+	protected = append(protected, instructionIdentityCall{"Bash", map[string]interface{}{"command": "printf changed >> '" + via + "'"}})
+	ordinary := instructionIdentityWrites(neighbor)
+	contexts := protectHomeEvidence(t, root, project, append(append([]instructionIdentityCall(nil), protected...), ordinary...))
+	otherFile := map[string]string{
+		hookpaths.LoadedIdentityPrefix + filepath.Join(root, "persona", "AGENTS.md"): loadEvidence[hookpaths.LoadedIdentityPrefix+soul],
+	}
+	for name, evidence := range map[string]map[string]string{"loaded": loadEvidence, "not loaded": nil, "evidence for another file": otherFile} {
+		for i, call := range append(append([]instructionIdentityCall(nil), protected...), ordinary...) {
+			for _, mode := range []string{"action", "observe"} {
+				api := instructionProtectionTestAPI(t, "claudecode", mode, "CRITICAL")
+				if evidence != nil {
+					api.evaluateClaudeCodeHook(withAuthenticatedHookConnector(
+						context.WithValue(t.Context(), resolvedWritesContextKey{}, evidence), "claudecode"),
+						claudeCodeHookRequest{HookEventName: "InstructionsLoaded", SessionID: "protect-home", CWD: project, FilePath: soul})
+				}
+				response := api.evaluateClaudeCodeHook(contexts[i], claudeCodeHookRequest{
+					HookEventName: "PreToolUse", SessionID: "protect-home", CWD: project, ToolName: call.tool, ToolInput: call.input,
+				})
+				want := name == "loaded" && i < len(protected)
+				if got := findingStringHasRuleID(response.Findings, "COG-SOUL"); got != want {
+					t.Fatalf("%s, %s %v (%s): COG-SOUL %t, want %t: %+v", name, call.tool, call.input, mode, got, want, response)
+				}
+				switch {
+				case want && mode == "action" && (response.Action != guardrailActionBlock || response.Severity != "CRITICAL"):
+					t.Fatalf("%s %v in action mode: action=%q severity=%q", call.tool, call.input, response.Action, response.Severity)
+				case want && mode == "observe" && (response.Action != "allow" || !response.WouldBlock):
+					t.Fatalf("%s %v in observe mode: %+v", call.tool, call.input, response)
+				case !want && (response.Action == guardrailActionBlock || response.WouldBlock):
+					t.Fatalf("%s, %s %v (%s) was blocked: %v", name, call.tool, call.input, mode, response.Findings)
+				}
+			}
+		}
+	}
+}
+
+// GAP-1065: one call writes CLAUDE.md (HIGH) and SOUL.md (CRITICAL) under
+// other names. Each alias is judged, so block_at CRITICAL blocks the call as
+// COG-SOUL whichever alias comes first: behind ProtectHome from the hook
+// client's evidence alone, and from the gateway's own view.
+func TestInstructionProtectionEveryAliasOfOneCall(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell forms and client evidence; the Windows gateway checks every target itself")
+	}
+	for _, view := range []string{"hook client evidence behind ProtectHome", "gateway file system"} {
+		root := instructionIdentityTestRoot(t)
+		project := filepath.Join(root, "project")
+		claude := writeActiveAgentTestFile(t, project, "CLAUDE.md")
+		soul := writeActiveAgentTestFile(t, project, "SOUL.md")
+		a := instructionIdentityTestLink(t, claude, filepath.Join(root, "scratch", "a.txt"))
+		b := instructionIdentityTestLink(t, soul, filepath.Join(root, "scratch", "b.txt"))
+		via := instructionIdentityTestSymlink(t, soul, filepath.Join(root, "scratch", "via.txt"))
+		var calls []instructionIdentityCall
+		for _, command := range []string{
+			"printf x >> '" + a + "'; printf x >> '" + b + "'",
+			"printf x >> '" + b + "' && printf x >> '" + a + "'",
+			"echo x | tee -a '" + a + "' '" + b + "'",
+			"printf x >> '" + a + "'; printf x >> '" + via + "'",
+		} {
+			calls = append(calls, instructionIdentityCall{"Bash", map[string]interface{}{"command": command}})
+		}
+		contexts := make([]context.Context, len(calls))
+		if view == "gateway file system" {
+			for i := range contexts {
+				contexts[i] = withAuthenticatedHookConnector(t.Context(), "claudecode")
+			}
+		} else {
+			contexts = protectHomeEvidence(t, root, project, calls)
+		}
+		for i, call := range calls {
+			response := instructionProtectionTestAPI(t, "claudecode", "action", "CRITICAL").evaluateClaudeCodeHook(contexts[i], claudeCodeHookRequest{
+				HookEventName: "PreToolUse", SessionID: "two-aliases", CWD: project, ToolName: call.tool, ToolInput: call.input,
+			})
+			if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, "COG-SOUL") ||
+				!findingStringHasRuleID(response.Findings, "COG-CLAUDE-MD") {
+				t.Fatalf("%v (%s): action=%q findings=%v", call.input, view, response.Action, response.Findings)
+			}
+		}
+	}
+}

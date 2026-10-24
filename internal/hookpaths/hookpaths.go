@@ -593,6 +593,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		return ""
 	}
 	copilot := strings.EqualFold(strings.TrimSpace(connector), "copilot")
+	if !copilot {
+		if evidence := instructionLoadEvidence(envelope); evidence != "" {
+			return evidence
+		}
+	}
 	var toolRaw, args json.RawMessage
 	var toolConflict, argsConflict bool
 	if copilot {
@@ -684,13 +689,18 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	var safeRedirects []RedirectOccurrence
 	opaqueFacts := map[string]string{}
 	var unprovenReason string
-	// identity is the file-identity evidence for InstructionIdentityKey: the
-	// instruction file that a write target names under another name.
-	var identity string
+	// identities is the file-identity evidence for InstructionIdentityKey:
+	// every instruction file that a write target names under another name.
+	// fileIdentities are the write targets' own identities (FileIdentitiesKey).
+	var identities, fileIdentities []string
 	instructions := NewInstructionFiles(cwd, home, nil)
-	noteIdentity := func(instruction string) {
-		if identity == "" && filepath.IsAbs(instruction) && len(instruction) <= MaxWriteTargetPathBytes {
-			identity = instruction
+	noteIdentity := func(resolved string) {
+		if instruction := instructions.Alias(resolved); filepath.IsAbs(instruction) &&
+			len(instruction) <= MaxWriteTargetPathBytes && !slices.Contains(identities, instruction) {
+			identities = append(identities, instruction)
+		}
+		if identity := FileIdentity(resolved); identity != "" && !slices.Contains(fileIdentities, identity) {
+			fileIdentities = append(fileIdentities, identity)
 		}
 	}
 	if toolArgs != nil {
@@ -787,7 +797,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			// Protection follows the file: a symlink, a hard link, a case or
 			// short-name variant of an instruction file, and the physical
 			// file a symlinked one reaches (GAP-0869, GAP-0971).
-			noteIdentity(instructions.Alias(resolved))
+			noteIdentity(resolved)
 		}
 	}
 	// Exact shell operands take precedence over a duplicate PathFact. Their
@@ -855,6 +865,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		targets[key] = opaqueFacts[key]
 		size += entry
 	}
+	identity := strings.Join(identities, "\x00")
 	if unprovenReason != "" {
 		entry := len(jsonString(UnprovenReasonKey)) + 1 + len(jsonString(unprovenReason)) + 1
 		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+2 {
@@ -870,6 +881,17 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		targets[InstructionIdentityKey] = identity
 		size += entry
+	}
+	if len(fileIdentities) > 0 {
+		value := strings.Join(fileIdentities, ",")
+		entry := len(jsonString(FileIdentitiesKey)) + 1 + len(jsonString(value)) + 1
+		if size+entry > maxEncodedTargets || len(targets) >= MaxWriteTargets+4 {
+			// A gateway that cannot read the files cannot place them.
+			truncated = true
+		} else {
+			targets[FileIdentitiesKey] = value
+			size += entry
+		}
 	}
 	if truncated {
 		targets[TruncatedKey] = "1"
@@ -1041,11 +1063,25 @@ func Decode(value string) (map[string]string, bool) {
 		(targets[UnprovenReasonKey] != "" && UnprovenWriteTitle(targets[UnprovenReasonKey]) == "") {
 		return nil, false
 	}
-	if identity, present := targets[InstructionIdentityKey]; present &&
-		(!filepath.IsAbs(identity) || len(identity) > MaxWriteTargetPathBytes) {
-		return nil, false
+	if value, present := targets[InstructionIdentityKey]; present {
+		for _, identity := range strings.Split(value, "\x00") {
+			if !filepath.IsAbs(identity) || len(identity) > MaxWriteTargetPathBytes {
+				return nil, false
+			}
+		}
+	}
+	if value, present := targets[FileIdentitiesKey]; present {
+		for _, identity := range strings.Split(value, ",") {
+			if !validFileIdentity(identity) {
+				return nil, false
+			}
+		}
 	}
 	for key, value := range targets {
+		if strings.HasPrefix(key, LoadedIdentityPrefix) &&
+			(!filepath.IsAbs(strings.TrimPrefix(key, LoadedIdentityPrefix)) || !validFileIdentity(value)) {
+			return nil, false
+		}
 		if strings.HasPrefix(key, DirectoryFactPrefix) && value != "?" && !filepath.IsAbs(value) {
 			return nil, false
 		}
@@ -1709,11 +1745,12 @@ func (l Links) OpaqueTargetWithFacts(path string, ownCopy bool, facts map[string
 }
 
 // SplitOpaqueScopeFacts separates the OpaqueScopeFactPrefix entries from the
-// rest of a decoded map. The instruction-identity fact is for the
-// cognitive-file proof only and is in neither. targets is returned unchanged
-// when it has neither kind of entry.
+// rest of a decoded map. The identity facts (InstructionIdentityKey,
+// FileIdentitiesKey, LoadedIdentityPrefix) are for the cognitive-file proof
+// only and are in neither. targets is returned unchanged when it has neither
+// kind of entry.
 func SplitOpaqueScopeFacts(targets map[string]string) (rest, facts map[string]string) {
-	_, identity := targets[InstructionIdentityKey]
+	identity := false
 	for key, value := range targets {
 		if strings.HasPrefix(key, OpaqueScopeFactPrefix) {
 			if facts == nil {
@@ -1721,13 +1758,14 @@ func SplitOpaqueScopeFacts(targets map[string]string) (rest, facts map[string]st
 			}
 			facts[key] = value
 		}
+		identity = identity || clientIdentityFact(key)
 	}
 	if facts == nil && !identity {
 		return targets, nil
 	}
 	rest = make(map[string]string, len(targets)-len(facts))
 	for key, value := range targets {
-		if !strings.HasPrefix(key, OpaqueScopeFactPrefix) && key != InstructionIdentityKey {
+		if !strings.HasPrefix(key, OpaqueScopeFactPrefix) && !clientIdentityFact(key) {
 			rest[key] = value
 		}
 	}

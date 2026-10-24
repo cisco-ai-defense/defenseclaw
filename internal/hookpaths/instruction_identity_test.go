@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -413,5 +414,141 @@ func TestDecodeInstructionIdentity(t *testing.T) {
 	rest, _ := SplitOpaqueScopeFacts(map[string]string{CWDKey: "/repo", InstructionIdentityKey: "/repo/CLAUDE.md"})
 	if _, present := rest[InstructionIdentityKey]; present {
 		t.Fatal("the authorized-keys proof must not see the instruction-identity fact as an operand")
+	}
+}
+
+// GAP-1065: a call that writes several instruction files under other names
+// reports every one of them, once each, whatever their order.
+func TestResolveReportsEveryInstructionAlias(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows gateway checks file identity itself")
+	}
+	root := instructionIdentityRoot(t)
+	project := filepath.Join(root, "project")
+	claude := instructionIdentityFile(t, project, "CLAUDE.md")
+	soul := instructionIdentityFile(t, project, "SOUL.md")
+	first := instructionIdentityLink(t, claude, filepath.Join(root, "tmp", "a.txt"))
+	second := instructionIdentityLink(t, soul, filepath.Join(root, "tmp", "b.txt"))
+	ordinary := instructionIdentityFile(t, filepath.Join(root, "tmp"), "plain.txt")
+	both := []string{claude, soul}
+	for _, tc := range []struct {
+		name, command string
+		want          []string
+	}{
+		{"two appends", "printf x >> " + first + "; printf y >> " + second, both},
+		{"reversed", "printf y >> " + second + " && printf x >> " + first, both},
+		{"tee", "echo x | tee -a " + first + " " + second, both},
+		{"ordinary file between", "printf x >> " + first + "; printf x >> " + ordinary + "; printf y >> " + second, both},
+		{"same alias twice", "printf x >> " + first + "; printf x >> " + first, []string{claude}},
+		{"ordinary files only", "printf x >> " + ordinary, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targets := instructionResolve(t, project, "Bash", map[string]any{"command": tc.command})
+			got := InstructionIdentities(targets)
+			slices.Sort(got)
+			want := slices.Clone(tc.want)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("identities = %q, want %q (targets %v)", got, want, targets)
+			}
+		})
+	}
+}
+
+// GAP-1064: the hook client reads, as the user, the identity of a loaded
+// instruction file and of every write target. A gateway behind ProtectHome
+// matches the two, so a write to the file a loaded SOUL.md symlink reaches,
+// under any name, is a write to SOUL.md.
+func TestResolveReportsLoadedAndTargetIdentities(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Windows gateway checks file identity itself")
+	}
+	root := instructionIdentityRoot(t)
+	project := filepath.Join(root, "project")
+	persona := instructionIdentityFile(t, filepath.Join(root, "persona-src"), "soul.txt")
+	neighbor := instructionIdentityFile(t, filepath.Join(root, "persona-src"), "other.txt")
+	soul := instructionIdentitySymlink(t, persona, filepath.Join(root, "persona", "SOUL.md"))
+	hard := instructionIdentityLink(t, persona, filepath.Join(root, "tmp", "hard.txt"))
+	via := instructionIdentitySymlink(t, persona, filepath.Join(root, "tmp", "via.txt"))
+	want := FileIdentity(persona)
+	if want == "" || FileIdentity(soul) != want || FileIdentity(hard) != want {
+		t.Fatalf("file identities: persona %q, SOUL.md %q, hard link %q", want, FileIdentity(soul), FileIdentity(hard))
+	}
+	load := func(path string) string {
+		body, err := json.Marshal(map[string]any{
+			"hook_event_name": "InstructionsLoaded", "session_id": "s", "cwd": project, "file_path": path,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return Resolve(body)
+	}
+	evidence, ok := Decode(load(soul))
+	if !ok || evidence[LoadedIdentityPrefix+soul] != want || len(evidence) != 1 {
+		t.Fatalf("InstructionsLoaded evidence = %v (ok %t), want %s -> %s", evidence, ok, soul, want)
+	}
+	for name, path := range map[string]string{
+		"not an instruction name": persona,
+		"missing file":            filepath.Join(root, "persona", "AGENTS.md"),
+		"relative":                "SOUL.md",
+	} {
+		if got := load(path); got != "" {
+			t.Errorf("InstructionsLoaded of a %s sent evidence %q", name, got)
+		}
+	}
+	for _, tc := range []struct {
+		name, tool string
+		input      map[string]any
+		want       bool
+	}{
+		{"native write", "Write", map[string]any{"file_path": persona, "content": "x"}, true},
+		{"native edit", "Edit", map[string]any{"file_path": persona, "old_string": "instructions", "new_string": "x"}, true},
+		{"shell append", "Bash", map[string]any{"command": "printf x >> " + persona}, true},
+		{"hard link", "Write", map[string]any{"file_path": hard, "content": "x"}, true},
+		{"through a symlink", "Bash", map[string]any{"command": "printf x >> " + via}, true},
+		{"tee with a neighbor", "Bash", map[string]any{"command": "echo x | tee " + neighbor + " " + hard}, true},
+		{"neighbor", "Write", map[string]any{"file_path": neighbor, "content": "x"}, false},
+		{"new file", "Write", map[string]any{"file_path": filepath.Join(root, "tmp", "new.txt"), "content": "x"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			targets := instructionResolve(t, project, tc.tool, tc.input)
+			if got := slices.Contains(FileIdentities(targets), want); got != tc.want {
+				t.Fatalf("write-target identities %q contain the loaded file's %q: %t, want %t", FileIdentities(targets), want, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecodeClientIdentityFacts(t *testing.T) {
+	encode := func(facts map[string]string) string {
+		data, _ := json.Marshal(facts)
+		return base64.RawURLEncoding.EncodeToString(data)
+	}
+	posix := runtime.GOOS != "windows"
+	for _, tc := range []struct {
+		name  string
+		facts map[string]string
+		ok    bool
+	}{
+		{"two aliases", map[string]string{InstructionIdentityKey: "/repo/CLAUDE.md\x00/repo/SOUL.md"}, posix},
+		{"relative alias", map[string]string{InstructionIdentityKey: "/repo/CLAUDE.md\x00SOUL.md"}, false},
+		{"empty alias", map[string]string{InstructionIdentityKey: "/repo/CLAUDE.md\x00"}, false},
+		{"target identities", map[string]string{FileIdentitiesKey: "fd01:2a,3:4"}, true},
+		{"empty target identity", map[string]string{FileIdentitiesKey: "fd01:2a,"}, false},
+		{"bad target identity", map[string]string{FileIdentitiesKey: "/etc/passwd"}, false},
+		{"long target identity", map[string]string{FileIdentitiesKey: strings.Repeat("a", maxFileIdentityBytes+1)}, false},
+		{"loaded identity", map[string]string{LoadedIdentityPrefix + "/repo/SOUL.md": "fd01:2a"}, posix},
+		{"loaded relative", map[string]string{LoadedIdentityPrefix + "SOUL.md": "fd01:2a"}, false},
+		{"loaded bad identity", map[string]string{LoadedIdentityPrefix + "/repo/SOUL.md": "x"}, false},
+	} {
+		if _, ok := Decode(encode(tc.facts)); ok != tc.ok {
+			t.Errorf("%s: Decode ok=%t, want %t", tc.name, ok, tc.ok)
+		}
+	}
+	rest, _ := SplitOpaqueScopeFacts(map[string]string{
+		CWDKey: "/repo", "/repo/a": "/repo/a", FileIdentitiesKey: "1:2", LoadedIdentityPrefix + "/repo/SOUL.md": "1:2",
+	})
+	if len(rest) != 2 || rest["/repo/a"] != "/repo/a" {
+		t.Fatalf("the authorized-keys proof must see only operands, got %v", rest)
 	}
 }

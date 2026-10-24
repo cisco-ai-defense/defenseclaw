@@ -156,10 +156,20 @@ func provedHighWriteFindings(
 		}
 		addClientTarget(resolved, "")
 	}
-	// The hook client's file-identity check of the same targets
-	// (hookpaths.InstructionIdentityKey).
-	if identity := request.ResolvedWriteTargets[hookpaths.InstructionIdentityKey]; filepath.IsAbs(identity) {
-		addClientTarget(identity, instructionAliasTitle)
+	// The hook client's file-identity check of the same targets: every
+	// instruction file they write under another name
+	// (hookpaths.InstructionIdentityKey, GAP-1065), and the targets' own
+	// identities matched with those of the files the session loaded
+	// (hookpaths.FileIdentitiesKey, GAP-1064).
+	for _, identity := range hookpaths.InstructionIdentities(request.ResolvedWriteTargets) {
+		if filepath.IsAbs(identity) {
+			addClientTarget(identity, instructionAliasTitle)
+		}
+	}
+	for _, identity := range hookpaths.FileIdentities(request.ResolvedWriteTargets) {
+		if loaded := request.ActiveAgentFileIdentities[identity]; filepath.IsAbs(loaded) {
+			addClientTarget(loaded, instructionAliasTitle)
+		}
 	}
 	// A native apply_patch call or a shell invocation of apply_patch carries
 	// targets in its patch envelope. ActionFacts does not project those
