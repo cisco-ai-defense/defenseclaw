@@ -484,7 +484,7 @@ func TestManagedStandaloneRuntimeRequiresHeldAPIPort(t *testing.T) {
 			cfg.Enterprise.Profile = tc.profile
 			cfg.Gateway.APIBind = "127.0.0.1"
 			cfg.Gateway.APIPort = tc.port
-			err := validateManagedEnterpriseListenerBindings(cfg)
+			err := ValidateManagedEnterpriseListenerBindings(cfg)
 			if tc.wantError {
 				if err == nil || !strings.Contains(err.Error(), "gateway.api_port") {
 					t.Fatalf("port %d: error = %v, want refusal of an unheld API port", tc.port, err)
