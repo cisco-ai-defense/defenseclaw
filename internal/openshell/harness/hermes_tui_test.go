@@ -25,16 +25,41 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"gopkg.in/yaml.v3"
 )
 
 // GAP-1036 / GAP-1078: the pinned Hermes builds the agent of its TUI,
 // dashboard chat and serve backend without the shell hooks. The image keeps
-// the refusals only while its pin is such a release: the host refuses the
-// same releases, and a pin past them must drop the shim and the refusals.
+// the refusal, the managed TUI pins and the shim only while its pin is such
+// a release: the host refuses the same releases, and a pin past them must
+// drop them.
 func TestHermesImageRefusesTheUnhookedTUIOfItsPin(t *testing.T) {
 	if got := connector.ResolveHookContract("hermes", Hermes.DefaultVersion); !got.KnownBroken {
-		t.Fatalf("the image pins Hermes %s, whose TUI runs the hooks (%+v): remove hermesUnhookedAgentModule and the launcher's TUI refusals",
+		t.Fatalf("the image pins Hermes %s, whose TUI runs the hooks (%+v): remove hermesUnhookedAgentModule, the launcher's --tui refusal "+
+			"and the managed layer's TUI pins (HERMES_TUI=0, display.interface: cli in internal/gateway/connector/hermes_sandbox.go)",
 			Hermes.DefaultVersion, got)
+	}
+	// The managed layer keeps every start but --tui on the hooked classic
+	// interface: Hermes applies it over the environment, .env files and
+	// user configs (GAP-1036 review).
+	arts, err := Hermes.Provider.SandboxArtifacts(connector.SandboxRenderTarget{IngressPort: 18971, AgentVersion: Hermes.DefaultVersion})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed := map[string]string{}
+	for _, f := range arts.Files {
+		if f.Owner == connector.SandboxOwnerRoot {
+			managed[f.Path] = string(f.Data)
+		}
+	}
+	if env := managed[connector.HermesSandboxManagedEnvPath]; !strings.Contains(env, "\nHERMES_TUI=0\n") {
+		t.Fatalf("the root-owned managed .env does not pin HERMES_TUI=0:\n%s", env)
+	}
+	var cfg struct {
+		Display map[string]interface{} `yaml:"display"`
+	}
+	if err := yaml.Unmarshal([]byte(managed[connector.HermesSandboxManagedConfigPath]), &cfg); err != nil || cfg.Display["interface"] != "cli" {
+		t.Fatalf("the root-owned managed config does not pin display.interface: cli (%v):\n%s", err, managed[connector.HermesSandboxManagedConfigPath])
 	}
 	steps, err := Hermes.InstallSteps("")
 	if err != nil || len(steps) != 1 {
@@ -115,42 +140,48 @@ print(refused, server.BUILT)
 	}
 }
 
-// TestHermesLauncherRefusesTheTUI: the launcher refuses, with the cause,
-// the environment and configuration that start the pinned Hermes' TUI
-// (HERMES_TUI=1; display.interface: tui in the home or a profile, as Hermes'
-// YAML loader reads it, case and spaces aside) and starts with the others.
-func TestHermesLauncherRefusesTheTUI(t *testing.T) {
+// TestHermesLauncherLeavesTheInterfaceToTheManagedLayer (GAP-1036 review):
+// the launcher refuses only --tui and its prefix (launcher_test.go). Hermes
+// picks its TUI otherwise from HERMES_TUI=1 and display.interface: tui only
+// on a terminal, and the image's managed layer pins both to the hooked
+// classic interface over the environment, every .env and every config.yaml
+// (TestHermesImageRefusesTheUnhookedTUIOfItsPin checks the pins), so these
+// start Hermes, headless or not, set on or off, in the home or a profile.
+func TestHermesLauncherLeavesTheInterfaceToTheManagedLayer(t *testing.T) {
 	py := yamlInterpreter(t)
+	tuiConfig := "display:\n  interface: tui\n"
 	for name, tc := range map[string]struct {
-		env         []string
-		rel, config string
-		refusal     string // empty: Hermes must start
+		env       []string
+		rel, data string
+		args      []string
 	}{
-		"environment":            {env: []string{"HERMES_TUI=1"}, refusal: "HERMES_TUI=1 starts Hermes' TUI"},
+		"environment on":         {env: []string{"HERMES_TUI=1"}},
 		"environment off":        {env: []string{"HERMES_TUI=0"}},
 		"environment tui theme":  {env: []string{"HERMES_TUI_THEME=light"}},
-		"config":                 {rel: ".hermes/config.yaml", config: "display:\n  interface: tui\n", refusal: "config.yaml sets display.interface: tui"},
-		"config spaced capitals": {rel: ".hermes/config.yaml", config: "display: {interface: ' TUI '}\n", refusal: "sets display.interface: tui"},
-		"config escaped key":     {rel: ".hermes/config.yaml", config: "\"\\x64isplay\": {interface: tui}\n", refusal: "sets display.interface: tui"},
-		"profile config":         {rel: ".hermes/profiles/work/config.yaml", config: "display:\n  interface: tui\n", refusal: "profiles/work/config.yaml sets display.interface: tui"},
-		"config cli":             {rel: ".hermes/config.yaml", config: "display:\n  interface: cli\n"},
-		"config display scalar":  {rel: ".hermes/config.yaml", config: "display: tui\n"},
-		"config other keys":      {rel: ".hermes/config.yaml", config: "model: {default: m}\ndisplay: {skin: tui}\n"},
+		"env file off":           {rel: ".hermes/.env", data: "HERMES_TUI=0\n"},
+		"env file on":            {rel: ".hermes/.env", data: "HERMES_TUI=1\n"},
+		"env file quoted export": {rel: ".hermes/.env", data: "export HERMES_TUI=\"1\"\n"},
+		"env file glued pair":    {rel: ".hermes/.env", data: "OPENAI_API_KEY=sk-xHERMES_TUI=1\n"},
+		"op env file":            {rel: ".hermes/.op.env", data: "HERMES_TUI=1\n"},
+		"profile env file":       {rel: ".hermes/profiles/work/.env", data: "HERMES_TUI=1\n", args: []string{"-p", "work", "chat"}},
+		"config headless query":  {rel: ".hermes/config.yaml", data: tuiConfig},
+		"config bare":            {rel: ".hermes/config.yaml", data: tuiConfig, args: []string{}},
+		"config with --cli":      {rel: ".hermes/config.yaml", data: tuiConfig, args: []string{"chat", "--cli"}},
+		"config spaced capitals": {rel: ".hermes/config.yaml", data: "display: {interface: ' TUI '}\n"},
+		"profile config":         {rel: ".hermes/profiles/work/config.yaml", data: tuiConfig, args: []string{"--profile", "work"}},
+		"config cli":             {rel: ".hermes/config.yaml", data: "display:\n  interface: cli\n"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			l := newYAMLCheckedLauncher(t, Hermes, py)
 			if tc.rel != "" {
-				writeFile(t, filepath.Join(l.dir, filepath.FromSlash(tc.rel)), []byte(tc.config))
+				writeFile(t, filepath.Join(l.dir, filepath.FromSlash(tc.rel)), []byte(tc.data))
 			}
-			r := l.run(t, "", tc.env, "chat", "-q", "hi")
-			if tc.refusal == "" {
-				if r.exit != 0 || !r.started() {
-					t.Fatalf("refused: exit %d %s", r.exit, r.output)
-				}
-				return
+			args := tc.args
+			if args == nil {
+				args = []string{"chat", "-q", "hi"}
 			}
-			if r.exit != 2 || r.started() || !strings.Contains(r.output, "refusing to start Hermes: ") || !strings.Contains(r.output, tc.refusal) {
-				t.Fatalf("exit %d started %t output %q, want a refusal saying %q", r.exit, r.started(), r.output, tc.refusal)
+			if r := l.run(t, "", tc.env, args...); r.exit != 0 || !r.started() {
+				t.Fatalf("refused: exit %d %s", r.exit, r.output)
 			}
 		})
 	}

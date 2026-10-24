@@ -129,11 +129,14 @@ const hermesUnhookedAgentModuleName = "defenseclaw_hermes_unhooked"
 // serve backend with tui_gateway.server._make_agent, which does not register
 // the config.yaml shell hooks (Hermes 0.21.1 does,
 // NousResearch/hermes-agent 3094cde513), so a terminal call there ran with
-// no pre_tool_call. The launcher refuses the ways it knows to start the TUI
-// with a message; this shim is the backstop for every other way in:
-// _make_agent is replaced, whatever the original does, by one that raises,
-// so no such agent runs a tool. Remove it, and the launcher's TUI
-// refusals, when the image pins Hermes 0.21.1 or later
+// no pre_tool_call. The launcher refuses --tui with a message, and the
+// managed layer pins HERMES_TUI=0 and display.interface: cli over the
+// environment, the .env files and the user configs, so Hermes resolves
+// every other start to its hooked classic interface (whatever the TTY);
+// this shim is the backstop for every other way in: _make_agent is
+// replaced, whatever the original does, by one that raises, so no such
+// agent runs a tool. Remove it, the launcher's --tui refusal and the
+// managed TUI pins when the image pins Hermes 0.21.1 or later
 // (TestHermesImageRefusesTheUnhookedTUIOfItsPin).
 const hermesUnhookedAgentModule = `"""DefenseClaw: refuse the agents the pinned Hermes builds without its hooks.
 
@@ -282,7 +285,7 @@ var Hermes = register(&Spec{
 	},
 	preseedRefresh: []string{
 		"refuse --safe-mode and every prefix Hermes' argument parser resolves to it (--sa and longer): Hermes skips every shell hook in safe mode",
-		"refuse Hermes' TUI, whose agent the pinned Hermes builds without the shell hooks (GAP-1036): --tui and its prefix --tu, HERMES_TUI=1 in the environment or a .env, and display.interface: tui in a config.yaml; a root-owned shim refuses every agent Hermes builds in tui_gateway (the TUI, dashboard chat and serve backend) as the backstop",
+		"refuse --tui and its prefix --tu: the pinned Hermes builds the agent of its TUI without the shell hooks (GAP-1036). The managed layer pins HERMES_TUI=0 and display.interface: cli, which Hermes applies over the environment, every .env and every config.yaml, so nothing else selects the TUI; a root-owned shim refuses every agent Hermes builds in tui_gateway (the TUI, dashboard chat and serve backend) as the backstop",
 		"pin HOME and HERMES_HOME to the image home, and drop the variables that move the managed scope, the Hermes home or the code Hermes runs (HERMES_MANAGED_DIR, HERMES_PYTHON_SRC_ROOT, HERMES_LAZY_INSTALL_TARGET, the TUI's interpreter and directories, every PYTHON* variable) or switch the hooks off (HERMES_SAFE_MODE, HERMES_ENABLE_PROJECT_PLUGINS)",
 		"refuse to start while a .env or .op.env of the Hermes home or one of its profiles names any of them (Hermes loads ~/.hermes/.env over the process environment at start)",
 		"refuse to start while the Hermes home or a profile holds Python code under plugins/ (model-provider plugins are imported whatever plugins.enabled says; memory and cron providers load when the user config names them)",
@@ -331,9 +334,6 @@ func hermesModelArg(args []string) (flag, override string) {
 var hermesEnvFileNames = []string{
 	"HERMES_SAFE_MODE", "HERMES_MANAGED_DIR", "HERMES_HOME[A-Z_]*", "HERMES_ENABLE_PROJECT_PLUGINS", "HERMES_ACCEPT_HOOKS",
 	"HERMES_PYTHON[A-Z_]*", "HERMES_TUI_DIR", "HERMES_NODE", "HERMES_LAZY_INSTALL_TARGET",
-	// HERMES_TUI=1 starts the TUI (GAP-1036); its other HERMES_TUI_*
-	// settings do not.
-	"HERMES_TUI([^A-Za-z0-9_]|$)",
 }
 
 // hermesEnvFileGenericNames are the other variables the files may not name,
@@ -374,8 +374,6 @@ for arg in "$@"; do
       ;;
   esac
 done
-[ "${HERMES_TUI:-}" != 1 ] ||
-  refuse "HERMES_TUI=1 starts Hermes' TUI, which this Hermes runs without DefenseClaw's hooks" "Unset it: the classic interface runs the hooks."
 unset HERMES_SAFE_MODE HERMES_MANAGED_DIR HERMES_ENABLE_PROJECT_PLUGINS HERMES_HOME_OVERRIDE \
   HERMES_PYTHON_SRC_ROOT HERMES_PYTHON HERMES_TUI_DIR HERMES_NODE HERMES_LAZY_INSTALL_TARGET
 HOME=` + connector.SandboxHomeDir + `
@@ -392,15 +390,14 @@ check_home() {
   for f in "$h/.env" "$h/.op.env"; do
     [ -e "$f" ] || continue
     [ -f "$f" ] && [ -r "$f" ] || refuse "$f is not a readable regular file" "Remove it and start Hermes again."
-    hit="$(/usr/bin/tr -d '\000' <"$f" | /usr/bin/grep -aoE '` + hermesEnvFilePattern + `' | /usr/bin/head -n 1 | /usr/bin/sed 's/^[^A-Z]*//; s/[^A-Z0-9_]$//')"
+    hit="$(/usr/bin/tr -d '\000' <"$f" | /usr/bin/grep -aoE '` + hermesEnvFilePattern + `' | /usr/bin/head -n 1 | /usr/bin/sed 's/^[^A-Z]*//')"
     [ -z "$hit" ] || refuse "$f sets $hit" "It could switch DefenseClaw's hooks off or load code next to them; remove it and start Hermes again."
   done
   if [ -e "$h/plugins" ]; then
     hit="$(/usr/bin/find -L "$h/plugins" -name '*.py' -print -quit 2>/dev/null)"
     [ -z "$hit" ] || refuse "$hit is a Hermes plugin" "Hermes imports plugins into the process that runs DefenseClaw's hooks; remove it and start Hermes again."
   fi
-  # Parsed with the loader Hermes reads the secrets section and
-  # display.interface with (libyaml's
+  # Parsed with the loader Hermes reads the secrets section with (libyaml's
   # safe loader when it is there), whatever bytes spell the key: a key in
   # double quotes can spell secrets with escapes or fold it across lines.
   f="$h/config.yaml"
@@ -411,17 +408,10 @@ try:
         d = yaml.load(f, Loader=getattr(yaml, "CSafeLoader", None) or yaml.SafeLoader)
 except Exception:
     sys.exit(4)
-if not isinstance(d, dict):
-    sys.exit(0)
-if d.get("secrets"):
-    sys.exit(3)
-i = d.get("display")
-i = i.get("interface") if isinstance(i, dict) else None
-sys.exit(5 if isinstance(i, str) and i.strip().lower() == "tui" else 0)' "$f" 2>/dev/null
+sys.exit(3 if isinstance(d, dict) and d.get("secrets") else 0)' "$f" 2>/dev/null
     case $? in
       0) ;;
       3) refuse "$f has a secrets section" "Hermes' secret sources set environment variables before DefenseClaw's managed settings apply; remove it and start Hermes again." ;;
-      5) refuse "$f sets display.interface: tui, Hermes' TUI, which this Hermes runs without DefenseClaw's hooks" "Set it to cli or remove it, and start Hermes again." ;;
       4) refuse "$f is not a YAML file Hermes' loader can read, so it cannot be checked for a secrets section" "Fix or remove it and start Hermes again." ;;
       *) refuse "$f could not be checked for a secrets section" "Start Hermes again." ;;
     esac
