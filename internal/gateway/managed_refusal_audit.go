@@ -210,12 +210,17 @@ func (q *managedPolicyViewAlerts) enqueue(a *APIServer, alert managedPolicyViewA
 	}
 }
 
+// managedPolicyViewHostAlert is the uid of a queued alert that no call
+// raised: the gateway found a view it can not prove when the policy changed
+// (publishManagedPolicyView).
+const managedPolicyViewHostAlert = -1
+
 // recordManagedPolicyViewAlert queues the gateway log line and the HIGH
-// runtime alert for a managed hook that could not prove its agent's view of
-// vendor machine policy, and returns at once: the call it rides on is
-// served without waiting for either. The connector comes from the route
-// scope and the account from the kernel-verified peer; each account is
-// rate limited like refusal rows.
+// runtime alert for a managed hook call under a vendor policy view the
+// gateway can not prove, and returns at once: the call is served without
+// waiting for either. The connector comes from the route scope and the
+// account from the kernel-verified peer; each account is rate limited like
+// refusal rows.
 func (a *APIServer) recordManagedPolicyViewAlert(r *http.Request, peer managedHookPeer, route string) {
 	if !a.managedAlertLimits.allow(peer.UID) {
 		return
@@ -229,9 +234,13 @@ func (a *APIServer) recordManagedPolicyViewAlert(r *http.Request, peer managedHo
 
 // writeManagedPolicyViewAlert writes one queued policy-view alert.
 func (a *APIServer) writeManagedPolicyViewAlert(alert managedPolicyViewAlert) {
+	actor := "host"
+	if alert.uid != managedPolicyViewHostAlert {
+		actor = "uid:" + strconv.Itoa(alert.uid)
+	}
 	fmt.Fprintf(os.Stderr,
-		"[sidecar-api] hook policy-view alert uid=%d connector=%q route=%s reason=%s: the agent's view of managed vendor policy differs from the trusted pin; its calls are still inspected under the managed policy\n",
-		alert.uid, alert.connector, alert.route, hookexec.ManagedPolicyViewReason)
+		"[sidecar-api] policy-view alert actor=%s connector=%q route=%s reason=%s: the managed vendor policy differs from the trusted pin or can not be read; managed hook calls are still inspected under the managed policy\n",
+		actor, alert.connector, alert.route, hookexec.ManagedPolicyViewReason)
 	if a.logger == nil {
 		return
 	}
@@ -239,9 +248,9 @@ func (a *APIServer) writeManagedPolicyViewAlert(alert managedPolicyViewAlert) {
 	envelope.Connector = alert.connector
 	ctx := audit.ContextWithEnvelope(context.Background(), envelope)
 	if err := a.logger.LogAlertCtx(ctx, "managed_hook", "HIGH", hookexec.ManagedPolicyViewReason, map[string]any{
-		"actor": "uid:" + strconv.Itoa(alert.uid),
+		"actor": actor,
 		"route": alert.route,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar-api] hook policy-view alert by uid=%d was not recorded: %v\n", alert.uid, err)
+		fmt.Fprintf(os.Stderr, "[sidecar-api] policy-view alert by %s was not recorded: %v\n", actor, err)
 	}
 }

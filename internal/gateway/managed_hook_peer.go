@@ -536,11 +536,12 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get(hookexec.ClientAlertHeader) == hookexec.ManagedPolicyViewReason {
-			// The hook could not prove the agent sees the pinned vendor
-			// policy. The alert rides on the call itself, which is still
-			// served and inspected under the managed policy below; this
-			// queues the alert without waiting on it (GAP-0922, GAP-0923).
+		if connectorName, _ := a.managedHookRouteScope(r); a.managedPolicyView.Load().unproven(connectorName, peer.Name) {
+			// The gateway can not prove the vendor policy this connector's
+			// managed hooks enforce (managedPolicyView, published when the
+			// policy changes). The call is still served and inspected under
+			// the managed policy below; this queues the alert without
+			// waiting on it (GAP-0922, GAP-0923, GAP-1061).
 			a.recordManagedPolicyViewAlert(r, peer, route)
 		}
 		if reason := r.Header.Get(hookexec.ClientRefusalHeader); hookexec.IsManagedProcessContextReason(reason) {

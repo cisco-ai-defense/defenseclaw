@@ -203,18 +203,21 @@ user who can create a private user and mount namespace, or trace their own
 processes (for example with PRoot), can start an agent with its own view of the
 machine-policy files, the runtime descriptor and `/run/defenseclaw-hook`. That
 agent never calls the hook, so its tool calls are outside your enforcement
-([Residual risks](/docs/enterprise/plan/threat-model#residual-risks)). For
-an invoked machine-policy hook, DefenseClaw compares the content digest of
-the policy files it can read with the digest pinned in the administrator-owned
-runtime descriptor. When the view is missing, changed or unreadable, the hook
-does not refuse the call: it still sends it to the gateway, which inspects it
-under the managed policy, and it raises a `HIGH` runtime alert
-(`enterprise_managed_policy_view_unverified`, source `managed_hook`) in the
-audit log. Only a hook with no trusted runtime descriptor refuses. Linux also
-refuses a hook in a private user namespace, where it cannot verify the
-gateway's listener, and a traced hook. A private mount view alone (for
-example a `pam_namespace` login) is not refused; the digest decides. This
-check cannot run if an agent omitted its managed hook before launch.
+([Residual risks](/docs/enterprise/plan/threat-model#residual-risks)). At
+start and whenever a vendor policy file or the runtime descriptor changes, the
+gateway compares the content digest of exactly the policy files the vendor
+reads (drop-ins it ignores excluded) with the digest pinned in the
+administrator-owned runtime descriptor. The hook does no policy-view work on a
+call. When the view is missing, changed or unreadable, managed hook calls are
+still inspected under the managed policy, and the gateway raises a `HIGH`
+runtime alert (`enterprise_managed_policy_view_unverified`, source
+`managed_hook`) in the audit log: once when the view changes, and with each
+call, rate limited. Only a hook with no trusted runtime descriptor refuses.
+Linux also refuses a hook in a private user namespace, where it cannot verify
+the gateway's listener, and a traced hook. A private mount view alone (for
+example a `pam_namespace` login) is not refused. The gateway reads the host's
+files, so it cannot see a private view inside one agent process, and an agent
+that omitted its managed hook before launch makes no call to inspect.
 
 After an administrator or MDM changes a vendor machine-policy file or adds a
 drop-in, run `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json`

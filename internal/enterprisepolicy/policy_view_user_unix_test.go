@@ -56,9 +56,22 @@ func TestMacPolicyViewUserPinsCompareContentOnly(t *testing.T) {
 	if err != nil || len(problems) != 0 || len(pins) != 2 || pins["alice"] != sha256Hex([]byte("alice policy")) {
 		t.Fatalf("root pins = %v, problems %v, error %v", pins, problems, err)
 	}
-	if err := VerifyPolicyViewUserPin(opts, ConnectorCodex, "alice", pins["alice"]); err != nil {
-		t.Fatal(err)
+	unproven := func(what string, want ...string) {
+		t.Helper()
+		got, err := PolicyViewAccountsUnproven(opts, ConnectorCodex, pins)
+		if err != nil {
+			t.Fatalf("%s: %v", what, err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("%s: unproven accounts = %v, want %v", what, got, want)
+		}
+		for _, account := range want {
+			if !got[account] {
+				t.Fatalf("%s: unproven accounts = %v, want %v", what, got, want)
+			}
+		}
 	}
+	unproven("pinned preferences")
 	// An MDM agent rewrites the same bytes through a new file: a new inode,
 	// times and mode. Only content counts.
 	replacement := alice + ".new"
@@ -68,40 +81,18 @@ func TestMacPolicyViewUserPinsCompareContentOnly(t *testing.T) {
 	if err := os.Rename(replacement, alice); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPolicyViewUserPin(opts, ConnectorCodex, "alice", pins["alice"]); err != nil {
-		t.Fatalf("byte-identical rewrite of the account's own preference was not accepted: %v", err)
-	}
-	if err := VerifyPolicyViewUserPin(opts, ConnectorCodex, "charlie", ""); err != nil {
-		t.Fatalf("an account without a preference or pin was not accepted: %v", err)
-	}
-	// Another account's drift never affects this account.
+	unproven("a byte-identical rewrite of alice's preference")
+	// Another account's drift is that account's only.
 	if err := os.WriteFile(bob, []byte("changed bob"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := VerifyPolicyViewUserPin(opts, ConnectorCodex, "alice", pins["alice"]); err != nil {
-		t.Fatalf("another account's drift affected alice: %v", err)
+	unproven("bob's changed preference", "bob")
+	writeAccountPreference(t, opts, ConnectorCodex, "charlie", "unpinned")
+	unproven("charlie's unpinned preference", "bob", "charlie")
+	if err := os.Remove(alice); err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		what, account, pin string
-		setup              func()
-	}{
-		{"changed content", "bob", pins["bob"], nil},
-		{"preference without a pin", "alice", "", nil},
-		{"hidden preference", "alice", pins["alice"], func() { _ = os.Remove(alice) }},
-	} {
-		if tc.setup != nil {
-			tc.setup()
-		}
-		if err := VerifyPolicyViewUserPin(opts, ConnectorCodex, tc.account, tc.pin); err == nil {
-			t.Errorf("%s was proven", tc.what)
-		}
-	}
-	before := policyViewUserReadFile
-	t.Cleanup(func() { policyViewUserReadFile = before })
-	policyViewUserReadFile = func(Options, string) ([]byte, bool, error) { return nil, false, os.ErrPermission }
-	if err := VerifyPolicyViewUserPin(opts, ConnectorCodex, "bob", pins["bob"]); err == nil {
-		t.Fatal("an unreadable own preference was proven")
-	}
+	unproven("alice's hidden pinned preference", "alice", "bob", "charlie")
 }
 
 // One account entry that can not be pinned is reported and left out; every
@@ -193,10 +184,11 @@ func TestClaudeMacPolicyViewUsesItsAccountPreference(t *testing.T) {
 	if err != nil || len(problems) != 0 || len(pins) != 1 || pins["alice"] == "" {
 		t.Fatalf("Claude preference was not pinned: %v, %v, %v", pins, problems, err)
 	}
-	if err := VerifyPolicyViewUserPin(opts, ConnectorClaudeCode, "alice", pins["alice"]); err != nil {
-		t.Fatal(err)
+	if unproven, err := PolicyViewAccountsUnproven(opts, ConnectorClaudeCode, pins); err != nil || len(unproven) != 0 {
+		t.Fatalf("alice's pinned Claude preference = %v, %v", unproven, err)
 	}
-	if err := VerifyPolicyViewUserPin(opts, ConnectorClaudeCode, "bob", ""); err != nil {
-		t.Fatalf("alice's Claude preference affected bob: %v", err)
+	writeAccountPreference(t, opts, ConnectorCodex, "bob", "a Codex preference")
+	if unproven, err := PolicyViewAccountsUnproven(opts, ConnectorClaudeCode, pins); err != nil || len(unproven) != 0 {
+		t.Fatalf("bob's Codex preference affected the Claude view: %v, %v", unproven, err)
 	}
 }

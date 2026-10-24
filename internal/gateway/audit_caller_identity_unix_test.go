@@ -64,7 +64,7 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 		return peercred.Credentials{UID: 7101, GID: 7101, PID: 301}, nil
 	}
 	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
-	socket, _, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`})
+	socket, api, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7101","uid":7101,"connector":"claudecode","ok":true}]}`})
 	client := hookSocketClient(socket, 10*time.Second)
 	post := func(path, connectorName string, body any) int {
 		t.Helper()
@@ -137,10 +137,10 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 		})
 	}
 
-	// A hook that could not prove its policy view still sends its calls for
-	// inspection, and the alert rides on the call (review loop round 2, P1):
-	// the call is inspected and answered as any other, never refused, and
-	// the alert is recorded with it.
+	// A call under a vendor policy view the gateway can not prove (its
+	// published managedPolicyView) is inspected and answered as any other,
+	// never refused, and the gateway records the alert with it. The hook
+	// sends nothing extra (review loop round 1, P1).
 	inspectRows := func() int {
 		events, err := store.ListEvents(500)
 		if err != nil {
@@ -160,7 +160,7 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 	alert.Header.Set("Content-Type", "application/json")
 	alert.Header.Set("X-DefenseClaw-Client", "claude-code-hook/1.0")
 	alert.Header.Set("X-DefenseClaw-Connector", "claudecode")
-	alert.Header.Set(hookexec.ClientAlertHeader, hookexec.ManagedPolicyViewReason)
+	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{"claudecode": {shared: true}}})
 	if response, err := client.Do(alert); err != nil || response.StatusCode != http.StatusOK {
 		t.Fatalf("inspected call with the policy-view alert = %v %v", response, err)
 	} else {
@@ -250,8 +250,8 @@ func TestHookSocketAuditRowsNameTheVerifiedCaller(t *testing.T) {
 	}
 }
 
-// Review loop round 3 (P2): the policy-view alert rides on a valid call, and
-// its audit write never holds the call up. With the alert writer stalled (an
+// Review loop round 3 (P2): the policy-view alert of a valid call never holds
+// the call up. With the alert writer stalled (an
 // audit store that does not answer), every alerting call still gets its
 // verdict at once; the alerts are written once the store answers.
 func TestPolicyViewAlertNeverDelaysTheCallItRidesOn(t *testing.T) {
@@ -269,7 +269,8 @@ func TestPolicyViewAlertNeverDelaysTheCallItRidesOn(t *testing.T) {
 		return peercred.Credentials{UID: 7102, GID: 7102, PID: 302}, nil
 	}
 	t.Cleanup(func() { hookSocketPeerCredentials = restoreCredentials })
-	socket, _, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7102","uid":7102,"connector":"claudecode","ok":true}]}`})
+	socket, api, store := startTestHookSocketServer(t, hookSocketTestServer{ledger: `{"version":1,"ok":true,"protected_targets":[{"user":"user7102","uid":7102,"connector":"claudecode","ok":true}]}`})
+	api.managedPolicyView.Store(&managedPolicyView{connectors: map[string]managedPolicyViewConnector{"claudecode": {shared: true}}})
 	const calls = 5
 	// Registered after the server: runs first, so every queued alert is
 	// written before the writer is restored.
@@ -291,7 +292,6 @@ func TestPolicyViewAlertNeverDelaysTheCallItRidesOn(t *testing.T) {
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("X-DefenseClaw-Client", "claude-code-hook/1.0")
 		request.Header.Set("X-DefenseClaw-Connector", "claudecode")
-		request.Header.Set(hookexec.ClientAlertHeader, hookexec.ManagedPolicyViewReason)
 		started := time.Now()
 		response, err := client.Do(request)
 		if err != nil {

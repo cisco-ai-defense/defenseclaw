@@ -6,13 +6,11 @@
 package enterprisepolicy
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // policyViewDropInDir creates connector's merged drop-in folder with
@@ -176,51 +174,67 @@ func TestPolicyViewDigestUntrustedDropInFollowsTheVendorReader(t *testing.T) {
 	}
 }
 
-// Review loop round 3 (P2): a managed hook proves its view on every call,
-// before it asks its gateway, so the proof reads at most a bounded number of
-// bytes by a deadline. Within the bounds it is exactly the published digest
-// (the pins keep matching); past them it fails with ErrPolicyViewProofLimit
-// (the hook alerts and keeps enforcing), whichever source the bound is
-// reached on, while publication still reads the whole view.
-func TestPolicyViewDigestWithinBoundsTheHookProof(t *testing.T) {
-	for _, connector := range []string{ConnectorClaudeCode, ConnectorCopilot} {
-		t.Run(connector, func(t *testing.T) {
-			opts := Options{GOOS: "linux", Root: t.TempDir(), SkipTrustChecks: true}
-			dir := policyViewDropInDir(t, opts, connector)
-			later := time.Now().Add(time.Minute)
-			base, err := PolicyViewDigest(opts, connector)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if within, err := PolicyViewDigestWithin(opts, connector, PolicyViewProofLimits{MaxBytes: 8 << 20, Deadline: later}); err != nil || within != base {
-				t.Fatalf("a small view proved within the bounds = %q, %v; want the published digest", within, err)
-			}
-			if _, err := PolicyViewDigestWithin(opts, connector, PolicyViewProofLimits{MaxBytes: 8 << 20, Deadline: time.Now().Add(-time.Millisecond)}); !errors.Is(err, ErrPolicyViewProofLimit) {
-				t.Fatalf("a proof past its deadline = %v, want ErrPolicyViewProofLimit", err)
-			}
-			// Three valid 3 MiB drop-ins: each is under the per-file limit,
-			// together they are over the proof's 8 MiB.
-			total := int64(len(`{"hooks": {}}`))
-			for i := 0; i < 3; i++ {
-				data := []byte(`{"x": "` + strings.Repeat("a", 3<<20) + `"}`)
-				total += int64(len(data))
-				if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("%02d-large.json", i)), data, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			published, err := PolicyViewDigest(opts, connector)
-			if err != nil {
-				t.Fatalf("publication refused a large valid view: %v", err)
-			}
-			if _, err := PolicyViewDigestWithin(opts, connector, PolicyViewProofLimits{MaxBytes: 8 << 20, Deadline: later}); !errors.Is(err, ErrPolicyViewProofLimit) {
-				t.Fatalf("a %d-byte view proved within 8 MiB: %v", total, err)
-			}
-			if exact, err := PolicyViewDigestWithin(opts, connector, PolicyViewProofLimits{MaxBytes: total, Deadline: later}); err != nil || exact != published {
-				t.Fatalf("a view of exactly the byte bound = %q, %v; want the published digest", exact, err)
-			}
-			if _, err := PolicyViewDigestWithin(opts, connector, PolicyViewProofLimits{MaxBytes: total - 1, Deadline: later}); !errors.Is(err, ErrPolicyViewProofLimit) {
-				t.Fatalf("a view one byte over the bound = %v, want ErrPolicyViewProofLimit", err)
-			}
-		})
+// Review loop round 1 (P1): the gateway re-proves the policy view only when
+// PolicyViewStamp moves. The stamp reads no policy bytes, stays put for a
+// drop-in the vendor ignores, and moves for a same-size content change, a
+// new effective drop-in, a hidden source, a changed descriptor and, on
+// macOS, a new account preference.
+func TestPolicyViewStampMovesOnlyWithTheSources(t *testing.T) {
+	opts := Options{GOOS: "linux", Root: t.TempDir(), SkipTrustChecks: true}
+	dir := policyViewDropInDir(t, opts, ConnectorClaudeCode)
+	descriptor := filepath.Join(t.TempDir(), "managed-runtime.json")
+	if err := os.WriteFile(descriptor, []byte("v1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	connectors := []string{ConnectorClaudeCode}
+	stamp := PolicyViewStamp(opts, connectors, descriptor)
+	same := func(what string) {
+		t.Helper()
+		if now := PolicyViewStamp(opts, connectors, descriptor); now != stamp {
+			t.Fatalf("%s moved the stamp", what)
+		}
+	}
+	moved := func(what string) {
+		t.Helper()
+		now := PolicyViewStamp(opts, connectors, descriptor)
+		if now == stamp {
+			t.Fatalf("%s did not move the stamp", what)
+		}
+		stamp = now
+	}
+	same("nothing")
+	for _, name := range []string{".draft.json", "notes.txt", "backup.json~"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{"hooks": null}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	same("drop-ins the vendor ignores")
+	own := filepath.Join(dir, DefenseClawDropInName)
+	data, err := os.ReadFile(own)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(own, []byte(strings.Repeat("x", len(data))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved("a same-size content change")
+	if err := os.WriteFile(filepath.Join(dir, "50-other.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	moved("a new effective drop-in")
+	if err := os.Remove(own); err != nil {
+		t.Fatal(err)
+	}
+	moved("a hidden source")
+	if err := os.WriteFile(descriptor, []byte("v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	moved("a rewritten descriptor")
+
+	mac := Options{GOOS: "darwin", Root: t.TempDir(), SkipTrustChecks: true}
+	macStamp := PolicyViewStamp(mac, []string{ConnectorCodex})
+	writeAccountPreference(t, mac, ConnectorCodex, "alice", "alice policy")
+	if PolicyViewStamp(mac, []string{ConnectorCodex}) == macStamp {
+		t.Fatal("a new account preference did not move the macOS stamp")
 	}
 }

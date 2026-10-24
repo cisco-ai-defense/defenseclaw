@@ -376,7 +376,7 @@ func (l *lifecycle) publishMachinePolicy(p *plan, changed map[string]bool) error
 
 // policyViewAlert is how status names what an unproven policy view does to
 // a managed hook: it never refuses a call because of it.
-const policyViewAlert = "raises a policy-view alert on each call and keeps enforcing the managed policy"
+const policyViewAlert = "keeps enforcing the managed policy while the gateway raises a policy-view alert"
 
 // policyViewPinProblems reports where a managed hook can not prove its
 // policy view against the trusted descriptor. drift is what a new publish

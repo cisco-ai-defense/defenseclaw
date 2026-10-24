@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -53,10 +52,11 @@ const (
 // The hook inherits the agent's process context. A managed Linux hook refuses
 // a private user namespace, where it can not verify the gateway's listener,
 // and a traced process. A private mount view is not refused on its own (a
-// pam_namespace login has one): the policy-view digest below is the proof of
-// what the agent sees. This is an invocation check: an agent that never loads
-// its managed hook still has no invocation to check, which status reports
-// separately.
+// pam_namespace login has one). The hook does no policy-view work: the
+// gateway proves the published vendor policy when it changes and alerts off
+// the call path (gateway/managed_policy_view.go). This is an invocation
+// check: an agent that never loads its managed hook still has no invocation
+// to check, which status reports separately.
 var standaloneLinuxHookContext = func() string {
 	return linuxManagedHookContextReason(os.Readlink, readLinuxHookContextFile)
 }
@@ -67,12 +67,9 @@ func readLinuxHookContextFile(path string) ([]byte, error) {
 		return nil, err
 	}
 	defer f.Close()
-	// Mount tables can be much larger than status or uid_map. Bound every
-	// read so a replaced proc file cannot consume unbounded memory.
-	maxBytes := int64(16 * 1024)
-	if strings.HasSuffix(path, "/mountinfo") {
-		maxBytes = 4 * 1024 * 1024
-	}
+	// Bound every read so a replaced proc file cannot consume unbounded
+	// memory; uid_map and status are a few hundred bytes.
+	const maxBytes = int64(16 * 1024)
 	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
 	if err != nil || int64(len(data)) > maxBytes {
 		return nil, errors.New("cannot read bounded Linux process context")
@@ -153,48 +150,11 @@ var reportStandaloneHookRefusal = func(socket, connectorName, reason string) {
 
 // Test seams.
 var (
-	standaloneHookGOOS              = runtime.GOOS
-	standaloneRuntimeDescriptorLoad = managed.LoadRuntimeDescriptor
-	standaloneMachinePolicyOptions  = defaultStandaloneMachinePolicyOptions
-	standalonePolicyViewDigest      = func(goos, connector string, deadline time.Time) (string, error) {
-		opts, ok := standaloneMachinePolicyOptions(goos)
-		if !ok {
-			return "", errors.New("standalone machine policy paths are unavailable")
-		}
-		return enterprisepolicy.PolicyViewDigestWithin(opts, connector, enterprisepolicy.PolicyViewProofLimits{
-			MaxBytes: standalonePolicyViewProofMaxBytes, Deadline: deadline,
-		})
-	}
-	standaloneHookAccount = func() (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		defer cancel()
-		account, err := enterprisehooks.LookupStandaloneUIDBounded(ctx, os.Getuid())
-		if err != nil || account.UID != os.Getuid() || account.Name == "" {
-			return "", errors.New("cannot resolve managed hook account")
-		}
-		return account.Name, nil
-	}
-	standalonePolicyViewUser = func(goos, connector, account, pin string) error {
-		opts, ok := standaloneMachinePolicyOptions(goos)
-		if !ok {
-			return errors.New("standalone machine policy paths are unavailable")
-		}
-		return enterprisepolicy.VerifyPolicyViewUserPin(opts, connector, account, pin)
-	}
+	standaloneHookGOOS               = runtime.GOOS
+	standaloneRuntimeDescriptorLoad  = managed.LoadRuntimeDescriptor
+	standaloneMachinePolicyOptions   = defaultStandaloneMachinePolicyOptions
 	standaloneSecureClientInstallDir = "/opt/cisco/secureclient/defenseclaw"
 )
-
-// The per-call proof of the policy view runs before the hook asks its
-// gateway, inside the call's answer budget (hookexec's 3.5 s, counted from
-// the invocation). Real views are a few KiB and prove in milliseconds; a view
-// larger than standalonePolicyViewProofMaxBytes, or storage that does not
-// return it within standalonePolicyViewProofBudget, leaves the view unproven:
-// the call raises the policy-view alert and is inspected under the trusted
-// descriptor, instead of a watchdog refusal of a valid call (review loop
-// round 3, P2).
-const standalonePolicyViewProofMaxBytes = 8 << 20
-
-var standalonePolicyViewProofBudget = 750 * time.Millisecond
 
 var standaloneHookRuntime struct {
 	sync.Mutex
@@ -203,9 +163,6 @@ var standaloneHookRuntime struct {
 	layout     managed.StandaloneLayout
 	descriptor *managed.RuntimeDescriptor
 	reason     string
-	// alert is the policy-view alert of a runtime that still enforces: the
-	// hook could not prove the agent sees the pinned managed policy.
-	alert string
 	// secureClientHost marks a macOS Secure Client host, whose
 	// --enterprise-managed failures keep their historical results.
 	secureClientHost bool
@@ -237,16 +194,10 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	if err == nil {
 		loaded, err = standaloneRuntimeDescriptorLoad(layout.DescriptorPath)
 	}
-	// The trusted descriptor is the managed policy this hook enforces. A view
-	// it can not prove (an administrator's edit not yet pinned, an MDM
-	// rewrite, a hidden or unreadable file, an older descriptor) raises an
-	// alert and the call is still inspected under that policy; only a hook
-	// with no trusted descriptor at all refuses.
-	alert := ""
-	if err == nil && loaded != nil && loaded.HasMachinePolicyConnector(connectorName) &&
-		!standalonePolicyViewProvenWithin(loaded, connectorName, standalonePolicyViewProofBudget) {
-		alert = hookexec.ManagedPolicyViewReason
-	}
+	// The trusted descriptor is the managed policy this hook enforces; only
+	// a hook with no trusted descriptor at all refuses. The hook reads no
+	// vendor policy file: a view the gateway can not prove still has every
+	// call inspected under that policy, and the gateway raises the alert.
 	reason := ""
 	secureClientHost := false
 	switch {
@@ -274,51 +225,12 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	standaloneHookRuntime.layout = layout
 	standaloneHookRuntime.descriptor = loaded
 	standaloneHookRuntime.reason = reason
-	standaloneHookRuntime.alert = alert
 	standaloneHookRuntime.secureClientHost = secureClientHost
 	if reason != "" {
 		standaloneHookRuntime.descriptor = nil
-		standaloneHookRuntime.alert = ""
 	}
 	standaloneHookRuntime.Unlock()
 	return false
-}
-
-// standalonePolicyViewProvenWithin is standalonePolicyViewProven bounded by
-// budget: a proof that has not finished by then is unproven. A read the
-// storage holds up past the budget is left behind; the hook process ends
-// with its call, and the proof stops before its next file.
-func standalonePolicyViewProvenWithin(descriptor *managed.RuntimeDescriptor, connectorName string, budget time.Duration) bool {
-	deadline := time.Now().Add(budget)
-	goos := standaloneHookGOOS
-	proven := make(chan bool, 1)
-	go func() { proven <- standalonePolicyViewProven(descriptor, goos, connectorName, deadline) }()
-	timer := time.NewTimer(budget)
-	defer timer.Stop()
-	select {
-	case ok := <-proven:
-		return ok
-	case <-timer.C:
-		return false
-	}
-}
-
-// standalonePolicyViewProven reports whether this hook reads the managed
-// policy the descriptor pinned, by content: the shared vendor sources and, on
-// macOS, only the invoking account's own managed preference.
-func standalonePolicyViewProven(descriptor *managed.RuntimeDescriptor, goos, connectorName string, deadline time.Time) bool {
-	expected := descriptor.PolicyViewDigests[connectorName]
-	observed, err := standalonePolicyViewDigest(goos, connectorName, deadline)
-	if expected == "" || err != nil || observed != expected {
-		return false
-	}
-	if goos != "darwin" ||
-		connectorName != enterprisepolicy.ConnectorCodex && connectorName != enterprisepolicy.ConnectorClaudeCode {
-		return true
-	}
-	account, err := standaloneHookAccount()
-	return err == nil && time.Now().Before(deadline) && standalonePolicyViewUser(goos, connectorName, account,
-		descriptor.PolicyViewUserSources[connectorName][account]) == nil
 }
 
 func enterpriseManagedHookRuntimeForceClosed() bool {
@@ -383,7 +295,6 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	layout := standaloneHookRuntime.layout
 	prepared := standaloneHookRuntime.prepared && standaloneHookRuntime.connector == connectorName
 	failed := standaloneHookRuntime.reason != ""
-	alert := standaloneHookRuntime.alert
 	secureClientHost := standaloneHookRuntime.secureClientHost
 	standaloneHookRuntime.Unlock()
 	if opts.ManagedRuntimeFailure != "" {
@@ -399,10 +310,6 @@ func applyStandaloneManagedHookTransport(opts *hookexec.Options, connectorName s
 	if !matches || descriptor == nil {
 		return
 	}
-	// The policy-view alert rides on the inspected call
-	// (hookexec.ClientAlertHeader): no separate request runs before it
-	// and spends its answer budget.
-	opts.ManagedPolicyViewAlert = alert == hookexec.ManagedPolicyViewReason
 	opts.ManagedStandalone = true
 	opts.ManagedServiceUID = descriptor.ServiceUID
 	opts.ManagedUnixSocket = descriptor.HookSocket

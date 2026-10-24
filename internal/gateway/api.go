@@ -101,8 +101,11 @@ type APIServer struct {
 	hookCallerLimits hookCallerLimiter
 	// managedRefusalLimits bounds the managed refusal rows per account.
 	managedRefusalLimits managedRefusalLimiter
-	// managedAlertLimits bounds the managed hook policy-view alerts per
-	// account: a hook raises one on every call until the view is pinned.
+	// managedPolicyView is the published proof of the vendor machine
+	// policy managed hooks enforce (managed_policy_view.go).
+	managedPolicyView atomic.Pointer[managedPolicyView]
+	// managedAlertLimits bounds the policy-view alerts per account: every
+	// call under an unproven view raises one until the view is pinned.
 	managedAlertLimits managedRefusalLimiter
 	// managedAlerts records those alerts off the path of their calls.
 	managedAlerts managedPolicyViewAlerts

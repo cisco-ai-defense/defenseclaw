@@ -6,6 +6,7 @@
 package enterprisepolicy
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,8 +24,6 @@ const (
 	maxPolicyViewUserPins       = 128
 	policyViewUserPinByteBudget = 24 << 10
 )
-
-var policyViewUserReadFile = readPolicyFile
 
 func accountPreferenceName(connector string) string {
 	switch connector {
@@ -124,26 +123,91 @@ func PolicyViewUserPins(opts Options, connector string) (map[string]string, []st
 
 const sha256HexLen = 64
 
-// VerifyPolicyViewUserPin checks the invoking account's one relevant plist
-// against its root pin by content. Another account's preference is never
-// read here.
-func VerifyPolicyViewUserPin(opts Options, connector, account, pin string) error {
-	path, err := accountPreferencePath(opts, connector, account)
-	if err != nil {
-		return err
-	}
-	data, exists, err := policyViewUserReadFile(opts, path)
-	switch {
-	case err != nil:
-		return err
-	case !exists && pin != "":
-		return fmt.Errorf("%s preference for %s is hidden or removed", connector, account)
-	case !exists:
+// policyViewAccountSources are, on macOS, the managed-preferences folder and
+// each account's preference for connector: what PolicyViewStamp watches for
+// PolicyViewAccountsUnproven. At most maxPolicyViewAccountStamps accounts
+// are listed; the folder's own stamp still moves when an entry is added or
+// removed.
+func policyViewAccountSources(opts Options, connector string) []string {
+	if opts.goos() != "darwin" || accountPreferenceName(connector) == "" {
 		return nil
-	case pin == "":
-		return fmt.Errorf("%s preference for %s has no privileged pin", connector, account)
-	case sha256Hex(data) != pin:
-		return fmt.Errorf("%s preference for %s differs from its privileged pin", connector, account)
 	}
-	return nil
+	root := rooted(opts, managedPreferencesRoot)
+	paths := []string{root}
+	entries, _ := os.ReadDir(root)
+	for _, entry := range entries {
+		if len(paths) > maxPolicyViewAccountStamps {
+			break
+		}
+		if path, err := accountPreferencePath(opts, connector, entry.Name()); err == nil {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+const maxPolicyViewAccountStamps = 1024
+
+// PolicyViewAccountsUnproven names the macOS accounts whose own managed
+// preference for connector the descriptor's per-account pins do not prove by
+// content: a changed, removed or unpinned preference, one the caller can not
+// read or does not trust, or a symlinked account folder. Only content counts:
+// an MDM agent that rewrites the same bytes keeps the account proven. It
+// reads with the caller's own permissions (the gateway's), so an account it
+// can not read is unproven, never proven. The error is for the folder
+// itself, which leaves no account proven.
+func PolicyViewAccountsUnproven(opts Options, connector string, pins map[string]string) (map[string]bool, error) {
+	if opts.goos() != "darwin" || accountPreferenceName(connector) == "" {
+		return nil, nil
+	}
+	unproven := make(map[string]bool, len(pins))
+	for account := range pins {
+		// A pinned account is unproven until its preference matches.
+		unproven[account] = true
+	}
+	root := rooted(opts, managedPreferencesRoot)
+	if !opts.SkipTrustChecks {
+		if err := validateTrustedAncestors(opts, filepath.Join(root, "x")); err != nil {
+			return nil, err
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return unproven, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		account := entry.Name()
+		if !validPolicyViewAccount(account) {
+			continue
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			// A symlink that stands in for an account folder can not be
+			// trusted; an unrelated preference may be a symlink.
+			if target, err := os.Stat(filepath.Join(root, account)); err != nil || target.IsDir() {
+				unproven[account] = true
+			}
+			continue
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		path, _ := accountPreferencePath(opts, connector, account)
+		data, exists, err := readPolicyFile(opts, path)
+		pin := pins[account]
+		switch {
+		case err != nil:
+			unproven[account] = true
+		case !exists:
+			// Proven only when it was never pinned; a pinned one that is
+			// gone stays unproven.
+		case pin != "" && subtle.ConstantTimeCompare([]byte(sha256Hex(data)), []byte(pin)) == 1:
+			delete(unproven, account)
+		default:
+			unproven[account] = true
+		}
+	}
+	return unproven, nil
 }
