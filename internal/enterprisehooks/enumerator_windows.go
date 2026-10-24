@@ -1730,8 +1730,10 @@ func sortedManifestSubjects(subjects map[string]WindowsManifestSubject) []string
 
 // reportWindowsPrivateInstalls reports each unsupported, unversioned or
 // uninspected agent copy the profile at home can run.
+var windowsPrivateInstallsForEnumeration = DiscoverWindowsPrivateAgentInstalls
+
 func reportWindowsPrivateInstalls(ctx context.Context, report func(UnprotectedAgent), user, sid, home string, connectors []string) {
-	installs := DiscoverWindowsPrivateAgentInstalls(ctx, home, connectors)
+	installs := windowsPrivateInstallsForEnumeration(ctx, home, connectors)
 	if ctx.Err() == nil {
 		installs = append(installs, discoverWindowsWinGetCopies(sid, connectors)...)
 	} else {

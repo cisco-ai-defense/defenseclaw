@@ -104,6 +104,52 @@ func TestWindowsOversizedProfileLeavesOnlyThatAccountIncomplete(t *testing.T) {
 	}
 }
 
+func TestWindowsProfileTimeoutLeavesSiblingItsOwnScanShare(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	firstHome, secondHome := codexProfile(t, "0.150.0"), codexProfile(t, "0.150.0")
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: firstHome, testLocalUserTwo: secondHome})
+	previousReader := windowsProfileListSubkeyReader
+	t.Cleanup(func() { windowsProfileListSubkeyReader = previousReader })
+	windowsProfileListSubkeyReader = func() ([]string, error) { return []string{testLocalUserSID, testLocalUserTwo}, nil }
+	old := windowsPrivateInstallsForEnumeration
+	t.Cleanup(func() { windowsPrivateInstallsForEnumeration = old })
+	var called []string
+	windowsPrivateInstallsForEnumeration = func(ctx context.Context, home string, names []string) []PrivateAgentInstall {
+		called = append(called, home)
+		if home == firstHome {
+			<-ctx.Done() // This home consumes its entire profile share.
+			return []PrivateAgentInstall{{Connector: "codex", Incomplete: true, Skipped: PrivateInstallSkippedHome}}
+		}
+		if ctx.Err() != nil {
+			return []PrivateAgentInstall{{Connector: "codex", Incomplete: true, Skipped: PrivateInstallSkippedHome}}
+		}
+		return nil
+	}
+	cycleCtx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+	var reported []UnprotectedAgent
+	manifest, err := EnumerateWindows(cycleCtx, standaloneEnumeratorConfig("codex"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	})
+	if err != nil || len(manifest.Targets) != 2 {
+		t.Fatalf("profile share lost manifest rows: targets=%+v err=%v", manifest.Targets, err)
+	}
+	if len(called) != 2 || called[0] != firstHome || called[1] != secondHome {
+		t.Fatalf("profile scans = %q, want both homes", called)
+	}
+	var firstIncomplete bool
+	for _, agent := range reported {
+		if agent.SID == testLocalUserTwo && agent.Code == UnprotectedCodeInstallScanIncomplete {
+			t.Fatalf("sibling did not receive an independent share: %+v", reported)
+		}
+		firstIncomplete = firstIncomplete || agent.SID == testLocalUserSID && agent.Code == UnprotectedCodeInstallScanIncomplete &&
+			strings.Contains(agent.Reason, "home could not be fully listed")
+	}
+	if !firstIncomplete {
+		t.Fatalf("timed-out home did not report home_unreadable: %+v", reported)
+	}
+}
+
 func TestWindowsPrivateProfileBudgetReservesPublicationTime(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
