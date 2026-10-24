@@ -33,19 +33,30 @@ import (
 // that connector, each scanned as that member scans it (a rule any member
 // enforces there is enforced, also where two packs define one rule ID
 // differently; a member that only observes there adds none, and when none
-// blocks the meet observes with every member's rules), the suppressions those members share (allows are the
-// intersection), every sensitive tool any of them inspects, and the members'
-// sandbox floors
-// tightened together (config.Config.SandboxFloor). hook_fail_mode and
-// enabled are machine settings a profile cannot change, so they are the
-// same for every member. The block message is the base configuration's, so
-// no member's text reaches the caller.
+// blocks the meet observes with every member's rules), the suppressions
+// those members share (allows are the intersection), every sensitive tool
+// any of them inspects, and the members' sandbox floors tightened together
+// (config.Config.SandboxFloor). hook_fail_mode and enabled are machine
+// settings a profile cannot change, so they are the same for every member.
+// The block message is the base configuration's, so no member's text
+// reaches the caller.
+//
+// "Blocks" is per request path (profilePath): a hook request takes the
+// levels, HILT and rules of the members whose hook mode blocks there, an
+// inspect or proxy request those of the members whose inspect mode blocks
+// there, so each member is enforced in its own mode on each path and a
+// member that only observes on a path changes nothing there. A request on
+// no one path (explain, ACP, the sandbox authority) takes every member that
+// blocks on either.
 
 // profileMeet is one meet a set derived, on its first use.
 type profileMeet struct {
 	members []string
 	once    sync.Once
+	// derived is the meet for a request on any path; onPath holds the
+	// configuration each path decides with (pathConfig).
 	derived config.DerivedGuardrailProfile
+	onPath  [profilePathCount]*config.Config
 	ok      bool
 	// rules and packs hold the merged rule generations and composed packs
 	// by connector and member sources (meetSourcesKey).
@@ -102,18 +113,95 @@ func (set *guardrailProfileSet) meet(name string) *profileMeet {
 	value, _ := set.meets.LoadOrStore(name, &profileMeet{members: members})
 	meet := value.(*profileMeet)
 	meet.once.Do(func() {
-		profile, hookModes := set.meetProfile(members)
-		derived, err := set.base.DeriveGuardrailProfileMeet(members, profile, hookModes)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles %s: %v\n", strings.Join(members, ", "), err)
-			return
+		anyProfile, anyHooks := set.meetProfile(members, profilePathAny)
+		for _, path := range profilePaths {
+			profile, hookModes := anyProfile, anyHooks
+			if path != profilePathAny {
+				if profile, hookModes = set.meetProfile(members, path); reflect.DeepEqual(profile, anyProfile) && reflect.DeepEqual(hookModes, anyHooks) {
+					meet.onPath[path] = meet.derived.Config
+					continue
+				}
+			}
+			derived, err := set.base.DeriveGuardrailProfileMeet(members, profile, hookModes)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles %s: %v\n", strings.Join(members, ", "), err)
+				return
+			}
+			if path == profilePathAny {
+				meet.derived = derived
+			}
+			meet.onPath[path] = derived.Config
 		}
-		meet.derived, meet.ok = derived, true
+		meet.ok = true
 	})
 	if !meet.ok {
 		return nil
 	}
 	return meet
+}
+
+// pathConfig is the configuration the meet decides a request on path with.
+func (m *profileMeet) pathConfig(path profilePath) *config.Config {
+	if cfg := m.onPath[path]; cfg != nil {
+		return cfg
+	}
+	return m.derived.Config
+}
+
+// profilePath is the path a request's decision is for: the hook route, an
+// inspect endpoint or the LLM proxy (both decide by the inspect mode), or
+// none in particular (any).
+type profilePath uint8
+
+const (
+	profilePathAny profilePath = iota
+	profilePathHook
+	profilePathInspect
+	profilePathCount
+)
+
+// profilePaths lists every path, any first.
+var profilePaths = [...]profilePath{profilePathAny, profilePathHook, profilePathInspect}
+
+type profilePathKey struct{}
+
+// withProfilePath records the path of the request on ctx, before its
+// profile is resolved.
+func withProfilePath(ctx context.Context, path profilePath) context.Context {
+	return context.WithValue(ctx, profilePathKey{}, path)
+}
+
+// requestProfilePath is the path of the request on ctx: the one its route
+// recorded (withProfilePath), else inspect for a request the inspect
+// middleware scoped (profileRuleScanConnectorKey), else any.
+func requestProfilePath(ctx context.Context) profilePath {
+	if ctx == nil {
+		return profilePathAny
+	}
+	if path, ok := ctx.Value(profilePathKey{}).(profilePath); ok {
+		return path
+	}
+	if _, scoped := ctx.Value(profileRuleScanConnectorKey{}).(string); scoped {
+		return profilePathInspect
+	}
+	return profilePathAny
+}
+
+// blocksOn reports whether a profile whose hook and inspect modes block as
+// hook and inspect do blocks on path.
+func blocksOn(path profilePath, hook, inspect bool) bool {
+	switch path {
+	case profilePathHook:
+		return hook
+	case profilePathInspect:
+		return inspect
+	}
+	return hook || inspect
+}
+
+// configBlocksOn reports whether cfg blocks on connectorName on path.
+func configBlocksOn(cfg *config.Config, connectorName string, path profilePath) bool {
+	return blocksOn(path, hookModeForConfig(cfg, connectorName) == "action", inspectMode(cfg, connectorName) == "action")
 }
 
 // meetMembers expands meets among names into their members.
@@ -165,15 +253,14 @@ func (set *guardrailProfileSet) requestScanScopes(ctx context.Context, connector
 }
 
 // enforcingMembers are the members of a meet whose rules it scans
-// connectorName with: those that block there by hook or inspect mode. A
-// member that only observes on connectorName adds no rule, so the meet
-// never turns its observation into a block. When no member blocks there,
-// the meet observes with every member's rules.
-func (set *guardrailProfileSet) enforcingMembers(members []string, connectorName string) []string {
+// connectorName with on path: those that block there on that path
+// (configBlocksOn). A member that only observes there adds no rule, so the
+// meet never turns its observation into a block. When no member blocks
+// there, the meet observes with every member's rules.
+func (set *guardrailProfileSet) enforcingMembers(members []string, connectorName string, path profilePath) []string {
 	var out []string
 	for _, member := range members {
-		cfg := set.profileConfig(member)
-		if hookModeForConfig(cfg, connectorName) == "action" || inspectMode(cfg, connectorName) == "action" {
+		if configBlocksOn(set.profileConfig(member), connectorName, path) {
 			out = append(out, member)
 		}
 	}
@@ -220,10 +307,10 @@ type meetSettings struct {
 }
 
 // meetSettingsFor is the meet of members' effective settings for
-// connectorName ("" for the global settings). Hook and inspect action modes
-// are independent; thresholds and HILT cover every member that blocks on
-// either path.
-func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName string) meetSettings {
+// connectorName ("" for the global settings) on path. Hook and inspect
+// action modes are independent; thresholds and HILT cover every member that
+// blocks on path (on either for profilePathAny).
+func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName string, path profilePath) meetSettings {
 	out := meetSettings{inspectMode: "observe", hookMode: "observe"}
 	blockRank, alertRank, hiltRank := 0, 0, 0
 	for _, member := range members {
@@ -240,7 +327,7 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 		if alertRank == 0 || alert < alertRank {
 			alertRank = alert
 		}
-		if !hookBlock && !inspectBlock {
+		if !blocksOn(path, hookBlock, inspectBlock) {
 			continue
 		}
 		block, _ := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
@@ -274,17 +361,17 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 	return out
 }
 
-// meetProfile returns the inspect policy and the hook modes that differ from
-// it. Its rules are merged from every member (meetRuleGeneration); explicit
-// levels keep a pack posture from deciding them.
-func (set *guardrailProfileSet) meetProfile(members []string) (config.GuardrailProfile, map[string]string) {
-	global := set.meetSettingsFor(members, "")
+// meetProfile returns the inspect policy of the meet on path and the hook
+// modes that differ from it. Its rules are its members' (ruleGeneration);
+// explicit levels keep a pack posture from deciding them.
+func (set *guardrailProfileSet) meetProfile(members []string, path profilePath) (config.GuardrailProfile, map[string]string) {
+	global := set.meetSettingsFor(members, "", path)
 	hilt := global.hilt
 	profile := config.GuardrailProfile{Mode: global.inspectMode, BlockAt: global.block, AlertAt: global.alert, HILT: &hilt,
 		Connectors: map[string]config.PerConnectorGuardrailConfig{}}
 	hookModes := map[string]string{}
 	for _, name := range set.meetConnectors() {
-		s := set.meetSettingsFor(members, name)
+		s := set.meetSettingsFor(members, name, path)
 		connectorHILT := s.hilt
 		profile.Connectors[name] = config.PerConnectorGuardrailConfig{Mode: s.inspectMode, BlockAt: s.block, AlertAt: s.alert, HILT: &connectorHILT}
 		if s.hookMode != s.inspectMode {
@@ -316,7 +403,8 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 }
 
 // ruleGeneration is the rule generation of the meet for connectorName: the
-// generations of the members whose rules it scans there (enforcingMembers),
+// generations of the members whose rules it scans there on the request's
+// path (enforcingMembers),
 // each scanned with its own rules (compiledRulePackCategories.members). Each
 // was compiled within the rule and cost limits of one generation, and their
 // union is never compiled as one, so no limit of one generation drops a
@@ -325,7 +413,7 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) *compiledRulePackCategories {
 	connectorName = canonicalConnectorRulePackKey(connectorName)
 	var sources []*compiledRulePackCategories
-	for _, member := range set.enforcingMembers(m.members, connectorName) {
+	for _, member := range set.enforcingMembers(m.members, connectorName, requestProfilePath(ctx)) {
 		if generation := set.memberRuleGeneration(ctx, member, connectorName); generation != nil && !slices.Contains(sources, generation) {
 			sources = append(sources, generation)
 		}
@@ -352,6 +440,7 @@ func meetRuleGeneration(sources []*compiledRulePackCategories) *compiledRulePack
 		categories:         cloneRuleCategories(unionRuleCategories(sources)),
 		ruleIdentityTitles: map[string]map[string]struct{}{},
 		members:            sources,
+		budgetNote:         new(sync.Once),
 	}
 	for _, source := range sources {
 		merged.overridden, merged.added = max(merged.overridden, source.overridden), max(merged.added, source.added)
@@ -482,14 +571,15 @@ func (a *APIServer) generationRulePack(ctx context.Context, connectorName string
 }
 
 // rulePack is the composed pack of the meet for connectorName, over the
-// members whose rules it scans there (enforcingMembers): the first one's
+// members whose rules it scans there on the request's path
+// (enforcingMembers): the first one's
 // pack with only the suppressions every one's pack has, and every sensitive
 // tool any one's pack inspects, at its strictest.
 func (m *profileMeet) rulePack(ctx context.Context, a *APIServer, set *guardrailProfileSet, connectorName string) *guardrail.RulePack {
 	connectorName = canonicalConnectorRulePackKey(connectorName)
 	var sources []*guardrail.RulePack
 	missing := false
-	for _, member := range set.enforcingMembers(m.members, connectorName) {
+	for _, member := range set.enforcingMembers(m.members, connectorName, requestProfilePath(ctx)) {
 		pack := a.memberRulePack(ctx, set, member, connectorName)
 		if pack == nil {
 			missing = true

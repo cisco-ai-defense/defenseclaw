@@ -724,10 +724,11 @@ func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []st
 	return set.profileCoverage(a, b, connectors, true)
 }
 
-// profileCoverage checks sandbox enforcement and wherever b blocks by hook,
-// inspect or proxy mode: a blocks there too, scanning every rule pack b
-// scans there (scansRulePacksOf), from a block level at or below b's and a
-// HILT that asks wherever b's asks.
+// profileCoverage checks sandbox enforcement and, on each path (hook, or
+// inspect and proxy) where b blocks, that a blocks there too with what it
+// decides that path with (profilePathConfig), scanning every rule pack b
+// scans there (scansRulePacksOf, also for a request on no one path), from a
+// block level at or below b's and a HILT that asks wherever b's asks.
 // Where b only observes, its guardrail settings do not matter. A name that
 // is not a profile is the base configuration. alert_at and block_message do
 // not enforce anything and are not compared.
@@ -748,29 +749,46 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 		return false
 	}
 	for _, name := range connectors {
-		hookB, inspectB := hookModeForConfig(cb, name) == "action", inspectMode(cb, name) == "action"
-		if !hookB && !inspectB {
-			continue
-		}
-		if (hookB && hookModeForConfig(ca, name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
-			return false
-		}
-		if !set.scansRulePacksOf(a, b, name) {
-			return false
-		}
-		blockA, _ := guardrailThresholdRanks(resolveThresholds(ca, name))
-		blockB, _ := guardrailThresholdRanks(resolveThresholds(cb, name))
-		proxyA, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&ca.Guardrail, name))
-		proxyB, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cb.Guardrail, name))
-		if blockA > blockB || proxyA > proxyB {
-			return false
-		}
-		if !hiltCovers(hiltEnabledForConfig(ca, name), hiltMinRankForConfig(ca, name), hiltEnabledForConfig(cb, name), hiltMinRankForConfig(cb, name)) ||
-			!hiltCovers(hiltEnabled(&ca.Guardrail, name), hiltMinRank(&ca.Guardrail, name), hiltEnabled(&cb.Guardrail, name), hiltMinRank(&cb.Guardrail, name)) {
-			return false
+		for _, path := range []profilePath{profilePathHook, profilePathInspect} {
+			if !set.pathCovers(a, b, name, path) {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// pathCovers is profileCoverage on one connector and path.
+func (set *guardrailProfileSet) pathCovers(a, b, name string, path profilePath) bool {
+	ca, cb := set.profilePathConfig(a, path), set.profilePathConfig(b, path)
+	if !configBlocksOn(cb, name, path) {
+		return true
+	}
+	if !configBlocksOn(ca, name, path) {
+		return false
+	}
+	if !set.scansRulePacksOf(a, b, name, path) || !set.scansRulePacksOf(a, b, name, profilePathAny) {
+		return false
+	}
+	blockA, _ := guardrailThresholdRanks(resolveThresholds(ca, name))
+	blockB, _ := guardrailThresholdRanks(resolveThresholds(cb, name))
+	proxyA, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&ca.Guardrail, name))
+	proxyB, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cb.Guardrail, name))
+	if blockA > blockB || proxyA > proxyB {
+		return false
+	}
+	return hiltCovers(hiltEnabledForConfig(ca, name), hiltMinRankForConfig(ca, name), hiltEnabledForConfig(cb, name), hiltMinRankForConfig(cb, name)) &&
+		hiltCovers(hiltEnabled(&ca.Guardrail, name), hiltMinRank(&ca.Guardrail, name), hiltEnabled(&cb.Guardrail, name), hiltMinRank(&cb.Guardrail, name))
+}
+
+// profilePathConfig is the configuration profile name decides a request on
+// path with: a meet's for that path (profileMeet.pathConfig), else
+// profileConfig's.
+func (set *guardrailProfileSet) profilePathConfig(name string, path profilePath) *config.Config {
+	if meet := set.meet(strings.TrimSpace(name)); meet != nil {
+		return meet.pathConfig(path)
+	}
+	return set.profileConfig(name)
 }
 
 // rulePackID is the composed rule pack a profile scans one connector with:
@@ -780,21 +798,22 @@ type rulePackID struct {
 	ref config.RulePackRef
 }
 
-// scannedRulePacks are the rule packs name scans connectorName with, in the
-// order its scan composes them: a profile's own (the base configuration's
-// for a name that is no profile), or, for a meet, the packs of its members
-// that block there (enforcingMembers), as profileMeet.ruleGeneration and
-// profileMeet.rulePack take them. A meet's own configuration names the
-// base pack, which the meet never scans by that reference, so it is never
-// read here. ok is false for a meet this set cannot derive.
-func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string) (packs []rulePackID, ok bool) {
+// scannedRulePacks are the rule packs name scans connectorName with on
+// path, in the order its scan composes them: a profile's own (the base
+// configuration's for a name that is no profile), or, for a meet, the packs
+// of its members that block there on path (enforcingMembers), as
+// profileMeet.ruleGeneration and profileMeet.rulePack take them. A meet's
+// own configuration names the base pack, which the meet never scans by that
+// reference, so it is never read here. ok is false for a meet this set
+// cannot derive.
+func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string, path profilePath) (packs []rulePackID, ok bool) {
 	members := []string{strings.TrimSpace(name)}
 	if config.IsProfileMeet(members[0]) {
 		meet := set.meet(members[0])
 		if meet == nil {
 			return nil, false
 		}
-		members = set.enforcingMembers(meet.members, connectorName)
+		members = set.enforcingMembers(meet.members, connectorName, path)
 	}
 	for _, member := range members {
 		cfg := set.profileConfig(member)
@@ -809,16 +828,16 @@ func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string) (pa
 	return packs, len(packs) > 0
 }
 
-// scansRulePacksOf reports whether a scans connectorName with everything b
-// scans there: every rule pack of b's is one of a's (so every rule b
+// scansRulePacksOf reports whether a scans connectorName on path with
+// everything b scans there: every rule pack of b's is one of a's (so every rule b
 // enforces is in a's rules, every sensitive tool b inspects is inspected,
 // and a allows only what b allows), and both compose their pack from the
 // same first one, whose judge prompts and local patterns a composed pack
 // keeps (mergeRulePacks). Anything else is not proved: an uncertain
 // assignment it decides keeps its missing fact.
-func (set *guardrailProfileSet) scansRulePacksOf(a, b, connectorName string) bool {
-	packsA, okA := set.scannedRulePacks(a, connectorName)
-	packsB, okB := set.scannedRulePacks(b, connectorName)
+func (set *guardrailProfileSet) scansRulePacksOf(a, b, connectorName string, path profilePath) bool {
+	packsA, okA := set.scannedRulePacks(a, connectorName, path)
+	packsB, okB := set.scannedRulePacks(b, connectorName, path)
 	if !okA || !okB || !reflect.DeepEqual(packsA[0], packsB[0]) {
 		return false
 	}

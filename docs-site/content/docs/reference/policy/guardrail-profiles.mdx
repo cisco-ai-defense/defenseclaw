@@ -146,11 +146,17 @@ How the keys combine:
   When none does, it applies their strictest combination, whatever the order
   of the assignments. Order only sets which assignment `explain` reports when
   two give the same profile. Different proven profiles do not cause a refusal.
-- **The strictest combination.** Every block of any candidate applies: the
-  action applies wherever one blocks, with the lowest `block_at` of those that
-  block. The strictest HILT applies. The rules of every rule pack are
-  enforced; suppressions apply only when all packs share them (allows are the
-  intersection). Every sensitive tool any pack inspects is inspected. The
+- **The strictest combination.** Every block of any candidate applies, each
+  in its own mode on each path: hooks take the candidates whose hook mode
+  blocks, the inspect endpoints and the LLM proxy those whose guardrail mode
+  blocks. On a path, the action applies wherever one blocks, with the lowest
+  `block_at` and the strictest HILT of those that block there, and the rules
+  of their rule packs are enforced. A candidate that only observes on a path
+  changes nothing there. Suppressions apply only when all those packs share
+  them (allows are the intersection). Every sensitive tool any of them
+  inspects is inspected. A tool call is judged within the same semantic rule
+  cost budget as with one profile; a rule several packs share is judged once.
+  The
   sandbox limits of all candidates are combined: requirements and blocks are
   unions, allowed lists are intersections, and false wins. If no sandbox can
   satisfy them all (for example two different required packs), no sandbox

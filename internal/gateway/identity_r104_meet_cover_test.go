@@ -63,7 +63,7 @@ func TestProvenMeetCoversAnUncertainProfileOnlyWithThePacksItScans(t *testing.T)
 
 				meetName := config.ProfileMeetName([]string{"a", "c"})
 				meet := set.meet(meetName)
-				if meet == nil || !slices.Equal(set.enforcingMembers(meet.members, tc.connector), []string{"a", "c"}) {
+				if meet == nil || !slices.Equal(set.enforcingMembers(meet.members, tc.connector, profilePathAny), []string{"a", "c"}) {
 					t.Fatalf("fixture: meet %s enforcing members on %q are not [a c]", meetName, tc.connector)
 				}
 				if tc.name == "uncertain profile on the base pack, codex" &&

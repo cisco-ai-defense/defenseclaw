@@ -662,7 +662,10 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	decision := set.matchAgent(subject, source, connectorName, scans, agent, legacy)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
-		if derived, ok := set.derivedProfile(decision.Name); ok {
+		if meet := set.meet(decision.Name); meet != nil {
+			// A meet decides each path with its members that block there.
+			resolved.derived = meet.pathConfig(requestProfilePath(ctx))
+		} else if derived, ok := set.derivedProfile(decision.Name); ok {
 			resolved.derived = derived.Config
 		}
 	}

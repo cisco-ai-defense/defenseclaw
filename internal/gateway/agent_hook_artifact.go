@@ -131,7 +131,8 @@ func promotedArtifactFindings(
 	// member's own rules (one list of findings each); any other profile
 	// judges it with its own.
 	members := []*compiledRulePackCategories{nil}
-	if generation := snapshotRulePackGenerationFor(ctx, req.ConnectorName); generation != nil && len(generation.members) > 0 {
+	generation := snapshotRulePackGenerationFor(ctx, req.ConnectorName)
+	if generation != nil && len(generation.members) > 0 {
 		members = generation.members
 	}
 	findings := make([][]RuleFinding, len(members))
@@ -169,6 +170,11 @@ func promotedArtifactFindings(
 			promotedArtifactSequentialReachabilityEligible(artifactFacts)
 		lists := make([][]RuleFinding, 0, len(members))
 		var observed trustedActionTelemetry
+		// The members judge one artifact within one budget, as one profile does.
+		var budget *trustedActionBudget
+		if len(members) > 1 {
+			budget = newTrustedActionBudget(true)
+		}
 		for i, member := range members {
 			matched := dispatchTrustedAction(ctx, trustedActionRequest{
 				Input:              input,
@@ -178,6 +184,7 @@ func promotedArtifactFindings(
 				EnforcementCapable: enforcementCapable,
 				recordTelemetry:    func(telemetry trustedActionTelemetry) { observed.widen(telemetry) },
 				generation:         member,
+				budget:             budget,
 			})
 			lists = append(lists, matched)
 			for _, finding := range matched {
@@ -189,6 +196,7 @@ func promotedArtifactFindings(
 				findings[i] = append(findings[i], finding)
 			}
 		}
+		noteMeetBudget(generation, budget)
 		if recordTelemetry != nil && !observed.empty() {
 			recordTelemetry(observed)
 		}

@@ -229,6 +229,9 @@ type compiledRulePackCategories struct {
 	ruleIdentityTitles map[string]map[string]struct{}
 	overridden         int
 	added              int
+	// budgetNote says once that the members' semantic rules of one action
+	// reached their shared cost budget (noteMeetBudget); nil for one pack.
+	budgetNote *sync.Once
 	// members are the generations of the profiles of a strictest
 	// combination (a meet) whose rules it scans with. A scan of the meet is
 	// each member's own scan, the strongest finding of a rule kept
