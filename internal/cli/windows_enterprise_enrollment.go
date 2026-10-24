@@ -22,6 +22,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 )
 
@@ -55,11 +56,21 @@ func windowsEnterpriseEnrollmentAccounts(rows []enterpriseHookReconcileRow) []en
 			account.Account = account.SID
 		}
 		pending := false
+		hermesLimited := false
 		for _, connector := range entry.Connectors {
 			account.Connectors[connector.Connector] = connector.State
 			pending = pending || connector.State == "pending"
+			hermesLimited = hermesLimited || connector.Connector == "hermes" && connector.State == "enrolled"
 		}
 		account.Reason = windowsEnterpriseEnrollmentReason(pending, failures[windowsEnterpriseEnrollmentKey(entry.SID, entry.User, entry.UserHome)])
+		if hermesLimited {
+			if limit := enterprisehooks.ManagedHermesSessionHomeAttestation("windows", "hermes", true, false); limit != nil {
+				if account.Reason != "" {
+					account.Reason += "; "
+				}
+				account.Reason += "Hermes NOT COVERED: " + limit.Error()
+			}
+		}
 		accounts = append(accounts, account)
 	}
 	return accounts

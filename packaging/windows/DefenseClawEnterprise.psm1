@@ -23457,7 +23457,10 @@ function Get-DefenseClawGuardianReadinessProbe {
             diagnostic = 'guardian service is not running'
         }
     }
-    $verb = if ($LiveVerify) { 'verify' } else { 'status' }
+    $verb = if ($LiveVerify) {
+        if (Test-DefenseClawStandaloneProfile) { 'readiness' } else { 'verify' }
+    }
+    else { 'status' }
     $probe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `

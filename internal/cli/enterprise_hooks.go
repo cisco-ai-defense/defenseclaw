@@ -135,6 +135,7 @@ var (
 	enterpriseHooksWatchRunE                   = runEnterpriseHooksWatch
 	enterpriseHooksStatusRunE                  = runEnterpriseHooksStatus
 	enterpriseHooksVerifyRunE                  = runEnterpriseHooksVerify
+	enterpriseHooksReadinessRunE               = runEnterpriseHooksReadiness
 	enterpriseHookAuthorizationOwnershipSetter = setEnterpriseHookAuthorizationOwnership
 	enterpriseHookAuthorizationDirTrustCheck   = func(path string) error {
 		return managed.ValidateTrustedRuntimeDir(path, "hook guardian authorization directory")
@@ -303,6 +304,17 @@ target or aggregate guardian control is unhealthy.`,
 	},
 }
 
+// Setup checks live hook registration before it commits machine readiness.
+// Public Verify separately refuses to certify a session-only Hermes home.
+var enterpriseHooksReadinessCmd = &cobra.Command{
+	Use:    "readiness",
+	Short:  "Check live machine hook registration for managed Setup",
+	Hidden: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksReadinessRunE(cmd, args)
+	},
+}
+
 func init() {
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
 		"Hook-native connector to install or repair (codex, claudecode, or cursor on native Windows)")
@@ -378,6 +390,14 @@ func init() {
 		"Local guardrail proxy host:port (default: 127.0.0.1:<guardrail.port>)")
 	enterpriseHooksVerifyCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
+	enterpriseHooksReadinessCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
+		"YAML manifest of per-user hook targets")
+	enterpriseHooksReadinessCmd.Flags().StringVar(&enterpriseHookAPIAddr, "api-addr", "",
+		"Local gateway API host:port used by hook scripts (default: 127.0.0.1:<gateway.api_port>)")
+	enterpriseHooksReadinessCmd.Flags().StringVar(&enterpriseHookProxyAddr, "proxy-addr", "",
+		"Local guardrail proxy host:port (default: 127.0.0.1:<guardrail.port>)")
+	enterpriseHooksReadinessCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
+		"Emit machine-readable JSON")
 
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksUninstallCmd)
@@ -385,6 +405,7 @@ func init() {
 	enterpriseHooksCmd.AddCommand(enterpriseHooksWatchCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksStatusCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksVerifyCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksReadinessCmd)
 	enterpriseCmd.AddCommand(enterpriseHooksCmd)
 	rootCmd.AddCommand(enterpriseCmd)
 }
@@ -597,7 +618,7 @@ type enterpriseHookReconcileRun struct {
 }
 
 var (
-	enterpriseHookReconcileVerifier         = enterprisehooks.Verify
+	enterpriseHookReconcileVerifier         = enterpriseHookGuardianVerify
 	enterpriseHookReconcileInstaller        = enterprisehooks.Install
 	enterpriseHookReconcileSessionAvailable = enterpriseHookTargetSessionAvailable
 	// enterpriseHookReconcileTargetRelease names the other DefenseClaw
@@ -1686,7 +1707,24 @@ type enterpriseHookVerifyGenerationCapture func() (
 var enterpriseHookVerifyCaptureGeneration enterpriseHookVerifyGenerationCapture = captureEnterpriseHookVerifyGeneration
 
 func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
-	run, err := runEnterpriseHookVerifyOnce(cmd.Context())
+	return runEnterpriseHooksVerifyWithScope(cmd, false)
+}
+
+func runEnterpriseHooksReadiness(cmd *cobra.Command, _ []string) error {
+	if runtime.GOOS != "windows" || cfg == nil || !cfg.StandaloneEnterprise() {
+		return fmt.Errorf("enterprise hooks readiness is available only for managed standalone Windows Setup")
+	}
+	return runEnterpriseHooksVerifyWithScope(cmd, true)
+}
+
+func runEnterpriseHooksVerifyWithScope(cmd *cobra.Command, registrationOnly bool) error {
+	var run enterpriseHookVerifyRun
+	var err error
+	if registrationOnly {
+		run, err = runEnterpriseHookRegistrationOnce(cmd.Context())
+	} else {
+		run, err = runEnterpriseHookVerifyOnce(cmd.Context())
+	}
 	if err != nil {
 		return err
 	}
@@ -1698,6 +1736,15 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 			"manifest":                         run.Manifest,
 			"results":                          run.Rows,
 			"claude_effective_policy_verified": enterpriseHooksClaudeEffectivePolicyVerified(run.Rows),
+		}
+		if registrationOnly {
+			payload["scope"] = "machine_hook_registration"
+			for _, row := range run.Rows {
+				if strings.EqualFold(row.Connector, "hermes") {
+					payload["hermes_session_coverage"] = "not_covered"
+					break
+				}
+			}
 		}
 		if run.AuthorizationErr != nil {
 			payload["authorization_error"] = run.AuthorizationErr.Error()
@@ -1713,13 +1760,20 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 			return err
 		}
 		if !ok {
+			if registrationOnly {
+				return fmt.Errorf("enterprise hooks readiness failed")
+			}
 			return fmt.Errorf("enterprise hooks verify failed")
 		}
 		return nil
 	}
+	verb := "verified"
+	if registrationOnly {
+		verb = "registered"
+	}
 	for _, row := range run.Rows {
 		if row.OK {
-			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified%s\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row), enterpriseHookAgentVersionNote(row))
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s %s%s\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row), verb, enterpriseHookAgentVersionNote(row))
 		} else if row.Pending {
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s pending an exact active Windows session\n", Style("•", "fg=yellow", "bold"), enterpriseHookTargetLabel(row))
 		} else if enterpriseHookVerifyRowExcused(run, row) {
@@ -1732,6 +1786,9 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "  %s protected authorization: %s\n", Style("✗", "fg=red", "bold"), run.AuthorizationErr)
 	}
 	if !ok {
+		if registrationOnly {
+			return fmt.Errorf("enterprise hooks readiness failed for %d target(s)", failures)
+		}
 		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", failures)
 	}
 	return nil
@@ -1755,6 +1812,20 @@ func runEnterpriseHookVerifyOnce(ctx context.Context) (enterpriseHookVerifyRun, 
 		enterpriseHookVerifyGenerationRetryDelay,
 		runEnterpriseHookVerifyAttempt,
 	)
+}
+
+func runEnterpriseHookRegistrationOnce(ctx context.Context) (enterpriseHookVerifyRun, error) {
+	return runEnterpriseHookVerifyGenerationConsistent(
+		ctx,
+		enterpriseHookVerifyCaptureGeneration,
+		enterpriseHookVerifyGenerationAttempts,
+		enterpriseHookVerifyGenerationRetryDelay,
+		runEnterpriseHookRegistrationAttempt,
+	)
+}
+
+func runEnterpriseHookRegistrationAttempt(ctx context.Context) (enterpriseHookVerifyRun, error) {
+	return runEnterpriseHookVerifyAttemptWithScope(ctx, true)
 }
 
 func captureEnterpriseHookVerifyGeneration() (
@@ -1873,6 +1944,20 @@ func runEnterpriseHookVerifyGenerationConsistent(
 }
 
 func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRun, error) {
+	return runEnterpriseHookVerifyAttemptWithScope(ctx, false)
+}
+
+var enterpriseHookLivePublicVerifier = enterprisehooks.Verify
+var enterpriseHookLiveRegistrationVerifier = enterpriseHookGuardianVerify
+
+func enterpriseHookLiveTargetVerifier(ctx context.Context, opts enterprisehooks.InstallOptions, registrationOnly bool) (enterprisehooks.InstallResult, error) {
+	if registrationOnly && strings.EqualFold(strings.TrimSpace(opts.ConnectorName), "hermes") {
+		return enterpriseHookLiveRegistrationVerifier(ctx, opts)
+	}
+	return enterpriseHookLivePublicVerifier(ctx, opts)
+}
+
+func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOnly bool) (enterpriseHookVerifyRun, error) {
 	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks verify: config is not loaded")
@@ -2044,7 +2129,7 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 			}
 			opts.MachinePolicyContractID = enterpriseHookMachinePolicyContractFor(target.Connector, claudeMachineContract)
 			var result enterprisehooks.InstallResult
-			result, targetErr = enterprisehooks.Verify(ctx, opts)
+			result, targetErr = enterpriseHookLiveTargetVerifier(ctx, opts, registrationOnly)
 			if targetErr == nil {
 				row.Result = &result
 				row.UserHome = result.UserHome
