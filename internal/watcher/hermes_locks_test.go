@@ -16,6 +16,14 @@ func TestHermesLocksMetadataIsNotAdmittedAsASkill(t *testing.T) {
 	if err := os.MkdirAll(locks, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// macOS puts t.TempDir under /var, an alias of /private/var. Hermes
+	// correctly refuses linked roots, so use the fixture's real path.
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root = resolvedRoot
+	locks = filepath.Join(root, ".locks")
 	if err := os.WriteFile(filepath.Join(locks, "install.lock"), []byte("metadata"), 0o600); err != nil {
 		t.Fatal(err)
 	}
