@@ -556,6 +556,18 @@ describe('Windows Hermes failure guidance', () => {
   });
 });
 
+describe('Hermes install-lock attribution', () => {
+  it('reports the observed permission error without assigning unproved file ownership', () => {
+    const limits = readFileSync(join(docs, 'reference/connectors/hermes.mdx'), 'utf8');
+    const lockLine = limits.split('\n').find((line) => line.includes('.install.lock'));
+    assert.ok(lockLine, 'Hermes install-lock guidance is missing');
+    assert.match(lockLine, /pm-runtime.*install-stamp\.json.*\.install\.lock/);
+    assert.match(lockLine, /Inspect the resolved path, owner, and permissions/);
+    assert.match(lockLine, /No DefenseClaw verdict was recorded/);
+    assert.doesNotMatch(lockLine, /(?:its own|its tools installer|vendor runtime errors)/i);
+  });
+});
+
 describe('managed-host enrollment protection', () => {
   const guides = [
     'enterprise/plan/threat-model.mdx',
