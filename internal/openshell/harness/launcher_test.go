@@ -223,6 +223,12 @@ func TestLaunchersPinTheirEnvironment(t *testing.T) {
 			map[string]string{"HERMES_DEFENSECLAW_API_KEY": "openshell:resolve:env:v4_BEDROCK_MANTLE_API_KEY", "HERMES_ACCEPT_HOOKS": "1",
 				"HERMES_SAFE_MODE": unset, "HERMES_MANAGED_DIR": unset, "HERMES_HOME": "{dir}/.hermes", "HERMES_PYTHON_SRC_ROOT": unset,
 				"HERMES_LAZY_INSTALL_TARGET": unset}},
+		// Hermes ignores /etc/hermes while PYTEST_CURRENT_TEST is set, even
+		// empty (GAP-1122).
+		{"hermes pytest switch", Hermes, []string{"PYTEST_CURRENT_TEST=t.py::t (call)"}, []string{"chat", "-q", "hi"},
+			map[string]string{"PYTEST_CURRENT_TEST": unset, "HERMES_ACCEPT_HOOKS": "1"}},
+		{"hermes empty pytest switch", Hermes, []string{"PYTEST_CURRENT_TEST="}, nil,
+			map[string]string{"PYTEST_CURRENT_TEST": unset}},
 		// An explicit key wins over the profile's.
 		{"hermes own key", Hermes, []string{"HERMES_DEFENSECLAW_API_KEY=mine", "OPENAI_API_KEY=other"}, nil,
 			map[string]string{"HERMES_DEFENSECLAW_API_KEY": "mine"}},

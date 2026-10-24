@@ -286,7 +286,7 @@ var Hermes = register(&Spec{
 	preseedRefresh: []string{
 		"refuse --safe-mode and every prefix Hermes' argument parser resolves to it (--sa and longer): Hermes skips every shell hook in safe mode",
 		"refuse --tui and its prefix --tu: the pinned Hermes builds the agent of its TUI without the shell hooks (GAP-1036). The managed layer pins HERMES_TUI=0 and display.interface: cli, which Hermes applies over the environment, every .env and every config.yaml, so nothing else selects the TUI; a root-owned shim refuses every agent Hermes builds in tui_gateway (the TUI, dashboard chat and serve backend) as the backstop",
-		"pin HOME and HERMES_HOME to the image home, and drop the variables that move the managed scope, the Hermes home or the code Hermes runs (HERMES_MANAGED_DIR, HERMES_PYTHON_SRC_ROOT, HERMES_LAZY_INSTALL_TARGET, the TUI's interpreter and directories, every PYTHON* variable) or switch the hooks off (HERMES_SAFE_MODE, HERMES_ENABLE_PROJECT_PLUGINS)",
+		"pin HOME and HERMES_HOME to the image home, and drop the variables that move the managed scope, the Hermes home or the code Hermes runs (HERMES_MANAGED_DIR, HERMES_PYTHON_SRC_ROOT, HERMES_LAZY_INSTALL_TARGET, the TUI's interpreter and directories, every PYTHON* variable) or switch the hooks off (HERMES_SAFE_MODE, HERMES_ENABLE_PROJECT_PLUGINS, and PYTEST_CURRENT_TEST, Hermes' test-suite switch that makes it ignore /etc/hermes)",
 		"refuse to start while a .env or .op.env of the Hermes home or one of its profiles names any of them (Hermes loads ~/.hermes/.env over the process environment at start)",
 		"refuse to start while the Hermes home or a profile holds Python code under plugins/ (model-provider plugins are imported whatever plugins.enabled says; memory and cron providers load when the user config names them)",
 		"refuse to start while a user config.yaml has a secrets section, as Hermes' YAML loader reads it, or is a file the loader cannot parse (its secret sources set environment variables before the managed .env applies)",
@@ -338,8 +338,11 @@ var hermesEnvFileNames = []string{
 
 // hermesEnvFileGenericNames are the other variables the files may not name,
 // matched where a name starts (Hermes does not split glued pairs for them):
-// the Tirith scanner's, the interpreter's and the dynamic loader's.
-var hermesEnvFileGenericNames = []string{"TIRITH_[A-Z_]*", "PYTHON[A-Z0-9_]*", "LD_[A-Z_]*"}
+// the Tirith scanner's, the interpreter's, the dynamic loader's and
+// PYTEST_CURRENT_TEST, Hermes' test-suite switch: while it is set, whatever
+// its value, Hermes ignores /etc/hermes (managed_scope._under_pytest), so
+// neither the hooks nor any managed pin apply (GAP-1122).
+var hermesEnvFileGenericNames = []string{"TIRITH_[A-Z_]*", "PYTHON[A-Z0-9_]*", "LD_[A-Z_]*", "PYTEST_CURRENT_TEST"}
 
 // hermesEnvFilePattern is the extended regular expression of both lists.
 var hermesEnvFilePattern = strings.Join(hermesEnvFileNames, "|") +
@@ -374,8 +377,10 @@ for arg in "$@"; do
       ;;
   esac
 done
+# PYTEST_CURRENT_TEST is Hermes' test-suite switch: set, even empty, it makes
+# Hermes ignore /etc/hermes, the managed layer that holds DefenseClaw's hooks.
 unset HERMES_SAFE_MODE HERMES_MANAGED_DIR HERMES_ENABLE_PROJECT_PLUGINS HERMES_HOME_OVERRIDE \
-  HERMES_PYTHON_SRC_ROOT HERMES_PYTHON HERMES_TUI_DIR HERMES_NODE HERMES_LAZY_INSTALL_TARGET
+  HERMES_PYTHON_SRC_ROOT HERMES_PYTHON HERMES_TUI_DIR HERMES_NODE HERMES_LAZY_INSTALL_TARGET PYTEST_CURRENT_TEST
 HOME=` + connector.SandboxHomeDir + `
 HERMES_HOME="$HOME/.hermes"
 HERMES_ACCEPT_HOOKS=1

@@ -137,6 +137,15 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 		"op env":              {".op.env", []byte("HERMES_MANAGED_DIR=/tmp/x\n"), ".op.env sets HERMES_MANAGED_DIR"},
 		"profile env":         {"profiles/work/.env", []byte("HERMES_SAFE_MODE=1\n"), "profiles/work/.env sets HERMES_SAFE_MODE"},
 		"env directory":       {".env/", nil, ".env is not a readable regular file"},
+		// Hermes ignores /etc/hermes while PYTEST_CURRENT_TEST is set, even
+		// empty (GAP-1122); it does not split it out of a glued pair.
+		"env pytest switch":         {".env", []byte("PYTEST_CURRENT_TEST=x\n"), ".env sets PYTEST_CURRENT_TEST"},
+		"env empty pytest switch":   {".env", []byte("export PYTEST_CURRENT_TEST=\n"), "sets PYTEST_CURRENT_TEST"},
+		"env quoted pytest switch":  {".env", []byte("'PYTEST_CURRENT_TEST'=x\n"), "sets PYTEST_CURRENT_TEST"},
+		"env utf-16 pytest switch":  {".env", utf16LE("PYTEST_CURRENT_TEST=x\n"), "sets PYTEST_CURRENT_TEST"},
+		"op env pytest switch":      {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ".op.env sets PYTEST_CURRENT_TEST"},
+		"profile env pytest switch": {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), "profiles/work/.env sets PYTEST_CURRENT_TEST"},
+		"env glued pytest value":    {".env", []byte("OPENAI_API_KEY=sk-xPYTEST_CURRENT_TEST=1\n"), ""},
 		// The managed .env pins HERMES_TUI=0 over these (GAP-1036 review);
 		// HERMES_TUI_DIR still moves the code the TUI runs.
 		"env tui":                {".env", []byte("export HERMES_TUI = 1\n"), ""},
