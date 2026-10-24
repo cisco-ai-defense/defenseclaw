@@ -18,29 +18,38 @@ import (
 )
 
 const hermesHotConfigProbeFixtureEnv = "HERMES_HOT_CONFIG_PROBE_FIXTURE"
+const hermesHotConfigProbeManifestEnv = "HERMES_HOT_CONFIG_PROBE_MANIFEST"
 
-// The probe executes the test binary as its installed CLI. The child models
-// the public coverage refusal and the distinct registration result, so this
-// test exercises the actual verb and JSON report handling together.
+// The probe executes the test binary as its installed CLI. The child parses
+// the real readiness flags, then models registered and missing owned hooks.
 func init() {
 	fixture := os.Getenv(hermesHotConfigProbeFixtureEnv)
 	if fixture == "" {
 		return
 	}
-	if len(os.Args) != 5 || os.Args[1] != "enterprise" || os.Args[2] != "hooks" || os.Args[4] != "--json" {
+	if len(os.Args) < 5 || os.Args[1] != "enterprise" || os.Args[2] != "hooks" || os.Args[3] != "readiness" {
 		fmt.Fprintln(os.Stderr, "unexpected hot-config hook probe arguments:", os.Args[1:])
 		os.Exit(2)
 	}
+	// Parse the production command's flags before returning fixture rows. An
+	// omitted --manifest would otherwise return a convincing success for the
+	// Unix default path on Windows.
+	if err := enterpriseHooksReadinessCmd.ParseFlags(os.Args[4:]); err != nil ||
+		!enterpriseHooksReadinessCmd.Flags().Changed("json") ||
+		!enterpriseHooksReadinessCmd.Flags().Changed("manifest") ||
+		len(enterpriseHooksReadinessCmd.Flags().Args()) != 0 ||
+		enterpriseHookManifest != os.Getenv(hermesHotConfigProbeManifestEnv) {
+		fmt.Fprintln(os.Stderr, "unexpected hot-config readiness flags or manifest:", os.Args[4:], enterpriseHookManifest, err)
+		os.Exit(2)
+	}
 	row := enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1002", Connector: "hermes"}
-	switch {
-	case os.Args[3] == "verify":
-		row.Error = "session-only HERMES_HOME cannot be observed"
-	case os.Args[3] == "readiness" && fixture == "registered":
+	switch fixture {
+	case "registered":
 		row.OK = true
-	case os.Args[3] == "readiness" && fixture == "absent":
+	case "absent":
 		row.Error = "owned hook command not present"
 	default:
-		fmt.Fprintln(os.Stderr, "unexpected hot-config hook probe fixture:", fixture, os.Args[3])
+		fmt.Fprintln(os.Stderr, "unexpected hot-config hook probe fixture:", fixture)
 		os.Exit(2)
 	}
 	if err := json.NewEncoder(os.Stdout).Encode(struct {
@@ -55,6 +64,10 @@ func init() {
 }
 
 func TestWindowsHotConfigHermesRegistrationProof(t *testing.T) {
+	layout, err := managed.StandaloneWindowsLayoutForRoots(`C:\Program Files`, `C:\ProgramData With Spaces`)
+	if err != nil {
+		t.Fatal(err)
+	}
 	hermes := enterprisehooks.ManifestTarget{User: "operator", SID: "S-1-5-21-1-2-3-1002", Connector: "hermes"}
 	publicRefusal := enterpriseHookReconcileRow{SID: hermes.SID, Connector: "hermes", Error: "session-only HERMES_HOME cannot be observed"}
 	if got := windowsHotConfigUnprovenTargets([]enterprisehooks.ManifestTarget{hermes}, []enterpriseHookReconcileRow{publicRefusal}); len(got) != 1 {
@@ -69,7 +82,8 @@ func TestWindowsHotConfigHermesRegistrationProof(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(hermesHotConfigProbeFixtureEnv, tc.name)
-			got, err := windowsEnterpriseHotConfigUnprovenTargetHooks(context.Background(), os.Args[0], managed.StandaloneLayout{}, []enterprisehooks.ManifestTarget{hermes})
+			t.Setenv(hermesHotConfigProbeManifestEnv, layout.ManifestPath)
+			got, err := windowsEnterpriseHotConfigUnprovenTargetHooks(context.Background(), os.Args[0], layout, []enterprisehooks.ManifestTarget{hermes})
 			if err != nil || len(got) != tc.unproven {
 				t.Fatalf("Hermes %s registration proof = (%+v, %v), want %d unproven", tc.name, got, err, tc.unproven)
 			}

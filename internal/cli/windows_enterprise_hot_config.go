@@ -809,13 +809,13 @@ var windowsEnterpriseHotConfigTargetHooksProven = func(ctx context.Context, layo
 }
 
 // windowsEnterpriseHotConfigUnprovenTargetHooks runs enterprise hooks readiness
-// --json once and returns the targets whose row is neither verified nor
-// pending. The command exits nonzero when any target fails, so its report is
-// read whatever its exit status.
+// --json for the installed Windows manifest. It returns targets whose row is
+// neither verified nor pending. The command exits nonzero when any target
+// fails, so its report is read whatever its exit status.
 func windowsEnterpriseHotConfigUnprovenTargetHooks(ctx context.Context, installedCLI string, layout managed.StandaloneLayout, targets []enterprisehooks.ManifestTarget) ([]enterprisehooks.ManifestTarget, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
-	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "readiness", "--json")
+	command := exec.CommandContext(ctx, installedCLI, "enterprise", "hooks", "readiness", "--manifest", layout.ManifestPath, "--json")
 	command.Env = windowsEnterpriseEnvironmentWith(os.Environ(), windowsEnterpriseServicePins(layout))
 	out, runErr := command.Output()
 	var report struct {
