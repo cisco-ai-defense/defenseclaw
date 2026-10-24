@@ -46,7 +46,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 
 - In action mode `PreToolUse` can deny a tool call or ask you first, using Antigravity's own `decision` field. The ask always prompts, even when you chose "Always Allow" before.
 - `PreInvocation` and `PostInvocation` can only add context. `PostToolUse` only observes. `Stop` is always allowed.
-- Observe mode records policy findings without blocking on those findings. By default the running hook denies `PreToolUse` when the gateway is unreachable ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)).
+- Observe mode records policy findings without blocking on those findings. When the gateway is not running, the default and permissive policies let the call run with one warning and strict denies `PreToolUse`; every other hook failure denies it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)).
 
 ## Files it changes
 
