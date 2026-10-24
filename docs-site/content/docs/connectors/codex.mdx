@@ -60,7 +60,7 @@ Teardown restores the backup, or removes only DefenseClaw's entries.
 ## Limits
 
 - `codex features disable hooks` keeps the entries but runs none of them. DefenseClaw raises a guardrail-degraded alert, `defenseclaw status` shows DEGRADED and `defenseclaw doctor` fails the **Codex hooks** row. Run `codex features enable hooks`.
-- Delete only DefenseClaw's `command` lines from `config.toml` and Codex will not start. Use `defenseclaw setup codex --yes` or `defenseclaw doctor --fix` to repair it.
+- If DefenseClaw's `command` lines are deleted from `config.toml`, Codex may start and run without DefenseClaw hooks. `defenseclaw doctor` reports the missing commands; run `defenseclaw setup codex --yes` or `defenseclaw doctor --fix` to repair them, then restart Codex.
 - Hosted tools, file reads and `write_stdin` have no complete hook coverage. On Windows each gateway start runs Codex's app-server once, which contacts OpenAI.
 - After you rotate a model key, or after an upgrade, run `codex app-server daemon restart`. The daemon keeps the environment and telemetry credential it started with.
 

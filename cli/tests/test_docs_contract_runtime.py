@@ -97,6 +97,12 @@ def test_codex_sandbox_reference_describes_its_notify_bridge():
     assert "never blocks" in row and "process list" in row
 
 
+def test_codex_guide_warns_when_command_fields_are_removed():
+    text = flat("connectors/codex.mdx")
+    assert "may start and run without DefenseClaw hooks" in text
+    assert "Codex will not start" not in text
+
+
 def test_codex_notify_privacy_residual_includes_the_sandbox():
     text = (DOCS / "enterprise/plan/threat-model.mdx").read_text()
     row = next(line for line in text.splitlines() if line.startswith("| **Codex passes each turn"))

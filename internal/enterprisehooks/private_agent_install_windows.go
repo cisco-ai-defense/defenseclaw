@@ -12,9 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
 )
 
 func privateInstallContractReason(name, version string) string {
@@ -42,8 +44,9 @@ var windowsPrivateInstallMachineRoots = func() []string {
 // DiscoverWindowsPrivateAgentInstalls checks the fixed npm roots, every
 // installed Node of the version managers (not only the newest few), the
 // Volta package images, the vendor's local install, the native installer's
-// versions, the machine npm prefix and one directory below a profile,
-// where npm --prefix leaves a runnable local copy. It performs bounded
+// versions, the machine npm prefix and every npm prefix at any depth below
+// a profile, where npm --prefix or a project leaves a runnable local copy
+// (GAP-0988). It performs bounded
 // static reads and refuses reparse chains while the enumerator runs as
 // LocalSystem; a part it cannot read or that exceeds its bound is reported
 // incomplete with the reason.
@@ -68,28 +71,15 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 	for _, modules := range modulesRoots {
 		roots = append(roots, filepath.Dir(modules))
 	}
-	f, err := os.Open(home)
-	var entries []string
-	if err == nil {
-		entries, err = f.Readdirnames(privateAgentInstallMaxEntries + 1)
-		_ = f.Close()
-		if err == io.EOF {
-			err = nil
-		}
-	}
-	if err != nil || len(entries) > privateAgentInstallMaxEntries {
+	// The walk never descends through a reparse point: the profile's
+	// compatibility junctions name folders it reads through their own
+	// paths, and LocalSystem must not follow a user's link anywhere else.
+	nested, complete := walkPrivateNPMPrefixes(home, privateInstallWalk{open: openWindowsPrivateWalkDir,
+		unreachable: func(_ string, err error) bool { return errors.Is(err, fs.ErrNotExist) }})
+	if !complete {
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
-		entries = nil
 	}
-	for _, entry := range entries {
-		child := filepath.Join(home, entry)
-		if winpath.RejectReparseChain(child) != nil {
-			continue // the profile's compatibility junctions name folders scanned through their own roots
-		}
-		if info, err := os.Lstat(child); err == nil && info.IsDir() {
-			roots = append(roots, child)
-		}
-	}
+	roots = append(roots, nested...)
 	for _, machine := range windowsPrivateInstallMachineRoots() {
 		info, err := os.Lstat(machine)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || winpath.RejectReparseChain(machine) != nil {
@@ -139,6 +129,88 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 		scanWindowsClaudeVersions(scan, filepath.Join(home, ".local", "share", "claude", "versions"))
 	}
 	return scan.result()
+}
+
+// errPrivateWalkReparse refuses a directory path that cannot be opened as
+// ordinary local directories from the drive root.
+var errPrivateWalkReparse = errors.New("the folder is a reparse point")
+
+// openWindowsPrivateWalkDir opens each directory relative to its held parent.
+// A pathname check followed by os.Open can follow a junction planted between
+// those calls; the handle returned here is the one ReadDir uses.
+func openWindowsPrivateWalkDir(dir string) (*os.File, error) {
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, err
+	}
+	// The scan runs as LocalSystem. A UNC or device path is never a profile
+	// directory to enumerate, even if it is selected by a user-controlled
+	// reparse point.
+	if len(absolute) < 3 || absolute[1] != ':' || absolute[2] != '\\' ||
+		((absolute[0] < 'A' || absolute[0] > 'Z') && (absolute[0] < 'a' || absolute[0] > 'z')) ||
+		len(filepath.VolumeName(absolute)) != 2 || strings.Contains(absolute[2:], ":") {
+		return nil, errPrivateWalkReparse
+	}
+	root := absolute[:3]
+	ptr, err := winpath.UTF16Ptr(root)
+	if err != nil {
+		return nil, err
+	}
+	access := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIBUTES | windows.SYNCHRONIZE)
+	share := uint32(windows.FILE_SHARE_READ | windows.FILE_SHARE_WRITE | windows.FILE_SHARE_DELETE)
+	handle, err := windows.CreateFile(ptr, access, share, nil, windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, err
+	}
+	for _, part := range strings.Split(strings.Trim(absolute[3:], `\`), `\`) {
+		var info windows.ByHandleFileInformation
+		if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
+			_ = windows.CloseHandle(handle)
+			return nil, err
+		}
+		if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+			info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+			_ = windows.CloseHandle(handle)
+			return nil, errPrivateWalkReparse
+		}
+		if part == "" {
+			break // volume root
+		}
+		name, err := windows.NewNTUnicodeString(part)
+		if err != nil {
+			_ = windows.CloseHandle(handle)
+			return nil, err
+		}
+		attributes := windows.OBJECT_ATTRIBUTES{
+			Length: uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})), RootDirectory: handle,
+			ObjectName: name, Attributes: windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+		}
+		var child windows.Handle
+		var status windows.IO_STATUS_BLOCK
+		err = windows.NtCreateFile(&child, access, &attributes, &status, nil, 0, share, windows.FILE_OPEN,
+			windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT,
+			0, 0)
+		_ = windows.CloseHandle(handle)
+		if err != nil {
+			if errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) || errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND) {
+				return nil, fs.ErrNotExist
+			}
+			return nil, err
+		}
+		handle = child
+	}
+	var final windows.ByHandleFileInformation
+	if err := windows.GetFileInformationByHandle(handle, &final); err != nil {
+		_ = windows.CloseHandle(handle)
+		return nil, err
+	}
+	if final.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 ||
+		final.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 {
+		_ = windows.CloseHandle(handle)
+		return nil, errPrivateWalkReparse
+	}
+	return os.NewFile(uintptr(handle), absolute), nil
 }
 
 // windowsCopyIdentity names one copy: the scan refuses reparse points, so

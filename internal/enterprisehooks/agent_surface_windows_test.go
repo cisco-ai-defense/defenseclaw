@@ -14,6 +14,7 @@ package enterprisehooks
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -106,7 +107,8 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	SetUnverifiedVersionsPolicy(nil)
 
 	reported, readAsErr = nil, errors.New("no active session token")
-	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, ""); got != "" || len(reported) != 0 {
+	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, ""); got != "" || len(reported) != 1 ||
+		reported[0].Code != UnprotectedCodeInstallScanIncomplete {
 		t.Fatalf("failed impersonation version = %q, reported %+v", got, reported)
 	}
 	impersonated, rowContext.sessionActive = 0, false
@@ -115,11 +117,71 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	}
 }
 
+func TestWindowsEnrolledCLIReportsExplicitlyOldExtension(t *testing.T) {
+	home := t.TempDir()
+	extension := filepath.Join(home, ".vscode", "extensions", "anthropic.claude-code-2.1.100-win32-x64")
+	if err := os.MkdirAll(extension, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-2-3-1001"
+	previous := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previous })
+	var reported []UnprotectedAgent
+	row := &ManifestTarget{SID: sid, UserHome: home, Connector: "claudecode"}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, "2.1.300"); got != "2.1.300" {
+		t.Fatalf("CLI row version = %q, want 2.1.300", got)
+	}
+	if len(reported) != 1 || reported[0].Code != UnprotectedCodeSurfaceUnverified ||
+		reported[0].Version != "2.1.100" || reported[0].Refusal != "" {
+		t.Fatalf("old extension beside enrolled CLI = %+v, want one non-refusal warning", reported)
+	}
+}
+
+func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
+	home := t.TempDir()
+	root := filepath.Join(home, ".vscode", "extensions")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < windowsSurfaceMaxEntries-1; i++ {
+		path := filepath.Join(root, fmt.Sprintf("unrelated-%04d", i))
+		if err := os.Mkdir(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Mkdir(filepath.Join(root, "anthropic.claude-code-2.1.220-win32-x64"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-2-3-1001"
+	previousReadAs := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previousReadAs })
+	if surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode"); err != nil || len(surfaces) != 1 {
+		t.Fatalf("exactly %d entries: surfaces=%+v error=%v", windowsSurfaceMaxEntries, surfaces, err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "one-more"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode"); err == nil {
+		t.Fatalf("overflow produced no incomplete error: %+v", surfaces)
+	}
+	var reported []UnprotectedAgent
+	row := &ManifestTarget{SID: sid, UserHome: home, Connector: "claudecode"}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+	_ = windowsStandaloneSurfaceVersion(row, nil, ctx, "2.1.300")
+	if len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("overflow must make signed-in coverage incomplete: %+v", reported)
+	}
+}
+
 // A native claude.exe whose build Claude Code has not recorded yet (it
 // writes .local\share\claude\versions on first start) cannot be enrolled,
 // and the account is reported with what is missing instead of being left
 // without a row and without a reason (GAP-0597).
 func TestWindowsStandaloneNativeClaudeWithoutRecordedBuildSaysWhatIsMissing(t *testing.T) {
+	stubWindowsSurfaceReadAs(t)
 	home := t.TempDir()
 	bin := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {

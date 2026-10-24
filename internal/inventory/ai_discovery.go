@@ -4029,15 +4029,22 @@ func (s *ContinuousDiscoveryService) signalFromEvidenceWithComponent(sig AISigna
 	return out
 }
 
+// scanRoots lists the package-manifest walk roots. A configured root in a
+// macOS privacy-protected folder is still a chosen root: it is not walked,
+// the scan records the skip (and so reports itself partial), and it does
+// not count as "no root configured", so the walk never widens to the
+// whole home because the only roots asked for were protected.
 func (s *ContinuousDiscoveryService) scanRoots() []string {
 	var roots []string
 	seen := make(map[string]struct{})
+	privacySkipped := false
 	for _, root := range s.opts.ScanRoots {
 		for _, expanded := range s.expandCandidatePath(root) {
 			if _, ok := seen[expanded]; ok {
 				continue
 			}
 			if s.macOSPrivacyPathSkipped(expanded) {
+				privacySkipped = true
 				continue
 			}
 			if st, err := os.Stat(expanded); err == nil && st.IsDir() {
@@ -4046,7 +4053,7 @@ func (s *ContinuousDiscoveryService) scanRoots() []string {
 			}
 		}
 	}
-	if len(roots) == 0 {
+	if len(roots) == 0 && !privacySkipped {
 		for _, home := range s.homesToScan() {
 			if _, ok := seen[home]; ok {
 				continue

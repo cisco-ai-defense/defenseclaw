@@ -411,6 +411,7 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 		versions := map[string]string{}
 		reasons := map[string]string{}
 		surfaces := map[string][]connector.AgentSurface{}
+		var unlisted []enterprisehooks.PrivateAgentInstall
 		for _, name := range request.Connectors {
 			name = strings.ToLower(strings.TrimSpace(name))
 			if name == "" {
@@ -429,15 +430,19 @@ func enterpriseHookWorkerMain(ctx context.Context, stdin io.Reader, stdout, stde
 			}
 			// Host apps are never run; an engine CLI bundled in one is run
 			// only outside a static (untrusted-home) discovery.
-			if found := enterpriseHookWorkerDiscoverSurfaces(ctx, request.Home, name, !request.StaticDiscovery); len(found) != 0 {
+			found, complete := enterpriseHookWorkerDiscoverSurfaces(ctx, request.Home, name, !request.StaticDiscovery)
+			if len(found) != 0 {
 				surfaces[name] = found
+			}
+			if !complete {
+				unlisted = append(unlisted, enterprisehooks.PrivateAgentInstall{Connector: name, Incomplete: true, Skipped: enterprisehooks.PrivateInstallSkippedExtensions})
 			}
 			if name == "kiro" {
 				// The Kiro IDE is read, never run, so static discovery reads it too.
 				enterprisehooks.PutUnixKiroIDEForms(enterpriseHookWorkerDiscoverKiroIDE(request.Home), versions, reasons)
 			}
 		}
-		installs := enterprisehooks.DiscoverUnixPrivateAgentInstalls(request.Home, request.Connectors)
+		installs := append(enterprisehooks.DiscoverUnixPrivateAgentInstalls(request.Home, request.Connectors), unlisted...)
 		return respond(enterpriseHookWorkerResponse{Versions: versions, Reasons: reasons, Surfaces: surfaces, PrivateInstalls: installs}, 0)
 	case enterpriseHookWorkerOpForeignCleanup:
 		for _, target := range request.Targets {

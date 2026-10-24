@@ -251,6 +251,7 @@ func TestWindowsEnrollmentGroupsDecideWellKnownGroupsFromTokens(t *testing.T) {
 // oldest enrolled contract, so one user editing their package.json moved
 // every user from claudecode-hooks-v2 to v1, which lacks hooks v2 has.
 func TestStandaloneKnownClaudeRowNeverMovesTheSharedPolicyToAnOlderContract(t *testing.T) {
+	stubWindowsSurfaceReadAs(t)
 	stubMachineWinGet(t, nil)
 	const older, newer = "2.1.160", "2.1.230"
 	v2 := connector.ResolveHookContract("claudecode", newer).Contract.ContractID
