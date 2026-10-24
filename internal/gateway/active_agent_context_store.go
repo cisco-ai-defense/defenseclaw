@@ -27,14 +27,12 @@ import (
 const maxInstructionLoadRecordBytes = 1 << 20
 
 type instructionLoadRecord struct {
-	Scope                    string            `json:"scope,omitempty"`
-	Connector                string            `json:"connector"`
-	Session                  string            `json:"session"`
-	Files                    []string          `json:"files,omitempty"`
-	CaseInsensitiveFiles     []string          `json:"case_insensitive_files,omitempty"`
-	Identities               map[string]string `json:"identities,omitempty"`
-	Uncertain                bool              `json:"uncertain,omitempty"`
-	CaseInsensitiveUncertain bool              `json:"case_insensitive_uncertain,omitempty"`
+	Scope                string            `json:"scope,omitempty"`
+	Connector            string            `json:"connector"`
+	Session              string            `json:"session"`
+	Files                []string          `json:"files,omitempty"`
+	CaseInsensitiveFiles []string          `json:"case_insensitive_files,omitempty"`
+	Identities           map[string]string `json:"identities,omitempty"`
 }
 
 func (a *APIServer) instructionLoadDir() string {
@@ -60,15 +58,14 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 	defer a.activeAgentContext.storeMu.Unlock()
 	record := instructionLoadRecordPath(dir, key)
 	session, ok := a.activeAgentContext.sessionKey(key)
-	if !ok || !session.uncertain && len(session.files) == 0 {
+	if !ok || len(session.files) == 0 {
 		_ = os.Remove(record)
 		return
 	}
 	data, err := json.Marshal(instructionLoadRecord{
 		Scope: key.scope, Connector: key.connector, Session: key.sessionID,
 		Files: session.files, CaseInsensitiveFiles: session.caseInsensitiveFiles,
-		Identities: session.identities, Uncertain: session.uncertain,
-		CaseInsensitiveUncertain: session.caseInsensitiveUncertain,
+		Identities: session.identities,
 	})
 	if err != nil || len(data) > maxInstructionLoadRecordBytes || os.MkdirAll(dir, 0o700) != nil {
 		return
@@ -147,7 +144,8 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 	var record instructionLoadRecord
 	if json.Unmarshal(data, &record) != nil || record.Scope != key.scope ||
 		record.Connector != key.connector || record.Session != key.sessionID ||
-		len(record.Files) > maxActiveAgentContextFiles || len(record.Identities) > maxActiveAgentContextFiles {
+		len(record.Files) == 0 || len(record.Files) > maxActiveAgentContextFiles ||
+		len(record.Identities) > maxActiveAgentContextFiles {
 		return instructionLoadRecord{}, false
 	}
 	for _, file := range record.Files {

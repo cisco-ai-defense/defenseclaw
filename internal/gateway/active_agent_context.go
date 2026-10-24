@@ -617,8 +617,8 @@ func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, reco
 		files:                    slices.Clone(record.Files),
 		caseInsensitiveFiles:     slices.Clone(record.CaseInsensitiveFiles),
 		identities:               maps.Clone(record.Identities),
-		uncertain:                record.Uncertain || uncertain,
-		caseInsensitiveUncertain: record.CaseInsensitiveUncertain || caseInsensitiveUncertain,
+		uncertain:                uncertain,
+		caseInsensitiveUncertain: caseInsensitiveUncertain,
 		updatedAt:                now,
 	}
 }
