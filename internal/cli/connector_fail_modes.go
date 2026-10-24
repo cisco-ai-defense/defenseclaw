@@ -22,6 +22,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
@@ -40,7 +41,9 @@ has exited, before it lets go: the old gateway cannot render its open again
 while it stops. So no hook follows an open an earlier release recorded for a
 mode nobody set. An open the config sets stays open. A config this release cannot
 load yet (a 0.8.x one before 'defenseclaw migrate') is read for its explicit
-fail modes only. With --closed every hook is closed instead, whatever the
+fail modes only. While an installer holds the data directory (.install.lock)
+every hook is closed, an open the config sets included: the hooks of an
+earlier release do not check that lock. With --closed every hook is closed instead, whatever the
 config chooses, until the gateway renders them again: install.ps1 runs it
 when it stops with its install unfinished (a restore a running hook refused),
 so no hook follows an outage open while its programs and data do not match.
@@ -89,6 +92,15 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 	if dataDir == "" {
 		dataDir = config.DefaultDataPath()
 	}
+	if !managedInstall && refreshFailModesInstallHeld(dataDir) {
+		// The installers run this while they hold the data directory. The
+		// hooks of 0.8.10 to 1.0.3 never read that lock, so an open they
+		// follow lets a call run while the gateway is down for the swap
+		// (GAP-1001): every hook is closed for the install, and the new
+		// gateway renders the config's modes when it starts.
+		mode = func(string) string { return "closed" }
+		read = "install"
+	}
 	hookDir := filepath.Join(dataDir, "hooks")
 	if refreshFailModesHoldPID != 0 {
 		if connectorFlagJSON {
@@ -97,7 +109,7 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 		if refreshFailModesHoldPID < 0 || refreshFailModesHoldTimeout <= 0 {
 			return errors.New("connector refresh-fail-modes: --hold-until-exit takes a process ID and --hold-timeout a positive time")
 		}
-		return holdConnectorFailModes(cmd, hookDir, mode, managedInstall)
+		return holdConnectorFailModes(cmd, hookDir, mode, read, managedInstall)
 	}
 	var result connector.HookFailModeRefresh
 	if !managedInstall {
@@ -113,7 +125,7 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 			"refreshed": nonNilStrings(result.Sidecar), "scripts": nonNilStrings(result.Scripts),
 		})
 	}
-	printHookFailModeRefresh(cmd, result)
+	printHookFailModeRefresh(cmd, result, read)
 	if len(result.Scripts) > 0 {
 		fmt.Fprintf(cmd.OutOrStdout(), "Hooks closed until the gateway starts: %s\n", strings.Join(result.Scripts, ", "))
 	}
@@ -124,10 +136,10 @@ func runConnectorRefreshFailModes(cmd *cobra.Command, _ []string) error {
 // refresh under the sidecar lock is held until the gateway exits
 // (connector.HoldHookFailModes). A managed install is left alone and has
 // nothing to hold.
-func holdConnectorFailModes(cmd *cobra.Command, hookDir string, mode func(string) string, managedInstall bool) error {
+func holdConnectorFailModes(cmd *cobra.Command, hookDir string, mode func(string) string, read string, managedInstall bool) error {
 	out := cmd.OutOrStdout()
 	held := func(first connector.HookFailModeRefresh) {
-		printHookFailModeRefresh(cmd, first)
+		printHookFailModeRefresh(cmd, first, read)
 		fmt.Fprintf(out, "%s until the gateway (process %d) exits\n", hookFailModeHoldMarker, refreshFailModesHoldPID)
 	}
 	if managedInstall {
@@ -146,7 +158,7 @@ func holdConnectorFailModes(cmd *cobra.Command, hookDir string, mode func(string
 	return nil
 }
 
-func printHookFailModeRefresh(cmd *cobra.Command, result connector.HookFailModeRefresh) {
+func printHookFailModeRefresh(cmd *cobra.Command, result connector.HookFailModeRefresh, read string) {
 	if len(result.Sidecar) == 0 {
 		return
 	}
@@ -154,12 +166,25 @@ func printHookFailModeRefresh(cmd *cobra.Command, result connector.HookFailModeR
 		fmt.Fprintf(cmd.OutOrStdout(), "Hooks closed until the gateway renders them: %s\n", strings.Join(result.Sidecar, ", "))
 		return
 	}
+	if read == "install" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Hook fail modes closed for the install until the gateway starts: %s\n", strings.Join(result.Sidecar, ", "))
+		return
+	}
 	fmt.Fprintf(cmd.OutOrStdout(), "Hook fail modes set from the config: %s\n", strings.Join(result.Sidecar, ", "))
+}
+
+// refreshFailModesInstallHeld reports whether an installer holds the data
+// directory the refresh writes, or the one DEFENSECLAW_HOME names (where
+// install.sh and install.ps1 take the lock): hookexec.InstallLockHeld, as the
+// hooks of this release read it.
+func refreshFailModesInstallHeld(dataDir string) bool {
+	return hookexec.InstallLockHeld(dataDir) || hookexec.InstallLockHeld(config.DefaultDataPath())
 }
 
 // refreshFailModeResolver returns the outage fail mode the config chooses for
 // each connector (connector.OutageHookFailMode: open only where the config
-// sets it), how the config was read ("loaded" or "document"), and whether
+// sets it), how the config was read ("loaded" or "document"; the refresh
+// reports "install" when an installer holds the data directory), and whether
 // the install is managed, which is left alone.
 func refreshFailModeResolver(cmd *cobra.Command) (func(string) string, string, bool) {
 	if err := loadGatewayCommandConfigFor(cmd); err == nil && cfg != nil {

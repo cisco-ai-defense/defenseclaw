@@ -536,9 +536,16 @@ OUTPUT=$(echo "$RESULT" | _dc_jq -c '.codex_output // empty' 2>/dev/null) || {
 {{if not .SecureClient}}# A block or confirmation reaches Codex as the native object, which Codex acts
 # on: one that does not deny (or ask) for the registered event would let the
 # call run beside the gateway's block. The hook refuses such an answer
-# closed, in every fail mode, as the native hook does (GAP-0950).
+# closed, in every fail mode, as the native hook does (GAP-0950). A
+# confirmation with no object at all would let the call run too: Codex asks
+# only through it (GAP-0983).
+_DC_GATEWAY_ACTION="$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null)" || _DC_GATEWAY_ACTION=""
+if { [ -z "$OUTPUT" ] || [ "$OUTPUT" = "null" ]; } && [ "$_DC_GATEWAY_ACTION" = "confirm" ] &&
+  codex_event_can_control "$BOUND_CONTRACT" "$BOUND_EVENT"; then
+  [ "$FAIL_MODE" = "closed" ] || FAIL_MODE=closed
+  fail_response "confirm without native output in gateway response"
+fi
 if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
-  _DC_GATEWAY_ACTION="$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null)" || _DC_GATEWAY_ACTION=""
   case "$_DC_GATEWAY_ACTION" in
     block|confirm)
       if codex_event_can_control "$BOUND_CONTRACT" "$BOUND_EVENT" &&
