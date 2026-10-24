@@ -16,7 +16,11 @@
 
 package gateway
 
-import "github.com/defenseclaw/defenseclaw/internal/config"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+)
 
 // The Gateway subsystem publishes these when the OpenClaw fleet uplink is off
 // because OpenClaw is not installed (see openClawImpliedButNotInstalled). The
@@ -28,11 +32,14 @@ const (
 	fleetOffHintOpenClawNotInstalled    = "hooks and the local audit continue; to use OpenClaw, install it and restart the gateway, or set gateway.fleet_mode: enabled"
 )
 
-// openClawImpliedButNotInstalled reports the one case where the OpenClaw
-// connector is only implied and nothing on this machine could answer the dial:
+// openClawImpliedButNotInstalled selects the missing-install health reason for
+// an automatic OpenClaw fleet decision. An explicit disabled mode is reported
+// as fleet off; config.OpenClawImpliedButNotInstalled still suppresses its
+// absent implied connector in the loader.
 //
-//   - gateway.fleet_mode is unset ("" or the loader default "auto"; any other
-//     value, typos included, keeps the connector + host derivation),
+// The missing-install case has these conditions:
+//
+//   - gateway.fleet_mode is unset or "auto",
 //   - gateway.host is loopback,
 //   - guardrail.connector and the connector roster are empty, so "openclaw"
 //     comes only from claw.mode (init's default, and the
@@ -43,9 +50,16 @@ const (
 // Sandbox-only and hook-only installs that never set a connector hit exactly
 // this, and without the check the fleet client retried 127.0.0.1:18789 for
 // the life of the process. An installed or configured OpenClaw, an explicit
-// openclaw connector, a non-loopback host and an explicit fleet_mode all keep
-// the previous behaviour. The configuration checks run first so the
-// filesystem is only consulted in the narrow case.
+// openclaw connector, a non-loopback host and an enabled fleet mode keep the
+// previous behaviour. The configuration checks run first, so the filesystem
+// is only consulted in the narrow case.
 func openClawImpliedButNotInstalled(cfg *config.Config) bool {
+	if cfg == nil {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(cfg.Gateway.FleetMode))
+	if mode != "" && mode != "auto" {
+		return false
+	}
 	return cfg.OpenClawImpliedButNotInstalled()
 }

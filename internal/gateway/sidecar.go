@@ -7037,7 +7037,7 @@ func gatewayShouldConnectForConfiguredConnector(cfg *config.Config) bool {
 	switch fleetMode {
 	case "enabled", "on", "true":
 		return true
-	case "disabled", "off", "false":
+	case "disabled", "off", "false", "0":
 		return false
 	}
 	if !cfg.SecureClientIntegration() && slices.Contains(cfg.ActiveConnectors(), "openclaw") {

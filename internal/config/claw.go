@@ -1017,18 +1017,21 @@ func (c *Config) OpenClawOnlyImplied() bool {
 
 // OpenClawImpliedButNotInstalled reports when the loader and fleet gateway
 // should treat a defaulted OpenClaw connector as absent. An explicit fleet
-// mode keeps the connector, including for a loopback host without OpenClaw
-// installed locally. Mirrors openclaw_implied_but_not_installed in the CLI.
+// enabled mode keeps the connector, including for a loopback host without
+// OpenClaw installed locally. A disabled mode has no fleet link even with a
+// remote host. Mirrors openclaw_implied_but_not_installed in the CLI.
 func (c *Config) OpenClawImpliedButNotInstalled() bool {
 	if c == nil {
 		return false
 	}
-	switch strings.ToLower(strings.TrimSpace(c.Gateway.FleetMode)) {
+	mode := strings.ToLower(strings.TrimSpace(c.Gateway.FleetMode))
+	switch mode {
 	case "", "auto":
+		if host := strings.TrimSpace(c.Gateway.Host); host != "" && !isLoopbackListenerHost(host) {
+			return false
+		}
+	case "disabled", "off", "false", "0": // Viper decodes unquoted YAML false as "0".
 	default:
-		return false
-	}
-	if host := strings.TrimSpace(c.Gateway.Host); host != "" && !isLoopbackListenerHost(host) {
 		return false
 	}
 	return c.OpenClawOnlyImplied() && !c.OpenClawInstalled()

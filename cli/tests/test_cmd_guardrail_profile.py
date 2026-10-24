@@ -353,6 +353,30 @@ def test_explain_blames_a_slow_directory_not_a_stopped_gateway(monkeypatch):
     assert "running but did not answer in time" in text
 
 
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [
+        (400, b'{"error":"unknown connector \\"nosuch\\"; valid connectors: codex, cursor"}',
+         'unknown connector "nosuch"; valid connectors: codex, cursor'),
+        (403, b'{"error":"profile resolution needs the gateway token"}',
+         "profile resolution needs the gateway token"),
+        (500, b"not-json", "HTTP 500"),
+    ],
+)
+def test_explain_reports_gateway_http_error_without_stopped_advice(monkeypatch, status, body, expected):
+    import requests
+
+    response = requests.Response()
+    response.status_code = status
+    response._content = body
+    response.url = "http://127.0.0.1:18974/api/v1/guardrail/profiles/resolve"
+    error = requests.exceptions.HTTPError(f"HTTP {status}", response=response)
+    result = _explain(monkeypatch, error, "--connector", "nosuch")
+    assert result.exit_code == 1, result.output
+    assert expected in result.output
+    assert "Start it with: defenseclaw-gateway start" not in result.output
+
+
 def test_warnings_from_the_gateway_reach_explain_status_and_doctor(monkeypatch):
     """GAP-0182: what the decision alone does not show is a warning in each view."""
     from defenseclaw import gateway
