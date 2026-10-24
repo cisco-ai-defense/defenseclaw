@@ -488,7 +488,10 @@ func isSQLiteBusy(err error) bool {
 	}
 	var coded sqliteCoded
 	if errors.As(err, &coded) {
-		switch coded.Code() {
+		// Extended codes retain the primary result in their low byte.
+		// SQLITE_BUSY_SNAPSHOT (517) needs a new transaction, not a retry
+		// of the failed statement inside its stale read snapshot.
+		switch coded.Code() & 0xff {
 		case sqliteCodeBusy, sqliteCodeLocked:
 			return true
 		}
@@ -512,6 +515,10 @@ func isSQLiteBusy(err error) bool {
 	}
 	return false
 }
+
+// IsSQLiteBusy reports transient SQLite contention to callers that must
+// retry an entire transaction after a stale read snapshot.
+func IsSQLiteBusy(err error) bool { return isSQLiteBusy(err) }
 
 // SQLite BUSY retry policy. Even with busy_timeout=5000 some bursts
 // outpace SQLite's internal waiter — we layer an application-level

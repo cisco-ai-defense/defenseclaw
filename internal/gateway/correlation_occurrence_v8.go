@@ -46,8 +46,25 @@ func (a *APIServer) correlateHookOccurrence(
 ) (context.Context, agentHookRequest, error) {
 	for attempt := 1; ; attempt++ {
 		outCtx, out, err := a.correlateHookOccurrenceOnce(ctx, profile, cloneHookCorrelationState(req), rawBody)
-		if !errors.Is(err, audit.ErrCorrelationStale) || attempt >= hookCorrelationAttempts || ctx.Err() != nil {
+		if err == nil || attempt >= hookCorrelationAttempts || ctx.Err() != nil {
 			return outCtx, out, err
+		}
+		if errors.Is(err, audit.ErrCorrelationStale) {
+			continue
+		}
+		if !audit.IsSQLiteBusy(err) {
+			return outCtx, out, err
+		}
+		// A read transaction cannot upgrade after another writer commits:
+		// SQLITE_BUSY_SNAPSHOT must restart from the connector resolution,
+		// cursor and receipt, not just repeat its failed INSERT. Give the
+		// competing writer a bounded chance to finish without extending the
+		// hook's answer deadline.
+		wait := min(10*time.Millisecond<<uint(attempt-1), 80*time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return outCtx, out, ctx.Err()
+		case <-time.After(wait):
 		}
 	}
 }
