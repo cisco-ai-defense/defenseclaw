@@ -196,6 +196,77 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 	}
 }
 
+// Hermes the enumerator could not enroll (no hook contract for its version)
+// has no installed hook to prove. Lifecycle verify must not run a live
+// registration check for it or fail on its session-home limit: the
+// unprotected install and the limit stay warnings, as before the
+// registration proof existed.
+func TestVerifyDoesNotProveAnUnenrolledManagedHermes(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			h := newTestHost(t, goos)
+			h.env.ReportLaunchCoverage = func(context.Context, managed.LaunchCoverageReport) error { return nil }
+			file := "linux-standalone.yaml"
+			if goos == "darwin" {
+				file = "macos-standalone.yaml"
+			}
+			raw := strings.Replace(string(readSampleConfig(t, file)), "    claudecode: {}", "    claudecode: {}\n    hermes: {}", 1)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: writeTempConfig(t, []byte(raw))}))
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets: []\n")
+			writeFreshLedger(t, h)
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)), []byte(`{"results":[]}`), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+				User:      "alice",
+				Connector: "hermes",
+				Version:   "0.18.0",
+				Code:      enterprisehooks.UnprotectedCodeHookContractUnverified,
+				Reason:    "version 0.18.0 is not verified against a known hook contract; DefenseClaw installs no hooks for it, so it runs without DefenseClaw hooks",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			readiness := "defenseclaw-gateway enterprise hooks readiness --manifest " + h.env.Layout.ManifestPath + " --json"
+			h.runner.replies = map[string]fakeReply{readiness: {err: errors.New("readiness must not run without an installed Hermes hook")}}
+			r := h.run(Options{Action: ActionVerify})
+			if r.ExitCode != 0 || !r.OK {
+				t.Fatalf("verify failed an unenrolled Hermes: errors=%+v", r.Errors)
+			}
+			if r.CoverageComplete || r.SecurityComplete {
+				t.Fatalf("verify certified Hermes coverage: coverage=%t security=%t", r.CoverageComplete, r.SecurityComplete)
+			}
+			if msg := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(msg, "NOT COVERED") {
+				t.Fatalf("verify did not report the Hermes limit: %q", msg)
+			}
+			if msg := messagesOf(r.Warnings, enterprisehooks.UnprotectedCodeHookContractUnverified); !strings.Contains(msg, "hermes 0.18.0 for user alice is not protected") {
+				t.Fatalf("verify dropped the unprotected Hermes warning: %q", msg)
+			}
+			// The guardian attests a Hermes target: the live proof is required.
+			writeHostFile(t, h, h.env.Layout.ManifestPath, "version: 1\ntargets:\n"+
+				"  - user: alice\n    uid: 1001\n    user_home: /home/alice\n    connector: hermes\n    agent_version: 0.21.0\n")
+			if err := os.WriteFile(h.env.P(filepath.Join(h.env.Layout.DataDir, guardianStateFile)),
+				[]byte(`{"results":[{"user":"alice","user_home":"/home/alice","connector":"hermes","ok":true}]}`), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			for name, reply := range map[string]fakeReply{
+				"failed":      {err: errors.New("owned Hermes hook command is missing")},
+				"no hermes":   {result: CommandResult{Stdout: []byte(`{"ok":true,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[]}`)}},
+				"wrong scope": {result: CommandResult{Stdout: []byte(`{"ok":true,"results":[{"connector":"hermes","ok":true}]}`)}},
+				"failed row":  {result: CommandResult{Stdout: []byte(`{"ok":true,"scope":"machine_hook_registration","hermes_session_coverage":"not_covered","results":[{"connector":"hermes","ok":false}]}`)}},
+			} {
+				h.runner.replies[readiness] = reply
+				if got := h.run(Options{Action: ActionVerify}); got.ExitCode == 0 {
+					t.Fatalf("%s: verify passed without a live Hermes registration proof", name)
+				}
+			}
+		})
+	}
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	data, err := json.Marshal(value)

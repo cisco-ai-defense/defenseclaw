@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -147,6 +148,21 @@ func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
 	state, ok := l.result.Connectors["hermes"]
 	if !ok || !state.Enabled || state.HooksInstalled != enterprisestatus.HooksInstalledUnknown {
 		return nil
+	}
+	if rows, known := l.attestedGuardianRows(); known {
+		targets := 0
+		for _, row := range rows {
+			if strings.EqualFold(strings.TrimSpace(row.Connector), "hermes") {
+				targets++
+			}
+		}
+		if targets == 0 {
+			// The guardian installed no Hermes hook: Hermes is only an
+			// install the enumerator could not enroll. There is no
+			// registration to prove; the unprotected install and the
+			// session-home limit stay warnings.
+			return nil
+		}
 	}
 	out, err := l.env.runGatewayCLI(ctx, "enterprise", "hooks", "readiness", "--manifest", l.env.Layout.ManifestPath, "--json")
 	if err != nil {
