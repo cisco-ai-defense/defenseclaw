@@ -6,18 +6,24 @@
 package enterprisepolicy
 
 import (
+	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const managedPreferencesRoot = "/Library/Managed Preferences"
 
-var policyViewUserReadFile = readPolicyFile
+// The descriptor keeps at most this many per-account pins per connector, in
+// at most this many bytes, so one crowded managed-preferences folder can not
+// push the descriptor over its size limit and fail the whole host.
+const (
+	maxPolicyViewUserPins       = 128
+	policyViewUserPinByteBudget = 24 << 10
+)
 
 func accountPreferenceName(connector string) string {
 	switch connector {
@@ -46,15 +52,118 @@ func accountPreferencePath(opts Options, connector, account string) (string, err
 	return filepath.Join(rooted(opts, managedPreferencesRoot), account, name), nil
 }
 
-// PolicyViewUserPins records each per-account managed preference under the
-// root lifecycle's privileges. Its protected descriptor records which
-// account's file the hook must read; an unreadable relevant file still closes.
-func PolicyViewUserPins(opts Options, connector string) (map[string]managed.PolicyViewFilePin, error) {
+// PolicyViewUserPins returns the SHA-256 of each account's managed
+// preference for connector, read with root's privileges through the trusted
+// policy-file reader. Only content counts: an MDM agent that rewrites the
+// same bytes keeps the pin. An account entry that can not be pinned (an
+// invalid name, a symlinked folder, an unreadable, untrusted or oversize
+// file, or one past the descriptor's budget) is left out and named in the
+// returned problems; the other accounts keep their pins. The error is for a
+// failure of the folder itself.
+func PolicyViewUserPins(opts Options, connector string) (map[string]string, []string, error) {
+	if opts.goos() != "darwin" || accountPreferenceName(connector) == "" {
+		return nil, nil, nil
+	}
+	if opts.Root == "" && os.Geteuid() != 0 {
+		return nil, nil, errors.New("per-account policy-view pins require root")
+	}
+	root := rooted(opts, managedPreferencesRoot)
+	if !opts.SkipTrustChecks {
+		if err := validateTrustedAncestors(opts, filepath.Join(root, "x")); err != nil {
+			return nil, nil, err
+		}
+	}
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	pins := make(map[string]string)
+	var problems []string
+	budget := policyViewUserPinByteBudget
+	for _, entry := range entries {
+		account := entry.Name()
+		if entry.Type()&os.ModeSymlink != 0 {
+			// An unrelated preference may be a symlink. A symlink that
+			// stands in for an account folder can not be trusted.
+			if target, err := os.Stat(filepath.Join(root, account)); err != nil || target.IsDir() {
+				problems = append(problems, fmt.Sprintf("%s managed-preferences entry %q is a symlink", connector, account))
+			}
+			continue
+		}
+		if !entry.IsDir() {
+			continue
+		}
+		if !validPolicyViewAccount(account) {
+			problems = append(problems, fmt.Sprintf("%s managed-preferences account %q has an invalid name", connector, account))
+			continue
+		}
+		path, _ := accountPreferencePath(opts, connector, account)
+		data, exists, err := readPolicyFile(opts, path)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s preference for %s can not be pinned: %v", connector, account, err))
+			continue
+		}
+		if !exists {
+			continue
+		}
+		quoted, _ := json.Marshal(account)
+		cost := len(quoted) + sha256HexLen + 4 // "account":"digest",
+		if len(pins) == maxPolicyViewUserPins || cost > budget {
+			problems = append(problems, fmt.Sprintf("%s preference for %s is not pinned: the runtime descriptor has no room for more per-account pins", connector, account))
+			continue
+		}
+		budget -= cost
+		pins[account] = sha256Hex(data)
+	}
+	return pins, problems, nil
+}
+
+const sha256HexLen = 64
+
+// policyViewAccountSources are, on macOS, the managed-preferences folder and
+// each account's preference for connector: what PolicyViewStamp watches for
+// PolicyViewAccountsUnproven. At most maxPolicyViewAccountStamps accounts
+// are listed; the folder's own stamp still moves when an entry is added or
+// removed.
+func policyViewAccountSources(opts Options, connector string) []string {
+	if opts.goos() != "darwin" || accountPreferenceName(connector) == "" {
+		return nil
+	}
+	root := rooted(opts, managedPreferencesRoot)
+	paths := []string{root}
+	entries, _ := os.ReadDir(root)
+	for _, entry := range entries {
+		if len(paths) > maxPolicyViewAccountStamps {
+			break
+		}
+		if path, err := accountPreferencePath(opts, connector, entry.Name()); err == nil {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
+const maxPolicyViewAccountStamps = 1024
+
+// PolicyViewAccountsUnproven names the macOS accounts whose own managed
+// preference for connector the descriptor's per-account pins do not prove by
+// content: a changed, removed or unpinned preference, one the caller can not
+// read or does not trust, or a symlinked account folder. Only content counts:
+// an MDM agent that rewrites the same bytes keeps the account proven. It
+// reads with the caller's own permissions (the gateway's), so an account it
+// can not read is unproven, never proven. The error is for the folder
+// itself, which leaves no account proven.
+func PolicyViewAccountsUnproven(opts Options, connector string, pins map[string]string) (map[string]bool, error) {
 	if opts.goos() != "darwin" || accountPreferenceName(connector) == "" {
 		return nil, nil
 	}
-	if opts.Root == "" && os.Geteuid() != 0 {
-		return nil, errors.New("per-account policy-view pins require root")
+	unproven := make(map[string]bool, len(pins))
+	for account := range pins {
+		// A pinned account is unproven until its preference matches.
+		unproven[account] = true
 	}
 	root := rooted(opts, managedPreferencesRoot)
 	if !opts.SkipTrustChecks {
@@ -64,123 +173,41 @@ func PolicyViewUserPins(opts Options, connector string) (map[string]managed.Poli
 	}
 	entries, err := os.ReadDir(root)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return unproven, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	pins := make(map[string]managed.PolicyViewFilePin)
 	for _, entry := range entries {
+		account := entry.Name()
+		if !validPolicyViewAccount(account) {
+			continue
+		}
 		if entry.Type()&os.ModeSymlink != 0 {
-			// An unrelated preference may be a symlink. A symlink that
-			// stands in for an account directory cannot be trusted.
-			target, err := os.Stat(filepath.Join(root, entry.Name()))
-			if err != nil || target.IsDir() {
-				return nil, fmt.Errorf("macOS managed-preferences account entry %q is a symlink", entry.Name())
+			// A symlink that stands in for an account folder can not be
+			// trusted; an unrelated preference may be a symlink.
+			if target, err := os.Stat(filepath.Join(root, account)); err != nil || target.IsDir() {
+				unproven[account] = true
 			}
 			continue
 		}
 		if !entry.IsDir() {
 			continue
 		}
-		account := entry.Name()
-		if !validPolicyViewAccount(account) {
-			return nil, fmt.Errorf("invalid macOS managed-preferences account %q", account)
-		}
 		path, _ := accountPreferencePath(opts, connector, account)
-		before, statErr := os.Lstat(path)
-		if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
-			return nil, statErr
-		}
 		data, exists, err := readPolicyFile(opts, path)
-		if err != nil {
-			return nil, fmt.Errorf("read %s preference for %s: %w", connector, account, err)
-		}
-		if !exists {
-			if _, statErr := os.Lstat(path); statErr == nil || !errors.Is(statErr, os.ErrNotExist) {
-				return nil, fmt.Errorf("%s preference for %s changed during attestation", connector, account)
-			}
-			continue
-		}
-		if statErr != nil {
-			return nil, fmt.Errorf("%s preference for %s appeared during attestation", connector, account)
-		}
-		info, err := os.Lstat(path)
-		if err != nil {
-			return nil, err
-		}
-		pin, err := policyViewFilePin(info, data)
-		if err != nil {
-			return nil, err
-		}
-		if err := matchPolicyViewFilePin(before, pin); err != nil {
-			return nil, fmt.Errorf("%s preference for %s changed during attestation: %w", connector, account, err)
-		}
-		if len(pins) == 128 {
-			return nil, fmt.Errorf("%s has more than 128 per-account preferences", connector)
-		}
-		pins[account] = pin
-	}
-	return pins, nil
-}
-
-// VerifyPolicyViewUserPin checks the invoking account's one relevant plist.
-// The root's byte attestation does not substitute for what the hook sees:
-// unreadable relevant files and any other uncertainty close.
-func VerifyPolicyViewUserPin(opts Options, connector, account string, pin managed.PolicyViewFilePin) error {
-	path, err := accountPreferencePath(opts, connector, account)
-	if err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		if !opts.SkipTrustChecks {
-			if err := validateTrustedAncestors(opts, path); err != nil {
-				return err
-			}
-		}
-		if pin.SHA256 != "" {
-			return fmt.Errorf("%s preference for %s is hidden or removed", connector, account)
-		}
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if pin.SHA256 == "" {
-		return fmt.Errorf("%s preference for %s has no privileged pin", connector, account)
-	}
-	if !opts.SkipTrustChecks {
-		if err := validateTrustedPolicyFile(opts, path); err != nil {
-			return err
+		pin := pins[account]
+		switch {
+		case err != nil:
+			unproven[account] = true
+		case !exists:
+			// Proven only when it was never pinned; a pinned one that is
+			// gone stays unproven.
+		case pin != "" && subtle.ConstantTimeCompare([]byte(sha256Hex(data)), []byte(pin)) == 1:
+			delete(unproven, account)
+		default:
+			unproven[account] = true
 		}
 	}
-	if err := matchPolicyViewFilePin(info, pin); err != nil {
-		return err
-	}
-	data, exists, readErr := policyViewUserReadFile(opts, path)
-	if readErr != nil {
-		return readErr
-	}
-	if !exists || sha256Hex(data) != pin.SHA256 {
-		return fmt.Errorf("%s preference for %s differs from its privileged pin", connector, account)
-	}
-	// A second metadata read closes a replacement during the byte read.
-	current, err := os.Lstat(path)
-	if err != nil {
-		return err
-	}
-	return matchPolicyViewFilePin(current, pin)
-}
-
-func matchPolicyViewFilePin(info os.FileInfo, pin managed.PolicyViewFilePin) error {
-	current, err := policyViewFilePin(info, nil)
-	if err != nil {
-		return err
-	}
-	if current.Size != pin.Size || current.Mode != pin.Mode || current.Device != pin.Device ||
-		current.Inode != pin.Inode || current.MTime != pin.MTime || current.CTime != pin.CTime {
-		return fmt.Errorf("per-account preference differs from its privileged file attestation")
-	}
-	return nil
+	return unproven, nil
 }

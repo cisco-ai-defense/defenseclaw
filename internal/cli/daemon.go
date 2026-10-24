@@ -220,6 +220,8 @@ func init() {
 	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
 	startCmd.Flags().Bool(hookColdStartFlag, false, "start requested by a connector hook after a refused connection")
 	_ = startCmd.Flags().MarkHidden(hookColdStartFlag)
+	startCmd.Flags().Bool(requireEveryConnectorFlag, false, "exit 3 unless every configured connector is guarded")
+	_ = startCmd.Flags().MarkHidden(requireEveryConnectorFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationCleanupFlag)
 
@@ -355,12 +357,21 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if note := movedCLILauncherNote(); note != "" {
 			Warn(note)
 		}
-		if _, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg)); healthErr != nil {
+		running, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg))
+		if healthErr != nil {
 			// GAP-1342: a hung gateway; status and start pointed at each other.
 			fmt.Println("It does not answer /health. If it stays that way, restart it with: defenseclaw-gateway restart")
+			if requireEveryConnectorRequested(cmd) {
+				return withExitCode(errors.New("gateway does not answer /health, so no connector is proven guarded"),
+					gatewayStartAdmissionRefusedExitCode)
+			}
 			return nil
 		}
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
+		if requireEveryConnectorRequested(cmd) {
+			// The installers' wait for a slow first start ends here.
+			return everyConnectorGuardedError(cfg, running)
+		}
 		return nil
 	}
 	if err := gatewayDiskFullError("start", config.DefaultDataPath()); err != nil {
@@ -461,7 +472,11 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	removeRunningGatewayToken(config.DefaultDataPath())
 
 	refused, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
-	if admissionRefused {
+	var unguarded error
+	if !admissionRefused && requireEveryConnectorRequested(cmd) {
+		unguarded = everyConnectorGuardedError(cfg, snap)
+	}
+	if admissionRefused || unguarded != nil {
 		fmt.Printf("%s (PID %d)\n", Style("DEGRADED", "fg=yellow", "bold"), pid)
 		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
 		printConnectorsNotStarted(snap)
@@ -487,14 +502,16 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if admissionRefused {
 		return hookContractAdmissionStartError(refused, snap.Guardrail.LastError)
 	}
-	return nil
+	return unguarded
 }
 
 // gatewayStartAdmissionRefusedExitCode reports a gateway that is running but
 // refused one or more connectors at the hook-contract admission gate because
 // their agent changed underneath the recorded contract. The previous release
 // would refuse them the same way, so an installer keeps this version and
-// relays the fix instead of rolling back.
+// relays the fix instead of rolling back. With --require-every-connector it
+// also reports a running gateway that does not guard every configured
+// connector (GAP-0878).
 const gatewayStartAdmissionRefusedExitCode = 3
 
 func hookContractAdmissionStartError(connectors []string, detail string) error {
@@ -1861,7 +1878,9 @@ func configuredGuardrailExpectedRunning(cfg *config.Config) bool {
 	return false
 }
 
-func rotationRequiredConnectorNames(cfg *config.Config) []string {
+// guardedConnectorNames lists, sorted, the connectors cfg guards: the
+// configured roster with the guardrail on and each connector not turned off.
+func guardedConnectorNames(cfg *config.Config) []string {
 	if cfg == nil || !cfg.Guardrail.Enabled {
 		return nil
 	}
@@ -2007,7 +2026,7 @@ func rotationConnectorStateFromConfig(cfg *config.Config) (rotationConnectorStat
 		state.Connectors = append(state.Connectors, rotationConnectorPolicy{
 			Name:         name,
 			Mode:         strings.ToLower(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))),
-			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookFailModeForConnector(name))),
+			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookOutageFailModeForConnector(name))),
 			Enabled:      cfg.Guardrail.EffectiveEnabled(name),
 		})
 	}

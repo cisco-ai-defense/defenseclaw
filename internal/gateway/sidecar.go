@@ -2088,9 +2088,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// A connector added, removed, enabled or disabled re-runs the connector
 	// setup in-process and restarts the install watcher, which watches the
 	// skill and plugin dirs of the connectors. Secure Client never gets here
-	// with such a change: diffConfigs keeps it restart-required. Per-user
-	// hooks always render closed, so a legacy open edit cannot change setup.
-	guardrailRestart := connectorSetChanged(oldCfg, newCfg)
+	// with such a change: diffConfigs keeps it restart-required. A hook runtime
+	// policy change no hook guard rewrites re-runs the setup too.
+	guardrailRestart := connectorSetChanged(oldCfg, newCfg) || hookPolicyNeedsSetup(oldCfg, newCfg)
 	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || guardrailRestart
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || discoveryAssetsChanged(previousGen, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
@@ -2575,6 +2575,30 @@ func connectorSetChanged(oldCfg, newCfg *config.Config) bool {
 	return !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
 }
 
+// hookPolicyNeedsSetup reports a runtime hook-policy change that no hook guard
+// applies. With self-heal off, connector setup runs again so the generated
+// hooks carry the new mode, HILT and fail-mode settings without a restart.
+// The enterprise hook guardian owns managed hooks; Secure Client is unchanged.
+func hookPolicyNeedsSetup(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || newCfg.Guardrail.HookSelfHeal ||
+		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
+		return false
+	}
+	for _, name := range newCfg.ActiveConnectors() {
+		if hookRuntimePolicyChanged(oldCfg, newCfg, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func hookRuntimePolicyChanged(oldCfg, newCfg *config.Config, name string) bool {
+	return oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) ||
+		oldCfg.EffectiveHookOutageFailModeForConnector(name) != newCfg.EffectiveHookOutageFailModeForConnector(name) ||
+		oldCfg.EffectiveGuardrailModeForConnector(name) != newCfg.EffectiveGuardrailModeForConnector(name) ||
+		oldCfg.EffectiveHILTForConnector(name).Enabled != newCfg.EffectiveHILTForConnector(name).Enabled
+}
+
 // connectorHookSettings keeps, per connector, only whether its hooks are
 // installed (membership and enablement).
 func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailConfig) map[string]config.PerConnectorGuardrailConfig {
@@ -2748,20 +2772,17 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			return hookRuntimePolicy{}, nil, false
 		}
 		return hookRuntimePolicy{
-			hookFailMode:           cfg.EffectiveHookFailModeForConnector(connectorName),
-			configuredHookFailMode: cfg.ConfiguredHookFailModeForConnector(connectorName),
-			guardrailMode:          cfg.EffectiveGuardrailModeForConnector(connectorName),
-			hiltEnabled:            cfg.EffectiveHILTForConnector(connectorName).Enabled,
+			hookFailMode:  cfg.EffectiveHookOutageFailModeForConnector(connectorName),
+			guardrailMode: cfg.EffectiveGuardrailModeForConnector(connectorName),
+			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
 	})
 }
 
-// refreshHookGuardPolicies re-renders the hooks of every hook-only connector
-// whose effective hook fail mode the published config changed. The fail mode is
-// baked into the generated hook scripts and the agent's registration, and it
-// follows the guardrail mode (action uses the global fail mode, observe is
-// open), so a mode change through any writer must reach them without a
-// restart. It runs off the reload path: Setup rewrites agent config files.
+// refreshHookGuardPolicies re-renders hook-only connectors when the published
+// runtime policy changes. The saved fail mode can change without changing
+// the effective one, so it, the guardrail mode and HILT are compared too.
+// It runs off the reload path: Setup rewrites agent config files.
 func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
 	if s == nil || oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || !newCfg.Guardrail.HookSelfHeal ||
 		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
@@ -2775,16 +2796,15 @@ func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
 	s.hookGuardsMu.RUnlock()
 	for _, guard := range guards {
 		conn := guard.activeConnector()
-		// A per-user Cursor's outage mode also follows the config's explicit
-		// value (connector.OutageHookFailMode), which can change alone.
+		// A per-user hook's outage mode follows its policy tier
+		// (config.HookOutageFailMode): a rule-pack change alone changes it.
 		if conn == nil || proxyShouldBindForConnector(conn, &newCfg.Guardrail) ||
-			(oldCfg.EffectiveHookFailModeForConnector(conn.Name()) == newCfg.EffectiveHookFailModeForConnector(conn.Name()) &&
-				oldCfg.ConfiguredHookFailModeForConnector(conn.Name()) == newCfg.ConfiguredHookFailModeForConnector(conn.Name())) {
+			!hookRuntimePolicyChanged(oldCfg, newCfg, conn.Name()) {
 			continue
 		}
 		go func() {
 			if err := guard.RefreshPolicy(context.Background()); err != nil {
-				fmt.Fprintf(os.Stderr, "[hook-guard] hook fail mode refresh for %s: %v\n", conn.Name(), err)
+				fmt.Fprintf(os.Stderr, "[hook-guard] hook policy refresh for %s: %v\n", conn.Name(), err)
 			}
 		}()
 	}
@@ -6291,7 +6311,12 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					})
 				}
 				rollbackErr := rollbackMultiConnectorPublication(context.WithoutCancel(ctx), transaction)
-				failed := fmt.Errorf("connector %s refresh failed: %w; close the agent holding its settings, then run: defenseclaw upgrade", registration.conn.Name(), err)
+				failed := fmt.Errorf("connector %s refresh failed: %w", registration.conn.Name(), err)
+				if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+					// A Setup refusal (a known-broken agent, an unsupported
+					// profile topology) names its own next step.
+					failed = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", failed)
+				}
 				if rollbackErr != nil {
 					failed = fmt.Errorf("%w; connector setup rollback incomplete: %v", failed, rollbackErr)
 				}
@@ -6664,10 +6689,9 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HookAPIToken:         setupTokens.hookToken,
 		HookAPITokenScoped:   setupTokens.hookTokenScoped,
 		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
-		HookFailMode:         s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
-		// Per-user Cursor's outage mode is open only with an explicit open.
-		ConfiguredHookFailMode: s.currentConfig().ConfiguredHookFailModeForConnector(conn.Name()),
-		// Secure Client renders the resolved mode as is (#1163).
+		// The hooks' outage mode (config.HookOutageFailMode); Secure Client
+		// renders the resolved mode as is (#1163).
+		HookFailMode:             s.currentConfig().EffectiveHookOutageFailModeForConnector(conn.Name()),
 		SecureClientHookDelivery: s.currentConfig().SecureClientIntegration(),
 		GuardrailMode:            s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
 		HILTEnabled:              s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
@@ -7784,7 +7808,7 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
 	previouslyActive := !opts.ManagedEnterprise && len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
-	if previouslyActive {
+	if previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
 		err = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", err)
 	}
 	if !previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {

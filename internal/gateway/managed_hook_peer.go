@@ -578,6 +578,14 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
+		if connectorName, _ := a.managedHookRouteScope(r); a.managedPolicyView.Load().unproven(connectorName, peer.Name) {
+			// The gateway can not prove the vendor policy this connector's
+			// managed hooks enforce (managedPolicyView, published when the
+			// policy changes). The call is still served and inspected under
+			// the managed policy below; this queues the alert without
+			// waiting on it (GAP-0922, GAP-0923, GAP-1061).
+			a.recordManagedPolicyViewAlert(r, peer, route)
+		}
 		if reason := r.Header.Get(hookexec.ClientRefusalHeader); hookexec.IsManagedProcessContextReason(reason) {
 			// A hook refused an unsafe or unverified process context before it
 			// could inspect the event. Keep the refusal in the audit and log.

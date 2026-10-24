@@ -928,7 +928,24 @@
     "hermes": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
-      "known_broken_versions": [],
+      "known_broken_versions": [
+        {
+          "min_inclusive": "0.19.0",
+          "max_exclusive": "0.21.1",
+          "reason": "its TUI (hermes --tui) and dashboard chat run tools without the shell hooks DefenseClaw registers; Hermes 0.21.1 (v2026.9.7) is the first release that runs them there, so update Hermes (hermes update)",
+          "issue": "https://github.com/NousResearch/hermes-agent/commit/3094cde5138bd2bc28134d060345081ab5099d25",
+          "host_only": true,
+          "warn_only": true
+        },
+        {
+          "min_inclusive": "2026.7.20",
+          "max_exclusive": "2026.9.7",
+          "reason": "its TUI (hermes --tui) and dashboard chat run tools without the shell hooks DefenseClaw registers; Hermes 0.21.1 (v2026.9.7) is the first release that runs them there, so update Hermes (hermes update)",
+          "issue": "https://github.com/NousResearch/hermes-agent/commit/3094cde5138bd2bc28134d060345081ab5099d25",
+          "host_only": true,
+          "warn_only": true
+        }
+      ],
       "version_probe": "hermes --version",
       "contracts": [
         {

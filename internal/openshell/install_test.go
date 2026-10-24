@@ -533,7 +533,7 @@ func TestPrepareUpgrade(t *testing.T) {
 	pulls = 0
 	c, _ = gateway(t, openshell.DriverVM, running)
 	err := openshell.PrepareUpgrade(context.Background(), c, pull, noMicroVMs)
-	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "dc-a (ready): `defenseclaw sandbox stop dc-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-a` (raw OpenShell sandbox); dc-b (provisioning): wait until") || pulls != 0 {
+	if !errors.Is(err, openshell.ErrSandboxesRunning) || !strings.Contains(err.Error(), "dc-a (ready): "+openshell.StopWayOn("dc-a", openshell.PhaseReady, "", openshell.LegacyMin)+"; dc-b (provisioning): wait until") || pulls != 0 {
 		t.Fatalf("vm, sandboxes running: %v (pulled %d times)", err, pulls)
 	}
 	c, _ = gateway(t, openshell.DriverVM, map[string]openshell.SandboxPhase{"dc-c": openshell.PhaseStopped})

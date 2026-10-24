@@ -85,7 +85,7 @@ You are an AI agent working for an administrator, on an admin workstation or a t
    ```
 
    macOS: `sudo /opt/cisco/defenseclaw/bin/defenseclaw-gateway enterprise macos verify --json`. Windows (elevated): `& 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe' enterprise windows verify --profile standalone --json`.
-   Expected: `coverage_complete` and `security_complete` are `true`; on Linux and macOS `policy.applied` is `true`.
+   Expected: `coverage_complete` is `true`; on Linux and macOS `policy.applied` is `true`. `security_complete` is `true`, or `false` with only the warning `hook_process_fail_open` when Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity is enabled: report that warning as the known hook-process limit, not as a failed install.
    If it differs: report the fields and the error codes. See [Enterprise troubleshooting](/docs/troubleshooting/enterprise). Do not edit installed files by hand.
 
 ## Report

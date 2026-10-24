@@ -1484,6 +1484,36 @@ def _read_hermes_config_bounded(path: str | None = None) -> tuple[dict[str, Any]
     return document, ""
 
 
+_HERMES_PROFILE_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def hermes_profile_entry_name(name: str) -> bool:
+    """Return whether an entry under profiles/ is one Hermes can run as a named profile.
+
+    The same rule as hermesProfileEntryName in
+    internal/gateway/connector/hook_only.go, and tested against the same
+    cases (internal/gateway/connector/testdata/hermes_profile_names.json).
+    Hermes lists, serves and resolves the names its id pattern
+    ``^[a-z0-9][a-z0-9_-]{0,63}$`` admits under ``re.match``, whose ``$``
+    also matches before one final newline. Only the exact name ``default``
+    is the root home; Hermes' own metadata (the ``.deleted`` that
+    ``hermes profile delete`` leaves, other dot directories) and any other
+    name are never a profile. The name is lowercased first, as Go's
+    strings.ToLower does it (a case-insensitive file system opens
+    profiles/Coder for ``hermes -p coder``).
+    """
+    lowered = name.replace("\u0130", "i").lower()
+    newline = lowered.endswith("\n")
+    profile_id = lowered[:-1] if newline else lowered
+    if (profile_id == "default" and not newline) or not 0 < len(profile_id) <= 64:
+        return False
+    for index, char in enumerate(profile_id):
+        if char in _HERMES_PROFILE_ID_CHARS or (index > 0 and char in "_-"):
+            continue
+        return False
+    return True
+
+
 def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     """Return why a selected Hermes home is outside the single-profile contract."""
 
@@ -1525,8 +1555,10 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     if len(entries) > _HERMES_PROFILE_ENTRY_LIMIT:
         return "Hermes profiles directory exceeds the bounded inspection limit"
     for entry in entries:
+        if not hermes_profile_entry_name(entry.name):
+            continue
         try:
-            if entry.is_dir(follow_symlinks=False):
+            if entry.is_dir(follow_symlinks=False) or entry.is_symlink():
                 return (
                     f"Hermes named profile {entry.name!r} is unsupported by the "
                     f"single-HERMES_HOME connector; remove it with 'hermes profile "

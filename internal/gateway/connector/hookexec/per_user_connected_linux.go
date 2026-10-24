@@ -16,8 +16,14 @@ import (
 	"strings"
 )
 
+// procSelfNet holds this network namespace's socket tables. /proc/net is
+// only a symlink to it, and a /proc mounted subset=pid (ProcSubset=pid) has
+// no /proc/net, while /proc/self is always there, hidepid included
+// (GAP-1138).
+const procSelfNet = "/proc/self/net"
+
 func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
-	uid, err := findConnectedTCPUID("/proc/net", client, server)
+	uid, err := findConnectedTCPUID(procSelfNet, client, server)
 	if err != nil {
 		return err
 	}

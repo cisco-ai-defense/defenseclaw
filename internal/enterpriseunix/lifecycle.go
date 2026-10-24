@@ -164,6 +164,13 @@ type lifecycle struct {
 	env    *Env
 	opts   Options
 	result *enterprisestatus.Result
+	// gatewayAuditFailure is the active mandatory event-history write failure
+	// in the gateway's latest /health answer, used when describe computes
+	// security_complete after reading that answer.
+	gatewayAuditFailure bool
+	// replacedHooksFenced is set once the run fenced the replaced
+	// release's shell hooks (fenceReplacedHooks).
+	replacedHooksFenced bool
 	// keepThroughRollback names the units a rollback leaves running: the
 	// gateway and the sensor helper of an interrupted hot transaction
 	// (recoverInterrupted, GAP-0238).
@@ -494,6 +501,15 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) before it started; nothing was changed")
 		return 0
 	}
+	// Managed hooks answer closed while this run can stop or restart the
+	// gateway (GAP-1074). Removed before the lock is released.
+	releaseMarker, err := env.holdLifecycleMarker()
+	if err != nil {
+		r.AddError(codeState, err.Error()+"; nothing was changed")
+		l.reportNoSpace(err)
+		return 0
+	}
+	defer releaseMarker()
 	if l.opts.FromPackage && l.opts.Reason != "package" {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.
@@ -541,7 +557,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddWarning(codeSuperseded, fmt.Sprintf("this apply run's binary (%s) is older than the installed deployment (%s), which another run applied while this one waited; the installed binary applies later changes",
 			env.ProductVersion, record.ProductVersion))
 		l.describe(ctx, record, false)
-		return 0
+		return l.requireProtectedTargetsOnChange(0)
 	}
 	if l.applyRunAfterRolledBackUpgrade(record) {
 		r.Noop = true
@@ -549,7 +565,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddWarning(codeUpgradeRolledBack, fmt.Sprintf("the upgrade to %s failed and was rolled back to %s, and config.yaml and the protected credentials are still the ones %s applied, so this apply run does not retry the upgrade; install the package again, or run `%s --from-package`",
 			env.ProductVersion, record.ProductVersion, record.ProductVersion, env.lifecycleCommand(ActionEnsure)))
 		l.describe(ctx, record, false)
-		return 0
+		return l.requireProtectedTargetsOnChange(0)
 	}
 	if l.opts.Mutate != nil {
 		if l.opts.Action != ActionEnsure {
@@ -580,7 +596,7 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 	}
 
 	if code, done := l.prepareBundleMode(ctx, record); done {
-		return code
+		return l.requireProtectedTargetsOnChange(code)
 	}
 
 	switch l.opts.Action {
@@ -2284,6 +2300,11 @@ func (l *lifecycle) quiesce(ctx context.Context, units []Unit, keep map[string]b
 	for _, unit := range ordered {
 		if unit.Kind == "socket" || unit.Kind == "timer" || unit.Name == l.env.SelfUnit || keep[unit.Name] {
 			continue
+		}
+		if unit.Kind == "gateway" {
+			// The guardian and the enumerator are stopped (a later stage),
+			// so nothing renders the hooks again meanwhile (GAP-1123).
+			l.fenceReplacedHooks(ctx)
 		}
 		_ = l.env.Services.Stop(ctx, unit)
 	}

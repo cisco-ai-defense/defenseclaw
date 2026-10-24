@@ -20,7 +20,7 @@ import (
 // A per-user Copilot CLI hook bound to no reviewed event cannot tell
 // preToolUse from permissionRequest: in fail mode closed (or strict
 // availability) it writes both of Copilot's denies and says how to register
-// the hook again, like the standalone hook; in fail mode open the call runs.
+// the hook again, like the standalone hook. An older per-user open is closed.
 // The gateway is never asked.
 func TestPerUserCopilotHookRefusesAnUnboundEvent(t *testing.T) {
 	for _, event := range []string{"", "futureEvent", "PreToolUse"} {
@@ -41,12 +41,6 @@ func TestPerUserCopilotHookRefusesAnUnboundEvent(t *testing.T) {
 				if rt.requests != 0 {
 					t.Fatalf("unbound event %q reached the gateway", event)
 				}
-				if mode == "open" {
-					if result.code != 0 || result.stdout != "" {
-						t.Fatalf("open: code=%d stdout=%q, want the fail-open result", result.code, result.stdout)
-					}
-					return
-				}
 				if result.code != 0 || !strings.Contains(result.stdout, `"permissionDecision":"deny"`) ||
 					!strings.Contains(result.stdout, `"behavior":"deny"`) || !strings.Contains(result.stdout, "defenseclaw setup copilot") ||
 					strings.Contains(result.stdout, "administrator") {
@@ -62,8 +56,7 @@ func TestPerUserCopilotHookRefusesAnUnboundEvent(t *testing.T) {
 // only with the agent's native ask (Antigravity: force_ask) and a block only
 // with its native deny, as
 // copilot-hook.sh and antigravity-hook.sh check; anything else is no verdict
-// and is denied. A real ask passes through, and fail mode open lets an
-// unusable answer run.
+// and is denied. A real ask passes through in either outage mode.
 func TestPerUserHookDeniesAnAnswerWithoutTheNativeDecision(t *testing.T) {
 	for _, tc := range []struct {
 		name, connector, event, body, mode, want string
@@ -84,7 +77,7 @@ func TestPerUserHookDeniesAnAnswerWithoutTheNativeDecision(t *testing.T) {
 			`{"action":"confirm","hook_output":{"decision":"ask","reason":"check"}}`, "closed", `"decision":"deny"`},
 		{"antigravity force_ask", "antigravity", "PreToolUse",
 			`{"action":"confirm","hook_output":{"decision":"force_ask","reason":"check"}}`, "closed", `"decision":"force_ask"`},
-		{"antigravity confirm open", "antigravity", "PreToolUse", `{"action":"confirm"}`, "open", `"decision":"allow"`},
+		{"antigravity confirm open", "antigravity", "PreToolUse", `{"action":"confirm"}`, "open", `"decision":"deny"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			result := run(t, tc.connector, ok(tc.body), func(opts *Options) {
@@ -98,11 +91,10 @@ func TestPerUserHookDeniesAnAnswerWithoutTheNativeDecision(t *testing.T) {
 	}
 }
 
-// Review round 3: strict availability closes a per-user hook rendered open
-// (an explicit open Windows sidecar) for the answer checks too. The checks
-// read the raw open mode, so a block or confirm without the native deny, or
-// an answer with no valid action, let the call run.
-func TestStrictAvailabilityClosesAnOpenPerUserHookAnswer(t *testing.T) {
+// A per-user hook's outage-open preference never lets an unusable or
+// contradictory gateway answer run the tool, with or without strict
+// availability.
+func TestOpenPerUserHooksCloseUnusableNativeAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		name, connector, event, body, want string
 	}{
@@ -124,13 +116,6 @@ func TestStrictAvailabilityClosesAnOpenPerUserHookAnswer(t *testing.T) {
 					opts.FailMode = "open"
 					opts.StrictAvailability = strict
 				})
-				if !strict && !strings.Contains(tc.name, "invalid action") && !strings.Contains(tc.name, "not json") {
-					// Fail mode open without strict availability lets it run.
-					if strings.Contains(result.stdout, "deny") {
-						t.Fatalf("open: stdout=%q, want no deny", result.stdout)
-					}
-					return
-				}
 				if result.code != 0 || !strings.Contains(result.stdout, tc.want) || strings.Count(result.stdout, "\n") != 1 {
 					t.Fatalf("code=%d stdout=%q stderr=%q, want one answer with %s", result.code, result.stdout, result.stderr, tc.want)
 				}
@@ -178,8 +163,8 @@ func TestClosedCopilotHookRefusesAnUnboundEventBeforeEarlyExits(t *testing.T) {
 		opts.FailMode = "open"
 		opts.Home = filepath.Join(opts.Home, "missing")
 	})
-	if strings.Contains(open.stdout, "deny") {
-		t.Fatalf("fail mode open keeps Copilot's fail-open result: stdout=%q", open.stdout)
+	if !strings.Contains(open.stdout, "deny") {
+		t.Fatalf("legacy per-user open must still deny: stdout=%q", open.stdout)
 	}
 }
 
@@ -205,7 +190,7 @@ func TestClosedAntigravityHookDeniesAnUnboundToolCall(t *testing.T) {
 		{name: "stop input", input: stop, mode: "closed"},
 		{name: "stop input home missing", input: stop, mode: "closed", path: "home missing"},
 		{name: "invocation input", input: `{"conversationId":"c1","invocationNum":2,"initialNumSteps":0}`, mode: "closed"},
-		{name: "open", input: toolCall, mode: "open"},
+		{name: "open", input: toolCall, mode: "open", deny: true, want: "defenseclaw setup antigravity"},
 		// Review round 3: only an input that is clearly another event keeps
 		// the neutral answer; one that may be a tool call is denied.
 		{name: "no tool call", input: `{"conversationId":"c1"}`, mode: "closed", deny: true, want: "defenseclaw setup antigravity"},

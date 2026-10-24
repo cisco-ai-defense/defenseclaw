@@ -38,10 +38,11 @@ func (r *installOnRead) Read(p []byte) (int, error) {
 // the install state when it answers: while the agent writes its payload
 // (too large, or no hook credential), and once the gateway has answered or
 // failed to (no connection, an outage or error status, no verdict, no JSON).
-// Without an install the account's open choice still applies to an outage;
-// an unusable answer (no verdict, no JSON) and input too large to read close
-// outside Secure Client in every fail mode (fix/r104-sa-hook-pause, the
-// hookexec oversized-input rule), so those block either way.
+// Without an install the account's open choice still applies to an outage
+// (no connection); every answer the running gateway gave (an error status,
+// no verdict, no JSON) and input too large to read close outside Secure
+// Client in every fail mode (fix/r104-sa-hook-pause), so those block either
+// way.
 func TestNativeHookAnswersClosedWhenAnInstallStartsDuringTheCall(t *testing.T) {
 	failures := []struct {
 		name    string
@@ -53,9 +54,9 @@ func TestNativeHookAnswersClosedWhenAnInstallStartsDuringTheCall(t *testing.T) {
 		closed  bool // blocks outside Secure Client in every fail mode
 	}{
 		{name: "gateway connection fails", err: errors.New("connection reset by peer")},
-		{name: "gateway answers HTTP 503", status: http.StatusServiceUnavailable, body: `{"error":"down"}`},
-		{name: "gateway answers HTTP 401", status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`},
-		{name: "gateway answers HTTP 404", status: http.StatusNotFound, body: `{}`},
+		{name: "gateway answers HTTP 503", status: http.StatusServiceUnavailable, body: `{"error":"down"}`, closed: true},
+		{name: "gateway answers HTTP 401", status: http.StatusUnauthorized, body: `{"error":"unauthorized"}`, closed: true},
+		{name: "gateway answers HTTP 404", status: http.StatusNotFound, body: `{}`, closed: true},
 		{name: "gateway answers no verdict", status: http.StatusOK, body: `{"action":"maybe"}`, closed: true},
 		{name: "gateway answers no JSON", status: http.StatusOK, body: `not json`, closed: true},
 		{name: "payload too large", big: true, closed: true},
@@ -103,11 +104,6 @@ func TestNativeHookAnswersClosedWhenAnInstallStartsDuringTheCall(t *testing.T) {
 						opts.Stdin = &installOnRead{t: t, home: &home, payload: strings.NewReader(payload), taken: !install || !early}
 					})
 					want := install || failure.closed
-					if form.connector == "hermes" && failure.status == http.StatusOK && failure.body != "not json" {
-						// Hermes reads a JSON answer without a verdict as no decision,
-						// which its open mode lets through (the train, as before).
-						want = install
-					}
 					if got := nativeAnswerBlocks(result.code, result.stdout); got != want {
 						t.Fatalf("exit %d stdout %q stderr %q blocks=%v, want blocks=%v",
 							result.code, result.stdout, result.stderr, got, want)
@@ -155,23 +151,20 @@ const nativeAllowOutput = `{"permissionDecision":"allow","decision":"allow","beh
 // allow, no verdict, no JSON, a body cut off, an error status, a body too
 // large) is now checked with the install state of when it was read, for
 // every native tool hook form: during an install the call answers as fail
-// mode closed answers it, and the failures block. Without an install the
-// account's open choice still applies to an outage or error status; an
-// answered body DefenseClaw cannot use (no verdict, no JSON, cut off, too
-// large) blocks outside Secure Client in every fail mode on the train
-// (fix/r104-sa-hook-pause), except a Hermes answer without a verdict.
+// mode closed answers it, and the failures block. Without an install every
+// one of these is still the running gateway's answer, never an outage, so
+// it blocks outside Secure Client in every fail mode (fix/r104-sa-hook-pause),
+// Hermes included.
 func TestNativeHookAnswersClosedWhenAnInstallStartsWhileTheAnswerIsRead(t *testing.T) {
 	failures := []struct {
 		name   string
 		status int
 		body   func(sp spec) string
 		err    error
-		// failure: a failed check, which fail mode closed blocks and open
-		// lets run. The contradictory allow is a policy answer, which fail
-		// mode closed refuses where the connector can block the event.
+		// failure: a failed check, which blocks in every fail mode outside
+		// Secure Client. The contradictory allow is a policy answer, which
+		// fail mode closed refuses where the connector can block the event.
 		failure bool
-		// unusable: an answered body DefenseClaw cannot use.
-		unusable bool
 	}{
 		{name: "block with a native allow", status: http.StatusOK, body: func(sp spec) string {
 			field := sp.outputField
@@ -180,12 +173,12 @@ func TestNativeHookAnswersClosedWhenAnInstallStartsWhileTheAnswerIsRead(t *testi
 			}
 			return `{"action":"block","reason":"policy","` + field + `":` + nativeAllowOutput + `,"hook_output":` + nativeAllowOutput + `}`
 		}},
-		{name: "no verdict", status: http.StatusOK, body: func(spec) string { return `{"action":"maybe"}` }, failure: true, unusable: true},
-		{name: "no JSON", status: http.StatusOK, body: func(spec) string { return `not json` }, failure: true, unusable: true},
-		{name: "body cut off", status: http.StatusOK, body: func(spec) string { return `` }, err: io.ErrUnexpectedEOF, failure: true, unusable: true},
+		{name: "no verdict", status: http.StatusOK, body: func(spec) string { return `{"action":"maybe"}` }, failure: true},
+		{name: "no JSON", status: http.StatusOK, body: func(spec) string { return `not json` }, failure: true},
+		{name: "body cut off", status: http.StatusOK, body: func(spec) string { return `` }, err: io.ErrUnexpectedEOF, failure: true},
 		{name: "HTTP 503", status: http.StatusServiceUnavailable, body: func(spec) string { return `{"error":"down"}` }, failure: true},
 		{name: "HTTP 401", status: http.StatusUnauthorized, body: func(spec) string { return `{"error":"unauthorized"}` }, failure: true},
-		{name: "body too large", status: http.StatusOK, body: func(spec) string { return strings.Repeat("a", int(defaultMaxBody)+2) }, failure: true, unusable: true},
+		{name: "body too large", status: http.StatusOK, body: func(spec) string { return strings.Repeat("a", int(defaultMaxBody)+2) }, failure: true},
 	}
 	for _, form := range nativeToolHookForms {
 		sp, ok := specFor(form.connector)
@@ -221,9 +214,8 @@ func TestNativeHookAnswersClosedWhenAnInstallStartsWhileTheAnswerIsRead(t *testi
 						installing.code, installing.stdout, installing.stderr, got, closedBlocks)
 				}
 				open := answer(t, "open", false)
-				closesOpen := failure.unusable && (form.connector != "hermes" || failure.name != "no verdict")
-				if got := nativeAnswerBlocks(open.code, open.stdout); failure.failure && got != closesOpen {
-					t.Fatalf("fail mode open without an install: exit %d stdout %q stderr %q blocks=%v, want blocks=%v", open.code, open.stdout, open.stderr, got, closesOpen)
+				if got := nativeAnswerBlocks(open.code, open.stdout); failure.failure && !got {
+					t.Fatalf("fail mode open without an install: exit %d stdout %q stderr %q, want a block", open.code, open.stdout, open.stderr)
 				}
 			})
 		}

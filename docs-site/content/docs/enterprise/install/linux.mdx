@@ -197,7 +197,8 @@ per-user install. See [Per-user installs](/docs/enterprise/install/reference/lin
 On most distributions `status` and `verify` warn `unprivileged_user_namespaces`
 or `unprivileged_ptrace` when the observed kernel settings allow private policy
 views. DefenseClaw does not change those host settings. An administrator can
-apply optional hardening with their own tools after testing workloads. Every
-invoked managed machine-policy hook checks its policy content against the
-administrator-owned digest and refuses an unproven view. See
+apply optional hardening with their own tools after testing workloads. When a
+vendor policy file changes, the gateway checks it against the
+administrator-owned digest; an unproven view raises an alert while managed
+hook calls are still inspected. See
 [User namespaces](/docs/enterprise/install/reference/linux#user-namespaces).
