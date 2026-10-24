@@ -1035,7 +1035,12 @@ off the device. The agent does not read `/health` itself (section 7); the
   entry for administrator review because that format cannot prove whether
   the value came from the rotation or a later write. A settled entry is renamed `.retired` in one
   step before it is overwritten and deleted, so a cleanup that stops never
-  leaves an entry a later run would put back.
+  leaves an entry a later run would put back. If replay or journal inspection
+  cannot settle an entry, every Windows ensure, including a config-only ensure
+  or Setup ensure, exits `mdm_secret_failed` before applying a new config or bundle.
+  If inspection of the installed deployment fails, the journal is left for
+  review and the ensure exits. An absent installation marker retains the
+  existing no-CLI settlement behavior.
   `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
   old value in memory only and puts it back when the bundle apply or the
   ensure before it fails, the run stops early, or the MDM stops it (HUP, INT,
