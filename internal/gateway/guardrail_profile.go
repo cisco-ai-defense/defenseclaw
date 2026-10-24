@@ -537,7 +537,15 @@ func (a *APIServer) withGuardrailProfileDecision(ctx context.Context, routeConne
 	if g := a.generation(); g.published() {
 		ctx = withPinnedGeneration(ctx, g)
 	}
-	return withGuardrailProfile(ctx, a.requestProfileSet(ctx), routeConnector)
+	set := a.requestProfileSet(ctx)
+	if set != nil && requestProfilePath(ctx) == profilePathHook && routeConnector != "" {
+		// Profile selection may resolve the agent before the hook body is
+		// parsed. Keep that verified identity for this hook's later
+		// correlation, evaluation and audit work as well.
+		facts := resolveHookAgentIdentity(ctx, agentHookRequest{ConnectorName: routeConnector})
+		ctx = withHookIdentitySnapshot(ctx, facts)
+	}
+	return withGuardrailProfile(ctx, set, routeConnector)
 }
 
 // requestProfileSet is the profile set decisions for ctx read: the set of
@@ -599,7 +607,7 @@ func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgent
 	if facts.ID == "" || !strings.EqualFold(facts.ID, agent) {
 		return profileAgentClaim{}, false
 	}
-	return facts.LegacyClaim, true
+	return legacyAgentClaim(facts.LegacyID, facts.UserID, facts.MachineHash, facts.account, facts.self), true
 }
 
 // guardrailProfileInspectMiddleware resolves the profile for the inspect

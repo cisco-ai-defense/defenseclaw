@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -23,6 +24,17 @@ type hookDeliveryReceipt struct {
 }
 
 type hookDeliveryAdvertisedKey struct{}
+
+type hookDeliveryStartContextKey struct{}
+
+func hookDeliveryReceiptForRequest(r *http.Request) *hookDeliveryReceipt {
+	delivery, _ := r.Context().Value(hookDeliveryStartContextKey{}).(*hookDeliveryReceipt)
+	return delivery
+}
+
+func withHookDeliveryReceipt(r *http.Request, delivery *hookDeliveryReceipt) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), hookDeliveryStartContextKey{}, delivery))
+}
 
 func (a *APIServer) beginHookDeliveryReceipt(w http.ResponseWriter, r *http.Request) *hookDeliveryReceipt {
 	if a == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() ||

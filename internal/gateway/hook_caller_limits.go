@@ -244,6 +244,18 @@ func (a *APIServer) admitHookCaller(w http.ResponseWriter, r *http.Request, iden
 			release()
 			return r, nil
 		}
+		// Advertise the receipt protocol as soon as a managed hook is
+		// admitted. Waiting for this caller's run slot can exceed the native
+		// hook's fixed capability window under load. A 103 is only a transport
+		// capability; the policy answer still follows authorization and the
+		// full handler. In-flight admission already bounds waiting requests.
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/hook") {
+			if _, ok := a.hookTokenScopeForPath(r.URL.Path); ok {
+				if delivery := a.beginHookDeliveryReceipt(w, r); delivery != nil {
+					r = withHookDeliveryReceipt(r, delivery)
+				}
+			}
+		}
 		select {
 		case run <- struct{}{}:
 			slot := &hookRunSlot{run: run, held: true}
@@ -299,6 +311,13 @@ func yieldHookRunSlot(ctx context.Context) (resume func()) {
 	// The hook bounds its wait for a local decision; this one waits on a
 	// remote scanner, so it reports progress first (hook_progress.go).
 	reportHookProgress(ctx)
+	return pauseHookRunSlot(ctx)
+}
+
+// pauseHookRunSlot frees the caller's run slot while this request waits for
+// an external answer. The request still counts toward its in-flight limits.
+// The caller resumes the slot before doing more gateway work.
+func pauseHookRunSlot(ctx context.Context) (resume func()) {
 	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
 	if slot == nil {
 		return func() {}

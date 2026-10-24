@@ -320,7 +320,42 @@ fail_response() {
   exit 0
 }
 {{end}}
-{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}AUTH_HEADER_ARGS=()
+{{if and .Managed (not .SecureClient) (not .Sandbox)}}{{.ManagedHTTPFailureSH}}{{end}}{{.HookSocketTransportSH}}{{if .HermesNativeHookSH}}# The registered Hermes command remains this shell hook. The trusted native
+# hook speaks the managed answer/receipt protocol for the same payload.
+# Restore the original soft virtual-memory limit before starting Go. Buffer
+# its one JSON answer so a missing executable or failed native hook cannot
+# leave Hermes with an empty answer (Hermes ignores the process status).
+ulimit -S -v "${_DC_HOOK_NATIVE_VMEM_LIMIT:-$(ulimit -H -v)}" 2>/dev/null || :
+_DC_NATIVE_STATUS=0
+_DC_NATIVE_ANSWER="$(HOME="${DEFENSECLAW_GUARD_AGENT_HOME:-${DEFENSECLAW_AGENT_HOME:-$HOME}}" {{.HermesNativeHookSH}} hook --connector hermes --enterprise-managed <<<"$PAYLOAD")" || _DC_NATIVE_STATUS=$?
+if [ "$_DC_NATIVE_STATUS" -eq 0 ] && [ -z "$_DC_NATIVE_ANSWER" ]; then
+  # Native Hermes returns an empty successful answer only for its neutral
+  # allow result; managed failures print a block directive or exit nonzero.
+  exit 0
+fi
+if [ "$_DC_NATIVE_STATUS" -eq 0 ]; then
+  # The native hook has already validated the gateway answer. Preserve each
+  # documented Hermes output shape while rejecting an unusable nonempty
+  # result. The string-field reader validates the whole JSON, including
+  # duplicate keys, even on hosts without jq or Python.
+  _DC_NATIVE_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" hook_event_name)" ||
+    _DC_NATIVE_EVENT="$(defenseclaw_json_string_field "$PAYLOAD" event)" || _DC_NATIVE_EVENT=""
+  _DC_NATIVE_ACTION="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" action)" || _DC_NATIVE_ACTION=""
+  _DC_NATIVE_DECISION="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" decision)" || _DC_NATIVE_DECISION=""
+  _DC_NATIVE_MESSAGE="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" message)" || _DC_NATIVE_MESSAGE=""
+  _DC_NATIVE_REASON="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" reason)" || _DC_NATIVE_REASON=""
+  _DC_NATIVE_CONTEXT="$(defenseclaw_json_string_field "$_DC_NATIVE_ANSWER" context)" || _DC_NATIVE_CONTEXT=""
+  if { [ "$_DC_NATIVE_ACTION" = "block" ] && [ -n "$_DC_NATIVE_MESSAGE" ]; } ||
+     { [ "$_DC_NATIVE_DECISION" = "block" ] && [ -n "$_DC_NATIVE_REASON" ]; } ||
+     { [ "$_DC_NATIVE_EVENT" = "pre_llm_call" ] && [ -n "$_DC_NATIVE_CONTEXT" ]; } ||
+     { [ "$_DC_NATIVE_EVENT" = "pre_verify" ] && [ "$_DC_NATIVE_ACTION" = "continue" ] && [ -n "$_DC_NATIVE_MESSAGE" ]; }; then
+    printf '%s\n' "$_DC_NATIVE_ANSWER"
+    exit 0
+  fi
+fi
+hermes_block response "the trusted native hook could not start"
+exit 2
+{{end}}AUTH_HEADER_ARGS=()
 if [ -n "${API_TOKEN}" ]; then
 {{if not .Sandbox}}  # A bearer is an HTTP field value: CR or LF is never valid in it, and either
   # would end the curl config line defenseclaw_gateway_post writes it to.
