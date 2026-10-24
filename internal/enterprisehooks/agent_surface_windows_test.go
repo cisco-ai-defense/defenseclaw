@@ -107,7 +107,8 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	SetUnverifiedVersionsPolicy(nil)
 
 	reported, readAsErr = nil, errors.New("no active session token")
-	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, ""); got != "" || len(reported) != 0 {
+	if got := windowsStandaloneSurfaceVersion(row("claudecode"), nil, rowContext, ""); got != "" || len(reported) != 1 ||
+		reported[0].Code != UnprotectedCodeInstallScanIncomplete {
 		t.Fatalf("failed impersonation version = %q, reported %+v", got, reported)
 	}
 	impersonated, rowContext.sessionActive = 0, false
