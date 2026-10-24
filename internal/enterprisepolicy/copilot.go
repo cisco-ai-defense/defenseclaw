@@ -428,7 +428,7 @@ func (t copilotTarget) Reconcile(opts Options) (State, error) {
 			// trusted: a file there that an unprivileged principal controls is
 			// neither DefenseClaw's nor the administrator's. Replace it.
 			state.detail("replacing %s: %v", paths[0], untrusted.err)
-			current, exists, err = nil, true, nil
+			current, exists, err = nil, true, state.replaceUntrustedPolicyFile(opts, paths[0])
 		}
 		if err != nil {
 			return state, err

@@ -2087,12 +2087,22 @@ def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path
         'while kill -0 "$pid" 2>/dev/null; do sleep 0.05; done\n'
         f'echo "second refresh" >> "{calls}"\n'
     )
+    # GAP-0839: "stopped" was written after `wait` reaped the old gateway,
+    # and the hold's poll could see it gone and write "second refresh" first
+    # (about 1 run in 10). "stopping" is written while the old gateway still
+    # runs, before it is killed, so the hold cannot have seen it exit yet;
+    # the hold then proves it saw the exit itself.
+    newer = newer.replace(
+        f'echo "second refresh" >> "{calls}"\n',
+        f'if kill -0 "$pid" 2>/dev/null; then echo "second refresh while the gateway runs" >> "{calls}"; '
+        f'else echo "second refresh" >> "{calls}"; fi\n',
+    )
     old_gateway = (
         'sleep 30 & old=$!\n'
         'hold_hook_fail_modes "$old"\n'
         'echo "holding" >> "$CALLS"\n'
+        'echo "stopping" >> "$CALLS"\n'
         'kill "$old"; wait "$old" 2>/dev/null || true\n'
-        'echo "stopped" >> "$CALLS"\n'
         'finish_hook_fail_mode_hold\n'
         'echo "finished" >> "$CALLS"\n'
     )
@@ -2101,7 +2111,7 @@ def test_a_running_gateway_cannot_reopen_its_hooks_while_it_stops(tmp_path: Path
     lines = calls.read_text(encoding="utf-8").splitlines()
     assert lines[0] == "connector refresh-fail-modes --help", lines
     assert lines[1].startswith(f"connector refresh-fail-modes --data-dir {home} --hold-until-exit "), lines
-    assert lines[2:] == ["holding", "stopped", "second refresh", "finished"], lines
+    assert lines[2:] == ["holding", "stopping", "second refresh", "finished"], lines
     assert "Hook fail modes set from the config: codex" in result.stdout
     assert "Holding the hook fail modes" not in result.stdout
 

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
@@ -292,6 +293,7 @@ func TestPurgeWindowsNamespaceRootValidatesThenRemovesPinnedTree(t *testing.T) {
 
 func TestPurgeWindowsNamespaceRootExclusivePinRejectsSharedReadHandle(t *testing.T) {
 	request, root := newWindowsNamespacePurgeTestTree(t)
+	shortenWindowsNamespacePurgeSharingWait(t, 200*time.Millisecond)
 	payload := filepath.Join(root, "nested", "payload.bin")
 	handle, err := openWindowsTargetsManifestObject(payload, false, windows.GENERIC_READ)
 	if err != nil {
@@ -309,6 +311,10 @@ func TestPurgeWindowsNamespaceRootExclusivePinRejectsSharedReadHandle(t *testing
 		(!errors.Is(err, windows.ERROR_SHARING_VIOLATION) &&
 			!errors.Is(err, windows.STATUS_SHARING_VIOLATION)) {
 		t.Fatalf("shared-read purge report=%#v error=%v", report, err)
+	}
+	// GAP-0848: the refusal names the file and what to do, not only its name.
+	if !strings.Contains(err.Error(), payload+" is held open by another program") {
+		t.Fatalf("shared-read purge error does not name the held file: %v", err)
 	}
 	if got, readErr := os.ReadFile(payload); readErr != nil || string(got) != "payload" {
 		t.Fatalf("failed exclusive preflight mutated payload: %q, %v", got, readErr)
@@ -329,6 +335,7 @@ func TestPurgeWindowsNamespaceRootExclusivePinRejectsSharedReadHandle(t *testing
 
 func TestPurgeWindowsNamespaceRootValidateOnlyRequiresExclusivePinsWithoutMutation(t *testing.T) {
 	request, root := newWindowsNamespacePurgeTestTree(t)
+	shortenWindowsNamespacePurgeSharingWait(t, 200*time.Millisecond)
 	payload := filepath.Join(root, "nested", "payload.bin")
 	handle, err := openWindowsTargetsManifestObject(payload, false, windows.GENERIC_READ)
 	if err != nil {
@@ -371,6 +378,91 @@ func TestPurgeWindowsNamespaceRootValidateOnlyRequiresExclusivePinsWithoutMutati
 	if _, err := os.Stat(payload); err != nil {
 		t.Fatalf("successful validate-only removed payload: %v", err)
 	}
+}
+
+// GAP-0848: the printed FORCE uninstall failed on native Windows with every
+// DefenseClaw service stopped, because another program had
+// defenseclaw-hook.exe open for a moment (a hash check, a scanner) when the
+// purge pinned it with no sharing. A reader that closes the file, its folder
+// or the root itself within the purge's wait no longer refuses it: the purge
+// waits, still with no sharing, and then validates and removes the whole
+// tree. Before, the first sharing violation refused the purge at once.
+func TestPurgeWindowsNamespaceRootWaitsForAReaderThatCloses(t *testing.T) {
+	for _, held := range []struct {
+		name      string
+		directory bool
+		path      func(root string) string
+	}{
+		{name: "file", path: func(root string) string { return filepath.Join(root, "nested", "payload.bin") }},
+		{name: "folder", directory: true, path: func(root string) string { return filepath.Join(root, "nested") }},
+		{name: "root", directory: true, path: func(root string) string { return root }},
+	} {
+		for _, validateOnly := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/validate-only=%t", held.name, validateOnly), func(t *testing.T) {
+				request, root := newWindowsNamespacePurgeTestTree(t)
+				shortenWindowsNamespacePurgeSharingWait(t, 20*time.Second)
+				handle := openWindowsNamespacePurgeTestReader(t, held.path(root), held.directory)
+				const holdFor = 400 * time.Millisecond
+				released := make(chan error, 1)
+				go func() {
+					time.Sleep(holdFor)
+					released <- windows.CloseHandle(handle)
+				}()
+				request.ValidateOnly = validateOnly
+				started := time.Now()
+				report, err := PurgeWindowsNamespaceRoot(request)
+				elapsed := time.Since(started)
+				if closeErr := <-released; closeErr != nil {
+					t.Fatalf("close the reader: %v", closeErr)
+				}
+				if err != nil || !report.OK || report.Error != "" {
+					t.Fatalf("purge with a reader that closes report=%#v error=%v", report, err)
+				}
+				if elapsed < holdFor/2 {
+					t.Fatalf("the purge finished in %s while the reader held %s for %s", elapsed, held.path(root), holdFor)
+				}
+				_, statErr := os.Lstat(root)
+				if validateOnly {
+					if report.Removed || statErr != nil {
+						t.Fatalf("validate-only removed the tree: report=%#v stat=%v", report, statErr)
+					}
+					return
+				}
+				if !report.Removed || report.EntriesRemoved != 3 || !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("purge report=%#v, root stat %v: want the whole tree removed", report, statErr)
+				}
+			})
+		}
+	}
+}
+
+func shortenWindowsNamespacePurgeSharingWait(t *testing.T, wait time.Duration) {
+	t.Helper()
+	previous, previousPoll := windowsNamespacePurgeSharingWait, windowsNamespacePurgeSharingPoll
+	windowsNamespacePurgeSharingWait, windowsNamespacePurgeSharingPoll = wait, 20*time.Millisecond
+	t.Cleanup(func() {
+		windowsNamespacePurgeSharingWait, windowsNamespacePurgeSharingPoll = previous, previousPoll
+	})
+}
+
+// openWindowsNamespacePurgeTestReader opens path for reading as an ordinary
+// program does: Get-FileHash shares only reading, so neither a delete nor an
+// exclusive open can share with it.
+func openWindowsNamespacePurgeTestReader(t *testing.T, path string, directory bool) windows.Handle {
+	t.Helper()
+	pointer, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flags := uint32(windows.FILE_ATTRIBUTE_NORMAL)
+	if directory {
+		flags = windows.FILE_FLAG_BACKUP_SEMANTICS
+	}
+	handle, err := windows.CreateFile(pointer, windows.GENERIC_READ, windows.FILE_SHARE_READ, nil, windows.OPEN_EXISTING, flags, 0)
+	if err != nil {
+		t.Fatalf("open a reader of %s: %v", path, err)
+	}
+	return handle
 }
 
 func TestPurgeWindowsNamespaceRootRejectsRunningExecutableIdentity(t *testing.T) {
@@ -530,6 +622,12 @@ func TestPurgeWindowsNamespaceStateRootDeletesACLDriftedChild(t *testing.T) {
 			}
 		}
 	})
+	// GAP-0898: an elevated session can hold SeBackupPrivilege enabled (the
+	// AD-joined stack B host does over SSH), and Go opens every file with
+	// backup semantics, so the deny below was not observable there. Disable
+	// both privileges for the test, as LocalSystem holds them, so the fixture
+	// proves its deny and the purge must enable its own scoped privilege.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 	setWindowsSelfDenyDACL(t, child, currentWindowsTestSID(t), windows.FILE_READ_DATA)
 	if _, err := os.ReadFile(child); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("ACL-drifted child read error = %v, want access denied", err)
@@ -566,6 +664,12 @@ func TestPurgeWindowsNamespaceInstallRootSealsThenDeletesACLDriftedTree(t *testi
 	if err := os.WriteFile(child, []byte("payload"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// GAP-0898: an elevated session can hold SeBackupPrivilege enabled (the
+	// AD-joined stack B host does over SSH), and Go opens every file with
+	// backup semantics, so the deny below was not observable there. Disable
+	// both privileges for the test, as LocalSystem holds them, so the fixture
+	// proves its deny and the purge must enable its own scoped privilege.
+	disableWindowsProcessPrivilegesForTest(t, "SeBackupPrivilege", "SeRestorePrivilege")
 	setWindowsSelfDenyDACL(t, child, currentWindowsTestSID(t), windows.FILE_READ_DATA)
 	if _, err := os.ReadFile(child); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
 		t.Fatalf("fixture did not deny child data read: %v", err)
