@@ -325,7 +325,7 @@ func (a *APIServer) requireSandboxSubjectKey(rec requireSandboxRecord) string {
 // match, matched group, provisional) with the subject key, as the
 // require-sandbox gate records carry them, so a fleet groups foreign items
 // by profile whether or not the person has a registration (GAP-0444).
-func (a *APIServer) sandboxForeignIdentity(ctx context.Context, reg sandboxreg.Registration, id, name, harnessName, runtime string) audit.SandboxIdentity {
+func (a *APIServer) sandboxForeignIdentity(ctx context.Context, reg sandboxreg.Registration, id, name, harnessName, sandboxRuntime string) audit.SandboxIdentity {
 	connectorName := ""
 	if _, ok := harness.Get(harnessName); ok {
 		connectorName = sandboxConnectorClaim(harnessName)
@@ -340,11 +340,20 @@ func (a *APIServer) sandboxForeignIdentity(ctx context.Context, reg sandboxreg.R
 		// caller's policy (guardrailProfileTelemetryFromDecision).
 		d.Name, d.Digest, d.MatchedGroup = "", "", ""
 	}
-	return audit.SandboxIdentity{ID: id, Name: name, Connector: connectorName, Runtime: runtime,
+	identity := audit.SandboxIdentity{ID: id, Name: name, Connector: connectorName, Runtime: sandboxRuntime,
 		Managed: sandboxManagedStamp(sandboxreg.Registration{
 			Profile: d.Name, ProfileDigest: d.Digest, ProfileMatch: d.Match, MatchedGroup: d.MatchedGroup,
 			Provisional: match.provisional, SubjectKey: reg.SubjectKey,
 		})}
+	if sandboxRuntime == audit.SandboxRuntimeOpenShell {
+		// The foreign sandbox has no registration to supply its driver. The
+		// configured driver is still known, unless Linux auto needs a probe.
+		switch driver := sandboxDriverFor(a.requireSandboxFallbackConfig(ctx), runtime.GOOS); driver {
+		case audit.SandboxDriverDocker, audit.SandboxDriverVM:
+			identity.Driver = driver
+		}
+	}
+	return identity
 }
 
 // sandboxRelayProfileExtra adds to a relayed sandbox hook call's audit row
