@@ -23,9 +23,10 @@ func stubManagedLifecycle(t *testing.T, held func() bool) {
 
 // managedOutages are the gateway failures a managed hook meets, each as the
 // hook answers it. idleRuns: the administrator's open lets the call through
-// while no lifecycle runs (ManagedOutageFailsOpen). On the train only a
-// proven stopped service is such an outage; a restart or a missing answer
-// stays closed (the managed standalone outage guard, TGT-0040).
+// while no lifecycle runs (ManagedOutageFailsOpen): a proven stopped
+// service, and a tool call that a verified gateway took and did not answer
+// in time. A restart, and a missing answer of a call no verified gateway
+// took, stay closed (the managed standalone outage guard, TGT-0040).
 var managedOutages = []struct {
 	name     string
 	idleRuns bool
@@ -42,7 +43,11 @@ var managedOutages = []struct {
 	{"still restarting after the restart wait", false, func(opts Options, sp spec) int {
 		return failUnreachable(withManagedOutage(opts, errGatewayRestarting), sp, opts.FailMode, managedGatewayRestartingReason)
 	}},
-	{"no answer in time", false, func(opts Options, sp spec) int {
+	{"no answer in time", true, func(opts Options, sp spec) int {
+		opts.gatewayTookCall = true
+		return failNoAnswer(opts, sp, opts.FailMode)
+	}},
+	{"no answer, no verified gateway took the call", false, func(opts Options, sp spec) int {
 		return failNoAnswer(opts, sp, opts.FailMode)
 	}},
 }
@@ -137,13 +142,16 @@ func TestAdoptedManagedAnswerWatchdogAnswersClosedWhenTheLifecycleStartsMidCall(
 	cases := []struct {
 		name   string
 		blocks bool
+		took   bool
 		held   func() bool
 	}{
-		// A missing answer is no outage on the train: it stays closed even
-		// while no lifecycle runs (TGT-0040).
-		{"lifecycle idle (control)", true, func() bool { return false }},
-		{"lifecycle starts mid-call", true, func() bool { return true }},
-		{"lifecycle look stalls", true, func() bool { <-release; return false }},
+		// The administrator's open covers a gateway that took the call and
+		// did not answer it (loop round 3), never one no verified gateway
+		// took, and never a lifecycle run.
+		{"lifecycle idle, the gateway took the call (control)", false, true, func() bool { return false }},
+		{"lifecycle idle, no verified gateway took the call", true, false, func() bool { return false }},
+		{"lifecycle starts mid-call", true, true, func() bool { return true }},
+		{"lifecycle look stalls", true, true, func() bool { <-release; return false }},
 	}
 	for _, form := range nativeToolHookForms {
 		sp, ok := specFor(form.connector)
@@ -184,6 +192,9 @@ func TestAdoptedManagedAnswerWatchdogAnswersClosedWhenTheLifecycleStartsMidCall(
 				adopted.Event = resolveHookEvent(adopted.Event, nil)
 				watchdog.hold(&adopted)
 				watchdog.adopt(&adopted, sp, "open")
+				if tc.took {
+					watchdog.markGatewayTookCall()
+				}
 				running.Store(true)
 				var code int
 				select {

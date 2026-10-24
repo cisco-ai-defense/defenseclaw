@@ -8,6 +8,7 @@ import (
 	"io"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -39,9 +40,11 @@ var installLockCheckWait = 100 * time.Millisecond
 // further. Until then the call's output is held in memory, so exactly one
 // answer reaches the agent. On Windows the watchdog waits on its own thread
 // at the highest priority of the process (answerDeadlineWaiter), so
-// ordinary-priority work that fills the CPU does not delay it. It never
-// allows a call: its answer is the one the call gives when its gateway does
-// not answer in time, and once the call logged a closed failure (an
+// ordinary-priority work that fills the CPU does not delay it. Its answer
+// is the one the call gives when its gateway does not answer in time
+// (closed, unless an administrator's open covers a
+// gateway that took the call, noAnswerFailMode; a call no verified gateway
+// took gets the closed answer), and once the call logged a closed failure (an
 // unverified gateway peer, an invalid runtime) it is that call's closed
 // answer in every fail mode (claimFailureLog). While this account's
 // installer holds its data directory (.install.lock) the answer is closed
@@ -90,6 +93,12 @@ type answerWatchdog struct {
 
 	ceiling time.Time
 	waiter  *answerDeadlineWaiter
+
+	// tookCall is set once the call's gateway took it: the hook request's
+	// connection passed the transport's peer check (awaitAnswerBy, GotConn).
+	// Until then the hook has reached no verified gateway, and the watchdog
+	// gives the closed answer below (installOut) instead of an open fallback.
+	tookCall atomic.Bool
 }
 
 // AnswerWatchdog is the answer watchdog of one tool call that the hook
@@ -165,6 +174,9 @@ func startAnswerWatchdog(opts *Options, sp spec, failMode string, deadline, ceil
 // renderNoAnswer renders the answer of a call whose gateway did not answer
 // in time, and the failure log line it writes when it is given.
 func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []byte, code int, logFailure func()) {
+	// The answer of a call its gateway took. While it has not (tookCall), the
+	// watchdog gives the closed answer of renderInstallAnswer instead.
+	opts.gatewayTookCall = true
 	// The row and the rendered decision must use the same effective mode.
 	failMode = noAnswerFailMode(opts, failMode)
 	var out, errb bytes.Buffer
@@ -197,7 +209,8 @@ func renderNoAnswer(opts Options, sp spec, failMode string) (stdout, stderr []by
 }
 
 // renderInstallAnswer renders the closed answer a call whose fallback is
-// not closed gets when, at the deadline, an install holds it: the answer Run
+// not closed gets when, at the deadline, an install holds it or no verified
+// gateway has taken it (tookCall): the answer Run
 // gives it then (closeDuringInstall closes the call and sets strict
 // availability). The look is the per-user call's .install.lock, or the
 // managed call's computer lifecycle (managedLifecycleActive). It returns no
@@ -363,8 +376,9 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	w.mu.Lock()
 	installCheck := w.installCheck
 	w.mu.Unlock()
-	// Outside the lock: Run must still be able to finish meanwhile.
-	installing := installCheck != nil && installCheck()
+	// Outside the lock: Run must still be able to finish meanwhile. An open
+	// fallback covers only a gateway that took the call.
+	installing := installCheck != nil && (!w.tookCall.Load() || installCheck())
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.finished {
@@ -468,6 +482,20 @@ func heldWithin(check func() bool, wait time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+// markGatewayTookCall records that the call's gateway took it (tookCall).
+// Safe on a nil watchdog.
+func (w *answerWatchdog) markGatewayTookCall() {
+	if w != nil {
+		w.tookCall.Store(true)
+	}
+}
+
+// gatewayTookCall reports whether the call's gateway took it (tookCall);
+// false on a nil watchdog.
+func (w *answerWatchdog) gatewayTookCall() bool {
+	return w != nil && w.tookCall.Load()
 }
 
 // answered stands the watchdog down: the gateway's decision is in. Safe on

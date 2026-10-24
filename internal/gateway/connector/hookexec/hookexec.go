@@ -269,6 +269,11 @@ type Options struct {
 	// gateway request with less than hookGatewayAnswerFloor of the answer
 	// budget left: a missing answer then fails closed (failNoAnswer).
 	answerSpentLocally bool
+	// gatewayTookCall is set when the call's gateway took it over a
+	// connection that passed the transport's peer check (the answer
+	// watchdog's tookCall). Only such a call's missing answer can be the
+	// outage an administrator's open covers (managedNoAnswerOutage).
+	gatewayTookCall bool
 	// answeredErrorStatus records an HTTP refusal seen before a retry. A
 	// failed retry cannot turn that answered error into an outage allow.
 	answeredErrorStatus int
@@ -2402,8 +2407,8 @@ func coldStartFailureReason(err error) string {
 // Code or Codex hook prints when the gateway of this account is down. Those
 // agents do not show stderr after exit 0, so an agent in outage-open mode ran
 // unguarded with no message (GAP-0377). The Unix hooks print the same notice
-// (defenseclaw_unreachable_notice_json) on the same events. A missing answer
-// never fails open outside Secure Client (noAnswerFailMode), so only the
+// (defenseclaw_unreachable_notice_json) on the same events. A per-user
+// hook's missing answer never fails open (noAnswerFailMode), so only the
 // outage reasons have a notice.
 func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" {
@@ -3237,7 +3242,8 @@ func managedPeerFailMode(opts Options, failMode string, err error) string {
 // Client (managedNativeDecision) whose administrator chose open for the
 // connector (opts.FailMode, which the managed runtime sets), without strict
 // availability or a runtime failure, and only when err proves the gateway
-// service is not running. Every other error (a peer
+// service is not running, or is the missing answer of a tool call that a
+// verified gateway took (managedNoAnswerOutage). Every other error (a peer
 // DefenseClaw cannot verify, another program on the gateway port, an
 // unusable answer), any failure after an HTTP error reply
 // (Options.answeredErrorStatus) and every
@@ -3253,9 +3259,13 @@ func ManagedOutageFailsOpen(opts Options, err error) bool {
 	if errors.Is(err, errManagedGatewayPortHeld) || errors.Is(err, errAnswerBudgetSpentLocally) {
 		return false
 	}
-	// Only a proven stopped service is an outage; a restart or a missing
-	// answer keeps the refusal.
-	if !errors.Is(err, errManagedGatewayNotRunning) {
+	// A proven stopped service is an outage, and so is a tool call that a
+	// verified gateway took and left without a decision for its whole
+	// answer budget (failNoAnswer). A restart, a session exchange's missing
+	// answer and a contact that never passed the peer check keep the
+	// refusal.
+	noAnswerOutage := errors.Is(err, errGatewayNoAnswer) && managedNoAnswerOutage(opts)
+	if !errors.Is(err, errManagedGatewayNotRunning) && !noAnswerOutage {
 		return false
 	}
 	return !managedLifecycleActive(opts)
@@ -3264,7 +3274,9 @@ func ManagedOutageFailsOpen(opts Options, err error) bool {
 // managedCopilotOpen reports a managed GitHub Copilot hook whose delivery
 // mode is open: an authenticated Secure Client hook (#1163), or a standalone
 // hook whose administrator chose open. A proven stopped service may allow
-// the call under open; an unanswered or unverified gateway stays closed.
+// the call under open, and so may a verified gateway that took a tool call
+// and did not answer it in time (noAnswerFailMode); an unverified gateway
+// stays closed.
 // A closed mode (configured, strict availability, or another program on the
 // gateway port) and the enrollment and policy refusals still deny.
 func managedCopilotOpen(opts Options, sp spec, failMode string) bool {
