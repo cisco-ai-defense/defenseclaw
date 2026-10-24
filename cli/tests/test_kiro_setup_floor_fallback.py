@@ -68,7 +68,13 @@ def test_refusal_scope_says_whether_observe_may_follow_an_action_refusal(tmp_pat
     assert ok and cmd_setup._observe_fallback_admitted(scope)
 
 
-def test_setup_kiro_action_does_not_fall_back_to_observe_for_an_old_cli():
+@pytest.mark.parametrize("mode", ("observe", "action"))
+@pytest.mark.parametrize("allow_drift", (False, True))
+def test_setup_kiro_never_stages_an_old_cli_even_with_drift(mode, allow_drift, monkeypatch):
+    if allow_drift:
+        monkeypatch.setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
+    else:
+        monkeypatch.delenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", raising=False)
     app, root, db_path = make_app_context()
     try:
         warnings: list[str] = []
@@ -78,7 +84,7 @@ def test_setup_kiro_action_does_not_fall_back_to_observe_for_an_old_cli():
             patch.object(app.cfg, "save") as save,
         ):
             ok = cmd_setup._apply_hook_connector_setup(
-                app, connector="kiro", mode="action", restart=False,
+                app, connector="kiro", mode=mode, restart=False,
             )
         assert ok is False
         save.assert_not_called()
