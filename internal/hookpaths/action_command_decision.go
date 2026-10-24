@@ -1215,7 +1215,7 @@ func actionTextDynamicWrite(command string) bool {
 func actionHomeReference(text string) bool {
 	for _, prefix := range []string{"${HOME}", "$HOME"} {
 		if rest, ok := strings.CutPrefix(text, prefix); ok {
-			return rest == "" || !(rest[0] == '_' || asciiLetter(rest[0]) || rest[0] >= '0' && rest[0] <= '9')
+			return rest == "" || rest[0] != '_' && !asciiLetter(rest[0]) && (rest[0] < '0' || rest[0] > '9')
 		}
 	}
 	return false
