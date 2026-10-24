@@ -1687,7 +1687,8 @@ namespace $nativeNamespace
         }
 
         public static string RestoreUserFileNoFollow(string path, byte[] content,
-            string sddl, DateTime creationTimeUtc, DateTime lastWriteTimeUtc)
+            string sddl, DateTime creationTimeUtc, DateTime lastWriteTimeUtc,
+            string expectedCurrentSha256)
         {
             if (content == null || content.Length > 4194304)
                 throw new InvalidOperationException("user file restore size is invalid");
@@ -1697,6 +1698,8 @@ namespace $nativeNamespace
             const uint WRITE_DAC = 0x00040000;
             const uint WRITE_OWNER = 0x00080000;
             const uint FILE_SHARE_READ = 0x00000001;
+            const uint CREATE_NEW = 1;
+            const uint OPEN_EXISTING = 3;
             const uint OPEN_ALWAYS = 4;
             const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
             const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
@@ -1730,7 +1733,9 @@ namespace $nativeNamespace
                         IntPtr handle = CreateFileW(path,
                             GENERIC_READ | GENERIC_WRITE | READ_CONTROL |
                                 WRITE_DAC | WRITE_OWNER,
-                            FILE_SHARE_READ, IntPtr.Zero, OPEN_ALWAYS,
+                            FILE_SHARE_READ, IntPtr.Zero,
+                            expectedCurrentSha256 == null ? OPEN_ALWAYS :
+                                expectedCurrentSha256 == "absent" ? CREATE_NEW : OPEN_EXISTING,
                             FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
                             IntPtr.Zero);
                         if (handle == new IntPtr(-1))
@@ -1743,6 +1748,21 @@ namespace $nativeNamespace
                                 new Microsoft.Win32.SafeHandles.SafeFileHandle(handle, false),
                                 FileAccess.ReadWrite))
                             {
+                                if (expectedCurrentSha256 != null &&
+                                    expectedCurrentSha256 != "absent")
+                                {
+                                    stream.Position = 0;
+                                    using (var sha = System.Security.Cryptography.SHA256.Create())
+                                    {
+                                        string actual = BitConverter.ToString(
+                                            sha.ComputeHash(stream)).Replace("-", "")
+                                            .ToLowerInvariant();
+                                        if (!String.Equals(actual, expectedCurrentSha256,
+                                                StringComparison.Ordinal))
+                                            throw new InvalidOperationException(
+                                                "user file changed after transaction postimage capture");
+                                    }
+                                }
                                 stream.Position = 0;
                                 stream.Write(content, 0, content.Length);
                                 stream.SetLength(content.Length);
@@ -14641,10 +14661,15 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
                 $userHome, $agent, '.defenseclaw-cas-state')
             $stateCaptured = $true
             $stateExisted = $false
+            $stateLastWriteTicks = ''
             try {
                 Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
                 $stateExisted = [bool](Microsoft.PowerShell.Management\Test-Path `
                     -LiteralPath $statePath -PathType Container)
+                if ($stateExisted) {
+                    $stateLastWriteTicks = [IO.Directory]::GetLastWriteTimeUtc(
+                        $statePath).Ticks.ToString()
+                }
             }
             catch {
                 $stateCaptured = $false
@@ -14652,6 +14677,7 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
             $states.Add([ordered]@{
                 captured = $stateCaptured
                 existed = $stateExisted
+                last_write_ticks = $stateLastWriteTicks
             })
         }
         foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
@@ -14693,6 +14719,7 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
                 existed = $exists
                 sha256 = $hash
                 security_descriptor = $sddl
+                postimage_sha256 = ''
             })
             $index++
         }
@@ -14706,6 +14733,88 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
             files = @($files)
             state_directories = @($states)
         }) -Force
+    Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
+}
+
+# Record the exact agent-file bytes published by Guardian before another
+# activation step can trigger rollback. A pre-existing CAS directory is not a
+# transaction witness unless Guardian changed its directory timestamp.
+function Set-DefenseClawUserNativeOTLPTransactionPostimages {
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    Assert-DefenseClawDescendant -Path $SnapshotPath -Root $Layout.StateRoot `
+        -Label 'native OTLP transaction snapshot' | Microsoft.PowerShell.Core\Out-Null
+    Assert-DefenseClawNoReparsePath -Path $SnapshotPath
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath -Raw |
+        Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $property = $snapshot.PSObject.Properties['user_native_otlp_preimages']
+    if ($null -eq $property) { return }
+    $saved = $property.Value
+    if ($saved.schema_version -ne 1 -or
+        @($saved.files).Count -ne 4 * @($saved.roots).Count -or
+        @($saved.state_directories).Count -ne 2 * @($saved.roots).Count) {
+        throw 'invalid user native OTLP postimage target list'
+    }
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    for ($rootIndex = 0; $rootIndex -lt @($saved.roots).Count; $rootIndex++) {
+        $userHome = [string]$saved.roots[$rootIndex].user_home
+        $paths = @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                -UserHome $userHome)
+        for ($offset = 0; $offset -lt 4; $offset++) {
+            $fileIndex = 4 * $rootIndex + $offset
+            $entry = $saved.files[$fileIndex]
+            if (-not [bool]$entry.captured -or -not [bool]$entry.existed) {
+                continue
+            }
+            if ($offset -lt 2) {
+                $state = $saved.state_directories[2 * $rootIndex + $offset]
+                if (-not [bool]$state.captured) { continue }
+                $statePath = [IO.Path]::Combine(
+                    $userHome, @('.codex', '.claude')[$offset],
+                    '.defenseclaw-cas-state')
+                try {
+                    Assert-DefenseClawNoReparsePath -Path $statePath
+                    if (-not (Microsoft.PowerShell.Management\Test-Path `
+                            -LiteralPath $statePath -PathType Container)) {
+                        continue
+                    }
+                    $currentTicks = [IO.Directory]::GetLastWriteTimeUtc(
+                        $statePath).Ticks.ToString()
+                    if ([bool]$state.existed -and
+                        $currentTicks -ceq [string]$state.last_write_ticks) {
+                        continue
+                    }
+                }
+                catch { continue }
+            }
+            try {
+                $current = $nativeSecurity::CaptureUserFileNoFollowIfExists(
+                    $paths[$offset])
+                # Guardian only revokes these scoped credentials during
+                # cleanup. A still-present changed credential is an operator
+                # edit, so it has no transaction postimage.
+                if ($offset -ge 2 -and $null -ne $current) {
+                    continue
+                }
+                $postimage = if ($null -eq $current) {
+                    'absent'
+                } else {
+                    Get-DefenseClawNuclearSHA256 -Bytes $current.Content
+                }
+                if ($postimage -cne [string]$entry.sha256) {
+                    $entry.postimage_sha256 = $postimage
+                }
+            }
+            catch {
+                # An unreadable or linked file has no provable postimage.
+                # Rollback leaves it with the operator and reports the skip.
+                continue
+            }
+        }
+    }
     Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
 }
 
@@ -14754,34 +14863,6 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
             [string]$root.sid -cnotmatch '^S-1-[0-9-]+$') {
             throw 'native OTLP rollback target root is not canonical'
         }
-        # An absent CAS directory that stayed absent means Guardian never
-        # edited this agent config. Preserve any user change made while
-        # Setup was open. A newly created CAS directory is the cleanup's
-        # witness; an existing one is conservatively restorable.
-        $restoreAgent = @()
-        foreach ($agentOffset in 0, 1) {
-            $agent = @('.codex', '.claude')[$agentOffset]
-            $statePath = [IO.Path]::Combine(
-                $userHome, $agent, '.defenseclaw-cas-state')
-            $state = $saved.state_directories[$stateIndex + $agentOffset]
-            $stateCaptured = $state.PSObject.Properties['captured']
-            if ($null -ne $stateCaptured -and -not [bool]$stateCaptured.Value) {
-                $restoreAgent += $false
-                continue
-            }
-            try {
-                Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
-                $restoreAgent += [bool](
-                    [bool]$state.existed -or
-                    (Microsoft.PowerShell.Management\Test-Path `
-                        -LiteralPath $statePath -PathType Container))
-            }
-            catch {
-                Add-DefenseClawUserNativeOTLPRollbackLeftover `
-                    -Path $statePath -Reason $_.Exception.Message
-                $restoreAgent += $false
-            }
-        }
         foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
                     -UserHome $userHome)) {
             $entry = $saved.files[$index]
@@ -14793,12 +14874,22 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                             [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$')) {
                         throw 'invalid user native OTLP rollback file record'
                     }
-                    # Guardian can revoke a token without changing its agent
-                    # config. A still-present token is a concurrent user edit.
-                    $restoreThisFile = $restoreAgent[$index % 2]
-                    if ($index % 4 -ge 2) {
+                    $postimage = [string]$entry.postimage_sha256
+                    $restoreThisFile = $false
+                    if ($postimage -cmatch '^[0-9a-f]{64}$') {
+                        $current = $nativeSecurity::CaptureUserFileNoFollowIfExists($path)
+                        $restoreThisFile = $null -ne $current -and
+                            (Get-DefenseClawNuclearSHA256 -Bytes $current.Content) -ceq
+                                $postimage
+                    }
+                    elseif ($postimage -ceq 'absent') {
                         $restoreThisFile = -not (Microsoft.PowerShell.Management\Test-Path `
                             -LiteralPath $path -PathType Leaf)
+                    }
+                    elseif ($index % 4 -lt 2) {
+                        # Even when no transaction postimage exists, report a
+                        # linked or unreadable agent path without touching it.
+                        [void]$nativeSecurity::CaptureUserFileNoFollowIfExists($path)
                     }
                     if ([bool]$entry.existed -and $restoreThisFile) {
                         $backup = [IO.Path]::Combine(
@@ -14815,7 +14906,8 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                         $actualSDDL = $nativeSecurity::RestoreUserFileNoFollow(
                             $path, $bytes, [string]$entry.security_descriptor,
                             [IO.File]::GetCreationTimeUtc($backup),
-                            [IO.File]::GetLastWriteTimeUtc($backup))
+                            [IO.File]::GetLastWriteTimeUtc($backup),
+                            $postimage)
                         if ($actualSDDL -cne [string]$entry.security_descriptor) {
                             throw 'user native OTLP rollback did not restore exact ACL'
                         }
@@ -33770,11 +33862,19 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             Set-DefenseClawServiceStartMode `
                 -Name $GuardianServiceName `
                 -StartMode 3
-            [void](Wait-DefenseClawFreshGuardianReconcile `
-                -Layout $Layout `
-                -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName `
-                -ExpectedManifestSHA256 $expectedGuardianManifestSHA256)
+            try {
+                [void](Wait-DefenseClawFreshGuardianReconcile `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -GuardianServiceName $GuardianServiceName `
+                    -ExpectedManifestSHA256 $expectedGuardianManifestSHA256)
+            }
+            finally {
+                if (Test-DefenseClawStandaloneProfile) {
+                    Set-DefenseClawUserNativeOTLPTransactionPostimages `
+                        -SnapshotPath $snapshot -Layout $Layout
+                }
+            }
             # The protected Guardian receipt is now exact for this manifest.
             # Promote the monotonic deployment activation state inside the
             # still-open transaction before the gateway can become startable.
