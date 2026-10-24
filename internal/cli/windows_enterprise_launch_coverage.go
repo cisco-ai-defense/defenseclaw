@@ -159,6 +159,7 @@ func postWindowsManagedCoverageAlert(source, summary string, details map[string]
 	}
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-DefenseClaw-Client", "cli")
 	// The administrator's token, the account and the install path go only
 	// to the gateway service's own socket: another account that holds the
 	// port while the service is down receives nothing (GAP-0962 class).

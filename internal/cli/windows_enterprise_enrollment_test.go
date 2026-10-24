@@ -46,3 +46,21 @@ func TestWindowsEnterpriseEnrollmentAccounts(t *testing.T) {
 		t.Fatalf("accounts = %+v", accounts)
 	}
 }
+
+func TestWindowsEnterpriseEnrollmentDoesNotClaimHermesSessionHomeCoverage(t *testing.T) {
+	accounts := windowsEnterpriseEnrollmentAccounts([]enterpriseHookReconcileRow{
+		{User: "dcw-std1", SID: "S-1-5-21-1-2-3-1001", Connector: "hermes", OK: true},
+		{User: "dcw-std1", SID: "S-1-5-21-1-2-3-1001", Connector: "codex", OK: true},
+		{User: "dcw-std2", SID: "S-1-5-21-1-2-3-1002", Connector: "hermes", OK: true},
+	})
+	if len(accounts) != 2 {
+		t.Fatalf("accounts = %+v", accounts)
+	}
+	for _, account := range accounts {
+		if account.Connectors["hermes"] != "enrolled" ||
+			!strings.Contains(account.Reason, "NOT COVERED") ||
+			!strings.Contains(account.Reason, "session-only HERMES_HOME") {
+			t.Fatalf("Hermes registration was presented as coverage for %s: %+v", account.Account, account)
+		}
+	}
+}

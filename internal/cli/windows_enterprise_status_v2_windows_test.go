@@ -102,6 +102,9 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 	if !strings.Contains(string(document), "session-only HERMES_HOME") {
 		t.Fatalf("managed Hermes status omitted the unverified session home: %s", document)
 	}
+	if !strings.Contains(string(document), "NOT COVERED") {
+		t.Fatalf("managed Hermes status did not label unobservable coverage: %s", document)
+	}
 	if result.OpenShell == nil || result.OpenShell.ReasonCode != enterprisestatus.CodePlatformUnsupported || result.OpenShell.DriverAvailable != "none" {
 		t.Fatalf("openshell = %+v", result.OpenShell)
 	}
@@ -111,6 +114,10 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 }
 
 func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
+	previousAudit := windowsManagedHermesCoverageAudit
+	checks := 0
+	windowsManagedHermesCoverageAudit = func() error { checks++; return nil }
+	t.Cleanup(func() { windowsManagedHermesCoverageAudit = previousAudit })
 	cfg := windowsStatusV2Config()
 	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
 		cfg: cfg,
@@ -143,11 +150,15 @@ func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
 	// Ensure prints no block but cannot certify what verify refuses.
 	ensure := enterprisestatus.New("ensure", managed.ProfileStandalone, "windows", "1.0.4")
 	ensure.Installed, ensure.CoverageComplete, ensure.SecurityComplete = true, true, true
+	ensure.Readiness.Gateway = true
 	applyWindowsEnterpriseStatusV2(ensure)
 	if code := ensure.Finish("windows", 0); code != 0 || ensure.SecurityComplete || ensure.CoverageComplete || ensure.Connectors != nil ||
 		messagesWithCode(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable) != 1 {
 		t.Fatalf("ensure with unverified Hermes: code=%d security=%v coverage=%v connectors=%v warnings=%+v",
 			code, ensure.SecurityComplete, ensure.CoverageComplete, ensure.Connectors, ensure.Warnings)
+	}
+	if checks != 1 || !strings.Contains(ensure.Warnings[0].Message, "NOT COVERED") {
+		t.Fatalf("ensure omitted Hermes coverage audit or reason: checks=%d warnings=%+v", checks, ensure.Warnings)
 	}
 }
 

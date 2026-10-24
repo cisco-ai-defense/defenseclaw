@@ -152,10 +152,14 @@ func addManagedWindowsAnswer(root *cobra.Command, name string, answer func(args 
 // It names the administrator's check for this account as well, because the
 // deployment status has no per-account detail.
 func managedWindowsAdminCommandAnswer(where, command string) error {
+	coverage := ""
+	if command == "doctor" {
+		coverage = " If Hermes is enrolled, a session-only HERMES_HOME is NOT COVERED because the managed service cannot observe a home selected only by your shell; the administrator's status and verify name this limit."
+	}
 	return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no per-user "+
 		"deployment to check and nothing for you to do; your administrator can check the managed deployment %s, "+
-		"and your account's agents with `& '%s' enterprise policy show --user %s`. Nothing was changed.",
-		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName())
+		"and your account's agents with `& '%s' enterprise policy show --user %s`.%s Nothing was changed.",
+		where, command, managedWindowsAdminStatusHint(), managedWindowsAdminCLI(), managedHostCurrentAccountName(), coverage)
 }
 
 // managedWindowsVersionChangeAnswer tells a user on a managed Windows
