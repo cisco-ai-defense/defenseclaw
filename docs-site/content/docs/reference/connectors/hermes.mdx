@@ -20,6 +20,8 @@ Reference for the [Hermes connector](/docs/connectors/hermes). DefenseClaw wires
 
 Hermes can refuse a foreground terminal command that it classifies as a long-running server or watcher, including an ordinary `npm start`, before DefenseClaw receives a shell-hook event. This is a Hermes terminal decision; no DefenseClaw verdict or rule ID is available for that refusal.
 
+At startup, Hermes can ask for approval separately for each shell-hook event registered in its profile. A retained registration pointing at a disabled DefenseClaw hook can therefore produce repeated native approval prompts even though DefenseClaw is not evaluating calls. Check the profile's registered hook commands and the connector's setup/teardown status before approving a stale command; the prompts themselves are issued by Hermes.
+
 ### What setup does
 
 `setup hermes` is shorthand for `setup guardrail --connector hermes`. It stages hooks in the resolved default-profile `config.yaml`, adds only the exact 23 DefenseClaw `(event, command)` approval entries, and inventories the bounded default-profile sources. It preserves your `hooks_auto_accept` value and third-party approvals. The connector rejects named-profile homes, a non-default `active_profile` and multiplex gateways. Project plugins and other launch-directory sources are reported unverified.
