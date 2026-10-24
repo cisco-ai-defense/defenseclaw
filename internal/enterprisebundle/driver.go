@@ -197,6 +197,9 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	if err != nil {
 		return refuse(err)
 	}
+	if err := d.Store.RefuseBelowPending(receipt, res.Manifest, sha256Hex(staged.Manifest)); err != nil {
+		return refuse(err)
+	}
 	p.Manifest = res.Manifest
 	p.EffectivePolicyDigest = res.EffectivePolicyDigest
 	if res.AlreadyApplied {

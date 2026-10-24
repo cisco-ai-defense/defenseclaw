@@ -1398,6 +1398,32 @@ func (s *Store) Unsettled() ([]*Receipt, error) {
 	return out, nil
 }
 
+// RefuseBelowPending keeps bundle versions monotonic over a bundle that
+// another run applied and that no run has confirmed or failed yet: a
+// receipt kept staged or applied through a gateway outage or a product
+// upgrade. As over the confirmed bundle, an older version, a repeat of the
+// confirmed bundle and other content under the pending version are
+// version_not_newer, so an older delivery never writes over the newer
+// pending config. A retry of the pending bundle itself goes ahead. own is
+// the receipt of this delivery; the caller holds the bundle lock and has
+// settled the store.
+func (s *Store) RefuseBelowPending(own *Receipt, m *Manifest, manifestSHA256 string) error {
+	receipts, err := s.Unsettled()
+	if err != nil {
+		return &Error{Code: CodeStateInvalid, Detail: "cannot read the policy bundle receipts: " + err.Error()}
+	}
+	for _, rc := range receipts {
+		if (own != nil && rc.ReceiptID == own.ReceiptID) || (rc.State != StateStaged && rc.State != StateApplied) {
+			continue
+		}
+		if m.Version < rc.Version || (m.Version == rc.Version && (m.BundleID != rc.BundleID || manifestSHA256 != rc.ManifestSHA256)) {
+			return refuse(CodeVersionNotNewer, "version", "policy bundle %s version %d is applied and not yet confirmed; deliver that bundle again or a version above %d",
+				rc.BundleID, rc.Version, rc.Version)
+		}
+	}
+	return nil
+}
+
 // UnsettledMessage is the WarnBundlePending message of a read-only lifecycle
 // status that found unsettled receipts and no run holding the lock. ensure is
 // the command that settles them.

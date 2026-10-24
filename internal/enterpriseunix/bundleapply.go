@@ -275,7 +275,9 @@ func (l *lifecycle) configFileHolds(raw []byte) bool {
 
 // reinstallLastGoodBundle is reinstallAfterSettle: an ensure transaction of
 // the current (last good) bundle's config. It returns the digest the gateway
-// enforces afterwards and whether that config is the deployment again.
+// enforces afterwards and whether the gateway enforces the last good bundle
+// again: its verified digest, generation and identity with no reload or
+// config error, not only its config in the deployment (GAP-1100).
 func (l *lifecycle) reinstallLastGoodBundle(ctx context.Context, record *Deployment) (string, bool) {
 	env, r := l.env, l.result
 	errorsBefore := len(r.Errors)
@@ -293,8 +295,15 @@ func (l *lifecycle) reinstallLastGoodBundle(ctx context.Context, record *Deploym
 	if err != nil || latest == nil {
 		return "", false
 	}
+	restored := code == 0 && len(r.Errors) == errorsBefore && latest.ConfigSHA256 == sha256Bytes(want)
+	if restored {
+		if err := l.confirmRecoveredBundle(ctx); err != nil {
+			restored = false
+			r.AddWarning(codeBundleUnconfirmed, "the last good bundle's config is installed again, but the gateway does not enforce it: "+err.Error())
+		}
+	}
 	enforcing, _ := l.gatewayPolicyNow(ctx, latest.ServiceUID)
-	return enforcing, code == 0 && len(r.Errors) == errorsBefore && latest.ConfigSHA256 == sha256Bytes(want)
+	return enforcing, restored
 }
 
 // prepareBundleMode runs before a changing action. It picks the inbox bundle
@@ -606,6 +615,9 @@ func (l *lifecycle) applyBundle(ctx context.Context, record *Deployment) int {
 		r.AddWarning(w.Code, w.Message)
 	}
 	if err != nil {
+		return refuse(err)
+	}
+	if err := store.RefuseBelowPending(receipt, res.Manifest, sha256Bytes(staged.Manifest)); err != nil {
 		return refuse(err)
 	}
 	if res.AlreadyApplied {
@@ -1320,7 +1332,9 @@ func (l *lifecycle) settleUnconfirmedBundle(ctx context.Context, store *enterpri
 			l.env.ProductVersion, record.ProductVersion))
 	}
 	st, _ := store.LoadState()
-	rc.RolledBack = st.Current != nil
+	// Nothing is rolled back yet: the receipt says so only once a run put the
+	// last good bundle back and the gateway enforces it (GAP-1100).
+	rc.RolledBack = false
 	rc.EnforcingDigest = health.digest
 	next := "there is no last good bundle to return to, and the gateway keeps enforcing the policy it last built"
 	if st.Current != nil {
