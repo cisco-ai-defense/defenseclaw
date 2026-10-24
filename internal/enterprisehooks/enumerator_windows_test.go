@@ -26,6 +26,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -223,6 +224,49 @@ func TestEffectiveWindowsStandaloneHookConnectorsCanonicalizeClaudeAliases(t *te
 	}}
 	if got := EffectiveWindowsStandaloneHookConnectors(cfg); len(got) != 0 {
 		t.Fatalf("disabled canonical entry was re-enabled by alias: %v", got)
+	}
+}
+
+// GAP-0904: a connector named only under enterprise.machine_policy.connectors
+// was in the policy verifier's roster (enterprisepolicy.StandaloneConnectors)
+// but not in the Windows runtime roster, so with no enrolled user its machine
+// hook was never published and enterprise windows verify could still pass.
+// The standalone roster now counts it, unless guardrail.connectors turns it
+// off; a config that is not standalone does not.
+func TestEffectiveWindowsStandaloneHookConnectorsCountMachinePolicyMapConnectors(t *testing.T) {
+	disabled := false
+	standalone := func(guardrail map[string]config.PerConnectorGuardrailConfig, mapped ...string) *config.Config {
+		cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+		cfg.Enterprise.Profile = managed.ProfileStandalone
+		cfg.Guardrail.Connectors = guardrail
+		cfg.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{}
+		for _, name := range mapped {
+			cfg.Enterprise.MachinePolicy.Connectors[name] = config.EnterpriseConnectorPolicy{}
+		}
+		return cfg
+	}
+	for _, tc := range []struct {
+		name string
+		cfg  *config.Config
+		want []string
+	}{
+		{name: "Claude Code named only in the machine-policy map", want: []string{"claudecode", "codex"},
+			cfg: standalone(map[string]config.PerConnectorGuardrailConfig{"codex": {}}, "claudecode")},
+		{name: "every machine-hook connector named only in the map", want: []string{"claudecode", "codex", "cursor"},
+			cfg: standalone(nil, "claudecode", "codex", "cursor")},
+		{name: "a map entry the guardrail turns off", want: []string{"codex"},
+			cfg: standalone(map[string]config.PerConnectorGuardrailConfig{"codex": {}, "claudecode": {Enabled: &disabled}}, "claudecode")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := EffectiveWindowsStandaloneHookConnectors(tc.cfg); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("standalone roster = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	notStandalone := &config.Config{Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{"codex": {}}}}
+	notStandalone.Enterprise.MachinePolicy.Connectors = map[string]config.EnterpriseConnectorPolicy{"claudecode": {}}
+	if got := EffectiveWindowsStandaloneHookConnectors(notStandalone); strings.Join(got, ",") != "codex" {
+		t.Fatalf("a config that is not standalone counted its map entries: %v", got)
 	}
 }
 
