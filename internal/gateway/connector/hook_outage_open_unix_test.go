@@ -260,10 +260,9 @@ if defenseclaw_per_user_outage_open; then printf 'open:%s' "$status"; else print
 	}
 }
 
-// An outage record the hook cannot trust (a record without the config
-// source, one that names another connector or is malformed, or none) keeps
-// the open tier's outage closed.
-func TestPerUserShellHookOutageNeedsItsOwnRecord(t *testing.T) {
+// A setup-time record cannot override the current policy tier, including a
+// record left by an earlier strict render or a missing legacy record.
+func TestPerUserShellHookOutageIgnoresStaleRecord(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		record string // "" removes the record
@@ -279,7 +278,7 @@ func TestPerUserShellHookOutageNeedsItsOwnRecord(t *testing.T) {
 			invoke := hookArgvConnectorCase(t, "codex")
 			home := t.TempDir()
 			installNativeGatewayForHookTest(t, home)
-			// The config gives the open outage mode: only the record decides.
+			// The current config gives the open outage mode.
 			writeOutageTierConfig(t, home, outageDefaultTierConfig)
 			hookDir := filepath.Join(home, "hooks")
 			opts := SetupOpts{DataDir: home, APIAddr: freeLoopbackAddrForOutageTest(t), APIToken: "scoped-test-token", HookFailMode: "open"}
@@ -299,8 +298,8 @@ func TestPerUserShellHookOutageNeedsItsOwnRecord(t *testing.T) {
 			// An inherited transport status cannot stand in for the call's own.
 			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0", "_DC_TRANSPORT_STATUS=7")
 			output, err := cmd.CombinedOutput()
-			if !hookCallBlocked(err, string(output)) {
-				t.Fatalf("an outage with record %q ran the call:\n%s", tc.record, output)
+			if hookCallBlocked(err, string(output)) {
+				t.Fatalf("an outage with record %q blocked the call:\n%s", tc.record, output)
 			}
 		})
 	}
@@ -322,7 +321,7 @@ func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
 			name, config string
 			opens        bool
 		}{
-			{"default pack", outageDefaultTierConfig, true},
+			{"default pack after a strict render", outageDefaultTierConfig, true},
 			{"permissive pack", outageDefaultTierConfig + "  rule_pack: permissive\n", true},
 			{"strict pack", outageStrictTierConfig, false},
 			{"strict pack for this connector", outageDefaultTierConfig + "  connectors:\n    " + conn.Name() + ":\n      rule_pack: strict\n", false},
@@ -336,8 +335,8 @@ func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
 				home := t.TempDir()
 				installNativeGatewayForHookTest(t, home)
 				hookDir := filepath.Join(home, "hooks")
-				// Rendered in the default tier: the record says open.
-				opts := SetupOpts{DataDir: home, APIAddr: freeLoopbackAddrForOutageTest(t), APIToken: "scoped-test-token", HookFailMode: "open"}
+				// A strict render can remain installed when the gateway is stopped.
+				opts := SetupOpts{DataDir: home, APIAddr: freeLoopbackAddrForOutageTest(t), APIToken: "scoped-test-token", HookFailMode: "closed"}
 				if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 					t.Fatal(err)
 				}
@@ -359,6 +358,9 @@ func TestPerUserShellHookOutageFollowsTheConfigNow(t *testing.T) {
 				}
 				if last := records[len(records)-1]; last["outcome"] != want {
 					t.Fatalf("outage row = %+v, want %s", last, want)
+				}
+				if tc.opens && !strings.Contains(string(output), "fail mode open for an outage") {
+					t.Fatalf("open outage omitted its warning:\n%s", output)
 				}
 			})
 		}

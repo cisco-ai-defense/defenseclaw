@@ -281,7 +281,7 @@ type Options struct {
 	// perUserOutage is set on a per-user hook for a failure that is a gateway
 	// outage (withPerUserOutage): this account's gateway refused or dropped
 	// the connection, gave no connection within the restart budget, or could
-	// not be started. Only such a failure takes OutageFailMode; an answer the
+	// not be started. Only such a failure asks OutageFailModeNow; an answer the
 	// gateway gave, a stalled answer and every local failure stay closed.
 	perUserOutage bool
 	// answerBy is the answer deadline of a tool call (answerDeadline);
@@ -314,20 +314,9 @@ type Options struct {
 	// closed independently. Only "open" opens: empty or any other value is
 	// "closed" (owner rule: hooks fail closed unless the operator chose open).
 	FailMode string
-	// OutageFailMode is a per-user hook's gateway-outage mode, the one Setup
-	// recorded in hooks/.hookcfg from the connector's policy tier
-	// (config.HookOutageFailMode): "open" lets a call through with a warning
-	// and a hook-failures.jsonl row when this account's gateway is not
-	// running, "closed" (or empty) blocks it. It applies only to a failure
-	// withPerUserOutage marked; FailMode governs every other failure.
-	// Managed and Secure Client hooks ignore it.
-	OutageFailMode string
-	// OutageFailModeNow returns the outage mode the config on disk gives the
-	// connector now. A per-user outage runs only when OutageFailMode and it
-	// both say "open": the record is what the gateway last wrote, and a
-	// rule-pack change since (strict while the gateway is stopped) has not
-	// reached it. It is called only for an outage the record would open; a
-	// nil OutageFailModeNow keeps the outage closed.
+	// OutageFailModeNow returns the outage mode the hook's own config on disk
+	// gives this connector at call time. A nil callback keeps the outage
+	// closed. No mode written at setup time may override this decision.
 	OutageFailModeNow func() string
 
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
@@ -2242,8 +2231,7 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 }
 
 // withPerUserOutage marks opts for a per-user failure that is a gateway
-// outage, so failUnreachable answers it with the hook's OutageFailMode
-// (perUserOutageMode).
+// outage, so failUnreachable answers it with the runtime config's mode.
 func withPerUserOutage(opts Options) Options {
 	opts.perUserOutage = !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" && !opts.SecureClient
 	return opts
@@ -2264,15 +2252,13 @@ func perUserOutageError(opts Options, err error) bool {
 	return gatewayRestartShaped(err)
 }
 
-// perUserOutageMode is the fail mode of a per-user failure: OutageFailMode
-// for a gateway outage withPerUserOutage marked (open in the default and
-// permissive policy tiers, config.HookOutageFailMode) when the config on
-// disk still gives it (OutageFailModeNow), failMode for every other failure.
+// perUserOutageMode is the fail mode of a per-user failure: the config on
+// disk (OutageFailModeNow) decides a classified gateway outage, and failMode
+// governs every other failure.
 // Strict availability and this account's install window close the outage
 // too (closeDuringInstall runs first).
 func perUserOutageMode(opts *Options, failMode string) string {
 	if !opts.perUserOutage || opts.StrictAvailability || perUserInstallWindow(*opts) ||
-		normalizeFailMode(opts.OutageFailMode) != "open" ||
 		opts.OutageFailModeNow == nil || normalizeFailMode(opts.OutageFailModeNow()) != "open" {
 		return failMode
 	}

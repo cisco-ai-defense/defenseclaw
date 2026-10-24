@@ -31,7 +31,7 @@ func TestPackagedWindowsHookOutageReadsTheInstalledRuntimesConfig(t *testing.T) 
 			t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(attacker, "config.yaml"))
 
 			opts := buildHookOptions("claudecode", "PreToolUse", "", "")
-			if opts.Home != trustedHome || opts.OutageFailMode != "open" || opts.OutageFailModeNow == nil {
+			if opts.Home != trustedHome || opts.OutageFailModeNow == nil {
 				t.Fatalf("the packaged hook did not take its installed runtime: %+v", opts)
 			}
 			if got := opts.OutageFailModeNow(); got != tc.want {

@@ -4,7 +4,9 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -22,11 +24,8 @@ import (
 // Client, and the connector's rule pack is not strict. Every other case is
 // "closed".
 //
-// A per-user hook asks it only when its runtime record (hooks/.hookcfg*, a
-// plugin's baked mode) would let an outage run. The record is what the
-// gateway or the last refresh wrote, and a rule-pack change made since (strict
-// selected while the gateway is stopped, or with hook_self_heal off) has not
-// reached it, so the record alone cannot open a call.
+// A per-user hook asks only for a classified gateway outage. Its current
+// config decides even when a setup-time record has a different tier.
 //
 // The policy source is the runtime's own config, config.yaml in the data
 // directory above hookDir, whose data_dir is that directory: the folder the
@@ -44,6 +43,26 @@ func hookOutageFailModeNow(connectorName, hookDir string) string {
 	loaded, err := config.LoadFromFile(filepath.Join(dataDir, config.DefaultConfigName))
 	if err != nil || loaded == nil || managed.IsManagedEnterprise(loaded.DeploymentMode) || loaded.SecureClientIntegration() {
 		return "closed"
+	}
+	// The machine installation marker is an independent managed signal. A
+	// leftover per-user hook cannot reopen a managed host just because its
+	// own config still says OSS; an unreadable marker state also closes it.
+	if secureClientHost() {
+		return "closed"
+	}
+	if _, present := managedHostWindowsStandalone(); present {
+		return "closed"
+	}
+	// A Windows machine marker that exists but cannot be verified, or whose
+	// registry key cannot be read, is not proof of an OSS host. Only a
+	// definite absence may leave the per-user outage open.
+	if managedHostWindowsMarkerUncertain() {
+		return "closed"
+	}
+	if marker := managedHostDescriptorPath(); marker != "" {
+		if _, err := os.Lstat(marker); err == nil || !errors.Is(err, os.ErrNotExist) {
+			return "closed"
+		}
 	}
 	// An environment that moves the loader's data directory, or a config
 	// whose data_dir is elsewhere, is not this runtime's config.
