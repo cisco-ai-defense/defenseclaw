@@ -121,7 +121,10 @@ func TestStatusV2BlocksLinuxAndMacOS(t *testing.T) {
 
 // A shell that was already running can export HERMES_HOME after its process
 // environment was captured. The guardian's healthy default-home receipt
-// cannot prove what a later Hermes process launched from that shell reads.
+// cannot prove what a later Hermes process launched from that shell reads,
+// so status, verify and ensure report coverage and security incomplete and
+// name the limit. It is a warning: verify of the verified install passes,
+// so an upgrade that verifies is not rolled back for it.
 func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
@@ -153,18 +156,20 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 				if r.CoverageComplete || r.SecurityComplete {
 					t.Fatalf("%s certified universal Hermes coverage: coverage=%t security=%t", action, r.CoverageComplete, r.SecurityComplete)
 				}
-				messages := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable) +
-					messagesOf(r.Errors, enterprisestatus.CodeStatusDetailUnavailable)
-				if !strings.Contains(messages, "session-only HERMES_HOME") {
+				if messages := messagesOf(r.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(messages, "session-only HERMES_HOME") {
 					t.Fatalf("%s did not name the unknown home: %q", action, messages)
 				}
-				if action == ActionVerify && r.ExitCode == 0 {
-					t.Fatal("verify certified an unobservable Hermes launch home")
+				if !r.OK || r.ExitCode != 0 || len(r.Errors) != 0 {
+					t.Fatalf("%s failed a verified Hermes install on the session-home limit: ok=%t exit=%d errors=%+v",
+						action, r.OK, r.ExitCode, r.Errors)
 				}
 			}
 			// A no-op ensure describes the same managed deployment without
 			// status-v2 blocks. It must not certify coverage that verify rejects.
 			ensure := h.run(Options{Action: ActionEnsure})
+			if !ensure.OK || ensure.ExitCode != 0 || len(ensure.Errors) != 0 {
+				t.Fatalf("ensure failed on the session-home limit: ok=%t exit=%d errors=%+v", ensure.OK, ensure.ExitCode, ensure.Errors)
+			}
 			if ensure.CoverageComplete || ensure.SecurityComplete || ensure.Connectors != nil {
 				t.Fatalf("ensure certified Hermes or changed its result shape: coverage=%t security=%t connectors=%+v",
 					ensure.CoverageComplete, ensure.SecurityComplete, ensure.Connectors)

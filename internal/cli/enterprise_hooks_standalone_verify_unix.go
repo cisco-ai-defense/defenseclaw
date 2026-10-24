@@ -16,7 +16,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -203,18 +202,6 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 			row.Error = "protected authorization does not cover target"
 		}
 		run.Rows[index] = row
-	}
-	for index, row := range run.Rows {
-		if row.Connector != "hermes" || !row.OK {
-			continue
-		}
-		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(runtime.GOOS, row.Connector, true, false); err != nil {
-			row.OK = false
-			row.Pending = false
-			row.Result = nil
-			row.Error = "enterprise hooks: connector hermes cannot be verified: " + err.Error()
-			run.Rows[index] = row
-		}
 	}
 	for _, row := range run.Rows {
 		switch {

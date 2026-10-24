@@ -117,13 +117,10 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		state.Targets = nil
 		block["hermes"] = state
 		r.CoverageComplete, r.SecurityComplete = false, false
-		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(env.GOOS, "hermes", true, false); err != nil {
-			message := "connectors.hermes: " + err.Error()
-			if l.opts.Action == ActionVerify {
-				r.AddError(enterprisestatus.CodeStatusDetailUnavailable, message)
-			} else {
-				r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
-			}
+		// A coverage verdict, never an error: verify keeps a verified
+		// install verified, and an upgrade is not rolled back for it.
+		if limit := enterprisehooks.ManagedHermesSessionHomeCoverageLimit(env.GOOS, "hermes", true, false); limit != "" {
+			r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors.hermes: "+limit)
 		}
 	}
 	r.AddHookProcessFailureWarnings(block)

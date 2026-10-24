@@ -33,7 +33,8 @@ import (
 // manifest and unprotected-agents record, the guardian state and one
 // loopback /health read; the PowerShell report is not involved. An enabled
 // Hermes target cannot be certified against an unobservable session-only
-// HERMES_HOME, so its coverage and security flags are incomplete.
+// HERMES_HOME, so its coverage and security flags are incomplete; that is a
+// warning, never an error.
 
 // windowsEnterpriseStatusV2Inputs are the files the connectors block reads.
 type windowsEnterpriseStatusV2Inputs struct {
@@ -183,11 +184,10 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 		state.Targets = nil
 		block["hermes"] = state
 		result.CoverageComplete, result.SecurityComplete = false, false
-		message := "connectors.hermes: the guardian's persistent-home registration cannot prove a session-only HERMES_HOME is hooked; Windows managed Hermes coverage cannot be verified"
-		if result.Action == "verify" {
-			result.AddError(enterprisestatus.CodeStatusDetailUnavailable, message)
-		} else {
-			result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+		// A coverage verdict, never an error: verify keeps a verified
+		// install verified, and Setup /ensure is not rolled back for it.
+		if limit := enterprisehooks.ManagedHermesSessionHomeCoverageLimit("windows", "hermes", true, false); limit != "" {
+			result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors.hermes: "+limit)
 		}
 	}
 	if publish && hidden > 0 {

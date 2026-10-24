@@ -757,7 +757,7 @@ func installWindowsGenericManagedResult(ctx context.Context, opts InstallOptions
 			if err := hardenWindowsGenericFootprint(target, configPaths, footprint); err != nil {
 				return rollback(err)
 			}
-			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, false); err != nil {
+			if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
 				return rollback(err)
 			}
 			generation, generationUsed, err = prepareWindowsPerUserManagedGeneration(target, lockEntry.ContractID)
@@ -822,7 +822,7 @@ func verifyWindowsGenericManagedResult(ctx context.Context, opts InstallOptions)
 		if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 			return err
 		}
-		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint, true); err != nil {
+		if err := verifyWindowsGenericManagedTarget(ctx, target, configPaths, footprint); err != nil {
 			return err
 		}
 		lock, err := connector.LoadHookContractLockEntryForMode(
@@ -1257,7 +1257,7 @@ func publishWindowsPluginScopedHookToken(target windowsGenericManagedTarget) err
 	return nil
 }
 
-func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths, attestSession bool) error {
+func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGenericManagedTarget, configPaths []string, footprint connector.AgentPaths) error {
 	if err := prepareWindowsGenericFootprint(target, configPaths, footprint, false); err != nil {
 		return err
 	}
@@ -1326,11 +1326,6 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	}
 	if strings.TrimSpace(lock.HookFailMode) != strings.TrimSpace(current.HookFailMode) {
 		return fmt.Errorf("enterprise hooks: connector %s fail mode %q does not match configured mode %q", target.conn.Name(), lock.HookFailMode, current.HookFailMode)
-	}
-	if attestSession {
-		if err := ManagedHermesSessionHomeAttestation("windows", target.conn.Name(), target.setup.ManagedEnterprise, target.setup.SecureClientHookDelivery); err != nil {
-			return fmt.Errorf("enterprise hooks: connector %s cannot be verified: %w", target.conn.Name(), err)
-		}
 	}
 	return nil
 }
