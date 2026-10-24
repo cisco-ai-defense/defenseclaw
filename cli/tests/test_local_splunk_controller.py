@@ -557,8 +557,9 @@ def test_failed_upgrade_stop_restores_prior_running_stack_before_returning(
 
 
 @pytest.mark.parametrize("failure", ["unavailable", "timeout"])
-def test_upgrade_resolves_staged_image_before_stopping_running_stack(
-    tmp_path: Path, docker_exe: Path, monkeypatch: pytest.MonkeyPatch, failure: str,
+@pytest.mark.parametrize("running", [True, False])
+def test_upgrade_resolves_staged_image_before_changing_prior_stack(
+    tmp_path: Path, docker_exe: Path, monkeypatch: pytest.MonkeyPatch, failure: str, running: bool,
 ) -> None:
     data_dir = tmp_path / "Offline Upgrade"
     stable = data_dir / "splunk-bridge"
@@ -583,6 +584,8 @@ def test_upgrade_resolves_staged_image_before_stopping_running_stack(
                 return CommandResult(command, 0 if command[-1] == RETIRED_SPLUNK_IMAGE else 1)
             if command[1] == "pull":
                 self.calls.append((command, timeout, dict(env or {})))
+                assert (stable / ENV_FILE_REL).read_bytes() == previous_env
+                assert self.containers["prior-container"]["running"] is running
                 if failure == "timeout":
                     raise CommandTimeoutError("pull timed out", CommandResult(command, -1))
                 return CommandResult(command, 1, stderr="registry unavailable")
@@ -590,6 +593,7 @@ def test_upgrade_resolves_staged_image_before_stopping_running_stack(
 
     runner = OfflineReplacementRunner()
     runner.add_owned(stable, container_id="prior-container")
+    runner.containers["prior-container"]["running"] = running
     monkeypatch.setattr(local_splunk, "validate_native_docker_preflight", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(NativeLocalSplunkController, "_port_in_use", staticmethod(lambda _port: True))
     monkeypatch.setattr(NativeLocalSplunkController, "_web_ready", staticmethod(lambda _timeout: True))
@@ -610,8 +614,9 @@ def test_upgrade_resolves_staged_image_before_stopping_running_stack(
         )
 
     assert (stable / ENV_FILE_REL).read_bytes() == previous_env
-    assert runner.containers["prior-container"]["running"] is True
+    assert runner.containers["prior-container"]["running"] is running
     assert not any("down" in command for command, _, _ in runner.calls)
+    assert not any("up" in command for command, _, _ in runner.calls)
     assert not list(data_dir.glob(".splunk-stage-*"))
     pull = next(call for call in runner.calls if call[0][1] == "pull")
     assert pull[0][-1] == replacement
