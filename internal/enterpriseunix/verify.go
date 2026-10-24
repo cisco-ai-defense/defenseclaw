@@ -1063,7 +1063,6 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
 	reportedPolicy, reloadError := "", ""
-	var gatewayPolicy bundleHealth
 	kernelApplied, kernelGeneration := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
@@ -1091,7 +1090,6 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 					r.Readiness.Gateway = true
 					l.readGatewayPosture(body)
 					reportedPolicy, reloadError = gatewayPolicyHealth(body)
-					gatewayPolicy = parseBundleHealth(body)
 					kernelApplied, kernelGeneration = gatewayKernelPolicy(body)
 				}
 			}
@@ -1111,7 +1109,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		}
 	}
 	r.Enrollment = l.enrollmentCounts()
-	l.describePolicy(ctx, reportedPolicy, reloadError, gatewayPolicy)
+	l.describePolicy(ctx, reportedPolicy, reloadError)
 	l.describeBundle()
 	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {
@@ -1121,17 +1119,11 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
 	if record != nil {
-		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
-		for _, problem := range drift {
-			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionReconcile)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to pin the verified policy view")
-		}
-		for _, problem := range unpinnable {
-			r.AddWarning(codeMachinePolicyIncomplete, problem)
+		for _, problem := range l.policyViewPinProblems(record.MachinePolicyConnectors) {
+			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionEnsure)+"` to publish the verified policy view")
 		}
 	}
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
-		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure && reloadError == "" &&
-		r.Policy != nil && r.Policy.Applied
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()
@@ -1157,11 +1149,6 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.Inspection.AIDefense = "unknown"
 	}
 	r.AddAIDefenseWarning()
-	// Ensure, install and repair describe the same managed Hermes coverage
-	// limit as status and verify, without adding status-v2 output blocks.
-	if record != nil && !l.statusV2() {
-		l.describeConnectors(record)
-	}
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.
@@ -1235,7 +1222,6 @@ func (l *lifecycle) warnDirectoryUnreachable() {
 }
 
 const codeOptionalDestination = "optional_destination_failing"
-const codeAuditWriteFailed = "audit_write_failed"
 
 // codeJudgeFailing names an LLM judge whose recent calls all failed, or that
 // could not start.
@@ -1256,10 +1242,8 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		ProfileWarningCount           int `json:"profile_warning_count"`
 		Telemetry                     struct {
 			Details struct {
-				OptionalState       string `json:"optional_destination_state"`
-				FailureSummary      string `json:"optional_destination_failure_summary"`
-				EventHistoryFailure string `json:"event_history_failure"`
-				LastSQLiteClass     string `json:"event_history_last_sqlite_class"`
+				OptionalState  string `json:"optional_destination_state"`
+				FailureSummary string `json:"optional_destination_failure_summary"`
 			} `json:"details"`
 		} `json:"telemetry"`
 		Inspection *struct {
@@ -1279,22 +1263,6 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
-	}
-	l.gatewayAuditFailure = health.Telemetry.Details.EventHistoryFailure != ""
-	if l.gatewayAuditFailure {
-		failure := health.Telemetry.Details.EventHistoryFailure
-		switch failure {
-		case "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed":
-		default:
-			failure = "unknown"
-		}
-		message := "the gateway cannot write mandatory audit records (" + failure + ")"
-		class := health.Telemetry.Details.LastSQLiteClass
-		switch class {
-		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
-			message += "; last SQLite failure class: " + class
-		}
-		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
 	}
 	// A judge that stops answering silently downgrades detection to the
 	// static rules; only /health and the journal said so (GAP-0626).

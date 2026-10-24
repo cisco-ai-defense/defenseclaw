@@ -92,9 +92,9 @@ Run it as root or an administrator.`,
 				res.Errors, err = bundleRefusal(err)
 			}
 			res.OK = err == nil
-			if code := enterprisebundle.CodeOf(err); code == enterprisebundle.CodeNotAdmin || code == enterprisebundle.CodeNotRoot {
+			if enterprisebundle.CodeOf(err) == enterprisebundle.CodeNotAdmin {
 				// The protected state was not read. Do not present zero values as
-				// facts about the device in the privilege refusal (GAP-1052).
+				// facts about the device in the privilege refusal.
 				return printBundleResult(cmd, asJSON, struct {
 					SchemaVersion int           `json:"schema_version"`
 					Command       string        `json:"command"`
@@ -312,14 +312,13 @@ func currentBuildBundleDigest(ctx context.Context, store *enterprisebundle.Store
 }
 
 // bundleReceiptWarningMessage explains a warning code the confirmed
-// receipt recorded, in the lifecycle result's words where it has them
-// (receipt_publish_failed read as a digest mismatch, GAP-1013). Digest
-// mismatch codes keep the generic text.
+// receipt recorded. Digest mismatch codes keep the generic text.
 func bundleReceiptWarningMessage(code string, receipt *enterprisebundle.Receipt) string {
-	if message, ok := enterprisestatus.BundleReceiptWarningMessage(code); ok {
-		return message
-	}
 	switch code {
+	case enterprisebundle.WarnDigestUnverifiable:
+		return "the signer used a different product version, so its signed digest cannot be compared with this build's; bundle file hashes and the gateway-versus-installed digest were checked"
+	case enterprisebundle.WarnDigestLayoutUnverifiable:
+		return "the device's non-standard managed layout changed the effective digest; the signed digest matched this device's digest for the standard layout, and the gateway's enforcing digest was recorded"
 	case enterprisebundle.WarnConfirmedAfterInterrupt:
 		return "the run that applied this bundle ended before the gateway confirmed it; a later lifecycle run confirmed it once the gateway reported its policy"
 	case "capability_disabled":
@@ -391,7 +390,7 @@ func bundleSignerWarning(anchors *enterprisebundle.Anchors, signerKeyID string) 
 // standard account (not_root), else state_invalid.
 func bundleStateError(err error) error {
 	if errors.Is(err, fs.ErrPermission) {
-		return &enterprisebundle.Error{Code: enterprisebundle.CodeNotRoot, Detail: "run this command as root or an administrator: the bundle state is readable only there"}
+		return &enterprisebundle.Error{Code: "not_root", Detail: "run this command as root or an administrator: the bundle state is readable only there"}
 	}
 	return &enterprisebundle.Error{Code: enterprisebundle.CodeStateInvalid, Detail: err.Error()}
 }

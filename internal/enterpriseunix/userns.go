@@ -23,9 +23,8 @@ const (
 
 const restrictPolicyViewsAdvice = "ask the host administrator to apply optional kernel hardening with their own tools"
 
-// warnOpenPolicyViews reports only live kernel facts. The gateway separately
-// proves the host's vendor policy against the descriptor's pins when it
-// changes (gateway/managed_policy_view.go).
+// warnOpenPolicyViews reports only live kernel facts. An invoked managed hook
+// separately proves that its view still contains the administrator's policy.
 func (l *lifecycle) warnOpenPolicyViews() {
 	if l.env.GOOS != "linux" {
 		return

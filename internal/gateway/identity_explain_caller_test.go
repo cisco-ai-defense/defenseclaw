@@ -45,10 +45,6 @@ func TestProfileExplainUsesTheCallersNSSFacts(t *testing.T) {
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{"numeric": {Mode: "observe"}, "strict": {Mode: "action", BlockAt: "LOW"}}
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{Profile: "numeric", Match: config.ProfileMatch{Groups: []string{"t6-numeric"}}}}
 	cfg.Guardrail.DefaultProfile = "strict"
-	// NewAPIServer publishes its profile set process-wide; a later test that
-	// resolves without a pinned generation must not read this one.
-	live := liveGuardrailProfiles.Load()
-	t.Cleanup(func() { liveGuardrailProfiles.Store(live) })
 	api := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg)
 	previous := profileExplainSubjectLookup
 	t.Cleanup(func() { profileExplainSubjectLookup = previous })

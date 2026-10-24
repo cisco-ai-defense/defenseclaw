@@ -21,7 +21,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -257,7 +256,7 @@ func TestSplunkHECExactProjectionOnlyWrapperAndOverride(t *testing.T) {
 		request.header.Get("Content-Type") != "application/json" {
 		t.Fatalf("unexpected request metadata")
 	}
-	want := `{"index":"main","source":"defenseclaw","sourcetype":"defenseclaw:config","event":{"record":` + projected + `,"os.type":"` + runtime.GOOS + `","id":"r1","record_id":"r1","timestamp":"2026-07-03T01:02:03Z","bucket":"diagnostic","event_name":"diagnostic.message","severity":"INFO","source":"gateway","action":"config-update","semantic_event_id":"semantic-1","logical_event_id":"logical-1","connector_instance_id":"connector-instance-1","run_id":"run-1","details":"safe"}}` + "\n"
+	want := `{"index":"main","source":"defenseclaw","sourcetype":"defenseclaw:config","event":{"record":` + projected + `,"id":"r1","record_id":"r1","timestamp":"2026-07-03T01:02:03Z","bucket":"diagnostic","event_name":"diagnostic.message","severity":"INFO","source":"gateway","action":"config-update","semantic_event_id":"semantic-1","logical_event_id":"logical-1","connector_instance_id":"connector-instance-1","run_id":"run-1","details":"safe"}}` + "\n"
 	if got := string(request.payload); got != want {
 		t.Fatalf("wire mismatch\n got: %s\nwant: %s", got, want)
 	}
@@ -275,27 +274,6 @@ func TestSplunkHECExactProjectionOnlyWrapperAndOverride(t *testing.T) {
 	}
 	if size, ok := adapter.EncodedSize([]int{len(projected)}); !ok || len(request.payload) > size {
 		t.Fatalf("encoded size=(%d,%t) wire=%d", size, ok, len(request.payload))
-	}
-}
-
-func TestSplunkHECSandboxRecordCarriesOSType(t *testing.T) {
-	projected := []byte(`{"record_id":"sandbox-1","event_name":"sandbox.foreign_sandbox","body":{"defenseclaw.sandbox.id":"sandbox-1"}}`)
-	aliases, _, ok := projectedAliases(projected)
-	if !ok {
-		t.Fatal("sandbox projection was rejected")
-	}
-	wire, err := encodeHECEnvelope(hecEnvelope{Event: hecEvent{Record: projected, Aliases: aliases}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	var envelope struct {
-		Event map[string]json.RawMessage `json:"event"`
-	}
-	if err := json.Unmarshal(wire, &envelope); err != nil {
-		t.Fatal(err)
-	}
-	if got := string(envelope.Event["os.type"]); got != `"`+runtime.GOOS+`"` {
-		t.Fatalf("Splunk sandbox event os.type = %s, want %s", got, runtime.GOOS)
 	}
 }
 

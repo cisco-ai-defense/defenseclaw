@@ -6,7 +6,6 @@ package hookexec
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -99,29 +98,6 @@ func NewPerUserGatewayHTTPClient(timeout time.Duration, apiAddr string) (*http.C
 // the very socket that carries its bearer and payload. A separate preflight
 // would leave a race when the gateway stops and another account binds its
 // port before the plugin opens a second connection.
-// errPerUserAnswerIncomplete wraps a body read failure after the gateway
-// sent a status line.
-var errPerUserAnswerIncomplete = errors.New("per-user gateway answer incomplete")
-
-// PerUserPostOutageExit is the exit status of `hook-post` for a gateway
-// outage (PerUserPostOutage), curl's "could not connect" status, which the
-// shell hooks and in-agent plugins already read as this account's gateway
-// not running.
-const PerUserPostOutageExit = 7
-
-// PerUserPostOutage reports whether err, from PostPerUserHook, is a gateway
-// outage: this account's gateway refused or dropped the connection before it
-// sent any status. A status line followed by a cut-off body, a listener
-// whose owner could not be verified, a timeout after the connection and
-// every other error are not.
-func PerUserPostOutage(err error) bool {
-	if err == nil || errors.Is(err, errPerUserAnswerIncomplete) || errors.Is(err, errInvalidHookRequest) ||
-		errors.Is(err, errGatewayTookCallNoAnswer) {
-		return false
-	}
-	return gatewayRestartShaped(err)
-}
-
 func PostPerUserHook(ctx context.Context, apiAddr, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
 	client, err := NewPerUserGatewayHTTPClient(30*time.Second, apiAddr)
 	if err != nil {
@@ -173,9 +149,7 @@ func postPluginHook(ctx context.Context, client *http.Client, apiAddr, path stri
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20+1))
 	if err != nil {
-		// The gateway sent its status: a cut-off body is its unusable
-		// answer, never an outage (PerUserPostOutage).
-		return PerUserHookReply{}, fmt.Errorf("%w: %w", errPerUserAnswerIncomplete, err)
+		return PerUserHookReply{}, err
 	}
 	if len(data) > 1<<20 {
 		return PerUserHookReply{}, fmt.Errorf("per-user gateway hook response is too large")

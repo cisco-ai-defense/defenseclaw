@@ -69,11 +69,12 @@ var newHookConfigFSWatcher = fsnotify.NewWatcher
 var errHookRepairSuppressed = errors.New("hook registration repair is suppressed during connector transition")
 
 type hookRuntimePolicy struct {
-	// hookFailMode is the connector's hook outage mode
-	// (config.Config.EffectiveHookOutageFailModeForConnector).
-	hookFailMode  string
-	guardrailMode string
-	hiltEnabled   bool
+	hookFailMode string
+	// configuredHookFailMode is the config's explicit value
+	// (SetupOpts.ConfiguredHookFailMode): a per-user Cursor's outage mode.
+	configuredHookFailMode string
+	guardrailMode          string
+	hiltEnabled            bool
 }
 
 type hookRuntimePolicyResolver func(connectorName string) (hookRuntimePolicy, func(), bool)
@@ -649,8 +650,8 @@ func (g *HookConfigGuard) repairCurrent(
 	if dataDir != "" && !sameHookGuardDataDir(opts.DataDir, dataDir) {
 		return errors.New("hook registration guard owns a different data home")
 	}
-	// Compare the whole policy used to render the hooks with the current one.
-	// A mode or HILT change must not be hidden by an unchanged closed fail mode.
+	// installedFailMode is the hook fail mode the connector's hooks were last
+	// rendered with; the resolver below replaces it with the current one.
 	installedFailMode := strings.ToLower(strings.TrimSpace(opts.HookFailMode))
 	installedOutage := connector.OutageHookFailMode(opts, conn)
 	renderedOpts := opts
@@ -669,6 +670,7 @@ func (g *HookConfigGuard) repairCurrent(
 			return errors.New("authoritative hook runtime fail mode is invalid")
 		}
 		opts.HookFailMode = policy.hookFailMode
+		opts.ConfiguredHookFailMode = policy.configuredHookFailMode
 		opts.GuardrailMode = policy.guardrailMode
 		opts.HILTEnabled = policy.hiltEnabled
 	}
@@ -685,16 +687,15 @@ func (g *HookConfigGuard) repairCurrent(
 	}
 
 	// Check the files against the policy that rendered them. A legitimate
-	// policy change can leave the registration intact while its hook options
-	// differ. A per-user hook's outage mode follows its policy tier
-	// (config.HookOutageFailMode), so a rule-pack change re-renders it.
-	policyDrift := policyResolver != nil &&
+	// fail-mode change makes Windows Codex evidence differ from the new
+	// options even while every stored registration is intact.
+	// A per-user Cursor's outage mode can change while its resolved mode
+	// (its guardrail mode) does not: an explicit open set or removed.
+	failModeDrift := policyResolver != nil &&
 		((installedFailMode != "" && installedFailMode != opts.HookFailMode) ||
-			!strings.EqualFold(strings.TrimSpace(renderedOpts.GuardrailMode), strings.TrimSpace(opts.GuardrailMode)) ||
-			renderedOpts.HILTEnabled != opts.HILTEnabled ||
 			installedOutage != connector.OutageHookFailMode(opts, conn))
 	checkOpts := opts
-	if policyDrift {
+	if failModeDrift {
 		checkOpts = renderedOpts
 	}
 	present, err := connector.OwnedHooksPresent(conn, checkOpts)
@@ -757,8 +758,10 @@ func (g *HookConfigGuard) repairCurrent(
 		return err
 	}
 	g.clearPolicyFailure()
-	// The registration can be intact while its rendered runtime policy is stale.
-	if present && evidenceCurrent && !policyDrift {
+	// The registration can be intact while the rendered hooks bake a stale
+	// hook fail mode: a guardrail mode change (action implies the global fail
+	// mode, observe implies open) never touches the hook entries themselves.
+	if present && evidenceCurrent && !failModeDrift {
 		g.setHealFailure("")
 		return nil
 	}
@@ -773,7 +776,7 @@ func (g *HookConfigGuard) repairCurrent(
 		baseCtx = context.Background()
 	}
 	if present && evidenceCurrent {
-		err = g.refreshPolicyLocked(baseCtx, conn, opts, releasePolicy)
+		err = g.refreshFailModeLocked(baseCtx, conn, opts, releasePolicy)
 	} else {
 		err = g.healLocked(baseCtx, conn, opts, changed, releasePolicy)
 	}
@@ -873,16 +876,17 @@ func (g *HookConfigGuard) activeConnector() connector.Connector {
 func (g *HookConfigGuard) adoptRenderedPolicy(opts connector.SetupOpts) {
 	g.mu.Lock()
 	g.opts.HookFailMode = opts.HookFailMode
+	g.opts.ConfiguredHookFailMode = opts.ConfiguredHookFailMode
 	g.opts.GuardrailMode = opts.GuardrailMode
 	g.opts.HILTEnabled = opts.HILTEnabled
 	g.mu.Unlock()
 }
 
-// refreshPolicyLocked re-runs Setup for a connector whose registration is
-// intact but was rendered with another runtime policy. It is a policy
+// refreshFailModeLocked re-runs Setup for a connector whose registration is
+// intact but was rendered with another hook fail mode. It is a policy
 // refresh, not a repair: no tamper audit row and no heal notification.
 // Caller holds repairMu.
-func (g *HookConfigGuard) refreshPolicyLocked(
+func (g *HookConfigGuard) refreshFailModeLocked(
 	baseCtx context.Context,
 	conn connector.Connector,
 	opts connector.SetupOpts,
@@ -912,17 +916,17 @@ func (g *HookConfigGuard) refreshPolicyLocked(
 		}
 	}
 	if err == nil {
-		// The hook contract lock follows the freshly rendered policy for every
-		// connector, as at gateway boot.
+		// The re-render changed the script digests and the baked fail mode, so
+		// the hook contract lock follows for every connector, as at gateway boot.
 		err = publishFreshHookRegistrationEvidence(opts, conn)
 	}
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[hook-guard] re-render %s hooks for current policy failed: %v\n", connName, err)
+		fmt.Fprintf(os.Stderr, "[hook-guard] re-render %s hooks for hook fail mode %s failed: %v\n", connName, opts.HookFailMode, err)
 		emitErrorConnector(baseCtx, "hook_guard", "self-heal-failed", connName,
-			fmt.Sprintf("failed to re-render %s hooks for current policy", connName), err)
+			fmt.Sprintf("failed to re-render %s hooks for hook fail mode %s", connName, opts.HookFailMode), err)
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "[hook-guard] re-rendered %s hooks for current policy\n", connName)
+	fmt.Fprintf(os.Stderr, "[hook-guard] re-rendered %s hooks for hook fail mode %s\n", connName, opts.HookFailMode)
 	emitLifecycle(baseCtx, "hook_guard", "refreshed", map[string]string{"connector": connName})
 	return nil
 }

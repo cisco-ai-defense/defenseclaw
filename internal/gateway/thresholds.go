@@ -472,13 +472,7 @@ func requestThresholds(ctx context.Context) policy.ThresholdsInput {
 		// whatever the rule pack.
 		return policy.SecureClientGuardrailThresholds(g.Config.PolicyDir)
 	}
-	var resolved ResolvedThresholds
-	if profileResolved := requestProfile(ctx, g); profileResolved != nil && config.IsProfileMeet(profile) {
-		// A meet's levels are those of the request's path (pathConfig).
-		resolved = resolveThresholds(profileResolved.derived, config.NormalizeConnectorName(thresholdConnectorFrom(ctx)))
-	} else {
-		resolved = ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
-	}
+	resolved := ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
 	block, alert := guardrailThresholdRanks(resolved)
 	trust := config.CiscoTrustFull
 	if g != nil && g.Config != nil {

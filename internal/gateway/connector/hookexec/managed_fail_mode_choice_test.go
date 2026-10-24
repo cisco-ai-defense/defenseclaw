@@ -285,7 +285,8 @@ func (r *failingReader) Read(p []byte) (int, error) {
 // Re-review P2: a managed standalone Copilot hook whose command binds no
 // reviewed Copilot event never answers allow: in every fail mode it writes
 // Copilot's two native denies (preToolUse and permissionRequest, the only
-// Copilot events that can block). A saved per-user open is still closed.
+// Copilot events that can block). A per-user hook in fail mode open keeps
+// Copilot's documented fail-open result.
 func TestInvalidManagedCopilotEventBindingNeverAllows(t *testing.T) {
 	for _, event := range []string{"", "bogusEvent", "PreToolUse"} {
 		for _, mode := range []string{"", "open", "closed"} {
@@ -304,10 +305,11 @@ func TestInvalidManagedCopilotEventBindingNeverAllows(t *testing.T) {
 			}
 		}
 	}
-	// A per-user hook whose older config said open also refuses it.
+	// A per-user hook in fail mode open keeps Copilot's fail-open result
+	// (TestPerUserCopilotHookRefusesAnUnboundEvent covers closed).
 	perUser := run(t, "copilot", ok(`{"action":"allow"}`), func(o *Options) { o.Event = "bogusEvent"; o.FailMode = "open" })
-	if !strings.Contains(perUser.stdout, "deny") {
-		t.Fatalf("a saved per-user open must still deny: stdout=%q", perUser.stdout)
+	if strings.Contains(perUser.stdout, "deny") {
+		t.Fatalf("a per-user hook in fail mode open keeps Copilot's fail-open result: stdout=%q", perUser.stdout)
 	}
 }
 

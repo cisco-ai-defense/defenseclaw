@@ -21,7 +21,6 @@ package gateway
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -31,37 +30,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxrelay"
 )
-
-// The managed daemon probes before it starts its first gateway. In setup
-// mode, the planned gateway's sibling is a valid fallback after driver_dir.
-func TestDaemonVMProbeUsesPlannedGatewayBeforeFirstStart(t *testing.T) {
-	home := t.TempDir()
-	binDir := filepath.Join(home, ".local", "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	driver := filepath.Join(binDir, "openshell-driver-vm")
-	if err := os.WriteFile(driver, []byte("driver"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	missingDir := filepath.Join(home, "configured")
-	rendered := openshell.RenderedGateway{BindAddress: "127.0.0.1:17670", ComputeDriver: openshell.DriverVM,
-		DriverDir: missingDir, VMSandboxUID: 1000, VMSandboxGID: 1000}
-	data, err := rendered.TOML()
-	if err != nil {
-		t.Fatal(err)
-	}
-	configPath := filepath.Join(home, "gateway.toml")
-	if err := os.WriteFile(configPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	settings := sandboxrelay.DaemonSettings{Enterprise: sandboxrelay.EnterpriseOpenShell{
-		Install: "setup", GatewayConfigPath: configPath}}
-	dirs := daemonVMDriverDirs(settings, home, "")
-	if got := openshell.FindVMDriverIn(dirs); got != driver {
-		t.Fatalf("pre-start driver directories %v selected %q, want planned gateway sibling %q", dirs, got, driver)
-	}
-}
 
 // The daemon picks a create's driver at sandbox start from its own probe,
 // sends it in the resolve, and shows it in status; under driver_fallback:

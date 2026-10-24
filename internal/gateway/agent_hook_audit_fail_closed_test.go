@@ -20,7 +20,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
-	"github.com/defenseclaw/defenseclaw/internal/managed"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
@@ -49,21 +48,6 @@ type auditFailureHookFixture struct {
 	api     *APIServer
 	path    string
 	emitter *failingAuditEmitter
-}
-
-// A receipt has already committed the answer to the agent. Its durable
-// pending occurrence can be retried after an audit write fault; changing the
-// in-memory verdict to a block would falsely report an enforcement.
-func TestManagedReceiptedHookAuditFaultKeepsTheCommittedVerdict(t *testing.T) {
-	fixture := newAuditFailureHookFixture(t, "closed")
-	fixture.emitter.fail = true
-	result := fixture.api.finalizeAgentHook(t.Context(), "claudecode", agentHookRequest{
-		ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "Bash",
-		pendingOccurrenceID: "00000000-0000-4000-8000-000000000001",
-	}, agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action"}, nil, nil, 0, false, nil)
-	if result.Response.Action != "allow" || result.AuditFailedClosed || result.AuditPersisted {
-		t.Fatalf("committed answer after audit failure = %+v, want pending allow without a false block", result)
-	}
 }
 
 func newAuditFailureHookFixture(t *testing.T, failMode string) auditFailureHookFixture {
@@ -184,29 +168,11 @@ func TestHookAuditWriteFailureDeniesTheCall(t *testing.T) {
 			t.Fatalf("busy store: action %v, want block", out["action"])
 		}
 	})
-	t.Run("saved per-user open still blocks an unaudited call", func(t *testing.T) {
+	t.Run("legacy per-user open still denies", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "open")
 		fixture.emitter.fail = true
 		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "block" {
-			t.Fatalf("saved per-user open: action %v, want block", out["action"])
-		}
-	})
-	t.Run("managed outage-open still blocks an unaudited call", func(t *testing.T) {
-		fixture := newAuditFailureHookFixture(t, "open")
-		fixture.api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
-		fixture.api.scannerCfg.Enterprise.Profile = managed.ProfileStandalone
-		fixture.emitter.fail = true
-		if out := fixture.preToolUse(t, "toolu-managed-open"); out["action"] != "block" {
-			t.Fatalf("managed outage-open: action %v, want block", out["action"])
-		}
-	})
-	t.Run("Secure Client explicit open keeps the verdict", func(t *testing.T) {
-		fixture := newAuditFailureHookFixture(t, "open")
-		fixture.api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
-		fixture.api.scannerCfg.Enterprise.Profile = managed.ProfileSecureClient
-		fixture.emitter.fail = true
-		if out := fixture.preToolUse(t, "toolu-secure-open"); out["action"] != "allow" {
-			t.Fatalf("Secure Client open: action %v, want allow", out["action"])
+			t.Fatalf("per-user open fail mode: action %v, want block", out["action"])
 		}
 	})
 }

@@ -855,8 +855,8 @@ def _installed_mac_app(platform_name: str) -> str:
 # DefenseClaw Setup keeps its hook launcher and transaction log under
 # %LOCALAPPDATA%\DefenseClaw. When the installer replaces Setup it keeps the
 # launcher, because agent hooks that Setup wrote may still run it until each
-# connector is set up again, and points it at a copy of this install's hook
-# (GAP-1000), so nothing else removes these folders.
+# connector is set up again (it moves the launcher's state file aside, which
+# turns the launcher off), so nothing else removes these folders.
 _WINDOWS_SETUP_LEFTOVERS = ("HookRuntime", "InstallerState")
 
 
@@ -868,33 +868,17 @@ def _windows_setup_leftovers(platform_name: str) -> tuple[str, ...]:
     except Exception:  # noqa: BLE001 - no Known Folder means nothing to clean.
         return ()
     root = os.path.join(local_app_data, "DefenseClaw") if local_app_data else ""
-    state = os.path.join(root, "HookRuntime", "hook-runtime-state.json") if root else ""
     if (
         not root
         or os.path.lexists(os.path.join(local_app_data, "Programs", "DefenseClaw"))
         or os.path.lexists(os.path.join(root, "InstallerCache"))
-        or (os.path.lexists(state) and not _installer_launcher_trampoline(state, root))
+        or os.path.lexists(os.path.join(root, "HookRuntime", "hook-runtime-state.json"))
     ):
         # A Setup install, or its cleanup after the next sign-in, still owns them.
         return ()
     return tuple(
         path for path in (os.path.join(root, name) for name in _WINDOWS_SETUP_LEFTOVERS) if os.path.lexists(path)
     )
-
-
-def _installer_launcher_trampoline(state_path: str, root: str) -> bool:
-    """True for the launcher state install.ps1 publishes once it replaces
-    Setup: it delegates to a copy of this install's hook under
-    HookRuntime\\delegated (GAP-1000), so it goes with this install."""
-    delegated = os.path.normcase(os.path.join(root, "HookRuntime", "delegated")) + os.sep
-    try:
-        if os.path.islink(state_path) or os.path.getsize(state_path) > 64 * 1024:
-            return False
-        with open(state_path, encoding="utf-8-sig") as handle:
-            hook = json.load(handle).get("hook_path")
-    except (OSError, ValueError, AttributeError):
-        return False
-    return isinstance(hook, str) and os.path.normcase(os.path.abspath(hook)).startswith(delegated)
 
 
 def _remove_setup_leftovers(paths: tuple[str, ...]) -> None:

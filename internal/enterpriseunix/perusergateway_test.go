@@ -170,7 +170,7 @@ func TestStatusNamesClaudeSessionsOpenWhileTheDropInWasChanged(t *testing.T) {
 	if err != nil || record == nil {
 		t.Fatalf("no deployment: %v", err)
 	}
-	activated, err := time.Parse(time.RFC3339Nano, record.ActivatedAt)
+	activated, err := time.Parse(time.RFC3339, record.InstalledAt)
 	if err != nil {
 		t.Fatal(err)
 	}

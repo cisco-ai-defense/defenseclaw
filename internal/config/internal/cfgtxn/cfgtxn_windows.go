@@ -8,7 +8,6 @@ package cfgtxn
 import (
 	"errors"
 	"os"
-	"path/filepath"
 	"time"
 
 	"golang.org/x/sys/windows"
@@ -86,33 +85,6 @@ func replaceDurable(source, target string) error {
 
 // syncDir is a no-op: MOVEFILE_WRITE_THROUGH already flushes the rename.
 func syncDir(string) error { return nil }
-
-// moveFileEx is windows.MoveFileEx; a test replaces it.
-var moveFileEx = windows.MoveFileEx
-
-// mkdirDurable makes dir as a temp folder beside it, moved into place with
-// MOVEFILE_WRITE_THROUGH, which returns once the move is on disk: a folder
-// made in place has no flush of its own. A folder already at dir is kept.
-func mkdirDurable(dir string) error {
-	if info, err := os.Stat(dir); err == nil && info.IsDir() {
-		return nil
-	}
-	tmp, err := os.MkdirTemp(filepath.Dir(dir), "."+filepath.Base(dir)+".*.tmp")
-	if err != nil {
-		return err
-	}
-	from, err := windows.UTF16PtrFromString(tmp)
-	if err == nil {
-		var to *uint16
-		if to, err = windows.UTF16PtrFromString(dir); err == nil {
-			err = moveFileEx(from, to, windows.MOVEFILE_WRITE_THROUGH)
-		}
-	}
-	if err != nil {
-		_ = os.Remove(tmp)
-	}
-	return err
-}
 
 // syncFile flushes path, its security descriptor included
 // (FlushFileBuffers, which needs write access).

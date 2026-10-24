@@ -94,7 +94,7 @@ func TestLegacyOwnerRefusalNamesAnExplainCommandForTheCurrentAgent(t *testing.T)
 	}}
 	set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
 	subject := &profileSubject{UserID: "70001", UserName: "alice"}
-	hook := set.matchAgent(subject, profileSubjectLookup, "codex", nil, current, func() (profileAgentClaim, bool) {
+	hook := set.matchAgent(subject, profileSubjectLookup, "codex", current, func() (profileAgentClaim, bool) {
 		return profileAgentClaim{ID: legacy, UserID: "70001", Account: "alice@corp.example"}, true
 	})
 	if !strings.Contains(hook.Refused, "ownership of a pre-upgrade agent identity is unconfirmed") {
@@ -103,7 +103,7 @@ func TestLegacyOwnerRefusalNamesAnExplainCommandForTheCurrentAgent(t *testing.T)
 	if !strings.Contains(hook.Refused, " --agent "+current+"`") {
 		t.Fatalf("refusal's explain command omits the current agent: %q", hook.Refused)
 	}
-	explained := set.matchAgent(subject, profileSubjectLookup, "codex", nil, current, nil)
+	explained := set.matchAgent(subject, profileSubjectLookup, "codex", current, nil)
 	if explained.Refused == "" || !slices.Contains(explained.Unproven, "agent:unknown") {
 		t.Fatalf("the named explain command lost the hook's missing fact: %+v", explained)
 	}

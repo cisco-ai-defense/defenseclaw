@@ -326,12 +326,6 @@ func (a *APIServer) sandboxRelayServe(routes map[string]sandboxRelayRoute) http.
 			// Session promotion re-resolves the agent identity from the
 			// registry; restore the registration's user on top of it.
 			ctx = contextWithSandboxUser(ctx, binding)
-			switch route.class {
-			case sandboxauth.RouteHook:
-				ctx = withProfilePath(ctx, profilePathHook)
-			case sandboxauth.RouteInspect:
-				ctx = withProfilePath(ctx, profilePathInspect)
-			}
 			ctx = a.withGuardrailProfileDecision(ctx, binding.Connector)
 			r = r.WithContext(ctx)
 			if route.class == sandboxauth.RouteOTLP {

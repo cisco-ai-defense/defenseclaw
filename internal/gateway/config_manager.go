@@ -42,7 +42,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
@@ -775,14 +774,14 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			pendingTrigger = ""
 			pendingKinds = map[string]bool{}
 			if len(kinds) == 1 && kinds[configGenerationTrigger] {
-				// A lifecycle generation can replace policy assets without
-				// changing parsed config fields. Its record is then the only
-				// event that tells us to build and audit the new policy.
+				// A bundle can replace policy assets without changing parsed
+				// config fields. Its generation record is then the only event
+				// that tells us to build and audit the new policy.
 				m.mu.Lock()
-				pendingGeneration := m.pendingManagedGeneration(nil)
+				pendingBundle := m.pendingBundleGeneration(nil)
 				m.mu.Unlock()
-				if pendingGeneration {
-					if err := m.reload(ctx, reason, false, nil); err != nil && ctx.Err() == nil {
+				if pendingBundle {
+					if err := m.reload(ctx, reason, false); err != nil && ctx.Err() == nil {
 						fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 					}
 				} else {
@@ -793,7 +792,7 @@ func (m *ConfigManager) run(ctx context.Context, startupReady chan<- error) erro
 			}
 			// A reload the gateway's own stop or restart cancelled is not a
 			// failure; the restart applies the new config (GAP-1698).
-			if err := m.reload(ctx, reason, kinds[configDiffAssets], nil); err != nil && ctx.Err() == nil {
+			if err := m.reload(ctx, reason, kinds[configDiffAssets]); err != nil && ctx.Err() == nil {
 				fmt.Fprintf(os.Stderr, "[config] reload failed: %v\n", err)
 			}
 			configReloadInFlight.settle()
@@ -1067,24 +1066,13 @@ func (m *ConfigManager) savedWriteNotApplied(raw []byte) bool {
 	return ok && m.appliedGenerationKnown && generation > m.appliedGeneration
 }
 
-// pendingManagedGeneration accepts a new signed bundle, or a lifecycle
-// generation recorded before bundle trust anchors were installed. In both
-// cases the record must bind these config bytes and advance the applied
-// generation; a watched hand edit has neither proof.
-func (m *ConfigManager) pendingManagedGeneration(raw []byte) bool {
+// pendingBundleGeneration is true only for a new lifecycle-recorded bundle
+// whose generation has not passed through the config manager's apply path.
+func (m *ConfigManager) pendingBundleGeneration(raw []byte) bool {
 	state, err := configwrite.ReadGenerationState(m.path)
-	if err != nil || !m.appliedGenerationKnown || state.Generation <= m.appliedGeneration ||
-		(raw != nil && !strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw))) {
-		return false
-	}
-	if state.BundleID != "" {
-		return true
-	}
-	if state.Actor != configwrite.ActorLifecycle || state.BundleVersion != 0 || state.SignerKeyID != "" {
-		return false
-	}
-	_, err = os.Lstat(filepath.Join(filepath.Dir(m.path), "trust", enterprisebundle.AnchorsName))
-	return errors.Is(err, fs.ErrNotExist)
+	return err == nil && state.BundleID != "" && m.appliedGenerationKnown &&
+		state.Generation > m.appliedGeneration &&
+		(raw == nil || strings.EqualFold(strings.TrimPrefix(state.ConfigSHA256, "sha256:"), configwrite.SHA256Hex(raw)))
 }
 
 // startupSourceUnchanged reports whether config.yaml still holds the bytes
@@ -1128,82 +1116,17 @@ func signalConfigStartupReady(ready chan<- error, err error) {
 }
 
 func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
-	return m.reload(ctx, reason, false, nil)
+	return m.reload(ctx, reason, false)
 }
 
 // ReloadAssets is Reload that rebuilds the generation even when config.yaml
 // is unchanged, because a referenced asset may have changed
 // (/policy/reload).
 func (m *ConfigManager) ReloadAssets(ctx context.Context, reason string) error {
-	return m.reload(ctx, reason, true, nil)
+	return m.reload(ctx, reason, true)
 }
 
-// errNoRecordedGeneration refuses a managed /policy/reload when config.yaml
-// carries no generation the lifecycle recorded and the gateway has not
-// applied.
-var errNoRecordedGeneration = errors.New("no lifecycle-recorded generation is waiting to load")
-
-// ReloadRecordedGeneration is the managed /policy/reload: it rebuilds the
-// generation, assets included, only when the lifecycle recorded one for the
-// installed config.yaml that the gateway has not applied
-// (pendingManagedGeneration). A repeat request for the generation already
-// applied rebuilds it only to prove that config.yaml and every referenced
-// asset still match the live generation (proveUnchanged), so a policy asset
-// edited without a record, whose watcher event was missed, is refused
-// instead of answered as reloaded. Anything else, such as a hand edit or an
-// unsigned record, is refused before any state changes. Every refusal wraps
-// errNoRecordedGeneration and names its cause.
-func (m *ConfigManager) ReloadRecordedGeneration(ctx context.Context, reason string) error {
-	if m == nil {
-		return fmt.Errorf("%w: the config manager is not running", errNoRecordedGeneration)
-	}
-	repeat := false
-	err := m.reload(ctx, reason, true, func() (bool, error) {
-		load, again, err := m.recordedGenerationAdmission()
-		repeat = again
-		return load || again, err
-	})
-	if err != nil && repeat && !errors.Is(err, errNoRecordedGeneration) {
-		return fmt.Errorf("%w: %w", errNoRecordedGeneration, err)
-	}
-	return err
-}
-
-// recordedGenerationAdmission reports whether the installed config.yaml
-// holds a recorded generation to load (load), is the applied generation
-// again (repeat: the reload proves it unchanged, assets included), or
-// neither (an error naming why). Callers hold mu.
-func (m *ConfigManager) recordedGenerationAdmission() (load, repeat bool, err error) {
-	refuse := func(format string, args ...any) (bool, bool, error) {
-		return false, false, fmt.Errorf("%w: "+format, append([]any{errNoRecordedGeneration}, args...)...)
-	}
-	if m.readSnapshot == nil {
-		return refuse("config.yaml cannot be read by this gateway")
-	}
-	snapshot, err := m.readSnapshot(m.path)
-	if err != nil {
-		return refuse("config.yaml could not be read: %v", err)
-	}
-	if m.pendingManagedGeneration(snapshot.raw) {
-		return true, false, nil
-	}
-	if m.appliedRaw == nil || !bytes.Equal(m.appliedRaw, snapshot.raw) {
-		return refuse("config.yaml differs from the applied generation and no lifecycle-recorded generation binds it")
-	}
-	state, err := configwrite.ReadGenerationState(m.path)
-	if err != nil {
-		return refuse("the recorded generation could not be read: %v", err)
-	}
-	if !m.appliedGenerationKnown || state.Generation != m.appliedGeneration {
-		return refuse("recorded generation %d is neither the applied generation nor a newer one this computer accepts", state.Generation)
-	}
-	return false, true, nil
-}
-
-// reload rebuilds the generation from config.yaml. admit, when set, runs
-// under mu before anything is read into the manager; it can refuse the
-// reload or report that there is nothing to load.
-func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, admit func() (bool, error)) error {
+func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) error {
 	if m == nil {
 		return nil
 	}
@@ -1218,13 +1141,6 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	}()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if admit != nil {
-		load, err := admit()
-		if err != nil || !load {
-			hot = false
-			return err
-		}
-	}
 
 	oldCfg := m.Current()
 	next, source, err := m.loadStableCandidate(ctx)
@@ -1379,14 +1295,14 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
 	}
-	// On a standalone managed host only the lifecycle records a new config
-	// or policy generation. Once anchors exist, that record must name a signed
-	// bundle. A watcher or API call cannot activate hand-edited bytes/assets.
+	// On a standalone managed host the lifecycle's signed bundle is the only
+	// source of a new config or policy generation. A watcher event or an
+	// authenticated API call cannot turn hand-edited bytes or assets active.
 	// The boot bytes are already the running snapshot and may be reconciled
 	// once before the manager has an applied generation.
 	startupBoot := !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
 		sha256.Sum256(source.raw) == m.startupSource
-	pendingGeneration := m.pendingManagedGeneration(source.raw)
+	pendingBundle := m.pendingBundleGeneration(source.raw)
 	// A watched asset can be checked without a new bundle only when the
 	// config bytes are the ones already running. At startup those are the
 	// exact boot bytes; later they are the last applied bytes. The same proof
@@ -1394,12 +1310,12 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	// The sidecar rebuilds all referenced assets and refuses any difference.
 	knownBytes := m.appliedRaw != nil && bytes.Equal(m.appliedRaw, source.raw) ||
 		m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource
-	proveUnchanged := !pendingGeneration && knownBytes && (assets || m.rejected) &&
+	proveUnchanged := !pendingBundle && knownBytes && (assets || m.rejected) &&
 		oldCfg.StandaloneEnterprise() && next.StandaloneEnterprise()
 	if (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) && !startupBoot &&
-		!pendingGeneration && !proveUnchanged &&
+		!pendingBundle && !proveUnchanged &&
 		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
-		err := fmt.Errorf("config reload refused: this managed computer requires a lifecycle-recorded generation, or a signed policy bundle when trust anchors are installed; run enterprise ensure or apply a new signed bundle")
+		err := fmt.Errorf("config reload refused: this managed computer takes config and policy from a signed policy bundle; apply a new signed bundle")
 		m.rejected = true
 		recordGenerationBuildError(err)
 		m.recordLoadError(ctx, "managed_unbundled_reload", err)
@@ -1424,8 +1340,8 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 	if len(diff.Changed) == 0 && (assets || m.rejected) {
 		diff.Changed = []string{configDiffAssets}
 	}
-	if len(diff.Changed) == 0 && pendingGeneration {
-		// The lifecycle may have changed only a referenced policy file. Build
+	if len(diff.Changed) == 0 && pendingBundle {
+		// The bundle may have changed only a referenced policy file. Build
 		// its generation before recording that it was applied.
 		diff.Changed = []string{configDiffAssets}
 	}

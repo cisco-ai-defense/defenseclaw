@@ -16,7 +16,6 @@ from defenseclaw.commands import cmd_guardrail, cmd_setup
 from defenseclaw.context import AppContext
 
 from tests.test_fail_mode_runtime import _runtime_cfg
-from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 
 def _app(cfg) -> AppContext:
@@ -31,9 +30,7 @@ def test_cursor_action_shows_closed_and_disabled_connector_has_no_drift(
 ) -> None:
     # GAP-1717: status said Cursor Fail=open; the bare view printed drift for a
     # disabled connector and two contradicting rules.
-    # Cursor in the strict tier (fail_mode_tier: a saved closed): its action
-    # mode does not pin the fail mode, its tier does (oss-outage-open).
-    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "open", "cursor": "closed"})
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "open", "cursor": "open"})
     cfg.guardrail.connectors["cursor"].mode = "action"
     cfg.guardrail.connectors["codex"].enabled = False
     app = _app(cfg)
@@ -88,7 +85,7 @@ def test_batch_setup_prints_one_summary(capsys: pytest.CaptureFixture[str]) -> N
     out = capsys.readouterr().out
     assert out.count("Config saved") == 1
     assert "      - codex: action\n" in out
-    assert out.count("use-pack strict") == 1 and "claudecode, codex" in out
+    assert out.count("fail-open") == 1 and "claudecode, codex" in out
     assert "registration and lock evidence" not in out
 
 

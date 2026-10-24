@@ -374,7 +374,7 @@ func TestRequireSandboxRecordsCarryTheProfile(t *testing.T) {
 	if rec.Profile != "contractors" || rec.ProfileMatch != profileMatchDefault || rec.ProfileDigest == "" || rec.Provisional {
 		t.Fatalf("record profile = %+v", rec)
 	}
-	identity := api.requireSandboxIdentity(context.Background(), rec)
+	identity := api.requireSandboxIdentity(rec)
 	m := identity.Managed
 	if m.GuardrailProfile != "contractors" || m.ProfileMatch != audit.SandboxProfileMatchDefault || m.ProfileDigest != rec.ProfileDigest ||
 		m.Provisional == nil || *m.Provisional || !regexp.MustCompile(`^hmac-sha256:[0-9a-f]{64}$`).MatchString(m.SubjectKey) {

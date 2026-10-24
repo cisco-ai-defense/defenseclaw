@@ -401,7 +401,6 @@ def test_windows_rollback_over_ssh_gives_the_command_for_this_terminal(
 
     (home / "installer").mkdir()
     (home / "installer" / "install.ps1").write_text(f'$DcVersion = "{__version__}"\n', encoding="utf-8")
-    _record(home, home / "installer" / "install.ps1")
     monkeypatch.setattr(upgrade_shim.os, "name", "nt")
     monkeypatch.setenv("SSH_CONNECTION", "10.0.0.1 50000 10.0.0.2 22")
     started: list[object] = []
@@ -422,7 +421,6 @@ def test_rollback_uses_the_saved_installer(home: Path, execs: list[list[str]]) -
     saved = home / "installer" / "install.sh"
     saved.parent.mkdir()
     saved.write_text("#!/bin/bash\n", encoding="utf-8")
-    _record(home, saved)
 
     assert upgrade_shim.run(["rollback", "--yes"]) == 0
 
@@ -947,102 +945,3 @@ def test_downgrade_stops_with_the_unset_command_when_the_key_cannot_be_set_aside
     err = capsys.readouterr().err
     assert "defenseclaw config unset openshell.trusted_ca_bundle" in err
     assert "Nothing was changed." in err
-
-
-# ── GAP-1067: rollback runs only the saved installer the install recorded ───
-
-
-def _record(data: Path, saved: Path, name: str | None = None, digest: str | None = None) -> Path:
-    record = data / "receipts" / "installer.sha256"
-    record.parent.mkdir(parents=True, exist_ok=True)
-    digest = digest if digest is not None else hashlib.sha256(saved.read_bytes()).hexdigest()
-    record.write_bytes(f"{digest}  {name or saved.name}\n".encode())
-    return record
-
-
-def _saved_installer(root: Path, name: str = "install.sh", body: str = "#!/bin/bash\n") -> Path:
-    saved = root / "installer" / name
-    saved.parent.mkdir(parents=True, exist_ok=True)
-    saved.write_bytes(body.encode())
-    return saved
-
-
-@pytest.mark.parametrize("platform", ["posix", "nt"])
-@pytest.mark.parametrize("change", ["appended", "missing-record", "wrong-name", "not-hex", "oversized", "empty"])
-def test_rollback_refuses_a_saved_installer_the_install_did_not_save(
-    home: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    platform: str,
-    change: str,
-) -> None:
-    from defenseclaw import __version__
-
-    name = "install.ps1" if platform == "nt" else "install.sh"
-    body = f'$DcVersion = "{__version__}"\n' if platform == "nt" else "#!/bin/bash\n"
-    saved = _saved_installer(home, name, body)
-    record = _record(home, saved)
-    if change == "appended":
-        saved.write_bytes(saved.read_bytes() + b"# r28sa note\n")
-    elif change == "missing-record":
-        record.unlink()
-    elif change == "wrong-name":
-        _record(home, saved, name="other.sh")
-    elif change == "not-hex":
-        _record(home, saved, digest="z" * 64)
-    elif change == "oversized":
-        record.write_bytes(record.read_bytes() + b" " * 300)
-    else:
-        record.write_bytes(b"")
-    execs: list[list[str]] = []
-    started: list[object] = []
-    monkeypatch.setattr(upgrade_shim.os, "execv", lambda path, argv: execs.append(list(argv)))
-    monkeypatch.setattr(upgrade_shim.subprocess, "Popen", lambda *args, **kwargs: started.append(args))
-    monkeypatch.setattr(upgrade_shim.os, "name", platform)
-
-    assert upgrade_shim.run(["rollback", "--yes"]) == 1
-
-    assert execs == [] and started == []
-    err = capsys.readouterr().err
-    assert f"defenseclaw upgrade --version {__version__} --yes" in err, err
-    assert "nothing was changed" in err
-    assert ("is missing" if change == "missing-record" else "is not the one DefenseClaw saved") in err or (
-        change == "oversized" and "could not read the record" in err
-    ), err
-    # The staged copy is removed with the refusal.
-    assert list((home.parent.parent / "tmp").iterdir()) == []
-
-
-@pytest.mark.parametrize("platform", ["posix", "nt"])
-def test_rollback_runs_the_recorded_saved_installer(
-    home: Path, monkeypatch: pytest.MonkeyPatch, platform: str
-) -> None:
-    from defenseclaw import __version__
-
-    name = "install.ps1" if platform == "nt" else "install.sh"
-    saved = _saved_installer(home, name, f'$DcVersion = "{__version__}"\n' if platform == "nt" else "#!/bin/bash\n")
-    _record(home, saved)
-    ran: list[tuple[str, list[str], bytes]] = []
-    monkeypatch.setattr(
-        upgrade_shim, "_run_installer", lambda path, args, workdir: ran.append((path, args, Path(path).read_bytes())) or 0
-    )
-    monkeypatch.setattr(upgrade_shim.os, "name", platform)
-
-    assert upgrade_shim.run(["rollback", "--yes"]) == 0
-
-    assert ran[0][0] != str(saved) and ran[0][1:] == (["--rollback", "--yes"], saved.read_bytes())
-
-
-def test_rollback_checks_a_previous_installer_only_when_it_was_recorded(home: Path, execs: list[list[str]]) -> None:
-    # until 1.1: an installer that 1.0.3 or older saved in previous/ has no
-    # record (GAP-2459 roll forward from a source install keeps working).
-    previous = home / "previous"
-    saved = _saved_installer(previous)
-    assert upgrade_shim.run(["rollback", "--yes"]) == 0
-    assert len(execs) == 1
-    _record(previous / "data", saved, digest="0" * 64)
-    assert upgrade_shim.run(["rollback", "--yes"]) == 1
-    assert len(execs) == 1
-    _record(previous / "data", saved)
-    assert upgrade_shim.run(["rollback", "--yes"]) == 0
-    assert len(execs) == 2

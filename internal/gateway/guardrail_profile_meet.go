@@ -6,7 +6,6 @@ package gateway
 import (
 	"context"
 	"fmt"
-	"maps"
 	"os"
 	"reflect"
 	"slices"
@@ -29,34 +28,20 @@ import (
 // is config.ProfileMeetName, "strictest.<members>": for every
 // connector, hook and inspect action wherever a member blocks on that path,
 // the lowest block level and strictest HILT of members that block, the lowest
-// alert level, and the rules of the rule pack of every member that blocks on
-// that connector, each scanned as that member scans it (a rule any member
-// enforces there is enforced, also where two packs define one rule ID
-// differently; a member that only observes there adds none, and when none
-// blocks the meet observes with every member's rules), the suppressions
-// those members share (allows are the intersection), every sensitive tool
-// any of them inspects, and the members' sandbox floors tightened together
-// (config.Config.SandboxFloor). hook_fail_mode and enabled are machine
-// settings a profile cannot change, so they are the same for every member.
-// The block message is the base configuration's, so no member's text
-// reaches the caller.
-//
-// "Blocks" is per request path (profilePath): a hook request takes the
-// levels, HILT and rules of the members whose hook mode blocks there, an
-// inspect or proxy request those of the members whose inspect mode blocks
-// there, so each member is enforced in its own mode on each path and a
-// member that only observes on a path changes nothing there. A request on
-// no one path (explain, ACP, the sandbox authority) takes every member that
-// blocks on either.
+// alert level, and the rules of every member's rule pack (a rule any member
+// enforces is enforced),
+// the suppressions all members share (allows are the intersection), every
+// sensitive tool any member inspects, and the members' sandbox floors
+// tightened together (config.Config.SandboxFloor). hook_fail_mode and
+// enabled are machine settings a profile cannot change, so they are the
+// same for every member. The block message is the base configuration's, so
+// no member's text reaches the caller.
 
 // profileMeet is one meet a set derived, on its first use.
 type profileMeet struct {
 	members []string
 	once    sync.Once
-	// derived is the meet for a request on any path; onPath holds the
-	// configuration each path decides with (pathConfig).
 	derived config.DerivedGuardrailProfile
-	onPath  [profilePathCount]*config.Config
 	ok      bool
 	// rules and packs hold the merged rule generations and composed packs
 	// by connector and member sources (meetSourcesKey).
@@ -113,95 +98,18 @@ func (set *guardrailProfileSet) meet(name string) *profileMeet {
 	value, _ := set.meets.LoadOrStore(name, &profileMeet{members: members})
 	meet := value.(*profileMeet)
 	meet.once.Do(func() {
-		anyProfile, anyHooks := set.meetProfile(members, profilePathAny)
-		for _, path := range profilePaths {
-			profile, hookModes := anyProfile, anyHooks
-			if path != profilePathAny {
-				if profile, hookModes = set.meetProfile(members, path); reflect.DeepEqual(profile, anyProfile) && reflect.DeepEqual(hookModes, anyHooks) {
-					meet.onPath[path] = meet.derived.Config
-					continue
-				}
-			}
-			derived, err := set.base.DeriveGuardrailProfileMeet(members, profile, hookModes)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles %s: %v\n", strings.Join(members, ", "), err)
-				return
-			}
-			if path == profilePathAny {
-				meet.derived = derived
-			}
-			meet.onPath[path] = derived.Config
+		profile, hookModes := set.meetProfile(members)
+		derived, err := set.base.DeriveGuardrailProfileMeet(members, profile, hookModes)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles %s: %v\n", strings.Join(members, ", "), err)
+			return
 		}
-		meet.ok = true
+		meet.derived, meet.ok = derived, true
 	})
 	if !meet.ok {
 		return nil
 	}
 	return meet
-}
-
-// pathConfig is the configuration the meet decides a request on path with.
-func (m *profileMeet) pathConfig(path profilePath) *config.Config {
-	if cfg := m.onPath[path]; cfg != nil {
-		return cfg
-	}
-	return m.derived.Config
-}
-
-// profilePath is the path a request's decision is for: the hook route, an
-// inspect endpoint or the LLM proxy (both decide by the inspect mode), or
-// none in particular (any).
-type profilePath uint8
-
-const (
-	profilePathAny profilePath = iota
-	profilePathHook
-	profilePathInspect
-	profilePathCount
-)
-
-// profilePaths lists every path, any first.
-var profilePaths = [...]profilePath{profilePathAny, profilePathHook, profilePathInspect}
-
-type profilePathKey struct{}
-
-// withProfilePath records the path of the request on ctx, before its
-// profile is resolved.
-func withProfilePath(ctx context.Context, path profilePath) context.Context {
-	return context.WithValue(ctx, profilePathKey{}, path)
-}
-
-// requestProfilePath is the path of the request on ctx: the one its route
-// recorded (withProfilePath), else inspect for a request the inspect
-// middleware scoped (profileRuleScanConnectorKey), else any.
-func requestProfilePath(ctx context.Context) profilePath {
-	if ctx == nil {
-		return profilePathAny
-	}
-	if path, ok := ctx.Value(profilePathKey{}).(profilePath); ok {
-		return path
-	}
-	if _, scoped := ctx.Value(profileRuleScanConnectorKey{}).(string); scoped {
-		return profilePathInspect
-	}
-	return profilePathAny
-}
-
-// blocksOn reports whether a profile whose hook and inspect modes block as
-// hook and inspect do blocks on path.
-func blocksOn(path profilePath, hook, inspect bool) bool {
-	switch path {
-	case profilePathHook:
-		return hook
-	case profilePathInspect:
-		return inspect
-	}
-	return hook || inspect
-}
-
-// configBlocksOn reports whether cfg blocks on connectorName on path.
-func configBlocksOn(cfg *config.Config, connectorName string, path profilePath) bool {
-	return blocksOn(path, cfg.HookModeForConnector(connectorName) == "action", inspectMode(cfg, connectorName) == "action")
 }
 
 // meetMembers expands meets among names into their members.
@@ -218,56 +126,24 @@ func meetMembers(names []string) []string {
 	return compactProfiles(out)
 }
 
-// meetOf is the profile that applies when any of names may, compared on
-// the scopes the request scans (scans): a profile that covers every other
-// one there, under its own name (single), else their meet. A meet that
-// cannot be derived (an internal error, logged) leaves the strictest of
-// them by mode and block level.
-func (set *guardrailProfileSet) meetOf(names, scans []string) (name string, single bool) {
+// meetOf is the profile that applies when any of names may: a profile that
+// covers every other one, under its own name (single), else their meet. A
+// meet that cannot be derived (an internal error, logged) leaves the
+// strictest of them by mode and block level.
+func (set *guardrailProfileSet) meetOf(names []string, connectorName string) (name string, single bool) {
 	names = meetMembers(names)
 	if len(names) == 0 {
 		return set.defaultProfile, true
 	}
-	if name, covers := set.strictestOf(names, scans); covers {
+	if name, covers := set.strictestOf(names, connectorName); covers {
 		return name, true
 	}
 	name = config.ProfileMeetName(names)
 	if set.meet(name) != nil {
 		return name, false
 	}
-	strictest, _ := set.strictestOf(names, scans)
+	strictest, _ := set.strictestOf(names, connectorName)
 	return strictest, false
-}
-
-// requestScanScopes are the rule scopes ctx's decision on connectorName
-// compares profiles on: the one scope an inspect
-// route recorded (profileRuleScanConnectorKey), else profileCoverConnectors.
-// Every name is canonicalConnectorRulePackKey's, the one the scans use.
-func (set *guardrailProfileSet) requestScanScopes(ctx context.Context, connectorName string) []string {
-	if ctx != nil {
-		if scan, scoped := ctx.Value(profileRuleScanConnectorKey{}).(string); scoped {
-			return []string{canonicalConnectorRulePackKey(scan)}
-		}
-	}
-	return set.profileCoverConnectors(connectorName)
-}
-
-// enforcingMembers are the members of a meet whose rules it scans
-// connectorName with on path: those that block there on that path
-// (configBlocksOn). A member that only observes there adds no rule, so the
-// meet never turns its observation into a block. When no member blocks
-// there, the meet observes with every member's rules.
-func (set *guardrailProfileSet) enforcingMembers(members []string, connectorName string, path profilePath) []string {
-	var out []string
-	for _, member := range members {
-		if configBlocksOn(set.profileConfig(member), connectorName, path) {
-			out = append(out, member)
-		}
-	}
-	if len(out) == 0 {
-		return members
-	}
-	return out
 }
 
 // meetConnectors are the connectors a meet sets explicitly: every built-in
@@ -286,11 +162,6 @@ func (set *guardrailProfileSet) meetConnectors() []string {
 	for _, name := range thresholdConnectorNamesWith(set.base, profileConnectorNames(set.base)) {
 		add(name)
 	}
-	// The meet's explicit mode clears inherited hook modes, so a
-	// connector whose hook mode only connector_hooks sets is listed too.
-	for name := range set.base.ConnectorHooks {
-		add(name)
-	}
 	names := make([]string, 0, len(seen))
 	for name := range seen {
 		names = append(names, name)
@@ -307,10 +178,10 @@ type meetSettings struct {
 }
 
 // meetSettingsFor is the meet of members' effective settings for
-// connectorName ("" for the global settings) on path. Hook and inspect
-// action modes are independent; thresholds and HILT cover every member that
-// blocks on path (on either for profilePathAny).
-func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName string, path profilePath) meetSettings {
+// connectorName ("" for the global settings). Hook and inspect action modes
+// are independent; thresholds and HILT cover every member that blocks on
+// either path.
+func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName string) meetSettings {
 	out := meetSettings{inspectMode: "observe", hookMode: "observe"}
 	blockRank, alertRank, hiltRank := 0, 0, 0
 	for _, member := range members {
@@ -327,7 +198,7 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 		if alertRank == 0 || alert < alertRank {
 			alertRank = alert
 		}
-		if !blocksOn(path, hookBlock, inspectBlock) {
+		if !hookBlock && !inspectBlock {
 			continue
 		}
 		block, _ := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
@@ -361,17 +232,17 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 	return out
 }
 
-// meetProfile returns the inspect policy of the meet on path and the hook
-// modes that differ from it. Its rules are its members' (ruleGeneration);
-// explicit levels keep a pack posture from deciding them.
-func (set *guardrailProfileSet) meetProfile(members []string, path profilePath) (config.GuardrailProfile, map[string]string) {
-	global := set.meetSettingsFor(members, "", path)
+// meetProfile returns the inspect policy and the hook modes that differ from
+// it. Its rules are merged from every member (meetRuleGeneration); explicit
+// levels keep a pack posture from deciding them.
+func (set *guardrailProfileSet) meetProfile(members []string) (config.GuardrailProfile, map[string]string) {
+	global := set.meetSettingsFor(members, "")
 	hilt := global.hilt
 	profile := config.GuardrailProfile{Mode: global.inspectMode, BlockAt: global.block, AlertAt: global.alert, HILT: &hilt,
 		Connectors: map[string]config.PerConnectorGuardrailConfig{}}
 	hookModes := map[string]string{}
 	for _, name := range set.meetConnectors() {
-		s := set.meetSettingsFor(members, name, path)
+		s := set.meetSettingsFor(members, name)
 		connectorHILT := s.hilt
 		profile.Connectors[name] = config.PerConnectorGuardrailConfig{Mode: s.inspectMode, BlockAt: s.block, AlertAt: s.alert, HILT: &connectorHILT}
 		if s.hookMode != s.inspectMode {
@@ -402,65 +273,76 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 	return key
 }
 
-// ruleGeneration is the rule generation of the meet for connectorName: the
-// generations of the members whose rules it scans there on the request's
-// path (enforcingMembers),
-// each scanned with its own rules (compiledRulePackCategories.members). Each
-// was compiled within the rule and cost limits of one generation, and their
-// union is never compiled as one, so no limit of one generation drops a
-// member's rule or refuses a request: a scan of the meet costs at most its
-// members' scans.
-func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) *compiledRulePackCategories {
-	connectorName = canonicalConnectorRulePackKey(connectorName)
+// meetRuleGeneration is the rule generation of the meet for connectorName:
+// every rule of every member's generation, a rule all of them define the
+// same way once. A merge that does not compile must refuse the decision;
+// substituting any one member would silently drop the others' rules.
+type meetRuleGenerationResult struct {
+	generation *compiledRulePackCategories
+	err        error
+}
+
+func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) (*compiledRulePackCategories, error) {
 	var sources []*compiledRulePackCategories
-	for _, member := range set.enforcingMembers(m.members, connectorName, requestProfilePath(ctx)) {
+	for _, member := range m.members {
 		if generation := set.memberRuleGeneration(ctx, member, connectorName); generation != nil && !slices.Contains(sources, generation) {
 			sources = append(sources, generation)
 		}
 	}
 	switch len(sources) {
 	case 0:
-		return nil
+		return nil, nil
 	case 1:
-		return sources[0]
+		return sources[0], nil
 	}
 	key := meetSourcesKey(connectorName, sources)
 	if cached, ok := m.rules.Load(key); ok {
-		return cached.(*compiledRulePackCategories)
+		result := cached.(meetRuleGenerationResult)
+		return result.generation, result.err
 	}
-	value, _ := m.rules.LoadOrStore(key, meetRuleGeneration(sources))
-	return value.(*compiledRulePackCategories)
+	merged, err := mergeRuleGenerations(sources)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] strictest combination %s: merging the rule packs of its profiles: %v; requests are refused\n", m.derived.Name, err)
+	}
+	value, _ := m.rules.LoadOrStore(key, meetRuleGenerationResult{generation: merged, err: err})
+	result := value.(meetRuleGenerationResult)
+	return result.generation, result.err
 }
 
-// meetRuleGeneration is the generation that scans with each of sources' own
-// rules (members). Its categories and rule titles are their union, for
-// lookups only.
-func meetRuleGeneration(sources []*compiledRulePackCategories) *compiledRulePackCategories {
-	merged := &compiledRulePackCategories{
-		categories:         cloneRuleCategories(unionRuleCategories(sources)),
-		ruleIdentityTitles: map[string]map[string]struct{}{},
-		members:            sources,
-		budgetNote:         new(sync.Once),
+// refuseUncompiledMeet checks the rule generation this request can scan.
+// Unscoped tool inspect uses the gateway's configured connector; the other
+// unscoped inspect routes scan the global generation. A different
+// connector's failed merge cannot refuse a valid request here.
+// The member names and compiler error remain in the administrator's log.
+func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decision profileDecision, connectorName string) profileDecision {
+	if decision.Refused != "" {
+		return decision
 	}
-	for _, source := range sources {
-		merged.overridden, merged.added = max(merged.overridden, source.overridden), max(merged.added, source.added)
-		for ruleID, titles := range source.ruleIdentityTitles {
-			if merged.ruleIdentityTitles[ruleID] == nil {
-				merged.ruleIdentityTitles[ruleID] = map[string]struct{}{}
-			}
-			maps.Copy(merged.ruleIdentityTitles[ruleID], titles)
-		}
+	meet := set.meet(decision.Name)
+	if meet == nil {
+		return decision
 	}
-	return merged
+	connectorName = config.NormalizeConnectorName(connectorName)
+	if scanConnector, scoped := ctx.Value(profileRuleScanConnectorKey{}).(string); scoped {
+		connectorName = scanConnector
+	} else if connectorName == "" {
+		connectorName = config.NormalizeConnectorName(connectorNameForConfig(set.base))
+	}
+	if _, err := meet.ruleGeneration(ctx, set, connectorName); err != nil {
+		decision.Refused = "DefenseClaw refused this request: the strictest combination of rule packs could not be compiled; ask an administrator to check the profile rule packs"
+	}
+	return decision
 }
 
-// unionRuleCategories is the union of sources' categories: each category
-// keeps every rule any source has, a rule two sources define the same way
-// once.
-func unionRuleCategories(sources []*compiledRulePackCategories) []ruleCategory {
+// mergeRuleGenerations compiles the union of sources' categories: each
+// category keeps every rule any source has, a rule two sources define the
+// same way once.
+func mergeRuleGenerations(sources []*compiledRulePackCategories) (*compiledRulePackCategories, error) {
 	var categories []ruleCategory
 	index := map[string]int{}
+	overridden, added := 0, 0
 	for _, source := range sources {
+		overridden, added = max(overridden, source.overridden), max(added, source.added)
 		for _, category := range source.categories {
 			i, ok := index[category.Name]
 			if !ok {
@@ -475,53 +357,12 @@ func unionRuleCategories(sources []*compiledRulePackCategories) []ruleCategory {
 			}
 		}
 	}
-	return categories
-}
-
-// strongestRuleFindings combines the findings of several scans of one
-// request: one finding per rule (key), the strongest of them
-// (strongerRuleFinding), where the rule first appeared.
-func strongestRuleFindings(lists [][]RuleFinding, key func(string) string) []RuleFinding {
-	var out []RuleFinding
-	positions := map[string]int{}
-	for _, findings := range lists {
-		for _, finding := range findings {
-			k := key(finding.RuleID)
-			if i, seen := positions[k]; seen {
-				if strongerRuleFinding(finding, out[i]) {
-					out[i] = finding
-				}
-				continue
-			}
-			positions[k] = len(out)
-			out = append(out, finding)
-		}
+	merged, err := compileRulePackGeneration(categories)
+	if err != nil {
+		return nil, err
 	}
-	return out
-}
-
-// strongerRuleFinding reports whether a enforces more than b: it may block
-// where b only alerts or detects, else its severity is higher, else its
-// confidence.
-func strongerRuleFinding(a, b RuleFinding) bool {
-	weight := func(f RuleFinding) int {
-		switch {
-		case f.contributesToEnforcement():
-			return 2
-		case f.contributesToAlertOnly():
-			return 1
-		}
-		return 0
-	}
-	if wa, wb := weight(a), weight(b); wa != wb {
-		return wa > wb
-	}
-	ra := severityRank[strings.ToUpper(strings.TrimSpace(a.Severity))]
-	rb := severityRank[strings.ToUpper(strings.TrimSpace(b.Severity))]
-	if ra != rb {
-		return ra > rb
-	}
-	return a.Confidence > b.Confidence
+	merged.overridden, merged.added = overridden, added
+	return merged, nil
 }
 
 // samePatternRule reports whether two rules are one definition.
@@ -570,16 +411,13 @@ func (a *APIServer) generationRulePack(ctx context.Context, connectorName string
 	return g.RulePacks["global"]
 }
 
-// rulePack is the composed pack of the meet for connectorName, over the
-// members whose rules it scans there on the request's path
-// (enforcingMembers): the first one's
-// pack with only the suppressions every one's pack has, and every sensitive
-// tool any one's pack inspects, at its strictest.
+// rulePack is the composed pack of the meet for connectorName: the first
+// member's pack with only the suppressions every member's pack has, and
+// every sensitive tool any member's pack inspects, at its strictest.
 func (m *profileMeet) rulePack(ctx context.Context, a *APIServer, set *guardrailProfileSet, connectorName string) *guardrail.RulePack {
-	connectorName = canonicalConnectorRulePackKey(connectorName)
 	var sources []*guardrail.RulePack
 	missing := false
-	for _, member := range set.enforcingMembers(m.members, connectorName, requestProfilePath(ctx)) {
+	for _, member := range m.members {
 		pack := a.memberRulePack(ctx, set, member, connectorName)
 		if pack == nil {
 			missing = true

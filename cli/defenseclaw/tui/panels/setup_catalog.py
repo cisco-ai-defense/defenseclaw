@@ -32,7 +32,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from defenseclaw.fail_mode import upstream_fail_open
-from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupWizard, connector_turned_off
+from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupWizard
 from defenseclaw.tui.services.setup_state import (
     ConfigSection,
     ReadinessCheck,
@@ -356,14 +356,7 @@ def _connector_status(cfg: Any, owned: bool) -> TaskStatus:
     names = active_connector_names(cfg)
     if not names:
         return TaskStatus("attention" if owned else "off", "no agent yet")
-    # A connector turned off is not protected: count only the others, and
-    # say how many are off (GAP-0854).
-    on = [name for name in names if not connector_turned_off(cfg, name)]
-    off = len(names) - len(on)
-    if not on:
-        return TaskStatus("attention", f"{_plural(off, 'agent')} off")
-    label = on[0] if len(on) == 1 else _plural(len(on), "agent")
-    return TaskStatus("ok", f"{label}, {off} off" if off else label)
+    return TaskStatus("ok", names[0] if len(names) == 1 else _plural(len(names), "agent"))
 
 
 def _credentials_status(credentials: Any, problems: Sequence[TaskProblem]) -> TaskStatus:

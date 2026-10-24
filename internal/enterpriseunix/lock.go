@@ -130,37 +130,3 @@ func (l *lifecycleLock) release() {
 	_ = syscall.Flock(int(l.file.Fd()), syscall.LOCK_UN)
 	_ = l.file.Close()
 }
-
-// holdLifecycleMarker publishes the lifecycle run marker
-// (managed.StandaloneLayout.LifecycleMarkerPath) for a run that holds the
-// lifecycle lock and may change the deployment, and returns what removes it
-// again. The managed hooks of this computer answer a gateway they cannot
-// reach closed while it exists, whatever the administrator chose for an
-// outage: a run stops, restarts or rolls back the gateway, and its lock is
-// in the root-only lifecycle directory, which no account can read (GAP-1074).
-// The run removes it before it releases the lock, after the gateway it
-// started is ready or the run failed. One a killed run left behind keeps
-// the hooks closed until the next run ends, or until the computer starts
-// again (/run and /var/run are emptied at boot).
-func (e *Env) holdLifecycleMarker() (func(), error) {
-	if e.Layout.LifecycleMarkerPath == "" {
-		return func() {}, nil
-	}
-	path := e.P(e.Layout.LifecycleMarkerPath)
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, fmt.Errorf("publish the lifecycle marker %s: %w", path, err)
-	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o644)
-	if err != nil {
-		return nil, fmt.Errorf("publish the lifecycle marker %s: %w", path, err)
-	}
-	_, writeErr := fmt.Fprintf(file, "%d\n", os.Getpid())
-	if closeErr := file.Close(); writeErr == nil {
-		writeErr = closeErr
-	}
-	if writeErr != nil {
-		_ = os.Remove(path)
-		return nil, fmt.Errorf("publish the lifecycle marker %s: %w", path, writeErr)
-	}
-	return func() { _ = os.Remove(path) }, nil
-}

@@ -431,25 +431,6 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
                 (local / "DefenseClaw" / "HookRuntime" / "hook-runtime-state.json").write_text("{}")
                 self.assertEqual(cmd_uninstall._windows_setup_leftovers("win32"), ())
 
-    def test_binaries_removes_the_launcher_trampoline_this_install_published(self):
-        # GAP-1000: once install.ps1 replaced Setup, Setup's launcher delegates
-        # to a copy of this install's hook (HookRuntime\delegated). That state
-        # goes with this install; Setup's own state keeps its folders.
-        with tempfile.TemporaryDirectory() as tmp:
-            local = Path(tmp).resolve()
-            runtime = local / "DefenseClaw" / "HookRuntime"
-            copy = runtime / "delegated" / ("0" * 32) / "defenseclaw-hook.exe"
-            copy.parent.mkdir(parents=True)
-            copy.write_bytes(b"MZ")
-            (runtime / "defenseclaw-hook.exe").write_bytes(b"MZ")
-            state = runtime / "hook-runtime-state.json"
-            with patch.object(cmd_uninstall.windows_native_uninstall, "_known_folder_path", return_value=str(local)):
-                state.write_text(json.dumps({"schema_version": 2, "hook_path": str(copy)}), encoding="utf-8")
-                leftovers = cmd_uninstall._windows_setup_leftovers("win32")
-                self.assertEqual(leftovers, (str(runtime),))
-                state.write_text(json.dumps({"schema_version": 2, "hook_path": str(local / "Programs" / "DefenseClaw" / "bin" / "defenseclaw-hook.exe")}), encoding="utf-8")
-                self.assertEqual(cmd_uninstall._windows_setup_leftovers("win32"), ())
-
     def test_binary_removal_drops_install_bookkeeping_and_pip_hint(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve() / "bin"

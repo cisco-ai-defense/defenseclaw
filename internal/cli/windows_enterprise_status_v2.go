@@ -111,21 +111,16 @@ func readWindowsEnterpriseStatusV2Manifest(path string) ([]enterprisestatus.Conn
 }
 
 // applyWindowsEnterpriseStatusV2 adds the status v2 blocks to a status or
-// verify of an installed standalone deployment. Every other action prints no
-// block but states the same Hermes and hook-process limits, so ensure,
-// install and repair cannot report coverage or security that verify does not
-// (as on Linux and macOS).
+// verify of an installed standalone deployment.
 func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
-	publish := result.Action == "status" || result.Action == "verify"
-	in := windowsEnterpriseStatusV2Read()
-	block := windowsEnterpriseConnectorsBlock(result, in, publish)
-	result.AddHookProcessFailureWarnings(block)
-	if !publish {
+	if result.Action != "status" && result.Action != "verify" {
 		return
 	}
 	// Enterprise OpenShell runs on Linux and macOS only.
 	result.OpenShell = enterprisestatus.OpenShellUnsupportedCapability()
-	result.Connectors = block
+	in := windowsEnterpriseStatusV2Read()
+	result.Connectors = windowsEnterpriseConnectorsBlock(result, in)
+	result.AddHookProcessFailureWarnings()
 	result.Identity = enterprisestatus.IdentityGatewayNotReady()
 	if result.Readiness.Gateway && in.gatewayHealth != nil {
 		// A failed read is a gateway that did not report.
@@ -138,8 +133,7 @@ func applyWindowsEnterpriseStatusV2(result *enterprisestatus.Result) {
 // the Windows hook renderer's (enterprisehooks.ManagedHookFailMode); a
 // connector's hook is in machine policy when the installer reported its
 // machine policy (Codex, Claude Code, Cursor) or it is a runtime-only row.
-// Only a published block reports which of its details could not be read.
-func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in windowsEnterpriseStatusV2Inputs, publish bool) map[string]enterprisestatus.ConnectorState {
+func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in windowsEnterpriseStatusV2Inputs) map[string]enterprisestatus.ConnectorState {
 	inputs := enterprisestatus.ConnectorInputs{Known: in.knownConnector, Guardian: in.guardian, GuardianKnown: in.guardianKnown}
 	cfg := in.cfg
 	switch {
@@ -147,14 +141,14 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 		inputs.ConfigLoaded = true
 		inputs.Enabled = enterprisehooks.EffectiveWindowsStandaloneHookConnectors(cfg)
 		inputs.Mode = cfg.EffectiveGuardrailModeForConnector
-	case publish && !errors.Is(in.configErr, os.ErrNotExist):
+	case !errors.Is(in.configErr, os.ErrNotExist):
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors: the installed config could not be loaded, "+
 			"so effective_mode and effective_hook_fail_mode are not reported")
 	}
 	switch {
 	case in.manifestErr == nil:
 		inputs.ManifestRead, inputs.Manifest = true, in.manifest
-	case publish && !errors.Is(in.manifestErr, os.ErrNotExist) && !errors.Is(in.manifestErr, os.ErrPermission):
+	case !errors.Is(in.manifestErr, os.ErrNotExist) && !errors.Is(in.manifestErr, os.ErrPermission):
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors: the enumerator's targets manifest could not be read, "+
 			"so detected and versions are not reported")
 	}
@@ -179,8 +173,6 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 	if state, ok := block["hermes"]; ok && state.Enabled &&
 		(state.Detected == nil || *state.Detected || state.Targets != nil && state.Targets.Total > 0) {
 		state.HooksInstalled = enterprisestatus.HooksInstalledUnknown
-		// A persistent-home target cannot prove a session-only HERMES_HOME.
-		state.Targets = nil
 		block["hermes"] = state
 		result.CoverageComplete, result.SecurityComplete = false, false
 		message := "connectors.hermes: the guardian's persistent-home registration cannot prove a session-only HERMES_HOME is hooked; Windows managed Hermes coverage cannot be verified"
@@ -190,7 +182,7 @@ func windowsEnterpriseConnectorsBlock(result *enterprisestatus.Result, in window
 			result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
 		}
 	}
-	if publish && hidden > 0 {
+	if hidden > 0 {
 		result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, fmt.Sprintf("connectors: %d agent version(s) not shown: "+
 			"they are not plain version strings", hidden))
 	}

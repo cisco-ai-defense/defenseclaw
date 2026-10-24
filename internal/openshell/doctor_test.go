@@ -31,7 +31,6 @@ import (
 
 	"github.com/NVIDIA/OpenShell/sdk/go/openshell/v1/types"
 
-	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/openshelltest"
 )
@@ -292,15 +291,6 @@ func (f *doctorFixture) run() *openshell.DoctorReport {
 	return f.doctor.Run(context.Background())
 }
 
-func (f *doctorFixture) contactedGatewayPID(pid int) {
-	f.doctor.PortHolder = func(host string, port int) (daemon.PortHolder, error) {
-		if host != "127.0.0.1" || port != 17670 {
-			f.t.Fatalf("looked up an unrelated listener at %s:%d", host, port)
-		}
-		return daemon.PortHolder{PID: pid, UID: f.doctor.Geteuid(), Command: openshell.GatewayBinary}, nil
-	}
-}
-
 func expectCheck(t *testing.T, r *openshell.DoctorReport, id string, status openshell.CheckStatus, detail string) *openshell.Check {
 	t.Helper()
 	c := r.Get(id)
@@ -437,32 +427,8 @@ func TestDoctorOffersTheUpgrade(t *testing.T) {
 	f.onMicroVMs()
 	c = expectCheck(t, f.run(), openshell.CheckIDCLI, openshell.StatusWarn, "0.1.1 at ")
 	if c.Fix == nil || c.Fix.Command != "defenseclaw sandbox setup --install-openshell" ||
-		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this restarts the gateway; save or sync each MicroVM guest's work first; raw stop on OpenShell older than 0.1.5 may not flush the guest, so save its work outside the guest before it; then stop running sandboxes with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; a failed sync can lose later changes)" {
+		c.Fix.Summary != "upgrade OpenShell to "+openshell.InstallerVersion+" in place (this restarts the gateway; stop running MicroVM sandboxes first with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes)" {
 		t.Fatalf("openshell-cli fix on MicroVMs = %+v", c.Fix)
-	}
-}
-
-// The upgrade runs against pre-0.1.5 gateways too. A raw stop on those
-// releases can discard work the guest has not synced.
-func TestDoctorMicroVMUpgradeFixSavesWorkBeforeLegacyStop(t *testing.T) {
-	f := newDoctorFixture(t)
-	f.onMicroVMs()
-	f.fake.SetRelease("0.1.1")
-	r := f.run()
-	for _, id := range []string{openshell.CheckIDCLI, openshell.CheckIDGatewayVersion} {
-		c := r.Get(id)
-		if c == nil || c.Fix == nil {
-			t.Fatalf("%s has no upgrade fix: %+v", id, c)
-		}
-		fix := c.Fix.Summary
-		save := strings.Index(fix, "save or sync")
-		dcStop := strings.Index(fix, "`defenseclaw sandbox stop NAME`")
-		rawStop := strings.Index(fix, "`openshell sandbox stop NAME`")
-		warning := strings.Index(fix, "may not flush")
-		if save < 0 || dcStop <= save || rawStop <= save || warning <= save || warning >= rawStop ||
-			!strings.Contains(fix, "older than 0.1.5") {
-			t.Errorf("%s upgrade fix does not put save-first advice before both stops: %q", id, fix)
-		}
 	}
 }
 

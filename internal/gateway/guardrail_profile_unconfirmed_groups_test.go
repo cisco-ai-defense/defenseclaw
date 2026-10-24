@@ -102,7 +102,7 @@ func TestUnconfirmedGroupNamesNeverResolveToAWeakerProfile(t *testing.T) {
 		}
 		cfg.Guardrail.DefaultProfile = "current"
 		set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
-		got := set.matchAgent(&alice, profileSubjectVerified, "codex", nil, "agt-alice", nil)
+		got := set.matchAgent(&alice, profileSubjectVerified, "codex", "agt-alice", nil)
 		if !config.IsProfileMeet(got.Name) || got.Match != profileMatchDefaultLookupFailed {
 			t.Errorf("decision %+v; want the strictest combination as default_lookup_failed", got)
 		}

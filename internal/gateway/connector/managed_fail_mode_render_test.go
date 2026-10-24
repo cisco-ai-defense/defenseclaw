@@ -13,8 +13,6 @@ package connector
 import (
 	"bytes"
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +26,8 @@ import (
 // connectors without a fail-closed hook contract of their own. Secure Client
 // keeps its rules. The per-user Hermes, Copilot and Antigravity hooks block
 // their own failures, so they keep closed (GAP-0150, GAP-0269, r104 W3
-// G3-upg). A per-user render records the outage mode of its policy tier
-// (oss-outage-open): open only when its caller resolved open.
+// G3-upg), and a per-user Cursor in observe closes its outages even if an
+// older config opened them.
 func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 	useVerifiedSecureClientDeployment(t)
 	standalone := SetupOpts{ManagedEnterprise: true, ManagedHookSocket: "/run/defenseclaw/hook.sock", HookFailMode: "closed", GuardrailMode: "observe"}
@@ -47,8 +45,7 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 		{"secure client hermes", NewHermesConnector(), secureClient, "open"},
 		{"secure client cursor observe", NewCursorConnector(), secureClient, "closed"},
 		{"per-user cursor observe", NewCursorConnector(), perUser, "closed"},
-		{"per-user cursor observe, outage open tier", NewCursorConnector(), SetupOpts{HookFailMode: "open", GuardrailMode: "observe"}, "open"},
-		{"per-user copilot, outage open tier", NewCopilotConnector(), SetupOpts{HookFailMode: "open"}, "open"},
+		{"per-user cursor observe, explicit open", NewCursorConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open", GuardrailMode: "observe"}, "closed"},
 		{"per-user hermes", NewHermesConnector(), perUser, "closed"},
 		{"per-user copilot", NewCopilotConnector(), perUser, "closed"},
 		{"per-user antigravity", NewAntigravityConnector(), perUser, "closed"},
@@ -60,32 +57,6 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 				t.Fatalf("rendered fail mode = %q, want %q", got, test.want)
 			}
 		})
-	}
-}
-
-// A managed standalone plugin bridge renders closed for every failure, an
-// administrator's open included (config.HookOutageFailMode), so no gateway
-// answer can take an outage-open path.
-func TestManagedStandalonePluginRendersClosed(t *testing.T) {
-	for _, asset := range []string{"amp-plugin.ts", "opencode-plugin.js"} {
-		body, err := renderHookTemplate(asset, templateData{Managed: true, FailMode: "open"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Contains(body, []byte(`DC_FAIL_MODE = "closed"`)) &&
-			!bytes.Contains(body, []byte(`DC_FAIL_MODE: string = "closed"`)) {
-			t.Fatalf("%s renders an administrator's open into a standalone plugin", asset)
-		}
-	}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	}))
-	defer server.Close()
-	data := openCodePluginTestData(t, server)
-	data.Managed, data.FailMode = true, "open"
-	lines := runOpenCodePluginHarness(t, data, 1)
-	if len(lines) == 0 || !strings.HasPrefix(lines[0], "block:") {
-		t.Fatalf("managed outage-open plugin allowed HTTP 503: %q", lines)
 	}
 }
 

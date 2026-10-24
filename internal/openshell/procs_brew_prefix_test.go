@@ -44,7 +44,6 @@ func TestDoctorGatewayOfAnotherHomebrew(t *testing.T) {
 				t.Fatal(err)
 			}
 			f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", "    1     0     0 /sbin/launchd\n 7976     1   501 "+gateway+"\n", nil)
-			f.contactedGatewayPID(7976)
 			f.runner.On("launchctl list", "PID\tStatus\tLabel\n7976\t0\tsh.brew.openshell\n", nil)
 			r := f.run()
 			c := expectCheck(t, r, openshell.CheckIDGatewayService, openshell.StatusWarn, gateway+

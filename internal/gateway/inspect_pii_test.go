@@ -18,7 +18,6 @@ package gateway
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -161,67 +160,6 @@ func TestInspectHandler_RevealDoesNotUnmaskAuditStore(t *testing.T) {
 		if strings.Contains(e.Details, piiLiteral) {
 			t.Errorf("audit event %s leaked secret in Details: %q", e.ID, e.Details)
 		}
-	}
-}
-
-// A raw evidence response has the same attributable audit event on every
-// direct inspect route, including the request, response and tool result paths.
-func TestEveryDirectInspectRevealWritesAttributedAuditEvent(t *testing.T) {
-	for _, tc := range []struct {
-		route, body, target string
-		handle              func(*APIServer, http.ResponseWriter, *http.Request)
-	}{
-		{"/api/v1/inspect/request", `{"content":"leaked secret ` + piiLiteral + `"}`, "pre-request", (*APIServer).handleInspectRequest},
-		{"/api/v1/inspect/response", `{"content":"leaked secret ` + piiLiteral + `"}`, "post-response", (*APIServer).handleInspectResponse},
-		{"/api/v1/inspect/tool-response", `{"tool":"read","output":"leaked secret ` + piiLiteral + `"}`, "read", (*APIServer).handleInspectToolResponse},
-	} {
-		t.Run(tc.route, func(t *testing.T) {
-			api := testAPIServerWithConfig(t, "action")
-			ctx := context.WithValue(withServiceAccountGateway(context.Background()), verifiedUserScopedIdentityContextKey{}, "1001")
-			for _, header := range []string{"", "true", "1"} {
-				req := httptest.NewRequest(http.MethodPost, tc.route, bytes.NewBufferString(tc.body)).WithContext(ctx)
-				if header != "" {
-					req.Header.Set(revealHeader, header)
-				}
-				w := httptest.NewRecorder()
-				tc.handle(api, w, req)
-				if w.Code != http.StatusOK {
-					t.Fatalf("header %q: status = %d, body = %q", header, w.Code, w.Body.String())
-				}
-				if got := strings.Contains(w.Body.String(), piiLiteral); got != (header == "1") {
-					t.Fatalf("header %q: raw evidence present = %t", header, got)
-				}
-			}
-			events, err := api.store.ListEvents(200)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var reveals int
-			for _, event := range events {
-				if event.Action != "inspect-reveal" {
-					continue
-				}
-				reveals++
-				if event.Timestamp.IsZero() || event.Target != tc.target ||
-					event.Structured["route"] != tc.route || event.Structured["user.id"] != "1001" ||
-					strings.Contains(event.Details, piiLiteral) {
-					t.Fatalf("reveal event = %+v, want time, target, verified caller and no raw evidence", event)
-				}
-			}
-			if reveals != 1 {
-				t.Fatalf("reveal events = %d, want one for the exact header", reveals)
-			}
-			// A write fault cannot turn the opt-in header into an untracked
-			// disclosure. The reveal request reports the audit failure.
-			api.logger.SetRuntimeV8Emitter(&failingAuditEmitter{fail: true})
-			req := httptest.NewRequest(http.MethodPost, tc.route, bytes.NewBufferString(tc.body)).WithContext(ctx)
-			req.Header.Set(revealHeader, "1")
-			w := httptest.NewRecorder()
-			tc.handle(api, w, req)
-			if w.Code != http.StatusServiceUnavailable || strings.Contains(w.Body.String(), piiLiteral) {
-				t.Fatalf("audit write fault: status = %d, raw evidence present = %t", w.Code, strings.Contains(w.Body.String(), piiLiteral))
-			}
-		})
 	}
 }
 

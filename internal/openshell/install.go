@@ -746,7 +746,7 @@ func PrepareUpgrade(ctx context.Context, c Client, pull func(context.Context) er
 		}
 		return fmt.Errorf("%w (the sandboxes on it could not be listed: %v); then upgrade", ErrSandboxesRunning, err)
 	}
-	return stoppedRefusal(ErrSandboxesRunning, list, func() string { return restartGatewayRelease(ctx, c) }, "upgrade")
+	return stoppedRefusal(ErrSandboxesRunning, list, func() bool { return gatewayRunsSandboxes(ctx, c) }, "upgrade")
 }
 
 // runtimeImageRepository holds the images OpenShell's docker driver runs

@@ -41,10 +41,6 @@ func TestErrorPhaseWayOnFollowsTheGatewayRelease(t *testing.T) {
 	if !strings.Contains(old, "neither stop nor start") || !strings.Contains(old, "upgrade OpenShell, then `defenseclaw sandbox stop box`") {
 		t.Errorf("before %s: %q", openshell.SupportedMin, old)
 	}
-	oldVM := errorPhaseWayOn("box", "MainProcessFailed: exited 1", "upgrade OpenShell", true)
-	if save, del := strings.Index(oldVM, "save or sync any accessible work outside the guest first"), strings.Index(oldVM, "`defenseclaw sandbox delete box`"); save < 0 || del < save {
-		t.Errorf("old MicroVM deletion lacks save-first advice: %q", oldVM)
-	}
 	if got := errorPhaseWayOn("box", overlayDiskFullText, "", false); got != overlayDiskWayOn("box") {
 		t.Errorf("a full disk: %q", got)
 	}

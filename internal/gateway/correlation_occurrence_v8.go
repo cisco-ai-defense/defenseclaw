@@ -279,7 +279,6 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	receipt := correlationReceiptForHook(
 		spec,
 		instance.ConnectorInstanceID,
-		hookReceiptCaller(ctx),
 		sourceDigest,
 		fingerprintHex,
 		now,
@@ -1021,40 +1020,20 @@ func dedupeCorrelationValues(slices []connector.CorrelationValue, canonical map[
 	return out
 }
 
-// correlationReceiptForHook is the delivery receipt of a hook occurrence.
-// caller (hookReceiptCaller) scopes it to the verified account that sent
-// the hook: on a managed host every account's hooks share one connector
-// instance, and the same body from another account is that account's own
-// call, never a replay of the first one's, so it keeps its own decision
-// records (GAP-1028).
 func correlationReceiptForHook(
 	spec connector.CorrelationSpec,
 	instance audit.ConnectorInstanceID,
-	caller, sourceDigest, fingerprint string,
+	sourceDigest, fingerprint string,
 	now time.Time,
 ) *audit.CorrelationReceiptClaim {
 	if sourceDigest == "" ||
 		!spec.AllowsReceiptTarget(connector.CorrelationTargetSourceEvent) {
 		return nil
 	}
-	channel := string(connector.CorrelationSurfaceHook)
-	if caller != "" {
-		channel += "/caller=" + caller
-	}
 	return &audit.CorrelationReceiptClaim{SourceKeyDigest: correlationReceiptSourceKey(
-		instance, audit.CorrelationRailHook, channel, sourceDigest,
+		instance, audit.CorrelationRailHook, string(connector.CorrelationSurfaceHook), sourceDigest,
 	), FingerprintSHA256: fingerprint,
 		ReceivedAt: now, ExpiresAt: now.Add(correlationReceiptTTL)}
-}
-
-// hookReceiptCaller is the verified caller of a hook (verifiedAuditCaller),
-// "" when the gateway has none.
-func hookReceiptCaller(ctx context.Context) string {
-	caller, ok := verifiedAuditCaller(ctx)
-	if !ok || caller.ID == "" {
-		return ""
-	}
-	return caller.IDKind + ":" + caller.ID
 }
 
 // reviewedHookToolRetryDigest admits a provider tool invocation ID as an

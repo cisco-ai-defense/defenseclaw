@@ -28,10 +28,9 @@ import (
 // tool call DefenseClaw cannot check when its fail mode is closed or not set
 // (the gateway is down or does not answer in time, or its answer cannot be
 // used), with Hermes' block directive and a text that says why and what to
-// do, and logs the call as failed closed. An explicit open lets only a
-// gateway outage call run; a timeout, an HTTP status and an unusable answer
-// or input stay closed.
-func TestPerUserHermesToolCallFailsClosedUnlessAnOutageIsOpen(t *testing.T) {
+// do, and logs the call as failed closed. Only an explicit "open" lets an
+// outage call run; malformed oversized input stays closed.
+func TestPerUserHermesToolCallFailsClosedUnlessOpen(t *testing.T) {
 	waitForDeadline := func(_ *stubRT, req *http.Request) (*http.Response, error) {
 		<-req.Context().Done()
 		return nil, req.Context().Err()
@@ -44,9 +43,9 @@ func TestPerUserHermesToolCallFailsClosedUnlessAnOutageIsOpen(t *testing.T) {
 	}{
 		{name: "gateway down", want: "the DefenseClaw gateway is not running or not answering (fail mode closed)",
 			rt: func() *stubRT { return &stubRT{err: errors.New("connection refused")} }},
-		{name: "timeout", want: "this account's DefenseClaw gateway did not answer in time (fail mode closed)",
+		{name: "timeout", want: "the DefenseClaw gateway is not running or not answering (fail mode closed)",
 			rt: func() *stubRT { return &stubRT{onRequest: waitForDeadline} }, timeout: 200 * time.Millisecond},
-		{name: "gateway 5xx", want: "returned an answer DefenseClaw could not use",
+		{name: "gateway 5xx", want: "the DefenseClaw gateway is not available (fail mode closed)",
 			rt: func() *stubRT { return &stubRT{status: 503, body: "unavailable"} }},
 		{name: "gateway refusal", want: "the DefenseClaw gateway refused it (HTTP 401",
 			rt: func() *stubRT { return &stubRT{status: 401, body: `{"error":"token rejected"}`} }},
@@ -91,10 +90,12 @@ func TestPerUserHermesToolCallFailsClosedUnlessAnOutageIsOpen(t *testing.T) {
 					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
 				}
 				logged := lastHookFailure(t, home)["fail_mode"]
-				if failMode == "open" && (tc.name == "gateway down" || tc.name == "missing token") {
-					// The user's outage choice: the call runs, logged open.
-					if strings.TrimSpace(result.stdout) != "" || logged != "open" {
-						t.Fatalf("stdout %q logged %q, want the neutral result logged open", result.stdout, logged)
+				if failMode == "open" && tc.name != "oversized" && tc.name != "malformed answer" {
+					if strings.TrimSpace(result.stdout) != "" {
+						t.Fatalf("stdout %q, want the neutral result for an explicit open", result.stdout)
+					}
+					if logged != "open" {
+						t.Fatalf("logged fail_mode = %q, want open", logged)
 					}
 					return
 				}

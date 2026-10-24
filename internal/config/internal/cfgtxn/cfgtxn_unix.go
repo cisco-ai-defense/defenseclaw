@@ -48,9 +48,6 @@ func keepOwner(tmp *os.File, target string) {
 
 func replaceDurable(source, target string) error { return os.Rename(source, target) }
 
-// mkdirDurable makes dir; MkdirDurable flushes its parent.
-func mkdirDurable(dir string) error { return os.Mkdir(dir, 0o700) }
-
 func syncDir(dir string) error {
 	d, err := os.Open(dir)
 	if err != nil {

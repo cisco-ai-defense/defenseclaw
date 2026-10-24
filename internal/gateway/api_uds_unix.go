@@ -88,9 +88,6 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 		return nil, nil, fmt.Errorf("api: socket-activated hook listener %s is not a unix socket", listener.Addr())
 	}
 
-	// Prove the published vendor policy before the first call, then again
-	// only when it or the descriptor changes; no hook call computes it.
-	a.startManagedPolicyView(ctx, runtime.GOOS)
 	server := &http.Server{
 		Handler:     a.managedHookSocketHandler(authorizer, base),
 		BaseContext: func(net.Listener) context.Context { return ctx },

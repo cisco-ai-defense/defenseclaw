@@ -432,10 +432,6 @@ func agentAssetPolicySubject(reason string) string {
 		return kind + " " + name + " is denied by the default asset policy"
 	case "admin-deny":
 		return kind + " " + name + " is denied by asset policy"
-	case "install-block":
-		if values["asset_type"] == "plugin" {
-			return kind + " " + name + " was blocked by install admission"
-		}
 	case "runtime-disable":
 		// A disabled or quarantined asset: say so in words, not with the
 		// registry fields of the record (GAP-0362).

@@ -26,9 +26,9 @@ function reply(status, body) {
   return {
     ok: status >= 200 && status < 300,
     status,
-    async text() {
+    async json() {
       if (body instanceof Error) throw body;
-      return JSON.stringify(body);
+      return body;
     },
   };
 }

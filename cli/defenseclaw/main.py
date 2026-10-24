@@ -22,7 +22,6 @@ mirroring the Cobra root command in internal/cli/root.go.
 
 from __future__ import annotations
 
-import contextlib
 import inspect
 import json
 import os
@@ -525,20 +524,10 @@ def cli(ctx: click.Context) -> None:
     except Exception as exc:
         from defenseclaw.audit_capacity import audit_open_failure_notice
 
-        notice = audit_open_failure_notice(app.cfg.audit_db, exc)
-        if invoked != "status":
-            ux.echo(notice, err=True)
-            raise SystemExit(1)
-        # Status is read-only and has an independently authenticated gateway
-        # health source. Do not lose that view when the local audit volume is
-        # full; carry the failure into both text and JSON output instead.
-        if app.store is not None:
-            with contextlib.suppress(Exception):  # a failed open may leave SQLite unable to close cleanly
-                app.store.close()
-        app.store = None
-        app.audit_db_error = notice
+        ux.echo(audit_open_failure_notice(app.cfg.audit_db, exc), err=True)
+        raise SystemExit(1)
 
-    if source_is_v8 and not getattr(app, "config_problems", None) and not app.audit_db_error:
+    if source_is_v8 and not getattr(app, "config_problems", None):
         app.logger = Logger.from_config(app.cfg)
     else:
         app.logger = Logger.no_runtime()

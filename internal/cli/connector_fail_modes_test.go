@@ -124,18 +124,15 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 
 // A loaded config: an earlier render recorded Copilot's unset mode as open
 // (lowered because its vendor hook surface cannot fail closed) without a
-// source. The native hook does not trust that open; the refresh writes the
-// outage mode of the policy tier with its config source (oss-outage-open):
-// open for the default tier, also when a saved per-user value says something
-// else, closed for strict. Every other native hook failure stays closed.
-func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
+// source. No operator chose it, so the refresh writes the closed outage mode
+// and a gateway-down native call is blocked. An old explicit connector open
+// must also be closed on a per-user host.
+func TestRefreshFailModesDoesNotTreatACapabilityOpenAsTheConfigs(t *testing.T) {
 	for _, test := range []struct {
 		name, config, want string
 	}{
-		{name: "default tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n", want: "open"},
-		{name: "default tier, saved closed", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: action\n  connectors:\n    copilot:\n      hook_fail_mode: closed\n", want: "open"},
-		{name: "strict tier", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n", want: "closed"},
-		{name: "strict tier, saved open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  rule_pack: strict\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "closed"},
+		{name: "unset", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n", want: "closed"},
+		{name: "operator open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -145,8 +142,8 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 			}
 			// What the earlier render recorded for Copilot: open, no source.
 			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"copilot":"open"}}`)
-			if got := buildHookOptions("copilot", "preToolUse", "", ""); got.FailMode != "closed" || got.OutageFailMode != "closed" {
-				t.Fatalf("before the refresh the native hook fails %q, outage %q, want closed for both", got.FailMode, got.OutageFailMode)
+			if got := buildHookOptions("copilot", "preToolUse", "", "").FailMode; got != test.want {
+				t.Fatalf("before the refresh the native hook fails %q, want %q", got, test.want)
 			}
 			if result := runRefreshFailModesForTest(t, home); result.Config != "loaded" || !reflect.DeepEqual(result.Refreshed, []string{"copilot"}) {
 				t.Fatalf("refresh %+v", result)
@@ -154,26 +151,27 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 			if got := oldHookFailMode(t, home, "copilot"); got != test.want {
 				t.Fatalf("refreshed copilot mode %q, want %q", got, test.want)
 			}
-			if got := buildHookOptions("copilot", "preToolUse", "", ""); got.FailMode != "closed" || got.OutageFailMode != test.want {
-				t.Fatalf("the native hook fails %q, outage %q, want closed and %q", got.FailMode, got.OutageFailMode, test.want)
+			if got := buildHookOptions("copilot", "preToolUse", "", "").FailMode; got != test.want {
+				t.Fatalf("the native hook fails %q, want %q", got, test.want)
 			}
 		})
 	}
 }
 
-// Cursor: a 1.0.x refresh recorded its observe mode open whatever the
-// config said. The refresh now writes the policy tier's outage mode in
-// observe and action mode alike; a 0.8.x document the release cannot load
-// yet is closed until the migrated config renders the hooks.
-func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
+// Cursor in observe: its resolved mode (open) follows the guardrail mode, so
+// a 1.0.x refresh that wrote it (with its config source) let the old and the
+// new hooks allow calls while the gateway was down. The refresh writes open
+// only for an explicit open, from a loaded config or from a 0.8.x document
+// alike, and never under action mode.
+func TestRefreshFailModesClosesACursorOpenNobodyChose(t *testing.T) {
 	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n"
 	const v7 = "config_version: 7\nguardrail:\n"
 	for _, test := range []struct {
 		name, config, read, want string
 	}{
-		{"1.0.x observe, default tier", v9 + "  mode: observe\n", "loaded", "open"},
-		{"1.0.x action, default tier, cursor closed", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: closed\n", "loaded", "open"},
-		{"1.0.x action, strict tier", v9 + "  mode: action\n  rule_pack: strict\n", "loaded", "closed"},
+		{"1.0.x observe, unset", v9 + "  mode: observe\n", "loaded", "closed"},
+		{"1.0.x observe, cursor open", v9 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "loaded", "closed"},
+		{"1.0.x action, cursor open", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "loaded", "closed"},
 		{"0.8.x observe, unset", v7 + "  mode: observe\n", "document", "closed"},
 		{"0.8.x observe, cursor open", v7 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "closed"},
 		{"0.8.x action, cursor open", v7 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "closed"},
@@ -192,8 +190,8 @@ func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
 			if got := oldHookFailMode(t, home, "cursor"); got != test.want {
 				t.Fatalf("the old cursor hook reads %q, want %q", got, test.want)
 			}
-			if got := buildHookOptions("cursor", "beforeShellExecution", "", ""); got.FailMode != "closed" || got.OutageFailMode != test.want {
-				t.Fatalf("the new cursor hook fails %q, outage %q, want closed and %q", got.FailMode, got.OutageFailMode, test.want)
+			if got := buildHookOptions("cursor", "beforeShellExecution", "", "").FailMode; got != test.want {
+				t.Fatalf("the new cursor hook fails %q, want %q", got, test.want)
 			}
 		})
 	}
@@ -342,9 +340,9 @@ func TestRefreshFailModesHoldsUntilTheGatewayExits(t *testing.T) {
 func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testing.T) {
 	previous := refreshFailModesClosed
 	t.Cleanup(func() { refreshFailModesClosed = previous })
-	for _, test := range []struct{ name, doc, tier string }{
-		{"loaded config, default tier", "config_version: 9\nguardrail:\n  mode: action\n  hook_fail_mode: open\n", "open"},
-		{"0.8.x document open", "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n", "closed"},
+	for _, test := range []struct{ name, doc string }{
+		{"loaded config open", "config_version: 9\nguardrail:\n  mode: action\n  hook_fail_mode: open\n"},
+		{"0.8.x document open", "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -355,10 +353,8 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","claudecode":"open"}}`)
 			refreshFailModesClosed = false
 			runRefreshFailModesForTest(t, home)
-			// Without --closed the refresh writes the policy tier's outage
-			// mode (oss-outage-open); an unloadable 0.8.x document is closed.
-			if got := oldHookFailMode(t, home, "codex"); got != test.tier {
-				t.Fatalf("per-user refresh wrote %q, want the tier's %q", got, test.tier)
+			if got := oldHookFailMode(t, home, "codex"); got != "closed" {
+				t.Fatalf("per-user refresh left an old open in place: %q", got)
 			}
 			refreshFailModesClosed = true
 			if result := runRefreshFailModesForTest(t, home); !reflect.DeepEqual(result.Refreshed, []string{"claudecode", "codex"}) {
@@ -390,112 +386,4 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 			t.Fatalf("managed sidecar rewritten: %s", got)
 		}
 	})
-}
-
-// GAP-1001: the installers run the refresh while they hold the data
-// directory. The hooks of 0.8.10 to 1.0.3 never read .install.lock, so an
-// open the config sets let a call run while the gateway was down for the
-// swap. With the lock held every hook is closed, the config's open included,
-// in the sidecar the old native hooks read and in the open an old script
-// bakes; the hold refreshes the same way. Without the lock the operator's
-// open stays open (control). The lock in DEFENSECLAW_HOME counts too, for
-// a refresh whose --data-dir names the gateway's data_dir.
-func TestRefreshFailModesClosesEveryHookWhileAnInstallHoldsTheDataDirectory(t *testing.T) {
-	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"
-	const v7 = "config_version: 7\nguardrail:\n  mode: observe\n  hook_fail_mode: open\n"
-	released, err := os.ReadFile(filepath.Join("..", "gateway", "connector", "testdata", "released-hooks", "1.0.3", "copilot-hook.sh"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(released, []byte(`FAIL_MODE="open"`)) {
-		t.Fatal("precondition: the released 1.0.3 Copilot hook bakes no open")
-	}
-	for _, test := range []struct {
-		name, config, read string
-		lock               string // "", "data" or "home"
-		hold               bool
-		want               string
-	}{
-		{name: "1.0.x config open, install", config: v9, read: "install", lock: "data", want: "closed"},
-		{name: "0.8.x config open, install", config: v7, read: "install", lock: "data", want: "closed"},
-		{name: "config open, install in DEFENSECLAW_HOME", config: v9, read: "install", lock: "home", want: "closed"},
-		{name: "config open, install, hold", config: v9, read: "install", lock: "data", hold: true, want: "closed"},
-		// Outside an install the runtime record holds the per-user outage mode,
-		// which follows the policy tier (owner decision 2026-10-23: default
-		// tier open); the open a released script baked is closed (TGT-0115).
-		{name: "config open, no install", config: v9, read: "loaded", want: "open"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			home := t.TempDir()
-			dataDir := home
-			if test.lock == "home" {
-				dataDir = t.TempDir()
-			}
-			isolateHookEnvForTest(t, home)
-			if err := os.WriteFile(filepath.Join(home, "config.yaml"), []byte(test.config), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			writeHookSidecarForTest(t, dataDir, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","copilot":"open"},"fail_mode_sources":{"codex":"config","copilot":"config"}}`)
-			script := filepath.Join(dataDir, "hooks", "copilot-hook.sh")
-			if err := os.WriteFile(script, released, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			switch test.lock {
-			case "data":
-				if err := os.Mkdir(filepath.Join(dataDir, ".install.lock"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			case "home":
-				if err := os.Mkdir(filepath.Join(home, ".install.lock"), 0o700); err != nil {
-					t.Fatal(err)
-				}
-			}
-			if test.hold {
-				runRefreshFailModesHoldForTest(t, dataDir)
-			} else if result := runRefreshFailModesForTest(t, dataDir); result.Config != test.read {
-				t.Fatalf("refresh %+v, want config %q", result, test.read)
-			}
-			for _, name := range []string{"codex", "copilot"} {
-				if got := oldHookFailMode(t, dataDir, name); got != test.want {
-					t.Fatalf("the old %s hook reads %q, want %q", name, got, test.want)
-				}
-			}
-			body, err := os.ReadFile(script)
-			if err != nil {
-				t.Fatal(err)
-			}
-			// A per-user script bakes closed in every tier (TGT-0115).
-			if bytes.Contains(body, []byte(`FAIL_MODE="open"`)) {
-				t.Fatal("the released Copilot hook still bakes open")
-			}
-		})
-	}
-}
-
-// runRefreshFailModesHoldForTest runs the refresh with --hold-until-exit for
-// a gateway that has already exited, as an installer does for a gateway
-// that stops at once.
-func runRefreshFailModesHoldForTest(t *testing.T, dataDir string) {
-	t.Helper()
-	gateway := exec.Command(os.Args[0], "-test.run=^$")
-	if err := gateway.Run(); err != nil {
-		t.Fatal(err)
-	}
-	previousCfg, previousDir, previousJSON := cfg, connectorFlagDataDir, connectorFlagJSON
-	previousPID, previousTimeout := refreshFailModesHoldPID, refreshFailModesHoldTimeout
-	t.Cleanup(func() {
-		cfg, connectorFlagDataDir, connectorFlagJSON = previousCfg, previousDir, previousJSON
-		refreshFailModesHoldPID, refreshFailModesHoldTimeout = previousPID, previousTimeout
-		connectorRefreshFailModesCmd.SetOut(nil)
-	})
-	connectorFlagDataDir, connectorFlagJSON = dataDir, false
-	refreshFailModesHoldPID, refreshFailModesHoldTimeout = gateway.Process.Pid, time.Minute
-	var out bytes.Buffer
-	connectorRefreshFailModesCmd.SetOut(&out)
-	if err := runConnectorRefreshFailModes(connectorRefreshFailModesCmd, nil); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "Hook fail modes closed for the install until the gateway starts: ") {
-		t.Fatalf("hold output %q names no install close", out.String())
-	}
 }

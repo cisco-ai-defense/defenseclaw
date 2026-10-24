@@ -604,8 +604,7 @@ func (p *GuardrailProxy) withProxyAgent(r *http.Request) *http.Request {
 			sharedAgentIdentities.observe(facts, "", false)
 		}
 	}
-	// The proxy decides by the inspect mode.
-	return r.WithContext(withGuardrailProfile(withProfilePath(ctx, profilePathInspect), set, connectorName))
+	return r.WithContext(withGuardrailProfile(ctx, set, connectorName))
 }
 
 // profileModeFor applies the request's identity-based guardrail profile to

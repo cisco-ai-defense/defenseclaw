@@ -255,28 +255,26 @@ func TestClientForConfig(t *testing.T) {
 // Ready works across daemon versions: a daemon of DefenseClaw 1.0.3 or
 // older decodes POST ready as an empty object and refuses any field, so the
 // client sends the harness first and, on that refusal only, the empty
-// object it takes. A current daemon gets the harness once, a ready that
-// names no agent is sent once anywhere, and any other refusal is the answer.
+// object it takes. A current daemon gets the harness once, and any other
+// refusal is the answer.
 func TestReadyAcrossDaemonVersions(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		harness string
-		strict  bool
-		refuse  string
-		want    []string
-		ok      bool
+		name   string
+		strict bool
+		refuse string
+		want   []string
+		ok     bool
 	}{
-		{name: "1.0.3 daemon", harness: "codex", strict: true, want: []string{`{"harness":"codex"}`, `{}`}, ok: true},
-		{name: "current daemon", harness: "codex", want: []string{`{"harness":"codex"}`}, ok: true},
-		{name: "no agent named", strict: true, want: []string{`{}`}, ok: true},
-		{name: "current daemon refuses the agent", harness: "codex", refuse: "a supported sandbox harness is required to ready OpenShell",
+		{name: "1.0.3 daemon", strict: true, want: []string{`{"harness":"codex"}`, `{}`}, ok: true},
+		{name: "current daemon", want: []string{`{"harness":"codex"}`}, ok: true},
+		{name: "current daemon refuses the agent", refuse: "a supported sandbox harness is required to ready OpenShell",
 			want: []string{`{"harness":"codex"}`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var bodies []string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				raw, _ := io.ReadAll(r.Body)
-				bodies = append(bodies, strings.TrimSpace(string(raw)))
+				bodies = append(bodies, string(raw))
 				fail := func(e *Error) {
 					w.Header().Set("Content-Type", "application/json")
 					w.WriteHeader(e.HTTPStatus())
@@ -300,7 +298,7 @@ func TestReadyAcrossDaemonVersions(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(Status{Enabled: true, Available: true})
 			}))
 			defer srv.Close()
-			st, err := NewClient(srv.URL, "t").Ready(context.Background(), ReadyRequest{Harness: tc.harness})
+			st, err := NewClient(srv.URL, "t").Ready(context.Background(), ReadyRequest{Harness: "codex"})
 			if tc.ok != (err == nil) || (err == nil && (st == nil || !st.Available)) {
 				t.Fatalf("Ready = %+v, %v", st, err)
 			}

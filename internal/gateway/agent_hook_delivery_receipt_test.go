@@ -41,12 +41,8 @@ type managedHookAuditFixture struct {
 // managed gateway with its audit store and hook_decision records. wrap, when
 // set, wraps the hook's response writer.
 func newManagedHookAuditFixture(t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter) managedHookAuditFixture {
-	return newManagedHookAuditFixtureFor(t, "claudecode", wrap)
-}
-
-func newManagedHookAuditFixtureFor(t *testing.T, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter) managedHookAuditFixture {
 	t.Helper()
-	return newManagedHookAuditFixtureForCollectingNo(t, connectorName, wrap)
+	return newManagedHookAuditFixtureCollectingNo(t, wrap)
 }
 
 // newManagedHookAuditFixtureCollectingNo is newManagedHookAuditFixture with
@@ -55,32 +51,17 @@ func newManagedHookAuditFixtureCollectingNo(
 	t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter, off ...observability.Bucket,
 ) managedHookAuditFixture {
 	t.Helper()
-	return newManagedHookAuditFixtureForExportingTo(t, "claudecode", wrap, nil, off...)
+	return newManagedHookAuditFixtureExportingTo(t, wrap, nil, off...)
 }
 
-// newManagedHookAuditFixtureExportingTo adds a remote destination to the
-// ordinary Claude fixture.
+// newManagedHookAuditFixtureExportingTo is newManagedHookAuditFixtureCollectingNo
+// whose records are also sent to remote, when set.
 func newManagedHookAuditFixtureExportingTo(
 	t *testing.T, wrap func(http.ResponseWriter) http.ResponseWriter, remote delivery.Adapter, off ...observability.Bucket,
 ) managedHookAuditFixture {
 	t.Helper()
-	return newManagedHookAuditFixtureForExportingTo(t, "claudecode", wrap, remote, off...)
-}
-
-func newManagedHookAuditFixtureForCollectingNo(
-	t *testing.T, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter, off ...observability.Bucket,
-) managedHookAuditFixture {
-	t.Helper()
-	return newManagedHookAuditFixtureForExportingTo(t, connectorName, wrap, nil, off...)
-}
-
-func newManagedHookAuditFixtureForExportingTo(
-	t *testing.T, connectorName string, wrap func(http.ResponseWriter) http.ResponseWriter,
-	remote delivery.Adapter, off ...observability.Bucket,
-) managedHookAuditFixture {
-	t.Helper()
 	installCorrelationHMACForTest()
-	installDefaultProfileConnector(t, connectorName)
+	installDefaultProfileConnector(t, "claudecode")
 	fixture := newSidecarRuntimeFixtureExportingTo(t, nil, remote, off...)
 	fingerprints, err := observabilityredaction.NewEngine(bytes.Repeat([]byte{0x42}, 32))
 	if err != nil {
@@ -91,10 +72,10 @@ func newManagedHookAuditFixtureForExportingTo(
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	cfg.DataDir = filepath.Dir(fixture.path)
 	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = connectorName
+	cfg.Guardrail.Connector = "claudecode"
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 	bindHookLifecycleV8(t, api, fixture.runtime)
-	hook := api.handleUnifiedConnectorHook(connectorName)
+	hook := api.handleUnifiedConnectorHook("claudecode")
 	server := httptest.NewServer(apiBodyLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var rw http.ResponseWriter = &statusWriter{ResponseWriter: w}
 		if wrap != nil {
@@ -206,7 +187,7 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	// A crash after the records but before the journal row was deleted
 	// must not produce a second record of this occurrence on the next
 	// start of the main API.
-	if err := f.store.JournalHookDelivery(t.Context(), entries[0].ID, "the restarted process", entries[0].Occurrence, pendingHookJournalLimits); err != nil {
+	if err := f.store.JournalHookDelivery(t.Context(), entries[0].ID, "the restarted process", entries[0].Occurrence, 1); err != nil {
 		t.Fatal(err)
 	}
 	runAPIUntil(t, f.restartedAPI(t, true), func() bool { return len(pendingEntries(t, f)) == 0 })
@@ -225,46 +206,6 @@ func TestManagedHookConfirmedAnswerSurvivesGatewayExitBeforeFinalization(t *test
 	}
 	if count != 1 {
 		t.Fatalf("connector audit rows after replay = %d, want one", count)
-	}
-}
-
-func TestManagedOpenCodeAuditsItsFinalLocalRefusal(t *testing.T) {
-	f := newManagedHookAuditFixtureFor(t, "opencode", nil)
-	for _, tc := range []struct {
-		name, reason string
-		payload      map[string]interface{}
-	}{
-		{"non_authoritative_arguments", "later plugin argument mutations", map[string]interface{}{"arguments_authoritative": false, "mcp_identity_status": "not_mcp"}},
-		{"ambiguous_mcp_identity", "ambiguous MCP server identity", map[string]interface{}{"arguments_authoritative": true, "mcp_identity_status": "ambiguous"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			req := agentHookRequest{
-				HookEventName: "tool.execute.before", SessionID: "opencode-" + tc.name,
-				ToolName: "bash", ToolArgs: []byte(`{"command":"echo ok"}`), Payload: tc.payload,
-			}
-			resp := f.api.handleAgentHookSynthetic(t.Context(), "opencode", req, []byte(`{"tool_name":"bash","tool_input":{"command":"echo ok"}}`))
-			if resp.Action != "block" || resp.RawAction != "block" || resp.Severity != "HIGH" ||
-				!strings.Contains(resp.SourceReason, tc.reason) {
-				t.Fatalf("final verdict = %+v, want a complete local refusal", resp)
-			}
-			events, err := f.store.ListEvents(100)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, event := range events {
-				if event.Action == string(audit.ActionConnectorHookSynthetic) && event.SessionID == req.SessionID {
-					if !strings.Contains(event.Details, "action=block") ||
-						!strings.Contains(event.Details, "raw_action=block") ||
-						!strings.Contains(event.Details, "severity=HIGH") ||
-						!strings.Contains(event.Details, "mode=action") ||
-						!strings.Contains(event.Details, tc.reason) {
-						t.Fatalf("audit row = %q, want the final refusal fields", event.Details)
-					}
-					return
-				}
-			}
-			t.Fatal("local OpenCode refusal has no audit row")
-		})
 	}
 }
 
@@ -406,7 +347,7 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 		"timeout":           "unconfirmed/no_answer",
 		"delivered":         "allow",
 		"rejected":          "block/rejected",
-		"disconnected":      "unconfirmed/no_answer",
+		"disconnected":      "block/no_answer",
 		"legacy-no-receipt": "unconfirmed/no_answer",
 		"prompt":            "allow",
 		"open-timeout":      "unconfirmed/no_answer",
@@ -419,7 +360,7 @@ func TestManagedHookAuditWaitsForTheAnswerActuallyGiven(t *testing.T) {
 	}
 	// Every call has its hook_decision, an unconfirmed one included: the
 	// hook result stays a technical ok (schema enum ok|panic).
-	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok"}
+	wantDecisions := []string{"allow/ok", "allow/ok", "block/ok", "block/ok", "unconfirmed/ok", "unconfirmed/ok", "unconfirmed/ok"}
 	if got := f.decisions(t); strings.Join(got, ",") != strings.Join(wantDecisions, ",") {
 		t.Errorf("hook_decision records = %v, want %v", got, wantDecisions)
 	}
@@ -542,35 +483,6 @@ func TestManagedHookAndGatewayAuditTheAnswerTheAgentGot(t *testing.T) {
 	}
 }
 
-// GAP-0672: the first benign Hermes pre_tool_call after a gateway start
-// needs the same acknowledged allow as the other managed native hooks.
-func TestManagedHermesFirstBenignCallAuditsAllow(t *testing.T) {
-	f := newManagedHookAuditFixtureFor(t, "hermes", nil)
-	home := t.TempDir()
-	token := "authenticated-generation-token"
-	var stdout, stderr bytes.Buffer
-	const session = "hermes-first-benign"
-	code := hookexec.Run(t.Context(), hookexec.Options{
-		Connector: "hermes", Event: "pre_tool_call", APIAddr: f.server.Listener.Addr().String(),
-		FailMode: "closed", ManagedEnterprise: true, AuthenticatedManagedToken: &token,
-		Home: home, HookDir: filepath.Join(home, "hooks"),
-		Stdin:  strings.NewReader(`{"hook_event_name":"pre_tool_call","session_id":"` + session + `","tool_name":"terminal","tool_input":{"command":"echo ok"}}`),
-		Stdout: &stdout, Stderr: &stderr, HTTPClient: &http.Client{}, StartedAt: time.Now(),
-	})
-	if code != 0 || strings.Contains(stdout.String(), `"block"`) {
-		t.Fatalf("Hermes benign answer code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-	}
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		if got := f.audited(t, session)[session]; got == "allow" {
-			return
-		} else if time.Now().After(deadline) {
-			t.Fatalf("Hermes first benign audit = %q, want allow", got)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-}
-
 // A 103 the gateway sends after the hook's capability wait (a slow peer
 // lookup at handler start) does not turn an answer given in time into a
 // block: the hook takes it, and the audit records the unconfirmed decision,
@@ -667,8 +579,8 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 		{"claudecode", "Stop", true, "allow"},
 		{"codex", "PreToolUse", false, "unconfirmed"},
 		{"copilot", "preToolUse", false, "unconfirmed"},
-		{"opencode", "tool.execute.before", true, "unconfirmed"},
-		{"claudecode", "UserPromptSubmit", true, "unconfirmed"},
+		{"opencode", "tool.execute.before", true, "block"},
+		{"claudecode", "UserPromptSubmit", true, "block"},
 	} {
 		if got := api.unreceiptedHookDecision(tc.hungUp, tc.connector, tc.event, allow).Action; got != tc.want {
 			t.Errorf("%s %s (hung up %v) = %q, want %q", tc.connector, tc.event, tc.hungUp, got, tc.want)
@@ -683,31 +595,6 @@ func TestUnreceiptedManagedHookDecisions(t *testing.T) {
 	}
 }
 
-// A missing receipt across a downgrade or gateway restart does not prove
-// the older hook blocked. In observe mode the hook may have allowed an alert.
-func TestManagedHangupWithoutReceiptDoesNotClaimAnEnforcedBlock(t *testing.T) {
-	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
-	api := &APIServer{scannerCfg: cfg}
-	for _, tc := range []struct {
-		name string
-		resp agentHookResponse
-	}{
-		{"legacy_downgrade", agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action", Severity: "NONE"}},
-		{"observe_restart", agentHookResponse{Action: "allow", RawAction: "block", Mode: "observe", Severity: "HIGH", WouldBlock: true}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, got := range []agentHookResponse{
-				api.unreceiptedHookDecision(true, "claudecode", "PreToolUse", tc.resp),
-				api.deliveredHookDecision("claudecode", tc.resp, ""),
-			} {
-				if got.Action != hookActionUnconfirmed || got.Mode != tc.resp.Mode || got.RawAction != tc.resp.RawAction {
-					t.Fatalf("audit verdict = %+v, want unconfirmed with the evaluated mode and raw action", got)
-				}
-			}
-		})
-	}
-}
-
 func TestManagedHookMissingReceiptRecordsOnlyKnownEnforcement(t *testing.T) {
 	cfg := &config.Config{DeploymentMode: "managed_enterprise", Enterprise: config.EnterpriseConfig{Profile: "standalone"}}
 	api := &APIServer{scannerCfg: cfg}
@@ -716,20 +603,22 @@ func TestManagedHookMissingReceiptRecordsOnlyKnownEnforcement(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		mode    string
+		hungUp  bool
 		offered agentHookResponse
 		receipt string
 		want    string
 	}{
 		{name: "allow without receipt", offered: allow, want: "unconfirmed"},
+		{name: "pre-answer hang-up", hungUp: true, offered: allow, want: "block"},
 		{name: "policy block without receipt", offered: block, want: "block"},
 		{name: "open outage cannot confirm policy block", mode: "open", offered: block, want: "unconfirmed"},
-		{name: "open mode without receipt", mode: "open", offered: allow, want: "unconfirmed"},
+		{name: "open outage before answer", mode: "open", hungUp: true, offered: allow, want: "unconfirmed"},
 		{name: "acknowledged allow", offered: allow, receipt: hookexec.HookDeliveryReceiptAck, want: "allow"},
 		{name: "hook rejected allow", offered: allow, receipt: hookexec.HookDeliveryReceiptBlock, want: "block"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg.Guardrail.HookFailMode = tc.mode
-			got := api.deliveredHookDecision("codex", tc.offered, tc.receipt)
+			got := api.deliveredHookDecision(tc.hungUp, "codex", tc.offered, tc.receipt)
 			if got.Action != tc.want {
 				t.Fatalf("audited action = %q, want %q", got.Action, tc.want)
 			}

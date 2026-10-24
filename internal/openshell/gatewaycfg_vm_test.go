@@ -386,14 +386,12 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 		}
 	}
 	phases := map[string]openshell.SandboxPhase{"dc-a": openshell.PhaseReady, "dc-b": openshell.PhaseStopped, "theirs": openshell.PhaseReady}
-	refused := func(release string) string {
-		return "; OpenShell has not reported these stopped: dc-a (ready): " + openshell.StopWayOn("dc-a", openshell.PhaseReady, "", release) +
-			"; theirs (ready): " + openshell.StopWayOn("theirs", openshell.PhaseReady, "", release) + "; then try again"
-	}
+	const refused = "; OpenShell has not reported these stopped: dc-a (ready): `defenseclaw sandbox stop dc-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-a` (raw OpenShell sandbox); theirs (ready): `defenseclaw sandbox stop theirs` (DefenseClaw sandbox), or `openshell sandbox stop theirs` (raw OpenShell sandbox); then try again"
+
 	for _, release := range []string{openshell.SupportedMin, "0.1.3", "0.1.5-pre.3"} {
 		vm := gateway(t, openshell.DriverVM, release, phases)
 		c := vm.Client(openshell.ClientOptions{})
-		if err := openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused(release)) {
+		if err := openshell.CheckSandboxesStopped(context.Background(), c, noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused) {
 			t.Fatalf("OpenShell %s, ready MicroVMs: %v", release, err)
 		}
 		untouched(t, vm)
@@ -423,7 +421,7 @@ func TestCheckSandboxesStoppedBeforeARestart(t *testing.T) {
 	} {
 		busy := gateway(t, openshell.DriverVM, openshell.SupportedMin, phases)
 		busy.FailNext(openshelltest.MethodGatewayInfo, infoErr)
-		if err := openshell.CheckSandboxesStopped(context.Background(), busy.Client(openshell.ClientOptions{}), noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused(openshell.SupportedMin)) {
+		if err := openshell.CheckSandboxesStopped(context.Background(), busy.Client(openshell.ClientOptions{}), noMicroVMs); !errors.Is(err, openshell.ErrUnflushed) || !strings.HasSuffix(err.Error(), refused) {
 			t.Fatalf("GatewayInfo failed with %v: %v", infoErr, err)
 		}
 		untouched(t, busy)
@@ -501,7 +499,7 @@ func TestARestartChecksTheSandboxesRightBeforeItActs(t *testing.T) {
 	if err := fake.SetPhase(openshell.DefaultWorkspace, "dc-a", openshell.PhaseReady); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "dc-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-a`") || f.brewRestarts() != 0 {
+	if err := f.cfg.Restart(context.Background()); !errors.Is(err, openshell.ErrUnflushed) || !strings.Contains(err.Error(), "dc-a (ready): `defenseclaw sandbox stop dc-a`") || f.brewRestarts() != 0 {
 		t.Fatalf("Restart under a MicroVM started after the consent = %v (restarts %d)", err, f.brewRestarts())
 	}
 	if n := fake.Calls(openshelltest.MethodStopSandbox); n != 0 {

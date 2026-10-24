@@ -34,7 +34,7 @@ func TestKernelBlockNameResolvesDirectoryOnlyUIDAndCachesIt(t *testing.T) {
 	}
 	event := sensor.KernelEvent{UID: &uid}
 	for range 2 {
-		if got := kernelBlockUserNameWithLookup(event, cache.name); got != "directory-user" {
+		if got := kernelBlockUserNameWithLookup(event, cache.name); got != "directory-user@example.test" {
 			t.Fatalf("resolved name = %q", got)
 		}
 	}
@@ -47,7 +47,7 @@ func TestKernelBlockNameResolvesDirectoryOnlyUIDAndCachesIt(t *testing.T) {
 	}
 	now = now.Add(kernelBlockNameCacheTTL)
 	event.User = ""
-	if got := kernelBlockUserNameWithLookup(event, cache.name); got != "directory-user" || lookups != 2 {
+	if got := kernelBlockUserNameWithLookup(event, cache.name); got != "directory-user@example.test" || lookups != 2 {
 		t.Fatalf("refreshed name = %q, lookups = %d", got, lookups)
 	}
 }

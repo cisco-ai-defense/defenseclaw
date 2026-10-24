@@ -78,6 +78,10 @@ func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) (pend
 		l.result.AddWarning(codeBundleInterrupted, fmt.Sprintf(
 			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
 	}
+	if len(report.Pending) > 0 {
+		pending = true
+		l.result.AddWarning(enterprisebundle.WarnBundlePending, "an applied policy bundle remains pending because its confirmation prerequisite is unavailable")
+	}
 	for _, rc := range report.Unconfirmed {
 		if l.settleUnconfirmedBundle(ctx, store, record, rc) {
 			pending = true

@@ -230,12 +230,10 @@ func TestHermesHookContractResolvesReleasesAndReleaseDates(t *testing.T) {
 		{version: "2026.7.7"},
 		{version: "2026.8.29"},
 		{version: "vunknown"},
-		// GAP-0978: a warning on the host, not a refusal (1.0.4 review).
 		{version: "0.19.0", contract: "hermes-hooks-v1"},
 		{version: "2026.7.20", contract: "hermes-hooks-v1"},
 		{version: "2026.8.27", contract: "hermes-hooks-v1"},
 		{version: "2026.8.31", contract: "hermes-hooks-v2"},
-		{version: "2026.9.7", contract: "hermes-hooks-v2"},
 		{version: "2026.9.24", contract: "hermes-hooks-v2"},
 		{version: "0.21.5+4977.g12e4d3e", contract: "hermes-hooks-v2"},
 		{version: "2026.10.2", contract: "hermes-hooks-v2", untested: true},
@@ -491,20 +489,16 @@ func TestHermesHookContractV019V020ClassifiesAllValidEventsWithoutInventingBlock
 	if got := ResolveHookContract("hermes", "0.18.99").Status; got != HookCompatibilityUnknown {
 		t.Fatalf("Hermes 0.18 compatibility = %q, want unknown for the v0.19 event contract", got)
 	}
-	// hermes-hooks-v1 is the pinned OpenShell image's contract; on the host
-	// its releases (and 0.21.0) carry the TUI warning (GAP-0978).
-	resolution := ResolveSandboxHookContract("hermes", "0.19.0")
-	if resolution.Status != HookCompatibilityKnown || resolution.Contract.ContractID != "hermes-hooks-v1" {
-		t.Fatalf("sandbox Hermes 0.19 = %+v, want hermes-hooks-v1", resolution)
+	resolution := ResolveHookContract("hermes", "0.19.0")
+	if resolution.Status != HookCompatibilityKnown {
+		t.Fatalf("Hermes 0.19 compatibility = %q, want known", resolution.Status)
 	}
 	contract := resolution.Contract
-	for _, version := range []string{"0.19.0", "Hermes Agent v0.20.0 (2026.8.3)", "0.21.0"} {
-		if got := ResolveHookContract("hermes", version); got.Status != HookCompatibilityKnown || got.Warning == "" {
-			t.Fatalf("host Hermes %s = %+v, want its contract with the TUI warning", version, got)
-		}
+	if got := ResolveHookContract("hermes", "Hermes Agent v0.20.0 (2026.8.3)").Status; got != HookCompatibilityKnown {
+		t.Fatalf("Hermes 0.20 compatibility = %q, want known", got)
 	}
-	if got := ResolveHookContract("hermes", "0.21.1"); got.Status != HookCompatibilityKnown || got.Contract.ContractID != "hermes-hooks-v2" {
-		t.Fatalf("Hermes 0.21.1 = %+v, want hermes-hooks-v2", got)
+	if got := ResolveHookContract("hermes", "0.21.0").Status; got != HookCompatibilityKnown {
+		t.Fatalf("Hermes 0.21 compatibility = %q, want known for hermes-hooks-v2", got)
 	}
 	if got := ResolveHookContract("hermes", "Hermes Agent v0.21.3 (2026.9.14)").Contract.ContractID; got != "hermes-hooks-v2" {
 		t.Fatalf("Hermes 0.21.3 contract = %q, want hermes-hooks-v2", got)
@@ -622,8 +616,6 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 		MaxExclusive string `json:"max_exclusive"`
 		Reason       string `json:"reason"`
 		Issue        string `json:"issue"`
-		HostOnly     bool   `json:"host_only"`
-		WarnOnly     bool   `json:"warn_only"`
 	}
 	type manifestConnector struct {
 		Kind                string                `json:"kind"`
@@ -686,7 +678,7 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 	for name, spec := range gotManifest.Connectors {
 		var wantBroken []manifestKnownBroken
 		for _, entry := range knownBrokenAgentVersions[name] {
-			wantBroken = append(wantBroken, manifestKnownBroken{entry.Exact, entry.Min, entry.Max, entry.Reason, entry.Issue, entry.HostOnly, entry.WarnOnly})
+			wantBroken = append(wantBroken, manifestKnownBroken{entry.Exact, entry.Min, entry.Max, entry.Reason, entry.Issue})
 		}
 		if len(spec.KnownBrokenVersions) != 0 || len(wantBroken) != 0 {
 			if !reflect.DeepEqual(spec.KnownBrokenVersions, wantBroken) {
@@ -1337,14 +1329,14 @@ func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	opts := SetupOpts{
 		DataDir:      dir,
 		APIAddr:      "127.0.0.1:18970",
-		AgentVersion: "Hermes Agent v0.21.5 (2026.9.24)",
+		AgentVersion: "Hermes Agent v0.20.0 (2026.8.3)",
 	}
 	opts = prepareHermesSetupAdmissionFixture(t, opts)
 	if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dir, "hooks"), opts, conn); err != nil {
 		t.Fatalf("write hooks: %v", err)
 	}
 	entry := NewHookContractLockEntry(opts, conn, "test-build")
-	if entry.ContractID != "hermes-hooks-v2" {
+	if entry.ContractID != "hermes-hooks-v1" {
 		t.Fatalf("ContractID=%q", entry.ContractID)
 	}
 	if len(entry.HookScriptDigests) == 0 {
@@ -1374,7 +1366,7 @@ func TestWindowsHermesLockSealsManagedExecutableVersionEvidence(t *testing.T) {
 	entry := NewHookContractLockEntry(opts, NewHermesConnector(), "test-build")
 	if !validSetupSelectedAgentExecutableEvidence(entry, "hermes") ||
 		entry.AgentExecutableSource != "setup-selected" ||
-		entry.NormalizedAgentVersion != "0.21.5" {
+		entry.NormalizedAgentVersion != "0.20.0" {
 		t.Fatalf("Hermes protected lock evidence = %+v", entry)
 	}
 	if err := SaveFreshHookContractLockEntry(dir, entry); err != nil {
@@ -2470,8 +2462,8 @@ func TestSetupSelectionReceiptCarriesProtectedAgentsForGatewayConsumption(t *tes
 				Connector:         "hermes",
 				Source:            "setup-selected",
 				Executable:        filepath.Join(dir, "hermes.exe"),
-				RawVersion:        "Hermes Agent v0.21.5",
-				NormalizedVersion: "0.21.5",
+				RawVersion:        "Hermes Agent v0.20.0",
+				NormalizedVersion: "0.20.0",
 				SHA256:            strings.Repeat("b", 64),
 				SelectedAt:        now.Format(time.RFC3339),
 				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),

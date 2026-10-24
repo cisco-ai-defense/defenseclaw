@@ -210,10 +210,11 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/request", auditAction, "pre-request", auditDetails))
 
+	reveal := wantsReveal(r)
 	if managedAIDOnly {
 		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	}
-	a.writeInspectVerdict(w, r, "/api/v1/inspect/request", "pre-request", verdict)
+	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
 // handleInspectResponse inspects LLM response content after it is returned.
@@ -293,10 +294,11 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	auditDetails = appendHookEvaluationDetails(auditDetails, evalCtx)
 	_ = a.logger.LogEventCtx(r.Context(), a.inspectAuditEvent(r, "/api/v1/inspect/response", auditAction, "post-response", auditDetails))
 
+	reveal := wantsReveal(r)
 	if managedAIDOnly {
 		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	}
-	a.writeInspectVerdict(w, r, "/api/v1/inspect/response", "post-response", verdict)
+	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
 // handleInspectToolResponse inspects tool execution output before it is fed back to the LLM.
@@ -411,10 +413,11 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		a.alertSensitiveToolResult(r, req.Tool, outputStr, verdict)
 	}
 
+	reveal := wantsReveal(r)
 	if managedAIDOnly {
 		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	}
-	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool-response", req.Tool, verdict)
+	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
 // alertSensitiveToolResult raises tool-result-pii-alert for a tool result on

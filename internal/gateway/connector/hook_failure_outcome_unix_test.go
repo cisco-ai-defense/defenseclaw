@@ -137,16 +137,20 @@ func TestShellHookFailureRecordsNameTheOutcomeTheHookApplied(t *testing.T) {
 						t.Fatalf("blocked=%v but the record says %q: %+v\n%s", blocked, last["outcome"], last, output)
 					}
 					// The per-user outage outcome and the strict availability
-					// column of the gateway outage table (HookOutage). The
-					// per-user outage mode is the record this render wrote.
+					// column of the gateway outage table (HookOutage). The run
+					// sets no guardrail mode, so a hook that follows it is in
+					// observe mode and lets the call run.
 					outage := ConnectorHookOutage(run.conn)
 					perUser := outage.PerUserOpen
-					if mode == "closed" || strings.HasPrefix(run.invoke.script, "inspect-") {
-						// The shared inspect-* scripts close a per-user
-						// outage in every tier (defenseclaw_per_user_outage_open).
+					if mode == "closed" {
 						perUser = outage.PerUserClosed
 					}
-
+					if perUser == OutageFollowsGuardrailMode {
+						// Cursor: the run sets no guardrail mode, and the
+						// train renders such a hook in its closed (action)
+						// posture, so the outage blocks.
+						perUser = OutageBlocks
+					}
 					switch scenario {
 					case "outage":
 						if want := perUser == OutageBlocks; blocked != want {

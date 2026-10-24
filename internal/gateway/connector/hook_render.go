@@ -33,15 +33,9 @@ const derivedHookHeader = "# defenseclaw-derived:"
 
 // derivedHookLine is the header line for a connector script rendered from data.
 func derivedHookLine(data templateData) string {
-	// A per-user script bakes closed for every failure; the mode its config
-	// chose is its outage mode (OutageFailMode), which doctor compares.
-	mode := data.FailMode
-	if data.OutageFailMode != "" {
-		mode = data.OutageFailMode
-	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("defenseclaw-hook-render-v1\nconnector=%s\nfail_mode=%s\napi_addr=%s\n",
-		data.ConnectorName, mode, data.APIAddr)))
-	return fmt.Sprintf("%s sha256=%s fail_mode=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]), mode)
+		data.ConnectorName, data.FailMode, data.APIAddr)))
+	return fmt.Sprintf("%s sha256=%s fail_mode=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]), data.FailMode)
 }
 
 // withDerivedHeader inserts the derived-from line after the shebang and the

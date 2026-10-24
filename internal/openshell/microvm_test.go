@@ -444,7 +444,6 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 	release := func(t *testing.T) (*doctorFixture, string) {
 		f := newDoctorFixture(t)
 		f.onMicroVMs()
-		f.contactedGatewayPID(7976)
 		f.doctor.Gateway.BrewFormulaInstalled = func() bool { return false }
 		_ = os.Remove(f.vmDriverPath())
 		prefix := filepath.Join(f.home, "openshell-direct", "prefix")
@@ -517,7 +516,6 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		touchExecutable(t, driver)
 		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", " 7976  7974   501 "+filepath.Join(f.brew, "Cellar", "openshell", "0.1.1", "bin", "openshell-gateway")+"\n"+
 			" 7989  7976   501 "+driver+"\n", nil)
-		f.contactedGatewayPID(7976)
 		f.runner.On(codesign, "code object is not signed at all", errors.New("exit status 1"))
 		r := f.run()
 		c := expectCheck(t, r, openshell.CheckIDVMDriver, fail, driver+" is not signed for Apple's Hypervisor")
@@ -525,11 +523,10 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 			t.Fatalf("driver fix = %+v, microvm %+v", c.Fix, r.MicroVM)
 		}
 	})
-	// The driver in the libexec beside the registered gateway's bin is
-	// found even when that gateway is on PATH.
+	// The driver next to the openshell-gateway on PATH, in the libexec
+	// beside its bin, is found without asking ps.
 	t.Run("on PATH", func(t *testing.T) {
 		f, prefix := release(t)
-		f.runner.On("ps -axww -o pid=,ppid=,uid=,comm=", ps(prefix), nil)
 		lookPath := f.doctor.LookPath
 		f.doctor.LookPath = func(name string) (string, error) {
 			if name == "openshell-gateway" {
@@ -539,8 +536,7 @@ func TestDoctorOnReleaseBinaries(t *testing.T) {
 		}
 		r := f.run()
 		expectCheck(t, r, openshell.CheckIDVMDriver, pass, filepath.Join(prefix, "libexec", "openshell-driver-vm")+" signed for Apple's Hypervisor")
-		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, filepath.Join(prefix, "bin", "openshell-gateway")+
-			" (process 7976) was started by hand"), restartYourself)
+		wantUnmanagedFix(t, expectCheck(t, r, openshell.CheckIDGatewayService, warn, "the gateway answers, but not Homebrew's nvidia/openshell/openshell service runs it (DefenseClaw could not tell what does)"), restartYourself)
 	})
 	// ps lists nothing: the answering gateway still runs the driver.
 	t.Run("driver not found", func(t *testing.T) {

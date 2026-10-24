@@ -225,20 +225,6 @@ func (l *lifecycle) requireProtectedTargets(code int) int {
 	return code
 }
 
-// requireProtectedTargetsOnChange is requireProtectedTargets for a run that
-// ends before its action does anything: an empty bundle inbox, a bundle
-// mode refusal, or a queued apply run that stands down. Such an ensure
-// (or install, upgrade, repair) exited 0 while describe reported an
-// enrolled target unprotected (GAP-0985). Other actions return code as it
-// is.
-func (l *lifecycle) requireProtectedTargetsOnChange(code int) int {
-	switch l.opts.Action {
-	case ActionInstall, ActionUpgrade, ActionRepair, ActionEnsure:
-		return l.requireProtectedTargets(code)
-	}
-	return code
-}
-
 // codeAgentSettingsNotRestored names an account whose agent config the
 // guardian had to recreate or put back from a copy (GAP-0564): the hooks are
 // in place, but the account's own settings are missing or older.

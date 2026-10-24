@@ -64,11 +64,8 @@ func TestPlanSandboxOpenShellExecDockerFallback(t *testing.T) {
 	openShellExecHome = func() (string, error) { return home, nil }
 	openShellExecTrustedFile = func(string, string) error { return nil }
 	kvm, accountFallback, probes := false, "docker", 0
-	openShellExecVMProbe = func(_, _, gatewayExecutable string) openshell.VMProbeResult {
+	openShellExecVMProbe = func(string, string) openshell.VMProbeResult {
 		probes++
-		if want := filepath.Join(home, ".local", "bin", openshell.GatewayBinary); gatewayExecutable != want {
-			t.Fatalf("fallback probed sibling of %q, want planned gateway %q", gatewayExecutable, want)
-		}
 		if kvm {
 			return openshell.VMProbeResult{OK: true}
 		}

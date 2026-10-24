@@ -159,23 +159,20 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_per_connector_override_wins(self):
         g = self._cfg()
         self.assertEqual(g.effective_mode("codex"), "action")
-        # Its permissive pack is the outage-open tier (oss-outage-open).
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         self.assertEqual(g.effective_block_message("codex"), "codex-msg")
         self.assertEqual(g.effective_rule_pack("codex"), "permissive")
         self.assertTrue(g.effective_hilt("codex").enabled)
         self.assertEqual(g.effective_hilt("codex").min_severity, "LOW")
 
-    def test_cursor_outage_mode_follows_the_tier_in_every_guardrail_mode(self):
+    def test_cursor_fail_mode_stays_closed_despite_stored_open(self):
         g = GuardrailConfig(
             mode="observe",
-            hook_fail_mode="closed",
-            connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="closed")},
+            hook_fail_mode="open",
+            connectors={"cursor": PerConnectorGuardrailConfig(hook_fail_mode="open")},
         )
-        self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
         g.connectors["cursor"].mode = "action"
-        self.assertEqual(g.effective_hook_fail_mode("cursor"), "open")
-        g.connectors["cursor"].rule_pack = "strict"
         self.assertEqual(g.effective_hook_fail_mode("cursor"), "closed")
 
     def test_empty_block_inherits_global(self):
@@ -220,9 +217,9 @@ class TestEffectiveResolvers(unittest.TestCase):
     def test_safe_fallbacks_when_unset(self):
         g = GuardrailConfig(mode="", hook_fail_mode="")
         self.assertEqual(g.effective_mode(""), "observe")
-        # A per-user outage mode follows the policy tier: the default tier is
-        # open (mirrors Go EffectiveHookOutageFailModeForConnector).
-        self.assertEqual(g.effective_hook_fail_mode(""), "open")
+        # Outside Secure Client a fail mode that is not set is closed, in
+        # observe mode too (mirrors Go EffectiveHookFailModeForConnector).
+        self.assertEqual(g.effective_hook_fail_mode(""), "closed")
         # Under Secure Client an unset fail mode is open (#1163).
         g._secure_client = True
         self.assertEqual(g.effective_hook_fail_mode(""), "open")
@@ -239,12 +236,12 @@ class TestEffectiveResolvers(unittest.TestCase):
                 "claudecode": PerConnectorGuardrailConfig(),
             },
         )
-        # A per-user outage mode follows the default tier, whatever is saved.
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
-        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
+        # A per-user hook stays closed in observe mode.
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
         g.hook_fail_mode = "open"
-        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "open")
-        self.assertEqual(g.effective_hook_fail_mode("codex"), "open")
+        self.assertEqual(g.effective_hook_fail_mode("claudecode"), "closed")
+        self.assertEqual(g.effective_hook_fail_mode("codex"), "closed")
         # Under Secure Client an explicit value wins too: the global closed
         # closes a connector without its own value, and an unset global is
         # open (#1163).
@@ -331,11 +328,10 @@ class TestEffectiveResolvers(unittest.TestCase):
                 )
 
     def test_non_secure_client_keeps_fail_closed_default(self):
-        # The standalone enterprise profile keeps its fail-closed default and
-        # the administrator's explicit automatic-protection open wins (owner
-        # decision 2026-10-20). OSS follows its policy tier: the default tier
-        # is open for an outage and an overlay does not change it (owner
-        # decision 2026-10-23).
+        # OSS and the standalone enterprise profile keep main's fail-closed
+        # default: unset resolves closed in action mode. On the standalone
+        # profile the administrator's explicit automatic-protection open wins
+        # (owner decision 2026-10-20).
         oss = "guardrail: {mode: action}\n"
         standalone = (
             "config_version: 8\ndeployment_mode: managed_enterprise\n"
@@ -343,8 +339,8 @@ class TestEffectiveResolvers(unittest.TestCase):
         )
         overlay = "application_protection: {enabled: true, guardrail: {hook_fail_mode: open}}\n"
         for doc, extra, expected in (
-            (oss, "", "open"),
-            (oss, overlay, "open"),
+            (oss, "", "closed"),
+            (oss, overlay, "closed"),
             (standalone, "", "closed"),
             (standalone, overlay, "open"),
         ):

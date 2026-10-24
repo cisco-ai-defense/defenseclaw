@@ -164,6 +164,10 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 		return openShellExecPlan{}, err
 	}
 	settings := openShellExecSettings(ctx)
+	if goos == "linux" {
+		configPath = openShellExecConfigFor(configPath, home, settings.DriverFallback)
+		configPath = openShellExecBridgeFor(configPath, home)
+	}
 	install := settings.Install
 	if install == "" {
 		// The managed gateway did not answer: an account with an OpenShell
@@ -171,6 +175,11 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 		install = config.EnterpriseOpenShellInstallPrerequisite
 		if ownFileOnly(filepath.Join(home, ".local", "bin", openshell.GatewayBinary)) == nil {
 			install = config.EnterpriseOpenShellInstallSetup
+		}
+	}
+	if goos == "linux" && install == config.EnterpriseOpenShellInstallPrerequisite {
+		if err := openShellExecVMDriver(configPath, goos); err != nil {
+			return openShellExecPlan{}, fmt.Errorf("%w: %v (an administrator refreshes it with `enterprise linux ensure`)", errOpenShellPrerequisiteMissing, err)
 		}
 	}
 	var binary, binDir string
@@ -191,15 +200,6 @@ func planSandboxOpenShellExec(ctx context.Context, goos string, args []string) (
 				errOpenShellPrerequisiteMissing, err)
 		}
 		binDir = filepath.Dir(binary)
-	}
-	if goos == "linux" {
-		configPath = openShellExecConfigFor(configPath, home, settings.DriverFallback, binary)
-		configPath = openShellExecBridgeFor(configPath, home)
-		if install == config.EnterpriseOpenShellInstallPrerequisite {
-			if err := openShellExecVMDriver(configPath, goos); err != nil {
-				return openShellExecPlan{}, fmt.Errorf("%w: %v (an administrator refreshes it with `enterprise linux ensure`)", errOpenShellPrerequisiteMissing, err)
-			}
-		}
 	}
 	path := []string{binDir}
 	for _, dir := range []string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"} {
@@ -363,7 +363,7 @@ func openShellE2fsprogs(adminDir, home string) (string, error) {
 // the managed gateway did not answer) and its own KVM probe fails now. The
 // gateway restarts only while none of the account's sandboxes runs, so a
 // running sandbox never switches driver.
-func openShellExecConfigFor(configPath, home, fallback, gatewayExecutable string) string {
+func openShellExecConfigFor(configPath, home, fallback string) string {
 	if fallback != config.EnterpriseOpenShellFallbackDocker {
 		// none, or no answer: the MicroVM configuration, and the daemon
 		// refuses the sandbox with the reason.
@@ -373,7 +373,7 @@ func openShellExecConfigFor(configPath, home, fallback, gatewayExecutable string
 	if _, err := os.Lstat(fallbackPath); err != nil || openShellExecTrustedFile(fallbackPath, "OpenShell docker fallback configuration") != nil {
 		return configPath
 	}
-	if openShellExecVMProbe(home, configPath, gatewayExecutable).OK {
+	if openShellExecVMProbe(home, configPath).OK {
 		return configPath
 	}
 	return fallbackPath
@@ -481,17 +481,16 @@ var openShellExecDefaultNamespaceSandboxIDs = func() (map[string]bool, error) {
 
 // sandboxOpenShellVMProbe is the account's MicroVM probe as the user: CPU
 // flags, /dev/kvm read-write, and openshell-driver-vm in the rendered
-// driver_dir when set, or in the user's and system directories otherwise,
-// followed by the sibling of the executable this launcher will start. This works even
-// while the gateway is down before its first start.
-func sandboxOpenShellVMProbe(home, configPath, gatewayExecutable string) openshell.VMProbeResult {
+// driver_dir when set, or in the user's and system directories otherwise.
+// The probe does not locate the running gateway's sibling fallback.
+func sandboxOpenShellVMProbe(home, configPath string) openshell.VMProbeResult {
 	dir := ""
 	if data, err := os.ReadFile(configPath); err == nil {
 		if rendered, err := openshell.ParseRenderedGateway(data, nil); err == nil {
 			dir = rendered.DriverDir
 		}
 	}
-	return openshell.VMProbe{DriverDirs: openshell.UserVMDriverDirs(home, dir, gatewayExecutable)}.Run()
+	return openshell.VMProbe{DriverDirs: openshell.UserVMDriverDirs(home, dir)}.Run()
 }
 
 // sandboxOpenShellAdminSettings asks the managed gateway for

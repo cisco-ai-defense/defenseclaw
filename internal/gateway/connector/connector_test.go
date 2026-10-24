@@ -10019,12 +10019,10 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 		}{
 			{"closed", "open", true},
 			{"closed", "OPEN", true},
-			// Installed outage open (the default and permissive tiers): the
-			// environment cannot close it either; the outage runs the call.
-			{"open", "closed", false},
-			{"open", "Closed", false},
-			{"open", " CLOSED ", false},
-			{"open", "", false},
+			{"open", "closed", true},
+			{"open", "Closed", true},
+			{"open", " CLOSED ", true},
+			{"open", "", true},
 			{"closed", "", true},
 		} {
 			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
@@ -10104,21 +10102,21 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 		},
 		{
 			name:         "cursor_observe_with_an_inherited_closed_closes_outages",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "closed"},
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "closed", ConfiguredHookFailMode: "closed"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
 			wantFailMode: "closed",
 		},
 		{
 			name:         "cursor_observe_legacy_open_closes",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "open"},
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
 			wantFailMode: "closed",
 		},
 		{
 			name:         "cursor_action_closes_an_explicit_open",
-			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "action", HookFailMode: "closed"},
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "action", HookFailMode: "closed", ConfiguredHookFailMode: "open"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
 			wantFailMode: "closed",

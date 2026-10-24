@@ -180,20 +180,14 @@ func (l *Logger) logActivityImpl(in ActivityInput) error {
 
 // spooledChange reads what an offer of a spooled occurrence needs: its pin
 // and the stored row. A pin that does not read is an error (no sink gets
-// the offer). A store that cannot say whether it holds the row is not, for
-// a pinned change and for a change's first offer: the offer skips the
-// store (lookupErr) and still goes to the remote destinations. A change
-// without a pin that an earlier offer may have sent (not its FirstOffer) is
-// an error while the store cannot answer: its row may hold the record that
-// offer sent, so no sink gets another record under its id. A row whose pin
-// is gone pins the record the row holds: its provenance and the digest
-// stored with it. A row without a digest cannot say which record it holds,
-// so its change is not offered again.
+// the offer); a store that cannot say whether it holds the row is not: the
+// offer skips it (lookupErr) and still goes to the remote destinations. A
+// row whose pin is gone pins the record the row holds.
 func (l *Logger) spooledChange(ctx context.Context, in ActivityInput) (*spooledChange, error) {
 	if in.Pins == nil {
 		return nil, fmt.Errorf("audit: spooled occurrence %s has no record pins", in.OccurrenceID)
 	}
-	change := &spooledChange{pins: in.Pins, key: in.PinKey, id: in.OccurrenceID}
+	change := &spooledChange{pins: in.Pins, key: in.PinKey}
 	var err error
 	if change.pin, change.pinned, err = in.Pins.load(in.PinKey); err != nil {
 		return nil, err
@@ -201,10 +195,6 @@ func (l *Logger) spooledChange(ctx context.Context, in ActivityInput) (*spooledC
 	row, stored, lookupErr := l.store.storedChangeRow(ctx, in.OccurrenceID)
 	switch {
 	case lookupErr != nil:
-		if !change.pinned && (in.ConfigChange == nil || !in.ConfigChange.FirstOffer) {
-			return nil, fmt.Errorf("audit: change %s has no record pin and the audit store cannot say whether it holds "+
-				"its record, so it is offered once the store answers: %w", in.PinKey, lookupErr)
-		}
 		change.lookupErr = lookupErr
 	case stored:
 		change.row = &row
@@ -231,5 +221,5 @@ func (l *Logger) occurrenceDurable(ctx context.Context, occurrenceID string, loc
 	if localErr != nil {
 		return localErr
 	}
-	return l.store.SyncCommittedWrites(ctx)
+	return l.store.syncCommittedWrites(ctx)
 }

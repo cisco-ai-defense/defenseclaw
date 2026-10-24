@@ -6,7 +6,8 @@
 package cli
 
 import (
-	"bufio"
+	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -48,29 +50,35 @@ const (
 	standaloneRuntimeReasonHookSocketMissing = "enterprise_managed_hook_socket_missing"
 )
 
-// The hook inherits the agent's process context. A managed Linux hook refuses
-// a private user namespace, where it can not verify the gateway's listener,
-// and a traced process. A private mount view is not refused on its own (a
-// pam_namespace login has one). The hook does no policy-view work: the
-// gateway proves the published vendor policy when it changes and alerts off
-// the call path (gateway/managed_policy_view.go). This is an invocation
-// check: an agent that never loads its managed hook still has no invocation
-// to check, which status reports separately.
+// The hook inherits the agent's process context. A managed Linux hook checks
+// its user and mount namespaces against the host's and refuses a traced
+// process. This is an invocation check: an agent that never loads its managed
+// hook still has no invocation to check, which status reports separately.
 var standaloneLinuxHookContext = func() string {
-	return linuxManagedHookContextReason(os.Readlink, openLinuxHookContextFile)
+	return linuxManagedHookContextReason(os.Readlink, readLinuxHookContextFile)
 }
 
-func openLinuxHookContextFile(path string) (io.ReadCloser, error) { return os.Open(path) }
+func readLinuxHookContextFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	// Mount tables can be much larger than status or uid_map. Bound every
+	// read so a replaced proc file cannot consume unbounded memory.
+	maxBytes := int64(16 * 1024)
+	if strings.HasSuffix(path, "/mountinfo") {
+		maxBytes = 4 * 1024 * 1024
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil || int64(len(data)) > maxBytes {
+		return nil, errors.New("cannot read bounded Linux process context")
+	}
+	return data, nil
+}
 
-// linuxHookContextMaxBytes bounds every proc read so a replaced proc file
-// cannot consume unbounded memory. In the host user namespace uid_map is one
-// line. Only the head of status is read: TracerPid is its eighth line, while
-// later lines such as Groups grow with the account (up to 65,536
-// supplementary groups), and a large file must not refuse a valid call.
-const linuxHookContextMaxBytes = 16 * 1024
-
-func linuxManagedHookContextReason(readlink func(string) (string, error), open func(string) (io.ReadCloser, error)) string {
-	uidMap, err := readLinuxHookContextFile(open, "/proc/self/uid_map")
+func linuxManagedHookContextReason(readlink func(string) (string, error), readFile func(string) ([]byte, error)) string {
+	uidMap, err := readFile("/proc/self/uid_map")
 	if err != nil {
 		return hookexec.ManagedProcessContextUnknownReason
 	}
@@ -78,60 +86,69 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), open f
 	if len(fields) != 3 || fields[0] != "0" || fields[1] != "0" || fields[2] != "4294967295" {
 		return hookexec.ManagedUserNamespaceReason
 	}
-	self, err := readlink("/proc/self/ns/user")
-	if err != nil || self == "" {
-		return hookexec.ManagedProcessContextUnknownReason
-	}
-	// SELinux on managed RHEL denies standard users readlink on /proc/1/ns,
-	// even in the host namespaces. An unprivileged private user namespace
-	// can not keep the full host uid map checked above, so that check
-	// stands alone then.
-	if host, err := readlink("/proc/1/ns/user"); err == nil && host != "" && host != self {
-		return hookexec.ManagedUserNamespaceReason
-	}
-	return linuxTracerPidReason(open)
-}
-
-func readLinuxHookContextFile(open func(string) (io.ReadCloser, error), path string) ([]byte, error) {
-	f, err := open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, linuxHookContextMaxBytes+1))
-	if err != nil || len(data) > linuxHookContextMaxBytes {
-		return nil, errors.New("cannot read bounded Linux process context")
-	}
-	return data, nil
-}
-
-// linuxTracerPidReason reads /proc/self/status only up to its first complete
-// TracerPid line. A status with no complete TracerPid line in its first
-// linuxHookContextMaxBytes, or an unparsable one, is unverifiable.
-func linuxTracerPidReason(open func(string) (io.ReadCloser, error)) string {
-	f, err := open("/proc/self/status")
-	if err != nil {
-		return hookexec.ManagedProcessContextUnknownReason
-	}
-	defer f.Close()
-	// Keep read-ahead smaller than the Uid/Gid/FDSize lines between
-	// TracerPid and Groups in the kernel's status format. A default-sized
-	// bufio reader asks proc for 4 KiB at once, making a valid hook wait
-	// for (or fail on) the account's entire Groups line before it can see
-	// TracerPid, even though the parser stops there.
-	head := bufio.NewReaderSize(io.LimitReader(f, linuxHookContextMaxBytes), 16)
-	for {
-		line, err := head.ReadString('\n')
-		if err != nil {
-			// EOF or the bound before a complete TracerPid line: a cut
-			// line is never trusted.
+	for _, kind := range []struct{ name, reason, fallback string }{
+		{"user", hookexec.ManagedUserNamespaceReason, "uid_map"},
+		{"mnt", hookexec.ManagedMountNamespaceReason, "mountinfo"},
+	} {
+		self, selfErr := readlink("/proc/self/ns/" + kind.name)
+		host, hostErr := readlink("/proc/1/ns/" + kind.name)
+		if selfErr != nil || self == "" {
 			return hookexec.ManagedProcessContextUnknownReason
 		}
-		value, ok := strings.CutPrefix(line, "TracerPid:")
-		if !ok {
+		if hostErr != nil {
+			// SELinux on managed RHEL denies standard users readlink on
+			// /proc/1/ns, even in the host namespaces. Compare the proc
+			// views the same users can read. A private mount view differs;
+			// unprivileged private user namespaces cannot retain the full
+			// host uid map checked above.
+			selfView, selfErr := readFile("/proc/self/" + kind.fallback)
+			hostView, hostErr := readFile("/proc/1/" + kind.fallback)
+			if selfErr != nil {
+				return hookexec.ManagedProcessContextUnknownReason
+			}
+			if hostErr != nil {
+				// RHEL can deny /proc/1 even for a host-context user.
+				// The trusted descriptor's policy-content pin is the
+				// invocation proof when that comparison is unavailable.
+				continue
+			}
+			if !bytes.Equal(selfView, hostView) {
+				if kind.fallback != "mountinfo" {
+					return kind.reason
+				}
+				// Mounts can change between the two snapshots. A second
+				// bounded comparison avoids refusing a host-context call for
+				// that brief difference; a stable mismatch stays closed.
+				selfView, selfErr = readFile("/proc/self/mountinfo")
+				hostView, hostErr = readFile("/proc/1/mountinfo")
+				if hostErr != nil {
+					continue
+				}
+				if selfErr != nil {
+					return hookexec.ManagedProcessContextUnknownReason
+				}
+				if !bytes.Equal(selfView, hostView) {
+					return kind.reason
+				}
+			}
 			continue
 		}
-		pid, err := strconv.Atoi(strings.TrimSpace(value))
+		if host == "" {
+			continue
+		}
+		if self != host {
+			return kind.reason
+		}
+	}
+	status, err := readFile("/proc/self/status")
+	if err != nil {
+		return hookexec.ManagedProcessContextUnknownReason
+	}
+	for _, line := range strings.Split(string(status), "\n") {
+		if !strings.HasPrefix(line, "TracerPid:") {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "TracerPid:")))
 		if err != nil || pid < 0 {
 			return hookexec.ManagedProcessContextUnknownReason
 		}
@@ -140,6 +157,7 @@ func linuxTracerPidReason(open func(string) (io.ReadCloser, error)) string {
 		}
 		return ""
 	}
+	return hookexec.ManagedProcessContextUnknownReason
 }
 
 // reportStandaloneHookRefusal tells the gateway, over the hook socket, that
@@ -173,9 +191,32 @@ var reportStandaloneHookRefusal = func(socket string, serviceUID int, connectorN
 
 // Test seams.
 var (
-	standaloneHookGOOS               = runtime.GOOS
-	standaloneRuntimeDescriptorLoad  = managed.LoadRuntimeDescriptor
-	standaloneMachinePolicyOptions   = defaultStandaloneMachinePolicyOptions
+	standaloneHookGOOS              = runtime.GOOS
+	standaloneRuntimeDescriptorLoad = managed.LoadRuntimeDescriptor
+	standaloneMachinePolicyOptions  = defaultStandaloneMachinePolicyOptions
+	standalonePolicyViewDigest      = func(goos, connector string) (string, error) {
+		opts, ok := standaloneMachinePolicyOptions(goos)
+		if !ok {
+			return "", errors.New("standalone machine policy paths are unavailable")
+		}
+		return enterprisepolicy.PolicyViewDigest(opts, connector)
+	}
+	standaloneHookAccount = func() (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		defer cancel()
+		account, err := enterprisehooks.LookupStandaloneUIDBounded(ctx, os.Getuid())
+		if err != nil || account.UID != os.Getuid() || account.Name == "" {
+			return "", errors.New("cannot resolve managed hook account")
+		}
+		return account.Name, nil
+	}
+	standalonePolicyViewUser = func(goos, connector, account string, pin managed.PolicyViewFilePin) error {
+		opts, ok := standaloneMachinePolicyOptions(goos)
+		if !ok {
+			return errors.New("standalone machine policy paths are unavailable")
+		}
+		return enterprisepolicy.VerifyPolicyViewUserPin(opts, connector, account, pin)
+	}
 	standaloneSecureClientInstallDir = "/opt/cisco/secureclient/defenseclaw"
 )
 
@@ -217,15 +258,29 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	if err == nil {
 		loaded, err = standaloneRuntimeDescriptorLoad(layout.DescriptorPath)
 	}
-	// The trusted descriptor is the managed policy this hook enforces; only
-	// a hook with no trusted descriptor at all refuses. The hook reads no
-	// vendor policy file: a view the gateway can not prove still has every
-	// call inspected under that policy, and the gateway raises the alert.
+	viewReason := ""
+	if err == nil && loaded != nil && loaded.HasMachinePolicyConnector(connectorName) {
+		expected := loaded.PolicyViewDigests[connectorName]
+		observed, digestErr := standalonePolicyViewDigest(standaloneHookGOOS, connectorName)
+		if expected == "" || digestErr != nil || observed != expected {
+			viewReason = hookexec.ManagedPolicyViewReason
+		}
+		if viewReason == "" && standaloneHookGOOS == "darwin" &&
+			(connectorName == enterprisepolicy.ConnectorCodex || connectorName == enterprisepolicy.ConnectorClaudeCode) {
+			account, accountErr := standaloneHookAccount()
+			if accountErr != nil || standalonePolicyViewUser(standaloneHookGOOS, connectorName, account,
+				loaded.PolicyViewUserSources[connectorName][account]) != nil {
+				viewReason = hookexec.ManagedPolicyViewReason
+			}
+		}
+	}
 	reason := ""
 	secureClientHost := false
 	switch {
 	case contextReason != "":
 		reason = contextReason
+	case viewReason != "":
+		reason = viewReason
 	case err == nil && loaded != nil && strings.TrimSpace(loaded.HookSocket) == "":
 		reason = standaloneRuntimeReasonHookSocketMissing
 	case err == nil:

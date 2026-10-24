@@ -91,7 +91,7 @@ func TestPlanSandboxOpenShellExecDefaultNamespaceBridge(t *testing.T) {
 	openShellExecHome = func() (string, error) { return home, nil }
 	openShellExecTrustedFile = func(string, string) error { return nil }
 	kvm := false
-	openShellExecVMProbe = func(string, string, string) openshell.VMProbeResult {
+	openShellExecVMProbe = func(string, string) openshell.VMProbeResult {
 		if kvm {
 			return openshell.VMProbeResult{OK: true}
 		}

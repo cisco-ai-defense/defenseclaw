@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,7 +22,7 @@ from defenseclaw.observability.local_splunk import (
     LOCAL_TOKEN_ENV,
     NativeSplunkContract,
 )
-from defenseclaw.observability.local_stack import CommandResult, LocalStackError
+from defenseclaw.observability.local_stack import LocalStackError
 
 from tests.permissions import set_known_windows_directory_acl
 
@@ -667,123 +666,6 @@ def test_local_setup_never_takes_over_an_unrecorded_destination(
     else:
         _native_local_setup(app)
     assert _destinations(tmp_path)[existing["name"]]["local_stack"] == _RECORD
-
-
-@pytest.mark.parametrize(
-    ("platform", "home_layout"),
-    [("unix", "home/alice"), ("unix", "Users/alice"), ("native", "Users/alice/AppData/Local")],
-    ids=["linux-layout", "macos-layout", "windows-layout"],
-)
-@pytest.mark.parametrize(
-    "proof",
-    ["owned", "wrong-token", "wrong-endpoint", "wrong-tree", "wrong-working-dir", "wrong-compose", "multiple-containers"],
-)
-def test_legacy_local_sink_migrates_only_with_bridge_and_container_proof(
-    tmp_path: Path, monkeypatch, platform: str, home_layout: str, proof: str
-) -> None:
-    data_dir = tmp_path / home_layout / ".defenseclaw"
-    app = _app(data_dir)
-    name = "local-splunk" if platform == "native" else "splunk-hec-127-0-0-1"
-    token_env = LOCAL_TOKEN_ENV if platform == "native" else _SHARED
-    credential = "older local fixture credential"
-    endpoint = _REMOTE_HEC if proof == "wrong-endpoint" else _DEFAULT_HEC
-    legacy = _hec(name, endpoint, token_env)
-    _write_state(data_dir, [legacy], {"KEEP_ME": "unchanged", token_env: credential})
-    if os.name == "nt":
-        bridge_env_dir = data_dir / "splunk-bridge" / "env"
-        bridge_env_dir.mkdir(parents=True)
-        set_known_windows_directory_acl(bridge_env_dir)
-    _write_bridge_contract(data_dir, credential if proof != "wrong-token" else "other bridge credential")
-    bridge = data_dir / "splunk-bridge"
-    (bridge / "bin").mkdir()
-    (bridge / "bin" / "splunk-claw-bridge").write_text("bridge fixture", encoding="utf-8")
-    (bridge / "compose").mkdir()
-    compose = bridge / "compose" / "docker-compose.local.yml"
-    compose.write_text("name: defenseclaw-splunk-local\n", encoding="utf-8")
-    # The 1.0.2/1.0.3 Unix bridge used `docker compose -f` without
-    # --project-directory, so Compose records the compose file's parent.
-    working_dir = bridge if platform == "native" else compose.parent
-    if proof == "wrong-working-dir":
-        working_dir = compose.parent if platform == "native" else bridge
-    elif proof == "wrong-tree":
-        working_dir = tmp_path / "other"
-    labels = {
-        "com.docker.compose.project": "defenseclaw-splunk-local",
-        "com.docker.compose.service": "splunk",
-        "com.docker.compose.project.working_dir": str(working_dir),
-        "com.docker.compose.project.config_files": str(compose if proof != "wrong-compose" else tmp_path / "other.yml"),
-    }
-
-    calls: list[tuple[str, ...]] = []
-
-    class DockerEvidence:
-        def run(self, argv, *, timeout, env=None):
-            command = tuple(argv)
-            calls.append(command)
-            if command[1] == "ps":
-                ids = _FULL_ID + "\n"
-                if proof == "multiple-containers":
-                    ids += "f" * 64 + "\n"
-                return CommandResult(command, 0, stdout=ids)
-            if command[1] == "inspect":
-                return CommandResult(command, 0, stdout=json.dumps(labels))
-            raise AssertionError(command)
-
-    monkeypatch.setattr(cmd_setup.shutil, "which", lambda name: "docker" if name == "docker" else None)
-    with (
-        patch("defenseclaw.observability.local_stack.CommandRunner", return_value=DockerEvidence()),
-        patch("defenseclaw.config_writer.refuse_when_managed"),
-        patch("defenseclaw.observability.v8_writer._assert_config_write_allowed"),
-        patch("defenseclaw.config_writer.managed_refuses", return_value=False),
-    ):
-        if proof == "owned":
-            from defenseclaw.commands.cmd_setup_observability import _stored_secret
-
-            assert _stored_secret(str(data_dir), token_env) == credential
-            assert cmd_setup._load_dotenv(str(bridge / "env" / ".env")) == {
-                "DEFENSECLAW_HEC_TOKEN": credential, "DEFENSECLAW_HEC_URL": _DEFAULT_HEC,
-            }
-            verified = cmd_setup._verified_legacy_local_splunk_destination(
-                str(data_dir), name, native_windows=platform == "native", gateway_token_env="",
-            )
-            assert verified is not None, calls
-            assert verified[0]["name"] == name
-        if proof == "owned":
-            if platform == "native":
-                _native_local_setup(app)
-            else:
-                _unix_local_setup(app)
-            sink = _destinations(data_dir)[name]
-            assert sink["local_stack"] == _RECORD
-            assert sink["token_env"] == LOCAL_TOKEN_ENV
-        else:
-            with pytest.raises(ClickException, match="did not record it"):
-                if platform == "native":
-                    _native_local_setup(app)
-                else:
-                    _unix_local_setup(app)
-            assert _destinations(data_dir)[name] == legacy
-
-
-def test_legacy_local_proof_expires_if_destination_changes_before_commit(tmp_path: Path) -> None:
-    from defenseclaw.commands.cmd_setup_observability import _v8_authored_destination_snapshot
-
-    app = _app(tmp_path)
-    name = "splunk-hec-127-0-0-1"
-    original = _hec(name, _DEFAULT_HEC, _SHARED)
-    _write_state(tmp_path, [original], {"KEEP_ME": "unchanged", _SHARED: "older credential"})
-    authored, digest = _v8_authored_destination_snapshot(str(tmp_path))
-    changed = _hec(name, "https://127.0.0.1:8088/other/collector/path", _SHARED)
-    _write_state(tmp_path, [changed], {"KEEP_ME": "unchanged", _SHARED: "older credential"})
-    before = ((tmp_path / "config.yaml").read_bytes(), (tmp_path / ".env").read_bytes())
-    status, validate = _v8_writer_patches()
-    with status, validate, pytest.raises(ValueError, match="changed during setup"):
-        cmd_setup._apply_v8_observability_preset(
-            app, "splunk-hec", {"endpoint": _DEFAULT_HEC}, name=name,
-            secret_value="new local credential", local_stack=dict(_RECORD),
-            legacy_local_destination=(authored[0], digest), allow_private_networks=True,
-        )
-    assert ((tmp_path / "config.yaml").read_bytes(), (tmp_path / ".env").read_bytes()) == before
 
 
 def test_local_setup_does_not_start_the_stack_when_it_would_refuse(tmp_path: Path) -> None:

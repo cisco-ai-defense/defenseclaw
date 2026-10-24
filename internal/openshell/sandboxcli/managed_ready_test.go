@@ -84,8 +84,6 @@ func TestRunReadiesManagedOpenShellAtFirstRun(t *testing.T) {
 	}
 }
 
-// A run's ready names the run's own agent, so the daemon asks only that
-// agent's policy view (S2 review, loop round 2).
 func TestRunReadiesTheRequestedManagedHarness(t *testing.T) {
 	ta := newTestApp(t, "")
 	gw := ta.daemon.status.Gateway

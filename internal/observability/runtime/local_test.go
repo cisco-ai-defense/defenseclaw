@@ -105,8 +105,9 @@ func TestRuntimeLocalWriteFailureIsCountedOnLocalSQLite(t *testing.T) {
 
 // A producer that writes an occurrence again after a failed local write
 // holds its remote export until the local store keeps the record
-// (RemoteExportAfterLocalWrite). The default still exports a record the
-// local store refused (GAP-1536).
+// (RemoteExportAfterLocalWrite), and one whose record the remote
+// destinations already got writes it locally only (RemoteExportNone). The
+// default still exports a record the local store refused (GAP-1536).
 func TestRuntimeRemoteExportFollowsTheProducer(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
 	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
@@ -151,6 +152,10 @@ func TestRuntimeRemoteExportFollowsTheProducer(t *testing.T) {
 		t.Fatal("the local append succeeded under a failing SQLite writer")
 	}
 	assertNoRuntimeDelivery(t, sink)
+	if err := emit(observability.RemoteExportNone, "local-only-refused"); err == nil {
+		t.Fatal("the local append succeeded under a failing SQLite writer")
+	}
+	assertNoRuntimeDelivery(t, sink)
 	if err := emit(observability.RemoteExportDefault, "default-refused"); err == nil {
 		t.Fatal("the local append succeeded under a failing SQLite writer")
 	}
@@ -159,6 +164,13 @@ func TestRuntimeRemoteExportFollowsTheProducer(t *testing.T) {
 	}
 
 	refuse(false)
+	if err := emit(observability.RemoteExportNone, "local-only-stored"); err != nil {
+		t.Fatal(err)
+	}
+	assertNoRuntimeDelivery(t, sink)
+	if got := countRuntimeRecord(t, dependencies, "local-only-stored"); got != 1 {
+		t.Fatalf("local-only record stored %d times, want once", got)
+	}
 	if err := emit(observability.RemoteExportAfterLocalWrite, "held-refused"); err != nil {
 		t.Fatal(err)
 	}

@@ -129,8 +129,7 @@ func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 		{name: "kiro old open sidecar still blocks", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, want: 2},
 		{name: "kiro unset fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, want: 2},
 		{name: "kiro sidecar without kiro fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"codex":"open"}}`, want: 2},
-		// A per-user hook is closed whatever its flags say (sa-port-peer).
-		{name: "codex old open flag still blocks", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "open"}, want: 2},
+		{name: "codex unknown flag", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 1},
 		{name: "kiro fail open during an install", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "open"}, installing: true, want: 2},
 		{name: "kiro open in the hook sidecar during an install", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, installing: true, want: 2},
 	} {
@@ -151,10 +150,9 @@ func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			previous, previousIO := hookRawArgs, hookFailureIO
+			previous := hookRawArgs
 			hookRawArgs = func() []string { return tc.args }
-			hookFailureIO = func() (io.Reader, io.Writer, io.Writer) { return strings.NewReader("{}"), io.Discard, io.Discard }
-			t.Cleanup(func() { hookRawArgs, hookFailureIO = previous, previousIO })
+			t.Cleanup(func() { hookRawArgs = previous })
 			cmd := newHookCmd()
 			cmd.SetArgs(tc.args)
 			cmd.SetOut(io.Discard)

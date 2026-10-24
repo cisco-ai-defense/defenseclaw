@@ -171,9 +171,9 @@ def test_fail_mode_ignores_disabled_connector() -> None:
 
     cfg = default_config()
     cfg.guardrail.mode = "action"
+    cfg.guardrail.hook_fail_mode = "closed"
     cfg.guardrail.connectors = {
-        "claudecode": PerConnectorGuardrailConfig(mode="action", enabled=True, rule_pack="strict"),
-        "codex": PerConnectorGuardrailConfig(mode="action", enabled=False),
+        "claudecode": PerConnectorGuardrailConfig(mode="action", enabled=True),
+        "codex": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="open", enabled=False),
     }
-    # The disabled codex (default tier, open) does not count.
     assert setup_catalog._fail_mode_text(cfg) == "fail closed"

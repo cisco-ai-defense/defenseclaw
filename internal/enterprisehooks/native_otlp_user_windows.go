@@ -84,18 +84,12 @@ func windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir string) []st
 // credential. The caller runs it as the target user with the account's home
 // bound (connector.WithUserHomeDir) and hardens the data directory afterwards:
 // the atomic edit protects its state directory there with the per-user DACL.
-//
-// The cleanup is best-effort (GAP-1103): an account with nothing to take back
-// opens no transaction, and a removal that fails is reported, never an install
-// failure that rolls the upgrade back. Verify keeps reporting an exporter that
-// stays, and the next repair retries it.
 func removeWindowsManagedUserNativeOTLPAsTarget(connectorName, dataDir string) error {
-	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
-	if residue, err := connector.UserNativeOTLPResidue(connectorName, opts); err == nil && len(residue) == 0 {
-		return nil
-	}
-	if _, err := connector.RemoveUserNativeOTLP(connectorName, opts); err != nil {
-		fmt.Fprintf(os.Stderr, "defenseclaw: enterprise hooks: could not remove the %s native OTLP exporter an earlier per-user install left (%v); verify reports it and repair retries\n", connectorName, err)
+	if _, err := connector.RemoveUserNativeOTLP(connectorName, connector.SetupOpts{
+		DataDir:           dataDir,
+		ManagedEnterprise: true,
+	}); err != nil {
+		return fmt.Errorf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install: %w", connectorName, err)
 	}
 	return nil
 }

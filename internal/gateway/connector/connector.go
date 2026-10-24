@@ -165,16 +165,21 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// HookFailMode is the hook outage mode supplied to setup
-	// (cfg.EffectiveHookOutageFailModeForConnector, config.HookOutageFailMode).
-	// A managed administrator may select open for an outage, and Secure
-	// Client may default open. A per-user render records it as the mode its
-	// hooks follow while the gateway is down (open in the default and
-	// permissive tiers, closed in strict) and bakes closed for every other
-	// failure. Profile-only callers may omit it; an empty or invalid value is
-	// closed. DEFENSECLAW_STRICT_AVAILABILITY remains an unconditional
-	// force-closed override in generated hooks.
+	// HookFailMode is the resolved hook failure mode supplied to setup. A
+	// managed administrator may select open for an outage, and Secure Client
+	// may default open. Per-user renders always close, including a legacy open.
+	// Runtime setup populates it from cfg.EffectiveHookFailModeForConnector.
+	// Profile-only callers may omit it; provider-specific profile defaults are
+	// separate from the hook-writing boundary.
+	// DEFENSECLAW_STRICT_AVAILABILITY remains
+	// an unconditional force-closed override in generated hooks.
 	HookFailMode string
+
+	// ConfiguredHookFailMode is the hook fail mode the config sets
+	// explicitly for the connector (cfg.ConfiguredHookFailModeForConnector:
+	// "open", "closed", or "" when it sets none). This field records a legacy
+	// per-user open without granting an outage exception.
+	ConfiguredHookFailMode string
 
 	// SecureClientHookDelivery selects the Secure Client delivery contract
 	// (#1163): an unset HookFailMode renders open and an explicit value wins

@@ -142,7 +142,7 @@ func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *t
 		recorded(b, legacy, corp)
 		cfg := orderBridgeConfig(strictBridgeModes, legacy, "strict", corp, "watch", true, "watch")
 		set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
-		got := set.matchAgent(&profileSubject{UserID: "70001", UserName: "x"}, profileSubjectLookup, "codex", nil, corp, nil)
+		got := set.matchAgent(&profileSubject{UserID: "70001", UserName: "x"}, profileSubjectLookup, "codex", corp, nil)
 		if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
 			t.Errorf("explain: %+v; want strict as default_lookup_failed", got)
 		}
@@ -152,7 +152,7 @@ func TestLegacyAgentAssignmentKeepsItsPlaceBeforeACurrentIdentityAssignment(t *t
 		b.ledger([]inventory.AgentIdentityRecord{})
 		cfg := orderBridgeConfig(strictBridgeModes, legacy, "strict", corp, "watch", true, "watch")
 		set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
-		got := set.matchAgent(&profileSubject{UserID: "70001", UserName: "x"}, profileSubjectLookup, "codex", nil, corp, nil)
+		got := set.matchAgent(&profileSubject{UserID: "70001", UserName: "x"}, profileSubjectLookup, "codex", corp, nil)
 		if got.Name != "strict" || got.Match != profileMatchDefaultLookupFailed {
 			t.Errorf("explain: %+v; want strict as default_lookup_failed", got)
 		}

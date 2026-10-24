@@ -457,12 +457,13 @@ func executable(p string) bool {
 // formula's (libexec, else bin, of the keg under the Homebrew prefix), then
 // the directories the gateway itself searches (~/.local/libexec/openshell,
 // /usr/libexec/openshell, /usr/local/libexec/openshell,
-// /usr/local/libexec), then the contacted gateway's executable directory
-// and adjacent libexec. An answering gateway is tied to its registered
-// listener before doctor uses its process. An unbound PATH gateway cannot
-// prove which driver the selected gateway will use. A driver launched from
-// another directory is found through a child process of that same gateway.
-// The second result is the earlier user directory when a gateway-adjacent
+// /usr/local/libexec), else the one next to the openshell-gateway on PATH
+// (in its directory or the libexec beside it, as OpenShell's release
+// archives lay them out). With driver_dir, the running gateway executable's
+// sibling is preferred over a different gateway on PATH. Without an explicit
+// driver_dir, a gateway that runs the driver from anywhere else names it
+// through its running process.
+// The second result is the earlier user directory when a PATH-adjacent
 // driver was selected and no driver_dir was configured.
 func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 	var dirs []string
@@ -483,12 +484,13 @@ func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 	}
 	gatewayDirStart := len(dirs)
 	gw := ""
-	var running *process
-	if r.gateway != nil && r.gateway.Healthy {
-		running = r.gatewayProcess(ctx)
-		if running != nil {
+	if configuredDir {
+		if running := r.gatewayProcess(ctx); running != nil {
 			gw = running.path
 		}
+	}
+	if gw == "" {
+		gw, _ = r.LookPath(GatewayBinary)
 	}
 	if filepath.IsAbs(gw) {
 		if configuredDir {
@@ -496,10 +498,6 @@ func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 			// fallback with driver_dir set is beside that executable.
 			if real, err := filepath.EvalSymlinks(gw); err == nil {
 				dirs = append(dirs, filepath.Dir(real))
-			} else {
-				// A running binary can be replaced while its sibling driver
-				// remains. Keep the directory ps saw if the path vanished.
-				dirs = append(dirs, filepath.Dir(gw))
 			}
 		} else {
 			bins := []string{filepath.Dir(gw)}
@@ -523,13 +521,13 @@ func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 		return "", ""
 	}
 	parent := 0
-	if running != nil {
-		parent = running.pid
-	}
-	if parent == 0 {
-		return "", ""
+	if gw := r.gatewayProcess(ctx); gw != nil {
+		parent = gw.pid
 	}
 	p := findProcess(r.processes(ctx), vmDriverBinary, parent)
+	if p == nil && parent != 0 {
+		p = findProcess(r.processes(ctx), vmDriverBinary, 0)
+	}
 	if p != nil && executable(p.path) {
 		return p.path, ""
 	}

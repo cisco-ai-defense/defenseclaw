@@ -15,7 +15,7 @@ import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import pytest
 from defenseclaw.observability.local_splunk import (
@@ -166,57 +166,6 @@ def test_local_splunk_image_resolves_or_reports_registry_outage(tmp_path: Path, 
         controller.up()
     assert any(command[1] == "pull" for command in offline.calls)
     assert all(command[1:3] != ("manifest", "inspect") for command in offline.calls)
-
-
-@pytest.mark.skipif(os.name == "nt", reason="the Unix bridge runs under Bash")
-@pytest.mark.parametrize(
-    ("refresh_bundle", "running"),
-    [(True, True), (True, False), (False, True), (False, False)],
-)
-def test_offline_upgrade_keeps_the_stack_and_old_image_contract(
-    tmp_path: Path, refresh_bundle: bool, running: bool,
-) -> None:
-    from defenseclaw.bundle_refresh import RefreshResult
-    from defenseclaw.commands import cmd_setup
-
-    data_dir = tmp_path / "data"
-    bridge_dir = data_dir / "splunk-bridge"
-    shutil.copytree(BUNDLE, bridge_dir)
-    env_file = bridge_dir / "env" / ".env"
-    original = (bridge_dir / "env" / ".env.example").read_text(encoding="utf-8")
-    old_contract = original.replace("SPLUNK_IMAGE=splunk/splunk:10.2.0", f"SPLUNK_IMAGE={RETIRED_SPLUNK_IMAGE}")
-    env_file.write_text(old_contract, encoding="utf-8")
-    env_file.chmod(0o600)
-    calls = tmp_path / "docker-calls"
-    docker = tmp_path / "docker"
-    docker.write_text(
-        "#!/bin/sh\n"
-        'printf "%s\\n" "$*" >> "$DOCKER_CALLS"\n'
-        'case "$1 $2" in\n'
-        '  "info --format") echo x86_64; exit 0 ;;\n'
-        '  "image inspect") exit 1 ;;\n'
-        '  "pull splunk/splunk:10.2.0") echo "registry unavailable" >&2; exit 1 ;;\n'
-        '  "compose -f") exit 0 ;;\n'
-        '  *) exit 1 ;;\n'
-        'esac\n',
-        encoding="utf-8",
-    )
-    docker.chmod(0o755)
-    refresh_result = RefreshResult("splunk-bridge", str(bridge_dir), str(BUNDLE), refreshed=False)
-    with (
-        patch.dict(os.environ, {"PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}", "DOCKER_CALLS": str(calls)}),
-        patch.object(cmd_setup, "is_compose_project_running", return_value=running),
-        patch.object(cmd_setup, "refresh_splunk_bridge", return_value=refresh_result) as refresh,
-        patch.object(cmd_setup, "bundled_splunk_bridge_dir", return_value=BUNDLE),
-    ):
-        with pytest.raises(Exception, match="image|registry"):
-            cmd_setup._bootstrap_bridge(str(data_dir), refresh_bundle=refresh_bundle)
-
-    recorded = calls.read_text(encoding="utf-8").splitlines()
-    assert any(call == "pull splunk/splunk:10.2.0" for call in recorded)
-    assert not any(call.startswith("compose ") for call in recorded)
-    assert env_file.read_text(encoding="utf-8") == old_contract
-    refresh.assert_not_called()
 
 
 @pytest.mark.parametrize("architecture", ["arm64", "aarch64"])

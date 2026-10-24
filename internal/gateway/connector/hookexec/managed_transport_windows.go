@@ -232,24 +232,14 @@ func queryManagedGatewayServicePID(serviceName string) (uint32, error) {
 		return 0, err
 	}
 	if status.CurrentState != windows.SERVICE_RUNNING || status.ProcessId == 0 {
-		return 0, fmt.Errorf("%w (state=%d pid=%d)", errManagedGatewayNotRunning, status.CurrentState, status.ProcessId)
+		return 0, fmt.Errorf(
+			"%w (state=%d pid=%d)",
+			errManagedGatewayNotRunning,
+			status.CurrentState,
+			status.ProcessId,
+		)
 	}
 	return status.ProcessId, nil
-}
-
-// managedGatewayServiceStartType reads the service's start type.
-func managedGatewayServiceStartType(service windows.Handle) (uint32, bool) {
-	var needed uint32
-	err := windows.QueryServiceConfig(service, nil, 0, &needed)
-	if !errors.Is(err, windows.ERROR_INSUFFICIENT_BUFFER) || needed == 0 || needed > 64<<10 {
-		return 0, false
-	}
-	buffer := make([]byte, needed)
-	config := (*windows.QUERY_SERVICE_CONFIG)(unsafe.Pointer(&buffer[0]))
-	if err := windows.QueryServiceConfig(service, config, needed, &needed); err != nil {
-		return 0, false
-	}
-	return config.StartType, true
 }
 
 func connectedManagedGatewayPID(conn net.Conn) (uint32, error) {

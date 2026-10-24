@@ -6,7 +6,6 @@ package gateway
 import (
 	"crypto/sha256"
 	"encoding/binary"
-	"strconv"
 	"sync"
 )
 
@@ -40,7 +39,7 @@ func newProfileMatchCache() *profileMatchCache {
 
 // profileMatchKey digests the inputs of match with length prefixes, so no two
 // different inputs share a key.
-func profileMatchKey(subject *profileSubject, source, connectorName string, scans []string, agent string) [sha256.Size]byte {
+func profileMatchKey(subject *profileSubject, source, connectorName, agent string) [sha256.Size]byte {
 	h := sha256.New()
 	var n [8]byte
 	put := func(s string) {
@@ -50,10 +49,6 @@ func profileMatchKey(subject *profileSubject, source, connectorName string, scan
 	}
 	put(source)
 	put(connectorName)
-	put(strconv.Itoa(len(scans)))
-	for _, scan := range scans {
-		put(scan)
-	}
 	put(agent)
 	putSubject := func(subject *profileSubject) {
 		put("subject")

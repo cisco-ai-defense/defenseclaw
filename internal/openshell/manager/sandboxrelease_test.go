@@ -357,13 +357,6 @@ func TestOldSupervisorWordsForARecordWithoutARelease(t *testing.T) {
 	if got := e.m.upgradeWayOn("dev"); got != "" {
 		t.Fatalf("upgrade way on an unreadable release = %q", got)
 	}
-	managed, _ := managedEnv(t, nil)
-	got := managed.m.upgradeWayOn("0.1.3")
-	stop, del := strings.Index(got, "`defenseclaw sandbox stop NAME`"), strings.Index(got, "`defenseclaw sandbox delete NAME`")
-	if save := strings.Index(got, "save or sync any accessible work first"); save < 0 || stop < save || del < save ||
-		!strings.Contains(got, "requests a disk sync") || !strings.Contains(got, "a failed sync can lose later changes") || strings.Contains(got, "flushes") {
-		t.Fatalf("managed upgrade advice risks guest work: %q", got)
-	}
 }
 
 // TestALegacySessionOfAnOlderRecordIsKeptUntilItsUsersStop (GAP-0415): a

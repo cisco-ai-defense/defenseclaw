@@ -1351,17 +1351,12 @@ func (c *WebhookConfig) ResolvedSecret() string {
 //   - GuardrailConfig.HookFailMode (yaml: guardrail.hook_fail_mode)
 //     is the SHELL-side fail-mode baked into the generated hook
 //     templates (codex-hook.sh, claude-code-hook.sh, inspect-*).
-//     On a managed install it is the administrator's outage mode: "open"
-//     allows, logs and warns for a confirmed gateway outage (the gateway
-//     not running or not accepting connections); "closed" (the default)
-//     blocks where the connector exposes a block response. A per-user
-//     install's outage mode follows its policy tier instead
-//     (HookOutageFailMode). Outside Secure Client any HTTP status,
-//     malformed or incomplete answer, or missing answer at the hook
-//     deadline blocks in every mode and tier. Secure Client keeps its
-//     separate fail-mode contract.
-//     DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and
-//     missing-token failures closed.
+//     It governs what those scripts do when delivery, authentication,
+//     or the gateway response fails (connection/timeout/5xx, missing
+//     token, 4xx, malformed JSON, or no `action` field). "open"
+//     allows and logs; "closed" blocks where the connector exposes a
+//     block response. DEFENSECLAW_STRICT_AVAILABILITY=1 additionally
+//     forces transport and missing-token failures closed.
 //
 //   - AgentHookConfig.FailMode (yaml: <connector>.fail_mode below)
 //     is a per-connector POLICY-LAYER hint that downstream

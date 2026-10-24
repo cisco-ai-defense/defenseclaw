@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://defenseclaw.cisco.com/schemas/enterprise/management/bundle-status-v1.json",
   "title": "enterprise bundle status --json",
-  "description": "`enterprise bundle status --json` (bundleStatusResult, internal/cli/enterprise_bundle_status.go): the confirmed bundle (current), the last good bundle, the version floor, the last receipt that reached staging, the last refusal before staging, the running gateway's digest and whether it enforces the current bundle. On Windows the command first settles a receipt that a killed run left in state applied (skipped while an apply holds bundle.lock), and an unelevated token (not_admin) or a Linux or macOS standard account that cannot read the bundle state (not_root) gets the short refusal document (bundle-refused.schema.json). Exit 0 when ok, 1 (Linux, macOS) or 1603 (Windows) otherwise.",
+  "description": "`enterprise bundle status --json` (bundleStatusResult, internal/cli/enterprise_bundle_status.go): the confirmed bundle (current), the last good bundle, the version floor, the last receipt that reached staging, the last refusal before staging, the running gateway's digest and whether it enforces the current bundle. On Windows the command first settles a receipt that a killed run left in state applied (skipped while an apply holds bundle.lock), and an unelevated token gets the short not_admin document (bundle-refused.schema.json). Exit 0 when ok, 1 (Linux, macOS) or 1603 (Windows) otherwise.",
   "oneOf": [
     {
       "$ref": "#/$defs/full"
@@ -93,7 +93,7 @@
         },
         "sessions_restart_required": {
           "$ref": "https://defenseclaw.cisco.com/schemas/enterprise/lifecycle-result-v2.json#/$defs/sessionRestartStatus",
-          "description": "Agent sessions that must restart to pick up the confirmed bundle. A status refused before the live session scan (not_managed, state_invalid) reports state unknown, count 0 and no entries."
+          "description": "Agent sessions that must restart to pick up the confirmed bundle. A status refused before the live session scan (not_managed, not_root, state_invalid) reports state unknown, count 0 and no entries."
         },
         "alert_only_rule_count": {
           "type": "integer",

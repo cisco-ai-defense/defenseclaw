@@ -60,14 +60,8 @@ func (a *APIServer) emitHookDecisionObservabilityV8(
 	if !ok {
 		return hookDecisionLogUnbuildable
 	}
-	if req.pendingProvenance != nil {
-		meta = req.pendingProvenance.decisionMeta(meta)
-	}
 	result := a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
-	if !req.pendingRecovery {
-		// The live call counted itself; recovery writes its record only.
-		a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
-	}
+	a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
 	return result
 }
 
@@ -106,6 +100,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 	}
 	effectiveAction := normalizeHookActionLabel(resp.Action)
 	sandboxID, sandboxName := hookV8Sandbox(audit.EnvelopeFromContext(ctx))
+	managed := sandboxHookManagedV8(ctx)
 	classification := observability.ClassificationContext{
 		Bucket: observability.BucketGuardrailEvaluation, EventName: observability.EventName(observability.TelemetryEventHookDecision),
 		RawSeverity: string(severity.Severity), Enforced: env.Enforced,
@@ -161,15 +156,12 @@ func (a *APIServer) emitHookDecisionLogV8(
 				ConfigGeneration: int64(snapshot.Generation()), ConfigDigest: snapshot.Digest(),
 			},
 		}
-		// A journaled call names the policy it was evaluated under, also
-		// when a later gateway process writes its record.
-		policy := req.pendingProvenance.decisionPolicyOr(ctx)
-		managed := policy.sandbox
+		profileTelemetry := guardrailProfileTelemetryFor(ctx)
 		identityInput := observability.LogCompatHookDecisionInput{
-			DefenseClawGuardrailProfileName: policy.profile.Name, DefenseClawGuardrailProfileDigest: policy.profile.Digest,
-			DefenseClawPolicyEffectiveDigest: policy.digest, DefenseClawPolicyGeneration: policy.generation,
-			DefenseClawGuardrailProfileMatch: policy.profile.Match, DefenseClawGuardrailProfileMatchedGroup: policy.profile.MatchedGroup,
-			DefenseClawUserEnrollment: policy.enrollment,
+			DefenseClawGuardrailProfileName: profileTelemetry.Name, DefenseClawGuardrailProfileDigest: profileTelemetry.Digest,
+			DefenseClawPolicyEffectiveDigest: policyDigestV8(ctx), DefenseClawPolicyGeneration: policyGenerationV8(ctx),
+			DefenseClawGuardrailProfileMatch: profileTelemetry.Match, DefenseClawGuardrailProfileMatchedGroup: profileTelemetry.MatchedGroup,
+			DefenseClawUserEnrollment: enterpriseEnrollmentV8(ctx),
 			Envelope:                  envelope, Severity: observability.Present(severity.Severity),
 			LogLevel: logLevel, Outcome: hookDecisionV8Outcome(effectiveAction, result),
 			DefenseClawRequestID:                hookV8OptionalIdentifier(meta.RequestID),
@@ -214,7 +206,7 @@ func (a *APIServer) emitHookDecisionLogV8(
 			DefenseClawGuardrailEnforced:        env.Enforced,
 			DefenseClawConnectorStepIdx:         hookV8OptionalPositiveInt64(int64(env.StepIdx)),
 			DefenseClawGuardrailLatencyMs:       observability.Present(max(float64(env.ElapsedMs), 0)),
-			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), hookDecisionReasonMaxBytes),
+			DefenseClawGuardrailReason:          hookV8OptionalText(hookSourceReason(resp), 65536),
 			DefenseClawGuardrailRuleIds:         hookDecisionV8RuleIDs(resp.RuleIDs),
 			DefenseClawSandboxID:                sandboxID,
 			DefenseClawSandboxName:              sandboxName,

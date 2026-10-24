@@ -22,7 +22,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -316,59 +315,5 @@ func TestBundleReceiptReporterRetriesAMarkerItCouldNotWrite(t *testing.T) {
 	reporter.poll(context.Background())
 	if len(sink.changes) != 1 || len(sink.receipts) != 1 {
 		t.Fatalf("offers after the repair: %d changes, %d receipts; want still one each", len(sink.changes), len(sink.receipts))
-	}
-}
-
-// Only the first offer of a change that entered the spool while the
-// reporter ran is a first offer (audit.ConfigChange.FirstOffer): a change
-// that was in the spool at the reporter's first poll may have been offered
-// by an earlier gateway process, and an offer after a refused one is never
-// a first offer. The audit logger lets a change without a record pin go to
-// the remote destinations while the store cannot answer only on its first
-// offer.
-func TestBundleReceiptReporterSaysWhichOfferOfAChangeIsItsFirst(t *testing.T) {
-	dir := t.TempDir()
-	spool := enterprisestatus.ChangeEventsDir(dir)
-	sink := &fakeBundleReceiptSink{}
-	reporter := &bundleReceiptReporter{receiptPath: enterprisestatus.PublicReceiptPath(dir),
-		markerPath: filepath.Join(dir, bundleReceiptMarkerName), sink: sink, enforcedVersion: func() uint64 { return 0 }}
-	before := writeTestChangeEvent(t, spool, enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionSet,
-		enterprisestatus.ChangeApplied, "", func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "splunk-hec-token" })
-	reporter.poll(context.Background())
-	later := writeTestChangeEvent(t, spool, enterprisestatus.ChangeKindSecret, enterprisestatus.ChangeActionRemove,
-		enterprisestatus.ChangeApplied, "", func(ev *enterprisestatus.ChangeEvent) { ev.SecretName = "otlp-token" })
-	sink.changeErr = errors.New("audit store unavailable")
-	reporter.poll(context.Background())
-	sink.changeErr = nil
-	reporter.poll(context.Background())
-	type offer struct {
-		id    string
-		first bool
-	}
-	var got []offer
-	for _, change := range sink.offers {
-		got = append(got, offer{change.EventID, change.FirstOffer})
-	}
-	want := []offer{{before.EventID, false}, {later.EventID, true}, {later.EventID, false}}
-	if len(got) != len(want) {
-		t.Fatalf("offers = %+v, want %+v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("offers = %+v, want %+v", got, want)
-		}
-	}
-	// A reporter that could not read the spool at its first poll takes no
-	// change as a first offer until it has read it. On Windows a path under
-	// a file reads as one that does not exist, which holds no change either.
-	if runtime.GOOS == "windows" {
-		return
-	}
-	file := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(file, []byte("not a folder"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if ids, read := changeSpoolIDs(filepath.Join(file, enterprisestatus.ChangeEventsDirName)); read || ids != nil {
-		t.Fatalf("spool under a file: ids %v, read %t; want it unread", ids, read)
 	}
 }

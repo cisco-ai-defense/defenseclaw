@@ -59,12 +59,8 @@ against the hook code on every change.
 
 <OutageMatrix />
 
-- **Per-user** is an install without a managed deployment. Its outage mode
-  follows the connector's policy tier (rule pack): the default (balanced) and
-  permissive policies let the call run with a warning and a
-  `hook-failures.jsonl` record, the strict policy blocks it. Every other
-  failure blocks in every tier
-  ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)).
+- **Per-user** is an install without a managed deployment: the fail mode is
+  the one `defenseclaw guardrail fail-mode` installed with the hooks.
 - **Managed standalone** is an enterprise host outside Secure Client. Its fail
   mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
   the outage on every connector, and the two managed columns give `open`. A
@@ -110,9 +106,8 @@ Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), A
 
 ### Which connectors fail closed?
 
-Every listed connector can block a gateway outage: on a per-user install in the
-strict policy, on a managed host by default. Copilot CLI, Antigravity and
-Hermes hooks block delivery failures when the effective mode is `closed`.
+Every listed connector can block a gateway outage. Copilot CLI, Antigravity and
+Hermes hooks block delivery failures when the effective mode is `closed`, the default.
 Hermes 0.21+ blocks a `pre_tool_call` on hook spawn error or timeout when Setup has written `fail_closed: true`; it can still run after a killed hook exits non-2 with empty stdout. Earlier Hermes contracts also fail open on timeout. Other agents may still allow a call when the hook process times out or cannot start. The table marks gateway delivery behavior separately from agent-side process failure.
 
 - Fail-closed in this matrix means the running hook blocks when it cannot reach the gateway. A killed or timed-out pre-tool hook is non-blocking in Claude Code and Codex; a killed pre-tool hook can be non-blocking in Devin. Kiro CLI 2.x can run after hook timeout, and Antigravity has no documented timeout-deny setting. See the [enterprise threat model](/docs/enterprise/plan/threat-model#residual-risks).
@@ -120,7 +115,7 @@ Hermes 0.21+ blocks a `pre_tool_call` on hook spawn error or timeout when Setup 
   also in observe mode. The default is `closed`. If the administrator explicitly selects `open`,
   a gateway outage can allow the call. Oversized input, a gateway 5xx, an unusable
   answer and other transport errors still block. See [Fail modes](/docs/reference/configuration/fail-modes).
-- On a per-user install, every hook and plugin records a call that ran unchecked in `hook-failures.jsonl`, and the gateway turns those records into a `guardrail-degraded` alert when it starts again ([Reporting](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
+- On a per-user install, fail-open calls recorded by the shell hooks, native hook and OpenCode plugin become a `guardrail-degraded` alert when the gateway starts again. Amp does not write these failure records ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
 - Cursor writes `failClosed: true` outside Secure Client in action and observe mode. Observe still allows ordinary calls and records `would_block` findings; the host flag covers a hook process that cannot answer.
 
 ### I want to run the agent in an OpenShell sandbox

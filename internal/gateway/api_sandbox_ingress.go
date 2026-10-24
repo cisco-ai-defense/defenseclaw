@@ -970,10 +970,7 @@ func (a *APIServer) observeSandboxHookDecision(ctx context.Context, req agentHoo
 	if sink != nil {
 		// The tool input stays on this gateway: the daemon pairs a
 		// content-keyed call's events by its content reference.
-		decision.CallRef = req.pendingSandboxCallRef
-		if decision.CallRef == "" {
-			decision.CallRef = manager.ContentRef(decision.SessionID, decision.Tool, decision.ToolInput)
-		}
+		decision.CallRef = manager.ContentRef(decision.SessionID, decision.Tool, decision.ToolInput)
 		decision.ToolInput = nil
 		sink.put(decision)
 		return

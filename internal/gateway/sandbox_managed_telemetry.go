@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -266,7 +265,7 @@ func emitRequireSandboxRecord(ctx context.Context, a *APIServer, rec requireSand
 	if rec.Unavailable {
 		what = "host run unavailable"
 	}
-	if err := record(a.requireSandboxIdentity(ctx, rec)); err != nil {
+	if err := record(a.requireSandboxIdentity(rec)); err != nil {
 		sandboxRecordFailed(what+" (stamped)", err)
 		sandboxRecordFailed(what, record(audit.SandboxIdentity{Connector: rec.Connector}))
 	}
@@ -277,20 +276,11 @@ func emitRequireSandboxRecord(ctx context.Context, a *APIServer, rec requireSand
 // matched group, provisional) and subject key, as a registration's records
 // carry them, so a fleet groups host-run refusals by profile and person on
 // every platform (GAP-0184, GAP-0229, GAP-0243, GAP-0410).
-func (a *APIServer) requireSandboxIdentity(ctx context.Context, rec requireSandboxRecord) audit.SandboxIdentity {
-	identity := audit.SandboxIdentity{Connector: rec.Connector, Managed: sandboxManagedStamp(sandboxreg.Registration{
+func (a *APIServer) requireSandboxIdentity(rec requireSandboxRecord) audit.SandboxIdentity {
+	return audit.SandboxIdentity{Connector: rec.Connector, Managed: sandboxManagedStamp(sandboxreg.Registration{
 		Profile: rec.Profile, ProfileDigest: rec.ProfileDigest, ProfileMatch: rec.ProfileMatch,
 		MatchedGroup: rec.MatchedGroup, Provisional: rec.Provisional, SubjectKey: a.requireSandboxSubjectKey(rec),
 	})}
-	// A host-run gate has no sandbox registration. Stamp the configured
-	// compute driver when it names one, so the log and its companion counter
-	// carry the same bounded driver label. Linux auto is left unstamped until
-	// a per-user KVM probe chooses the actual driver.
-	switch driver := sandboxDriverFor(a.requireSandboxFallbackConfig(ctx), runtime.GOOS); driver {
-	case audit.SandboxDriverDocker, audit.SandboxDriverVM:
-		identity.Driver = driver
-	}
-	return identity
 }
 
 // requireSandboxSubjectKey is the subject key of the gate record's caller,

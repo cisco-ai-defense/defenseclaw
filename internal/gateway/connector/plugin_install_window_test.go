@@ -83,8 +83,8 @@ func pluginInstallWindowCases(t *testing.T, asset, extension, harness string) {
 const pluginInstallFailureFetch = `
 globalThis.fetch = async () => {
   if (process.argv[2] === "transport") throw Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
-  if (process.argv[2] === "invalid-verdict") return { ok: true, text: async () => JSON.stringify({ action: "unknown" }) };
-  if (process.argv[2] === "valid-allow") return { ok: true, text: async () => JSON.stringify({ action: "allow", hook_output: { decision: "allow" } }) };
+  if (process.argv[2] === "invalid-verdict") return { ok: true, json: async () => ({ action: "unknown" }) };
+  if (process.argv[2] === "valid-allow") return { ok: true, json: async () => ({ action: "allow", hook_output: { decision: "allow" } }) };
   return { ok: false, status: 503 };
 };
 `

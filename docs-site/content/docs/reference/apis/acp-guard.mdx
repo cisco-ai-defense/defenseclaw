@@ -50,7 +50,7 @@ Protocol version: ACP `schema-v1.21.0`.
 | Guard cannot start | The editor shows the reason (Zed: under **Failed to Launch**). |
 | Agent silent for 60 seconds after a prompt | The guard says the agent may be waiting for first-run questions in a terminal. |
 
-A profile's `fail_mode: closed` makes an observe-mode guard refuse a step it could not check, once the gateway has answered that session. `fail_mode: open` lets such a step through. Hook fail modes are separate; per-user hooks default to closed.
+A profile's `fail_mode: closed` makes an observe-mode guard refuse a step it could not check, once the gateway has answered that session. `fail_mode: open` lets such a step through. On a managed computer outside Secure Client the default is stricter than on a per-user install.
 
 If the central profile mode and the mode the entry was set up for differ, the guard stops the session and names both modes and the setup command to run. Zed keeps one guard for every thread of an agent, so after such an end the guard answers with the same message until you run the command.
 

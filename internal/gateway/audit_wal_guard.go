@@ -18,14 +18,11 @@ const (
 	// auditWALGuardInterval is how often the audit write-ahead log's active
 	// frame count is checked on its dedicated checkpoint connection.
 	auditWALGuardInterval = 2 * time.Second
-	// auditWALLimitBytes is the published on-disk flood ceiling. The
-	// registered T9 flood grew the WAL by up to about 18 MiB/s at 10 hooks/s.
+	// auditWALLimitBytes bounds the log in use. A pass brings the log to its
+	// end from half of it, so SQLite restarts it, and background writers wait
+	// while it is over it. One Claude Code PreToolUse decision writes about
+	// 1.65 MB of log (16 commits), so this is the log of roughly 160 hooks.
 	auditWALLimitBytes = 256 << 20
-	// Start the bounded catch-up with room for two guard ticks at 10 hooks/s.
-	// A catch-up first requested at the ceiling can arrive one or more ticks
-	// late and leave the on-disk WAL above it (GAP-0952).
-	auditWALGuardHeadroomBytes = 80 << 20
-	auditWALGuardTriggerBytes  = auditWALLimitBytes - auditWALGuardHeadroomBytes
 	// auditWALWriterBudget bounds the idle-gap trim, the only statement a pass
 	// runs on the audit store's writer connection (the catch-up copy holds it
 	// for at most 100 ms, or up to 2 s to bring a log over the limit back,
@@ -81,7 +78,7 @@ func (s *Sidecar) runAuditWALGuard(ctx context.Context) {
 // auditWALGuardPass runs one checkpoint pass and reports its outcome.
 func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *auditWALAlarm, now time.Time, log io.Writer) {
 	copyCtx, cancel := context.WithTimeout(ctx, auditWALCopyTimeout)
-	pass, err := store.CheckpointWALIfLarge(copyCtx, auditWALGuardTriggerBytes, auditWALWriterBudget)
+	pass, err := store.CheckpointWALIfLarge(copyCtx, auditWALLimitBytes, auditWALWriterBudget)
 	cancel()
 	if ctx.Err() != nil {
 		return
@@ -99,15 +96,10 @@ func auditWALGuardPass(ctx context.Context, store auditWALCheckpointer, alarm *a
 	// records (rel-1-0-3 GAP-0288).
 	switch {
 	case pass.Bounded && pass.WriterHeld > 0:
-		// A flood on a slow disk: hooks waited so the log can restart.
-		// Name the published ceiling accurately when catch-up began below it.
-		if pass.LogBytes > auditWALLimitBytes {
-			fmt.Fprintf(log, "[sidecar] audit WAL over its %d MiB limit (%d MiB): held the audit writer for %s of up to %s to bring it back (restarted %t)\n",
-				int64(auditWALLimitBytes)>>20, pass.LogBytes>>20, pass.WriterHeld.Round(time.Millisecond), pass.HoldCap, pass.Restarted)
-		} else {
-			fmt.Fprintf(log, "[sidecar] audit WAL nearing its %d MiB ceiling (%d MiB): held the audit writer for %s of up to %s to bring it back (restarted %t)\n",
-				int64(auditWALLimitBytes)>>20, pass.LogBytes>>20, pass.WriterHeld.Round(time.Millisecond), pass.HoldCap, pass.Restarted)
-		}
+		// A flood on a slow disk: hooks waited this long so that the log
+		// restarts instead of growing until the disk is full.
+		fmt.Fprintf(log, "[sidecar] audit WAL over its %d MiB limit (%d MiB): held the audit writer for %s of up to %s to bring it back (restarted %t)\n",
+			int64(auditWALLimitBytes)>>20, pass.LogBytes>>20, pass.WriterHeld.Round(time.Millisecond), pass.HoldCap, pass.Restarted)
 	case pass.WriterHeld > auditWALWriterBudget:
 		fmt.Fprintf(log, "[sidecar] audit WAL checkpoint held the audit writer for %s (budget %s)\n",
 			pass.WriterHeld.Round(time.Millisecond), auditWALWriterBudget)

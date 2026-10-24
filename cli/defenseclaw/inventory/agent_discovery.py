@@ -1566,8 +1566,6 @@ def _scan_agent(
     # connector_contracts loads its bundled manifest through inventory, so
     # importing it at module load time would create a cycle for CLI startup.
     from defenseclaw.connector_contracts import (
-        assess_kiro,
-        judge_kiro_form,
         kiro_cli_below_hook_floor,
         kiro_ide_below_hook_floor,
         normalize_agent_version,
@@ -1601,16 +1599,6 @@ def _scan_agent(
     # failed probe is an installed form whose version is unknown, GAP-0895).
     kiro_forms: list[dict[str, str]] = []
 
-    def kiro_found(surface: str, candidate: str, version_for_surface: str) -> None:
-        # Per surface the first install at or above its floor wins over an
-        # earlier one below it, so the version cached for the gateway is the
-        # one setup protects; every install stays a form for reporting.
-        below = kiro_cli_below_hook_floor if surface == "cli" else kiro_ide_below_hook_floor
-        recorded = kiro_versions.get(surface)
-        if recorded is None or (below(recorded[1]) and not below(version_for_surface)):
-            kiro_versions[surface] = (candidate, version_for_surface)
-        kiro_forms.append({"kind": surface, "version": version_for_surface, "unread": "", "path": candidate})
-
     def kiro_unread(candidate: str, why: str) -> None:
         kiro_forms.append(
             {
@@ -1638,7 +1626,10 @@ def _scan_agent(
                     probe_errors.append(f"{candidate}: Kiro surface or version could not be identified")
                     kiro_unread(candidate, "Kiro surface or version could not be identified")
                     continue
-                kiro_found(surface, candidate, f"kiro-cli {normalized}" if surface == "cli" else normalized)
+                version_for_surface = f"kiro-cli {normalized}" if surface == "cli" else normalized
+                if surface not in kiro_versions:
+                    kiro_versions[surface] = (candidate, version_for_surface)
+                kiro_forms.append({"kind": surface, "version": version_for_surface, "unread": "", "path": candidate})
                 continue
             binary_path = candidate
             version = candidate_version
@@ -1672,7 +1663,9 @@ def _scan_agent(
                 surface = _kiro_binary_surface(timed_out, candidate_version)
                 normalized = normalize_agent_version(candidate_version)
                 if surface and normalized:
-                    kiro_found(surface, timed_out, f"kiro-cli {normalized}" if surface == "cli" else normalized)
+                    canonical = f"kiro-cli {normalized}" if surface == "cli" else normalized
+                    kiro_versions[surface] = (timed_out, canonical)
+                    kiro_forms.append({"kind": surface, "version": canonical, "unread": "", "path": timed_out})
                     timed_out_read = True
             else:
                 binary_path, version, version_ok = timed_out, candidate_version, True
@@ -1682,20 +1675,16 @@ def _scan_agent(
         # form whose version is unknown, never hidden by the supported one.
         kiro_unread(timed_out, VERSION_PROBE_TIMED_OUT)
     if name == "kiro" and kiro_versions:
-        # The version cached for the gateway is the form setup preflight
-        # selects (assess_kiro over the forms it records); without a protected one
-        # it is the kiro-cli's, else the IDE's, so admission refuses it.
-        protected = assess_kiro(
-            [
-                judge_kiro_form(form["kind"], form["version"], unread=form["unread"], path=form["path"])
-                for form in kiro_forms[:_KIRO_FORMS_MAX]
-            ]
-        ).selected
-        if protected is not None and protected.path:
-            binary_path, version = protected.path, protected.version
-        else:
-            binary_path, version = kiro_versions.get("cli") or kiro_versions["ide"]
-        version_ok = True
+        cli = kiro_versions.get("cli")
+        ide = kiro_versions.get("ide")
+        selected = cli or ide
+        if cli and not kiro_cli_below_hook_floor(cli[1]):
+            selected = cli
+        elif ide and not kiro_ide_below_hook_floor(ide[1]):
+            selected = ide
+        if selected is not None:
+            binary_path, version = selected
+            version_ok = True
     if missing_state[0]:
         _record_probe_state(missing_state, data_dir=data_dir)
     if not version_ok and probe_errors:
