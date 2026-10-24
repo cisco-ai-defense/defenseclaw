@@ -805,20 +805,97 @@ function Get-GatewayProcess {
     return $process
 }
 
-# A loaded 1.0.3 OpenCode or Amp plugin cannot acquire this release's lock
-# check until its agent process exits. A process is OpenCode or Amp by the
-# program file it runs and the package that installed it, never by a name in
-# its command line, the folder it runs from or the command name PATH finds
-# (GAP-1128): its executable is the agent of the native installers
-# (Get-InstalledAgentPrograms) or an OpenCode binary of its npm packages, or
-# Node or Bun runs a script of the agents' npm packages (opencode-ai,
-# @sourcegraph/amp). A package counts by its own manifest (Test-NpmPackage),
-# never by the name of its folder. A project, script or other program that is
-# only named opencode or amp is not an agent.
+# Older OpenCode and Amp processes retain their plugin in memory. Only the
+# exact installed entry may defer a gateway swap. Unproven identity is audited
+# and the upgrade proceeds with the configured hook outage behavior.
+function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) {
+    Write-Warn "audit: live-agent identity unproven for PID ${ProcessId}: $Reason"
+}
+
+# Resolve a file link without consulting PATH. Get-Item sees Windows file
+# symlinks and junctions; an unreadable or looping link proves no identity.
+function Resolve-AgentPath([string]$Path) {
+    if (-not $Path) { return "" }
+    try {
+        $next = [IO.Path]::GetFullPath($Path)
+        for ($depth = 0; $depth -lt 8; $depth++) {
+            $root = [IO.Path]::GetPathRoot($next)
+            $parts = @($next.Substring($root.Length).Split([IO.Path]::DirectorySeparatorChar, [StringSplitOptions]::RemoveEmptyEntries))
+            $current = $root
+            $changed = $false
+            for ($i = 0; $i -lt $parts.Count; $i++) {
+                $current = Join-Path $current $parts[$i]
+                $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+                $link = $item.PSObject.Properties["LinkType"]
+                if ($null -eq $link -or -not $link.Value) { continue }
+                $target = [string](@($item.Target)[0])
+                if (-not $target) { return "" }
+                if (-not [IO.Path]::IsPathRooted($target)) { $target = Join-Path (Split-Path -Parent $current) $target }
+                for ($j = $i + 1; $j -lt $parts.Count; $j++) { $target = Join-Path $target $parts[$j] }
+                $next = [IO.Path]::GetFullPath($target)
+                $changed = $true
+                break
+            }
+            if (-not $changed) { return [IO.Path]::GetFullPath($current) }
+        }
+    } catch { }
+    return ""
+}
+
+# Native installer paths, the fixed WinGet/npm OpenCode image, npm's exact
+# Node entry when its command shim exists, and any setup-selected executable
+# sealed in the previous hook lock. No package name, manifest or PATH lookup
+# establishes an entry.
+function Get-InstalledAgentPrograms {
+    $installed = @{}
+    $profile = [string]$env:USERPROFILE
+    if ($profile) {
+        foreach ($name in @("opencode", "amp")) {
+            $path = Join-Path $profile ".$name\bin\$name.exe"
+            $resolved = Resolve-AgentPath $path
+            if ($resolved) { $installed[$resolved.ToLowerInvariant()] = $name }
+        }
+    }
+    $local = [string]$env:LOCALAPPDATA
+    if ($local) {
+        $winget = Join-Path $local "Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe\opencode.exe"
+        $resolved = Resolve-AgentPath $winget
+        if ($resolved) { $installed[$resolved.ToLowerInvariant()] = "opencode" }
+    }
+    $roaming = [string]$env:APPDATA
+    if ($roaming) {
+        $npm = Join-Path $roaming "npm"
+        $native = Resolve-AgentPath (Join-Path $npm "node_modules\opencode-ai\bin\opencode.exe")
+        if ($native) { $installed[$native.ToLowerInvariant()] = "opencode" }
+        foreach ($name in @("opencode", "amp")) {
+            $relative = if ($name -eq "opencode") { "node_modules\opencode-ai\bin\opencode" } else { "node_modules\@sourcegraph\amp\dist\main.js" }
+            if (-not (Test-Path -LiteralPath (Join-Path $npm ($name + ".cmd")) -PathType Leaf)) { continue }
+            $entry = Resolve-AgentPath (Join-Path $npm $relative)
+            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+        }
+    }
+    try {
+        $lock = Get-Content -Raw -LiteralPath (Join-Path $DataDir "hook_contract_lock.json") -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        foreach ($name in @("opencode", "amp")) {
+            $row = $lock.connectors.$name
+            if ($row.agent_executable_source -ne "setup-selected") { continue }
+            $selected = ([string]$row.agent_executable).Replace('/', '\')
+            if ($selected -notmatch '^([A-Za-z]:\\|\\\\)') { continue }
+            $entry = Resolve-AgentPath $selected
+            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+        }
+    } catch { }
+    return $installed
+}
+
 function Get-LoadedPluginAgent($Process) {
-    $program = [string]$Process.ExecutablePath
-    if (-not $program) { return "" }
-    # Read once per run: the check asks for every process of the host.
+    $processId = 0
+    try { $processId = [int]$Process.ProcessId } catch { }
+    $program = Resolve-AgentPath ([string]$Process.ExecutablePath)
+    if (-not $program) {
+        Write-AgentIdentityAudit $processId "executable path unreadable"
+        return ""
+    }
     $installed = Get-Variable -Name InstalledAgentPrograms -Scope Script -ValueOnly -ErrorAction SilentlyContinue
     if ($null -eq $installed) {
         $installed = Get-InstalledAgentPrograms
@@ -826,91 +903,28 @@ function Get-LoadedPluginAgent($Process) {
     }
     $key = $program.ToLowerInvariant()
     if ($installed.ContainsKey($key)) { return $installed[$key] }
-    # The OpenCode binary of opencode-ai or of one of the Windows packages it
-    # publishes (opencode-windows-x64, -x64-baseline, -arm64), by exact name
-    # and by that package's manifest: another package named
-    # opencode-windows-*, or a folder only named like one, is not OpenCode.
-    if ($program -match '^(.*\\node_modules\\(opencode-(ai|windows-(x64|arm64)(-baseline)?)))\\bin\\\.?opencode(\.exe)?$') {
-        if (Test-NpmPackage $Matches[1] $Matches[2]) { return "opencode" }
+    if (-not $key.EndsWith("\node.exe") -and -not $key.EndsWith("\nodejs.exe")) { return "" }
+    $words = @(Split-CommandLine ([string]$Process.CommandLine))
+    if ($words.Count -lt 2 -or -not $words[1]) {
+        Write-AgentIdentityAudit $processId "Node script argument unavailable"
         return ""
     }
-    if ($key -match '[\\/](node|bun)\.exe$') { $runtime = $Matches[1] } else { return "" }
-    $operand = (Get-ScriptOperand $runtime ([string]$Process.CommandLine)).Replace('/', '\')
-    # A relative script is relative to the process's folder, which this
-    # check cannot read: it is not known.
-    if ($operand -notmatch '^([A-Za-z]:\\|\\\\)') { return "" }
-    if (Test-NpmPackage (Get-NpmPackageFolder $operand "opencode-ai") "opencode-ai") { return "opencode" }
-    if (Test-NpmPackage (Get-NpmPackageFolder $operand "@sourcegraph\amp") "@sourcegraph/amp") { return "amp" }
-    return ""
-}
-
-# The folder of the npm package $Package (a\b for a scoped one) that holds
-# the file $Path: its last node_modules\$Package (pnpm nests), or "".
-function Get-NpmPackageFolder([string]$Path, [string]$Package) {
-    $marker = "\node_modules\$Package\"
-    $at = $Path.LastIndexOf($marker, [StringComparison]::OrdinalIgnoreCase)
-    if ($at -lt 0) { return "" }
-    return $Path.Substring(0, $at + $marker.Length - 1)
-}
-
-# Whether the folder $Root holds the npm package $Name by the name its own
-# package.json gives (npm and Bun install a package so). A folder that is
-# only named like the package is not it.
-function Test-NpmPackage([string]$Root, [string]$Name) {
-    if (-not $Root) { return $false }
-    return [string](Get-Field (Read-Json (Join-Path $Root "package.json")) "name") -ieq $Name
-}
-
-# The OpenCode and Amp executables of the native installers
-# (%USERPROFILE%\.opencode\bin, %USERPROFILE%\.amp\bin), lower-cased full
-# path to agent. The opencode.exe or amp.exe that PATH runs is not an agent
-# by that name alone: an unrelated program can carry it. An npm install is
-# told by its package (Test-NpmPackage).
-function Get-InstalledAgentPrograms {
-    $installed = @{}
-    if (-not $env:USERPROFILE) { return $installed }
-    foreach ($name in @("opencode", "amp")) {
-        $path = Join-Path $env:USERPROFILE ".$name\bin\$name.exe"
-        if (Test-Path -LiteralPath $path -PathType Leaf) {
-            $installed[[IO.Path]::GetFullPath($path).ToLowerInvariant()] = $name
-        }
+    if ($words[1].StartsWith("-")) {
+        Write-AgentIdentityAudit $processId "Node entry hidden by options"
+        return ""
     }
-    return $installed
-}
-
-# The script Node or Bun ($Runtime node or bun) runs for a Windows command
-# line, or "" when it runs none (-e, -p, --run, --test). An option's value
-# is never the script: the options that take it in the next word are listed
-# (from node and bun --help; install.sh script_operand has the same lists).
-# Any other option is a switch, and --option=value is one word. Options are
-# case-sensitive (Node's -C takes a value, its -c does not). The words are
-# those Node and Bun get (Split-CommandLine), so a quoted value with spaces
-# in it, also as --option="value", is one word.
-function Get-ScriptOperand([string]$Runtime, [string]$CommandLine) {
-    if ($Runtime -eq "bun") {
-        $valueOptions = -split "-r --preload --require --import --cwd -c --config --env-file --conditions -d --define --drop -l --loader --tsconfig-override --main-fields --extension-order --jsx-factory --jsx-fragment --jsx-import-source --jsx-runtime --port --title --console-depth --fetch-preconnect --max-http-header-size --dns-result-order --install --unhandled-rejections --user-agent -F --filter --shell --elide-lines --cpu-prof-name --cpu-prof-dir"
-        $noScript = -split "-e --eval -p --print"
-    } else {
-        $valueOptions = -split "-C --conditions -r --require --import --loader --experimental-loader --input-type --env-file --env-file-if-exists --experimental-config-file --experimental-default-type --experimental-sea-config --experimental-test-isolation --test-isolation --test-global-setup --experimental-policy --policy-integrity --experimental-specifier-resolution --es-module-specifier-resolution --allow-fs-read --allow-fs-write --build-snapshot-config --snapshot-blob --cpu-prof-dir --cpu-prof-interval --cpu-prof-name --heap-prof-dir --heap-prof-interval --heap-prof-name --heapsnapshot-near-heap-limit --heapsnapshot-signal --diagnostic-dir --report-dir --report-directory --report-filename --report-signal --redirect-warnings --disable-proto --disable-warning --dns-result-order --icu-data-dir --openssl-config --inspect-port --debug-port --inspect-publish-uid --localstorage-file --max-http-header-size --max-old-space-size-percentage --network-family-autoselection-attempt-timeout --secure-heap --secure-heap-min --test-concurrency --test-coverage-branches --test-coverage-exclude --test-coverage-functions --test-coverage-include --test-coverage-lines --test-name-pattern --test-reporter --test-reporter-destination --test-shard --test-skip-pattern --test-timeout --title --tls-cipher-list --tls-keylog --trace-event-categories --trace-event-file-pattern --trace-require-module --unhandled-rejections --use-largepages --v8-pool-size --watch-kill-signal --watch-path"
-        $noScript = -split "-e --eval -p --print --run --test"
+    $operand = ([string]$words[1]).Replace('/', '\')
+    if ($operand -notmatch '^([A-Za-z]:\\|\\\\)') {
+        Write-AgentIdentityAudit $processId "relative Node script cwd unreadable"
+        return ""
     }
-    $words = @(Split-CommandLine $CommandLine)
-    for ($i = 1; $i -lt $words.Count; $i++) {
-        $word = $words[$i]
-        if (-not $word) { continue }
-        if ($noScript -ccontains $word.Split('=')[0]) { return "" }
-        if ($word -ceq "--") {
-            if ($i + 1 -lt $words.Count) { return $words[$i + 1] }
-            return ""
-        }
-        if ($word.Length -gt 1 -and $word.StartsWith("-")) {
-            if (-not $word.Contains("=") -and $valueOptions -ccontains $word) { $i++ }
-            continue
-        }
-        # bun run SCRIPT
-        if ($Runtime -eq "bun" -and $word -ceq "run") { continue }
-        return $word
+    $script = Resolve-AgentPath $operand
+    if (-not $script) {
+        Write-AgentIdentityAudit $processId "Node script unreadable"
+        return ""
     }
+    $key = $script.ToLowerInvariant()
+    if ($installed.ContainsKey($key)) { return $installed[$key] }
     return ""
 }
 
@@ -971,23 +985,24 @@ function Split-CommandLine([string]$CommandLine) {
 function Assert-NoLoadedPluginAgents {
     $loaded = @()
     $current = [Security.Principal.WindowsIdentity]::GetCurrent().Name
-    try { $currentSession = (Get-Process -Id $PID -ErrorAction Stop).SessionId } catch {
-        Die "Could not check this installer's process session; the gateway was not stopped"
-    }
     try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
-        Die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+        Write-AgentIdentityAudit 0 "process list unreadable"
+        return
     }
     foreach ($process in $processes) {
         $agent = Get-LoadedPluginAgent $process
         if (-not $agent) { continue }
+        $fresh = $null
+        try { $fresh = Get-CimInstance Win32_Process -Filter "ProcessId=$([int]$process.ProcessId)" -ErrorAction Stop } catch { }
+        if (-not $fresh -or $fresh.ExecutablePath -ne $process.ExecutablePath -or $fresh.CommandLine -ne $process.CommandLine) {
+            Write-AgentIdentityAudit ([int]$process.ProcessId) "process vanished or changed during lookup"
+            continue
+        }
         $owner = $null
-        try { $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop } catch { }
+        try { $owner = Invoke-CimMethod -InputObject $fresh -MethodName GetOwner -ErrorAction Stop } catch { }
         if ($null -eq $owner -or [int]$owner.ReturnValue -ne 0) {
-            # A standard user may not read another account's process owner
-            # on a shared host. Ignore that uncertainty only across sessions;
-            # a readable same-account process in any session still blocks.
-            if ($null -ne $process.SessionId -and [int]$process.SessionId -ne [int]$currentSession) { continue }
-            Die "Could not check the owner of a running $agent process; the gateway was not stopped"
+            Write-AgentIdentityAudit ([int]$process.ProcessId) "process owner unreadable"
+            continue
         }
         if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }
     }

@@ -3734,127 +3734,178 @@ def test_loaded_plugins_block_windows_install_before_gateway_stop() -> None:
 # agent. The agent is told by its executable, never by a name (GAP-1128).
 _WINDOWS_AGENT_ROWS = [
     (r"C:\Users\u\.opencode\bin\opencode.exe", "opencode.exe", "opencode"),
-    (r"C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\.opencode.exe", "opencode", "opencode"),
-    (r"C:\Users\u\AppData\Roaming\npm\node_modules\opencode-windows-x64\bin\opencode.exe", "opencode", "opencode"),
-    (r"C:\Program Files\nodejs\node.exe",
-     r'"C:\Program Files\nodejs\node.exe" --no-warnings "C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode"', "opencode"),
-    (r"C:\Program Files\nodejs\node.exe", r"node C:/Users/u/AppData/Roaming/npm/node_modules/@sourcegraph/amp/dist/main.js", "amp"),
-    (r"C:\Users\u\.bun\bin\bun.exe", r"bun C:\Users\u\.bun\install\global\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
-    (r"C:\Users\u\.amp\bin\amp.exe", "amp", "amp"),
-    # GAP-1128: a Node project, folder or program only named opencode or amp.
-    (r"C:\Program Files\nodejs\node.exe", r'"C:\Program Files\nodejs\node.exe" C:\Users\u\r31sa-work\opencode\worker.js', ""),
-    (r"C:\Program Files\nodejs\node.exe", r"node C:\Users\u\work\amp\server.js --amp", ""),
-    (r"C:\Program Files\nodejs\node.exe", r"node build.js C:\npm\node_modules\opencode-ai\bin\opencode", ""),
-    (r"C:\Users\u\src\opencode\bin\opencode.exe", "opencode.exe", ""),
-    (r"C:\Users\u\src\node_modules\opencode-clone\bin\opencode.exe", "opencode.exe", ""),
-    (r"C:\Tools\amp.exe", "amp.exe", ""),
+    (r"C:\Tools\opencode.exe", "opencode.exe", ""),
+    (r"C:\work\node_modules\opencode-ai\bin\opencode.exe", "opencode.exe", ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node "C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode"', "opencode"),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node --conditions C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode C:\work\worker.js", ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node --conditions="dev C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode" C:\work\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\work\worker.js C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Program Files\nodejs\node.exe", r"node C:\Users\u\AppData\Roaming\npm\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
+    (r"C:\Users\u\.bun\bin\bun.exe", r"bun C:\Users\u\AppData\Roaming\npm\node_modules\opencode-ai\bin\opencode", ""),
+    (r"C:\Users\u\.amp\bin\amp.exe", "amp.exe", "amp"),
     ("", "opencode.exe", ""),
-    # R1 review: an option's value is never the script Node or Bun runs, and
-    # -e, -p, --run and --test run none.
-    (r"C:\Program Files\nodejs\node.exe",
-     r'"C:\Program Files\nodejs\node.exe" --conditions C:\work\node_modules\opencode-ai\feature C:\work\worker.js', ""),
-    (r"C:\Program Files\nodejs\node.exe", r"node -C C:\w\node_modules\opencode-ai\feature worker.js", ""),
-    (r"C:\Program Files\nodejs\node.exe", r"node -r C:\w\node_modules\@sourcegraph\amp\dist\main.js worker.js", ""),
-    (r"C:\Program Files\nodejs\node.exe", r"node --import C:/w/node_modules/opencode-ai/bin/opencode worker.js", ""),
-    (r"C:\Program Files\nodejs\node.exe", r"""node -e "require('C:/w/node_modules/@sourcegraph/amp/dist/main.js')" """, ""),
-    (r"C:\Program Files\nodejs\node.exe", r"node --test C:\w\node_modules\opencode-ai\t.test.js", ""),
-    (r"C:\Users\u\.bun\bin\bun.exe", r"bun --preload C:\w\node_modules\opencode-ai\p.ts app.ts", ""),
-    # ... while the script after the options and their values still is.
-    (r"C:\Program Files\nodejs\node.exe", r"node --conditions dev -- C:\w\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
-    (r"C:\Program Files\nodejs\node.exe", r"node -c C:\w\node_modules\@sourcegraph\amp\dist\main.js", "amp"),
-    (r"C:\Users\u\.bun\bin\bun.exe",
-     r"bun run --smol -r .\p.ts C:\Users\u\.bun\install\global\node_modules\opencode-ai\bin\opencode", "opencode"),
-    # R1 review: only the Windows packages OpenCode publishes.
-    (r"C:\w\node_modules\opencode-windows-tools\bin\opencode.exe", "opencode.exe", ""),
-    (r"C:\w\node_modules\opencode-windows-x64-extra\bin\opencode.exe", "opencode.exe", ""),
-    (r"C:\w\node_modules\opencode-linux-x64\bin\opencode.exe", "opencode.exe", ""),
-    (r"C:\w\node_modules\opencode-windows-arm64\bin\opencode.exe", "opencode.exe", "opencode"),
-    (r"C:\w\node_modules\opencode-windows-x64-baseline\bin\opencode.exe", "opencode.exe", "opencode"),
-    # Review loop 1 (rc.7 at 677bf76b): a program is an agent by its package,
-    # never by the command name PATH finds or a folder's name.
-    (r"C:\Users\u\scoop\shims\opencode.exe", "opencode", ""),
-    (r"C:\Tools\bin\opencode.exe", "opencode.exe", ""),
-    (r"C:\no-manifest\node_modules\opencode-windows-x64\bin\opencode.exe", "opencode.exe", ""),
-    (r"C:\no-manifest\node_modules\opencode-ai\bin\.opencode.exe", "opencode.exe", ""),
-    (r"C:\Program Files\nodejs\node.exe", r"node C:\no-manifest\node_modules\opencode-ai\bin\opencode", ""),
-    (r"C:\Program Files\nodejs\node.exe", r"node C:/no-manifest/node_modules/@sourcegraph/amp/dist/main.js", ""),
-    # pnpm: the package is the last node_modules\opencode-ai; any case.
-    (r"C:\Program Files\nodejs\node.exe",
-     r"node C:\w\node_modules\.pnpm\opencode-ai@1.19.4\node_modules\opencode-ai\bin\opencode", "opencode"),
-    (r"C:\W\Node_Modules\OpenCode-Windows-X64\bin\opencode.exe", "opencode.exe", "opencode"),
-    # Review loop 2 (rc.7 at 677bf76b): the words are those Node gets
-    # (Split-CommandLine), so a quoted value with spaces, also as
-    # --option="value" or with a quote mid-word, is one word, never the script.
-    (r"C:\Program Files\nodejs\node.exe", r'node --conditions="dev C:\w\node_modules\opencode-ai\feature" C:\w\worker.js', ""),
-    (r"C:\Program Files\nodejs\node.exe", r'node --title "x C:\w\node_modules\@sourcegraph\amp\dist\main.js" C:\w\worker.js', ""),
-    (r"C:\Program Files\nodejs\node.exe", r'node --title "a\" C:\w\node_modules\opencode-ai\bin\opencode" C:\w\worker.js', ""),
-    (r"C:\Program Files\nodejs\node.exe", r'node --title=x" "C:\w\node_modules\opencode-ai\bin\opencode C:\w\worker.js', ""),
-    (r"C:\Program Files\nodejs\node.exe", r'node C:\w\app.js "C:\w\node_modules\opencode-ai\bin\opencode"', ""),
-    # A relative script is relative to a folder this check cannot read.
-    (r"C:\Program Files\nodejs\node.exe", r"node w\node_modules\opencode-ai\bin\opencode", ""),
-    # ... while a real agent, in a folder with spaces or on a share, still is.
-    (r"C:\Program Files\nodejs\node.exe",
-     r'"C:\Program Files\nodejs\node.exe" "C:\Users\John Smith\AppData\Roaming\npm\node_modules\@sourcegraph\amp\dist\main.js"', "amp"),
-    (r"C:\Program Files\nodejs\node.exe", r'node --title "a b" \\srv\share\node_modules\opencode-ai\bin\opencode', "opencode"),
 ]
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.allow_subprocess
-def test_a_windows_agent_is_told_by_its_executable() -> None:
+def test_a_windows_agent_is_told_only_by_its_recorded_entry() -> None:
+    # Fake WMI rows retain exact Windows command-line boundaries. The map is
+    # what the agent installer recorded, independent of names and manifests.
     installed = (
         "$script:InstalledAgentPrograms = @{ "
         "'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode'; "
-        "'c:\\users\\u\\.amp\\bin\\amp.exe' = 'amp' }\n"
+        "'c:\\users\\u\\.amp\\bin\\amp.exe' = 'amp'; "
+        "'c:\\users\\u\\appdata\\roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode' = 'opencode'; "
+        "'c:\\users\\u\\appdata\\roaming\\npm\\node_modules\\@sourcegraph\\amp\\dist\\main.js' = 'amp' }\n"
     )
-    # Name is the image file name, as Win32_Process reports it.
     rows = "\n".join(
-        "$p = [pscustomobject]@{{ Name = '{}'; ExecutablePath = '{}'; CommandLine = '{}' }}; "
+        "$p = [pscustomobject]@{{ ProcessId = {}; ExecutablePath = '{}'; CommandLine = '{}' }}; "
         "'[' + (Get-LoadedPluginAgent $p) + ']'".format(
-            program.rsplit("\\", 1)[-1] or command, program.replace("'", "''"), command.replace("'", "''")
+            index + 1, program.replace("'", "''"), command.replace("'", "''")
         )
-        for program, command, _ in _WINDOWS_AGENT_ROWS
+        for index, (program, command, _) in enumerate(_WINDOWS_AGENT_ROWS)
     )
-    # Test-NpmPackage reads the package's manifest (its own test reads real
-    # files); here a package under no-manifest\ has none, and the stub checks
-    # the folder and name Get-LoadedPluginAgent asks about.
-    manifests = (
-        "function Test-NpmPackage([string]$Root, [string]$Name) { "
-        "[bool]$Root -and $Root -notlike '*\\no-manifest\\*' -and "
-        "$Root.EndsWith('\\node_modules\\' + $Name.Replace('/', '\\'), [StringComparison]::OrdinalIgnoreCase) }\n"
+    resolver = (
+        "function Resolve-AgentPath([string]$Path) { if (-not $Path) { return '' }; "
+        "return $Path.Replace('/', '\\').ToLowerInvariant() }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: PID $ProcessId $Reason\" }\n"
     )
-    script = ("Set-StrictMode -Version Latest\n" + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Get-ScriptOperand")
-              + _ps1_function("Split-CommandLine") + _ps1_function("Get-NpmPackageFolder") + manifests
-              + "function Get-InstalledAgentPrograms { " + installed.split("=", 1)[1].strip() + " }\n" + rows)
+    script = ("Set-StrictMode -Version Latest\n" + resolver + _ps1_function("Get-LoadedPluginAgent")
+              + _ps1_function("Split-CommandLine") + installed + rows)
     result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     got = [line for line in result.stdout.splitlines() if line.startswith("[")]
     assert got == [f"[{agent}]" for _, _, agent in _WINDOWS_AGENT_ROWS], list(zip(_WINDOWS_AGENT_ROWS, got))
+    assert "audit: PID 13 executable path unreadable" in result.stdout
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
 @pytest.mark.allow_subprocess
-def test_the_installed_windows_agents_are_those_of_the_native_installers(tmp_path: Path) -> None:
-    # Review loop 1 (rc.7 at 677bf76b): the opencode.exe that PATH runs is no
-    # agent by that name; the native installers' programs are.
-    on_path = tmp_path / "bin"
-    on_path.mkdir()
-    (on_path / "opencode.exe").write_bytes(b"MZ")
-    (on_path / "opencode.exe").chmod(0o755)
-    profile = tmp_path / "profile"
-    (profile / ".amp" / "bin").mkdir(parents=True)
-    (profile / ".amp" / "bin" / "amp.exe").write_bytes(b"MZ")
+def test_windows_installed_entries_are_exact_files(tmp_path: Path) -> None:
+    profile, roaming, local, data = (tmp_path / name for name in ("profile", "roaming", "local", "data"))
+    data.mkdir()
+    native = profile / ".amp" / "bin" / "amp.exe"
+    native.parent.mkdir(parents=True)
+    native.write_bytes(b"MZ")
+    entry = roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("node entry", encoding="utf-8")
+    (roaming / "npm" / "opencode.cmd").write_text("@echo off", encoding="utf-8")
+    unrecorded = roaming / "npm" / "node_modules" / "opencode-ai" / "bin" / "worker.js"
+    unrecorded.write_text("worker", encoding="utf-8")
+    (entry.parent.parent / "package.json").write_text('{"author":{"name":"opencode-ai"},"name":"other"}', encoding="utf-8")
+    on_path = tmp_path / "tools" / "opencode.exe"
+    on_path.parent.mkdir()
+    on_path.write_bytes(b"MZ")
     script = (
         "Set-StrictMode -Version Latest\n"
-        + _ps1_function("Get-InstalledAgentPrograms")
-        + f"$env:PATH = '{on_path}'\n$env:USERPROFILE = '{profile}'\n"
-        + "$i = Get-InstalledAgentPrograms\n"
-        + "foreach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
+        + _ps1_function("Resolve-AgentPath") + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$env:USERPROFILE = '{profile}'\n$env:APPDATA = '{roaming}'\n$env:LOCALAPPDATA = '{local}'\n$env:PATH = '{on_path.parent}'\n$DataDir = '{data}'\n"
+        + "$i = Get-InstalledAgentPrograms\nforeach ($k in @($i.Keys | Sort-Object)) { '{0}={1}' -f $k, $i[$k] }\n"
     )
     result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     lines = sorted(line for line in result.stdout.splitlines() if "=" in line)
-    assert lines == [f"{str(profile / '.amp' / 'bin' / 'amp.exe').lower()}=amp"]
+    assert lines == sorted([f"{str(native).lower()}=amp", f"{str(entry).lower()}=opencode"]), result.stdout
+    assert str(on_path).lower() not in result.stdout and str(unrecorded).lower() not in result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(("selected", "want"), [
+    ("relative/opencode.exe", "0"),
+    ("C:/scratch/opencode.exe", "1"),
+])
+def test_windows_hook_lock_entry_requires_an_absolute_path(tmp_path: Path, selected: str, want: str) -> None:
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "hook_contract_lock.json").write_text(json.dumps({"connectors": {
+        "opencode": {"agent_executable_source": "setup-selected", "agent_executable": selected},
+        "amp": {},
+    }}), encoding="utf-8")
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        "function Resolve-AgentPath([string]$Path) { "
+        "if ($Path -eq 'relative\\opencode.exe' -or $Path -eq 'C:\\scratch\\opencode.exe') { "
+        "return 'C:\\scratch\\opencode.exe' }; return '' }\n"
+        + _ps1_function("Get-InstalledAgentPrograms")
+        + f"$DataDir = '{data}'\n"
+        + f"$env:USERPROFILE = '{tmp_path / 'profile'}'\n"
+        + f"$env:APPDATA = '{tmp_path / 'roaming'}'\n"
+        + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n"
+        + "(Get-InstalledAgentPrograms).Count\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0 and result.stdout.strip() == want, (result.stdout, result.stderr)
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_entry_resolution_follows_a_parent_link(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    entry = real / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory links require a Windows developer token")
+    script = (_ps1_function("Resolve-AgentPath")
+              + f"Resolve-AgentPath '{alias / 'bin' / 'opencode'}'")
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip().lower() == str(entry.resolve()).lower(), result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None or shutil.which("node") is None, reason="native Windows Node required")
+@pytest.mark.allow_subprocess
+def test_windows_relative_node_entry_does_not_use_the_installers_cwd(tmp_path: Path) -> None:
+    entry = tmp_path / "node_modules" / "opencode-ai" / "bin" / "opencode"
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    node = Path(shutil.which("node")).resolve()
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        + _ps1_function("Resolve-AgentPath") + _ps1_function("Get-LoadedPluginAgent")
+        + _ps1_function("Split-CommandLine")
+        + "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + f"$script:InstalledAgentPrograms = @{{ '{str(entry).lower()}' = 'opencode' }}\n"
+        + f"$p = [pscustomobject]@{{ ProcessId = 1; ExecutablePath = '{node}'; CommandLine = 'node node_modules\\opencode-ai\\bin\\opencode' }}\n"
+        + "'[' + (Get-LoadedPluginAgent $p) + ']'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], cwd=tmp_path,
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "[]" in result.stdout and "audit: relative Node script cwd unreadable" in result.stdout
+
+
+@pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows identity required")
+@pytest.mark.allow_subprocess
+def test_windows_vanished_agent_process_is_audited_without_refusal() -> None:
+    # A PID can exit between the first WMI enumeration and the ownership
+    # check. Its old row cannot establish that an agent is still live.
+    script = (
+        "Set-StrictMode -Version Latest\n"
+        "function Get-CimInstance { param($Class, $Filter, $ErrorAction) "
+        "if ($Filter) { return $null }; "
+        "return [pscustomobject]@{ ProcessId = 123; ExecutablePath = 'C:\\agent.exe'; CommandLine = 'agent' } }\n"
+        "function Get-LoadedPluginAgent($Process) { return 'opencode' }\n"
+        "function Invoke-CimMethod { throw 'owner query must not run for a vanished PID' }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Output \"audit: $Reason\" }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        + _ps1_function("Assert-NoLoadedPluginAgents")
+        + "Assert-NoLoadedPluginAgents\n'scan-passed'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert "audit: process vanished or changed during lookup" in result.stdout
+    assert "scan-passed" in result.stdout
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3878,46 +3929,6 @@ def test_a_windows_command_line_splits_as_node_reads_it() -> None:
     result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     assert [json.loads(line) for line in result.stdout.splitlines() if line.strip()] == [words for _, words in rows]
-
-
-@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
-@pytest.mark.allow_subprocess
-def test_a_windows_package_counts_by_its_own_manifest(tmp_path: Path) -> None:
-    # Review loop 1 (rc.7 at 677bf76b): a folder named like an agent package
-    # is the agent only when the package's own manifest says so.
-    cases = {
-        "real": ('{"name": "opencode-ai", "version": "1.19.4"}', "opencode-ai", True),
-        "scoped": ('{"name":"@sourcegraph/amp"}', "@sourcegraph/amp", True),
-        "upper": ('{"name":"opencode-windows-x64"}', "OpenCode-Windows-X64", True),
-        "fork": ('{"name": "opencode-ai-fork"}', "opencode-ai", False),
-        "nested": ('{"name":"tools","author":{"name":"opencode-ai"}}', "opencode-ai", False),
-        "broken": ("not a manifest", "opencode-ai", False),
-        "none": (None, "opencode-ai", False),
-    }
-    lines = []
-    for folder, (text, name, _) in cases.items():
-        (tmp_path / folder).mkdir()
-        if text is not None:
-            (tmp_path / folder / "package.json").write_text(text, encoding="utf-8")
-        lines.append(f"'{folder}=' + (Test-NpmPackage '{tmp_path / folder}' '{name}')")
-    lines.append("'empty=' + (Test-NpmPackage '' 'opencode-ai')")
-    folders = [
-        (r"C:\w\node_modules\opencode-ai\bin\opencode", "opencode-ai", r"C:\w\node_modules\opencode-ai"),
-        (r"C:\w\NODE_MODULES\@Sourcegraph\Amp\dist\main.js", r"@sourcegraph\amp", r"C:\w\NODE_MODULES\@Sourcegraph\Amp"),
-        (r"C:\w\node_modules\opencode-ai-fork\bin\opencode", "opencode-ai", ""),
-        (r"C:\a\node_modules\opencode-ai\node_modules\.pnpm\x\node_modules\opencode-ai\b.js", "opencode-ai",
-         r"C:\a\node_modules\opencode-ai\node_modules\.pnpm\x\node_modules\opencode-ai"),
-    ]
-    for index, (path, package, _) in enumerate(folders):
-        lines.append(f"'folder{index}=' + (Get-NpmPackageFolder '{path}' '{package}')")
-    script = ("Set-StrictMode -Version Latest\n" + _ps1_function("Get-Field") + _ps1_function("Read-Json")
-              + _ps1_function("Test-NpmPackage") + _ps1_function("Get-NpmPackageFolder") + "\n".join(lines))
-    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
-    assert result.returncode == 0, result.stderr
-    got = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    want = {folder: str(ok) for folder, (_, _, ok) in cases.items()} | {"empty": "False"}
-    want |= {f"folder{index}": folder for index, (_, _, folder) in enumerate(folders)}
-    assert got == want, result.stdout
 
 
 @pytest.mark.skipif(os.name != "nt" or POWERSHELL is None, reason="native Windows PowerShell required")

@@ -495,55 +495,97 @@ installed_version() {
     done
 }
 
-# Older OpenCode and Amp processes retain their plugin in memory. Releases
-# before this one do not inspect .install.lock, so stopping the gateway under
-# one would let an open-mode tool call through. Inspect this account's native
-# agent processes immediately before a gateway swap; an unreadable process
-# list cannot establish that the swap is safe.
-#
-# A process is OpenCode or Amp by the program file it runs and the package
-# that installed it, never by a name in its command line, the folder it runs
-# from or the command name PATH finds (GAP-1128): the program (agent_program)
-# is the agent of the native installers (installed_agent_programs), an
-# OpenCode binary of its npm packages or of its Homebrew formula, or Node or
-# Bun runs a script of the agents' npm packages (opencode-ai,
-# @sourcegraph/amp). A package counts by its own manifest (npm_package_is,
-# homebrew_opencode), never by the name of its folder. A project, script or
-# other program that is only named opencode or amp is not an agent. The
-# script is read from the process's own arguments (process_argv): ps joins
-# them with spaces, so an option value with a space in it would read as two
-# words, the second one taken for the script.
-loaded_plugin_agents() {
-    local processes installed pid program agent word
-    local -a argv
-    processes="$(ps -u "$(id -u)" -o pid= -o args= 2>/dev/null)" || return 2
-    installed="$(installed_agent_programs)"
-    while read -r pid _; do
-        [[ "${pid}" =~ ^[0-9]+$ ]] || continue
-        program="$(agent_program "${pid}")" || continue
-        argv=()
-        while IFS= read -r -d '' word || [[ -n "${word}" ]]; do
-            argv+=("${word}")
-        done < <(process_argv "${pid}" 2>/dev/null || true)
-        agent="$(agent_of "${program}" "${installed}" "${pid}" ${argv[@]+"${argv[@]}"})"
-        [[ -z "${agent}" ]] || printf '%s (PID %s)\n' "${agent}" "${pid}"
-    done < <(printf '%s\n' "${processes}" | awk 'tolower($0) ~ /opencode|amp/')
+# Older OpenCode and Amp processes retain their plugin in memory. Refuse a
+# gateway swap only when the process is the exact entry installed for that
+# agent. Unproven process identity is audited and does not block the upgrade.
+agent_identity_audit() {
+    printf 'audit: live-agent identity unproven for PID %s: %s\n' "$1" "$2" >&2
 }
 
-# process_argv PID: the arguments of process PID as the kernel keeps them,
-# each ended by a NUL, so an argument with spaces in it stays one argument:
-# /proc/PID/cmdline on Linux, sysctl KERN_PROCARGS2 (CTL_KERN 1, 49) through
-# the system perl on macOS (ps prints them joined by spaces). Nothing for a
-# process that has exited or that this account may not read.
+# resolved_agent_path FILE: the file's real path, with no PATH search.
+resolved_agent_path() {
+    [[ -f "$1" ]] || return 1
+    if [[ "${OSTYPE:-}" == linux* ]]; then
+        readlink -f -- "$1" 2>/dev/null
+    elif [[ "${OSTYPE:-}" == darwin* ]]; then
+        /usr/bin/perl -MCwd=realpath -e 'my $p = realpath($ARGV[0]); defined($p) or exit 1; print $p' "$1" 2>/dev/null
+    else
+        return 1
+    fi
+}
+
+# The installer's entry evidence: native fixed locations; npm/Bun/pnpm
+# launcher symlinks to their exact Node entry. A folder name, manifest or
+# command on PATH is not an entry record.
+installed_agent_programs() {
+    local agent name path target base link
+    for agent in OpenCode:opencode Amp:amp; do
+        name="${agent#*:}"
+        path="${HOME}/.${name}/bin/${name}"
+        target="$(resolved_agent_path "${path}")" || continue
+        printf '%s\t%s\n' "${agent%%:*}" "${target}"
+    done
+    for agent in OpenCode:opencode Amp:amp; do
+        name="${agent#*:}"
+        for base in "${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" "${HOME}/.local/share/pnpm" /usr/local/bin /opt/homebrew/bin; do
+            link="${base}/${name}"
+            [[ -L "${link}" ]] || continue
+            target="$(resolved_agent_path "${link}")" || continue
+            case "${agent}:${target}" in
+                OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+                    printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
+            esac
+        done
+    done
+}
+
+# One proc_pidpath call per PID in one interpreter on macOS. An absent old
+# venv or an unreadable process yields an empty path; never fall back to lsof.
+process_programs() {
+    local pid program python rows
+    if [[ "${OSTYPE:-}" == linux* ]]; then
+        while read -r pid; do
+            [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+            program="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || program=""
+            printf '%s\t%s\n' "${pid}" "${program}"
+        done <<< "$1"
+        return 0
+    fi
+    [[ "${OSTYPE:-}" == darwin* ]] || return 0
+    python="${VENV:-${HOME}/.defenseclaw/.venv}/bin/python"
+    if [[ ! -x "${python}" ]]; then
+        while read -r pid; do [[ "${pid}" =~ ^[0-9]+$ ]] && printf '%s\t\n' "${pid}"; done <<< "$1"
+        return 0
+    fi
+    rows="$("${python}" -I -c '
+import ctypes, sys
+lib = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+path_for = lib.proc_pidpath
+path_for.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
+path_for.restype = ctypes.c_int
+for line in sys.stdin:
+    pid = line.strip()
+    if not pid.isdecimal():
+        continue
+    buf = ctypes.create_string_buffer(4096)
+    size = path_for(int(pid), buf, len(buf))
+    path = buf.value.decode("utf-8", "surrogateescape") if size > 0 else ""
+    print(pid + "\t" + path)
+' <<< "$1" 2>/dev/null)" || {
+        while read -r pid; do [[ "${pid}" =~ ^[0-9]+$ ]] && printf '%s\t\n' "${pid}"; done <<< "$1"
+        return 0
+    }
+    printf '%s\n' "${rows}"
+}
+
+# process_argv PID: kernel argument boundaries, never the flattened ps text.
 process_argv() {
     if [[ "${OSTYPE:-}" == linux* ]]; then
         cat "/proc/$1/cmdline" 2>/dev/null
         return
     fi
-    [[ "${OSTYPE:-}" == darwin* ]] && command -v perl >/dev/null 2>&1 || return 1
-    # SYS___sysctl is 202 on macOS (x86_64 and arm64); the buffer holds
-    # argc, the executable path, padding NULs, then the arguments.
-    perl -e '
+    [[ "${OSTYPE:-}" == darwin* && -x /usr/bin/perl ]] || return 1
+    /usr/bin/perl -e '
         my $mib = pack("i3", 1, 49, $ARGV[0]); my $len = pack("Q", 0);
         syscall(202, $mib, 3, 0, $len, 0, 0) == 0 or exit 1;
         my $buf = "\0" x unpack("Q", $len);
@@ -558,251 +600,70 @@ process_argv() {
     ' "$1"
 }
 
-# process_cwd PID: the folder process PID runs in (a relative script is
-# relative to it, not to this installer's folder): /proc/PID/cwd on Linux,
-# lsof's cwd entry on macOS.
+# A relative Node entry is resolved from the process's own cwd on Linux.
+# macOS has no bounded cwd lookup here, so such an entry remains unproven.
 process_cwd() {
-    if [[ "${OSTYPE:-}" == linux* ]]; then
-        readlink "/proc/$1/cwd" 2>/dev/null
-        return
-    fi
-    command -v lsof >/dev/null 2>&1 || return 1
-    lsof -nP -a -p "$1" -d cwd -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); found = 1; exit } END { exit !found }'
+    [[ "${OSTYPE:-}" == linux* ]] || return 1
+    readlink "/proc/$1/cwd" 2>/dev/null
 }
 
-# agent_program PID: the program file process PID runs, as the kernel found
-# it: /proc/PID/exe on Linux, lsof's first txt file on macOS. A process
-# cannot choose it, as it can its name or argv[0]. The lookup goes by the
-# OS: a Linux process that exited since ps listed it has no /proc entry and
-# is skipped at once; lsof, a slow scan there, never runs on Linux.
-agent_program() {
-    if [[ "${OSTYPE:-}" == linux* ]]; then
-        readlink "/proc/$1/exe" 2>/dev/null
-        return
-    fi
-    command -v lsof >/dev/null 2>&1 || return 1
-    lsof -nP -a -p "$1" -d txt -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); found = 1; exit } END { exit !found }'
-}
-
-# installed_agent_programs: one "<agent> <program>" line for the OpenCode
-# and Amp of the native installers (~/.opencode/bin, ~/.amp/bin), links
-# resolved. The opencode or amp that PATH runs is not an agent by that name
-# alone: an unrelated program (the amp text editor, a copy of a system tool)
-# can carry it. agent_of tells an npm or Homebrew install by its package.
-installed_agent_programs() {
-    local agent name path
-    for agent in OpenCode:opencode Amp:amp; do
-        name="${agent#*:}"
-        path="${HOME}/.${name}/bin/${name}"
-        [[ -f "${path}" ]] || continue
-        printf '%s %s\n' "${agent%%:*}" "$(readlink -f "${path}" 2>/dev/null || printf '%s' "${path}")"
-    done
-}
-
-# json_string FILE KEY...: the string at KEY... (one key per object level,
-# from the top-level object) of the JSON file FILE, as JSON.parse reads it:
-# escapes decoded, the last of duplicate keys wins, a "name" inside a nested
-# object, an array or a string value is no top-level "name". Fails for a
-# file that is not one JSON object, or when that value is not a string.
-json_string() {
-    local file="$1"
-    shift
-    LC_ALL=C awk -v want="$*" '
-        function skip() { while (i <= n && index(" \t\r\n", substr(text, i, 1))) i++ }
-        function hex4(h,    k, c, v) {
-            v = 0
-            for (k = 1; k <= 4; k++) {
-                c = index("0123456789abcdef", tolower(substr(h, k, 1)))
-                if (!c) return -1
-                v = v * 16 + c - 1
-            }
-            return v
-        }
-        function str(    out, c, e, v) {
-            out = ""; i++
-            while (i <= n) {
-                c = substr(text, i, 1)
-                if (c == "\"") { i++; ok = 1; return out }
-                if (c < " ") break
-                if (c == "\\") {
-                    e = substr(text, i + 1, 1)
-                    if (e == "u") {
-                        v = hex4(substr(text, i + 2, 4))
-                        if (v < 0) break
-                        # Only printable ASCII matters here; any other character
-                        # (a control character could forge the key path) is one placeholder.
-                        out = out ((v >= 32 && v < 127) ? sprintf("%c", v) : "\001"); i += 6; continue
-                    }
-                    if (e == "n") c = "\n"; else if (e == "t") c = "\t"; else if (e == "r") c = "\r"
-                    else if (e == "b") c = "\b"; else if (e == "f") c = "\f"
-                    else if (e == "\"" || e == "\\" || e == "/") c = e
-                    else break
-                    out = out c; i += 2; continue
-                }
-                out = out c; i++
-            }
-            ok = 0; return ""
-        }
-        function value(path,    c, key, s) {
-            skip(); c = substr(text, i, 1)
-            if (path == target) found = 0
-            if (c == "{" || c == "[") {
-                i++; skip()
-                if (substr(text, i, 1) == (c == "{" ? "}" : "]")) { i++; return 1 }
-                while (1) {
-                    if (c == "{") {
-                        skip()
-                        if (substr(text, i, 1) != "\"") return 0
-                        key = str(); if (!ok) return 0
-                        skip()
-                        if (substr(text, i, 1) != ":") return 0
-                        i++
-                        if (!value(path SUBSEP key)) return 0
-                    } else if (!value(path SUBSEP "\036")) return 0
-                    skip(); s = substr(text, i, 1); i++
-                    if (s == ",") continue
-                    return s == (c == "{" ? "}" : "]")
-                }
-            }
-            if (c == "\"") {
-                s = str(); if (!ok) return 0
-                if (path == target) { found = 1; result = s }
-                return 1
-            }
-            if (match(substr(text, i), /^(-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?|true|false|null)/)) { i += RLENGTH; return 1 }
-            return 0
-        }
-        { text = text $0 "\n" }
-        END {
-            n = length(text); i = 1; found = 0
-            if (substr(text, 1, 3) == "\357\273\277") i = 4
-            target = "\035"; k = split(want, keys, " ")
-            for (j = 1; j <= k; j++) target = target SUBSEP keys[j]
-            skip()
-            if (substr(text, i, 1) != "{" || !value("\035")) exit 1
-            skip()
-            if (i <= n || !found) exit 1
-            printf "%s", result
-        }
-    ' "${file}" 2>/dev/null
-}
-
-# npm_package_is FOLDER NAME: FOLDER holds the npm package NAME by the
-# top-level name of its own package.json (npm, pnpm and Bun install a
-# package so). A folder that is only named like the package is not it, nor
-# one whose manifest names it anywhere else (an author, a dependency).
-npm_package_is() {
-    local name
-    name="$(json_string "$1/package.json" name)" || return 1
-    [[ "${name}" == "$2" ]]
-}
-
-# homebrew_opencode KEG: KEG (.../Cellar/opencode/VERSION) is OpenCode as
-# Homebrew installed it: its install receipt names a tap that ships this
-# OpenCode (homebrew/core, sst/tap, anomalyco/tap). Another formula named
-# opencode (the archived Go opencode of opencode-ai/tap) is not this agent.
-# The tap is the receipt's source.tap, where
-# Homebrew records it; a "tap" anywhere else in the receipt is not it.
-homebrew_opencode() {
-    local tap
-    tap="$(json_string "$1/INSTALL_RECEIPT.json" source tap)" || return 1
-    case "${tap}" in
-        homebrew/core | sst/tap | anomalyco/tap) return 0 ;;
-    esac
-    return 1
-}
-
-# agent_of PROGRAM INSTALLED PID WORD...: OpenCode or Amp when process PID,
-# running PROGRAM with the arguments WORD... (its program first), is that
-# agent, else nothing.
+# agent_of PROGRAM INSTALLED PID WORD...: only an installed binary, or Node
+# running that installed entry as its immediate script argument, counts.
+# Options cannot be mistaken for a script: a command with Node flags is
+# unproven and skipped rather than guessed from a list of option names.
 agent_of() {
-    local program="${1% (deleted)}" installed="$2" pid="$3" agent path runtime script cwd
+    local program="$1" installed="$2" pid="$3" agent path script cwd
     shift 3
-    # The OpenCode binary of opencode-ai or of one of the platform packages it
-    # publishes (opencode-linux-x64-baseline-musl, opencode-darwin-arm64, ...),
-    # by exact name and by that package's manifest: another package named
-    # opencode-*, or a folder only named like one, is not OpenCode.
-    local opencode_binary='^(.*/node_modules/(opencode-(ai|linux-(x64|arm64)(-baseline)?(-musl)?|darwin-(x64|arm64)(-baseline)?)))/bin/\.?opencode$'
-    # OpenCode as its Homebrew formula installs it (Cellar/opencode/VERSION).
-    local opencode_keg='^(.*/Cellar/opencode/[^/]+)/bin/opencode$'
-    while read -r agent path; do
+    [[ "${program}" != *' (deleted)' ]] || { agent_identity_audit "${pid}" 'executable was removed'; return 0; }
+    while IFS=$'\t' read -r agent path; do
         [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
-    if [[ "${program}" =~ ${opencode_binary} ]]; then
-        ! npm_package_is "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" || printf 'OpenCode'
-        return 0
+    case "${program##*/}" in node | nodejs) ;; *) return 0 ;; esac
+    [[ $# -ge 2 && -n "$2" ]] || { agent_identity_audit "${pid}" 'Node script argument unavailable'; return 0; }
+    [[ "$2" != -* ]] || { agent_identity_audit "${pid}" 'Node entry hidden by options'; return 0; }
+    script="$2"
+    if [[ "${script}" != /* ]]; then
+        cwd="$(process_cwd "${pid}")" || { agent_identity_audit "${pid}" 'relative Node script cwd unreadable'; return 0; }
+        script="${cwd%/}/${script}"
     fi
-    if [[ "${program}" =~ ${opencode_keg} ]]; then
-        ! homebrew_opencode "${BASH_REMATCH[1]}" || printf 'OpenCode'
-        return 0
-    fi
-    case "${program##*/}" in
-        node | nodejs) runtime=node ;;
-        bun) runtime=bun ;;
-        *) return 0 ;;
-    esac
-    script="$(script_operand "${runtime}" "$@")"
-    # A relative script is relative to the folder the process runs in; when
-    # that cannot be read, the script is not known.
-    if [[ -n "${script}" && "${script}" != /* ]]; then
-        cwd="$(process_cwd "${pid}")" || cwd=""
-        if [[ "${cwd}" == /* ]]; then script="${cwd%/}/${script}"; else script=""; fi
-    fi
-    # A script started by its #! line is named by the path PATH found (often
-    # a link into the package): resolve it as the kernel did.
-    [[ -z "${script}" ]] || script="$(readlink -f "${script}" 2>/dev/null || printf '%s' "${script}")"
-    while read -r agent path; do
+    script="$(resolved_agent_path "${script}")" || { agent_identity_audit "${pid}" 'Node script unreadable'; return 0; }
+    while IFS=$'\t' read -r agent path; do
         [[ -n "${path}" && "${script}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
-    # The package is the last node_modules/<name> on the path (pnpm nests).
-    case "${script}" in
-        */node_modules/opencode-ai/*)
-            ! npm_package_is "${script%/node_modules/opencode-ai/*}/node_modules/opencode-ai" opencode-ai || printf 'OpenCode'
-            ;;
-        */node_modules/@sourcegraph/amp/*)
-            ! npm_package_is "${script%/node_modules/@sourcegraph/amp/*}/node_modules/@sourcegraph/amp" @sourcegraph/amp || printf 'Amp'
-            ;;
-    esac
     return 0
 }
 
-# script_operand RUNTIME WORD...: the script Node or Bun (RUNTIME node or
-# bun) runs for the command line WORD... (its program first), or nothing
-# when it runs none (-e, -p, --run, --test). An option's value is never the
-# script: the options that take it in the next word are listed (from node
-# and bun --help; install.ps1 Get-ScriptOperand has the same lists). Any
-# other option is a switch, and --option=value is one word.
-script_operand() {
-    local runtime="$1" value_options no_script
-    if [[ "${runtime}" == bun ]]; then
-        value_options="-r --preload --require --import --cwd -c --config --env-file --conditions -d --define --drop -l --loader --tsconfig-override --main-fields --extension-order --jsx-factory --jsx-fragment --jsx-import-source --jsx-runtime --port --title --console-depth --fetch-preconnect --max-http-header-size --dns-result-order --install --unhandled-rejections --user-agent -F --filter --shell --elide-lines --cpu-prof-name --cpu-prof-dir"
-        no_script="-e --eval -p --print"
-    else
-        value_options="-C --conditions -r --require --import --loader --experimental-loader --input-type --env-file --env-file-if-exists --experimental-config-file --experimental-default-type --experimental-sea-config --experimental-test-isolation --test-isolation --test-global-setup --experimental-policy --policy-integrity --experimental-specifier-resolution --es-module-specifier-resolution --allow-fs-read --allow-fs-write --build-snapshot-config --snapshot-blob --cpu-prof-dir --cpu-prof-interval --cpu-prof-name --heap-prof-dir --heap-prof-interval --heap-prof-name --heapsnapshot-near-heap-limit --heapsnapshot-signal --diagnostic-dir --report-dir --report-directory --report-filename --report-signal --redirect-warnings --disable-proto --disable-warning --dns-result-order --icu-data-dir --openssl-config --inspect-port --debug-port --inspect-publish-uid --localstorage-file --max-http-header-size --max-old-space-size-percentage --network-family-autoselection-attempt-timeout --secure-heap --secure-heap-min --test-concurrency --test-coverage-branches --test-coverage-exclude --test-coverage-functions --test-coverage-include --test-coverage-lines --test-name-pattern --test-reporter --test-reporter-destination --test-shard --test-skip-pattern --test-timeout --title --tls-cipher-list --tls-keylog --trace-event-categories --trace-event-file-pattern --trace-require-module --unhandled-rejections --use-largepages --v8-pool-size --watch-kill-signal --watch-path"
-        no_script="-e --eval -p --print --run --test"
-    fi
-    shift
-    [[ $# -gt 0 ]] && shift
-    while [[ $# -gt 0 ]]; do
-        [[ " ${no_script} " != *" ${1%%=*} "* ]] || return 0
-        case "$1" in
-            --) shift; break ;;
-            -?*=*) shift ;;
-            -?*)
-                [[ $# -gt 1 && " ${value_options} " == *" $1 "* ]] && shift
-                shift
+loaded_plugin_agents() {
+    local pids installed pid program agent word
+    local -a argv
+    pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { agent_identity_audit 0 'process list unreadable'; return 0; }
+    installed="$(installed_agent_programs)"
+    while IFS=$'\t' read -r pid program; do
+        [[ "${pid}" =~ ^[0-9]+$ ]] || continue
+        [[ -n "${program}" ]] || { agent_identity_audit "${pid}" 'executable path unreadable'; continue; }
+        argv=()
+        case "${program##*/}" in
+            node | nodejs)
+                while IFS= read -r -d '' word; do
+                    argv+=("${word}")
+                    [[ ${#argv[@]} -ge 2 ]] && break
+                done < <(process_argv "${pid}" 2>/dev/null)
+                [[ ${#argv[@]} -gt 0 ]] || { agent_identity_audit "${pid}" 'arguments unreadable'; continue; }
                 ;;
-            # bun run SCRIPT
-            run) [[ "${runtime}" == bun ]] || break; shift ;;
-            *) break ;;
         esac
-    done
-    printf '%s' "${1:-}"
+        agent="$(agent_of "${program}" "${installed}" "${pid}" ${argv[@]+"${argv[@]}"})"
+        [[ -n "${agent}" ]] || continue
+        if [[ "${OSTYPE:-}" == linux* && ! "/proc/${pid}/exe" -ef "${program}" ]]; then
+            agent_identity_audit "${pid}" 'executable changed during lookup'
+            continue
+        fi
+        printf '%s (PID %s)\n' "${agent}" "${pid}"
+    done < <(process_programs "${pids}")
 }
 
 assert_no_loaded_plugin_agents() {
     local agents
-    agents="$(loaded_plugin_agents)" || die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    agents="$(loaded_plugin_agents)"
     [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
 }
 
