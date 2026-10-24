@@ -978,6 +978,7 @@ func (a *APIServer) finalizeAgentHook(
 		Result:       envResult,
 		Action:       resp.Action,
 		RawAction:    resp.RawAction,
+		Enforced:     resp.Action == "block",
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
 		Reason:       hookSourceReason(resp),

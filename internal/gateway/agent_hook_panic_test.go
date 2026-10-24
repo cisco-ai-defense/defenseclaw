@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -538,6 +539,33 @@ func TestHandleAgentHook_AnswerEncodingPanicCountsOnce(t *testing.T) {
 	}
 	if got := countGeneratedMetricRecordsByName(capture.metricRecords, observability.TelemetryInstrumentDefenseClawPanicsTotal); got != 1 {
 		t.Fatalf("answer encoding panic count=%d, want one", got)
+	}
+}
+
+func TestFinalizeAgentHook_IdentityPanicKeepsNativeBlockEnforced(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger,
+		stepIdxBySession: map[string]*sessionStepState{
+			"identity-panic": {turnToStep: nil},
+		},
+	}
+	// A nil turn map makes the identity stamper panic before it can assign
+	// Enforced. The finalized verdict must already have supplied that bit.
+	req := agentHookRequest{
+		ConnectorName: "antigravity", HookEventName: "PreToolUse",
+		SessionID: "identity-panic", TurnID: "turn-1", ToolName: "run_command",
+	}
+	resp := agentHookResponse{
+		Action: "block", RawAction: "block", Mode: "action", Reason: "blocked command",
+		HookOutput: map[string]interface{}{"decision": "deny", "reason": "blocked command"},
+	}
+	result := api.finalizeAgentHook(t.Context(), "antigravity", req, resp, nil, []byte(`{}`), time.Millisecond, false, nil)
+	if !result.AuditPersisted || !result.Enforced || !result.notificationReady() {
+		t.Fatalf("finalization=%+v, want persisted enforced native block and ready notification", result)
+	}
+	row := soleHookDecisionForTest(t, store)
+	if row.Structured["action"] != "block" || !row.Enforced {
+		t.Fatalf("audit row=%+v, want native block marked enforced", row)
 	}
 }
 
