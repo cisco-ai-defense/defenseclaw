@@ -566,6 +566,81 @@ try {
                 $failures.Add('link target outside the tree was removed')
             }
 
+            # GAP-1304: a hook process may still hold the executable when a
+            # failed fresh install removes its transaction-created root. The
+            # authenticated rollback gets a bounded retry after the old
+            # five-second delete window, and cannot use it on another root.
+            $rollback = New-TestLayout 'rollback-held'
+            $rollbackHook = [IO.Path]::Combine($rollback.BinDirectory, 'defenseclaw-hook.exe')
+            $ready = [IO.Path]::Combine($Root, 'rollback-hook-held')
+            [IO.File]::WriteAllText($rollbackHook, 'stand-in')
+            $security = Initialize-DefenseClawNativeSecurity
+            $rootSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($rollback.InstallRoot)
+            $holder = Start-Job -ScriptBlock {
+                param([string]$Hook, [string]$Ready)
+                $stream = [IO.File]::Open($Hook, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+                try {
+                    [IO.File]::WriteAllText($Ready, 'held')
+                    Start-Sleep -Seconds 12
+                }
+                finally { $stream.Dispose() }
+            } -ArgumentList $rollbackHook, $ready
+            try {
+                $clock = [Diagnostics.Stopwatch]::StartNew()
+                while (-not [IO.File]::Exists($ready) -and $clock.ElapsedMilliseconds -lt 10000) {
+                    Start-Sleep -Milliseconds 100
+                }
+                if (-not [IO.File]::Exists($ready)) {
+                    $failures.Add('the native rollback hook holder did not start')
+                }
+                else {
+                    $priorStrict = [Environment]::GetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', 'Process')
+                    try {
+                        [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', '1', 'Process')
+                        try {
+                            Remove-DefenseClawManagedTree `
+                                -Path $rollback.InstallRoot `
+                                -RequiredBase $Root `
+                                -Label 'InstallRoot' `
+                                -RetryHeldFileMilliseconds 15000 `
+                                -ExpectedRootIdentity ([string]$rootSnapshot.Identity) `
+                                -ExpectedRootSecurityDescriptor ([byte[]]$rootSnapshot.SecurityDescriptor)
+                        }
+                        catch {
+                            $failures.Add("fresh-install rollback did not wait for an active hook: $($_.Exception.Message)")
+                        }
+                        if ([IO.Directory]::Exists($rollback.InstallRoot)) {
+                            $failures.Add('fresh-install rollback left the transaction-created root after the hook exited')
+                        }
+                    }
+                    finally {
+                        [Environment]::SetEnvironmentVariable('DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS', $priorStrict, 'Process')
+                    }
+                }
+            }
+            finally {
+                if ($null -ne $holder) {
+                    [void](Wait-Job -Job $holder -Timeout 30)
+                    if ($holder.State -eq 'Running') { Stop-Job -Job $holder }
+                    Remove-Job -Job $holder -Force
+                }
+            }
+
+            $otherRoot = New-TestLayout 'rollback-other-root'
+            $otherSnapshot = $security::GetDirectorySecuritySnapshotNoFollowIfExists($otherRoot.InstallRoot)
+            Test-Refused 'fresh-install rollback root identity changed' {
+                Remove-DefenseClawManagedTree `
+                    -Path $otherRoot.InstallRoot `
+                    -RequiredBase $Root `
+                    -Label 'InstallRoot' `
+                    -RetryHeldFileMilliseconds 15000 `
+                    -ExpectedRootIdentity ([string]$rootSnapshot.Identity) `
+                    -ExpectedRootSecurityDescriptor ([byte[]]$otherSnapshot.SecurityDescriptor)
+            } 'identity changed'
+            if (-not [IO.File]::Exists($otherRoot.GatewayPath)) {
+                $failures.Add('fresh-install rollback removed a root with a different identity')
+            }
+
             # GAP-0942: an editor's ACP thread that runs defenseclaw-acp.exe
             # from the install folder refuses the uninstall before it changes
             # anything and names the program, account and parent; a process
