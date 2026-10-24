@@ -89,3 +89,36 @@ func TestInstructionProtectionCreatingAbsentStartupFile(t *testing.T) {
 		})
 	}
 }
+
+// Codex has no InstructionsLoaded event. Its native patch tools must treat
+// an absent AGENTS.md at session start as a file creation, even when the
+// hook client resolves the new path.
+func TestInstructionProtectionCodexCreatesAbsentAgentsWithPatch(t *testing.T) {
+	for _, tc := range []struct {
+		name, tool string
+		input      map[string]interface{}
+	}{
+		{"apply patch", "apply_patch", map[string]interface{}{
+			"command": "*** Begin Patch\n*** Add File: AGENTS.md\n+new instructions\n*** End Patch",
+		}},
+		{"exec patch heredoc", "exec_command", map[string]interface{}{
+			"cmd": "apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: AGENTS.md\n+new instructions\n*** End Patch\nPATCH",
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			project := t.TempDir()
+			api := instructionProtectionTestAPI(t, "codex", "action", "HIGH")
+			api.evaluateCodexHook(t.Context(), codexHookRequest{
+				HookEventName: "SessionStart", SessionID: "new-file", CWD: project,
+			})
+			ctx := instructionResolvedWriteContext(t, project, tc.tool, tc.input)
+			response := api.evaluateCodexHook(ctx, codexHookRequest{
+				HookEventName: "PreToolUse", SessionID: "new-file", CWD: project,
+				ToolName: tc.tool, ToolInput: tc.input,
+			})
+			if cogBlocked(response.Action, response.WouldBlock, response.Findings) {
+				t.Fatalf("creating absent AGENTS.md through %s was blocked: %+v", tc.tool, response)
+			}
+		})
+	}
+}
