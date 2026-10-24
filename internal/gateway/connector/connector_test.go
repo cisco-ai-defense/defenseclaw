@@ -5908,7 +5908,9 @@ func TestCodexSurgicalRestoreRejectsStaleManagedTelemetryBackup(t *testing.T) {
 	}
 	cfg := map[string]interface{}{"otel": currentOtel, "notify": notify}
 
-	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexOtelEntries(cfg, backup, opts); err != nil {
+		t.Fatal(err)
+	}
 	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
 		t.Fatalf("restore Codex notify: %v", err)
 	}
@@ -5967,7 +5969,9 @@ func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
 	}
 	cfg := map[string]interface{}{"otel": managedOtel, "notify": managedNotify}
 
-	restoreCodexOtelEntries(cfg, backup, opts)
+	if err := restoreCodexOtelEntries(cfg, backup, opts); err != nil {
+		t.Fatal(err)
+	}
 	if err := restoreCodexNotify(cfg, backup, opts); err != nil {
 		t.Fatalf("restore Codex notify: %v", err)
 	}
@@ -5988,7 +5992,9 @@ func TestCodexSurgicalRestorePreservesEditedTelemetryEnvironment(t *testing.T) {
 	managedOtel["environment"] = "operator-edited"
 	cfg := map[string]interface{}{"otel": managedOtel}
 
-	restoreCodexOtelEntries(cfg, codexConfigBackup{}, opts)
+	if err := restoreCodexOtelEntries(cfg, codexConfigBackup{}, opts); err != nil {
+		t.Fatal(err)
+	}
 	restoredOtel, ok := cfg["otel"].(map[string]interface{})
 	if !ok {
 		t.Fatalf("surgical restore removed edited Codex OTel table: %#v", cfg)
@@ -6213,7 +6219,9 @@ func TestRestoreCodexOtelEntriesRemovesManagedExporterAfterGatewayPortDrift(t *t
 	// Native acceptance changes gateway.api_port before uninstall. Exercise
 	// the surgical restore directly: the old scoped exporter is still owned,
 	// while current operator fields and displaced original fields survive.
-	restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189"})
+	if err := restoreCodexOtelEntries(cfg, backup, SetupOpts{APIAddr: "127.0.0.1:43189"}); err != nil {
+		t.Fatal(err)
+	}
 	restored, err := json.Marshal(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -6260,7 +6268,9 @@ func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testin
 		t.Fatal(err)
 	}
 	cfg := map[string]interface{}{"otel": map[string]interface{}{"exporter": currentExporter}}
-	restoreCodexOtelEntries(cfg, codexConfigBackup{HadOtelBlock: true, OriginalOtel: original}, SetupOpts{})
+	if err := restoreCodexOtelEntries(cfg, codexConfigBackup{HadOtelBlock: true, OriginalOtel: original}, SetupOpts{OTLPPathToken: "synthetic-product-token"}); err != nil {
+		t.Fatal(err)
+	}
 
 	otel := cfg["otel"].(map[string]interface{})
 	exporter := otel["exporter"].(map[string]interface{})
@@ -6302,10 +6312,12 @@ func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testin
 	currentHeaders["authorization"] = "Bearer synthetic-product-token"
 	currentHeaders["x-defenseclaw-client"] = "codex-otel/legacy"
 	currentHeaders["x-defenseclaw-source"] = "codex-legacy"
-	restoreCodexOtelEntries(withContaminatedOriginal, codexConfigBackup{
+	if err := restoreCodexOtelEntries(withContaminatedOriginal, codexConfigBackup{
 		HadOtelBlock: true,
 		OriginalOtel: contaminatedOriginal,
-	}, SetupOpts{})
+	}, SetupOpts{OTLPPathToken: "synthetic-product-token"}); err != nil {
+		t.Fatal(err)
+	}
 	cleaned := codexExporterHeaders(withContaminatedOriginal["otel"].(map[string]interface{})["exporter"])
 	for _, key := range []string{"authorization", "x-defenseclaw-client", "x-defenseclaw-source"} {
 		if _, exists := cleaned[key]; exists {
@@ -6314,6 +6326,34 @@ func TestRestoreCodexOtelEntriesScrubsPairedMarkersFromDriftedExporter(t *testin
 	}
 	if cleaned["x-operator-header"] != "preserve-current" {
 		t.Fatalf("surgical cleanup discarded unrelated header: %#v", cleaned)
+	}
+}
+
+func TestRestoreCodexOtelEntriesKeepsChangedAuthorizationOverOlderBackup(t *testing.T) {
+	current := map[string]interface{}{
+		"otlp-http": map[string]interface{}{
+			"endpoint": "https://operator.example.test/v1/logs",
+			"headers": map[string]interface{}{
+				"authorization":        "Bearer new-operator-token",
+				"x-defenseclaw-source": "codex",
+				"x-defenseclaw-client": "codex-otel/1.0",
+			},
+		},
+	}
+	backup := codexConfigBackup{
+		HadOtelBlock: true,
+		OriginalOtel: json.RawMessage(`{"exporter":{"otlp-http":{"endpoint":"https://operator.example.test/v1/logs","headers":{"authorization":"Bearer old-operator-token"}}}}`),
+	}
+	cfg := map[string]interface{}{"otel": map[string]interface{}{"exporter": current}}
+	if err := restoreCodexOtelEntries(cfg, backup, SetupOpts{OTLPPathToken: "product-token"}); err != nil {
+		t.Fatal(err)
+	}
+	headers := codexExporterHeaders(cfg["otel"].(map[string]interface{})["exporter"])
+	if headers["authorization"] != "Bearer new-operator-token" {
+		t.Fatal("current operator authorization was replaced by an older backup")
+	}
+	if _, exists := headers["x-defenseclaw-source"]; exists {
+		t.Fatal("product marker survived")
 	}
 }
 
