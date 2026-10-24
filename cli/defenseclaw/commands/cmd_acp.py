@@ -332,10 +332,9 @@ def _lock_is_private(path: Path) -> bool:
     return info.st_uid in {os.geteuid(), 0} and not stat.S_IMODE(info.st_mode) & 0o077
 
 
-# Every field the guard's lock decoder knows, per object (RuntimeContractLock
-# in internal/acp/contract.go). The guard refuses a lock with any other field
-# at any level (DisallowUnknownFields). Every DefenseClaw release since 1.0.0
-# has written only these fields, so this also covers locks from upgrades.
+# Every field the current guard's lock decoder knows, per object
+# (RuntimeContractLock in internal/acp/contract.go). The 1.0.0-1.0.3 decoder
+# has the same fields except client.adopted_entries.
 _LOCK_FIELDS: dict[str, frozenset[str]] = {
     "": frozenset({"version", "generated_at", "protocol", "client", "agent", "guard", "profile", "mode"}),
     "protocol": frozenset({"schema_version", "schema_sha256"}),
@@ -936,6 +935,11 @@ def _legacy_guard_entry_refusal(
     lock_problem = _guard_contract_lock_problem(Path(values["contract-lock"]))
     if lock_problem:
         return f"its --contract-lock {lock_problem}"
+    # The 1.0.0-1.0.3 decoder uses DisallowUnknownFields and has no
+    # adopted_entries field. _lock_is_complete has checked every other field
+    # against the current schema, which otherwise matches those releases.
+    if "adopted_entries" in lock["client"]:
+        return "the lock has fields unsupported by the pinned guard"
     agents = catalog.get("agents")
     if (
         not isinstance(catalog.get("schema_version"), str)
@@ -1346,6 +1350,10 @@ def setup_cmd(
     try:
         _progress(show, f"Writing the DefenseClaw {agent} entry to {client_path}...")
         path, written = _set_client_entry(client, agent, data_dir, guard, args, entry_name, retained)
+        if any(name != _managed_name(agent) for name in written) and _guard_supports_binding_check(guard) is not True:
+            raise click.ClickException(
+                "the pinned ACP guard cannot adopt editor entries; upgrade it before running acp adopt"
+            )
         _progress(show, "Pinning the guard and agent executable digests...")
         lock_path = _write_contract_lock(
             data_dir=data_dir,

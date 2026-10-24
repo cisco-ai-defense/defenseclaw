@@ -425,6 +425,64 @@ def test_verify_accepts_a_binding_pinned_to_a_guard_without_diagnostic_mode(tmp_
         cleanup_app(app, db_path, data_dir)
 
 
+def test_legacy_guard_rejects_adopted_lock_before_reporting_a_binding_healthy(tmp_path, monkeypatch):
+    """A release guard cannot decode the adopted_entries field in a newer lock."""
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings = _zed_settings(tmp_path)
+    lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+    real_run = subprocess.run
+
+    def release_guard_run(argv, *args, **kwargs):
+        if argv[0] == guard and argv[1:] == ["--help"]:
+            return subprocess.CompletedProcess(
+                argv, 1, "", "Usage of defenseclaw-acp:\n  -agent string\n  -contract-lock string\n"
+            )
+        return real_run(argv, *args, **kwargs)
+
+    try:
+        setup = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert setup.exit_code == 0, setup.output
+        document = json.loads(settings.read_text())
+        alias = dict(document["agent_servers"]["DefenseClaw · Kiro"])
+        document["agent_servers"]["My Kiro"] = alias
+        settings.write_text(json.dumps(document))
+        lock = json.loads(lock_path.read_text())
+        lock["client"]["adopted_entries"] = ["My Kiro"]
+        atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+        cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
+
+        with patch("defenseclaw.commands.cmd_acp.subprocess.run", side_effect=release_guard_run):
+            verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+            status = CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app)
+        assert verified.exit_code != 0, verified.output
+        assert "unsupported by the pinned guard" in verified.output
+        assert json.loads(status.output)["bindings"]["zed/kiro"]["healthy"] is False
+
+        lock["client"].pop("adopted_entries")
+        atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+        document["agent_servers"]["My Kiro"] = {"command": agent, "args": ["acp"]}
+        settings.write_text(json.dumps(document))
+        cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
+        before_lock, before_settings = lock_path.read_bytes(), settings.read_bytes()
+        with patch("defenseclaw.commands.cmd_acp.subprocess.run", side_effect=release_guard_run):
+            adoption = CliRunner().invoke(
+                acp_cmd, ["adopt", "--client", "zed", "--guard-binary", guard, "--yes"], obj=app,
+            )
+        assert adoption.exit_code != 0, adoption.output
+        assert "cannot adopt" in adoption.output
+        assert lock_path.read_bytes() == before_lock
+        assert settings.read_bytes() == before_settings
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_verify_uses_guard_acceptance_for_an_adopted_alias_with_a_custom_guard_name(tmp_path, monkeypatch):
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
