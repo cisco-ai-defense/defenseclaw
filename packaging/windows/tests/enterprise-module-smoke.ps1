@@ -1189,6 +1189,47 @@ if (-not [bool]$guardianFailureDiagnosticPreserved) {
     throw 'guardian live verifier diagnostic regression did not execute'
 }
 
+$guardianReadinessVerbSelection = & $module {
+    function script:Invoke-DefenseClawGatewayCommand {
+        param(
+            [hashtable]$Layout,
+            [string]$GatewayServiceName,
+            [object[]]$Arguments,
+            [switch]$Capture,
+            [switch]$AllowFailure
+        )
+        $script:guardianReadinessArguments = @($Arguments)
+        return [pscustomobject]@{ exit_code = 0; output = @() }
+    }
+    $previousProfile = Get-DefenseClawEnterpriseProfile
+    try {
+        foreach ($case in @(
+            @{ profile = 'Standalone'; verb = 'readiness' },
+            @{ profile = 'SecureClient'; verb = 'verify' }
+        )) {
+            Set-DefenseClawEnterpriseProfile -EnterpriseProfile $case.profile
+            $script:guardianReadinessArguments = @()
+            $result = Get-DefenseClawGuardianReadinessProbe `
+                -Layout @{ ManifestPath = 'C:\fixture\targets.yaml' } `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'EventLog' `
+                -LiveVerify
+            if (-not [bool]$result.ready -or
+                $script:guardianReadinessArguments.Count -ne 6 -or
+                $script:guardianReadinessArguments[2] -cne $case.verb) {
+                throw "$($case.profile) live guardian probe did not invoke $($case.verb)"
+            }
+        }
+    }
+    finally {
+        Set-DefenseClawEnterpriseProfile -EnterpriseProfile $previousProfile
+    }
+    return $true
+}
+if (-not [bool]$guardianReadinessVerbSelection) {
+    throw 'guardian readiness verb selection regression did not execute'
+}
+
 [pscustomobject]@{
     schema_version = 1
     ok = $true
@@ -1205,6 +1246,7 @@ if (-not [bool]$guardianFailureDiagnosticPreserved) {
     service_missing_array_properties_normalized = $true
     teardown_failure_diagnostic_preserved = $teardownFailurePreserved
     guardian_failure_diagnostic_preserved = $guardianFailureDiagnosticPreserved
+    guardian_readiness_verb_selection = $guardianReadinessVerbSelection
     production_codex_home_absent = $true
     certification_codex_home_exact = $true
     certification_scope_rejections = $true

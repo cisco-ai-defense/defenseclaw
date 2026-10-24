@@ -8,6 +8,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -16,6 +17,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/spf13/cobra"
 )
+
+func TestManagedWindowsHermesVerifierDefaults(t *testing.T) {
+	want := reflect.ValueOf(enterpriseHookGuardianVerify).Pointer()
+	if got := reflect.ValueOf(enterpriseHookReconcileVerifier).Pointer(); got != want {
+		t.Errorf("guardian default verifier = %x, want physical registration verifier %x", got, want)
+	}
+	if got := reflect.ValueOf(enterpriseHookLiveRegistrationVerifier).Pointer(); got != want {
+		t.Errorf("live readiness default verifier = %x, want physical registration verifier %x", got, want)
+	}
+}
 
 // The guardian needs proof of the hooks it installed, while Verify still
 // refuses to certify a Hermes home that only a later user shell can select.
