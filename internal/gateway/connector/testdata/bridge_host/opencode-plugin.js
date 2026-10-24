@@ -69,6 +69,10 @@ const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST = "1";
+// The Windows PowerShell that checks the helper's owner and DACL: setup
+// resolves the system directory with GetSystemDirectoryW, so a Windows
+// installed outside C:\Windows runs its own copy.
+const DC_WINDOWS_POWERSHELL = "{{.WindowsPowerShellJS}}";
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
@@ -511,11 +515,12 @@ function defenseclawPerUserNativePostBinary() {
 }
 
 function defenseclawCheckWindowsHelperACL(paths) {
-  // Windows stat mode bits do not represent the DACL. The OS-owned
-  // PowerShell checks every path before a bearer-bearing helper launch: its
-  // owner is this account, SYSTEM, Administrators (an elevated install) or
-  // TrustedInstaller, and no other principal may write it. An inherit-only
-  // entry does not apply to the path itself; its children carry it.
+  // Windows stat mode bits do not represent the DACL. The system
+  // PowerShell (DC_WINDOWS_POWERSHELL) checks every path before a
+  // bearer-bearing helper launch: its owner is this account, SYSTEM,
+  // Administrators (an elevated install) or TrustedInstaller, and no other
+  // principal may write it. An inherit-only entry does not apply to the
+  // path itself; its children carry it.
   // execFileSync opens the helper by this path, so every folder above a
   // checked path, up to its volume root, must not let another principal
   // rename or replace what it holds (a custom data root's parent, for one):
@@ -548,7 +553,7 @@ function defenseclawCheckWindowsHelperACL(paths) {
     "}",
   ].join("\n");
   try {
-    execFileSync("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    execFileSync(DC_WINDOWS_POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", script], {
       input: JSON.stringify(entries), timeout: 5000, windowsHide: true, stdio: ["pipe", "ignore", "ignore"],
     });
   } catch {

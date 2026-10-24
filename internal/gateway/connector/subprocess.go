@@ -71,9 +71,14 @@ type templateData struct {
 	// make the listener prove it is the gateway before sending its per-user
 	// credential (UserScopedListenerProof); empty skips the proof.
 	ListenerProofJS string
-	FailMode        string // Rendered non-outage mode; per-user hooks bake "closed" and ask the current config for a classified outage.
-	Managed         bool
-	SecureClient    bool // render-time profile marker for Unix shell identity headers
+	// WindowsPowerShellJS is the system Windows PowerShell (resolved with
+	// GetSystemDirectoryW) a per-user plugin runs to check the native
+	// helper's owner and DACL on Windows, escaped for a JavaScript
+	// double-quoted string.
+	WindowsPowerShellJS string
+	FailMode            string // Rendered non-outage mode; per-user hooks bake "closed" and ask the current config for a classified outage.
+	Managed             bool
+	SecureClient        bool // render-time profile marker for Unix shell identity headers
 	// SecureClientDelivery marks a Secure Client render on a verified install.
 	// Every shell hook uses the installed mode, never the agent environment.
 	SecureClientDelivery bool

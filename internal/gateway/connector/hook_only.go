@@ -1432,18 +1432,19 @@ func (c *hookOnlyConnector) renderPluginArtifact(opts SetupOpts) ([]byte, error)
 	failMode := setupHookFailMode(opts)
 	hookSocket, serviceUID := managedPluginHookSocket(opts)
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:            opts.APIAddr,
-		TokenFileJS:        javaScriptStringContent(tokenPath),
-		NativePostBinaryJS: javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
-		HookSocketJS:       javaScriptStringContent(hookSocket),
-		ServiceUID:         serviceUID,
-		ForeignHookGuardJS: javaScriptStringContent(managedPluginForeignHookGuard(opts)),
-		InstallMarkerJS:    javaScriptStringContent(managedPluginInstallMarker(opts)),
-		ListenerProofJS:    managedPluginListenerProofJS(opts),
-		FailMode:           failMode,
-		Managed:            opts.ManagedEnterprise,
-		SecureClient:       shellHookSecureClientProfile(opts),
-		ConnectorName:      c.name,
+		APIAddr:             opts.APIAddr,
+		TokenFileJS:         javaScriptStringContent(tokenPath),
+		NativePostBinaryJS:  javaScriptStringContent(secureClientPluginNativePostBinary(opts)),
+		HookSocketJS:        javaScriptStringContent(hookSocket),
+		ServiceUID:          serviceUID,
+		ForeignHookGuardJS:  javaScriptStringContent(managedPluginForeignHookGuard(opts)),
+		InstallMarkerJS:     javaScriptStringContent(managedPluginInstallMarker(opts)),
+		ListenerProofJS:     managedPluginListenerProofJS(opts),
+		WindowsPowerShellJS: javaScriptStringContent(windowsSystemPowerShellExe()),
+		FailMode:            failMode,
+		Managed:             opts.ManagedEnterprise,
+		SecureClient:        shellHookSecureClientProfile(opts),
+		ConnectorName:       c.name,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s render plugin template: %w", c.name, err)

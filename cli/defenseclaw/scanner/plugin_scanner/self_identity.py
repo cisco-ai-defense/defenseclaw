@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import ntpath
 import os
 import stat
 from collections.abc import Iterable
@@ -71,15 +72,15 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "76fc842daf185f21c36bc3af38079b857dd1bbe5d548f538c2ef216fa626a8da",  # amp-plugin.ts
-            "82b34d8fd330de4d4759d80bec17be39f0b9894ef4a97d228d8aae3aee079c9b",  # amp-plugin-managed.ts
+            "433c329016e9389cd34e6aed66ca03438b4e04224653969a381c6cc29dd575dc",  # amp-plugin.ts
+            "a6a0befc138d1b436ddb4b00c08a56d2153beea09ec5a0565ca5928d3a158a7a",  # amp-plugin-managed.ts
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "6a83720ad8f3aaf733e6384f9c468cc688706f5ac472fa0b8a2ab099c20852c7",  # opencode-plugin.js
-            "24d7cdbc65202aebd1bce3e5a0673b1272f63f3ec152973938518485ccd5be7b",  # opencode-plugin-managed.js
+            "8ffec3f99160ea93fc00b7911cd2366921480f98a8e803ecdb198586ce1e0380",  # opencode-plugin.js
+            "7a381a5fe8be34dad36485134a72fc509c9fc1725b072b01b3db58e9b72fe31e",  # opencode-plugin-managed.js
             "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
     ),
@@ -152,6 +153,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"\n',
             "proof",
         ),
+        (
+            b'const DC_WINDOWS_POWERSHELL: string = "',
+            b'"\n',
+            b'const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"\n',
+            "powershell",
+        ),
     ),
     "opencode": (
         (
@@ -207,6 +214,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";\n',
             "proof",
+        ),
+        (
+            b'const DC_WINDOWS_POWERSHELL = "',
+            b'";\n',
+            b'const DC_WINDOWS_POWERSHELL = "{{.WindowsPowerShellJS}}";\n',
+            "powershell",
         ),
     ),
 }
@@ -449,6 +462,24 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     return info.st_uid == 0 and not info.st_mode & 0o022
 
 
+def _valid_bridge_powershell(value: bytes) -> bool:
+    """Setup renders the system Windows PowerShell it resolved with
+    GetSystemDirectoryW; a bridge naming any other executable is not ours."""
+
+    from defenseclaw.doctor_hooks import _windows_system_powershell_path
+
+    expected = _windows_system_powershell_path()
+    try:
+        rendered = json.loads('"' + value.decode("utf-8", errors="strict") + '"')
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        bool(expected)
+        and isinstance(rendered, str)
+        and ntpath.normcase(rendered) == ntpath.normcase(expected)
+    )
+
+
 def _valid_bridge_dynamic_value(
     kind: str,
     value: bytes,
@@ -465,6 +496,8 @@ def _valid_bridge_dynamic_value(
         return value in {b"", b"1"}
     if kind == "mode":
         return value in {b"open", b"closed"}
+    if kind == "powershell":
+        return _valid_bridge_powershell(value)
     if kind in {"socket", "guard", "marker", "native"}:
         return _valid_bridge_managed_path(kind, value)
     if kind != "token":
@@ -500,7 +533,7 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
-        if not matches and kind in {"native", "proof", "mode"}:
+        if not matches and kind in {"native", "proof", "mode", "powershell"}:
             # Current and Secure Client templates have distinct fields, each
             # still covered by its exact pinned digest.
             continue

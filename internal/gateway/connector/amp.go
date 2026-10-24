@@ -135,6 +135,8 @@ func (c *AMPConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
 		markers = append(markers,
 			[]byte("const DC_PER_USER_NATIVE_POST: string = \"1\"\n"),
 			[]byte(`execFileSync(binary, ["hook-post", "--api-addr", DC_API_ADDR]`),
+			// A Windows owner/DACL check that hard-codes C:\Windows is repaired.
+			[]byte(`execFileSync(DC_WINDOWS_POWERSHELL, [`),
 		)
 	}
 	if pluginSecureClientProfile(opts) {

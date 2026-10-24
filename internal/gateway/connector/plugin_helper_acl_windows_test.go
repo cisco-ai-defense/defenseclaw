@@ -153,12 +153,19 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 					filepath.Join(home, ".local"), l.binDir, l.binary} {
 					icacls(path, "/setowner", owner)
 				}
-				body := renderPluginAssetForTest(t, asset.source, templateData{TokenFileJS: javaScriptStringContent(filepath.Join(l.hooks, ".token"))})
-				body += "\ntry { " + asset.function + "(); console.log('trusted') } catch (error) { console.log('rejected:' + String(error)) }\n"
 				plugin := filepath.Join(base, asset.file)
-				if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
-					t.Fatal(err)
+				render := func(powershell string) {
+					t.Helper()
+					body := renderPluginAssetForTest(t, asset.source, templateData{
+						TokenFileJS:         javaScriptStringContent(filepath.Join(l.hooks, ".token")),
+						WindowsPowerShellJS: javaScriptStringContent(powershell),
+					})
+					body += "\ntry { " + asset.function + "(); console.log('trusted') } catch (error) { console.log('rejected:' + String(error)) }\n"
+					if err := os.WriteFile(plugin, []byte(body), 0o600); err != nil {
+						t.Fatal(err)
+					}
 				}
+				render(windowsSystemPowerShellExe())
 				check := func() string {
 					t.Helper()
 					out, err := exec.Command(node, plugin).CombinedOutput()
@@ -170,6 +177,30 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 				if got := check(); got != "trusted" {
 					t.Fatalf("private fixture: %q", got)
 				}
+				// The plugin runs the PowerShell setup rendered, not a fixed
+				// C:\Windows copy: one in a system directory elsewhere (a
+				// Windows installed in D:\WINNT) is used, and a missing one
+				// fails the check.
+				relocated := filepath.Join(base, "WINNT", "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+				system, err := os.ReadFile(windowsSystemPowerShellExe())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(relocated), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(relocated, system, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				render(relocated)
+				if got := check(); got != "trusted" {
+					t.Fatalf("private fixture with the system PowerShell outside C:\\Windows: %q", got)
+				}
+				render(filepath.Join(base, "missing", "powershell.exe"))
+				if got := check(); !strings.HasPrefix(got, "rejected:") {
+					t.Fatalf("private fixture with a missing system PowerShell: %q, want rejected", got)
+				}
+				render(windowsSystemPowerShellExe())
 				if tc.changes != nil {
 					for _, args := range tc.changes(l) {
 						icacls(args...)

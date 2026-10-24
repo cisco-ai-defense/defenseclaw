@@ -60,6 +60,10 @@ const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST: string = ""
+// The Windows PowerShell that checks the helper's owner and DACL: setup
+// resolves the system directory with GetSystemDirectoryW, so a Windows
+// installed outside C:\Windows runs its own copy.
+const DC_WINDOWS_POWERSHELL: string = "{{.WindowsPowerShellJS}}"
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
@@ -441,7 +445,7 @@ function checkWindowsHelperACL(paths: string[]): void {
 		"}",
 	].join("\n")
 	try {
-		execFileSync("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+		execFileSync(DC_WINDOWS_POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", script], {
 			input: JSON.stringify(entries), timeout: 5000, windowsHide: true, stdio: ["pipe", "ignore", "ignore"],
 		})
 	} catch {

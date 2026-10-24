@@ -1103,17 +1103,21 @@ func legacyWindowsNativePowerShellHookCommandForBinary(connector, hookBinary str
 	return windowsSystemPowerShellExe() + " -NoLogo -NoProfile -NonInteractive -EncodedCommand " + powershellEncodedCommand(script)
 }
 
+// windowsSystemDirectory is trustedWindowsSystemDirectory; a test replaces
+// it to render for a Windows installed outside C:\Windows.
+var windowsSystemDirectory = trustedWindowsSystemDirectory
+
 func windowsSystemPowerShellExe() string {
 	// The system directory is resolved by a Windows API, never by mutable
 	// SystemRoot/WINDIR values inherited from the project launching an agent.
 	// Build this as a Windows path even in OS-parameterized tests.
-	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
+	return strings.TrimRight(windowsSystemDirectory(), `\/`) + `\WindowsPowerShell\v1.0\powershell.exe`
 }
 
 // windowsSystemCmdExe is cmd.exe in the trusted system directory, built as a
 // Windows path like windowsSystemPowerShellExe.
 func windowsSystemCmdExe() string {
-	return strings.TrimRight(trustedWindowsSystemDirectory(), `\/`) + `\cmd.exe`
+	return strings.TrimRight(windowsSystemDirectory(), `\/`) + `\cmd.exe`
 }
 
 // powershellDecodedCommand is the script of a -EncodedCommand argument
