@@ -3643,7 +3643,7 @@ def _load_codex_agent_toml(path: str) -> tuple[dict[str, Any] | None, str]:
             path,
             max_bytes=1024 * 1024,
         )
-    except connector_paths.InventoryFileTooLarge as exc:
+    except connector_paths.InventoryFileTooLargeError as exc:
         # Listed, not dropped: the agent exists, only its fields are unread
         # (GAP-1083).
         return None, f"not read: {exc}"

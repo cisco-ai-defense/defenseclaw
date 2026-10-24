@@ -864,7 +864,7 @@ def codex_home() -> str:
     return _connector_env_home("CODEX_HOME", ".codex")
 
 
-class InventoryFileTooLarge(OSError):
+class InventoryFileTooLargeError(OSError):
     """A file is larger than the bounded inventory read takes."""
 
 
@@ -874,7 +874,7 @@ def _read_bounded_stable_file(path: str, *, max_bytes: int) -> bytes:
     try:
         before = os.fstat(fd)
         if before.st_size > max_bytes:
-            raise InventoryFileTooLarge(f"file exceeds {max_bytes} byte inventory limit")
+            raise InventoryFileTooLargeError(f"file exceeds {max_bytes} byte inventory limit")
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining:
@@ -885,7 +885,7 @@ def _read_bounded_stable_file(path: str, *, max_bytes: int) -> bytes:
             remaining -= len(chunk)
         payload = b"".join(chunks)
         if len(payload) > max_bytes:
-            raise InventoryFileTooLarge(f"file exceeds {max_bytes} byte inventory limit")
+            raise InventoryFileTooLargeError(f"file exceeds {max_bytes} byte inventory limit")
         after = os.fstat(fd)
         before_identity = (
             before.st_dev,
