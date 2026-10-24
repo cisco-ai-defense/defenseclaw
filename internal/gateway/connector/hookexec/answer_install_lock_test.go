@@ -101,8 +101,8 @@ func unreadableLook(path string) (fs.FileInfo, error) {
 // armed, one taken before the deadline, and a lock whose state cannot be
 // read in time (unreadable, or a read held on a stalled disk, at arming or
 // at the deadline). Without a lock the call blocks too: since
-// fix/r104-sa-hook-pause no answer closes every per-user hook, whatever the
-// account's fail mode.
+// fix/r104-sa-hook-pause no answer closes every hook outside Secure Client,
+// whatever the account's fail mode.
 func TestEarlyAnswerWatchdogAnswersClosedDuringInstallInEveryHookForm(t *testing.T) {
 	const budget = 150 * time.Millisecond
 	shortAnswerBudget(t, budget)
@@ -189,8 +189,8 @@ func TestEarlyAnswerWatchdogAnswersClosedDuringInstallInEveryHookForm(t *testing
 // The watchdog Run adopted carries Run's own data directory: an install
 // that starts while the gateway has not answered closes the call at the
 // deadline, though Run found no lock when it started (GAP-0862). Without an
-// install the call blocks too: no answer closes every per-user hook
-// (fix/r104-sa-hook-pause).
+// install the call blocks too: no answer closes every hook outside Secure
+// Client (fix/r104-sa-hook-pause).
 func TestAdoptedAnswerWatchdogAnswersClosedWhenAnInstallStartsMidCall(t *testing.T) {
 	const budget = 300 * time.Millisecond
 	shortAnswerBudget(t, budget)

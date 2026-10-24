@@ -70,9 +70,7 @@ func blocked(result runResult) bool {
 // GAP-0155, GAP-0167, GAP-0139, GAP-0160: a managed gateway that accepted a
 // tool call but gives no decision (it is stopping, starting, repairing or
 // too busy) holds the call no longer than the answer budget, and the call is
-// blocked then in fail mode closed. The managed Codex prompt and tool-result
-// events are blocked in open too; a tool gate in open is
-// TestStandaloneManagedNoAnswerFollowsTheAdministratorsOpenOnlyForATakenCall.
+// blocked then, whatever the hook's fail mode: never allowed.
 func TestManagedToolCallFailsClosedWhenTheGatewayDoesNotAnswerInTime(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
 	shortAnswerFloor(t)

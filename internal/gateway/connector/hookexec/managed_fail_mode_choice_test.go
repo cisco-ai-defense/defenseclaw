@@ -9,12 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -204,16 +202,8 @@ func TestManagedHookIgnoresTheEnvironmentFailMode(t *testing.T) {
 	}
 }
 
-// tookToolCall makes opts a Copilot tool call that a verified gateway took.
-func tookToolCall(o *Options) {
-	o.Event = "preToolUse"
-	o.gatewayTookCall = true
-}
-
 // GAP-0346: only an outage of a standalone hook in fail mode open lets the
-// call through when the foreign-hook guard cannot reach the gateway. The
-// missing answer of a tool call that a verified gateway took is such an
-// outage (loop round 3); the session exchange's is not.
+// call through when the foreign-hook guard cannot reach the gateway.
 func TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage(t *testing.T) {
 	notRunning := fmt.Errorf("dial hook socket: %w", errManagedGatewayNotRunning)
 	for _, tc := range []struct {
@@ -227,28 +217,6 @@ func TestManagedOutageFailsOpenOnlyForAnOpenStandaloneOutage(t *testing.T) {
 		{name: "open, not running", err: notRunning, want: true},
 		{name: "open, restarting", err: fmt.Errorf("session exchange: %w", errGatewayRestarting)},
 		{name: "open, no answer", err: fmt.Errorf("session exchange: %w", errGatewayNoAnswer)},
-		{name: "open, no answer of a tool call a verified gateway took", mutate: tookToolCall,
-			err: fmt.Errorf("hook request: %w", errGatewayNoAnswer), want: true},
-		{name: "closed, no answer of a tool call a verified gateway took", mutate: func(o *Options) {
-			tookToolCall(o)
-			o.FailMode = "closed"
-		}, err: errGatewayNoAnswer},
-		{name: "open, no answer of an event that gates no tool call", mutate: func(o *Options) {
-			tookToolCall(o)
-			o.Event = "sessionStart"
-		}, err: errGatewayNoAnswer},
-		{name: "open, no answer after an error status", mutate: func(o *Options) {
-			tookToolCall(o)
-			o.answeredErrorStatus = http.StatusTooManyRequests
-		}, err: errGatewayNoAnswer},
-		{name: "open, no answer, the hook spent the budget", mutate: func(o *Options) {
-			tookToolCall(o)
-			o.answerSpentLocally = true
-		}, err: fmt.Errorf("%w: %w", errGatewayNoAnswer, errAnswerBudgetSpentLocally)},
-		{name: "open, no answer of a taken tool call, Secure Client", mutate: func(o *Options) {
-			tookToolCall(o)
-			o.SecureClient = true
-		}, err: errGatewayNoAnswer},
 		{name: "open, port held", err: fmt.Errorf("%w: %w", errManagedGatewayPortHeld, errManagedGatewayNotRunning)},
 		{name: "open, unverified peer", err: errManagedGatewayPeerUnverified},
 		{name: "open, unusable answer", err: errors.New("invalid session gateway decision")},
@@ -366,143 +334,22 @@ func TestStandaloneManagedOpenCodeAndCopilotFollowTheAdministratorsFailMode(t *t
 	}
 }
 
-// Final review P1 (benign defaults, loop round 3): an administrator's open
-// covers a gateway that took a standalone managed tool call and gave no
-// decision for the call's whole answer budget, as on rel/1.0.4 and as the
-// fail-modes page says (open applies when the gateway "gives no answer in
-// time"). A train change answered it closed in every fail mode. Every other
-// missing answer stays closed under open: a budget the hook's own work spent,
-// a gateway that answered an HTTP status first (a 429 or a 401 before the
-// stalled resend, a 2xx whose body stalls), a connection that never passed
-// the transport's peer check, strict availability, and the foreign-hook
-// session exchange. Closed, the default, blocks every one of them.
-func TestStandaloneManagedNoAnswerFollowsTheAdministratorsOpenOnlyForATakenCall(t *testing.T) {
-	const budget = 1500 * time.Millisecond
-	shortAnswerBudget(t, budget)
+// No answer cannot prove a stopped gateway, even with a full answer budget.
+// Local work consuming the budget is also recorded separately.
+func TestStandaloneManagedNoAnswerAlwaysStaysClosed(t *testing.T) {
+	shortAnswerBudget(t, 300*time.Millisecond)
 	previousFloor := hookGatewayAnswerFloor
 	hookGatewayAnswerFloor = 200 * time.Millisecond
-	previousCeiling := hookProgressCeiling
-	hookProgressCeiling = 2 * time.Second
-	previousAuthDelay := hookAuthRetryDelay
-	hookAuthRetryDelay = 10 * time.Millisecond
-	t.Cleanup(func() {
-		hookGatewayAnswerFloor = previousFloor
-		hookProgressCeiling = previousCeiling
-		hookAuthRetryDelay = previousAuthDelay
-	})
-	// stallingGateway answers the call's first request with first (nothing
-	// when nil) and holds every request after that without a decision.
-	stallingGateway := func(t *testing.T, first func(http.ResponseWriter) bool) string {
-		t.Helper()
-		release := make(chan struct{})
-		var requests atomic.Int32
-		addr := gatewayAt(t, func(w http.ResponseWriter, r *http.Request) {
-			if requests.Add(1) == 1 && first != nil && first(w) {
-				return
-			}
-			select {
-			case <-r.Context().Done():
-			case <-release:
-			}
-		})
-		t.Cleanup(func() { close(release) })
-		return addr
-	}
-	status := func(code int, header, value string) func(http.ResponseWriter) bool {
-		return func(w http.ResponseWriter) bool {
-			if header != "" {
-				w.Header().Set(header, value)
-			}
-			w.WriteHeader(code)
-			_, _ = w.Write([]byte(`{"error":"refused"}`))
-			return true
-		}
-	}
-	cases := []struct {
-		name      string
-		openAllow bool
-		first     func(http.ResponseWriter) bool
-		mutate    func(*Options)
-	}{
-		{name: "the gateway took the call and gave no answer", openAllow: true},
-		{name: "102 progress, then no answer by the ceiling", openAllow: true, first: func(w http.ResponseWriter) bool {
-			w.WriteHeader(HookProgressStatus)
-			return false
-		}},
-		{name: "a 2xx whose body stalls", first: func(w http.ResponseWriter) bool {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"action":`))
-			w.(http.Flusher).Flush()
-			return false
-		}},
-		{name: "429, then no answer", first: status(http.StatusTooManyRequests, "Retry-After", "1")},
-		{name: "401, then no answer", first: status(http.StatusUnauthorized, "", "")},
-		{name: "a local step spent the budget", mutate: func(o *Options) {
-			o.StartedAt = time.Now().Add(-(budget - 150*time.Millisecond))
-		}},
-		{name: "strict availability", mutate: func(o *Options) { o.StrictAvailability = true }},
-		{name: "the connection never passed the peer check", mutate: func(o *Options) {
-			o.HTTPClient = &http.Client{Transport: &http.Transport{
-				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-					// A peer check that is still running at the deadline.
-					<-ctx.Done()
-					return nil, ctx.Err()
-				},
-			}}
-		}},
-	}
-	events := map[string]string{
-		"claudecode": "PreToolUse",
-		"codex":      "PreToolUse",
-		"copilot":    "preToolUse",
-		"hermes":     "pre_tool_call",
-		"opencode":   "tool.execute.before",
-	}
-	for connector, event := range events {
-		for _, tc := range cases {
-			for _, mode := range []string{"open", "closed"} {
-				t.Run(connector+"/"+tc.name+"/"+mode, func(t *testing.T) {
-					t.Parallel()
-					home := t.TempDir()
-					result, _ := runAgainstGateway(t, connector, stallingGateway(t, tc.first), func(o *Options) {
-						managedWindowsStandalone(o)
-						o.FailMode = mode
-						o.Event = event
-						o.FailureLogHome = userLogHome(home)
-						o.Stdin = strings.NewReader(`{"hook_event_name":"` + event + `","tool_name":"Bash","tool_input":{"command":"echo ok"},` +
-							`"tool":"bash","args":{"command":"echo ok"},"toolName":"bash","toolArgs":"{}"}`)
-						if tc.mutate != nil {
-							tc.mutate(o)
-						}
-					})
-					wantAllow := mode == "open" && tc.openAllow
-					if blocked(result) == wantAllow {
-						t.Fatalf("blocked = %v, want %v: code=%d stdout=%q stderr=%q", blocked(result), !wantAllow, result.code, result.stdout, result.stderr)
-					}
-					if !wantAllow {
-						return
-					}
-					entry := lastHookFailure(t, home)
-					if entry["reason"] != managedGatewayNoAnswerReason || entry["fail_mode"] != "open" || entry["outcome"] != "fail_open" {
-						t.Fatalf("failure = %v, want the managed no-answer row in fail mode open", entry)
-					}
-				})
-			}
-		}
-	}
-
-	// The foreign-hook session exchange is not the tool call: its missing
-	// answer, with the whole budget or a budget local work spent, never
-	// counts as the outage open covers (the guard blocks it in every mode).
+	t.Cleanup(func() { hookGatewayAnswerFloor = previousFloor })
 	addr := hungGateway(t)
+
 	for _, tc := range []struct {
 		name         string
 		spent        time.Duration
 		spentLocally bool
 	}{
 		{name: "the gateway had the budget", spent: 0},
-		{name: "a local step spent the budget", spent: budget - 150*time.Millisecond, spentLocally: true},
+		{name: "a local step spent the budget", spent: 250 * time.Millisecond, spentLocally: true},
 	} {
 		t.Run("session exchange: "+tc.name, func(t *testing.T) {
 			token := "authenticated-generation-token"
@@ -520,6 +367,21 @@ func TestStandaloneManagedNoAnswerFollowsTheAdministratorsOpenOnlyForATakenCall(
 			}
 			if got := ManagedOutageFailsOpen(opts, err); got {
 				t.Fatalf("ManagedOutageFailsOpen = true for %v", err)
+			}
+		})
+		t.Run("hook request: "+tc.name, func(t *testing.T) {
+			result := run(t, "codex", nil, func(o *Options) {
+				managedCodex(o)
+				o.ExplainUnenrolledAccount = true
+				o.FailMode = "open"
+				o.APIAddr = addr
+				o.HTTPClient = &http.Client{}
+				// run prepares the on-disk test home before this callback.
+				// Only the simulated hook work belongs to this budget.
+				o.StartedAt = time.Now().Add(-tc.spent)
+			})
+			if !blocked(result) {
+				t.Fatalf("unanswered managed call was allowed: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
 			}
 		})
 	}

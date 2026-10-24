@@ -21,10 +21,9 @@ import (
 // counts against it: a restart (gatewayRestartBudget), a dial, a gateway that
 // accepted the call but does not answer (it is stopping, it is starting, or
 // it is so busy that the call waits for its turn), and the resends after a
-// 429 or a 401. When the budget ends the call fails closed (GAP-0155,
-// GAP-0167, GAP-0139, GAP-0160). The one exception is the administrator's
-// fail mode open on a standalone managed tool call that a verified gateway
-// took and did not answer (noAnswerFailMode).
+// 429 or a 401. When the budget ends, every hook outside Secure Client fails
+// closed. A slow gateway cannot allow a call without a decision (GAP-0155,
+// GAP-0167, GAP-0139, GAP-0160).
 //
 // The agent may wait at most 5 s for DefenseClaw, and the deadline itself
 // runs late on a loaded host: the answer is written by a process that the
@@ -43,10 +42,9 @@ var hookAnswerBudget = 3500 * time.Millisecond
 // hookProgressCeiling is how long, from the start of the hook process, a
 // tool call whose gateway reported (102) that it waits on a remote scanner
 // may wait for the decision. The 102 only moves the answer deadline to it:
-// a scanner that answers later is not waited for, the call fails as a
-// missing answer does (noAnswerFailMode), and the agent's tool call still
-// waits at most about five seconds for DefenseClaw. The scanner's late
-// verdict is discarded, like any
+// a scanner that answers later is not waited for, the call fails (closed for
+// a managed hook) and the agent's tool call still waits at most about five
+// seconds for DefenseClaw. The scanner's late verdict is discarded, like any
 // late answer. Before it the 102 lifted the deadline altogether, so a judge
 // that took longer held the call to the agent's own hook timeout (GAP-0255).
 // It keeps 1 s of the 5 s for the slip of a late deadline.
@@ -191,9 +189,7 @@ func toolGateEvent(connector, event string) bool {
 // watchdog stays armed until then. Release when the request is done. This
 // lets the hook send its receipt after the answer deadline without the
 // deadline canceling the HTTP request. watch, when set, takes the ceiling
-// at the 102, and learns when the gateway took the call: the connection
-// passed the transport's peer check (GotConn). A zero deadline returns ctx
-// unchanged.
+// at the 102. A zero deadline returns ctx unchanged.
 func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answerWatchdog) (watched context.Context, stop, stopResponse, release func()) {
 	if deadline.IsZero() {
 		noop := func() {}
@@ -214,18 +210,15 @@ func awaitAnswerBy(ctx context.Context, deadline, ceiling time.Time, watch *answ
 		stopResponse()
 		watch.answered()
 	}
-	trace := &httptrace.ClientTrace{
-		GotConn: func(httptrace.GotConnInfo) { watch.markGatewayTookCall() },
-		Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
-			if code == HookProgressStatus {
-				progressOnce.Do(func() {
-					close(progressed)
-					watch.progressed()
-				})
-			}
-			return nil
-		},
-	}
+	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+		if code == HookProgressStatus {
+			progressOnce.Do(func() {
+				close(progressed)
+				watch.progressed()
+			})
+		}
+		return nil
+	}}
 	watched, cancel := context.WithCancelCause(httptrace.WithClientTrace(ctx, trace))
 	go func() {
 		timer := time.NewTimer(time.Until(deadline))
@@ -259,47 +252,27 @@ func gatewayNoAnswer(ctx context.Context) bool {
 	return errors.Is(context.Cause(ctx), errGatewayNoAnswer)
 }
 
-// noAnswerFailMode is the fail mode of a call whose gateway gave no decision
-// in time. failNoAnswer and renderNoAnswer both use it, so the decision and
-// the failure row agree. A standalone managed tool call that a verified
-// gateway took and left without a decision for its whole answer budget
-// (managedNoAnswerOutage) is an outage: the administrator's fail mode decides
-// it, as in rel/1.0.4 (owner decision 2026-10-20; closed is the default).
-// Everything else is closed: a budget the hook's own work spent
-// (answerSpentLocally), a call the gateway answered with an HTTP error first
-// (answeredErrorStatus), a contact that never passed the peer check, a
-// managed event that does not gate a tool call (managed Codex prompts and
-// tool results keep their closed outcome), and every per-user hook, whose
-// outage mode covers only a call no gateway took (perUserOutageMode, owner
-// decision 2026-10-23). A Secure Client hook outside the managed profile
-// keeps its mode.
+// noAnswerFailMode keeps managed non-tool events, locally spent budgets and a
+// call the gateway answered with an HTTP error first (Options.answeredErrorStatus,
+// ManagedOutageFailsOpen) closed. No answer proves no gateway decision, so
+// every hook outside Secure Client closes. A stopped or late hook has no
+// confirmed outage and cannot turn a tool call into an unaudited allow.
+// failNoAnswer and renderNoAnswer both use it, so the decision and failure
+// row agree.
 func noAnswerFailMode(opts Options, failMode string) string {
-	if managedNoAnswerOutage(opts) {
-		return failMode
-	}
 	if opts.answerSpentLocally || opts.answeredErrorStatus != 0 || opts.ManagedEnterprise || !opts.SecureClient {
 		return "closed"
 	}
 	return failMode
 }
 
-// managedNoAnswerOutage reports a standalone managed tool call whose gateway
-// took it over a connection that passed the peer check
-// (Options.gatewayTookCall) and gave no decision within the call's whole
-// answer budget, and no HTTP error before.
-func managedNoAnswerOutage(opts Options) bool {
-	return managedNativeDecision(opts) && opts.gatewayTookCall && !opts.answerSpentLocally &&
-		opts.answeredErrorStatus == 0 && toolGateEvent(opts.Connector, opts.Event)
-}
-
 func failNoAnswer(opts Options, sp spec, failMode string) int {
 	if managedNativeDecision(opts) && opts.answeredErrorStatus != 0 {
 		return failAfterErrorStatus(opts, sp, "closed", opts.answeredErrorStatus)
 	}
-	opts.gatewayTookCall = opts.gatewayTookCall || opts.answerWatch.gatewayTookCall()
 	failMode = noAnswerFailMode(opts, failMode)
 	if opts.ManagedEnterprise {
-		return failUnreachable(withManagedOutage(opts, errGatewayNoAnswer), sp, failMode, managedGatewayNoAnswerReason)
+		return failUnreachable(opts, sp, failMode, managedGatewayNoAnswerReason)
 	}
 	return failUnreachable(opts, sp, failMode, noAnswerReason(opts))
 }

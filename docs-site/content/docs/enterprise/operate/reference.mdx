@@ -230,12 +230,9 @@ to about 4 seconds, then is blocked the same way. Prompts and session, stop and 
 keep their whole budget. Lifecycle runs run at a lower CPU priority than the hooks on every OS,
 so a repair does not take the CPU the hooks need to answer in time.
 
-The administrator's `hook_fail_mode: open` allows only classified outages:
-the service is stopped or restarting before it accepts the call, or the
-gateway took a tool call over a verified connection and gave no decision by
-the answer deadline (recorded as a fail-open `enterprise_managed_gateway_no_answer`).
-A call whose deadline the hook's own work used up, or that the gateway answered
-with an error status first, blocks. Integrity,
+The administrator's `hook_fail_mode: open` allows only classified connection outages:
+the service is stopped or restarting before it accepts the call. A hook that
+reaches its answer deadline without a decision blocks. Integrity,
 peer-verification, credential and rate-limit refusals still block. Connectors
 whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`,
 the default) block outages too
