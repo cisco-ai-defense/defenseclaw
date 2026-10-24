@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -22,17 +23,30 @@ func TestR104DetectorStateWriteRequiresResolvedTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	installDefaultProfileConnector(t, "claudecode")
-	for _, tc := range []struct {
+	tests := []struct {
 		name, command string
 		block         bool
 	}{
 		{"active state", `printf marker >> ` + state, true},
 		{"project file", `printf marker >> report.txt`, false},
 		{"state path as data", `printf '%s\n' '` + state + `' > report.txt`, false},
-	} {
+	}
+	dialect := actionfacts.DialectPOSIX
+	if runtime.GOOS == "windows" {
+		dialect = actionfacts.DialectPowerShell
+		tests = []struct {
+			name, command string
+			block         bool
+		}{
+			{"active state", `Add-Content -LiteralPath '` + state + `' -Value marker`, true},
+			{"project file", `Add-Content -LiteralPath report.txt -Value marker`, false},
+			{"state path as data", `Set-Content -LiteralPath report.txt -Value '` + state + `'`, false},
+		}
+	}
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd, ActiveHome: home,
-				DialectHint: actionfacts.DialectPOSIX}
+				DialectHint: dialect}
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, Connector: "claudecode", EnforcementCapable: true,
 			})
