@@ -48,6 +48,10 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("On a managed standalone host with `foreign_hooks: remove`", guard)
         self.assertIn("GitHub Copilot CLI, Cursor, Devin, OpenCode and Amp", guard)
         self.assertIn("Hermes on Linux and macOS", guard)
+        self.assertIn("Each gateway-backed guarded call requires a current gateway answer", guard)
+        self.assertIn("Windows Amp checks its session record locally", guard)
+        effective = text.split("## Effective behavior", 1)[1].split("These outcomes apply", 1)[0]
+        self.assertIn("A gateway-backed guarded tool call", effective)
 
 
     def test_amp_is_excluded_from_persisted_fail_open_reporting(self):
