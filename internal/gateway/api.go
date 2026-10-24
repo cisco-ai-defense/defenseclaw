@@ -281,9 +281,11 @@ type APIServer struct {
 
 	claudeCodeMu                sync.Mutex
 	claudeCodeLastComponentScan time.Time
-	// activeAgentContext is process-local, authenticated connector context. It
-	// is deliberately separate from hook payloads so tool arguments and generic
-	// request fields cannot assert which agent instruction files are active.
+	// activeAgentContext is authenticated connector context, kept in memory
+	// and recorded per session under the data directory so a restart keeps it
+	// (saveInstructionLoads). It is deliberately separate from hook payloads
+	// so tool arguments and generic request fields cannot assert which agent
+	// instruction files are active.
 	activeAgentContext     activeAgentContextCache
 	codexMu                sync.Mutex
 	codexLastComponentScan time.Time

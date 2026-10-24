@@ -18,8 +18,9 @@ import (
 // mode never blocks a write to it, observe mode never reports one, from the
 // gateway's own view and from the hook client's evidence, also when the
 // session loaded the file of that name in the project, and on the Codex
-// hook. The same forms on the project's file stay COG-blocked, so what
-// decides is where the file is, not how it is written.
+// hook. The same forms on the project's file stay COG-blocked when Claude
+// Code reads it at every start (CLAUDE.md) or the session loaded it, so what
+// decides is which file it is, not how it is written.
 func TestInstructionProtectionUnloadedNameEveryWriteForm(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell forms; TestInstructionProtectionOnlyInLoadLocations has the Windows ones")
@@ -55,6 +56,7 @@ func TestInstructionProtectionUnloadedNameEveryWriteForm(t *testing.T) {
 				{"fixture", fixture, ""},
 				{"relative fixture", relative, ""},
 				{"project file", instruction, rule},
+				{"unloaded project file", instruction, ""},
 			} {
 				input := map[string]interface{}{"command": strings.ReplaceAll(form, "%s", "'"+target.path+"'")}
 				for source, ctx := range instructionFormContexts(t, project, input) {
@@ -62,6 +64,16 @@ func TestInstructionProtectionUnloadedNameEveryWriteForm(t *testing.T) {
 						api     *APIServer
 						session string
 					}{{action, "unloaded"}, {action, "loaded"}, {observe, "unloaded"}} {
+						// Claude Code reads only CLAUDE.md at every start; the
+						// project's other instruction names are its files only
+						// once the session loads them. InstructionsLoaded names
+						// markdown memory files, never openclaw.json.
+						loaded := run.session == "loaded" && name != "openclaw.json"
+						switch {
+						case target.label == "project file" && !loaded && name != "CLAUDE.md",
+							target.label == "unloaded project file" && (loaded || name == "CLAUDE.md"):
+							continue
+						}
 						response := run.api.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
 							HookEventName: "PreToolUse", SessionID: run.session, CWD: project,
 							ToolName: "Bash", ToolInput: input,

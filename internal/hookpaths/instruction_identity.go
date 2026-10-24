@@ -216,24 +216,25 @@ func (f *InstructionFiles) Alias(path string) string {
 	return ""
 }
 
-// Located reports whether path, spelled as an instruction file name, is in
-// the directory of a file the session loaded or in a load location
-// (instructionDirectories), reached through another spelling of that
-// directory: a symlinked or case-variant one. The file itself need not
-// exist. The gateway checks the spelling first (instructionLoadLocation);
-// this is the file-system check for the rest.
-func (f *InstructionFiles) Located(path string) bool {
+// Located returns the spelling of path that names it in the directory of a
+// file the session loaded or in a load location (instructionDirectories),
+// when path, spelled as an instruction file name, reaches that directory
+// through another spelling: a symlinked or case-variant one. It is empty
+// for any other path. The file itself need not exist. The gateway checks the
+// spelling first (instructionLoadLocation) and judges the returned spelling
+// the same way; this is the file-system check for the rest.
+func (f *InstructionFiles) Located(path string) string {
 	if f == nil || !filepath.IsAbs(path) {
-		return false
+		return ""
 	}
 	path = filepath.Clean(path)
 	name, named := InstructionFileName(filepath.Base(path), instructionNameFold())
 	if !named {
-		return false
+		return ""
 	}
 	directory, err := os.Stat(filepath.Dir(path))
 	if err != nil || !directory.IsDir() {
-		return false
+		return ""
 	}
 	sameDirectory := func(candidate string) bool {
 		info, err := os.Stat(candidate)
@@ -242,10 +243,15 @@ func (f *InstructionFiles) Located(path string) bool {
 	for _, loaded := range f.loaded {
 		if loadedName, named := InstructionFileName(filepath.Base(loaded), instructionNameFold()); named &&
 			loadedName == name && filepath.IsAbs(loaded) && sameDirectory(filepath.Dir(filepath.Clean(loaded))) {
-			return true
+			return filepath.Clean(loaded)
 		}
 	}
-	return slices.ContainsFunc(instructionDirectories(f.cwd, f.home), sameDirectory)
+	for _, candidate := range instructionDirectories(f.cwd, f.home) {
+		if sameDirectory(candidate) {
+			return filepath.Join(candidate, name)
+		}
+	}
+	return ""
 }
 
 // InstructionHomeFolders are the home-relative folders, slash separated,

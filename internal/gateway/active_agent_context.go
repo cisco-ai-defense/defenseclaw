@@ -106,6 +106,9 @@ type activeAgentContextCache struct {
 	uncertain                bool
 	caseInsensitiveUncertain bool
 	now                      func() time.Time
+	// storeMu orders the writes of a session's load record
+	// (saveInstructionLoads) with the state each one copies.
+	storeMu sync.Mutex
 }
 
 func (cache *activeAgentContextCache) currentTime() time.Time {
@@ -579,6 +582,47 @@ func (cache *activeAgentContextCache) endKey(key activeAgentContextKey) {
 	cache.mu.Unlock()
 }
 
+// sessionKey returns a copy of the session the cache holds for key.
+func (cache *activeAgentContextCache) sessionKey(key activeAgentContextKey) (activeAgentContextSession, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	session, ok := cache.sessions[key]
+	if !ok {
+		return activeAgentContextSession{}, false
+	}
+	session.files = slices.Clone(session.files)
+	session.caseInsensitiveFiles = slices.Clone(session.caseInsensitiveFiles)
+	session.identities = maps.Clone(session.identities)
+	return session, true
+}
+
+// restoreKey gives key the loads a previous gateway process recorded for it
+// (restoreInstructionLoads), unless this process already holds the session.
+// An eviction this process remembers for key keeps the session uncertain.
+func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, record instructionLoadRecord, now time.Time) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if _, exists := cache.sessions[key]; exists {
+		return
+	}
+	if cache.sessions == nil {
+		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
+	}
+	uncertain, caseInsensitiveUncertain := false, false
+	if _, evicted := cache.evictions[key]; evicted {
+		uncertain, caseInsensitiveUncertain = cache.consumeEvictionLocked(key)
+	}
+	cache.makeRoomLocked(key)
+	cache.sessions[key] = activeAgentContextSession{
+		files:                    slices.Clone(record.Files),
+		caseInsensitiveFiles:     slices.Clone(record.CaseInsensitiveFiles),
+		identities:               maps.Clone(record.Identities),
+		uncertain:                record.Uncertain || uncertain,
+		caseInsensitiveUncertain: record.CaseInsensitiveUncertain || caseInsensitiveUncertain,
+		updatedAt:                now,
+	}
+}
+
 func (cache *activeAgentContextCache) snapshot(connectorName, sessionID string) activeAgentContextSnapshot {
 	key, ok := validActiveAgentContextKey(connectorName, sessionID)
 	if !ok {
@@ -641,16 +685,23 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	switch req.HookEventName {
 	case "SessionStart", "CwdChanged":
 		a.activeAgentContext.beginKey(key)
+		a.saveInstructionLoads(key)
 	case "SessionEnd":
 		a.activeAgentContext.endKey(key)
+		a.saveInstructionLoads(key)
 	case "InstructionsLoaded":
+		// A load recorded before this gateway started is still this
+		// session's load.
+		a.restoreInstructionLoads(key)
 		if sandboxed {
 			a.activeAgentContext.seedSandboxKey(key, view, req.FilePath)
 		} else {
 			a.activeAgentContext.seedKey(key, req.FilePath,
 				resolvedWritesFromContext(ctx)[hookpaths.LoadedIdentityPrefix+req.FilePath])
 		}
+		a.saveInstructionLoads(key)
 	case "PreToolUse", "PermissionRequest":
+		a.restoreInstructionLoads(key)
 		return a.activeAgentContext.snapshotKey(key)
 	}
 	return activeAgentContextSnapshot{}

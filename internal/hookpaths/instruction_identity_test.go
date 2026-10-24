@@ -588,8 +588,8 @@ func TestInstructionAliasAndLocationOfInstructionNames(t *testing.T) {
 		{"ordinary name", filepath.Join(project, "notes.md"), nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := NewInstructionFiles(workdir, home, tc.loaded).Located(tc.path); got != tc.want {
-				t.Fatalf("Located(%q) = %t, want %t", tc.path, got, tc.want)
+			if got := NewInstructionFiles(workdir, home, tc.loaded).Located(tc.path); (got != "") != tc.want {
+				t.Fatalf("Located(%q) = %q, want located=%t", tc.path, got, tc.want)
 			}
 		})
 	}

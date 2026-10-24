@@ -27,16 +27,20 @@ func TestInstructionProtectionOnlyInLoadLocations(t *testing.T) {
 		winHome = `C:\Users\alice`
 	)
 	type decision struct {
-		name, command, cwd, home, guestCWD, rule string
-		loaded                                   []string
-		loadedIdentity                           string
-		dialect                                  actionfacts.Dialect
+		connector, name, command, cwd, home, guestCWD, rule string
+		loaded                                              []string
+		loadedIdentity                                      string
+		dialect                                             actionfacts.Dialect
 	}
 	posix := func(name, command, workdir, rule string, loaded ...string) decision {
-		return decision{name: name, command: command, cwd: workdir, home: home, rule: rule, loaded: loaded, dialect: actionfacts.DialectPOSIX}
+		return decision{connector: "claudecode", name: name, command: command, cwd: workdir, home: home, rule: rule, loaded: loaded, dialect: actionfacts.DialectPOSIX}
 	}
 	windows := func(name, command, rule string) decision {
-		return decision{name: name, command: command, cwd: winCWD, home: winHome, rule: rule, dialect: actionfacts.DialectPowerShell}
+		return decision{connector: "claudecode", name: name, command: command, cwd: winCWD, home: winHome, rule: rule, dialect: actionfacts.DialectPowerShell}
+	}
+	as := func(connector string, tc decision) decision {
+		tc.connector = connector
+		return tc
 	}
 	var cases []decision
 	for rule, name := range instructionRuleFiles {
@@ -44,9 +48,9 @@ func TestInstructionProtectionOnlyInLoadLocations(t *testing.T) {
 			posix("fixture append "+name, "printf x >> /tmp/fixtures/"+name, cwd, ""),
 			posix("fixture write "+name, "printf x > /tmp/fixtures/"+name, cwd, ""),
 			posix("fixture delete "+name, "rm -f /tmp/fixtures/"+name, cwd, ""),
-			posix("project append "+name, "printf x >> /repo/"+name, cwd, rule),
+			as("openclaw", posix("project append "+name, "printf x >> /repo/"+name, cwd, rule)),
 			windows("Windows fixture write "+name, `Set-Content -LiteralPath 'C:\fixtures\`+name+`' -Value x`, ""),
-			windows("Windows project write "+name, `Set-Content -LiteralPath 'C:\Repo\`+name+`' -Value x`, rule),
+			as("openclaw", windows("Windows project write "+name, `Set-Content -LiteralPath 'C:\Repo\`+name+`' -Value x`, rule)),
 		)
 	}
 	cases = append(cases,
@@ -54,19 +58,19 @@ func TestInstructionProtectionOnlyInLoadLocations(t *testing.T) {
 		posix("a .claude folder outside the project", "printf x >> /tmp/.claude/CLAUDE.md", cwd, ""),
 		posix("home folder no agent loads from", "printf x >> /home/alice/Documents/SOUL.md", cwd, ""),
 		posix("a loaded file's neighbor", "printf x >> /opt/persona/other/SOUL.md", cwd, "", "/opt/persona/SOUL.md"),
-		posix("parent of the working directory", "printf x >> /repo/AGENTS.md", "/repo/src/pkg", "COG-AGENTS-MD"),
+		as("codex", posix("parent of the working directory", "printf x >> /repo/AGENTS.md", "/repo/src/pkg", "COG-AGENTS-MD")),
 		posix("filesystem root above the working directory", "printf x >> /CLAUDE.md", cwd, "COG-CLAUDE-MD"),
 		posix("project .claude folder from a subdirectory", "printf x >> /repo/.claude/CLAUDE.md", "/repo/src", "COG-CLAUDE-MD"),
-		posix("home", "printf x >> /home/alice/CLAUDE.md", cwd, "COG-CLAUDE-MD"),
+		posix("home above the working directory", "printf x >> /home/alice/CLAUDE.md", "/home/alice/repo", "COG-CLAUDE-MD"),
 		posix("home .claude", "printf x >> /home/alice/.claude/CLAUDE.md", cwd, "COG-CLAUDE-MD"),
-		posix("home .codex", "printf x >> /home/alice/.codex/AGENTS.md", cwd, "COG-AGENTS-MD"),
-		posix("OpenClaw workspace", "printf x >> /home/alice/.openclaw/workspace/SOUL.md", cwd, "COG-SOUL"),
-		posix("OpenClaw home", "printf x >> /home/alice/.openclaw/openclaw.json", cwd, "COG-OPENCLAW-JSON"),
-		posix("opencode global", "printf x >> /home/alice/.config/opencode/AGENTS.md", cwd, "COG-AGENTS-MD"),
+		as("codex", posix("home .codex", "printf x >> /home/alice/.codex/AGENTS.md", cwd, "COG-AGENTS-MD")),
+		as("openclaw", posix("OpenClaw workspace", "printf x >> /home/alice/.openclaw/workspace/SOUL.md", cwd, "COG-SOUL")),
+		as("openclaw", posix("OpenClaw home", "printf x >> /home/alice/.openclaw/openclaw.json", cwd, "COG-OPENCLAW-JSON")),
+		as("opencode", posix("opencode global", "printf x >> /home/alice/.config/opencode/AGENTS.md", cwd, "COG-AGENTS-MD")),
 		posix("loaded by the session", "printf x >> /opt/persona/SOUL.md", cwd, "COG-SOUL", "/opt/persona/SOUL.md"),
 		posix("loaded file deleted", "rm -f /opt/persona/MEMORY.md", cwd, "COG-MEMORY", "/opt/persona/MEMORY.md"),
-		windows("Windows case-variant project", `Set-Content -LiteralPath 'C:\REPO\agents.md' -Value x`, "COG-AGENTS-MD"),
-		windows("Windows home .codex", `Set-Content -LiteralPath 'C:\Users\alice\.codex\AGENTS.md' -Value x`, "COG-AGENTS-MD"),
+		as("codex", windows("Windows case-variant project", `Set-Content -LiteralPath 'C:\REPO\agents.md' -Value x`, "COG-AGENTS-MD")),
+		as("codex", windows("Windows home .codex", `Set-Content -LiteralPath 'C:\Users\alice\.codex\AGENTS.md' -Value x`, "COG-AGENTS-MD")),
 		windows("Windows home Documents", `Set-Content -LiteralPath 'C:\Users\alice\Documents\SOUL.md' -Value x`, ""),
 	)
 	patch := func(target string) string {
@@ -76,13 +80,13 @@ func TestInstructionProtectionOnlyInLoadLocations(t *testing.T) {
 	// (hookpaths.ApplyPatchWriteTargets).
 	if runtime.GOOS == "windows" {
 		cases = append(cases,
-			windows("patch to a fixture", patch(`C:\fixtures\AGENTS.md`), ""),
-			windows("patch to the project", patch(`C:\Repo\AGENTS.md`), "COG-AGENTS-MD"),
+			as("codex", windows("patch to a fixture", patch(`C:\fixtures\AGENTS.md`), "")),
+			as("codex", windows("patch to the project", patch(`C:\Repo\AGENTS.md`), "COG-AGENTS-MD")),
 		)
 	} else {
 		cases = append(cases,
-			posix("patch to a fixture", patch("/tmp/fixtures/AGENTS.md"), cwd, ""),
-			posix("patch to the project", patch("/repo/AGENTS.md"), cwd, "COG-AGENTS-MD"),
+			as("codex", posix("patch to a fixture", patch("/tmp/fixtures/AGENTS.md"), cwd, "")),
+			as("codex", posix("patch to the project", patch("/repo/AGENTS.md"), cwd, "COG-AGENTS-MD")),
 		)
 	}
 	loadedByClient := posix("loaded, identified by the hook client", "printf x >> /opt/persona/IDENTITY.md", cwd, "COG-IDENTITY")
@@ -98,10 +102,10 @@ func TestInstructionProtectionOnlyInLoadLocations(t *testing.T) {
 				name += " (allow-listed)"
 			}
 			t.Run(name, func(t *testing.T) {
-				installToolCallCorpusProfileConnector(t, "claudecode", "default")
+				installToolCallCorpusProfileConnector(t, tc.connector, "default")
 				cfg := &config.Config{}
 				cfg.Guardrail.Mode = "action"
-				cfg.Guardrail.Connector = "claudecode"
+				cfg.Guardrail.Connector = tc.connector
 				cfg.Guardrail.BlockAt = "HIGH"
 				cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "default")
 				if allowListed {
@@ -111,11 +115,11 @@ func TestInstructionProtectionOnlyInLoadLocations(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				request := &ToolInspectRequest{Tool: "Bash", Args: args, Direction: "tool_call", Connector: "claudecode"}
+				request := &ToolInspectRequest{Tool: "Bash", Args: args, Direction: "tool_call", Connector: tc.connector}
 				action := trustedActionRequest{
 					Input: actionfacts.Input{Tool: "Bash", Args: args, CWD: tc.cwd, ActiveHome: tc.home,
 						ActiveAgentFiles: tc.loaded, DialectHint: tc.dialect},
-					LegacyText: string(args), Connector: "claudecode", EnforcementCapable: true,
+					LegacyText: string(args), Connector: tc.connector, EnforcementCapable: true,
 					SandboxGuestCWD: tc.guestCWD,
 				}
 				if tc.loadedIdentity != "" {

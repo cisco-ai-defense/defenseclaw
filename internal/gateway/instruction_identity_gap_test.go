@@ -328,12 +328,20 @@ func TestInstructionProtectionUnloadedInstructionFileNeighbors(t *testing.T) {
 					t.Fatalf("write beside a loaded %s (%s): action=%q findings=%v", tc.name, source, response.Action, response.Findings)
 				}
 			}
+			// Claude Code reads the CLAUDE.md of its working directory at every
+			// start, never a SOUL.md there.
 			for source, ctx := range instructionIdentityContexts(t, unrelated, call.tool, call.input) {
 				response := instructionProtectionTestAPI(t, "claudecode", "action", "HIGH").evaluateClaudeCodeHook(
 					ctx, claudeCodeHookRequest{
 						HookEventName: "PreToolUse", SessionID: "beside", CWD: unrelated,
 						ToolName: call.tool, ToolInput: call.input,
 					})
+				if tc.name != "CLAUDE.md" {
+					if response.Action == guardrailActionBlock {
+						t.Fatalf("write with the agent beside an unloaded %s (%s) was blocked: %v", tc.name, source, response.Findings)
+					}
+					continue
+				}
 				if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, tc.rule) {
 					t.Fatalf("write with the agent beside %s (%s): action=%q findings=%v", tc.name, source, response.Action, response.Findings)
 				}
@@ -511,10 +519,11 @@ func TestInstructionProtectionLoadedFileBehindProtectHome(t *testing.T) {
 	}
 }
 
-// GAP-1065: one call writes CLAUDE.md (HIGH) and SOUL.md (CRITICAL) under
-// other names. Each alias is judged, so block_at CRITICAL blocks the call as
-// COG-SOUL whichever alias comes first: behind ProtectHome from the hook
-// client's evidence alone, and from the gateway's own view.
+// GAP-1065: one call writes CLAUDE.md (HIGH) and a SOUL.md the session
+// loaded (CRITICAL) under other names. Each alias is judged, so block_at
+// CRITICAL blocks the call as COG-SOUL whichever alias comes first: behind
+// ProtectHome from the hook client's evidence alone, and from the gateway's
+// own view.
 func TestInstructionProtectionEveryAliasOfOneCall(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell forms and client evidence; the Windows gateway checks every target itself")
@@ -536,6 +545,14 @@ func TestInstructionProtectionEveryAliasOfOneCall(t *testing.T) {
 		} {
 			calls = append(calls, instructionIdentityCall{"Bash", map[string]interface{}{"command": command}})
 		}
+		loadEvidence, ok := hookpaths.Decode(hookpaths.Resolve(mustJSON(t, map[string]interface{}{
+			"hook_event_name": "InstructionsLoaded", "session_id": "two-aliases", "cwd": project, "file_path": soul,
+		})))
+		if !ok {
+			t.Fatal("no InstructionsLoaded evidence")
+		}
+		loadContext := withAuthenticatedHookConnector(
+			context.WithValue(t.Context(), resolvedWritesContextKey{}, loadEvidence), "claudecode")
 		contexts := make([]context.Context, len(calls))
 		if view == "gateway file system" {
 			for i := range contexts {
@@ -545,7 +562,11 @@ func TestInstructionProtectionEveryAliasOfOneCall(t *testing.T) {
 			contexts = protectHomeEvidence(t, root, project, calls)
 		}
 		for i, call := range calls {
-			response := instructionProtectionTestAPI(t, "claudecode", "action", "CRITICAL").evaluateClaudeCodeHook(contexts[i], claudeCodeHookRequest{
+			api := instructionProtectionTestAPI(t, "claudecode", "action", "CRITICAL")
+			api.evaluateClaudeCodeHook(loadContext, claudeCodeHookRequest{
+				HookEventName: "InstructionsLoaded", SessionID: "two-aliases", CWD: project, FilePath: soul,
+			})
+			response := api.evaluateClaudeCodeHook(contexts[i], claudeCodeHookRequest{
 				HookEventName: "PreToolUse", SessionID: "two-aliases", CWD: project, ToolName: call.tool, ToolInput: call.input,
 			})
 			if response.Action != guardrailActionBlock || !findingStringHasRuleID(response.Findings, "COG-SOUL") ||

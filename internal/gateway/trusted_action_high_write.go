@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -44,10 +45,12 @@ const instructionAliasTitle = " (written through another name of the file)"
 // symlinked instruction file reaches (GAP-0971), is a write to the file.
 // Another name is matched by file identity against the instruction files
 // agents load and the files the session loaded (hookpaths.InstructionFiles).
-// A file spelled with an instruction name is an instruction file only there
-// (instructionLoadLocation): a SOUL.md fixture or template elsewhere that the
-// session did not load is ordinary. Every other file is ordinary, however
-// many links it has, and creating a link writes nothing.
+// Either way the file is an instruction file of the call only when the
+// session loaded it or the session's own agent loads it at every start
+// (instructionLoadLocation, connectorInstructionLoads): a SOUL.md in a Claude
+// Code project, an AGENTS.md beside a Claude Code session or a CLAUDE.md
+// beside a Codex one is ordinary, under any of its names. Every other file is
+// ordinary, however many links it has, and creating a link writes nothing.
 func provedHighWriteFindings(
 	ctx context.Context,
 	request trustedActionRequest,
@@ -75,6 +78,7 @@ func provedHighWriteFindings(
 	// name it, and the files the session loaded, also those the hook client
 	// identified for a gateway that cannot read them.
 	locations := instructionLocations{
+		loads: connectorInstructionLoads(request.Connector),
 		cwds: []string{
 			request.Input.CWD, request.SandboxGuestCWD,
 			request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+request.Input.CWD],
@@ -90,22 +94,24 @@ func provedHighWriteFindings(
 			return true
 		}
 		// A symlinked or case-variant spelling of a load location's
-		// directory, on this host's file system.
-		return flavor == hostFlavor && !isSandboxHookRequest(ctx) &&
-			instructions.Located(filepath.FromSlash(resolved))
+		// directory, on this host's file system, is judged as the spelling
+		// of the location it reaches.
+		if flavor != hostFlavor || isSandboxHookRequest(ctx) {
+			return false
+		}
+		located := instructions.Located(filepath.FromSlash(resolved))
+		return located != "" && instructionLoadLocation(located, flavor, locations)
 	}
-	// seenTargets records whether a target was checked as an instruction
-	// file. Identity evidence for a target already checked as an ordinary
-	// file checks it again.
+	// File-identity evidence names the instruction file a target writes
+	// under its own path, so every target, however it was found, is judged
+	// by the same instructionTarget once.
 	seenTargets := make(map[string]bool)
 	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof, note string) {
-		// A note marks file-identity evidence: the target is one of the
-		// call's instruction files under its own name.
-		instruction := note != "" || instructionTarget(resolved, flavor)
-		if checked, seen := seenTargets[resolved]; seen && (checked || !instruction) {
+		if seenTargets[resolved] {
 			return
 		}
-		seenTargets[resolved] = instruction
+		seenTargets[resolved] = true
+		instruction := instructionTarget(resolved, flavor)
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
 				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
@@ -232,11 +238,11 @@ func provedHighWriteFindings(
 
 // An active instruction file may be loaded by a session that predates this
 // gateway process. Its in-memory load event is unavailable after a restart,
-// so a proved write to one of the catalog's instruction filenames in a place
-// agents load it from must still enforce that catalog rule. instruction
-// reports that place (instructionLoadLocation) or file-identity evidence;
-// without it the name is an ordinary file's. Another name of the same file
-// reaches this check as the file's own path (hookpaths.InstructionFiles).
+// so a proved write to an instruction file the session's agent loads at
+// every start must still enforce that catalog rule. instruction reports such
+// a file or one the session loaded (instructionLoadLocation); without it the
+// name is an ordinary file's. Another name of the same file reaches this
+// check as the file's own path (hookpaths.InstructionFiles).
 func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor actionfacts.PathFlavor, instruction bool) bool {
 	if name, ok := instructionRuleFiles[rule.ID]; ok {
 		return instruction && activeAgentInstructionBaseMatches(
@@ -245,21 +251,78 @@ func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor action
 	return rule.Pattern.MatchString(resolved)
 }
 
-// instructionLocations are the places of one call that agents load
+// instructionLocations are the places of one call that its agent loads
 // instruction files from, as the call names them.
 type instructionLocations struct {
+	loads  instructionLoads
 	cwds   []string
 	home   string
 	loaded []string
 }
 
+// instructionLoads are the instruction files an agent reads at the start of
+// every session without reporting the load: the names it reads in the
+// working directory and each parent (project), in their .claude folders
+// (claudeFolder), in folders of the home (home, slash separated, from
+// hookpaths.InstructionHomeFolders) and in the folders its home variables
+// name (variables, from hookpaths.InstructionHomeVariables).
+type instructionLoads struct {
+	project, claudeFolder []string
+	home, variables       map[string][]string
+}
+
+var (
+	allInstructionNames     = hookpaths.InstructionFileNames[:]
+	projectInstructionNames = []string{"AGENTS.md", "CLAUDE.md"}
+	clawInstructionLoads    = instructionLoads{project: allInstructionNames, home: map[string][]string{".openclaw": allInstructionNames, ".openclaw/workspace": allInstructionNames}}
+	builtinInstructionLoads = map[string]instructionLoads{
+		"claudecode": {
+			project: []string{"CLAUDE.md"}, claudeFolder: []string{"CLAUDE.md"},
+			home: map[string][]string{".claude": {"CLAUDE.md"}}, variables: map[string][]string{"CLAUDE_CONFIG_DIR": {"CLAUDE.md"}},
+		},
+		"codex": {
+			project: []string{"AGENTS.md"},
+			home:    map[string][]string{".codex": {"AGENTS.md"}}, variables: map[string][]string{"CODEX_HOME": {"AGENTS.md"}},
+		},
+		"opencode": {project: projectInstructionNames, home: map[string][]string{".config/opencode": {"AGENTS.md"}, ".claude": {"CLAUDE.md"}}},
+		"amp":      {project: projectInstructionNames, home: map[string][]string{".config/amp": {"AGENTS.md"}, ".config": {"AGENTS.md"}}},
+		"openclaw": clawInstructionLoads, "zeptoclaw": clawInstructionLoads,
+	}
+)
+
+// connectorInstructionLoads are the instruction files connector's agent
+// loads at every start. Another built-in agent reads AGENTS.md and CLAUDE.md
+// in its project. An agent DefenseClaw does not know (a plugin connector, or
+// none) may read any instruction name in any of the places, so all of them
+// count for it.
+func connectorInstructionLoads(connector string) instructionLoads {
+	name := canonicalConnectorRulePackKey(connector)
+	if loads, ok := builtinInstructionLoads[name]; ok {
+		return loads
+	}
+	if gatewayconnector.IsKnownBuiltinConnector(name) {
+		return instructionLoads{project: projectInstructionNames}
+	}
+	every := instructionLoads{
+		project: allInstructionNames, claudeFolder: allInstructionNames,
+		home: map[string][]string{}, variables: map[string][]string{},
+	}
+	for _, folder := range hookpaths.InstructionHomeFolders {
+		every.home[folder] = allInstructionNames
+	}
+	for _, variable := range hookpaths.InstructionHomeVariables {
+		every.variables[variable] = allInstructionNames
+	}
+	return every
+}
+
 // instructionLoadLocation reports whether target, spelled with an
-// instruction file name, is in a place agents load it from, by its
-// spelling in flavor: a file the session loaded, the working directory or
-// one of its parents or their .claude folders, an agent folder of the home
-// (hookpaths.InstructionHomeFolders) or an agent's configured home
-// (hookpaths.InstructionHomeVariables). Windows spellings compare without
-// case. Any other file of that name is ordinary.
+// instruction file name, is an instruction file of the call by its spelling
+// in flavor: a file the session loaded, or one the call's agent loads at
+// every start (instructionLoads) from the working directory or one of its
+// parents or their .claude folders, a folder of the home or a folder its
+// home variables name. Windows spellings compare without case. Any other
+// file of that name is ordinary.
 func instructionLoadLocation(target string, flavor actionfacts.PathFlavor, locations instructionLocations) bool {
 	normal := func(value string) string {
 		normalized, ok := activeAgentInstructionPath(value, flavor)
@@ -272,7 +335,8 @@ func instructionLoadLocation(target string, flavor actionfacts.PathFlavor, locat
 	if file == "" {
 		return false
 	}
-	if _, named := hookpaths.InstructionFileName(path.Base(file), flavor == actionfacts.PathFlavorWindows); !named {
+	name, named := hookpaths.InstructionFileName(path.Base(file), flavor == actionfacts.PathFlavorWindows)
+	if !named {
 		return false
 	}
 	for _, loaded := range locations.loaded {
@@ -280,6 +344,7 @@ func instructionLoadLocation(target string, flavor actionfacts.PathFlavor, locat
 			return true
 		}
 	}
+	loads := locations.loads
 	directory := instructionParent(file)
 	// within reports whether the working directory is base or under it.
 	within := func(base string) bool {
@@ -291,22 +356,23 @@ func instructionLoadLocation(target string, flavor actionfacts.PathFlavor, locat
 		}
 		return false
 	}
-	if within(directory) || path.Base(directory) == ".claude" && within(instructionParent(directory)) {
+	if slices.Contains(loads.project, name) && within(directory) ||
+		slices.Contains(loads.claudeFolder, name) && path.Base(directory) == ".claude" && within(instructionParent(directory)) {
 		return true
 	}
 	if home := normal(locations.home); home != "" {
-		for _, folder := range hookpaths.InstructionHomeFolders {
+		for folder, names := range loads.home {
 			candidate := home
 			if folder != "" {
 				candidate = normal(home + "/" + folder)
 			}
-			if candidate == directory {
+			if candidate == directory && slices.Contains(names, name) {
 				return true
 			}
 		}
 	}
-	for _, variable := range hookpaths.InstructionHomeVariables {
-		if value := normal(os.Getenv(variable)); value != "" && value == directory {
+	for variable, names := range loads.variables {
+		if value := normal(os.Getenv(variable)); value != "" && value == directory && slices.Contains(names, name) {
 			return true
 		}
 	}
