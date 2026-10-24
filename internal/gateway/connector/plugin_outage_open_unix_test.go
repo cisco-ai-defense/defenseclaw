@@ -19,8 +19,16 @@ import (
 const openCodeOutageHarness = `
 import { pathToFileURL } from "node:url";
 const toasts = [];
+const durations = [];
+let attempts = 0;
 const href = pathToFileURL(process.argv[1]).href;
-const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async (arg) => { toasts.push(arg && arg.body ? arg.body.message : ""); return true; } } } });
+const plugin = await (await import(href)).DefenseClaw({ directory: "", client: { tui: { showToast: async (arg) => {
+  attempts++;
+  if (process.env.DC_TOAST_FAIL_FIRST === "1" && attempts === 1) return { error: { message: "TUI unavailable" } };
+  toasts.push(arg && arg.body ? arg.body.message : "");
+  durations.push(arg && arg.body ? arg.body.duration : 0);
+  return { data: true };
+} } } });
 await plugin.config({ plugin_origins: [{ spec: href }], mcp: {} });
 let verdict = "allow";
 try {
@@ -32,7 +40,7 @@ try {
   verdict = "block:" + String(error && error.message || error);
 }
 await new Promise((resolve) => setTimeout(resolve, 50));
-console.log(JSON.stringify({ verdict, notices: toasts }));
+console.log(JSON.stringify({ verdict, notices: toasts, durations, attempts }));
 `
 
 func TestOpenCodeOutageToastOncePerSessionAndAuditEveryCall(t *testing.T) {
@@ -64,25 +72,42 @@ func TestOpenCodeOutageToastOncePerSessionAndAuditEveryCall(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", openCodeOutageHarness, path)
-	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DC_TWO_CALLS=1", "DEFENSECLAW_GATEWAY_AUTOSTART=0")
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("node: %v\n%s", err, out)
-	}
-	var result struct {
-		Verdict string   `json:"verdict"`
-		Notices []string `json:"notices"`
-	}
-	if err := json.Unmarshal(out, &result); err != nil {
-		t.Fatalf("harness output %q: %v", out, err)
-	}
-	if result.Verdict != "allow" || len(result.Notices) != 1 ||
-		!strings.Contains(result.Notices[0], "defenseclaw-gateway start") {
-		t.Fatalf("one user warning for two unchecked calls: %+v", result)
-	}
-	if rows := hookFailureRecords(t, dataDir); len(rows) != 2 || rows[0]["call_id"] != "C" || rows[1]["call_id"] != "C2" {
-		t.Fatalf("two correlated audit rows: %+v", rows)
+	for _, failFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "delivered", true: "retry rejected toast"}[failFirst], func(t *testing.T) {
+			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", openCodeOutageHarness, path)
+			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DC_TWO_CALLS=1", "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+			if failFirst {
+				cmd.Env = append(cmd.Env, "DC_TOAST_FAIL_FIRST=1")
+			}
+			out, err := cmd.Output()
+			if err != nil {
+				t.Fatalf("node: %v\n%s", err, out)
+			}
+			var result struct {
+				Verdict   string   `json:"verdict"`
+				Notices   []string `json:"notices"`
+				Durations []int    `json:"durations"`
+				Attempts  int      `json:"attempts"`
+			}
+			if err := json.Unmarshal(out, &result); err != nil {
+				t.Fatalf("harness output %q: %v", out, err)
+			}
+			wantAttempts := 1
+			if failFirst {
+				wantAttempts = 2
+			}
+			if result.Verdict != "allow" || len(result.Notices) != 1 || result.Attempts != wantAttempts ||
+				len(result.Durations) != 1 || result.Durations[0] != 15000 ||
+				!strings.Contains(result.Notices[0], "defenseclaw-gateway start") {
+				t.Fatalf("one visible warning for two unchecked calls: %+v", result)
+			}
+			if rows := hookFailureRecords(t, dataDir); len(rows) != 2 || rows[0]["call_id"] != "C" || rows[1]["call_id"] != "C2" {
+				t.Fatalf("two correlated audit rows: %+v", rows)
+			}
+			if err := os.Remove(filepath.Join(dataDir, "logs", "hook-failures.jsonl")); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

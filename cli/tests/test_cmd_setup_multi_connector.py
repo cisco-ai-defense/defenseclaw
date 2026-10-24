@@ -1394,10 +1394,8 @@ class TestWriteConnectorIdentityUnit(unittest.TestCase):
         gc.hook_fail_mode = "closed"
         _write_connector_identity(self.app.cfg, "codex", "add")
         self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "")
-        # A per-user outage follows the default tier, whatever is saved
-        # (oss-outage-open); Secure Client keeps the global closed in observe
-        # and action mode.
-        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
+        # The saved global closed choice applies to the seeded connector.
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc._secure_client = True
         self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "closed")
         gc.connectors["claudecode"].mode = "action"
@@ -3920,8 +3918,8 @@ class TestPerConnectorModeAndPreserve(unittest.TestCase):
                 self.assertEqual(gc.connectors[connector].mode, "action")
                 self.assertEqual(gc.connectors[connector].hook_fail_mode, "closed")
                 self.assertEqual(gc.effective_mode(connector), "action")
-                # Saved, but a per-user outage follows the default tier.
-                self.assertEqual(gc.effective_hook_fail_mode(connector), "open")
+                # An explicit saved closed choice wins over the default tier.
+                self.assertEqual(gc.effective_hook_fail_mode(connector), "closed")
 
 
     def test_toggling_one_connector_mode_lands_per_connector(self):

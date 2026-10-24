@@ -562,7 +562,34 @@ async function defenseclawProvenTCPRequest(path, init, token) {
     if (info.isSymbolicLink() || ([2, 6].includes(index) ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted");
     if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account");
   };
+  if (process.platform === "win32") defenseclawCheckWindowsHelperACL(paths);
   return binary;
+}
+
+function defenseclawCheckWindowsHelperACL(paths) {
+  // Windows stat mode bits do not represent the DACL. The OS-owned
+  // PowerShell checks every path before a bearer-bearing helper launch.
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    "$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+    "$trusted=@($current,'S-1-5-18','S-1-5-32-544')",
+    "$writeMask=[int64]0x500D0156",
+    "$paths=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())",
+    "foreach($path in $paths) {",
+    "  $acl=Get-Acl -LiteralPath $path",
+    "  if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $current) { throw 'owner' }",
+    "  foreach($ace in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) {",
+    "    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
+    "  }",
+    "}",
+  ].join("\n");
+  try {
+    execFileSync("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+      input: JSON.stringify(paths), timeout: 5000, windowsHide: true, stdio: ["pipe", "ignore", "ignore"],
+    });
+  } catch {
+    throw new Error("per-user gateway helper path has an untrusted Windows owner or DACL");
+  }
 }
 {{end}}// defenseclawFetch posts to the gateway over the managed hook socket when one
 // is configured. A per-user post goes through the native helper, which
@@ -713,18 +740,18 @@ function defenseclawConfirmNotice(data) {
   return lead + ". OpenCode cannot ask you to confirm it here, so it runs; DefenseClaw recorded it.";
 }
 
-// defenseclawShowNotice shows a notice in the OpenCode TUI. It is best
-// effort: without a TUI client, or when the notice cannot be shown, nothing
-// else changes.
-function defenseclawShowNotice(client, message, variant) {
-  if (!message) return;
+// defenseclawShowNotice asks OpenCode's documented TUI surface to display a
+// notice. A failed request leaves an outage session eligible for the next
+// call's warning; it never changes the tool verdict.
+async function defenseclawShowNotice(client, message, variant) {
+  if (!message || !client || !client.tui || typeof client.tui.showToast !== "function") return false;
   try {
-    const shown = client && client.tui && typeof client.tui.showToast === "function"
-      ? client.tui.showToast({ body: { message, variant: variant || "warning" } })
-      : undefined;
-    if (shown && typeof shown.catch === "function") shown.catch(() => {});
+    const shown = await client.tui.showToast({ body: {
+      title: "DefenseClaw", message, variant: variant || "warning", duration: 15000,
+    } });
+    return shown === true || !!(shown && shown.data === true);
   } catch (_) {
-    // A notice never blocks or fails the tool call.
+    return false;
   }
 }
 
@@ -1185,12 +1212,12 @@ function defenseclawToast(client, reason) {
 {{if .Sandbox}}      if (verdict && verdict.reason) defenseclawToast(client, verdict.reason);
       if (verdict && verdict.reason) throw new Error(verdict.reason);
 {{else}}      if (verdict && verdict.reason) throw defenseclawBlock(client, verdict.reason);
-{{end}}      if (verdict && verdict.notice) defenseclawShowNotice(client, verdict.notice);
+{{end}}      if (verdict && verdict.notice) await defenseclawShowNotice(client, verdict.notice);
       if (verdict && verdict.outage_notice) {
         const sessionID = String(input && (input.sessionID || input.sessionId) || "");
         if (!sessionID || !warnedOutageSessions.has(sessionID)) {
-          defenseclawShowNotice(client, verdict.outage_notice);
-          if (sessionID && client && client.tui && typeof client.tui.showToast === "function") {
+          const shown = await defenseclawShowNotice(client, verdict.outage_notice);
+          if (sessionID && shown) {
             warnedOutageSessions.add(sessionID);
             if (warnedOutageSessions.size > 1024) warnedOutageSessions.delete(warnedOutageSessions.values().next().value);
           }

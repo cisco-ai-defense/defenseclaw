@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 func hookFailureCorrelation(payload []byte) (sessionID, callID string) {
@@ -89,7 +90,28 @@ func firstOutageWarning(opts Options) bool {
 		return true
 	}
 	_ = f.Close()
+	// A rare new session pays for pruning; repeated calls never scan. The
+	// marker is advisory and pruning never changes a verdict.
+	if hash[0] == 0 {
+		pruneOutageWarningMarkers(dir, time.Now().Add(-7*24*time.Hour))
+	}
 	return true
+}
+
+func pruneOutageWarningMarkers(dir string, before time.Time) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if !entry.Type().IsRegular() {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && info.ModTime().Before(before) {
+			_ = os.Remove(filepath.Join(dir, entry.Name()))
+		}
+	}
 }
 
 // readCapped reads up to max bytes from r. It returns overflow=true (and the

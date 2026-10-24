@@ -10909,9 +10909,8 @@ def _apply_hook_connector_setup(
         else:
             gc.block_message = block_message
     if fail_mode is not None:
-        # Saved as given. The guardrail mode no longer pins Cursor's value:
-        # every hook's outage mode is the policy tier's on a per-user install
-        # (oss-outage-open) and the administrator's on a managed one.
+        # Saved as given. The guardrail mode no longer pins Cursor's value;
+        # an explicit choice wins over the per-user tier's outage default.
         normalized_fail = "closed" if str(fail_mode).strip().lower() == "closed" else "open"
         if per_connector:
             gc.connectors[connector].hook_fail_mode = normalized_fail
@@ -14680,19 +14679,16 @@ def _prompt_hook_fail_mode(gc) -> None:
     their explicit choice silently rotated by a subsequent mode flip.
     """
     ux.section("Hook fail mode")
-    ux.subhead("How hooks behave when delivery/authentication fails or")
-    ux.subhead("the gateway returns 4xx, malformed JSON, or no action.")
+    ux.subhead("How hooks behave when the gateway is down before it answers.")
     click.echo()
-    ux.echo("    " + ux.bold("[1] open  ") + " — allow the tool/prompt and log the failure")
+    ux.echo("    " + ux.bold("[1] open  ") + " — allow the tool/prompt with a warning and audit entry")
     click.echo("                 " + ux.dim("A stopped gateway lets calls that policy blocks run."))
     ux.echo(
         "    "
         + ux.bold("[2] closed")
-        + " — block supported events when inspection is unavailable "
-        + ux.dim("(recommended)")
+        + " — block supported events while the gateway is down"
     )
-    click.echo("                 " + ux.dim("The default on a new install: action mode keeps"))
-    click.echo("                 " + ux.dim("blocking while the gateway is down."))
+    click.echo("                 " + ux.dim("Strict policy and managed installs default to closed."))
     click.echo()
     click.echo(
         "  "
@@ -14702,11 +14698,10 @@ def _prompt_hook_fail_mode(gc) -> None:
             "choice is open."
         )
     )
-    current_fail = (getattr(gc, "hook_fail_mode", "") or "closed").lower()
+    resolver = getattr(gc, "effective_hook_fail_mode", None)
+    current_fail = (resolver("") if callable(resolver) else (getattr(gc, "hook_fail_mode", "") or "closed")).lower()
     fail_default = "1" if current_fail == "open" else "2"
-    if fail_default == "1":
-        # The default keeps the saved value, which can differ from the
-        # recommended choice; say so instead of leaving [1] unexplained.
+    if fail_default == "1" and getattr(gc, "_hook_fail_mode_saved", False):
         click.echo("  " + ux.dim("Current setting: open. Press Enter to keep it, or type 2 for closed."))
     fail_choice = click.prompt(
         "  Select hook fail mode",

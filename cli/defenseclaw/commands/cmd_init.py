@@ -788,9 +788,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         # bootstrap layer treats "" as a no-op so first-run flows
         # that don't surface this option don't accidentally reset
         # an operator's earlier choice.
-        # The wizard asks the fail mode once for every action connector, so
-        # it is the global default too: a connector switched to action later
-        # keeps the answer (GAP-1321), even when the primary is observe.
+        # An explicit fail-mode choice is shared across action connectors;
+        # without one, the saved config stays unset and follows the tier.
         hook_fail_mode=next((s["fail_mode"] for s in connector_settings if s.get("fail_mode")), "").lower(),
         # HITL: ``None`` is "leave alone", ``True``/``False`` set
         # the toggle. Empty severity preserves the existing floor;
@@ -1488,10 +1487,8 @@ def _prompt_action_policy(
 ) -> tuple[str | None, bool | None, str | None]:
     """Ask the action-mode policy knobs once, shared by every action connector.
 
-    Hook failures stay closed on per-user hosts. HITL is asked once after the
-    action subset is known rather than per connector."""
-    if fail_mode is None:
-        fail_mode = "closed"
+    An outage choice is saved only when the operator supplied one; otherwise
+    the policy tier decides. HITL is asked after the action subset is known."""
     # Human-In-the-Loop (HITL) only fires in action mode, so it is only asked
     # here (after at least one connector opted into action).
     if human_approval is None:

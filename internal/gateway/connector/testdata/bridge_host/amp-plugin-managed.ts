@@ -393,7 +393,34 @@ function perUserNativePostBinary(): string {
 		if (info.isSymbolicLink() || ([2, 6].includes(index) ? !info.isFile() : !info.isDirectory())) throw new Error("per-user gateway helper path is untrusted")
 		if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) throw new Error("per-user gateway helper path is writable by another account")
 	}
+	if (process.platform === "win32") checkWindowsHelperACL(paths)
 	return binary
+}
+
+function checkWindowsHelperACL(paths: string[]): void {
+	// Windows stat mode bits do not represent the DACL. Check the owner and
+	// write grants before the bearer-bearing native helper is launched.
+	const script = [
+		"$ErrorActionPreference='Stop'",
+		"$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
+		"$trusted=@($current,'S-1-5-18','S-1-5-32-544')",
+		"$writeMask=[int64]0x500D0156",
+		"$paths=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())",
+		"foreach($path in $paths) {",
+		"  $acl=Get-Acl -LiteralPath $path",
+		"  if($acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $current) { throw 'owner' }",
+		"  foreach($ace in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) {",
+		"    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
+		"  }",
+		"}",
+	].join("\n")
+	try {
+		execFileSync("C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+			input: JSON.stringify(paths), timeout: 5000, windowsHide: true, stdio: ["pipe", "ignore", "ignore"],
+		})
+	} catch {
+		throw new Error("per-user gateway helper path has an untrusted Windows owner or DACL")
+	}
 }
 // gatewayFetch posts over the verified managed hook socket when one is
 // configured (Bun's unix fetch option). A per-user post goes through the

@@ -3627,7 +3627,7 @@ class TestMultiConnectorInit(unittest.TestCase):
         from defenseclaw.commands import cmd_init
 
         disc = self._disc({"codex", "claudecode"})
-        # Scanner mode and HITL severity; per-user fail mode is fixed closed.
+        # Scanner mode and HITL severity; outage mode stays unset without a choice.
         prompts = iter(["local", "MEDIUM"])
         confirms = iter([True, False, True])  # action HITL, start_gateway, verify
         checkbox_returns = iter([["codex", "claudecode"], ["claudecode"], []])
@@ -3661,7 +3661,7 @@ class TestMultiConnectorInit(unittest.TestCase):
         # The named subset is promoted to action and carries the shared
         # fail-mode/HITL answers.
         self.assertEqual(by_name["claudecode"]["profile"], "action")
-        self.assertEqual(by_name["claudecode"]["fail_mode"], "closed")
+        self.assertIsNone(by_name["claudecode"]["fail_mode"])
         self.assertTrue(by_name["claudecode"]["human_approval"])
         self.assertEqual(by_name["claudecode"]["hilt_min_severity"], "MEDIUM")
         self.assertEqual(scanner_mode, "local")
@@ -4911,8 +4911,8 @@ def test_init_leaves_out_a_connector_setup_cannot_select_on_windows(tmp_path):
     assert "cannot select amp executable" in report.setup[-1].detail
 
 
-def test_first_run_ignores_saved_per_user_open(tmp_path):
-    # An older config's open is retained as data, but first run closes hooks.
+def test_first_run_does_not_replace_a_saved_per_user_choice(tmp_path):
+    # Action-mode selection alone is not an explicit outage choice.
     from defenseclaw.commands import cmd_init
 
     def ask():
@@ -4924,6 +4924,6 @@ def test_first_run_ignores_saved_per_user_open(tmp_path):
                 fail_mode=None, human_approval=None, hilt_min_severity=None
             )[0]
 
-    assert ask() == "closed"
+    assert ask() is None
     (tmp_path / "config.yaml").write_text("guardrail:\n  hook_fail_mode: open\n", encoding="utf-8")
-    assert ask() == "closed"
+    assert ask() is None

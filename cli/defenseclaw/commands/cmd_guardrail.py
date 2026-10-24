@@ -1479,8 +1479,8 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     """Show or set the hook fail mode for a SINGLE connector.
 
     Per-connector analog of the global ``guardrail fail-mode``: writes
-    ``guardrail.connectors[X].hook_fail_mode`` so one connector can run a
-    different delivery/response fail posture than its peers. On restart the Go
+    ``guardrail.connectors[X].hook_fail_mode`` so one connector can use a
+    different classified-outage posture than its peers. On restart the Go
     boot loop regenerates that connector's hook with the new ``FAIL_MODE``;
     the others are untouched.
 
@@ -1557,7 +1557,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         click.echo()
         return
 
-    if mode == configured_mode and runtime_state.desired == mode and runtime_state.current:
+    if has_override and mode == configured_mode and runtime_state.desired == mode and runtime_state.current:
         ux.echo(f"  {ux.dim(f'{label} hook fail mode is already')} {mode!r} {ux.dim('— nothing to do.')}")
         return
 
@@ -1580,7 +1580,24 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
         ux.echo(
             f"  {ux.bold(f'Changing {label} hook fail mode:')} {configured_mode} {ux.dim('→')} {ux.accent(mode)}"
         )
-    if mode == "closed" and upstream_fail_open(app.cfg, key):
+    outage_only = not _secure_client_fail_mode(app)
+    if outage_only and mode == "closed":
+        ux.warn(f"A gateway outage will now BLOCK supported {label} calls.", indent="  ")
+        ux.subhead("Other delivery and response failures remain closed.", indent="    ")
+        if normalize_connector(key) == "hermes":
+            ux.subhead(_HERMES_UPSTREAM_TIMEOUT_NOTE, indent="    ")
+        else:
+            signal = _CLOSED_FAILURE_SIGNALS.get(
+                normalize_connector(key), "will exit 2 from this connector's hooks."
+            )
+            ux.subhead(f"A blocked call {signal}", indent="    ")
+    elif outage_only:
+        ux.subhead(
+            f"A classified gateway outage will now ALLOW {label} with a warning and per-call audit entry. "
+            "Other failures remain closed.",
+            indent="  ",
+        )
+    elif mode == "closed" and upstream_fail_open(app.cfg, key):
         ux.warn(
             f"{label} will remain fail-open; this value is stored only as requested policy provenance.",
             indent="  ",
@@ -1638,8 +1655,8 @@ def _apply_global_fail_mode_transaction(
 ) -> None:
     """Persist global/fan-out fail mode and atomically refresh registrations.
 
-    ``target_modes`` overrides the value written for a target (Cursor keeps
-    the value its guardrail mode pins).
+    ``target_modes`` contains the per-connector values staged with the global
+    choice when an active multi-connector roster is present.
     """
 
     gc = app.cfg.guardrail
@@ -1798,36 +1815,21 @@ def _apply_global_fail_mode_transaction(
 
 # What a per-user hook does while its gateway is down (Go
 # config.HookOutageFailMode), as `guardrail fail-mode` explains it.
+def _secure_client_fail_mode(app: AppContext) -> bool:
+    if getattr(app.cfg.guardrail, "_secure_client", False):
+        return True
+    if str(getattr(app.cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        return False
+    outside = getattr(app.cfg, "managed_outside_secure_client", None)
+    return callable(outside) and not outside()
+
+
 _PER_USER_OUTAGE_RULE = (
-    "On a per-user install the gateway-outage mode follows the policy tier: the default (balanced) and "
-    "permissive rule packs let a call run with a warning while the gateway is not running, strict blocks it. "
+    "On a per-user install an explicit saved mode wins. When unset, the gateway-outage mode follows the "
+    "policy tier: the default (balanced) and permissive rule packs let a call run with a warning while "
+    "the gateway is not running, strict blocks it. "
     "Every other failure (an error or unusable gateway answer, a missing token, an install or upgrade) blocks."
 )
-
-
-def _refuse_a_mode_the_policy_tier_does_not_give(app: AppContext, mode: str, connector_flag: str | None) -> None:
-    """Refuse a per-user ``fail-mode`` value the connectors' policy tier does not give.
-
-    A per-user hook's gateway-outage mode follows its policy tier (owner
-    decision 2026-10-23, Go config.HookOutageFailMode). With the tier's value
-    the command refreshes and verifies the installed hooks; any other value
-    would not change what they do. A connector the config does not know is
-    left to the usual "not configured" error.
-    """
-    gc = app.cfg.guardrail
-    resolver = getattr(gc, "effective_hook_fail_mode", None)
-    if not callable(resolver):
-        return
-    known = set(_active_connector_keys(app)) | set(getattr(gc, "connectors", {}) or {})
-    if connector_flag:
-        known_keys = {normalize_connector(k) for k in known}
-        targets = [connector_flag] if normalize_connector(connector_flag) in known_keys or not known else []
-    else:
-        targets = sorted(known) or [_resolve_active_connector(app.cfg)]
-    if any(resolver(name) != mode for name in targets if name):
-        ux.err(_PER_USER_OUTAGE_RULE, indent="  ")
-        click.echo(f"  {ux.dim('Fail closed during an outage:')} defenseclaw guardrail use-pack strict")
-        raise SystemExit(1)
 
 
 def _show_per_user_outage_modes(app: AppContext) -> None:
@@ -1835,7 +1837,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
 
     gc = app.cfg.guardrail
     click.echo()
-    click.echo(f"  {ux.bold('gateway outage:')} follows the policy tier (rule pack)")
+    click.echo(f"  {ux.bold('gateway outage:')} saved choice or policy tier (rule pack)")
     click.echo()
     click.echo(f"  {ux._style('per connector:', fg='bright_black', bold=True)}")
     for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg)):
@@ -1849,6 +1851,11 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
             resolver = getattr(gc, "effective_hook_fail_mode", None)
             outage = resolver(name) if callable(resolver) else ("closed" if tier == "strict" else "open")
             notes = [f"{tier} tier"]
+            override = gc._connector_override(name) if hasattr(gc, "_connector_override") else None
+            if (override is not None and str(override.hook_fail_mode or "").strip()) or (
+                getattr(gc, "_hook_fail_mode_saved", False) and str(gc.hook_fail_mode or "").strip()
+            ):
+                notes.append("saved choice")
             limit = upstream_hook_limit(name)
             if outage == "closed" and limit:
                 # What closed cannot change for a vendor hook (GAP-0150).
@@ -1861,7 +1868,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         click.echo(f"      - {_connector_label(name)} ({name}): {shown}")
     click.echo()
     ux.subhead(_PER_USER_OUTAGE_RULE, indent="  ")
-    click.echo(f"  {ux.dim('Fail closed during an outage:')} defenseclaw guardrail use-pack strict")
+    click.echo(f"  {ux.dim('Fail closed during an outage:')} defenseclaw guardrail fail-mode closed")
     click.echo(f"  {ux.dim('Gateway down:')} defenseclaw-gateway start; defenseclaw doctor if it does not start")
     click.echo()
 
@@ -1892,20 +1899,18 @@ def fail_mode_cmd(
 ) -> None:
     """Show or change the hook failure behavior.
 
-    The hook fail mode controls what generated hooks do when delivery or
-    authentication fails, or when the DefenseClaw gateway returns a 4xx,
-    an unparseable JSON body, or no ``action`` field. Two values are supported:
+    On a per-user install, a saved hook fail mode controls a classified
+    gateway outage. Other delivery, authentication and response failures
+    block. Two values are supported:
 
       \b
-      open   — allow the tool/prompt and log the failure.
-               A gateway outage never blocks your agent.
-      closed — block supported events when inspection is unavailable.
-               The default on a new install: every prompt and
-               tool call is inspected or blocked.
+      open   — allow an eligible outage call with a warning and audit row.
+      closed — block supported events during a gateway outage.
 
-    Transport failures (gateway unreachable / timeout / 5xx) follow the
-    same connector-scoped setting. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
-    additionally forces transport and missing-token failures closed.
+    An unset per-user mode follows the rule-pack tier. Managed installs
+    default closed; a managed administrator can select outage-open. Secure
+    Client keeps its own default. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
+    forces transport and missing-token failures closed.
 
     Without an argument this prints the current value. With
     ``open`` or ``closed`` it persists the choice to ~/.defenseclaw/
@@ -1921,9 +1926,7 @@ def fail_mode_cmd(
     while the global default and the other connectors are left untouched.
     """
     managed_host = str(getattr(app.cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
-    secure_client = bool(getattr(app.cfg.guardrail, "_secure_client", False))
-    if mode is not None and not managed_host and not secure_client:
-        _refuse_a_mode_the_policy_tier_does_not_give(app, mode, connector_flag)
+    secure_client = _secure_client_fail_mode(app)
     if connector_flag:
         _set_connector_fail_mode(
             app, connector_flag, mode, restart=restart, yes=yes
@@ -1935,7 +1938,13 @@ def fail_mode_cmd(
     # (an OpenShell policy connector, a connector set up later), so a no-op
     # needs the saved global value to be exactly the requested one.
     saved_global = str(gc.hook_fail_mode or "").strip().lower()
-    current = saved_global if (managed_host or secure_client) and saved_global in ("open", "closed") else "closed"
+    if not (managed_host or secure_client) and not getattr(gc, "_hook_fail_mode_saved", bool(saved_global)):
+        saved_global = ""
+    resolver = getattr(gc, "effective_hook_fail_mode", None)
+    fallback = resolver(_resolve_active_connector(app.cfg)) if callable(resolver) else "closed"
+    current = saved_global if saved_global in ("open", "closed") else (
+        "closed" if managed_host or secure_client else fallback
+    )
 
     if mode is None and not managed_host and not secure_client:
         _show_per_user_outage_modes(app)
@@ -2035,7 +2044,7 @@ def fail_mode_cmd(
         for name in fail_mode_targets:
             entry = configured.get(name)
             stored = str(getattr(entry, "hook_fail_mode", "") or "").strip().lower()
-            target_modes[name] = stored if stored in ("open", "closed") else current
+            target_modes[name] = stored if stored in ("open", "closed") else gc.effective_hook_fail_mode(name)
             runtime_states[name] = resolve_connector_fail_mode(app.cfg, name)
     desired_modes = dict.fromkeys(fail_mode_targets, mode)
 
@@ -2159,7 +2168,20 @@ def fail_mode_cmd(
         if upstream_open
         else ""
     )
-    if mode == "closed" and upstream_open and len(upstream_open) == len(active_names):
+    outage_only = not secure_client
+    if outage_only and all(_is_proxy_connector(name) for name in active_names):
+        ux.subhead(
+            "No active hooks use this setting; proxy-backed connectors still block while the gateway is down. "
+            "The choice is saved for hook connectors added later.", indent="  ",
+        )
+    elif outage_only and mode == "closed":
+        ux.warn("A gateway outage will now BLOCK supported calls. Other failures remain closed.", indent="  ")
+    elif outage_only:
+        ux.subhead(
+            "A classified gateway outage will now ALLOW supported calls with a warning and per-call audit entry. "
+            "Other failures remain closed.", indent="  ",
+        )
+    elif mode == "closed" and upstream_open and len(upstream_open) == len(active_names):
         ux.warn(
             f"{upstream_labels} will remain fail-open; closed is stored only as requested policy provenance.",
             indent="  ",

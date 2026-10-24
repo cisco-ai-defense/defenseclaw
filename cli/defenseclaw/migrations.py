@@ -30,6 +30,8 @@ code. Three kinds of steps exist:
   Desktop connector ID to ``devin`` and drops connectors this release does not
   ship. It has no ``config_version``: it runs whenever ``config.yaml`` still
   names such a connector.
+* Release-specific steps use the installer's ``--from-version`` when a prior
+  release wrote a value without recording whether an operator chose it.
 
 Every step is idempotent and writes through temp-file-and-rename.
 """
@@ -4193,11 +4195,66 @@ def _pending_migration_steps(
         if step is None:
             raise MigrationError(f"no migration from config_version {number} to {number + 1}")
         steps.append((f"config_version {number} → {number + 1}", _config_version_step(step, number + 1, config_path)))
+    # 1.0.0-1.0.3 init wrote Cursor's fail mode from observe/action without
+    # an operator choice. The installer supplies the release that wrote this
+    # config, so that provenance is available here even for version 9 YAML.
+    if (
+        from_version
+        and not _version_before(from_version, (1, 0, 0))
+        and _version_before(from_version, (1, 0, 4))
+        and _legacy_cursor_outage_pin_paths(config_path)
+    ):
+        steps.append(("remove old automatic Cursor outage setting", _remove_legacy_cursor_outage_pins))
     if not steps and current >= 9 and _legacy_providers_overlay_pending(config_path, data_dir):
         steps.append((_PROVIDERS_FOLD_STEP_NAME, _fold_legacy_providers_overlay))
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
     return steps
+
+
+def _legacy_cursor_outage_pin_paths(config_path: str) -> list[str]:
+    """Find only the two values old init generated, on an OSS document."""
+    source = _read_config_text(config_path)
+    if source is None or _guardrail_runtime_migration_is_managed(source):
+        return []
+    try:
+        root = yaml.safe_load(source) or {}
+    except yaml.YAMLError:
+        return []
+    guardrail = root.get("guardrail") if isinstance(root, dict) else None
+    if not isinstance(guardrail, dict):
+        return []
+    mode = str(guardrail.get("mode") or "observe").strip().lower()
+    paths: list[str] = []
+    connectors = guardrail.get("connectors")
+    if isinstance(connectors, dict):
+        for name, entry in connectors.items():
+            if str(name).strip().lower() != "cursor" or not isinstance(entry, dict):
+                continue
+            own_mode = str(entry.get("mode") or mode).strip().lower()
+            pinned = "closed" if own_mode == "action" else "open"
+            if str(entry.get("hook_fail_mode") or "").strip().lower() == pinned:
+                paths.append(f"guardrail.connectors.{name}.hook_fail_mode")
+    if str(guardrail.get("connector") or "").strip().lower() == "cursor":
+        pinned = "closed" if mode == "action" else "open"
+        if str(guardrail.get("hook_fail_mode") or "").strip().lower() == pinned:
+            paths.append("guardrail.hook_fail_mode")
+    return paths
+
+
+def _remove_legacy_cursor_outage_pins(ctx: MigrationContext) -> None:
+    from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply
+
+    paths = _legacy_cursor_outage_pin_paths(ctx.active_config_path())
+    if not paths:
+        return
+    apply(
+        [Change(path, unset=True) for path in paths],
+        ACTOR_MIGRATION,
+        "remove Cursor fail mode written automatically by DefenseClaw 1.0.0-1.0.3",
+        path=ctx.active_config_path(),
+    )
+    ctx.changes.append("removed old automatic Cursor outage mode; policy tier now decides")
 
 
 def _config_version_step(

@@ -1007,12 +1007,18 @@ func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t
 	s.cfg.Guardrail.Enabled = true
 	s.cfg.Guardrail.Mode = "observe"
 	s.cfg.Guardrail.HookFailMode = "closed"
-	// The default tier: the current outage mode is open (oss-outage-open),
-	// changed from the prior install's closed.
+	// An explicit current open choice differs from the prior install's closed
+	// choice; publication failure must restore the prior registration.
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"codex": {Mode: "observe", HookFailMode: "closed"},
+		"codex": {Mode: "observe", HookFailMode: "open"},
 	}
 	s.health = NewSidecarHealth()
+	// Changing the saved outage choice refreshes the hook. Supply a known
+	// agent contract so this rollback test reaches publication on every host.
+	if err := os.WriteFile(filepath.Join(s.cfg.DataDir, "agent_discovery.json"),
+		[]byte(`{"agents":{"codex":{"version":"codex 0.146.0"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	artifactPath := filepath.Join(testenv.PrivateTempDir(t), "codex-registration-posture")
 	if err := os.WriteFile(artifactPath, []byte("closed\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -1021,12 +1027,14 @@ func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t
 		t.Fatal(err)
 	}
 	priorLockEntry := connector.HookContractLockEntry{
-		Connector:           "codex",
-		ContractID:          "codex-hooks-v4",
-		CompatibilityStatus: connector.HookCompatibilityKnown,
-		HookScriptVersion:   "v8",
-		HookFailMode:        "closed",
-		DefenseClawVersion:  "prior-build",
+		Connector:              "codex",
+		RawAgentVersion:        "codex 0.146.0",
+		NormalizedAgentVersion: "0.146.0",
+		ContractID:             "codex-hooks-v4",
+		CompatibilityStatus:    connector.HookCompatibilityKnown,
+		HookScriptVersion:      "v8",
+		HookFailMode:           "closed",
+		DefenseClawVersion:     "prior-build",
 		RegistrationPosture: &connector.HookRegistrationPosture{
 			GuardrailMode: "observe",
 			HILTEnabled:   false,

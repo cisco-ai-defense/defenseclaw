@@ -6,6 +6,7 @@ package hookexec
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -45,6 +46,53 @@ func TestNativeOutageWarnsOncePerSessionAndAuditsEveryCall(t *testing.T) {
 	if err != nil || strings.Count(string(rows), `"outcome":"fail_open"`) != 2 ||
 		!strings.Contains(string(rows), `"call_id":"call-0"`) || !strings.Contains(string(rows), `"call_id":"call-1"`) {
 		t.Fatalf("per-call outage audit: %s: %v", rows, err)
+	}
+}
+
+func TestNativeOutageWarningPrunesExpiredSessionMarkers(t *testing.T) {
+	hooks := filepath.Join(t.TempDir(), "hooks")
+	markers := filepath.Join(hooks, ".outage-warnings")
+	if err := os.MkdirAll(markers, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := filepath.Join(markers, "old-session")
+	if err := os.WriteFile(old, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ago := time.Now().Add(-10 * 24 * time.Hour)
+	if err := os.Chtimes(old, ago, ago); err != nil {
+		t.Fatal(err)
+	}
+	// The marker hash selects a low-frequency prune pass, keeping this test
+	// deterministic without scanning the directory on every hook call.
+	session := ""
+	for i := 0; i < 10000; i++ {
+		candidate := fmt.Sprintf("session-%d", i)
+		if sha256.Sum256([]byte(candidate))[0] == 0 {
+			session = candidate
+			break
+		}
+	}
+	if session == "" {
+		t.Fatal("no pruning session found")
+	}
+	if !firstOutageWarning(Options{HookDir: hooks, failurePayload: []byte(`{"session_id":"` + session + `"}`)}) {
+		t.Fatal("new session suppressed its warning")
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Fatalf("expired marker survived: %v", err)
+	}
+	if err := os.WriteFile(old, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(old, ago, ago); err != nil {
+		t.Fatal(err)
+	}
+	if firstOutageWarning(Options{HookDir: hooks, failurePayload: []byte(`{"session_id":"` + session + `"}`)}) {
+		t.Fatal("repeated session got another warning")
+	}
+	if _, err := os.Stat(old); err != nil {
+		t.Fatalf("repeated session scanned old markers: %v", err)
 	}
 }
 
@@ -155,6 +203,72 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 						}
 					}
 				})
+			}
+		}
+	}
+}
+
+// The whole policy Cartesian product reaches the native hook decision, not
+// just the config resolver: an answer (even an unusable one) is never an
+// outage, while a confirmed absent gateway uses the chosen outage mode.
+func TestNativeOutageTierInstallAnswerExplicitModeTable(t *testing.T) {
+	fastRestartRetries(t)
+	answers := []struct {
+		name string
+		rt   func() *stubRT
+	}{
+		{"up", func() *stubRT { return ok(`{"action":"allow","raw_action":"allow"}`) }},
+		{"down", func() *stubRT { return &stubRT{err: syscall.ECONNREFUSED} }},
+		{"timeout", func() *stubRT {
+			return &stubRT{err: fmt.Errorf("%w: %w", errGatewayTookCallNoAnswer, context.DeadlineExceeded)}
+		}},
+		{"truncated", func() *stubRT {
+			return &stubRT{onRequest: func(_ *stubRT, _ *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(failingBody{strings.NewReader(`{"action":"al`), io.ErrUnexpectedEOF})}, nil
+			}}
+		}},
+		{"malformed", func() *stubRT { return ok(`{"action":"allow" garbage`) }},
+	}
+	for _, tier := range []string{"permissive", "default", "strict"} {
+		for _, install := range []string{"oss", "managed", "secure_client"} {
+			for _, explicit := range []string{"", "open", "closed"} {
+				mode := explicit
+				if mode == "" {
+					mode = "closed"
+					if install == "secure_client" || (install == "oss" && tier != "strict") {
+						mode = "open"
+					}
+				}
+				for _, answer := range answers {
+					t.Run(tier+"/"+install+"/"+explicit+"/"+answer.name, func(t *testing.T) {
+						rt := answer.rt()
+						if answer.name == "down" && install != "oss" {
+							rt.err = fmt.Errorf("%w: %w", errManagedGatewayPeerUnverified, errManagedGatewayNotRunning)
+						}
+						result := run(t, "codex", rt, func(opts *Options) {
+							if install == "oss" {
+								opts.FailMode = "closed"
+								opts.OutageFailModeNow = func() string { return mode }
+							} else {
+								if install == "managed" {
+									managedWindowsStandalone(opts)
+								} else {
+									managedCodex(opts)
+									opts.SecureClient = true
+								}
+								opts.FailMode = mode
+							}
+							if answer.name == "down" {
+								opts.StartedAt = time.Now().Add(-gatewayRestartBudget)
+							}
+						})
+						wantAllow := answer.name == "up" || (answer.name == "down" && mode == "open") ||
+							(install == "secure_client" && mode == "open" && (answer.name == "timeout" || answer.name == "malformed"))
+						if gotAllow := !nativeOutageBlocked(result); gotAllow != wantAllow {
+							t.Fatalf("allow=%v, want %v: exit=%d stdout=%q stderr=%q", gotAllow, wantAllow, result.code, result.stdout, result.stderr)
+						}
+					})
+				}
 			}
 		}
 	}

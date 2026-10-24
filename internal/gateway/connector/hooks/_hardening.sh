@@ -2091,6 +2091,11 @@ defenseclaw_first_outage_warning() {
     return 0
   fi
   if (set -C; : > "$dir/$digest") 2>/dev/null; then
+    # One in 256 new sessions prunes old advisory markers. Repeated calls
+    # never scan, and pruning cannot change the verdict.
+    case "$digest" in
+      00*) find "$dir" -type f -mtime +7 -delete >/dev/null 2>&1 || : ;;
+    esac
     _DC_OUTAGE_WARNING_THIS_CALL=1
     return 0
   fi

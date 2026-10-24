@@ -2555,7 +2555,9 @@ class GuardrailConfig:
     # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
     # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
     # in internal/config/config.go.
-    hook_fail_mode: str = "closed"
+    # An empty constructor value means no operator choice. __post_init__ keeps
+    # the historical public value while recording whether a choice was made.
+    hook_fail_mode: str = ""
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
     # One of:
@@ -2645,6 +2647,18 @@ class GuardrailConfig:
             return pc.hilt
         return self.hilt
 
+    def __post_init__(self) -> None:
+        supplied = bool(self.hook_fail_mode.strip())
+        if not supplied:
+            object.__setattr__(self, "hook_fail_mode", "closed")
+        object.__setattr__(self, "_hook_fail_mode_saved", supplied)
+        object.__setattr__(self, "_hook_fail_mode_track", True)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        object.__setattr__(self, name, value)
+        if name == "hook_fail_mode" and getattr(self, "_hook_fail_mode_track", False):
+            object.__setattr__(self, "_hook_fail_mode_saved", bool(str(value or "").strip()))
+
     def effective_hook_fail_mode(self, connector: str = "") -> str:
         """Resolve hook failure behavior for this deployment profile.
 
@@ -2678,7 +2692,7 @@ class GuardrailConfig:
         pc = self._connector_override(connector)
         if pc is not None and pc.hook_fail_mode.strip():
             return _normalize_hook_fail_mode(pc.hook_fail_mode)
-        if getattr(self, "_hook_fail_mode_saved", True) and self.hook_fail_mode.strip():
+        if getattr(self, "_hook_fail_mode_saved", False) and self.hook_fail_mode.strip():
             return _normalize_hook_fail_mode(self.hook_fail_mode)
         if standalone or self.secure_client_hook_fail_modes():
             return "closed" if standalone else "open"
@@ -4795,6 +4809,11 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         scanners.get("skill_scanner", {}).pop("virustotal_api_key", None)
     _strip_empty_llm(scanners, "plugin_llm")
     guardrail = d.get("guardrail") or {}
+    # The public in-memory default remains "closed" for existing callers,
+    # but an unset document must stay unset in the modeled save baseline.
+    # Otherwise choosing "closed" in setup looks unchanged and is omitted.
+    if isinstance(guardrail, dict) and not getattr(cfg.guardrail, "_hook_fail_mode_saved", False):
+        guardrail.pop("hook_fail_mode", None)
     if isinstance(guardrail, dict) and not guardrail.get("allow_private_upstreams"):
         guardrail.pop("allow_private_upstreams", None)
     _strip_unset_levels(guardrail)
