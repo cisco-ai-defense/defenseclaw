@@ -713,7 +713,7 @@ def connector_fail_mode_report(
 
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
     if connector == "amp":
-        return "amp-plugin", _read_amp_plugin_mode(Path(amp_policy_plugin_path()), cfg)
+        return "amp-plugin", _read_amp_plugin_mode(Path(amp_policy_plugin_path()))
     if connector == "opencode":
         return "opencode-plugin", _read_opencode_plugin_mode(cfg)
     if _is_windows():
@@ -736,13 +736,9 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
         and not reads_env
         and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
     ):
-        # A current per-user script decides its outage mode from config at
-        # call time; older scripts still read their runtime record.
-        helper = _read_small_file(hook_dir / "_hardening.sh")
-        if helper and "defenseclaw-call-time-outage-v1" in helper:
-            resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-            if callable(resolver):
-                return "hook-script", normalize_fail_mode(resolver(connector))
+        # A per-user script bakes closed for every failure and reads its
+        # gateway-outage mode from its runtime record (_hardening.sh
+        # defenseclaw_per_user_outage_open).
         return "hook-script", _read_flat_hook_record_mode(hook_dir, connector)
     return ("hook-script-env" if reads_env else "hook-script"), mode
 
@@ -1117,22 +1113,16 @@ def _read_opencode_plugin_mode(cfg: Any) -> str | None:
         plugin = _read_small_file(Path(str(raw_path)))
         if plugin is None:
             continue
-        if "defenseclaw-call-time-outage-v1" in plugin:
-            resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-            return normalize_fail_mode(resolver("opencode")) if callable(resolver) else None
         match = _OPENCODE_OUTAGE_PATTERN.search(plugin) or _OPENCODE_FAIL_MODE_PATTERN.search(plugin)
         if match:
             return match.group(1)
     return None
 
 
-def _read_amp_plugin_mode(path: Path, cfg: Any) -> str | None:
+def _read_amp_plugin_mode(path: Path) -> str | None:
     data = _read_small_file(path)
     if data is None:
         return None
-    if "defenseclaw-call-time-outage-v1" in data:
-        resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
-        return normalize_fail_mode(resolver("amp")) if callable(resolver) else None
     match = _AMP_OUTAGE_PATTERN.search(data) or _AMP_FAIL_MODE_PATTERN.search(data)
     return match.group(1) if match else None
 

@@ -48,8 +48,9 @@ func nativeOutageBlocked(r runResult) bool {
 
 // oss-outage-open (owner decision 2026-10-23): the per-user native hook (the
 // Windows hook of every connector) lets a call run only for a gateway outage
-// and only in the outage-open tier the current config selects.
-// The strict tier, strict availability, the install window, an answer the gateway gave (malformed, cut off, an error
+// and only in the outage-open tier (Options.OutageFailMode, Setup's record of
+// config.HookOutageFailMode). The strict tier, strict availability, the
+// install window, an answer the gateway gave (malformed, cut off, an error
 // status, an authentication refusal) and a gateway that took the call and did
 // not answer block in every tier.
 func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
@@ -95,7 +96,6 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		"devin":       {"PreToolUse", `{"hook_event_name":"PreToolUse","tool_name":"exec","tool_input":{"command":"echo hi"}}`},
 		"antigravity": {"PreToolUse", `{"toolName":"run_command","toolInput":{"CommandLine":"echo hi"}}`},
 		"hermes":      {"pre_tool_call", `{"hook_event_name":"pre_tool_call","tool_name":"terminal","tool_input":{"command":"echo hi"}}`},
-		"kiro":        {"PreToolUse", `{"hook_event_name":"PreToolUse","session_id":"s","cwd":"/work","tool_name":"execute_bash","tool_input":{"command":"echo hi"}}`},
 	}
 	for connector, call := range events {
 		for _, tier := range []struct{ name, mode string }{{"default or permissive", "open"}, {"strict", "closed"}} {
@@ -105,8 +105,7 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 						opts.Event = call.event
 						opts.Stdin = strings.NewReader(call.stdin)
 						opts.FailMode = "closed"
-						// The config on disk agrees with the record.
-						opts.OutageFailModeNow = func() string { return tier.mode }
+						opts.OutageFailMode = tier.mode
 						if sc.mutate != nil {
 							sc.mutate(opts)
 						}
@@ -129,49 +128,13 @@ func TestPerUserNativeHookOutageOpenOnlyForAnOutage(t *testing.T) {
 	}
 }
 
-// The config on disk (OutageFailModeNow) alone decides a classified outage.
-// A prior render's outage mode cannot override it.
-func TestPerUserNativeHookOutageFollowsTheConfigNow(t *testing.T) {
-	fastRestartRetries(t)
-	constant := func(mode string) func() string { return func() string { return mode } }
-	for _, connector := range []string{"claudecode", "codex", "copilot", "cursor"} {
-		for _, tc := range []struct {
-			name  string
-			now   func() string
-			opens bool
-		}{
-			{"config open", constant("open"), true},
-			{"strict selected since render", constant("closed"), false},
-			{"config unreadable", constant(""), false},
-			{"no config check", nil, false},
-		} {
-			t.Run(connector+"/"+tc.name, func(t *testing.T) {
-				result := run(t, connector, &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
-					opts.FailMode = "closed"
-					opts.OutageFailModeNow = tc.now
-				})
-				if blocked := nativeOutageBlocked(result); blocked == tc.opens {
-					t.Fatalf("blocked=%v, want %v: code=%d stdout=%q stderr=%q", blocked, !tc.opens, result.code, result.stdout, result.stderr)
-				}
-			})
-		}
-	}
-	asked := 0
-	result := run(t, "codex", &stubRT{status: 503, body: "unavailable"}, func(opts *Options) {
-		opts.FailMode = "closed"
-		opts.OutageFailModeNow = func() string { asked++; return "open" }
-	})
-	if !nativeOutageBlocked(result) || asked != 0 {
-		t.Fatalf("an error status asked the config %d times or ran: code=%d stdout=%q", asked, result.code, result.stdout)
-	}
-}
-
-// A managed hook ignores the per-user outage callback.
+// A managed or Secure Client hook never takes the per-user outage mode: an
+// OutageFailMode left in its options does not open a refused call.
 func TestManagedNativeHookIgnoresThePerUserOutageMode(t *testing.T) {
 	fastRestartRetries(t)
 	result := run(t, "codex", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		managedCodex(opts)
-		opts.OutageFailModeNow = func() string { return "open" }
+		opts.OutageFailMode = "open"
 	})
 	if !nativeOutageBlocked(result) {
 		t.Fatalf("a managed closed hook let a refused call run: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)

@@ -26,14 +26,19 @@ import (
 
 // derivedHookHeader is the first comment of every per-user (unmanaged)
 // connector hook script: the digest of the config values rendered into it
-// and the hook fail mode it bakes for other failures, so doctor can tell a
-// script rendered from another config apart from the current one (spec section 6). Managed
+// and the hook fail mode it bakes in, so doctor can tell a script rendered
+// from another config apart from the current one (spec section 6). Managed
 // installs compare the whole render instead (HookScriptRenderDrift).
 const derivedHookHeader = "# defenseclaw-derived:"
 
 // derivedHookLine is the header line for a connector script rendered from data.
 func derivedHookLine(data templateData) string {
+	// A per-user script bakes closed for every failure; the mode its config
+	// chose is its outage mode (OutageFailMode), which doctor compares.
 	mode := data.FailMode
+	if data.OutageFailMode != "" {
+		mode = data.OutageFailMode
+	}
 	sum := sha256.Sum256([]byte(fmt.Sprintf("defenseclaw-hook-render-v1\nconnector=%s\nfail_mode=%s\napi_addr=%s\n",
 		data.ConnectorName, mode, data.APIAddr)))
 	return fmt.Sprintf("%s sha256=%s fail_mode=%s\n", derivedHookHeader, hex.EncodeToString(sum[:]), mode)

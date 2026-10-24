@@ -145,7 +145,7 @@ Only `PreToolUse` supports native ask. In action mode a confirm verdict returns 
 
 ## Fail mode
 
-Fail closed: yes. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. On a managed host the administrator's `guardrail.hook_fail_mode` decides an outage, and the default is `closed`. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

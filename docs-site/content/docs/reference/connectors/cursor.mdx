@@ -102,7 +102,7 @@ Cursor runs every matching hook and merges conflicts in **Enterprise > Team > Pr
 | Mode | Registration | Behavior |
 | --- | --- | --- |
 | Action | `failClosed: true` | Returns the documented native deny on supported pre-action events. `beforeSubmitPrompt` blocks with `continue: false`. The permission-gated events use `permission: "deny"`. Confirm verdicts stay attributed alerts. Native ask is not enabled. |
-| Observe | `failClosed: true` | Allows on policy findings and records `would_block` audit state; on a per-user install, a gateway outage follows the policy tier: default and permissive run the call with a warning, strict blocks it. If the hook process never answers, Cursor blocks the call. |
+| Observe | `failClosed: true` | Allows on policy findings and records `would_block` audit state; on a per-user install, the running hook still blocks supported events during a gateway outage by default. If the hook process never answers, Cursor blocks the call. |
 
 Blocking events are `preToolUse`, `subagentStart`, `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`, `beforeTabFileRead` and `beforeSubmitPrompt`. `sessionStart` and `sessionEnd` are not gates. `stop` and `subagentStop` accept only a follow-up message. Result inspection reads `tool_output`, `error_message`, shell `output`, MCP `result_json`, file `edits`, agent `text` and subagent `summary`. `beforeMCPExecution` keeps its exact `tool_input` and URL or command, and derives a stable digest identity without inventing a vendor name.
 
