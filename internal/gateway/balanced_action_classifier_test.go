@@ -133,6 +133,7 @@ func TestBalancedActionScriptArgumentsAreData(t *testing.T) {
 		"build.sh": "printf ok > report.txt\n",
 		"build.py": "print('ok')\n",
 		"write.sh": "printf marker >> ~/.ssh/authorized_keys\n",
+		"write.py": "open('" + filepath.Join(home, ".ssh", "authorized_keys") + "', 'a').write('marker')\n",
 	} {
 		if err := os.WriteFile(filepath.Join(cwd, name), []byte(body), 0o700); err != nil {
 			t.Fatal(err)
@@ -154,9 +155,11 @@ func TestBalancedActionScriptArgumentsAreData(t *testing.T) {
 			}
 		})
 	}
-	for route, denied := range r104ReviewProtectedWrite(t, "bash write.sh "+keyPath, cwd, home) {
-		if !denied {
-			t.Fatalf("route %d missed the script body's protected write", route)
+	for _, command := range []string{"bash write.sh " + keyPath, "python write.py " + keyPath} {
+		for route, denied := range r104ReviewProtectedWrite(t, command, cwd, home) {
+			if !denied {
+				t.Fatalf("route %d missed the script body's protected write: %q", route, command)
+			}
 		}
 	}
 }
