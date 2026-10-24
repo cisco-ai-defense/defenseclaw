@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.request
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -522,10 +523,98 @@ def test_command_runner_can_feed_bounded_stdin_without_argv_leak() -> None:
     assert secret.decode().strip() not in " ".join(result.argv)
 
 
+def _grafana_container(subject, runner, status: str = "running") -> None:
+    """This stack's own Grafana container exists, in status."""
+    runner.add((subject.docker_path, "ps", "--all", "--filter"), stdout="defenseclaw-grafana\n")
+    runner.add((subject.docker_path, "ps", "--all", "--format"), stdout="defenseclaw-grafana\n")
+    runner.add(
+        (subject.docker_path, "inspect"),
+        stdout=json.dumps(
+            {
+                "com.docker.compose.project": COMPOSE_PROJECT,
+                "com.docker.compose.service": "grafana",
+                "com.docker.compose.project.config_files": str(subject.compose_file),
+                "com.docker.compose.project.working_dir": str(subject.stack_dir),
+            }
+        ),
+    )
+    runner.add(
+        (subject.docker_path, "inspect", "--format", "{{.State.Status}}", "defenseclaw-grafana"),
+        stdout=status + "\n",
+    )
+
+
+@pytest.mark.parametrize("status", [None, "exited", "restarting", "created"])
+def test_grafana_credential_is_never_sent_unless_this_stack_grafana_runs(controller, status) -> None:
+    """GAP-0981: a stopped or missing Grafana leaves port 3000 to any account."""
+    subject, runner = controller
+    if status is not None:
+        _grafana_container(subject, runner, status)
+    with (
+        patch("defenseclaw.observability.local_stack.urllib.request.urlopen") as urlopen,
+        patch("defenseclaw.observability.local_stack._open_without_redirects") as authenticated,
+        pytest.raises(LocalStackError, match="credential was not sent"),
+    ):
+        LocalStackController._verify_grafana_authentication(subject, "A" * 40)
+    urlopen.assert_not_called()
+    authenticated.assert_not_called()
+
+
+def test_grafana_credential_is_never_sent_to_a_foreign_grafana_copy(controller) -> None:
+    """A same-name Grafana of another copy of the stack is not this stack's."""
+    subject, runner = controller
+    _grafana_container(subject, runner)
+    runner.add(
+        (subject.docker_path, "inspect", "--format", "{{json .Config.Labels}}"),
+        stdout=json.dumps(
+            {
+                "com.docker.compose.project": COMPOSE_PROJECT,
+                "com.docker.compose.service": "grafana",
+                "com.docker.compose.project.config_files": str(subject.compose_file),
+                "com.docker.compose.project.working_dir": str(subject.stack_dir.parent),
+            }
+        ),
+    )
+    with (
+        patch("defenseclaw.observability.local_stack._open_without_redirects") as authenticated,
+        pytest.raises(LocalStackError),
+    ):
+        LocalStackController._verify_grafana_authentication(subject, "A" * 40)
+    authenticated.assert_not_called()
+
+
+def test_up_does_not_send_the_credential_to_a_stopped_stack_port(controller) -> None:
+    """The pre-start check of a password-mode stack sends nothing while Grafana is down."""
+    subject, _runner = controller
+    subject._verify_grafana_authentication = LocalStackController._verify_grafana_authentication.__get__(subject)
+    subject.wait_for_grafana_access = MagicMock()
+    persist_grafana_access_mode(subject.stack_dir, GRAFANA_ACCESS_PASSWORD)
+    unauthorized = urllib.error.HTTPError("http://127.0.0.1:3000/api/search", 401, "Unauthorized", None, None)
+    accepted = MagicMock()
+    accepted.__enter__.return_value.status = 200
+    with (
+        patch("defenseclaw.observability.local_stack._open_without_redirects", return_value=accepted) as authenticated,
+        patch("defenseclaw.observability.local_stack.urllib.request.urlopen", side_effect=unauthorized) as urlopen,
+    ):
+        subject.up(wait=False, grafana_access_mode=GRAFANA_ACCESS_PASSWORD)
+    authenticated.assert_not_called()
+    urlopen.assert_not_called()
+
+
+def test_grafana_credential_request_refuses_redirects() -> None:
+    """urllib resends Authorization on a redirect; the credential request follows none."""
+    from defenseclaw.observability import local_stack
+
+    handler = local_stack._RefuseRedirects()
+    request = urllib.request.Request("http://127.0.0.1:3000/x", headers={"Authorization": "Basic x"})
+    assert handler.redirect_request(request, None, 302, "Found", {}, "http://127.0.0.1:3001/") is None
+
+
 def test_grafana_auth_check_denies_anonymous_and_accepts_managed_login(
     controller,
 ) -> None:
-    subject, _runner = controller
+    subject, runner = controller
+    _grafana_container(subject, runner)
     password = "A" * 40
     unauthorized = urllib.error.HTTPError(
         "http://127.0.0.1:3000/api/search",
@@ -537,21 +626,28 @@ def test_grafana_auth_check_denies_anonymous_and_accepts_managed_login(
     authenticated = MagicMock()
     authenticated.__enter__.return_value.status = 200
 
-    with patch(
-        "defenseclaw.observability.local_stack.urllib.request.urlopen",
-        side_effect=[unauthorized, authenticated],
-    ) as urlopen:
+    with (
+        patch(
+            "defenseclaw.observability.local_stack.urllib.request.urlopen",
+            side_effect=[unauthorized],
+        ) as urlopen,
+        patch(
+            "defenseclaw.observability.local_stack._open_without_redirects",
+            return_value=authenticated,
+        ) as authenticated_open,
+    ):
         LocalStackController._verify_grafana_authentication(subject, password)
 
     anonymous_request = urlopen.call_args_list[0].args[0]
-    authenticated_request = urlopen.call_args_list[1].args[0]
+    authenticated_request = authenticated_open.call_args_list[0].args[0]
     assert anonymous_request.get_header("Authorization") is None
     assert authenticated_request.get_header("Authorization", "").startswith("Basic ")
     assert password not in authenticated_request.full_url
 
 
 def test_grafana_auth_check_rejects_anonymous_success(controller) -> None:
-    subject, _runner = controller
+    subject, runner = controller
+    _grafana_container(subject, runner)
     anonymous = MagicMock()
     anonymous.__enter__.return_value.status = 200
     with (

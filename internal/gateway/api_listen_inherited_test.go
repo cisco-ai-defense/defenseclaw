@@ -61,6 +61,18 @@ func TestInheritedAPIListenerOnAnotherAddress(t *testing.T) {
 		t.Fatalf("listener %s, want the configured %s", listener.Addr(), configured)
 	}
 
+	// GAP-1086: under an older launchd job (no API socket) a managed
+	// standalone gateway does not bind the port itself; other profiles do.
+	inheritedAPIListener = func() (net.Listener, bool, error) { return nil, false, nil }
+	api.scannerCfg = managedCfg
+	if unheld, err := api.acquireAPIListener(context.Background()); err == nil || !strings.Contains(err.Error(), "holds no API socket") {
+		if unheld != nil {
+			_ = unheld.Close()
+		}
+		t.Fatalf("managed launchd job without the API socket = %v, want the reload refusal", err)
+	}
+	api.scannerCfg = nil
+
 	// The configured address itself is adopted on every platform.
 	inheritedAPIListener = func() (net.Listener, bool, error) { return listener, true, nil }
 	adopted, err := api.acquireAPIListener(context.Background())

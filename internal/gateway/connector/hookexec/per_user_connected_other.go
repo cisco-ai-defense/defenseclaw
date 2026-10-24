@@ -10,6 +10,10 @@ import (
 	"net"
 )
 
+func verifyLocalPeerTuple(_, _ *net.TCPAddr) error {
+	return errors.New("local peer socket ownership is unavailable on this OS")
+}
+
 func verifyPerUserConnectedTuple(_, _ *net.TCPAddr) error {
 	return errors.New("connected gateway socket ownership is unavailable on this OS")
 }

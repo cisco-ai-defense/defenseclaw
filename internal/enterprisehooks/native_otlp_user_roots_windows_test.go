@@ -45,6 +45,8 @@ type windowsNativeOTLPRootsFixture struct {
 	volatile  map[string]string
 	readAs    int
 	readAsErr error
+	// warnings are what the check could not do (windowsNativeOTLPWarn).
+	warnings []string
 }
 
 func newWindowsNativeOTLPRootsFixture(t *testing.T) *windowsNativeOTLPRootsFixture {
@@ -70,6 +72,8 @@ func newWindowsNativeOTLPRootsFixture(t *testing.T) *windowsNativeOTLPRootsFixtu
 	}
 	windowsMachineEnvironment = func(name string) string { return f.machine[name] }
 	f.volatile = map[string]string{}
+	previousWarn := windowsNativeOTLPWarn
+	windowsNativeOTLPWarn = func(message string) { f.warnings = append(f.warnings, message) }
 	previousVolatile, previousReadAs := windowsAccountVolatileEnvironment, windowsAccountConfigReadAs
 	windowsAccountVolatileEnvironment = func(sid *windows.SID, name string) string {
 		if !sid.Equals(f.sid) {
@@ -93,6 +97,7 @@ func newWindowsNativeOTLPRootsFixture(t *testing.T) *windowsNativeOTLPRootsFixtu
 		windowsEnterpriseTargetImpersonation = previousImpersonation
 		windowsUserEnvironment, windowsMachineEnvironment = previousUser, previousMachine
 		windowsAccountVolatileEnvironment, windowsAccountConfigReadAs = previousVolatile, previousReadAs
+		windowsNativeOTLPWarn = previousWarn
 	})
 	for _, scope := range []connector.OTLPPathTokenScope{connector.OTLPScopeCodex, connector.OTLPScopeClaude} {
 		path, err := connector.OTLPPathTokenFilePath(f.dataDir, scope)
@@ -174,16 +179,38 @@ func (f *windowsNativeOTLPRootsFixture) requireStale(t *testing.T, name, source 
 	}
 }
 
-// requireNeedsSession fails unless verify kept the row unverified because
-// source is read only as the account and the account has no session.
-func (f *windowsNativeOTLPRootsFixture) requireNeedsSession(t *testing.T, name, source string, err error) {
+// requireWarning fails unless the last check warned with every part, and
+// with no value or path.
+func (f *windowsNativeOTLPRootsFixture) requireWarning(t *testing.T, name string, parts ...string) {
 	t.Helper()
-	if err == nil || !strings.Contains(err.Error(), "no signed-in session") || !strings.Contains(err.Error(), source) {
-		t.Fatalf("%s: verify = %v, want %s unverified until the account signs in", name, err, source)
+	all := strings.Join(f.warnings, "\n")
+	for _, part := range parts {
+		if !strings.Contains(all, part) {
+			t.Fatalf("%s: warnings %q, want %q", name, f.warnings, part)
+		}
 	}
-	if strings.Contains(err.Error(), f.bearer) || strings.Contains(err.Error(), f.home) || strings.Contains(err.Error(), `\\`) {
-		t.Fatalf("%s: verify error carries a value or a path: %v", name, err)
+	if strings.Contains(all, f.bearer) || strings.Contains(all, f.home) || strings.Contains(all, `\\`) {
+		t.Fatalf("%s: a warning carries a value or a path: %q", name, f.warnings)
 	}
+}
+
+// requireNeedsSession fails unless verify warned that source is read only
+// as the account and the account has no session: the row is not failed for
+// it (a failed row closes the account's hooks).
+func (f *windowsNativeOTLPRootsFixture) requireNeedsSession(t *testing.T, name, source string) {
+	t.Helper()
+	f.requireWarning(t, name, "no signed-in session", source)
+}
+
+// tokenPath is the earlier per-user install's credential of name.
+func (f *windowsNativeOTLPRootsFixture) tokenPath(t *testing.T, name string) string {
+	t.Helper()
+	token, err := connector.OTLPPathTokenFilePath(f.dataDir, map[string]connector.OTLPPathTokenScope{
+		"codex": connector.OTLPScopeCodex, "claudecode": connector.OTLPScopeClaude}[name])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return token
 }
 
 // windowsTestShare is local reached as a share, through the administrative
@@ -202,15 +229,20 @@ func windowsTestShare(t *testing.T, local string) string {
 }
 
 func (f *windowsNativeOTLPRootsFixture) verify(name string) error {
+	f.warnings = nil
 	return windowsManagedUserNativeOTLPAbsent(name, f.home, f.dataDir, f.sid)
 }
 
 func (f *windowsNativeOTLPRootsFixture) repair(t *testing.T, name string) {
 	t.Helper()
 	if err := connector.WithUserHomeDir(f.home, func() error {
-		return removeWindowsManagedUserNativeOTLPAsTarget(name, f.sid, f.home, f.dataDir)
+		removeWindowsManagedUserNativeOTLPAsTarget(name, f.sid, f.home, f.dataDir)
+		return nil
 	}); err != nil {
 		t.Fatalf("%s: repair: %v", name, err)
+	}
+	if _, err := os.Stat(f.tokenPath(t, name)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("%s: repair kept the earlier per-user credential: %v", name, err)
 	}
 }
 
@@ -299,11 +331,13 @@ func TestWindowsManagedRowCleansRelocatedAgentConfigurations(t *testing.T) {
 			f.repair(t, tc.name)
 			f.requireClean(t, filepath.Join(inProfile, tc.file))
 
-			// A value that names no folder cannot be checked.
+			// A value that names no folder cannot be checked: a warning, never
+			// a failed row.
 			f.env[tc.variable] = `%DC_NOT_SET%\agent-root`
-			if err := f.verify(tc.name); err == nil || !strings.Contains(err.Error(), tc.variable) {
-				t.Fatalf("an unresolvable %s verified: %v", tc.variable, err)
+			if err := f.verify(tc.name); err != nil {
+				t.Fatalf("an unresolvable %s failed the row: %v", tc.variable, err)
 			}
+			f.requireWarning(t, tc.name, tc.variable)
 		})
 	}
 }
@@ -311,9 +345,9 @@ func TestWindowsManagedRowCleansRelocatedAgentConfigurations(t *testing.T) {
 // GAP-0929: a configuration reached through a junction is the file the agent
 // reads. Verify follows the link and judges that file: a stale exporter there
 // is reported and repair removes it through the link, which stays. A link to
-// a file the account does not own is never read or changed for the row: the
-// row stays unverified, names the source and says what to do, and the
-// credential stays until the account can be checked.
+// a file the account does not own is never read or changed for the row: a
+// warning names the source and says what to do, the row is not failed for
+// it, and repair revokes the credential.
 func TestWindowsManagedRowResolvesLinkedAgentConfigurations(t *testing.T) {
 	for _, tc := range []struct{ name, dir, file string }{
 		{"codex", ".codex", "config.toml"},
@@ -349,27 +383,23 @@ func TestWindowsManagedRowResolvesLinkedAgentConfigurations(t *testing.T) {
 				t.Fatal(err)
 			}
 			makeTestJunction(t, link, foreign)
-			token, err := connector.OTLPPathTokenFilePath(f.dataDir, map[string]connector.OTLPPathTokenScope{
-				"codex": connector.OTLPScopeCodex, "claudecode": connector.OTLPScopeClaude}[tc.name])
-			if err != nil {
-				t.Fatal(err)
-			}
-			f.write(t, token, f.bearer)
+			f.write(t, f.tokenPath(t, tc.name), f.bearer)
 			err = f.verify(tc.name)
-			if err == nil || !strings.Contains(err.Error(), "does not own") || !strings.Contains(err.Error(), tc.file) ||
-				strings.Contains(err.Error(), foreign) {
-				t.Fatalf("verify of a link to another owner's file = %v, want the explicit unverified refusal", err)
+			if err == nil || !strings.Contains(err.Error(), "hooks/") {
+				t.Fatalf("verify with the credential left = %v, want it named for repair", err)
+			}
+			f.requireWarning(t, tc.name, "does not own", tc.file)
+			if strings.Contains(strings.Join(f.warnings, " "), foreign) {
+				t.Fatalf("warning names the foreign file: %q", f.warnings)
 			}
 			f.repair(t, tc.name)
 			if data, _ := os.ReadFile(filepath.Join(foreign, tc.file)); string(data) != stale {
 				t.Fatal("repair changed a file the account does not own")
 			}
-			if _, err := os.Stat(token); err != nil {
-				t.Fatalf("the credential was revoked while a configuration could not be checked: %v", err)
+			if err := f.verify(tc.name); err != nil {
+				t.Fatalf("verify after repair = %v, want a warning, not a failed row", err)
 			}
-			if err := f.verify(tc.name); err == nil || !strings.Contains(err.Error(), "does not own") {
-				t.Fatalf("verify after repair = %v, want the row still unverified", err)
-			}
+			f.requireWarning(t, tc.name, "does not own")
 		})
 	}
 }
@@ -447,11 +477,11 @@ func TestWindowsManagedRowCleansRedirectedAppDataNativeOTLP(t *testing.T) {
 // AppData redirected to a share, by User Shell Folders or through the
 // account's home share, is where its agent reads its configuration. A fresh
 // account verifies there; a stale exporter there is reported. Repair cannot
-// edit a share durably, so it leaves that file and the credential, and the
-// row stays unverified until the exporter is removed there by hand. Verify
-// reads the share as the account (the service would reach it as the
-// computer) and stays unverified while the account has no signed-in session
-// to read it under.
+// edit a share durably, so it leaves that file, revokes the credential, and
+// verify warns to remove the exporter there by hand without failing the row.
+// Verify reads the share as the account (the service would reach it as the
+// computer) and only warns while the account has no signed-in session to
+// read it under.
 func TestWindowsManagedRowChecksNetworkAppDataAsTheAccount(t *testing.T) {
 	for _, tc := range []struct {
 		name, variable, file, folderVariable, shellName string
@@ -507,37 +537,39 @@ func TestWindowsManagedRowChecksNetworkAppDataAsTheAccount(t *testing.T) {
 			f.ownRuntime(t, true)
 			f.writeOwned(t, filepath.Join(agentDir, tc.file), staleWindowsNativeOTLP(f.bearer)[name])
 			err = f.verify(name)
-			f.requireStale(t, name, source, err)
-			if strings.Contains(err.Error(), "localhost") {
-				t.Fatalf("verify error names the share: %v", err)
+			if err == nil || !strings.Contains(err.Error(), "hooks/") {
+				t.Fatalf("verify with the credential left = %v, want it named for repair", err)
+			}
+			f.requireWarning(t, name, source+" on a network share", "by hand")
+			if strings.Contains(strings.Join(f.warnings, " "), "localhost") {
+				t.Fatalf("warning names the share: %q", f.warnings)
 			}
 
 			f.readAsErr = errors.New("no session")
-			f.requireNeedsSession(t, name, source, f.verify(name))
+			_ = f.verify(name)
+			f.requireNeedsSession(t, name, source)
 			f.readAsErr = nil
 
-			// Repair cannot edit a share durably: it leaves the file and the
-			// credential, and verify says to remove the exporter by hand.
+			// Repair cannot edit a share durably: it leaves the file, revokes
+			// the credential, and verify warns to remove the exporter by hand.
 			stale := staleWindowsNativeOTLP(f.bearer)[name]
 			f.repair(t, name)
 			if data, _ := os.ReadFile(filepath.Join(agentDir, tc.file)); string(data) != stale {
 				t.Fatal("repair edited a configuration on a share")
 			}
-			err = f.verify(name)
-			f.requireStale(t, name, source, err)
-			if !strings.Contains(err.Error(), "by hand") || !strings.Contains(err.Error(), source+" on a network share") {
-				t.Fatalf("verify = %v, want %s named for removal by hand", err, source)
+			if err := f.verify(name); err != nil {
+				t.Fatalf("verify after repair = %v, want a warning, not a failed row", err)
 			}
+			f.requireWarning(t, name, source+" on a network share", "by hand")
 
-			// Once the account removes it, repair revokes the credential.
+			// Once the account removes it, verify has nothing to warn about.
 			clean := `model = "gpt-5"`
 			if name == "claudecode" {
 				clean = `{"model":"opus"}`
 			}
 			f.writeOwned(t, filepath.Join(agentDir, tc.file), clean)
-			f.repair(t, name)
-			if err := f.verify(name); err != nil {
-				t.Fatalf("verify after the exporter on the share was removed: %v", err)
+			if err := f.verify(name); err != nil || len(f.warnings) != 0 {
+				t.Fatalf("verify after the exporter on the share was removed: %v %q", err, f.warnings)
 			}
 		})
 	}
@@ -572,7 +604,8 @@ func TestWindowsManagedRowReadsMappedDriveConfigAsTheAccount(t *testing.T) {
 	// The profile is on the same drive, so its default file is the first
 	// one read as the account.
 	f.readAsErr = errors.New("no session")
-	f.requireNeedsSession(t, "codex", "config.toml", f.verify("codex"))
+	_ = f.verify("codex")
+	f.requireNeedsSession(t, "codex", "config.toml")
 	f.readAsErr = nil
 	f.requireStale(t, "codex", "CODEX_HOME config.toml", f.verify("codex"))
 	if f.readAs == 0 {
@@ -585,7 +618,8 @@ func TestWindowsManagedRowReadsMappedDriveConfigAsTheAccount(t *testing.T) {
 	windowsDriveType = previous
 	f.env["CODEX_HOME"] = missing + `\codex`
 	f.readAsErr = errors.New("no session")
-	f.requireNeedsSession(t, "codex", "CODEX_HOME config.toml", f.verify("codex"))
+	_ = f.verify("codex")
+	f.requireNeedsSession(t, "codex", "CODEX_HOME config.toml")
 }
 
 // A configuration the service is refused (by its DACL, or through a link
@@ -626,34 +660,39 @@ func TestWindowsManagedRowRereadsRefusedConfigAsTheAccount(t *testing.T) {
 	}
 }
 
-func TestWindowsManagedRowRefusesUnknownAppDataFolder(t *testing.T) {
+// An AppData folder whose User Shell Folders value cannot be read (the
+// account's hive is not loaded) is never guessed: the configuration under it
+// is not judged, verify warns instead of failing the row, and repair revokes
+// the credential.
+func TestWindowsManagedRowWarnsOnUnknownAppDataFolder(t *testing.T) {
 	for _, variable := range []string{"APPDATA", "LOCALAPPDATA"} {
 		t.Run(variable, func(t *testing.T) {
 			f := newWindowsNativeOTLPRootsFixture(t)
 			f.env["CODEX_HOME"] = "%" + variable + "%\\Codex"
+			guessed := filepath.Join(f.home, "AppData", "Roaming", "Codex", "config.toml")
+			if variable == "LOCALAPPDATA" {
+				guessed = filepath.Join(f.home, "AppData", "Local", "Codex", "config.toml")
+			}
+			stale := staleWindowsNativeOTLP(f.bearer)["codex"]
+			f.write(t, guessed, stale)
 			previousShell := windowsAccountUserShellFolderValue
 			windowsAccountUserShellFolderValue = func(*windows.SID, string) (string, error) {
 				return "", errors.New("profile hive unavailable")
 			}
 			t.Cleanup(func() { windowsAccountUserShellFolderValue = previousShell })
 
-			err := f.verify("codex")
-			if err == nil || !strings.Contains(err.Error(), "CODEX_HOME") || !strings.Contains(err.Error(), "cannot be determined") {
-				t.Fatalf("verify = %v, want unverified when %s is unknown", err, variable)
+			if err := f.verify("codex"); err == nil || strings.Contains(err.Error(), "CODEX_HOME") {
+				t.Fatalf("verify = %v, want only the credential named for repair", err)
 			}
-			err = connector.WithUserHomeDir(f.home, func() error {
-				return removeWindowsManagedUserNativeOTLPAsTarget("codex", f.sid, f.home, f.dataDir)
-			})
-			if err == nil {
-				t.Fatal("repair accepted a guessed AppData folder")
+			f.requireWarning(t, "codex", "CODEX_HOME", "cannot be determined")
+			f.repair(t, "codex")
+			if data, _ := os.ReadFile(guessed); string(data) != stale {
+				t.Fatal("repair edited a guessed AppData folder")
 			}
-			token, err := connector.OTLPPathTokenFilePath(f.dataDir, connector.OTLPScopeCodex)
-			if err != nil {
-				t.Fatal(err)
+			if err := f.verify("codex"); err != nil {
+				t.Fatalf("verify after repair = %v, want a warning, not a failed row", err)
 			}
-			if _, err := os.Stat(token); err != nil {
-				t.Fatalf("repair revoked the bearer before checking its effective config: %v", err)
-			}
+			f.requireWarning(t, "codex", "CODEX_HOME", "cannot be determined")
 		})
 	}
 }

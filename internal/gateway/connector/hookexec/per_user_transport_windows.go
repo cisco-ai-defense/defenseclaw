@@ -45,6 +45,53 @@ func newPerUserHookHTTPClient(timeout time.Duration, apiAddr string) (*http.Clie
 	), nil
 }
 
+// verifyLocalPeerTuple is VerifyLocalPeer on Windows: the listener's process
+// runs as this account or as LocalSystem.
+func verifyLocalPeerTuple(client, server *net.TCPAddr) error {
+	clientEndpoint, err := managedIPv4EndpointFromAddr(client)
+	if err != nil {
+		return err
+	}
+	serverEndpoint, err := managedIPv4EndpointFromAddr(server)
+	if err != nil {
+		return err
+	}
+	pid, err := connectedManagedGatewayPIDForEndpoints(clientEndpoint, serverEndpoint)
+	if err != nil {
+		return err
+	}
+	err = connectedPerUserProcessOwned(pid)
+	if err == nil || !errors.Is(err, errConnectedListenerOtherAccount) {
+		return err
+	}
+	if owner, ownerErr := connectedProcessAccount(pid); ownerErr == nil && owner.IsWellKnown(windows.WinLocalSystemSid) {
+		return nil
+	}
+	return err
+}
+
+// errConnectedListenerOtherAccount is a listener another account runs.
+var errConnectedListenerOtherAccount = errors.New("connected listener belongs to another account")
+
+// connectedProcessAccount is the account a connected listener process runs as.
+func connectedProcessAccount(pid uint32) (*windows.SID, error) {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return nil, fmt.Errorf("open connected listener process: %w", err)
+	}
+	defer windows.CloseHandle(process)
+	var token windows.Token
+	if err := windows.OpenProcessToken(process, windows.TOKEN_QUERY, &token); err != nil {
+		return nil, fmt.Errorf("read connected listener account: %w", err)
+	}
+	defer token.Close()
+	peer, err := token.GetTokenUser()
+	if err != nil {
+		return nil, fmt.Errorf("read connected listener account SID: %w", err)
+	}
+	return peer.User.Sid.Copy()
+}
+
 func connectedPerUserProcessOwned(pid uint32) error {
 	if pid == 0 {
 		return errors.New("connected listener has no owner PID")
@@ -68,7 +115,7 @@ func connectedPerUserProcessOwned(pid uint32) error {
 		return fmt.Errorf("read current account SID: %w", err)
 	}
 	if !peer.User.Sid.Equals(self.User.Sid) {
-		return errors.New("connected listener belongs to another account")
+		return errConnectedListenerOtherAccount
 	}
 	return nil
 }

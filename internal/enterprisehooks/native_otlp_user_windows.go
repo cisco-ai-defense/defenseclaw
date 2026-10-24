@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,6 +40,14 @@ import (
 // account's mapped drives are the account's folders too: verify reads a file
 // there under the account's own token, as the service would reach a share as
 // the computer and has none of the account's drive mappings.
+//
+// The check never blocks the account's hooks: a configuration it cannot
+// read or resolve (a hive or share that is unavailable, a signed-out account,
+// a file another owner holds) and an exporter on a share repair cannot edit
+// durably are warnings, never a failed row (a failed row leaves the account
+// unprotected and its hooks closed). Repair always revokes the credential,
+// so an exporter the guardian could not remove sends no DefenseClaw
+// credential to the holder of its port.
 
 // windowsNativeOTLPConfig is one configuration file the check reads and how
 // messages name it (never by the account's path or its values).
@@ -58,88 +67,138 @@ var windowsNativeOTLPRoots = map[string]struct{ variable, file string }{
 // through a link or outside the profile that the account does not own.
 var errWindowsAccountFileNotOwned = errors.New("the file is not the account's own")
 
-// windowsManagedUserNativeOTLPAbsent fails while any configuration the
-// account's agent reads keeps a DefenseClaw native exporter, or while one
-// cannot be checked. The error names fields and sources, never values or
-// paths. Verify is read-only and never impersonates.
+// windowsNativeOTLPWarn reports what the check could not do for a row
+// (replaceable in tests). The message names fields and sources, never values
+// or paths.
+var windowsNativeOTLPWarn = func(message string) {
+	fmt.Fprintf(os.Stderr, "[enterprise-hooks] WARN %s\n", message)
+}
+
+// windowsManagedUserNativeOTLPAbsent fails while a configuration the
+// account's agent reads keeps a DefenseClaw native exporter repair can
+// remove, or while the credential of an earlier per-user install remains:
+// the guardian's repair then removes them. Every configuration it cannot
+// check, and an exporter on a share, is a warning (windowsNativeOTLPWarn).
+// The error names fields and sources, never values or paths. Verify is
+// read-only and never impersonates.
 func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, sid *windows.SID) error {
 	if _, ok := windowsNativeOTLPRoots[connectorName]; !ok {
 		return nil
 	}
-	configs, err := windowsManagedUserNativeOTLPConfigs(connectorName, sid, home, dataDir)
-	if err != nil {
-		return fmt.Errorf("enterprise hooks: inspect %s native OTLP settings: %w", connectorName, err)
-	}
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
-	backup, err := readWindowsAccountFile(filepath.Join(dataDir, connector.UserNativeOTLPBackupName(connectorName)), sid, home)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return windowsNativeOTLPUncheckable(connectorName, "the setup backup", err)
-	}
 	var residue, onShare []string
-	for _, config := range configs {
-		data, final, err := readWindowsAccountConfig(config.path, sid, home)
-		if errors.Is(err, os.ErrNotExist) {
+	for _, found := range windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, readWindowsAccountConfig) {
+		if windowsShareFinalPath(found.final) {
+			onShare = append(onShare, found.label)
 			continue
 		}
-		if err != nil {
-			return windowsNativeOTLPUncheckable(connectorName, config.label, err)
+		for _, name := range found.names {
+			residue = append(residue, found.label+": "+name)
 		}
-		names, err := connector.UserNativeOTLPResidueIn(connectorName, data, backup, opts)
-		if err != nil {
-			return fmt.Errorf("enterprise hooks: inspect %s native OTLP settings (%s): %w", connectorName, config.label, err)
-		}
-		for _, name := range names {
-			residue = append(residue, config.label+": "+name)
-		}
-		if len(names) > 0 && windowsShareFinalPath(final) {
-			onShare = append(onShare, config.label)
-		}
+	}
+	if len(onShare) > 0 {
+		windowsNativeOTLPWarn(fmt.Sprintf(
+			"enterprise hooks: %s keeps a native OTLP exporter from an earlier per-user install in %s on a network share, "+
+				"which repair cannot edit durably; remove the exporter there by hand (its DefenseClaw credential is revoked)",
+			connectorName, strings.Join(onShare, ", ")))
 	}
 	credential, err := connector.UserNativeOTLPCredentialResidue(connectorName, opts)
 	if err != nil {
-		return fmt.Errorf("enterprise hooks: inspect %s native OTLP settings: %w", connectorName, err)
+		windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: inspect %s native OTLP credential: %v", connectorName, err))
 	}
 	residue = append(residue, credential...)
 	if len(residue) > 0 {
-		repair := "repair removes it"
-		if len(onShare) > 0 {
-			repair = "repair cannot edit " + strings.Join(onShare, ", ") + " on a network share durably, so remove the exporter " +
-				"there by hand and the next repair removes the rest"
-		}
 		return fmt.Errorf(
 			"enterprise hooks: %s keeps a native OTLP exporter from an earlier per-user install (%s); "+
-				"the managed gateway does not serve it, so another account could receive its telemetry; %s",
+				"the managed gateway does not serve it, so another account could receive its telemetry; repair removes it",
 			connectorName,
 			strings.Join(residue, ", "),
-			repair,
 		)
 	}
 	return nil
 }
 
-func windowsNativeOTLPUncheckable(connectorName, label string, err error) error {
+// windowsNativeOTLPFound is a configuration that keeps the exporter: its
+// label, the final path read and the exporter entries.
+type windowsNativeOTLPFound struct {
+	label, final string
+	names        []string
+}
+
+// windowsManagedUserNativeOTLPResidue resolves the account's configurations
+// once and returns those that keep a DefenseClaw exporter, read with read.
+// What it cannot resolve or read is a warning.
+func windowsManagedUserNativeOTLPResidue(
+	connectorName string,
+	sid *windows.SID,
+	home, dataDir string,
+	read func(string, *windows.SID, string) ([]byte, string, error),
+) []windowsNativeOTLPFound {
+	configs, problems := windowsManagedUserNativeOTLPConfigs(connectorName, sid, home, dataDir)
+	for _, problem := range problems {
+		windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: inspect %s native OTLP settings: %v", connectorName, problem))
+	}
+	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
+	backup, err := readWindowsAccountFile(filepath.Join(dataDir, connector.UserNativeOTLPBackupName(connectorName)), sid, home)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		// Without the backup an operator entry cannot be told from
+		// DefenseClaw's, so no configuration is judged.
+		windowsNativeOTLPWarn(windowsNativeOTLPUncheckable(connectorName, "the setup backup", err))
+		return nil
+	}
+	var found []windowsNativeOTLPFound
+	for _, config := range configs {
+		data, final, err := read(config.path, sid, home)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			windowsNativeOTLPWarn(windowsNativeOTLPUncheckable(connectorName, config.label, err))
+			continue
+		}
+		names, err := connector.UserNativeOTLPResidueIn(connectorName, data, backup, opts)
+		if err != nil {
+			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: inspect %s native OTLP settings (%s): %v", connectorName, config.label, err))
+			continue
+		}
+		if len(names) > 0 {
+			found = append(found, windowsNativeOTLPFound{label: config.label, final: final, names: names})
+		}
+	}
+	return found
+}
+
+// windowsNativeOTLPUncheckable is the warning for a configuration the check
+// could not read. A path error keeps only its cause: the warning names the
+// source, never the path.
+func windowsNativeOTLPUncheckable(connectorName, label string, err error) string {
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		err = pathErr.Err
+	}
 	if errors.Is(err, errWindowsAccountFileNotOwned) {
-		return fmt.Errorf(
+		return fmt.Sprintf(
 			"enterprise hooks: %s: %s reaches a file the account does not own, through a link or outside the profile, "+
 				"so it cannot be checked for an earlier per-user native OTLP exporter; replace it with the account's own file, "+
 				"or remove the link, and the next repair checks it",
 			connectorName, label)
 	}
 	if errors.Is(err, errWindowsAccountConfigNeedsSession) {
-		return fmt.Errorf(
+		return fmt.Sprintf(
 			"enterprise hooks: %s: %s is on a share or a drive only the account has, so it is checked as the account, "+
-				"and the account has no signed-in session now; the next repair after the account signs in checks it: %w",
+				"and the account has no signed-in session now; the next repair after the account signs in checks it: %v",
 			connectorName, label, err)
 	}
-	return fmt.Errorf("enterprise hooks: %s: cannot check %s for an earlier per-user native OTLP exporter: %w", connectorName, label, err)
+	return fmt.Sprintf("enterprise hooks: %s: cannot check %s for an earlier per-user native OTLP exporter: %v", connectorName, label, err)
 }
 
 // windowsManagedUserNativeOTLPConfigs lists the configuration files of
 // connectorName's agent for the account: the one its current root names
 // under the profile, the one its persistent CODEX_HOME or CLAUDE_CONFIG_DIR
 // names (its own value over the machine's), and the one its per-user setup
-// recorded. A variable that does not resolve to a folder fails the check.
-func windowsManagedUserNativeOTLPConfigs(connectorName string, sid *windows.SID, home, dataDir string) ([]windowsNativeOTLPConfig, error) {
+// recorded. A variable that does not resolve to a folder, or a record that
+// cannot be read, is a problem; the other configurations are still listed.
+func windowsManagedUserNativeOTLPConfigs(connectorName string, sid *windows.SID, home, dataDir string) ([]windowsNativeOTLPConfig, []error) {
 	root := windowsNativeOTLPRoots[connectorName]
 	var configs []windowsNativeOTLPConfig
 	seen := map[string]bool{}
@@ -152,11 +211,12 @@ func windowsManagedUserNativeOTLPConfigs(connectorName string, sid *windows.SID,
 		configs = append(configs, windowsNativeOTLPConfig{path: filepath.Clean(path), label: label})
 	}
 	add(connector.UserNativeOTLPConfigPathFor(connectorName, home), root.file)
+	var problems []error
 	relocated, err := windowsAccountFolderVariable(sid, home, root.variable)
-	if err != nil {
-		return nil, err
-	}
-	if relocated != "" {
+	switch {
+	case err != nil:
+		problems = append(problems, err)
+	case relocated != "":
 		add(filepath.Join(relocated, root.file), root.variable+" "+root.file)
 	}
 	record, err := readWindowsAccountFile(connector.UserAgentConfigRecordPath(dataDir, connectorName), sid, home)
@@ -164,9 +224,9 @@ func windowsManagedUserNativeOTLPConfigs(connectorName string, sid *windows.SID,
 	case err == nil:
 		add(connector.UserAgentConfigRecordTarget(connectorName, record), "the recorded "+root.file)
 	case !errors.Is(err, os.ErrNotExist):
-		return nil, fmt.Errorf("read the recorded %s location: %w", root.file, err)
+		problems = append(problems, fmt.Errorf("read the recorded %s location: %w", root.file, err))
 	}
-	return configs, nil
+	return configs, problems
 }
 
 // windowsMachineEnvironment reads a value of the machine environment
@@ -522,63 +582,32 @@ func windowsHandleFinalPath(handle windows.Handle) (string, error) {
 }
 
 // removeWindowsManagedUserNativeOTLPAsTarget removes that exporter from every
-// configuration the check reads and then its credential. The caller runs it
-// as the target user with the account's home bound (connector.WithUserHomeDir)
-// and hardens the data directory afterwards: the atomic edit protects its
-// state directory there with the per-user DACL. A file the check may not read
-// (errWindowsAccountFileNotOwned), or one on a network share that keeps the
-// exporter (the compare-and-swap edit refuses a share), is left as it is,
-// and so is the credential: verify keeps the row unverified and names that
-// file.
-func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windows.SID, home, dataDir string) error {
+// configuration the check reads and revokes its credential. The caller runs
+// it as the target user with the account's home bound
+// (connector.WithUserHomeDir) and hardens the data directory afterwards: the
+// atomic edit protects its state directory there with the per-user DACL. It
+// never fails the row: a configuration it cannot read or edit (another
+// owner's file, a share the compare-and-swap edit refuses, an unavailable
+// folder) is left as it is with a warning, and the credential is revoked in
+// every case, so no exporter the guardian left sends it to another account.
+func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windows.SID, home, dataDir string) {
 	if _, ok := windowsNativeOTLPRoots[connectorName]; !ok {
-		return nil
-	}
-	configs, err := windowsManagedUserNativeOTLPConfigs(connectorName, sid, home, dataDir)
-	if err != nil {
-		return fmt.Errorf("enterprise hooks: inspect %s native OTLP settings: %w", connectorName, err)
+		return
 	}
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
-	backup, err := readWindowsAccountFile(filepath.Join(dataDir, connector.UserNativeOTLPBackupName(connectorName)), sid, home)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return windowsNativeOTLPUncheckable(connectorName, "the setup backup", err)
-	}
-	complete := true
-	for _, config := range configs {
-		data, final, err := openWindowsAccountFile(config.path, sid, home)
-		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if errors.Is(err, errWindowsAccountFileNotOwned) {
-				complete = false
-				continue
-			}
-			return windowsNativeOTLPUncheckable(connectorName, config.label, err)
-		}
-		if windowsShareFinalPath(final) {
-			// The compare-and-swap edit refuses a share. A file there that
-			// keeps the exporter stays as it is, and so does the credential:
-			// verify names the file and says to remove the exporter by hand.
-			names, err := connector.UserNativeOTLPResidueIn(connectorName, data, backup, opts)
-			if err != nil {
-				return fmt.Errorf("enterprise hooks: inspect %s native OTLP settings (%s): %w", connectorName, config.label, err)
-			}
-			if len(names) > 0 {
-				complete = false
-			}
+	for _, found := range windowsManagedUserNativeOTLPResidue(connectorName, sid, home, dataDir, openWindowsAccountFile) {
+		if windowsShareFinalPath(found.final) {
+			windowsNativeOTLPWarn(fmt.Sprintf(
+				"enterprise hooks: %s: %s on a network share keeps a native OTLP exporter from an earlier per-user install; "+
+					"repair cannot edit a share durably, so remove the exporter there by hand", connectorName, found.label))
 			continue
 		}
-		if _, err := connector.RemoveUserNativeOTLPAt(connectorName, final, opts); err != nil {
-			return fmt.Errorf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install (%s): %w",
-				connectorName, config.label, err)
+		if _, err := connector.RemoveUserNativeOTLPAt(connectorName, found.final, opts); err != nil {
+			windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install (%s): %v",
+				connectorName, found.label, err))
 		}
 	}
-	if !complete {
-		return nil
-	}
 	if _, err := connector.RevokeUserNativeOTLPCredential(connectorName, opts); err != nil {
-		return fmt.Errorf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install: %w", connectorName, err)
+		windowsNativeOTLPWarn(fmt.Sprintf("enterprise hooks: revoke %s native OTLP credential from an earlier per-user install: %v", connectorName, err))
 	}
-	return nil
 }

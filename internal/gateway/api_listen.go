@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -63,6 +64,16 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 			return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
 		}
 		return listener, nil
+	}
+	if apiInheritedMismatchBinds && a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() {
+		// GAP-1086: launchd holds the managed API port across restarts only
+		// while its job declares the socket. Under an older job the gateway
+		// would bind the port itself, and every restart would free it for
+		// another account while native exporters keep sending to it.
+		return nil, errors.New("api: the managed gateway's launchd job holds no API socket, so the port " +
+			"would be free while the gateway restarts; reload the job: launchctl bootout " +
+			"system/com.cisco.defenseclaw.gateway, then launchctl bootstrap system " +
+			"/Library/LaunchDaemons/com.cisco.defenseclaw.gateway.plist")
 	}
 	return listenWithRetry(ctx, a.addr, apiListenRetryBudget)
 }

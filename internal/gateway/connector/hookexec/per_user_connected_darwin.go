@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+// verifyLocalPeerTuple is VerifyLocalPeer on macOS: lsof run as this account
+// lists only its own sockets, so only this account's socket is proven (Docker
+// Desktop's port proxy runs as the signed-in account).
+func verifyLocalPeerTuple(client, server *net.TCPAddr) error {
+	return verifyPerUserConnectedTuple(client, server)
+}
+
 func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 	if client == nil || server == nil {
 		return errors.New("connected gateway endpoint is missing")

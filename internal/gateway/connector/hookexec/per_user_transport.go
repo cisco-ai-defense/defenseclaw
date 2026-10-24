@@ -25,6 +25,22 @@ func VerifyPerUserConnectedTuple(local, remote string) error {
 	return verifyPerUserConnectedTuple(client, server)
 }
 
+// VerifyLocalPeer is the one check that a loopback TCP connection
+// DefenseClaw opened to a local service it does not run itself (the bundled
+// observability stack's collector) reaches that service and not another
+// account: the accepted server socket must belong to this account or to the
+// system account (root, LocalSystem), which can read this account's data
+// anyway. A socket of any other account, or one whose owner cannot be read,
+// is sent no byte (GAP-1087). It refuses to send; it never blocks a call.
+func VerifyLocalPeer(conn net.Conn) error {
+	local, localOK := conn.LocalAddr().(*net.TCPAddr)
+	remote, remoteOK := conn.RemoteAddr().(*net.TCPAddr)
+	if !localOK || !remoteOK {
+		return fmt.Errorf("local peer is not a TCP connection")
+	}
+	return verifyLocalPeerTuple(local, remote)
+}
+
 // connectedSocketNameMatches accepts lsof's optional protocol and state text
 // while requiring both TCP endpoint ports to match exactly. A prefix match
 // could mistake a different same-account connection for the accepted socket.

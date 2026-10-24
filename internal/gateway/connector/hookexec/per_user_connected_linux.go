@@ -27,6 +27,23 @@ func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
 	return nil
 }
 
+func verifyLocalPeerTuple(client, server *net.TCPAddr) error {
+	return verifyLocalPeerIn("/proc/net", client, server)
+}
+
+// verifyLocalPeerIn accepts an accepted server socket of this account or of
+// root (VerifyLocalPeer): Docker's port proxy runs as root.
+func verifyLocalPeerIn(procNet string, client, server *net.TCPAddr) error {
+	uid, err := findConnectedTCPUID(procNet, client, server)
+	if err != nil {
+		return err
+	}
+	if uid != os.Geteuid() && uid != 0 {
+		return errors.New("local peer socket belongs to another account")
+	}
+	return nil
+}
+
 // findConnectedTCPUID reads the kernel's accepted server socket, identified
 // by both endpoints. A listening-port lookup is insufficient: its owner can
 // change while the old process still holds this connected client socket.
