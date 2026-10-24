@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -159,29 +161,87 @@ func (a *APIServer) handleManagedRefusalAudit(w http.ResponseWriter, r *http.Req
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// recordManagedPolicyViewAlert writes the gateway log line and the HIGH
+// managedPolicyViewAlertQueueSize is how many policy-view alerts may wait
+// for the audit store. Each account adds at most managedRefusalBurst at
+// once (managedAlertLimits), so a full queue means the store has stalled.
+const managedPolicyViewAlertQueueSize = 64
+
+// managedPolicyViewAlert is one policy-view alert, with every fact taken
+// from its call before the call is served.
+type managedPolicyViewAlert struct {
+	uid       int
+	connector string
+	route     string
+	envelope  audit.CorrelationEnvelope
+}
+
+// managedPolicyViewAlerts records policy-view alerts off the path of the
+// call that carries them: one writer drains a bounded queue, so an audit
+// store that stalls can delay the alerts, never the call's verdict (review
+// loop round 3, P2). An alert the full queue cannot take is counted and
+// reported with the next one written.
+type managedPolicyViewAlerts struct {
+	start   sync.Once
+	queue   chan managedPolicyViewAlert
+	dropped atomic.Uint64
+}
+
+// writeManagedPolicyViewAlert is the queue's writer (a test seam).
+var writeManagedPolicyViewAlert = (*APIServer).writeManagedPolicyViewAlert
+
+func (q *managedPolicyViewAlerts) enqueue(a *APIServer, alert managedPolicyViewAlert) bool {
+	q.start.Do(func() {
+		q.queue = make(chan managedPolicyViewAlert, managedPolicyViewAlertQueueSize)
+		go func() {
+			for alert := range q.queue {
+				writeManagedPolicyViewAlert(a, alert)
+				if n := q.dropped.Swap(0); n > 0 {
+					fmt.Fprintf(os.Stderr, "[sidecar-api] %d hook policy-view alerts were not recorded: the audit store did not keep up\n", n)
+				}
+			}
+		}()
+	})
+	select {
+	case q.queue <- alert:
+		return true
+	default:
+		q.dropped.Add(1)
+		return false
+	}
+}
+
+// recordManagedPolicyViewAlert queues the gateway log line and the HIGH
 // runtime alert for a managed hook that could not prove its agent's view of
-// vendor machine policy. The connector comes from the route scope and the
-// account from the kernel-verified peer; each account is rate limited like
-// refusal rows.
+// vendor machine policy, and returns at once: the call it rides on is
+// served without waiting for either. The connector comes from the route
+// scope and the account from the kernel-verified peer; each account is
+// rate limited like refusal rows.
 func (a *APIServer) recordManagedPolicyViewAlert(r *http.Request, peer managedHookPeer, route string) {
 	if !a.managedAlertLimits.allow(peer.UID) {
 		return
 	}
 	connectorName, _ := a.managedHookRouteScope(r)
+	a.managedAlerts.enqueue(a, managedPolicyViewAlert{
+		uid: peer.UID, connector: connectorName, route: route,
+		envelope: audit.EnvelopeFromContext(r.Context()),
+	})
+}
+
+// writeManagedPolicyViewAlert writes one queued policy-view alert.
+func (a *APIServer) writeManagedPolicyViewAlert(alert managedPolicyViewAlert) {
 	fmt.Fprintf(os.Stderr,
 		"[sidecar-api] hook policy-view alert uid=%d connector=%q route=%s reason=%s: the agent's view of managed vendor policy differs from the trusted pin; its calls are still inspected under the managed policy\n",
-		peer.UID, connectorName, route, hookexec.ManagedPolicyViewReason)
+		alert.uid, alert.connector, alert.route, hookexec.ManagedPolicyViewReason)
 	if a.logger == nil {
 		return
 	}
-	envelope := audit.EnvelopeFromContext(r.Context())
-	envelope.Connector = connectorName
-	ctx := audit.ContextWithEnvelope(r.Context(), envelope)
+	envelope := alert.envelope
+	envelope.Connector = alert.connector
+	ctx := audit.ContextWithEnvelope(context.Background(), envelope)
 	if err := a.logger.LogAlertCtx(ctx, "managed_hook", "HIGH", hookexec.ManagedPolicyViewReason, map[string]any{
-		"actor": "uid:" + strconv.Itoa(peer.UID),
-		"route": route,
+		"actor": "uid:" + strconv.Itoa(alert.uid),
+		"route": alert.route,
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "[sidecar-api] hook policy-view alert by uid=%d was not recorded: %v\n", peer.UID, err)
+		fmt.Fprintf(os.Stderr, "[sidecar-api] hook policy-view alert by uid=%d was not recorded: %v\n", alert.uid, err)
 	}
 }

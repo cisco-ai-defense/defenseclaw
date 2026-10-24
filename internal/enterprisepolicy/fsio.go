@@ -126,6 +126,15 @@ func readPolicyFile(opts Options, path string) ([]byte, bool, error) {
 // readPolicyFileWith is readPolicyFile with the trust rule for the file
 // itself supplied by the caller (the managed OpenCode plugin has its own).
 func readPolicyFileWith(opts Options, path string, validate func(Options, string) error) ([]byte, bool, error) {
+	return readPolicyFileWithin(opts, path, validate, policyFileLimit)
+}
+
+// readPolicyFileWithin is readPolicyFileWith that reads at most limit bytes
+// (at most policyFileLimit): a larger file fails with a *readLimitError.
+func readPolicyFileWithin(opts Options, path string, validate func(Options, string) error, limit int64) ([]byte, bool, error) {
+	if limit < 0 || limit > policyFileLimit {
+		limit = policyFileLimit
+	}
 	path = platformPath(opts, path)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -159,7 +168,7 @@ func readPolicyFileWith(opts Options, path string, validate func(Options, string
 	if !os.SameFile(info, stat) {
 		return nil, false, fmt.Errorf("%s changed while it was opened", path)
 	}
-	data, err := readBounded(file, policyFileLimit)
+	data, err := readBounded(file, limit)
 	if err != nil {
 		return nil, false, err
 	}

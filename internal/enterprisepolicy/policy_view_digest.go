@@ -7,13 +7,33 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
+
+// PolicyViewProofLimits bound a managed hook's proof of its policy view,
+// which runs on every call before the hook asks its gateway: the bytes it
+// reads, in total, and the time by which it must have read them. Real
+// views are a few KiB and prove in milliseconds; publication, which runs as
+// an administrator, reads the whole view (PolicyViewDigest).
+type PolicyViewProofLimits struct {
+	// MaxBytes caps the policy bytes read; zero or less is no cap.
+	MaxBytes int64
+	// Deadline stops the proof before its next file; zero is none.
+	Deadline time.Time
+}
+
+// ErrPolicyViewProofLimit is a policy view that a managed hook could not
+// prove within its PolicyViewProofLimits. The view is unproven, not
+// refused: the hook raises its policy-view alert and the call is still
+// inspected under the trusted descriptor (review loop round 3, P2).
+var ErrPolicyViewProofLimit = errors.New("the policy view is larger or slower to read than a managed hook may spend proving it")
 
 // PolicyViewDigest binds the bytes of a connector's vendor machine policy
 // sources to the administrator's protected runtime descriptor. It includes
@@ -23,6 +43,17 @@ import (
 // publication and each managed hook invocation use this exact reader, with a
 // bounded file count and the existing trusted, bounded policy-file reader.
 func PolicyViewDigest(opts Options, connector string) (string, error) {
+	return policyViewDigest(opts, connector, PolicyViewProofLimits{})
+}
+
+// PolicyViewDigestWithin is PolicyViewDigest for a managed hook's per-call
+// proof: it fails with ErrPolicyViewProofLimit instead of reading more than
+// limits allow. Within them it returns exactly PolicyViewDigest's digest.
+func PolicyViewDigestWithin(opts Options, connector string, limits PolicyViewProofLimits) (string, error) {
+	return policyViewDigest(opts, connector, limits)
+}
+
+func policyViewDigest(opts Options, connector string, limits PolicyViewProofLimits) (string, error) {
 	if opts.goos() != "linux" && opts.goos() != "darwin" {
 		return "", fmt.Errorf("policy-view digest is unavailable on %s", opts.goos())
 	}
@@ -99,11 +130,24 @@ func PolicyViewDigest(opts Options, connector string) (string, error) {
 	}
 	sort.Strings(names)
 	digest := sha256.New()
+	var read int64
 	for _, path := range names {
 		if !filepath.IsAbs(path) || strings.ContainsRune(path, '\x00') {
 			return "", fmt.Errorf("invalid machine-policy path %q", path)
 		}
-		data, exists, err := readPolicyFile(opts, path)
+		if !limits.Deadline.IsZero() && !time.Now().Before(limits.Deadline) {
+			return "", ErrPolicyViewProofLimit
+		}
+		limit := int64(policyFileLimit)
+		if limits.MaxBytes > 0 && limits.MaxBytes-read < limit {
+			limit = limits.MaxBytes - read
+		}
+		data, exists, err := readPolicyFileWithin(opts, path, validateTrustedPolicyFile, limit)
+		var tooLarge *readLimitError
+		if limit < policyFileLimit && errors.As(err, &tooLarge) {
+			return "", ErrPolicyViewProofLimit
+		}
+		read += int64(len(data))
 		if err != nil && skipIfUntrusted[path] {
 			// Copilot does not load it; record only that it is there, so
 			// it becoming trusted still changes the digest.

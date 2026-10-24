@@ -104,6 +104,8 @@ type APIServer struct {
 	// managedAlertLimits bounds the managed hook policy-view alerts per
 	// account: a hook raises one on every call until the view is pinned.
 	managedAlertLimits managedRefusalLimiter
+	// managedAlerts records those alerts off the path of their calls.
+	managedAlerts managedPolicyViewAlerts
 	// copilotDedupe answers the second delivery of one Copilot tool call
 	// with the first delivery's verdict.
 	copilotDedupe copilotHookDedupe

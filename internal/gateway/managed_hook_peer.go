@@ -540,7 +540,7 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			// The hook could not prove the agent sees the pinned vendor
 			// policy. The alert rides on the call itself, which is still
 			// served and inspected under the managed policy below; this
-			// records the alert (GAP-0922, GAP-0923).
+			// queues the alert without waiting on it (GAP-0922, GAP-0923).
 			a.recordManagedPolicyViewAlert(r, peer, route)
 		}
 		if reason := r.Header.Get(hookexec.ClientRefusalHeader); hookexec.IsManagedProcessContextReason(reason) {

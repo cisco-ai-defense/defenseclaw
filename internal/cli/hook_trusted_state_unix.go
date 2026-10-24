@@ -156,12 +156,14 @@ var (
 	standaloneHookGOOS              = runtime.GOOS
 	standaloneRuntimeDescriptorLoad = managed.LoadRuntimeDescriptor
 	standaloneMachinePolicyOptions  = defaultStandaloneMachinePolicyOptions
-	standalonePolicyViewDigest      = func(goos, connector string) (string, error) {
+	standalonePolicyViewDigest      = func(goos, connector string, deadline time.Time) (string, error) {
 		opts, ok := standaloneMachinePolicyOptions(goos)
 		if !ok {
 			return "", errors.New("standalone machine policy paths are unavailable")
 		}
-		return enterprisepolicy.PolicyViewDigest(opts, connector)
+		return enterprisepolicy.PolicyViewDigestWithin(opts, connector, enterprisepolicy.PolicyViewProofLimits{
+			MaxBytes: standalonePolicyViewProofMaxBytes, Deadline: deadline,
+		})
 	}
 	standaloneHookAccount = func() (string, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -181,6 +183,18 @@ var (
 	}
 	standaloneSecureClientInstallDir = "/opt/cisco/secureclient/defenseclaw"
 )
+
+// The per-call proof of the policy view runs before the hook asks its
+// gateway, inside the call's answer budget (hookexec's 3.5 s, counted from
+// the invocation). Real views are a few KiB and prove in milliseconds; a view
+// larger than standalonePolicyViewProofMaxBytes, or storage that does not
+// return it within standalonePolicyViewProofBudget, leaves the view unproven:
+// the call raises the policy-view alert and is inspected under the trusted
+// descriptor, instead of a watchdog refusal of a valid call (review loop
+// round 3, P2).
+const standalonePolicyViewProofMaxBytes = 8 << 20
+
+var standalonePolicyViewProofBudget = 750 * time.Millisecond
 
 var standaloneHookRuntime struct {
 	sync.Mutex
@@ -230,7 +244,7 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	// with no trusted descriptor at all refuses.
 	alert := ""
 	if err == nil && loaded != nil && loaded.HasMachinePolicyConnector(connectorName) &&
-		!standalonePolicyViewProven(loaded, connectorName) {
+		!standalonePolicyViewProvenWithin(loaded, connectorName, standalonePolicyViewProofBudget) {
 		alert = hookexec.ManagedPolicyViewReason
 	}
 	reason := ""
@@ -270,21 +284,40 @@ func prepareEnterpriseManagedHookRuntime(connectorName string) bool {
 	return false
 }
 
+// standalonePolicyViewProvenWithin is standalonePolicyViewProven bounded by
+// budget: a proof that has not finished by then is unproven. A read the
+// storage holds up past the budget is left behind; the hook process ends
+// with its call, and the proof stops before its next file.
+func standalonePolicyViewProvenWithin(descriptor *managed.RuntimeDescriptor, connectorName string, budget time.Duration) bool {
+	deadline := time.Now().Add(budget)
+	goos := standaloneHookGOOS
+	proven := make(chan bool, 1)
+	go func() { proven <- standalonePolicyViewProven(descriptor, goos, connectorName, deadline) }()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case ok := <-proven:
+		return ok
+	case <-timer.C:
+		return false
+	}
+}
+
 // standalonePolicyViewProven reports whether this hook reads the managed
 // policy the descriptor pinned, by content: the shared vendor sources and, on
 // macOS, only the invoking account's own managed preference.
-func standalonePolicyViewProven(descriptor *managed.RuntimeDescriptor, connectorName string) bool {
+func standalonePolicyViewProven(descriptor *managed.RuntimeDescriptor, goos, connectorName string, deadline time.Time) bool {
 	expected := descriptor.PolicyViewDigests[connectorName]
-	observed, err := standalonePolicyViewDigest(standaloneHookGOOS, connectorName)
+	observed, err := standalonePolicyViewDigest(goos, connectorName, deadline)
 	if expected == "" || err != nil || observed != expected {
 		return false
 	}
-	if standaloneHookGOOS != "darwin" ||
+	if goos != "darwin" ||
 		connectorName != enterprisepolicy.ConnectorCodex && connectorName != enterprisepolicy.ConnectorClaudeCode {
 		return true
 	}
 	account, err := standaloneHookAccount()
-	return err == nil && standalonePolicyViewUser(standaloneHookGOOS, connectorName, account,
+	return err == nil && time.Now().Before(deadline) && standalonePolicyViewUser(goos, connectorName, account,
 		descriptor.PolicyViewUserSources[connectorName][account]) == nil
 }
 

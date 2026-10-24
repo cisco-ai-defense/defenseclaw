@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -40,7 +41,7 @@ func withStandaloneHookRuntime(
 	standaloneHookGOOS = goos
 	standaloneRuntimeDescriptorLoad = load
 	standaloneMachinePolicyOptions = policy
-	standalonePolicyViewDigest = func(_, _ string) (string, error) { return strings.Repeat("a", 64), nil }
+	standalonePolicyViewDigest = func(_, _ string, _ time.Time) (string, error) { return strings.Repeat("a", 64), nil }
 	standaloneHookAccount = func() (string, error) { return "test-user", nil }
 	standalonePolicyViewUser = func(string, string, string, string) error { return nil }
 	standaloneSecureClientInstallDir = secureClientDir
@@ -235,7 +236,7 @@ func TestStandaloneHookAlertsOnUnprovenPolicyViewAndKeepsEnforcing(t *testing.T)
 				withStandaloneHookRuntime(t, goos,
 					func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
 					noMarkers, "/nonexistent-secure-client")
-				standalonePolicyViewDigest = func(_, _ string) (string, error) { return tc.observed, tc.readErr }
+				standalonePolicyViewDigest = func(_, _ string, _ time.Time) (string, error) { return tc.observed, tc.readErr }
 				prepareEnterpriseManagedHookRuntime("codex")
 				opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
 				if opts.ManagedRuntimeFailure != "" || enterpriseManagedHookRuntimeForceClosed() {
@@ -261,7 +262,7 @@ func TestStandaloneHookWithoutDescriptorRefusesWithoutAlert(t *testing.T) {
 	withStandaloneHookRuntime(t, "linux",
 		func(string) (*managed.RuntimeDescriptor, error) { return nil, managed.ErrNoRuntimeDescriptor },
 		noMarkers, "/nonexistent-secure-client")
-	standalonePolicyViewDigest = func(_, _ string) (string, error) { return "", os.ErrPermission }
+	standalonePolicyViewDigest = func(_, _ string, _ time.Time) (string, error) { return "", os.ErrPermission }
 	prepareEnterpriseManagedHookRuntime("codex")
 	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
 	if opts.ManagedRuntimeFailure != standaloneRuntimeReasonDescriptorMissing || opts.FailMode != "closed" || opts.ManagedPolicyViewAlert {
@@ -342,7 +343,7 @@ func TestStandalonePolicyViewAlertAddsNoRequestBeforeTheCall(t *testing.T) {
 	withStandaloneHookRuntime(t, "linux",
 		func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
 		noMarkers, "/nonexistent-secure-client")
-	standalonePolicyViewDigest = func(_, _ string) (string, error) { return strings.Repeat("b", 64), nil }
+	standalonePolicyViewDigest = func(_, _ string, _ time.Time) (string, error) { return strings.Repeat("b", 64), nil }
 	prepareEnterpriseManagedHookRuntime("codex")
 	started := time.Now()
 	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
@@ -565,5 +566,116 @@ func TestStandaloneMissingDescriptorDeniesToolCallsWithOrWithoutMachinePolicy(t 
 				}
 			}
 		}
+	}
+}
+
+// Review loop round 3 (P2): the per-call proof of the policy view is bounded
+// in time. Storage that holds up the digest, the macOS account lookup or the
+// account's preference read past standalonePolicyViewProofBudget leaves the
+// view unproven: the call raises the policy-view alert and keeps the trusted
+// descriptor's transport and fail mode, instead of spending the call's
+// answer budget until the watchdog refuses it.
+func TestStandalonePolicyViewProofIsBoundedInTime(t *testing.T) {
+	for _, tc := range []struct{ goos, stall string }{
+		{"linux", "digest"}, {"darwin", "digest"}, {"darwin", "account"}, {"darwin", "preference"},
+	} {
+		t.Run(tc.goos+"/"+tc.stall, func(t *testing.T) {
+			descriptor := testDescriptor()
+			withStandaloneHookRuntime(t, tc.goos,
+				func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+				noMarkers, "/nonexistent-secure-client")
+			oldBudget := standalonePolicyViewProofBudget
+			standalonePolicyViewProofBudget = 50 * time.Millisecond
+			t.Cleanup(func() { standalonePolicyViewProofBudget = oldBudget })
+			release, stalled := make(chan struct{}), make(chan struct{})
+			// The stalled step ends unproven once released, so the proof
+			// reads no seam after this test restores them.
+			stall := func() error {
+				defer close(stalled)
+				<-release
+				return os.ErrDeadlineExceeded
+			}
+			t.Cleanup(func() { close(release); <-stalled })
+			switch tc.stall {
+			case "digest":
+				standalonePolicyViewDigest = func(string, string, time.Time) (string, error) { return "", stall() }
+			case "account":
+				standaloneHookAccount = func() (string, error) { return "", stall() }
+			case "preference":
+				standalonePolicyViewUser = func(string, string, string, string) error { return stall() }
+			}
+			prepared := make(chan struct{})
+			go func() { prepareEnterpriseManagedHookRuntime("codex"); close(prepared) }()
+			select {
+			case <-prepared:
+			case <-time.After(3 * time.Second):
+				t.Fatalf("a stalled %s held the hook's policy-view proof past its %s budget", tc.stall, standalonePolicyViewProofBudget)
+			}
+			opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+			if opts.ManagedRuntimeFailure != "" || enterpriseManagedHookRuntimeForceClosed() {
+				t.Fatalf("a slow policy-view proof refused the call: failure %q", opts.ManagedRuntimeFailure)
+			}
+			if !opts.ManagedStandalone || opts.ManagedUnixSocket != descriptor.HookSocket || opts.FailMode != descriptor.HookFailMode("codex") {
+				t.Fatalf("the call did not keep the descriptor's transport and fail mode: %+v", opts)
+			}
+			if !opts.ManagedPolicyViewAlert {
+				t.Fatal("an unproven (slow) policy view raised no alert")
+			}
+		})
+	}
+}
+
+// Review loop round 3 (P2): the per-call proof reads at most
+// standalonePolicyViewProofMaxBytes. A valid view that large is unproven
+// (alert, still enforcing under the descriptor) instead of read in full on
+// every call; a normal view proves to the published digest.
+func TestStandalonePolicyViewProofIsBoundedInBytes(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			realDigest := standalonePolicyViewDigest
+			policy := enterprisepolicy.Options{GOOS: goos, Root: t.TempDir(), SkipTrustChecks: true}
+			descriptor := testDescriptor()
+			descriptor.MachinePolicyConnectors = []string{enterprisepolicy.ConnectorClaudeCode}
+			withStandaloneHookRuntime(t, goos,
+				func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+				func(string) (enterprisepolicy.Options, bool) { return policy, true }, "/nonexistent-secure-client")
+			standalonePolicyViewDigest = realDigest
+			managedDir, err := enterprisepolicy.ClaudeManagedDir(policy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dropIns := filepath.Join(managedDir, "managed-settings.d")
+			if err := os.MkdirAll(dropIns, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			write := func(name string, data []byte) {
+				t.Helper()
+				if err := os.WriteFile(filepath.Join(dropIns, name), data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			check := func(what string, wantAlert bool) {
+				t.Helper()
+				pin, err := enterprisepolicy.PolicyViewDigest(policy, enterprisepolicy.ConnectorClaudeCode)
+				if err != nil {
+					t.Fatal(err)
+				}
+				descriptor.PolicyViewDigests = map[string]string{enterprisepolicy.ConnectorClaudeCode: pin}
+				prepareEnterpriseManagedHookRuntime(enterprisepolicy.ConnectorClaudeCode)
+				opts := buildHookOptionsForRuntime(enterprisepolicy.ConnectorClaudeCode, "PreToolUse", "", "", true)
+				if opts.ManagedRuntimeFailure != "" || !opts.ManagedStandalone || opts.ManagedUnixSocket != descriptor.HookSocket {
+					t.Fatalf("%s: refused instead of enforcing: failure %q", what, opts.ManagedRuntimeFailure)
+				}
+				if opts.ManagedPolicyViewAlert != wantAlert {
+					t.Fatalf("%s: policy-view alert = %v, want %v", what, opts.ManagedPolicyViewAlert, wantAlert)
+				}
+			}
+			write(enterprisepolicy.DefenseClawDropInName, []byte(`{"hooks": {}}`))
+			check("a pinned normal view", false)
+			for i := 0; i < 3; i++ {
+				write(fmt.Sprintf("%02d-large.json", i), []byte(`{"x": "`+strings.Repeat("a", 3<<20)+`"}`))
+			}
+			check("a pinned view over the proof's byte bound", true)
+		})
 	}
 }
