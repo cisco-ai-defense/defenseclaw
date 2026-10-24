@@ -75,9 +75,9 @@ func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, sid
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return windowsNativeOTLPUncheckable(connectorName, "the setup backup", err)
 	}
-	var residue []string
+	var residue, onShare []string
 	for _, config := range configs {
-		data, err := readWindowsAccountConfig(config.path, sid, home)
+		data, final, err := readWindowsAccountConfig(config.path, sid, home)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -91,6 +91,9 @@ func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, sid
 		for _, name := range names {
 			residue = append(residue, config.label+": "+name)
 		}
+		if len(names) > 0 && windowsShareFinalPath(final) {
+			onShare = append(onShare, config.label)
+		}
 	}
 	credential, err := connector.UserNativeOTLPCredentialResidue(connectorName, opts)
 	if err != nil {
@@ -98,11 +101,17 @@ func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, sid
 	}
 	residue = append(residue, credential...)
 	if len(residue) > 0 {
+		repair := "repair removes it"
+		if len(onShare) > 0 {
+			repair = "repair cannot edit " + strings.Join(onShare, ", ") + " on a network share durably, so remove the exporter " +
+				"there by hand and the next repair removes the rest"
+		}
 		return fmt.Errorf(
 			"enterprise hooks: %s keeps a native OTLP exporter from an earlier per-user install (%s); "+
-				"the managed gateway does not serve it, so another account could receive its telemetry; repair removes it",
+				"the managed gateway does not serve it, so another account could receive its telemetry; %s",
 			connectorName,
 			strings.Join(residue, ", "),
+			repair,
 		)
 	}
 	return nil
@@ -255,22 +264,31 @@ var errWindowsAccountConfigNeedsSession = errors.New("the file is read as the ac
 // reach a share as the computer, and has none of the account's drive
 // mappings, so it would judge another file than the agent reads, or none.
 // The same bounds and ownership rule apply.
-func readWindowsAccountConfig(path string, sid *windows.SID, home string) ([]byte, error) {
+// It also returns the final path of the file read (openWindowsAccountFile).
+func readWindowsAccountConfig(path string, sid *windows.SID, home string) ([]byte, string, error) {
 	if !windowsAccountOnlyPath(path) {
-		data, err := readWindowsAccountFile(path, sid, home)
+		data, final, err := openWindowsAccountFile(path, sid, home)
 		if !windowsServiceRefused(err) {
-			return data, err
+			return data, final, err
 		}
 	}
 	var data []byte
+	var final string
 	var readErr error
 	if err := windowsAccountConfigReadAs(sid, home, func() error {
-		data, readErr = readWindowsAccountFile(path, sid, home)
+		data, final, readErr = openWindowsAccountFile(path, sid, home)
 		return nil
 	}); err != nil {
-		return nil, fmt.Errorf("%w: %v", errWindowsAccountConfigNeedsSession, err)
+		return nil, "", fmt.Errorf("%w: %v", errWindowsAccountConfigNeedsSession, err)
 	}
-	return data, readErr
+	return data, final, readErr
+}
+
+// windowsShareFinalPath reports a final path (windowsHandleFinalPath) on a
+// network share, which the compare-and-swap edit refuses: it cannot order
+// its writes durably over SMB.
+func windowsShareFinalPath(final string) bool {
+	return strings.HasPrefix(final, `\\`)
 }
 
 // windowsAccountOnlyPath reports a path the service cannot read as the
@@ -508,8 +526,10 @@ func windowsHandleFinalPath(handle windows.Handle) (string, error) {
 // as the target user with the account's home bound (connector.WithUserHomeDir)
 // and hardens the data directory afterwards: the atomic edit protects its
 // state directory there with the per-user DACL. A file the check may not read
-// (errWindowsAccountFileNotOwned) is left as it is, and so is the
-// credential: verify keeps the row unverified and names that file.
+// (errWindowsAccountFileNotOwned), or one on a network share that keeps the
+// exporter (the compare-and-swap edit refuses a share), is left as it is,
+// and so is the credential: verify keeps the row unverified and names that
+// file.
 func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windows.SID, home, dataDir string) error {
 	if _, ok := windowsNativeOTLPRoots[connectorName]; !ok {
 		return nil
@@ -519,9 +539,13 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windo
 		return fmt.Errorf("enterprise hooks: inspect %s native OTLP settings: %w", connectorName, err)
 	}
 	opts := connector.SetupOpts{DataDir: dataDir, ManagedEnterprise: true}
+	backup, err := readWindowsAccountFile(filepath.Join(dataDir, connector.UserNativeOTLPBackupName(connectorName)), sid, home)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return windowsNativeOTLPUncheckable(connectorName, "the setup backup", err)
+	}
 	complete := true
 	for _, config := range configs {
-		_, final, err := openWindowsAccountFile(config.path, sid, home)
+		data, final, err := openWindowsAccountFile(config.path, sid, home)
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				continue
@@ -531,6 +555,19 @@ func removeWindowsManagedUserNativeOTLPAsTarget(connectorName string, sid *windo
 				continue
 			}
 			return windowsNativeOTLPUncheckable(connectorName, config.label, err)
+		}
+		if windowsShareFinalPath(final) {
+			// The compare-and-swap edit refuses a share. A file there that
+			// keeps the exporter stays as it is, and so does the credential:
+			// verify names the file and says to remove the exporter by hand.
+			names, err := connector.UserNativeOTLPResidueIn(connectorName, data, backup, opts)
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: inspect %s native OTLP settings (%s): %w", connectorName, config.label, err)
+			}
+			if len(names) > 0 {
+				complete = false
+			}
+			continue
 		}
 		if _, err := connector.RemoveUserNativeOTLPAt(connectorName, final, opts); err != nil {
 			return fmt.Errorf("enterprise hooks: remove %s native OTLP exporter from an earlier per-user install (%s): %w",

@@ -446,10 +446,12 @@ func TestWindowsManagedRowCleansRedirectedAppDataNativeOTLP(t *testing.T) {
 
 // AppData redirected to a share, by User Shell Folders or through the
 // account's home share, is where its agent reads its configuration. A fresh
-// account verifies there; a stale exporter there is reported and repair
-// removes it. Verify reads the share as the account (the service would
-// reach it as the computer) and stays unverified while the account has no
-// signed-in session to read it under.
+// account verifies there; a stale exporter there is reported. Repair cannot
+// edit a share durably, so it leaves that file and the credential, and the
+// row stays unverified until the exporter is removed there by hand. Verify
+// reads the share as the account (the service would reach it as the
+// computer) and stays unverified while the account has no signed-in session
+// to read it under.
 func TestWindowsManagedRowChecksNetworkAppDataAsTheAccount(t *testing.T) {
 	for _, tc := range []struct {
 		name, variable, file, folderVariable, shellName string
@@ -514,10 +516,28 @@ func TestWindowsManagedRowChecksNetworkAppDataAsTheAccount(t *testing.T) {
 			f.requireNeedsSession(t, name, source, f.verify(name))
 			f.readAsErr = nil
 
-			f.repairAsAccount(t, name, filepath.Join(agentDir, tc.file))
-			f.requireClean(t, filepath.Join(agentDir, tc.file))
+			// Repair cannot edit a share durably: it leaves the file and the
+			// credential, and verify says to remove the exporter by hand.
+			stale := staleWindowsNativeOTLP(f.bearer)[name]
+			f.repair(t, name)
+			if data, _ := os.ReadFile(filepath.Join(agentDir, tc.file)); string(data) != stale {
+				t.Fatal("repair edited a configuration on a share")
+			}
+			err = f.verify(name)
+			f.requireStale(t, name, source, err)
+			if !strings.Contains(err.Error(), "by hand") || !strings.Contains(err.Error(), source+" on a network share") {
+				t.Fatalf("verify = %v, want %s named for removal by hand", err, source)
+			}
+
+			// Once the account removes it, repair revokes the credential.
+			clean := `model = "gpt-5"`
+			if name == "claudecode" {
+				clean = `{"model":"opus"}`
+			}
+			f.writeOwned(t, filepath.Join(agentDir, tc.file), clean)
+			f.repair(t, name)
 			if err := f.verify(name); err != nil {
-				t.Fatalf("verify after the share repair: %v", err)
+				t.Fatalf("verify after the exporter on the share was removed: %v", err)
 			}
 		})
 	}
