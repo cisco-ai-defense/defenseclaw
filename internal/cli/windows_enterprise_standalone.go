@@ -1601,13 +1601,35 @@ func addWindowsEnterpriseUserStateWarning(result *enterprisestatus.Result, repor
 // addWindowsEnterpriseMachineStateWarning names the machine folders outside
 // StateRoot that the uninstall could not remove. Every standalone uninstall
 // removes them, not only --purge, so the MDM default uninstall reports them
-// too (GAP-1734).
+// too (GAP-1734). A retained selector shared with another deployment is
+// intentional, and two cleanup steps can report the same path (GAP-0571).
 func addWindowsEnterpriseMachineStateWarning(result *enterprisestatus.Result, report *windowsEnterpriseInstallerReport) {
-	if kept := windowsEnterpriseReportStrings(report.MachineStateRemaining); len(kept) > 0 {
+	var failed, kept []string
+	seen := map[string]bool{}
+	for _, entry := range windowsEnterpriseReportStrings(report.MachineStateRemaining) {
+		path, reason, _ := strings.Cut(entry, ": ")
+		key := strings.ToLower(path)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if strings.HasPrefix(reason, "kept: ") {
+			kept = append(kept, entry)
+		} else {
+			failed = append(failed, entry)
+		}
+	}
+	if len(failed) > 0 {
 		result.AddWarning("machine_state_remaining", fmt.Sprintf(
 			"the uninstall could not remove %d DefenseClaw machine folder(s); remove them from an elevated prompt: %s",
-			len(kept),
-			windowsEnterpriseBoundedLabels(kept),
+			len(failed),
+			windowsEnterpriseBoundedLabels(failed),
+		))
+	}
+	if len(kept) > 0 {
+		result.AddWarning("machine_state_kept", fmt.Sprintf(
+			"the uninstall kept %d DefenseClaw machine file(s) or folder(s) on purpose; leave them in place: %s",
+			len(kept), windowsEnterpriseBoundedLabels(kept),
 		))
 	}
 }

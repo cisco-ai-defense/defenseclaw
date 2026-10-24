@@ -2224,6 +2224,21 @@ func TestWindowsEnterpriseUninstallReportsTheUserRegistrationsItLeft(t *testing.
 			t.Fatalf("machine leftovers (purge %v): errors %+v warnings %+v", purge, left.Errors, left.Warnings)
 		}
 	}
+	// Two cleanup steps can report the same selector retained for another
+	// deployment. It is not a removal failure and must appear only once.
+	selector := `C:\\Program Files\\OpenAI\\Codex\\.defenseclaw-managed-runtime-selector.state: kept: it also holds runtime selections of another DefenseClaw deployment (1 target(s)); that deployment's uninstall removes them`
+	mixed := warnings(base + `,"machine_state_remaining":["` + selector + `","` + selector + `","C:\\ProgramData\\DefenseClaw-PowerShell-x: access denied"]}`)
+	if len(mixed) != 2 || mixed[0].Code != "machine_state_remaining" || mixed[1].Code != "machine_state_kept" ||
+		!strings.Contains(mixed[0].Message, "could not remove 1 DefenseClaw machine folder(s)") ||
+		strings.Contains(mixed[0].Message, "selector") ||
+		!strings.Contains(mixed[1].Message, "kept 1 DefenseClaw machine file(s) or folder(s) on purpose") ||
+		strings.Count(mixed[1].Message, "runtime-selector.state") != 1 {
+		t.Fatalf("kept selector reported twice or as a failure: %+v", mixed)
+	}
+	if only := warnings(base + `,"machine_state_remaining":["` + selector + `","` + selector + `"]}`); len(only) != 1 ||
+		only[0].Code != "machine_state_kept" || strings.Contains(only[0].Message, "could not remove") {
+		t.Fatalf("a kept selector alone: %+v", only)
+	}
 	if got := warnings(base + `}`); len(got) != 0 {
 		t.Fatalf("a report without the cleanup fields warned: %+v", got)
 	}
