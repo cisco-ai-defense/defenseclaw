@@ -6,6 +6,7 @@ package hookpaths
 import (
 	"encoding/base64"
 	"path"
+	"slices"
 	"strings"
 	"unicode/utf16"
 )
@@ -97,11 +98,14 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 	if !ok || len(words) == 0 {
 		return false
 	}
-	for i, word := range words {
-		if word == ";" || word == "&" || word == "&&" || word == "|" || word == "||" {
-			return actionWindowsResolvedProtectedTarget(strings.Join(words[:i], " "), cwd, home, depth+1) ||
-				actionWindowsResolvedProtectedTarget(strings.Join(words[i+1:], " "), cwd, home, depth+1)
+	statements := actionWindowsResolvedStatements(words, cwd, home)
+	if len(statements) != 1 || !slices.Equal(statements[0], words) {
+		for _, statement := range statements {
+			if actionWindowsResolvedProtectedTarget(strings.Join(statement, " "), cwd, home, depth+1) {
+				return true
+			}
 		}
+		return false
 	}
 	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
 	switch program {
@@ -143,11 +147,13 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 		}
 	}
 	for i, word := range words {
-		for _, token := range strings.FieldsFunc(word, func(r rune) bool {
-			return r == ' ' || r == '\t' || r == '>' || r == '<' || r == ';' || r == '|' || r == '&' || r == '(' || r == ')' || r == '{' || r == '}' || r == '\'' || r == '"'
-		}) {
-			if protected, _ := actionWindowsProtected(token, cwd, home, false); protected {
-				return true
+		if actionWindowsPathPosition(program, i, words) {
+			for _, token := range strings.FieldsFunc(word, func(r rune) bool {
+				return r == ' ' || r == '\t' || r == '>' || r == '<' || r == ';' || r == '|' || r == '&' || r == '(' || r == ')' || r == '{' || r == '}' || r == '\'' || r == '"'
+			}) {
+				if protected, _ := actionWindowsProtected(token, cwd, home, false); protected {
+					return true
+				}
 			}
 		}
 		if !strings.EqualFold(word, "-encodedcommand") && !strings.EqualFold(word, "-enc") || i+1 >= len(words) {
@@ -225,7 +231,19 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 	if !ok || len(words) == 0 {
 		return "shell-parse"
 	}
+	for _, statement := range actionWindowsResolvedStatements(words, cwd, home) {
+		if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
+// Keep bounded assignment resolution common to audit and enforcement. Only
+// literal assignments and Join-Path children are substituted into commands.
+func actionWindowsResolvedStatements(words []string, cwd, home string) [][]string {
 	values := make(map[string]string)
+	var statements [][]string
 	for start := 0; start < len(words); {
 		end := start
 		for end < len(words) && words[end] != ";" && words[end] != "|" && words[end] != "||" && words[end] != "&" && words[end] != "&&" {
@@ -262,13 +280,11 @@ func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
 					statement[i] = value
 				}
 			}
-			if reason := actionWindowsStatement(statement, cwd, home, depth); reason != "" {
-				return reason
-			}
+			statements = append(statements, statement)
 		}
 		start = end + 1
 	}
-	return ""
+	return statements
 }
 
 func actionWindowsStatement(words []string, cwd, home string, depth int) string {
@@ -403,11 +419,17 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 	case "echo", "printf", "write-output":
 		return false
 	case "add-content", "set-content", "out-file":
-		for i := 1; i < index; i++ {
-			if strings.EqualFold(words[i], "-Value") {
-				return false
-			}
+		if index == 0 {
+			return false
 		}
+		switch strings.ToLower(words[index-1]) {
+		case "-path", "-literalpath", "-filepath":
+			return true
+		}
+		if index == 1 && !strings.HasPrefix(words[index], "-") {
+			return true // first positional path
+		}
+		return false // value or an option operand, not a write target
 	}
 	return true
 }

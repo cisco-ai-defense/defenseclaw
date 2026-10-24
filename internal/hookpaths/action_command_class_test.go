@@ -144,6 +144,14 @@ func TestR104ActionClassBoundedOrdinaryValues(t *testing.T) {
 			}
 		})
 	}
+	for _, command := range []string{
+		`read f < target-name.txt; echo ok > "$f"`,
+		`v=alias; if false; then v=report.txt; fi; echo ok > "$v"`,
+	} {
+		if ActionCommandDecision(command, cwd, home) == "" {
+			t.Errorf("resolved protected alias allowed: %q", command)
+		}
+	}
 }
 
 func TestR104ActionClassWrapperRecursion(t *testing.T) {
@@ -214,7 +222,10 @@ func TestR104LeadGapCorpusPOSIX(t *testing.T) {
 	} {
 		t.Run(row.gap, func(t *testing.T) {
 			if reason := ActionCommandAuditReason(row.command, cwd, home); reason == "" {
-				t.Fatalf("allowed %q", row.command)
+				t.Fatalf("missing audit reason for %q", row.command)
+			}
+			if row.gap != "GAP-0659 computed program" && ActionCommandDecision(row.command, cwd, home) == "" {
+				t.Fatalf("resolved protected target allowed: %q", row.command)
 			}
 		})
 	}
@@ -265,6 +276,10 @@ func TestR104ActionGitArchiveReadOnly(t *testing.T) {
 			t.Errorf("%q reason=%q, want blocked=%t", tc.command, reason, tc.blocked)
 		}
 	}
+	protected := "git archive --output=" + filepath.Join(home, ".ssh", "authorized_keys") + " HEAD"
+	if ActionCommandDecision(protected, cwd, home) == "" {
+		t.Fatal("git archive to resolved protected target allowed")
+	}
 }
 
 func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
@@ -281,6 +296,14 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 		if got := ActionCommandAuditReason(tc.command, cwd, home) != ""; got != tc.blocked {
 			t.Errorf("%q blocked=%t, want %t", tc.command, got, tc.blocked)
 		}
+	}
+	protected := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath $target -Value 'dummy-key'`
+	if ActionCommandDecision(protected, cwd, home) == "" {
+		t.Fatal("resolved Windows authorized-keys target allowed")
+	}
+	data := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath report.txt -Value $target`
+	if got := ActionCommandDecision(data, cwd, home); got != "" {
+		t.Fatalf("protected path used only as data blocked: %q", got)
 	}
 }
 
@@ -332,5 +355,8 @@ func TestR104ActionBoundedFunctionAndProcessInputs(t *testing.T) {
 		if reason := ActionCommandAuditReason(tc.command, cwd, home); (reason != "") != tc.blocked {
 			t.Errorf("%q reason=%q, want blocked=%t", tc.command, reason, tc.blocked)
 		}
+	}
+	if ActionCommandDecision(`cat <(sort -o alias docs/a.txt) > merged.txt`, cwd, home) == "" {
+		t.Fatal("resolved protected process-substitution output allowed")
 	}
 }
