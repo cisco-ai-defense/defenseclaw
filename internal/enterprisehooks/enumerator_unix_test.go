@@ -1456,6 +1456,52 @@ func TestEnumerateUnixKeepsRefusedSurfacesWhenDiscoveryFails(t *testing.T) {
 	}
 }
 
+func TestEnumerateUnixReportsIncompleteMachinePolicySurfaceScanOnFailure(t *testing.T) {
+	root := trustedTestDir(t)
+	homes := filepath.Join(root, "home")
+	if err := os.MkdirAll(homes, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	uid, gid := os.Getuid(), os.Getgid()
+	alice := makeHome(t, homes, "alice")
+	cfg := enumeratorConfig("claudecode")
+	cfg.Enterprise.Enrollment.UnverifiedVersions = config.EnterpriseUnverifiedRefuse
+	for _, useSurfaces := range []bool{false, true} {
+		name := "legacy"
+		if useSurfaces {
+			name = "surfaces"
+		}
+		t.Run(name, func(t *testing.T) {
+			opts := UnixEnumerateOptions{
+				Resolver: &fakeResolver{accounts: map[string]unixidentity.Account{
+					"alice": {Name: "alice", UID: uid, GID: gid, Home: alice, Shell: "/bin/bash"},
+				}, listed: []string{"alice"}},
+				HomeRoots: []string{homes}, UIDMin: uid, UIDMax: uid + 1,
+				MachinePolicyConnectors: []string{"claudecode"},
+			}
+			if useSurfaces {
+				opts.DiscoverSurfaces = func(context.Context, unixidentity.Account, []string) (UnixDiscovery, error) {
+					return UnixDiscovery{}, errors.New("worker failed")
+				}
+			} else {
+				opts.Discover = func(context.Context, unixidentity.Account, []string) (map[string]string, map[string]string, error) {
+					return nil, nil, errors.New("worker failed")
+				}
+			}
+			_, report, err := EnumerateUnix(context.Background(), cfg, connector.NewDefaultRegistry(), opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, agent := range report.Unprotected {
+				if agent.User == "alice" && agent.Connector == "claudecode" && agent.Code == UnprotectedCodeInstallScanIncomplete {
+					return
+				}
+			}
+			t.Fatalf("failed machine-policy surface scan reported healthy: %+v", report.Unprotected)
+		})
+	}
+}
+
 func TestEnumerateUnixReportsIncompletePrivateScanOnPerUserDiscoveryFailure(t *testing.T) {
 	root := trustedTestDir(t)
 	homes := filepath.Join(root, "homes")
