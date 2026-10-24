@@ -141,7 +141,8 @@ func TestManagedWindowsSetupAnswer(t *testing.T) {
 	// `doctor` was an unknown command and `status` printed the raw missing
 	// per-user config error (WIN-R1-23).
 	root.SetArgs([]string{"doctor"})
-	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") {
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "managed by your organization") ||
+		!strings.Contains(err.Error(), "session-only HERMES_HOME is NOT COVERED") {
 		t.Fatalf("doctor on a managed Windows computer: %v", err)
 	}
 	// GAP-1719: `upgrade` was a bare unknown command.
