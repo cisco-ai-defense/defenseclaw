@@ -530,8 +530,8 @@ async function installWindow(): Promise<boolean> {
 // native helper exited 7 (hookexec.PerUserPostOutageExit: this account's
 // gateway refused or dropped the connection before any status), the outage
 // mode is open and no install holds the data
-// directory. An answer the gateway gave, an unverified listener and every
-// other error keep the call blocked. Like the rest of this plugin it reads
+// directory. An answer the gateway gave and every other error keep the call
+// blocked; a listener the helper could not prove got nothing and exits 7 too. Like the rest of this plugin it reads
 // no environment, so strict availability does not apply (the strict policy
 // tier closes it).
 async function perUserOutageOpen(error: unknown): Promise<boolean> {

@@ -42,6 +42,16 @@ func TestForeignListenerGetsNoTokenAndIsNamed(t *testing.T) {
 		t.Fatalf("prompt lead = %q", lead)
 	}
 
+	// The refusal to send is not a block of its own: in the outage-open tier
+	// the call runs with a warning naming the holder, and still nothing is
+	// sent (sa-port-peer review: peer checks never block the user's call).
+	rt = &stubRT{status: 401, body: "unauthorized"}
+	r = run(t, "claudecode", rt, func(o *Options) { o.FailMode = "closed"; o.OutageFailMode = "open" })
+	if rt.requests != 0 || nativeOutageBlocked(r) || !strings.Contains(r.stderr, "another account's process (PID 13496)") {
+		t.Fatalf("open tier: requests=%d code=%d stdout=%q stderr=%q, want the call run, nothing sent, holder named",
+			rt.requests, r.code, r.stdout, r.stderr)
+	}
+
 	// A managed hook keeps its own service-listener verification.
 	foreignListenerPID = func(string, int, string) int { t.Fatal("managed hook ran the per-user check"); return 0 }
 	if pid := perUserForeignListener(Options{ManagedEnterprise: true, APIAddr: "127.0.0.1:8787"}); pid != 0 {

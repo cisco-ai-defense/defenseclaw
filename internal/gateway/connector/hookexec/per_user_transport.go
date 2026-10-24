@@ -89,16 +89,25 @@ const PerUserPostOutageExit = 7
 
 // PerUserPostOutage reports whether err, from PostPerUserHook, is a gateway
 // outage: this account's gateway refused or dropped the connection before it
-// sent any status. A status line followed by a cut-off body, a listener
-// whose owner could not be verified, a timeout after the connection and
+// sent any status, or another account's listener, or one whose owner could
+// not be verified, holds its port (errPerUserGatewayPeerUnverified: nothing
+// was sent to it, and this account's gateway is not reachable there). A
+// status line followed by a cut-off body, a timeout after the connection and
 // every other error are not.
 func PerUserPostOutage(err error) bool {
 	if err == nil || errors.Is(err, errPerUserAnswerIncomplete) || errors.Is(err, errInvalidHookRequest) ||
 		errors.Is(err, errGatewayTookCallNoAnswer) {
 		return false
 	}
-	return gatewayRestartShaped(err)
+	return errors.Is(err, errPerUserGatewayPeerUnverified) || gatewayRestartShaped(err)
 }
+
+// errPerUserGatewayPeerUnverified wraps a per-user connection whose listener
+// is not proven to be this account's: the hook wrote nothing to it. It is a
+// refusal to send, never a block of the call by itself: the call takes the
+// outage decision (withPerUserOutage, config.HookOutageFailMode), as when
+// this account's gateway is not running.
+var errPerUserGatewayPeerUnverified = errors.New("per-user gateway listener is not proven to be this account's")
 
 func PostPerUserHook(ctx context.Context, apiAddr, path string, headers map[string]string, body []byte) (PerUserHookReply, error) {
 	switch path {
@@ -154,5 +163,10 @@ func verifiedPerUserHTTPClient(
 	dial func(context.Context, string, string) (net.Conn, error),
 	verify func(net.Conn) error,
 ) *http.Client {
-	return verifiedGatewayHTTPClient(timeout, apiAddr, "per-user gateway", dial, verify)
+	return verifiedGatewayHTTPClient(timeout, apiAddr, "per-user gateway", dial, func(conn net.Conn) error {
+		if err := verify(conn); err != nil {
+			return fmt.Errorf("%w: %v", errPerUserGatewayPeerUnverified, err)
+		}
+		return nil
+	})
 }

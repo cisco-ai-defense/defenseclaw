@@ -827,8 +827,9 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
 // unchecked: the native helper exited 7 (hookexec.PerUserPostOutageExit:
 // this account's gateway refused or dropped the connection before any
 // status), the outage mode is open, strict availability is off and no
-// install holds the data directory. An answer the gateway gave, an
-// unverified listener and every other error keep the call blocked.
+// install holds the data directory. An answer the gateway gave and
+// every other error keep the call blocked. A listener the helper could not
+// prove got nothing and exits 7 too: this account's gateway is not there.
 async function defenseclawPerUserOutageOpen(err) {
   if (DC_OUTAGE_FAIL_MODE !== "open" || !err || err.status !== 7) return false;
   if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;

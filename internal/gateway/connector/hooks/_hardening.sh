@@ -1213,7 +1213,7 @@ defenseclaw_log_hook_delivery_failure() {
 # (hooks/.hookcfg.<connector>, written by Setup from the policy tier) says
 # open with its config source. Strict availability, this account's install
 # window, an answer the gateway gave (any HTTP status, a cut-off or
-# malformed body), another program on the port, a missing token and every
+# malformed body), a missing token and every
 # record that is missing, malformed or closed keep the call closed. Managed,
 # socket, Secure Client and shared inspect-* hooks never take this path.
 defenseclaw_per_user_outage_open() {
@@ -1589,7 +1589,19 @@ defenseclaw_own_gateway_stopped() {
 # and unreadable socket tables must never send a token or hook payload to an
 # unverified endpoint. Linux reads /proc/net/tcp*; macOS lsof lists this
 # account's listeners. Managed hooks use their separate verified transport.
+# A foreign or unknown listener gets nothing sent, and this account's gateway
+# is not reachable there: the call's transport status is the outage status 7
+# (_DC_TRANSPORT_STATUS), so the outage decision applies
+# (defenseclaw_per_user_outage_open). The peer check refuses to send; it
+# never blocks the call by itself.
 defenseclaw_api_listener_unproven() {
+  local _dc_listener_owner=0
+  _defenseclaw_api_listener_owner "$@" || _dc_listener_owner=$?
+  [ "$_dc_listener_owner" -ne 0 ] || _DC_TRANSPORT_STATUS=7
+  return "$_dc_listener_owner"
+}
+
+_defenseclaw_api_listener_owner() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
@@ -2546,7 +2558,10 @@ defenseclaw_gateway_post() {
         case "$_dc_listener_status" in
           1) _dc_native_post=1 ;; # This account owns the listener now.
           2) return 7 ;; # No listener: let the existing cold-start retry run.
-          *) return 1 ;; # Foreign or unknown owner: fail closed.
+          # Foreign or unknown owner: send it nothing. This account's gateway
+          # is not reachable there, so the outage decision applies (7),
+          # never a block of its own.
+          *) return 7 ;;
         esac
       fi
       ;;
@@ -2639,9 +2654,13 @@ defenseclaw_gateway_post() {
           exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null
     )" || {
+      # hook-post exits 7 for an outage, including a listener it could not
+      # prove (hookexec.PerUserPostOutage); a port that is free or held by
+      # another account now is the same outage.
+      [ "$?" -eq 7 ] && return 7
       _dc_listener_status=0
       defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
-      [ "$_dc_listener_status" -eq 2 ] && return 7
+      [ "$_dc_listener_status" -ne 1 ] && return 7
       return 1
     }
     printf '%s' "$_dc_post_output"

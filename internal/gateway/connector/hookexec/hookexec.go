@@ -832,7 +832,10 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 // failure split exactly like the .sh hooks.
 func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payload []byte, token string, requestCancel context.CancelFunc, requestHandedOff *bool) int {
 	if pid := perUserForeignListener(opts); pid > 0 {
-		return failUnreachable(opts, sp, failMode, foreignListenerReason(opts.APIAddr, pid))
+		// Nothing is sent to another account's listener. That refusal does
+		// not block the call by itself: this account's gateway is not
+		// reachable, so the outage decision applies (withPerUserOutage).
+		return failUnreachable(withPerUserOutage(opts), sp, failMode, foreignListenerReason(opts.APIAddr, pid))
 	}
 	restartDeadline := gatewayRestartDeadline(opts, opts.StartedAt)
 	// One deadline bounds every wait of a tool call: the restart tries, the
@@ -1038,9 +1041,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// it could not be reached. Secure Client keeps its reason.
 			reason = noAnswerReason(opts)
 		}
-		if perUserOutageError(opts, err) {
+		if perUserOutageError(opts, err) || errors.Is(err, errPerUserGatewayPeerUnverified) {
 			// This account's gateway refused or dropped the connection, or
-			// gave none in time, and sent no status: an outage.
+			// gave none in time, and sent no status: an outage. A listener
+			// not proven to be this account's got no byte, and this
+			// account's gateway is not reachable there: the same decision.
 			opts = withPerUserOutage(opts)
 		}
 		return failUnreachable(opts, sp, failMode, reason)
@@ -2147,7 +2152,9 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 
 // withPerUserOutage marks opts for a per-user failure that is a gateway
 // outage, so failUnreachable answers it with the hook's OutageFailMode
-// (perUserOutageMode).
+// (perUserOutageMode). A listener on this account's port that is not proven
+// to be this account's (sent nothing) is one: peer checks refuse to send,
+// they never decide the call.
 func withPerUserOutage(opts Options) Options {
 	opts.perUserOutage = !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" && !opts.SecureClient
 	return opts
