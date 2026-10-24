@@ -10291,16 +10291,11 @@ def _apply_hook_connector_setup(
             gc.connectors[connector].block_message = block_message
         else:
             gc.block_message = block_message
-    if fail_mode is not None or connector == "cursor":
+    if fail_mode is not None:
+        # Saved as given. The guardrail mode no longer pins Cursor's value:
+        # every hook's outage mode is the policy tier's on a per-user install
+        # (oss-outage-open) and the administrator's on a managed one.
         normalized_fail = "closed" if str(fail_mode).strip().lower() == "closed" else "open"
-        if connector == "cursor":
-            mode_fail = "closed" if desired_mode == "action" else "open"
-            if fail_mode is not None and normalized_fail != mode_fail:
-                ux.echo(
-                    f"  ⚠ Cursor {desired_mode} mode pins hook failures={mode_fail}; "
-                    f"ignoring --fail-mode {normalized_fail}."
-                )
-            normalized_fail = mode_fail
         if per_connector:
             gc.connectors[connector].hook_fail_mode = normalized_fail
         else:
@@ -10315,8 +10310,8 @@ def _apply_hook_connector_setup(
             _batch_summary.setdefault("fail_open", []).append(connector)
         else:
             ux.echo(
-                f"  ⚠ {connector} hook failures are fail-open: while the gateway is down or "
-                "unreachable, tool calls run uninspected. Pass --fail-mode closed to block them."
+                f"  ⚠ {connector} hooks let tool calls run with a warning while the gateway is not "
+                "running (default policy). To block them: defenseclaw guardrail use-pack strict"
             )
     if connector == "cursor":
         if hilt:
@@ -10457,11 +10452,9 @@ def _apply_hook_connector_setup(
         # toward unsafe global edits on multi-connector installs.
         ux.echo(f"  ✓ {connector} mode={desired_mode}")
     if connector == "cursor":
-        effective_fail_mode = "closed" if desired_mode == "action" else "open"
-        ux.echo(
-            f"  ✓ cursor hook failures={effective_fail_mode} "
-            f"(failClosed={'true' if desired_mode == 'action' else 'false'})"
-        )
+        # Cursor registers failClosed: true in both modes; while the gateway
+        # is down its hook follows the outage mode (oss-outage-open).
+        ux.echo(f"  ✓ cursor gateway outage={gc.effective_hook_fail_mode('cursor')} (failClosed=true)")
         ux.echo(
             "  ℹ Cursor runs all matching hooks and merges Enterprise > Team > Project > User; "
             "DefenseClaw cannot safely detect an actual higher-priority conflict, so none is inferred"
@@ -10525,9 +10518,8 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
     fail_open = summary.get("fail_open") or []
     if fail_open:
         ux.echo(
-            f"  ⚠ Hook failures are fail-open for {', '.join(fail_open)}: while the gateway is down or "
-            "unreachable, their tool calls run uninspected. Block them with: "
-            "defenseclaw guardrail fail-mode closed"
+            f"  ⚠ While the gateway is not running, {', '.join(fail_open)} hooks let tool calls run "
+            "with a warning (default policy). To block them: defenseclaw guardrail use-pack strict"
         )
     if not restart:
         _echo_saved_without_restart(plural=True)

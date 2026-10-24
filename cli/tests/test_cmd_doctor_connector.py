@@ -567,7 +567,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         cfg, hooks_path, runtime = self._cursor_runtime_case(
             tmp,
             mode="observe",
-            fail_closed=False,
+            fail_closed=True,
         )
         cfg.data_dir = tmp
         with open(hooks_path, encoding="utf-8") as fh:
@@ -596,7 +596,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             cfg, hooks_path, runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=False,
+                fail_closed=True,
             )
             # Cursor has no approval prompt: an inherited human_approval is
             # the Human approval row's warning, not an inconsistent posture.
@@ -614,7 +614,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertIn(runtime, r.checks[-1]["detail"])
         self.assertIn("mode=observe", r.checks[-1]["detail"])
-        self.assertIn("failClosed=false", r.checks[-1]["detail"])
+        self.assertIn("failClosed=true", r.checks[-1]["detail"])
         self.assertIn("enforcement=observe-only", r.checks[-1]["detail"])
         self.assertIn("higher-priority conflict detection=unavailable (none inferred)", r.checks[-1]["detail"])
         self.assertNotIn("inspect-tool.sh", r.checks[-1]["detail"])
@@ -678,7 +678,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             cfg, hooks_path, _runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=False,
+                fail_closed=True,
             )
             r = _DoctorResult()
             _check_cursor_configured_runtime(
@@ -698,7 +698,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             cfg, hooks_path, _runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=False,
+                fail_closed=True,
                 legacy_native=True,
             )
             r = _DoctorResult()
@@ -714,12 +714,14 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn("PowerShell input adapter", r.checks[-1]["detail"])
 
-    def test_cursor_doctor_rejects_fail_closed_observe_hook(self) -> None:
+    def test_cursor_doctor_rejects_fail_open_observe_hook(self) -> None:
+        # A per-user Cursor registration has failClosed: true in observe mode
+        # too (Setup), so a fail-open one is drift (oss-outage-open).
         with tempfile.TemporaryDirectory() as tmp:
             cfg, hooks_path, _runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=True,
+                fail_closed=False,
             )
             cfg.guardrail.effective_hook_fail_mode.return_value = "open"
             r = _DoctorResult()
@@ -733,7 +735,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             )
 
         self.assertEqual(r.checks[-1]["status"], "fail")
-        self.assertIn("failClosed=false", r.checks[-1]["detail"])
+        self.assertIn("failClosed=true", r.checks[-1]["detail"])
 
     def test_cursor_doctor_accepts_fail_closed_action_hook(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -771,7 +773,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             cfg, hooks_path, _runtime = self._cursor_runtime_case(
                 tmp,
                 mode="observe",
-                fail_closed=False,
+                fail_closed=True,
             )
             with open(hooks_path, encoding="utf-8") as fh:
                 hooks = json.load(fh)

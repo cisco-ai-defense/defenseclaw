@@ -2657,7 +2657,13 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - per-user hosts always fail closed, including old explicit opens.
+        - a per-user host reports its gateway-outage mode, which follows the
+          connector's policy tier (Go ``config.HookOutageFailMode``, owner
+          decision 2026-10-23): ``closed`` for a strict rule pack, ``open``
+          for default (balanced) and permissive. A saved per-user
+          ``hook_fail_mode`` does not change it, and every failure that is
+          not an outage (an answer the gateway gave, a malformed or partial
+          one, a missing token, the install window) blocks in every tier.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
@@ -2677,7 +2683,25 @@ class GuardrailConfig:
             if self.hook_fail_mode.strip():
                 return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
-        return "closed"
+        return "closed" if self.hook_policy_tier(connector) == "strict" else "open"
+
+    def hook_policy_tier(self, connector: str = "") -> str:
+        """The connector's policy tier: its rule pack's posture (strict, default or permissive).
+
+        Mirrors Go ``Config.HookPolicyTierForConnector``: the pack manifest's
+        posture, else the pack folder's name (``policy_catalog.pack_profile``).
+        """
+        from defenseclaw import policy_catalog
+
+        name = self.effective_rule_pack(connector)
+        if name in {"default", "strict", "permissive"} and name not in (getattr(self, "custom_packs", None) or {}):
+            # A built-in pack's tier is its name, also where its folder is not
+            # installed (Go: a built-in name without a manifest posture).
+            return name
+        try:
+            return policy_catalog.pack_profile(self.effective_rule_pack_dir(connector))
+        except Exception:  # noqa: BLE001 - an unresolvable pack is the default tier, as in Go
+            return "default"
 
     def secure_client_hook_fail_modes(self) -> bool:
         """Whether this guardrail belongs to a Secure Client config.

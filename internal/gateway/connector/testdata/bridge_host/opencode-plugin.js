@@ -69,6 +69,11 @@ const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST = "1";
+// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
+// in the default and permissive policy tiers lets a tool call run with a
+// warning and a hook-failures.jsonl row while this account's gateway is not
+// running; "closed" (strict) blocks it. Every other failure blocks.
+const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
@@ -723,7 +728,14 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     }
     return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {
-    if (DC_PER_USER_NATIVE_POST) return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
+    if (DC_PER_USER_NATIVE_POST) {
+      if (await defenseclawPerUserOutageOpen(err)) {
+        if (actionable) await defenseclawLogFailOpen("gateway unreachable", "transport");
+        return { reason: "", notice: actionable ? await defenseclawPerUserOutageNotice() : "" };
+      }
+      if (err && err.status === 7) return { reason: await defenseclawPerUserGatewayDownText(err, 0) };
+      return { reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" };
+    }
     // Transport failure (gateway unreachable / timeout). Honor fail mode:
     // closed → block, open → allow. An uninstalled deployment allows.
     if (await defenseclawDeploymentRemoved()) return null;
@@ -737,6 +749,36 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
   } finally {
     clearTimeout(timer);
   }
+}
+
+// defenseclawPerUserOutageOpen reports a per-user tool check that may run
+// unchecked: the native helper exited 7 (hookexec.PerUserPostOutageExit:
+// this account's gateway refused or dropped the connection before any
+// status), the outage mode is open, strict availability is off and no
+// install holds the data directory. An answer the gateway gave, an
+// unverified listener and every other error keep the call blocked.
+async function defenseclawPerUserOutageOpen(err) {
+  if (DC_OUTAGE_FAIL_MODE !== "open" || !err || err.status !== 7) return false;
+  if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;
+  return !(await defenseclawInstallWindow());
+}
+
+// defenseclawPerUserOutageNotice is the one warning of a tool call that ran
+// because this account's gateway is down: the cause and the fix.
+async function defenseclawPerUserOutageNotice() {
+  let stopped = false;
+  try {
+    await lstat(join(dirname(dirname(DC_TOKEN_FILE)), "gateway.stopped"));
+    stopped = true;
+  } catch (_) {
+    // No marker: the gateway is down for another reason.
+  }
+  const cause = stopped
+    ? "this account's gateway was stopped with `defenseclaw-gateway stop`"
+    : "this account's gateway is not running";
+  return "DefenseClaw is not checking this session: " + cause + ", so tool calls run unchecked (fail mode open for an outage). " +
+    "Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state. " +
+    "If it does not start, run `defenseclaw doctor`.";
 }
 
 // defenseclawPerUserGatewayDownText is what a per-user install that fails
@@ -790,6 +832,8 @@ const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the Defense
 // gateway is not running: its hook socket is missing, or nothing accepts
 // the connection.
 function defenseclawGatewayStopped(err) {
+  // The per-user native helper exits 7 for a gateway that is not running.
+  if (err && err.status === 7) return true;
   const codes = [err && err.code, err && err.cause && err.cause.code];
   return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused");
 }

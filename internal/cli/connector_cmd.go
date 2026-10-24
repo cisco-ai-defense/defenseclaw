@@ -615,8 +615,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	opts := resolveConnectorOpts(dataDir)
 	if cfg != nil {
 		opts.CodexOtelEnvironment = cfg.Environment
-		opts.HookFailMode = cfg.EffectiveHookFailModeForConnector(name)
-		opts.ConfiguredHookFailMode = cfg.ConfiguredHookFailModeForConnector(name)
+		opts.HookFailMode = cfg.EffectiveHookOutageFailModeForConnector(name)
 		opts.SecureClientHookDelivery = cfg.SecureClientIntegration()
 		opts.GuardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
 		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled

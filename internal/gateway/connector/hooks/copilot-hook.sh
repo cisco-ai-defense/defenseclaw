@@ -309,10 +309,17 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "$1" transport || true
 {{end}}{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
-{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
-  defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
+{{end}}{{if .Managed}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
+{{else}}  defenseclaw_log_hook_delivery_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
+{{end}}  defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
 {{if .Managed}}  {{$failure}}
-{{else}}  local next=""
+{{else}}  # This account's gateway is down and the policy tier lets an outage
+  # through (defenseclaw_per_user_outage_open): the tool runs, with the
+  # warning above and a hook-failures.jsonl row.
+  if ! defenseclaw_should_fail_closed_on_unreachable; then
+    exit 0
+  fi
+  local next=""
   [ "$1" != "gateway unreachable" ] || next="$(defenseclaw_unreachable_next_step)"
   copilot_hook_failure "${next:-the DefenseClaw gateway is unavailable ($1). Run \`defenseclaw-gateway status\`.}"
 {{end}}}

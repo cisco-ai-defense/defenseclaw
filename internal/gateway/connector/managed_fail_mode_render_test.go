@@ -26,8 +26,8 @@ import (
 // connectors without a fail-closed hook contract of their own. Secure Client
 // keeps its rules. The per-user Hermes, Copilot and Antigravity hooks block
 // their own failures, so they keep closed (GAP-0150, GAP-0269, r104 W3
-// G3-upg), and a per-user Cursor in observe closes its outages even if an
-// older config opened them.
+// G3-upg). A per-user render records the outage mode of its policy tier
+// (oss-outage-open): open only when its caller resolved open.
 func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 	useVerifiedSecureClientDeployment(t)
 	standalone := SetupOpts{ManagedEnterprise: true, ManagedHookSocket: "/run/defenseclaw/hook.sock", HookFailMode: "closed", GuardrailMode: "observe"}
@@ -45,7 +45,8 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 		{"secure client hermes", NewHermesConnector(), secureClient, "open"},
 		{"secure client cursor observe", NewCursorConnector(), secureClient, "closed"},
 		{"per-user cursor observe", NewCursorConnector(), perUser, "closed"},
-		{"per-user cursor observe, explicit open", NewCursorConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open", GuardrailMode: "observe"}, "closed"},
+		{"per-user cursor observe, outage open tier", NewCursorConnector(), SetupOpts{HookFailMode: "open", GuardrailMode: "observe"}, "open"},
+		{"per-user copilot, outage open tier", NewCopilotConnector(), SetupOpts{HookFailMode: "open"}, "open"},
 		{"per-user hermes", NewHermesConnector(), perUser, "closed"},
 		{"per-user copilot", NewCopilotConnector(), perUser, "closed"},
 		{"per-user antigravity", NewAntigravityConnector(), perUser, "closed"},

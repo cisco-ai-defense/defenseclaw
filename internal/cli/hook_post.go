@@ -60,8 +60,15 @@ func init() {
 				return fmt.Errorf("per-user hook timeout must be 1 to 30 seconds")
 			}
 			ctx, cancel := context.WithTimeout(cmd.Context(), time.Duration(maxTime)*time.Second)
-			defer cancel()
-			return postPerUserPluginHook(ctx, apiAddr, os.Stdin, cmd.OutOrStdout(), curlOutput)
+			err := postPerUserPluginHook(ctx, apiAddr, os.Stdin, cmd.OutOrStdout(), curlOutput)
+			cancel()
+			if hookexec.PerUserPostOutage(err) {
+				// This account's gateway is not running: the status the shell
+				// hooks and plugins read as an outage, not as a refusal.
+				fmt.Fprintf(cmd.ErrOrStderr(), "defenseclaw-gateway hook-post: %v\n", err)
+				hookProcessExit(hookexec.PerUserPostOutageExit)
+			}
+			return err
 		},
 	}
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway loopback host:port")

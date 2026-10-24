@@ -31,19 +31,20 @@ const guardTestDebounce = 40 * time.Millisecond
 // Exercise the real rendered Amp artifact and the live policy resolver, not a
 // mock that can conceal installation/repair policy drift. Both boot paths use
 // connectorSetupOptsChecked; repair must reproduce those same bytes. This is
-// an OSS install: all configured fail modes render closed, including legacy
-// open values in both observe and action mode.
+// an OSS install: the plugin bakes closed for every failure, and its outage
+// mode follows the policy tier (oss-outage-open), never a saved value, in
+// both observe and action mode.
 func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 	for _, mode := range []string{"observe", "action"} {
 		for _, tc := range []struct {
-			name, global, override, wantObserve, wantAction string
+			name, global, override, pack, wantObserve, wantAction string
 		}{
-			// A legacy per-user open is pinned closed at setup and repair.
-			{"default", "", "", "closed", "closed"},
-			{"explicit-open", "open", "", "closed", "closed"},
-			{"global-closed", "closed", "", "closed", "closed"},
-			{"override-open", "closed", "open", "closed", "closed"},
-			{"override-closed", "open", "closed", "closed", "closed"},
+			{"default", "", "", "", "open", "open"},
+			{"explicit-open", "open", "", "", "open", "open"},
+			{"global-closed", "closed", "", "", "open", "open"},
+			{"override-open", "closed", "open", "", "open", "open"},
+			{"override-closed", "open", "closed", "", "open", "open"},
+			{"strict", "open", "open", "strict", "closed", "closed"},
 		} {
 			want := tc.wantAction
 			if mode == "observe" {
@@ -59,6 +60,7 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 				cfg.DataDir = testenv.PrivateTempDir(t)
 				cfg.Guardrail.Mode = mode
 				cfg.Guardrail.HookFailMode = tc.global
+				cfg.Guardrail.RulePack = tc.pack
 				cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
 					"amp": {HookFailMode: tc.override},
 				}
@@ -80,7 +82,8 @@ func TestAMPHookSelfHealPreservesDeliveryPolicy(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if !bytes.Contains(original, []byte(fmt.Sprintf(`const DC_FAIL_MODE: string = "%s"`, want))) {
+				if !bytes.Contains(original, []byte(`const DC_FAIL_MODE: string = "closed"`)) ||
+					!bytes.Contains(original, []byte(fmt.Sprintf(`const DC_OUTAGE_FAIL_MODE: string = "%s"`, want))) {
 					t.Fatal("initial plugin does not contain the selected delivery mode")
 				}
 				guard := NewHookConfigGuard(nil, nil, time.Hour)
@@ -544,7 +547,8 @@ func TestHookConfigGuardRetriesFailedFailModeRefresh(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.DataDir = root
 	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.HookFailMode = "closed"
+	// The strict tier: its outage mode is closed (oss-outage-open).
+	cfg.Guardrail.RulePack = "strict"
 	sidecar.publishConfig(cfg)
 	if err := guard.RefreshPolicy(ctx); err == nil {
 		t.Fatal("expected first refresh to fail")

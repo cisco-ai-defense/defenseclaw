@@ -2074,7 +2074,9 @@ func connectorModeForDecision(cfg, decisionCfg *config.Config, name string) map[
 		if decisionCfg != nil {
 			guardrailMode = decisionCfg.EffectiveGuardrailModeForConnector(name)
 		}
-		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		// What the installed hooks do while the gateway is down
+		// (config.HookOutageFailMode); every other per-user failure closes.
+		hookFailMode = cfg.EffectiveHookOutageFailModeForConnector(name)
 		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)

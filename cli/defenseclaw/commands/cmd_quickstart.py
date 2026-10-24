@@ -63,13 +63,12 @@ from defenseclaw import ux
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'closed' (the default on a new install) blocks where the hook supports it, "
-        "so the agent's tools are blocked while the gateway is down; 'open' allows + logs. "
-        "Omit it to keep the current setting. "
+        "Saved as guardrail.hook_fail_mode. Per-user hooks do not read it: while the "
+        "gateway is not running they follow the policy tier (default and permissive let "
+        "calls run with a warning, strict blocks them: `defenseclaw guardrail use-pack strict`), "
+        "and every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces transport and "
-        "missing-token failures closed. "
-        "Change it later with `defenseclaw guardrail fail-mode open|closed`."
+        "missing-token failures closed."
     ),
 )
 @click.option(

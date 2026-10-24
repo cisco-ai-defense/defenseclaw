@@ -44,6 +44,7 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 		"{{.ForeignHookGuardJS}}", "",
 		"{{.InstallMarkerJS}}", "",
 		"{{.ListenerProofJS}}", "1",
+		"{{.OutageFailMode}}", "closed",
 		"const DC_PER_USER_NATIVE_POST = \"1\"", "const DC_PER_USER_NATIVE_POST = \"\"",
 		"const DC_PER_USER_NATIVE_POST: string = \"1\"", "const DC_PER_USER_NATIVE_POST: string = \"\"",
 	).Replace(string(body))

@@ -24,6 +24,7 @@ from defenseclaw.fail_mode import (
     connector_fail_mode_report,
     resolve_connector_fail_mode,
 )
+from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
 
@@ -290,7 +291,8 @@ def test_scoped_amp_fail_mode_refreshes_plugin_registration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "open", "codex": "open"})
+    # The strict tier (closed) with a plugin still rendered open.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "closed", "codex": "closed"})
     plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
     _write_current_amp_runtime(cfg, plugin_path, "open")
     monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
@@ -314,7 +316,9 @@ def test_global_amp_fail_mode_refreshes_plugin_registration(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "open"})
+    # The strict tier (closed) with a plugin still rendered open.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "closed"})
+    cfg.guardrail.hook_fail_mode = "closed"
     plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
     _write_current_amp_runtime(cfg, plugin_path, "open")
     monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
@@ -622,9 +626,9 @@ def test_windows_resolver_reports_effective_mixed_modes(monkeypatch: pytest.Monk
     ):
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
+    # Each connector runs its own tier's outage mode (oss-outage-open).
     assert claude.current and claude.runtime == "closed"
-    assert not codex.current and codex.desired == "closed" and codex.runtime == "open"
-    assert "windows-sidecar-open" in codex.drift
+    assert codex.current and codex.desired == "open" and codex.runtime == "open"
 
 
 def test_windows_resolver_accepts_sealed_claude_v2_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -654,14 +658,15 @@ def test_windows_resolver_initial_open_open_and_reverse_mixed_mode(
         patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
     ):
-        assert not resolve_connector_fail_mode(cfg, "claudecode").current
-        assert not resolve_connector_fail_mode(cfg, "codex").current
+        # The default tier's open is current (oss-outage-open).
+        assert resolve_connector_fail_mode(cfg, "claudecode").current
+        assert resolve_connector_fail_mode(cfg, "codex").current
 
         cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
         _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "closed"})
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
-    assert not claude.current and claude.runtime == "open" and claude.desired == "closed"
+    assert claude.current and claude.runtime == "open" and claude.desired == "open"
     assert codex.current and codex.runtime == "closed"
 
 
@@ -669,7 +674,8 @@ def test_cli_status_reports_old_open_mode_as_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
-    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
+    # Codex's tier gives open, but its installed hook still records closed.
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()
@@ -805,7 +811,8 @@ def test_legacy_hookcfg_is_runtime_fallback_but_requires_migration(
 def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
+    # Claude Code in the strict tier with its hook still rendered open.
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     original_settings = (home / ".claude" / "settings.json").read_bytes()
     tracked_paths = [
@@ -842,7 +849,7 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
             obj=app,
         )
     assert result.exit_code != 0
-    assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "open"
+    assert cfg.guardrail.connectors["claudecode"].hook_fail_mode == "closed"
     assert (home / ".claude" / "settings.json").read_bytes() == original_settings
     assert {path: path.read_bytes() for path in tracked_paths} == original_runtime
     assert "restored" in result.output
@@ -1108,7 +1115,8 @@ def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # GAP-1370: the change list shows the installed runtime value that
-    # guardrail status shows, and Cursor in action mode stays fail-closed.
+    # guardrail status shows. The guardrail mode no longer pins Cursor's fail
+    # mode: it changes like every other connector.
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"codex": "", "cursor": ""})
     cfg.deployment_mode = "managed_enterprise"
     cfg.managed_outside_secure_client = lambda: True
@@ -1134,8 +1142,8 @@ def test_fail_mode_change_list_matches_status_runtime_and_cursor_contract(
     restart.assert_not_called()
     assert "(codex): closed → open" in result.output or "(codex): closed -> open" in result.output
     assert "(codex): already open" not in result.output
-    assert "(cursor): stays closed" in result.output
-    assert "Cursor action mode keeps hook failures closed" in result.output
+    assert "(cursor): stays closed" not in result.output
+    assert "(cursor): closed → open" in result.output or "(cursor): closed -> open" in result.output
 
 
 def test_rollback_skips_unchanged_immutable_config(tmp_path) -> None:

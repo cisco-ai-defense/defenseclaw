@@ -2245,6 +2245,8 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._make_cfg(tmp)
             cfg.guardrail.mode, cfg.guardrail.hook_fail_mode = "action", "closed"
+            # The strict tier: its outage mode is closed (oss-outage-open).
+            cfg.guardrail.rule_pack = "strict"
             self._write_hook(
                 tmp, "codex-hook.sh",
                 "#!/bin/bash\n# defenseclaw-managed-hook v7\n# defenseclaw-derived: sha256=00 fail_mode=open\n"

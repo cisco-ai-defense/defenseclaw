@@ -8480,15 +8480,23 @@ def _check_cursor_configured_runtime(
     mode = str(mode_resolver("cursor") if callable(mode_resolver) else "observe").strip().lower()
     fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
     mode = "action" if mode == "action" else "observe"
-    # Cursor observe hooks fail open, except on a managed deployment outside
-    # Secure Client, where the Cursor registration carries the
-    # administrator's fail mode (unset closed) in either guardrail mode.
+    # On a managed deployment outside Secure Client the Cursor registration
+    # carries the administrator's fail mode (unset closed) in either
+    # guardrail mode. A per-user registration has failClosed: true in both
+    # modes, and its hook's outage mode follows the policy tier
+    # (oss-outage-open), so no guardrail mode makes it inconsistent. Secure
+    # Client keeps its observe-open, action-closed registration.
     standalone = getattr(cfg, "managed_outside_secure_client", None)
+    per_user = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
     if callable(standalone) and standalone() is True:
         expected_fail_mode = "open" if fail_mode == "open" else "closed"
+        expected_fail_closed = expected_fail_mode == "closed"
+    elif per_user:
+        expected_fail_mode = fail_mode
+        expected_fail_closed = True
     else:
         expected_fail_mode = "closed" if mode == "action" else "open"
-    expected_fail_closed = expected_fail_mode == "closed"
+        expected_fail_closed = expected_fail_mode == "closed"
     hilt = None
     hilt_resolver = getattr(guardrail, "effective_hilt", None)
     if callable(hilt_resolver):

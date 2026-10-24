@@ -203,6 +203,9 @@ type GatewayResponse = {
 	reason?: string
 	additional_context?: string
 	severity?: string
+	// outage_notice is the warning of a per-user call that ran because this
+	// account's gateway is down (perUserOutageOpen); never from the gateway.
+	outage_notice?: string
 }
 
 type TurnState = {
@@ -809,6 +812,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			await notifyIfForeground(threadID, verdict.additional_context || verdict.reason || "DefenseClaw flagged this tool call.")
 			return { action: "allow" }
 		default:
+			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
 			return { action: "allow" }
 		}
 	})

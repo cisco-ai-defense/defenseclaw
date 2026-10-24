@@ -258,6 +258,12 @@ type Options struct {
 	// failure takes the administrator's open; every other failure is closed
 	// (managedNonOutageMode, bounded review P1).
 	managedOutageOpen bool
+	// perUserOutage is set on a per-user hook for a failure that is a gateway
+	// outage (withPerUserOutage): this account's gateway refused or dropped
+	// the connection, gave no connection within the restart budget, or could
+	// not be started. Only such a failure takes OutageFailMode; an answer the
+	// gateway gave, a stalled answer and every local failure stay closed.
+	perUserOutage bool
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -288,6 +294,14 @@ type Options struct {
 	// closed independently. Only "open" opens: empty or any other value is
 	// "closed" (owner rule: hooks fail closed unless the operator chose open).
 	FailMode string
+	// OutageFailMode is a per-user hook's gateway-outage mode, the one Setup
+	// recorded in hooks/.hookcfg from the connector's policy tier
+	// (config.HookOutageFailMode): "open" lets a call through with a warning
+	// and a hook-failures.jsonl row when this account's gateway is not
+	// running, "closed" (or empty) blocks it. It applies only to a failure
+	// withPerUserOutage marked; FailMode governs every other failure.
+	// Managed and Secure Client hooks ignore it.
+	OutageFailMode string
 
 	// Home is DEFENSECLAW_HOME (default ~/.defenseclaw). If it does not exist
 	// or contains a .disabled file the hook is a no-op (exit 0).
@@ -876,9 +890,9 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		case wait.recoveryErr != nil:
 			// Keep the cause: hook-failures.jsonl is the only record of
 			// why a hook could not start the gateway (GAP-0480).
-			return failUnreachable(opts, sp, failMode, coldStartFailureReason(wait.recoveryErr))
+			return failUnreachable(withPerUserOutage(opts), sp, failMode, coldStartFailureReason(wait.recoveryErr))
 		case wait.outlasted:
-			return failUnreachable(opts, sp, failMode, perUserGatewayRestartingReason)
+			return failUnreachable(withPerUserOutage(opts), sp, failMode, perUserGatewayRestartingReason)
 		}
 	}
 	// A managed gateway that is restarting refuses the connection, or drops
@@ -1023,6 +1037,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 			// Same fail mode; the record says the gateway stalled, not that
 			// it could not be reached. Secure Client keeps its reason.
 			reason = noAnswerReason(opts)
+		}
+		if perUserOutageError(opts, err) {
+			// This account's gateway refused or dropped the connection, or
+			// gave none in time, and sent no status: an outage.
+			opts = withPerUserOutage(opts)
 		}
 		return failUnreachable(opts, sp, failMode, reason)
 	}
@@ -2126,9 +2145,47 @@ func emitFailOpenAllow(opts Options, sp spec, reason string) int {
 	return emitHookResult(opts, sp, sp.openAllow)
 }
 
+// withPerUserOutage marks opts for a per-user failure that is a gateway
+// outage, so failUnreachable answers it with the hook's OutageFailMode
+// (perUserOutageMode).
+func withPerUserOutage(opts Options) Options {
+	opts.perUserOutage = !opts.ManagedEnterprise && opts.ManagedUnixSocket == "" && !opts.SecureClient
+	return opts
+}
+
+// perUserOutageError reports a per-user transport error that is a gateway
+// outage: a connection this account's gateway refused, reset or closed
+// before any status (it exited or is restarting), or none within the
+// restart budget. A call the gateway took and did not answer in time
+// (errGatewayTookCallNoAnswer), an invalid request and every other error
+// are not, and neither is any error after an HTTP status: the gateway
+// answered.
+func perUserOutageError(opts Options, err error) bool {
+	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || err == nil ||
+		opts.answeredErrorStatus != 0 || errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(err, errInvalidHookRequest) {
+		return false
+	}
+	return gatewayRestartShaped(err)
+}
+
+// perUserOutageMode is the fail mode of a per-user failure: OutageFailMode
+// for a gateway outage withPerUserOutage marked (open in the default and
+// permissive policy tiers, config.HookOutageFailMode), failMode for every
+// other failure. Strict availability and this account's install window
+// close the outage too (closeDuringInstall runs first).
+func perUserOutageMode(opts *Options, failMode string) string {
+	if !opts.perUserOutage || opts.StrictAvailability || perUserInstallWindow(*opts) ||
+		normalizeFailMode(opts.OutageFailMode) != "open" {
+		return failMode
+	}
+	opts.FailMode = "open"
+	return "open"
+}
+
 func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 	failMode = closeDuringInstall(&opts, failMode)
 	failMode = managedNonOutageMode(&opts, failMode)
+	failMode = perUserOutageMode(&opts, failMode)
 	if perUserInstallWindow(opts) {
 		// An install or upgrade stops this account's gateway and starts it
 		// again when it is done. That window is not an outage, so an open
@@ -2172,7 +2229,11 @@ func failUnreachable(opts Options, sp spec, failMode, reason string) int {
 		}
 		return emitHookResult(opts, sp, sp.unreachableStrict)
 	}
-	fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+	if text := perUserOutageOpenText(opts, reason); text != "" && opts.perUserOutage {
+		fmt.Fprintf(opts.Stderr, "defenseclaw: %s\n", text)
+	} else {
+		fmt.Fprintf(opts.Stderr, "defenseclaw: %s: %s\n", unreachableLead(opts, sp, reason, "allowing"), unreachableDetail(opts, reason))
+	}
 	if notice := perUserGatewayDownNotice(opts, sp, reason); notice != "" {
 		fmt.Fprintln(opts.Stdout, notice)
 		return 0
@@ -2269,25 +2330,38 @@ func perUserGatewayDownNotice(opts Options, sp spec, reason string) string {
 	if !slices.ContainsFunc(events, func(event string) bool { return strings.EqualFold(event, strings.TrimSpace(opts.Event)) }) {
 		return ""
 	}
-	text := ""
-	switch {
-	case reason == "gateway unreachable":
-		text = "DefenseClaw is not checking this session: this account's gateway is not running. " +
-			"Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
-	case reason == perUserGatewayRestartingReason:
-		text = "DefenseClaw is not checking this session: this account's gateway is restarting or not running " +
-			"(no answer within 3 seconds). Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint
-	case reason == perUserGatewayNoAnswerReason:
-		text = "DefenseClaw is not checking this session: this account's gateway did not answer in time " +
-			"(it may be restarting or busy). Check it with `defenseclaw-gateway status`."
-	case strings.HasPrefix(reason, coldStartFailedReason):
-		// The logged reason carries the cause of the failed start (GAP-0480).
-		text = "DefenseClaw is not checking this session: the gateway could not be started. " +
-			"Run `defenseclaw-gateway start` to see why."
-	default:
+	text := perUserOutageOpenText(opts, reason)
+	if text == "" {
 		return ""
 	}
 	return `{"systemMessage":` + mustJSONString(text) + `}`
+}
+
+// perUserOutageDoctorHint ends every per-user outage warning: the command
+// that finds and repairs what keeps the gateway down.
+const perUserOutageDoctorHint = " If it does not start, run `defenseclaw doctor`."
+
+// perUserOutageOpenText is the one warning a per-user hook gives when it lets
+// a call through because this account's gateway is down (OutageFailMode
+// open): the cause and the fix. "" for a reason that is no outage.
+func perUserOutageOpenText(opts Options, reason string) string {
+	cause := ""
+	switch {
+	case reason == "gateway unreachable":
+		cause = "this account's gateway is not running"
+	case reason == perUserGatewayRestartingReason:
+		cause = "this account's gateway is restarting or not running (no answer within 3 seconds)"
+	case strings.HasPrefix(reason, coldStartFailedReason) && fileExists(filepath.Join(opts.Home, gatewayStoppedMarker)):
+		cause = "this account's gateway was stopped with `defenseclaw-gateway stop`"
+	case strings.HasPrefix(reason, coldStartFailedReason):
+		// The logged reason carries the cause of the failed start (GAP-0480).
+		cause = "this account's gateway is not running and could not be started"
+	default:
+		return ""
+	}
+	return "DefenseClaw is not checking this session: " + cause + ", so calls run unchecked (fail mode open " +
+		"for an outage). Run `defenseclaw-gateway start` to resume protection." + perUserGatewayStatusHint +
+		perUserOutageDoctorHint
 }
 
 // perUserGatewayStatusHint ends a per-user gateway-down notice: the command

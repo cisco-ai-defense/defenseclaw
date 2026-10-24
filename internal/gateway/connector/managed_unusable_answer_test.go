@@ -119,8 +119,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 						HookAPITokenScoped: true,
 						HookFailMode:       failMode,
 						// The operator's choice: Cursor's open outage needs it.
-						ConfiguredHookFailMode: failMode,
-						GuardrailMode:          "observe",
+						GuardrailMode: "observe",
 					}
 					if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 						t.Fatal(err)

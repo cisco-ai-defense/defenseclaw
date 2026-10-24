@@ -42,7 +42,7 @@ func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 	} {
 		home := t.TempDir()
 		hookDir := filepath.Join(home, "hooks")
-		opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: "open", ConfiguredHookFailMode: "open"}
+		opts := SetupOpts{DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "scoped-test-token", HookFailMode: "open"}
 		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, agent.conn); err != nil {
 			t.Fatal(err)
 		}

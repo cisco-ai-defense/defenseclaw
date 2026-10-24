@@ -140,7 +140,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "outage": { "perUserClosed": "guardrail-mode", "perUserOpen": "guardrail-mode", "managedOpen": "blocks", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "managed",

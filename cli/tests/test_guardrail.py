@@ -3045,7 +3045,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                     "# defenseclaw-managed-hook v9\ndefenseclaw-hook.exe\n"
                     "ProcessStartInfo\nRedirectStandardInput\n"
                     "RedirectStandardOutput\nWaitForExit\n"
-                    '{"continue":true}\n'
+                    '{"continue":false,"permission":"deny"}\n'
                 )
                 command = "& '" + runtime_path.replace("'", "''") + "'"
             else:
@@ -3060,7 +3060,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                         "type": "command",
                         "command": command,
                         "timeout": 30,
-                        "failClosed": False,
+                        "failClosed": True,  # per-user Setup registers it in observe too
                     }
                 ]
                 for event in CURSOR_HOOK_EVENTS
