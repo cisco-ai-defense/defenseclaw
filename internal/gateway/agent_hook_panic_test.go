@@ -407,6 +407,37 @@ func TestHandleAgentHook_PostFinalizePanicDoesNotDoubleAudit(t *testing.T) {
 	}
 }
 
+func TestHandleAgentHook_NotificationPanicDoesNotFinalizeTwice(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	api.webhookSource = func() *WebhookDispatcher { panic("synthetic notification panic after finalization") }
+	previous := hookEvaluatorPanicHook
+	hookEvaluatorPanicHook = func() { panic("synthetic evaluator panic to produce a block") }
+	t.Cleanup(func() { hookEvaluatorPanicHook = previous })
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", strings.NewReader(
+		`{"hook_event_name":"pre_tool_call","session_id":"sess-notify-panic","tool_name":"shell"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleAgentHook("hermes").ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	events, err := store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decisions int
+	for _, event := range events {
+		if event.Action == string(audit.ActionConnectorHook) {
+			decisions++
+		}
+	}
+	if decisions != 1 {
+		t.Fatalf("notification panic persisted %d connector decisions, want one", decisions)
+	}
+}
+
 // TestHandleAgentHook_SandboxPanicFailsClosed: a request authenticated with
 // a sandbox binding is blocked, with a reason that says DefenseClaw failed,
 // when the evaluator panics or when a panic after evaluation reaches the

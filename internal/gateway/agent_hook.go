@@ -869,8 +869,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 		}
 		a.settlePendingHook(persistCtx, pending, finalization)
-		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
 		finalized = true
+		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
 		a.recordManagedAIDFailOpenForSelectedNativeHookResult(
 			accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
 		)
