@@ -2737,6 +2737,9 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 	oldOverride := defenseclawHookBinaryOverride
 	defenseclawHookBinaryOverride = filepath.Join(dir, "Defense Claw", windowsHookBinaryName)
 	defer func() { defenseclawHookBinaryOverride = oldOverride }()
+	// The installed full hook of a packaged install, which PreToolUse runs.
+	installedHook := filepath.Join(dir, "Programs", "DefenseClaw", "bin", windowsHookBinaryName)
+	pinClaudeCodePreToolGuard(t, installedHook)
 
 	c := NewClaudeCodeConnector()
 	if err := c.Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
@@ -2763,11 +2766,16 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 	}
 	entries := hooks["PreToolUse"].([]interface{})
 	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
-	// PreToolUse runs the launcher directly: Cursor imports this file and
-	// runs only the command, and cmd.exe without its args blocked every
-	// Cursor tool call (GAP-1011).
-	if got := handler["command"]; got != defenseclawHookBinaryOverride {
-		t.Fatalf("PreToolUse command = %q, want the launcher %q", got, defenseclawHookBinaryOverride)
+	// PreToolUse runs the installed hook as the launcher guard: Cursor
+	// imports this file and runs only the command, and cmd.exe without its
+	// args blocked every Cursor tool call (GAP-1011); the launcher itself,
+	// started while missing, let the tool call run.
+	if got := handler["command"]; got != installedHook {
+		t.Fatalf("PreToolUse command = %q, want the installed hook %q", got, installedHook)
+	}
+	wantGuard := []interface{}{ClaudeCodeLauncherGuardSubcommand, defenseclawHookBinaryOverride, "hook", "--connector", "claudecode"}
+	if got := handler["args"]; !reflect.DeepEqual(got, wantGuard) {
+		t.Fatalf("PreToolUse args = %#v, want %#v", got, wantGuard)
 	}
 	view := claudeCodeExecView(handler).(map[string]interface{})
 	if got := view["command"]; got != defenseclawHookBinaryOverride {

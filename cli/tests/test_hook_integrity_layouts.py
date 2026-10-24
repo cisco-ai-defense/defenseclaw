@@ -21,8 +21,9 @@ Bedrock connector's Go Setup writes on a POSIX host (Claude Code, Codex,
 Copilot, Hermes, OpenCode), the same files with the hook entries removed but
 other DefenseClaw text left (GAP-1311), and the Windows launcher commands.
 internal/gateway/connector/testdata/claudecode_windows_handlers.json holds the
-two handlers per-user Windows Setup writes for Claude Code: the cmd.exe launcher
-guard of 1.0.1 and later and the exec form of 1.0.0; the Go test
+handlers per-user Windows Setup writes for Claude Code: the cmd.exe launcher
+guard of 1.0.1 and later, the PreToolUse guard of 1.0.4 (the installed full
+hook started with launcher-guard) and the exec form of 1.0.0; the Go test
 TestClaudeCodeWindowsHandlersMatchTheSharedGolden checks it against Setup
 (GAP-0463).
 """
@@ -230,7 +231,7 @@ def _claude_windows_settings(handler: dict, launcher: str) -> str:
     return json.dumps({"env": env, "hooks": hooks})
 
 
-@pytest.mark.parametrize("form", ["guard", "exec"])
+@pytest.mark.parametrize("form", ["guard", "pretool_guard", "exec"])
 def test_windows_claude_code_handlers_setup_writes_are_registered(tmp_path, monkeypatch, form):
     # GAP-0463: since 1.0.1 per-user Windows Setup runs the launcher through
     # cmd.exe (command = cmd.exe, launcher only in args). status read only the
@@ -245,6 +246,12 @@ def test_windows_claude_code_handlers_setup_writes_are_registered(tmp_path, monk
     launcher.parent.mkdir()
     launcher.write_bytes(b"MZ")
     handler = _CLAUDE_WINDOWS[form]
+    guard = tmp_path / "Programs" / "bin" / "defenseclaw-hook.exe"
+    if form == "pretool_guard":
+        # The PreToolUse guard is the installed full hook, a second file.
+        guard.parent.mkdir(parents=True)
+        guard.write_bytes(b"MZ")
+        handler = {**handler, "command": str(guard)}
     cfg, config = _install(tmp_path, "claudecode", _claude_windows_settings(handler, str(launcher)))
     assert hook_registration_problems(cfg, "claudecode") == []
     assert _hook_runtime_degraded_suffix(cfg, "claudecode") == ""
@@ -274,6 +281,21 @@ def test_status_and_doctor_read_the_claude_launcher_guard_the_same_way(monkeypat
     edited = {**golden["guard"], "args": [*golden["guard"]["args"][:-2], "0", ")"]}
     assert hook_integrity.claude_launcher_guard_view(edited) is edited
     assert golden["launcher"] in hook_integrity.hook_handler_command_lines(edited, "claudecode")[0]
+    # The PreToolUse guard (GAP-1011) reads as the same exec form.
+    assert hook_integrity.claude_launcher_guard_view(golden["pretool_guard"]) == golden["exec"]
+    assert hook_integrity.hook_handler_command_lines(golden["pretool_guard"], "claudecode") == expected
+    pretool = golden["pretool_guard"]
+    for args in (
+        [*pretool["args"], "--fail-open"],
+        ["guard", *pretool["args"][1:]],
+        [pretool["args"][0], "defenseclaw-hook.exe", *pretool["args"][2:]],
+        [pretool["args"][0], "C:\\Windows\\System32\\cmd.exe", *pretool["args"][2:]],
+        [*pretool["args"][:-1], "codex"],
+    ):
+        changed = {**pretool, "args": args}
+        assert hook_integrity.claude_launcher_guard_view(changed) is changed, args
+    same = {**pretool, "command": golden["launcher"]}
+    assert hook_integrity.claude_launcher_guard_view(same) is same
 
 
 def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_registered(tmp_path, monkeypatch):

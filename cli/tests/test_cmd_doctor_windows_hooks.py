@@ -1148,6 +1148,30 @@ class WindowsHookDoctorTests(unittest.TestCase):
         config.write_text(json.dumps(document), encoding="utf-8")
         self.assertNotEqual(self._validate("claudecode", config).state, "healthy")
 
+    def test_claude_pretool_guard_form_is_healthy_and_edits_are_not(self) -> None:
+        # Per-user Setup's PreToolUse handler runs the installed full hook as
+        # the launcher guard (cmd.exe broke Cursor's import, GAP-1011); doctor
+        # must read it as the exec form it runs.
+        runtime = self._runtime()
+        installed = self.install / "bin" / "defenseclaw-hook.exe"
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_bytes(b"MZfixture")
+        config = self._config("claudecode", str(runtime))
+        document = json.loads(config.read_text(encoding="utf-8"))
+        guard_args = ["launcher-guard", str(runtime), "hook", "--connector", "claudecode"]
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["args"] = ["hook", "--connector", "claudecode"]
+        document["hooks"]["PreToolUse"][0]["hooks"][0]["command"] = str(installed)
+        document["hooks"]["PreToolUse"][0]["hooks"][0]["args"] = guard_args
+        config.write_text(json.dumps(document), encoding="utf-8")
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(runtime)))
+
+        document["hooks"]["PreToolUse"][0]["hooks"][0]["args"] = [*guard_args, "--fail-open"]
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self.assertNotEqual(self._validate("claudecode", config).state, "healthy")
+
     def test_claude_exec_form_rejects_malformed_args(self) -> None:
         runtime = self._runtime()
         config = self._config("claudecode", str(runtime))

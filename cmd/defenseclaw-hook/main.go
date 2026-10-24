@@ -26,14 +26,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 
 	// Its init raises a Windows hook process to above-normal priority
 	// before the CLI packages initialize (GAP-0155).
 	_ "github.com/defenseclaw/defenseclaw/cmd/defenseclaw-hook/internal/hookpriority"
 	"github.com/defenseclaw/defenseclaw/internal/cli"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
 var (
@@ -60,6 +63,12 @@ func main() {
 		}
 		return
 	}
+	// The per-user Windows Claude Code PreToolUse handler. It runs before the
+	// installer-state checks below: the launcher it starts applies them, and
+	// a missing launcher must block whatever that state says.
+	if launcher, hookArgs, ok := connector.ClaudeCodeLauncherGuardArgv(os.Args[1:]); ok {
+		os.Exit(runLauncherGuard(launcher, hookArgs, os.Stdin, os.Stdout, os.Stderr))
+	}
 	// The stable Windows launcher survives uninstall because agent clients may
 	// cache its absolute command for the lifetime of their process. Disabled,
 	// publishing, missing, or unsafe installer state is an intentional no-op;
@@ -82,11 +91,33 @@ func main() {
 	os.Exit(cli.Execute())
 }
 
+// runLauncherGuard runs launcher with hookArgs and passes its stdin, stdout,
+// stderr and exit code through, as the cmd.exe guard of the other Claude Code
+// events does. When the launcher is missing or cannot start it prints the
+// guard sentence and exits 2, which Claude Code treats as a block; a direct
+// start of a missing launcher was a non-blocking error that let the tool call
+// run unchecked.
+func runLauncherGuard(launcher string, hookArgs []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	command := exec.Command(launcher, hookArgs...)
+	command.Stdin, command.Stdout, command.Stderr = stdin, stdout, stderr
+	err := command.Run()
+	if err == nil {
+		return 0
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() >= 0 {
+		return exitErr.ExitCode()
+	}
+	fmt.Fprintln(stderr, connector.ClaudeCodeLauncherMissingMessage)
+	return 2
+}
+
 // nonHookInvocationExit answers a start without a hook subcommand. Cursor
 // imports the hooks in ~/.claude/settings.json (its third-party hooks, on by
 // default) and runs only each handler's command, without the handler's args.
-// For a Windows exec-form Claude Code handler that is this launcher with no
-// arguments and a Cursor event on stdin. Its exit 2 made Cursor block every
+// For a Windows Claude Code PreToolUse handler that is this binary (the
+// guard, or the launcher of an exec-form handler) with no arguments and a
+// Cursor event on stdin. Its exit 2 made Cursor block every
 // tool call, also with no Cursor hooks set up (GAP-1011). That call is no
 // Claude Code event, so it gets no answer (exit 0, no output); Cursor's own
 // DefenseClaw hooks, when set up, decide its events. Any other start without
