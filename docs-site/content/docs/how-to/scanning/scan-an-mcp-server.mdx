@@ -35,7 +35,7 @@ These `defenseclaw mcp` steps are for a per-user installation. On managed Linux 
 
    A URL scan is a pre-flight check. It does not add the server to any connector. Add `--scan-prompts --scan-resources --scan-instructions` to look beyond the tool list.
 
-3. Add a server through the scanner. `mcp set` scans first and writes the server into the connector's MCP config only if the scan passes.
+3. Add a server through the scanner. `mcp set` scans first and follows the configured MCP admission action. Balanced admission adds a server with HIGH findings with a warning and an audit entry; `admission.mcp.actions.high: quarantine` refuses it under a stricter policy.
 
    ```bash
    defenseclaw mcp set context7 --command npx --args '["-y", "@upstash/context7-mcp"]'

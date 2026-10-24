@@ -288,6 +288,36 @@ def _secure_client_admission(policy_dir: str, target_type: str) -> CompiledAdmis
     )
 
 
+def _legacy_strict_mcp(adm: Any) -> bool:
+    """Keep the MCP actions a v8 -> v9 strict preset inherited and left unset."""
+    defaults = getattr(adm, "defaults", None)
+    if getattr(defaults, "allow_list_bypass_scan", None) is not False or getattr(defaults, "actions", None):
+        return False
+    skill = _compile_action_map(getattr(getattr(adm, "skill", None), "actions", None))
+    return (skill.get("HIGH") == (_QUARANTINE, False)
+            and skill.get("MEDIUM") == (_QUARANTINE, False)
+            and skill.get("LOW") == (_WARN, False))
+
+
+def _legacy_balanced_default_mcp(adm: Any) -> bool:
+    """Recognize only the MCP actions the pre-1.0.4 default preset stored."""
+    defaults = getattr(adm, "defaults", None)
+    if (getattr(defaults, "scan_on_install", None) is not True
+            or getattr(defaults, "allow_list_bypass_scan", None) is not True):
+        return False
+    defaults_actions = _compile_action_map(getattr(defaults, "actions", None))
+    if defaults_actions != {
+        "CRITICAL": (_QUARANTINE, False), "HIGH": (_QUARANTINE, False),
+        "MEDIUM": (_WARN, False), "LOW": (_WARN, False), "INFO": (_WARN, False),
+    }:
+        return False
+    mcp = _compile_action_map(getattr(getattr(adm, "mcp", None), "actions", None))
+    return mcp == {
+        "MEDIUM": (_QUARANTINE, False),
+        "LOW": (SeverityAction(file="none", runtime="disable", install="none"), False),
+    }
+
+
 def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     """Compile ``admission:`` for one asset type, as the gateway does (Go
     ``policy.CompileAdmission``). Each field and severity resolves, first
@@ -298,8 +328,12 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
 
     if asset_lists.is_secure_client(cfg):
         return _secure_client_admission(str(getattr(cfg, "policy_dir", "") or ""), target_type)
-    out = _builtin_admission(target_type)
     adm = getattr(cfg, "admission", None)
+    out = _builtin_admission(target_type)
+    if target_type == "mcp" and not _legacy_strict_mcp(adm):
+        # Balanced MCP scans keep findings visible without refusing ordinary
+        # tools. Secure Client keeps its separate 1.0 action map above.
+        out.actions.update({sev: (_WARN, False) for sev in ("HIGH", "MEDIUM", "LOW")})
     if adm is None:
         return out
     defaults = getattr(adm, "defaults", None)
@@ -341,6 +375,12 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
         source = "derived:scanners.skill_scanner"
     elif "defaults" in used:
         source = "config:admission.defaults.actions"
+
+    if target_type == "mcp" and _legacy_balanced_default_mcp(adm):
+        # The selected shipped preset changed in 1.0.4. Preserve explicit
+        # actions and translate only its old stored action shape.
+        actions.update({sev: (_WARN, False) for sev in ("HIGH", "MEDIUM", "LOW")})
+        source = "compat:pre-1.0.4 default"
 
     sources["actions"] = source
     overrides: dict[str, dict[str, tuple[SeverityAction, bool]]] = {}

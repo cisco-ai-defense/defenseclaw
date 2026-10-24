@@ -227,14 +227,18 @@ Each severity resolves on its own, first match wins:
 | Severity | Skill (default gate) | MCP server | Plugin |
 | --- | --- | --- | --- |
 | `critical` | `quarantine` | `quarantine` | `quarantine` |
-| `high` | `quarantine` | `quarantine` | `quarantine` |
-| `medium` | `warn` | `quarantine` | `warn` |
-| `low` | `allow` | install `none`, file `none`, runtime `disable` | `warn` |
+| `high` | `quarantine` | `warn` | `quarantine` |
+| `medium` | `warn` | `warn` | `warn` |
+| `low` | `allow` | `warn` | `warn` |
 | `info` | `allow` | `warn` | `warn` |
 
 The built-in first-party entries are `codeguard` for skills, `defenseclaw` for
 plugins, and none for MCP servers. Both names are DefenseClaw's own, so they
 trust only DefenseClaw's own content; see [First-party assets](#first-party-assets).
+
+Balanced MCP admission keeps HIGH, MEDIUM and LOW scan findings in the audit log and warns without disabling the server. CRITICAL findings still reject it. To refuse HIGH findings in a stricter deployment, set `admission.mcp.actions.high: quarantine` in `config.yaml`; an explicit organization setting wins over the built-in action. Secure Client retains its separate admission actions.
+
+A configuration migrated from the older strict preset keeps the MCP actions that preset enforced even if the old migration left them unset. This applies only when the migrated strict per-skill actions and disabled allow-list bypass identify that preset; an explicit MCP action still takes precedence.
 
 ### The scanner gate
 

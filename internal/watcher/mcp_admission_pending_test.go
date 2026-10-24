@@ -21,6 +21,7 @@ import (
 func TestMCPServerWithoutAdmissionIsPendingUntilAdmitted(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
 	project := filepath.Join(t.TempDir(), "decoy-proj")
 	server := config.MCPServerEntry{Name: "gb05-decoy", Command: "npx", Args: []string{"-y", "."},
 		Connector: "claudecode", Project: project, SourceScope: "project"}
@@ -137,6 +138,7 @@ func TestRemovedMCPServerLeavesNoAdmissionIssue(t *testing.T) {
 func TestChangedMCPServerDefinitionIsPendingUntilReadmitted(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
 	base := t.TempDir()
 	servers := []config.MCPServerEntry{enrolledMCPServer(base, "1001", "benign"), enrolledMCPServer(base, "1002", "benign")}
 	rejected := map[string]bool{}

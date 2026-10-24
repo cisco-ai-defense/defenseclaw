@@ -2422,6 +2422,19 @@ func (w *InstallWatcher) logAssetPolicyWouldBlock(ctx context.Context, evt Insta
 // disable the watcher writes for a rejected verdict (applyPostScanEnforcement).
 const autoBlockReasonPrefix = "auto-block: watch detected "
 
+// hasRecoverableMCPBlock checks only this watcher's scoped rejection or
+// scanner-failure block. A manual hold or row for another definition must not
+// turn a periodic rescan into a recovery admission.
+func (w *InstallWatcher) hasRecoverableMCPBlock(evt InstallEvent) bool {
+	if evt.Type != InstallMCP || w.store == nil {
+		return false
+	}
+	entry, err := w.store.GetActionForConnector(string(InstallMCP), journalName(evt), w.journalScope(w.eventConnector(evt)))
+	return err == nil && entry != nil && (entry.Actions.Runtime == "disable" || entry.Actions.Install == "block") &&
+		(strings.HasPrefix(entry.Reason, autoBlockReasonPrefix) || strings.HasPrefix(entry.Reason, scanFailureReason)) &&
+		(entry.SourcePath == "" || sameWatcherPath(entry.SourcePath, evt.Path))
+}
+
 // releaseSupersededMCPRejection lifts the install block and runtime disable
 // that the watcher's own rejection of an MCP server left, once admission
 // allowed a changed definition of that server. The rejection was for the

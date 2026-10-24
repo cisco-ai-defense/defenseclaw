@@ -65,6 +65,7 @@ func TestRescanAdmitsMCPServerAddedLaterWithoutScan(t *testing.T) {
 func TestRescanFirstCycleAdmitsMCPServerPresentAtStart(t *testing.T) {
 	t.Setenv("PATH", "")
 	cfg, store, logger, _ := setupTestEnv(t)
+	cfg.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
 	servers := []config.MCPServerEntry{{Name: "usm-time", Command: "uvx", Args: []string{"mcp-server-time"}, Connector: "claudecode"}}
 	var admitted []AdmissionResult
 	w := New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { admitted = append(admitted, r) })
