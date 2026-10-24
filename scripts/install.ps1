@@ -1686,7 +1686,7 @@ function Copy-BinDir([string]$To) {
     }
 }
 
-function Restore-BinDir([string]$From) {
+function Restore-BinDir([string]$From, [string]$GuardSHA256 = "") {
     $marker = Join-Path $From "NO_BINDIR"
     if (Test-Path -LiteralPath $marker) {
         # There was no bin folder: take out this run's files, and the .new
@@ -1720,6 +1720,13 @@ function Restore-BinDir([string]$From) {
     if ($ManagedFiles -contains $gatewayName) { $order += $gatewayName }
     $refused = @()
     foreach ($name in $order) {
+        if ($name -eq "defenseclaw-hook.exe" -and $GuardSHA256) {
+            $live = Join-Path $BinDir $name
+            if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne $GuardSHA256) {
+                throw "The checked hook guard changed during restore: $live"
+            }
+            continue
+        }
         if ($name -eq $gatewayName -and $refused.Count) { continue }
         $saved = Join-Path $From $name
         $live = Join-Path $BinDir $name
@@ -1729,10 +1736,10 @@ function Restore-BinDir([string]$From) {
         } catch { $refused += $_.Exception.Message }
     }
     if ($refused.Count) { throw "Could not put back every program in ${BinDir}: $($refused -join '; ')" }
-    Assert-BinDirRestored $From
+    Assert-BinDirRestored $From $GuardSHA256
 }
 
-function Assert-BinDirRestored([string]$From) {
+function Assert-BinDirRestored([string]$From, [string]$GuardSHA256 = "") {
     # A restore is claimed only when $BinDir holds exactly the files saved in
     # $From, byte for byte: a hook or gateway of the failed install left
     # beside the previous data is not the previous install.
@@ -1741,6 +1748,12 @@ function Assert-BinDirRestored([string]$From) {
     foreach ($name in $ManagedFiles) {
         $saved = Join-Path $From $name
         $live = Join-Path $BinDir $name
+        if ($name -eq "defenseclaw-hook.exe" -and $GuardSHA256) {
+            if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne $GuardSHA256) {
+                $wrong += $name
+            }
+            continue
+        }
         if (-not $noBinDir -and (Test-Path -LiteralPath $saved -PathType Leaf)) {
             if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne (Get-Sha256 $saved)) { $wrong += $name }
         } elseif (Test-Path -LiteralPath $live) {
@@ -2075,6 +2088,88 @@ function Save-LifecycleCloser([string]$Slot) {
     } catch { Write-Warn "Could not keep the hook closer in ${LifecycleCloser}: $($_.Exception.Message)" }
 }
 
+function Get-LifecycleHookTransition($Manifest) {
+    $guardSHA256 = [string](Get-Field $Manifest "TransitionHookSHA256")
+    $priorSHA256 = [string](Get-Field $Manifest "TransitionPriorHookSHA256")
+    if (-not $guardSHA256 -and -not $priorSHA256) { return $null }
+    if ($guardSHA256 -cnotmatch '^[0-9a-f]{64}$' -or $priorSHA256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw "The lifecycle hook transition has invalid digests"
+    }
+    $guard = Join-Path $LifecycleCloser "defenseclaw-hook.exe"
+    $prior = Join-Path $LifecycleCloser "prior-defenseclaw-hook.exe"
+    if (-not (Test-Path -LiteralPath $guard -PathType Leaf) -or (Get-Sha256 $guard) -ne $guardSHA256 -or
+        -not (Test-Path -LiteralPath $prior -PathType Leaf) -or (Get-Sha256 $prior) -ne $priorSHA256) {
+        throw "The lifecycle hook transition copies are missing or changed"
+    }
+    return @{ GuardSHA256 = $guardSHA256; PriorSHA256 = $priorSHA256; Guard = $guard; Prior = $prior }
+}
+
+function Save-LifecycleHookTransition([string]$Slot) {
+    # The 1.0.4 hook remains callable at the agents' fixed path while the
+    # prior release's files, data and gateway are restored. Keep both hook
+    # images beside the durable lifecycle record before the snapshot moves.
+    $marker = Join-Path $Slot "HOOK_GUARD"
+    if (-not (Test-Path -LiteralPath $marker -PathType Leaf)) { return "" }
+    $guardSHA256 = Read-Text $marker
+    $priorSHA256 = Read-Text (Join-Path $Slot "HOOK_FIRST")
+    $sourceGuard = Join-Path $Slot "closer\defenseclaw-hook.exe"
+    $sourcePrior = Join-Path $Slot "bin\defenseclaw-hook.exe"
+    if ($guardSHA256 -cnotmatch '^[0-9a-f]{64}$' -or $priorSHA256 -cnotmatch '^[0-9a-f]{64}$' -or
+        -not (Test-Path -LiteralPath $sourceGuard -PathType Leaf) -or (Get-Sha256 $sourceGuard) -ne $guardSHA256 -or
+        -not (Test-Path -LiteralPath $sourcePrior -PathType Leaf) -or (Get-Sha256 $sourcePrior) -ne $priorSHA256) {
+        throw "The rollback hook guard or previous hook copy is missing or changed"
+    }
+    $manifest = Read-LifecycleManifest
+    if (-not $manifest) { throw "The rollback hook guard has no lifecycle record" }
+    $expected = ConvertTo-Map (Get-Field $manifest "Bins")
+    if ($expected.Contains("defenseclaw-hook.exe") -and $expected["defenseclaw-hook.exe"] -ne $priorSHA256) {
+        throw "The rollback hook copy differs from the recorded prior install"
+    }
+    New-Item -ItemType Directory -Path $LifecycleCloser -Force -ErrorAction Stop | Out-Null
+    Install-File $sourceGuard (Join-Path $LifecycleCloser "defenseclaw-hook.exe")
+    Install-File $sourcePrior (Join-Path $LifecycleCloser "prior-defenseclaw-hook.exe")
+    $copy = [ordered]@{}
+    foreach ($property in $manifest.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+    $copy["TransitionHookSHA256"] = $guardSHA256
+    $copy["TransitionPriorHookSHA256"] = $priorSHA256
+    Write-DurableText $LifecycleManifest ($copy | ConvertTo-Json -Depth 4)
+    $transition = Get-LifecycleHookTransition (Read-LifecycleManifest)
+    $live = Join-Path $BinDir "defenseclaw-hook.exe"
+    if (-not (Test-Path -LiteralPath $live -PathType Leaf) -or (Get-Sha256 $live) -ne $guardSHA256) {
+        Install-File $transition.Guard $live
+    }
+    if ((Get-Sha256 $live) -ne $guardSHA256) { throw "The checked hook guard was not published" }
+    return $guardSHA256
+}
+
+function Restore-PriorHookAfterProof($Manifest) {
+    $transition = Get-LifecycleHookTransition $Manifest
+    if (-not $transition) { return }
+    $live = Join-Path $BinDir "defenseclaw-hook.exe"
+    if ((Get-Sha256 $live) -ne $transition.GuardSHA256) {
+        throw "The checked hook guard changed before the restored gateway was proven"
+    }
+    Install-File $transition.Prior $live
+    if ((Get-Sha256 $live) -ne $transition.PriorSHA256) {
+        throw "The prior hook was not published after the restored gateway was proven"
+    }
+}
+
+function Ensure-LifecycleHookGuard($Transition) {
+    $live = Join-Path $BinDir "defenseclaw-hook.exe"
+    $digest = Get-OptionalSha256 $live
+    if ($digest -eq $Transition.GuardSHA256) { return }
+    # A process may stop between publishing the prior hook after proof and
+    # retiring the record. Reinstall the checked guard before retrying proof.
+    if ($digest -ne $Transition.PriorSHA256) {
+        throw "The registered hook changed during lifecycle recovery: $live"
+    }
+    Install-File $Transition.Guard $live
+    if ((Get-Sha256 $live) -ne $Transition.GuardSHA256) {
+        throw "The checked hook guard was not restored during lifecycle recovery"
+    }
+}
+
 function Close-AllHooks([string[]]$Gateways) {
     # Close every installed hook (refresh-fail-modes --closed) with the first
     # of $Gateways that can; true once one did.
@@ -2088,7 +2183,7 @@ function Close-AllHooks([string[]]$Gateways) {
 }
 
 function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest, [bool]$RequireProtected = $true,
-        [string]$SetupRoot = "", [switch]$AllowLegacyStatus) {
+        [string]$SetupRoot = "", [switch]$AllowLegacyStatus, [string]$TransitionHookSHA256 = "") {
     # Step 3: what is wrong with the live install, empty when it is proven.
     # $Bins: the SHA-256 each managed binary must have. $GatewayRunning: the
     # gateway must run from this install. $Connectors: those it must guard.
@@ -2103,6 +2198,12 @@ function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors
     foreach ($name in $ManagedBinaries) {
         $live = Join-Path $BinDir $name
         $present = Test-Path -LiteralPath $live -PathType Leaf
+        if ($name -eq "defenseclaw-hook.exe" -and $TransitionHookSHA256) {
+            if (-not $present -or (Get-Sha256 $live) -ne $TransitionHookSHA256) {
+                $problems += "$live is not the checked rollback hook guard"
+            }
+            continue
+        }
         if ($expected.Contains($name)) {
             if (-not $present) { $problems += "$live is missing" }
             elseif ((Get-Sha256 $live) -ne $expected[$name]) { $problems += "$live is not the expected $name" }
@@ -2158,7 +2259,8 @@ function Set-RecoveryPending([string]$Flag = "RestorePending") {
 }
 
 function Wait-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest,
-        [bool]$RequireProtected = $true, [string]$SetupRoot = "", [switch]$AllowLegacyStatus) {
+        [bool]$RequireProtected = $true, [string]$SetupRoot = "", [switch]$AllowLegacyStatus,
+        [string]$TransitionHookSHA256 = "") {
     # Test-LifecycleProof, asked again for a while when a running gateway is
     # part of the proof: a gateway that just passed its start readiness can
     # take a few seconds to report its connectors and its policy generation.
@@ -2167,7 +2269,7 @@ function Wait-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors
     if ($null -eq $limit) { $limit = 30 }
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
-        $problems = @(Test-LifecycleProof $Bins $GatewayRunning $Connectors -RequireDigest:$RequireDigest -RequireProtected $RequireProtected -SetupRoot $SetupRoot -AllowLegacyStatus:$AllowLegacyStatus)
+        $problems = @(Test-LifecycleProof $Bins $GatewayRunning $Connectors -RequireDigest:$RequireDigest -RequireProtected $RequireProtected -SetupRoot $SetupRoot -AllowLegacyStatus:$AllowLegacyStatus -TransitionHookSHA256 $TransitionHookSHA256)
         if (-not $problems.Count -or -not $GatewayRunning -or $clock.Elapsed.TotalSeconds -ge $limit) { return $problems }
         Start-Sleep -Seconds 2
     }
@@ -2218,7 +2320,16 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     $protected = [bool](Get-Field $Manifest "BinDirProtected")
     $setupRoot = [string](Get-Field $Manifest "SetupRoot")
     $allowLegacyStatus = [string](Get-Field $Manifest "From") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
-    $problems = @(Wait-LifecycleProof $bins $running @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus)
+    # Restore-Slot may have added the durable transition after the caller
+    # read its record, so prove the currently recorded guard before release.
+    $transitionRecord = if (Get-Field $Manifest "Slot") { Read-LifecycleManifest } else { $Manifest }
+    $transition = $null
+    if ((Get-Field $transitionRecord "TransitionHookSHA256") -or (Get-Field $transitionRecord "TransitionPriorHookSHA256")) {
+        $transition = Get-LifecycleHookTransition $transitionRecord
+    }
+    if ($transition) { Ensure-LifecycleHookGuard $transition }
+    $guardSHA256 = if ($transition) { [string]$transition.GuardSHA256 } else { "" }
+    $problems = @(Wait-LifecycleProof $bins $running @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus -TransitionHookSHA256 $guardSHA256)
     $drift = @()
     $configChanged = $false
     $config = [string](Get-Field $Manifest "Config")
@@ -2239,7 +2350,7 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     # roster that cannot be read keeps every connector.
     $unguarded = @()
     if ($Outlived -and $problems.Count -and
-        -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus).Count) {
+        -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus -TransitionHookSHA256 $guardSHA256).Count) {
         # Only connectors the record names are not guarded.
         $report = if ($setupRoot) { $null } else { Get-GatewayHealthReport (Join-Path $BinDir "defenseclaw-gateway.exe") }
         $listed = @(@(Get-Field (Get-Field $report "health") "connectors") | ForEach-Object { [string](Get-Field $_ "name") })
@@ -2289,14 +2400,26 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
         throw ("The previous install is not proven back: $($problems -join '; '). The record of it stays in $LifecycleManifest and the install stays locked; " +
             "fix the cause, then run: $(Get-LifecycleNextStep)$accept")
     }
+    if ($transition) {
+        if (-not $running) {
+            Set-RecoveryPending
+            throw "The prior gateway is still stopped; the checked hook guard and lifecycle record remain until gateway readiness can be proven"
+        }
+        Restore-PriorHookAfterProof $transitionRecord
+        $finalProblems = @(Test-LifecycleProof $bins $true @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus)
+        if ($finalProblems.Count) {
+            Set-RecoveryPending
+            throw "The prior hook was restored but the gateway proof changed: $($finalProblems -join '; ')"
+        }
+    }
     Remove-LifecycleManifest
 }
 
 function Save-BinarySnapshot {
     # Only immutable binaries are copied while the gateway runs. The new
     # hook understands .install.lock, including when upgrading from 1.0.2.
-    # HOOK_FIRST lets interrupted-run recovery restore it before any data
-    # snapshot or process shutdown has started.
+    # HOOK_FIRST and HOOK_GUARD let recovery hold the checked new hook until
+    # the old gateway and connector set have been restored and proven.
     New-InstallDirectory $Snap
     # Recovery needs the running state even if copying the snapshot is
     # interrupted before COMPLETE can be written.
@@ -2485,8 +2608,8 @@ function Install-HookFirst([string]$Slot) {
     # more on a busy host. A 1.0.2 hook takes the stopped gateway for an
     # operator stop and tries to start it (GAP-0196); the new hook reads
     # .install.lock, waits for the install and names it. So the new hook goes
-    # in as soon as the rollback copy holds the old one. HOOK_FIRST, written
-    # once that copy is whole, tells Undo-Snapshot to put the old hook back.
+    # in as soon as the rollback copy holds the old one. HOOK_FIRST and
+    # HOOK_GUARD record both images for recovery through the old gateway proof.
     # Until the new gateway is published, the gateways in place are older and
     # cannot close the hooks, so the slot first keeps the staged (checked)
     # gateway in closer\: a run that stops in that window (killed, or a
@@ -2508,7 +2631,10 @@ function Install-HookFirst([string]$Slot) {
         throw "Could not keep a whole rollback copy of $live in $(Split-Path -Parent $saved) (an antivirus may have removed it); nothing was changed. Run the installer again"
     }
     Save-HookCloser $Slot $gateway
-    Set-Content -LiteralPath (Join-Path $Slot "HOOK_FIRST") -Value $old -Encoding Ascii
+    # Both digests are durable before the replacement is published. A retry
+    # can hold the checked new hook while it restores the prior gateway.
+    Write-DurableText (Join-Path $Slot "HOOK_FIRST") $old
+    Write-DurableText (Join-Path $Slot "HOOK_GUARD") (Get-Sha256 $staged)
     Install-File $staged $live
     Wait-PreviousHookExit ([DateTime]::UtcNow)
 }
@@ -2555,6 +2681,16 @@ function Save-HookCloser([string]$Slot, [string]$Gateway) {
     } catch {
         throw ("Could not keep the new gateway in $(Split-Path -Parent $closer), which closes the agent hooks if this install stops " +
             "unfinished ($($_.Exception.Message)); the installed hook was left as it was")
+    }
+    $stagedHook = Join-Path $Staging "bin\defenseclaw-hook.exe"
+    $guard = Join-Path $Slot "closer\defenseclaw-hook.exe"
+    try {
+        Copy-Item -LiteralPath $stagedHook -Destination $guard -Force -ErrorAction Stop
+        if ((Get-Sha256 $guard) -ne (Get-Sha256 $stagedHook)) {
+            throw "the kept hook differs from the checked release"
+        }
+    } catch {
+        throw "Could not keep the checked hook guard in $guard; the installed hook was left as it was: $($_.Exception.Message)"
     }
 }
 
@@ -2722,12 +2858,17 @@ function Undo-HookFirst([string]$Slot) {
 }
 
 function Undo-Snapshot([string]$Slot) {
-    # Put back what an unfinished Save-Snapshot moved. The slot holds the
-    # only copy of the previous hook until it is back in place: when a
-    # running hook refuses that switch, the slot stays and the error says so,
-    # and the next run finishes the undo (Resume-InterruptedRun).
+    # Put back what an unfinished Save-Snapshot moved. Keep both hook images
+    # beside the lifecycle record when the slot is consumed; a later proof
+    # returns the old image to its registered path.
     $hookRefused = ""
-    try { Undo-HookFirst $Slot } catch { $hookRefused = $_.Exception.Message }
+    try {
+        if (Test-Path -LiteralPath (Join-Path $Slot "HOOK_GUARD") -PathType Leaf) {
+            [void](Save-LifecycleHookTransition $Slot)
+        } else {
+            Undo-HookFirst $Slot
+        }
+    } catch { $hookRefused = $_.Exception.Message }
     if ((Test-Path -LiteralPath (Join-Path $Slot "venv")) -and -not (Test-Path -LiteralPath $Venv)) { Move-Path (Join-Path $Slot "venv") $Venv 60 }
     if ((Test-Path -LiteralPath (Join-Path $Slot "installer")) -and -not (Test-Path -LiteralPath $InstallerDir)) {
         Move-Path (Join-Path $Slot "installer") $InstallerDir
@@ -2841,7 +2982,13 @@ function Restart-Old([switch]$KeepStopped) {
     if ($earlySlot -and (Test-Path -LiteralPath $earlySlot) -and -not (Test-Path -LiteralPath (Join-Path $earlySlot "COMPLETE"))) {
         Undo-EarlySnapshot $earlySlot
     } elseif ($earlySlot -and (Test-Path -LiteralPath (Join-Path $earlySlot "HOOK_FIRST"))) {
-        try { Undo-HookFirst $earlySlot } catch {
+        try {
+            if (Test-Path -LiteralPath (Join-Path $earlySlot "HOOK_GUARD") -PathType Leaf) {
+                [void](Save-LifecycleHookTransition $earlySlot)
+            } else {
+                Undo-HookFirst $earlySlot
+            }
+        } catch {
             Write-Err "Could not put the previous hook back: $($_.Exception.Message)"
             $Run.RestorePending = $true
         }
@@ -3093,6 +3240,7 @@ function Restore-Slot([string]$Slot) {
     # resumable without moving already restored data aside a second time.
     $planPath = Join-Path $Slot "RESTORE.json"
     $failed = ""
+    $guardSHA256 = ""
     $digest = {
         param([string]$Path)
         $root = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
@@ -3116,12 +3264,15 @@ function Restore-Slot([string]$Slot) {
         else { [IO.File]::Move("$planPath.new", $planPath) }
     }
     try {
+        if (Test-Path -LiteralPath (Join-Path $Slot "HOOK_GUARD") -PathType Leaf) {
+            $guardSHA256 = Save-LifecycleHookTransition $Slot
+        }
         # Programs first: a program that cannot go back (a hook of the failed
         # install still running refuses its in-place switch) stops the
         # restore before any data or environment moves, with the slot and its
         # COMPLETE marker kept. Restore-BinDir is idempotent, so a resumed
         # restore runs it again and proves the bytes.
-        Restore-BinDir (Join-Path $Slot "bin")
+        Restore-BinDir (Join-Path $Slot "bin") $guardSHA256
         if (Test-Path -LiteralPath $planPath) {
             $plan = [IO.File]::ReadAllText($planPath) | ConvertFrom-Json -ErrorAction Stop
             if ($plan.Schema -ne 1 -or $plan.FailedName -notmatch '^\.failed-[A-Za-z0-9-]+$') { throw "Invalid restore plan at $planPath" }
@@ -3175,7 +3326,7 @@ function Restore-Slot([string]$Slot) {
             & $save
         }
         Restore-ExternalConfig $Slot
-        Assert-BinDirRestored (Join-Path $Slot "bin")
+        Assert-BinDirRestored (Join-Path $Slot "bin") $guardSHA256
         foreach ($move in $plan.Moves) {
             if ((& $digest $move.To) -cne $move.Digest) { throw "Restored contents changed: $($move.To)" }
         }
@@ -3355,7 +3506,7 @@ function Resume-InterruptedRun {
         foreach ($slot in @((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"))) {
             if (-not (Test-Path -LiteralPath $slot)) { continue }
             Write-Warn "An earlier install finished but was interrupted while it cleaned up; finishing that"
-            foreach ($marker in @("COMPLETE", "HOOK_FIRST", "GATEWAY_RESTART_UNPROVEN")) {
+            foreach ($marker in @("COMPLETE", "HOOK_FIRST", "HOOK_GUARD", "GATEWAY_RESTART_UNPROVEN")) {
                 Remove-Item -LiteralPath (Join-Path $slot $marker) -Force -ErrorAction SilentlyContinue
             }
             Invoke-Quietly { Remove-Tree (Join-Path $slot "closer") }
@@ -3510,6 +3661,18 @@ function Resume-InterruptedRun {
         }
     }
     $recordedBins = if ($manifest) { ConvertTo-Map (Get-Field $manifest "Bins") } else { @{} }
+    # A consumed snapshot may leave the checked new hook at the fixed path
+    # until this recovery proves the old gateway. It is the one intentional
+    # binary difference from the recorded previous install.
+    $transition = $null
+    if ($manifest -and ($manifest.PSObject.Properties["TransitionHookSHA256"] -or
+        $manifest.PSObject.Properties["TransitionPriorHookSHA256"])) {
+        $transition = Get-LifecycleHookTransition $manifest
+    }
+    if ($transition) {
+        Ensure-LifecycleHookGuard $transition
+        $recordedBins["defenseclaw-hook.exe"] = $transition.GuardSHA256
+    }
     $liveBinNames = @()
     if ($manifest) { $liveBinNames = @($ManagedBinaries | Where-Object { Test-Path -LiteralPath (Join-Path $BinDir $_) -PathType Leaf }) }
     if ($manifest -and $recordedBins.Count -and -not $liveBinNames.Count -and -not (Find-SetupInstall)) {
@@ -3733,6 +3896,7 @@ function Complete-StoppedConnectorReconcile {
 function Complete-Swap {
     # The new install is live: a run killed from here on must not restore the old one.
     Remove-Item -LiteralPath (Join-Path $Snap "COMPLETE") -Force
+    Remove-Item -LiteralPath (Join-Path $Snap "HOOK_GUARD") -Force -ErrorAction SilentlyContinue
     # Deleting the old venv and staging copies takes a minute or two on Windows (GAP-1347).
     # A first install has no previous install, only its staging copies (GAP-1827).
     if ($PrevVersion) { Write-Info "Cleaning up the previous install's files (this can take a minute or two)" }

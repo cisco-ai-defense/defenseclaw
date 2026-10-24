@@ -804,6 +804,8 @@ def test_the_locked_package_install_is_retried_with_backoff() -> None:
 # transaction, run with the transaction's record and proof stubbed out (the
 # transaction has its own tests below, fix/r104-windows).
 _NO_TXN = (
+    "function Write-DurableText { param($Path, $Text) [IO.File]::WriteAllText($Path, $Text) }\n"
+    "function Save-LifecycleHookTransition { param($Slot) Undo-HookFirst $Slot; return '' }\n"
     "function Write-LifecycleManifest { return $null }\n"
     "function Read-LifecycleManifest { return $null }\n"
     "function New-RecoveryManifest { return $null }\n"
@@ -3779,13 +3781,115 @@ def test_the_new_hook_goes_in_before_the_data_copy() -> None:
     assert positions == sorted(positions), save
     first = _ps1_function("Install-HookFirst")
     assert first.index("Save-HookCloser $Slot $gateway") < first.index('(Join-Path $Slot "HOOK_FIRST")') < first.index("Install-File $staged $live")
-    # An unfinished snapshot puts the old hook back before anything else.
+    # A rollback keeps the checked hook at the registered path until the
+    # restored gateway has passed its readiness and connector proof.
     undo = _ps1_function("Undo-Snapshot")
-    assert undo.index("Undo-HookFirst $Slot") < undo.index("Move-Path")
+    assert undo.index("Save-LifecycleHookTransition $Slot") < undo.index("Move-Path")
     install = _ps1_function("Invoke-Install")
     assert install.index("Save-BinarySnapshot") < install.index("if (-not (Stop-Gateway))")
-    # A finished one is restored with the rest of the bin folder.
-    assert 'Restore-BinDir (Join-Path $Slot "bin")' in _ps1_function("Restore-Slot")
+    restore = _ps1_function("Restore-Slot")
+    assert restore.index("Save-LifecycleHookTransition $Slot") < restore.index('Restore-BinDir (Join-Path $Slot "bin")')
+    proof = _ps1_function("Assert-LifecycleRestored")
+    assert proof.index("Wait-LifecycleProof") < proof.index("Restore-PriorHookAfterProof")
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("prior_version", ["0.8.10", "1.0.0", "1.0.2", "1.0.3"])
+def test_windows_rollback_holds_checked_hook_until_prior_gateway_is_proven(tmp_path: Path, prior_version: str) -> None:
+    # The registered 1.0.2 hook answered open while Restore-BinDir copied it
+    # back ahead of the gateway. This exercises the real binary restore and
+    # lifecycle proof with all supported prior-release families. A failed
+    # proof must leave the checked new hook and durable record for a retry.
+    transition_names = (
+        "Get-LifecycleHookTransition", "Save-LifecycleHookTransition", "Restore-PriorHookAfterProof",
+        "Ensure-LifecycleHookGuard",
+    )
+    optional_transition = "\n".join(
+        _ps1_function(name) for name in transition_names if f"function {name}(" in _text()
+    )
+    body = (
+        _ps1_function("Read-Text")
+        + _ps1_function("Restore-BinDir")
+        + _ps1_function("Assert-BinDirRestored")
+        + _ps1_function("Undo-HookFirst")
+        + _ps1_function("Undo-Snapshot")
+        + optional_transition
+        + r"""
+$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')
+$Slot = Join-Path $DataDir 'previous.new'
+New-Item -ItemType Directory -Path (Join-Path $Slot 'bin'), (Join-Path $Slot 'closer') -Force | Out-Null
+function Install-File { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+function Remove-Aside { param($Path) Remove-Item -LiteralPath $Path -Force }
+[IO.File]::WriteAllText((Join-Path $Slot 'bin\defenseclaw-gateway.exe'), 'old gateway')
+[IO.File]::WriteAllText((Join-Path $Slot 'bin\defenseclaw-hook.exe'), 'old hook')
+[IO.File]::WriteAllText((Join-Path $Slot 'closer\defenseclaw-hook.exe'), 'checked new hook')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'failed new gateway')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-hook.exe'), 'checked new hook')
+$priorSHA = Get-Sha256 (Join-Path $Slot 'bin\defenseclaw-hook.exe')
+$guardSHA = Get-Sha256 (Join-Path $Slot 'closer\defenseclaw-hook.exe')
+$gatewaySHA = Get-Sha256 (Join-Path $Slot 'bin\defenseclaw-gateway.exe')
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $Slot 'HOOK_GUARD'), $guardSHA)
+$state = [ordered]@{ Schema = 1; Operation = 'upgrade'; From = '__PRIOR__'; To = '1.0.4'; Slot = $Slot
+    Bins = [ordered]@{ 'defenseclaw-gateway.exe' = $gatewaySHA
+        'defenseclaw-hook.exe' = $priorSHA }; GatewayWasRunning = $true; Connectors = @(); Config = ''
+    ExternalConfig = ''; ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = ''; Committed = $false }
+Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+$recordBeforeRestore = Read-LifecycleManifest
+$transitionCommand = Get-Command Save-LifecycleHookTransition -ErrorAction SilentlyContinue
+$guardForRestore = if ($transitionCommand) { Save-LifecycleHookTransition $Slot } else { '' }
+Restore-BinDir (Join-Path $Slot 'bin') $guardForRestore
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+    throw 'the registered prior hook ran before gateway readiness'
+}
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-gateway.exe')) -ne $gatewaySHA) { throw 'prior gateway not restored' }
+$failed = $false
+try { Assert-LifecycleRestored $recordBeforeRestore } catch { $failed = $true }
+if (-not $failed -or -not (Test-Path -LiteralPath $LifecycleManifest) -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+    throw 'unproven restore released the registered prior hook or lifecycle record'
+}
+# Model a process stop immediately after prior-hook publication, before the
+# record is retired. The retry must put the checked guard back before proof.
+Copy-Item -LiteralPath (Join-Path $Slot 'bin\defenseclaw-hook.exe') -Destination (Join-Path $BinDir 'defenseclaw-hook.exe') -Force
+try { Assert-LifecycleRestored $recordBeforeRestore } catch { }
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest)) { throw 'interrupted publication did not restore the guard' }
+$script:gateway = [pscustomobject]@{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+$script:digestHelp = $false
+function Invoke-Native { param($FilePath, $Arguments, [switch]$Quiet) if ($script:gateway) { return 0 }; return 1 }
+Assert-LifecycleRestored $recordBeforeRestore
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Test-Path -LiteralPath $LifecycleManifest)) { throw 'proved rollback did not finish the hook transition' }
+# The unfinished-snapshot undo follows the same transition. Its snapshot is
+# consumed before the caller proves the prior gateway, so the record and both
+# hook copies must survive in .lifecycle-closer.
+$early = Join-Path $DataDir 'early.new'
+New-Item -ItemType Directory -Path (Join-Path $early 'bin'), (Join-Path $early 'closer') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $Slot 'bin\defenseclaw-hook.exe') -Destination (Join-Path $early 'bin\defenseclaw-hook.exe')
+Copy-Item -LiteralPath (Join-Path $Slot 'closer\defenseclaw-hook.exe') -Destination (Join-Path $early 'closer\defenseclaw-hook.exe')
+Copy-Item -LiteralPath (Join-Path $early 'closer\defenseclaw-hook.exe') -Destination (Join-Path $BinDir 'defenseclaw-hook.exe') -Force
+[IO.File]::WriteAllText((Join-Path $early 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $early 'HOOK_GUARD'), $guardSHA)
+$state['Slot'] = $early
+Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
+$earlyRecord = Read-LifecycleManifest
+$Venv = Join-Path $DataDir '.venv'
+$InstallerDir = Join-Path $DataDir 'installer'
+function Remove-Tree { param($Path) Remove-Item -LiteralPath $Path -Recurse -Force }
+$script:gateway = $null
+Undo-Snapshot $early
+if ((Test-Path -LiteralPath $early) -or (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest)) { throw 'early undo released the prior hook before gateway proof' }
+$script:gateway = [pscustomobject]@{ Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }
+Assert-LifecycleRestored $earlyRecord
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Test-Path -LiteralPath $LifecycleManifest)) { throw 'proved early undo did not finish the hook transition' }
+'OK'
+"""
+    ).replace("__PRIOR__", prior_version)
+    result = _txn_harness(tmp_path, body)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
 def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits() -> None:
@@ -4055,6 +4159,7 @@ def test_install_hook_first_swaps_the_hook_and_undo_puts_it_back(tmp_path: Path,
         + _bin_dir_functions()
         + _ps1_function("Read-Text")
         + _ps1_function("Get-Sha256")
+        + _ps1_function("Write-DurableText")
         + _ps1_function("Install-HookFirst")
         + _ps1_function("Save-HookCloser")
         + _ps1_function("Undo-HookFirst")
@@ -5261,6 +5366,7 @@ def _txn_harness(tmp_path: Path, body: str) -> subprocess.CompletedProcess:
     script = tmp_path / "txn.ps1"
     script.write_text(
         "Set-StrictMode -Version Latest\n$ErrorActionPreference = 'Stop'\n"
+        "if ($PSVersionTable.PSVersion.Major -lt 6) { Import-Module (Join-Path $PSHOME 'Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop }\n"
         f"$DataDir = '{data}'\n$BinDir = '{bin_dir}'\n$Local = ''\n$Setup = $null\n"
         "$ManagedBinaries = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe', 'defenseclaw-acp.exe')\n"
         "$LifecycleManifest = Join-Path $DataDir '.lifecycle-txn.json'\n"
