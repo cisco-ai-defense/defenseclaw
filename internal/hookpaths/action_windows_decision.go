@@ -310,15 +310,16 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 		return false
 	}
 	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
-	switch program {
-	case "echo", "printf", "write-output", "cat", "type", "get-content", "grep", "rg", "head", "tail", "wc":
-		for i, word := range words {
-			if (word == ">" || word == ">>") && i+1 < len(words) {
-				if protected, _ := actionWindowsProtected(words[i+1], cwd, home, false); protected {
-					return true
-				}
+	// A redirect owns its destination regardless of the program's arguments.
+	for i, word := range words {
+		if (word == ">" || word == ">>") && i+1 < len(words) {
+			if protected, _ := actionWindowsProtected(words[i+1], cwd, home, false); protected {
+				return true
 			}
 		}
+	}
+	switch program {
+	case "echo", "printf", "write-output", "cat", "type", "get-content", "grep", "rg", "head", "tail", "wc":
 		return false
 	}
 	if program == "source" || program == "." {
@@ -347,6 +348,24 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 		if program != "pwsh" && program != "powershell" {
 			return false
 		}
+		for i, word := range words {
+			if !strings.EqualFold(word, "-encodedcommand") && !strings.EqualFold(word, "-enc") || i+1 >= len(words) {
+				continue
+			}
+			encoded, err := base64.StdEncoding.DecodeString(words[i+1])
+			if err != nil || len(encoded)%2 != 0 || len(encoded) == 0 {
+				return false
+			}
+			letters := make([]uint16, len(encoded)/2)
+			for j := range letters {
+				letters[j] = uint16(encoded[j*2]) | uint16(encoded[j*2+1])<<8
+			}
+			return actionWindowsResolvedProtectedTarget(string(utf16.Decode(letters)), cwd, home, depth+1)
+		}
+		return false
+	}
+	if !actionWindowsWriteProgram(program) {
+		return false
 	}
 	for i, word := range words {
 		if actionWindowsPathPosition(program, i, words) {
@@ -358,20 +377,16 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 				}
 			}
 		}
-		if !strings.EqualFold(word, "-encodedcommand") && !strings.EqualFold(word, "-enc") || i+1 >= len(words) {
-			continue
-		}
-		encoded, err := base64.StdEncoding.DecodeString(words[i+1])
-		if err != nil || len(encoded)%2 != 0 || len(encoded) == 0 {
-			continue
-		}
-		letters := make([]uint16, len(encoded)/2)
-		for j := range letters {
-			letters[j] = uint16(encoded[j*2]) | uint16(encoded[j*2+1])<<8
-		}
-		if actionWindowsResolvedProtectedTarget(string(utf16.Decode(letters)), cwd, home, depth+1) {
-			return true
-		}
+	}
+	return false
+}
+
+func actionWindowsWriteProgram(program string) bool {
+	switch program {
+	case "add-content", "set-content", "out-file", "clear-content", "copy-item", "move-item",
+		"remove-item", "new-item", "rename-item", "tee-object", "copy", "move", "del",
+		"erase", "rm", "unlink", "truncate", "tee":
+		return true
 	}
 	return false
 }
@@ -619,6 +634,35 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 func actionWindowsPathPosition(program string, index int, words []string) bool {
 	switch program {
 	case "echo", "printf", "write-output":
+		return false
+	case "copy-item", "copy":
+		if index == 0 || strings.HasPrefix(words[index], "-") {
+			return false
+		}
+		sourceSeen := false
+		for i := 1; i <= index; i++ {
+			word := strings.ToLower(words[i])
+			switch word {
+			case "-destination", "-dest":
+				return i+1 == index
+			case "-path", "-literalpath":
+				if i+1 == index {
+					return false
+				}
+				i++
+				sourceSeen = true
+				continue
+			case "-force", "-recurse":
+				continue
+			}
+			if strings.HasPrefix(word, "-") {
+				return false
+			}
+			if i == index {
+				return sourceSeen
+			}
+			sourceSeen = true
+		}
 		return false
 	case "add-content", "set-content", "out-file":
 		if index == 0 || strings.HasPrefix(words[index], "-") {

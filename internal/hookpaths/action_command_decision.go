@@ -38,11 +38,9 @@ func ActionCommandDecision(command, cwd, home string) string {
 	if actionWindowsHome(home) && actionWindowsDotNetFileCommand(command, cwd, home, 0) {
 		return "protected-target"
 	}
-	if ActionCommandAuditReason(command, cwd, home) != "" {
-		if actionWindowsHome(home) && actionWindowsResolvedProtectedTarget(command, cwd, home, 0) ||
-			!actionWindowsHome(home) && actionResolvedProtectedTarget(command, cwd, home) {
-			return "protected-target"
-		}
+	if actionWindowsHome(home) && actionWindowsResolvedProtectedTarget(command, cwd, home, 0) ||
+		!actionWindowsHome(home) && actionResolvedProtectedTarget(command, cwd, home) {
+		return "protected-target"
 	}
 	return ""
 }
@@ -333,6 +331,7 @@ func actionResolvedProtectedTarget(command, cwd, home string) bool {
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
+	scannable := []byte(command)
 	if file, ok := parseShell(command); ok {
 		values := actionValues{"HOME": home, "PWD": cwd}
 		for _, stmt := range file.Stmts {
@@ -350,11 +349,41 @@ func actionResolvedProtectedTarget(command, cwd, home string) bool {
 		if actionOnlyReadOnlyCommands(file, home) {
 			return false
 		}
-		if actionScriptArgumentsAreData(file, cwd, home) {
+		// Mask only the span of an inert invocation. A later command still
+		// contributes its own target, even when the same pathname was data
+		// in this one. Command substitutions remain executable effects.
+		syntax.Walk(file, func(node syntax.Node) bool {
+			stmt, ok := node.(*syntax.Stmt)
+			if !ok || len(stmt.Redirs) != 0 {
+				return true
+			}
+			call, ok := stmt.Cmd.(*syntax.CallExpr)
+			if !ok {
+				return true
+			}
+			for _, arg := range call.Args {
+				if wordHasCommandSubstitution(arg) {
+					return true
+				}
+			}
+			one := &syntax.File{Stmts: []*syntax.Stmt{stmt}}
+			if !actionScriptArgumentsAreData(one, cwd, home) {
+				return true
+			}
+			start, end := int(stmt.Pos().Offset()), int(stmt.End().Offset())
+			if start < 0 || end > len(scannable) || start >= end {
+				return true
+			}
+			for i := start; i < end; i++ {
+				scannable[i] = ' '
+			}
 			return false
-		}
+		})
 	}
-	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
+	if actionCommandDecision(command, cwd, home, 0) == "" {
+		return false
+	}
+	text := strings.ReplaceAll(strings.ReplaceAll(string(scannable), "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, match := range unprovenPathToken.FindAllString(text, 513) {
 		if len(match) > MaxWriteTargetPathBytes || match == "~" || match == "." || match == ".." {
 			continue

@@ -77,6 +77,34 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 	}
 }
 
+func TestBalancedActionEffectRolesIndependent(t *testing.T) {
+	home, cwd := r104ReviewHome(t)
+	key := filepath.Join(home, ".ssh", "authorized_keys")
+	if err := os.Symlink(key, filepath.Join(cwd, "effect-alias")); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, command string
+		protected     bool
+	}{
+		{"unbound output with path data", `echo marker >> "$out"; printf '%s' ` + key, false},
+		{"build with path data", `npm test; printf '%s' ` + key, false},
+		{"read with uncertain neighbor", `cat ` + key + `; npm test`, false},
+		{"script argument with neighbor", `python build.py ` + key + `; git status`, false},
+		{"literal destination after build", `npm test; echo marker >> ` + key, true},
+		{"alias destination after build", `npm test; echo marker >> effect-alias`, true},
+		{"literal destination after data", `printf '%s' ` + key + `; echo marker >> ` + key, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for route, denied := range r104ReviewProtectedWrite(t, tc.command, cwd, home) {
+				if denied != tc.protected {
+					t.Errorf("route %d: persistence=%v, want %v for %q", route, denied, tc.protected, tc.command)
+				}
+			}
+		})
+	}
+}
+
 func TestBalancedActionUncertaintyIsAuditOnly(t *testing.T) {
 	home, cwd := r104ReviewHome(t)
 	input := actionfacts.Input{Tool: "Bash", Command: "git merge-base HEAD HEAD", CWD: cwd, ActiveHome: home}

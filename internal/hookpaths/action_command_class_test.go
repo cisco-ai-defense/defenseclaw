@@ -335,6 +335,28 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 			t.Errorf("protected path used only as data blocked: %q, reason=%q", command, got)
 		}
 	}
+	for _, command := range []string{
+		`Get-ChildItem C:\Users\alice\.ssh\authorized_keys`,
+		`Get-Content C:\Users\alice\.ssh\authorized_keys`,
+		`git status --short C:\Users\alice\.ssh\authorized_keys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("read-only path operand blocked: %q, reason=%q", command, got)
+		}
+	}
+	for _, tc := range []struct {
+		command string
+		block   bool
+	}{
+		{`Copy-Item C:\Users\alice\.ssh\authorized_keys report.txt`, false},
+		{`Copy-Item -Path C:\Users\alice\.ssh\authorized_keys -Destination report.txt`, false},
+		{`Copy-Item report.txt C:\Users\alice\.ssh\authorized_keys`, true},
+		{`Copy-Item -Path report.txt -Destination C:\Users\alice\.ssh\authorized_keys`, true},
+	} {
+		if got := ActionCommandDecision(tc.command, cwd, home) != ""; got != tc.block {
+			t.Errorf("copy destination proof=%v, want %v for %q", got, tc.block, tc.command)
+		}
+	}
 }
 
 func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
