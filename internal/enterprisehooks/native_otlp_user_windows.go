@@ -172,6 +172,20 @@ var windowsAccountMachineWideVariables = []string{
 	"ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
 }
 
+// windowsAccountUserShellFolderValue reads the account's effective AppData
+// root from its loaded profile hive. A signed-out account has no running
+// agent; until its hive is loaded, verification must stay unverified rather
+// than guess the profile's default folder.
+var windowsAccountUserShellFolderValue = func(sid *windows.SID, name string) (string, error) {
+	key, err := registry.OpenKey(registry.USERS, sid.String()+`\`+windowsUserShellFoldersKey, registry.QUERY_VALUE)
+	if err != nil {
+		return "", err
+	}
+	defer key.Close()
+	value, _, err := key.GetStringValue(name)
+	return value, err
+}
+
 // windowsAccountFolderVariable resolves the folder a variable of the
 // account's persistent environment names, the account's own value over the
 // machine's ("" when neither sets it). The profile variables, the
@@ -189,19 +203,43 @@ func windowsAccountFolderVariable(sid *windows.SID, home, name string) (string, 
 	home = filepath.Clean(home)
 	volume := filepath.VolumeName(home)
 	vars := map[string]string{
-		"USERPROFILE":  home,
-		"HOMEDRIVE":    volume,
-		"HOMEPATH":     strings.TrimPrefix(home, volume),
-		"APPDATA":      filepath.Join(home, "AppData", "Roaming"),
-		"LOCALAPPDATA": filepath.Join(home, "AppData", "Local"),
+		"USERPROFILE": home,
+		"HOMEDRIVE":   volume,
+		"HOMEPATH":    strings.TrimPrefix(home, volume),
 	}
 	for _, variable := range windowsAccountMachineWideVariables {
 		if machine := os.Getenv(variable); machine != "" {
 			vars[strings.ToUpper(variable)] = machine
 		}
 	}
-	if account, _, _, err := sid.LookupAccount(""); err == nil && account != "" {
+	account, _, _, err := sid.LookupAccount("")
+	if err == nil && account != "" {
 		vars["USERNAME"] = account
+	}
+	for _, folder := range []struct {
+		variable, shellName, defaultRel string
+	}{
+		{"APPDATA", "AppData", `AppData\Roaming`},
+		{"LOCALAPPDATA", "Local AppData", `AppData\Local`},
+	} {
+		if !strings.Contains(strings.ToUpper(value), "%"+folder.variable+"%") {
+			continue
+		}
+		raw, err := windowsAccountUserShellFolderValue(sid, folder.shellName)
+		if err != nil {
+			return "", fmt.Errorf("the account's %s folder cannot be determined for %s", folder.variable, name)
+		}
+		if account == "" && strings.Contains(strings.ToUpper(raw), "%USERNAME%") {
+			return "", fmt.Errorf("the account's %s folder cannot be determined for %s", folder.variable, name)
+		}
+		redirected, refused := RedirectedAppDataFolder(raw, home, account, folder.defaultRel)
+		if refused != "" {
+			return "", fmt.Errorf("the account's %s folder cannot be checked for %s: %s", folder.variable, name, refused)
+		}
+		if redirected == "" {
+			redirected = filepath.Join(home, folder.defaultRel)
+		}
+		vars[folder.variable] = redirected
 	}
 	value = expandWindowsAccountVariables(value, vars)
 	switch {

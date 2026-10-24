@@ -46,9 +46,8 @@ var apiListenTCP = func(ctx context.Context, addr string) (net.Listener, error) 
 // An inherited socket must be exactly the configured api_bind:api_port — on
 // Linux a mismatch fails closed rather than silently serving the API
 // somewhere the managed config did not name. The macOS plist declares the
-// default address only, which a gateway an administrator moved to another
-// api_port never adopts; it binds that port itself, as it did before launchd
-// held the default one.
+// default address only. A standalone managed gateway must adopt that socket;
+// only other profiles may bind a configured address in its place.
 func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error) {
 	listener, inherited, err := inheritedAPIListener()
 	if err != nil {
@@ -57,7 +56,7 @@ func (a *APIServer) acquireAPIListener(ctx context.Context) (net.Listener, error
 	if inherited {
 		if err := inheritedAddrMatches(listener.Addr(), a.addr); err != nil {
 			_ = listener.Close()
-			if !apiInheritedMismatchBinds {
+			if !apiInheritedMismatchBinds || a.scannerCfg != nil && a.scannerCfg.StandaloneEnterprise() {
 				return nil, err
 			}
 			fmt.Fprintf(os.Stderr, "[sidecar-api] %v; binding the configured address instead\n", err)

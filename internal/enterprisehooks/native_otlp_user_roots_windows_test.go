@@ -286,3 +286,105 @@ func TestWindowsManagedRowResolvesLinkedAgentConfigurations(t *testing.T) {
 		})
 	}
 }
+
+// GAP-1043: Windows resolves APPDATA and LOCALAPPDATA from User Shell Folders,
+// not by appending AppData to USERPROFILE. A per-user setup record may still
+// name the old file after an account moves its known folder.
+func TestWindowsManagedRowCleansRedirectedAppDataNativeOTLP(t *testing.T) {
+	for _, tc := range []struct {
+		name, variable, file, folderVariable, shellValue string
+	}{
+		{"codex roaming", "CODEX_HOME", "config.toml", "APPDATA", "AppData"},
+		{"codex local", "CODEX_HOME", "config.toml", "LOCALAPPDATA", "Local AppData"},
+		{"claudecode roaming", "CLAUDE_CONFIG_DIR", "settings.json", "APPDATA", "AppData"},
+		{"claudecode local", "CLAUDE_CONFIG_DIR", "settings.json", "LOCALAPPDATA", "Local AppData"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWindowsNativeOTLPRootsFixture(t)
+			name := strings.Fields(tc.name)[0]
+			redirected := f.outside(t)
+			f.env[tc.variable] = "%" + tc.folderVariable + "%\\Moved"
+			previousShell := windowsAccountUserShellFolderValue
+			windowsAccountUserShellFolderValue = func(sid *windows.SID, value string) (string, error) {
+				if !sid.Equals(f.sid) {
+					t.Errorf("read another account's User Shell Folders: %s", sid)
+				}
+				if value == tc.shellValue {
+					return redirected, nil
+				}
+				return filepath.Join(f.home, "AppData", "Local"), nil
+			}
+			t.Cleanup(func() { windowsAccountUserShellFolderValue = previousShell })
+
+			currentDir := filepath.Join(redirected, "Moved")
+			current := filepath.Join(currentDir, tc.file)
+			f.writeOwned(t, current, staleWindowsNativeOTLP(f.bearer)[name])
+			setWindowsTestPathExactOwner(t, currentDir, f.sid)
+			recorded := filepath.Join(f.outside(t), tc.file)
+			clean := "model = \"gpt-5\""
+			if name == "claudecode" {
+				clean = `{"model":"opus"}`
+			}
+			f.writeOwned(t, recorded, clean)
+			record, err := json.Marshal(map[string]any{
+				"version": 1, "connector": name, "logical_name": tc.file, "path": recorded, "existed": true,
+				"pristine_sha256": strings.Repeat("0", 64), "captured_at": "2026-10-01T00:00:00Z",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.write(t, connector.UserAgentConfigRecordPath(f.dataDir, name), string(record))
+			// The elevated lane creates temporary directories under the
+			// Administrators group; production repair runs as this account.
+			for _, path := range []string{f.home, f.dataDir, filepath.Join(f.dataDir, "hooks")} {
+				setWindowsTestPathExactOwner(t, path, f.sid)
+			}
+			for _, scope := range []connector.OTLPPathTokenScope{connector.OTLPScopeCodex, connector.OTLPScopeClaude} {
+				token, err := connector.OTLPPathTokenFilePath(f.dataDir, scope)
+				if err != nil {
+					t.Fatal(err)
+				}
+				setWindowsTestPathExactOwner(t, token, f.sid)
+			}
+
+			f.requireRefusal(t, name, tc.variable+" "+tc.file, f.verify(name))
+			f.repairAsAccount(t, name, current)
+			f.requireClean(t, current)
+			if err := f.verify(name); err != nil {
+				t.Fatalf("verify after redirected config repair: %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsManagedRowRefusesUnknownAppDataFolder(t *testing.T) {
+	for _, variable := range []string{"APPDATA", "LOCALAPPDATA"} {
+		t.Run(variable, func(t *testing.T) {
+			f := newWindowsNativeOTLPRootsFixture(t)
+			f.env["CODEX_HOME"] = "%" + variable + "%\\Codex"
+			previousShell := windowsAccountUserShellFolderValue
+			windowsAccountUserShellFolderValue = func(*windows.SID, string) (string, error) {
+				return "", errors.New("profile hive unavailable")
+			}
+			t.Cleanup(func() { windowsAccountUserShellFolderValue = previousShell })
+
+			err := f.verify("codex")
+			if err == nil || !strings.Contains(err.Error(), "CODEX_HOME") || !strings.Contains(err.Error(), "cannot be determined") {
+				t.Fatalf("verify = %v, want unverified when %s is unknown", err, variable)
+			}
+			err = connector.WithUserHomeDir(f.home, func() error {
+				return removeWindowsManagedUserNativeOTLPAsTarget("codex", f.sid, f.home, f.dataDir)
+			})
+			if err == nil {
+				t.Fatal("repair accepted a guessed AppData folder")
+			}
+			token, err := connector.OTLPPathTokenFilePath(f.dataDir, connector.OTLPScopeCodex)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Stat(token); err != nil {
+				t.Fatalf("repair revoked the bearer before checking its effective config: %v", err)
+			}
+		})
+	}
+}

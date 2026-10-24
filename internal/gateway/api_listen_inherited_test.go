@@ -8,12 +8,13 @@ import (
 	"net"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-// GAP-0963: the macOS plist makes launchd hold the default API address. A
-// gateway an administrator moved to another api_port binds that port itself
-// instead of failing; on Linux a socket unit that names another address than
-// the config still fails closed.
+// GAP-0963/1042: launchd holds the default API address. Standalone managed
+// gateways must adopt it; a different profile may still bind its own
+// configured port. A mismatched Linux socket unit always fails closed.
 func TestInheritedAPIListenerOnAnotherAddress(t *testing.T) {
 	restoreAPI, restoreMismatch := inheritedAPIListener, apiInheritedMismatchBinds
 	t.Cleanup(func() { inheritedAPIListener, apiInheritedMismatchBinds = restoreAPI, restoreMismatch })
@@ -40,6 +41,17 @@ func TestInheritedAPIListenerOnAnotherAddress(t *testing.T) {
 	}
 
 	apiInheritedMismatchBinds = true
+	managedCfg := config.DefaultConfig()
+	managedCfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	managedCfg.Enterprise.Profile = "standalone"
+	api.scannerCfg = managedCfg
+	if listener, err := api.acquireAPIListener(context.Background()); err == nil || !strings.Contains(err.Error(), "does not match configured") {
+		if listener != nil {
+			_ = listener.Close()
+		}
+		t.Fatalf("managed launchd socket on another address = %v, want the mismatch refusal", err)
+	}
+	api.scannerCfg = nil
 	listener, err := api.acquireAPIListener(context.Background())
 	if err != nil {
 		t.Fatalf("launchd socket on the default address with another configured port: %v", err)
