@@ -800,6 +800,13 @@ def test_upstream_fail_open_remains_distinct_from_configured_mode(monkeypatch, t
     monkeypatch.setattr(cmd_doctor, "hermes_profile_unsupported_reason", lambda *_args: "")
     monkeypatch.setattr(
         cmd_doctor,
+        "_check_hook_contract_lock",
+        lambda _cfg, _connector, result: cmd_doctor._emit(
+            "pass", "Hook contract", "registered", r=result
+        ),
+    )
+    monkeypatch.setattr(
+        cmd_doctor,
         "_windows_native_hook_check",
         lambda *_args, **_kwargs: WindowsHookCheck("healthy", "registered"),
     )
