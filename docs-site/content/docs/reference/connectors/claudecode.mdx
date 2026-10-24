@@ -115,6 +115,8 @@ The machine-wide drop-in carries one hook contract for every account, not the ve
 
 Thirteen events can block on Claude Code `>=2.1.154, <2.1.219`. From `2.1.219` fourteen can, because `PostToolBatch` joins the list. Only `PreToolUse` supports native ask. `Setup` is observation-only and is not registered. `WorktreeCreate` is not registered, because a handler replaces Claude Code's default worktree creation and must return the new path.
 
+Claude Code's interactive `!` shell mode is outside this hook contract. In the reviewed native CLI, a command entered through `!` ran without a preceding `PreToolUse` or `UserPromptSubmit` event, while the same kind of command through the Bash tool produced `PreToolUse`. DefenseClaw cannot inspect or deny a direct `!` shell command through this connector; host filesystem permissions still apply.
+
 | Event group | DefenseClaw behavior |
 | --- | --- |
 | `PreToolUse` | Evaluates typed tool arguments. Action mode returns a deny, or `permissionDecision: ask`. |
