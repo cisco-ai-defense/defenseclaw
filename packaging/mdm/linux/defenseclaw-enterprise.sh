@@ -1706,7 +1706,7 @@ dc_restore_secret() {
     fi
     dc_restore_detail=$(dc_secret_json_error "$DC_STAGE/secret-restore.json" || true)
     [ -n "$dc_restore_detail" ] || dc_restore_detail=$(head -c 1024 "$DC_STAGE/secret-restore.err" 2>/dev/null || true)
-    dc_log "kept the delivered value of credential $DC_SECRET_NAME: the gateway refused the old one (exit $dc_restore_status): $dc_restore_detail"
+    dc_log "did not put back credential $DC_SECRET_NAME: the gateway refused the undo (exit $dc_restore_status): $dc_restore_detail; the stored value was left unchanged"
     return 1
 }
 

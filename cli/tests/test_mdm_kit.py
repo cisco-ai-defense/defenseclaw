@@ -1106,8 +1106,11 @@ echo "rotated=$(cat "$DC_SECRETS_DIR/ai-key")"
     secret = secrets / "ai-key"
     assert (secret.read_text(encoding="utf-8").strip() if secret.exists() else None) == stored, out
     assert not stage.exists(), "the stage is removed after the put-back"
-    if case in ("confirmed", "absent-in-use"):
-        assert "kept the delivered value of credential ai-key" in (tmp_path / "kit.log").read_text(encoding="utf-8")
+    if case in ("confirmed", "absent-in-use", "admin-changed"):
+        log = (tmp_path / "kit.log").read_text(encoding="utf-8")
+        assert "did not put back credential ai-key" in log and "stored value was left unchanged" in log
+        if case == "admin-changed":
+            assert "credential_changed" in log
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
