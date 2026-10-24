@@ -531,7 +531,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
 		defer dedupeTicket.release()
 		if deduped {
-			writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, copilotDedupedResponse(profile, req, earlier), ""))
+			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -571,19 +571,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			judge.ResetToolJudgeSession(sandboxSessionStateKey(ctx, req.SessionID))
 		}
 		t0 := time.Now()
-		// attemptedWrite covers a started response write. Once
-		// the first write is invoked we must not retry it from the
+		// attemptedWrite covers BOTH "writeJSON returned successfully"
+		// AND "writeJSON started writing and panicked partway". Once
+		// the first writeJSON is invoked we must not retry it from the
 		// defer: the response stream is in an indeterminate state and
 		// a second invocation against a broken writer would just
 		// re-panic (this time uncaught, since the defer is not itself
 		// wrapped in another recover).
 		attemptedWrite := false
-		// finalized guards against a double-emit when post-finalize work panics.
+		// finalized guards against a double-emit when the post-finalize
+		// code (renderAgentHookResponseForProfile / writeJSON) panics.
 		// Without this flag the deferred recover would re-run
 		// finalizeAgentHook, doubling audit rows, hook-outcome metrics,
 		// and the connector telemetry log for a single request.
 		finalized := false
-		var wireResp agentHookResponse
 		// pending is the journal row of a receipt-capable call
 		// (agent_hook_pending.go); its records carry its IDs.
 		var pending *pendingHookOccurrence
@@ -591,10 +592,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				elapsed := time.Since(t0)
-				resp := wireResp
-				if !finalized || attemptedWrite {
-					resp = a.hookPanicResponse(ctx, connectorName, req, b, payload)
-				}
+				resp := a.hookPanicResponse(ctx, connectorName, req, b, payload)
 				if pending != nil && attemptedWrite {
 					// The proposal may have reached the hook; nothing
 					// proves which answer the hook gave.
@@ -625,9 +623,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					// the HTTP server's serving goroutine.
 					func() {
 						defer func() { _ = recover() }()
-						body := a.hookAnswerBody(ctx, profile, connectorName, req, resp, "")
 						attemptedWrite = true
-						writeHookAnswer(w, body)
+						a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, resp))
 					}()
 				}
 			}
@@ -772,7 +769,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// A managed answer is only an evaluated proposal until the hook
 		// commits it to its agent: the audit row, hook_decision and
 		// dedupe get the decision the agent was given (GAP-0286).
-		wireResp = resp
+		wireResp := resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
@@ -809,14 +806,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				fmt.Fprintf(os.Stderr, "[gateway] sandbox tool-call chain finalization failed connector=%s event=%s: %v\n",
 					connectorName, req.HookEventName, err)
 			}
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, pending.ID)
+			wire := renderAgentHookResponseForProfile(profile, wireResp)
+			wire["delivery_receipt"] = pending.ID
 			a.scheduleSandboxHookReceiptRecovery(pending.ID)
 			// The first request is done; a later authenticated receipt owns
 			// this journal row. The bounded recovery pass may now inspect it.
 			pendingHooksInFlight.Delete(pending.ID)
 			finalized = true
 			attemptedWrite = true
-			writeHookAnswer(w, body)
+			a.writeJSON(w, http.StatusOK, wire)
 			return
 		}
 		// Reading or closing the answer can cancel the HTTP request before
@@ -824,10 +822,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// can establish that an unreceipted hook missed that answer.
 		hungUpBeforeAnswer := r.Context().Err() != nil
 		if delivery != nil {
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
 			attemptedWrite = true
 			receipt := delivery.offer(w, func() {
-				writeHookAnswer(w, body)
+				a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
 			})
 			if receipt == hookexec.HookDeliveryReleased {
 				resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
@@ -872,16 +869,29 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 		}
 		a.settlePendingHook(persistCtx, pending, finalization)
-		finalized = true
 		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
+		finalized = true
 		a.recordManagedAIDFailOpenForSelectedNativeHookResult(
 			accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
 		)
 
+		// Mark the write attempt BEFORE invoking writeJSON. A panic
+		// from inside renderAgentHookResponseForProfile or json.Encode
+		// then signals "do not retry from the defer"; the response
+		// stream may already be partially written, and a second
+		// attempt against the same writer would just re-panic.
+		attemptedWrite = true
+
+		// Render the wire response with the connector-specific
+		// top-level field name for the output map (e.g.
+		// "claude_code_output", "codex_output", "hook_output").
+		// Without this projection, agentHookResponse always
+		// renders the output under "hook_output", which Claude
+		// Code and Codex agent CLIs reject. See
+		// renderAgentHookResponse() for the canonical
+		// connector → field-name mapping.
 		if delivery == nil {
-			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp, "")
-			attemptedWrite = true
-			writeHookAnswer(w, body)
+			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
 		}
 	}
 }
@@ -982,7 +992,6 @@ func (a *APIServer) finalizeAgentHook(
 		Result:       envResult,
 		Action:       resp.Action,
 		RawAction:    resp.RawAction,
-		Enforced:     resp.Action == "block",
 		Severity:     resp.Severity,
 		Mode:         resp.Mode,
 		Reason:       hookSourceReason(resp),
@@ -3645,9 +3654,6 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 	case "antigravity":
 		if action == "block" && canonicalEvent(req.HookEventName) == "pretooluse" {
 			return map[string]interface{}{"decision": "deny", "reason": reason}
-		}
-		if action == "confirm" && canonicalEvent(req.HookEventName) == "pretooluse" {
-			return map[string]interface{}{"decision": "force_ask", "reason": reason}
 		}
 	case "kiro":
 		if action == "block" {

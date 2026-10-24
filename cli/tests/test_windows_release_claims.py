@@ -177,7 +177,6 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     assert set(builds) == {
         "defenseclaw",
         "defenseclaw-windows-amd64",
-        "defenseclaw-hook-post",
         "defenseclaw-hook",
         "defenseclaw-acp-posix",
         "defenseclaw-acp-windows-amd64",
@@ -186,8 +185,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     }
     assert builds["defenseclaw"]["binary"] == "defenseclaw-gateway"
     assert builds["defenseclaw-windows-amd64"]["binary"] == "defenseclaw-gateway"
-    assert builds["defenseclaw-hook-post"]["binary"] == "defenseclaw-hook-post"
-    for posix in ("defenseclaw", "defenseclaw-hook-post", "defenseclaw-acp-posix", "defenseclaw-hook-posix", "defenseclaw-sensor-helper-posix"):
+    for posix in ("defenseclaw", "defenseclaw-acp-posix", "defenseclaw-hook-posix", "defenseclaw-sensor-helper-posix"):
         assert builds[posix]["goos"] == ["linux", "darwin"]
         assert builds[posix]["goarch"] == ["amd64", "arm64"]
         assert {"goos": "darwin", "goarch": "amd64"} in builds[posix]["ignore"]
@@ -198,7 +196,7 @@ def test_release_builds_only_the_four_supported_targets_with_flat_names() -> Non
     archives = {archive["id"]: archive for archive in release["archives"]}
     flat_name = "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
     assert set(archives) == {"default", "enterprise-posix", "windows-amd64"}
-    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-hook-post", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
+    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-acp-posix", "defenseclaw-sensor-helper-posix"]
     # The standalone managed-enterprise payload is its own flat asset family;
     # per-user installers never fetch it.
     enterprise = archives.pop("enterprise-posix")

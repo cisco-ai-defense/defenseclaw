@@ -60,26 +60,6 @@ builds:
         - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component gateway -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
           output: true
 
-  - id: defenseclaw-hook-post
-    main: ./cmd/defenseclaw-hook-post
-    binary: defenseclaw-hook-post
-    env:
-      - CGO_ENABLED=0
-    goos:
-      - linux
-      - darwin
-    goarch:
-      - amd64
-      - arm64
-    ignore:
-      - goos: darwin
-        goarch: amd64
-    flags:
-      - -trimpath
-      - -buildvcs=false
-    ldflags:
-      - -s -w -buildid=defenseclaw-hook-post-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
-
   - id: defenseclaw-hook
     main: ./cmd/defenseclaw-hook
     binary: defenseclaw-hook
@@ -195,7 +175,6 @@ archives:
   - id: default
     ids:
       - defenseclaw
-      - defenseclaw-hook-post
       - defenseclaw-acp-posix
       - defenseclaw-sensor-helper-posix
     formats:

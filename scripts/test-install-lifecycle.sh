@@ -190,21 +190,12 @@ PY
 }
 
 assert_versions() {
-    local want="$1" cli gateway hook_post hook_post_path recovery recovery_version archive entry arch
+    local want="$1" cli gateway archive entry arch
     cli="$(version_of "$("${HOME}/.local/bin/defenseclaw" --version 2>/dev/null)")"
     gateway="$(version_of "$("${HOME}/.local/bin/defenseclaw-gateway" --version 2>/dev/null)")"
     [[ "${cli}" == "${want}" && "${gateway}" == "${want}" ]] \
         || fail "expected ${want}, got cli=${cli:-none} gateway=${gateway:-none}"
     if [[ "${want}" == "${TARGET}" ]]; then
-        recovery="${DC_HOME}/installer/defenseclaw-hook-post"
-        recovery_version="$(version_of "$("${recovery}" --version 2>/dev/null)")"
-        [[ "${recovery_version}" == "${want}" ]] \
-            || fail "expected installer recovery hook transport ${want}, got ${recovery_version:-none}"
-        hook_post_path="${HOME}/.local/bin/defenseclaw-hook-post"
-        [[ -x "${hook_post_path}" ]] || hook_post_path="${recovery}"
-        hook_post="$(version_of "$("${hook_post_path}" --version 2>/dev/null)")"
-        [[ "${hook_post}" == "${want}" ]] \
-            || fail "expected hook transport ${want}, got ${hook_post:-none}"
         if fleet_enabled_in_lane; then
             [[ -f "${DC_HOME}/installer/policy_compiler.py" ]] || fail "Fleet-on upgrade did not install its compiler"
             case "$(uname -m)" in x86_64|amd64) arch=amd64 ;; *) arch=arm64 ;; esac
