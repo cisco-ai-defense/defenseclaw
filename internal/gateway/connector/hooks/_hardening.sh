@@ -1236,6 +1236,7 @@ defenseclaw_per_user_outage_open() {
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
+  # Either data folder an installer may hold (GAP-0914, defenseclaw_install_held).
   ! defenseclaw_install_held || return 1
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
   case "$connector" in

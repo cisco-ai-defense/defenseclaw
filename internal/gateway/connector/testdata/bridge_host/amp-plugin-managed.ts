@@ -368,6 +368,7 @@ async function provenTCPRequest(path: string, init: RequestInit, token: string):
 				const value = response.headers[name.toLowerCase()]
 				return Array.isArray(value) ? value.join(", ") : value ?? null
 			} },
+			text: async () => response.body,
 			json: async () => JSON.parse(response.body),
 		} as Response
 	} finally {

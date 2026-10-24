@@ -494,14 +494,15 @@ func windowsEnterpriseStandaloneRosterRunning(services []enterprisestatus.Servic
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
 // after a failed lifecycle left its transaction pending: the exact Setup
 // command, and when the recovery could not use this Setup's gateway, why.
-// busy is a run refused lifecycle_busy. services are the DefenseClaw
-// services as the service manager reports them now. It is empty when
-// nothing is pending and the run was not busy.
+// busy is a run refused lifecycle_busy. force is a FORCE=1 uninstall.
+// services are the DefenseClaw services as the service manager reports them
+// now. It is empty when nothing is pending and the run was not busy.
 func windowsEnterpriseStandaloneNextStep(
 	action string,
 	configPath string,
 	purge bool,
 	busy bool,
+	force bool,
 	pending bool,
 	runs []windowsEnterpriseRecoveryGatewayRun,
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
@@ -520,6 +521,18 @@ func windowsEnterpriseStandaloneNextStep(
 		return ""
 	}
 	lead := windowsEnterprisePendingLead(services)
+	if force && action == "uninstall" {
+		// The forced uninstall is the last resort the other steps name, so
+		// it is never told to run itself "otherwise" (GAP-0848). What stops
+		// it is a program that keeps a DefenseClaw file open, which the
+		// error names; a restart closes every such program.
+		forced := windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1"
+		return lead + " The forced uninstall did not finish." +
+			" Next step: end or close each program the error above says holds a DefenseClaw file (or fix what else it names), then run " + forced + " again as LocalSystem." +
+			" If the error names no program, or the program cannot be ended, restart Windows and run " + forced + " as LocalSystem before any other DefenseClaw Setup;" +
+			" a restart closes every program that holds a DefenseClaw file. If it still fails, send the lifecycle log (" +
+			windowsEnterpriseLifecycleLogPath + ") to DefenseClaw support."
+	}
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	// The last resort when no recovery finishes: it removes the deployment
 	// without recovering the transaction (GAP-0920, GAP-1041).

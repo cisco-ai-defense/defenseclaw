@@ -466,7 +466,7 @@ func windowsEnterpriseCollectGenerationsRequested(ctx context.Context) bool {
 }
 
 // windowsEnterpriseInstallerRequestEnvironment is what a run asks the
-// standalone installer for in its environment: a forced uninstall, the
+// standalone installer for in its environment: a forced uninstall and the
 // generation collect of a Verify.
 func windowsEnterpriseInstallerRequestEnvironment(ctx context.Context, args []string) []string {
 	var env []string
@@ -484,8 +484,8 @@ func windowsEnterpriseInstallerRequestEnvironment(ctx context.Context, args []st
 // upgrade and repair requests the installer refuses for the recorded
 // deployment before it changes anything (Assert-DefenseClawDeferredInstallIsFresh
 // and the deferred-configuration checks of Invoke-DefenseClawInstallLikeLifecycle),
-// so they come before this run's first change (q-win-lifecycle review,
-// loop round 3): a deferred install over an installed deployment and, while the
+// so they come before the run's first change, the repair of the hook runtime
+// access included (q-win-lifecycle review, loop round 3): a deferred install over an installed deployment and, while the
 // deployment waits for its deferred configuration, an install or upgrade,
 // or a repair without both --config and --manifest or with --no-start. With
 // a record of an interrupted lifecycle of this run's scope
@@ -1431,16 +1431,17 @@ func applyWindowsEnterpriseInstallerReport(
 	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
-		purge := false
+		purge, force := false, false
 		if opts != nil {
 			configPath = opts.configPath
-			purge = opts.purge
+			purge, force = opts.purge, opts.force
 		}
 		if next := windowsEnterpriseStandaloneNextStep(
 			result.Action,
 			configPath,
 			purge,
 			windowsBundleHasCode(result.Errors[firstError:], "lifecycle_busy"),
+			force,
 			report.TransactionPending,
 			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
@@ -1759,9 +1760,25 @@ const (
 // accounts are signed in (an uninstall acts only for signed-in accounts). An
 // administrator at an elevated prompt gets LocalSystem from a one-time
 // scheduled task, which the remedy names.
+// windowsEnterpriseRollbackCreatedFolderLeftover marks a rollback leftover
+// that is a per-user folder the rolled back change created
+// (Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep).
+const windowsEnterpriseRollbackCreatedFolderLeftover = ": a per-user DefenseClaw folder this change created; the rollback could not remove it ("
+
 func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
 	var warnings []enterprisestatus.Message
 	for _, leftover := range windowsEnterpriseReportStrings(raw) {
+		if strings.Contains(leftover, windowsEnterpriseRollbackCreatedFolderLeftover) {
+			// A rollback whose per-user runtime cleanup failed went on and
+			// put the previous release back (GAP-0856); the folder is not
+			// one that release uses.
+			warnings = append(warnings, enterprisestatus.Message{
+				Code: "rollback_leftover",
+				Message: "the rollback left " + leftover + "; the restored release does not use that folder, " +
+					"so remove it as an administrator after that account signs out",
+			})
+			continue
+		}
 		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
 			"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
 			"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"

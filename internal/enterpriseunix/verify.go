@@ -1063,6 +1063,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
 	reportedPolicy, reloadError := "", ""
+	var gatewayPolicy bundleHealth
 	kernelApplied, kernelGeneration := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
@@ -1090,6 +1091,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 					r.Readiness.Gateway = true
 					l.readGatewayPosture(body)
 					reportedPolicy, reloadError = gatewayPolicyHealth(body)
+					gatewayPolicy = parseBundleHealth(body)
 					kernelApplied, kernelGeneration = gatewayKernelPolicy(body)
 				}
 			}
@@ -1109,7 +1111,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		}
 	}
 	r.Enrollment = l.enrollmentCounts()
-	l.describePolicy(ctx, reportedPolicy, reloadError)
+	l.describePolicy(ctx, reportedPolicy, reloadError, gatewayPolicy)
 	l.describeBundle()
 	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {
@@ -1128,7 +1130,8 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		}
 	}
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
-		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure
+		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure && reloadError == "" &&
+		r.Policy != nil && r.Policy.Applied
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()
@@ -1154,12 +1157,10 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.Inspection.AIDefense = "unknown"
 	}
 	r.AddAIDefenseWarning()
-	if r.Action == ActionEnsure && record != nil {
-		// Ensure reports the same preventative coverage as status and verify,
-		// while keeping its compact lifecycle result without status blocks.
+	// Ensure, install and repair describe the same managed Hermes coverage
+	// limit as status and verify, without adding status-v2 output blocks.
+	if record != nil && !l.statusV2() {
 		l.describeConnectors(record)
-		r.AddHookProcessFailureWarnings()
-		r.Connectors = nil
 	}
 }
 

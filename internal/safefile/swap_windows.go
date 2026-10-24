@@ -22,6 +22,13 @@ import (
 // the one it expected: another writer changed it. The newer file is kept.
 var ErrSwapRaced = errors.New("safefile: the file changed concurrently")
 
+// ErrSwapUnsupported reports a volume without POSIX-semantics renames
+// (FileRenameInfoEx). There an ordinary rename replaces only a file nobody
+// has open, so the swap would have to release its hold on the compared file
+// first, and an in-place save landing then would be overwritten. The swap
+// refuses instead: the file at the path is left as it is (GAP-0897).
+var ErrSwapUnsupported = errors.New("safefile: this volume has no POSIX-semantics rename, so a shared file cannot be replaced without losing a concurrent save; nothing was changed")
+
 // swapLockTimeout bounds how long a compare-and-swap waits for another
 // process to close a file it has open for writing, and for a reader that
 // does not share deletion to close the file the swap replaces.
@@ -296,44 +303,10 @@ func replaceHeldFile(source, destination string, held *os.File, beforeRename fun
 			errors.Is(err, windows.ERROR_NOT_SUPPORTED) ||
 			errors.Is(err, windows.ERROR_INVALID_FUNCTION):
 			// A volume without POSIX renames replaces only a file nobody
-			// has open: release the hold and replace in one step.
-			return replaceReleasedFile(source, destination, held, deadline, beforeRename)
+			// has open. Releasing the hold would let a writer save in place
+			// before the rename, which would then overwrite that save.
+			return fmt.Errorf("%w (%s: %v)", ErrSwapUnsupported, destination, err)
 		case !swapBusy(err) || !time.Now().Before(deadline):
-			return err
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-// replaceReleasedFile is replaceHeldFile for a volume without POSIX renames.
-// beforeRename runs once, before the hold is released.
-func replaceReleasedFile(source, destination string, held *os.File, deadline time.Time, beforeRename func()) error {
-	identity, err := fileIdentity(held)
-	if err != nil {
-		return err
-	}
-	beforeRename()
-	if err := held.Close(); err != nil {
-		return err
-	}
-	for {
-		current, err := openFileAttributes(destination)
-		if err != nil {
-			if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) || errors.Is(err, windows.ERROR_PATH_NOT_FOUND) {
-				return swapRaced(destination)
-			}
-			return err
-		}
-		currentIdentity, err := fileIdentity(current)
-		_ = current.Close()
-		if err != nil {
-			return err
-		}
-		if currentIdentity != identity {
-			return swapRaced(destination)
-		}
-		err = swapRenameReplace(source, destination, windows.FileRenameInfo, fileRenameReplaceIfExists)
-		if err == nil || !swapBusy(err) || !time.Now().Before(deadline) {
 			return err
 		}
 		time.Sleep(time.Millisecond)
@@ -382,28 +355,6 @@ func openFileForReplace(path string) (*os.File, error) {
 		name,
 		windows.DELETE|windows.FILE_READ_ATTRIBUTES,
 		windows.FILE_SHARE_READ|windows.FILE_SHARE_DELETE,
-		nil,
-		windows.OPEN_EXISTING,
-		windows.FILE_FLAG_OPEN_REPARSE_POINT,
-		0,
-	)
-	if err != nil {
-		return nil, err
-	}
-	return os.NewFile(uintptr(handle), path), nil
-}
-
-// openFileAttributes opens path for reading its attributes only, which
-// neither blocks nor is blocked by any other handle.
-func openFileAttributes(path string) (*os.File, error) {
-	name, err := winpath.UTF16Ptr(path)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := windows.CreateFile(
-		name,
-		windows.FILE_READ_ATTRIBUTES,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
 		nil,
 		windows.OPEN_EXISTING,
 		windows.FILE_FLAG_OPEN_REPARSE_POINT,
