@@ -26,7 +26,30 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
 	"github.com/defenseclaw/defenseclaw/internal/openshell/sandboxapi"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/stream"
 )
+
+func TestTimeoutConditionOutranksConfigurationPending(t *testing.T) {
+	pending := stream.Condition{Type: "ConfigurationReady", Status: "False", Reason: "ConfigurationPending"}
+	timedOut := stream.Condition{Type: "Ready", Status: "False", Reason: "ImagePreparationTimedOut",
+		Message: "Image preparation exceeded its absolute deadline"}
+	for _, conditions := range [][]stream.Condition{{pending, timedOut}, {timedOut, pending}} {
+		e := newVMEnv(t, nil)
+		e.create(sandboxapi.CreateRequest{Name: "box", Copy: true})
+		b := e.boxOf("box")
+		e.m.statusEvent(t.Context(), b, &stream.Status{Phase: openshell.PhaseError, Conditions: conditions})
+		e.m.mu.Lock()
+		reason := b.rec.PhaseReason
+		e.m.mu.Unlock()
+		if !strings.Contains(reason, "ImagePreparationTimedOut") || strings.Contains(reason, "ConfigurationPending") {
+			t.Fatalf("conditions %+v recorded %q, want timeout recovery", conditions, reason)
+		}
+		way := errorPhaseWayOn("box", reason, "", true)
+		if !strings.Contains(way, "then `defenseclaw sandbox start box` (no stop)") || strings.Contains(way, "`defenseclaw sandbox stop box`") {
+			t.Fatalf("timeout recovery = %q", way)
+		}
+	}
+}
 
 // A gateway that runs sandboxes (openshell.SupportedMin, which includes
 // NVIDIA/OpenShell#4231) stops a sandbox in its error state and starts it

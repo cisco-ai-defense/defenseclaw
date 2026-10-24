@@ -276,7 +276,9 @@ func (m *Manager) statusEvent(ctx context.Context, b *box, st *stream.Status) {
 	for _, c := range st.Conditions {
 		if !strings.EqualFold(c.Status, "true") {
 			cond = &audit.SandboxCondition{Type: c.Type, Status: c.Status, Reason: c.Reason, Message: c.Message}
-			break
+			if strings.EqualFold(c.Type, "Ready") {
+				break
+			}
 		}
 	}
 	phase := auditPhase(st.Phase)
