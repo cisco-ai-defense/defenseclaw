@@ -706,6 +706,16 @@ func validateHookAPITokenLocationWith(
 		return err
 	}
 	hooksDir := filepath.Dir(tokenPath)
+	if _, err := os.Lstat(hooksDir); errors.Is(err, os.ErrNotExist) {
+		// A missing token directory must not turn a symlinked or untrusted
+		// dataDir ancestor into an ordinary absent token. There is no hot
+		// path to optimize here: validate its full chain before reporting
+		// the absence to LoadHookAPIToken.
+		if err := validateDirectory(dataDir); err != nil {
+			return fmt.Errorf("hook API token data dir %s is not trusted: %w", dataDir, err)
+		}
+		return os.ErrNotExist
+	}
 	// Check dataDir as the named, protected directory. The hooks directory
 	// walk below includes its full ancestor chain, so walking all of those
 	// ancestors a second time for dataDir only forks redundant ACL inspectors.
