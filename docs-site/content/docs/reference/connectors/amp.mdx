@@ -107,7 +107,7 @@ The contract is `amp-plugin-v1`, plugin script `v2`. DefenseClaw pins the normal
 | `tool.result` | Inspect status and output after execution, before model delivery | Preserve, withhold or replace, or native confirm |
 | `agent.end` | Close the turn and record its status | Observe only |
 
-Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable UI rejects a pending call or withholds a pending result. Per-user gateway failures and unverified listeners fail closed once the plugin has loaded. A managed administrator may select open for classified outages only; no bearer or event is sent to an unverified listener.
+Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable UI rejects a pending call or withholds a pending result. Once the plugin has loaded, a per-user gateway that is not running follows the policy tier, for a call and for its result ([Fail mode](#fail-mode)); every other per-user gateway failure and an unverified listener block. A managed administrator may select open for classified outages only; no bearer or event is sent to an unverified listener.
 
 ## Native ask
 
@@ -115,7 +115,7 @@ Amp can ask in the active foreground thread during `tool.call` and before a `too
 
 ## Fail mode
 
-Fail closed: yes. Per-user host failures block the events that support a block response, including when an older sidecar says `open`. A managed administrator may choose open for a classified gateway outage only. The default is `closed`, and an unverified listener receives no bearer or event. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed: yes. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning and a `hook-failures.jsonl` record, and the strict policy blocks it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Every other per-user failure blocks the events that support a block response, and an unverified listener receives no bearer or event. A managed administrator may choose open for a classified gateway outage only; the managed default is `closed`. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

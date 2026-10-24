@@ -159,7 +159,6 @@ def _render_bridge_publication(
         .replace("{{.ForeignHookGuardJS}}", json.dumps(foreign_guard)[1:-1])
         .replace("{{.InstallMarkerJS}}", json.dumps(install_marker)[1:-1])
         .replace("{{.ListenerProofJS}}", listener_proof)
-        .replace("{{.OutageFailMode}}", "open")
     )
     assert "{{." not in rendered
     return rendered.encode()

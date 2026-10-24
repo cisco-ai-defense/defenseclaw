@@ -83,13 +83,17 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
 		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
 	} {
-		for _, tier := range []struct{ name, mode string }{{"default or permissive", "open"}, {"strict", "closed"}} {
+		for _, tier := range []struct{ name, mode, config string }{
+			{"default or permissive", "open", outageDefaultTierConfig},
+			{"strict", "closed", outageStrictTierConfig},
+		} {
 			for _, sc := range scenarios {
 				t.Run(plugin.connector+"/"+tier.name+"/"+sc.name, func(t *testing.T) {
 					t.Parallel()
 					home := t.TempDir()
 					installNativeGatewayForHookTest(t, home)
 					dataDir := filepath.Join(home, ".defenseclaw")
+					writeOutageTierConfig(t, dataDir, tier.config)
 					token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
 					if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
 						t.Fatal(err)
@@ -111,13 +115,13 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 						}
 					}
 					body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: addr, TokenFileJS: javaScriptStringContent(token),
-						FailMode: "closed", OutageFailMode: tier.mode})
+						FailMode: "closed"})
 					path := filepath.Join(home, plugin.name)
 					if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 						t.Fatal(err)
 					}
 					cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
-					cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
 					out, err := cmd.Output()
 					if err != nil {
 						t.Fatalf("node: %v\n%s", err, out)
@@ -154,6 +158,76 @@ func TestPerUserPluginOutageOpenOnlyForAnOutage(t *testing.T) {
 					}
 				})
 			}
+		}
+	}
+}
+
+// The current runtime config decides a plugin's outage, even when the last
+// render recorded a different tier. A strict pack or a config this release
+// cannot read closes it; the default pack opens it with one warning and one
+// audit row.
+func TestPerUserPluginOutageFollowsTheConfigNow(t *testing.T) {
+	nodeForTest(t)
+	for _, plugin := range []struct{ asset, name, connector, harness string }{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
+	} {
+		for _, tc := range []struct {
+			name, config string
+			opens        bool
+		}{
+			{"default pack after a strict render", outageDefaultTierConfig, true},
+			{"strict pack", outageStrictTierConfig, false},
+			{"strict pack for this connector", outageDefaultTierConfig + "  connectors:\n    " + plugin.connector + ":\n      rule_pack: strict\n", false},
+			{"no config", "", false},
+			{"config this release cannot read", "config_version: 9\nguardrail: [\n", false},
+		} {
+			t.Run(plugin.connector+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+				home := t.TempDir()
+				installNativeGatewayForHookTest(t, home)
+				dataDir := filepath.Join(home, ".defenseclaw")
+				token := filepath.Join(dataDir, "hooks", ".hook-"+plugin.connector+".token")
+				if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				writeOutageTierConfig(t, dataDir, tc.config)
+				// A strict render can remain installed when the gateway is stopped.
+				body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
+					TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
+				path := filepath.Join(home, plugin.name)
+				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", plugin.harness, path)
+				cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatalf("node: %v\n%s", err, out)
+				}
+				var result struct {
+					Verdict string   `json:"verdict"`
+					Notices []string `json:"notices"`
+				}
+				if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
+					t.Fatalf("harness output %q: %v", out, err)
+				}
+				if (result.Verdict == "allow") != tc.opens {
+					t.Fatalf("verdict %q, want run=%v", result.Verdict, tc.opens)
+				}
+				rows := hookFailureRecords(t, dataDir)
+				if tc.opens {
+					if len(rows) != 1 || rows[0]["fail_mode"] != "open" || rows[0]["category"] != "transport" || len(result.Notices) != 1 ||
+						!strings.Contains(result.Notices[0], "fail mode open for an outage") {
+						t.Fatalf("open outage rows=%+v notices=%q, want one audit row and one warning", rows, result.Notices)
+					}
+				} else if len(rows) != 0 {
+					t.Fatalf("a closed outage wrote fail-open rows %+v", rows)
+				}
+			})
 		}
 	}
 }
