@@ -257,11 +257,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     from defenseclaw.commands.cmd_setup import _validated_api_key_env_name
 
     refuse_first_run_when_managed()
-    if fail_mode == "open":
-        raise click.ClickException(
-            "On a per-user install the gateway-outage mode follows the policy tier: default and permissive "
-            "fail open during an outage, strict fails closed (defenseclaw guardrail use-pack strict)"
-        )
 
     from defenseclaw import config as config_module
 

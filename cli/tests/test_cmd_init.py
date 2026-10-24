@@ -3189,7 +3189,10 @@ class TestInitFailModeFlag(unittest.TestCase):
             "closed",
         )
 
-    def test_fail_mode_open_is_refused_before_writing_config(self):
+    def test_fail_mode_open_persists_to_config(self):
+        # An explicit open is the operator's saved outage choice and wins
+        # over every policy tier (owner decision 2026-10-23); init used to
+        # refuse it before reading the config.
         result = self._invoke([
             "--non-interactive",
             "--yes",
@@ -3206,9 +3209,17 @@ class TestInitFailModeFlag(unittest.TestCase):
             "open",
             "--json-summary",
         ])
-        self.assertNotEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        self.assertIn("policy tier", result.output + (result.stderr or ""))
-        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            saved = yaml.safe_load(fh)
+        self.assertEqual(saved["guardrail"]["hook_fail_mode"], "open")
+        from defenseclaw.config import load
+
+        gc = load(data_dir=self.tmp_dir).guardrail
+        for tier in ("default", "permissive", "strict"):
+            gc.rule_pack = tier
+            self.assertEqual(gc.effective_hook_fail_mode("codex"), "open", tier)
 
     def test_omitting_flag_is_noninvasive(self):
         # No --fail-mode means "leave existing alone." On a brand-new
@@ -4425,7 +4436,7 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
-    def test_fail_mode_open_with_observe_primary_is_refused(self, mock_discover, _gate):
+    def test_fail_mode_open_with_observe_primary_is_saved(self, mock_discover, _gate):
         mock_discover.return_value = self._disc({"codex", "claudecode"})
 
         result = self._invoke([
@@ -4434,8 +4445,13 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
             "--scanner-mode", "local", "--skip-install",
             "--no-start-gateway", "--no-verify", "--json-summary",
         ])
-        self.assertNotEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        self.assertIn("policy tier", result.output + (result.stderr or ""))
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        from defenseclaw.config import load
+
+        gc = load(data_dir=self.tmp_dir).guardrail
+        self.assertEqual(gc.connectors["claudecode"].hook_fail_mode, "open")
+        gc.rule_pack = "strict"
+        self.assertEqual(gc.effective_hook_fail_mode("claudecode"), "open")
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
@@ -4455,8 +4471,8 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.assertNotIn("defenseclaw guardrail fail-mode open", result.output)
 
         result = self._invoke([*args, "--fail-mode", "open"])
-        self.assertNotEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        self.assertIn("policy tier", result.output + (result.stderr or ""))
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertIn("claudecode=action (fail open)", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
