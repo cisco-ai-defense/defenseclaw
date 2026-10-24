@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -56,7 +57,8 @@ func servePolicyHealth(h *testHost, reported, reloadError *string) {
 		if !h.healthy || !h.services.isActive(gateway) {
 			return 0, nil, errors.New("connection refused")
 		}
-		return 200, []byte(`{"api":{"state":"running"},"policy":{"effective_digest":"` + *reported + `","last_reload_error":"` + *reloadError + `"},"inspection":{"local":"active","ai_defense":"disabled"}}`), nil
+		return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d,"last_reload_error":%q},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+			*reported, installedGenerationOf(h), *reloadError)), nil
 	}
 }
 
@@ -81,9 +83,12 @@ func TestEnsureReportsTheAppliedPolicy(t *testing.T) {
 	}
 
 	reported = "sha256:" + strings.Repeat("0", 64)
+	// A repair that restarted the gateway into another policy did not repair
+	// it: it fails with both digests, as verify does (GAP-0943).
 	r = h.run(Options{Action: ActionRepair})
-	if r.Policy == nil || r.Policy.Applied || r.Policy.GatewayReportedDigest != reported || !hasWarning(r, codePolicyNotApplied) {
-		t.Fatalf("repair with a stale gateway: policy = %+v, warnings = %+v", r.Policy, r.Warnings)
+	if r.OK || r.Policy == nil || r.Policy.Applied || r.Policy.GatewayReportedDigest != reported ||
+		!strings.Contains(messagesOf(r.Errors, codePolicyNotApplied), shortDigest(reported)) {
+		t.Fatalf("repair with a stale gateway: policy = %+v, errors = %+v", r.Policy, r.Errors)
 	}
 
 	// A reload the gateway rejected leaves the digests equal, but the policy
@@ -94,8 +99,9 @@ func TestEnsureReportsTheAppliedPolicy(t *testing.T) {
 		t.Fatalf("status with a rejected reload: policy = %+v, warnings = %+v", r.Policy, r.Warnings)
 	}
 	// GAP-0587: a change action does not add "reports X but computes to X".
-	if r = h.run(Options{Action: ActionRepair}); hasWarning(r, codePolicyNotApplied) || !hasWarning(r, codePolicyReloadRejected) {
-		t.Fatalf("repair with a rejected reload: warnings = %+v", r.Warnings)
+	if r = h.run(Options{Action: ActionRepair}); r.OK || messagesOf(r.Errors, codePolicyNotApplied) != "" || hasWarning(r, codePolicyNotApplied) ||
+		!strings.Contains(messagesOf(r.Errors, codePolicyReloadRejected), reloadError) {
+		t.Fatalf("repair with a rejected reload: errors = %+v warnings = %+v", r.Errors, r.Warnings)
 	}
 
 	raw, err := os.ReadFile(h.env.deploymentPath())

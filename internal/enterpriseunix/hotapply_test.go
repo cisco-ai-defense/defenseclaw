@@ -64,10 +64,17 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 	h.env.Runner = runner
 	// The gateway reloads config.yaml itself: it reports the new policy once
 	// the file holds the new mode, unless it is told to ignore the change.
-	reloads := true
+	// A restart loads the installed config whole.
+	reloads, restarted := true, false
+	h.services.afterRestart = func(u Unit) { restarted = restarted || u.Name == unitGateway }
+	h.services.afterStart = h.services.afterRestart
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {
 		if !h.healthy || !h.services.isActive(unitGateway) {
 			return 0, nil, errors.New("connection refused")
+		}
+		if !reloads && restarted {
+			return 200, []byte(fmt.Sprintf(`{"api":{"state":"running"},"policy":{"effective_digest":%q,"config_generation":%d},"inspection":{"local":"active","ai_defense":"disabled"}}`,
+				runner.digest, installedGenerationOf(h))), nil
 		}
 		reported := digest("a")
 		if reloads && strings.Contains(h.read(h.env.Layout.ConfigPath), "mode: action") {
@@ -124,17 +131,22 @@ func TestEnsureAppliesAHotConfigChangeInTheRunningGateway(t *testing.T) {
 	if _, touched := ensure(strings.Replace(hot, "mode: action\n", "mode: action\n  hook_self_heal: false\n", 1)); !touched {
 		t.Fatal("a restart-required key (guardrail.hook_self_heal) left the gateway running")
 	}
-	reloads = false
+	reloads, restarted = false, false
 	if _, touched := ensure(strings.Replace(hot, "mode: action\n", "mode: action\n  block_at: HIGH\n", 1)); !touched {
 		t.Fatal("a gateway that did not apply the change was not restarted")
 	}
+}
+
+func installedGenerationOf(h *testHost) uint64 {
+	state, _ := configwrite.ReadGenerationState(h.env.P(h.env.Layout.ConfigPath))
+	return state.Generation
 }
 
 func TestNoAnchorHotEnsureRequiresGatewayGenerationAndCleanReload(t *testing.T) {
 	const digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	h := newTestHost(t, "linux")
 	h.env.Runner = &policyDigestRunner{fakeRunner: h.runner, digest: digest}
-	staleGeneration, restartFrom := uint64(0), -1
+	staleGeneration, restartFrom := ^uint64(0), -1
 	reloadError := ""
 	persist := false
 	h.env.HealthGet = func(context.Context) (int, []byte, error) {

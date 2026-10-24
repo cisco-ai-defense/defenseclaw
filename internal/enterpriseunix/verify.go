@@ -1063,6 +1063,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	env, r := l.env, l.result
 	r.Services = r.Services[:0]
 	reportedPolicy, reloadError := "", ""
+	var gatewayPolicy bundleHealth
 	kernelApplied, kernelGeneration := "", ""
 	for _, unit := range env.Services.Units() {
 		status, _ := env.Services.Status(ctx, unit)
@@ -1090,6 +1091,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 					r.Readiness.Gateway = true
 					l.readGatewayPosture(body)
 					reportedPolicy, reloadError = gatewayPolicyHealth(body)
+					gatewayPolicy = parseBundleHealth(body)
 					kernelApplied, kernelGeneration = gatewayKernelPolicy(body)
 				}
 			}
@@ -1109,7 +1111,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		}
 	}
 	r.Enrollment = l.enrollmentCounts()
-	l.describePolicy(ctx, reportedPolicy, reloadError)
+	l.describePolicy(ctx, reportedPolicy, reloadError, gatewayPolicy)
 	l.describeBundle()
 	l.describeKernelPolicy(kernelApplied, kernelGeneration)
 	if problem := env.rejectedConfigProblem(); problem != "" {

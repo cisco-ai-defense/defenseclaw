@@ -137,6 +137,41 @@ func (l *lifecycle) computePolicy(ctx context.Context) (digest string, configGen
 	return report.EffectiveDigest, report.ConfigGeneration, nil
 }
 
+// generationMismatch says how the generation the gateway reports differs
+// from the installed config's generation record, "" when it is the same one.
+// The hot settle of ensure, status and verify all use it (GAP-0943).
+func generationMismatch(gateway bundleHealth, installed configwrite.GenerationState) string {
+	switch {
+	case gateway.configGeneration != installed.Generation:
+		return fmt.Sprintf("gateway reports config generation %d, not lifecycle generation %d", gateway.configGeneration, installed.Generation)
+	case gateway.bundleID != installed.BundleID || gateway.bundleVersion != installed.BundleVersion:
+		return fmt.Sprintf("gateway reports bundle %q version %d, not lifecycle bundle %q version %d", gateway.bundleID, gateway.bundleVersion, installed.BundleID, installed.BundleVersion)
+	}
+	return ""
+}
+
+// installedGenerationMismatch is generationMismatch for the installed
+// config.yaml outside bundle mode, where signed bundles confirm their own
+// generation. A gateway that omits the generation does not confirm a recorded
+// lifecycle generation, even when its policy digest matches.
+func (l *lifecycle) installedGenerationMismatch(gateway bundleHealth) string {
+	env := l.env
+	if l.bundle != nil || env.bundleMode() {
+		return ""
+	}
+	installed, err := configwrite.ReadGenerationState(env.P(env.Layout.ConfigPath))
+	if err != nil {
+		return "cannot read lifecycle generation record: " + err.Error()
+	}
+	if installed.Generation == 0 {
+		return "lifecycle generation record has no generation"
+	}
+	if installed.BundleID != "" {
+		return ""
+	}
+	return generationMismatch(gateway, installed)
+}
+
 // computedPolicy is one computePolicy answer.
 type computedPolicy struct {
 	digest     string
@@ -157,9 +192,15 @@ func gatewayPolicyDigest(body []byte) string {
 // policy-state.json once the gateway reports the computed digest, and warns
 // when it reports another one. A reload the gateway rejected (reloadError)
 // is never "applied", and every action reports it, with or without a digest:
-// the gateway keeps enforcing the previous policy.
-func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError string) {
+// the gateway keeps enforcing the previous policy. Neither is a gateway that
+// runs another lifecycle generation than the installed config records. Verify
+// and a committed change (confirmCommitted) fail on these; status warns.
+func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError string, gateway bundleHealth) {
 	env, r := l.env, l.result
+	report := r.AddWarning
+	if l.opts.Action == ActionVerify || l.confirmCommitted {
+		report = r.AddError
+	}
 	state := &enterprisestatus.PolicyState{GatewayReportedDigest: reported, LastReloadError: reloadError}
 	computed := false
 	// A same-build bundle already had its rendered policy computed during
@@ -200,11 +241,7 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 	if reloadError != "" {
 		message := "the gateway reports a policy error and keeps enforcing the policy it last built: " + reloadError +
 			"; fix the asset or the config it names, and the gateway clears this when the next reload succeeds"
-		if l.opts.Action == ActionVerify {
-			r.AddError(codePolicyReloadRejected, message)
-		} else {
-			r.AddWarning(codePolicyReloadRejected, message)
-		}
+		report(codePolicyReloadRejected, message)
 	}
 	if state.EffectiveDigest == "" {
 		// Name the check that did not run instead of omitting the policy
@@ -214,17 +251,17 @@ func (l *lifecycle) describePolicy(ctx context.Context, reported, reloadError st
 		}
 		return
 	}
-	state.Applied = state.EffectiveDigest == reported && reloadError == ""
+	generation := l.installedGenerationMismatch(gateway)
+	state.Applied = state.EffectiveDigest == reported && reloadError == "" && generation == ""
 	r.Policy = state
 	if !state.Applied && computed && r.Readiness.Gateway && reloadError == "" {
 		message := fmt.Sprintf(
 			"the gateway reports effective policy %s but the installed config computes to %s; the gateway keeps enforcing the policy it last built",
 			shortDigest(reported), shortDigest(state.EffectiveDigest))
-		if l.opts.Action == ActionVerify {
-			r.AddError(codePolicyNotApplied, message)
-		} else {
-			r.AddWarning(codePolicyNotApplied, message)
+		if state.EffectiveDigest == reported {
+			message = generation + "; the gateway keeps enforcing the generation it last applied"
 		}
+		report(codePolicyNotApplied, message)
 	}
 	if l.opts.Action == ActionStatus || l.opts.Action == ActionVerify || !computed || !r.Readiness.Gateway || !state.Applied {
 		return

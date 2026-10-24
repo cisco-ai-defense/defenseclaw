@@ -175,10 +175,8 @@ func (l *lifecycle) settleHotGateway(ctx context.Context, gateway Unit) error {
 			return false, "gateway rejected the config reload: " + health.reloadError
 		case health.configState == "error":
 			return false, "gateway config.state=error: " + health.configError
-		case health.configGeneration != state.Generation:
-			return false, fmt.Sprintf("gateway reports config generation %d, not lifecycle generation %d", health.configGeneration, state.Generation)
-		case health.bundleID != state.BundleID || health.bundleVersion != state.BundleVersion:
-			return false, fmt.Sprintf("gateway reports bundle %q version %d, not lifecycle bundle %q version %d", health.bundleID, health.bundleVersion, state.BundleID, state.BundleVersion)
+		case generationMismatch(health, state) != "":
+			return false, generationMismatch(health, state)
 		case health.digest != want:
 			return false, fmt.Sprintf("gateway reports effective policy %s, not %s of the installed config", shortDigest(health.digest), shortDigest(want))
 		default:

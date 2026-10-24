@@ -211,6 +211,10 @@ type lifecycle struct {
 	// gatewayKeptRunning is set when the gateway applied a config change
 	// itself (hotConfigApply) and was not restarted.
 	gatewayKeptRunning bool
+	// confirmCommitted is set while a committed change describes the
+	// gateway: a generation the gateway rejected or does not run then fails
+	// the run with its cause, as verify does (GAP-0943).
+	confirmCommitted bool
 	// policyAssetsEdited is set when ensure found a policy asset the config
 	// names edited in place (policyAssetsChanged): the apply then records the
 	// next config_generation although config.yaml stayed the same.
@@ -2260,7 +2264,11 @@ func (l *lifecycle) applyAdopting(ctx context.Context, record *Deployment, adopt
 			l.noteRepairedTargets(activationStarted)
 		}
 	}
+	// The change succeeds only when the gateway runs it. A config.yaml
+	// replaced during the run is confirmed by its follow-up transaction.
+	l.confirmCommitted = !l.opts.NoStart && !l.inputsChanged()
 	l.describe(ctx, newRecord, false)
+	l.confirmCommitted = false
 	if !l.opts.NoStart && l.testFaultRequested(testFaultAfterCommit) {
 		r.AddError(codeLifecycleTestFault, "the lifecycle test fault asked this run to fail after its deployment committed")
 	}
