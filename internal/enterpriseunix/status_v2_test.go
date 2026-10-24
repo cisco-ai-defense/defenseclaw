@@ -146,6 +146,7 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 			}
 			for _, action := range []string{ActionStatus, ActionVerify} {
 				r := h.run(Options{Action: action})
+				contracttest.Compile(t).ValidateValue(t, "lifecycle-result.schema.json", r)
 				if got := r.Connectors["hermes"].HooksInstalled; got != enterprisestatus.HooksInstalledUnknown {
 					t.Fatalf("%s certified Hermes hooks from a persistent-home receipt: %q", action, got)
 				}
@@ -160,6 +161,16 @@ func TestStatusAndVerifyDoNotCertifyManagedHermesSessionHome(t *testing.T) {
 				if action == ActionVerify && r.ExitCode == 0 {
 					t.Fatal("verify certified an unobservable Hermes launch home")
 				}
+			}
+			// A no-op ensure describes the same managed deployment without
+			// status-v2 blocks. It must not certify coverage that verify rejects.
+			ensure := h.run(Options{Action: ActionEnsure})
+			if ensure.CoverageComplete || ensure.SecurityComplete || ensure.Connectors != nil {
+				t.Fatalf("ensure certified Hermes or changed its result shape: coverage=%t security=%t connectors=%+v",
+					ensure.CoverageComplete, ensure.SecurityComplete, ensure.Connectors)
+			}
+			if message := messagesOf(ensure.Warnings, enterprisestatus.CodeStatusDetailUnavailable); !strings.Contains(message, "session-only HERMES_HOME") {
+				t.Fatalf("ensure did not name the unobservable home: %q", message)
 			}
 		})
 	}

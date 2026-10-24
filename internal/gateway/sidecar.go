@@ -8208,6 +8208,12 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		}
 		return s.configMgr.ReloadAssets(ctx, "api:policy_reload")
 	})
+	api.SetRecordedGenerationReloader(func() error {
+		if s.configMgr == nil {
+			return fmt.Errorf("config manager is not running")
+		}
+		return s.configMgr.ReloadRecordedGeneration(ctx, "api:policy_reload")
+	})
 	reg := connector.NewDefaultRegistry()
 	if s.currentConfig().PluginDir != "" {
 		_ = reg.DiscoverPlugins(s.currentConfig().PluginDir)

@@ -13,15 +13,19 @@ import (
 const CodeHookProcessFailOpen = "hook_process_fail_open"
 
 // AddHookProcessFailureWarnings reports the agent-side failure behavior of
-// enabled standalone connectors. This is distinct from effective_hook_fail_mode:
-// that setting controls a running DefenseClaw hook's response to a gateway
-// outage, not what the agent does when its hook process cannot answer.
-func (r *Result) AddHookProcessFailureWarnings() {
-	if r == nil || r.Profile != "standalone" || (r.Action != "status" && r.Action != "verify" && r.Action != "ensure") {
+// the enabled standalone connectors in connectors. This is distinct from
+// effective_hook_fail_mode: that setting controls a running DefenseClaw
+// hook's response to a gateway outage, not what the agent does when its hook
+// process cannot answer. Every lifecycle action passes the connectors it
+// described, whether or not it prints the connectors block, so ensure,
+// install and repair never report security_complete where status and verify
+// report this limit.
+func (r *Result) AddHookProcessFailureWarnings(connectors map[string]ConnectorState) {
+	if r == nil || r.Profile != "standalone" {
 		return
 	}
 	for _, name := range []string{"antigravity", "claudecode", "codex", "copilot", "devin", "hermes", "kiro"} {
-		state, ok := r.Connectors[name]
+		state, ok := connectors[name]
 		if !ok || !state.Enabled {
 			continue
 		}
