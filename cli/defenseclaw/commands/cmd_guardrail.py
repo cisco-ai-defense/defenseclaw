@@ -1600,8 +1600,9 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
     else:
         if normalize_connector(key) == "amp":
             ux.subhead(
-                "For an eligible fail-open call, Amp does not write hook-failures.jsonl; "
-                "no guardrail-degraded alert follows that call.",
+                "An eligible per-user Amp outage-open call writes "
+                "~/.defenseclaw/logs/hook-failures.jsonl; the gateway records a "
+                "guardrail-degraded alert when it resumes. Managed and sandbox Amp plugins write no such row.",
                 indent="  ",
             )
         else:
@@ -1905,7 +1906,7 @@ def fail_mode_cmd(
 
       \b
       open   — allow eligible failures where the deployment permits.
-               Amp does not write hook-failures.jsonl for an allowed call.
+               A per-user Amp call an outage lets run writes hook-failures.jsonl.
       closed — block supported events when inspection is unavailable.
                The default on a new install: every prompt and
                tool call is inspected or blocked.
@@ -2201,9 +2202,10 @@ def fail_mode_cmd(
         ux.subhead("open is saved for hook connectors you set up later.", indent="    ")
     elif "amp" in active_names:
         ux.subhead(
-            "For eligible fail-open calls, other hook connectors log failures to "
-            "~/.defenseclaw/logs/hook-failures.jsonl. Amp does not write "
-            "hook-failures.jsonl; no guardrail-degraded alert follows its call.",
+            "On a per-user install, eligible Amp outage-open calls write "
+            "~/.defenseclaw/logs/hook-failures.jsonl; the gateway records a "
+            "guardrail-degraded alert when it resumes. Other hook connectors also log eligible "
+            "fail-open calls. Managed and sandbox Amp plugins write no such row.",
             indent="  ",
         )
     else:
