@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unicode/utf16"
 
@@ -27,7 +28,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int) boo
 	if actionWindowsHome(home) {
 		return actionWindowsTargetMention(command, cwd, home, depth)
 	}
-	if !filepath.IsAbs(cwd) {
+	if !filepath.IsAbs(cwd) && !(actionPosixWindowsHome(home) && path.IsAbs(cwd)) {
 		return false
 	}
 	file, parsed := parseShell(command)
@@ -44,10 +45,17 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int) boo
 			return false
 		}
 		if strings.HasPrefix(value, "~/") {
-			value = filepath.Join(home, value[2:])
+			if actionPosixWindowsHome(home) {
+				value = path.Join(home, value[2:])
+			} else {
+				value = filepath.Join(home, value[2:])
+			}
 		}
 		if strings.ContainsAny(value, "*?[]") {
 			return false // A pattern in source text is not a resolved pathname.
+		}
+		if actionPosixWindowsHome(home) && actionPosixWindowsProtected(value, cwd, home) {
+			return true
 		}
 		return protectedReachPath(OperandPath(value, cwd), protected, ssh)
 	}
@@ -89,6 +97,39 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int) boo
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
 	for _, token := range unprovenPathToken.FindAllString(text, -1) {
 		if check(token) {
+			return true
+		}
+	}
+	return false
+}
+
+// A Windows hook may receive a POSIX-dialect command from WSL or another
+// shell with a POSIX active home. The host filesystem cannot resolve those
+// names, so compare only their bounded lexical protected-target spelling.
+func actionPosixWindowsHome(home string) bool {
+	return runtime.GOOS == "windows" && strings.HasPrefix(home, "/") && !strings.HasPrefix(home, "//")
+}
+
+func actionPosixWindowsPath(value, cwd, home string) string {
+	if value == "~" {
+		value = home
+	} else if strings.HasPrefix(value, "~/") {
+		value = path.Join(home, value[2:])
+	}
+	if !path.IsAbs(value) {
+		value = path.Join(cwd, value)
+	}
+	return path.Clean(value)
+}
+
+func actionPosixWindowsProtected(value, cwd, home string) bool {
+	resolved := actionPosixWindowsPath(value, cwd, home)
+	ssh := path.Join(home, ".ssh")
+	if resolved == ssh {
+		return true
+	}
+	for _, name := range AuthorizedKeysFiles {
+		if resolved == path.Join(ssh, name) {
 			return true
 		}
 	}
@@ -259,6 +300,9 @@ func actionPosixSSHDirectoryNavigation(args []*syntax.Word, cwd, home string) bo
 	value, known := actionWordValue(targetWord, actionValues{"HOME": home, "PWD": cwd}, cwd, home)
 	if !known {
 		return false
+	}
+	if actionPosixWindowsHome(home) {
+		return actionPosixWindowsPath(value, cwd, home) == path.Join(home, ".ssh")
 	}
 	target, resolved := ResolveWriteTarget(OperandPath(value, cwd))
 	ssh, sshResolved := ResolveWriteTarget(filepath.Join(home, ".ssh"))

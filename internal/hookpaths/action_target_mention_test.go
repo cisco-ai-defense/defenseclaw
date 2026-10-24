@@ -165,3 +165,30 @@ func TestR104ActionProtectedMentionBeforeSSHDirectoryExists(t *testing.T) {
 		}
 	}
 }
+
+func TestR104PosixHomeTargetMentionOnWindows(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows host resolving a POSIX shell home")
+	}
+	const home, cwd = "/home/alice", "/repo"
+	const target = "/home/alice/.ssh/authorized_keys"
+	for _, command := range []string{
+		"echo " + target,
+		"echo $HOME/.ssh/authorized_keys",
+		"echo ~/.ssh/authorized_keys",
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+			t.Errorf("POSIX target %q decision = %q", command, got)
+		}
+	}
+	for _, command := range []string{
+		"cat " + target,
+		"cd /home/alice/.ssh",
+		"cd -- /home/alice/.ssh",
+		"echo /repo/report.txt",
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("POSIX ordinary/read-only %q decision = %q", command, got)
+		}
+	}
+}
