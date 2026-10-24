@@ -47,27 +47,59 @@ $responseWritten = $false
 $deadline = [System.Diagnostics.Stopwatch]::StartNew()
 
 {{if not .Managed}}function Test-DefenseClawInstallLockHeld {
-    # The one install check of the Windows adapters: true while this
-    # account's installer holds its data directory, the folder above this
-    # adapter's hooks folder: its .install.lock exists as any type, or its
-    # state cannot be read. Only "not found" is free, as for the native hook
-    # (installLockHeld), the shell hooks and the in-agent plugins (GAP-0915).
+    # The installer may keep its lock in DEFENSECLAW_HOME while config.data_dir
+    # puts this adapter elsewhere. The native hook's installer-written state
+    # records that home beside the launcher, independent of the agent's env.
+    $dataDir = Split-Path -Parent $PSScriptRoot
+    $hookDir = Split-Path -Parent $hook
+    if ([string]::IsNullOrEmpty($dataDir) -or [string]::IsNullOrEmpty($hookDir)) { return $true }
+    $roots = @($dataDir)
+    $statePath = Join-Path $hookDir 'defenseclaw-hook-state.json'
+    $statePresent = $false
     try {
-        $dataDir = Split-Path -Parent $PSScriptRoot
-        if ([string]::IsNullOrEmpty($dataDir)) { return $true }
-        [void][System.IO.File]::GetAttributes((Join-Path $dataDir '.install.lock'))
-        return $true
+        $attributes = [System.IO.File]::GetAttributes($statePath)
+        $statePresent = $true
     }
     catch {
-        $cause = $_.Exception
-        while ($null -ne $cause) {
-            if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) {
-                return $false
-            }
-            $cause = $cause.InnerException
+        $missing = $false
+        for ($cause = $_.Exception; $null -ne $cause; $cause = $cause.InnerException) {
+            if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) { $missing = $true; break }
         }
-        return $true
+        if (-not $missing) { return $true }
     }
+    if ($statePresent) {
+        if (($attributes -band [System.IO.FileAttributes]::Directory) -or
+            ($attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $true }
+        try {
+            $info = [System.IO.FileInfo]::new($statePath)
+            if ($info.Length -gt 65536) { return $true }
+            $state = [System.IO.File]::ReadAllText($statePath) | ConvertFrom-Json -ErrorAction Stop
+            $expectedDir = [System.IO.Path]::GetFullPath($hookDir).TrimEnd([char]92)
+            $root = [string]$state.data_root
+            if ([int]$state.schema_version -ne 1 -or $state.install_kind -cne 'powershell-windows' -or
+                $state.install_scope -cne 'user' -or $state.command_dir -ine $expectedDir -or
+                -not [System.IO.Path]::IsPathRooted($root) -or
+                -not [string]::Equals([System.IO.Path]::GetFullPath($root).TrimEnd([char]92), $root.TrimEnd([char]92), [StringComparison]::OrdinalIgnoreCase)) {
+                return $true
+            }
+            $roots += $root
+        }
+        catch { return $true }
+    }
+    foreach ($root in $roots) {
+        try {
+            [void][System.IO.File]::GetAttributes((Join-Path $root '.install.lock'))
+            return $true
+        }
+        catch {
+            $missing = $false
+            for ($cause = $_.Exception; $null -ne $cause; $cause = $cause.InnerException) {
+                if ($cause -is [System.IO.FileNotFoundException] -or $cause -is [System.IO.DirectoryNotFoundException]) { $missing = $true; break }
+            }
+            if (-not $missing) { return $true }
+        }
+    }
+    return $false
 }
 $installGuard = $false
 {{end}}try {
