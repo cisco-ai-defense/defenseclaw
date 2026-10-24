@@ -1855,7 +1855,7 @@ class TestSkillInstall(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         data = json.loads(result.output)
         self.assertEqual(data["scanner"], "skill-scanner")
-        self.assertEqual(data["connector"], "codex")
+        self.assertNotIn("connector", data)
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info", return_value=None)
     def test_scan_unresolvable_skill_errors(self, _mock_info):
