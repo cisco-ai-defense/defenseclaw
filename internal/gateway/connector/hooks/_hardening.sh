@@ -966,13 +966,35 @@ defenseclaw_install_held() {
   [ -n "${_DC_HOOK_DATA_DIR:-}" ] && defenseclaw_install_lock_held "${_DC_HOOK_DATA_DIR}"
 }
 
+# defenseclaw_managed_lifecycle_held returns 0 (true) while the enterprise
+# lifecycle of this computer runs: its run marker exists, as any file type.
+# The lifecycle holds it with its lock, from before it can stop or restart
+# the gateway until the gateway it started is ready, in the root-only /run
+# (/var/run on macOS). The native hook (managedLifecycleActive) reads the
+# same marker (GAP-1074).
+defenseclaw_managed_lifecycle_held() {
+  local marker
+  for marker in /run/defenseclaw-lifecycle.active /var/run/defenseclaw-lifecycle.active; do
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # defenseclaw_install_in_progress returns 0 (true) while this account is
 # being installed or upgraded (defenseclaw_install_held of its data
-# directories). Managed and Secure Client hooks use administrator-owned
-# delivery policy instead of this per-user marker, and return 1.
+# directories). A managed hook outside Secure Client reads its computer's
+# lifecycle instead (defenseclaw_managed_lifecycle_held): an administrator's
+# open covers an outage, never an install, upgrade or lifecycle restart. A
+# Secure Client hook keeps its delivery policy and returns 1.
 defenseclaw_install_in_progress() {
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
-    1|true|TRUE|yes|YES) return 1 ;;
+    1|true|TRUE|yes|YES)
+      [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
+      defenseclaw_managed_lifecycle_held
+      return
+      ;;
   esac
   defenseclaw_install_held
 }

@@ -58,6 +58,8 @@ type fakeServices struct {
 	failReloadOnce bool
 	inner          ServiceManager // definition paths and unit list
 	env            *Env
+	// observe, when set, sees every call as it is made.
+	observe func(call string)
 }
 
 func newFakeServices(env *Env) *fakeServices {
@@ -103,8 +105,12 @@ func (f *fakeServices) DropInPaths(_ context.Context, u Unit) []string {
 
 func (f *fakeServices) record(call string) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.calls = append(f.calls, call)
+	observe := f.observe
+	f.mu.Unlock()
+	if observe != nil {
+		observe(call)
+	}
 }
 
 func (f *fakeServices) Check(context.Context) error            { return nil }

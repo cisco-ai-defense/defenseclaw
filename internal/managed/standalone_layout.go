@@ -52,6 +52,16 @@ type StandaloneLayout struct {
 	ManifestPath    string // guardian target manifest (enumerator output)
 	DescriptorPath  string // public, non-secret runtime descriptor for hooks
 	LifecycleDir    string // transaction state, snapshots, preimages, persistent lock
+	// LifecycleMarkerPath (Linux and macOS) exists while a lifecycle run
+	// holds the lifecycle lock, so from before the run can stop or restart
+	// the gateway until the gateway it started is ready. It is in the
+	// root-only /run (/var/run on macOS): no account can make or remove it,
+	// and every account can see it. A managed hook answers a gateway it
+	// cannot reach closed while it exists, whatever the administrator chose
+	// for an outage (GAP-1074). Windows has none: there the gateway
+	// service's start type is the marker (it is automatic only outside a
+	// lifecycle transaction).
+	LifecycleMarkerPath string
 
 	// Service-owned runtime state.
 	DataDir         string // gateway state (audit DB, runtime tokens)
@@ -120,6 +130,8 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			ServiceUser:     StandaloneLinuxServiceUser,
 			ServiceGroup:    StandaloneLinuxServiceUser,
 			APIAddr:         StandaloneAPIAddr,
+
+			LifecycleMarkerPath: "/run/defenseclaw-lifecycle.active",
 		}, nil
 	case "darwin":
 		const root = "/opt/cisco/defenseclaw"
@@ -147,6 +159,8 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			ServiceUser:     StandaloneDarwinServiceUser,
 			ServiceGroup:    StandaloneDarwinServiceUser,
 			APIAddr:         StandaloneAPIAddr,
+
+			LifecycleMarkerPath: "/var/run/defenseclaw-lifecycle.active",
 		}, nil
 	default:
 		return StandaloneLayout{}, fmt.Errorf("no unix standalone layout for %q", goos)

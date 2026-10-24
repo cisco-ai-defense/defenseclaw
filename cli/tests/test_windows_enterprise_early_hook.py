@@ -9,6 +9,11 @@ replacement hook (this release's, which answers closed while the lifecycle
 has the services disabled) before it disables and stops them, keeps the
 prior hook as its preimage, and every path that restarts the prior services
 before the snapshot exists puts the prior hook back.
+
+GAP-1070: a call the replaced hook had already taken (a process still reading
+its input or waiting for its answer) still met the stopped service. After the
+swap the transaction waits, bounded, until every hook process that started
+before it has ended, while the old gateway still answers them.
 """
 
 from __future__ import annotations
@@ -56,6 +61,12 @@ def test_the_transaction_publishes_the_hook_before_it_stops_the_services() -> No
     # Install, Upgrade and Repair hand it the authenticated replacement hook.
     assert "-EarlyHookSource $earlyHookSource" in module
     assert "$earlyHookSource = $Sources['hook']" in module
+    # GAP-1070: the wait for the replaced hook's calls is part of the early
+    # publish, so it ends before the services are disabled and stopped.
+    publish_body = _function_body(module, "Publish-DefenseClawEarlyHook")
+    swap = publish_body.index("Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath")
+    wait = publish_body.index("Wait-DefenseClawPriorHookCalls -HookPath $Layout.HookPath -StartedBefore ([DateTime]::Now)")
+    assert swap < wait < publish_body.index("return $preimage")
 
 
 _HARNESS = r"""
@@ -66,7 +77,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Publish-DefenseClawEarlyHook', 'Restore-DefenseClawEarlyHook')) {
+foreach ($name in @('Publish-DefenseClawEarlyHook', 'Restore-DefenseClawEarlyHook', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -85,6 +96,21 @@ function Install-DefenseClawSourceDescriptor {
     param([hashtable]$Source, [string]$Destination)
     $script:events.Add('publish:' + (Get-Content -LiteralPath $Destination -Raw))
     Copy-Item -LiteralPath $Source.path -Destination $Destination -Force
+}
+function Write-DefenseClawLifecyclePhase {
+    param([string]$Stage)
+    $script:events.Add('phase:' + $Stage)
+}
+if ($Case -like 'drain*') {
+    # The replaced release's hook process 4242 ends after two looks (drain),
+    # or never (drain-timeout).
+    $script:looks = 0
+    function Get-DefenseClawPriorHookProcessIds {
+        param([string]$HookPath, [datetime]$StartedBefore)
+        $script:looks++
+        $script:events.Add('look:' + [string]$script:looks)
+        if ($Case -eq 'drain-timeout' -or $script:looks -le 2) { 4242 }
+    }
 }
 function Install-DefenseClawFileAtomic {
     param([string]$Source, [string]$Destination, [string]$ExpectedSHA256)
@@ -127,6 +153,23 @@ try {
         'no-source' {
             $result.preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source $null -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive
             $result.hook = Get-Content -LiteralPath $hook -Raw
+        }
+        'drain' {
+            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+            $script:events.Add('returned')
+        }
+        'drain-timeout' {
+            $started = [DateTime]::UtcNow
+            $result.running = @(Wait-DefenseClawPriorHookCalls -HookPath $hook -StartedBefore ([DateTime]::Now) -TimeoutSeconds 1)
+            $result.seconds = ([DateTime]::UtcNow - $started).TotalSeconds
+        }
+        'started-before' {
+            # This PowerShell process runs under its own image name: it
+            # counts when it started before the swap, never when after.
+            $self = [Diagnostics.Process]::GetCurrentProcess()
+            $image = $self.ProcessName + '.exe'
+            $result.before = @(Get-DefenseClawPriorHookProcessIds -HookPath (Join-Path $bin $image) -StartedBefore ([DateTime]::Now)) -contains $self.Id
+            $result.after = @(Get-DefenseClawPriorHookProcessIds -HookPath (Join-Path $bin $image) -StartedBefore $self.StartTime.AddSeconds(-1)) -contains $self.Id
         }
         'foreign-preimage' {
             $intent['early_hook_preimage'] = (Join-Path $Scratch 'elsewhere.exe')
@@ -189,6 +232,30 @@ def test_nothing_is_published_early_without_a_prior_deployment_or_a_replacement(
     assert result["preimage"] == "", result
     assert result["hook"] == "hook-1.0.2", result
     assert "restore" not in result["events"], result
+
+
+def test_the_early_publish_waits_for_the_replaced_hooks_calls(tmp_path: Path) -> None:
+    result = _run(tmp_path, "drain")
+    assert result["threw"] == "", result
+    events = result["events"]
+    # The swap, then looks until the replaced hook's process has ended, then
+    # the transaction goes on (and disables and stops the services).
+    assert events[:2] == ["intent:True", "publish:hook-1.0.2"], result
+    assert events[2:] == ["look:1", "look:2", "look:3", "returned"], result
+
+
+def test_the_wait_for_the_replaced_hooks_calls_is_bounded(tmp_path: Path) -> None:
+    result = _run(tmp_path, "drain-timeout")
+    assert result["threw"] == "", result
+    assert result["running"] == [4242], result
+    assert result["seconds"] < 30, result
+
+
+def test_only_hook_processes_started_before_the_swap_are_waited_for(tmp_path: Path) -> None:
+    result = _run(tmp_path, "started-before")
+    assert result["threw"] == "", result
+    assert result["before"] is True, result
+    assert result["after"] is False, result
 
 
 def test_recovery_refuses_a_preimage_outside_its_transaction(tmp_path: Path) -> None:
