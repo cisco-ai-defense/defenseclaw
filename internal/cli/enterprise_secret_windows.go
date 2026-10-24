@@ -161,9 +161,14 @@ func runEnterpriseSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		// The success document (secret-result.schema.json) has no warnings.
 		layout, layoutErr := windowsSecretLayout()
 		if layoutErr == nil {
-			layoutErr = recordWindowsChange(layout, change.reservation, ev)
+			warnChangeUnrecorded(cmd.ErrOrStderr(), recordWindowsChange(layout, change.reservation, ev))
+		} else if change.changed || !errors.Is(err, layoutErr) {
+			// A post-change or different layout failure still names the
+			// missing audit event.
+			warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
 		}
-		warnChangeUnrecorded(cmd.ErrOrStderr(), layoutErr)
+		// The same unreadable layout before any change is already in the
+		// JSON refusal; retrying it cannot record another refusal event.
 	}
 	// A run that recorded nothing (the stored value, an absent credential)
 	// gives its reservation back here, durably.
