@@ -28,9 +28,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// ErrChildBoundToJob reports that a child StartIndependent would start
-// would end with the enclosing process job: the job kills its processes when
-// it closes and lets none break away.
+// ErrChildBoundToJob reports that a child StartIndependent cannot be proven
+// to outlive the enclosing process job.
 var ErrChildBoundToJob = errors.New("the child cannot outlive the enclosing process job")
 
 // independentHost is what StartIndependent asks of Windows; tests replace it.
@@ -62,13 +61,10 @@ var windowsIndependentHost = independentHost{
 //     when the job allows it. A job that kills its members on close and
 //     lets none go silently is refused (ErrChildBoundToJob) before
 //     anything starts.
-//   - A job whose limits cannot be read (Access is denied for the
-//     LocalSystem process of a one-shot scheduled task, GAP-0960) is
-//     unknown, not refused: the caller has recorded what the helper would
-//     finish. IsProcessInJob, which needs no access to the job, says
-//     whether there is one. In no job nothing more is needed. In a job, or
-//     when that is unknown too, the child breaks away when the job accepts
-//     the flag, and otherwise starts in the job.
+//   - If job limits cannot be read (GAP-0960), IsProcessInJob still says
+//     whether there is one. Outside a job nothing more is needed. In a job,
+//     or when membership is unknown, the child must prove the job accepts
+//     breakaway before it starts (GAP-1160).
 func StartIndependent(cmd *exec.Cmd) error {
 	return startIndependent(cmd, windowsIndependentHost)
 }
@@ -87,7 +83,10 @@ func startIndependent(cmd *exec.Cmd, host independentHost) error {
 			return fmt.Errorf("%w: the job kills its processes when it closes and allows no breakaway", ErrChildBoundToJob)
 		}
 	default:
-		if member, err := host.inJob(); (err != nil || member) && host.breakawayAccepted(cmd.Path) {
+		if member, err := host.inJob(); err != nil || member {
+			if !host.breakawayAccepted(cmd.Path) {
+				return fmt.Errorf("%w: job limits are unreadable and the job does not allow breakaway", ErrChildBoundToJob)
+			}
 			flags |= windows.CREATE_BREAKAWAY_FROM_JOB
 		}
 	}

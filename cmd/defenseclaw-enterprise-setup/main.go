@@ -43,6 +43,7 @@ import (
 const (
 	enterpriseSetupArtifactName     = "DefenseClawSetup-Enterprise-x64.exe"
 	enterpriseFailureExitCode       = 1603
+	enterpriseBusyExitCode          = 1618 // ERROR_INSTALL_ALREADY_RUNNING
 	enterpriseInvalidArgsExitCode   = 1639 // ERROR_INVALID_COMMAND_LINE
 	defaultLifecycleTimeout         = 30 * time.Minute
 	maximumLifecycleTimeout         = 2 * time.Hour
@@ -65,6 +66,8 @@ const standaloneSetupArtifactName = "DefenseClawSetup-Enterprise-Standalone-x64.
 
 // enterpriseSetupPayloadLoader reads the embedded payload; tests replace it.
 var enterpriseSetupPayloadLoader = loadTrustedEnterprisePayload
+
+var errEnterpriseSetupEnsureBusy = errors.New("lifecycle_busy: another standalone Setup /ensure is active; retry after it finishes")
 
 // standalonePayloadBinding is the setuppayload.PayloadBinding of the payload
 // and manifest identity (flavor, version, source commit)
@@ -289,7 +292,9 @@ func runEnterpriseSetup(arguments []string, stdout, stderr io.Writer) int {
 	if err != nil {
 		code := enterpriseFailureExitCode
 		var invalid enterpriseSetupInvalidArguments
-		if errors.As(err, &invalid) {
+		if errors.Is(err, errEnterpriseSetupEnsureBusy) {
+			code = enterpriseBusyExitCode
+		} else if errors.As(err, &invalid) {
 			code = enterpriseInvalidArgsExitCode
 		}
 		writeEnterpriseSetupFailureFor(stdout, stderr, standalone, name, opts, err, code)
@@ -883,6 +888,8 @@ func writeEnterpriseSetupFailureFor(stdout, stderr io.Writer, standalone bool, n
 	var invalid enterpriseSetupInvalidArguments
 	var timeout enterpriseSetupLifecycleTimeout
 	switch {
+	case errors.Is(err, errEnterpriseSetupEnsureBusy):
+		code = "lifecycle_busy"
 	case errors.As(err, &invalid):
 		code = "invalid_arguments"
 	case errors.As(err, &timeout):

@@ -74,7 +74,7 @@ What a gateway outage does to a Hermes call, per install and fail mode, is in th
 ## Limits
 
 - The connector covers the default profile only. Named-profile homes and multiplex gateways are rejected.
-- Hermes runs the call when a hook times out or cannot start. In the supported releases it blocks only on a valid block answer and, from Hermes 0.21, on exit code 2.
+- Hermes 0.19/0.20 can run a call when a hook times out or cannot start. In the reviewed 0.21 contract, Setup or guardian reconciliation writes `fail_closed: true` for `pre_tool_call`, so a timeout or spawn error blocks after the Hermes host loads that registration. Restart every running Hermes host after the change. A killed hook can still let a call run on a non-2 exit with empty stdout. A valid block answer blocks in all supported versions; 0.21 also blocks on exit code 2.
 - Hermes runs every hook registered for an event, in order. A hook added after DefenseClaw's can change a command DefenseClaw already checked.
 - `hermes --safe-mode`, or a `HERMES_HOME` without the `hooks` block, runs with no DefenseClaw hook.
 - A host that is not reloaded keeps its old state, also after you turn the connector off.

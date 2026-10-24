@@ -64,6 +64,9 @@ func (e *Env) renderGatewayFiles(op *openshellPlan) error {
 	envData := op.rendered.EnvFile()
 	op.digest = openshell.RenderedDigest(tomlData, envData)
 	op.files = append(op.files, desiredFile{Path: e.renderedTOMLPath(), Data: tomlData, SHA: sha256Bytes(tomlData), Mode: 0o644, Owner: root, Kind: "openshell-gateway-toml"})
+	digestData := []byte(op.digest + "\n")
+	op.files = append(op.files, desiredFile{Path: filepath.Join(e.openshellDir(), openshell.GatewayRenderedDigestFile),
+		Data: digestData, SHA: sha256Bytes(digestData), Mode: 0o644, Owner: root, Kind: "openshell-gateway-digest"})
 	if e.GOOS == "linux" && op.settings.dockerFallback() {
 		// The docker fallback's configuration: what a user's gateway starts
 		// with when its KVM probe fails (sandbox-openshell-exec). Same

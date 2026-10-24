@@ -229,6 +229,94 @@ func managedEnv(t *testing.T, edit func(*config.Config)) (*harnessEnv, *fakeAuth
 	return e, auth
 }
 
+func TestManagedAskDecisionsMissingGatewayRouteReachTelemetryOnce(t *testing.T) {
+	e, auth := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "askbox"})
+	e.register("askbox")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.m.refreshEgress()
+	e.propose("askbox", "rejected.example.org")
+	e.draft("askbox")
+	rejectID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), rejectID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject}); err != nil {
+		t.Fatalf("reject ask: %v", err)
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.UserApprovals = config.OpenShellUserApprovalsSession })
+	e.m.refreshEgress()
+	e.propose("askbox", "bounded.example.org")
+	e.draft("askbox")
+	boundedID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), boundedID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionApprove, Always: true}); !sandboxapi.IsCode(err, sandboxapi.CodeAdminViolation) {
+		t.Fatalf("approval past session floor = %v", err)
+	}
+	e.tel.mu.Lock()
+	got := append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || got[0].ApprovalID != rejectID || got[0].Result != audit.SandboxApprovalDenied || got[0].Reason != "" ||
+		got[1].ApprovalID != boundedID || got[1].Result != audit.SandboxApprovalDenied || got[1].Reason != "floor_denied" {
+		t.Fatalf("missing gateway decision records = %+v", got)
+	}
+	if _, err := e.m.DecideApproval(t.Context(), boundedID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionApprove}); err != nil {
+		t.Fatalf("ordinary gateway approval: %v", err)
+	}
+	e.tel.mu.Lock()
+	got = append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || len(auth.decisions()) != 1 {
+		t.Fatalf("gateway approval was relayed twice: records=%+v, decisions=%+v", got, auth.decisions())
+	}
+	e.setConfig(func(c *config.Config) { c.OpenShell.Admin.UserApprovals = "" })
+	e.m.refreshEgress()
+	e.propose("askbox", "always-rejected.example.org")
+	e.draft("askbox")
+	alwaysID := e.waitAsks("askbox", 1)[0].ID
+	if _, err := e.m.DecideApproval(t.Context(), alwaysID, sandboxapi.ApprovalDecision{Decision: sandboxapi.DecisionReject, Always: true}); err != nil {
+		t.Fatalf("gateway-kept rejection: %v", err)
+	}
+	e.tel.mu.Lock()
+	got = append([]audit.SandboxAskDecidedEvent(nil), e.tel.askDecisions...)
+	e.tel.mu.Unlock()
+	if len(got) != 2 || len(auth.decisions()) != 2 {
+		t.Fatalf("gateway-kept rejection was relayed twice: records=%+v, decisions=%+v", got, auth.decisions())
+	}
+}
+
+func TestManagedAskDecisionReadsIdentityUnderManagerLock(t *testing.T) {
+	e, _ := managedEnv(t, nil)
+	e.live(sandboxapi.CreateRequest{Name: "askbox"})
+	e.register("askbox")
+	e.setConfig(func(c *config.Config) { c.OpenShell.Profile = config.OpenShellProfileBalanced })
+	e.m.refreshEgress()
+	e.propose("askbox", "locked.example.org")
+	e.draft("askbox")
+	approvalID := e.waitAsks("askbox", 1)[0].ID
+
+	e.m.mu.Lock()
+	b, a := e.m.boxes["askbox"], e.m.approvals[approvalID]
+	started, finished := make(chan struct{}), make(chan struct{})
+	go func() {
+		close(started)
+		e.m.recordManagedAskDecision(t.Context(), b, a, "")
+		close(finished)
+	}()
+	<-started
+	returnedWhileLocked := false
+	select {
+	case <-finished:
+		returnedWhileLocked = true
+	case <-time.After(250 * time.Millisecond):
+	}
+	e.m.mu.Unlock()
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("managed ask decision did not finish after the manager lock was released")
+	}
+	if returnedWhileLocked {
+		t.Fatal("managed ask decision read the box identity without the manager lock")
+	}
+}
+
 // Re-resolving one sandbox must use its registration's floor, even while a
 // second sandbox in the same account has a different floor in force.
 func TestManagedManagerResolvesEachSandboxUnderItsOwnFloor(t *testing.T) {

@@ -64,8 +64,11 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 | --- | --- |
 | Hooks for Kiro IDE and `kiro-cli --v3` | `.kiro/hooks/defenseclaw.json` (global: `~/.kiro/hooks/defenseclaw.json`) |
 | Agent for bare `kiro-cli` | `~/.kiro/agents/defenseclaw.json` |
+| Kiro CLI default agent setting | `chat.defaultAgent` in `~/.kiro/settings/cli.json` |
 | Hook program, macOS and Linux | `~/.defenseclaw/hooks/kiro-hook.sh` |
 | Hook program, Windows | `defenseclaw-hook.exe` through a system PowerShell launcher |
+
+On a per-user setup, an unset or built-in `chat.defaultAgent` is set to `defenseclaw` so bare `kiro-cli` loads its hooks. Setup keeps a custom default and leaves `~/.kiro/settings/mcp.json` discovery-only. The file-change notice lists the setting before setup edits it.
 
 ## Limits
 

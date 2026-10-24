@@ -819,6 +819,14 @@ func (a *APIServer) handleAIUsageDiscovery(w http.ResponseWriter, r *http.Reques
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ai discovery disabled"})
 		return
 	}
+	// IngestExternalReport forces the source to external, but its fanout
+	// otherwise accepts summaries that canonical observability cannot emit.
+	summary := report.Summary
+	summary.Source = inventory.AISourceExternal
+	if !aiDiscoveryV8SummaryValid(summary) {
+		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid discovery summary"})
+		return
+	}
 	if err := discovery.IngestExternalReport(r.Context(), &report); err != nil {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

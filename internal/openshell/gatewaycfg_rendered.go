@@ -90,6 +90,10 @@ func (r RenderedGateway) dockerNamespace() string {
 // renderedHeader marks the files the lifecycle owns.
 const renderedHeader = "# Written by the DefenseClaw enterprise lifecycle from enterprise.openshell. Do not edit.\n"
 
+// GatewayRenderedDigestFile pins the lifecycle's intended render independently
+// of gateway.toml, so a later hand edit cannot redefine its own baseline.
+const GatewayRenderedDigestFile = "gateway.rendered.sha256"
+
 // Docker sandbox namespaces. OpenShell's docker driver labels every
 // container and volume it makes with its sandbox namespace
 // (openshell.ai/sandbox-namespace, [openshell.drivers.docker] sandbox_label)
@@ -284,6 +288,23 @@ func RenderedDigest(tomlData, envData []byte) string {
 	sum.Write([]byte("\x00"))
 	sum.Write(envData)
 	return "sha256:" + hex.EncodeToString(sum.Sum(nil))
+}
+
+// ReadRenderedGatewayDigest reads the administrator's pinned render digest.
+// Older installations have no pin until their 1.0.4 ensure writes one.
+func ReadRenderedGatewayDigest(path string) (string, error) {
+	data, _, err := readRenderedFile(path)
+	if err != nil || data == nil {
+		return "", err
+	}
+	digest := strings.TrimSpace(string(data))
+	if len(digest) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(digest, "sha256:") {
+		return "", fmt.Errorf("openshell: rendered gateway digest is invalid")
+	}
+	if _, err := hex.DecodeString(strings.TrimPrefix(digest, "sha256:")); err != nil {
+		return "", fmt.Errorf("openshell: rendered gateway digest is invalid: %w", err)
+	}
+	return digest, nil
 }
 
 // ReadRenderedGateway reads the rendered configuration at tomlPath and

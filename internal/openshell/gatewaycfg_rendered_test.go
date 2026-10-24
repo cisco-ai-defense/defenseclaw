@@ -194,6 +194,31 @@ func TestRenderedGatewayRoundTripAndDigest(t *testing.T) {
 	}
 }
 
+func TestPinnedRenderedDigestIsIndependentOfEditedGatewayTOML(t *testing.T) {
+	old := renderedOwnerOK
+	renderedOwnerOK = func(info fs.FileInfo) bool { return info.Mode().Perm()&0o022 == 0 }
+	t.Cleanup(func() { renderedOwnerOK = old })
+	dir := t.TempDir()
+	toml := []byte("original render")
+	pinned := RenderedDigest(toml, nil)
+	pinPath := filepath.Join(dir, GatewayRenderedDigestFile)
+	if err := os.WriteFile(pinPath, []byte(pinned+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadRenderedGatewayDigest(pinPath); err != nil || got != pinned {
+		t.Fatalf("pinned render digest = %q, %v", got, err)
+	}
+	if got := RenderedDigest([]byte("hand edited render"), nil); got == pinned {
+		t.Fatal("a hand edit redefined the independent render digest")
+	}
+	if err := os.WriteFile(pinPath, []byte("not-a-digest\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRenderedGatewayDigest(pinPath); err == nil {
+		t.Fatal("a corrupt expected-render digest was accepted")
+	}
+}
+
 func writeRendered(t *testing.T, r RenderedGateway) RenderedPaths {
 	t.Helper()
 	dir := t.TempDir()

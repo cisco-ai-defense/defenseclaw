@@ -41,12 +41,11 @@ class ReferencePolicyDocsTest(unittest.TestCase):
         self.assertIn("429", row.split("|")[1])
 
 
-    def test_amp_is_excluded_from_persisted_fail_open_reporting(self):
+    def test_amp_per_user_outage_is_persisted_but_managed_and_sandbox_are_not(self):
         text = (DOCS / "configuration/fail-modes.mdx").read_text()
         reporting = text.split("## Reporting and diagnosis", 1)[1]
-        self.assertNotIn("A call that ran fail-open is never silent", reporting)
-        self.assertIn("Amp", reporting)
-        self.assertIn("does not write", reporting)
+        self.assertIn("Amp plugin writes a record only for a call an outage let run", reporting)
+        self.assertIn("managed and sandbox Amp plugins write no record", reporting)
         self.assertIn("guardrail-degraded", reporting)
 
 

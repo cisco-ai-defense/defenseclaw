@@ -5512,7 +5512,9 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "Amp MCP registrations are discovered read-only; manage them with `amp mcp add`",
     ),
     "kiro": (
-        "~/.kiro/settings/cli.json and ~/.kiro/settings/mcp.json are discovery-only",
+        "~/.kiro/settings/cli.json — setup sets chat.defaultAgent=defenseclaw when unset or built-in; "
+        "keeps a custom default",
+        "~/.kiro/settings/mcp.json is discovery-only",
         "Kiro IDE and Kiro CLI share .kiro/hooks; setup writes ~/.kiro/hooks/defenseclaw.json",
         "CLI 2.x uses a defenseclaw agent (built-in kiro_default cannot carry hooks); /agent swap defenseclaw",
         "A custom chat.defaultAgent also gets the hooks, and Kiro IDE hides agents with hooks; doctor reports it",
@@ -19350,7 +19352,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
         count = len(result.refreshed_paths)
         preserved_count = len(result.preserved_paths)
         click.echo(
-            f"  {ux.bold('Bundle refreshed:')} ~/.defenseclaw/splunk-bridge/ "
+            f"  {ux.bold('Bundle refreshed:')} {result.seeded_dest}{os.sep} "
             f"({count} file{'s' if count != 1 else ''} updated, "
             f"{preserved_count} preserved)"
         )

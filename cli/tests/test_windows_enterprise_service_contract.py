@@ -4896,7 +4896,16 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
     post_quarantine_no_reparse = cleanup.index(
         "Assert-DefenseClawManagedTreeNoReparse -Root $path", requery_acl_check
     )
+    holder_retry_gate = cleanup.index(
+        "if ([string]$claim[0] -ceq 'InstallRoot' -and", post_quarantine_no_reparse
+    )
+    holder_retry = cleanup[holder_retry_gate:]
+    assert "(Test-DefenseClawStandaloneProfile)" in holder_retry
+    assert "$removalOptions.RetryHeldFileMilliseconds = 60000" in holder_retry
+    assert "$removalOptions.ExpectedRootIdentity = [string]$rechecked.Identity" in holder_retry
+    assert "$removalOptions.ExpectedRootSecurityDescriptor = [byte[]]$rechecked.SecurityDescriptor" in holder_retry
     removal = cleanup.index("Remove-DefenseClawManagedTree `", post_quarantine_no_reparse)
+    assert "@removalOptions" in cleanup[removal:]
     absence_requery = cleanup.index("GetDirectorySecuritySnapshotNoFollowIfExists(", removal)
     assert (
         service_absence
@@ -4913,6 +4922,7 @@ def test_fresh_install_commit_and_root_rollback_authority_is_phase_bound() -> No
         < requery_identity
         < requery_acl_check
         < post_quarantine_no_reparse
+        < holder_retry_gate
         < removal
         < absence_requery
     )

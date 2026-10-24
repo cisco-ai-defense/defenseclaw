@@ -821,6 +821,9 @@ func managedStatusRows(m *sandboxapi.ManagedStatus, now time.Time) [][2]string {
 	if m.PendingRestart {
 		rows = append(rows, [2]string{"Pending", "an update of the sandbox service waits until your sandboxes stop"})
 	}
+	if m.RenderedConfigDrift {
+		rows = append(rows, [2]string{"Settings drift", "your organization's OpenShell gateway configuration changed outside DefenseClaw; ask IT to repair it"})
+	}
 	if text := otherGatewaysText(m.OtherGateways); text != "" {
 		rows = append(rows, [2]string{"Other gateway", text})
 	}
@@ -1053,6 +1056,13 @@ func managedRuntimeCheck(m *sandboxapi.ManagedStatus) openshell.Check {
 		c.Status = openshell.StatusWarn
 		c.Detail += "; an update waits until your sandboxes stop"
 		c.Fix = &openshell.Fix{Summary: "stop your sandboxes (" + CommandName + " stop NAME); the next command applies the update"}
+	}
+	if m.RenderedConfigDrift {
+		c.Detail += "; the organization's OpenShell gateway configuration changed outside DefenseClaw"
+		if c.Status == openshell.StatusPass {
+			c.Status = openshell.StatusFail
+			c.Fix = &openshell.Fix{Summary: "ask IT to repair the managed OpenShell gateway configuration"}
+		}
 	}
 	return c
 }

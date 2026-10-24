@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +22,78 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
+
+// GAP-1027: a later Setup /ensure cannot report compliant while an earlier
+// Setup /ensure can still commit a different policy.
+func TestStandaloneSetupConcurrentEnsureReportsBusy(t *testing.T) {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("the standalone Setup requires an elevated administrator token")
+	}
+	previousFlavor, previousPayload := enterpriseSetupStandaloneFlavor, enterpriseSetupPayloadLoader
+	t.Cleanup(func() {
+		enterpriseSetupStandaloneFlavor, enterpriseSetupPayloadLoader = previousFlavor, previousPayload
+	})
+	enterpriseSetupStandaloneFlavor = func() bool { return true }
+	payloadFS, _ := newEnterprisePayloadFixtureForFlavor(t, false, true)
+	enterpriseSetupPayloadLoader = func() (enterprisePayload, error) { return loadEnterprisePayload(payloadFS) }
+
+	name, err := windows.UTF16PtrFromString(`Global\Cisco-DefenseClaw-Standalone-Setup-Ensure`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime.LockOSThread()
+	handle, err := windows.CreateMutex(nil, true, name)
+	if err != nil {
+		runtime.UnlockOSThread()
+		t.Fatalf("hold the first ensure's mutex: %v", err)
+	}
+	held := true
+	releaseFirst := func() {
+		_ = windows.ReleaseMutex(handle)
+		_ = windows.CloseHandle(handle)
+		runtime.UnlockOSThread()
+	}
+	defer func() {
+		if held {
+			releaseFirst()
+		}
+	}()
+
+	type answer struct {
+		code   int
+		stdout string
+		stderr string
+	}
+	finished := make(chan answer, 1)
+	go func() {
+		var stdout, stderr bytes.Buffer
+		code := runEnterpriseSetup([]string{"/ensure", `CONFIG=C:\missing\config.yaml`, "JSON=1"}, &stdout, &stderr)
+		finished <- answer{code, stdout.String(), stderr.String()}
+	}()
+	select {
+	case got := <-finished:
+		var result struct {
+			ExitCode int `json:"exit_code"`
+			Errors   []struct {
+				Code string `json:"code"`
+			} `json:"errors"`
+		}
+		if err := json.Unmarshal([]byte(got.stdout), &result); err != nil ||
+			got.code != enterpriseBusyExitCode || result.ExitCode != got.code ||
+			len(result.Errors) != 1 || result.Errors[0].Code != "lifecycle_busy" || got.stderr != "" {
+			t.Fatalf("concurrent ensure: code=%d stdout=%q stderr=%q parse=%v", got.code, got.stdout, got.stderr, err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("concurrent ensure waited instead of reporting the first run")
+	}
+	releaseFirst()
+	held = false
+	var stdout, stderr bytes.Buffer
+	code := runEnterpriseSetup([]string{"/ensure", `CONFIG=C:\missing\config.yaml`, "JSON=1"}, &stdout, &stderr)
+	if code != enterpriseInvalidArgsExitCode || !strings.Contains(stdout.String(), `"code":"invalid_arguments"`) {
+		t.Fatalf("the next ensure did not get past the released guard: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+}
 
 // An implicit deferred install over an active deployment must be rejected by
 // Setup itself, before the lifecycle can publish an unclaimed rollback intent.
@@ -264,7 +337,7 @@ func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.
 	// An existing input that fails the trust check stays a 1603 security
 	// refusal for the Secure Client Setup. The standalone Setup refuses it
 	// as every config the lifecycle will not take (1639) and names the
-	// account and the icacls fix, not a bare SID (GAP-0528, GAP-0562).
+	// account and safe staging step, not a bare SID (GAP-0528, GAP-1112).
 	untrusted := filepath.Join(t.TempDir(), "config.yaml")
 	if err := os.WriteFile(untrusted, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
@@ -275,8 +348,9 @@ func TestStandaloneSetupReportsMalformedInputPathsAsInvalidArguments(t *testing.
 		t.Fatalf("untrusted config: %v", err)
 	}
 	standalone := standaloneEnterpriseSetupInputError(true, err)
-	if !errors.As(standalone, &invalid) || !strings.Contains(standalone.Error(), "icacls \""+filepath.Dir(untrusted)+"\"") ||
-		strings.Contains(standalone.Error(), "access mask") {
+	if !errors.As(standalone, &invalid) ||
+		!strings.Contains(standalone.Error(), "Copy the config into a dedicated administrator-only staging folder") ||
+		strings.Contains(strings.ToLower(standalone.Error()), "icacls") || strings.Contains(standalone.Error(), "access mask") {
 		t.Fatalf("standalone untrusted config error = %v", standalone)
 	}
 }

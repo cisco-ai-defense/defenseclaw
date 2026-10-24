@@ -172,6 +172,10 @@ type trustedActionRequest struct {
 	// A present empty map means the client inspected the action and found no
 	// static write target; nil denotes missing or invalid client evidence.
 	ResolvedWriteTargets map[string]string
+	// ActiveAgentFileIdentities maps the hook client's file identity of each
+	// instruction file the session loaded to that file, for a gateway that
+	// cannot read it (hookpaths.LoadedIdentityPrefix).
+	ActiveAgentFileIdentities map[string]string
 	// Hermes' native patch parser can reinterpret a symlink target containing
 	// a line break as another file directive. Its write views require the
 	// narrower patch-target proof, including in guest-directory views.

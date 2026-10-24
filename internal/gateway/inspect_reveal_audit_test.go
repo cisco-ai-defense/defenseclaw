@@ -11,7 +11,47 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
+
+func TestInspectRevealPersistsWhenComplianceCollectionIsOff(t *testing.T) {
+	for _, tc := range []struct {
+		name, route, body string
+		handle            func(*APIServer, http.ResponseWriter, *http.Request)
+	}{
+		{"tool", "/api/v1/inspect/tool", piiPayload, (*APIServer).handleInspectTool},
+		{"request", "/api/v1/inspect/request", `{"content":"leaked secret ` + piiLiteral + `"}`, (*APIServer).handleInspectRequest},
+		{"response", "/api/v1/inspect/response", `{"content":"leaked secret ` + piiLiteral + `"}`, (*APIServer).handleInspectResponse},
+		{"tool-response", "/api/v1/inspect/tool-response", `{"tool":"bash","output":"leaked secret ` + piiLiteral + `"}`, (*APIServer).handleInspectToolResponse},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newSidecarRuntimeFixtureCollectingNo(t, nil, observability.BucketComplianceActivity)
+			logger := audit.NewLogger(fixture.store)
+			logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime})
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+			req := httptest.NewRequest(http.MethodPost, tc.route, bytes.NewBufferString(tc.body))
+			req.Header.Set(revealHeader, "1")
+			w := httptest.NewRecorder()
+			tc.handle(api, w, req)
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), piiLiteral) {
+				t.Fatalf("reveal status=%d body=%s", w.Code, w.Body.String())
+			}
+			events, err := fixture.store.ListEvents(100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Action == string(audit.ActionInspectReveal) {
+					return
+				}
+			}
+			t.Fatal("raw inspect response has no persisted reveal row")
+		})
+	}
+}
 
 // Every inspect route that can return matched evidence must leave an
 // attributable, content-free reveal record before returning that evidence.

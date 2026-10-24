@@ -20,6 +20,7 @@ from defenseclaw.observability.local_splunk import (
     APP_PACKAGE_REL,
     COMPOSE_FILE_REL,
     COMPOSE_PROJECT,
+    ENV_EXAMPLE_REL,
     ENV_FILE_REL,
     RETIRED_SPLUNK_IMAGE,
     NativeLocalSplunkController,
@@ -558,12 +559,19 @@ def test_failed_upgrade_stop_restores_prior_running_stack_before_returning(
 
 @pytest.mark.parametrize("failure", ["unavailable", "timeout"])
 @pytest.mark.parametrize("running", [True, False])
+@pytest.mark.parametrize("refresh_bundle", [True, False])
 def test_upgrade_resolves_staged_image_before_changing_prior_stack(
-    tmp_path: Path, docker_exe: Path, monkeypatch: pytest.MonkeyPatch, failure: str, running: bool,
+    tmp_path: Path, docker_exe: Path, monkeypatch: pytest.MonkeyPatch,
+    failure: str, running: bool, refresh_bundle: bool,
 ) -> None:
     data_dir = tmp_path / "Offline Upgrade"
     stable = data_dir / "splunk-bridge"
     local_splunk._copy_bundle(bundled_splunk_bridge_dir(), stable)
+    old_template = stable / ENV_EXAMPLE_REL
+    old_template.write_text(
+        old_template.read_text(encoding="utf-8").replace("splunk/splunk:10.2.0", RETIRED_SPLUNK_IMAGE),
+        encoding="utf-8",
+    )
     previous_values = _credential_values(
         {"SPLUNK_IMAGE": RETIRED_SPLUNK_IMAGE},
         {},
@@ -611,6 +619,7 @@ def test_upgrade_resolves_staged_image_before_changing_prior_stack(
             os_name="windows",
             environment={},
             timeout=2,
+            refresh_bundle=refresh_bundle,
         )
 
     assert (stable / ENV_FILE_REL).read_bytes() == previous_env
