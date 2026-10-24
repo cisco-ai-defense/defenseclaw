@@ -612,6 +612,23 @@ func (l codexMachineRequirementsLayout) reconcile(cfg map[string]interface{}) er
 	return nil
 }
 
+// eventsWithExactGroup reports the managed events whose list in cfg already
+// holds the exact group this layout renders for them.
+func (l codexMachineRequirementsLayout) eventsWithExactGroup(cfg map[string]interface{}) map[string]bool {
+	exact := map[string]bool{}
+	hooks, _ := cfg["hooks"].(map[string]interface{})
+	for _, expected := range l.groups {
+		groups, _ := hooks[expected.eventType].([]interface{})
+		for _, candidate := range groups {
+			if l.groupMatches(candidate, expected) {
+				exact[expected.eventType] = true
+				break
+			}
+		}
+	}
+	return exact
+}
+
 // verify requires pinned isolation controls, the protected managed directory
 // and exactly one DefenseClaw group per managed event.
 func (l codexMachineRequirementsLayout) verify(cfg map[string]interface{}) error {
@@ -676,15 +693,41 @@ func parseWindowsCodexRequirements(raw []byte) (map[string]interface{}, error) {
 	return cfg, nil
 }
 
+// reconcileWindowsCodexRequirements merges the managed hook matrix opts
+// publishes into raw. published reports that raw is, byte for byte, the file
+// DefenseClaw last published (the ownership record's postimage), so nobody
+// has edited it since.
+//
+// This install's own command in the SessionStart shape only an earlier
+// release renders (windowsCodexEditedCurrentGroup) is either that release's
+// group or this install's group as an administrator edited it: the two are
+// byte for byte the same. It is replaced, as the earlier release's group,
+// only when published proves DefenseClaw wrote it and the file holds no exact
+// group of this install for that event (an upgrade from 1.0.2 or 1.0.3 that
+// nobody edited since). Every other such group is the administrator's: it
+// stays and the exact group is added beside it, as uninstall keeps it
+// (removeWindowsCodexOwnedGroups). A publication of this install that already
+// kept it holds the exact group, so later repairs keep it too.
 func reconcileWindowsCodexRequirements(
 	raw []byte,
 	opts WindowsCodexMachineRequirementsOptions,
+	published bool,
 ) ([]byte, bool, error) {
 	cfg, err := parseWindowsCodexRequirements(raw)
 	if err != nil {
 		return nil, false, fmt.Errorf("parse Codex requirements: %w", err)
 	}
-	if err := windowsCodexMachineLayout(opts).reconcile(cfg); err != nil {
+	layout := windowsCodexMachineLayout(opts)
+	if owned := layout.owned; owned != nil {
+		exact := layout.eventsWithExactGroup(cfg)
+		layout.owned = func(event string, group interface{}) bool {
+			if !owned(event, group) {
+				return false
+			}
+			return !windowsCodexEditedCurrentGroup(group, event, opts) || published && !exact[event]
+		}
+	}
+	if err := layout.reconcile(cfg); err != nil {
 		return nil, false, err
 	}
 
@@ -915,10 +958,11 @@ func removeWindowsCodexRequirementsOwnedChanges(
 // that shape (the SessionStart matcher before the compact source), so the
 // shape alone does not make it DefenseClaw's: it is what an administrator
 // who edits this install's group gets (the compact source cut from the
-// matcher). An upgrade replaces it, as the earlier release's group
-// (reconcile's owned); a removal leaves it unless the recorded preimage
-// holds that same group, and its reference to the managed directory keeps
-// the binary removal unsafe.
+// matcher). Reconcile replaces it only in a file nobody edited since
+// DefenseClaw published it that holds no exact group of this install (the
+// earlier release's own file, reconcileWindowsCodexRequirements); a removal
+// leaves it unless the recorded preimage holds that same group. A kept group's
+// reference to the managed directory keeps the binary removal unsafe.
 func windowsCodexEditedCurrentGroup(raw interface{}, event string, opts WindowsCodexMachineRequirementsOptions) bool {
 	command := windowsCodexManagedHookCommandFor(opts, event)
 	for _, shape := range windowsCodexMachineProfileGroups(opts) {

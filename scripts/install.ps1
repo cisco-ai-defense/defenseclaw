@@ -1279,7 +1279,14 @@ function Get-EffectiveConfigConnectors {
     # external DEFENSECLAW_CONFIG, before this run records its rollback point.
     # Every release defaults guardrail.enabled to false and a disabled
     # guardrail tears every connector down, so such a config guards none.
-    # Get-HeldConnectors still keeps any connector the running gateway reports.
+    # Otherwise the roster is the union the gateway protects
+    # (EffectiveWindowsStandaloneHookConnectors): every guardrail.connectors
+    # entry it does not turn off, the guardrail.connector scalar (claw.mode
+    # when neither names one, as activeConnector reads it), and on a
+    # standalone managed config every enterprise.machine_policy.connectors
+    # name, less each name guardrail.connectors.<name>.enabled: false turns
+    # off. Get-HeldConnectors still keeps any connector the running gateway
+    # reports.
     $path = if ($env:DEFENSECLAW_CONFIG) { $env:DEFENSECLAW_CONFIG } else { Join-Path $DataDir "config.yaml" }
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
     $python = Join-Path $Staging "venv\Scripts\python.exe"
@@ -1287,7 +1294,7 @@ function Get-EffectiveConfigConnectors {
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Cannot read the effective config's connectors without a checked Python environment: $path" }
     # Windows PowerShell 5.1 strips embedded double quotes from native argv.
     # Keep Python's string literals single-quoted so -c receives valid code.
-    $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; c=yaml.safe_load(open(sys.argv[1],encoding=''utf-8'')); c=c if isinstance(c,dict) else {}; g=c.get(''guardrail'') or {}; g=g if isinstance(g,dict) else {}; m=g.get(''connectors'') or {}; claw=c.get(''claw'') or {}; claw=claw if isinstance(claw,dict) else {}; names=[n for n,v in m.items() if isinstance(n,str) and n.strip() and not (isinstance(v,dict) and v.get(''enabled'') is False)] if isinstance(m,dict) and m else [g.get(''connector'') or claw.get(''mode'')]; names=names if str(g.get(''enabled'')).strip().lower() in (''1'',''t'',''true'') else []; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()})))'
+    $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; d=lambda v: v if isinstance(v,dict) else {}; c=d(yaml.safe_load(open(sys.argv[1],encoding=''utf-8''))); g=d(c.get(''guardrail'')); m=d(g.get(''connectors'')); e=d(c.get(''enterprise'')); off={normalize(n) for n,v in m.items() if isinstance(n,str) and isinstance(v,dict) and v.get(''enabled'') is False}; on=[n for n,v in m.items() if not (isinstance(v,dict) and v.get(''enabled'') is False)]; names=on+[g.get(''connector'') or ('''' if on else d(c.get(''claw'')).get(''mode''))]; standalone=str(c.get(''deployment_mode'') or '''').strip().lower()==''managed_enterprise'' and str(e.get(''profile'') or '''').strip().lower()==''standalone''; names+=list(d(d(e.get(''machine_policy'')).get(''connectors''))) if standalone else []; names=names if str(g.get(''enabled'')).strip().lower() in (''1'',''t'',''true'') else []; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()}-off)))'
     $probe = Get-NativeProbe $python @("-I", "-c", $code, $path)
     if ($probe.Exit -ne 0) { throw "Cannot read the effective config's connectors: $path" }
     try {

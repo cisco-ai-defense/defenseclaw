@@ -60,7 +60,7 @@ func windowsCodexTestCountGroup(t *testing.T, raw []byte, event string, want int
 // without reconcile so removal is checked on its own).
 func windowsCodexTestWithGroup(t *testing.T, opts WindowsCodexMachineRequirementsOptions, event string, group map[string]interface{}) []byte {
 	t.Helper()
-	rendered, _, err := reconcileWindowsCodexRequirements([]byte("approval_policy_floor = \"on-request\"\n"), opts)
+	rendered, _, err := reconcileWindowsCodexRequirements([]byte("approval_policy_floor = \"on-request\"\n"), opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestWindowsCodexLifecycleKeepsAnAdministratorEditedDefenseClawGroup(t *test
 				{"upgrade from the earlier release", written},
 				{"repair of the current release", upgraded},
 			} {
-				reconciled, _, err := reconcileWindowsCodexRequirements(install.file, current)
+				reconciled, _, err := reconcileWindowsCodexRequirements(install.file, current, true)
 				if err != nil {
 					t.Fatalf("%s: %v", install.name, err)
 				}
@@ -305,7 +305,7 @@ func TestWindowsCodexUninstallKeepsAnAdministratorNarrowedSessionStart(t *testin
 			wantNarrowed := windowsCodexTestNormalized(t, narrowed)
 			wantCompact := windowsCodexTestNormalized(t, compact)
 			admin := []byte("approval_policy_floor = \"on-request\"\n")
-			rendered, _, err := reconcileWindowsCodexRequirements(admin, current)
+			rendered, _, err := reconcileWindowsCodexRequirements(admin, current, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -366,7 +366,7 @@ func TestWindowsCodexUninstallKeepsAnAdministratorNarrowedSessionStart(t *testin
 			// same command: an upgrade replaces its group, the layout strip
 			// takes it, and an uninstall whose preimage records it removes it.
 			earlierFile := editedFile(t, false)
-			upgraded, _, err := reconcileWindowsCodexRequirements(earlierFile, current)
+			upgraded, _, err := reconcileWindowsCodexRequirements(earlierFile, current, true)
 			if err != nil {
 				t.Fatal(err)
 			}

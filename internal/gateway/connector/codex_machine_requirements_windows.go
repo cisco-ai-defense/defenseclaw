@@ -234,7 +234,11 @@ func ReconcileWindowsCodexMachineRequirements(
 		}
 		report.PreimageSHA256 = state.PreimageSHA256
 
-		rendered, _, err := reconcileWindowsCodexRequirements(requirementsBase, opts)
+		// The file is DefenseClaw's own publication when it still holds, byte
+		// for byte, the postimage the trusted record names.
+		ownPublication := !ownershipAdopted && requirements.existed &&
+			windowsCodexMachineHash(requirements.data) == state.PostimageSHA256
+		rendered, _, err := reconcileWindowsCodexRequirements(requirementsBase, opts, ownPublication)
 		if err != nil {
 			return err
 		}

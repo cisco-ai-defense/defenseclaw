@@ -160,7 +160,7 @@ func TestWindowsCodexLifecycleKeepsAnAdministratorScriptThatNamesTheHook(t *test
 			// without reconcile so that removal is checked on its own.
 			withAdmin := func(t *testing.T, opts WindowsCodexMachineRequirementsOptions) []byte {
 				t.Helper()
-				managed, _, err := reconcileWindowsCodexRequirements([]byte("approval_policy_floor = \"on-request\"\n"), opts)
+				managed, _, err := reconcileWindowsCodexRequirements([]byte("approval_policy_floor = \"on-request\"\n"), opts, true)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -186,7 +186,7 @@ func TestWindowsCodexLifecycleKeepsAnAdministratorScriptThatNamesTheHook(t *test
 				{name: "upgrade from the earlier release", file: written, opts: current},
 				{name: "repair of the current release", file: upgraded, opts: current},
 			} {
-				reconciled, _, err := reconcileWindowsCodexRequirements(install.file, install.opts)
+				reconciled, _, err := reconcileWindowsCodexRequirements(install.file, install.opts, true)
 				if err != nil {
 					t.Fatal(err)
 				}

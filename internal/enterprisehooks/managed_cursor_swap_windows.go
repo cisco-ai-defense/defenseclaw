@@ -333,7 +333,7 @@ func undoWindowsCursorManagedHooks(write safefile.SharedFileWrite, rebase safefi
 // writer's save in progress, is never discarded.
 func windowsCursorHooksRegistrationRender(adapterPath, failMode string) safefile.SharedRender {
 	return func(base safefile.SharedFile) (safefile.SharedEdit, error) {
-		hooks, err := mergeWindowsCursorManagedRebuildHooks(windowsCursorManagedSnapshotOf(base), adapterPath, failMode, false)
+		hooks, err := mergeWindowsCursorManagedRebuildHooks(windowsCursorManagedSnapshotOf(base), adapterPath, failMode)
 		return safefile.SharedEdit{Data: hooks}, err
 	}
 }

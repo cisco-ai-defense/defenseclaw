@@ -70,7 +70,7 @@ func TestWindowsCodexMachineRequirementsCoverCompactSessionStart(t *testing.T) {
 		return groups
 	}
 
-	rendered, _, err := reconcileWindowsCodexRequirements(nil, opts)
+	rendered, _, err := reconcileWindowsCodexRequirements(nil, opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestWindowsCodexMachineRequirementsCoverCompactSessionStart(t *testing.T) {
 	if err := verifyWindowsCodexRequirementsBytes(old, opts); err == nil {
 		t.Fatal("verify accepted SessionStart without compact")
 	}
-	upgraded, changed, err := reconcileWindowsCodexRequirements(old, opts)
+	upgraded, changed, err := reconcileWindowsCodexRequirements(old, opts, true)
 	if err != nil || !changed {
 		t.Fatalf("upgrade: changed=%v err=%v", changed, err)
 	}

@@ -722,7 +722,20 @@ if ($SecretName) {
     }
 }
 
+function Get-WrapperSecretErrorCode {
+    # errors[0].code of a failed `enterprise secret set|remove --json`, or ''.
+    param($Run)
+    try {
+        $document = ([string]$Run.StdOut).Trim() | ConvertFrom-Json -ErrorAction Stop
+        return [string]@($document.errors)[0].code
+    } catch {
+        return ''
+    }
+}
+
 function Set-WrapperSecret {
+    # Stores the staged credential with the installed CLI. Returns $null when
+    # it is stored, else the failure (Code is the CLI's errors[0].code).
     param([string[]]$Extra = @())
     try {
         $deployment = Get-DefenseClawInstalledDeployment
@@ -730,15 +743,162 @@ function Set-WrapperSecret {
         $run = Invoke-DefenseClawNative -FilePath $deployment.Cli -StandardInputPath $secret -ArgumentList (@(
             'enterprise', 'secret', 'set', '--name', $SecretName, '--from-stdin', '--json') + $Extra)
     } catch {
-        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed: $($_.Exception.Message)"
+        return [pscustomobject]@{ Code = ''; Message = "storing credential '$SecretName' failed: $($_.Exception.Message)" }
     }
     if ($run.ExitCode -ne 0) {
         $detail = ([string]$run.StdErr).Trim()
         if ($detail.Length -gt 1024) { $detail = $detail.Substring(0, 1024) }
-        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "storing credential '$SecretName' failed (exit $($run.ExitCode)): $detail"
+        return [pscustomobject]@{ Code = (Get-WrapperSecretErrorCode -Run $run)
+            Message = "storing credential '$SecretName' failed (exit $($run.ExitCode)): $detail" }
     }
     Write-WrapperLog -Message "stored credential $SecretName"
+    return $null
 }
+
+# region credential rotation journal
+#
+# A credential delivered with a bundle to an installed 1.0.4 deployment is
+# stored before the lifecycle applies that bundle (secret set --bundle, which
+# restarts the gateway with it). Until the lifecycle confirms the bundle, the
+# confirmed bundle signs only the value stored before. So that value (or
+# that none was stored) is journaled first, in an administrator-only folder,
+# and put back when the lifecycle fails, or at the start of the next ensure
+# when this run stopped before it settled. The CLI decides each put-back:
+# secret set stores only a value the confirmed bundle signs, and secret
+# remove refuses a credential the installed config uses. Either refusal means
+# the delivered bundle was confirmed after all, so its value stays.
+
+function Get-WrapperProgramData {
+    $value = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+    if (-not $value -or $value -notmatch '^[A-Za-z]:\\') { throw "program_data_unresolved: unexpected ProgramData '$value'" }
+    return $value.TrimEnd('\')
+}
+
+function Get-WrapperRotationJournal {
+    return Join-Path (Get-WrapperProgramData) 'Cisco\DefenseClaw-MDM\rotation'
+}
+
+function Get-WrapperStoredSecretPath {
+    # The deployment's credential file (managed.StandaloneLayout SecretsDir).
+    param([Parameter(Mandatory = $true)][string]$Name)
+    return Join-Path (Get-WrapperProgramData) ('Cisco\DefenseClaw\secrets\' + $Name)
+}
+
+function Initialize-WrapperRotationJournal {
+    $journal = Get-WrapperRotationJournal
+    foreach ($directory in @((Split-Path -Parent $journal), $journal)) {
+        if (-not (Test-Path -LiteralPath $directory)) {
+            $security = [System.Security.AccessControl.DirectorySecurity]::new()
+            $security.SetSecurityDescriptorSddlForm('O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+            [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($directory), $security)
+        }
+        if (-not (Test-DefenseClawAdminOnlyItem -Path $directory)) {
+            throw "the credential journal folder $directory is not administrator-only"
+        }
+    }
+    if (-not (Test-WrapperAdminOnlyAncestors -Path (Join-Path $journal 'entry'))) {
+        throw "a folder above the credential journal $journal can be changed by a non-administrator, or is a link"
+    }
+    return $journal
+}
+
+function Save-WrapperSecretJournal {
+    # Journals credential $Name as it is stored now, before a rotation
+    # replaces it. An entry an earlier run left is older, so it is kept: it
+    # holds the value from before that run's rotation.
+    param([Parameter(Mandatory = $true)][string]$Name)
+    $journal = Initialize-WrapperRotationJournal
+    $entry = Join-Path $journal $Name
+    if ((Test-Path -LiteralPath $entry) -or (Test-Path -LiteralPath "$entry.absent")) { return }
+    $stored = Get-WrapperStoredSecretPath -Name $Name
+    $item = Get-Item -LiteralPath $stored -Force -ErrorAction SilentlyContinue
+    $target = "$entry.absent"
+    $bytes = [byte[]]::new(0)
+    if ($null -ne $item) {
+        $folder = Get-Item -LiteralPath (Split-Path -Parent $stored) -Force
+        if ($item.PSIsContainer -or ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -or
+            ($folder.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            throw "the stored credential $stored is not a regular file"
+        }
+        $target = $entry
+        $bytes = [System.IO.File]::ReadAllBytes($stored)
+    }
+    $partial = "$entry.partial"
+    try {
+        $stream = [System.IO.FileStream]::new($partial, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
+        try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    } finally { [Array]::Clear($bytes, 0, $bytes.Length) }
+    [System.IO.File]::Move($partial, $target)
+}
+
+function Remove-WrapperJournalEntry {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item) { return }
+    # Overwrite a journaled credential before deleting it.
+    if ($item.Length -gt 0) { [System.IO.File]::WriteAllBytes($Path, [byte[]]::new($item.Length)) }
+    Remove-Item -LiteralPath $Path -Force
+}
+
+function Complete-WrapperSecretJournal {
+    # Settles the journal: -Restore puts each journaled credential back with
+    # $Cli, and without it (the lifecycle confirmed the bundle) the entries
+    # go. With no $Cli (nothing is installed any more) there is nothing to
+    # put back. -Name limits it to one credential. Returns what could not be
+    # put back; those entries stay for the next ensure.
+    param([string]$Cli = '', [string]$Name = '', [switch]$Restore)
+    $journal = Get-WrapperRotationJournal
+    if (-not (Test-Path -LiteralPath $journal -PathType Container)) { return @() }
+    $problems = @()
+    foreach ($file in @(Get-ChildItem -LiteralPath $journal -Force -File)) {
+        if ($file.Name.EndsWith('.partial')) {
+            # A journal write that never finished: the rotation never ran.
+            Remove-WrapperJournalEntry -Path $file.FullName
+            continue
+        }
+        $absent = $file.Name.EndsWith('.absent')
+        $entryName = if ($absent) { $file.Name.Substring(0, $file.Name.Length - 7) } else { $file.Name }
+        if ($entryName -cnotmatch '^[a-z0-9][a-z0-9-]{0,62}$' -or ($Name -and $entryName -ne $Name)) { continue }
+        if ($Restore -and $Cli) {
+            $arguments = @('enterprise', 'secret', 'set', '--name', $entryName, '--from-stdin', '--json')
+            $standardInput = $file.FullName
+            if ($absent) {
+                $arguments = @('enterprise', 'secret', 'remove', '--name', $entryName, '--json')
+                $standardInput = ''
+            }
+            try {
+                $run = Invoke-DefenseClawNative -FilePath $Cli -StandardInputPath $standardInput -ArgumentList $arguments
+            } catch {
+                $problems += "putting back credential '$entryName' failed: $($_.Exception.Message); the next ensure tries again"
+                continue
+            }
+            if ($run.ExitCode -eq 0) {
+                Write-WrapperLog -Message "put back credential ${entryName}: the lifecycle did not confirm the bundle that signs its new value"
+            } else {
+                $code = Get-WrapperSecretErrorCode -Run $run
+                if (@('secret_ref_mismatch', 'secret_ref_unbound', 'credential_in_use', 'not_installed') -notcontains $code) {
+                    $problems += "putting back credential '$entryName' failed (exit $($run.ExitCode) $code); the next ensure tries again"
+                    continue
+                }
+                Write-WrapperLog -Message "kept credential ${entryName}: the confirmed bundle uses the delivered value ($code)"
+            }
+        }
+        Remove-WrapperJournalEntry -Path $file.FullName
+    }
+    return @($problems)
+}
+
+function Undo-WrapperSecretRotation {
+    # Puts back credential $SecretName after the lifecycle failed or did not
+    # start. Anything not put back stays journaled for the next ensure.
+    param([string]$Cli)
+    foreach ($problem in @(Complete-WrapperSecretJournal -Cli $Cli -Name $SecretName -Restore)) {
+        Write-WrapperLog -Message $problem
+        [Console]::Error.WriteLine($problem)
+    }
+}
+# endregion credential rotation journal
 
 function Test-WrapperSecretSetBundle {
     # True when the installed CLI's secret set takes --bundle: --version-json
@@ -755,17 +915,51 @@ function Test-WrapperSecretSetBundle {
     }
 }
 
+# An earlier ensure that stopped between storing a credential and settling
+# its lifecycle left a journal entry: put that credential back first. A
+# deployment this run cannot trust keeps the entry for a later run.
+if ($normalizedAction -eq 'ensure') {
+    $resumeCli = $null
+    try {
+        $resumeDeployment = Get-DefenseClawInstalledDeployment
+        $resumeCli = if ($null -ne $resumeDeployment) { $resumeDeployment.Cli } else { '' }
+    } catch { $resumeCli = $null }
+    if ($null -ne $resumeCli) {
+        foreach ($problem in @(Complete-WrapperSecretJournal -Cli $resumeCli -Restore)) {
+            Write-WrapperLog -Message $problem
+            [Console]::Error.WriteLine($problem)
+        }
+    }
+}
+
 # A credential delivered with a bundle to an installed deployment is stored
 # first, with the bundle: the apply refuses a stored value the bundle does
 # not sign, and a credential the confirmed bundle signs changes only to a
-# value a newer signed bundle signs (secret set --bundle). With -SetupPath,
-# or an installed CLI before 1.0.4, which takes no --bundle, the credential
-# is stored after the lifecycle as before.
+# value a newer signed bundle signs (secret set --bundle). The value it
+# replaces is journaled first and put back unless the lifecycle succeeds
+# (credential rotation journal). With -SetupPath, or an installed CLI before
+# 1.0.4, which takes no --bundle, the credential is stored after the
+# lifecycle as before.
 $secretStored = $false
 $installedDeployment = $null
 if ($secret -and $bundle -and -not $SetupPath) { $installedDeployment = Get-DefenseClawInstalledDeployment }
 if ($null -ne $installedDeployment -and (Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)) {
-    Set-WrapperSecret -Extra @('--bundle', $bundle)
+    try {
+        Save-WrapperSecretJournal -Name $SecretName
+    } catch {
+        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "journaling credential '$SecretName' before its rotation failed, so nothing was changed: $($_.Exception.Message)"
+    }
+    $failure = Set-WrapperSecret -Extra @('--bundle', $bundle)
+    if ($null -ne $failure) {
+        # These refusals come before anything is written; after any other
+        # failure the new value may be stored, so the old one goes back.
+        if (@('secret_ref_mismatch', 'secret_ref_unbound', 'invalid_arguments', 'lifecycle_busy') -contains $failure.Code) {
+            [void](Complete-WrapperSecretJournal -Name $SecretName)
+        } else {
+            Undo-WrapperSecretRotation -Cli $installedDeployment.Cli
+        }
+        Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' $failure.Message
+    }
     $secretStored = $true
 }
 
@@ -801,11 +995,22 @@ try {
         $exitCode = Write-LifecycleResult -Run $run -Label 'defenseclaw.exe'
     }
 } catch {
-    Exit-Wrapper $script:ExitFailure 'mdm_lifecycle_launch_failed' $_.Exception.Message
+    $launchFailure = $_.Exception.Message
+    if ($secretStored) { Undo-WrapperSecretRotation -Cli $installedDeployment.Cli }
+    Exit-Wrapper $script:ExitFailure 'mdm_lifecycle_launch_failed' $launchFailure
 }
 
+if ($secretStored) {
+    # Success confirmed the bundle that signs the stored value.
+    if ($exitCode -eq 0) {
+        [void](Complete-WrapperSecretJournal -Name $SecretName)
+    } else {
+        Undo-WrapperSecretRotation -Cli $installedDeployment.Cli
+    }
+}
 if ($exitCode -eq 0 -and $secret -and -not $secretStored) {
-    Set-WrapperSecret
+    $failure = Set-WrapperSecret
+    if ($null -ne $failure) { Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' $failure.Message }
 }
 Remove-WrapperStaging
 exit $exitCode

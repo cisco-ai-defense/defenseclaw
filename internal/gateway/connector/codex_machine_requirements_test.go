@@ -155,7 +155,7 @@ func TestReconcileWindowsCodexRequirementsReplacesTheOneZeroHookSet(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	rendered, changed, err := reconcileWindowsCodexRequirements(upgraded, opts)
+	rendered, changed, err := reconcileWindowsCodexRequirements(upgraded, opts, true)
 	if err != nil || !changed {
 		t.Fatalf("reconcile of the 1.0.0 form: changed=%v err=%v", changed, err)
 	}
@@ -188,7 +188,7 @@ func TestReconcileWindowsCodexRequirementsReplacesTheOneZeroHookSet(t *testing.T
 func TestRemoveWindowsCodexRequirementsOwnedChangesPreservesSharedControls(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	baseline := []byte("administrator_key = \"preserve\"\n")
-	managed, _, err := reconcileWindowsCodexRequirements(baseline, opts)
+	managed, _, err := reconcileWindowsCodexRequirements(baseline, opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,7 +257,7 @@ func TestRemoveWindowsCodexRequirementsOwnedChangesPreservesSharedControls(t *te
 func TestRemoveWindowsCodexRequirementsOwnedChangesDropsUnsharedControls(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	baseline := []byte("administrator_key = \"preserve\"\n")
-	managed, _, err := reconcileWindowsCodexRequirements(baseline, opts)
+	managed, _, err := reconcileWindowsCodexRequirements(baseline, opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -362,7 +362,7 @@ func TestWindowsCodexAdoptRequirementsStripsDiscardedLayout(t *testing.T) {
 			scoped := testWindowsCodexScopedLayout()
 			scoped.HookContractID = contract
 			admin := []byte("administrator_key = \"preserve\"\n")
-			stale, _, err := reconcileWindowsCodexRequirements(admin, scoped)
+			stale, _, err := reconcileWindowsCodexRequirements(admin, scoped, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -381,7 +381,7 @@ func TestWindowsCodexAdoptRequirementsStripsDiscardedLayout(t *testing.T) {
 				cfg["allow_managed_hooks_only"] != nil || cfg["features"] != nil {
 				t.Fatalf("adopted preimage keeps DefenseClaw changes: %s", adoption.preimage)
 			}
-			rendered, _, err := reconcileWindowsCodexRequirements(adoption.base, opts)
+			rendered, _, err := reconcileWindowsCodexRequirements(adoption.base, opts, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -402,7 +402,7 @@ func TestWindowsCodexAdoptRequirementsKeepsIsolationControlsOnlyWithEvidence(t *
 	opts := testWindowsCodexMachineOptions()
 	scoped := testWindowsCodexScopedLayout()
 	admin := []byte("allow_managed_hooks_only = true\nadministrator_key = \"preserve\"\n\n[features]\nhooks = true\n")
-	stale, _, err := reconcileWindowsCodexRequirements(admin, scoped)
+	stale, _, err := reconcileWindowsCodexRequirements(admin, scoped, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -438,7 +438,7 @@ func TestWindowsCodexAdoptRequirementsKeepsIsolationControlsOnlyWithEvidence(t *
 			// Without a record only the current layout is recognizable.
 			current := stale
 			if discarded == nil {
-				current, _, err = reconcileWindowsCodexRequirements(admin, opts)
+				current, _, err = reconcileWindowsCodexRequirements(admin, opts, true)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -466,7 +466,7 @@ func windowsCodexAdoptThenReconcile(t *testing.T, current []byte, opts WindowsCo
 	if err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
-	rendered, _, err := reconcileWindowsCodexRequirements(adoption.base, opts)
+	rendered, _, err := reconcileWindowsCodexRequirements(adoption.base, opts, true)
 	return adoption, rendered, err
 }
 
@@ -482,7 +482,7 @@ func TestWindowsCodexReconcileForeignManagedDirNeedsDefenseClawEvidence(t *testi
 	administrator := []byte("[hooks]\nwindows_managed_dir = 'C:\\CorpHooks'\n\n[[hooks.PreToolUse]]\nmatcher = \"corp\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = 'C:\\CorpHooks\\audit.exe'\ntimeout = 5\n")
 	scoped := testWindowsCodexScopedLayout()
 	scoped.HookContractID = opts.HookContractID
-	staleDefenseClaw, _, err := reconcileWindowsCodexRequirements([]byte("administrator_key = \"preserve\"\n"), scoped)
+	staleDefenseClaw, _, err := reconcileWindowsCodexRequirements([]byte("administrator_key = \"preserve\"\n"), scoped, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +566,7 @@ func TestWindowsCodexAdoptRequirementsKeepsAdministratorManagedDir(t *testing.T)
 func TestWindowsCodexAdoptRequirementsPreimageExistence(t *testing.T) {
 	opts := testWindowsCodexMachineOptions()
 	opts.HookContractID = KnownHookContracts("codex")[0].ContractID
-	created, _, err := reconcileWindowsCodexRequirements(nil, opts)
+	created, _, err := reconcileWindowsCodexRequirements(nil, opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -31,11 +31,11 @@ func TestRemoveWindowsCodexRequirementsTakesTheGroupsOfAnEarlierRelease(t *testi
 	}
 	admin := []byte("approval_policy_floor = \"on-request\"\n")
 	adminWithHook := []byte("approval_policy_floor = \"on-request\"\n\n[[hooks.PreToolUse]]\nmatcher = \"*\"\n\n[[hooks.PreToolUse.hooks]]\ntype = \"command\"\ncommand = 'C:\\Tools\\audit.exe'\ntimeout = 5\n")
-	written, _, err := reconcileWindowsCodexRequirements(admin, earlier)
+	written, _, err := reconcileWindowsCodexRequirements(admin, earlier, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	writtenWithHook, _, err := reconcileWindowsCodexRequirements(adminWithHook, earlier)
+	writtenWithHook, _, err := reconcileWindowsCodexRequirements(adminWithHook, earlier, true)
 	if err != nil {
 		t.Fatal(err)
 	}

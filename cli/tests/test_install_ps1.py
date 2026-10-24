@@ -209,6 +209,82 @@ def test_effective_config_roster_is_empty_when_the_guardrail_is_disabled(tmp_pat
     assert _effective_config_roster(config) == []
 
 
+# Loop round 2 review (Windows consolidation): the fallback roster read the
+# guardrail.connector scalar only when guardrail.connectors was empty, so a
+# disabled map entry dropped an enabled scalar, and it never read
+# enterprise.machine_policy.connectors. An older gateway that omits connector
+# status then left those connectors out of an accepted retry's record, and
+# its restore passed without proving their hooks. The roster is now the union
+# EffectiveWindowsStandaloneHookConnectors protects, less explicit disables.
+_STANDALONE = "deployment_mode: managed_enterprise\nenterprise:\n  profile: standalone\n"
+_UNION_ROSTERS = [
+    ("a disabled map entry and an enabled scalar",
+     "guardrail:\n  enabled: true\n  connector: codex\n  connectors:\n    cursor:\n      enabled: false\n", ["codex"]),
+    ("a map entry and another scalar",
+     "guardrail:\n  enabled: true\n  connector: codex\n  connectors:\n    claude-code: {}\n", ["claudecode", "codex"]),
+    ("claw.mode next to a disabled map entry",
+     "claw:\n  mode: codex\nguardrail:\n  enabled: true\n  connectors:\n    cursor:\n      enabled: false\n", ["codex"]),
+    ("claw.mode next to an enabled map entry",
+     "claw:\n  mode: codex\nguardrail:\n  enabled: true\n  connectors:\n    claude-code: {}\n", ["claudecode"]),
+    ("the scalar turned off in the map",
+     "guardrail:\n  enabled: true\n  connector: claude_code\n  connectors:\n    claude-code:\n      enabled: false\n", []),
+    ("a machine policy connector only",
+     _STANDALONE + "  machine_policy:\n    connectors:\n      cursor: {}\nguardrail:\n  enabled: true\n  connector: codex\n",
+     ["codex", "cursor"]),
+    ("a machine policy connector with a disabled map entry",
+     _STANDALONE + "  machine_policy:\n    connectors:\n      cursor: {}\n      codex: {}\nguardrail:\n  enabled: true\n"
+     "  connectors:\n    codex:\n      enabled: false\n", ["cursor"]),
+    ("a machine policy connector outside a standalone config",
+     "enterprise:\n  machine_policy:\n    connectors:\n      cursor: {}\nguardrail:\n  enabled: true\n  connector: codex\n",
+     ["codex"]),
+    ("a machine policy connector with the guardrail disabled",
+     _STANDALONE + "  machine_policy:\n    connectors:\n      cursor: {}\nguardrail:\n  enabled: false\n", []),
+]
+
+
+@pytest.mark.parametrize(("config", "want"), [(c, w) for _, c, w in _UNION_ROSTERS], ids=[n for n, _, _ in _UNION_ROSTERS])
+def test_effective_config_roster_is_the_union_the_gateway_protects(tmp_path: Path, config: str, want: list[str]) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(config, encoding="utf-8")
+    assert _effective_config_roster(path) == want
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize(("config", "want"), [(c, w) for _, c, w in _UNION_ROSTERS if w],
+                         ids=[n for n, _, w in _UNION_ROSTERS if w])
+def test_an_accepted_retry_records_every_connector_the_config_protects(tmp_path: Path, config: str, want: list[str]) -> None:
+    # The accepted gateway is an older one that gives no status --json, so
+    # its record (and the journal its restore proves) comes from the
+    # effective config alone: every connector of the union is held.
+    path = tmp_path / "config.yaml"
+    path.write_text(config, encoding="utf-8")
+    roster = ", ".join(f"'{name}'" for name in _effective_config_roster(path))
+    result = _txn_harness(tmp_path, f"""
+$closer = Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'
+[void][IO.Directory]::CreateDirectory($LifecycleCloser)
+[IO.File]::WriteAllText($closer, 'checked 1.0.4 gateway')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'older gateway')
+$script:enabled = @({roster})
+$original = @{{ Schema = 1; Operation = 'install'; From = ''; To = '1.0.4'; Slot = ''; SetupRoot = ''; Bins = @{{}};
+    GatewayWasRunning = $false; Connectors = @(); Config = ''; ExternalConfig = ''; ExternalConfigSha256 = '';
+    HookFailModes = ''; BinDirProtected = $false; Committed = $false; ReplacementGatewayWasRunning = $true }}
+Write-DurableText $LifecycleManifest ($original | ConvertTo-Json -Depth 4)
+$Run.UnprovenConnectors = @(); $Run.UnprovenGatewayWasRunning = $true
+$script:health = ''
+Save-AcceptedConnectors $closer ([pscustomobject]@{{ Id = 123; Path = (Join-Path $BinDir 'defenseclaw-gateway.exe') }})
+"SAVED=$(@(Get-Field (Read-LifecycleManifest) 'ReplacementConnectors') -join ',')"
+$Run.UnprovenReplacement = Read-LifecycleManifest
+$Run.UnprovenAcceptedBins = Get-BinariesState $BinDir
+$Run.UnprovenCloserSha256 = Get-Sha256 $closer
+$journal = Write-LifecycleManifest 'upgrade' '1.0.3' '1.0.4' (Join-Path $DataDir 'previous.new')
+"JOURNAL=$(@(Get-Field $journal 'Connectors') -join ',')"
+""")
+    out = result.stdout + result.stderr
+    assert result.returncode == 0, out
+    joined = ",".join(want)
+    assert f"SAVED={joined}\n" in out and f"JOURNAL={joined}\n" in out, out
+
+
 @pytest.mark.parametrize("enabled", ["true", "True", "\"true\"", "1"])
 def test_effective_config_roster_reads_an_enabled_guardrail_as_the_gateway_does(tmp_path: Path, enabled: str) -> None:
     # The gateway reads guardrail.enabled with strconv.ParseBool semantics.
