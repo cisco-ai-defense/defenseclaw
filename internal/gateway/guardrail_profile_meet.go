@@ -412,8 +412,25 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 // members' scans.
 func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) *compiledRulePackCategories {
 	connectorName = canonicalConnectorRulePackKey(connectorName)
+	// Meet names are sorted for stable identity, but the first proven
+	// assignment must get its rules judged before other members spend the
+	// shared semantic budget.
+	order := m.members
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set == set && set.meet(resolved.decision.Name) == m {
+		order = make([]string, 0, len(m.members))
+		for _, candidate := range resolved.decision.Candidates {
+			if slices.Contains(m.members, candidate) && !slices.Contains(order, candidate) {
+				order = append(order, candidate)
+			}
+		}
+		for _, member := range m.members {
+			if !slices.Contains(order, member) {
+				order = append(order, member)
+			}
+		}
+	}
 	var sources []*compiledRulePackCategories
-	for _, member := range set.enforcingMembers(m.members, connectorName, requestProfilePath(ctx)) {
+	for _, member := range set.enforcingMembers(order, connectorName, requestProfilePath(ctx)) {
 		if generation := set.memberRuleGeneration(ctx, member, connectorName); generation != nil && !slices.Contains(sources, generation) {
 			sources = append(sources, generation)
 		}
