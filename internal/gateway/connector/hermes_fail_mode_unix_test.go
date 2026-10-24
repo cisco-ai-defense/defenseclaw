@@ -148,9 +148,10 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 	}
 	for _, mode := range []string{"", "closed", "open"} {
 		dir := t.TempDir()
-		hookDir := filepath.Join(dir, "hooks")
+		dataDir := filepath.Join(dir, "dc")
+		hookDir := filepath.Join(dataDir, "hooks")
 		opts := SetupOpts{
-			DataDir:       filepath.Join(dir, "dc"),
+			DataDir:       dataDir,
 			APIAddr:       freeAPIAddr(t),
 			APIToken:      "tok-test",
 			HookFailMode:  mode,
@@ -169,7 +170,7 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 			t.Run("mode "+map[string]string{"": "unset"}[mode]+mode+"/"+tc.event, func(t *testing.T) {
 				// The config the outage-open hook reads gives the open tier.
 				home := t.TempDir()
-				installOutageOpenRuntimeForHookTest(t, home, home)
+				installOutageOpenRuntimeForHookTest(t, home, dataDir)
 				out, errOut, code := runPerUserHookIn(t, home, []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, script,
 					`{"sessionId":"s","timestamp":1,"cwd":"/tmp","toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`,
 					"--event", tc.event)
