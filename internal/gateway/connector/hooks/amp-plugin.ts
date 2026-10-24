@@ -679,13 +679,15 @@ async function perUserOutageOpen(error: unknown): Promise<boolean> {
 }
 
 // configOutageOpen asks the per-user helper (`hook-outage-mode`, which only
-// reads config.yaml) for Amp's outage mode now. The mode baked above is the
+// reads the config.yaml of this plugin's data directory, never one the
+// agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for Amp's outage mode
+// now. The mode baked above is the
 // one of the last render, and a rule-pack change since (strict selected
 // while the gateway is stopped) has not reached it. A helper that cannot run
 // or answers anything but "open" keeps it closed.
 function configOutageOpen(): boolean {
 	try {
-		const output = execFileSync(perUserNativePostBinary(), ["hook-outage-mode", "--connector", "amp"], {
+		const output = execFileSync(perUserNativePostBinary(), ["hook-outage-mode", "--connector", "amp", "--hook-dir", dirname(DC_TOKEN_FILE)], {
 			timeout: 3000, maxBuffer: 4096, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
 		})
 		return String(output).trim() === "open"
@@ -1193,7 +1195,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			)
 			return
 		default:
-			// Returning void preserves Amp's original status and output.
+			// A result kept because this account's gateway is down carries the
+			// same one warning as the call. Returning void preserves Amp's
+			// original status and output.
+			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
 			return
 		}
 	})

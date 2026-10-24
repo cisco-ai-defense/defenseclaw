@@ -1250,21 +1250,24 @@ defenseclaw_per_user_outage_open() {
   defenseclaw_config_outage_open "$connector"
 }
 
-# defenseclaw_config_outage_open CONNECTOR returns 0 (true) when the config on
-# disk gives CONNECTOR's per-user hooks the open outage mode now: this
-# account's gateway binary (`hook-outage-mode`, which only reads config.yaml)
-# prints "open". No binary, a config it cannot load, a strict rule pack and
-# any other answer return 1, and the outage stays closed.
+# defenseclaw_config_outage_open CONNECTOR returns 0 (true) when the config of
+# this hook's runtime gives CONNECTOR's per-user hooks the open outage mode
+# now: this account's gateway binary (`hook-outage-mode`, which only reads
+# config.yaml in the data directory above HOOK_DIR) prints "open". The binary
+# is looked up from that data directory too, never from the agent's
+# DEFENSECLAW_HOME, and the agent's DEFENSECLAW_CONFIG does not choose the
+# config. No binary, a config it cannot load, a strict rule pack and any other
+# answer return 1, and the outage stays closed.
 defenseclaw_config_outage_open() {
-  local home="${DEFENSECLAW_AGENT_HOME:-}" bin=""
+  local home="${DEFENSECLAW_AGENT_HOME:-}" hook_dir="${HOOK_DIR:-}" bin=""
   if [ -z "$_DC_CONFIG_OUTAGE_MODE" ]; then
     _DC_CONFIG_OUTAGE_MODE=closed
-    if [ -n "$home" ] && [ -d "$home" ] &&
-      bin="$(defenseclaw_gateway_binary "${DEFENSECLAW_HOME:-${home}/.defenseclaw}" "$home")"; then
+    if [ -n "$home" ] && [ -d "$home" ] && [ "${hook_dir#/}" != "$hook_dir" ] &&
+      bin="$(defenseclaw_gateway_binary "${hook_dir}/.." "$home")"; then
       # The Go runtime cannot start under the hook's address-space limit.
       _DC_CONFIG_OUTAGE_MODE="$(
         ulimit -S -v "$(ulimit -H -v)" 2>/dev/null || true
-        HOME="$home" exec "$bin" hook-outage-mode --connector "$1" </dev/null 2>/dev/null
+        HOME="$home" exec "$bin" hook-outage-mode --connector "$1" --hook-dir "$hook_dir" </dev/null 2>/dev/null
       )" || _DC_CONFIG_OUTAGE_MODE=closed
     fi
   fi

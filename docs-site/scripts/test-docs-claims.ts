@@ -123,6 +123,23 @@ describe('Observe mode policy findings and gateway outages', () => {
     }
   });
 
+  it('keeps no per-user fail-mode claim the outage tier replaced on any connector page', () => {
+    // oss-outage-open review (loop round 3): the Amp, Hermes and Kiro
+    // references (and the Copilot and Antigravity connector pages) still
+    // said a per-user gateway failure fails closed by default, or that only
+    // an explicit `open` lets a call run. A per-user outage follows the
+    // policy tier; a sentence about a fail mode `open` or a `closed` default
+    // must name the managed host, the administrator, Secure Client or a
+    // sandbox it is about.
+    const stale = /explicit `open`|fail mode `open`|With `open`|hook_fail_mode` is `open`|default when no `hook_fail_mode`|fail mode `closed`, the default|per-user gateway failures\b.{0,60}?\bfail closed/i;
+    const scoped = /managed|administrator|Secure Client|sandbox|OpenShell/i;
+    const offenders = ['reference/connectors', 'connectors'].flatMap((folder) => docsPages(join(docs, folder))
+      .flatMap((path) => readFileSync(path, 'utf8').replace(/\s+/g, ' ').split(/(?<=[.|])\s+/)
+        .filter((sentence) => stale.test(sentence) && !scoped.test(sentence))
+        .map((sentence) => `${relative(docs, path)}: ${sentence.slice(0, 160)}`)));
+    assert.deepEqual(offenders, []);
+  });
+
   it('does not pair observe with blocks nothing on any content page', () => {
     const content = join(site, 'content');
     const offenders = docsPages(content).flatMap((path) => {

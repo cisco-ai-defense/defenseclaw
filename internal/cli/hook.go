@@ -612,9 +612,15 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 	var outageFailModeNow func() string
 	if !enterpriseManaged {
 		outageFailMode = perUserHookOutageFailMode(filepath.Join(hookDir, ".hookcfg"), connector)
-		// The record may predate a rule-pack change: the config decides
-		// (read once, and only for an outage the record would open).
-		outageFailModeNow = sync.OnceValue(func() string { return hookOutageFailModeNow(connector) })
+		// The record may predate a rule-pack change: the config of this
+		// runtime decides (read once, and only for an outage the record would
+		// open). Only a hook home the installed runtime names (the packaged
+		// Windows launcher's protected install state) can open one: a home
+		// taken from the agent's DEFENSECLAW_HOME is the agent's choice, so
+		// its record and config stay closed for an outage.
+		if trustedNativeState {
+			outageFailModeNow = sync.OnceValue(func() string { return hookOutageFailModeNow(connector, hookDir) })
+		}
 	}
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
 	if trustedNativeState {
