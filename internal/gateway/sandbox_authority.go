@@ -798,7 +798,6 @@ func (a *APIServer) sandboxMatchPeer(ctx context.Context, peer managedHookPeer, 
 	connectorName = config.NormalizeConnectorName(connectorName)
 	scans := set.requestScanScopes(ctx, connectorName)
 	decision := set.matchResolved(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, connectorName, scans, "")
-	decision = set.refuseUncompiledMeet(ctx, decision, scans)
 	return sandboxMatch{
 		decision: decision, resolved: resolved, facts: facts,
 		provisional: decision.Match == profileMatchDefaultLookupFailed,

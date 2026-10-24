@@ -88,6 +88,12 @@ type trustedActionRequest struct {
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
 	// has its hint inferred again from that command (GAP-0686).
 	windowsShellDialect bool
+	// generation is the rule generation the call is judged with; nil: the
+	// request profile's (snapshotRulePackGenerationFor). A caller that
+	// combines several dispatches of one request judges each with each
+	// member's generation of a strictest combination of profiles
+	// (promotedArtifactFindings).
+	generation *compiledRulePackCategories
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -160,7 +166,10 @@ func dispatchTrustedAction(
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)
 	}
-	generation := snapshotRulePackGenerationFor(parent, request.Connector)
+	generation := request.generation
+	if generation == nil {
+		generation = snapshotRulePackGenerationFor(parent, request.Connector)
+	}
 	if generation == nil || len(generation.members) == 0 {
 		return dispatchTrustedActionWith(parent, request, facts, generation, &telemetry)
 	}

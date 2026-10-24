@@ -101,10 +101,7 @@ func TestMeetScansEachDefinitionOfACollidingRuleID(t *testing.T) {
 				if order == "strong first" {
 					sources[0], sources[1] = sources[1], sources[0]
 				}
-				merged, err := mergeRuleGenerations(sources)
-				if err != nil {
-					t.Fatal(err)
-				}
+				merged := meetRuleGeneration(sources)
 				got := findingWithID(scanRuleGeneration(merged, tc.text, "Bash", ruleScanOptions{}), "R-SHARED")
 				if got == nil || got.Severity != "HIGH" {
 					t.Fatalf("finding %+v; want the stronger member's HIGH", got)
@@ -161,24 +158,23 @@ func TestMeetDispatchJudgesEachMembersExpressionOfASharedRuleID(t *testing.T) {
 // Two proven observe profiles with different sandbox sections form a meet.
 // Each pack is valid alone; their union is over the semantic rule limit of
 // one generation. No member blocks, so the meet observes with each
-// member's rules and never refuses; where both block, the uncompiled
-// merge still refuses.
+// member's rules and never refuses; where members block, it scans each
+// one's rules and never refuses either.
 func TestObserveOnlyMeetOverTheRuleLimitObservesInsteadOfRefusing(t *testing.T) {
 	stubProfileSources(t)
 	root := t.TempDir()
 	aRules, bRules := meetSemanticGeneration(t, "OBS-A", 200), meetSemanticGeneration(t, "OBS-B", 200)
-	if _, err := mergeRuleGenerations([]*compiledRulePackCategories{aRules, bRules}); err == nil {
+	if _, err := compileRulePackGeneration(unionRuleCategories([]*compiledRulePackCategories{aRules, bRules})); err == nil {
 		t.Fatal("fixture unexpectedly fits in one compiled generation")
 	}
 	for _, tc := range []struct {
 		name         string
 		aMode, bMode string
-		wantRefused  bool
 	}{
 		{name: "both observe", aMode: "observe", bMode: "observe"},
-		// Only a's rules are scanned where only a blocks: no merge.
+		// Only a's rules are scanned where only a blocks.
 		{name: "one member blocks", aMode: "action", bMode: "observe"},
-		{name: "both block", aMode: "action", bMode: "action", wantRefused: true},
+		{name: "both block", aMode: "action", bMode: "action"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			profiles := map[string]config.GuardrailProfile{
@@ -198,30 +194,30 @@ func TestObserveOnlyMeetOverTheRuleLimitObservesInsteadOfRefusing(t *testing.T) 
 			if decision.Name != config.ProfileMeetName([]string{"a", "b"}) {
 				t.Fatalf("decision %+v; want the meet of both profiles", decision)
 			}
-			if (decision.Refused != "") != tc.wantRefused {
-				t.Fatalf("decision %+v; want refused %v", decision, tc.wantRefused)
+			if decision.Refused != "" {
+				t.Fatalf("decision %+v; a rule limit must never refuse", decision)
 			}
 			api := &APIServer{}
 			api.guardrailProfiles.set.Store(set)
 			response, refused := api.refuseProfileHook(ctx, connector.HookProfile{}, "codex",
 				agentHookRequest{ConnectorName: "codex", HookEventName: "pre_tool_use"}, nil, nil)
-			if refused != tc.wantRefused || (refused && response.Action != "block") {
-				t.Fatalf("hook refused %v (%+v); want %v", refused, response, tc.wantRefused)
+			if refused {
+				t.Fatalf("hook refused: %+v", response)
 			}
 			req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", nil).WithContext(ctx)
-			if got := api.refuseProfileInspect(httptest.NewRecorder(), req, "/api/v1/inspect/tool", "inspect-tool-block", "tool"); got != tc.wantRefused {
-				t.Fatalf("inspect refused %v; want %v", got, tc.wantRefused)
+			if api.refuseProfileInspect(httptest.NewRecorder(), req, "/api/v1/inspect/tool", "inspect-tool-block", "tool") {
+				t.Fatal("inspect refused")
 			}
-			if got := refuseProfileProxy(httptest.NewRecorder(), req); got != tc.wantRefused {
-				t.Fatalf("proxy refused %v; want %v", got, tc.wantRefused)
+			if refuseProfileProxy(httptest.NewRecorder(), req) {
+				t.Fatal("proxy refused")
 			}
 			if tc.bMode != "observe" || tc.aMode != "observe" {
 				return
 			}
 			// The meet still observes with every rule of both members.
-			generation, err := set.meet(decision.Name).ruleGeneration(ctx, set, "codex")
-			if err != nil || generation == nil {
-				t.Fatalf("observe-only meet generation %p, error %v", generation, err)
+			generation := set.meet(decision.Name).ruleGeneration(ctx, set, "codex")
+			if generation == nil {
+				t.Fatal("observe-only meet has no rule generation")
 			}
 			for _, marker := range []string{"OBS-A-marker-000", "OBS-B-marker-199"} {
 				findings := scanRuleGeneration(generation, marker, "Bash", ruleScanOptions{includeToolCallOnly: true})

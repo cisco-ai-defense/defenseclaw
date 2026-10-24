@@ -133,11 +133,7 @@ func TestEveryCandidateProfileIsEnforcedInItsOwnModePerConnector(t *testing.T) {
 							var withoutBCtx context.Context
 							rulesOf := func(name, on string) []string {
 								if meet := set.meet(name); meet != nil {
-									generation, err := meet.ruleGeneration(ctx, set, on)
-									if err != nil {
-										t.Fatalf("meet %s on %q: %v", name, on, err)
-									}
-									return generationRuleIDs(generation)
+									return generationRuleIDs(meet.ruleGeneration(ctx, set, on))
 								}
 								return generationRuleIDs(set.memberRuleGeneration(ctx, name, on))
 							}

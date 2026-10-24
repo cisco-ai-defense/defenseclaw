@@ -127,8 +127,18 @@ func promotedArtifactFindings(
 	if len(candidates) == 0 {
 		return nil
 	}
-	var findings []RuleFinding
-	seenRules := make(map[string]struct{})
+	// A strictest combination of profiles judges every artifact with each
+	// member's own rules (one list of findings each); any other profile
+	// judges it with its own.
+	members := []*compiledRulePackCategories{nil}
+	if generation := snapshotRulePackGenerationFor(ctx, req.ConnectorName); generation != nil && len(generation.members) > 0 {
+		members = generation.members
+	}
+	findings := make([][]RuleFinding, len(members))
+	seenRules := make([]map[string]struct{}, len(members))
+	for i := range seenRules {
+		seenRules[i] = make(map[string]struct{})
+	}
 	for _, candidate := range candidates {
 		body, dialect, ok := readPromotedArtifactBounded(
 			ctx,
@@ -157,31 +167,47 @@ func promotedArtifactFindings(
 			artifactFacts.Authoritative() &&
 			artifactFacts.EnforcementEligible() &&
 			promotedArtifactSequentialReachabilityEligible(artifactFacts)
-		matched := dispatchTrustedAction(ctx, trustedActionRequest{
-			Input:              input,
-			LegacyText:         string(body),
-			ArtifactBody:       true,
-			Connector:          req.ConnectorName,
-			EnforcementCapable: enforcementCapable,
-			recordTelemetry:    recordTelemetry,
-		})
+		lists := make([][]RuleFinding, 0, len(members))
+		var observed trustedActionTelemetry
+		for i, member := range members {
+			matched := dispatchTrustedAction(ctx, trustedActionRequest{
+				Input:              input,
+				LegacyText:         string(body),
+				ArtifactBody:       true,
+				Connector:          req.ConnectorName,
+				EnforcementCapable: enforcementCapable,
+				recordTelemetry:    func(telemetry trustedActionTelemetry) { observed.widen(telemetry) },
+				generation:         member,
+			})
+			lists = append(lists, matched)
+			for _, finding := range matched {
+				if _, duplicate := seenRules[i][finding.RuleID]; duplicate {
+					continue
+				}
+				seenRules[i][finding.RuleID] = struct{}{}
+				finding.Tags = appendUniqueStrings(finding.Tags, "artifact-promotion", "experimental")
+				findings[i] = append(findings[i], finding)
+			}
+		}
+		if recordTelemetry != nil && !observed.empty() {
+			recordTelemetry(observed)
+		}
 		if req.toolChain != nil {
+			matched := lists[0]
+			if len(lists) > 1 {
+				matched = strongestRuleFindings(lists, trustedActionFindingKey)
+			}
 			req.toolChain.recordArtifactTrustedAction(
 				artifactFacts,
 				matched,
 				enforcementCapable,
 			)
 		}
-		for _, finding := range matched {
-			if _, duplicate := seenRules[finding.RuleID]; duplicate {
-				continue
-			}
-			seenRules[finding.RuleID] = struct{}{}
-			finding.Tags = appendUniqueStrings(finding.Tags, "artifact-promotion", "experimental")
-			findings = append(findings, finding)
-		}
 	}
-	return findings
+	if len(findings) == 1 {
+		return findings[0]
+	}
+	return strongestRuleFindings(findings, func(ruleID string) string { return ruleID })
 }
 
 // promotedArtifactSequentialReachabilityEligible masks a narrow POSIX case

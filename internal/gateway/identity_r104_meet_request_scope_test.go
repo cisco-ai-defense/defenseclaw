@@ -54,17 +54,15 @@ func generationRuleIDs(g *compiledRulePackCategories) []string {
 }
 
 // A gateway connector configured under an alias (claude-code, claude_code,
-// any case) is one scope under one name. The profile decision checks the
-// merge of the very generation the scan reads, so a merge that compiles for
-// the checked spelling can never be swapped at scan time for one that does
-// not, which would fall back to the global rules and drop a member's
-// blocking rule. Here the members' Claude Code merge compiles, while a
-// merge with the global rules would exceed the semantic rule limit.
+// any case) is one scope under one name: the scan reads the Claude Code
+// rules of every member, never the global rules, so no member's blocking
+// rule is dropped. Whether or not the members' rules together exceed the
+// semantic rule limit of one generation, the request is never refused.
 func TestConnectorAliasScansTheGenerationItsMeetChecked(t *testing.T) {
 	stubProfileSources(t)
 	for _, alias := range []string{"claude-code", "claude_code", "Claude-Code", "CLAUDECODE"} {
 		for _, failing := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/claudecode merge fails %v", alias, failing), func(t *testing.T) {
+			t.Run(fmt.Sprintf("%s/claudecode rules over one generation limit %v", alias, failing), func(t *testing.T) {
 				if got := canonicalConnectorRulePackKey(alias); got != "claudecode" {
 					t.Errorf("rule scope of %q = %q, want claudecode", alias, got)
 				}
@@ -112,8 +110,8 @@ func TestConnectorAliasScansTheGenerationItsMeetChecked(t *testing.T) {
 					{name: "unscoped decision without a route"},
 				} {
 					decision, scan := resolveProfileScope(t, api, ctx, rq)
-					if decision.Name != meetName || (decision.Refused != "") != failing {
-						t.Errorf("%s: decision %+v; want the meet, refused %v", rq.name, decision, failing)
+					if decision.Name != meetName || decision.Refused != "" {
+						t.Errorf("%s: decision %+v; want the meet, never refused", rq.name, decision)
 					}
 					if rq.path != "" || rq.hook != "" {
 						if scan != "claudecode" {
@@ -126,19 +124,17 @@ func TestConnectorAliasScansTheGenerationItsMeetChecked(t *testing.T) {
 				req := httptest.NewRequest(http.MethodPost, "/api/v1/inspect/tool", strings.NewReader(body)).WithContext(ctx)
 				rec := httptest.NewRecorder()
 				api.guardrailProfileInspectMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					if !failing {
-						ids := generationRuleIDs(snapshotRulePackGenerationFor(r.Context(), canonicalConnectorRulePackKey(api.connectorName())))
-						if !slices.Contains(ids, "ALIAS-A-PLAIN") || !slices.Contains(ids, "BASE-CLAUDE-PLAIN") || slices.Contains(ids, "BASE-GLOBAL-PLAIN") {
-							t.Errorf("unscoped tool inspect scans rules %v; want the Claude Code meet of a and the base Claude Code rules", ids)
-						}
+					ids := generationRuleIDs(snapshotRulePackGenerationFor(r.Context(), canonicalConnectorRulePackKey(api.connectorName())))
+					if !slices.Contains(ids, "ALIAS-A-PLAIN") || !slices.Contains(ids, "BASE-CLAUDE-PLAIN") || slices.Contains(ids, "BASE-GLOBAL-PLAIN") {
+						t.Errorf("unscoped tool inspect scans rules %v; want the Claude Code meet of a and the base Claude Code rules", ids)
 					}
 					api.handleInspectTool(w, r)
 				})).ServeHTTP(rec, req)
 				if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"action":"block"`) {
 					t.Fatalf("a's blocking rule did not block the unscoped tool inspect: %d %s", rec.Code, rec.Body.String())
 				}
-				if failing != strings.Contains(rec.Body.String(), "rule packs") {
-					t.Fatalf("unscoped tool inspect: refusal %v, want %v: %s", !failing, failing, rec.Body.String())
+				if strings.Contains(rec.Body.String(), "rule packs") {
+					t.Fatalf("unscoped tool inspect was refused: %s", rec.Body.String())
 				}
 			})
 		}
@@ -234,10 +230,7 @@ func TestObserveOnlyProfileAddsNoBlockingRulesToItsConnector(t *testing.T) {
 				if meet == nil {
 					t.Fatalf("meet of %v did not derive", tc.members)
 				}
-				generation, err := meet.ruleGeneration(ctx, set, tc.connector)
-				if err != nil {
-					t.Fatalf("meet of %v on %q: %v", tc.members, tc.connector, err)
-				}
+				generation := meet.ruleGeneration(ctx, set, tc.connector)
 				ids := generationRuleIDs(generation)
 				for _, id := range tc.want {
 					if !slices.Contains(ids, id) {

@@ -233,9 +233,10 @@ type compiledRulePackCategories struct {
 	// combination (a meet) whose rules it scans with. A scan of the meet is
 	// each member's own scan, the strongest finding of a rule kept
 	// (strongestRuleFindings), so a rule ID two packs define differently
-	// keeps both definitions. categories, semanticRules and
-	// ruleIdentityTitles then hold their union, for lookups only. nil for
-	// the generation of one pack.
+	// keeps both definitions. categories and ruleIdentityTitles then hold
+	// their union, for lookups only, and semanticRules is empty: every lane
+	// that judges with rules runs each member's. nil for the generation of
+	// one pack.
 	members []*compiledRulePackCategories
 }
 

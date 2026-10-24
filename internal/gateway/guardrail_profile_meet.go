@@ -152,7 +152,7 @@ func (set *guardrailProfileSet) meetOf(names, scans []string) (name string, sing
 }
 
 // requestScanScopes are the rule scopes ctx's decision on connectorName
-// compares profiles on and checks merges for: the one scope an inspect
+// compares profiles on: the one scope an inspect
 // route recorded (profileRuleScanConnectorKey), else profileCoverConnectors.
 // Every name is canonicalConnectorRulePackKey's, the one the scans use.
 func (set *guardrailProfileSet) requestScanScopes(ctx context.Context, connectorName string) []string {
@@ -164,9 +164,12 @@ func (set *guardrailProfileSet) requestScanScopes(ctx context.Context, connector
 	return set.profileCoverConnectors(connectorName)
 }
 
-// blockingMembers are the members of a meet that block on connectorName by
-// hook or inspect mode.
-func (set *guardrailProfileSet) blockingMembers(members []string, connectorName string) []string {
+// enforcingMembers are the members of a meet whose rules it scans
+// connectorName with: those that block there by hook or inspect mode. A
+// member that only observes on connectorName adds no rule, so the meet
+// never turns its observation into a block. When no member blocks there,
+// the meet observes with every member's rules.
+func (set *guardrailProfileSet) enforcingMembers(members []string, connectorName string) []string {
 	var out []string
 	for _, member := range members {
 		cfg := set.profileConfig(member)
@@ -174,19 +177,10 @@ func (set *guardrailProfileSet) blockingMembers(members []string, connectorName 
 			out = append(out, member)
 		}
 	}
-	return out
-}
-
-// enforcingMembers are the members of a meet whose rules it scans
-// connectorName with: those that block there (blockingMembers). A member
-// that only observes on connectorName adds no rule, so the meet never turns
-// its observation into a block. When no member blocks there, the meet
-// observes with every member's rules.
-func (set *guardrailProfileSet) enforcingMembers(members []string, connectorName string) []string {
-	if out := set.blockingMembers(members, connectorName); len(out) > 0 {
-		return out
+	if len(out) == 0 {
+		return members
 	}
-	return members
+	return out
 }
 
 // meetConnectors are the connectors a meet sets explicitly: every built-in
@@ -321,22 +315,14 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 	return key
 }
 
-// meetRuleGenerationResult is a merged rule generation of a meet, or why its
-// rules could not be compiled as one.
-type meetRuleGenerationResult struct {
-	generation *compiledRulePackCategories
-	err        error
-}
-
 // ruleGeneration is the rule generation of the meet for connectorName: the
 // generations of the members whose rules it scans there (enforcingMembers),
-// each scanned with its own rules (compiledRulePackCategories.members).
-// Where a member blocks, their union must compile as one generation, within
-// its rule and cost limits; a merge that does not must refuse the decision
-// (refuseUncompiledMeet), since substituting any one member would silently
-// drop the others' rules. Where no member blocks the meet only observes, so
-// those limits never turn the observation into a refusal.
-func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) (*compiledRulePackCategories, error) {
+// each scanned with its own rules (compiledRulePackCategories.members). Each
+// was compiled within the rule and cost limits of one generation, and their
+// union is never compiled as one, so no limit of one generation drops a
+// member's rule or refuses a request: a scan of the meet costs at most its
+// members' scans.
+func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) *compiledRulePackCategories {
 	connectorName = canonicalConnectorRulePackKey(connectorName)
 	var sources []*compiledRulePackCategories
 	for _, member := range set.enforcingMembers(m.members, connectorName) {
@@ -346,78 +332,29 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 	}
 	switch len(sources) {
 	case 0:
-		return nil, nil
+		return nil
 	case 1:
-		return sources[0], nil
+		return sources[0]
 	}
 	key := meetSourcesKey(connectorName, sources)
 	if cached, ok := m.rules.Load(key); ok {
-		result := cached.(meetRuleGenerationResult)
-		return result.generation, result.err
+		return cached.(*compiledRulePackCategories)
 	}
-	var merged *compiledRulePackCategories
-	var err error
-	if len(set.blockingMembers(m.members, connectorName)) == 0 {
-		merged = observedRuleGenerations(sources)
-	} else if merged, err = mergeRuleGenerations(sources); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] strictest combination %s: merging the rule packs of its profiles: %v; requests are refused\n", m.derived.Name, err)
-	}
-	value, _ := m.rules.LoadOrStore(key, meetRuleGenerationResult{generation: merged, err: err})
-	result := value.(meetRuleGenerationResult)
-	return result.generation, result.err
+	value, _ := m.rules.LoadOrStore(key, meetRuleGeneration(sources))
+	return value.(*compiledRulePackCategories)
 }
 
-// refuseUncompiledMeet checks every rule generation this request can scan
-// (scans, requestScanScopes: the scope an inspect route recorded, else a
-// connector's own scope, else the global and gateway connector scopes of an
-// unscoped decision). Another connector's failed merge never refuses the
-// request; a failed merge of a scope it scans always does, so no scan
-// substitutes the base pack. Only a scope where a member blocks can fail
-// (ruleGeneration), so an observing meet is never refused. The member names and compiler error remain in
-// the administrator's log.
-func (set *guardrailProfileSet) refuseUncompiledMeet(ctx context.Context, decision profileDecision, scans []string) profileDecision {
-	if decision.Refused != "" {
-		return decision
-	}
-	meet := set.meet(decision.Name)
-	if meet == nil {
-		return decision
-	}
-	for _, scope := range scans {
-		if _, err := meet.ruleGeneration(ctx, set, scope); err != nil {
-			decision.Refused = "DefenseClaw refused this request: the strictest combination of rule packs could not be compiled; ask an administrator to check the profile rule packs"
-			return decision
-		}
-	}
-	return decision
-}
-
-// mergeRuleGenerations is the generation that scans with each of sources'
-// own rules (members). Its lookups use the union of their categories
-// (unionRuleCategories), which must compile as one generation, within the
-// rule and cost limits of one.
-func mergeRuleGenerations(sources []*compiledRulePackCategories) (*compiledRulePackCategories, error) {
-	merged, err := compileRulePackGeneration(unionRuleCategories(sources))
-	if err != nil {
-		return nil, err
-	}
-	merged.members = sources
-	for _, source := range sources {
-		merged.overridden, merged.added = max(merged.overridden, source.overridden), max(merged.added, source.added)
-	}
-	return merged, nil
-}
-
-// observedRuleGenerations is mergeRuleGenerations where no member blocks:
-// the same members and union, never compiled as one, so no limit of one
-// generation refuses an observation.
-func observedRuleGenerations(sources []*compiledRulePackCategories) *compiledRulePackCategories {
+// meetRuleGeneration is the generation that scans with each of sources' own
+// rules (members). Its categories and rule titles are their union, for
+// lookups only.
+func meetRuleGeneration(sources []*compiledRulePackCategories) *compiledRulePackCategories {
 	merged := &compiledRulePackCategories{
 		categories:         cloneRuleCategories(unionRuleCategories(sources)),
 		ruleIdentityTitles: map[string]map[string]struct{}{},
 		members:            sources,
 	}
 	for _, source := range sources {
+		merged.overridden, merged.added = max(merged.overridden, source.overridden), max(merged.added, source.added)
 		for ruleID, titles := range source.ruleIdentityTitles {
 			if merged.ruleIdentityTitles[ruleID] == nil {
 				merged.ruleIdentityTitles[ruleID] = map[string]struct{}{}

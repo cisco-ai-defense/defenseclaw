@@ -114,21 +114,13 @@ func TestConnectorAssignmentMatchesOnlyARecordedConnector(t *testing.T) {
 	}
 }
 
-// A meet whose rule packs do not merge for one scope refuses exactly the
-// requests that scan that scope: a Codex request is never refused for
-// another connector's merge, and a request is never let through on a
-// scope it may scan. An unscoped decision taken without an inspect route
-// may scan the global rules or the gateway connector's.
-func TestMeetMergeFailureRefusesOnlyTheScopesARequestScans(t *testing.T) {
+// A meet whose members' rules together exceed the semantic rule limit of one
+// generation on one scope refuses no request, whatever scope it scans: each
+// member's rules are scanned as that member scans them.
+func TestMeetOverTheLimitOnOneScopeRefusesNoRequest(t *testing.T) {
 	stubProfileSources(t)
-	refusedFor := map[string][]string{ // failing scope -> requests refused
-		"": {"unscoped prompt inspect", "unscoped decision without a route"},
-		"codex": {"Codex hook", "unscoped tool inspect", "Codex-scoped tool inspect",
-			"unscoped decision without a route"},
-		"claudecode": {"Claude Code hook", "Claude Code-scoped tool inspect"},
-	}
-	for failing, refused := range refusedFor {
-		t.Run("failing scope "+failing, func(t *testing.T) {
+	for _, failing := range []string{"", "codex", "claudecode"} {
+		t.Run("over the limit on scope "+failing, func(t *testing.T) {
 			root := t.TempDir()
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
@@ -161,22 +153,14 @@ func TestMeetMergeFailureRefusesOnlyTheScopesARequestScans(t *testing.T) {
 			ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, identityTestSubject(p, p.providers[0], stateProven, true))
 			meetName := config.ProfileMeetName([]string{"a", "b"})
 			for _, scope := range []string{"", "codex", "claudecode"} {
-				_, err := set.meet(meetName).ruleGeneration(ctx, set, scope)
-				if (err != nil) != (scope == failing) {
-					t.Fatalf("scope %q merge error %v; only %q should fail", scope, err, failing)
+				if generation := set.meet(meetName).ruleGeneration(ctx, set, scope); generation == nil || len(generation.members) != 2 {
+					t.Fatalf("scope %q: meet generation %+v; want both members' rules", scope, generation)
 				}
 			}
 			for _, rq := range profileScopeRequests {
 				decision, _ := resolveProfileScope(t, api, ctx, rq)
-				wantRefused := false
-				for _, name := range refused {
-					wantRefused = wantRefused || name == rq.name
-				}
-				if decision.Name != meetName {
-					t.Errorf("%s: decision %q; want the meet whatever its merge", rq.name, decision.Name)
-				}
-				if (decision.Refused != "") != wantRefused {
-					t.Errorf("%s: refused %q; want refused %v", rq.name, decision.Refused, wantRefused)
+				if decision.Name != meetName || decision.Refused != "" {
+					t.Errorf("%s: decision %+v; want the meet, never refused", rq.name, decision)
 				}
 			}
 		})
