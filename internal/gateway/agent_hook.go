@@ -507,16 +507,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if connectorName == "copilot" && copilotVSCodeLocalFromContext(r.Context()) {
 			req.HookSurface = connector.CopilotHookSurfaceVSCodeLocal
 		}
-		// A session's prompts and tool calls wait for its start verdict and
-		// are refused while it blocks (GAP-0806, session_start_gate.go). A
-		// start that ends without a verdict blocks.
-		startGateKey := sessionStartGateKey(r.Context(), connectorName, req.SessionID)
-		var startTicket *sessionStartTicket
-		startVerdictBlocked, startVerdictReason := true, sessionStartUnfinishedReason
-		if canonicalHookLifecycleEvent(req.HookEventName) == "session_start" {
-			startTicket = a.sessionStartGate.begin(startGateKey)
-			defer func() { startTicket.finish(startVerdictBlocked, startVerdictReason) }()
-		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
 		// proves the connector hook route authenticated the request. A fresh
 		// SessionStart is the last authoritative recovery signal before a
@@ -528,7 +518,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			if err := a.ensureHookRegistration(r.Context(), connectorName); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] Codex SessionStart registration recovery failed: %v\n", err)
 				a.recordConnectorHookRejection(r.Context(), connectorName, req.HookEventName, "registration_recovery", int64(len(b)))
-				startVerdictReason = "Codex runtime registration is unavailable"
 				a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 					"error": "Codex runtime registration is unavailable",
 				})
@@ -542,9 +531,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
 		defer dedupeTicket.release()
 		if deduped {
-			dedupedResp := copilotDedupedResponse(profile, req, earlier)
-			startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(dedupedResp), dedupedResp.Reason
-			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, dedupedResp))
+			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -728,11 +715,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			resp = unparsedStructuredHookResponse(profile, req)
 			gated = true
 		}
-		if !gated && !hookSideRefusal(ctx) && sessionStartGateEvent(req.HookEventName) {
-			if reason, refuse := a.sessionStartGate.await(ctx, startGateKey, sessionStartGateWait(connectorName, req.HookEventName)); refuse {
-				resp, gated = a.sessionStartGateRefusal(ctx, profile, connectorName, req, payload, reason), true
-			}
-		}
 		sandboxGate := requireSandboxOutcome{}
 		if !gated {
 			// The require-sandbox gate answers a host run of a connector
@@ -873,9 +855,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if delivery == nil && finalization.AuditFailedClosed {
 			wireResp = resp
 		}
-		// The start verdict is final: release the session's waiting calls.
-		startVerdictBlocked, startVerdictReason = sessionStartVerdictBlocks(wireResp), wireResp.Reason
-		startTicket.finish(startVerdictBlocked, startVerdictReason)
 		if !panicked && resp.Action != hookActionUnconfirmed {
 			dedupeTicket.complete(resp)
 		}

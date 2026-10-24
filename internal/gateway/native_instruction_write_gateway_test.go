@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -25,11 +24,9 @@ func TestR104GAP0768NativeHighSeverityWrites(t *testing.T) {
 	}{
 		{"claude Unix active CLAUDE", "claudecode", "printf changed > /repo/CLAUDE.md", "/repo", "/home/alice", "COG-CLAUDE-MD", "HIGH", "/other/CLAUDE.md", actionfacts.DialectPOSIX, true},
 		{"claude Windows active CLAUDE", "claudecode", `Set-Content -LiteralPath 'C:\Repo\CLAUDE.md' -Value changed`, `C:\Repo`, `C:\Users\alice`, "COG-CLAUDE-MD", "HIGH", `C:\Other\CLAUDE.md`, actionfacts.DialectPowerShell, true},
-		{"openclaw Unix SOUL", "openclaw", "printf changed > /repo/SOUL.md", "/repo", "/home/alice", "COG-SOUL", "CRITICAL", "/other/SOUL.md", actionfacts.DialectPOSIX, true},
-		{"openclaw Windows absolute SOUL", "openclaw", `Set-Content -LiteralPath 'C:\Users\alice\scratch\SOUL.md' -Value changed`, `C:\Users\alice\scratch`, `C:\Users\alice`, "COG-SOUL", "CRITICAL", `C:\Other\SOUL.md`, actionfacts.DialectPowerShell, true},
-		{"codex Unix AGENTS", "codex", "printf changed > /repo/AGENTS.md", "/repo", "/home/alice", "COG-AGENTS-MD", "HIGH", "/other/AGENTS.md", actionfacts.DialectPOSIX, true},
-		{"codex Unix SOUL it does not load", "codex", "printf changed > /repo/SOUL.md", "/repo", "/home/alice", "", "CRITICAL", "/other/SOUL.md", actionfacts.DialectPOSIX, false},
-		{"claude Unix AGENTS it does not load", "claudecode", "printf changed > /repo/AGENTS.md", "/repo", "/home/alice", "", "HIGH", "/other/AGENTS.md", actionfacts.DialectPOSIX, false},
+		{"codex Unix SOUL", "codex", "printf changed > /repo/SOUL.md", "/repo", "/home/alice", "COG-SOUL", "CRITICAL", "/other/SOUL.md", actionfacts.DialectPOSIX, true},
+		{"codex Windows absolute SOUL", "codex", `Set-Content -LiteralPath 'C:\Users\alice\scratch\SOUL.md' -Value changed`, `C:\Users\alice\scratch`, `C:\Users\alice`, "COG-SOUL", "CRITICAL", `C:\Other\SOUL.md`, actionfacts.DialectPowerShell, true},
+		{"claude Unix AGENTS", "claudecode", "printf changed > /repo/AGENTS.md", "/repo", "/home/alice", "COG-AGENTS-MD", "HIGH", "/other/AGENTS.md", actionfacts.DialectPOSIX, true},
 		{"codex Windows AGENTS", "codex", `Set-Content -LiteralPath 'C:\Repo\AGENTS.md' -Value changed`, `C:\Repo`, `C:\Users\alice`, "COG-AGENTS-MD", "HIGH", `C:\Other\AGENTS.md`, actionfacts.DialectPowerShell, true},
 		{"claude Unix ordinary write", "claudecode", "printf changed > /repo/notes.txt", "/repo", "/home/alice", "", "HIGH", "/other/CLAUDE.md", actionfacts.DialectPOSIX, false},
 		{"claude Unix name in write data", "claudecode", "printf CLAUDE.md > /repo/notes.txt", "/repo", "/home/alice", "", "HIGH", "/other/CLAUDE.md", actionfacts.DialectPOSIX, false},
@@ -54,7 +51,6 @@ func TestR104GAP0768NativeHighSeverityWrites(t *testing.T) {
 					ActiveAgentFiles: []string{tc.active}, DialectHint: tc.dialect},
 				LegacyText: string(args), Connector: tc.connector, EnforcementCapable: true,
 			}
-			action.ResolvedWriteTargets = syntheticExistingInstructionEvidence(t, action.Input, tc.rule)
 			verdict := (&APIServer{scannerCfg: cfg}).inspectTrustedToolPolicyCtx(t.Context(), request, action)
 			if (verdict.Action == guardrailActionBlock) != tc.block ||
 				tc.rule != "" && !findingStringHasRuleID(verdict.Findings, tc.rule) {
@@ -64,27 +60,21 @@ func TestR104GAP0768NativeHighSeverityWrites(t *testing.T) {
 	}
 }
 
-// GAP-0777: a restarted gateway gets no InstructionsLoaded again for a
-// session that is still running. A resolved instruction-file write keeps its
-// action-mode block in that session: the gateway restores the loads it
-// recorded under its data directory. A new session that loaded nothing
-// keeps the block only on the CLAUDE.md that Claude Code reads at every
-// start; its SOUL.md and AGENTS.md are ordinary files.
+// GAP-0777: a restarted gateway has no process-local InstructionsLoaded
+// snapshot for a session that is still running. A resolved instruction-file
+// write must retain its action-mode block in that state and in a new session.
 func TestR104GAP0777ExistingSessionAfterGatewayRestart(t *testing.T) {
 	installToolCallCorpusProfileConnector(t, "claudecode", "default")
-	cfg := &config.Config{DataDir: t.TempDir()}
+	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "claudecode"
 	cfg.Guardrail.BlockAt = "HIGH"
 	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "default")
 	root := t.TempDir()
-	for _, tc := range []struct {
-		name, rule  string
-		startupLoad bool
-	}{
-		{"CLAUDE.md", "COG-CLAUDE-MD", true},
-		{"SOUL.md", "COG-SOUL", false},
-		{"AGENTS.md", "COG-AGENTS-MD", false},
+	for _, tc := range []struct{ name, rule string }{
+		{"CLAUDE.md", "COG-CLAUDE-MD"},
+		{"SOUL.md", "COG-SOUL"},
+		{"AGENTS.md", "COG-AGENTS-MD"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			file := filepath.Join(root, tc.name)
@@ -110,12 +100,6 @@ func TestR104GAP0777ExistingSessionAfterGatewayRestart(t *testing.T) {
 					HookEventName: "PreToolUse", SessionID: session, CWD: root,
 					ToolName: "Bash", ToolInput: toolInput,
 				})
-				if session == "new-session" && !tc.startupLoad {
-					if response.Action == guardrailActionBlock {
-						t.Errorf("session=%q wrote an unloaded %s: action=%q findings=%v", session, tc.name, response.Action, response.Findings)
-					}
-					continue
-				}
 				if response.Action != guardrailActionBlock ||
 					!findingStringHasRuleID(response.Findings, tc.rule) {
 					t.Errorf("session=%q action=%q findings=%v, want %s block", session, response.Action, response.Findings, tc.rule)
@@ -126,19 +110,13 @@ func TestR104GAP0777ExistingSessionAfterGatewayRestart(t *testing.T) {
 }
 
 func TestR104GAP0768NativePOSIXHookRoutes(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX shell hook routes; Windows PowerShell and cmd routes have native coverage")
-	}
 	for _, tc := range []struct {
-		connector, file, rule, blockAt string
+		connector, command, rule, blockAt string
 	}{
-		{"claudecode", "CLAUDE.md", "COG-CLAUDE-MD", "HIGH"},
-		{"codex", "AGENTS.md", "COG-AGENTS-MD", "HIGH"},
+		{"claudecode", "printf changed > /repo/CLAUDE.md", "COG-CLAUDE-MD", "HIGH"},
+		{"codex", "printf changed > /repo/SOUL.md", "COG-SOUL", "CRITICAL"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {
-			root := t.TempDir()
-			file := writeActiveAgentTestFile(t, root, tc.file)
-			command := "printf changed > '" + file + "'"
 			installToolCallCorpusProfileConnector(t, tc.connector, "default")
 			cfg := &config.Config{}
 			cfg.Guardrail.Mode = "action"
@@ -150,14 +128,14 @@ func TestR104GAP0768NativePOSIXHookRoutes(t *testing.T) {
 			var findings []string
 			if tc.connector == "claudecode" {
 				response := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
-					HookEventName: "PreToolUse", ToolName: "Bash", CWD: root,
-					ToolInput: map[string]interface{}{"command": command},
+					HookEventName: "PreToolUse", ToolName: "Bash", CWD: "/repo",
+					ToolInput: map[string]interface{}{"command": tc.command},
 				})
 				action, raw, findings = response.Action, response.RawAction, response.Findings
 			} else {
 				response := api.evaluateCodexHook(t.Context(), codexHookRequest{
-					HookEventName: "PreToolUse", ToolName: "Bash", CWD: root,
-					ToolInput: map[string]interface{}{"command": command},
+					HookEventName: "PreToolUse", ToolName: "Bash", CWD: "/repo",
+					ToolInput: map[string]interface{}{"command": tc.command},
 				})
 				action, raw, findings = response.Action, response.RawAction, response.Findings
 			}
