@@ -39,6 +39,12 @@ type windowsNativeOTLPRootsFixture struct {
 	bearer  string
 	env     map[string]string
 	machine map[string]string
+	// volatile is the account's logon environment; readAs counts the
+	// configuration reads verify made under the account's token, which
+	// fail with readAsErr when it is set (no signed-in session).
+	volatile  map[string]string
+	readAs    int
+	readAsErr error
 }
 
 func newWindowsNativeOTLPRootsFixture(t *testing.T) *windowsNativeOTLPRootsFixture {
@@ -63,9 +69,30 @@ func newWindowsNativeOTLPRootsFixture(t *testing.T) *windowsNativeOTLPRootsFixtu
 		return f.env[name]
 	}
 	windowsMachineEnvironment = func(name string) string { return f.machine[name] }
+	f.volatile = map[string]string{}
+	previousVolatile, previousReadAs := windowsAccountVolatileEnvironment, windowsAccountConfigReadAs
+	windowsAccountVolatileEnvironment = func(sid *windows.SID, name string) string {
+		if !sid.Equals(f.sid) {
+			t.Errorf("the logon environment of %s was read for the row of %s", sid, f.sid)
+		}
+		return f.volatile[name]
+	}
+	// The test process is the account, so reading as the account is a
+	// direct read.
+	windowsAccountConfigReadAs = func(sid *windows.SID, home string, fn func() error) error {
+		if !sid.Equals(f.sid) || home != f.home {
+			t.Errorf("a configuration of the row of %s was read as %s", f.sid, sid)
+		}
+		f.readAs++
+		if f.readAsErr != nil {
+			return f.readAsErr
+		}
+		return fn()
+	}
 	t.Cleanup(func() {
 		windowsEnterpriseTargetImpersonation = previousImpersonation
 		windowsUserEnvironment, windowsMachineEnvironment = previousUser, previousMachine
+		windowsAccountVolatileEnvironment, windowsAccountConfigReadAs = previousVolatile, previousReadAs
 	})
 	for _, scope := range []connector.OTLPPathTokenScope{connector.OTLPScopeCodex, connector.OTLPScopeClaude} {
 		path, err := connector.OTLPPathTokenFilePath(f.dataDir, scope)
@@ -112,6 +139,66 @@ func (f *windowsNativeOTLPRootsFixture) outside(t *testing.T) string {
 	dir := t.TempDir()
 	setWindowsTestPathExactOwner(t, dir, f.sid)
 	return dir
+}
+
+// ownRuntime gives the profile, the data directory and the native OTLP
+// credentials to the account (an elevated test process otherwise makes
+// Administrators their owner), as when the account's own setup made them;
+// with present false it removes the credentials, as for a fresh account.
+func (f *windowsNativeOTLPRootsFixture) ownRuntime(t *testing.T, present bool) {
+	t.Helper()
+	for _, path := range []string{f.home, f.dataDir, filepath.Join(f.dataDir, "hooks")} {
+		setWindowsTestPathExactOwner(t, path, f.sid)
+	}
+	for _, scope := range []connector.OTLPPathTokenScope{connector.OTLPScopeCodex, connector.OTLPScopeClaude} {
+		token, err := connector.OTLPPathTokenFilePath(f.dataDir, scope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !present {
+			if err := os.Remove(token); err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			continue
+		}
+		f.writeOwned(t, token, f.bearer)
+	}
+}
+
+// requireStale fails unless verify named the stale exporter in source.
+func (f *windowsNativeOTLPRootsFixture) requireStale(t *testing.T, name, source string, err error) {
+	t.Helper()
+	f.requireRefusal(t, name, source, err)
+	if !strings.Contains(err.Error(), "keeps a native OTLP exporter") {
+		t.Fatalf("%s: verify = %v, want the stale exporter in %s read and named", name, err, source)
+	}
+}
+
+// requireNeedsSession fails unless verify kept the row unverified because
+// source is read only as the account and the account has no session.
+func (f *windowsNativeOTLPRootsFixture) requireNeedsSession(t *testing.T, name, source string, err error) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), "no signed-in session") || !strings.Contains(err.Error(), source) {
+		t.Fatalf("%s: verify = %v, want %s unverified until the account signs in", name, err, source)
+	}
+	if strings.Contains(err.Error(), f.bearer) || strings.Contains(err.Error(), f.home) || strings.Contains(err.Error(), `\\`) {
+		t.Fatalf("%s: verify error carries a value or a path: %v", name, err)
+	}
+}
+
+// windowsTestShare is local reached as a share, through the administrative
+// share of its drive.
+func windowsTestShare(t *testing.T, local string) string {
+	t.Helper()
+	volume := filepath.VolumeName(local)
+	if len(volume) != 2 || volume[1] != ':' {
+		t.Fatalf("%s is not on a drive", local)
+	}
+	share := `\\localhost\` + volume[:1] + `$` + local[2:]
+	if _, err := os.Stat(share); err != nil {
+		t.Skipf("the administrative share of %s is not reachable on this host: %v", volume, err)
+	}
+	return share
 }
 
 func (f *windowsNativeOTLPRootsFixture) verify(name string) error {
@@ -354,6 +441,168 @@ func TestWindowsManagedRowCleansRedirectedAppDataNativeOTLP(t *testing.T) {
 				t.Fatalf("verify after redirected config repair: %v", err)
 			}
 		})
+	}
+}
+
+// AppData redirected to a share, by User Shell Folders or through the
+// account's home share, is where its agent reads its configuration. A fresh
+// account verifies there; a stale exporter there is reported and repair
+// removes it. Verify reads the share as the account (the service would
+// reach it as the computer) and stays unverified while the account has no
+// signed-in session to read it under.
+func TestWindowsManagedRowChecksNetworkAppDataAsTheAccount(t *testing.T) {
+	for _, tc := range []struct {
+		name, variable, file, folderVariable, shellName string
+		homeShare                                       bool
+	}{
+		{"codex roaming", "CODEX_HOME", "config.toml", "APPDATA", "AppData", false},
+		{"claudecode local", "CLAUDE_CONFIG_DIR", "settings.json", "LOCALAPPDATA", "Local AppData", false},
+		{"codex home share", "CODEX_HOME", "config.toml", "APPDATA", "AppData", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newWindowsNativeOTLPRootsFixture(t)
+			name := strings.Fields(tc.name)[0]
+			account, _, _, err := f.sid.LookupAccount("")
+			if err != nil || account == "" {
+				t.Fatalf("look up the test account: %v", err)
+			}
+			local := f.outside(t)
+			share := windowsTestShare(t, local)
+			shellValue := share + `\%USERNAME%\AppData`
+			if tc.homeShare {
+				f.volatile["HOMESHARE"] = share + `\` + account
+				shellValue = `%HOMESHARE%\AppData`
+			}
+			f.env[tc.variable] = "%" + tc.folderVariable + "%\\Moved"
+			previousShell := windowsAccountUserShellFolderValue
+			windowsAccountUserShellFolderValue = func(sid *windows.SID, value string) (string, error) {
+				if !sid.Equals(f.sid) {
+					t.Errorf("read another account's User Shell Folders: %s", sid)
+				}
+				if value == tc.shellName {
+					return shellValue, nil
+				}
+				return "", nil
+			}
+			t.Cleanup(func() { windowsAccountUserShellFolderValue = previousShell })
+			agentDir := filepath.Join(local, account, "AppData", "Moved")
+			if err := os.MkdirAll(agentDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			for _, dir := range []string{filepath.Join(local, account), filepath.Join(local, account, "AppData"), agentDir} {
+				setWindowsTestPathExactOwner(t, dir, f.sid)
+			}
+			source := tc.variable + " " + tc.file
+
+			f.ownRuntime(t, false)
+			if err := f.verify(name); err != nil {
+				t.Fatalf("a fresh account with AppData on a share failed verify: %v", err)
+			}
+			if f.readAs == 0 {
+				t.Fatal("verify did not read the share as the account")
+			}
+
+			f.ownRuntime(t, true)
+			f.writeOwned(t, filepath.Join(agentDir, tc.file), staleWindowsNativeOTLP(f.bearer)[name])
+			err = f.verify(name)
+			f.requireStale(t, name, source, err)
+			if strings.Contains(err.Error(), "localhost") {
+				t.Fatalf("verify error names the share: %v", err)
+			}
+
+			f.readAsErr = errors.New("no session")
+			f.requireNeedsSession(t, name, source, f.verify(name))
+			f.readAsErr = nil
+
+			f.repairAsAccount(t, name, filepath.Join(agentDir, tc.file))
+			f.requireClean(t, filepath.Join(agentDir, tc.file))
+			if err := f.verify(name); err != nil {
+				t.Fatalf("verify after the share repair: %v", err)
+			}
+		})
+	}
+}
+
+// A configuration on a drive the service does not have as the account has it
+// (the account's mapped drive is remote, or missing for the service) is read
+// as the account: the service would find no file there and pass a stale
+// exporter, or judge another file than the agent reads.
+func TestWindowsManagedRowReadsMappedDriveConfigAsTheAccount(t *testing.T) {
+	missing := ""
+	for letter := 'Z'; letter >= 'D'; letter-- {
+		if windowsDriveType(string(letter)+`:\`) == windows.DRIVE_NO_ROOT_DIR {
+			missing = string(letter) + ":"
+			break
+		}
+	}
+	f := newWindowsNativeOTLPRootsFixture(t)
+	root := f.outside(t)
+	f.env["CODEX_HOME"] = root
+	f.writeOwned(t, filepath.Join(root, "config.toml"), staleWindowsNativeOTLP(f.bearer)["codex"])
+	drive := filepath.VolumeName(root) + `\`
+	previous := windowsDriveType
+	windowsDriveType = func(r string) uint32 {
+		if strings.EqualFold(r, drive) {
+			return windows.DRIVE_REMOTE
+		}
+		return previous(r)
+	}
+	t.Cleanup(func() { windowsDriveType = previous })
+
+	// The profile is on the same drive, so its default file is the first
+	// one read as the account.
+	f.readAsErr = errors.New("no session")
+	f.requireNeedsSession(t, "codex", "config.toml", f.verify("codex"))
+	f.readAsErr = nil
+	f.requireStale(t, "codex", "CODEX_HOME config.toml", f.verify("codex"))
+	if f.readAs == 0 {
+		t.Fatal("verify read a configuration on a remote drive as the service")
+	}
+
+	if missing == "" {
+		t.Skip("every drive letter is in use on this host")
+	}
+	windowsDriveType = previous
+	f.env["CODEX_HOME"] = missing + `\codex`
+	f.readAsErr = errors.New("no session")
+	f.requireNeedsSession(t, "codex", "CODEX_HOME config.toml", f.verify("codex"))
+}
+
+// A configuration the service is refused (by its DACL, or through a link
+// that reaches a share) is read again as the account.
+func TestWindowsManagedRowRereadsRefusedConfigAsTheAccount(t *testing.T) {
+	f := newWindowsNativeOTLPRootsFixture(t)
+	path := connector.UserNativeOTLPConfigPathFor("codex", f.home)
+	f.write(t, path, staleWindowsNativeOTLP(f.bearer)["codex"])
+	sid := f.sid.String()
+	setDACL := func(sddl string) {
+		sd, err := windows.SecurityDescriptorFromString(sddl)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dacl, _, err := sd.DACL()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	allowed := "D:P(A;;FA;;;" + sid + ")(A;;FA;;;SY)(A;;FA;;;BA)"
+	setDACL("D:P(D;;0x1;;;" + sid + ")(A;;FA;;;" + sid + ")(A;;FA;;;SY)(A;;FA;;;BA)")
+	t.Cleanup(func() { setDACL(allowed) })
+	previous := windowsAccountConfigReadAs
+	windowsAccountConfigReadAs = func(sid *windows.SID, home string, fn func() error) error {
+		// The account's own rights let it read its file.
+		setDACL(allowed)
+		return previous(sid, home, fn)
+	}
+	t.Cleanup(func() { windowsAccountConfigReadAs = previous })
+
+	f.requireStale(t, "codex", "config.toml", f.verify("codex"))
+	if f.readAs != 1 {
+		t.Fatalf("verify read the refused configuration as the account %d times, want once", f.readAs)
 	}
 }
 

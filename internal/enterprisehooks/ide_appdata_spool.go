@@ -128,16 +128,55 @@ func RedirectedAppDataFolder(value, home, user, defaultRel string) (folder, refu
 		return "", "names an environment variable other than USERPROFILE or USERNAME"
 	case strings.HasPrefix(value, `\\`) || strings.HasPrefix(value, "//"):
 		return "", "is a network or device path; AppData on a network share is not inventoried"
-	case len(value) < 3 || !isASCIIDriveLetter(value[0]) || value[1] != ':' || (value[2] != '\\' && value[2] != '/'):
+	}
+	if folder, refused = windowsAbsoluteFolder(value, false); refused != "" {
+		return "", refused
+	}
+	if strings.EqualFold(folder, windowsCleanPath(strings.TrimSpace(home)+`\`+defaultRel)) {
+		return "", ""
+	}
+	return folder, ""
+}
+
+// windowsAbsoluteFolder cleans an absolute Windows folder path, on any
+// platform: a drive path, and when network is set also a share path
+// (\\server\share\...) and the \\?\ and \\.\ forms of either. A ".." never
+// climbs above the drive or the share. refused says why value is not one.
+func windowsAbsoluteFolder(value string, network bool) (folder, refused string) {
+	value = strings.ReplaceAll(strings.TrimSpace(value), "/", `\`)
+	if network && strings.HasPrefix(value, `\\`) {
+		share := value[2:]
+		if len(share) >= 2 && (share[0] == '?' || share[0] == '.') && share[1] == '\\' {
+			share = share[2:]
+			if len(share) < 4 || !asciiEqualFold(share[:4], `UNC\`) {
+				// \\?\D:\... is the drive path; any other device is no folder.
+				if folder, refused = windowsAbsoluteFolder(share, false); refused != "" {
+					return "", "is a device path, not a folder"
+				}
+				return folder, ""
+			}
+			share = share[4:]
+		}
+		server, rest, _ := strings.Cut(share, `\`)
+		name, rest, _ := strings.Cut(rest, `\`)
+		for _, part := range []string{server, name} {
+			if part == "" || part == "." || part == ".." || strings.ContainsAny(part, `:*?"<>|`) {
+				return "", `is not a share path (\\server\share\folder)`
+			}
+		}
+		folder = `\\` + server + `\` + name
+		if cleaned := path.Clean("/" + strings.ReplaceAll(rest, `\`, "/")); cleaned != "/" {
+			folder += strings.ReplaceAll(cleaned, "/", `\`)
+		}
+		return folder, ""
+	}
+	if len(value) < 3 || !isASCIIDriveLetter(value[0]) || value[1] != ':' || value[2] != '\\' {
 		return "", "is not an absolute local path"
 	}
 	folder = windowsCleanPath(value)
 	if len(folder) < 3 || folder[1] != ':' || folder[2] != '\\' {
 		// ".." above the drive root leaves no absolute path.
 		return "", "is not an absolute local path"
-	}
-	if strings.EqualFold(folder, windowsCleanPath(strings.TrimSpace(home)+`\`+defaultRel)) {
-		return "", ""
 	}
 	return folder, ""
 }

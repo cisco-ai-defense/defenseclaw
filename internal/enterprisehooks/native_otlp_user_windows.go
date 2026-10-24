@@ -34,7 +34,11 @@ import (
 // pass through a link; the check follows it as the agent does and judges the
 // file it reaches (GAP-0929), but reads a file outside the profile, or one it
 // reaches through a link, only when the account owns it: the guardian never
-// reads or changes another account's file for this row.
+// reads or changes another account's file for this row. AppData that User
+// Shell Folders redirects to a share, a share a variable names, and the
+// account's mapped drives are the account's folders too: verify reads a file
+// there under the account's own token, as the service would reach a share as
+// the computer and has none of the account's drive mappings.
 
 // windowsNativeOTLPConfig is one configuration file the check reads and how
 // messages name it (never by the account's path or its values).
@@ -73,7 +77,7 @@ func windowsManagedUserNativeOTLPAbsent(connectorName, home, dataDir string, sid
 	}
 	var residue []string
 	for _, config := range configs {
-		data, err := readWindowsAccountFile(config.path, sid, home)
+		data, err := readWindowsAccountConfig(config.path, sid, home)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -111,6 +115,12 @@ func windowsNativeOTLPUncheckable(connectorName, label string, err error) error 
 				"so it cannot be checked for an earlier per-user native OTLP exporter; replace it with the account's own file, "+
 				"or remove the link, and the next repair checks it",
 			connectorName, label)
+	}
+	if errors.Is(err, errWindowsAccountConfigNeedsSession) {
+		return fmt.Errorf(
+			"enterprise hooks: %s: %s is on a share or a drive only the account has, so it is checked as the account, "+
+				"and the account has no signed-in session now; the next repair after the account signs in checks it: %w",
+			connectorName, label, err)
 	}
 	return fmt.Errorf("enterprise hooks: %s: cannot check %s for an earlier per-user native OTLP exporter: %w", connectorName, label, err)
 }
@@ -186,6 +196,118 @@ var windowsAccountUserShellFolderValue = func(sid *windows.SID, name string) (st
 	return value, err
 }
 
+// windowsAccountVolatileEnvironment reads a value sign-in set in the
+// account's logon environment (HKU\<sid>\Volatile Environment), "" when
+// unset or while the account is signed out. Replaceable in tests.
+var windowsAccountVolatileEnvironment = func(sid *windows.SID, name string) string {
+	key, err := registry.OpenKey(registry.USERS, sid.String()+`\Volatile Environment`, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer key.Close()
+	value, _, err := key.GetStringValue(name)
+	if err != nil {
+		return ""
+	}
+	return value
+}
+
+// windowsAccountShellFolder is the folder a User Shell Folders value names
+// for the account: the profile's defaultRel folder when it is empty, else the
+// value with the account's variables (vars) expanded as for its processes.
+// Unlike the IDE inventory (RedirectedAppDataFolder), a share is the
+// account's folder here: its agent reads its configuration there, and verify
+// reads it as the account (readWindowsAccountConfig).
+func windowsAccountShellFolder(raw string, vars map[string]string, home, defaultRel string) (folder, refused string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return filepath.Join(home, defaultRel), ""
+	}
+	value := expandWindowsAccountVariables(raw, vars)
+	if strings.Contains(value, "%") {
+		return "", "names a variable the account's processes do not set"
+	}
+	return windowsAbsoluteFolder(value, true)
+}
+
+// windowsAccountConfigReadAs runs fn under the token of the account's
+// signed-in session (replaceable in tests).
+var windowsAccountConfigReadAs = withWindowsEnterpriseSessionImpersonation
+
+// windowsDriveType is GetDriveType of a drive root (replaceable in tests).
+var windowsDriveType = func(root string) uint32 {
+	ptr, err := winpath.UTF16Ptr(root)
+	if err != nil {
+		return windows.DRIVE_UNKNOWN
+	}
+	return windows.GetDriveType(ptr)
+}
+
+// errWindowsAccountConfigNeedsSession marks a configuration only the
+// account's own token reads as its agent does, while that token is not
+// available.
+var errWindowsAccountConfigNeedsSession = errors.New("the file is read as the account and the account has no signed-in session")
+
+// readWindowsAccountConfig is readWindowsAccountFile for verify, which runs
+// as the service. A configuration on a share, on a drive the service does
+// not have as the account has it (a mapped drive), or one the service is
+// refused, is read under the account's own token instead: the service would
+// reach a share as the computer, and has none of the account's drive
+// mappings, so it would judge another file than the agent reads, or none.
+// The same bounds and ownership rule apply.
+func readWindowsAccountConfig(path string, sid *windows.SID, home string) ([]byte, error) {
+	if !windowsAccountOnlyPath(path) {
+		data, err := readWindowsAccountFile(path, sid, home)
+		if !windowsServiceRefused(err) {
+			return data, err
+		}
+	}
+	var data []byte
+	var readErr error
+	if err := windowsAccountConfigReadAs(sid, home, func() error {
+		data, readErr = readWindowsAccountFile(path, sid, home)
+		return nil
+	}); err != nil {
+		return nil, fmt.Errorf("%w: %v", errWindowsAccountConfigNeedsSession, err)
+	}
+	return data, readErr
+}
+
+// windowsAccountOnlyPath reports a path the service cannot read as the
+// account would: one on a share or any other non-drive volume, or on a drive
+// letter that is remote or missing for the service.
+func windowsAccountOnlyPath(path string) bool {
+	drive := filepath.VolumeName(path)
+	if len(drive) == 6 && (strings.HasPrefix(drive, `\\?\`) || strings.HasPrefix(drive, `\\.\`)) {
+		drive = drive[4:]
+	}
+	if len(drive) != 2 || drive[1] != ':' || !isASCIIDriveLetter(drive[0]) {
+		return true
+	}
+	switch windowsDriveType(drive + `\`) {
+	case windows.DRIVE_REMOTE, windows.DRIVE_NO_ROOT_DIR, windows.DRIVE_UNKNOWN:
+		return true
+	}
+	return false
+}
+
+// windowsServiceRefused reports a read the service was refused, or that
+// reached a share the service cannot sign in to, as through a link.
+func windowsServiceRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	for _, refused := range []error{
+		os.ErrPermission, windows.ERROR_BAD_NETPATH, windows.ERROR_BAD_NET_NAME,
+		windows.ERROR_NETWORK_ACCESS_DENIED, windows.ERROR_LOGON_FAILURE,
+	} {
+		if errors.Is(err, refused) {
+			return true
+		}
+	}
+	return false
+}
+
 // windowsAccountFolderVariable resolves the folder a variable of the
 // account's persistent environment names, the account's own value over the
 // machine's ("" when neither sets it). The profile variables, the
@@ -216,6 +338,13 @@ func windowsAccountFolderVariable(sid *windows.SID, home, name string) (string, 
 	if err == nil && account != "" {
 		vars["USERNAME"] = account
 	}
+	// Sign-in sets the home folder variables from the account's home folder,
+	// which may be on a share (HOMESHARE).
+	for _, variable := range []string{"HOMEDRIVE", "HOMEPATH", "HOMESHARE"} {
+		if session := strings.TrimSpace(windowsAccountVolatileEnvironment(sid, variable)); session != "" {
+			vars[variable] = session
+		}
+	}
 	for _, folder := range []struct {
 		variable, shellName, defaultRel string
 	}{
@@ -229,15 +358,9 @@ func windowsAccountFolderVariable(sid *windows.SID, home, name string) (string, 
 		if err != nil {
 			return "", fmt.Errorf("the account's %s folder cannot be determined for %s", folder.variable, name)
 		}
-		if account == "" && strings.Contains(strings.ToUpper(raw), "%USERNAME%") {
-			return "", fmt.Errorf("the account's %s folder cannot be determined for %s", folder.variable, name)
-		}
-		redirected, refused := RedirectedAppDataFolder(raw, home, account, folder.defaultRel)
+		redirected, refused := windowsAccountShellFolder(raw, vars, home, folder.defaultRel)
 		if refused != "" {
 			return "", fmt.Errorf("the account's %s folder cannot be checked for %s: %s", folder.variable, name, refused)
-		}
-		if redirected == "" {
-			redirected = filepath.Join(home, folder.defaultRel)
 		}
 		vars[folder.variable] = redirected
 	}
