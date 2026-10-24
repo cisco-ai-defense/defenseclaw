@@ -600,6 +600,30 @@ func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, f
 	cache.sessions[key] = session
 }
 
+// ensureStartupKey pins the first inspect call's snapshot without replacing a
+// concurrent call's snapshot or treating an evicted, unknown session as new.
+func (cache *activeAgentContextCache) ensureStartupKey(key activeAgentContextKey, files map[string]string) bool {
+	if files == nil {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	if _, exists := cache.sessions[key]; exists {
+		return false
+	}
+	if _, evicted := cache.evictions[key]; evicted || cache.uncertain {
+		return false
+	}
+	if cache.sessions == nil {
+		cache.sessions = make(map[activeAgentContextKey]activeAgentContextSession)
+	}
+	cache.makeRoomLocked(key)
+	cache.sessions[key] = activeAgentContextSession{
+		startupFiles: maps.Clone(files), startupKnown: true, updatedAt: cache.currentTime(),
+	}
+	return true
+}
+
 func (cache *activeAgentContextCache) end(connectorName, sessionID string) {
 	key, ok := validActiveAgentContextKey(connectorName, sessionID)
 	if !ok {

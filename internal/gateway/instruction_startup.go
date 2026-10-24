@@ -45,6 +45,10 @@ func instructionStartupFiles(ctx context.Context, connector, cwd string) map[str
 	if files == nil {
 		return nil
 	}
+	return retainedInstructionStartupFiles(connector, cwd, home, files)
+}
+
+func retainedInstructionStartupFiles(connector, cwd, home string, files map[string]string) map[string]string {
 	flavor := actionfacts.PathFlavorPOSIX
 	if runtime.GOOS == "windows" {
 		flavor = actionfacts.PathFlavorWindows
@@ -64,6 +68,52 @@ func instructionStartupFiles(ctx context.Context, connector, cwd string) map[str
 	return retained
 }
 
+// OpenClaw and ZeptoClaw have no SessionStart hook. Their authenticated
+// inspect call is the first boundary before the agent can run a tool. Capture
+// its existing instruction identities once per session, before that call.
+func instructionInspectStartupFiles(ctx context.Context, connector, cwd string) map[string]string {
+	if isSandboxHookRequest(ctx) || serviceAccountGatewayFromContext(ctx) {
+		return nil
+	}
+	if _, managed := managedHookPeerFromContext(ctx); managed {
+		return nil
+	}
+	home := hookActiveHome(ctx)
+	if !filepath.IsAbs(cwd) {
+		if !filepath.IsAbs(home) || home == unresolvedCallerHome {
+			return nil
+		}
+		cwd = filepath.Join(home, ".openclaw", "workspace")
+	}
+	files := hookpaths.StartupInstructionFiles(cwd, home)
+	if files == nil {
+		return nil
+	}
+	return retainedInstructionStartupFiles(connector, cwd, home, files)
+}
+
+func (a *APIServer) applyInstructionInspectStartup(ctx context.Context, connector, sessionID, cwd string) activeAgentContextSnapshot {
+	if a == nil || authenticatedInspectConnector(ctx) != connector {
+		return activeAgentContextSnapshot{}
+	}
+	scope := ""
+	if binding, ok := sandboxauth.FromContext(ctx); ok {
+		scope = sandboxBindingScope(binding)
+	}
+	key, ok := validScopedActiveAgentContextKey(scope, connector, sessionID)
+	if !ok {
+		return activeAgentContextSnapshot{}
+	}
+	a.restoreInstructionLoads(key)
+	if _, exists := a.activeAgentContext.sessionKey(key); exists {
+		return a.activeAgentContext.snapshotKey(key)
+	}
+	if a.activeAgentContext.ensureStartupKey(key, instructionInspectStartupFiles(ctx, connector, cwd)) {
+		a.saveInstructionLoads(key)
+	}
+	return a.activeAgentContext.snapshotKey(key)
+}
+
 func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sessionID, event, cwd string) activeAgentContextSnapshot {
 	if a == nil || authenticatedHookConnector(ctx) != connector {
 		return activeAgentContextSnapshot{}
@@ -76,15 +126,18 @@ func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sess
 	if !ok {
 		return activeAgentContextSnapshot{}
 	}
-	switch canonicalHookLifecycleEvent(event) {
-	case "session_start":
+	switch canonicalEvent(event) {
+	case "sessionstart", "onsessionstart", "onsessionreset", "sessioncreated":
 		a.activeAgentContext.beginKey(key)
 		a.activeAgentContext.setStartupKey(key, instructionStartupFiles(ctx, connector, cwd))
 		a.saveInstructionLoads(key)
-	case "session_end":
+	case "sessionend", "onsessionend", "onsessionfinalize", "sessiondeleted":
 		a.activeAgentContext.endKey(key)
 		a.saveInstructionLoads(key)
-	case "tool_start":
+	default:
+		if canonicalHookLifecycleEvent(event) != "tool_start" {
+			return activeAgentContextSnapshot{}
+		}
 		a.restoreInstructionLoads(key)
 		return a.activeAgentContext.snapshotKey(key)
 	}

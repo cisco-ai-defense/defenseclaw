@@ -576,6 +576,10 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 			},
 		}
 	}
+	if req.Connector == "openclaw" || req.Connector == "zeptoclaw" {
+		ctx = withInstructionStartup(ctx,
+			a.applyInstructionInspectStartup(ctx, req.Connector, req.SessionID, action.Input.CWD))
+	}
 	if trustedShimArgvTool(req.Tool) {
 		// Authenticated PATH shims have one closed argv envelope. If that
 		// envelope is malformed, extended, or names another executable, raw
