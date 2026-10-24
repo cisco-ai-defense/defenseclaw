@@ -10009,14 +10009,18 @@ def _write_connector_identity(
             # connector's "open" is derived from observe mode; pinning it made
             # a later `setup <it> --mode action` stay fail-open under a closed
             # global default (GAP-1109), so it inherits instead.
+            # The pin is the value the predecessor saved: on a per-user install
+            # effective_hook_fail_mode is the policy tier's outage mode, which
+            # would turn a saved closed into open (oss-outage-open).
             seeded_mode = gc.effective_mode(existing_single)
+            seeded_fail = ""
+            if str(seeded_mode).strip().lower() == "action":
+                seeded_fail = str(gc.hook_fail_mode or "").strip().lower()
+                if not seeded_fail and (gc.secure_client_hook_fail_modes() or cfg.managed_outside_secure_client()):
+                    seeded_fail = gc.effective_hook_fail_mode(existing_single)
             gc.connectors[existing_single] = PerConnectorGuardrailConfig(
                 mode=seeded_mode,
-                hook_fail_mode=(
-                    gc.effective_hook_fail_mode(existing_single)
-                    if str(seeded_mode).strip().lower() == "action"
-                    else ""
-                ),
+                hook_fail_mode=seeded_fail,
             )
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()

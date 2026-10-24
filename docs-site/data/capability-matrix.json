@@ -36,7 +36,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "runs-blocks-with-hooks-only-preserve", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "runs-blocks-with-hooks-only-preserve", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "managed",
@@ -74,7 +74,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "runs-blocks-with-hooks-only-preserve", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "runs-blocks-with-hooks-only-preserve", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "managed",
@@ -187,7 +187,7 @@
           "defenseclaw-anthropic"
         ]
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "blocks-linux-macos", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks-linux-macos", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
       "hilt": "Hermes has no native human-approval surface; confirm verdicts are recorded and alerted but cannot pause or resume the hook.",
       "notes": "Native Windows setup is supported; validation metadata remains empty and live=false. The connector covers one resolved default HERMES_HOME only and rejects named or multiplex profiles. It stages all 23 Hermes v0.19 hooks in config.yaml while preserving hooks_auto_accept, and transactionally owns only exact DefenseClaw event/command approvals in shell-hooks-allowlist.json. Running hosts cache callbacks, so registration and revocation remain pending reload; Windows teardown writes a direct-native disabled tombstone for stale callbacks. Only valid synchronous pre_tool_call block JSON vetoes a tool; pre_llm_call may inject context and pre_verify may continue a bounded verification loop. Other events are audit-only where the official shell parser proves no effect, and all failures remain open. The command is a directly quoted absolute native defenseclaw-hook.exe argv parsed by shlex.split and run with shell=False; there is no shell fallback and Hermes's PortableGit terminal is outside the integration. Bounded default-profile inventory covers MCP, local/external skills, SOUL.md, built-in/provider memory, and bundled/Nix/user/pip plugins; project-conditional, named-profile, and managed/ProgramData/cloud/MDM sources remain unverified."
     },
@@ -210,7 +210,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks", "heldUntilRestart": true, "secureClientClosed": "blocks", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks", "heldUntilRestart": true, "secureClientClosed": "blocks", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "user",
@@ -244,7 +244,7 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "blocks", "managedOpenNoGuard": "blocks", "heldUntilRestart": true, "secureClientClosed": "blocks", "strictAvailability": "no" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "blocks", "heldUntilRestart": true, "secureClientClosed": "blocks", "strictAvailability": "no" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "user",
@@ -260,7 +260,7 @@
       "notes": "A managed TypeScript plugin at ~/.config/amp/plugins/defenseclaw.ts forwards session.start, agent.start, tool.call, tool.result, and agent.end to /api/v1/amp/hook. tool.call is synchronously enforceable before execution, and tool.result can be replaced before model delivery but cannot undo completed side effects. Execute mode must use --plugin-ready-timeout 30 for lifecycle capture and guard readiness. Amp's reported custom-agent definition or built-in mode enriches Agent360 without being treated as a stable ID, request trace, or parent link. Delegation tools such as Task and oracle are governed at launch, and any emitted child-thread events remain independently correlated unless Amp supplies canonical parent evidence. No native OTLP or W3C traceparent channel is advertised."
     },
     {
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "blocks", "managedOpenNoGuard": "blocks", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "no" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "blocks", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "no" },
       "id": "copilot",
       "label": "GitHub Copilot CLI",
       "windowsSupport": "supported",
@@ -293,12 +293,12 @@
           "defenseclaw-copilot-github"
         ]
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks-linux-macos", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "per-user-route-blocks-linux-macos", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
       "hilt": "Copilot CLI confirmations block because its hook does not prove an approval prompt is available; VS Code Local uses its separate native ask.",
       "notes": "Native Windows setup is supported. Provider authentication remains required; HITL and official-client live evidence are unverified and unclaimed, validation metadata remains empty, and live=false. Global hooks live under ~/.copilot/hooks by default with optional workspace hooks under <workspace>/.github/hooks."
     },
     {
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "runs", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "runs", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
       "id": "antigravity",
       "label": "Antigravity",
       "windowsSupport": "supported",
@@ -320,7 +320,7 @@
         "scope": "user",
         "blocksDeliveryFailures": true
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "runs", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "runs", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "runs", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "user",
@@ -356,7 +356,7 @@
         "supportsFailClosed": true,
         "scope": "user,workspace"
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "blocks", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "blocks", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "user",
@@ -391,7 +391,7 @@
         "supportsFailClosed": true,
         "scope": "workspace"
       },
-      "outage": { "perUserClosed": "blocks", "perUserOpen": "blocks", "managedOpen": "runs", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
+      "outage": { "perUserClosed": "blocks", "perUserOpen": "runs", "managedOpen": "runs", "managedOpenNoGuard": "runs", "heldUntilRestart": false, "secureClientClosed": "blocks", "strictAvailability": "yes" },
       "sandbox": {
         "status": "artifacts",
         "tamperTier": "user",

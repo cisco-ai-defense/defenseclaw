@@ -1230,7 +1230,7 @@ defenseclaw_per_user_outage_open() {
   case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in
     1|true|TRUE|yes|YES) return 1 ;;
   esac
-  ! defenseclaw_install_lock_held "${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}" || return 1
+  ! defenseclaw_install_held || return 1
   local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
   case "$connector" in
     ""|inspect|*[!a-z0-9_-]*) return 1 ;;
