@@ -130,6 +130,8 @@ func guardrailActionForConnectorFindings(
 ) string {
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForConnector(cfg, connector, severity, confirmable)
+	}, func(member *config.Config, severity string) string {
+		return guardrailActionForConnector(member, connector, severity, confirmable)
 	})
 }
 
@@ -150,6 +152,8 @@ func guardrailContentAction(cfg *config.Config, connector, severity string, conf
 func guardrailContentActionForFindings(cfg *config.Config, connector string, findings []RuleFinding, confirmable bool) string {
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailContentAction(cfg, connector, severity, confirmable)
+	}, func(member *config.Config, severity string) string {
+		return guardrailContentAction(member, connector, severity, confirmable)
 	})
 }
 
@@ -194,12 +198,46 @@ func guardrailActionForGuardrailFindings(
 ) string {
 	return guardrailActionForFindings(findings, func(severity string) string {
 		return guardrailActionForGuardrailConnector(gc, connector, severity, confirmable)
+	}, func(member *config.Config, severity string) string {
+		return guardrailActionForGuardrailConnector(&member.Guardrail, connector, severity, confirmable)
 	})
 }
 
 // guardrailActionForFindings maps enforceable findings with actionFor and
 // caps alert-only findings at an alert.
-func guardrailActionForFindings(findings []RuleFinding, actionFor func(severity string) string) string {
+func guardrailActionForFindings(findings []RuleFinding, actionFor func(severity string) string, memberActionFor ...func(*config.Config, string) string) string {
+	if len(memberActionFor) != 0 {
+		meet := false
+		for _, finding := range findings {
+			if finding.meetMember != nil {
+				meet = true
+				break
+			}
+		}
+		if meet {
+			action := guardrailActionAllow
+			for _, finding := range findings {
+				if !finding.contributesToEnforcement() && !finding.contributesToAlertOnly() {
+					continue
+				}
+				candidate := actionFor(finding.Severity)
+				if finding.meetMember != nil {
+					cap := guardrailActionAlert
+					if finding.meetMember.enforces {
+						cap = memberActionFor[0](finding.meetMember.config, finding.Severity)
+					}
+					if strongerGuardrailAction(candidate, cap) == candidate {
+						candidate = cap
+					}
+				}
+				if !finding.contributesToEnforcement() && (candidate == guardrailActionBlock || candidate == guardrailActionConfirm) {
+					candidate = guardrailActionAlert
+				}
+				action = strongerGuardrailAction(action, candidate)
+			}
+			return action
+		}
+	}
 	action := guardrailActionAllow
 	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
 		action = actionFor(HighestSeverity(enforceable))

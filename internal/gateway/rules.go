@@ -50,6 +50,7 @@ type PatternRule struct {
 	// did (GAP-1480). markedMigratedLiteral is the rule's migrated_literal.
 	migratedLiteral       bool
 	markedMigratedLiteral bool
+	meetMember            *meetRuleMember
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -80,8 +81,20 @@ type RuleFinding struct {
 	// absent from the public JSON contract: callers may emit the finding, but
 	// only the in-process trusted-action boundary may use the proof to decide
 	// whether the finding can participate in a synchronous deny decision.
-	proof findingProof
+	proof      findingProof
+	meetMember *meetRuleMember
 }
+
+// ruleMatchKey preserves separate decisions for the same rule ID in two
+// members of a profile meet. Ordinary generations still use the rule ID.
+func ruleMatchKey(id string, member *meetRuleMember) string {
+	if member == nil {
+		return id
+	}
+	return id + "\x00" + member.name
+}
+
+func findingMatchKey(f RuleFinding) string { return ruleMatchKey(f.RuleID, f.meetMember) }
 
 type findingEnforcement uint8
 
@@ -755,7 +768,7 @@ func countRuleEntitiesFor(ctx context.Context, connector, text string) int {
 		}
 		for ruleIndex := range cat.Rules {
 			rule := &cat.Rules[ruleIndex]
-			if rule.Pattern == nil || !options.allows(rule.ID, rule.ToolCallOnly) {
+			if rule.Pattern == nil || !options.allowsRule(*rule) {
 				continue
 			}
 			for _, loc := range rule.Pattern.FindAllStringIndex(text, maxEntityMatchesPerRule) {
@@ -855,6 +868,14 @@ func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
 		return false
 	}
 	_, excluded := o.excludedRuleIDs[ruleID]
+	return !excluded
+}
+
+func (o ruleScanOptions) allowsRule(rule PatternRule) bool {
+	if rule.ToolCallOnly && !o.includeToolCallOnly {
+		return false
+	}
+	_, excluded := o.excludedRuleIDs[ruleMatchKey(rule.ID, rule.meetMember)]
 	return !excluded
 }
 
@@ -1001,7 +1022,7 @@ func scanRuleCategoriesWithOptions(
 	seen := make(map[string]bool)
 	for i := range findings {
 		findings[i] = adjustConfidence(toolName, findings[i])
-		seen[findings[i].RuleID] = true
+		seen[findingMatchKey(findings[i])] = true
 	}
 
 	// Scan raw text first
@@ -1016,13 +1037,13 @@ func scanRuleCategoriesWithOptions(
 			if !categoryAllowed && !rule.migratedLiteral {
 				continue
 			}
-			if !options.allows(rule.ID, rule.ToolCallOnly) {
+			if !options.allowsRule(*rule) {
 				continue
 			}
 			// An effective profile can contain the same canonical rule through
-			// more than one merged category. Findings are identities, not match
-			// occurrences, so emit each rule ID at most once per scan.
-			if seen[rule.ID] {
+			// more than one merged category. Emit each ID once per member,
+			// since members may assign that ID different actions.
+			if seen[ruleMatchKey(rule.ID, rule.meetMember)] {
 				continue
 			}
 			loc := firstAcceptedRuleMatch(*rule, text)
@@ -1033,6 +1054,7 @@ func scanRuleCategoriesWithOptions(
 			evidence := text[loc[0]:minInt(loc[1], loc[0]+80)]
 
 			f := RuleFinding{
+				meetMember: rule.meetMember,
 				RuleID:     rule.ID,
 				Title:      rule.Title,
 				Severity:   rule.Severity,
@@ -1045,7 +1067,7 @@ func scanRuleCategoriesWithOptions(
 			f = adjustConfidence(toolName, f)
 			f = applyTrustLiteralContext(generation, cat.Name, rule, text, f)
 			findings = append(findings, f)
-			seen[rule.ID] = true
+			seen[ruleMatchKey(rule.ID, rule.meetMember)] = true
 		}
 	}
 
@@ -1063,10 +1085,10 @@ func scanRuleCategoriesWithOptions(
 				if !categoryAllowed && !rule.migratedLiteral {
 					continue
 				}
-				if !options.allows(rule.ID, rule.ToolCallOnly) {
+				if !options.allowsRule(*rule) {
 					continue
 				}
-				if seen[rule.ID] {
+				if seen[ruleMatchKey(rule.ID, rule.meetMember)] {
 					continue // already found on raw pass
 				}
 				loc := firstAcceptedRuleMatch(*rule, normalized)
@@ -1080,6 +1102,7 @@ func scanRuleCategoriesWithOptions(
 				// against shell-normalized text, so an offset into it does not
 				// correspond to a line in the content the operator would read.
 				f := RuleFinding{
+					meetMember: rule.meetMember,
 					RuleID:     rule.ID,
 					Title:      rule.Title + " (obfuscated)",
 					Severity:   rule.Severity,
@@ -1091,6 +1114,7 @@ func scanRuleCategoriesWithOptions(
 				f = adjustConfidence(toolName, f)
 				f = applyTrustLiteralContext(generation, cat.Name, rule, normalized, f)
 				findings = append(findings, f)
+				seen[ruleMatchKey(rule.ID, rule.meetMember)] = true
 			}
 		}
 	}

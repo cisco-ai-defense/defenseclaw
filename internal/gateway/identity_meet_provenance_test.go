@@ -60,7 +60,7 @@ func provenanceSet(t *testing.T, base func(*config.Config), profiles map[string]
 func blocksText(cfg *config.Config, generation *compiledRulePackCategories, connectorName, mode, text string) (bool, []RuleFinding) {
 	findings := scanRuleGeneration(generation, text, "Bash", ruleScanOptions{})
 	return mode == "action" && len(findings) > 0 &&
-		guardrailActionForConnector(cfg, connectorName, HighestSeverity(findings), false) == guardrailActionBlock, findings
+		guardrailActionForConnectorFindings(cfg, connectorName, findings, false) == guardrailActionBlock, findings
 }
 
 // Review of r104 Q-identity (review at 9e7531fb): the meet of profiles

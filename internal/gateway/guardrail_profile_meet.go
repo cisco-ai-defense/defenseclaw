@@ -30,8 +30,8 @@ import (
 // inspect mode action wherever a member's inspect mode is (each apart), the
 // lowest block level and
 // the strictest HILT of the members that block, the lowest alert level, the
-// rules of every member's rule pack, each scanned only where its own member
-// would decide it (profileMeet.ruleGeneration), the suppressions all members
+// rules of every member's rule pack, each carrying its member into the
+// finding so its own action caps the meet's action, the suppressions all members
 // that enforce share (allows are the intersection), every sensitive tool any
 // of them inspects, and the members' sandbox floors
 // tightened together (config.Config.SandboxFloor). Each surface takes its
@@ -235,6 +235,14 @@ type memberEnforcement struct {
 	block, hilt    int
 }
 
+// meetRuleMember is private provenance for a rule in a composed generation.
+// The member's own configuration decides whether its finding may block or ask.
+type meetRuleMember struct {
+	name     string
+	config   *config.Config
+	enforces bool
+}
+
 // memberEnforcementFor is how cfg enforces for connectorName ("" for the
 // global settings): its block level is the lower of its hook and its proxy
 // thresholds, its HILT the one that asks most.
@@ -264,14 +272,6 @@ func memberEnforcementFor(cfg *config.Config, connectorName string) memberEnforc
 // hooks by its hook mode, inspect by its inspect mode.
 func (e memberEnforcement) enforcesOn(surfaces profileSurfaces) bool {
 	return e.hooks && surfaces&profileSurfaceHooks != 0 || e.inspect && surfaces&profileSurfaceInspect != 0
-}
-
-// decidesAt is the lowest severity rank the member blocks or asks at.
-func (e memberEnforcement) decidesAt() int {
-	if e.hilt != 0 && e.hilt < e.block {
-		return e.hilt
-	}
-	return e.block
 }
 
 // meetSettingsFor is the meet of members' effective settings for
@@ -372,36 +372,29 @@ func meetSourcesKey[T any](connectorName string, sources []*T) string {
 }
 
 // ruleGeneration is the rule generation of the meet for connectorName on
-// the surface the request is marked with (profileSurfaceFrom). Each rule
-// keeps its member: it is scanned when a member that enforces on that
-// surface has it at a severity that member blocks or asks at, or when it is
-// below the lowest level any member that enforces there blocks or asks at,
-// so it can only alert. A rule only a member that observes there has, or
-// one below its own member's levels but at another member's, is not
-// scanned, so the meet never blocks what no member alone blocks (review of
-// r104 Q-identity, review at 9e7531fb: an inspect-only member's CRITICAL
-// rule blocked hooks at the other member's level). When no member enforces
-// there, the meet observes and scans every member's rules. The generations
-// are combined, not compiled again (mergeRuleGenerations).
+// the surface the request is marked with (profileSurfaceFrom). Every rule
+// carries its member's configuration and mode on that surface into the
+// finding. The decision layer caps its action at that member's own action;
+// observing members can only alert. The generations are combined without
+// recompiling their semantic programs (mergeRuleGenerations).
 func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileSet, connectorName string) *compiledRulePackCategories {
 	surface := profileSurfaceFrom(ctx)
 	type memberRules struct {
-		generation  *compiledRulePackCategories
-		enforcement memberEnforcement
+		generation *compiledRulePackCategories
+		member     *meetRuleMember
 	}
 	var members []memberRules
 	var generations []*compiledRulePackCategories
-	floor := 0
 	for _, member := range m.members {
 		generation := set.memberRuleGeneration(ctx, member, connectorName)
 		if generation == nil {
 			continue
 		}
-		e := memberEnforcementFor(set.profileConfig(member), connectorName)
-		if e.enforcesOn(surface) && (floor == 0 || e.decidesAt() < floor) {
-			floor = e.decidesAt()
-		}
-		members = append(members, memberRules{generation: generation, enforcement: e})
+		cfg := set.profileConfig(member)
+		e := memberEnforcementFor(cfg, connectorName)
+		members = append(members, memberRules{generation: generation, member: &meetRuleMember{
+			name: member, config: cfg, enforces: e.enforcesOn(surface),
+		}})
 		generations = append(generations, generation)
 	}
 	if len(members) == 0 {
@@ -413,17 +406,7 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 	}
 	var sources []*compiledRulePackCategories
 	for _, member := range members {
-		generation := member.generation
-		if floor != 0 {
-			e := member.enforcement
-			generation = generation.withRules(func(rule PatternRule) bool {
-				rank := guardrailSeverityRank(rule.Severity)
-				return rank < floor || e.enforcesOn(surface) && rank >= e.decidesAt()
-			})
-		}
-		if !slices.Contains(sources, generation) {
-			sources = append(sources, generation)
-		}
+		sources = append(sources, member.generation.withMeetMember(member.member))
 	}
 	merged := sources[0]
 	if len(sources) > 1 {
@@ -431,6 +414,26 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 	}
 	value, _ := m.rules.LoadOrStore(key, merged)
 	return value.(*compiledRulePackCategories)
+}
+
+// withMeetMember copies a compiled generation's rule records while sharing
+// the compiled regexes and semantic programs. It never mutates a member pack.
+func (g *compiledRulePackCategories) withMeetMember(member *meetRuleMember) *compiledRulePackCategories {
+	out := &compiledRulePackCategories{ruleIdentityTitles: g.ruleIdentityTitles,
+		overridden: g.overridden, added: g.added, dispatchCost: g.dispatchCost}
+	for _, category := range g.categories {
+		copyCategory := ruleCategory{Name: category.Name}
+		for _, rule := range category.Rules {
+			rule.meetMember = member
+			copyCategory.Rules = append(copyCategory.Rules, rule)
+		}
+		out.categories = append(out.categories, copyCategory)
+	}
+	for _, rule := range g.semanticRules {
+		rule.rule.meetMember = member
+		out.semanticRules = append(out.semanticRules, rule)
+	}
+	return out
 }
 
 // enforcers are the members that enforce for connectorName on surfaces,
@@ -448,46 +451,16 @@ func (m *profileMeet) enforcers(set *guardrailProfileSet, connectorName string, 
 	return out
 }
 
-// withRules is g with only the rules keep keeps, g itself when it keeps
-// every one. Its compiled programs are shared, not compiled again.
-func (g *compiledRulePackCategories) withRules(keep func(PatternRule) bool) *compiledRulePackCategories {
-	out := &compiledRulePackCategories{ruleIdentityTitles: g.ruleIdentityTitles,
-		overridden: g.overridden, added: g.added, dispatchCost: g.dispatchCost}
-	dropped := false
-	for _, category := range g.categories {
-		kept := ruleCategory{Name: category.Name}
-		for _, rule := range category.Rules {
-			if keep(rule) {
-				kept.Rules = append(kept.Rules, rule)
-			} else {
-				dropped = true
-			}
-		}
-		out.categories = append(out.categories, kept)
-	}
-	for _, rule := range g.semanticRules {
-		if keep(rule.rule) {
-			out.semanticRules = append(out.semanticRules, rule)
-		} else {
-			dropped = true
-		}
-	}
-	if !dropped {
-		return g
-	}
-	return out
-}
-
 // mergeRuleGenerations combines sources' already compiled rules: each
-// category keeps every rule any source has, a rule two sources define the
-// same way once. Nothing is compiled again, so no limit of one generation
+// category keeps every member's rules, deduplicating only identical rules
+// within the same member. Nothing is compiled again, so no limit of one generation
 // can fail the union and drop a member's rules: each source is within the
 // limits on its own, and the union's semantic dispatch may spend the cost
 // budget of every source (dispatchMaxCost), as each member alone would
 // (review of r104 Q-identity, review at 9e7531fb: a union over the semantic
 // rule limit scanned with the largest member alone). Definitions of one
-// rule ID that differ are all kept, the strongest first, since a scan
-// reports a rule ID once, from the first definition that matches.
+// rule ID that differ are all kept. A scan reports one ID per member; the
+// decision layer combines the actions of those findings.
 func mergeRuleGenerations(sources []*compiledRulePackCategories) *compiledRulePackCategories {
 	merged := &compiledRulePackCategories{ruleIdentityTitles: map[string]map[string]struct{}{}}
 	var categories []ruleCategory
@@ -551,7 +524,7 @@ func samePatternRule(a, b PatternRule) bool {
 		}
 		return r.Pattern.String()
 	}
-	return a.ID == b.ID && a.Title == b.Title && a.Severity == b.Severity && a.Expression == b.Expression &&
+	return a.meetMember == b.meetMember && a.ID == b.ID && a.Title == b.Title && a.Severity == b.Severity && a.Expression == b.Expression &&
 		a.ToolCallOnly == b.ToolCallOnly && a.Confidence == b.Confidence && pattern(a) == pattern(b) &&
 		slices.Equal(a.Tags, b.Tags) && a.markedMigratedLiteral == b.markedMigratedLiteral
 }

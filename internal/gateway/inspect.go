@@ -1242,14 +1242,14 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 			generation := snapshotRulePackGenerationFor(ctx, req.Connector)
 			seen := make(map[string]bool, len(ruleFindings))
 			for _, finding := range ruleFindings {
-				seen[finding.RuleID] = true
+				seen[findingMatchKey(finding)] = true
 			}
 			for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
 				contentScope: req.contentScope, onlyCategory: "trust-exploit",
 			}) {
-				if !seen[finding.RuleID] {
+				if !seen[findingMatchKey(finding)] {
 					ruleFindings = append(ruleFindings, finding)
-					seen[finding.RuleID] = true
+					seen[findingMatchKey(finding)] = true
 				}
 			}
 		}
@@ -1268,15 +1268,10 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		severity := HighestSeverity(ruleFindings)
 		confidence := HighestConfidence(ruleFindings, severity)
 
-		action := guardrailActionAllow
-		if enforceable := enforceableRuleFindings(ruleFindings); len(enforceable) > 0 {
-			action = guardrailContentAction(
-				a.decisionConfig(ctx),
-				req.Connector,
-				HighestSeverity(enforceable),
-				strings.EqualFold(req.Direction, "outbound"),
-			)
-		}
+		action := guardrailContentActionForFindings(
+			a.decisionConfig(ctx), req.Connector, ruleFindings,
+			strings.EqualFold(req.Direction, "outbound"),
+		)
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 		for i, f := range ruleFindings {

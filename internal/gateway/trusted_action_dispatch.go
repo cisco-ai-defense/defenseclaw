@@ -310,7 +310,7 @@ func dispatchTrustedAction(
 				consumedCost >= maxCost {
 				break
 			}
-			if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
+			if _, alreadyMatched := matchedSemanticOwnerIDs[ruleMatchKey(candidate.rule.ID, candidate.rule.meetMember)]; alreadyMatched {
 				continue
 			}
 			if candidateOK != nil && !candidateOK(candidate) {
@@ -319,7 +319,7 @@ func dispatchTrustedAction(
 			if !candidate.owner.eligible(view) {
 				if !matchOnly && candidate.owner.suppressFallback != nil &&
 					candidate.owner.suppressFallback(view) {
-					excludeSemanticOwner(excluded, candidate.owner, false)
+					excludeSemanticOwner(excluded, candidate.owner, candidate.rule.meetMember, false)
 				}
 				continue
 			}
@@ -339,7 +339,7 @@ func dispatchTrustedAction(
 			}
 			if !result.Matched {
 				if !matchOnly {
-					excludeSemanticOwner(excluded, candidate.owner, false)
+					excludeSemanticOwner(excluded, candidate.owner, candidate.rule.meetMember, false)
 				}
 				continue
 			}
@@ -367,11 +367,12 @@ func dispatchTrustedAction(
 				continue
 			}
 
-			excludeSemanticOwner(excluded, candidate.owner, true)
+			excludeSemanticOwner(excluded, candidate.owner, candidate.rule.meetMember, true)
 			for _, claimedID := range candidate.owner.claimedIDs(true) {
-				matchedSemanticOwnerIDs[claimedID] = struct{}{}
+				matchedSemanticOwnerIDs[ruleMatchKey(claimedID, candidate.rule.meetMember)] = struct{}{}
 			}
 			finding := RuleFinding{
+				meetMember:  candidate.rule.meetMember,
 				RuleID:      candidate.rule.ID,
 				Title:       candidate.rule.Title,
 				Severity:    candidate.rule.Severity,
@@ -539,7 +540,7 @@ func withMigratedLiteralRuleFindings(
 			continue
 		}
 		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
-			return finding.RuleID == candidate.rule.ID
+			return findingMatchKey(finding) == ruleMatchKey(candidate.rule.ID, candidate.rule.meetMember)
 		})
 		if index >= 0 && findings[index].contributesToEnforcement() {
 			continue
@@ -551,6 +552,7 @@ func withMigratedLiteralRuleFindings(
 			continue
 		}
 		finding := RuleFinding{
+			meetMember: candidate.rule.meetMember,
 			RuleID:     candidate.rule.ID,
 			Title:      candidate.rule.Title,
 			Severity:   candidate.rule.Severity,
@@ -913,7 +915,7 @@ func withSequenceProvenFindings(findings, sequence []RuleFinding) []RuleFinding 
 			continue
 		}
 		index := slices.IndexFunc(findings, func(finding RuleFinding) bool {
-			return finding.RuleID == proven.RuleID
+			return findingMatchKey(finding) == findingMatchKey(proven)
 		})
 		if index < 0 {
 			findings = append(findings, proven)
@@ -963,14 +965,15 @@ func listReductionCandidate(candidate compiledSemanticRule) bool {
 func excludeSemanticOwner(
 	excluded map[string]struct{},
 	owner semanticOwner,
+	member *meetRuleMember,
 	matched bool,
 ) {
 	for _, ruleID := range owner.claimedIDs(matched) {
-		excluded[ruleID] = struct{}{}
+		excluded[ruleMatchKey(ruleID, member)] = struct{}{}
 	}
 	if matched {
 		for _, ruleID := range owner.fallbackAliasesOnMatch {
-			excluded[ruleID] = struct{}{}
+			excluded[ruleMatchKey(ruleID, member)] = struct{}{}
 		}
 	}
 }
@@ -2611,19 +2614,23 @@ func appendTrustedBoundedExactFallbackFindings(
 	commandText := trustedActionInputText(input, "")
 	seen := make(map[string]struct{}, len(findings))
 	for _, finding := range findings {
-		seen[finding.RuleID] = struct{}{}
+		seen[findingMatchKey(finding)] = struct{}{}
 	}
 	for ruleID, contract := range exactFallbackContracts {
 		if contract.boundedSubgraphProves == nil ||
 			!contract.boundedSubgraphProves(input, facts) {
 			continue
 		}
-		if _, ok := seen[ruleID]; ok {
+		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
+		if !ok {
 			continue
 		}
-		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
-		if !ok || (!contract.codeOwnedDetection &&
-			(strings.TrimSpace(commandText) == "" || rule.Pattern == nil || !rule.Pattern.MatchString(commandText))) {
+		key := ruleMatchKey(ruleID, rule.meetMember)
+		if _, alreadyFound := seen[key]; alreadyFound {
+			continue
+		}
+		if !contract.codeOwnedDetection &&
+			(strings.TrimSpace(commandText) == "" || rule.Pattern == nil || !rule.Pattern.MatchString(commandText)) {
 			continue
 		}
 		evidence := commandText
@@ -2631,6 +2638,7 @@ func appendTrustedBoundedExactFallbackFindings(
 			evidence = input.Tool
 		}
 		finding := RuleFinding{
+			meetMember:  rule.meetMember,
 			RuleID:      rule.ID,
 			Title:       rule.Title,
 			Severity:    rule.Severity,
@@ -2641,7 +2649,7 @@ func appendTrustedBoundedExactFallbackFindings(
 			enforcement: findingEnforcementAllowed,
 		}
 		findings = append(findings, adjustConfidence(input.Tool, finding))
-		seen[ruleID] = struct{}{}
+		seen[key] = struct{}{}
 	}
 	return findings
 }
@@ -2669,7 +2677,7 @@ func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
 	deduplicated := make([]RuleFinding, 0, len(findings))
 	positions := make(map[string]int, len(findings))
 	for _, finding := range findings {
-		key := trustedActionFindingKey(finding.RuleID)
+		key := ruleMatchKey(trustedActionFindingKey(finding.RuleID), finding.meetMember)
 		_, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
 		if position, duplicate := positions[key]; duplicate {
 			current := deduplicated[position]
@@ -4991,7 +4999,7 @@ func appendTrustedBashFallbackFindings(
 	var telemetry trustedActionTelemetry
 	seen := make(map[string]int, len(findings))
 	for index, finding := range findings {
-		seen[finding.RuleID] = index
+		seen[findingMatchKey(finding)] = index
 	}
 	var typedProof map[string]struct{}
 	loadTypedProof := func() map[string]struct{} {
@@ -5018,13 +5026,13 @@ func appendTrustedBashFallbackFindings(
 				matched = true
 				shadowFindings++
 				finding = markTrustedParserUncertainty(finding)
-				if index, exists := seen[finding.RuleID]; exists {
+				if index, exists := seen[findingMatchKey(finding)]; exists {
 					if _, proven := loadTypedProof()[finding.RuleID]; !proven {
 						findings[index] = finding
 					}
 					continue
 				}
-				seen[finding.RuleID] = len(findings)
+				seen[findingMatchKey(finding)] = len(findings)
 				findings = append(findings, finding)
 			}
 			telemetry.ParserUncertaintyCount++
@@ -5075,10 +5083,10 @@ func appendTrustedBashFallbackFindings(
 					newParserShadowFindingProof(finding.RuleID),
 				)
 			}
-			if _, exists := seen[finding.RuleID]; exists {
+			if _, exists := seen[findingMatchKey(finding)]; exists {
 				continue
 			}
-			seen[finding.RuleID] = len(findings)
+			seen[findingMatchKey(finding)] = len(findings)
 			findings = append(findings, finding)
 		}
 	}
@@ -5673,7 +5681,7 @@ func restoreTrustedEmbeddedCommandFallbacks(
 				matches,
 			)
 			for ruleID := range matches {
-				delete(excluded, ruleID)
+				restoreExcludedMeetRule(excluded, ruleID)
 			}
 		}
 	}
@@ -5688,7 +5696,7 @@ func appendTrustedEmbeddedCommandFindings(
 ) []RuleFinding {
 	seen := make(map[string]struct{}, len(findings))
 	for _, finding := range findings {
-		seen[finding.RuleID] = struct{}{}
+		seen[findingMatchKey(finding)] = struct{}{}
 	}
 	for _, command := range facts.Commands {
 		if command.Effect != actionfacts.EffectExecute {
@@ -5705,10 +5713,10 @@ func appendTrustedEmbeddedCommandFindings(
 					!strings.HasPrefix(finding.RuleID, "CMD-") {
 					continue
 				}
-				if _, exists := seen[finding.RuleID]; exists {
+				if _, exists := seen[findingMatchKey(finding)]; exists {
 					continue
 				}
-				seen[finding.RuleID] = struct{}{}
+				seen[findingMatchKey(finding)] = struct{}{}
 				findings = append(findings, finding)
 			}
 		}
@@ -6226,7 +6234,18 @@ func restoreTrustedUnresolvedReadFallbacks(
 		toolName,
 		facts,
 	) {
-		delete(excluded, ruleID)
+		restoreExcludedMeetRule(excluded, ruleID)
+	}
+}
+
+// A fallback proof for an ID can restore matching member definitions. The
+// subsequent pattern scan still requires each member's own rule to match.
+func restoreExcludedMeetRule(excluded map[string]struct{}, ruleID string) {
+	delete(excluded, ruleID)
+	for key := range excluded {
+		if strings.HasPrefix(key, ruleID+"\x00") {
+			delete(excluded, key)
+		}
 	}
 }
 

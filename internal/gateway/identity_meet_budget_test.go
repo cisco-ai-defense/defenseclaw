@@ -29,10 +29,14 @@ func TestMeetUnionDispatchBudgetIsItsMembers(t *testing.T) {
 	if abc.dispatchMaxCost() != 3*trustedActionDispatchMaxCost || len(abc.semanticRules) != 2 {
 		t.Fatalf("a union of a union: budget %d, %d rules", abc.dispatchMaxCost(), len(abc.semanticRules))
 	}
-	if kept := ab.withRules(func(PatternRule) bool { return true }); kept != ab {
-		t.Fatal("keeping every rule copied the generation")
+	member := &meetRuleMember{name: "a"}
+	copyOfAB := ab.withMeetMember(member)
+	if copyOfAB.dispatchMaxCost() != ab.dispatchMaxCost() || len(copyOfAB.semanticRules) != len(ab.semanticRules) {
+		t.Fatalf("member copy: budget %d, %d rules", copyOfAB.dispatchMaxCost(), len(copyOfAB.semanticRules))
 	}
-	if onlyA := ab.withRules(func(r PatternRule) bool { return r.ID == "BUDGET-A" }); len(onlyA.semanticRules) != 1 || onlyA.dispatchMaxCost() != ab.dispatchMaxCost() {
-		t.Fatalf("filtered union: %d rules, budget %d", len(onlyA.semanticRules), onlyA.dispatchMaxCost())
+	for _, rule := range copyOfAB.semanticRules {
+		if rule.rule.meetMember != member {
+			t.Fatal("member copy lost rule provenance")
+		}
 	}
 }

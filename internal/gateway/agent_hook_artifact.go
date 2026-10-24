@@ -84,15 +84,9 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 	if len(findings) == 0 {
 		return resp
 	}
-	intent := guardrailActionAllow
-	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
-		intent = guardrailActionForConnector(
-			a.decisionConfig(ctx),
-			req.ConnectorName,
-			HighestSeverity(enforceable),
-			true,
-		)
-	}
+	intent := guardrailActionForConnectorFindings(
+		a.decisionConfig(ctx), req.ConnectorName, findings, true,
+	)
 	resp = mergeAgentHookFindings(profile, req, resp, findings, intent)
 	if !req.SuppressCorrelationEmit {
 		eval := a.emitHookRuleFindings(
