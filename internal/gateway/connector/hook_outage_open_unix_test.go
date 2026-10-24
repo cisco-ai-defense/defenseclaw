@@ -53,6 +53,11 @@ func TestPerUserShellHookOutageOpenOnlyForAnOutage(t *testing.T) {
 		{name: "another account holds the port", handler: allow, foreign: true, opens: true},
 		{name: "another account holds the port, strict availability", handler: allow, foreign: true,
 			env: []string{"DEFENSECLAW_STRICT_AVAILABILITY=1"}},
+		// The marker is the hooks own: one inherited from the agents
+		// environment never opens a call the gateway answered.
+		{name: "inherited peer marker", env: []string{"_DC_PEER_UNPROVEN=1"}, handler: func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		}},
 		{name: "gateway down, install in progress", lock: true},
 		{name: "gateway took the call and did not answer", handler: func(_ http.ResponseWriter, r *http.Request) {
 			// Read the body so the server notices the hook hang up.
