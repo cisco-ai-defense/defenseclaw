@@ -1023,10 +1023,6 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				break
 			}
 		}
-		command := request.Input.Command
-		if command == "" {
-			command, _ = trustedBashCommandInput(request.Input)
-		}
 		home := filepath.Clean(facts.ActiveHome)
 		external := func(target string) bool {
 			return filepath.IsAbs(target) && filepath.Clean(target) != os.DevNull && target != home &&
