@@ -142,17 +142,17 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 		// Hermes drops /etc/hermes under PYTEST_CURRENT_TEST only while
 		// HERMES_MANAGED_DIR is unset, and the launcher sets it, so no file
 		// that names the variable is refused (GAP-1122, 1.0.4 review).
-		"env pytest switch":           {".env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
-		"env empty pytest switch":     {".env", []byte("export PYTEST_CURRENT_TEST=\n"), ""},
-		"env quoted pytest switch":    {".env", []byte("'PYTEST_CURRENT_TEST'=x\n"), ""},
-		"env utf-16 pytest switch":    {".env", utf16LE("PYTEST_CURRENT_TEST=x\n"), ""},
-		"op env pytest switch":        {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
-		"profile env pytest switch":   {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
-		"env commented pytest switch": {".env", []byte("# PYTEST_CURRENT_TEST=1\n"), ""},
-		"env commented managed dir": {".env", []byte("# HERMES_MANAGED_DIR=/tmp/old\n"), ""},
+		"env pytest switch":                {".env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"env empty pytest switch":          {".env", []byte("export PYTEST_CURRENT_TEST=\n"), ""},
+		"env quoted pytest switch":         {".env", []byte("'PYTEST_CURRENT_TEST'=x\n"), ""},
+		"env utf-16 pytest switch":         {".env", utf16LE("PYTEST_CURRENT_TEST=x\n"), ""},
+		"op env pytest switch":             {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"profile env pytest switch":        {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"env commented pytest switch":      {".env", []byte("# PYTEST_CURRENT_TEST=1\n"), ""},
+		"env commented managed dir":        {".env", []byte("# HERMES_MANAGED_DIR=/tmp/old\n"), ""},
 		"env indented managed dir comment": {".env", []byte("  # HERMES_MANAGED_DIR=/tmp/old\n"), ""},
-		"env utf-16 managed dir comment": {".env", utf16LE("# HERMES_MANAGED_DIR=/tmp/old\n"), ""},
-		"env managed dir after comment": {".env", []byte("# HERMES_MANAGED_DIR=/tmp/old\nHERMES_MANAGED_DIR=/tmp/new\n"), "sets HERMES_MANAGED_DIR"},
+		"env utf-16 managed dir comment":   {".env", utf16LE("# HERMES_MANAGED_DIR=/tmp/old\n"), ""},
+		"env managed dir after comment":    {".env", []byte("# HERMES_MANAGED_DIR=/tmp/old\nHERMES_MANAGED_DIR=/tmp/new\n"), "sets HERMES_MANAGED_DIR"},
 		// Only a real assignment, as python-dotenv reads it, sets a loader,
 		// interpreter or Tirith variable; a comment or a value that only
 		// mentions one does not (1.0.4 review).
