@@ -692,6 +692,19 @@ describe('docs claim CI coverage', () => {
 });
 
 describe('1.0.4 operator routes and limits', () => {
+  it('keeps the TUI host-port ask row aligned with the UI and sandbox guide', () => {
+    const tui = source('docs-site/content/docs/reference/commands/tui.mdx');
+    const asksRow = tui.split('\n').find((line) => line.startsWith('| Asks |')) ?? '';
+    const ui = source('cli/defenseclaw/tui/services/sandbox_state.py');
+    const sandboxGuide = page('reference/sandboxes/cli.mdx');
+    const manager = source('internal/openshell/manager/hostport.go');
+    assert.match(ui, /A port on this machine asks only if the run named it [^\n]*\n[^\n]*with --host-port PORT; approve that ask to open the port/);
+    assert.match(sandboxGuide, /A `--host-port` port reads `asks` until you approve its first connection/);
+    assert.match(manager, /func \(m \*Manager\) hostPortAsk\(/);
+    assert.match(asksRow, /A port on this machine asks only if the run named it with `--host-port PORT`; approve that ask to open the port\./);
+    assert.doesNotMatch(asksRow, /port on this machine never asks/i);
+  });
+
   it('derives the MCP-description YARA signature count from the shipped rules', () => {
     const rules = readFileSync(join(repo, 'policies/yara/mcp-tools/description_injection.yara'), 'utf8');
     const count = (rules.match(/^rule\s+\w+/gm) ?? []).length;
