@@ -405,6 +405,25 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
     )
 
 
+def test_closed_per_user_hook_note_does_not_claim_observe_mode() -> None:
+    # A saved open preference on a per-user action-mode host is overridden by
+    # the closed hook rule. Status must name that rule, not observe mode.
+    state = ConnectorFailModeState(
+        connector="codex",
+        desired="closed",
+        configured="open",
+        runtime="closed",
+        sources=(("config", "open"), ("hook-script", "closed")),
+        drift=(),
+    )
+    report = state.to_report()
+    assert report["effective"] == "closed"
+    assert report["note"] == (
+        "this per-user deployment keeps hooks fail-closed; "
+        "guardrail.hook_fail_mode=open does not control hook failures here"
+    )
+
+
 def test_opencode_fail_mode_uses_baked_plugin_and_ignores_process_env(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
