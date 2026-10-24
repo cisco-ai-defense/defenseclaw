@@ -18277,6 +18277,36 @@ def _splunk_bridge_child_env(
     return child_env
 
 
+def _preflight_splunk_bridge_image(
+    env_file: str,
+    child_env: dict[str, str],
+    *,
+    image_override: str | None = None,
+) -> None:
+    """Resolve an image before changing the private env or running Compose stack."""
+    preflight = str(bundled_splunk_bridge_dir() / "bin" / "splunk-claw-bridge")
+    preflight_args = [preflight, "preflight-image", "--env-file", env_file]
+    if image_override:
+        preflight_args.extend(["--image", image_override])
+    try:
+        preflight_kwargs = {
+            "capture_output": True, "text": True, "timeout": 10800, "check": False,
+            "env": child_env,
+        }
+        if click.get_text_stream("stderr").isatty():
+            # A registry download may take hours; show daemon progress.
+            preflight_kwargs.pop("capture_output")
+            preflight_kwargs.update(stdout=subprocess.PIPE, stderr=None)
+        checked = subprocess.run(preflight_args, **preflight_kwargs)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise click.ClickException(
+            f"Local Splunk image preflight failed; local stack was left untouched: {exc}"
+        ) from exc
+    if checked.returncode != 0:
+        _echo_bridge_output_tail(checked)
+        raise click.ClickException("Local Splunk image is unavailable; local stack was left untouched")
+
+
 def _refresh_and_maybe_restart_splunk_bridge(
     data_dir: str,
     *,
@@ -18284,28 +18314,9 @@ def _refresh_and_maybe_restart_splunk_bridge(
     child_env: dict[str, str] | None = None,
     gateway_token_env: str = "",
     image_override: str | None = None,
+    image_preflighted: bool = False,
 ) -> RefreshResult:
-    """Resolve the replacement image before stopping a running stack, then refresh.
-
-    Sequence (all best-effort — refresh failures don't abort the parent
-    setup flow because the operator can still run with a stale bundle):
-
-    1. Detect a running ``defenseclaw-splunk-local`` compose project.
-    2. If running, resolve the replacement image with the bundled bridge,
-       then invoke ``bridge down``
-       to release the compose project (named volumes survive, so user
-       data is preserved across the bounce).
-    3. Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundle. The
-       refresh preserves operator secrets (``env/.env``) and the
-       generated app tarball (``splunk/build/``).
-    4. The caller then runs ``bridge up`` so the freshly refreshed
-       bundle (compose, bin, s3_exporter Dockerfile, app source) is
-       what materializes the next stack.
-
-    Surface every step inline so an operator sees exactly what
-    happened and never has to wonder why a previously-running stack
-    came back up on a different image.
-    """
+    """Resolve the image before stopping a running stack, then refresh its bundle."""
     effective_child_env = _splunk_bridge_child_env(
         gateway_token_env,
         environment=child_env,
@@ -18316,32 +18327,12 @@ def _refresh_and_maybe_restart_splunk_bridge(
     )
     stopped = False
     if was_running:
-        preflight = str(bundled_splunk_bridge_dir() / "bin" / "splunk-claw-bridge")
-        preflight_args = [
-            preflight, "preflight-image", "--env-file",
-            env_file or os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL),
-        ]
-        if image_override:
-            preflight_args.extend(["--image", image_override])
-        try:
-            preflight_kwargs = {
-                "capture_output": True, "text": True, "timeout": 10800, "check": False,
-                "env": effective_child_env,
-            }
-            if click.get_text_stream("stderr").isatty():
-                # A registry download may take hours; show daemon progress.
-                preflight_kwargs.pop("capture_output")
-                preflight_kwargs.update(stdout=subprocess.PIPE, stderr=None)
-            checked = subprocess.run(
-                preflight_args, **preflight_kwargs,
+        if not image_preflighted:
+            _preflight_splunk_bridge_image(
+                env_file or os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL),
+                effective_child_env,
+                image_override=image_override,
             )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            raise click.ClickException(
-                f"Local Splunk image preflight failed; running stack was left untouched: {exc}"
-            ) from exc
-        if checked.returncode != 0:
-            _echo_bridge_output_tail(checked)
-            raise click.ClickException("Local Splunk image is unavailable; running stack was left untouched")
         ux.echo(f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle...")
         bridge = _resolve_bridge_bin(data_dir)
         if bridge:
@@ -18412,6 +18403,8 @@ def _bootstrap_bridge(
     env = _splunk_bridge_child_env(gateway_token_env)
     env_file = _ensure_private_splunk_bridge_env(data_dir)
     replacement_image = _replacement_splunk_image(env_file)
+    if replacement_image:
+        _preflight_splunk_bridge_image(env_file, env, image_override=replacement_image)
     if refresh_bundle:
         _refresh_and_maybe_restart_splunk_bridge(
             data_dir,
@@ -18419,6 +18412,7 @@ def _bootstrap_bridge(
             child_env=env,
             gateway_token_env=gateway_token_env,
             image_override=replacement_image,
+            image_preflighted=bool(replacement_image),
         )
     _migrate_retired_splunk_image(env_file)
 

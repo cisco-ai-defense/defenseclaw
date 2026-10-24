@@ -169,7 +169,13 @@ def test_local_splunk_image_resolves_or_reports_registry_outage(tmp_path: Path, 
 
 
 @pytest.mark.skipif(os.name == "nt", reason="the Unix bridge runs under Bash")
-def test_offline_upgrade_keeps_the_running_stack_and_old_image_contract(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("refresh_bundle", "running"),
+    [(True, True), (True, False), (False, True), (False, False)],
+)
+def test_offline_upgrade_keeps_the_stack_and_old_image_contract(
+    tmp_path: Path, refresh_bundle: bool, running: bool,
+) -> None:
     from defenseclaw.bundle_refresh import RefreshResult
     from defenseclaw.commands import cmd_setup
 
@@ -199,12 +205,12 @@ def test_offline_upgrade_keeps_the_running_stack_and_old_image_contract(tmp_path
     refresh_result = RefreshResult("splunk-bridge", str(bridge_dir), str(BUNDLE), refreshed=False)
     with (
         patch.dict(os.environ, {"PATH": f"{tmp_path}{os.pathsep}{os.environ['PATH']}", "DOCKER_CALLS": str(calls)}),
-        patch.object(cmd_setup, "is_compose_project_running", return_value=True),
+        patch.object(cmd_setup, "is_compose_project_running", return_value=running),
         patch.object(cmd_setup, "refresh_splunk_bridge", return_value=refresh_result) as refresh,
         patch.object(cmd_setup, "bundled_splunk_bridge_dir", return_value=BUNDLE),
     ):
         with pytest.raises(Exception, match="image|registry"):
-            cmd_setup._bootstrap_bridge(str(data_dir))
+            cmd_setup._bootstrap_bridge(str(data_dir), refresh_bundle=refresh_bundle)
 
     recorded = calls.read_text(encoding="utf-8").splitlines()
     assert any(call == "pull splunk/splunk:10.2.0" for call in recorded)
