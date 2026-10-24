@@ -34,7 +34,7 @@ func TestHookProcessFailureWarnings(t *testing.T) {
 			r := New("status", "standalone", "linux", "1.0.4")
 			r.SecurityComplete = true
 			r.Connectors = map[string]ConnectorState{tc.name: {Enabled: true, Versions: tc.versions}}
-			r.AddHookProcessFailureWarnings()
+			r.AddHookProcessFailureWarnings(r.Connectors)
 			if got := len(r.Warnings) > 0; got != tc.warn {
 				t.Fatalf("%s versions %v: warning=%v, want %v", tc.name, tc.versions, r.Warnings, tc.warn)
 			}
@@ -58,15 +58,35 @@ func TestHookProcessFailureWarnings(t *testing.T) {
 		r := New(action, "standalone", "windows", "1.0.4")
 		r.SecurityComplete = true
 		r.Connectors = map[string]ConnectorState{"codex": {Enabled: true}}
-		r.AddHookProcessFailureWarnings()
+		r.AddHookProcessFailureWarnings(r.Connectors)
 		if len(r.Warnings) != 1 || r.SecurityComplete {
 			t.Fatalf("%s warning=%v security_complete=%v", action, r.Warnings, r.SecurityComplete)
 		}
 		r = New(action, "standalone", "windows", "1.0.4")
 		r.Connectors = map[string]ConnectorState{"codex": {Enabled: false}}
-		r.AddHookProcessFailureWarnings()
+		r.AddHookProcessFailureWarnings(r.Connectors)
 		if len(r.Warnings) != 0 {
 			t.Fatalf("%s disabled connector warned: %v", action, r.Warnings)
 		}
+	}
+}
+
+// Ensure, install and repair print no connectors block, but they describe
+// the same connectors: the limit lowers their security_complete as it does
+// for status and verify (it applied only to status and verify).
+func TestHookProcessFailureWarningsApplyToEveryAction(t *testing.T) {
+	for _, action := range []string{"ensure", "install", "repair", "upgrade", "status", "verify"} {
+		r := New(action, "standalone", "darwin", "1.0.4")
+		r.SecurityComplete = true
+		r.AddHookProcessFailureWarnings(map[string]ConnectorState{"codex": {Enabled: true, Versions: []string{"0.160.0"}}})
+		if len(r.Warnings) != 1 || r.Warnings[0].Code != CodeHookProcessFailOpen || r.SecurityComplete || r.Connectors != nil {
+			t.Fatalf("%s: warnings=%v security_complete=%v connectors=%v", action, r.Warnings, r.SecurityComplete, r.Connectors)
+		}
+	}
+	r := New("ensure", "secure_client", "windows", "1.0.4")
+	r.SecurityComplete = true
+	r.AddHookProcessFailureWarnings(map[string]ConnectorState{"codex": {Enabled: true}})
+	if len(r.Warnings) != 0 || !r.SecurityComplete {
+		t.Fatalf("Secure Client ensure changed: warnings=%v security_complete=%v", r.Warnings, r.SecurityComplete)
 	}
 }
