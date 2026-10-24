@@ -25,7 +25,8 @@ import (
 // path (repair of a damaged guard, adapter refresh at upgrade) now keeps
 // such a file byte for byte, writes nothing else, and says what to do; once
 // the administrator fixes or removes the file, the same repair rebuilds the
-// guard.
+// guard. An empty file holds no bytes to lose and reads as an empty
+// document, so a repair still registers the guard in it.
 func TestWindowsCursorMachineGuardRepairKeepsAHooksFileThatIsNotJSON(t *testing.T) {
 	const hook = `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-hook.exe`
 	invalid := []struct {
@@ -34,7 +35,6 @@ func TestWindowsCursorMachineGuardRepairKeepsAHooksFileThatIsNotJSON(t *testing.
 	}{
 		{"not JSON", []byte("{ not json")},
 		{"a save cut short", []byte(`{"version":1,"hooks":{"adminEvent":[{"type":"command","command":"admin-hook"}`)},
-		{"empty", []byte{}},
 		{"byte order mark only", []byte("\xef\xbb\xbf")},
 		{"two documents", []byte(`{"version":1,"hooks":{}}{"version":1,"hooks":{}}`)},
 	}
