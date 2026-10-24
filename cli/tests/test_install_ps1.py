@@ -3759,9 +3759,12 @@ def test_a_windows_agent_is_told_by_its_executable() -> None:
         "'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode'; 'c:\\users\\u\\scoop\\shims\\opencode.exe' = 'opencode'; "
         "'c:\\users\\u\\.amp\\bin\\amp.exe' = 'amp' }\n"
     )
+    # Name is the image file name, as Win32_Process reports it.
     rows = "\n".join(
-        "$p = [pscustomobject]@{{ Name = 'x.exe'; ExecutablePath = '{}'; CommandLine = '{}' }}; "
-        "'[' + (Get-LoadedPluginAgent $p) + ']'".format(program.replace("'", "''"), command.replace("'", "''"))
+        "$p = [pscustomobject]@{{ Name = '{}'; ExecutablePath = '{}'; CommandLine = '{}' }}; "
+        "'[' + (Get-LoadedPluginAgent $p) + ']'".format(
+            program.rsplit("\\", 1)[-1] or command, program.replace("'", "''"), command.replace("'", "''")
+        )
         for program, command, _ in _WINDOWS_AGENT_ROWS
     )
     script = ("Set-StrictMode -Version Latest\n" + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Get-ScriptOperand")
