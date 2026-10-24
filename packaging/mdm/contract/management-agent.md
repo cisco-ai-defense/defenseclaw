@@ -998,22 +998,28 @@ off the device. The agent does not read `/health` itself (section 7); the
   it uses an entry only after the folders and the entry pass the
   administrator-only check (an entry it did not write is left as it is).
   Each entry also records the bundle confirmed before the rotation (the
-  manifest SHA-256 `bundle status --json` reports as `current`, or `none`).
+  manifest SHA-256 `bundle status --json` reports as `current`, or `none`),
+  and the SHA-256 of the exact value the rotation will store.
   The rotation passes it as `secret set --bundle B --if-confirmed <sha|none>`
   (refused `confirmed_bundle_changed`, nothing written, once another bundle
   is confirmed), and the put-back as `secret set|remove --undo-rotation
-  <sha|none>`: it runs only while that bundle is still confirmed and does
-  not sign the value stored now. An entry for a credential that was not
+  <sha|none> --if-stored <value-sha256>`: it runs only while the credential
+  still holds the rotation's value and that bundle is still confirmed and
+  does not sign the value stored now. A later direct credential change
+  returns `credential_changed`; the journal and that later value stay.
+  Linux and macOS also use `--if-stored` on their in-run put-back under the
+  lifecycle lock. An entry for a credential that was not
   stored also records the SHA-256 of the installed config (or `none`), and
   its put-back `secret remove --undo-rotation <sha|none> --undo-config
   <sha|none>` takes a credential that config references with no value
-  stored only while that same config is installed; a config installed since
+  stored only while that same config is installed; when the journal recorded
+  `none`, a still-absent config permits undo of the exact added value. A config installed since
   may use the value, so the CLI refuses `credential_in_use` and the entry
   stays. Its refusal
   `rotation_confirmed` is the only proof the rotation committed (the
   confirmed bundle uses the stored value), so only then does the new value
   stay; any other refusal (`credential_in_use`, `secret_ref_mismatch`,
-  `secret_ref_unbound`) keeps the entry, is reported, and no other rotation
+  `secret_ref_unbound`, `credential_changed`) keeps the entry, is reported, and no other rotation
   runs until it is settled. A settled entry is renamed `.retired` in one
   step before it is overwritten and deleted, so a cleanup that stops never
   leaves an entry a later run would put back.
