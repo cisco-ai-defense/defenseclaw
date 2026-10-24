@@ -239,6 +239,9 @@ func codexWithoutUserNativeOTLP(raw []byte, backup codexConfigBackup, opts Setup
 	}
 	owned := false
 	for _, key := range codexOtelExporterKeys {
+		if codexExporterHasAmbiguousLegacyPort(otel[key], opts) {
+			return nil, nil, fmt.Errorf("Codex native OTLP exporter ownership is unresolved at otel.%s.otlp-http.endpoint; remove the stale exporter from config.toml before retrying", key) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+		}
 		if codexExporterLooksManaged(otel[key], opts) || codexExporterHasManagedHeaderPair(otel[key]) {
 			owned = true
 			break

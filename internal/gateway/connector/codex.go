@@ -407,6 +407,13 @@ func (c *CodexConnector) checkAgentSettings(opts SetupOpts) error {
 	if err := parseCodexTOML(data, &cfg); err != nil {
 		return refuseForAgentConfig(fmt.Errorf("Codex config %s does not parse (%v); fix the file, then run: defenseclaw-gateway restart", path, err)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
 	}
+	if otel, ok := cfg["otel"].(map[string]interface{}); ok {
+		for _, key := range codexOtelExporterKeys {
+			if codexExporterHasAmbiguousLegacyPort(otel[key], opts) {
+				return refuseForAgentConfig(fmt.Errorf("Codex config %s has an ambiguous retired native exporter at otel.%s.otlp-http.endpoint; remove that exporter, then run: defenseclaw-gateway restart", path, key)) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+			}
+		}
+	}
 	if raw, exists := cfg["hooks"]; exists {
 		if _, ok := raw.(map[string]interface{}); !ok {
 			return refuseForAgentConfig(fmt.Errorf("Codex hooks configuration in %s has unsupported type %T; refusing to replace it; fix the file, then run: defenseclaw-gateway restart", path, raw)) //nolint:staticcheck // Preserve the product or platform name in this operator diagnostic.
@@ -4572,7 +4579,7 @@ func codexOtelResidueFields(v interface{}, opts SetupOpts) []string {
 	var residual []string
 	for _, key := range codexOtelExporterKeys {
 		exporter := otel[key]
-		if codexExporterLooksManaged(exporter, opts) {
+		if codexExporterLooksManaged(exporter, opts) || codexExporterHasAmbiguousLegacyPort(exporter, opts) {
 			residual = append(residual, fmt.Sprintf("config.toml otel.%s.otlp-http.endpoint retains DefenseClaw exporter", key))
 		}
 		if !codexExporterHasManagedHeaderResidue(exporter) {
@@ -4682,6 +4689,30 @@ func codexExporterLooksManaged(v interface{}, opts SetupOpts) bool {
 	// but port-independent ownership is deliberately stronger: require the
 	// exact pair of product markers and a strict loopback OTLP URL.
 	return sourceMarker && clientMarker && codexLegacyDirectOTLPEndpointLooksManaged(endpoint)
+}
+
+// A single exact product marker on a legacy direct receiver is insufficient
+// authority to remove an exporter after the API port changes. It is still
+// enough evidence to stop Setup: the unchanged bearer could reach a different
+// process on that retired port.
+func codexExporterHasAmbiguousLegacyPort(v interface{}, opts SetupOpts) bool {
+	if codexExporterLooksManaged(v, opts) {
+		return false
+	}
+	exporter, ok := v.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	otlpHTTP, ok := exporter["otlp-http"].(map[string]interface{})
+	if !ok {
+		return false
+	}
+	endpoint, _ := otlpHTTP["endpoint"].(string)
+	if !codexLegacyDirectOTLPEndpointLooksManaged(endpoint) {
+		return false
+	}
+	headers := codexExporterHeaders(v)
+	return headers["x-defenseclaw-source"] == "codex" || headers["x-defenseclaw-client"] == "codex-otel/1.0"
 }
 
 func codexScopedOTLPEndpointLooksManaged(endpoint string) bool {
