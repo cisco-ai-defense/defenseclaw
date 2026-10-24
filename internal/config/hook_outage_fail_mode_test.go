@@ -16,8 +16,8 @@ import (
 // fails open for an outage in the default and permissive tiers and closed in
 // strict; every managed or enterprise install keeps its administrator's mode
 // (closed by default), whatever the tier, and Secure Client keeps its open
-// default. A per-user configured hook_fail_mode, open or closed, and the
-// guardrail mode change nothing.
+// default. A saved per-user hook_fail_mode wins over the tier; the
+// unrelated guardrail enforcement mode does not change the outage mode.
 func TestHookOutageFailModeDecision(t *testing.T) {
 	standalone := func(c *Config) {
 		c.DeploymentMode = managed.DeploymentModeManagedEnterprise
