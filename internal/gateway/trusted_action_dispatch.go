@@ -2822,22 +2822,23 @@ func finalizeTrustedActionFindings(
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
 }
 
-// deduplicateTrustedActionFindings collapses both exact duplicate rule IDs and
-// equivalent aliases claimed by one semantic owner. Recovery lanes may prove
-// the same action independently; that strengthens provenance but must not
-// inflate finding counts or operator noise.
+// deduplicateTrustedActionFindings collapses exact duplicate rule IDs and
+// equivalent aliases claimed by one semantic owner within each profile.
+// Recovery lanes may prove the same action independently, but findings from
+// different meet members must remain for their own verdicts and audit.
 func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
 	deduplicated := make([]RuleFinding, 0, len(findings))
 	positions := make(map[string]int, len(findings))
 	for _, finding := range findings {
-		key := trustedActionFindingKey(finding.RuleID)
+		key := finding.profile + "\x00" + trustedActionFindingKey(finding.RuleID)
 		_, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
 		if position, duplicate := positions[key]; duplicate {
 			current := deduplicated[position]
 			candidateRank := severityRank[strings.ToUpper(strings.TrimSpace(finding.Severity))]
 			currentRank := severityRank[strings.ToUpper(strings.TrimSpace(current.Severity))]
-			candidateCanonical := claimed && canonicalTrustedRuleID(finding.RuleID) == key
-			currentCanonical := canonicalTrustedRuleID(current.RuleID) == key
+			ownerKey := trustedActionFindingKey(finding.RuleID)
+			candidateCanonical := claimed && canonicalTrustedRuleID(finding.RuleID) == ownerKey
+			currentCanonical := canonicalTrustedRuleID(current.RuleID) == ownerKey
 			if candidateRank > currentRank ||
 				(candidateRank == currentRank && finding.Confidence > current.Confidence) ||
 				(candidateRank == currentRank && finding.Confidence == current.Confidence &&
