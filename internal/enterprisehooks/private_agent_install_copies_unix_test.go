@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -383,6 +385,40 @@ func TestDiscoverUnixPrivateInstallsReportsTheFindingLimit(t *testing.T) {
 	if len(found) != privateAgentInstallMaxFindings+1 || !last.Incomplete || installFacts(t, last)["skipped"] != PrivateInstallSkippedFindings {
 		t.Fatalf("%d findings, last %+v", len(found), last)
 	}
+}
+
+// A root-owned folder may grant the enrolled user search but not listing.
+// The account can run a known copy below it, so its inventory is incomplete.
+func TestPrivateInstallWalkReportsSearchableUnlistableOtherOwner(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() == 0 {
+		t.Skip("requires a non-root Linux account and a distinct directory owner")
+	}
+	withPrivateInstallMachinePrefixes(t)
+	home := makeHome(t, trustedTestDir(t), "alice")
+	opaque := filepath.Join(home, "opaque")
+	npmCopy(t, claudePackage(filepath.Join(opaque, "nested"), false), "@anthropic-ai/claude-code", "2.0.77", "cli.js")
+	if err := os.Chmod(opaque, 0o711); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("sudo", "-n", "chown", "0", opaque).Run(); err != nil {
+		t.Skipf("cannot create a distinct-owner directory: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = exec.Command("sudo", "-n", "chown", fmt.Sprint(os.Geteuid()), opaque).Run()
+		_ = os.Chmod(opaque, 0o700)
+	})
+	if _, err := os.Stat(filepath.Join(opaque, "nested")); err != nil {
+		t.Fatalf("enrolled user must be able to traverse the opaque directory: %v", err)
+	}
+	if _, err := os.ReadDir(opaque); !os.IsPermission(err) {
+		t.Fatalf("opaque directory must be unlistable, got %v", err)
+	}
+	for _, install := range DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"}) {
+		if install.Connector == "claudecode" && install.Incomplete && install.Skipped == PrivateInstallSkippedHome {
+			return
+		}
+	}
+	t.Fatal("searchable, unlistable directory was silently treated as fully scanned")
 }
 
 // The worker's machine-prefix findings pass the parent's path check; a
