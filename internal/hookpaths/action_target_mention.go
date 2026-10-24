@@ -28,7 +28,7 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int) boo
 	if actionWindowsHome(home) {
 		return actionWindowsTargetMention(command, cwd, home, depth)
 	}
-	if !filepath.IsAbs(cwd) && !(actionPosixWindowsHome(home) && path.IsAbs(cwd)) {
+	if !filepath.IsAbs(cwd) && (!actionPosixWindowsHome(home) || !path.IsAbs(cwd)) {
 		return false
 	}
 	file, parsed := parseShell(command)
