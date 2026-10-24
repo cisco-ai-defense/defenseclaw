@@ -2378,11 +2378,11 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     if ([string](Get-Field $Manifest "HookFailModes") -and -not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) {
         $problems += "the hooks' outage modes ($(Join-Path $DataDir 'hooks\.hookcfg')) are missing"
     }
-    if (-not $problems.Count -and $KeepStopped -and [bool](Get-Field $Manifest "GatewayWasRunning") -and
+    if (-not $problems.Count -and -not $running -and ($transition -or ($KeepStopped -and [bool](Get-Field $Manifest "GatewayWasRunning"))) -and
         (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) {
-        # The gateway stays stopped on purpose (GAP-0407): its hooks block
-        # until it runs again, an outage open the config chooses included,
-        # because the gateway that ran before is down.
+        # A gateway kept stopped on purpose (GAP-0407), or one that was
+        # already stopped before this upgrade, needs closed hooks before the
+        # prior hook can be published and the install lock released.
         $gateways = @((Join-Path $LifecycleCloser "defenseclaw-gateway.exe"), (Join-Path $BinDir "defenseclaw-gateway.exe"))
         if (Close-AllHooks $gateways) {
             Write-Warn "Every agent hook blocks tool calls until the gateway runs again"
@@ -2401,12 +2401,8 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
             "fix the cause, then run: $(Get-LifecycleNextStep)$accept")
     }
     if ($transition) {
-        if (-not $running) {
-            Set-RecoveryPending
-            throw "The prior gateway is still stopped; the checked hook guard and lifecycle record remain until gateway readiness can be proven"
-        }
         Restore-PriorHookAfterProof $transitionRecord
-        $finalProblems = @(Test-LifecycleProof $bins $true @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus)
+        $finalProblems = @(Test-LifecycleProof $bins $running @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus)
         if ($finalProblems.Count) {
             Set-RecoveryPending
             throw "The prior hook was restored but the gateway proof changed: $($finalProblems -join '; ')"

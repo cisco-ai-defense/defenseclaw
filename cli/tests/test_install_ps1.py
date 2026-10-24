@@ -3892,6 +3892,80 @@ if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
     assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
 
 
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.parametrize("prior_version", ["0.8.10", "1.0.0", "1.0.2", "1.0.3"])
+def test_windows_rollback_finishes_for_a_previously_stopped_gateway(tmp_path: Path, prior_version: str) -> None:
+    # A stopped prior gateway has no readiness to prove. Its restored bytes
+    # and closed hooks must be proven before the old hook and lock return.
+    body = (
+        _ps1_function("Read-Text")
+        + _ps1_function("Restore-BinDir")
+        + _ps1_function("Assert-BinDirRestored")
+        + "\n".join(_ps1_function(name) for name in (
+            "Get-LifecycleHookTransition", "Save-LifecycleHookTransition",
+            "Restore-PriorHookAfterProof", "Ensure-LifecycleHookGuard",
+        ))
+        + r"""
+$ManagedFiles = @('defenseclaw-gateway.exe', 'defenseclaw-hook.exe')
+$slot = Join-Path $DataDir 'previous.new'
+New-Item -ItemType Directory -Path (Join-Path $slot 'bin'), (Join-Path $slot 'closer') -Force | Out-Null
+function Write-Warn { param($Message) }
+function Install-File { param($Source, $Destination) Copy-Item -LiteralPath $Source -Destination $Destination -Force }
+function Remove-Aside { param($Path) Remove-Item -LiteralPath $Path -Force }
+[IO.File]::WriteAllText((Join-Path $slot 'bin\defenseclaw-gateway.exe'), 'old gateway')
+[IO.File]::WriteAllText((Join-Path $slot 'bin\defenseclaw-hook.exe'), 'old hook')
+[IO.File]::WriteAllText((Join-Path $slot 'closer\defenseclaw-hook.exe'), 'checked new hook')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'failed new gateway')
+[IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-hook.exe'), 'checked new hook')
+$sidecar = Join-Path $DataDir 'hooks\.hookcfg'
+[IO.File]::WriteAllText($sidecar, '{"fail_modes":{"codex":"open"}}')
+$priorSHA = Get-Sha256 (Join-Path $slot 'bin\defenseclaw-hook.exe')
+$guardSHA = Get-Sha256 (Join-Path $slot 'closer\defenseclaw-hook.exe')
+$gatewaySHA = Get-Sha256 (Join-Path $slot 'bin\defenseclaw-gateway.exe')
+[IO.File]::WriteAllText((Join-Path $slot 'HOOK_FIRST'), $priorSHA)
+[IO.File]::WriteAllText((Join-Path $slot 'HOOK_GUARD'), $guardSHA)
+$record = [ordered]@{ Schema = 1; Operation = 'upgrade'; From = '__PRIOR__'; To = '1.0.4'; Slot = $slot
+    Bins = [ordered]@{ 'defenseclaw-gateway.exe' = $gatewaySHA; 'defenseclaw-hook.exe' = $priorSHA }
+    GatewayWasRunning = $false; Connectors = @('codex'); Config = ''; ExternalConfig = ''
+    ExternalConfigSha256 = ''; HookFailModes = ''; BinDirProtected = $false; SetupRoot = ''; Committed = $false }
+Write-DurableText $LifecycleManifest ($record | ConvertTo-Json -Depth 4)
+$guardForRestore = Save-LifecycleHookTransition $slot
+[IO.File]::WriteAllText((Join-Path $LifecycleCloser 'defenseclaw-gateway.exe'), 'checked closer')
+Restore-BinDir (Join-Path $slot 'bin') $guardForRestore
+$script:closeFails = $true
+function Invoke-Native {
+    param($FilePath, $Arguments, [switch]$Quiet)
+    if ($script:closeFails) { return 1 }
+    if (($Arguments -join ' ') -like 'connector refresh-fail-modes --closed*') {
+        if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA) {
+            throw 'old hook was published before closure'
+        }
+        [IO.File]::WriteAllText($sidecar, '{"fail_modes":{"codex":"closed"}}')
+        $script:closes++
+        return 0
+    }
+    throw 'a stopped gateway was probed for readiness'
+}
+try { Assert-LifecycleRestored (Read-LifecycleManifest); throw 'hook closure failure was accepted' }
+catch { if ($_.Exception.Message -eq 'hook closure failure was accepted') { throw } }
+if ((Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $guardSHA -or
+    -not (Test-Path -LiteralPath $LifecycleManifest) -or
+    [IO.File]::ReadAllText($sidecar) -notmatch '"open"') { throw 'failed closure released the guard' }
+$script:closeFails = $false
+Assert-LifecycleRestored (Read-LifecycleManifest)
+if ($script:closes -ne 1 -or (Test-Path -LiteralPath $LifecycleManifest) -or
+    [IO.File]::ReadAllText($sidecar) -notmatch '"closed"' -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-hook.exe')) -ne $priorSHA -or
+    (Get-Sha256 (Join-Path $BinDir 'defenseclaw-gateway.exe')) -ne $gatewaySHA -or $script:gateway) {
+    throw 'stopped prior install was not proven and retired'
+}
+'OK'
+"""
+    ).replace("__PRIOR__", prior_version)
+    result = _txn_harness(tmp_path, body)
+    assert result.returncode == 0 and "OK" in result.stdout, result.stdout + result.stderr
+
+
 def test_hook_fail_modes_are_held_from_before_the_gateway_stops_until_it_exits() -> None:
     # An earlier release's sidecar can hold an open nobody chose. For a
     # running gateway the new one sets the modes from the config and holds
