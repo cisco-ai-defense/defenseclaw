@@ -1026,6 +1026,7 @@ def _print_skill_info_card(
         note = _skill_policy_note(
             info_map.get("name", skill_name), verdict, held=held,
             connector=str(info_map.get("connector") or ""),
+            max_severity=str((scan_data or {}).get("max_severity") or ""),
         )
         for line in note.splitlines():
             click.echo(f"  {line}")
@@ -1129,6 +1130,7 @@ def _skill_held_off(info_map: dict[str, Any] | None, action_entry: Any = None) -
 
 def _skill_policy_note(
     name: str, label: str, *, held: bool = True, connector: str = "", installed: bool = True,
+    max_severity: str = "",
 ) -> str:
     """What a policy verdict means for an installed copy, plus next steps.
 
@@ -1158,6 +1160,8 @@ def _skill_policy_note(
             ("Accept it", "allow"),
         )
     if label == "warning":
+        if max_severity.upper() == "INFO":
+            return "allowed with informational findings."
         return steps("allowed with findings.", ("Block it", "block"))
     if label == "blocked":
         if held:
@@ -1773,6 +1777,7 @@ def _print_skill_scan_policy(
             held = True
     note = _skill_policy_note(
         name, label, held=held, connector=connector if installed else "", installed=installed,
+        max_severity=str(result.max_severity()),
     ) or reason
     first, *steps = (note or "").splitlines() or [""]
     ux.echo(f"        policy: {label}" + (f" — {first}" if first else ""))
@@ -2044,7 +2049,7 @@ def scan(
     scan_dir = scan_path
     scan_connector = ""
     adhoc = False
-    if folder_target and not connector_flag:
+    if (folder_target or scan_path) and not connector_flag:
         # Name the connector whose skill dir holds the folder; a folder no
         # connector holds is an ad-hoc path scan, not "on <first connector>".
         scan_connector = _connector_for_skill_path(app, scan_dir)
@@ -2432,6 +2437,8 @@ def _scan_one_local_skill(
         from defenseclaw.commands import hint
         if result.is_clean():
             hint("Scan MCP servers:  defenseclaw mcp scan --all")
+        elif str(result.max_severity()).upper() == "INFO":
+            hint("View alerts:       defenseclaw alerts")
         else:
             hint(
                 f"Block this skill:  defenseclaw skill block {name}",

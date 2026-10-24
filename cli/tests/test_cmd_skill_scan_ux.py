@@ -51,7 +51,7 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner
-from defenseclaw.commands.cmd_skill import skill
+from defenseclaw.commands.cmd_skill import _skill_policy_note, skill
 from defenseclaw.models import Finding, ScanResult
 
 from tests.helpers import cleanup_app, make_app_context, make_separate_stderr_runner
@@ -146,7 +146,7 @@ class TestSingleTargetUX(_SkillScanUXBase):
 
         result = self.invoke(["scan", "demo-skill", "--path", self.skill_dir])
         self.assertEqual(result.exit_code, 0, result.output)
-        self.assertIn("Scanning 1 skill on ", result.output)
+        self.assertIn("Scanning 1 skill at a path (not from a connector config)", result.output)
         # Default skill categories
         self.assertIn("prompt injection in SKILL.md", result.output)
         self.assertIn("malicious shell / Python invocations", result.output)
@@ -249,6 +249,37 @@ class TestSingleTargetUX(_SkillScanUXBase):
 
 class TestPathTargetUX(_SkillScanUXBase):
     """GAP-1599: ``skill scan <folder>`` outside every connector's skill dirs."""
+
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    def test_explicit_path_uses_owning_connector_and_info_has_no_block_hint(self, mock_cls) -> None:
+        project_skill = os.path.join(self.tmp_dir, ".opencode", "skills", "daybook-review")
+        os.makedirs(project_skill)
+        with open(os.path.join(project_skill, "SKILL.md"), "w") as file:
+            file.write("# daybook-review\n")
+        mock_cls.return_value.scan.return_value = self._info_result(project_skill)
+
+        def skill_dirs(_cfg, connector=None):
+            return [os.path.dirname(project_skill)] if connector == "opencode" else [self.skill_dir]
+
+        with (
+            patch.object(type(self.app.cfg), "skill_dirs", skill_dirs),
+            patch("defenseclaw.commands.cmd_skill._active_skill_connectors", return_value=["amp", "opencode"]),
+            patch("defenseclaw.commands.hint") as mock_hint,
+        ):
+            result = self.invoke(["scan", "--path", project_skill])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("on opencode", result.output)
+        self.assertNotIn("--connector amp", result.output)
+        self.assertNotIn("Block it:", result.output)
+        self.assertNotIn("Block this skill:", result.output)
+        self.assertNotIn("Block this skill:", str(mock_hint.call_args))
+
+    def test_info_warning_note_does_not_suggest_blocking(self) -> None:
+        self.assertEqual(
+            _skill_policy_note("daybook-review", "warning", max_severity="INFO"),
+            "allowed with informational findings.",
+        )
 
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
     def test_folder_target_is_adhoc_and_not_called_loaded(self, mock_cls) -> None:
@@ -357,7 +388,7 @@ class TestSingleTargetJsonMode(_SkillScanUXBase):
         self.assertNotIn("[ok]", result.output)
         payload = json.loads(result.output.strip())
         self.assertIn("scanner", payload)
-        self.assertIn("connector", payload)
+        self.assertNotIn("connector", payload)
         self.assertIn("target", payload)
         self.assertIn("findings", payload)
 
