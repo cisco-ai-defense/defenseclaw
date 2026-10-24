@@ -58,12 +58,12 @@ func appendTrustedPrivateKeyReaderFinding(
 		if findings[index].RuleID == "PATH-SSH-KEY" ||
 			findings[index].RuleID == "PATH-WIN-SSH-KEY" {
 			findings[index].enforcement = enforcement
-			findings[index].Severity = "CRITICAL"
+			findings[index].Severity = rule.Severity
 			return findings
 		}
 	}
 	return append(findings, adjustConfidence(request.Input.Tool, RuleFinding{
-		RuleID: rule.ID, Title: rule.Title, Severity: "CRITICAL",
+		RuleID: rule.ID, Title: rule.Title, Severity: rule.Severity,
 		Confidence: rule.Confidence, Evidence: trustedActionInputText(request.Input, ""),
 		Tags: append([]string(nil), rule.Tags...), LineNumber: 1,
 		enforcement: enforcement,
