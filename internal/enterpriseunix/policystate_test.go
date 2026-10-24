@@ -281,6 +281,13 @@ func TestEnsureAppliesAPolicyAssetEditedInPlace(t *testing.T) {
 	first := generation()
 
 	runner.digest = after
+	// A started gateway loads the edited pack.
+	h.services.afterStart = func(u Unit) {
+		if u.Name == unitGateway {
+			reported = runner.digest
+		}
+	}
+	h.services.afterRestart = h.services.afterStart
 	h.services.mu.Lock()
 	mark := len(h.services.calls)
 	h.services.mu.Unlock()
