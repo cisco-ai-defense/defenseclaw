@@ -20,6 +20,61 @@ type correlationRelationshipRecordCapture struct {
 	records []observability.Record
 }
 
+type correlationRelationshipBatchCapture struct {
+	single  int
+	batches int
+	items   int
+}
+
+func (capture *correlationRelationshipBatchCapture) Emit(
+	context.Context, router.Metadata, observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	capture.single++
+	return pipeline.LocalLogOutcome{}, nil
+}
+
+func (capture *correlationRelationshipBatchCapture) EmitAtomicBatch(
+	_ context.Context, items []observabilityruntime.LogBatchItem,
+) ([]pipeline.LocalLogOutcome, error) {
+	capture.batches++
+	capture.items += len(items)
+	return make([]pipeline.LocalLogOutcome, len(items)), nil
+}
+
+func TestManagedCorrelationRelationshipsShareOneDurableBatch(t *testing.T) {
+	prior := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(prior) })
+	capture := &correlationRelationshipBatchCapture{}
+	semantic := audit.SemanticEventID("019b2b7b-9f8c-7ea0-8757-3e064bcd9991")
+	relationships := []audit.CorrelationRelationship{
+		{RelationshipID: "rel-one", FromKind: audit.CorrelationNodeSemanticEvent,
+			FromID: string(semantic), ToKind: audit.CorrelationNodeSession,
+			ToID: "session-1", Type: audit.CorrelationBelongsTo,
+			Method: audit.CorrelationMethodReported, Confidence: 95,
+			RuleID: "session-membership", RuleVersion: "codex-correlation-v1",
+			EvidenceCount: 1, Status: audit.CorrelationRelationshipActive},
+		{RelationshipID: "rel-two", FromKind: audit.CorrelationNodeSemanticEvent,
+			FromID: string(semantic), ToKind: audit.CorrelationNodeSession,
+			ToID: "session-2", Type: audit.CorrelationBelongsTo,
+			Method: audit.CorrelationMethodReported, Confidence: 95,
+			RuleID: "session-membership", RuleVersion: "codex-correlation-v1",
+			EvidenceCount: 1, Status: audit.CorrelationRelationshipActive},
+	}
+	err := emitCorrelationRelationshipsV8WithEmitter(t.Context(), capture,
+		observability.SourceConnector, "codex", semantic,
+		audit.LogicalEventID(semantic),
+		audit.ConnectorInstanceID("019b2b7b-9f8c-7ea0-8757-3e064bcd9993"),
+		relationships)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if capture.batches != 1 || capture.items != 2 || capture.single != 0 {
+		t.Fatalf("emission = batches %d, items %d, singles %d; want one batch of both rows",
+			capture.batches, capture.items, capture.single)
+	}
+}
+
 func (capture *correlationRelationshipRecordCapture) Emit(
 	_ context.Context,
 	_ router.Metadata,

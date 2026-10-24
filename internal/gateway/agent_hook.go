@@ -823,9 +823,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		hungUpBeforeAnswer := r.Context().Err() != nil
 		if delivery != nil {
 			attemptedWrite = true
-			receipt := delivery.offer(w, func() {
-				a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
-			})
+			receipt := func() string {
+				resume := pauseHookRunSlot(ctx)
+				defer resume()
+				return delivery.offer(w, func() {
+					a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
+				})
+			}()
 			if receipt == hookexec.HookDeliveryReleased {
 				resp = a.unreceiptedHookDecision(hungUpBeforeAnswer, connectorName, req.HookEventName, resp)
 			} else {

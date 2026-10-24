@@ -190,9 +190,9 @@ func emitCorrelationRelationshipsV8WithEmitter(
 			)
 		}}, nil
 	}
-	// Outside Secure Client the rows of one occurrence commit together: one
-	// write-ahead-log sync instead of one per relationship (GAP-0246).
-	if batcher, ok := emitter.(sidecarRuntimeAtomicBatchEmitter); ok && !ManagedEnterpriseActive() &&
+	// The rows of one occurrence commit together: one write-ahead-log sync
+	// instead of one per relationship, including managed hook answers.
+	if batcher, ok := emitter.(sidecarRuntimeAtomicBatchEmitter); ok &&
 		len(relationships) > 1 && len(relationships) <= observabilityruntime.MaxLogBatchItems {
 		items := make([]observabilityruntime.LogBatchItem, 0, len(relationships))
 		for _, relationship := range relationships {

@@ -299,6 +299,13 @@ func yieldHookRunSlot(ctx context.Context) (resume func()) {
 	// The hook bounds its wait for a local decision; this one waits on a
 	// remote scanner, so it reports progress first (hook_progress.go).
 	reportHookProgress(ctx)
+	return pauseHookRunSlot(ctx)
+}
+
+// pauseHookRunSlot frees the caller's run slot while this request waits for
+// an external answer. The request still counts toward its in-flight limits.
+// The caller resumes the slot before doing more gateway work.
+func pauseHookRunSlot(ctx context.Context) (resume func()) {
 	slot, _ := ctx.Value(hookRunSlotContextKey{}).(*hookRunSlot)
 	if slot == nil {
 		return func() {}
