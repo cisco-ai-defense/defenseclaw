@@ -9708,9 +9708,6 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     # records configured policy while the host remains effectively open.
     if not upstream_fail_open(cfg, name):
         lock_mode_target = str(fail_mode.get("desired") or configured_mode)
-    if name == "cursor":
-        configured_mode = "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
-        lock_mode_target = configured_mode
     if lock_mode != lock_mode_target:
         effective = str(fail_mode.get("effective") or "unknown")
         return ConnectorSetupReadiness(

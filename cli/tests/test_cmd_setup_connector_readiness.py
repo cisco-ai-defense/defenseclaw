@@ -890,6 +890,40 @@ def test_readiness_rejects_lock_that_disagrees_with_mode_aware_desired_fail_mode
     assert readiness.detail == "lock=open configured=closed effective=open"
 
 
+@pytest.mark.parametrize("mode", ("observe", "action"))
+@pytest.mark.parametrize("outage_mode", ("open", "closed"))
+def test_cursor_readiness_uses_the_recorded_outage_mode_independent_of_guardrail_mode(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str, outage_mode: str,
+) -> None:
+    cfg = _config(tmp_path)
+    cfg.guardrail = _guardrail(mode=mode, fail_mode=outage_mode)
+    monkeypatch.setattr(
+        fail_mode, "connector_registration_lock_state", lambda *_args: (outage_mode, None),
+    )
+    monkeypatch.setattr(
+        fail_mode, "connector_fail_mode_report", lambda *_args, **_kwargs: {
+            "configured": outage_mode, "desired": outage_mode, "effective": outage_mode,
+            "sources": [{"name": "hook-script", "mode": outage_mode}],
+        },
+    )
+    monkeypatch.setattr(
+        cmd_doctor, "_check_hook_contract_lock",
+        lambda _cfg, _name, result: result.record("pass", "Hook contract", "current"),
+    )
+    monkeypatch.setattr(
+        cmd_doctor, "_check_connector_hooks",
+        lambda _cfg, _name, result: result.record("pass", "Cursor hooks", "current"),
+    )
+
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "cursor")
+    assert readiness.ready, readiness
+    assert readiness.detail == f"configured={outage_mode}; effective={outage_mode}"
+    other = "closed" if outage_mode == "open" else "open"
+    monkeypatch.setattr(fail_mode, "connector_registration_lock_state", lambda *_args: (other, None))
+    drift = cmd_doctor.connector_setup_readiness(cfg, "cursor")
+    assert not drift.ready and drift.invariant == "fail-mode", drift
+
+
 
 
 def test_copilot_stale_launcher_returns_executable_invariant(monkeypatch, tmp_path: Path) -> None:
