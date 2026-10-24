@@ -350,3 +350,120 @@ func TestTheNewestWordOfAGuestsOwnGatewayDecidesAfterASwitchBack(t *testing.T) {
 		}
 	})
 }
+
+// G-openshell review (continuation 2, loop round 3): a lookup of a guest's
+// own gateway that had nothing of it proved it gone only until a lookup of
+// another gateway: the proof was kept as where the last lookup missed it,
+// which the next lookup elsewhere (a get, a stop or get of a name another
+// sandbox holds there, a reconcile) overwrote. On that gateway, with its
+// own one not answering, the guest was named again, and back on its own
+// gateway the phase cached before it went named it running: either way
+// every new run was refused until a reconcile of its own gateway. Its
+// identity does not come back, so the guest keeps the proof whatever
+// gateway DefenseClaw is connected to and whatever a lookup elsewhere
+// finds. None is stopped.
+func TestAGuestItsOwnGatewayProvedGoneStaysGoneOnEveryGateway(t *testing.T) {
+	get := func(e *harnessEnv, name string) { _, _ = e.m.Get(e.t.Context(), name) }
+	for _, kind := range []struct {
+		name  string
+		guest func(t *testing.T, name string) *harnessEnv
+	}{
+		{"a contained VM", func(t *testing.T, name string) *harnessEnv {
+			e := newVMEnv(t, nil)
+			containedVM(t, e, name)
+			return e
+		}},
+		{"a legacy docker session", func(t *testing.T, name string) *harnessEnv {
+			e, _ := legacyGuest(t, name, false, nil)
+			return e
+		}},
+		{"a legacy MicroVM session", func(t *testing.T, name string) *harnessEnv {
+			e, _ := legacyGuest(t, name, true, nil)
+			return e
+		}},
+	} {
+		for _, away := range []struct {
+			name     string
+			replaced bool // the other gateway has another sandbox under the name
+			look     func(e *harnessEnv, name string)
+		}{
+			{"get", false, get},
+			{"get of a name another sandbox has there", true, get},
+			{"stop of a name another sandbox has there", true, func(e *harnessEnv, name string) { _, _ = e.m.Stop(e.t.Context(), name) }},
+			{"reconcile", false, func(e *harnessEnv, _ string) { _ = e.m.Reconcile(e.t.Context()) }},
+		} {
+			t.Run(kind.name+", then a "+away.name+" on another gateway", func(t *testing.T) {
+				const name = "gonehome"
+				e := kind.guest(t, name)
+				b := e.boxOf(name)
+				if entry, refusal, _ := guestAccount(t, e, name); entry == nil || refusal == "" {
+					t.Fatalf("the scenario was not reached: running, it is not named (entry %+v, refusal %q)", entry, refusal)
+				}
+				// Its own gateway proves it gone: deleted there, then a get.
+				_, err := e.client.DeleteSandbox(t.Context(), name)
+				must(t, err)
+				get(e, name)
+				if entry, refusal, _ := guestAccount(t, e, name); entry != nil || refusal != "" {
+					t.Fatalf("its own gateway says it is gone: entry %+v, refusal %q", entry, refusal)
+				}
+				own := e.gw
+				var down atomic.Bool
+				down.Store(true) // nothing reads its own gateway from elsewhere
+				homeGatewayAt(e, own, &down)
+				gw, other := awayGateway(e)
+				if away.replaced {
+					_, err := other.SDK().Sandboxes().Create(t.Context(), openshell.DefaultWorkspace, name, &types.SandboxSpec{}, nil)
+					must(t, err)
+				}
+				stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+				switchGateway(t, e, gw)
+				away.look(e, name)
+				e.m.mu.Lock()
+				elsewhere := b.elsewhere
+				e.m.mu.Unlock()
+				if elsewhere == "" {
+					t.Fatal("the scenario was not reached: the lookup elsewhere did not find it missing there")
+				}
+				if entry, refusal, _ := guestAccount(t, e, name); entry != nil || refusal != "" {
+					t.Errorf("gone from its own gateway, then missing from another: entry %+v, refusal %q", entry, refusal)
+				}
+				switchGateway(t, e, own)
+				if entry, refusal, warnings := guestAccount(t, e, name); entry != nil || refusal != "" ||
+					hasPrefix(warnings, containedUnprotected) || hasPrefix(warnings, unknownUnprotected) {
+					t.Fatalf("back on the gateway that proved it gone: entry %+v, refusal %q, warnings %q", entry, refusal, warnings)
+				}
+				if n := e.fake.Calls(openshelltest.MethodStopSandbox) - stops; n != 0 {
+					t.Fatalf("%d stops", n)
+				}
+			})
+		}
+	}
+
+	// A word of its own gateway after the read that proved it gone (a
+	// phase given there) does not bring it back either.
+	t.Run("a read proved it gone, then a phase given on its own gateway", func(t *testing.T) {
+		const name = "goneread"
+		e := newVMEnv(t, nil)
+		b := containedVM(t, e, name)
+		own := e.gw
+		var down atomic.Bool
+		homeGatewayAt(e, own, &down)
+		gw, _ := awayGateway(e)
+		switchGateway(t, e, gw)
+		_, err := e.client.DeleteSandbox(t.Context(), name)
+		must(t, err)
+		if entry, refusal, _ := guestAccount(t, e, name); entry != nil || refusal != "" {
+			t.Fatalf("its own gateway says it is gone, read from another: entry %+v, refusal %q", entry, refusal)
+		}
+		down.Store(true)
+		switchGateway(t, e, own)
+		_, err = e.m.gateway(t.Context())
+		must(t, err)
+		e.m.mu.Lock()
+		heardLocked(b, e.m.lastGw.Load())
+		e.m.mu.Unlock()
+		if entry, refusal, _ := guestAccount(t, e, name); entry != nil || refusal != "" {
+			t.Fatalf("proved gone by a read, then a word of its own gateway: entry %+v, refusal %q", entry, refusal)
+		}
+	})
+}

@@ -87,6 +87,13 @@ type box struct {
 	// gateway is its own but runs another compute driver now.
 	elsewhere   string
 	otherDriver bool
+	// gone is set once the sandbox's own place proved it gone: a lookup
+	// there had nothing of it (missingFromLocked), or a read of it said so
+	// (proveGuests). Its identity does not come back, so the proof is the
+	// guest's, whichever gateway DefenseClaw is connected to and whatever a
+	// lookup elsewhere or a later word finds, until a lookup finds the
+	// sandbox (foundOnLocked).
+	gone bool
 	// read is the latest read of the sandbox at the place its record names
 	// (proveGuests), which the guest inventory goes on where no lookup of
 	// the connected gateway does, or none since the read (provenPhase).

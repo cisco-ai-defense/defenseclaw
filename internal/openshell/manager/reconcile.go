@@ -781,6 +781,7 @@ func (m *Manager) missingFromLocked(gw *Gateway, b *box) func(context.Context) {
 	b.missing, b.elsewhere, b.otherDriver = true, where, otherDriver
 	if where == "" {
 		b.word++ // its own place says it is gone
+		b.gone = true
 	}
 	if where == "" || !changed {
 		return func(context.Context) {}
@@ -805,7 +806,7 @@ func (m *Manager) missingFromLocked(gw *Gateway, b *box) func(context.Context) {
 // otherDriver). A lookup of the place b's record names is that place's
 // newest read of it (provenPhase). The caller holds m.mu.
 func foundOnLocked(b *box, gw *Gateway, sb *openshell.Sandbox) {
-	b.sb, b.missing = sb, false
+	b.sb, b.missing, b.gone = sb, false, false
 	b.elsewhere = gatewayMismatch(record{Driver: b.rec.Driver}, gw)
 	b.otherDriver = b.elsewhere != ""
 	if place := recordPlace(b.rec); sb != nil && b.read.place == place && gatewayMismatch(b.rec, gw) == "" {

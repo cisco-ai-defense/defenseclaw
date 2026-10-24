@@ -99,9 +99,9 @@ func TestEveryAccountNamesAContainedVMUntilOpenShellShowsItGone(t *testing.T) {
 	contained := record{Name: "vm", Driver: vm, SessionRelease: openshell.SupportedMin, Contained: "its start failed"}
 	legacy := record{Name: "vm", Driver: vm, SessionRelease: "0.1.3"}
 	type flags struct {
-		phase                                audit.SandboxPhase
-		missing, deleted, retained, creating bool
-		elsewhere                            string
+		phase                                      audit.SandboxPhase
+		missing, gone, deleted, retained, creating bool
+		elsewhere                                  string
 	}
 	ready := audit.SandboxPhaseReady
 	for _, c := range []struct {
@@ -114,7 +114,7 @@ func TestEveryAccountNamesAContainedVMUntilOpenShellShowsItGone(t *testing.T) {
 		{name: "contained, deleting", rec: contained, box: flags{phase: audit.SandboxPhaseDeleting}, want: sandboxapi.UnprotectedContained},
 		{name: "contained, missing elsewhere", rec: contained, box: flags{phase: ready, missing: true, elsewhere: "gateway other"},
 			want: sandboxapi.UnprotectedContained},
-		{name: "contained, gone from its gateway", rec: contained, box: flags{phase: ready, missing: true}},
+		{name: "contained, gone from its gateway", rec: contained, box: flags{phase: ready, missing: true, gone: true}},
 		{name: "contained, stopped", rec: contained, box: flags{phase: audit.SandboxPhaseStopped}},
 		{name: "contained, deleted", rec: contained, box: flags{phase: ready, deleted: true}},
 		{name: "contained, retained", rec: contained, box: flags{phase: ready, retained: true}},
@@ -122,10 +122,10 @@ func TestEveryAccountNamesAContainedVMUntilOpenShellShowsItGone(t *testing.T) {
 		{name: "legacy, ready", rec: legacy, box: flags{phase: ready}, want: unprotectedLegacy},
 		{name: "legacy, missing elsewhere", rec: legacy, box: flags{phase: ready, missing: true, elsewhere: "gateway other"},
 			want: unprotectedLegacy},
-		{name: "legacy, gone from its gateway", rec: legacy, box: flags{phase: ready, missing: true}},
+		{name: "legacy, gone from its gateway", rec: legacy, box: flags{phase: ready, missing: true, gone: true}},
 		{name: "protected", rec: record{Name: "vm", Driver: vm, SessionRelease: openshell.SupportedMin}, box: flags{phase: ready}},
 	} {
-		b := &box{rec: c.rec, phase: c.box.phase, missing: c.box.missing, deleted: c.box.deleted, retained: c.box.retained,
+		b := &box{rec: c.rec, phase: c.box.phase, missing: c.box.missing, gone: c.box.gone, deleted: c.box.deleted, retained: c.box.retained,
 			creating: c.box.creating, elsewhere: c.box.elsewhere}
 		if got, _ := unprotectedKind(b, nil); got != c.want {
 			t.Errorf("%s: unprotectedKind = %q, want %q", c.name, got, c.want)
@@ -182,7 +182,7 @@ func TestEveryAccountNamesAContainedVMUntilOpenShellShowsItGone(t *testing.T) {
 		wantNamedUnprotected(t, e, "vmaway", audit.SandboxPhaseReady, sandboxapi.UnprotectedContained, "stop")
 		// Its own gateway no longer having it is what releases it.
 		e.m.mu.Lock()
-		b.missing, b.elsewhere = true, ""
+		b.missing, b.elsewhere, b.gone = true, "", true
 		e.m.mu.Unlock()
 		if st, err := e.m.Status(t.Context()); err != nil || len(st.Unprotected) != 0 {
 			t.Fatalf("a contained VM its gateway no longer has is named: %+v, %v", st, err)

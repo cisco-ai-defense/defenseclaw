@@ -92,22 +92,24 @@ func atConnectedPlace(b *box, here *Gateway) bool {
 }
 
 // provenPhase is the phase of b that its own place proves, and whether one
-// does: the newest word of that place. At the connected place that is a
-// read of the place no lookup or phase has come after (one taken while
-// DefenseClaw was connected elsewhere, whose word the phase cached before
-// the switch does not outrank), else its lookups' (phase, and missing when
-// the lookup was of that place: elsewhere unset); elsewhere only a read of
-// that place proves anything, and the phase returned unproven is the last
-// known one. The caller holds m.mu.
+// does. A guest its place proved gone (box.gone) is missing on whichever
+// gateway DefenseClaw is connected to. Otherwise it is the newest word of
+// that place: at the connected place a read of the place no lookup or
+// phase has come after (one taken while DefenseClaw was connected
+// elsewhere, whose word the phase cached before the switch does not
+// outrank), else its lookups' phase; elsewhere only a read of that place
+// proves anything, and the phase returned unproven is the last known one.
+// The caller holds m.mu.
 func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
+	if b.gone {
+		return phaseMissing, true
+	}
 	r := b.read
 	read := !r.at.IsZero() && r.err == "" && r.place == recordPlace(b.rec)
 	if atConnectedPlace(b, here) {
 		switch {
 		case read && r.word == b.word:
 			return r.found(), true
-		case b.missing && b.elsewhere == "":
-			return phaseMissing, true
 		case b.phase != "":
 			return b.phase, true
 		}
@@ -124,11 +126,10 @@ func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
 // otherwise (provenPhase): one at the connected place that no lookup has
 // found since the daemon started, and one that lives elsewhere, whose own
 // gateway is opened for it (Options.GatewayAt). A read stands for
-// proofFresh. A place that cannot be read leaves the guest unproven, and a
-// failed read does not undo a read that found the guest gone, whose
-// identity does not come back, on whichever gateway DefenseClaw connects to
-// next. A read that a lookup of its place or a phase came after while it
-// ran is dropped: the place said something newer.
+// proofFresh. A place that cannot be read leaves the guest unproven. A read
+// that found the guest gone proves it gone for good (box.gone), and a guest
+// so proven is not read again. A read that a lookup of its place or a phase
+// came after while it ran is dropped: the place said something newer.
 func (m *Manager) proveGuests(ctx context.Context) {
 	m.proveMu.Lock()
 	defer m.proveMu.Unlock()
@@ -144,7 +145,7 @@ func (m *Manager) proveGuests(ctx context.Context) {
 	away := map[string][]guest{}
 	m.mu.Lock()
 	for _, b := range m.boxes {
-		if b.deleted || b.retained || b.creating || !mayBeUnprotected(b.rec) {
+		if b.deleted || b.retained || b.creating || b.gone || !mayBeUnprotected(b.rec) {
 			continue
 		}
 		g := guest{b: b, rec: b.rec, place: recordPlace(b.rec), word: b.word}
@@ -195,11 +196,8 @@ func (m *Manager) proveGuests(ctx context.Context) {
 		if recordPlace(b.rec) != r.place || b.word != r.word {
 			continue // the record moved meanwhile, or its place said something since
 		}
-		if r.err != "" && b.read.place == r.place && b.read.gone {
-			b.read.at = r.at
-			continue
-		}
 		b.read = r
+		b.gone = b.gone || r.gone
 	}
 }
 
