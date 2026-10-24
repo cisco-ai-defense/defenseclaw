@@ -7,8 +7,7 @@
 
 [CmdletBinding()]
 param(
-    [string]$ModulePath = [IO.Path]::GetFullPath(
-        (Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')),
+    [string]$ModulePath = '',
     [string]$ScratchRoot = [IO.Path]::GetTempPath(),
     [ValidateSet('All', 'Baseline', 'Linked', 'Junction', 'Interrupted')]
     [string]$Case = 'All'
@@ -16,6 +15,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+if (-not $ModulePath) {
+    $ModulePath = [IO.Path]::GetFullPath(
+        (Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1'))
+}
 $module = Import-Module -Name $ModulePath -Force -PassThru
 $scratch = Join-Path $ScratchRoot ('native-otlp-rollback-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $scratch | Out-Null
