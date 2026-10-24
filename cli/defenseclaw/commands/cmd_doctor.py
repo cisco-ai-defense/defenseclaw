@@ -7323,6 +7323,29 @@ def _check_codex_telemetry_proxy(cfg, r: _DoctorResult) -> None:
     _emit(tag, "Codex telemetry proxy", detail, r=r, remediation=remediation)
 
 
+def _codex_otel_exports_to_defenseclaw(otel) -> bool:
+    """Whether a Codex [otel] table holds an exporter DefenseClaw wrote.
+
+    The markers are the ones the gateway's codexExporterLooksManaged reads:
+    DefenseClaw's product headers or its scoped /otlp/codex endpoint.
+    """
+    if not isinstance(otel, dict):
+        return False
+    for value in otel.values():
+        if not isinstance(value, dict):
+            continue
+        http = value.get("otlp-http")
+        if not isinstance(http, dict):
+            continue
+        endpoint = str(http.get("endpoint") or "")
+        headers = http.get("headers") if isinstance(http.get("headers"), dict) else {}
+        if "/otlp/codex" in endpoint or headers.get("x-defenseclaw-source") == "codex" or (
+            headers.get("x-defenseclaw-client") == "codex-otel/1.0"
+        ):
+            return True
+    return False
+
+
 def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
     """Bind Codex's configured OTel tag to trusted live runtime status.
 
@@ -7355,6 +7378,17 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
 
     if config_error:
         _emit("fail", "Codex OTel environment", config_error, r=r)
+    elif not _codex_otel_exports_to_defenseclaw(otel):
+        # Host Codex sends no native OTLP to DefenseClaw since 1.0.4: setup
+        # writes [otel] only inside an OpenShell sandbox and puts the user's
+        # own [otel] back on upgrade (GAP-1101). Hook telemetry carries
+        # DefenseClaw's environment, so there is nothing to align here.
+        _emit(
+            "pass",
+            "Codex OTel environment",
+            "Codex sends no native OTLP to DefenseClaw on this host; hook telemetry carries its environment",
+            r=r,
+        )
     elif not expected:
         _emit("fail", "Codex OTel environment", "DefenseClaw environment is empty", r=r)
     elif not actual:
