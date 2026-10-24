@@ -56,6 +56,10 @@ The upgrade restarts the gateway, which affects every sandbox on it, of every ow
 
 OpenShell 0.1.5 can refuse the recovery above with `VM sandbox is already running generation` and leave the sandbox in Starting, where `sandbox stop` is also refused. If this happens, keep the gateway running and save any accessible guest work outside the VM. The pending driver switch or upgrade cannot proceed while the VM still runs. Deleting the sandbox discards its retained work; choose that only after saving what you need. This is an OpenShell transition limit, and a successful non-destructive recovery from this state has not been established.
 
+### A Linux sign-out ends a running MicroVM
+
+On Linux, the OpenShell gateway runs in the account's systemd user manager. If linger is off, signing out of the last session stops that manager and the gateway, which ends its MicroVMs even when a guest disk sync failed. Save or pull accessible work and stop the sandbox before sign-out. If an administrator wants the gateway to outlive login sessions, they can enable linger for that account with `loginctl enable-linger USER`; this changes the account's service lifetime and is an administrator choice. A failed sync does not make sign-out safe for unsynced guest writes.
+
 A Docker sandbox created on OpenShell 0.1.1 to 0.1.4 keeps its work, but OpenShell 0.1.5 cannot read the older bootstrap under `~/.local/state/openshell/docker-sandbox-tokens`. After the upgrade, use `defenseclaw sandbox start NAME`: DefenseClaw moves the bootstrap to 0.1.5's format before starting it. If the gateway already left the sandbox in an error state, save or sync accessible work first, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. A raw `openshell sandbox start` does not perform this migration.
 
 Before stopping a raw OpenShell MicroVM on a gateway older than OpenShell 0.1.5, save its work yourself. On OpenShell 0.1.5 or later, `openshell sandbox stop` requests a guest flush before a planned stop. If the flush fails, changes after the last successful disk sync may still be lost.
