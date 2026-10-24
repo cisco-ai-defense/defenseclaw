@@ -394,6 +394,7 @@ else:
         texts.append(raw.decode("latin-1"))
 binding = re.compile(r"\s*(?:export[^\S\r\n]+)?(?:\x27([^\x27]+)\x27|([^=#\s]+))[^\S\r\n]*=")
 known = re.compile(r"(" + sys.argv[2] + r")[^\S\r\n]*=")
+known_key = re.compile(sys.argv[2])
 generic = re.compile(sys.argv[3])
 for text in texts:
     for line in re.split(r"\r\n|\r|\n", text.replace("\0", "")):
@@ -404,9 +405,11 @@ for text in texts:
             print(m.group(1))
             sys.exit(0)
         m = binding.match(line)
-        if m and generic.match(m.group(1) or m.group(2)):
-            print(m.group(1) or m.group(2))
-            sys.exit(0)`
+        if m:
+            key = m.group(1) or m.group(2)
+            if known_key.fullmatch(key) or generic.match(key):
+                print(key)
+                sys.exit(0)`
 
 var hermesLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v3

@@ -128,17 +128,19 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 		// refusal is what the launcher must say; empty: it must start.
 		refusal string
 	}{
-		"env safe mode":       {".env", []byte("HERMES_SAFE_MODE=1\n"), ".env sets HERMES_SAFE_MODE"},
-		"env managed dir":     {".env", []byte("export HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"env home":            {".env", []byte("HERMES_HOME=/tmp/x\n"), "sets HERMES_HOME"},
-		"env project plugins": {".env", []byte("HERMES_ENABLE_PROJECT_PLUGINS=true\n"), "sets HERMES_ENABLE_PROJECT_PLUGINS"},
-		"env python path":     {".env", []byte("PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
-		"env glued pair":      {".env", []byte("OPENAI_API_KEY=sk-xHERMES_SAFE_MODE=1\n"), "sets HERMES_SAFE_MODE"},
-		"env nul padded":      {".env", []byte("HERMES_\x00MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"env utf-16":          {".env", utf16LE("HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
-		"op env":              {".op.env", []byte("HERMES_MANAGED_DIR=/tmp/x\n"), ".op.env sets HERMES_MANAGED_DIR"},
-		"profile env":         {"profiles/work/.env", []byte("HERMES_SAFE_MODE=1\n"), "profiles/work/.env sets HERMES_SAFE_MODE"},
-		"env directory":       {".env/", nil, ".env is not a readable regular file"},
+		"env safe mode":                 {".env", []byte("HERMES_SAFE_MODE=1\n"), ".env sets HERMES_SAFE_MODE"},
+		"env managed dir":               {".env", []byte("export HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"env quoted safe mode":          {".env", []byte("'HERMES_SAFE_MODE'=1\n"), "sets HERMES_SAFE_MODE"},
+		"env export quoted managed dir": {".op.env", []byte("export 'HERMES_MANAGED_DIR'=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"env home":                      {".env", []byte("HERMES_HOME=/tmp/x\n"), "sets HERMES_HOME"},
+		"env project plugins":           {".env", []byte("HERMES_ENABLE_PROJECT_PLUGINS=true\n"), "sets HERMES_ENABLE_PROJECT_PLUGINS"},
+		"env python path":               {".env", []byte("PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
+		"env glued pair":                {".env", []byte("OPENAI_API_KEY=sk-xHERMES_SAFE_MODE=1\n"), "sets HERMES_SAFE_MODE"},
+		"env nul padded":                {".env", []byte("HERMES_\x00MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"env utf-16":                    {".env", utf16LE("HERMES_MANAGED_DIR=/tmp/x\n"), "sets HERMES_MANAGED_DIR"},
+		"op env":                        {".op.env", []byte("HERMES_MANAGED_DIR=/tmp/x\n"), ".op.env sets HERMES_MANAGED_DIR"},
+		"profile env":                   {"profiles/work/.env", []byte("HERMES_SAFE_MODE=1\n"), "profiles/work/.env sets HERMES_SAFE_MODE"},
+		"env directory":                 {".env/", nil, ".env is not a readable regular file"},
 		// Hermes drops /etc/hermes under PYTEST_CURRENT_TEST only while
 		// HERMES_MANAGED_DIR is unset, and the launcher sets it, so no file
 		// that names the variable is refused (GAP-1122, 1.0.4 review).
