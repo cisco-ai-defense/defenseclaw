@@ -458,8 +458,10 @@ func TestHookGuardPolicyRefreshOnModeOrHILTChange(t *testing.T) {
 			next := cloneConfig(old)
 			next.Guardrail.Mode = tc.mode
 			next.Guardrail.HILT.Enabled = tc.hilt
-			if old.EffectiveHookFailModeForConnector("codex") != next.EffectiveHookFailModeForConnector("codex") {
-				t.Fatal("precondition: per-user runtime fail mode changed")
+			outage := next.EffectiveHookOutageFailModeForConnector("codex")
+			if old.EffectiveHookFailModeForConnector("codex") != next.EffectiveHookFailModeForConnector("codex") ||
+				old.EffectiveHookOutageFailModeForConnector("codex") != outage {
+				t.Fatal("precondition: per-user runtime or outage fail mode changed")
 			}
 			sidecar.publishConfig(next)
 			sidecar.refreshHookGuardPolicies(old, next)
@@ -473,8 +475,9 @@ func TestHookGuardPolicyRefreshOnModeOrHILTChange(t *testing.T) {
 			last := conn.lastOpts
 			conn.mu.Unlock()
 			guard.repairMu.Unlock()
-			if last.HookFailMode != "closed" || last.GuardrailMode != tc.mode || last.HILTEnabled != tc.hilt {
-				t.Fatalf("refreshed policy = mode:%q fail:%q hilt:%t, want %s/closed/%t", last.GuardrailMode, last.HookFailMode, last.HILTEnabled, tc.mode, tc.hilt)
+			// The guard renders the outage mode (config.HookOutageFailMode).
+			if last.HookFailMode != outage || last.GuardrailMode != tc.mode || last.HILTEnabled != tc.hilt {
+				t.Fatalf("refreshed policy = mode:%q fail:%q hilt:%t, want %s/%s/%t", last.GuardrailMode, last.HookFailMode, last.HILTEnabled, tc.mode, outage, tc.hilt)
 			}
 		})
 	}

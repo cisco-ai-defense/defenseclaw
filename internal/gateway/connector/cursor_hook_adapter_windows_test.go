@@ -248,19 +248,19 @@ func TestCopilotAdapterDeniesWhenTheLauncherCrashes(t *testing.T) {
 	}
 }
 
-func TestCopilotAdapterFailureClosesLegacyPerUserOpen(t *testing.T) {
+func TestCopilotAdapterFailureFailsOpenOnlyWhenConfigured(t *testing.T) {
 	missingHook := filepath.Join(t.TempDir(), "missing-hook.exe")
 	adapter := renderCopilotAdapterForTest(t, missingHook, 10_000, "open")
 	stdout, stderr, code := runCopilotAdapterTest(
 		t, adapter, `{"source":"copilot-adapter-probe"}`,
 	)
 	if code != 0 {
-		t.Fatalf("exit code = %d, want Copilot's stdout denial; stderr=%q", code, stderr)
+		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
 	}
-	if stdout != copilotAdapterClosedDenial {
-		t.Fatalf("stdout = %q, want Copilot's denial", stdout)
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty fail-open response", stdout)
 	}
-	if !strings.Contains(stderr, "Copilot hook adapter failed closed") {
+	if !strings.Contains(stderr, "Copilot hook adapter failed open") {
 		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
 	}
 	if err := os.Mkdir(filepath.Join(filepath.Dir(filepath.Dir(adapter)), ".install.lock"), 0o700); err != nil {

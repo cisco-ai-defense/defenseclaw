@@ -204,10 +204,14 @@ class ConnectorFailModeState:
     def note(self) -> str:
         """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
 
-        Per-user and managed hooks follow the configured outage mode, so the
-        configured and desired modes differ only when a policy overrides the
-        saved value. A closed Copilot CLI, Antigravity or Hermes hook names
-        the vendor limit it keeps.
+        Per-user Cursor follows its guardrail mode (observe open, action
+        closed) whatever the global value says
+        (GuardrailConfig.effective_hook_fail_mode), so ``closed`` in
+        config.yaml next to ``open`` in its observe-mode hooks is intended;
+        reporting says so instead of looking like drift (GAP-0129). Every
+        other connector follows its configured value in observe mode too.
+        A closed Copilot CLI, Antigravity or Hermes hook names the vendor
+        limit it keeps instead.
         """
 
         notes = []
@@ -215,8 +219,8 @@ class ConnectorFailModeState:
             notes.append(self.limit)
         elif self.configured != self.desired and self.effective == self.desired:
             notes.append(
-                f"configured hook_fail_mode={self.configured} is overridden by "
-                f"the fail-{self.desired} policy"
+                f"observe mode keeps hooks fail-{self.desired}; "
+                f"guardrail.hook_fail_mode={self.configured} applies in action mode"
             )
         if not self.runtime_verified and self._managed_windows_runtime:
             notes.append(
