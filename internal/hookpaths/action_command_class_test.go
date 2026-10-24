@@ -460,7 +460,6 @@ func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
 		`cp ` + target + ` report.pub`,
 		`cp -a ` + target + ` report.pub`,
 		`cp -t report.pub ` + target,
-		`mv ` + target + ` report.pub`,
 		`ln -sf ` + target + ` report.pub`,
 		`rsync -av ` + target + ` report.pub`,
 		`install -m 644 ` + target + ` report.pub`,
@@ -483,6 +482,102 @@ func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
 		if got := ActionCommandDecision(command, cwd, home); got != "" {
 			t.Errorf("Windows path used only as data blocked: %q: %q", command, got)
 		}
+	}
+}
+
+func TestR104ActionWindowsMoveSourceIsProtected(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, command := range []string{
+		`Move-Item ` + target + ` ` + cwd + `\x.pub`,
+		`Move-Item -Path ` + target + ` -Destination report.pub`,
+		`move %USERPROFILE%\.ssh\authorized_keys report.pub`,
+		`mv /c/Users/Alice/.ssh/authorized_keys report.pub`,
+		`mi ` + target + ` report.pub`,
+		`rni ` + target + ` authorized_keys.bak`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("protected move source allowed: %q", command)
+		}
+	}
+	if got := ActionCommandDecision(`Move-Item report.pub done.pub`, cwd, home); got != "" {
+		t.Errorf("ordinary move blocked: %q", got)
+	}
+}
+
+func TestR104ActionWindowsRedirectAfterProtectedDestination(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, program := range []string{"cp", "mv", "ln", "rsync", "install", "xcopy"} {
+		for _, redirect := range []string{`2>&1`, `2>/dev/null`, `> nul`, `> out.log`} {
+			command := program + ` report.pub ` + target + ` ` + redirect
+			words, ok := actionWindowsWords(command)
+			if !ok || !actionWindowsPathPosition(program, 2, words) {
+				t.Errorf("destination lost after redirect: %q (words %q)", command, words)
+			}
+			if got := ActionCommandDecision(command, cwd, home); got == "" {
+				t.Errorf("protected destination allowed after redirect: %q", command)
+			}
+		}
+	}
+	for _, program := range []string{"cp", "ln", "rsync", "install", "xcopy"} {
+		command := program + ` ` + target + ` report.pub 2>&1`
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("protected copy source blocked after redirect: %q: %q", command, got)
+		}
+	}
+	if got := ActionCommandDecision(`cp `+target+` 2 > out.log`, cwd, home); got != "" {
+		t.Errorf("numeric destination before a spaced redirect blocked: %q", got)
+	}
+	for _, command := range []string{
+		`cp report.pub report.txt 2>` + target,
+		`cp report.pub report.txt 2>>` + target,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("protected file-descriptor redirect allowed: %q", command)
+		}
+	}
+}
+
+func TestR104ActionWindowsSedInPlaceSpellings(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	for _, command := range []string{
+		`sed -i.bak s/a/b/ ~/.ssh/authorized_keys`,
+		`sed -Ei s/a/b/ ~/.ssh/authorized_keys`,
+		`sed -ri s/a/b/ /c/Users/Alice/.ssh/authorized_keys`,
+		`sed -ni s/a/b/ ~/.ssh/authorized_keys`,
+		`sed --in-place=.bak s/a/b/ ~/.ssh/authorized_keys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("in-place protected sed allowed: %q", command)
+		}
+	}
+	for _, command := range []string{
+		`sed -einsert ~/.ssh/authorized_keys`,
+		`sed -finput.sed ~/.ssh/authorized_keys`,
+		`sed -E s/a/b/ ~/.ssh/authorized_keys`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("read-only sed blocked: %q: %q", command, got)
+		}
+	}
+}
+
+func TestR104ActionWindowsWebRequestOutputSpellings(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, command := range []string{
+		`iwr https://example.com/a.pub -OutF ` + target,
+		`Invoke-WebRequest https://example.com/a.pub -OutFi ` + target,
+		`iwr https://example.com/a.pub -OutFile:` + target,
+		`Invoke-WebRequest https://example.com/a.pub -OutF:` + target,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("protected web request output allowed: %q", command)
+		}
+	}
+	if got := ActionCommandDecision(`iwr https://example.com/a.pub -Body `+target+` -OutF report.pub`, cwd, home); got != "" {
+		t.Errorf("web request body data blocked: %q", got)
 	}
 }
 

@@ -315,7 +315,7 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
 	// A redirect owns its destination regardless of the program's arguments.
 	for i, word := range words {
-		if (word == ">" || word == ">>") && i+1 < len(words) {
+		if redirect := actionWindowsRedirectOperator(word); (redirect == ">" || redirect == ">>") && i+1 < len(words) {
 			if protected, _ := actionWindowsProtected(words[i+1], cwd, home, false); protected {
 				return true
 			}
@@ -391,6 +391,11 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 					continue
 				}
 				word = word[3:]
+			}
+			if program == "invoke-webrequest" || program == "iwr" {
+				if colon := strings.IndexByte(word, ':'); colon > 0 && actionWindowsOutFileOption(word[:colon]) {
+					word = word[colon+1:]
+				}
 			}
 			for _, token := range strings.FieldsFunc(word, func(r rune) bool {
 				return r == ' ' || r == '\t' || r == '>' || r == '<' || r == ';' || r == '|' || r == '&' || r == '(' || r == ')' || r == '{' || r == '}' || r == '\'' || r == '"'
@@ -543,7 +548,8 @@ func actionWindowsResolvedWrapperOption(program, option string) (value, known bo
 }
 
 // actionWindowsWords treats a quoted command body as one word and emits each
-// redirection separately. An unclosed quote leaves the command unproved.
+// redirection separately, preserving an attached file descriptor. An unclosed
+// quote leaves the command unproved.
 func actionWindowsWords(command string) ([]string, bool) {
 	var words []string
 	var word strings.Builder
@@ -576,6 +582,18 @@ func actionWindowsWords(command string) ([]string, bool) {
 				i += 2
 				continue
 			}
+			if c == '>' || c == '<' {
+				fd := word.String()
+				if len(fd) > 0 && strings.IndexFunc(fd, func(r rune) bool { return r < '0' || r > '9' }) == -1 {
+					word.WriteByte(c)
+					if i+1 < len(command) && command[i+1] == c {
+						word.WriteByte(c)
+						i++
+					}
+					flush()
+					continue
+				}
+			}
 			flush()
 			if i+1 < len(command) && command[i+1] == c && (c == '>' || c == '<' || c == '&' || c == '|') {
 				words = append(words, command[i:i+2])
@@ -589,6 +607,24 @@ func actionWindowsWords(command string) ([]string, bool) {
 	}
 	flush()
 	return words, quote == 0
+}
+
+func actionWindowsRedirectOperator(word string) string {
+	switch word {
+	case ">", ">>", "<", "<<":
+		return word
+	}
+	i := 0
+	for i < len(word) && word[i] >= '0' && word[i] <= '9' {
+		i++
+	}
+	if i > 0 {
+		switch word[i:] {
+		case ">", ">>", "<", "<<":
+			return word[i:]
+		}
+	}
+	return ""
 }
 
 func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
@@ -661,14 +697,15 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	}
 	program := strings.ToLower(strings.TrimSuffix(path.Base(strings.ReplaceAll(words[0], `\`, "/")), ".exe"))
 	for i := 1; i < len(words); i++ {
-		if words[i] != ">" && words[i] != ">>" && words[i] != "<" && words[i] != "<<" {
+		redirect := actionWindowsRedirectOperator(words[i])
+		if redirect == "" {
 			continue
 		}
 		if i+1 >= len(words) {
 			return "dynamic-argument"
 		}
-		if protected, resolved := actionWindowsProtected(words[i+1], cwd, home, words[i] == "<"); protected ||
-			!resolved && (words[i] != "<" || actionProgramMayWrite(program)) {
+		if protected, resolved := actionWindowsProtected(words[i+1], cwd, home, redirect == "<"); protected ||
+			!resolved && (redirect != "<" || actionProgramMayWrite(program)) {
 			return "dynamic-argument"
 		}
 	}
@@ -752,10 +789,10 @@ func actionWindowsStatement(words []string, cwd, home string, depth int) string 
 	}
 	writeCapable := actionProgramMayWrite(program) || strings.Contains(commandLike(words), ">")
 	for i, word := range words[1:] {
-		if word == ">" || word == ">>" || word == "<" || word == "<<" {
+		if actionWindowsRedirectOperator(word) != "" {
 			continue
 		}
-		if i > 0 && (words[i] == ">" || words[i] == ">>" || words[i] == "<" || words[i] == "<<") {
+		if i > 0 && actionWindowsRedirectOperator(words[i]) != "" {
 			continue
 		}
 		if word == "<<<" || word == "@'" || word == `@"` {
@@ -786,7 +823,7 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 	switch program {
 	case "echo", "printf", "write-output":
 		return false
-	case "copy-item", "copy", "cp", "cpi", "move-item", "move", "mv", "mi", "rni",
+	case "copy-item", "copy", "cp", "cpi",
 		"ln", "rsync", "install", "xcopy", "robocopy":
 		if index == 0 || strings.HasPrefix(words[index], "-") {
 			return false
@@ -813,11 +850,11 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 				i++
 				continue
 			case "-t", "--target-directory":
-				if program == "cp" || program == "mv" || program == "ln" || program == "install" {
+				if program == "cp" || program == "ln" || program == "install" {
 					return i+1 == index
 				}
 			}
-			if (program == "cp" || program == "mv" || program == "ln" || program == "rsync" || program == "install") &&
+			if (program == "cp" || program == "ln" || program == "rsync" || program == "install") &&
 				len(word) > 1 && word[0] == '-' && strings.Trim(word[1:], "aAbBcCdDfFghHiIlLmMnNoOpPrRsStTuUvVxXzZ") == "" {
 				continue
 			}
@@ -829,8 +866,13 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 				continue
 			}
 			if i == index {
-				if !unknownOption && (program == "cp" || program == "mv" || program == "ln" || program == "rsync" || program == "install" || program == "xcopy") {
-					for _, next := range words[index+1:] {
+				if !unknownOption && (program == "cp" || program == "ln" || program == "rsync" || program == "install" || program == "xcopy") {
+					for nextIndex := index + 1; nextIndex < len(words); nextIndex++ {
+						next := words[nextIndex]
+						if actionWindowsRedirectOperator(next) != "" ||
+							len(next) >= 4 && (next[0] == '1' || next[0] == '2') && strings.HasPrefix(next[1:], ">&") {
+							break // Redirection starts here; its words are not command operands.
+						}
 						if next != "" && next[0] != '-' && (program != "xcopy" || next[0] != '/') {
 							return false // A later positional operand is the destination.
 						}
@@ -843,13 +885,21 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 		return false
 	case "sed":
 		for _, word := range words[1:] {
-			if word == "-i" || strings.HasPrefix(word, "--in-place") {
+			if actionWindowsSedInPlaceOption(word) {
 				return index > 0 && !strings.HasPrefix(words[index], "-")
 			}
 		}
 		return false
 	case "invoke-webrequest", "iwr":
-		return index > 0 && strings.EqualFold(words[index-1], "-OutFile")
+		if index > 0 && actionWindowsOutFileOption(words[index-1]) {
+			return true
+		}
+		if index > 0 {
+			if colon := strings.IndexByte(words[index], ':'); colon > 0 {
+				return actionWindowsOutFileOption(words[index][:colon])
+			}
+		}
+		return false
 	case "add-content", "set-content", "out-file":
 		if index == 0 || strings.HasPrefix(words[index], "-") {
 			return false
@@ -893,6 +943,28 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 		return false
 	}
 	return true
+}
+
+func actionWindowsSedInPlaceOption(word string) bool {
+	if word == "--in-place" || strings.HasPrefix(word, "--in-place=") {
+		return true
+	}
+	if len(word) < 2 || word[0] != '-' || word[1] == '-' {
+		return false
+	}
+	for _, option := range word[1:] {
+		switch option {
+		case 'i':
+			return true
+		case 'e', 'f':
+			return false // The rest is an attached script or filename, not option letters.
+		}
+	}
+	return false
+}
+
+func actionWindowsOutFileOption(word string) bool {
+	return len(word) >= len("-OutF") && strings.HasPrefix("-outfile", strings.ToLower(word))
 }
 
 func actionWindowsDataParameter(word string) bool {
