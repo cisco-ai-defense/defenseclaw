@@ -64,6 +64,10 @@ A Docker sandbox created on OpenShell 0.1.1 to 0.1.4 keeps its work, but OpenShe
 
 Before stopping a raw OpenShell MicroVM on a gateway older than OpenShell 0.1.5, save its work yourself. On OpenShell 0.1.5 or later, `openshell sandbox stop` requests a guest flush before a planned stop. If the flush fails, changes after the last successful disk sync may still be lost.
 
+### A contained VM has no confirmed network withdrawal
+
+If the OpenShell gateway does not answer, or a global OpenShell policy prevents DefenseClaw from withdrawing a VM's network rules, a contained VM can remain reported as unprotected even while new DefenseClaw runs are refused. A user-level DefenseClaw daemon has no host-level network cutoff for that VM, and this OpenShell release has no VM pause or network-off operation. Treat the network as still available until withdrawal is confirmed. Keep the guest and gateway under operator control while saving accessible work; stopping or deleting the VM can lose writes after its last successful disk sync. An administrator must decide whether to retain that work or end the VM despite the loss.
+
 ## A raw `openshell` sandbox stops a restart or rollback
 
 **You see:** `the gateway was not restarted`, with `OpenShell has not reported these stopped: NAME (ready): ...`. After a rollback it ends with `the rollback was aborted: the active gateway files were kept and the gateway was not restarted`.
