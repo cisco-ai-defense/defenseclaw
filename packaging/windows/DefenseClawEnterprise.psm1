@@ -14482,11 +14482,16 @@ function Restore-DefenseClawTransaction {
     # Reassert the protected replacement hook before the first rollback
     # service mutation. The snapshot's old hook is restored only after the
     # prior gateway and managed target set have passed activation readiness.
-    $transitionHookSHA256 = Hold-DefenseClawEarlyHookGuard `
-        -Layout $Layout `
-        -TransactionDirectory ([string]$snapshot.directory) `
-        -GuardCopy ([string]$snapshot.early_hook_guard_copy) `
-        -GuardSHA256 ([string]$snapshot.early_hook_guard_sha256)
+    $guardCopy = Get-DefenseClawEarlyHookField -Record $snapshot -Name 'early_hook_guard_copy'
+    $guardSHA256 = Get-DefenseClawEarlyHookField -Record $snapshot -Name 'early_hook_guard_sha256'
+    $transitionHookSHA256 = ''
+    if (-not [string]::IsNullOrWhiteSpace($guardCopy) -or -not [string]::IsNullOrWhiteSpace($guardSHA256)) {
+        $transitionHookSHA256 = Hold-DefenseClawEarlyHookGuard `
+            -Layout $Layout `
+            -TransactionDirectory ([string]$snapshot.directory) `
+            -GuardCopy $guardCopy `
+            -GuardSHA256 $guardSHA256
+    }
     if (Test-DefenseClawServiceExists -Name $standaloneSensorHelper) {
         Assert-DefenseClawStandaloneSensorHelperOwned `
             -Name $standaloneSensorHelper `
@@ -15048,7 +15053,7 @@ function Assert-DefenseClawRestoredTransactionReadyForActivation {
         -GatewayServiceName ([string]$Snapshot.gateway_service) `
         -GuardianServiceName ([string]$Snapshot.guardian_service) `
         -ServicingTransaction `
-        -TransitionHookSHA256 ([string]$Snapshot.early_hook_guard_sha256) `
+        -TransitionHookSHA256 (Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_sha256') `
         -AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage `
         -AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage `
         -ExpectedGatewayAccount @(
@@ -18069,6 +18074,22 @@ function Restore-DefenseClawEarlyHook {
         -SkipIfContentMatches
 }
 
+# The early-hook guard fields of a lifecycle record (GAP-1305). A quiescing
+# intent or rollback snapshot written before them (a 1.0.x predecessor's, or a
+# test fixture) has no guard: read the field as empty instead of failing a
+# strict-mode property lookup, so Hold-DefenseClawEarlyHookGuard returns ''.
+function Get-DefenseClawEarlyHookField {
+    param($Record, [Parameter(Mandatory)][string]$Name)
+    if ($null -eq $Record) { return '' }
+    if ($Record -is [Collections.IDictionary]) {
+        if ($Record.Contains($Name)) { return [string]$Record[$Name] }
+        return ''
+    }
+    $property = $Record.PSObject.Properties[$Name]
+    if ($null -eq $property) { return '' }
+    return [string]$property.Value
+}
+
 function Hold-DefenseClawEarlyHookGuard {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -18118,7 +18139,7 @@ function Restore-DefenseClawSnapshotHookAfterActivation {
         [Parameter(Mandatory)]$Snapshot,
         [Parameter(Mandatory)][hashtable]$Layout
     )
-    if ([string]::IsNullOrWhiteSpace([string]$Snapshot.early_hook_guard_copy)) {
+    if ([string]::IsNullOrWhiteSpace((Get-DefenseClawEarlyHookField -Record $Snapshot -Name 'early_hook_guard_copy'))) {
         return
     }
     # The restored service set has passed Start-DefenseClawTransactionServices
@@ -18348,8 +18369,8 @@ function Recover-DefenseClawQuiescingIntent {
     [void](Hold-DefenseClawEarlyHookGuard `
         -Layout $Layout `
         -TransactionDirectory $recordedDirectory `
-        -GuardCopy ([string]$Intent.early_hook_guard_copy) `
-        -GuardSHA256 ([string]$Intent.early_hook_guard_sha256))
+        -GuardCopy (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_copy') `
+        -GuardSHA256 (Get-DefenseClawEarlyHookField -Record $Intent -Name 'early_hook_guard_sha256'))
     # A process/reboot recovery never trusts elapsed wall time from the prior
     # process. Reestablish both disabled+stopped, publish a fresh durable
     # quiescence point, and drain the complete failure-action window.
