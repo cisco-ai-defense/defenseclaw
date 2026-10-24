@@ -298,6 +298,13 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("audit export: open db: %w", err)
 	}
 	defer db.Close()
+	// A database without audit_events is refused before an -o file is
+	// created, so the export writes nothing (GAP-1044).
+	if ok, tableErr := tableExists(db, "audit_events"); tableErr != nil {
+		return fmt.Errorf("audit export: read db: %w", tableErr)
+	} else if !ok {
+		return fmt.Errorf("audit export: %s has no audit_events table; it is not a DefenseClaw audit database", auditPath)
+	}
 	// A reader that stops early (| head -1, | Select-Object -First 1) is
 	// not an export failure (GAP-1694).
 	defer func() { err = quietClosedOutputPipe(err) }()
@@ -321,23 +328,29 @@ func runAuditExport(cmd *cobra.Command, _ []string) (err error) {
 				return fmt.Errorf("audit export: remove existing output %s: %w", auditExportOut, rmErr)
 			}
 		}
-		f, err := os.OpenFile(
+		f, openErr := os.OpenFile(
 			auditExportOut,
 			os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_TRUNC,
 			0o600,
 		)
-		if err != nil {
-			if os.IsExist(err) {
+		if openErr != nil {
+			if os.IsExist(openErr) {
 				return fmt.Errorf("audit export: %s already exists; pass --force to overwrite it or choose another -o path", auditExportOut)
 			}
-			return fmt.Errorf("audit export: create output: %w", err)
+			return fmt.Errorf("audit export: create output: %w", openErr)
 		}
-		defer f.Close()
 		lc := &lineCountWriter{w: f}
 		out = lc
 		// GAP-1494: say what was written instead of finishing silently.
+		// A failed export says only why (err, the named result) and
+		// removes the file it created, so nothing claims an export that
+		// did not happen (GAP-1044).
 		defer func() {
+			if closeErr := f.Close(); err == nil && closeErr != nil {
+				err = fmt.Errorf("audit export: close output: %w", closeErr)
+			}
 			if err != nil {
+				_ = os.Remove(auditExportOut)
 				return
 			}
 			msgOut := io.Writer(os.Stderr)

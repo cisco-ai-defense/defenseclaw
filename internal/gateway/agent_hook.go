@@ -1902,12 +1902,25 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
 	// connector with the same identity. The hook payload's connector is
 	// authoritative on multi-connector installs.
-	if conn := strings.TrimSpace(req.ConnectorName); conn != "" {
-		env := audit.EnvelopeFromContext(ctx)
-		if env.Connector != conn {
-			env.Connector = conn
-			ctx = audit.ContextWithEnvelope(ctx, env)
-		}
+	//
+	// The tool and turn IDs of the request go on the envelope here too, not
+	// only once correlation is written (contextWithHookCorrelation): a hook
+	// whose correlation failed (concurrent hooks of one session, a busy
+	// store) still names its tool call on its connector-hook and
+	// hook_decision records (GAP-0980).
+	env := audit.EnvelopeFromContext(ctx)
+	changed := false
+	if conn := strings.TrimSpace(req.ConnectorName); conn != "" && env.Connector != conn {
+		env.Connector, changed = conn, true
+	}
+	if req.ToolInvocationID != "" && env.ToolID != req.ToolInvocationID {
+		env.ToolID, changed = req.ToolInvocationID, true
+	}
+	if req.TurnID != "" && env.TurnID != req.TurnID {
+		env.TurnID, changed = req.TurnID, true
+	}
+	if changed {
+		ctx = audit.ContextWithEnvelope(ctx, env)
 	}
 	return ctx
 }

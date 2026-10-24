@@ -181,3 +181,44 @@ func TestPendingHookRecoveryLoopSpacesTheTriesOfARefusedRow(t *testing.T) {
 		t.Fatalf("eviction alerts = %v, want one for the row", alerts)
 	}
 }
+
+// A gateway that died with a full journal, more rows than one recovery
+// pass takes, drains the whole journal after its restart while it serves,
+// and then answers new calls with a confirmed answer. No call has to meet
+// the full journal (and its 503) for the rows past the first pass to be
+// audited, each once.
+func TestPendingHookRestartDrainsAFullJournalLargerThanOnePass(t *testing.T) {
+	f := newManagedHookAuditFixture(t, nil)
+	limits, passRows := pendingHookJournalLimits, pendingHookRecoveryPassRows
+	t.Cleanup(func() { pendingHookJournalLimits, pendingHookRecoveryPassRows = limits, passRows })
+	awaitPendingHookDrain(t)
+	pendingHookRecoveryPassRows = 4
+	pendingHookJournalLimits.Rows = 3*pendingHookRecoveryPassRows + 1
+	sessions := make([]string, 0, pendingHookJournalLimits.Rows)
+	for i := range pendingHookJournalLimits.Rows {
+		session := fmt.Sprintf("full-at-death-%02d", i)
+		orphanPendingHook(t, f, session, pendingAllow)
+		sessions = append(sessions, session)
+	}
+	past := pendingToolRequest("one-past-full")
+	if _, err := f.api.journalHookDelivery(t.Context(), &past, pendingAllow, nil, 64, time.Millisecond, false, nil); err == nil {
+		t.Fatal("the journal took a row past its limit")
+	}
+	restarted := f.restartedAPI(t, true)
+	runAPIUntil(t, restarted, func() bool { return len(pendingEntries(t, f)) == 0 })
+	audited := f.audited(t, sessions...)
+	for _, session := range sessions {
+		if audited[session] != "unconfirmed/no_answer" || f.hookRows(t, session) != 1 {
+			t.Fatalf("%s: recovered audit %q in %d rows, want unconfirmed/no_answer once",
+				session, audited[session], f.hookRows(t, session))
+		}
+	}
+	if evicted, alerts := f.evictedRows(t), f.evictionAlerts(t); len(evicted) != 0 || len(alerts) != 0 {
+		t.Fatalf("evicted rows %v, eviction alerts %v; want none", evicted, alerts)
+	}
+	next := &recordFullDuplexStatusWriter{ResponseRecorder: httptest.NewRecorder()}
+	ackedHookCall(t, restarted, "after-the-restart", next)
+	if !strings.Contains(next.Body.String(), hookexec.HookDeliveryConfirmed) {
+		t.Fatalf("call after the restart = %q, want a confirmed answer", next.Body.String())
+	}
+}
