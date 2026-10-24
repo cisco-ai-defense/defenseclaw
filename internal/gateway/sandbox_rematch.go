@@ -108,10 +108,12 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 		// it was last matched under stands for the one it was created under.
 		created := reg.Profile
 		next.CreateProfile = &created
+		next.CreateProfileMembers = slices.Clone(reg.ProfileMembers)
 	}
 	next.Generation = a.sandboxHostGeneration(ctx)
 	if match.resolved {
 		next.Profile, next.ProfileMatch, next.MatchedGroup = match.decision.Name, match.decision.Match, match.decision.MatchedGroup
+		next.ProfileMembers, _ = config.ProfileMeetMembers(next.Profile)
 		next.ProfileDigest, next.Provisional, next.FactsDigest = match.decision.Digest, match.provisional, factsDigest
 	} else {
 		// The policy key moves on below without a match under it: the
@@ -126,6 +128,7 @@ func (a *APIServer) sandboxRematchIfDue(ctx context.Context, auth *sandboxAuthor
 		// the person's profile, and it pins the floor from now on.
 		created := next.Profile
 		next.CreateProfile = &created
+		next.CreateProfileMembers = slices.Clone(next.ProfileMembers)
 	}
 	floor, floorDigest, err := sandboxRegistrationFloor(cfg, next)
 	if err != nil {

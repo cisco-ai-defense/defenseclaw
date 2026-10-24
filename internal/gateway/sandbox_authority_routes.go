@@ -640,9 +640,11 @@ func (a *APIServer) handleSandboxResolve(w http.ResponseWriter, r *http.Request)
 		ProjectReal: req.ProjectReal, Driver: driver, DriverReason: driverReason, OpenShell: req.OpenShell.Version,
 		InstallMode: sandboxEnterprise(cfg, floor).Install, CreatedAt: auth.clock(),
 	}
+	reg.ProfileMembers, _ = config.ProfileMeetMembers(reg.Profile)
 	if !match.provisional {
 		created := match.decision.Name
 		reg.CreateProfile = &created
+		reg.CreateProfileMembers = slices.Clone(reg.ProfileMembers)
 	}
 	run := &sandboxreg.Run{
 		Flags: req.Flags, RepoOverlay: req.RepoOverlay, UserPack: req.UserPack,

@@ -43,6 +43,33 @@ func TestProfileMeetNames(t *testing.T) {
 	}
 }
 
+func TestStoredLongMeetMembersBindTheFloorAfterRestart(t *testing.T) {
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	members := []string{a, b}
+	name := ProfileMeetName(members)
+	profileMeets.Delete(name)
+	t.Cleanup(func() { ProfileMeetName(members) })
+	cfg := &Config{}
+	cfg.Guardrail.Profiles = map[string]GuardrailProfile{
+		a: {Sandbox: &OpenShellAdminConfig{EgressBlock: []string{"a.example"}}},
+		b: {Sandbox: &OpenShellAdminConfig{EgressBlock: []string{"b.example"}}},
+	}
+	if _, _, err := cfg.SandboxFloor(name); err == nil {
+		t.Fatal("fixture: hashed name unexpectedly resolved without stored members")
+	}
+	floor, _, err := cfg.SandboxFloorWithMembers(name, members)
+	if err != nil || !slices.Contains(floor.EgressBlock, "a.example") || !slices.Contains(floor.EgressBlock, "b.example") {
+		t.Fatalf("stored members lost a floor: %+v, %v", floor, err)
+	}
+	if _, _, err := cfg.SandboxFloorWithMembers(name, []string{a, "other"}); err == nil {
+		t.Fatal("members of another meet were accepted")
+	}
+	delete(cfg.Guardrail.Profiles, b)
+	if _, _, err := cfg.SandboxFloorWithMembers(name, members); err == nil {
+		t.Fatal("deleted member's floor was silently omitted")
+	}
+}
+
 // The meet's sandbox floor tightens openshell.admin by every member: false
 // wins, blocks and requirements are unions, allows intersections. Where no
 // sandbox satisfies every member, no sandbox runs and an agent a member

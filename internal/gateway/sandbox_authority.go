@@ -688,6 +688,13 @@ var sandboxFloorFor = func(cfg *config.Config, profile string) (config.OpenShell
 	return cfg.SandboxManagedFloor(profile)
 }
 
+func sandboxStoredMeetFloor(cfg *config.Config, profile string, members []string) (config.OpenShellAdminConfig, string, error) {
+	if len(members) != 0 {
+		return cfg.SandboxManagedFloorWithMembers(profile, members)
+	}
+	return sandboxFloorFor(cfg, profile)
+}
+
 // sandboxRegistrationFloor is the floor F of a registered sandbox and its
 // digest: the floor of the profile it is matched to now, tightened by the
 // floor of the profile it was created under when a profile-assignment
@@ -699,11 +706,11 @@ var sandboxFloorFor = func(cfg *config.Config, profile string) (config.OpenShell
 // combine (a contradiction, or a create profile no longer defined) fail
 // closed like any floor that does not load.
 func sandboxRegistrationFloor(cfg *config.Config, reg sandboxreg.Registration) (config.OpenShellAdminConfig, string, error) {
-	floor, digest, err := sandboxFloorFor(cfg, reg.Profile)
+	floor, digest, err := sandboxStoredMeetFloor(cfg, reg.Profile, reg.ProfileMembers)
 	if err != nil || reg.CreateProfile == nil || *reg.CreateProfile == reg.Profile {
 		return floor, digest, err
 	}
-	created, createdDigest, err := sandboxFloorFor(cfg, *reg.CreateProfile)
+	created, createdDigest, err := sandboxStoredMeetFloor(cfg, *reg.CreateProfile, reg.CreateProfileMembers)
 	if err != nil {
 		return config.OpenShellAdminConfig{}, "", fmt.Errorf("the floor of profile %q the sandbox was created under: %w", *reg.CreateProfile, err)
 	}
