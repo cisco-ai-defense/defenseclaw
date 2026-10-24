@@ -65,11 +65,20 @@ func TestDeliveryFailureDiagnostics(t *testing.T) {
 						if err := json.Unmarshal(failure, &record); err != nil {
 							t.Fatalf("expected one failure record: %v: %s", err, failure)
 						}
-						blocked := true
-						want := "fail_closed"
+						// An answered call (HTTP 401) is no outage: it closes in
+						// fail mode open too.
+						blocked := mode == "closed" || scenario == "malformed" || scenario == "auth" || scenario == "managed-missing-token" || scenario == "oversized" ||
+							(strict && (scenario == "outage" || scenario == "missing-token"))
+						want := "fail_open"
+						if blocked {
+							want = "fail_closed"
+						}
 						// A managed standalone hook runs closed whatever the
 						// connector or environment asks for.
-						wantMode := "closed"
+						wantMode := mode
+						if scenario == "malformed" || scenario == "auth" || scenario == "managed-missing-token" || scenario == "oversized" {
+							wantMode = "closed"
+						}
 						if record["connector"] != connector || record["fail_mode"] != wantMode || record["outcome"] != want || strings.Contains(r.stderr, "WARNING hook fail-open") == blocked {
 							t.Fatalf("wrong diagnostic: record=%+v stderr=%s", record, r.stderr)
 						}
@@ -85,15 +94,14 @@ func TestDeliveryFailureDiagnostics(t *testing.T) {
 	}
 }
 
-func TestFailClosedWarningSurvivesLogWriteFailure(t *testing.T) {
+func TestFailOpenWarningSurvivesLogWriteFailure(t *testing.T) {
 	r := run(t, "codex", &stubRT{err: errors.New("offline\nforged")}, func(opts *Options) {
 		// A regular file prevents the diagnostic directory from being created.
 		if err := os.WriteFile(filepath.Join(opts.Home, "logs"), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	})
-	if !blocked(r) || strings.Contains(r.stderr, "WARNING hook fail-open") ||
-		!strings.Contains(r.stderr, "blocking") {
+	if r.code != 0 || !strings.Contains(r.stderr, "WARNING hook fail-open") {
 		t.Fatalf("logging changed delivery or lost warning: code=%d stderr=%q", r.code, r.stderr)
 	}
 	for _, line := range strings.Split(strings.TrimSpace(r.stderr), "\n") {

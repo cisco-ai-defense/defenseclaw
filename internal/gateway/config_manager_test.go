@@ -1140,8 +1140,7 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||
-		boot.EffectiveHookFailModeForConnector("codex") != "closed" ||
-		boot.ConfiguredHookFailModeForConnector("codex") != "open" {
+		boot.EffectiveHookFailModeForConnector("codex") != "open" {
 		t.Fatal("API posture read mutated the immutable boot snapshot")
 	}
 }

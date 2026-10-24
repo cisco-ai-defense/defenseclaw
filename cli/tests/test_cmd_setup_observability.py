@@ -171,16 +171,19 @@ class TestObservabilityWizard(unittest.TestCase):
         self.assertFalse(gc.judge.enabled,
                          "Default scan strategy is regex_only; "
                          "operators who want judge can opt in on rerun")
-        # Per-user observe hooks still block a failed inspection. The old
-        # open choice is no longer offered during initial setup.
-        self.assertEqual(gc.hook_fail_mode, "closed")
+        # The observability-only branch now also surfaces the hook
+        # fail-mode prompt on initial setup. The mocked ``click.prompt``
+        # returns "1" (open), so the persisted value must reflect that —
+        # confirms the prompt was reached and the operator's answer was
+        # applied.
+        self.assertEqual(gc.hook_fail_mode, "open")
 
     def test_claudecode_observability_flow_lands_in_observe_mode(self):
         gc = self._drive_observability("claudecode")
         self.assertTrue(gc.enabled)
         self.assertEqual(gc.mode, "observe")
         self.assertFalse(gc.judge.enabled)
-        self.assertEqual(gc.hook_fail_mode, "closed")
+        self.assertEqual(gc.hook_fail_mode, "open")
 
     def test_empty_judge_selection_skips_judge_model_prompt(self):
         app, gc = _make_app("codex")

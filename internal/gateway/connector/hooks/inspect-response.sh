@@ -67,9 +67,12 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 RUNTIME_CONNECTOR="{{.ConnectorName}}"
 FAIL_MODE="closed"
 readonly RUNTIME_CONNECTOR FAIL_MODE{{else}}RUNTIME_CONNECTOR="$(defenseclaw_shared_runtime_connector "$HOOK_DIR")"
-{{if .Managed}}FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{else}}FAIL_MODE="closed"{{end}}{{end}}{{if not .Managed}}
-# A missing or disabled per-user home is a failed inspection. The per-user
-# mode stays closed even if an earlier shared sidecar records open.
+FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"{{end}}{{if not .Managed}}
+# A missing or disabled DEFENSECLAW_HOME is not retirement for a hook
+# installed closed. This one script serves every connector, so its installed
+# mode is the sidecar next to it (HOOK_DIR), read above, not a render-time
+# value: missing or unreadable state reads closed, and an inherited closed
+# mode or strict availability tightens it, as every later failure (GAP-0315).
 if [ ! -d "${DEFENSECLAW_HOME}" ] || [ -f "${DEFENSECLAW_HOME}/.disabled" ]; then
   if defenseclaw_should_fail_closed_on_unreachable; then
     echo "defenseclaw: hook home unavailable; blocking (fail mode closed)" >&2

@@ -191,9 +191,6 @@ func normalizeHookFailMode(mode string) string {
 // open under Secure Client (#1163) on an authenticated Secure Client
 // deployment (SecureClientDeploymentVerified) and closed everywhere else.
 func setupHookFailMode(opts SetupOpts) string {
-	if !opts.ManagedEnterprise && !opts.SecureClientHookDelivery {
-		return "closed"
-	}
 	if strings.TrimSpace(opts.HookFailMode) == "" && opts.SecureClientHookDelivery && SecureClientDeploymentVerified() {
 		return secureClientHookFailMode
 	}
@@ -555,12 +552,6 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 // sidecar source of failMode (HookFailModeSourceConfig, or "" for an open
 // CapableHookFailMode lowered).
 func writeHookScriptsCommonWithTransport(hookDir, apiAddr, token, failMode, failModeSource string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) error {
-	if !managed && !secureClient {
-		// Direct writers and upgrade helpers can receive a legacy open value.
-		// A per-user render must still block if its gateway is unavailable.
-		failMode = "closed"
-		failModeSource = HookFailModeSourceConfig
-	}
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		return fmt.Errorf("create hook dir: %w", err)
 	}
@@ -1537,9 +1528,10 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 // OutageHookFailMode is the fail mode conn's hooks follow while the gateway
 // is down when they answer for themselves (the native hook, the shared shell
 // readers, the installers' pre-swap refresh): the mode resolveHookFailMode
-// takes from the config. Per-user hooks are closed regardless of an older
-// saved open. CapableHookFailMode's lowering of closed to open for a vendor
-// hook surface that cannot fail closed is the vendor's limit.
+// takes from the config: the user's or administrator's explicit value, else
+// closed outside Secure Client. CapableHookFailMode's lowering of closed to
+// open for a vendor hook surface that cannot fail closed is the vendor's
+// limit.
 func OutageHookFailMode(opts SetupOpts, conn Connector) string {
 	return resolveHookFailMode(opts, conn)
 }
@@ -1965,8 +1957,8 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //  1. An authenticated Secure Client delivery follows its explicit value or
 //     defaults to "open" (#1163). Its legacy profile keeps Cursor's observe
 //     posture until delivery migrates.
-//  2. Every per-user hook renders "closed", including an explicit open left
-//     in config by an older release.
+//  2. A per-user hook renders the user's explicit value; an unset one is
+//     "closed" (defaultHookFailMode).
 //  3. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
@@ -1975,9 +1967,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 //     Copilot CLI, Antigravity and Hermes hooks, which block through the
 //     agent's native deny (CapableHookFailMode, hookBlocksItsOwnFailures).
 //
-// Only a managed standalone administrator may use open for an eligible
-// gateway connection outage. DEFENSECLAW_STRICT_AVAILABILITY=1 can only
-// tighten this choice.
+// An open choice covers a confirmed gateway outage only: an answered,
+// malformed or unanswered call blocks outside Secure Client.
+// DEFENSECLAW_STRICT_AVAILABILITY=1 can only tighten this choice.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	render := resolveConnectorHookRender(opts, c)
 	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.failModeSource, render.extras, opts.ManagedEnterprise,
@@ -2083,8 +2075,14 @@ func managedStandaloneRender(opts SetupOpts) bool {
 // authenticated Secure Client deployment (setupHookFailMode): guardrail mode
 // and enforcement flags do not change availability policy.
 //
-// A standalone managed render follows the administrator's explicit choice.
-// A per-user render is always closed, including legacy explicit open.
+// A standalone managed render follows the administrator's explicit choice
+// and a per-user render the user's; an unset value is closed
+// (defaultHookFailMode). A per-user Cursor is closed in action mode and
+// opens in observe mode only for the config's own open
+// (opts.ConfiguredHookFailMode), never for a mode resolved from the guardrail
+// mode. The choice covers a confirmed gateway outage only: every rendered
+// hook outside Secure Client blocks an answered, malformed or unanswered
+// call.
 func resolveHookFailMode(opts SetupOpts, conn Connector) string {
 	if managedStandaloneRender(opts) {
 		// The administrator's config chose this mode (explicit open, or
@@ -2102,7 +2100,17 @@ func resolveHookFailMode(opts SetupOpts, conn Connector) string {
 		}
 		return setupHookFailMode(opts)
 	}
-	return "closed"
+	if conn != nil && conn.Name() == "cursor" {
+		if strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") ||
+			strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "enforce") {
+			return "closed"
+		}
+		return normalizeHookFailMode(opts.ConfiguredHookFailMode)
+	}
+	if strings.TrimSpace(opts.HookFailMode) != "" {
+		return normalizeHookFailMode(opts.HookFailMode)
+	}
+	return defaultHookFailMode
 }
 
 // WriteHookScriptsForConnector generates the generic inspection scripts

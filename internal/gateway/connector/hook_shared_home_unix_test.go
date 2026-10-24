@@ -20,10 +20,15 @@ import (
 	"testing"
 )
 
-// Per-user shared inspect hooks pin closed before a missing or disabled home
-// can stop them. An older open sidecar and agent-provided environment cannot
-// reopen the early exit.
-func TestSharedInspectHookHomeUnavailableAlwaysBlocks(t *testing.T) {
+// 1.0.4 review (GAP-0315): the shared inspect-* scripts have one copy per data
+// directory, so the renderer bakes no fail mode into them. Their missing or
+// disabled DEFENSECLAW_HOME exit must therefore read the installed mode from
+// the sidecars next to the script: a closed installation blocks, missing
+// state reads closed, and an open one closes only with strict availability,
+// also when the agent's environment claims a managed hook
+// (DEFENSECLAW_MANAGED_HOOK=1). DEFENSECLAW_FAIL_MODE is not read (1.0.4 lead
+// directive).
+func TestSharedInspectHookHomeUnavailableReadsTheInstalledMode(t *testing.T) {
 	for _, invoke := range hookArgvInspectCases() {
 		if len(invoke.stdin) > 4096 {
 			continue
@@ -33,15 +38,16 @@ func TestSharedInspectHookHomeUnavailableAlwaysBlocks(t *testing.T) {
 				for _, tc := range []struct {
 					name string
 					env  []string
+					open bool // the call is allowed when the install is open
 				}{
-					{"no-env", nil},
-					{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}},
-					{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=closed"}},
-					{"strict", []string{"DEFENSECLAW_STRICT_AVAILABILITY=true"}},
-					{"managed-marker-env-closed", []string{"DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_FAIL_MODE=closed"}},
-					{"managed-marker-strict", []string{"DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_STRICT_AVAILABILITY=1"}},
+					{"no-env", nil, true},
+					{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, true},
+					{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=closed"}, true},
+					{"strict", []string{"DEFENSECLAW_STRICT_AVAILABILITY=true"}, false},
+					{"managed-marker-env-closed", []string{"DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_FAIL_MODE=closed"}, true},
+					{"managed-marker-strict", []string{"DEFENSECLAW_MANAGED_HOOK=1", "DEFENSECLAW_STRICT_AVAILABILITY=1"}, false},
 					{"managed-marker-secure-client-env-open", []string{"DEFENSECLAW_MANAGED_HOOK=1", "_DC_SECURE_CLIENT_HOOK=1",
-						"_DC_SECURE_CLIENT_DELIVERY=1", "DEFENSECLAW_FAIL_MODE=open"}},
+						"_DC_SECURE_CLIENT_DELIVERY=1", "DEFENSECLAW_FAIL_MODE=open"}, true},
 				} {
 					t.Run(invoke.script+"/"+install+"/"+home+"/"+tc.name, func(t *testing.T) {
 						dataDir := t.TempDir()
@@ -78,10 +84,11 @@ func TestSharedInspectHookHomeUnavailableAlwaysBlocks(t *testing.T) {
 						cmd.Env = append(cmd.Env, invoke.env...)
 						cmd.Env = append(cmd.Env, tc.env...)
 						output, err := cmd.CombinedOutput()
-						if err == nil {
-							t.Fatalf("missing home allowed a tool: %s", output)
+						wantAllow := install == "open" && tc.open
+						if allowed := err == nil; allowed != wantAllow {
+							t.Fatalf("allowed=%v want %v (err=%v)\n%s", allowed, wantAllow, err, output)
 						}
-						if !strings.Contains(string(output), "hook home unavailable") {
+						if !wantAllow && !strings.Contains(string(output), "hook home unavailable") {
 							t.Fatalf("the block did not come from the unavailable-home exit:\n%s", output)
 						}
 						if home == "missing" {

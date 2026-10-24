@@ -56,7 +56,7 @@ const DC_HOOK_SOCKET = "";
 const DC_FOREIGN_GUARD = "";
 const DC_INSTALL_MARKER = "";
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{if or .Managed .SecureClient}}{{.FailMode}}{{else}}closed{{end}}"; // managed outage choice or Secure Client
+const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
 const DC_RESPONSE_FAIL_MODE = "{{if .SecureClient}}{{.FailMode}}{{else}}closed{{end}}";
 const DC_MANAGED_HOOK = {{.Managed}};
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
@@ -720,6 +720,12 @@ async function defenseclawLogFailOpen(reason, category) {
     }
 {{if and .Managed (not .SecureClient)}}    if (!DC_HOOK_SOCKET || !defenseclawVerifiedSocketAbsences.has(err)) {
       return { reason: defenseclawGatewayStopped(err) ? DC_GATEWAY_STOPPED_TEXT : "DefenseClaw hook failed closed (unverified gateway outage)" };
+    }
+{{end}}{{if and (not .Managed) (not .SecureClient) (not .Sandbox)}}    // A per-user outage-open choice lets through only a gateway that refused
+    // the connection (it is not running). A timeout, a dropped or unreadable
+    // answer and every other failure block.
+    if (!defenseclawGatewayStopped(err)) {
+      return { reason: "DefenseClaw hook failed closed (unverified gateway outage)" };
     }
 {{end}}
 {{if not .Sandbox}}    if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");

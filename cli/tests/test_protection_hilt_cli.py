@@ -59,11 +59,10 @@ def test_a_saved_change_exits_0_when_the_audit_event_cannot_be_written(app, conn
 
 def test_fail_mode_exits_0_with_a_plain_note_when_the_gateway_is_stopped(app) -> None:
     """GAP-1250: after defenseclaw-gateway stop, fail-mode saved the value, then crashed."""
-    app.cfg.guardrail.hook_fail_mode = "open"  # saved by an older per-user install
-    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["open", "--yes"], obj=app)
     assert result.exit_code == 0, result.output
     assert result.exception is None
-    assert app.cfg.guardrail.hook_fail_mode == "closed"
+    assert app.cfg.guardrail.hook_fail_mode == "open"
     # GAP-1718: one stopped-gateway note that also names the skipped audit event.
     assert result.output.count("gateway isn't running") == 1, result.output
     assert "the audit event was not recorded" in result.output
@@ -126,9 +125,6 @@ def test_bare_policy_writes_resolve_the_same_alias_keys(app, field, value, comma
 @pytest.mark.parametrize("mode,prior", [("closed", "open"), ("open", "closed")])
 def test_bare_fail_mode_saves_the_global_value_when_every_override_already_matches(app, key, mode, prior) -> None:
     """A connector that inherits the global value (Codex under OpenShell) gets the requested mode."""
-    if mode == "open":
-        app.cfg.deployment_mode = "managed_enterprise"
-        app.cfg.enterprise_profile = "standalone"
     gc = app.cfg.guardrail
     gc.hook_fail_mode = prior
     gc.connectors = {key: PerConnectorGuardrailConfig(hook_fail_mode=mode)}
@@ -149,8 +145,6 @@ def test_bare_fail_mode_saves_the_global_value_when_every_override_already_match
 @pytest.mark.parametrize("connectors", [{}, {"claude-code": "closed"}])
 @pytest.mark.parametrize("saved", ["", "typo"])
 def test_bare_fail_mode_writes_an_unset_or_invalid_global_value(app, connectors, saved) -> None:
-    app.cfg.deployment_mode = "managed_enterprise"
-    app.cfg.enterprise_profile = "standalone"
     gc = app.cfg.guardrail
     gc.hook_fail_mode = saved
     gc.connectors = {key: PerConnectorGuardrailConfig(hook_fail_mode=value) for key, value in connectors.items()}

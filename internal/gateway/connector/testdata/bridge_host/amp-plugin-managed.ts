@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "{{.FailMode}}" // managed outage choice or Secure Client
+const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
 const DC_RESPONSE_FAIL_MODE: string = "closed"
 const DC_MANAGED_HOOK = true
 // DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035), as it

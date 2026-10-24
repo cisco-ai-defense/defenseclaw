@@ -1429,6 +1429,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
             [
                 "",  # enable guardrail
                 "2",  # action mode
+                "",  # hook fail-mode (default = open)
                 "y",  # human approval — INLINE PROMPT (mode == action)
                 "MEDIUM",  # approval min severity
                 "",  # local scanner

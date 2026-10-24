@@ -611,7 +611,7 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
         )
         restart_mock.assert_not_called()
 
-    def test_cursor_observe_reports_fail_closed_with_explicit_closed_preference(self):
+    def test_cursor_observe_reports_fail_open_despite_explicit_closed_preference(self):
         from defenseclaw.config import PerConnectorGuardrailConfig
 
         self.app.cfg.guardrail.connectors = {

@@ -1,10 +1,11 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
-"""A saved fail-mode change repairs legacy hooks with the gateway stopped.
+"""A fail-mode change reaches the rendered hooks even with the gateway stopped.
 
-GAP-0009 / GAP-0006: config unset guardrail.hook_fail_mode must re-render an
-older open script even though 1.0.4 resolves both saved values to closed.
+GAP-0009 / GAP-0006: config unset guardrail.hook_fail_mode said closed while
+the hooks kept failing open until the next gateway start, doctor reported
+that hook as PASS, and config set printed nothing about it.
 """
 
 from __future__ import annotations
@@ -59,8 +60,9 @@ def test_fail_mode_change_with_gateway_stopped_re_renders_hooks(tmp_path: Path, 
 
 
 def test_native_deny_connectors_are_re_rendered_outside_secure_client(tmp_path: Path, monkeypatch) -> None:
-    # A saved legacy open can remain baked into these per-user native-deny
-    # hooks. Re-render all active hooks when the stored choice changes.
+    # Per-user Antigravity, Copilot and Hermes hooks follow the fail mode, so
+    # a fail-mode write re-renders them too (only Secure Client keeps them
+    # upstream fail-open, GAP-0027).
     reconcile = MagicMock()
     config = _CONFIG + "".join(f"    {name}: {{mode: action}}\n" for name in ("antigravity", "copilot", "hermes"))
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))

@@ -84,7 +84,7 @@ def test_statuses_follow_the_config(config) -> None:
 
     guardrail = _status(SetupWizard.GUARDRAIL, config)
     assert guardrail.state == "ok" and "action" in guardrail.text
-    assert "closed" in _status(SetupWizard.GUARDRAIL_ACTIONS, config).text
+    assert "open" in _status(SetupWizard.GUARDRAIL_ACTIONS, config).text
     assert "strict" in _status(SetupWizard.SKILL_SCANNER, config).text
     assert _status(SetupWizard.ACP_GUARD, config).state == "ok"
 

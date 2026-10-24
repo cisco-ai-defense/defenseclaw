@@ -29,7 +29,7 @@ import { dirname, join } from "node:path";
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "{{.FailMode}}"; // managed outage choice or Secure Client
+const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
 const DC_RESPONSE_FAIL_MODE = "closed";
 const DC_MANAGED_HOOK = true;
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process

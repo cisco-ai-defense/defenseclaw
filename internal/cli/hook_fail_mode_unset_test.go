@@ -16,7 +16,7 @@ import (
 // B-40 (B-01 merge review item 2): a Windows native per-user hook command
 // carries no --fail-mode and relies on hooks/.hookcfg. A missing sidecar, a
 // sidecar without the connector's mode and an empty or unknown value all
-// resolve closed, as the config resolver does; an old explicit open is inert.
+// resolve closed, as the config resolver does; only an explicit open opens.
 func TestNativeHookFailModeWithoutAnExplicitOpenIsClosed(t *testing.T) {
 	for _, test := range []struct {
 		name, sidecar, flag, want string
@@ -27,8 +27,8 @@ func TestNativeHookFailModeWithoutAnExplicitOpenIsClosed(t *testing.T) {
 		{name: "legacy sidecar without a mode", sidecar: "DEFENSECLAW_GATEWAY_ADDR=127.0.0.1:12345\n", want: "closed"},
 		{name: "legacy empty value", sidecar: "DEFENSECLAW_FAIL_MODE=\n", want: "closed"},
 		{name: "unknown value", sidecar: `{"version":2,"fail_modes":{"claudecode":"opne"}}`, want: "closed"},
-		{name: "explicit open in the sidecar", sidecar: `{"version":2,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"}}`, want: "closed"},
-		{name: "explicit open flag", flag: "open", want: "closed"},
+		{name: "explicit open in the sidecar", sidecar: `{"version":2,"fail_modes":{"claudecode":"open"},"fail_mode_sources":{"claudecode":"config"}}`, want: "open"},
+		{name: "explicit open flag", flag: "open", want: "open"},
 		{name: "explicit closed flag over an open sidecar", sidecar: `{"version":2,"fail_modes":{"claudecode":"open"}}`, flag: "closed", want: "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -64,8 +64,8 @@ func TestManagedNativeHookIgnoresAnOpenFailMode(t *testing.T) {
 	}
 }
 
-// End to end: a per-user Kiro tool hook blocks a gateway failure (exit 2,
-// Kiro's veto), including with a legacy explicit open flag.
+// End to end: a per-user Kiro tool hook blocks a gateway 5xx (exit 2, Kiro's
+// veto), also with an explicit open: a gateway that answered is no outage.
 func TestNativeHookWithoutASidecarBlocksOnAGatewayFailure(t *testing.T) {
 	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.Copy(io.Discard, r.Body)
@@ -78,7 +78,7 @@ func TestNativeHookWithoutASidecarBlocksOnAGatewayFailure(t *testing.T) {
 		t.Fatalf("unset fail mode exit = %d, want 2 (blocked)", code)
 	}
 	if code := runHookCommandForTest(t, payload, "--connector", "kiro", "--api-addr", addr, "--fail-mode", "open"); code != 2 {
-		t.Fatalf("legacy explicit open exit = %d, want 2", code)
+		t.Fatalf("explicit open exit = %d, want 2: a 5xx answer is no outage", code)
 	}
 }
 

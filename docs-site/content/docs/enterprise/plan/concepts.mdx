@@ -329,7 +329,9 @@ A stricter result field. On Linux and macOS it adds the sensor helper and requir
 no errors. On Windows it needs at least one of Codex, Claude Code or Cursor turned
 on, and with Claude Code on, a current administrator attestation. An installed
 agent without DefenseClaw hooks (`agent_unprotected`, `hook_contract_unverified`)
-makes it `false`. See [Health fields](/docs/enterprise/operate/operations#health-fields).
+makes it `false`, and so does an enabled agent that can run a tool when its hook
+process is stopped or times out (`hook_process_fail_open`: Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity).
+See [Health fields](/docs/enterprise/operate/operations#health-fields).
 
 ### Observe and action modes
 

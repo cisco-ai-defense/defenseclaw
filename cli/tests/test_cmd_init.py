@@ -3164,7 +3164,7 @@ class TestInitFailModeFlag(unittest.TestCase):
             "closed",
         )
 
-    def test_fail_mode_open_is_refused_on_per_user_init(self):
+    def test_fail_mode_open_persists_to_config(self):
         result = self._invoke([
             "--non-interactive",
             "--yes",
@@ -3181,8 +3181,19 @@ class TestInitFailModeFlag(unittest.TestCase):
             "open",
             "--json-summary",
         ])
-        self.assertEqual(result.exit_code, 2, result.output + (result.stderr or ""))
-        self.assertIn("Per-user hooks always fail closed", result.output)
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        # Operator passed --fail-mode open explicitly — result must
+        # round-trip as "open" regardless of the new safer default
+        # ("closed"). This pins that operator intent is honored.
+        from defenseclaw.config import _normalize_hook_fail_mode
+        self.assertEqual(
+            _normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "")),
+            "open",
+        )
 
     def test_omitting_flag_is_noninvasive(self):
         # No --fail-mode means "leave existing alone." On a brand-new
@@ -3226,24 +3237,16 @@ class TestInitFailModeFlag(unittest.TestCase):
             "--profile", "observe", "--scanner-mode", "local",
             "--skip-install", "--no-start-gateway", "--no-verify", "--json-summary",
         ]
-        first = self._invoke([*args, "--fail-mode", "closed"])
+        first = self._invoke([*args, "--fail-mode", "open"])
         self.assertEqual(first.exit_code, 0, first.output + (first.stderr or ""))
-        import yaml
-        config_path = os.path.join(self.tmp_dir, "config.yaml")
-        with open(config_path, encoding="utf-8") as fh:
-            saved = yaml.safe_load(fh)
-        saved["guardrail"]["hook_fail_mode"] = "open"
-        with open(config_path, "w", encoding="utf-8") as fh:
-            yaml.safe_dump(saved, fh)
         second = self._invoke(args)
         self.assertEqual(second.exit_code, 0, second.output + (second.stderr or ""))
 
-        with open(config_path, encoding="utf-8") as fh:
+        import yaml
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         from defenseclaw.config import _normalize_hook_fail_mode
         self.assertEqual(_normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "")), "open")
-        from defenseclaw.config import load
-        self.assertEqual(load(data_dir=self.tmp_dir).guardrail.effective_hook_fail_mode("codex"), "closed")
 
 
 class TestInitHITLFlags(unittest.TestCase):
@@ -3602,8 +3605,8 @@ class TestMultiConnectorInit(unittest.TestCase):
         from defenseclaw.commands import cmd_init
 
         disc = self._disc({"codex", "claudecode"})
-        # scanner mode, HITL severity; per-user fail mode is always closed.
-        prompts = iter(["local", "MEDIUM"])
+        # scanner mode, fail mode, HITL severity
+        prompts = iter(["local", "closed", "MEDIUM"])
         confirms = iter([True, False, True])  # action HITL, start_gateway, verify
         checkbox_returns = iter([["codex", "claudecode"], ["claudecode"], []])
         checkbox_calls: list[tuple[list[str], str]] = []
@@ -4382,7 +4385,10 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
-    def test_open_fail_mode_is_refused_with_observe_primary(self, mock_discover, _gate):
+    def test_fail_mode_answer_is_the_global_default_with_observe_primary(self, mock_discover, _gate):
+        # GAP-1321: the fail mode asked for the action connectors is also the
+        # global default, so `guardrail mode action --connector codex` later
+        # keeps it instead of flipping codex to the built-in "closed".
         mock_discover.return_value = self._disc({"codex", "claudecode"})
 
         result = self._invoke([
@@ -4391,12 +4397,17 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
             "--scanner-mode", "local", "--skip-install",
             "--no-start-gateway", "--no-verify", "--json-summary",
         ])
-        self.assertEqual(result.exit_code, 2, result.output + (result.stderr or ""))
-        self.assertIn("Per-user hooks always fail closed", result.output)
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        from defenseclaw.config import _normalize_hook_fail_mode
+
+        self.assertEqual(_normalize_hook_fail_mode(self._load_cfg()["guardrail"].get("hook_fail_mode", "")), "open")
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
-    def test_noninteractive_closed_fail_mode_explains_outage_block(self, mock_discover, _gate):
+    def test_noninteractive_closed_fail_mode_says_how_to_open_it(self, mock_discover, _gate):
+        # GAP-1424: --non-interactive keeps the closed default the wizard asks
+        # about; the summary says what it does and how to change it.
         mock_discover.return_value = self._disc({"codex", "claudecode"})
         args = [
             "--non-interactive", "--yes",
@@ -4407,11 +4418,11 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         result = self._invoke(args)
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.assertIn("claudecode=action (fail closed)", result.output)
-        self.assertIn("hooks block the agent while the gateway is unreachable", result.output)
+        self.assertIn("to allow and log instead: defenseclaw guardrail fail-mode open", result.output)
 
         result = self._invoke([*args, "--fail-mode", "open"])
-        self.assertEqual(result.exit_code, 2, result.output + (result.stderr or ""))
-        self.assertIn("Per-user hooks always fail closed", result.output)
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertNotIn("defenseclaw guardrail fail-mode open", result.output)
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     @patch("defenseclaw.commands.cmd_init.agent_discovery.discover_agents")
@@ -4863,7 +4874,9 @@ def test_init_leaves_out_a_connector_setup_cannot_select_on_windows(tmp_path):
     assert "cannot select amp executable" in report.setup[-1].detail
 
 
-def test_fail_mode_prompt_closes_saved_per_user_open(tmp_path):
+def test_fail_mode_prompt_keeps_the_new_install_default(tmp_path):
+    # GAP-0047: Enter at "Fail mode" saved open, while quickstart and
+    # `guardrail fail-mode` help call closed the new-install default.
     from defenseclaw.commands import cmd_init
 
     def ask(data_dir):
@@ -4877,4 +4890,4 @@ def test_fail_mode_prompt_closes_saved_per_user_open(tmp_path):
 
     assert ask(str(tmp_path)) == "closed"
     (tmp_path / "config.yaml").write_text("guardrail:\n  hook_fail_mode: open\n", encoding="utf-8")
-    assert ask(str(tmp_path)) == "closed"
+    assert ask(str(tmp_path)) == "open"

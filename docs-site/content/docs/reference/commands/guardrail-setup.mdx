@@ -31,7 +31,7 @@ Each row is one wizard prompt, with the default that Enter selects and the flag 
 | **Which agent framework are you using?** *(first setup only; suggests an agent it finds)* | `--connector` / `--agent`: `claudecode`, `codex`, `cursor`, `devin`, `copilot`, `hermes`, `antigravity`, `opencode`, `amp`, `kiro`, `openclaw`, `zeptoclaw`. |
 | **Enable guardrail?** *(Y)* | Implied by running setup. `--disable` turns the guardrail off. |
 | **Select mode** *(observe on first setup, then the current mode)* | `--mode observe\|action`. `observe` records; `action` enforces. |
-| **Hook failure behavior** *(`closed` on per-user installs)* | Per-user setup runs failed inspections closed. `--fail-mode open` is refused. A managed administrator may set outage-open in the managed config. |
+| **Select hook fail mode** *(current setting; asked on first setup or when the mode changes)* | No flag on `setup guardrail`. Use `defenseclaw setup <connector> --fail-mode open\|closed`, `defenseclaw init --fail-mode`, or `defenseclaw guardrail fail-mode open\|closed` afterwards. |
 | **Human approval for risky actions?** *(action mode only; current setting)* | `--human-approval` / `--no-human-approval`. |
 | **Approval minimum severity** *(if HITL is on; HIGH)* | `--hilt-min-severity high\|medium\|low\|critical`, matched case-insensitively. |
 | **Select engine** *(local)* | `--scanner-mode local\|remote\|both`. The wizard offers only local and remote; pass `both` to run the two together. |
@@ -55,7 +55,7 @@ it as broad operator intent: it updates the shared block message and reconciles
 the active connector overrides, so no connector keeps stale block text.
 
 <Callout type="warn">
-Per-user hook failure behavior is closed. A managed administrator sets an outage-open choice in managed `config.yaml`. Judge fallback models live in `guardrail.judge.fallbacks` in `config.yaml`.
+Two wizard choices have no `setup guardrail` flag. The hook fail mode is set with `defenseclaw setup <connector> --fail-mode` or `defenseclaw guardrail fail-mode`. Judge fallback models live in `guardrail.judge.fallbacks` in `config.yaml`.
 </Callout>
 
 <Callout title="Redaction has its own workflow">
@@ -416,7 +416,7 @@ Every hook alias takes these flags; run `defenseclaw setup <connector> --help` f
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Per-user setup accepts closed only. A managed administrator can choose open for verified gateway connection outages.",
+      description: "Hook fail mode for this connector during a gateway outage: open allows, warns and logs; closed blocks. Error, malformed or missing gateway answers block either way.",
     },
     "--workspace / --workspace-dir": {
       type: "path",
@@ -494,6 +494,7 @@ guardrail:
   connectors:
     codex:
       mode: action
+      hook_fail_mode: open
     claudecode:
       mode: observe
       hilt:
@@ -507,7 +508,7 @@ The fields you can override per connector mirror the global guardrail knobs:
 | --- | --- | --- |
 | `enabled` | Per-connector on/off switch (`guardrail disable --connector X`). Drops it from the active set and removes its hooks; re-enable restores it with no re-prompt. | enabled |
 | `mode` | `observe` (log only) or `action` (enforce). | global `guardrail.mode` |
-| `hook_fail_mode` | Per-user hooks run closed even if an older config saved `open`. A managed administrator may choose `open` for verified gateway connection outages; invalid or incomplete answers still block. | global `guardrail.hook_fail_mode` |
+| `hook_fail_mode` | `open` / `closed` — what to do while the gateway is not running. Error, malformed or missing gateway answers block in either mode. | global `guardrail.hook_fail_mode` |
 | `hilt` | `{ enabled, min_severity }` — per-connector human-in-the-loop policy. | global `guardrail.hilt` |
 | `block_message` | Custom block text shown to this connector's agent. | global `guardrail.block_message` |
 | `rule_pack` | The rule pack this connector scans against: a preset or a `guardrail.custom_packs` name. | global `guardrail.rule_pack` |

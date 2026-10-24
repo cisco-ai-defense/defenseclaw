@@ -8762,9 +8762,9 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     configured_mode = str(fail_mode.get("configured") or "")
     lock_mode_target = configured_mode
     # Runtime locks are rendered from the desired hook posture. The report
-    # keeps any saved legacy per-user open value in ``configured``, but that
-    # value is not lock authority. Upstream fail-open connectors are the
-    # exception: their lock records configured policy.
+    # keeps the raw saved value in ``configured``, but that value is not lock
+    # authority. Upstream fail-open connectors are the exception: their lock
+    # records configured policy.
     if not upstream_fail_open(cfg, name):
         lock_mode_target = str(fail_mode.get("desired") or configured_mode)
     if lock_mode != lock_mode_target:

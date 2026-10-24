@@ -368,38 +368,45 @@ func (c *Config) EffectiveRulePackDirForConnector(connector string) string {
 }
 
 func (c *Config) EffectiveHookFailModeForConnector(connector string) string {
-	return c.effectiveHookFailModeForConnector(connector)
+	return c.effectiveHookFailModeForConnector(connector, false)
 }
 
 // EffectiveActionHookFailModeForConnector applies the installed hook's fail
 // mode precedence to an action-mode decision selected by a request profile.
 func (c *Config) EffectiveActionHookFailModeForConnector(connector string) string {
-	return c.effectiveHookFailModeForConnector(connector)
+	return c.effectiveHookFailModeForConnector(connector, true)
 }
 
 // effectiveHookFailModeForConnector is the one hook fail-mode resolver
 // (owner decisions 2026-10-14 and 2026-10-20: the customer chooses open or
 // closed and the default is closed; only Secure Client defaults to open):
 //
-//   - on a managed host an explicit value wins, the automatic-protection
-//     overlay first, then the connector's own value, then the global one.
-//     Anything but "open" (any case) is closed. Standalone managed open is
-//     the administrator's outage choice;
+//   - an explicit value always wins, the automatic-protection overlay
+//     first, then the connector's own value, then the global one, and
+//     anything but "open" (any case) is closed. On a managed standalone
+//     host the config is the administrator's (root- or SYSTEM-owned and
+//     trust-checked by the loader), so its open is the administrator's
+//     outage choice; on a per-user install it is the user's;
 //   - an unset value is open under Secure Client (secureClientHookFailModes,
 //     #1163) and closed everywhere else;
-//   - per-user hooks are closed even when an old config records open.
-func (c *Config) effectiveHookFailModeForConnector(connector string) string {
+//   - per-user Cursor in action mode (or for an action decision) is closed
+//     even with an explicit open: its action registration fails closed.
+//
+// The mode governs a confirmed gateway outage only. Outside Secure Client
+// an answered, malformed or unanswered call blocks in either mode.
+func (c *Config) effectiveHookFailModeForConnector(connector string, actionDecision bool) string {
 	if c == nil {
 		return "closed"
 	}
-	if managed.IsManagedEnterprise(c.DeploymentMode) {
-		if mode := c.configuredHookFailModeForConnector(connector); mode != "" {
-			return mode
-		}
-		if c.secureClientHookFailModes() {
-			return "open"
-		}
+	if !managed.IsManagedEnterprise(c.DeploymentMode) && normalizeConnectorKey(connector) == "cursor" &&
+		(actionDecision || strings.EqualFold(strings.TrimSpace(c.EffectiveGuardrailModeForConnector(connector)), "action")) {
 		return "closed"
+	}
+	if mode := c.configuredHookFailModeForConnector(connector); mode != "" {
+		return mode
+	}
+	if managed.IsManagedEnterprise(c.DeploymentMode) && c.secureClientHookFailModes() {
+		return "open"
 	}
 	return "closed"
 }
@@ -419,8 +426,7 @@ func (c *Config) secureClientHookFailModes() bool {
 
 // ConfiguredHookFailModeForConnector is the hook fail mode the config sets
 // explicitly for connector (configuredHookFailModeForConnector), or "" when
-// it sets none. A per-user value is retained for migration but does not
-// change the closed runtime mode.
+// it sets none.
 func (c *Config) ConfiguredHookFailModeForConnector(connector string) string {
 	if c == nil {
 		return ""

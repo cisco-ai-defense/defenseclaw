@@ -28,9 +28,10 @@ import (
 // tool call DefenseClaw cannot check when its fail mode is closed or not set
 // (the gateway is down or does not answer in time, or its answer cannot be
 // used), with Hermes' block directive and a text that says why and what to
-// do, and logs the call as failed closed. An older explicit open cannot
-// let an unchecked tool call run.
-func TestPerUserHermesToolCallFailsClosed(t *testing.T) {
+// do, and logs the call as failed closed. An explicit open lets only a
+// gateway outage call run; a timeout, an HTTP status and an unusable answer
+// or input stay closed.
+func TestPerUserHermesToolCallFailsClosedUnlessAnOutageIsOpen(t *testing.T) {
 	waitForDeadline := func(_ *stubRT, req *http.Request) (*http.Response, error) {
 		<-req.Context().Done()
 		return nil, req.Context().Err()
@@ -90,6 +91,13 @@ func TestPerUserHermesToolCallFailsClosed(t *testing.T) {
 					t.Fatalf("code %d, want 0 (stderr %q)", result.code, result.stderr)
 				}
 				logged := lastHookFailure(t, home)["fail_mode"]
+				if failMode == "open" && (tc.name == "gateway down" || tc.name == "missing token") {
+					// The user's outage choice: the call runs, logged open.
+					if strings.TrimSpace(result.stdout) != "" || logged != "open" {
+						t.Fatalf("stdout %q logged %q, want the neutral result logged open", result.stdout, logged)
+					}
+					return
+				}
 				message := hermesBlockMessage(t, result.stdout)
 				if !strings.HasPrefix(message, "DefenseClaw blocked this tool call: ") || !strings.Contains(message, tc.want) {
 					t.Fatalf("message %q, want a tool-call block naming %q (stderr %q)", message, tc.want, result.stderr)

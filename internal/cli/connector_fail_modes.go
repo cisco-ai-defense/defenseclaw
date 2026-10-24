@@ -38,9 +38,9 @@ holds the lock every release's hook writer takes after the first refresh,
 prints "Holding the hook fail modes", and refreshes again once that gateway
 has exited, before it lets go: the old gateway cannot render its open again
 while it stops. So no hook follows an open an earlier release recorded for a
-mode nobody set. A per-user open saved by an older release is closed. A config
-this release cannot load yet (a 0.8.x one before 'defenseclaw migrate') is read
-to identify a managed install. With --closed every hook is closed, whatever the
+mode nobody set. An open the config sets stays open. A config this release cannot
+load yet (a 0.8.x one before 'defenseclaw migrate') is read for its explicit
+fail modes only. With --closed every hook is closed instead, whatever the
 config chooses, until the gateway renders them again: install.ps1 runs it
 when it stops with its install unfinished (a restore a running hook refused),
 so no hook follows an outage open while its programs and data do not match.
@@ -186,13 +186,18 @@ func refreshFailModeResolver(cmd *cobra.Command) (func(string) string, string, b
 	}
 	// This release cannot load the config: a 0.8.x one before 'defenseclaw
 	// migrate', which the installer's 'migrate --check' has just validated,
-	// or none. Every per-user hook closes, including one whose earlier config
-	// saved open. Managed installs are left alone.
+	// or none. Its explicit fail modes are the operator's (every migration
+	// keeps them); everything else is closed, Cursor included.
 	raw := readHookConfigDocument(config.ConfigPath())
 	if config.ManagedEnterpriseDocument(raw) {
 		return nil, "document", true
 	}
-	return func(string) string { return "closed" }, "document", false
+	return func(name string) string {
+		if config.ConfiguredHookFailModeInDocument(raw, name) == "open" {
+			return "open"
+		}
+		return "closed"
+	}, "document", false
 }
 
 func nonNilStrings(values []string) []string {

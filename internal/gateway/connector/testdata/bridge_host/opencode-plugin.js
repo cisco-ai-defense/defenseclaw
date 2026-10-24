@@ -29,7 +29,7 @@ import { dirname, join } from "node:path";
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
 const DC_TOKEN_FILE = "{{.TokenFileJS}}";
-const DC_FAIL_MODE = "closed"; // managed outage choice or Secure Client
+const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
 const DC_RESPONSE_FAIL_MODE = "closed";
 const DC_MANAGED_HOOK = false;
 // The installed mode is the fail mode: DEFENSECLAW_FAIL_MODE in the process
@@ -646,6 +646,12 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (DC_TRANSPORT_FAIL_MODE === "closed") {
       if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && defenseclawGatewayStopped(err)) return { reason: DC_GATEWAY_STOPPED_TEXT };
       return { reason: "DefenseClaw hook failed closed (" + (err && err.message ? err.message : String(err)) + ")" };
+    }
+    // A per-user outage-open choice lets through only a gateway that refused
+    // the connection (it is not running). A timeout, a dropped or unreadable
+    // answer and every other failure block.
+    if (!defenseclawGatewayStopped(err)) {
+      return { reason: "DefenseClaw hook failed closed (unverified gateway outage)" };
     }
 
     if (actionable) await defenseclawLogFailOpen(err && err.message ? err.message : String(err), "transport");

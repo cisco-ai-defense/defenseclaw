@@ -48,7 +48,7 @@ const DC_HOOK_SOCKET: string = ""
 const DC_FOREIGN_GUARD: string = ""
 const DC_INSTALL_MARKER: string = ""
 {{else}}const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "{{if or .Managed .SecureClient}}{{.FailMode}}{{else}}closed{{end}}" // managed outage choice or Secure Client
+const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
 const DC_RESPONSE_FAIL_MODE: string = "{{if .SecureClient}}{{.FailMode}}{{else}}closed{{end}}"
 const DC_MANAGED_HOOK = {{.Managed}}
 // DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035), as it
@@ -732,6 +732,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			// absent in its verified directories, as the native hook does.
 			if (!DC_HOOK_SOCKET || !verifiedSocketAbsences.has(error as object)) {
 				return { action: "block", reason: gatewayStopped(error) ? DC_GATEWAY_STOPPED_TEXT : "DefenseClaw hook failed closed (unverified gateway outage)" }
+			}
+{{end}}{{if and (not .Managed) (not .SecureClient) (not .Sandbox)}}			// A per-user outage-open choice lets through only a gateway that
+			// refused the connection (it is not running). A timeout, a dropped
+			// or unreadable answer and every other failure block.
+			if (!gatewayStopped(error)) {
+				return { action: "block", reason: "DefenseClaw hook failed closed (unverified gateway outage)" }
 			}
 {{end}}			return { action: "allow" }
 		} finally {

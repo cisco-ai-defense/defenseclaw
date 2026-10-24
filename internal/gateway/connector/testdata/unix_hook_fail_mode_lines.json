@@ -8,9 +8,9 @@
     "      FAIL_MODE=\"closed\""
   ],
   "antigravity-hook.sh/open": [
-    "_DC_BOOT_FAIL_MODE=\"closed\"",
+    "_DC_BOOT_FAIL_MODE=\"open\"",
     "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_BOOT_FAIL_MODE=\"closed\" ;; esac",
-    "FAIL_MODE=\"closed\"",
+    "FAIL_MODE=\"open\"",
     "  FAIL_MODE=\"closed\"",
     "    FAIL_MODE=\"closed\"",
     "      FAIL_MODE=\"closed\""
@@ -24,9 +24,9 @@
     "      FAIL_MODE=\"closed\""
   ],
   "claude-code-hook.sh/open": [
-    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  _DC_HOME_FAIL_MODE=\"open\"",
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
-    "FAIL_MODE=\"closed\"",
+    "FAIL_MODE=\"open\"",
     "  FAIL_MODE=\"closed\"",
     "    FAIL_MODE=\"closed\"",
     "      FAIL_MODE=\"closed\""
@@ -39,9 +39,9 @@
     "    FAIL_MODE=\"closed\""
   ],
   "codex-hook.sh/open": [
-    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  _DC_HOME_FAIL_MODE=\"open\"",
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
-    "FAIL_MODE=\"closed\"",
+    "FAIL_MODE=\"open\"",
     "  FAIL_MODE=\"closed\"",
     "    FAIL_MODE=\"closed\""
   ],
@@ -53,7 +53,7 @@
     "      FAIL_MODE=\"closed\""
   ],
   "copilot-hook.sh/open": [
-    "FAIL_MODE=\"closed\"",
+    "FAIL_MODE=\"open\"",
     "case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) FAIL_MODE=\"closed\" ;; esac",
     "  FAIL_MODE=\"closed\"",
     "    FAIL_MODE=\"closed\"",
@@ -68,9 +68,9 @@
     "      FAIL_MODE=\"closed\""
   ],
   "devin-hook.sh/open": [
-    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  _DC_HOME_FAIL_MODE=\"open\"",
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
-    "FAIL_MODE=\"closed\"",
+    "FAIL_MODE=\"open\"",
     "  FAIL_MODE=\"closed\"",
     "    FAIL_MODE=\"closed\"",
     "      FAIL_MODE=\"closed\""
@@ -84,9 +84,9 @@
     "      FAIL_MODE=\"closed\""
   ],
   "hermes-hook.sh/open": [
-    "  _DC_HOME_FAIL_MODE=\"closed\"",
+    "  _DC_HOME_FAIL_MODE=\"open\"",
     "  case \"${DEFENSECLAW_STRICT_AVAILABILITY:-}\" in 1|true|TRUE|yes|YES) _DC_HOME_FAIL_MODE=\"closed\" ;; esac",
-    "FAIL_MODE=\"closed\"",
+    "FAIL_MODE=\"open\"",
     "  FAIL_MODE=\"closed\"",
     "    FAIL_MODE=\"closed\"",
     "      FAIL_MODE=\"closed\""

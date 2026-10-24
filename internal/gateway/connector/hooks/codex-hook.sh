@@ -108,8 +108,8 @@ BOUND_CONTRACT=
 
 fail_binding() {
   local reason="$1"
-{{if and .Managed (not .SecureClient)}}  # A managed binding error is integrity, not an outage: closed in every
-  # fail mode, as in the native runner.
+{{if not .SecureClient}}  # A binding error is integrity, not an outage: closed in every fail
+  # mode outside Secure Client, as in the native runner.
   defenseclaw_log_hook_delivery_failure codex codex-hook "$reason" response closed
   echo "defenseclaw: codex hook binding error: $reason" >&2
   exit 2

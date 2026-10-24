@@ -2655,8 +2655,15 @@ class GuardrailConfig:
           mode; an explicit value always wins (the administrator's config
           sets it), and an unset one is open under Secure Client (#1163) and
           closed on the standalone profile;
-        - every per-user hook is closed, including one with an explicit
-          ``open`` saved by an older release.
+        - everywhere else a fail mode that is not set is ``closed``, in
+          observe and action mode alike; only an explicit ``open`` (the
+          connector's, else the global one) opens a hook, and a per-user
+          Cursor in action mode stays closed (its action registration fails
+          closed).
+
+        The mode governs a confirmed gateway outage only: outside Secure
+        Client an HTTP status, a malformed or incomplete answer, or a missing
+        answer at the hook deadline blocks in either mode.
         """
         owner = getattr(self, "_owner", None)
         cfg = owner() if callable(owner) else None
@@ -2676,7 +2683,14 @@ class GuardrailConfig:
             if self.hook_fail_mode.strip():
                 return _normalize_hook_fail_mode(self.hook_fail_mode)
             return "closed" if standalone else "open"
-        return "closed"
+        if str(connector).strip().lower() == "cursor" and self.effective_mode(connector).strip().lower() == "action":
+            return "closed"
+        pc = self._connector_override(connector)
+        if pc is not None and pc.hook_fail_mode.strip():
+            # Only an explicit open opens; any other value (closed, a typo) is
+            # closed, as in Go.
+            return _normalize_hook_fail_mode(pc.hook_fail_mode)
+        return _normalize_hook_fail_mode(self.hook_fail_mode)
 
     def secure_client_hook_fail_modes(self) -> bool:
         """Whether this guardrail belongs to a Secure Client config.

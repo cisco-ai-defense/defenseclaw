@@ -168,8 +168,8 @@ func TestEffectiveResolvers_Precedence(t *testing.T) {
 	if got := g.EffectiveMode("empty"); got != "observe" {
 		t.Errorf("EffectiveMode(empty) = %q, want observe", got)
 	}
-	if got := hookFailModeFor(g, "empty"); got != "closed" {
-		t.Errorf("EffectiveHookFailModeFor(empty) = %q, want closed", got)
+	if got := hookFailModeFor(g, "empty"); got != "open" {
+		t.Errorf("EffectiveHookFailModeFor(empty) = %q, want open", got)
 	}
 	if got := g.EffectiveBlockMessage("empty"); got != "global-msg" {
 		t.Errorf("EffectiveBlockMessage(empty) = %q, want global-msg", got)
@@ -186,12 +186,12 @@ func TestEffectiveResolvers_Precedence(t *testing.T) {
 		t.Errorf("EffectiveMode(nope) = %q, want observe", got)
 	}
 	// Empty connector name resolves the global value (legacy callers).
-	if got := hookFailModeFor(g, ""); got != "closed" {
-		t.Errorf("EffectiveHookFailModeFor(\"\") = %q, want closed", got)
+	if got := hookFailModeFor(g, ""); got != "open" {
+		t.Errorf("EffectiveHookFailModeFor(\"\") = %q, want open", got)
 	}
 	// The original no-arg global resolver is untouched and still works.
-	if got := hookFailModeFor(g, ""); got != "closed" {
-		t.Errorf("EffectiveHookFailMode() = %q, want closed", got)
+	if got := hookFailModeFor(g, ""); got != "open" {
+		t.Errorf("EffectiveHookFailMode() = %q, want open", got)
 	}
 }
 
@@ -224,7 +224,7 @@ func TestEffectiveResolvers_SafeFallbacks(t *testing.T) {
 	}
 }
 
-func TestPerUserExplicitOpenDoesNotOverrideClosedRuntime(t *testing.T) {
+func TestEffectiveHookFailMode_ExplicitOverrideWinsInObserve(t *testing.T) {
 	g := &GuardrailConfig{
 		Mode:         "observe",
 		HookFailMode: "closed",
@@ -233,8 +233,8 @@ func TestPerUserExplicitOpenDoesNotOverrideClosedRuntime(t *testing.T) {
 			"claudecode": {},
 		},
 	}
-	if got := hookFailModeFor(g, "codex"); got != "closed" {
-		t.Fatalf("explicit connector fail mode = %q, want closed", got)
+	if got := hookFailModeFor(g, "codex"); got != "open" {
+		t.Fatalf("explicit connector fail mode = %q, want open", got)
 	}
 	// Observe mode no longer keeps a connector without its own value
 	// fail-open: the global value applies.
@@ -244,9 +244,9 @@ func TestPerUserExplicitOpenDoesNotOverrideClosedRuntime(t *testing.T) {
 }
 
 // Owner rules (B-01, 1.0.3, and 2026-10-20): an unset fail mode is closed
-// everywhere except under Secure Client. An explicit open is effective only
-// on a managed host, where the administrator owns the config. Secure Client
-// keeps its observe-mode fail-open contract.
+// everywhere except under Secure Client, and an explicit `hook_fail_mode`
+// wins everywhere, a standalone managed host included (its config is the
+// administrator's). Secure Client keeps its observe-mode fail-open contract.
 func TestUnsetHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
 	for _, test := range []struct {
 		name, deployment, profile string
@@ -254,8 +254,8 @@ func TestUnsetHookFailModeIsClosedOutsideSecureClient(t *testing.T) {
 		want                      string
 	}{
 		{name: "per-user, nothing set", want: "closed"},
-		{name: "per-user, global open", global: "open", want: "closed"},
-		{name: "per-user, connector open", connector: "open", want: "closed"},
+		{name: "per-user, global open", global: "open", want: "open"},
+		{name: "per-user, connector open", connector: "open", want: "open"},
 		{name: "per-user, global open, connector closed", global: "open", connector: "closed", want: "closed"},
 		{name: "standalone, nothing set", deployment: "managed_enterprise", profile: "standalone", want: "closed"},
 		{name: "standalone, connector open", deployment: "managed_enterprise", profile: "standalone", connector: "open", want: "open"},
@@ -462,16 +462,17 @@ func TestResolversArePure(t *testing.T) {
 }
 
 // TestEffectiveHookFailMode_GlobalOpenIgnoresCase keeps the global resolver in
-// step with the per-connector branch and the Python resolver: a hand-edited
-// per-user "Open" still resolves closed. Unset stays closed.
+// step with the per-connector branch and the Python resolver: the "open"
+// sentinel is matched case-insensitively after trimming, so a hand-edited
+// "Open" does not silently flip delivery to closed. Unset stays closed.
 func TestEffectiveHookFailMode_GlobalOpenIgnoresCase(t *testing.T) {
 	for _, raw := range []string{"Open", "OPEN", " open ", "\topEN\n"} {
 		g := &GuardrailConfig{Mode: "action", HookFailMode: raw}
-		if got := hookFailModeFor(g, ""); got != "closed" {
-			t.Errorf("EffectiveHookFailMode(%q) = %q, want closed", raw, got)
+		if got := hookFailModeFor(g, ""); got != "open" {
+			t.Errorf("EffectiveHookFailMode(%q) = %q, want open", raw, got)
 		}
-		if got := hookFailModeFor(g, "codex"); got != "closed" {
-			t.Errorf("EffectiveHookFailModeFor(codex) with global %q = %q, want closed", raw, got)
+		if got := hookFailModeFor(g, "codex"); got != "open" {
+			t.Errorf("EffectiveHookFailModeFor(codex) with global %q = %q, want open", raw, got)
 		}
 	}
 	for _, raw := range []string{"", "Closed", "opn", "open-ish"} {

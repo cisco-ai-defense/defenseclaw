@@ -1082,8 +1082,8 @@ func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
 		}
 	})
 	defer close(release)
-	if !blocked(r) {
-		t.Fatalf("MessageDisplay failure was not closed: code=%d stderr=%q", r.code, r.stderr)
+	if r.code != 0 {
+		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
 	}
 	ctx := <-startCtx
 	if ctx.Err() != nil {
@@ -1249,21 +1249,27 @@ func TestMissingToken(t *testing.T) {
 		o.HookDir = filepath.Join(o.Home, "empty") // no .token here
 	}
 
-	t.Run("default blocks without calling gateway", func(t *testing.T) {
+	t.Run("default allows without calling gateway", func(t *testing.T) {
 		rt := ok(`{"action":"allow"}`)
 		r := run(t, "claudecode", rt, noToken)
-		if !blocked(r) {
-			t.Fatalf("code = %d stdout=%q, want a block", r.code, r.stdout)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
 		}
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times, want 0", rt.requests)
 		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
 	})
 
-	t.Run("cursor default blocks", func(t *testing.T) {
+	t.Run("cursor default emits valid allow json", func(t *testing.T) {
 		r := run(t, "cursor", ok(`{"action":"allow"}`), noToken)
-		if !blocked(r) {
-			t.Fatalf("code = %d stdout=%q, want Cursor deny", r.code, r.stdout)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
 		}
 	})
 
@@ -1503,6 +1509,13 @@ func TestCopilotFailureContract(t *testing.T) {
 					if result.stdout != want {
 						t.Fatalf("managed: stdout=%q stderr=%q, want %q", result.stdout, result.stderr, want)
 					}
+				case hook == "per-user open" && (tc.name == "network" || tc.name == "missing-token" || tc.name == "unavailable-home"):
+					// Only a refused connection, a missing token and an
+					// unavailable home use the per-user open choice; an
+					// answered, timed-out, malformed or oversized call blocks.
+					if result.stdout != "" {
+						t.Fatalf("per-user open: stdout=%q stderr=%q, want the fail-open result", result.stdout, result.stderr)
+					}
 				case tc.name == "unavailable-home":
 					want := `{"permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}` + "\n"
 					if result.stdout != want {
@@ -1558,7 +1571,7 @@ func TestAntigravityFailureFallbacksUseDocumentedEventOutput(t *testing.T) {
 		closed bool
 		want   string
 	}{
-		{"PreToolUse", false, `{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}` + "\n"},
+		{"PreToolUse", false, `{"decision":"allow"}` + "\n"},
 		{"PreToolUse", true, `{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}` + "\n"},
 		{"PostToolUse", true, "{}\n"},
 		{"PreInvocation", true, "{}\n"},
@@ -1910,7 +1923,7 @@ func TestInvalidTraceparentDropped(t *testing.T) {
 
 // --- DEFENSECLAW_HOME guard ---
 
-func TestNonCursorDisabledOrMissingHomeBlocks(t *testing.T) {
+func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		home func(t *testing.T) string
@@ -1936,11 +1949,14 @@ func TestNonCursorDisabledOrMissingHomeBlocks(t *testing.T) {
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 				HTTPClient: &http.Client{Transport: rt},
 			})
-			if code == 0 && !strings.Contains(out.String(), "deny") && !strings.Contains(out.String(), "block") {
-				t.Fatalf("code = %d stdout=%q, want a block", code, out.String())
+			if code != 0 {
+				t.Fatalf("code = %d, want 0", code)
 			}
 			if rt.requests != 0 {
 				t.Fatalf("gateway called %d times, want 0", rt.requests)
+			}
+			if out.String() != "" {
+				t.Fatalf("stdout = %q, want empty for non-Cursor no-op", out.String())
 			}
 		})
 	}
@@ -2196,7 +2212,7 @@ func TestWindowsUnenrolledRefusalLeadsWithTheNextStep(t *testing.T) {
 	}
 }
 
-func TestCursorDisabledOrMissingHomeBlocks(t *testing.T) {
+func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		home func(t *testing.T) string
@@ -2219,8 +2235,11 @@ func TestCursorDisabledOrMissingHomeBlocks(t *testing.T) {
 				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"), FailMode: "open",
 				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
 			})
-			if code == 0 && !strings.Contains(out.String(), "deny") && !strings.Contains(out.String(), "block") {
-				t.Fatalf("code = %d stdout=%q, want Cursor deny", code, out.String())
+			if code != 0 {
+				t.Fatalf("code = %d, want 0", code)
+			}
+			if out.String() != cursorFallbackOutput("", false, "")+"\n" {
+				t.Fatalf("stdout = %q, want Cursor allow JSON", out.String())
 			}
 		})
 	}
@@ -3042,16 +3061,21 @@ func TestManagedNativeDecisionAcceptsExplicitAllowWithoutNativeOutput(t *testing
 }
 
 func TestUnreachable(t *testing.T) {
-	t.Run("per-user closes a gateway outage", func(t *testing.T) {
+	t.Run("default fail open", func(t *testing.T) {
 		r := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, nil)
-		if !blocked(r) {
-			t.Fatalf("code = %d stdout=%q, want a block", r.code, r.stdout)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0 (DefenseClaw outage must not brick agent)", r.code)
 		}
-		if !strings.Contains(r.stderr, "blocking claude-code tool") {
-			t.Errorf("stderr = %q, want block notice", r.stderr)
+		if !strings.Contains(r.stderr, "allowing claude-code tool") {
+			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
-		if !strings.Contains(r.stdout+r.stderr, "defenseclaw-gateway start") {
-			t.Errorf("stdout=%q stderr=%q, want the gateway restart advice", r.stdout, r.stderr)
+		// GAP-0377: Claude Code hides stderr after exit 0, so the user reads
+		// the per-user outage notice from systemMessage, as on Unix.
+		var notice map[string]string
+		if json.Unmarshal([]byte(r.stdout), &notice) != nil ||
+			!strings.Contains(notice["systemMessage"], "defenseclaw-gateway start") ||
+			!strings.Contains(notice["systemMessage"], "`defenseclaw-gateway status`") {
+			t.Errorf("stdout = %q, want a systemMessage naming defenseclaw-gateway start and status", r.stdout)
 		}
 		managed := run(t, "claudecode", &stubRT{err: errors.New("dial tcp: refused")}, func(o *Options) {
 			o.ManagedUnixSocket = "/run/defenseclaw/hook.sock"
@@ -3061,10 +3085,13 @@ func TestUnreachable(t *testing.T) {
 		}
 	})
 
-	t.Run("cursor per-user outage emits deny", func(t *testing.T) {
+	t.Run("cursor fail open emits valid allow json", func(t *testing.T) {
 		r := run(t, "cursor", &stubRT{err: errors.New("dial tcp: refused")}, nil)
-		if !blocked(r) {
-			t.Fatalf("code = %d stdout=%q, want Cursor deny", r.code, r.stdout)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
 		}
 	})
 

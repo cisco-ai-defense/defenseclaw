@@ -731,8 +731,8 @@ func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh
 			t.Fatalf("%s parse shared runtime state: %v", stage, err)
 		}
 		if runtimeState.Version != 2 ||
-			runtimeState.FailModes["claudecode"] != "closed" ||
-			runtimeState.FailModes["codex"] != "closed" {
+			runtimeState.FailModes["claudecode"] != "open" ||
+			runtimeState.FailModes["codex"] != "open" {
 			t.Fatalf("%s lost Claude runtime state: %+v", stage, runtimeState)
 		}
 		assertMixedHookContractsCurrent(t, dataDir, home)
@@ -1156,7 +1156,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
 	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	closed := assertMixedHookContractsCurrent(t, dataDir, home)
-	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "closed" {
+	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "open" {
 		t.Fatalf("mixed lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
 	}
 	codexAfter, err := os.ReadFile(codexPath)
@@ -1218,7 +1218,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
 	assertConnectorReconcileStderr(t, "codex", stderr)
 	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
-	if reverse.Connectors["claudecode"].HookFailMode != "closed" || reverse.Connectors["codex"].HookFailMode != "closed" {
+	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "closed" {
 		t.Fatalf("reverse mixed modes are wrong: %+v", reverse.Connectors)
 	}
 	for _, mode := range []string{"closed", "open", "closed", "open"} {

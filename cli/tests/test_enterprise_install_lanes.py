@@ -66,6 +66,41 @@ def test_hook_process_warning_keeps_install_lanes_honest(tmp_path: Path) -> None
         assert "hook_process_fail_open" in text and "security_complete" in text, page
 
 
+# Secure Client results carry no hook_process_fail_open warning (the warning
+# is standalone-only), so its pages may still expect security_complete true.
+_SECURE_CLIENT_PAGES = ("install/secure-client.mdx", "install/reference/secure-client.mdx")
+_WARNED_CONNECTOR_KEYS = re.compile(r'"(antigravity|claudecode|codex|copilot|devin|hermes|kiro)"\s*:')
+
+
+def test_docs_never_promise_security_complete_with_hook_residual() -> None:
+    """No status example or verification step expects a plain security_complete true.
+
+    Standalone status, verify and ensure report security_complete false and
+    hook_process_fail_open whenever Codex, Claude Code, Copilot, Devin, Hermes,
+    Kiro or Antigravity is enabled. An install guide, operations sample,
+    troubleshooting check or agent instruction that expects true would make
+    an operator or agent report a healthy install as failed.
+    """
+    problems: list[str] = []
+    for page in sorted((ROOT / "docs-site/content/docs").rglob("*.mdx")):
+        rel = page.relative_to(ROOT / "docs-site/content/docs").as_posix()
+        if rel.endswith(_SECURE_CLIENT_PAGES):
+            continue
+        text = page.read_text(encoding="utf-8")
+        for block in re.findall(r"```json[^\n]*\n(.*?)```", text, flags=re.S):
+            if '"security_complete": true' in block and _WARNED_CONNECTOR_KEYS.search(block):
+                problems.append(f"{rel}: JSON sample with a warned connector reports security_complete true")
+        for number, line in enumerate(text.splitlines(), 1):
+            expects_true = (
+                re.match(r"\|\s*`security_complete`\s*\|\s*`true`", line)
+                or "`security_complete` is `true`" in line
+                or ("Expected:" in line and "security_complete" in line and "`true`" in line)
+            )
+            if expects_true and "hook_process_fail_open" not in line:
+                problems.append(f"{rel}:{number}: expects security_complete true without hook_process_fail_open")
+    assert not problems, "\n".join(problems)
+
+
 def _result(**overrides: Any) -> dict[str, Any]:
     document: dict[str, Any] = {
         "schema_version": 2,

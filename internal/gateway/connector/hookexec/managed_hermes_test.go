@@ -132,6 +132,10 @@ func TestManagedHermesNativeRuntimeFailureNamesTheCause(t *testing.T) {
 // with none set blocks (TestPerUserHermesToolCallFailsClosedUnlessOpen).
 func TestHermesNeutralResultOutsideManagedToolCalls(t *testing.T) {
 	for name, mutate := range map[string]func(*Options){
+		"per-user open": func(o *Options) {
+			o.FailMode = "open"
+			o.StrictAvailability = false
+		},
 		"secure client": func(o *Options) {
 			o.ManagedEnterprise = true
 			o.SecureClient = true

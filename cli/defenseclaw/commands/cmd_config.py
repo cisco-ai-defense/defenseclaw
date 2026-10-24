@@ -803,9 +803,9 @@ _RECONCILE_CONNECTORS = frozenset(
 def _changed_hook_fail_modes(before: object, after: object) -> list[tuple[str, str]]:
     """Guarded connectors whose runtime or saved fail mode changed.
 
-    A legacy per-user open remains closed at runtime in 1.0.4. Changing that
-    saved value still has to refresh an older open script while the gateway is
-    stopped; comparing only the resolved modes would miss that repair.
+    A connector override and the global value can change without changing
+    the resolved mode; comparing the saved values as well keeps a stopped
+    gateway's rendered scripts in step with the config.
     """
     try:
         guardrail = after.guardrail

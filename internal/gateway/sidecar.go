@@ -2728,8 +2728,8 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 }
 
 // refreshHookGuardPolicies re-renders hook-only connectors when the published
-// runtime policy changes. A saved per-user open value leaves the effective
-// fail mode closed, so mode and HILT changes must be compared separately.
+// runtime policy changes. The saved fail mode can change without changing
+// the effective one, so it, the guardrail mode and HILT are compared too.
 // It runs off the reload path: Setup rewrites agent config files.
 func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
 	if s == nil || oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || !newCfg.Guardrail.HookSelfHeal ||

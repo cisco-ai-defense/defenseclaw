@@ -439,17 +439,6 @@ def test_registered_connector_bridge_requires_exact_published_bytes(
 
     assert first_party_self_reason(target) == "installed DefenseClaw connector bridge"
 
-    mode_line = (
-        b'const DC_FAIL_MODE = "closed";'
-        if connector == "opencode"
-        else b'const DC_FAIL_MODE: string = "closed"'
-    )
-    assert mode_line in published
-    opened = published.replace(mode_line, mode_line.replace(b'"closed"', b'"open"'), 1)
-    _write_bridge_publication(data_dir, target, connector=connector, payload=opened)
-    assert first_party_self_reason(target) is None
-    _write_bridge_publication(data_dir, target, connector=connector, payload=published)
-
     # Product/API marker strings at the same expected path are insufficient
     # after a third party replaces the setup-published bytes.
     third_party = (

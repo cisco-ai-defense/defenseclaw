@@ -272,7 +272,10 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(gc.connectors["codex"].mode, "observe")
         self.assertEqual(gc.connectors["codex"].hook_fail_mode, "open")
         self.assertEqual(gc.connectors["cursor"].mode, "action")
-        self.assertEqual(gc.connectors["cursor"].hook_fail_mode, "closed")
+        # Setup no longer writes a Cursor fail mode of its own (it would
+        # replace the user's outage choice); action mode resolves closed.
+        self.assertEqual(gc.connectors["cursor"].hook_fail_mode, "")
+        self.assertEqual(gc.effective_hook_fail_mode("cursor"), "closed")
         self.assertFalse(gc.connectors["cursor"].hilt.enabled)
         self.assertIn("cursor hook failures=closed (failClosed=true)", result.output)
 

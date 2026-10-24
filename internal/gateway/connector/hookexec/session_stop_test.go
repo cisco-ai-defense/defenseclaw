@@ -332,11 +332,11 @@ func TestPerUserFailClosedStopEventsAllowWhileOtherEventsStayBlocked(t *testing.
 	}
 }
 
-// A Stop event cannot block the tool that already ran. The per-user hook
-// explains the exception while later prompts and tool calls stay closed.
-func TestPerUserStopKeepsItsNonblockingException(t *testing.T) {
+// The fail-open per-user profile is unchanged: a stop event is allowed as
+// before, with no stop-exception line.
+func TestPerUserFailOpenStopIsUnchanged(t *testing.T) {
 	r := run(t, "codex", &stubRT{err: errors.New("connection refused")}, func(o *Options) { o.Event = "Stop" })
-	if r.code != 0 || r.stdout != "" || !strings.Contains(r.stderr, "is not blocking") {
+	if r.code != 0 || r.stdout != "" || strings.Contains(r.stderr, "is not blocking") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", r.code, r.stdout, r.stderr)
 	}
 }

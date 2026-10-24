@@ -7007,9 +7007,8 @@ func TestZeptoClaw_Setup_UsesHookFailMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read inspect-tool.sh: %v", err)
 	}
-	if !strings.Contains(string(body), `FAIL_MODE="closed"`) ||
-		strings.Contains(string(body), `FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode`) {
-		t.Fatalf("per-user inspect-tool.sh did not pin closed:\n%s", string(body))
+	if !strings.Contains(string(body), `FAIL_MODE="$(defenseclaw_shared_runtime_fail_mode "$HOOK_DIR" "$RUNTIME_CONNECTOR")"`) {
+		t.Fatalf("inspect-tool.sh did not use the shared runtime fail mode:\n%s", string(body))
 	}
 	runtimeBody, err := os.ReadFile(filepath.Join(dir, "hooks", ".hookcfg.zeptoclaw"))
 	if err != nil {
@@ -9994,9 +9993,14 @@ func TestHookScript_401WithoutOwnGateway_NamesAnotherListener(t *testing.T) {
 	}
 }
 
+// TestHookScript_EnvFailModeOnlyTightens covers GAP-0315: an inherited
+// DEFENSECLAW_FAIL_MODE=open cannot reopen a per-user hook installed closed,
+// and DEFENSECLAW_FAIL_MODE=closed still closes one installed open. Only the
+// persisted mode (guardrail fail-mode) opens a hook.
 // TestHookScript_EnvFailModeIsNotRead: the installed mode is the hook's fail
-// mode. DEFENSECLAW_FAIL_MODE in the agent's environment cannot reopen a
-// closed hook. A saved per-user open is rendered closed too.
+// mode. DEFENSECLAW_FAIL_MODE in the agent's environment neither reopens a
+// closed hook nor closes an open one (1.0.4 lead directive), so status, which
+// reads the render, reports what runs.
 func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -10016,10 +10020,10 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 		}{
 			{"closed", "open", true},
 			{"closed", "OPEN", true},
-			{"open", "closed", true},
-			{"open", "Closed", true},
-			{"open", " CLOSED ", true},
-			{"open", "", true},
+			{"open", "closed", false},
+			{"open", "Closed", false},
+			{"open", " CLOSED ", false},
+			{"open", "", false},
 			{"closed", "", true},
 		} {
 			t.Run(agent.conn.Name()+"/"+tc.installed+"/env="+tc.env, func(t *testing.T) {
@@ -10044,12 +10048,13 @@ func TestHookScript_EnvFailModeIsNotRead(t *testing.T) {
 	}
 }
 
-// TestSetupOpts_HookFailMode_RespectsOperatorChoice validates that a
-// per-user render closes a legacy open choice.
+// TestSetupOpts_HookFailMode_RespectsOperatorChoice validates the
+// resolution rules in WriteHookScriptsForConnectorObjectWithOpts.
 //
 // Contract:
 //   - Explicit "closed" stays closed when the connector supports it.
-//   - Empty, explicit open and invalid values all render closed.
+//   - Empty HookFailMode uses the connector default (Cursor open; otherwise
+//     closed), while invalid explicit values normalize to "closed".
 func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -10067,7 +10072,7 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
-			wantFailMode: "closed",
+			wantFailMode: "open",
 		},
 		{
 			name:         "codex_operator_closed",
@@ -10081,7 +10086,7 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "open"},
 			connector:    &ClaudeCodeConnector{},
 			hookFile:     "claude-code-hook.sh",
-			wantFailMode: "closed",
+			wantFailMode: "open",
 		},
 		{
 			name:         "operator_closed_with_codex_enforcement_stays_closed",
@@ -10092,8 +10097,9 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 		},
 		{
 			// Cursor's observe verdicts are nonblocking, but its host
-			// registration closes an unanswered hook process. Its per-user
-			// running hook closes gateway outages too.
+			// registration closes an unanswered hook process.
+			// but no operator chose an open for its outages: the hook blocks
+			// while the gateway is down (OutageHookFailMode).
 			name:         "cursor_empty_opts_close_outages",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
 			connector:    NewCursorConnector(),
@@ -10108,11 +10114,11 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			wantFailMode: "closed",
 		},
 		{
-			name:         "cursor_observe_closes_an_explicit_open",
+			name:         "cursor_observe_keeps_an_explicit_open",
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"},
 			connector:    NewCursorConnector(),
 			hookFile:     "cursor-hook.sh",
-			wantFailMode: "closed",
+			wantFailMode: "open",
 		},
 		{
 			name:         "cursor_action_closes_an_explicit_open",

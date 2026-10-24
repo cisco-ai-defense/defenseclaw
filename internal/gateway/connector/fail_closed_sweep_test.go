@@ -184,12 +184,12 @@ func TestInspectShellNoParserExplicitOpenNotice(t *testing.T) {
 			cmd.Env = append(os.Environ(), "PATH="+path, "DEFENSECLAW_HOME="+hookHome, "DEFENSECLAW_FAIL_MODE=open")
 			cmd.Stdin = strings.NewReader(`{"tool":"Bash","content":"marker"}`)
 			output, err := cmd.CombinedOutput()
-			if !hookCallBlocked(err, string(output)) || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") {
-				t.Fatalf("missing parser was allowed: err=%v output=%q", err, output)
+			if err != nil || !strings.Contains(string(output), "DefenseClaw needs jq or python3 to check this call") || !strings.Contains(string(output), "allowing") {
+				t.Fatalf("open notice missing: err=%v output=%q", err, output)
 			}
 			failure, err := os.ReadFile(filepath.Join(hookHome, "logs", "hook-failures.jsonl"))
-			if err != nil || !strings.Contains(string(failure), `"fail_mode":"closed"`) {
-				t.Fatalf("missing closed failure record: %v %q", err, failure)
+			if err != nil || !strings.Contains(string(failure), `"fail_mode":"open"`) {
+				t.Fatalf("missing open failure record: %v %q", err, failure)
 			}
 			if calls.Load() != 0 {
 				t.Fatalf("hook sent %d requests without a verdict parser", calls.Load())

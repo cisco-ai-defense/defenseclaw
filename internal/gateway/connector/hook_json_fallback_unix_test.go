@@ -126,28 +126,49 @@ func TestPerUserShellHTTP200FailuresBlockEveryConnector(t *testing.T) {
 	}
 }
 
-// A saved open choice from an older per-user install cannot allow a tool
-// call when its gateway is stopped. Only an administrator-managed hook may
-// use an outage-open choice outside Secure Client.
-func TestPerUserOpenShellBlocksGatewayConnectionOutage(t *testing.T) {
+// A per-user hook_fail_mode open is the user's outage choice (owner rule,
+// BALANCED-DEFAULTS 2026-10-23): a gateway that refuses the connection lets
+// the shell hook's tool call run with a fail-open record. A gateway that
+// answered, here with HTTP 503 or a 400, is no outage and blocks in the same
+// open render (the HTTP 200 variants are in
+// TestPerUserShellHTTP200FailuresBlockEveryConnector).
+func TestPerUserOpenShellAllowsOnlyAConfirmedOutage(t *testing.T) {
+	answered := map[string]*httptest.Server{}
+	for _, status := range []int{http.StatusServiceUnavailable, http.StatusBadRequest} {
+		status := status
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":"x"}`))
+		}))
+		t.Cleanup(server.Close)
+		answered[strconv.Itoa(status)] = server
+	}
+	run := func(t *testing.T, conn Connector, addr string) (string, error) {
+		invoke := hookArgvConnectorCase(t, conn.Name())
+		home := t.TempDir()
+		hooks := filepath.Join(home, "hooks")
+		if err := WriteHookScriptsForConnectorObjectWithOpts(hooks, SetupOpts{
+			DataDir: home, APIAddr: addr, APIToken: "test-token", HookFailMode: "open", ConfiguredHookFailMode: "open",
+		}, conn); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command("bash", append([]string{filepath.Join(hooks, invoke.script)}, invoke.args...)...)
+		cmd.Stdin = strings.NewReader(invoke.stdin)
+		cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+		out, err := cmd.CombinedOutput()
+		return string(out), err
+	}
 	for _, conn := range hookArgvShellConnectors {
 		conn := conn
 		t.Run(conn.Name(), func(t *testing.T) {
 			t.Parallel()
-			invoke := hookArgvConnectorCase(t, conn.Name())
-			home := t.TempDir()
-			hooks := filepath.Join(home, "hooks")
-			if err := WriteHookScriptsForConnectorObjectWithOpts(hooks, SetupOpts{
-				DataDir: home, APIAddr: "127.0.0.1:1", APIToken: "test-token", HookFailMode: "open",
-			}, conn); err != nil {
-				t.Fatal(err)
+			if out, err := run(t, conn, "127.0.0.1:1"); hookCallBlocked(err, out) || !strings.Contains(out, "fail-open") {
+				t.Fatalf("%s blocked a refused connection in open mode: %v %s", conn.Name(), err, out)
 			}
-			cmd := exec.Command("bash", append([]string{filepath.Join(hooks, invoke.script)}, invoke.args...)...)
-			cmd.Stdin = strings.NewReader(invoke.stdin)
-			cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
-			out, err := cmd.CombinedOutput()
-			if !hookCallBlocked(err, string(out)) {
-				t.Fatalf("%s allowed a per-user gateway outage in open mode: %v %s", conn.Name(), err, out)
+			for status, server := range answered {
+				if out, err := run(t, conn, strings.TrimPrefix(server.URL, "http://")); !hookCallBlocked(err, out) {
+					t.Fatalf("%s allowed an HTTP %s answer in open mode: %v %s", conn.Name(), status, err, out)
+				}
 			}
 		})
 	}

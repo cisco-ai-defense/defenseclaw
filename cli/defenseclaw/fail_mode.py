@@ -84,8 +84,8 @@ def upstream_fail_open(cfg: Any, connector: str) -> bool:
     open, as its hook render does (CapableHookFailMode). Per-user hooks (the
     Linux and macOS shell hooks and the Windows native hook) and a managed
     deployment outside Secure Client (Config.managed_outside_secure_client)
-    block a call they cannot check through the agent's native deny. Per-user
-    hooks always run closed; a managed administrator may choose outage-open.
+    block a call they cannot check through the agent's native deny, so they
+    follow the configured fail mode; an unset one is closed.
     """
     name = normalize(connector)
     if name not in _UPSTREAM_FAIL_OPEN_CONNECTORS:
@@ -180,10 +180,10 @@ class ConnectorFailModeState:
     def note(self) -> str:
         """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
 
-        A per-user hook runs closed even if an older config saved open.
-        Managed hooks follow the administrator's configured outage mode.
-        A closed Copilot CLI, Antigravity or Hermes hook names the vendor
-        limit it keeps.
+        Per-user and managed hooks follow the configured outage mode, so the
+        configured and desired modes differ only when a policy overrides the
+        saved value. A closed Copilot CLI, Antigravity or Hermes hook names
+        the vendor limit it keeps.
         """
 
         notes = []

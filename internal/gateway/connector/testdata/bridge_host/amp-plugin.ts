@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 
 const DC_API_ADDR = "{{.APIAddr}}"
 const DC_TOKEN_FILE = "{{.TokenFileJS}}"
-const DC_FAIL_MODE: string = "closed" // managed outage choice or Secure Client
+const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
 const DC_RESPONSE_FAIL_MODE: string = "closed"
 const DC_MANAGED_HOOK = false
 // DEFENSECLAW_STRICT_AVAILABILITY closes a gateway outage (GAP-0035), as it
@@ -667,6 +667,12 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			if (DC_TRANSPORT_FAIL_MODE === "closed") {
 				if ((DC_HOOK_SOCKET || DC_FOREIGN_GUARD) && gatewayStopped(error)) return { action: "block", reason: DC_GATEWAY_STOPPED_TEXT }
 				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
+			}
+			// A per-user outage-open choice lets through only a gateway that
+			// refused the connection (it is not running). A timeout, a dropped
+			// or unreadable answer and every other failure block.
+			if (!gatewayStopped(error)) {
+				return { action: "block", reason: "DefenseClaw hook failed closed (unverified gateway outage)" }
 			}
 			return { action: "allow" }
 		} finally {

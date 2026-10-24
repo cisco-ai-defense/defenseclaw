@@ -98,9 +98,12 @@ func TestRefreshFailModesClosesA08xSidecarOpenNobodySet(t *testing.T) {
 	}
 }
 
-// An older per-user open in a 0.8.x config outside the data directory
-// (DEFENSECLAW_CONFIG) is closed during the upgrade, including in the sidecar.
-func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
+// An operator open in a 0.8.x config outside the data directory
+// (DEFENSECLAW_CONFIG): the new hook never reads that path, so without the
+// refresh it blocks during the upgrade outage. The refresh carries the open
+// into the sidecar with its config source, and the new hook follows it with
+// no DEFENSECLAW_CONFIG in its environment.
+func TestRefreshFailModesCarriesAnExternalConfigsOpen(t *testing.T) {
 	home := t.TempDir()
 	isolateHookEnvForTest(t, home)
 	external := filepath.Join(t.TempDir(), "defenseclaw.yaml")
@@ -117,24 +120,22 @@ func TestRefreshFailModesClosesAnExternalConfigsOpen(t *testing.T) {
 		t.Fatalf("refresh %+v", result)
 	}
 	t.Setenv("DEFENSECLAW_CONFIG", "")
-	if got := buildHookOptions("codex", "PreToolUse", "", "").FailMode; got != "closed" {
-		t.Fatalf("the new hook fails %q, want closed", got)
-	}
-	if got := oldHookFailMode(t, home, "codex"); got != "closed" {
-		t.Fatalf("the old hook fails %q, want closed", got)
+	if got := buildHookOptions("codex", "PreToolUse", "", "").FailMode; got != "open" {
+		t.Fatalf("the new hook fails %q, want the operator's open", got)
 	}
 }
 
 // A loaded config: an earlier render recorded Copilot's unset mode as open
 // (lowered because its vendor hook surface cannot fail closed) without a
-// source. The refresh writes the closed outage mode for every per-user hook,
-// including one whose older config chose open.
+// source. No operator chose it, so the refresh writes the closed outage mode
+// and a gateway-down native call is blocked. An explicit connector open stays
+// open.
 func TestRefreshFailModesDoesNotTreatACapabilityOpenAsTheConfigs(t *testing.T) {
 	for _, test := range []struct {
 		name, config, want string
 	}{
 		{name: "unset", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n", want: "closed"},
-		{name: "older operator open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "closed"},
+		{name: "operator open", config: "config_version: 9\nobservability: {}\nguardrail:\n  mode: observe\n  connectors:\n    copilot:\n      hook_fail_mode: open\n", want: "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -160,8 +161,11 @@ func TestRefreshFailModesDoesNotTreatACapabilityOpenAsTheConfigs(t *testing.T) {
 	}
 }
 
-// A previous Cursor render could record open in observe mode. The refresh
-// closes it for every per-user upgrade, loaded or pre-migration document.
+// Cursor in observe: its resolved mode (open) follows the guardrail mode, so
+// a 1.0.x refresh that wrote it (with its config source) let the old and the
+// new hooks allow calls while the gateway was down. The refresh writes open
+// only for an explicit open, from a loaded config or from a 0.8.x document
+// alike, and never under action mode.
 func TestRefreshFailModesClosesACursorOpenNobodyChose(t *testing.T) {
 	const v9 = "config_version: 9\nobservability: {}\nguardrail:\n"
 	const v7 = "config_version: 7\nguardrail:\n"
@@ -169,10 +173,10 @@ func TestRefreshFailModesClosesACursorOpenNobodyChose(t *testing.T) {
 		name, config, read, want string
 	}{
 		{"1.0.x observe, unset", v9 + "  mode: observe\n", "loaded", "closed"},
-		{"1.0.x observe, cursor open", v9 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "loaded", "closed"},
+		{"1.0.x observe, cursor open", v9 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "loaded", "open"},
 		{"1.0.x action, cursor open", v9 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "loaded", "closed"},
 		{"0.8.x observe, unset", v7 + "  mode: observe\n", "document", "closed"},
-		{"0.8.x observe, cursor open", v7 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "closed"},
+		{"0.8.x observe, cursor open", v7 + "  mode: observe\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "open"},
 		{"0.8.x action, cursor open", v7 + "  mode: action\n  connectors:\n    cursor:\n      hook_fail_mode: open\n", "document", "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -214,20 +218,24 @@ func TestRefreshFailModesLeavesAManagedInstallAlone(t *testing.T) {
 	}
 }
 
-// An older automatic protection overlay may hold open in a 0.8.x document.
-// The refresh closes every per-user sidecar during the upgrade.
-func TestRefreshFailModesClosesA08xAutomaticProtectionOpen(t *testing.T) {
+// A 0.8.x config with automatic protection on: its overlay's open, or a
+// connector set up by hand with its own open, is the mode the 0.8.x gateway
+// rendered for the operator. The refresh keeps it, and an open nobody chose
+// is closed. Before r104 W3 G3-upg round 3 the document read ignored the
+// whole config whenever automatic protection was on, so the refresh closed
+// those opens: a false block while the gateway was down for the upgrade.
+func TestRefreshFailModesKeepsA08xAutomaticProtectionOpen(t *testing.T) {
 	const ap = "application_protection:\n  enabled: true\n"
 	for _, test := range []struct {
 		name, doc string
 		want      map[string]string
 	}{
 		{"overlay open", "config_version: 7\nguardrail:\n  mode: observe\n" + ap + "  guardrail:\n    hook_fail_mode: open\n",
-			map[string]string{"codex": "closed", "claudecode": "closed"}},
+			map[string]string{"codex": "open", "claudecode": "open"}},
 		{"connector overlay open", "config_version: 7\nguardrail:\n  mode: observe\n" + ap + "  connectors:\n    claudecode:\n      guardrail:\n        hook_fail_mode: open\n",
-			map[string]string{"codex": "closed", "claudecode": "closed"}},
+			map[string]string{"codex": "closed", "claudecode": "open"}},
 		{"set up by hand", "config_version: 7\nguardrail:\n  mode: observe\n  connectors:\n    codex:\n      hook_fail_mode: open\n" + ap + "  guardrail:\n    hook_fail_mode: closed\n",
-			map[string]string{"codex": "closed", "claudecode": "closed"}},
+			map[string]string{"codex": "open", "claudecode": "closed"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -345,8 +353,8 @@ func TestRefreshFailModesClosedClosesEveryHookWhateverTheConfigChooses(t *testin
 			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"codex":"open","claudecode":"open"}}`)
 			refreshFailModesClosed = false
 			runRefreshFailModesForTest(t, home)
-			if got := oldHookFailMode(t, home, "codex"); got != "closed" {
-				t.Fatalf("per-user config open stayed active, got %q", got)
+			if got := oldHookFailMode(t, home, "codex"); got != "open" {
+				t.Fatalf("precondition: without --closed the config's open stays, got %q", got)
 			}
 			refreshFailModesClosed = true
 			if result := runRefreshFailModesForTest(t, home); !reflect.DeepEqual(result.Refreshed, []string{"claudecode", "codex"}) {
