@@ -82,8 +82,9 @@ func windowsManagedUserNativeOTLPPaths(connectorName, home, dataDir string) []st
 
 // removeWindowsManagedUserNativeOTLPAsTarget removes that exporter and its
 // credential. The caller runs it as the target user with the account's home
-// bound (connector.WithUserHomeDir) and hardens the data directory afterwards:
-// the atomic edit protects its state directory there with the per-user DACL.
+// bound (connector.WithUserHomeDir). The atomic edit protects its private
+// transaction state beside the user's agent config, where that token owns the
+// directory DACL. It leaves the managed runtime data directory untouched.
 //
 // The cleanup is best-effort (GAP-1103): an account with nothing to take back
 // opens no transaction, and a removal that fails is reported, never an install

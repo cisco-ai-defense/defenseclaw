@@ -578,6 +578,9 @@ jobs:
       - name: Standalone runtime environment ACL repair
         if: ${{ !cancelled() }}
         run: ./packaging/windows/tests/enterprise-standalone-runtime-env-acl-smoke.ps1
+      - name: Standalone native OTLP user-file rollback
+        if: ${{ !cancelled() }}
+        run: ./packaging/windows/tests/enterprise-standalone-native-otlp-rollback-smoke.ps1
       - name: Native Setup bootstrap delegation and offline contract
         if: ${{ !cancelled() }}
         run: uv run --frozen python -m pytest cli/tests/test_install_ps1.py -q

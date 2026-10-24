@@ -20,6 +20,17 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 	if bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf}) {
 		bom, raw = raw[:3], raw[3:]
 	}
+	// A hook refresh also passes through this editor. Keep an operator's OTel
+	// spelling, comments, and table layout when cleanup changed no OTel value.
+	// A predecessor's marked exporter changes the desired table, so it still
+	// takes the normal removal path below.
+	current := map[string]interface{}{}
+	if err := parseCodexTOML(raw, &current); err != nil {
+		return nil, fmt.Errorf("parse Codex config: %w", err)
+	}
+	currentOtel, hasCurrentOtel := current["otel"]
+	desiredOtel, hasDesiredOtel := desired["otel"]
+	keepOtelBytes := hasCurrentOtel == hasDesiredOtel && codexValueMatches(currentOtel, desiredOtel)
 	newline := "\n"
 	if bytes.Contains(raw, []byte("\r\n")) {
 		newline = "\r\n"
@@ -35,6 +46,9 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 	}
 	sections := map[string]interface{}{}
 	for _, key := range []string{"hooks", "otel"} {
+		if key == "otel" && keepOtelBytes {
+			continue
+		}
 		if value, ok := desired[key]; ok {
 			sections[key] = value
 		}
@@ -81,7 +95,7 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 				section = sectionPath[0]
 			}
 		}
-		if section == "hooks" || section == "otel" {
+		if section == "hooks" || section == "otel" && !keepOtelBytes {
 			continue
 		}
 		var key []string
@@ -89,7 +103,7 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 			key = tomlKeyPath(line)
 		}
 		if section == "" && len(key) > 0 {
-			owned := key[0] == "hooks" || key[0] == "otel"
+			owned := key[0] == "hooks" || key[0] == "otel" && !keepOtelBytes
 			if len(key) == 1 && (key[0] == "notify" || key[0] == "openai_base_url" && desired[key[0]] == nil) {
 				owned = true
 				if key[0] == "notify" {
