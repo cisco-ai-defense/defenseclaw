@@ -7,7 +7,6 @@ package cli
 
 import (
 	"bufio"
-	"context"
 	"errors"
 	"io"
 	"net/http"
