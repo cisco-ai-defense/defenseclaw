@@ -123,27 +123,33 @@ _defenseclaw_on_import("hermes_cli.plugins", _defenseclaw_patch_plugins)
 // pinned Hermes from running an agent DefenseClaw's hooks do not guard.
 const hermesUnhookedAgentModuleName = "defenseclaw_hermes_unhooked"
 
-// hermesUnhookedAgentModule refuses every agent the pinned Hermes builds in
-// tui_gateway (GAP-1036). Hermes 0.19.0 to 0.21.0 build the agent of the TUI
-// (hermes --tui, a separate tui_gateway process), the dashboard chat and the
-// serve backend with tui_gateway.server._make_agent, which does not register
-// the config.yaml shell hooks (Hermes 0.21.1 does,
+// hermesUnhookedAgentModule refuses the TUI of the pinned Hermes and every
+// agent it builds in tui_gateway (GAP-1036). Hermes 0.19.0 to 0.21.0 build
+// the agent of the TUI (hermes --tui, a separate tui_gateway process), the
+// dashboard chat and the serve backend with tui_gateway.server._make_agent,
+// which does not register the config.yaml shell hooks (Hermes 0.21.1 does,
 // NousResearch/hermes-agent 3094cde513), so a terminal call there ran with
-// no pre_tool_call. The launcher refuses --tui with a message, and the
-// managed layer pins HERMES_TUI=0 and display.interface: cli over the
-// environment, the .env files and the user configs, so Hermes resolves
-// every other start to its hooked classic interface (whatever the TTY);
-// this shim is the backstop for every other way in: _make_agent is
-// replaced, whatever the original does, by one that raises, so no such
-// agent runs a tool. Remove it, the launcher's --tui refusal and the
-// managed TUI pins when the image pins Hermes 0.21.1 or later
-// (TestHermesImageRefusesTheUnhookedTUIOfItsPin).
-const hermesUnhookedAgentModule = `"""DefenseClaw: refuse the agents the pinned Hermes builds without its hooks.
+// no pre_tool_call. Every start Hermes resolves to its TUI (after its own
+// --cli, --tui, HERMES_TUI and display.interface precedence) runs
+// hermes_cli.main._launch_tui, which the shim replaces by a refusal with a
+// message: the sandbox refuses exactly what Hermes would run as its TUI and
+// nothing it runs as its classic interface (hermes --cli --tui, --tui
+// --version, --tui cron list; 1.0.4 review), so the launcher reads no
+// argument for it. The managed layer pins HERMES_TUI=0 and
+// display.interface: cli over the environment, the .env files and the user
+// configs, so a setting never selects the TUI; _make_agent, replaced by one
+// that raises, is the backstop for every other way in (dashboard chat, the
+// serve backend, a tui_gateway started by hand), so no such agent runs a
+// tool. Remove the shim and the managed TUI pins when the image pins Hermes
+// 0.21.1 or later (TestHermesImageRefusesTheUnhookedTUIOfItsPin).
+const hermesUnhookedAgentModule = `"""DefenseClaw: refuse what the pinned Hermes runs without its hooks.
 
-This Hermes builds the agent of its TUI, dashboard chat and serve backend
-(tui_gateway.server._make_agent) without the shell hooks DefenseClaw
-registers, so DefenseClaw would neither check nor record its tool calls.
+This Hermes runs its TUI (hermes_cli.main._launch_tui) and builds the agent of
+its TUI, dashboard chat and serve backend (tui_gateway.server._make_agent)
+without the shell hooks DefenseClaw registers, so DefenseClaw would neither
+check nor record their tool calls.
 """
+import os as _os
 ` + pyOnImport + `
 _MESSAGE = (
     "DefenseClaw: this Hermes runs the agent of its TUI, dashboard and serve "
@@ -151,16 +157,35 @@ _MESSAGE = (
     "Hermes with its classic interface (no --tui, display.interface: cli)"
 )
 
+_TUI_REFUSAL = (
+    "defenseclaw: refusing to start Hermes: this Hermes runs its TUI without "
+    "DefenseClaw's hooks. Start Hermes without --tui, or add --cli: the classic "
+    "interface runs the hooks.\n"
+)
+
 
 def _defenseclaw_refuse_agent(*args, **kwargs):
     raise RuntimeError(_MESSAGE)
+
+
+def _defenseclaw_refuse_tui(*args, **kwargs):
+    try:
+        _os.write(2, _TUI_REFUSAL.encode())
+    except OSError:
+        pass
+    raise SystemExit(2)
 
 
 def _defenseclaw_patch_server(server):
     server._make_agent = _defenseclaw_refuse_agent
 
 
+def _defenseclaw_patch_main(main):
+    main._launch_tui = _defenseclaw_refuse_tui
+
+
 _defenseclaw_on_import("tui_gateway.server", _defenseclaw_patch_server)
+_defenseclaw_on_import("hermes_cli.main", _defenseclaw_patch_main)
 `
 
 // hermesSuspendModuleName is the root-owned module the Hermes tool
@@ -285,9 +310,9 @@ var Hermes = register(&Spec{
 	},
 	preseedRefresh: []string{
 		"refuse --safe-mode and every prefix Hermes' argument parser resolves to it (--sa and longer): Hermes skips every shell hook in safe mode",
-		"refuse --tui and its prefix --tu, unless --cli or --cl (which Hermes lets win) comes before a --: the pinned Hermes builds the agent of its TUI without the shell hooks (GAP-1036). The managed layer pins HERMES_TUI=0 and display.interface: cli, which Hermes applies over the environment, every .env and every config.yaml, so nothing else selects the TUI; a root-owned shim refuses every agent Hermes builds in tui_gateway (the TUI, dashboard chat and serve backend) as the backstop",
-		"pin HOME and HERMES_HOME to the image home, and drop the variables that move the managed scope, the Hermes home or the code Hermes runs (HERMES_MANAGED_DIR, HERMES_PYTHON_SRC_ROOT, HERMES_LAZY_INSTALL_TARGET, the TUI's interpreter and directories, every PYTHON* variable) or switch the hooks off (HERMES_SAFE_MODE, HERMES_ENABLE_PROJECT_PLUGINS, and PYTEST_CURRENT_TEST, Hermes' test-suite switch that makes it ignore /etc/hermes)",
-		"refuse to start while a .env or .op.env of the Hermes home or one of its profiles names any of them, or for PYTHON*, LD_*, TIRITH_* and PYTEST_CURRENT_TEST assigns one as python-dotenv reads it (Hermes loads ~/.hermes/.env over the process environment at start)",
+		"the pinned Hermes runs its TUI without the shell hooks (GAP-1036): a root-owned shim refuses, with a message, the TUI Hermes itself resolves a start to (hermes_cli.main._launch_tui, after its own --cli/--tui/HERMES_TUI/display.interface precedence) and every agent it builds in tui_gateway (dashboard chat, serve backend); a start Hermes runs as its classic interface is never refused. The managed layer pins HERMES_TUI=0 and display.interface: cli over the environment, every .env and every config.yaml, so no setting selects the TUI",
+		"pin HOME and HERMES_HOME to the image home and HERMES_MANAGED_DIR to /etc/hermes (Hermes then reads the managed layer whatever else the environment holds), and drop the variables that move the Hermes home or the code Hermes runs (HERMES_PYTHON_SRC_ROOT, HERMES_LAZY_INSTALL_TARGET, the TUI's interpreter and directories, every PYTHON* variable) or switch the hooks off (HERMES_SAFE_MODE, HERMES_ENABLE_PROJECT_PLUGINS)",
+		"refuse to start while a .env or .op.env of the Hermes home or one of its profiles names any of them or HERMES_MANAGED_DIR, or for PYTHON*, LD_* and TIRITH_* assigns one as python-dotenv reads it (Hermes loads ~/.hermes/.env over the process environment at start)",
 		"refuse to start while the Hermes home or a profile holds Python code under plugins/ (model-provider plugins are imported whatever plugins.enabled says; memory and cron providers load when the user config names them)",
 		"refuse to start while a user config.yaml has a secrets section, as Hermes' YAML loader reads it, or is a file the loader cannot parse (its secret sources set environment variables before the managed .env applies)",
 		"export HERMES_ACCEPT_HOOKS=1 so the managed hooks register without the first-use consent prompt (the managed layer pins hooks_auto_accept as well)",
@@ -338,14 +363,14 @@ var hermesEnvFileNames = []string{
 
 // hermesEnvFileGenericNames are the other variables the files may not set
 // (Python regular expressions, matched where a key starts): the Tirith
-// scanner's, the interpreter's, the dynamic loader's and PYTEST_CURRENT_TEST,
-// Hermes' test-suite switch: while it is set, whatever its value, Hermes
-// ignores /etc/hermes (managed_scope._under_pytest), so neither the hooks nor
-// any managed pin apply (GAP-1122). Hermes does not split glued pairs for
-// them, so only a real assignment sets one: hermesEnvAssignmentCheck reads
-// the keys the way python-dotenv does, and a comment or a value that only
-// mentions a name is no assignment.
-var hermesEnvFileGenericNames = []string{"TIRITH_[A-Z_]*", "PYTHON[A-Z0-9_]*", "LD_[A-Z_]*", "PYTEST_CURRENT_TEST"}
+// scanner's, the interpreter's and the dynamic loader's. Hermes does not
+// split glued pairs for them, so only a real assignment sets one:
+// hermesEnvAssignmentCheck reads the keys the way python-dotenv does, and a
+// comment or a value that only mentions a name is no assignment.
+// PYTEST_CURRENT_TEST, Hermes' test-suite switch, needs no check: Hermes
+// ignores /etc/hermes under it only while HERMES_MANAGED_DIR is unset
+// (managed_scope.get_managed_dir), and the launcher sets that (GAP-1122).
+var hermesEnvFileGenericNames = []string{"TIRITH_[A-Z_]*", "PYTHON[A-Z0-9_]*", "LD_[A-Z_]*"}
 
 // hermesEnvFilePattern is the extended regular expression of hermesEnvFileNames.
 var hermesEnvFilePattern = strings.Join(hermesEnvFileNames, "|")
@@ -390,35 +415,26 @@ set -u
 }
 # Safe mode skips every shell hook, and DefenseClaw's hooks are the only gate
 # on a sandboxed tool call. Hermes' parsers resolve every prefix of
-# --safe-mode down to --sa.
-tui=
-cli=
-options=1
+# --safe-mode down to --sa. The TUI, which this Hermes runs without the
+# hooks, is refused where Hermes starts it (hermesUnhookedAgentModule), not
+# from the arguments.
 for arg in "$@"; do
   case "${arg%%=*}" in
     --sa|--saf|--safe|--safe-|--safe-m|--safe-mo|--safe-mod|--safe-mode)
       refuse "$arg turns on Hermes' safe mode, which runs without DefenseClaw's hooks" "DefenseClaw's own --safe (keep the harness's prompts) goes before the harness name."
       ;;
-    # The pinned Hermes builds the agent of its TUI without DefenseClaw's
-    # hooks (GAP-1036); its parsers resolve --tu to --tui.
-    --tu|--tui) tui=$arg ;;
-    # --cli wins over --tui in any order, at the top level or after chat
-    # (Hermes' _resolve_use_tui), and its parsers resolve --cl to --cli; after
-    # "--" it is no option.
-    --cl|--cli) [ -z "$options" ] || cli=1 ;;
   esac
-  [ "$arg" != "--" ] || options=
 done
-[ -z "$tui" ] || [ -n "$cli" ] ||
-  refuse "$tui starts Hermes' TUI, which this Hermes runs without DefenseClaw's hooks" "Start Hermes without it, or add --cli: the classic interface runs the hooks."
-# PYTEST_CURRENT_TEST is Hermes' test-suite switch: set, even empty, it makes
-# Hermes ignore /etc/hermes, the managed layer that holds DefenseClaw's hooks.
-unset HERMES_SAFE_MODE HERMES_MANAGED_DIR HERMES_ENABLE_PROJECT_PLUGINS HERMES_HOME_OVERRIDE \
-  HERMES_PYTHON_SRC_ROOT HERMES_PYTHON HERMES_TUI_DIR HERMES_NODE HERMES_LAZY_INSTALL_TARGET PYTEST_CURRENT_TEST
+unset HERMES_SAFE_MODE HERMES_ENABLE_PROJECT_PLUGINS HERMES_HOME_OVERRIDE \
+  HERMES_PYTHON_SRC_ROOT HERMES_PYTHON HERMES_TUI_DIR HERMES_NODE HERMES_LAZY_INSTALL_TARGET
+# Hermes reads its managed layer, which holds DefenseClaw's hooks, from
+# HERMES_MANAGED_DIR before anything else decides it (its test-suite switch
+# PYTEST_CURRENT_TEST only drops the /etc/hermes default).
+HERMES_MANAGED_DIR=` + connector.HermesSandboxManagedDir + `
 HOME=` + connector.SandboxHomeDir + `
 HERMES_HOME="$HOME/.hermes"
 HERMES_ACCEPT_HOOKS=1
-export HOME HERMES_HOME HERMES_ACCEPT_HOOKS
+export HERMES_MANAGED_DIR HOME HERMES_HOME HERMES_ACCEPT_HOOKS
 
 # Hermes loads <home>/.env and .op.env into its own environment, over the
 # launcher's, imports Python plugins from <home>/plugins, and runs the secret

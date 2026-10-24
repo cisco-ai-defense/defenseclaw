@@ -139,34 +139,34 @@ func TestHermesLauncherRefusesHomeCode(t *testing.T) {
 		"op env":              {".op.env", []byte("HERMES_MANAGED_DIR=/tmp/x\n"), ".op.env sets HERMES_MANAGED_DIR"},
 		"profile env":         {"profiles/work/.env", []byte("HERMES_SAFE_MODE=1\n"), "profiles/work/.env sets HERMES_SAFE_MODE"},
 		"env directory":       {".env/", nil, ".env is not a readable regular file"},
-		// Hermes ignores /etc/hermes while PYTEST_CURRENT_TEST is set, even
-		// empty (GAP-1122); it does not split it out of a glued pair.
-		"env pytest switch":         {".env", []byte("PYTEST_CURRENT_TEST=x\n"), ".env sets PYTEST_CURRENT_TEST"},
-		"env empty pytest switch":   {".env", []byte("export PYTEST_CURRENT_TEST=\n"), "sets PYTEST_CURRENT_TEST"},
-		"env quoted pytest switch":  {".env", []byte("'PYTEST_CURRENT_TEST'=x\n"), "sets PYTEST_CURRENT_TEST"},
-		"env utf-16 pytest switch":  {".env", utf16LE("PYTEST_CURRENT_TEST=x\n"), "sets PYTEST_CURRENT_TEST"},
-		"op env pytest switch":      {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ".op.env sets PYTEST_CURRENT_TEST"},
-		"profile env pytest switch": {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), "profiles/work/.env sets PYTEST_CURRENT_TEST"},
-		"env glued pytest value":    {".env", []byte("OPENAI_API_KEY=sk-xPYTEST_CURRENT_TEST=1\n"), ""},
-		// Only a real assignment, as python-dotenv reads it, sets one of
-		// these; a comment or a value that mentions one does not (1.0.4
-		// review). Each case was checked against Hermes 0.19.0's loader.
+		// Hermes drops /etc/hermes under PYTEST_CURRENT_TEST only while
+		// HERMES_MANAGED_DIR is unset, and the launcher sets it, so no file
+		// that names the variable is refused (GAP-1122, 1.0.4 review).
+		"env pytest switch":           {".env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"env empty pytest switch":     {".env", []byte("export PYTEST_CURRENT_TEST=\n"), ""},
+		"env quoted pytest switch":    {".env", []byte("'PYTEST_CURRENT_TEST'=x\n"), ""},
+		"env utf-16 pytest switch":    {".env", utf16LE("PYTEST_CURRENT_TEST=x\n"), ""},
+		"op env pytest switch":        {".op.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
+		"profile env pytest switch":   {"profiles/work/.env", []byte("PYTEST_CURRENT_TEST=x\n"), ""},
 		"env commented pytest switch": {".env", []byte("# PYTEST_CURRENT_TEST=1\n"), ""},
-		"env indented comment":        {".env", []byte("   #PYTEST_CURRENT_TEST=1\n"), ""},
-		"env inline comment":          {".env", []byte("OPENAI_API_KEY=sk-x # PYTEST_CURRENT_TEST=1\n"), ""},
-		"env value names pytest":      {".env", []byte("NOTE=\"set PYTEST_CURRENT_TEST=1 to test\"\n"), ""},
-		"env spaced value":            {".env", []byte("OPENAI_API_KEY=sk-x PYTEST_CURRENT_TEST=1\n"), ""},
-		"env double-quoted key":       {".env", []byte("\"PYTEST_CURRENT_TEST\"=1\n"), ""},
-		"env bare pytest name":        {".env", []byte("PYTEST_CURRENT_TEST\n"), ""},
-		"env utf-16 comment":          {".env", utf16LE("# PYTEST_CURRENT_TEST=1\n"), ""},
-		"env commented loader path":   {".env", []byte("# LD_PRELOAD=/tmp/x.so\n# PYTHONPATH=/tmp/x\n"), ""},
-		"env spaced pytest switch":    {".env", []byte("  PYTEST_CURRENT_TEST = 1\n"), "sets PYTEST_CURRENT_TEST"},
-		"env pytest after a comment":  {".env", []byte("# note\nPYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
-		"env pytest after a value":    {".env", []byte("A=\"x\ny\"\nPYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
-		"env cr line ends":            {".env", []byte("A=1\rPYTEST_CURRENT_TEST=1\r"), "sets PYTEST_CURRENT_TEST"},
-		"env unicode space":           {".env", utf16LE("\u3000PYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
-		"env latin-1 space":           {".env", []byte("A=\xff\n\xa0PYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
-		"env utf-8 space":             {".env", []byte("\u00a0PYTEST_CURRENT_TEST=1\n"), "sets PYTEST_CURRENT_TEST"},
+		// Only a real assignment, as python-dotenv reads it, sets a loader,
+		// interpreter or Tirith variable; a comment or a value that only
+		// mentions one does not (1.0.4 review).
+		"env commented loader path":  {".env", []byte("# LD_PRELOAD=/tmp/x.so\n# PYTHONPATH=/tmp/x\n"), ""},
+		"env indented comment":       {".env", []byte("   #LD_PRELOAD=/tmp/x.so\n"), ""},
+		"env inline comment":         {".env", []byte("OPENAI_API_KEY=sk-x # LD_PRELOAD=/tmp/x.so\n"), ""},
+		"env value names loader":     {".env", []byte("NOTE=\"set PYTHONPATH=/tmp/x to test\"\n"), ""},
+		"env spaced value":           {".env", []byte("OPENAI_API_KEY=sk-x LD_PRELOAD=/tmp/x.so\n"), ""},
+		"env double-quoted key":      {".env", []byte("\"LD_PRELOAD\"=/tmp/x.so\n"), ""},
+		"env bare loader name":       {".env", []byte("LD_PRELOAD\n"), ""},
+		"env utf-16 comment":         {".env", utf16LE("# LD_PRELOAD=/tmp/x.so\n"), ""},
+		"env spaced loader path":     {".env", []byte("  LD_PRELOAD = /tmp/x.so\n"), "sets LD_PRELOAD"},
+		"env loader after a comment": {".env", []byte("# note\nLD_PRELOAD=/tmp/x.so\n"), "sets LD_PRELOAD"},
+		"env loader after a value":   {".env", []byte("A=\"x\ny\"\nLD_PRELOAD=/tmp/x.so\n"), "sets LD_PRELOAD"},
+		"env cr line ends":           {".env", []byte("A=1\rLD_PRELOAD=/tmp/x.so\r"), "sets LD_PRELOAD"},
+		"env unicode space":          {".env", utf16LE("\u3000PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
+		"env latin-1 space":          {".env", []byte("A=\xff\n\xa0PYTHONPATH=/tmp/x\n"), "sets PYTHONPATH"},
+		"env utf-8 space":            {".env", []byte("\u00a0TIRITH_BIN=/tmp/x\n"), "sets TIRITH_BIN"},
 		// The managed .env pins HERMES_TUI=0 over these (GAP-1036 review);
 		// HERMES_TUI_DIR still moves the code the TUI runs.
 		"env tui":                {".env", []byte("export HERMES_TUI = 1\n"), ""},

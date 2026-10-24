@@ -35,12 +35,12 @@ import (
 // must drop them.
 func TestHermesImageRefusesTheUnhookedTUIOfItsPin(t *testing.T) {
 	if got := connector.ResolveHookContract("hermes", Hermes.DefaultVersion); !strings.Contains(got.Warning, "hermes --tui") {
-		t.Fatalf("the image pins Hermes %s, whose TUI runs the hooks (%+v): remove hermesUnhookedAgentModule, the launcher's --tui refusal "+
+		t.Fatalf("the image pins Hermes %s, whose TUI runs the hooks (%+v): remove hermesUnhookedAgentModule "+
 			"and the managed layer's TUI pins (HERMES_TUI=0, display.interface: cli in internal/gateway/connector/hermes_sandbox.go)",
 			Hermes.DefaultVersion, got)
 	}
-	// The managed layer keeps every start but --tui on the hooked classic
-	// interface: Hermes applies it over the environment, .env files and
+	// The managed layer keeps every start but an explicit --tui on the
+	// hooked classic interface: Hermes applies it over the environment, .env files and
 	// user configs (GAP-1036 review).
 	arts, err := Hermes.Provider.SandboxArtifacts(connector.SandboxRenderTarget{IngressPort: 18971, AgentVersion: Hermes.DefaultVersion})
 	if err != nil {
@@ -140,8 +140,69 @@ print(refused, server.BUILT)
 	}
 }
 
+// hermesMainStandIn is the part of Hermes 0.19.0 the TUI refusal works
+// with: hermes_cli.main._launch_tui, which cmd_chat calls (by its module
+// global) for every start Hermes resolves to its TUI, and only then.
+var hermesMainStandIn = map[string]string{
+	"hermes_cli/__init__.py": "",
+	"hermes_cli/main.py": `"""Stand-in hermes_cli.main."""
+LAUNCHED = []
+
+
+def _launch_tui(resume_session_id=None, **kwargs):
+    LAUNCHED.append(resume_session_id)
+
+
+def cmd_chat(use_tui):
+    if use_tui:
+        _launch_tui(None, tui_dev=False)
+        return "tui"
+    return "classic"
+`,
+}
+
+// TestHermesUnhookedTUIShim (1.0.4 review): the shim refuses the TUI where
+// Hermes starts it, after Hermes has resolved --cli, --tui, HERMES_TUI and
+// display.interface itself: the TUI start exits 2 with DefenseClaw's
+// refusal and the original _launch_tui never runs, a classic start runs as
+// before, and the patched module keeps its loader.
+func TestHermesUnhookedTUIShim(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the sandbox shims run in the Linux sandbox image, not on native Windows")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required")
+	}
+	dir := t.TempDir()
+	for name, body := range hermesMainStandIn {
+		writeFile(t, filepath.Join(dir, filepath.FromSlash(name)), []byte(body))
+	}
+	writeFile(t, filepath.Join(dir, hermesUnhookedAgentModuleName+".py"), []byte(hermesUnhookedAgentModule))
+	script := `import sys
+sys.path.insert(0, sys.argv[1])
+import ` + hermesUnhookedAgentModuleName + `
+import hermes_cli.main as main
+assert type(main.__loader__).__name__ == "SourceFileLoader", main.__loader__
+assert main.cmd_chat(False) == "classic"
+try:
+    main.cmd_chat(True)
+    code = None
+except SystemExit as exc:
+    code = exc.code
+sys.stderr.flush()
+print("RESULT", code, main.LAUNCHED)
+`
+	out, err := exec.Command(python, "-I", "-c", script, dir).CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "RESULT 2 []") ||
+		!strings.Contains(string(out), "defenseclaw: refusing to start Hermes: this Hermes runs its TUI without DefenseClaw's hooks.") {
+		t.Fatalf("shim run: %v\n%s", err, out)
+	}
+}
+
 // TestHermesLauncherLeavesTheInterfaceToTheManagedLayer (GAP-1036 review):
-// the launcher refuses only --tui and its prefix (launcher_test.go). Hermes
+// the launcher refuses no interface setting or argument (launcher_test.go);
+// the shim refuses the TUI where Hermes starts it. Hermes
 // picks its TUI otherwise from HERMES_TUI=1 and display.interface: tui only
 // on a terminal, and the image's managed layer pins both to the hooked
 // classic interface over the environment, every .env and every config.yaml

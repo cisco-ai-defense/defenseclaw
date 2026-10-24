@@ -53,14 +53,16 @@ import (
 // the pinned Hermes (0.19.0 to 0.21.0 build the agent of their TUI without
 // the shell hooks, GAP-1036) on its hooked classic interface whatever a user
 // config, .env or the environment selects; Hermes resolves the TUI from
-// exactly those two after --cli and --tui (which the launcher refuses).
+// exactly those two after --cli and --tui (an explicit --tui reaches the
+// image's root-owned TUI refusal).
 //
 // Hermes also applies /etc/hermes/.env last, over the user's ~/.hermes/.env
 // and the process environment, per variable. The image pins there the
 // variables that would switch the hooks off, select the unhooked TUI or
 // re-enable Tirith; the one
 // that moves the managed scope itself (HERMES_MANAGED_DIR) cannot be pinned
-// from inside it, so the launcher refuses a user .env that names it. The
+// from inside it, so the launcher sets it and refuses a user .env that names
+// it. The
 // harness's home stays workload-writable (plugins, .env, profiles), so the
 // connector is user tier: the launcher's checks, not file ownership, keep
 // the hooks in place.

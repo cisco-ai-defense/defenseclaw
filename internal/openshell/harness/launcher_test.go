@@ -221,14 +221,16 @@ func TestLaunchersPinTheirEnvironment(t *testing.T) {
 			"HERMES_MANAGED_DIR=/tmp/empty", "HERMES_HOME=/tmp/elsewhere", "HERMES_PYTHON_SRC_ROOT=/tmp/src", "HERMES_LAZY_INSTALL_TARGET=/tmp/lazy"},
 			[]string{"chat", "-q", "hi"},
 			map[string]string{"HERMES_DEFENSECLAW_API_KEY": "openshell:resolve:env:v4_BEDROCK_MANTLE_API_KEY", "HERMES_ACCEPT_HOOKS": "1",
-				"HERMES_SAFE_MODE": unset, "HERMES_MANAGED_DIR": unset, "HERMES_HOME": "{dir}/.hermes", "HERMES_PYTHON_SRC_ROOT": unset,
+				"HERMES_SAFE_MODE": unset, "HERMES_MANAGED_DIR": "/etc/hermes", "HERMES_HOME": "{dir}/.hermes", "HERMES_PYTHON_SRC_ROOT": unset,
 				"HERMES_LAZY_INSTALL_TARGET": unset}},
-		// Hermes ignores /etc/hermes while PYTEST_CURRENT_TEST is set, even
-		// empty (GAP-1122).
+		// Hermes drops its /etc/hermes default while PYTEST_CURRENT_TEST is
+		// set, but reads HERMES_MANAGED_DIR before that switch, so the
+		// launcher pins it and leaves the variable alone (GAP-1122, 1.0.4
+		// review; real Hermes 0.19.0: c5r1-pytest-managed-pin-probe).
 		{"hermes pytest switch", Hermes, []string{"PYTEST_CURRENT_TEST=t.py::t (call)"}, []string{"chat", "-q", "hi"},
-			map[string]string{"PYTEST_CURRENT_TEST": unset, "HERMES_ACCEPT_HOOKS": "1"}},
-		{"hermes empty pytest switch", Hermes, []string{"PYTEST_CURRENT_TEST="}, nil,
-			map[string]string{"PYTEST_CURRENT_TEST": unset}},
+			map[string]string{"PYTEST_CURRENT_TEST": "t.py::t (call)", "HERMES_MANAGED_DIR": "/etc/hermes", "HERMES_ACCEPT_HOOKS": "1"}},
+		{"hermes empty pytest switch", Hermes, []string{"PYTEST_CURRENT_TEST=", "HERMES_MANAGED_DIR="}, nil,
+			map[string]string{"PYTEST_CURRENT_TEST": "", "HERMES_MANAGED_DIR": "/etc/hermes"}},
 		// An explicit key wins over the profile's.
 		{"hermes own key", Hermes, []string{"HERMES_DEFENSECLAW_API_KEY=mine", "OPENAI_API_KEY=other"}, nil,
 			map[string]string{"HERMES_DEFENSECLAW_API_KEY": "mine"}},
@@ -272,19 +274,17 @@ func TestLaunchersRefuseUnsafeArguments(t *testing.T) {
 			{[]string{"--safe-mode"}, "safe mode"}, {[]string{"--safe-mode=1"}, "safe mode"},
 			{[]string{"chat", "--safe", "-q", "hi"}, "safe mode"}, {[]string{"--safe", "chat"}, "safe mode"},
 			{[]string{"--s"}, ""}, {[]string{"--save"}, ""}, {[]string{"--skills", "x"}, ""}, {[]string{"chat", "-q", "be safe"}, ""},
-			// The pinned Hermes runs its TUI without the hooks (GAP-1036);
-			// its parsers resolve --tu to --tui, and --t is ambiguous there.
-			{[]string{"--tui"}, "starts Hermes' TUI"}, {[]string{"--tu"}, "starts Hermes' TUI"},
-			{[]string{"--tui=1"}, "starts Hermes' TUI"}, {[]string{"chat", "--tui"}, "starts Hermes' TUI"},
-			{[]string{"chat", "-q", "hi", "--tui"}, "starts Hermes' TUI"},
-			{[]string{"--t"}, ""}, {[]string{"--toolsets", "terminal"}, ""}, {[]string{"--cli"}, ""}, {[]string{"chat", "-q", "open the tui"}, ""},
-			// --cli (or --cl) wins over --tui in Hermes' _resolve_use_tui, in
-			// any order and at either level (1.0.4 review); after "--" it is
-			// no option, and --c is ambiguous there.
-			{[]string{"--cli", "--tui"}, ""}, {[]string{"--tui", "--cli"}, ""}, {[]string{"--tu", "--cl"}, ""},
-			{[]string{"chat", "--tui", "--cli"}, ""}, {[]string{"--cli", "chat", "--tui"}, ""}, {[]string{"--tui", "chat", "--cl"}, ""},
-			{[]string{"--tui", "--", "--cli"}, "starts Hermes' TUI"}, {[]string{"chat", "--tui", "--", "--cl"}, "starts Hermes' TUI"},
-			{[]string{"--c", "--tui"}, "starts Hermes' TUI"}, {[]string{"--tui", "--clip"}, "starts Hermes' TUI"},
+			// The pinned Hermes runs its TUI without the hooks (GAP-1036), but
+			// the launcher reads no argument for it: the image refuses the TUI
+			// where Hermes starts it (TestHermesUnhookedTUIShim), so a start
+			// Hermes runs as its classic interface is never refused, --cli
+			// with --tui and --tui with a command or --version alike (1.0.4
+			// review; real Hermes 0.19.0: c5r1-tui-entry-probe).
+			{[]string{"--tui"}, ""}, {[]string{"--tu"}, ""}, {[]string{"chat", "--tui"}, ""}, {[]string{"--t"}, ""},
+			{[]string{"--cli", "--tui"}, ""}, {[]string{"--tui", "--cli"}, ""}, {[]string{"--tui", "chat", "--cl"}, ""},
+			{[]string{"--tui", "--", "--cli"}, ""}, {[]string{"--tui", "--version"}, ""}, {[]string{"--tui", "--help"}, ""},
+			{[]string{"--tui", "cron", "list"}, ""}, {[]string{"--tui", "doctor"}, ""}, {[]string{"--tui", "config", "show"}, ""},
+			{[]string{"--tui", "-z", "hi"}, ""}, {[]string{"--tui", "sessions", "list"}, ""}, {[]string{"chat", "-q", "hi", "--tui", "--cli"}, ""},
 		}},
 		{Kiro, []argCase{
 			{[]string{"--agent", "kiro_default", "hi"}, "--agent is not supported"},

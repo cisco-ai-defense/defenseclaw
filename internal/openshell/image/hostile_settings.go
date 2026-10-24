@@ -412,6 +412,9 @@ func hermesHostileSettings() hostileSettings {
 	// A managed scope of the workload's own, without DefenseClaw's hooks.
 	fakeManaged := p.dir + "/managed"
 	p.file(fakeManaged+"/config.yaml", "hooks: {}")
+	// Hermes' test-suite switch drops its /etc/hermes default; the launcher
+	// pins HERMES_MANAGED_DIR, so the hooks still fire (GAP-1122).
+	env["PYTEST_CURRENT_TEST"] = "x"
 	plan := p.plan()
 	plan.env = env
 	home := path.Join(connector.SandboxHomeDir, ".hermes")
@@ -422,8 +425,6 @@ func hermesHostileSettings() hostileSettings {
 		// Hermes loads ~/.hermes/.env over the process environment at start.
 		plantRefusal("env-safe-mode", home+"/.env", "HERMES_SAFE_MODE=1", refused+home+"/.env sets HERMES_SAFE_MODE"),
 		plantRefusal("env-managed-dir", home+"/.env", "HERMES_MANAGED_DIR="+fakeManaged, refused+home+"/.env sets HERMES_MANAGED_DIR"),
-		// Hermes ignores /etc/hermes while PYTEST_CURRENT_TEST is set (GAP-1122).
-		plantRefusal("env-pytest-switch", home+"/.env", "PYTEST_CURRENT_TEST=x", refused+home+"/.env sets PYTEST_CURRENT_TEST"),
 		// Model-provider plugins are imported whatever plugins.enabled says.
 		plantRefusal("model-provider-plugin", plugin,
 			"open("+strconv.Quote(hostileRanLog)+", \"a\").write(\"user:model-provider-plugin\\n\")",
