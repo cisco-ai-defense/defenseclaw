@@ -697,7 +697,6 @@ func (a *App) preflight(ctx context.Context, api API, harnessName string) (*sand
 
 // checkSandboxes is preflight; without ready, a managed computer's OpenShell
 // that a run readies passes as it is (`sandbox wrap` installs nothing).
-// harnessName is the agent a ready is for.
 func (a *App) checkSandboxes(ctx context.Context, api API, ready bool, harnessName string) (*sandboxapi.Status, error) {
 	st, err := api.Status(ctx)
 	if err != nil {

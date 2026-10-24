@@ -136,10 +136,6 @@ type EnterpriseDeployment struct {
 	// TrustMode is the payload trust standalone metadata records
 	// ("authenticode" or "hash_pinned"); Secure Client metadata has none.
 	TrustMode string
-	// DeferredConfigPending is an installed deployment's
-	// deferred_config_pending: a deferred install that waits for the repair
-	// that completes its configuration.
-	DeferredConfigPending bool
 }
 
 // classifyEnterpriseMetadata interprets deployment.json. Metadata without an
@@ -160,23 +156,6 @@ func classifyEnterpriseMetadata(body []byte) (EnterpriseDeploymentState, string)
 		return EnterpriseDeploymentTombstone, record.ProductVersion
 	}
 	return EnterpriseDeploymentInstalled, record.ProductVersion
-}
-
-// enterpriseMetadataDeferredConfigPending reads deployment.json's
-// deferred_config_pending; only a JSON true counts, as the lifecycle module
-// refuses any other value.
-func enterpriseMetadataDeferredConfigPending(body []byte) bool {
-	var record struct {
-		DeferredConfigPending *bool `json:"deferred_config_pending"`
-	}
-	trimmed := body
-	if len(trimmed) >= 3 && trimmed[0] == 0xef && trimmed[1] == 0xbb && trimmed[2] == 0xbf {
-		trimmed = trimmed[3:]
-	}
-	if err := json.Unmarshal(trimmed, &record); err != nil {
-		return false
-	}
-	return record.DeferredConfigPending != nil && *record.DeferredConfigPending
 }
 
 // enterpriseMetadataTrustMode reads the payload trust deployment.json

@@ -228,10 +228,7 @@ func TestBuildHookOptionsPackagedWindowsTakesItsInstalledModeAndTighteningKnobs(
 	t.Setenv("DEFENSECLAW_HOOK_MAX_BODY", "4096")
 
 	opts := buildHookOptions("claudecode", "PreToolUse", "", "")
-	// The installed record is the outage mode (oss-outage-open); every other
-	// per-user failure stays closed.
-	if opts.Home != trustedHome || opts.FailMode != "closed" || opts.OutageFailMode != "open" ||
-		!opts.StrictAvailability || opts.MaxBody != 4096 {
+	if opts.Home != trustedHome || opts.FailMode != "open" || !opts.StrictAvailability || opts.MaxBody != 4096 {
 		t.Fatalf("the installed mode or a tightening knob was not honored: %+v", opts)
 	}
 }

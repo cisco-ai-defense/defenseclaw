@@ -1233,15 +1233,37 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// Outbound messages get the full scan — tool name "message" for context.
 	// Routed through the request's connector so each connector scans against
 	// its own rule pack (empty ⇒ process-global default set).
+	var ruleFindings []RuleFinding
+	if req.contentScope != ruleContentScopeAll {
+		ruleFindings = scanContentRulesForConnectorFor(
+			ctx,
+			req.Connector,
+			content,
+			"message",
+			req.contentScope,
+		)
+	} else {
+		ruleFindings = scanAllRulesForConnectorFor(ctx, req.Connector, content, "message")
+	}
 	// Prompts and tool results can contain invisible separators or letters
 	// that resemble Latin script. Keep this extra view confined to trust rules.
-	folded := ""
 	if cfg := a.decisionConfig(ctx); cfg == nil || !cfg.SecureClientIntegration() {
-		if view := trustPatternText(content); view != content {
-			folded = view
+		if folded := trustPatternText(content); folded != content {
+			generation := snapshotRulePackGenerationFor(ctx, req.Connector)
+			seen := make(map[string]bool, len(ruleFindings))
+			for _, finding := range ruleFindings {
+				seen[finding.RuleID] = true
+			}
+			for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
+				contentScope: req.contentScope, onlyCategory: "trust-exploit",
+			}) {
+				if !seen[finding.RuleID] {
+					ruleFindings = append(ruleFindings, finding)
+					seen[finding.RuleID] = true
+				}
+			}
 		}
 	}
-	ruleFindings := messageRuleFindings(snapshotRulePackGenerationFor(ctx, req.Connector), content, folded, req.contentScope, !ManagedEnterpriseActive())
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
@@ -1911,47 +1933,4 @@ func (a *APIServer) emitCodeGuardTelemetry(
 			ctx, connectorName, verdict.Severity, "codeguard-finding", "codeguard",
 		)
 	}
-}
-
-// messageRuleFindings is the rule scan of an inspected message with
-// generation: every rule on content (scanRaw; scope as for
-// scanContentRuleCategoryWithGeneration), then the trust rules on folded
-// ("" for none), the same content with invisible separators and look-alike
-// letters folded, for a rule the first pass did not find. A strictest
-// combination of profiles runs it with each member's own rules and keeps
-// the strongest finding of each rule, so one member's weaker match of a
-// rule ID on content never hides another member's definition of that ID
-// that only the folded text matches.
-func messageRuleFindings(generation *compiledRulePackCategories, content, folded string, scope ruleContentScope, scanRaw bool) []RuleFinding {
-	if generation != nil && len(generation.members) > 0 {
-		lists := make([][]RuleFinding, 0, len(generation.members))
-		for _, member := range generation.members {
-			lists = append(lists, messageRuleFindings(member, content, folded, scope, scanRaw))
-		}
-		return strongestRuleFindings(lists, func(ruleID string) string { return ruleID })
-	}
-	var findings []RuleFinding
-	if scanRaw {
-		if scope != ruleContentScopeAll {
-			findings = scanContentRuleCategoryWithGeneration(generation, content, "message", scope, "")
-		} else {
-			findings = scanRuleGeneration(generation, content, "message", ruleScanOptions{})
-		}
-	}
-	if folded == "" {
-		return findings
-	}
-	seen := make(map[string]bool, len(findings))
-	for _, finding := range findings {
-		seen[finding.RuleID] = true
-	}
-	for _, finding := range scanRuleGeneration(generation, folded, "message", ruleScanOptions{
-		contentScope: scope, onlyCategory: "trust-exploit",
-	}) {
-		if !seen[finding.RuleID] {
-			findings = append(findings, finding)
-			seen[finding.RuleID] = true
-		}
-	}
-	return findings
 }

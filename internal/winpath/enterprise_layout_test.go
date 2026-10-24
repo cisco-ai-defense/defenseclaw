@@ -122,26 +122,3 @@ func TestEnterpriseMetadataTrustMode(t *testing.T) {
 		}
 	}
 }
-
-// The deferred configuration a deployment waits for is a JSON true in
-// deployment.json; the lifecycle module refuses any other value, so it
-// counts for nothing here.
-func TestEnterpriseMetadataDeferredConfigPending(t *testing.T) {
-	for _, tc := range []struct {
-		body string
-		want bool
-	}{
-		{`{"installed":true,"deferred_config_pending":true}`, true},
-		{"\xef\xbb\xbf{\"deferred_config_pending\":true}", true},
-		{`{"installed":true,"deferred_config_pending":false}`, false},
-		{`{"installed":true}`, false},
-		{`{"deferred_config_pending":"true"}`, false},
-		{`{"deferred_config_pending":1}`, false},
-		{`{"deferred_config_pending":null}`, false},
-		{`{"deferred_config_pending":`, false},
-	} {
-		if got := enterpriseMetadataDeferredConfigPending([]byte(tc.body)); got != tc.want {
-			t.Fatalf("%q: deferred config pending %v, want %v", tc.body, got, tc.want)
-		}
-	}
-}

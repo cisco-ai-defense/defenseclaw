@@ -111,10 +111,6 @@ type SharedFileWriter struct {
 	// metadata. It reports ErrSwapRaced (wrapped) when the path no longer
 	// holds base; the newer file is then left in place.
 	Write func(base SharedFile, edit SharedEdit) (SharedWriteResult, error)
-	// Stale, when set, reports a file whose own metadata DefenseClaw must
-	// repair, a machine policy ordinary users cannot read: an edit that
-	// leaves it as it is is written all the same.
-	Stale func(SharedFile) bool
 }
 
 // Unchanged reports whether edit leaves base as it is.
@@ -144,7 +140,7 @@ func (w SharedFileWriter) Update(base SharedFile, render SharedRender) (SharedFi
 		if err != nil {
 			return unwritten, err
 		}
-		if edit.Unchanged(base) && (w.Stale == nil || !w.Stale(base)) {
+		if edit.Unchanged(base) {
 			return unwritten, nil
 		}
 		result, err := w.Write(base, edit)

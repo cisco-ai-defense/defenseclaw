@@ -46,10 +46,10 @@ func TestKiroNativeHookAnswersLikeKiroHookScript(t *testing.T) {
 		// A reason that names DefenseClaw is not prefixed again (cert kiro:KR-F10).
 		{name: "DefenseClaw's own reason", rt: ok(`{"action":"block","hook_output":{"decision":"block","reason":"Blocked by DefenseClaw rule R1: marker"}}`),
 			wantCode: 2, wantStderr: "Blocked by DefenseClaw rule R1: marker", unprefixed: true},
-		{name: "block without a hook_output fails closed", rt: ok(`{"action":"block"}`), wantCode: 2},
+		{name: "block without a hook_output is not a veto", rt: ok(`{"action":"block"}`), wantCode: 0},
 		{name: "invalid response, fail open", rt: ok(`not json`), failMode: "open", wantCode: 2, wantStderr: "kiro hook error"},
 		{name: "invalid response, fail closed", rt: ok(`not json`), failMode: "closed", wantCode: 2, wantStderr: "kiro hook error"},
-		{name: "server error, fail open", rt: &stubRT{status: 503, body: "{}"}, failMode: "open", wantCode: 2},
+		{name: "server error, fail open", rt: &stubRT{status: 503, body: "{}"}, failMode: "open", wantCode: 0},
 		{name: "server error, fail closed", rt: &stubRT{status: 503, body: "{}"}, failMode: "closed", wantCode: 2},
 		{name: "unreachable, strict", rt: &stubRT{err: errors.New("dial tcp: refused")}, strict: true, wantCode: 2},
 	} {

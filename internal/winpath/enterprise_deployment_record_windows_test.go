@@ -42,14 +42,11 @@ func TestInspectEnterpriseDeploymentAtClassifiesRecordShapes(t *testing.T) {
 		return path
 	}
 	for _, tc := range []struct {
-		name     string
-		path     string
-		state    EnterpriseDeploymentState
-		version  string
-		deferred bool
+		name    string
+		path    string
+		state   EnterpriseDeploymentState
+		version string
 	}{
-		{name: "deferred install", path: write("deferred", []byte(`{"installed":true,"deferred_config_pending":true}`)), state: EnterpriseDeploymentInstalled, deferred: true},
-		{name: "tombstone of a deferred install", path: write("deferred-tombstone", []byte(`{"installed":false,"deferred_config_pending":true}`)), state: EnterpriseDeploymentTombstone},
 		{name: "absent", path: filepath.Join(dir, "absent", "deployment.json"), state: EnterpriseDeploymentAbsent},
 		{name: "historical secure client record", path: write("historical", []byte(`{"schema_version":1,"deployment_mode":"managed_enterprise","gateway_service":"DefenseClawGateway"}`)), state: EnterpriseDeploymentInstalled},
 		{name: "secure client record", path: write("secure-client", []byte(`{"schema_version":1,"installed":true}`)), state: EnterpriseDeploymentInstalled},
@@ -69,9 +66,6 @@ func TestInspectEnterpriseDeploymentAtClassifiesRecordShapes(t *testing.T) {
 			}
 			if deployment.Profile != "standalone" || deployment.MetadataPath != tc.path || deployment.Untrusted != "" {
 				t.Fatalf("deployment %+v does not describe the inspected record", deployment)
-			}
-			if deployment.DeferredConfigPending != tc.deferred {
-				t.Fatalf("deployment %+v, want deferred config pending %v", deployment, tc.deferred)
 			}
 		})
 	}

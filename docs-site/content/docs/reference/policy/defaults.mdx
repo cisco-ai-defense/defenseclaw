@@ -157,7 +157,7 @@ guardrail:
   connectors:
     codex:
       mode: observe
-      hook_fail_mode: closed
+      hook_fail_mode: open
 ```
 
 Manage them with `defenseclaw setup <connector>` and `defenseclaw guardrail ... --connector X`. The admission policy is global. Top-level `claude_code:` and `codex:` blocks are still parsed, but their `fail_mode` does nothing at runtime ([fail modes](/docs/reference/configuration/fail-modes/)).

@@ -44,11 +44,10 @@ var hermesTool = uvTool{
 		`printf 'import ` + hermesSuspendModuleName + `\n' >"$site/` + hermesSuspendModuleName + `.pth"; ` +
 		`chown root:root "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"; ` +
 		`chmod 0644 "$site/` + hermesSuspendModuleName + `.py" "$site/` + hermesSuspendModuleName + `.pth"; ` +
-		// The block-notice and unhooked-agent shims, and the install-method
-		// stamp (hermesInstallMethod) next to the code, root-owned like them.
+		// The block-notice shim, and the install-method stamp
+		// (hermesInstallMethod) next to the code, root-owned like it.
 		pyShimInstall(InstallRootBase+"/hermes/tools/hermes-agent/bin/python", InstallRootBase+"/hermes", "Hermes",
-			pyShim{name: hermesBlockNoticeModuleName, source: hermesBlockNoticeModule},
-			pyShim{name: hermesUnhookedAgentModuleName, source: hermesUnhookedAgentModule}) + `; ` +
+			pyShim{name: hermesBlockNoticeModuleName, source: hermesBlockNoticeModule}) + `; ` +
 		`printf '` + hermesInstallMethod + `\n' >"$site/.install_method"; chown root:root "$site/.install_method"; chmod 0644 "$site/.install_method"`,
 }
 
@@ -117,75 +116,6 @@ def _defenseclaw_patch_plugins(plugins):
 
 
 _defenseclaw_on_import("hermes_cli.plugins", _defenseclaw_patch_plugins)
-`
-
-// hermesUnhookedAgentModuleName is the root-owned module that keeps the
-// pinned Hermes from running an agent DefenseClaw's hooks do not guard.
-const hermesUnhookedAgentModuleName = "defenseclaw_hermes_unhooked"
-
-// hermesUnhookedAgentModule refuses the TUI of the pinned Hermes and every
-// agent it builds in tui_gateway (GAP-1036). Hermes 0.19.0 to 0.21.0 build
-// the agent of the TUI (hermes --tui, a separate tui_gateway process), the
-// dashboard chat and the serve backend with tui_gateway.server._make_agent,
-// which does not register the config.yaml shell hooks (Hermes 0.21.1 does,
-// NousResearch/hermes-agent 3094cde513), so a terminal call there ran with
-// no pre_tool_call. Every start Hermes resolves to its TUI (after its own
-// --cli, --tui, HERMES_TUI and display.interface precedence) runs
-// hermes_cli.main._launch_tui, which the shim replaces by a refusal with a
-// message: the sandbox refuses exactly what Hermes would run as its TUI and
-// nothing it runs as its classic interface (hermes --cli --tui, --tui
-// --version, --tui cron list; 1.0.4 review), so the launcher reads no
-// argument for it. The managed layer pins HERMES_TUI=0 and
-// display.interface: cli over the environment, the .env files and the user
-// configs, so a setting never selects the TUI; _make_agent, replaced by one
-// that raises, is the backstop for every other way in (dashboard chat, the
-// serve backend, a tui_gateway started by hand), so no such agent runs a
-// tool. Remove the shim and the managed TUI pins when the image pins Hermes
-// 0.21.1 or later (TestHermesImageRefusesTheUnhookedTUIOfItsPin).
-const hermesUnhookedAgentModule = `"""DefenseClaw: refuse what the pinned Hermes runs without its hooks.
-
-This Hermes runs its TUI (hermes_cli.main._launch_tui) and builds the agent of
-its TUI, dashboard chat and serve backend (tui_gateway.server._make_agent)
-without the shell hooks DefenseClaw registers, so DefenseClaw would neither
-check nor record their tool calls.
-"""
-import os as _os
-` + pyOnImport + `
-_MESSAGE = (
-    "DefenseClaw: this Hermes runs the agent of its TUI, dashboard and serve "
-    "backend without DefenseClaw's hooks, so the sandbox refuses it; start "
-    "Hermes with its classic interface (no --tui, display.interface: cli)"
-)
-
-_TUI_REFUSAL = (
-    "defenseclaw: refusing to start Hermes: this Hermes runs its TUI without "
-    "DefenseClaw's hooks. Start Hermes without --tui, or add --cli: the classic "
-    "interface runs the hooks.\n"
-)
-
-
-def _defenseclaw_refuse_agent(*args, **kwargs):
-    raise RuntimeError(_MESSAGE)
-
-
-def _defenseclaw_refuse_tui(*args, **kwargs):
-    try:
-        _os.write(2, _TUI_REFUSAL.encode())
-    except OSError:
-        pass
-    raise SystemExit(2)
-
-
-def _defenseclaw_patch_server(server):
-    server._make_agent = _defenseclaw_refuse_agent
-
-
-def _defenseclaw_patch_main(main):
-    main._launch_tui = _defenseclaw_refuse_tui
-
-
-_defenseclaw_on_import("tui_gateway.server", _defenseclaw_patch_server)
-_defenseclaw_on_import("hermes_cli.main", _defenseclaw_patch_main)
 `
 
 // hermesSuspendModuleName is the root-owned module the Hermes tool
@@ -310,9 +240,8 @@ var Hermes = register(&Spec{
 	},
 	preseedRefresh: []string{
 		"refuse --safe-mode and every prefix Hermes' argument parser resolves to it (--sa and longer): Hermes skips every shell hook in safe mode",
-		"the pinned Hermes runs its TUI without the shell hooks (GAP-1036): a root-owned shim refuses, with a message, the TUI Hermes itself resolves a start to (hermes_cli.main._launch_tui, after its own --cli/--tui/HERMES_TUI/display.interface precedence) and every agent it builds in tui_gateway (dashboard chat, serve backend); a start Hermes runs as its classic interface is never refused. The managed layer pins HERMES_TUI=0 and display.interface: cli over the environment, every .env and every config.yaml, so no setting selects the TUI",
-		"pin HOME and HERMES_HOME to the image home and HERMES_MANAGED_DIR to /etc/hermes (Hermes then reads the managed layer whatever else the environment holds), and drop the variables that move the Hermes home or the code Hermes runs (HERMES_PYTHON_SRC_ROOT, HERMES_LAZY_INSTALL_TARGET, the TUI's interpreter and directories, every PYTHON* variable) or switch the hooks off (HERMES_SAFE_MODE, HERMES_ENABLE_PROJECT_PLUGINS)",
-		"refuse to start while a .env or .op.env of the Hermes home or one of its profiles names any of them or HERMES_MANAGED_DIR, or for PYTHON*, LD_* and TIRITH_* assigns one as python-dotenv reads it (Hermes loads ~/.hermes/.env over the process environment at start)",
+		"pin HOME and HERMES_HOME to the image home, and drop the variables that move the managed scope, the Hermes home or the code Hermes runs (HERMES_MANAGED_DIR, HERMES_PYTHON_SRC_ROOT, HERMES_LAZY_INSTALL_TARGET, the TUI's interpreter and directories, every PYTHON* variable) or switch the hooks off (HERMES_SAFE_MODE, HERMES_ENABLE_PROJECT_PLUGINS)",
+		"refuse to start while a .env or .op.env of the Hermes home or one of its profiles names any of them (Hermes loads ~/.hermes/.env over the process environment at start)",
 		"refuse to start while the Hermes home or a profile holds Python code under plugins/ (model-provider plugins are imported whatever plugins.enabled says; memory and cron providers load when the user config names them)",
 		"refuse to start while a user config.yaml has a secrets section, as Hermes' YAML loader reads it, or is a file the loader cannot parse (its secret sources set environment variables before the managed .env applies)",
 		"export HERMES_ACCEPT_HOOKS=1 so the managed hooks register without the first-use consent prompt (the managed layer pins hooks_auto_accept as well)",
@@ -361,43 +290,14 @@ var hermesEnvFileNames = []string{
 	"HERMES_PYTHON[A-Z_]*", "HERMES_TUI_DIR", "HERMES_NODE", "HERMES_LAZY_INSTALL_TARGET",
 }
 
-// hermesEnvFileGenericNames are the other variables the files may not set
-// (Python regular expressions, matched where a key starts): the Tirith
-// scanner's, the interpreter's and the dynamic loader's. Hermes does not
-// split glued pairs for them, so only a real assignment sets one:
-// hermesEnvAssignmentCheck reads the keys the way python-dotenv does, and a
-// comment or a value that only mentions a name is no assignment.
-// PYTEST_CURRENT_TEST, Hermes' test-suite switch, needs no check: Hermes
-// ignores /etc/hermes under it only while HERMES_MANAGED_DIR is unset
-// (managed_scope.get_managed_dir), and the launcher sets that (GAP-1122).
+// hermesEnvFileGenericNames are the other variables the files may not name,
+// matched where a name starts (Hermes does not split glued pairs for them):
+// the Tirith scanner's, the interpreter's and the dynamic loader's.
 var hermesEnvFileGenericNames = []string{"TIRITH_[A-Z_]*", "PYTHON[A-Z0-9_]*", "LD_[A-Z_]*"}
 
-// hermesEnvFilePattern is the extended regular expression of hermesEnvFileNames.
-var hermesEnvFilePattern = strings.Join(hermesEnvFileNames, "|")
-
-// hermesEnvAssignmentCheck prints the first key of the .env file argv[1]
-// that matches the regular expression argv[2] where it starts. It reads the
-// file as Hermes may (utf-8 without a BOM, latin-1, UTF-16 with a BOM, NUL
-// bytes removed) and every line as python-dotenv starts a binding: optional
-// whitespace and export, an unquoted or single-quoted key, then "=". Each
-// binding starts a line, so checking every line also finds a key after a
-// value that spans lines.
-const hermesEnvAssignmentCheck = `import codecs, re, sys
-raw = open(sys.argv[1], "rb").read()
-texts = [raw.decode("utf-8-sig", "replace"), raw.decode("latin-1")]
-if raw.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
-    try:
-        texts.append(raw.decode("utf-16"))
-    except UnicodeDecodeError:
-        pass
-binding = re.compile(r"\s*(?:export[^\S\r\n]+)?(?:\x27([^\x27]+)\x27|([^=#\s]+))[^\S\r\n]*=")
-name = re.compile(sys.argv[2])
-for text in texts:
-    for line in re.split(r"\r\n|\r|\n", text.replace("\0", "")):
-        m = binding.match(line)
-        if m and name.match(m.group(1) or m.group(2)):
-            print(m.group(1) or m.group(2))
-            sys.exit(0)`
+// hermesEnvFilePattern is the extended regular expression of both lists.
+var hermesEnvFilePattern = strings.Join(hermesEnvFileNames, "|") +
+	"|(^|[^A-Za-z0-9_])(" + strings.Join(hermesEnvFileGenericNames, "|") + ")"
 
 var hermesLauncher = `#!/bin/bash -p
 # defenseclaw-sandbox-launcher v3
@@ -415,9 +315,7 @@ set -u
 }
 # Safe mode skips every shell hook, and DefenseClaw's hooks are the only gate
 # on a sandboxed tool call. Hermes' parsers resolve every prefix of
-# --safe-mode down to --sa. The TUI, which this Hermes runs without the
-# hooks, is refused where Hermes starts it (hermesUnhookedAgentModule), not
-# from the arguments.
+# --safe-mode down to --sa.
 for arg in "$@"; do
   case "${arg%%=*}" in
     --sa|--saf|--safe|--safe-|--safe-m|--safe-mo|--safe-mod|--safe-mode)
@@ -425,16 +323,12 @@ for arg in "$@"; do
       ;;
   esac
 done
-unset HERMES_SAFE_MODE HERMES_ENABLE_PROJECT_PLUGINS HERMES_HOME_OVERRIDE \
+unset HERMES_SAFE_MODE HERMES_MANAGED_DIR HERMES_ENABLE_PROJECT_PLUGINS HERMES_HOME_OVERRIDE \
   HERMES_PYTHON_SRC_ROOT HERMES_PYTHON HERMES_TUI_DIR HERMES_NODE HERMES_LAZY_INSTALL_TARGET
-# Hermes reads its managed layer, which holds DefenseClaw's hooks, from
-# HERMES_MANAGED_DIR before anything else decides it (its test-suite switch
-# PYTEST_CURRENT_TEST only drops the /etc/hermes default).
-HERMES_MANAGED_DIR=` + connector.HermesSandboxManagedDir + `
 HOME=` + connector.SandboxHomeDir + `
 HERMES_HOME="$HOME/.hermes"
 HERMES_ACCEPT_HOOKS=1
-export HERMES_MANAGED_DIR HOME HERMES_HOME HERMES_ACCEPT_HOOKS
+export HOME HERMES_HOME HERMES_ACCEPT_HOOKS
 
 # Hermes loads <home>/.env and .op.env into its own environment, over the
 # launcher's, imports Python plugins from <home>/plugins, and runs the secret
@@ -445,10 +339,7 @@ check_home() {
   for f in "$h/.env" "$h/.op.env"; do
     [ -e "$f" ] || continue
     [ -f "$f" ] && [ -r "$f" ] || refuse "$f is not a readable regular file" "Remove it and start Hermes again."
-    hit="$(/usr/bin/tr -d '\000' <"$f" | /usr/bin/grep -aoE '` + hermesEnvFilePattern + `' | /usr/bin/head -n 1)"
-    [ -n "$hit" ] || hit="$(` + shellQuote(hermesTool.interpreter()) + ` -I -c '` + hermesEnvAssignmentCheck + `' "$f" '` +
-	strings.Join(hermesEnvFileGenericNames, "|") + `' 2>/dev/null)" ||
-      refuse "$f cannot be read for the variables Hermes loads from it" "Fix or remove it and start Hermes again."
+    hit="$(/usr/bin/tr -d '\000' <"$f" | /usr/bin/grep -aoE '` + hermesEnvFilePattern + `' | /usr/bin/head -n 1 | /usr/bin/sed 's/^[^A-Z]*//')"
     [ -z "$hit" ] || refuse "$f sets $hit" "It could switch DefenseClaw's hooks off or load code next to them; remove it and start Hermes again."
   done
   if [ -e "$h/plugins" ]; then

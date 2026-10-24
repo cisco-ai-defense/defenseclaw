@@ -187,7 +187,7 @@ hook, and returns a nonzero exit code when anything fails. Healthy values:
 | `installed_version` | The version you deployed |
 | `readiness` | `gateway`, `guardian`, `enumerator` and `sensor_helper` all `true` |
 | `coverage_complete` | `true` |
-| `security_complete` | `false` with Codex or Claude Code enabled: the warning `hook_process_fail_open` says a stopped, killed or timed-out pre-tool hook can let a tool run ([limits](/docs/enterprise/install/reference/windows#claude-code-attestation)). `true` with only Cursor enabled. It needs Codex, Claude Code or Cursor enabled and, with Claude Code, an [attestation](/docs/enterprise/install/reference/windows#claude-code-attestation) |
+| `security_complete` | `true`. It needs Codex, Claude Code or Cursor enabled and, with Claude Code, an [attestation](/docs/enterprise/install/reference/windows#claude-code-attestation) |
 | `enrollment.targets` | One entry per user and connector. `0` means nobody is protected yet |
 | `policy` | `applied` is `true`; `effective_digest` identifies the config ([digest](/docs/enterprise/operate/operations#effective-policy-digest-and-config-generation)) |
 

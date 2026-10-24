@@ -100,6 +100,9 @@ func TestWindowsCursorMachineGuardRebuildKeepsConcurrentChanges(t *testing.T) {
 			write(t, paths.Hooks, []byte(`{"version":1,"hooks":{"operatorEvent":[{"type":"command","command":"operator-hook"}]}}`))
 		}},
 		{"registration fails open", failOpen},
+		{"hooks.json not JSON", func(t *testing.T, paths windowsCursorPaths) {
+			write(t, paths.Hooks, []byte("{ not json"))
+		}},
 	}
 	for _, enrolled := range []bool{false, true} {
 		for _, hooksCase := range hooksDamage {

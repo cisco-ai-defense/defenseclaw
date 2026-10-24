@@ -54,20 +54,11 @@ func TestHookProcessFailureWarnings(t *testing.T) {
 		})
 	}
 
-	for _, action := range []string{"status", "verify", "ensure"} {
-		r := New(action, "standalone", "windows", "1.0.4")
-		r.SecurityComplete = true
-		r.Connectors = map[string]ConnectorState{"codex": {Enabled: true}}
-		r.AddHookProcessFailureWarnings(r.Connectors)
-		if len(r.Warnings) != 1 || r.SecurityComplete {
-			t.Fatalf("%s warning=%v security_complete=%v", action, r.Warnings, r.SecurityComplete)
-		}
-		r = New(action, "standalone", "windows", "1.0.4")
-		r.Connectors = map[string]ConnectorState{"codex": {Enabled: false}}
-		r.AddHookProcessFailureWarnings(r.Connectors)
-		if len(r.Warnings) != 0 {
-			t.Fatalf("%s disabled connector warned: %v", action, r.Warnings)
-		}
+	r := New("verify", "standalone", "windows", "1.0.4")
+	r.Connectors = map[string]ConnectorState{"codex": {Enabled: false}}
+	r.AddHookProcessFailureWarnings(r.Connectors)
+	if len(r.Warnings) != 0 {
+		t.Fatalf("disabled connector warned: %v", r.Warnings)
 	}
 }
 

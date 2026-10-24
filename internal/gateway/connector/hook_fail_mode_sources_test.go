@@ -136,14 +136,13 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 		wantMode, wantSource, wantOut string
 	}{
 		{"copilot unset", NewCopilotConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"copilot outage open tier", NewCopilotConnector(), SetupOpts{HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"copilot old explicit open", NewCopilotConnector(), SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 		{"antigravity unset", NewAntigravityConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor observe unset", NewCursorConnector(), SetupOpts{GuardrailMode: "observe"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor observe outage open tier", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
-		{"cursor action outage open tier", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
-		{"cursor action strict tier", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "closed"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"cursor observe unset", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"cursor observe old explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"cursor action explicit open", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 		{"limited vendor unset", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"limited vendor outage open tier", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"limited vendor old explicit open", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -171,10 +170,9 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 	}
 }
 
-// A per-user Cursor's runtime records hold its outage mode whatever its
-// guardrail mode, and bake closed for every other failure: the contract of
-// the same outage mode validates them, another one is stale.
-func TestCursorRuntimeRecordsTheOutageMode(t *testing.T) {
+// A per-user Cursor's runtime stays closed even when an older config asked
+// for open. A closed contract validates that state; an open contract is stale.
+func TestCursorRuntimeIsClosedUnderOldOpenConfig(t *testing.T) {
 	cursor := NewCursorConnector()
 	for _, test := range []struct {
 		name     string
@@ -182,11 +180,9 @@ func TestCursorRuntimeRecordsTheOutageMode(t *testing.T) {
 		contract string
 		ok       bool
 	}{
-		{"observe, outage open tier", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", true},
-		{"action, outage open tier", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, "open", true},
-		{"observe, strict tier", SetupOpts{GuardrailMode: "observe", HookFailMode: "closed"}, "closed", true},
-		{"stale closed contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", false},
-		{"stale open contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "closed"}, "open", false},
+		{"observe, old open config", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", true},
+		{"observe, old explicit open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "closed", true},
+		{"stale open contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open", ConfiguredHookFailMode: "open"}, "open", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -269,8 +265,7 @@ func TestRefreshHookFailModesRendersAnEarlierReleasesSidecar(t *testing.T) {
 // no JSON entry, and the open a connector hook script bakes (0.8.10 to 1.0.2
 // let the environment open it; 1.0.3 bakes it, and its missing-home check).
 // While the gateway is down for the swap, the old hook scripts allow a call
-// before the refresh and block it after, in every tier: a per-user script
-// reads its outage mode from its runtime record, never from a baked open.
+// before the refresh and block it after; an open the config sets stays.
 func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 	hookDir := t.TempDir()
 	write := func(name, body string, perm os.FileMode) {
@@ -325,7 +320,7 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(refreshed.Sidecar, []string{"kiro", "legacy"}) ||
-		!reflect.DeepEqual(refreshed.Scripts, []string{"claude-code-hook.sh", "codex-hook.sh", "copilot-hook.sh", "cursor-hook.sh"}) {
+		!reflect.DeepEqual(refreshed.Scripts, []string{"claude-code-hook.sh", "codex-hook.sh", "cursor-hook.sh"}) {
 		t.Fatalf("refreshed %+v", refreshed)
 	}
 	state := readHookConfigSidecarForTest(t, hookDir)
@@ -339,7 +334,7 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 	if got := readFlatHookRecordForTest(t, hookDir, "legacy"); flatRecordValueForTest([]byte(got), "DEFENSECLAW_FAIL_MODE") != "closed" {
 		t.Fatalf("legacy flat record %q", got)
 	}
-	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "copilot-hook.sh", "cursor-hook.sh"} {
+	for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "cursor-hook.sh"} {
 		body, err := os.ReadFile(filepath.Join(hookDir, name))
 		if err != nil {
 			t.Fatal(err)
@@ -351,11 +346,17 @@ func TestRefreshHookFailModesClosesAnEarlierReleasesHooks(t *testing.T) {
 			t.Fatalf("%s mode %v (%v)", name, info.Mode(), err)
 		}
 	}
+	if body, _ := os.ReadFile(filepath.Join(hookDir, "copilot-hook.sh")); string(body) != scripts["copilot-hook.sh"] {
+		t.Fatalf("the operator's open copilot hook was changed:\n%s", body)
+	}
 	if canRun {
-		for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "copilot-hook.sh", "cursor-hook.sh"} {
+		for _, name := range []string{"codex-hook.sh", "claude-code-hook.sh", "cursor-hook.sh"} {
 			if got := run(name); got != 2 {
 				t.Fatalf("%s after the refresh exits %d, want 2 (fail closed)", name, got)
 			}
+		}
+		if got := run("copilot-hook.sh"); got != 0 {
+			t.Fatalf("the operator's open copilot hook exits %d, want 0", got)
 		}
 	}
 	// A second pass (after the gateway stopped) changes no script again.

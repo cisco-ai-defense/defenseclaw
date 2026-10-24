@@ -21,7 +21,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
-	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
@@ -181,15 +180,6 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 		installed      string
 		stops          int
 		state, targets string
-		// GAP-0847: the record of the targets published before the apply.
-		recordFails, putBackFails bool
-		putBack                   int    // how often the record is put back
-		warning                   string // a warning the result carries
-		unprotected               string // the dropped target the error names
-		// GAP-0905: the live proof of the dropped target's hook fails, and
-		// how often the proof must have run.
-		hookUnproven bool
-		proofs       int
 	}{
 		{name: "restore fails after adoption and target refresh", restoreFails: true, adopted: true, verify: true,
 			code: "config_restore_failed", installed: next, stops: 1,
@@ -200,36 +190,13 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 		{name: "restore fails before adoption", restoreFails: true,
 			code: "config_restore_failed", installed: next, stops: 1,
 			state: "still holds the config that was not applied", targets: "the enrolled targets were not changed"},
-		// GAP-0847: the undo's enumerator run fails, and the targets
-		// published before the apply go back as they were, so bob, whom the
-		// candidate dropped, is enrolled again and the undo is proven.
-		// Before, the undo stopped the gateway and closed the hooks that
-		// were left, which do not include bob's.
 		{name: "targets cannot be published again", refreshFails: 2, adopted: true, verify: true,
-			installed: previous, putBack: 1, warning: "targets_restored_from_record", proofs: 1},
-		// GAP-0905: the guardian removed bob's hook for the candidate and
-		// stopped before it read the targets put back, so a published
-		// targets.yaml proves nothing. Before, the undo was declared restored
-		// with bob still lacking a hook; now his hook must be verified back.
-		{name: "targets put back but the dropped hook is not back", refreshFails: 2, hookUnproven: true, adopted: true, verify: true,
-			code: "targets_restore_failed", installed: previous, stops: 1, putBack: 1, proofs: 1,
-			state: "holds the previous config", targets: "published again for the previous config",
-			unprotected: "these previously enrolled targets have no DefenseClaw hook now: bob (S-1-5-21-1-2-3-1002) claudecode"},
-		{name: "targets published again but the dropped hook is not back", hookUnproven: true, adopted: true, verify: true,
-			code: "targets_restore_failed", installed: previous, stops: 1, proofs: 1,
-			state: "holds the previous config", targets: "published again for the previous config",
-			unprotected: "these previously enrolled targets have no DefenseClaw hook now: bob (S-1-5-21-1-2-3-1002) claudecode"},
-		{name: "targets cannot be published again nor put back", refreshFails: 2, putBackFails: true, adopted: true, verify: true,
-			code: "targets_restore_failed", installed: previous, stops: 1, putBack: 1,
-			state: "holds the previous config", targets: "a user it does not enroll has no DefenseClaw hooks",
-			unprotected: "these previously enrolled targets have no DefenseClaw hook now: bob (S-1-5-21-1-2-3-1002) claudecode"},
-		// No refresh runs before the targets it replaces are recorded: the
-		// change goes to the upgrade transaction with the targets unchanged.
-		{name: "targets cannot be recorded", recordFails: true, adopted: true, installed: previous},
-		{name: "gateway keeps the new policy", adopted: true, gatewayStays: true, verify: true, proofs: 1,
+			code: "targets_restore_failed", installed: previous, stops: 1,
+			state: "holds the previous config", targets: "a user it does not enroll has no DefenseClaw hooks"},
+		{name: "gateway keeps the new policy", adopted: true, gatewayStays: true, verify: true,
 			code: "config_restore_failed", installed: previous, stops: 1,
 			state: "holds the previous config", targets: "published again for the previous config"},
-		{name: "proven undo", adopted: true, verify: true, installed: previous, proofs: 1},
+		{name: "proven undo", adopted: true, verify: true, installed: previous},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			host, opts := newHotConfigHost(t, previous, next)
@@ -253,16 +220,6 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 					return errors.New("enumerator refused")
 				}
 				return nil
-			}
-			if tc.recordFails {
-				host.targetRecordErr = errors.New("targets.yaml is unreadable")
-			}
-			if tc.putBackFails {
-				host.targetRestoreErr = errors.New("targets.yaml replace refused")
-			}
-			host.dropped = []enterprisehooks.ManifestTarget{{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "claudecode"}}
-			if tc.hookUnproven {
-				host.hookProofErr = errors.New("no verified DefenseClaw hook for bob (S-1-5-21-1-2-3-1002) claudecode")
 			}
 			replies := []map[string]any{installedStatus("status")}
 			if tc.verify {
@@ -316,23 +273,6 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 			if host.stops != tc.stops {
 				t.Fatalf("gateway stopped %d times, want %d; errors %+v", host.stops, tc.stops, result.Errors)
 			}
-			if len(host.hookProofs) != tc.proofs {
-				t.Fatalf("the dropped targets' hooks were proven %d times, want %d; errors %+v", len(host.hookProofs), tc.proofs, result.Errors)
-			}
-			for _, proof := range host.hookProofs {
-				if len(proof) != 1 || proof[0].SID != "S-1-5-21-1-2-3-1002" {
-					t.Fatalf("the hook proof covered %+v, want bob's dropped target", proof)
-				}
-			}
-			if host.targetRestores != tc.putBack {
-				t.Fatalf("the targets record was put back %d times, want %d; errors %+v", host.targetRestores, tc.putBack, result.Errors)
-			}
-			if tc.recordFails && (refreshes != 0 || host.targetRecords != 1) {
-				t.Fatalf("an unrecorded refresh ran: refreshes=%d records=%d", refreshes, host.targetRecords)
-			}
-			if tc.warning != "" && !windowsBundleHasCode(result.Warnings, tc.warning) {
-				t.Fatalf("warnings %+v, want %s", result.Warnings, tc.warning)
-			}
 			if tc.code == "" {
 				if windowsBundleHasCode(result.Errors, "config_restore_failed") || windowsBundleHasCode(result.Errors, "targets_restore_failed") {
 					t.Fatalf("a proven undo reported a failed restore: %+v", result.Errors)
@@ -346,9 +286,6 @@ func TestWindowsEnterpriseHotConfigUnprovenUndoFailsClosed(t *testing.T) {
 				t.Fatalf("installer runs %q: no upgrade transaction may follow an unproven undo", stub.calls)
 			}
 			message := fmt.Sprint(result.Errors)
-			if tc.unprotected != "" && !strings.Contains(message, tc.unprotected) {
-				t.Fatalf("errors %s do not name the target without a hook (%q)", message, tc.unprotected)
-			}
 			for _, want := range []string{tc.state, tc.targets, "gateway service was stopped"} {
 				if !strings.Contains(message, want) {
 					t.Fatalf("errors %s do not say %q", message, want)

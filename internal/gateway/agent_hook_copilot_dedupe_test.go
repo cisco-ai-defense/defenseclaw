@@ -19,7 +19,6 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"strconv"
 	"testing"
 	"time"
 )
@@ -36,12 +35,12 @@ func TestCopilotHookDedupe(t *testing.T) {
 		if id != "" {
 			payload["tool_use_id"] = id
 		}
-		return agentHookRequest{HookEventName: "PreToolUse", SessionID: "s1", CWD: "/project", ToolName: "bash", ToolArgs: args, Payload: payload}
+		return agentHookRequest{HookEventName: "PreToolUse", SessionID: "s1", ToolName: "bash", ToolArgs: args, Payload: payload}
 	}
 	camel := func(command string) agentHookRequest {
 		text := `{"command":"` + command + `"}`
 		args, _ := json.Marshal(text)
-		return agentHookRequest{HookEventName: "preToolUse", SessionID: "s1", CWD: "/project", ToolName: "bash", ToolArgs: args,
+		return agentHookRequest{HookEventName: "preToolUse", SessionID: "s1", ToolName: "bash", ToolArgs: args,
 			Payload: map[string]interface{}{"toolName": "bash", "toolArgs": text}}
 	}
 	verdict := agentHookResponse{Action: "block", Severity: "HIGH", EvaluationID: "e1"}
@@ -80,65 +79,5 @@ func TestCopilotHookDedupe(t *testing.T) {
 	abandoned.release()
 	if _, hit, _ := released.begin(ctx, "copilot", snake("t2", "ls")); hit {
 		t.Fatal("a delivery that ended without a verdict answered the next one")
-	}
-}
-
-// A repeated relative write changes target when its working directory
-// changes. A later live block for the same tool request also revokes an
-// earlier cached allow, including one still finishing evaluation.
-func TestCopilotHookDedupeTargetAndBlockInvalidation(t *testing.T) {
-	ctx := context.Background()
-	request := func(id, cwd, target string) agentHookRequest {
-		input := map[string]any{"path": target, "file_text": "updated"}
-		args, _ := json.Marshal(input)
-		return agentHookRequest{HookEventName: "preToolUse", SessionID: "s1", CWD: cwd,
-			ToolName: "create", ToolArgs: args, Payload: map[string]any{"toolName": "create", "toolArgs": input, "tool_use_id": id}}
-	}
-	allow := agentHookResponse{Action: "allow", EvaluationID: "allowed"}
-	block := agentHookResponse{Action: "block", EvaluationID: "blocked"}
-	var d copilotHookDedupe
-	_, _, first := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt"))
-	first.complete(allow)
-	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/protected", "notes.txt")); hit && got.Action == "allow" {
-		t.Fatal("cached allow crossed to a different resolved target")
-	}
-	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt")); !hit || got.Action != "allow" {
-		t.Fatalf("same target was not cached before a block: hit=%v action=%s", hit, got.Action)
-	}
-	from := context.WithValue(ctx, resolvedWritesContextKey{}, map[string]string{"/safe/notes.txt": "/safe/notes.txt"})
-	to := context.WithValue(ctx, resolvedWritesContextKey{}, map[string]string{"/safe/notes.txt": "/protected/notes.txt"})
-	_, _, evidenced := d.begin(from, "copilot", request("evidence", "/safe", "notes.txt"))
-	evidenced.complete(allow)
-	if got, hit, _ := d.begin(to, "copilot", request("evidence", "/safe", "notes.txt")); hit && got.Action == "allow" {
-		t.Fatal("cached allow crossed to a different resolved write target")
-	}
-	_, _, changed := d.begin(ctx, "copilot", request("one", "/safe", "protected.txt"))
-	changed.complete(block)
-	if got, hit, _ := d.begin(ctx, "copilot", request("one", "/safe", "notes.txt")); hit && got.Action == "allow" {
-		t.Fatal("a live block left the earlier allow cached for its request ID")
-	}
-
-	var pending copilotHookDedupe
-	_, _, old := pending.begin(ctx, "copilot", request("two", "/safe", "notes.txt"))
-	_, _, denied := pending.begin(ctx, "copilot", request("two", "/safe", "protected.txt"))
-	denied.complete(block)
-	old.complete(allow)
-	if got, hit, _ := pending.begin(ctx, "copilot", request("two", "/safe", "notes.txt")); hit && got.Action == "allow" {
-		t.Fatal("an in-flight allow replaced the later block")
-	}
-
-	var full copilotHookDedupe
-	_, _, cached := full.begin(ctx, "copilot", request("three", "/safe", "notes.txt"))
-	cached.complete(allow)
-	for index := len(full.entries); index < copilotDedupeMaxEntries; index++ {
-		full.entries["other-"+strconv.Itoa(index)] = &copilotDedupeEntry{expires: time.Now().Add(time.Minute)}
-	}
-	_, hit, uncached := full.begin(ctx, "copilot", request("three", "/safe", "protected.txt"))
-	if hit || len(uncached.entries) != 0 {
-		t.Fatal("full cache unexpectedly claimed the changed call")
-	}
-	uncached.complete(block)
-	if got, hit, _ := full.begin(ctx, "copilot", request("three", "/safe", "notes.txt")); hit && got.Action == "allow" {
-		t.Fatal("a live block at cache capacity left the old allow reusable")
 	}
 }

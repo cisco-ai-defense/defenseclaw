@@ -377,12 +377,10 @@ func (c *Config) EffectiveActionHookFailModeForConnector(connector string) strin
 	return c.effectiveHookFailModeForConnector(connector, true)
 }
 
-// effectiveHookFailModeForConnector is the hook fail-mode resolver for every
-// failure that is not a gateway outage. A managed host may use an
-// administrator's explicit open during an outage; Secure Client also
-// defaults to open. A per-user install is closed here, including values
-// retained from an older config: its outage mode follows its policy tier
-// (EffectiveHookOutageFailModeForConnector, HookOutageFailMode).
+// effectiveHookFailModeForConnector is the hook fail-mode resolver. A
+// managed host may use an administrator's explicit open during an outage;
+// Secure Client also defaults to open. A per-user install is always closed,
+// including observe-mode Cursor and values retained from an older config.
 func (c *Config) effectiveHookFailModeForConnector(connector string, _ bool) string {
 	if c == nil {
 		return "closed"
@@ -410,6 +408,17 @@ func (c *Config) effectiveHookFailModeForConnector(connector string, _ bool) str
 func (c *Config) secureClientHookFailModes() bool {
 	return c.SecureClientIntegration() &&
 		(runtime.GOOS != "linux" || managed.NormalizeEnterpriseProfile(c.Enterprise.Profile) != "")
+}
+
+// ConfiguredHookFailModeForConnector is the hook fail mode the config sets
+// explicitly for connector (configuredHookFailModeForConnector), or "" when
+// it sets none. This reports a stored legacy per-user open without making it
+// effective; only a managed administrator can select an outage open.
+func (c *Config) ConfiguredHookFailModeForConnector(connector string) string {
+	if c == nil {
+		return ""
+	}
+	return c.configuredHookFailModeForConnector(connector)
 }
 
 // configuredHookFailModeForConnector is the explicit hook fail mode the

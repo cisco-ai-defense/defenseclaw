@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unsafe"
 
@@ -39,7 +40,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -77,8 +77,7 @@ var (
 	windowsSecretIsElevated      = func() bool { return windows.GetCurrentProcessToken().IsElevated() }
 	windowsSecretRestartGateway  = restartWindowsStandaloneGatewayBeforeStop
 	windowsSecretSpawnRecovery   = spawnWindowsSecretGatewayRecovery
-	windowsSecretStartRecovery   = processutil.StartIndependent
-	windowsSecretGatewayLive     = windowsStandaloneGatewayLive
+	windowsSecretRecoveryFlags   = independentWindowsSecretRecoveryFlags
 	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
 		return exec.Command(executable, "enterprise", "secret", "recover-gateway")
 	}
@@ -263,9 +262,6 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if !managed.ValidCredentialName(opts.name) {
 		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
 	}
-	if err := secretTransactionArguments(opts); err != nil {
-		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
-	}
 	if err := requireWindowsSecretDeployment(); err != nil {
 		return windowsSecretChange{}, err
 	}
@@ -310,19 +306,15 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err != nil {
 			return windowsSecretChange{}, err
 		}
-		// A put-back (--undo-rotation) removes what a failed rotation added
-		// to the config confirmed before it, which may reference the
-		// credential with no value stored (checkSecretTransaction decides).
-		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && opts.undoRotation == "" {
+		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" {
 			return windowsSecretChange{}, secretFailed("credential_in_use", windowsSecretExitFailure,
 				fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at))
 		}
 	}
 	// Start an independent child before changing credentials, but only arm it
 	// at a live gateway's restart decision. Closing its pipe on a refusal or
-	// no-op cannot start a gateway that the administrator left stopped. A
-	// gateway that is stopped or not installed needs no restart, so no child.
-	recovery, err := prepareWindowsSecretRecovery()
+	// no-op cannot start a gateway that the administrator left stopped.
+	recovery, err := windowsSecretSpawnRecovery()
 	if err != nil {
 		return windowsSecretChange{}, secretFailed("change_failed", windowsSecretExitFailure,
 			fmt.Errorf("cannot arm gateway restart recovery; nothing was changed: %w", err))
@@ -338,17 +330,6 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
-	if opts.ifConfirmed != "" || opts.undoRotation != "" {
-		var stored []byte
-		entry, raw, readErr := store.openCredential(opts.name)
-		if readErr == nil {
-			_ = windows.CloseHandle(entry)
-			stored = raw
-		}
-		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
-			return windowsSecretChange{}, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
-		}
-	}
 	// A change this computer could not audit is not made: the spool must
 	// hold room for its change event before the credential is written or
 	// removed, until the event is written. A concurrent command cannot take
@@ -364,7 +345,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		unchanged = keepIdenticalWindowsSecret(store, opts.name, value)
 		if !unchanged {
 			// A value the signed bundle does not bind is not stored.
-			if err := checkSecretBinding(cmd.Context(), opts.name, value, opts.bundle, windowsSecretStored(layout.SecretsDir, opts.name)); err != nil {
+			if err := checkSecretBinding(cmd.Context(), opts.name, value, opts.bundle); err != nil {
 				return change, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
 			}
 			if err := writeWindowsSecret(store, opts.name, value); err != nil {
@@ -969,74 +950,6 @@ type windowsSecretRecoveryChild struct {
 	closed bool
 }
 
-// deferredWindowsSecretRecovery is the recovery a credential change holds.
-// changeWindowsSecret starts its child before the change when the gateway
-// runs (prepareWindowsSecretRecovery). With the gateway stopped or not
-// installed no restart is due and no child runs; one that started after that
-// check gets its child at the restart decision, before its stop, and a child
-// that cannot start there leaves the gateway running and the restart failed.
-type deferredWindowsSecretRecovery struct {
-	spawn func() (windowsSecretRecoveryControl, error)
-	child windowsSecretRecoveryControl
-}
-
-func (r *deferredWindowsSecretRecovery) arm() error {
-	if r.child == nil {
-		child, err := r.spawn()
-		if err != nil {
-			return err
-		}
-		r.child = child
-	}
-	return r.child.arm()
-}
-
-func (r *deferredWindowsSecretRecovery) finish(recoverGateway bool) error {
-	if r.child == nil {
-		return nil
-	}
-	return r.child.finish(recoverGateway)
-}
-
-// prepareWindowsSecretRecovery starts the recovery child up front unless the
-// service manager reports the gateway stopped or not installed. A state it
-// cannot read counts as running.
-func prepareWindowsSecretRecovery() (windowsSecretRecoveryControl, error) {
-	recovery := &deferredWindowsSecretRecovery{spawn: windowsSecretSpawnRecovery}
-	if live, err := windowsSecretGatewayLive(); err == nil && !live {
-		return recovery, nil
-	}
-	child, err := recovery.spawn()
-	if err != nil {
-		return nil, err
-	}
-	recovery.child = child
-	return recovery, nil
-}
-
-// windowsStandaloneGatewayLive reports whether the gateway service runs or
-// is changing state: false only for a stopped or absent service.
-func windowsStandaloneGatewayLive() (bool, error) {
-	manager, err := mgr.Connect()
-	if err != nil {
-		return false, err
-	}
-	defer manager.Disconnect()
-	service, err := manager.OpenService(managed.StandaloneWindowsGatewaySvc)
-	if err != nil {
-		if errors.Is(err, windows.ERROR_SERVICE_DOES_NOT_EXIST) {
-			return false, nil
-		}
-		return false, err
-	}
-	defer service.Close()
-	status, err := service.Query()
-	if err != nil {
-		return false, err
-	}
-	return windowsServiceState(status.State) != windowsServiceStopped, nil
-}
-
 func (r *windowsSecretRecoveryChild) arm() error {
 	if r.closed || r.armed {
 		return errors.New("gateway restart recovery is not ready to arm")
@@ -1070,16 +983,19 @@ func (r *windowsSecretRecoveryChild) finish(recoverGateway bool) error {
 
 // spawnWindowsSecretGatewayRecovery starts a detached child before the
 // credential write. The child has no credential value or writable state and
-// cannot start a service until the parent explicitly arms its restart. It
-// must outlive this command's process job (processutil.StartIndependent),
-// including the unreadable job of a LocalSystem scheduled task.
+// cannot start a service until the parent explicitly arms its restart.
 func spawnWindowsSecretGatewayRecovery() (windowsSecretRecoveryControl, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
+	flags, err := windowsSecretRecoveryFlags()
+	if err != nil {
+		return nil, err
+	}
 	child := windowsSecretRecoveryCommand(executable)
 	child.Dir = filepath.Dir(executable)
+	child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: flags}
 	child.Stderr = io.Discard
 	input, err := child.StdinPipe()
 	if err != nil {
@@ -1090,10 +1006,9 @@ func spawnWindowsSecretGatewayRecovery() (windowsSecretRecoveryControl, error) {
 		_ = input.Close()
 		return nil, fmt.Errorf("create gateway recovery readiness pipe: %w", err)
 	}
-	if err := windowsSecretStartRecovery(child); err != nil {
+	if err := child.Start(); err != nil {
 		_ = input.Close()
-		_ = ready.Close()
-		return nil, fmt.Errorf("start gateway recovery: %w", err)
+		return nil, err
 	}
 	result := make(chan error, 1)
 	go func() {
@@ -1118,6 +1033,30 @@ func spawnWindowsSecretGatewayRecovery() (windowsSecretRecoveryControl, error) {
 	}
 	_ = ready.Close()
 	return &windowsSecretRecoveryChild{child: child, input: input}, nil
+}
+
+func independentWindowsSecretRecoveryFlags() (uint32, error) {
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	err := windows.QueryInformationJobObject(0, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info)), nil)
+	return independentWindowsSecretRecoveryFlagsForJob(info.BasicLimitInformation.LimitFlags, err)
+}
+
+func independentWindowsSecretRecoveryFlagsForJob(limits uint32, err error) (uint32, error) {
+	flags := uint32(windows.CREATE_NEW_PROCESS_GROUP | windows.DETACHED_PROCESS)
+	if errors.Is(err, windows.ERROR_INVALID_HANDLE) {
+		return flags, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("inspect gateway recovery process job: %w", err)
+	}
+	if limits&windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK != 0 {
+		flags |= windows.CREATE_BREAKAWAY_FROM_JOB
+	} else if limits&windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE != 0 &&
+		limits&windows.JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK == 0 {
+		return 0, errors.New("gateway recovery cannot survive the credential command's enclosing process job; nothing was changed")
+	}
+	return flags, nil
 }
 
 func recoverWindowsSecretGateway(ctx context.Context, stdin io.Reader, stdout io.Writer) error {

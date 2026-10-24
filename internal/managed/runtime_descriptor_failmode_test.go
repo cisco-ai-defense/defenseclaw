@@ -4,6 +4,7 @@
 package managed
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -82,9 +83,9 @@ func TestRuntimeDescriptorPolicyViewPinsAreBoundToListedConnectors(t *testing.T)
 }
 
 func TestRuntimeDescriptorPerAccountPinsRejectInvalidSources(t *testing.T) {
-	good := strings.Repeat("a", 64)
+	good := PolicyViewFilePin{SHA256: strings.Repeat("a", 64), Size: 5, Mode: 0o600, Device: 1, Inode: 2, MTime: 3, CTime: 4}
 	d := failModeTestDescriptor()
-	d.PolicyViewUserSources = map[string]map[string]string{"codex": {"alice": good}}
+	d.PolicyViewUserSources = map[string]map[string]PolicyViewFilePin{"codex": {"alice": good}}
 	data, err := MarshalRuntimeDescriptor(d)
 	if err != nil {
 		t.Fatal(err)
@@ -93,10 +94,9 @@ func TestRuntimeDescriptorPerAccountPinsRejectInvalidSources(t *testing.T) {
 	if err != nil || parsed.PolicyViewUserSources["codex"]["alice"] != good {
 		t.Fatalf("per-account pin did not round-trip: %v, %+v", err, parsed)
 	}
-	for _, bad := range []map[string]map[string]string{
+	for _, bad := range []map[string]map[string]PolicyViewFilePin{
 		{"codex": {"../alice": good}},
-		{"codex": {"alice": "not-a-digest"}},
-		{"codex": {"alice": strings.Repeat("A", 64)}},
+		{"codex": {"alice": {SHA256: strings.Repeat("a", 64)}}},
 		{"claudecode": {"alice": good}},
 		{"copilot": {"alice": good}},
 	} {
@@ -105,5 +105,16 @@ func TestRuntimeDescriptorPerAccountPinsRejectInvalidSources(t *testing.T) {
 		if err := d.Validate(); err == nil {
 			t.Errorf("invalid per-account sources %+v validated", bad)
 		}
+	}
+	large := failModeTestDescriptor()
+	large.MachinePolicyConnectors = []string{"codex", "claudecode"}
+	large.PolicyViewUserSources = map[string]map[string]PolicyViewFilePin{"codex": {}, "claudecode": {}}
+	for i := range 128 {
+		name := strings.Repeat("u", 200) + strconv.Itoa(i)
+		large.PolicyViewUserSources["codex"][name] = good
+		large.PolicyViewUserSources["claudecode"][name] = good
+	}
+	if _, err := MarshalRuntimeDescriptor(large); err == nil {
+		t.Fatal("oversize per-account attestation descriptor was published")
 	}
 }

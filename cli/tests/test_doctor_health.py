@@ -105,26 +105,6 @@ def test_state_changing_component_repair_requires_attended_confirmation() -> Non
     assert authorize_remediation(choice, confirmed=True) == choice.argv
 
 
-def test_a_hermes_whose_tui_skips_the_hooks_warns_with_the_cause_and_points_past_it() -> None:
-    # GAP-0978: Hermes 0.19.0-0.21.0 run tools in their TUI without the shell
-    # hooks, in their classic interface with them. Doctor warns (it failed
-    # them, 1.0.4 review), names that cause and asks for a later release,
-    # never for the reviewed range that still holds 0.19.0.
-    for version in ("Hermes Agent v0.19.0 (2026.7.20)", "Hermes Agent vgit.5bba024 (2026.8.27)"):
-        discovery = SimpleNamespace(agents={"hermes": _signal(installed=True, version=version)})
-        (finding,) = assess_connector_health(("hermes",), discovery)
-        assert finding.status is HealthStatus.UNTESTED, version
-        assert finding.reason_code == "connector-version-partly-guarded"
-        assert finding.contract_id in {"hermes-hooks-v1", "hermes-hooks-v2"}, finding.contract_id
-        assert "is guarded, but" in finding.summary and "hermes --tui" in finding.summary
-        install = finding.remediations[0].summary
-        assert "not known broken" in install and "0.19.0" not in install, install
-    discovery = SimpleNamespace(agents={"hermes": _signal(installed=True, version="Hermes Agent v0.21.5 (2026.9.24)")})
-    (finding,) = assess_connector_health(("hermes",), discovery)
-    assert finding.status is HealthStatus.SUPPORTED
-    assert finding.contract_id == "hermes-hooks-v2"
-
-
 def test_connector_contract_states_and_capabilities_are_manifest_derived() -> None:
     discovery = SimpleNamespace(
         agents={

@@ -6,15 +6,8 @@ package connector
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"strings"
 )
-
-// ErrWindowsCursorHooksNotEditableInPlace is the refusal of
-// SpliceWindowsCursorEnterpriseHooksInPlace: the document cannot take
-// DefenseClaw's entries without a new render of the whole file.
-var ErrWindowsCursorHooksNotEditableInPlace = errors.New("only a new render of the whole file could register the guard in it, " +
-	"which would change entries DefenseClaw did not write (for example a duplicate key)")
 
 // SpliceWindowsCursorEnterpriseHooks returns the document
 // MergeWindowsCursorEnterpriseHooks returns, but it edits only DefenseClaw's
@@ -25,20 +18,6 @@ var ErrWindowsCursorHooksNotEditableInPlace = errors.New("only a new render of t
 // merged document. A document the splice cannot edit in place, such as one
 // with a duplicate key, gets the merged render, which keeps the same hooks.
 func SpliceWindowsCursorEnterpriseHooks(existing []byte, adapterPath, failMode string) ([]byte, error) {
-	return spliceWindowsCursorEnterpriseHooksDocument(existing, adapterPath, failMode, false)
-}
-
-// SpliceWindowsCursorEnterpriseHooksInPlace is SpliceWindowsCursorEnterpriseHooks
-// for a recovery (the machine guard rebuild): a document the splice cannot
-// edit in place is refused with ErrWindowsCursorHooksNotEditableInPlace
-// instead of rendered again, so only DefenseClaw's own entries ever change.
-// A duplicate key would otherwise lose the administrator's earlier value.
-// An empty document and {} take the merged render: they hold nothing else.
-func SpliceWindowsCursorEnterpriseHooksInPlace(existing []byte, adapterPath, failMode string) ([]byte, error) {
-	return spliceWindowsCursorEnterpriseHooksDocument(existing, adapterPath, failMode, true)
-}
-
-func spliceWindowsCursorEnterpriseHooksDocument(existing []byte, adapterPath, failMode string, inPlace bool) ([]byte, error) {
 	merged, err := MergeWindowsCursorEnterpriseHooks(existing, adapterPath, failMode)
 	if err != nil {
 		return nil, err
@@ -52,9 +31,6 @@ func spliceWindowsCursorEnterpriseHooksDocument(existing []byte, adapterPath, fa
 	}
 	spliced, ok := spliceCursorEnterpriseHooks(existing, adapterPath, failMode, false)
 	if !ok || !WindowsCursorEnterpriseHooksSemanticallyEqual(spliced, merged) {
-		if inPlace {
-			return nil, ErrWindowsCursorHooksNotEditableInPlace
-		}
 		return merged, nil
 	}
 	return spliced, nil

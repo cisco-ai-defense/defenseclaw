@@ -169,25 +169,19 @@ func TestProviderManagementHookOnlyIntegration(t *testing.T) {
 		_ = ReloadProviderRegistry()
 	})
 
-	// Keep both reservations open until both ports are chosen, so the kernel
-	// cannot return the API port again for the unused proxy port.
-	apiReservation, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	reservePort := func() int {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		port := ln.Addr().(*net.TCPAddr).Port
+		if err := ln.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return port
 	}
-	proxyReservation, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		_ = apiReservation.Close()
-		t.Fatal(err)
-	}
-	apiPort := apiReservation.Addr().(*net.TCPAddr).Port
-	proxyPort := proxyReservation.Addr().(*net.TCPAddr).Port
-	if err := proxyReservation.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := apiReservation.Close(); err != nil {
-		t.Fatal(err)
-	}
+	apiPort := reservePort()
+	proxyPort := reservePort()
 	addr := fmt.Sprintf("127.0.0.1:%d", apiPort)
 	cfg := &config.Config{Gateway: config.GatewayConfig{Token: "integration-token"}}
 	api := NewAPIServer(addr, NewSidecarHealth(), nil, nil, nil, cfg)

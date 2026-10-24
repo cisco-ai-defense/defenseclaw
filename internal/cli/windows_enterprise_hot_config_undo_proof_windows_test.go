@@ -129,10 +129,8 @@ func TestWindowsEnterpriseHotConfigEveryUndoIsProven(t *testing.T) {
 				}
 				gw := &undoProofGateway{host: host, loaded: []byte(tc.previous), stuck: stuck, restartFails: tc.restartFails}
 				if tc.bundle {
-					// A staged bundle always names its signed principal; the
-					// write that records it refuses one that does not
-					// (bundle_state_invalid), so a fixture without one never
-					// reached the failure it names (GAP-0834).
+					// A staged bundle needs its signer and policy principal before
+					// this test can exercise the config publication and undo.
 					opts.bundle = &windowsBundleRun{prepared: &enterprisebundle.Prepared{Receipt: &enterprisebundle.Receipt{
 						BundleID: bundleID, Version: 2, Principal: "control-plane:acme/alice", SignerKeyID: "k1",
 					}}}

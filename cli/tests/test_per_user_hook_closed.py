@@ -1,19 +1,16 @@
-"""A per-user hook's outage mode follows its policy tier, never a saved fail mode."""
+"""Per-user hooks cannot inherit an old outage-open configuration."""
 
 from defenseclaw.commands import cmd_init
 from defenseclaw.config import GuardrailConfig, PerConnectorGuardrailConfig
 
 
-def test_per_user_hook_outage_mode_follows_the_policy_tier_for_every_connector() -> None:
-    for connector in ("codex", "claudecode", "cursor", "copilot", "hermes", "amp", "opencode"):
-        for saved in ("open", "closed", ""):
-            for mode in ("observe", "action"):
-                default = GuardrailConfig(hook_fail_mode=saved, mode=mode)
-                default.connectors[connector] = PerConnectorGuardrailConfig(hook_fail_mode=saved)
-                assert default.effective_hook_fail_mode(connector) == "open"
-                strict = GuardrailConfig(hook_fail_mode=saved, mode=mode, rule_pack="strict")
-                strict.connectors[connector] = PerConnectorGuardrailConfig(hook_fail_mode=saved)
-                assert strict.effective_hook_fail_mode(connector) == "closed"
+def test_per_user_hook_fail_mode_is_closed_for_every_connector() -> None:
+    guardrail = GuardrailConfig(hook_fail_mode="open")
+    for connector in ("codex", "claudecode", "cursor", "amp", "opencode"):
+        guardrail.connectors[connector] = PerConnectorGuardrailConfig(hook_fail_mode="open")
+        for mode in ("observe", "action"):
+            guardrail.mode = mode
+            assert guardrail.effective_hook_fail_mode(connector) == "closed"
 
 
 def test_first_run_does_not_offer_a_per_user_open_choice(monkeypatch) -> None:

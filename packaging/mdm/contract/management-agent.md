@@ -982,49 +982,11 @@ off the device. The agent does not read `/health` itself (section 7); the
   shell kit and `Invoke-DefenseClawEnterprise.ps1` pass the bundle they
   deliver to such a build (Windows: not with `-SetupPath`, which stores the
   credential after Setup as before).
-- A rotation stores the new value before B applies, and the confirmed bundle
-  signs only the old one until B is confirmed. When the apply of B fails, put
-  the old value back with `secret set` (no `--bundle`): it is stored only
-  while the confirmed bundle signs it, so a refusal (`secret_ref_mismatch`)
-  means B was confirmed and the new value stays. A credential that was not
-  stored is put back with `secret remove`. Both kits do this:
-  `Invoke-DefenseClawEnterprise.ps1` journals the stored value in an
-  administrator-only folder (`%ProgramData%\Cisco\DefenseClaw-MDM\rotation`)
-  before the rotation and puts it back when the lifecycle fails or the run
-  stops early for any other reason, or at the start of the next ensure when
-  the run was killed. It holds `rotation.lock` beside that folder for the
-  whole run, so a concurrent ensure waits (after 60 seconds it exits
-  `lifecycle_busy`, 1618) instead of settling an entry still in flight, and
-  it uses an entry only after the folders and the entry pass the
-  administrator-only check (an entry it did not write is left as it is).
-  Each entry also records the bundle confirmed before the rotation (the
-  manifest SHA-256 `bundle status --json` reports as `current`, or `none`).
-  The rotation passes it as `secret set --bundle B --if-confirmed <sha|none>`
-  (refused `confirmed_bundle_changed`, nothing written, once another bundle
-  is confirmed), and the put-back as `secret set|remove --undo-rotation
-  <sha|none>`: it runs only while that bundle is still confirmed and does
-  not sign the value stored now, and `remove` then also takes a credential
-  the old config references with no value stored. Its refusal
-  `rotation_confirmed` is the only proof the rotation committed (the
-  confirmed bundle uses the stored value), so only then does the new value
-  stay; any other refusal (`credential_in_use`, `secret_ref_mismatch`,
-  `secret_ref_unbound`) keeps the entry, is reported, and no other rotation
-  runs until it is settled. A settled entry is renamed `.retired` in one
-  step before it is overwritten and deleted, so a cleanup that stops never
-  leaves an entry a later run would put back.
-  `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
-  old value in memory only and puts it back when the bundle apply or the
-  ensure before it fails, the run stops early, or the MDM stops it (HUP, INT,
-  TERM); a run killed outright (`SIGKILL`) cannot, so redeliver the bundle.
 - Upgrade from 1.0.2 or 1.0.3: a bundle signed before 1.0.4 has no
   `value_sha256`, so on 1.0.4 `bundle verify`, `bundle apply` (also a repeat
   delivery of the confirmed bundle, which an older build answered
   `already_applied`) and `secret set` for its credentials refuse
   `secret_ref_unbound`, exit 1 / 1603, until a re-signed bundle is applied.
-  A rotation (`secret set --bundle`) that would replace a stored value is
-  refused the same way before anything is written, since a failed apply
-  could not put that value back: apply a bundle re-signed for the value
-  stored now first, then rotate with a newer one.
   The confirmed config keeps enforcing; `ensure` and repair do not verify
   the bundle. 1.0.2 and 1.0.3 refuse a bundle signed by 1.0.4 with
   `value_sha256` (`manifest_invalid`), so one bundle cannot serve both:

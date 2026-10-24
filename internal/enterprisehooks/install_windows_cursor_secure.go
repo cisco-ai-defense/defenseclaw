@@ -430,9 +430,6 @@ func verifyWindowsCursorMachineTarget(target windowsGenericManagedTarget) error 
 	if !artifacts.active {
 		return errors.New("enterprise hooks: Cursor enterprise policy is inactive")
 	}
-	if err := verifyWindowsCursorManagedHooksUsersCanRead(artifacts); err != nil {
-		return err
-	}
 	return verifyWindowsCursorMachineTargetState(artifacts.parsed, target)
 }
 

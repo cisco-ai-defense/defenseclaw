@@ -19,31 +19,14 @@ var releasedAdapterOpens = map[string][]string{
 	"copilot-hook.ps1": {copilotAdapterOpenFailure},
 }
 
-func TestPerUserCopilotAdapterLegacyOpenRendersFailureDeny(t *testing.T) {
-	scripts, err := renderHookScripts("127.0.0.1:18970", "open", ".token", []string{"copilot-hook.ps1"}, false, "copilot", true, "", "", false, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, script := range scripts {
-		if script.name == "copilot-hook.ps1" {
-			body := string(script.body)
-			if strings.Contains(body, "Copilot hook adapter failed open") || !strings.Contains(body, `"permissionDecision":"deny"`) {
-				t.Fatal("legacy per-user open reached Copilot adapter failure handling")
-			}
-			return
-		}
-	}
-	t.Fatal("Copilot adapter was not rendered")
-}
-
 // The Windows Cursor and Copilot adapters answer for themselves when the
 // hook launcher is missing or times out, which an upgrade causes while it
 // swaps defenseclaw-hook.exe and the new hook waits for the install. The
 // released per-user adapters then let the call run: Cursor's printed
 // {"continue":true} (every 0.8.10 render, and 1.0.x observe), Copilot's
-// printed nothing. A launcher that fails is no gateway outage, so a refresh
-// gives them their closed answers in every tier, CRLF files too: the
-// outage-open tier (oss-outage-open) opens only the native hook's outage.
+// printed nothing. A refresh to closed gives them their closed answers, CRLF
+// files too, and a refresh that keeps the operator's open leaves them as
+// they are.
 func TestRefreshClosesTheReleasedWindowsAdapters(t *testing.T) {
 	for _, release := range []string{"0.8.10", "1.0.0", "1.0.3"} {
 		for adapter, opens := range releasedAdapterOpens {
@@ -75,6 +58,12 @@ func TestRefreshClosesTheReleasedWindowsAdapters(t *testing.T) {
 						after, err := os.ReadFile(path)
 						if err != nil {
 							t.Fatal(err)
+						}
+						if mode == "open" {
+							if !bytes.Equal(after, before) || len(result.Scripts) != 0 {
+								t.Fatalf("a refresh to the operator's open changed the adapter (%v)", result.Scripts)
+							}
+							return
 						}
 						for _, open := range opens {
 							if bytes.Contains(after, []byte(open)) {
@@ -116,7 +105,6 @@ func TestRefreshOfThisReleasesOpenAdapterIsItsClosedRender(t *testing.T) {
 		}
 		body, err := renderTemplate(string(tmpl), templateData{
 			FailMode:             mode,
-			SecureClient:         mode == "open",
 			HookBinaryPS:         `C:\Users\dc-user\AppData\Local\DefenseClaw\bin\defenseclaw-hook.exe`,
 			HookTimeoutMS:        windowsHookAdapterTimeoutMS,
 			CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,

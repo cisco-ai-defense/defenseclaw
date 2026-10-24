@@ -2911,10 +2911,22 @@ func (m *v9Migrator) embeddedPackDropped() bool {
 // manifest posture (defenseclaw-pack.json, guardrail.ReadPackPosture), else
 // the folder-name table (strict, permissive, else default).
 func v9DirPosture(dir string) string {
-	if posture := packManifestPosture(dir); posture != "" {
-		return posture
+	if raw, err := os.ReadFile(filepath.Join(dir, "defenseclaw-pack.json")); err == nil && len(raw) <= 1<<20 {
+		var manifest struct {
+			Posture string `json:"posture"`
+		}
+		if json.Unmarshal(raw, &manifest) == nil {
+			switch posture := strings.ToLower(strings.TrimSpace(manifest.Posture)); posture {
+			case "default", "strict", "permissive":
+				return posture
+			}
+		}
 	}
-	return packFolderPosture(dir)
+	switch base := strings.ToLower(filepath.Base(filepath.Clean(dir))); base {
+	case "strict", "permissive":
+		return base
+	}
+	return "default"
 }
 
 // policyDir is the policy_dir the v9 preset names resolve under.

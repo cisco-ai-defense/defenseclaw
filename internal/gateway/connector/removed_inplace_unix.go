@@ -34,11 +34,13 @@ func removedSavedCopyPrivate(_ *os.File, info os.FileInfo) error {
 	return nil
 }
 
-// removedInPlaceRefusal says why the mode of a hard-linked removed
-// connector's stub may not be set through the file (nil when it may): only a
-// file that the owner of its hooks folder owns is changed in place. So a
-// name in the hooks folder that leads to another account's file never makes
-// a privileged teardown change it. until 1.1, with removed.go.
+// removedInPlaceRefusal says why the stub may not be written into a removed
+// connector's script file (nil when it may): only a file that the owner of
+// its hooks folder owns is written in place. So a name in the hooks folder
+// that leads to another account's file with DefenseClaw's marker (a
+// root-owned managed hook) never makes a privileged teardown write it; it
+// gets the rename, or keeps its tokens when it has other names. until 1.1,
+// with removed.go.
 func removedInPlaceRefusal(file, folder os.FileInfo) error {
 	fileStat, ok := file.Sys().(*syscall.Stat_t)
 	if !ok {

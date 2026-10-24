@@ -185,7 +185,7 @@ func retireUnpublished(opts Options, intended, candidates []string) ([]State, er
 		if !recorded {
 			continue
 		}
-		state, err := removeTargetOwned(target, opts)
+		state, err := target.RemoveOwned(opts)
 		if err != nil {
 			errs = append(errs, &RetireError{Connector: name, Err: err})
 		}
@@ -229,7 +229,7 @@ func reconcileOne(opts Options, name string) (State, error) {
 		return state, nil
 	}
 	target, _ := TargetFor(name)
-	return reconcileTarget(target, opts)
+	return target.Reconcile(opts)
 }
 
 // kiroRouteDetail says where Kiro's hook lives on its route and that the
@@ -315,7 +315,7 @@ func RemoveAll(opts Options) (Result, error) {
 	var errs []error
 	for _, name := range names {
 		target, _ := TargetFor(name)
-		state, err := removeTargetOwned(target, opts)
+		state, err := target.RemoveOwned(opts)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", name, err))
 		}

@@ -152,7 +152,7 @@ func TestSecretSetStoresOnlyAValueASignedBundleBinds(t *testing.T) {
 	ctx := context.Background()
 	key := filepath.Join(e.dir, "key.pem")
 	v5 := e.signCredentialBundle(t, "5", "key-1", key)
-	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("any"), "", true); err != nil {
+	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("any"), ""); err != nil {
 		t.Fatalf("no bundle confirmed: %v", err)
 	}
 	confirmSignedBundle(t, store, v5)
@@ -183,7 +183,7 @@ func TestSecretSetStoresOnlyAValueASignedBundleBinds(t *testing.T) {
 			if tc.name == "a credential the bundle does not reference" {
 				name = "splunk-token"
 			}
-			err := checkSecretBinding(ctx, name, []byte(tc.value), tc.bundle, true)
+			err := checkSecretBinding(ctx, name, []byte(tc.value), tc.bundle)
 			if enterprisebundle.CodeOf(err) != tc.want || (tc.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.reason)) {
 				t.Fatalf("got %v, want %q naming %q", err, tc.want, tc.reason)
 			}
@@ -196,12 +196,8 @@ func TestSecretSetStoresOnlyAValueASignedBundleBinds(t *testing.T) {
 
 // After an upgrade from a release whose bundles signed credential names
 // only, the confirmed bundle binds no value: secret set refuses to change
-// the credential (secret_ref_unbound). A rotation with a bundle that binds
-// the new value is refused too while a value is stored (loop round 1,
-// rc.7): a failed apply puts the old value back with secret set, which that
-// bundle refuses, so the old config would keep the new credential. With
-// nothing stored there is nothing to put back, and the bundle authorizes
-// the value.
+// the credential (secret_ref_unbound) until a bundle that binds the value
+// is given with --bundle.
 func TestSecretSetRefusesACredentialALegacyBundleSignsByNameOnly(t *testing.T) {
 	e, store := credentialBundleEnv(t)
 	key := filepath.Join(e.dir, "key.pem")
@@ -233,145 +229,14 @@ func TestSecretSetRefusesACredentialALegacyBundleSignsByNameOnly(t *testing.T) {
 	}
 	confirmSignedBundle(t, store, legacy)
 	ctx := context.Background()
-	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-1"), "", true); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefUnbound {
+	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-1"), ""); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefUnbound {
 		t.Fatalf("legacy confirmed bundle: got %v, want secret_ref_unbound", err)
 	}
-	if code := secretBindingCode(checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-1"), "", true)); code != "secret_ref_unbound" {
+	if code := secretBindingCode(checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-1"), "")); code != "secret_ref_unbound" {
 		t.Fatalf("errors[].code %q", code)
 	}
 	v6 := e.signCredentialBundle(t, "6", "key-2", key)
-	err = checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-2"), v6, true)
-	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefUnbound || !strings.Contains(err.Error(), "could not put the stored value back") {
-		t.Fatalf("rotation over a stored value: got %v, want secret_ref_unbound naming the put-back", err)
-	}
-	if strings.Contains(err.Error(), "key-2") {
-		t.Fatalf("the refusal prints the value: %v", err)
-	}
-	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-2"), v6, false); err != nil {
-		t.Fatalf("rotation with nothing stored, with a bundle that binds the value: %v", err)
-	}
-}
-
-// Loop round 2 (rc.7), finding 1: the Windows wrapper read any refusal of a
-// put-back (credential_in_use, secret_ref_mismatch) as proof the delivered
-// bundle was confirmed and dropped its journal, so a failed apply over an
-// old config that references a credential with no value stored kept the
-// new value. The put-back now carries the bundle confirmed before the
-// rotation (--undo-rotation): it runs while that bundle is still confirmed
-// and does not sign the value stored now, and only rotation_confirmed says
-// the rotation committed. A rotation runs only while the journaled bundle is
-// confirmed (--if-confirmed).
-func TestSecretTransactionPutsBackOnlyWhileTheRotationIsUnconfirmed(t *testing.T) {
-	e, store := credentialBundleEnv(t)
-	key := filepath.Join(e.dir, "key.pem")
-	const name = "ai-defense-api-key"
-	manifestSHA := func(path string) string {
-		b, err := readBundleInput(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		sum := sha256.Sum256(b.Manifest)
-		return hex.EncodeToString(sum[:])
-	}
-	check := func(opts enterpriseSecretOptions, stored string, storedOK bool) enterprisebundle.Code {
-		t.Helper()
-		err := checkSecretTransaction(name, &opts, []byte(stored), storedOK)
-		if err == nil {
-			return ""
-		}
-		if strings.Contains(err.Error(), "key-") {
-			t.Fatalf("the refusal prints the value: %v", err)
-		}
-		return enterprisebundle.CodeOf(err)
-	}
-	other := strings.Repeat("a", 64)
-	// Nothing confirmed yet.
-	for _, tc := range []struct {
-		opts     enterpriseSecretOptions
-		stored   string
-		storedOK bool
-		want     enterprisebundle.Code
-	}{
-		{enterpriseSecretOptions{}, "key-2", true, ""},
-		{enterpriseSecretOptions{bundle: "b", ifConfirmed: "none"}, "key-1", true, ""},
-		{enterpriseSecretOptions{bundle: "b", ifConfirmed: other}, "key-1", true, codeConfirmedBundleChanged},
-		{enterpriseSecretOptions{undoRotation: "none"}, "key-2", true, ""},
-		{enterpriseSecretOptions{undoRotation: "none"}, "", false, ""},
-		{enterpriseSecretOptions{undoRotation: other}, "key-2", true, codeRotationConfirmed},
-	} {
-		if got := check(tc.opts, tc.stored, tc.storedOK); got != tc.want {
-			t.Fatalf("nothing confirmed, %+v stored %q: got %q, want %q", tc.opts, tc.stored, got, tc.want)
-		}
-	}
-	v5 := e.signCredentialBundle(t, "5", "key-1", key)
-	confirmSignedBundle(t, store, v5)
-	p5 := manifestSHA(v5)
-	for _, tc := range []struct {
-		name     string
-		opts     enterpriseSecretOptions
-		stored   string
-		storedOK bool
-		want     enterprisebundle.Code
-	}{
-		{"rotation while the journaled bundle is confirmed", enterpriseSecretOptions{bundle: "b", ifConfirmed: p5}, "key-1", true, ""},
-		{"rotation after another bundle was confirmed", enterpriseSecretOptions{bundle: "b", ifConfirmed: "none"}, "key-1", true, codeConfirmedBundleChanged},
-		// The failed apply left v5 confirmed with the new value (the
-		// finding: v5 references the credential and none was stored, so
-		// the rotation added it): put back, whatever v5 references.
-		{"put-back of a value v5 does not sign", enterpriseSecretOptions{undoRotation: p5}, "key-2", true, ""},
-		{"put-back with nothing stored", enterpriseSecretOptions{undoRotation: p5}, "", false, ""},
-		// v5 itself signs what is stored now (a redelivery of v5, or a run
-		// stopped before its rotation): kept.
-		{"put-back of the value v5 signs", enterpriseSecretOptions{undoRotation: p5}, "key-1", true, codeRotationConfirmed},
-		{"put-back of the value v5 signs, with a line ending", enterpriseSecretOptions{undoRotation: p5}, "key-1\n", true, codeRotationConfirmed},
-		// A bundle was confirmed since the rotation: kept.
-		{"put-back journaled before any bundle", enterpriseSecretOptions{undoRotation: "none"}, "key-2", true, codeRotationConfirmed},
-		{"put-back journaled under another bundle", enterpriseSecretOptions{undoRotation: other}, "", false, codeRotationConfirmed},
-	} {
-		if got := check(tc.opts, tc.stored, tc.storedOK); got != tc.want {
-			t.Fatalf("%s: got %q, want %q", tc.name, got, tc.want)
-		}
-	}
-	// The rotation's bundle confirmed: every put-back journaled under v5 is
-	// refused rotation_confirmed, whatever is stored.
-	v6 := e.signCredentialBundle(t, "6", "key-2", key)
-	confirmSignedBundle(t, store, v6)
-	for _, stored := range []string{"key-1", "key-2", ""} {
-		if got := check(enterpriseSecretOptions{undoRotation: p5}, stored, stored != ""); got != codeRotationConfirmed {
-			t.Fatalf("v6 confirmed, stored %q: got %q, want rotation_confirmed", stored, got)
-		}
-	}
-	if got := check(enterpriseSecretOptions{undoRotation: manifestSHA(v6)}, "key-2", true); got != codeRotationConfirmed {
-		t.Fatalf("v6 confirmed and signs the stored value: got %q", got)
-	}
-	if got := check(enterpriseSecretOptions{undoRotation: manifestSHA(v6)}, "key-3", true); got != "" {
-		t.Fatalf("v6 confirmed and does not sign the stored value: got %q", got)
-	}
-	if code := secretBindingCode(checkSecretTransaction(name, &enterpriseSecretOptions{undoRotation: p5}, nil, false)); code != "rotation_confirmed" {
-		t.Fatalf("errors[].code %q", code)
-	}
-}
-
-func TestSecretTransactionArgumentsRefuseAMeaninglessCombination(t *testing.T) {
-	digest := strings.Repeat("0", 64)
-	for _, tc := range []struct {
-		opts enterpriseSecretOptions
-		ok   bool
-	}{
-		{enterpriseSecretOptions{}, true},
-		{enterpriseSecretOptions{bundle: "b", ifConfirmed: digest}, true},
-		{enterpriseSecretOptions{bundle: "b", ifConfirmed: "none"}, true},
-		{enterpriseSecretOptions{undoRotation: digest}, true},
-		{enterpriseSecretOptions{undoRotation: "none"}, true},
-		{enterpriseSecretOptions{ifConfirmed: digest}, false},
-		{enterpriseSecretOptions{bundle: "b", undoRotation: digest}, false},
-		{enterpriseSecretOptions{bundle: "b", ifConfirmed: digest, undoRotation: digest}, false},
-		{enterpriseSecretOptions{undoRotation: strings.ToUpper(strings.Repeat("a", 64))}, false},
-		{enterpriseSecretOptions{undoRotation: "sha256:" + digest}, false},
-		{enterpriseSecretOptions{bundle: "b", ifConfirmed: "None"}, false},
-	} {
-		if err := secretTransactionArguments(&tc.opts); (err == nil) != tc.ok {
-			t.Fatalf("%+v: %v, want ok=%v", tc.opts, err, tc.ok)
-		}
+	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-2"), v6); err != nil {
+		t.Fatalf("rotation with a bundle that binds the value: %v", err)
 	}
 }

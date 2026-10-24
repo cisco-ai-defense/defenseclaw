@@ -199,7 +199,6 @@ type hookSocketTestServer struct {
 // the socket path, the API server and the audit store.
 func startTestHookSocketServer(t *testing.T, opts hookSocketTestServer) (string, *APIServer, *audit.Store) {
 	t.Helper()
-	withoutManagedPolicyView(t)
 	dir := shortGatewaySocketDir(t)
 	socket := filepath.Join(dir, "hook.sock")
 	dataDir := filepath.Join(dir, "data")

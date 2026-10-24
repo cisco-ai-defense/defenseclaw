@@ -248,8 +248,8 @@ API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
 unset DEFENSECLAW_GATEWAY_TOKEN{{end}}
 
 # FAIL_MODE was already set above (before the missing-token branch).
-# Outside Secure Client, response failures close and eligible connection
-# outages follow FAIL_MODE. DEFENSECLAW_STRICT_AVAILABILITY=1 can only close.
+# Response-layer and transport-layer failures both respect FAIL_MODE;
+# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override.
 
 {{if and (not .Sandbox) (not .Managed)}}# claude_fail_closed_decision prints the JSON block decision for a prompt,
 # tool call or permission request that is blocked because the gateway did not
@@ -439,8 +439,6 @@ elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/nul
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 
-{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
-{{end}}
 {{if and (not .Managed) (not .Sandbox)}}# Decode the action and its structured output together. Successful personal
 # hooks need one parser process rather than two (#1130). The fallback keeps
 # working on supported hosts without jq; managed/Secure Client renders retain

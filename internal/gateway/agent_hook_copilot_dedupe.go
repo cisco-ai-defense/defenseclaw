@@ -57,13 +57,11 @@ type copilotHookDedupe struct {
 }
 
 type copilotDedupeEntry struct {
-	done        chan struct{}
-	resp        agentHookResponse
-	ok          bool
-	dialect     string
-	request     string
-	expires     time.Time
-	invalidated bool
+	done    chan struct{}
+	resp    agentHookResponse
+	ok      bool
+	dialect string
+	expires time.Time
 }
 
 // copilotDedupeTicket is one delivery's claim on its keys. A zero ticket
@@ -71,7 +69,6 @@ type copilotDedupeEntry struct {
 type copilotDedupeTicket struct {
 	d       *copilotHookDedupe
 	entries []*copilotDedupeEntry
-	request string
 	once    sync.Once
 }
 
@@ -89,22 +86,20 @@ func copilotDedupeScope(ctx context.Context) string {
 	return "self"
 }
 
-// copilotDedupeKeys includes the effective working directory and the hook's
-// resolved write evidence. Identical relative arguments in another directory
-// can name a different protected target and must be evaluated again.
-func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookRequest) (exact, content, dialect, request string) {
+// copilotDedupeKeys returns the exact (tool_use_id) key, the content key
+// and the delivery's dialect ("camel" or "snake"). Empty keys do not apply.
+func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookRequest) (exact, content, dialect string) {
 	if connectorName != "copilot" || isSandboxHookRequest(ctx) {
-		return "", "", "", ""
+		return "", "", ""
 	}
 	phase := canonicalEvent(req.HookEventName)
 	if phase != "pretooluse" && phase != "posttooluse" {
-		return "", "", "", ""
+		return "", "", ""
 	}
 	scope := copilotDedupeScope(ctx)
 	session := strings.TrimSpace(req.SessionID)
-	cwd := strings.TrimSpace(req.CWD)
-	if scope == "" || session == "" || cwd == "" {
-		return "", "", "", ""
+	if scope == "" || session == "" {
+		return "", "", ""
 	}
 	dialect = "snake"
 	if firstValue(req.Payload, "toolArgs", "toolName") != nil {
@@ -113,21 +108,15 @@ func copilotDedupeKeys(ctx context.Context, connectorName string, req agentHookR
 	tool := strings.ToLower(strings.TrimSpace(req.ToolName))
 	digest, ok := copilotToolArgsDigest(req.ToolArgs)
 	if !ok || tool == "" {
-		return "", "", "", ""
+		return "", "", ""
 	}
-	evidence, err := json.Marshal(resolvedWritesFromContext(ctx))
-	if err != nil {
-		return "", "", "", ""
-	}
-	evidenceHash := sha256.Sum256(evidence)
 	// Both keys carry the call itself, so a reused or colliding id never
-	// answers a different call or a different resolved write target.
-	call := scope + "\x00" + session + "\x00" + phase + "\x00" + tool + "\x00" + digest + "\x00" + cwd + "\x00" + hex.EncodeToString(evidenceHash[:])
+	// answers a different call.
+	call := scope + "\x00" + session + "\x00" + phase + "\x00" + tool + "\x00" + digest
 	if id := firstString(req.Payload, "tool_use_id", "toolUseId"); id != "" {
-		request = scope + "\x00" + session + "\x00" + id
-		exact = "id\x00" + request + "\x00" + call
+		exact = "id\x00" + id + "\x00" + call
 	}
-	return exact, "args\x00" + call, dialect, request
+	return exact, "args\x00" + call, dialect
 }
 
 // copilotToolArgsDigest hashes the call's arguments in one form for both
@@ -157,8 +146,7 @@ func copilotToolArgsDigest(raw json.RawMessage) (string, bool) {
 // complete stores the verdict (release frees the claim on every path).
 func (d *copilotHookDedupe) begin(ctx context.Context, connectorName string, req agentHookRequest) (agentHookResponse, bool, *copilotDedupeTicket) {
 	ticket := &copilotDedupeTicket{d: d}
-	exact, content, dialect, request := copilotDedupeKeys(ctx, connectorName, req)
-	ticket.request = request
+	exact, content, dialect := copilotDedupeKeys(ctx, connectorName, req)
 	if exact == "" && content == "" {
 		return agentHookResponse{}, false, ticket
 	}
@@ -186,7 +174,7 @@ func (d *copilotHookDedupe) begin(ctx context.Context, connectorName string, req
 			if claim.key == "" || d.entries[claim.key] != nil || len(d.entries) >= copilotDedupeMaxEntries {
 				continue
 			}
-			entry := &copilotDedupeEntry{done: make(chan struct{}), dialect: dialect, request: request, expires: now.Add(claim.ttl)}
+			entry := &copilotDedupeEntry{done: make(chan struct{}), dialect: dialect, expires: now.Add(claim.ttl)}
 			d.entries[claim.key] = entry
 			ticket.entries = append(ticket.entries, entry)
 		}
@@ -206,44 +194,19 @@ func (d *copilotHookDedupe) begin(ctx context.Context, connectorName string, req
 	}
 	d.mu.Lock()
 	resp, ok := earlier.resp, earlier.ok
-	if earlier.invalidated {
-		ok = false
-	}
 	d.mu.Unlock()
 	return resp, ok, ticket
 }
 
 // complete stores the delivery's final verdict for its claimed keys.
 func (t *copilotDedupeTicket) complete(resp agentHookResponse) {
-	if t == nil || t.d == nil || len(t.entries) == 0 && t.request == "" {
+	if t == nil || len(t.entries) == 0 {
 		return
 	}
 	t.once.Do(func() {
 		t.d.mu.Lock()
-		cache := true
-		if resp.Action == "block" && t.request != "" {
-			for key, entry := range t.d.entries {
-				if entry.request != t.request {
-					continue
-				}
-				mine := false
-				for _, claimed := range t.entries {
-					if claimed == entry {
-						mine = true
-						break
-					}
-				}
-				if !mine {
-					entry.invalidated = true
-					delete(t.d.entries, key)
-				}
-			}
-		}
 		for _, entry := range t.entries {
-			if entry.invalidated {
-				cache = false
-			}
-			entry.resp, entry.ok = resp, cache
+			entry.resp, entry.ok = resp, true
 		}
 		t.d.mu.Unlock()
 		for _, entry := range t.entries {

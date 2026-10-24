@@ -238,7 +238,7 @@ func (f *devinCascadeFile) load(opts Options, write bool, state *State) error {
 			return nil
 		}
 		state.detail("replacing %s: %v", f.path, untrusted.err)
-		current, exists, err = nil, true, state.replaceUntrustedPolicyFile(opts, f.path)
+		current, exists, err = nil, true, nil
 	}
 	f.current, f.exists = current, exists
 	return err

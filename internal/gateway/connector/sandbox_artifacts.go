@@ -178,14 +178,14 @@ type SandboxArtifactProvider interface {
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if contracts := sandboxOnlyHookContracts(name); len(contracts) > 0 {
-		resolution := strictHookContractResolutionOf(resolveHookContractAgainstIn(name, agentVersion, contracts, true))
+		resolution := strictHookContractResolutionOf(resolveHookContractAgainst(name, agentVersion, contracts))
 		if why := sandboxOnlyRefusals[name]; why != "" && resolution.Status == HookCompatibilityUnknown &&
-			resolveHookContractForOSModeIn(name, agentVersion, "linux", true, true).Status == HookCompatibilityKnown {
+			resolveHookContractForOSMode(name, agentVersion, "linux", true).Status == HookCompatibilityKnown {
 			resolution.Reason = why
 		}
 		return resolution
 	}
-	return resolveHookContractForOSModeIn(connectorName, agentVersion, "linux", true, true)
+	return resolveHookContractForOSMode(connectorName, agentVersion, "linux", true)
 }
 
 // sandboxOnlyHookContractsByConnector are reviewed hook contracts that apply
@@ -458,7 +458,7 @@ func finalizeSandboxArtifacts(a SandboxArtifacts) (SandboxArtifacts, error) {
 // cannot write; TestSandboxHookRuntimeBinariesCoverEveryTool keeps the list
 // complete.
 var sandboxHookRuntimeTools = []string{
-	"awk", "bash", "chmod", "curl", "date", "find", "head", "id", "jq", "mkdir", "mktemp", "od", "readlink", "rm", "sed", "tail", "tr",
+	"bash", "chmod", "curl", "date", "find", "head", "id", "jq", "mkdir", "mktemp", "od", "readlink", "rm", "sed", "tail", "tr",
 }
 
 // sandboxHookRuntimeBinaries are the tools every sandbox hook set executes.

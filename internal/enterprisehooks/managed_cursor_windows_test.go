@@ -1069,6 +1069,11 @@ func TestWindowsCursorMachineGuardRebuildsEveryOwnedArtifact(t *testing.T) {
 				t.Fatal(err)
 			}
 		}},
+		{name: "hooks.json not JSON", apply: func(t *testing.T, paths windowsCursorPaths) {
+			if err := windowsManagedPolicyWriter(paths.Hooks, []byte("{ not json"), true); err != nil {
+				t.Fatal(err)
+			}
+		}},
 	}
 	adapterDamage := []struct {
 		name  string

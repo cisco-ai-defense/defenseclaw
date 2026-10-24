@@ -591,30 +591,6 @@ func revokePerUserHookAPIToken(opts SetupOpts, connectorName string) error {
 	return nil
 }
 
-// HookAPITokenRevocationPending reports a per-user connector-scoped hook API
-// credential that is still on disk (or its temporary copy) after a teardown:
-// its revocation did not finish, and the credential still authenticates to
-// the connector's hook route. Managed deployments revoke credentials at the
-// machine lifecycle boundary, and a connector 1.0.4 removed keeps its token
-// on purpose (removed.go keepHookToken), so neither is pending here.
-func HookAPITokenRevocationPending(opts SetupOpts, connectorName string) error {
-	if opts.ManagedEnterprise || strings.TrimSpace(opts.DataDir) == "" || IsRemovedConnector(connectorName) {
-		return nil
-	}
-	tokenPath, err := HookAPITokenFilePath(opts.DataDir, connectorName)
-	if err != nil {
-		return err
-	}
-	for _, path := range []string{tokenPath, tokenPath + ".tmp"} {
-		if _, err := os.Lstat(path); err == nil {
-			return fmt.Errorf("%s hook credential %s is still present: its revocation did not finish, so the removal is retried", connectorName, path)
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("inspect %s hook credential %s: %w", connectorName, path, err)
-		}
-	}
-	return nil
-}
-
 // LoadHookAPITokens loads connector-scoped hook API tokens for known connector
 // names. Missing tokens are omitted, and so are the tokens of the connectors
 // 1.0.4 removed: an upgraded host keeps the OpenHands one only so old hooks

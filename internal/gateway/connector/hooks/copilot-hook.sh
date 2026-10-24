@@ -335,17 +335,10 @@ unset DEFENSECLAW_GATEWAY_TOKEN
 fail_unreachable() {
 {{if and (not .Managed) (not .Sandbox)}}  copilot_per_user_install_block "$1" transport || true
 {{end}}{{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
-{{end}}{{if .Managed}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
-{{else}}  defenseclaw_log_hook_delivery_failure copilot copilot-hook "$1" transport "$FAIL_MODE"
-{{end}}  defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
+{{end}}  defenseclaw_log_hook_failure copilot copilot-hook "$1" transport "$FAIL_MODE" "$(defenseclaw_hook_delivery_outcome response "$FAIL_MODE")"
+  defenseclaw_emit_unreachable_stderr "copilot tool" "$1"
 {{if .Managed}}  {{$failure}}
-{{else}}  # This account's gateway is down and the policy tier lets an outage
-  # through (defenseclaw_per_user_outage_open): the tool runs, with the
-  # warning above and a hook-failures.jsonl row.
-  if ! defenseclaw_should_fail_closed_on_unreachable; then
-    exit 0
-  fi
-  local next=""
+{{else}}  local next=""
   [ "$1" != "gateway unreachable" ] || next="$(defenseclaw_unreachable_next_step)"
   copilot_hook_failure "${next:-the DefenseClaw gateway is unavailable ($1). Run \`defenseclaw-gateway status\`.}"
 {{end}}}
@@ -436,13 +429,11 @@ RESULT=$(echo "$RESPONSE" | sed '$d')
 {{else}}if [ -z "$HTTP_CODE" ]; then
   fail_unreachable "gateway returned no HTTP status"
 elif [ "$HTTP_CODE" -ge 500 ] 2>/dev/null && [ "$HTTP_CODE" -lt 600 ] 2>/dev/null; then
-  {{if and (not .SecureClient) (not .Sandbox)}}fail_response{{else}}fail_unreachable{{end}} "gateway returned HTTP ${HTTP_CODE}"
+  fail_unreachable "gateway returned HTTP ${HTTP_CODE}"
 elif [ "$HTTP_CODE" -lt 200 ] 2>/dev/null || [ "$HTTP_CODE" -ge 300 ] 2>/dev/null; then
   fail_response "gateway returned HTTP ${HTTP_CODE}"
 fi{{end}}
 
-{{if and (not .SecureClient) (not .Sandbox)}}defenseclaw_json_string_field "$RESULT" action >/dev/null || fail_response "invalid or ambiguous JSON response"
-{{end}}
 OUTPUT=$(echo "$RESULT" | _dc_jq -c '.hook_output // empty' 2>/dev/null) || {
   fail_response "invalid JSON response"
 }

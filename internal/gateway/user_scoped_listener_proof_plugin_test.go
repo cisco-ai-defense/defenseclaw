@@ -44,7 +44,6 @@ func renderListenerProofPlugin(t *testing.T, asset, addr, tokenPath string) []by
 		"{{.ForeignHookGuardJS}}", "",
 		"{{.InstallMarkerJS}}", "",
 		"{{.ListenerProofJS}}", "1",
-		"{{.OutageFailMode}}", "closed",
 	).Replace(string(body))
 	if strings.Contains(rendered, "{{.") {
 		t.Fatalf("%s rendered with a placeholder left", asset)

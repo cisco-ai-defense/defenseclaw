@@ -196,9 +196,8 @@ func TestWindowsCursorActiveRestoreMergesItsRegistrationIntoANewerSave(t *testin
 // into it (TestWindowsCursorRestoreRollbackKeepsANewerHooksSave covers a save
 // without it). A save that already carries it is left alone; a save in
 // progress that is not JSON is kept byte for byte, the rollback says the
-// guard is incomplete and the guard's record stays. A repair keeps that file
-// too (loop round 2 review: it is the administrator's), and once the save
-// completes the repair rebuilds the complete guard into it.
+// guard is incomplete, the guard's record stays, and the repair rebuilds the
+// complete guard from it.
 func TestWindowsCursorRestoreRollbackToAnActiveGuardRestoresItsRegistration(t *testing.T) {
 	t.Run("save that keeps the registration", func(t *testing.T) {
 		paths := withWindowsCursorStandaloneSeamsForTest(t)
@@ -269,20 +268,13 @@ func TestWindowsCursorRestoreRollbackToAnActiveGuardRestoresItsRegistration(t *t
 				t.Fatalf("the rollback dropped the guard's record %s: %v", path, statErr)
 			}
 		}
-		if restored, err := RestoreWindowsCursorManagedAdapter(windowsCursorSharedHooksTestHook); err == nil || restored {
-			t.Fatalf("repair over the save in progress: restored=%t err=%v", restored, err)
-		}
-		if data, readErr := os.ReadFile(paths.Hooks); readErr != nil || !bytes.Equal(data, partial) {
-			t.Fatalf("the repair replaced the administrator's save in progress (err %v):\n%s", readErr, data)
-		}
-		// The administrator's save completes.
-		if err := os.WriteFile(paths.Hooks, []byte(`{"version":1,"hooks":{"admin-in-progress":[{"type":"command","command":"admin-in-progress"}]}}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
 		if _, err := RestoreWindowsCursorManagedAdapter(windowsCursorSharedHooksTestHook); err != nil {
 			t.Fatalf("repair: %v", err)
 		}
-		hooks := requireWindowsCursorHooksContainForTest(t, paths.Hooks, "admin-in-progress")
+		hooks, err := os.ReadFile(paths.Hooks)
+		if err != nil {
+			t.Fatal(err)
+		}
 		requireWindowsCursorClosedGuardForTest(t, paths, hooks)
 	})
 }

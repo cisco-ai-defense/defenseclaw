@@ -2,7 +2,7 @@
 
 Cursor runs every matching hook and merges results in Enterprise > Team >
 Project > User order. DefenseClaw owns the ordinary user registration and
-validates its event coverage and the configured hook process failure posture.
+validates its mode-matched action/fail-closed or observe/fail-open posture.
 Setup readiness and Doctor share this connector-specific validator to avoid
 accepting a mere command substring as proof that the complete persisted
 contract is current.

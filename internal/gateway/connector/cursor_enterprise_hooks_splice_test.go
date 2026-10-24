@@ -6,7 +6,6 @@ package connector
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"testing"
 )
 
@@ -160,37 +159,6 @@ func TestSpliceWindowsCursorEnterpriseHooksFallsBackToTheMerge(t *testing.T) {
 		spliced, err := SpliceWindowsCursorEnterpriseHooks([]byte(doc), spliceTestAdapter, "closed")
 		if err != nil || !bytes.Equal(spliced, merged) {
 			t.Fatalf("splice of %s (err %v):\n%s\nwant\n%s", doc, err, spliced, merged)
-		}
-	}
-}
-
-// Continuation 2 review (Windows consolidation): a recovery edits only
-// DefenseClaw's entries. A document the splice cannot edit in place is
-// refused, not rendered again, so the duplicate key's first value stays.
-func TestSpliceWindowsCursorEnterpriseHooksInPlaceRefusesANewRender(t *testing.T) {
-	for _, doc := range []string{
-		`{"version":1,"hooks":{"adminEvent":[{"command":"a"}]},"hooks":{"adminEvent":[{"command":"b"}]}}`,
-		`{"version":1,"hooks":{"adminEvent":[{"command":"a"}],"adminEvent":[{"command":"b"}]}}`,
-		`null`,
-	} {
-		if got, err := SpliceWindowsCursorEnterpriseHooksInPlace([]byte(doc), spliceTestAdapter, "closed"); !errors.Is(err, ErrWindowsCursorHooksNotEditableInPlace) {
-			t.Fatalf("in-place splice of %s: %s (err %v), want ErrWindowsCursorHooksNotEditableInPlace", doc, got, err)
-		}
-	}
-	// Every document the splice edits in place gets the same bytes as the
-	// splice, and a new or empty document the merge's render.
-	for _, doc := range []string{
-		"", "{}", "{}\n",
-		`{"version":1,"hooks":{"adminEvent":[{"command":"admin"}]}}`,
-		"{\n  \"version\": 1,\n  \"hooks\": {\"beforeShellExecution\": [ {\"command\": \"admin\"} ]},\n  \"x\": 1.50\n}\n",
-	} {
-		want, err := SpliceWindowsCursorEnterpriseHooks([]byte(doc), spliceTestAdapter, "closed")
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := SpliceWindowsCursorEnterpriseHooksInPlace([]byte(doc), spliceTestAdapter, "closed")
-		if err != nil || !bytes.Equal(got, want) {
-			t.Fatalf("in-place splice of %q: %s (err %v), want %s", doc, got, err, want)
 		}
 	}
 }

@@ -20,7 +20,7 @@ import { execFile, execFileSync } from 'node:child_process'
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { lstatSync } from 'node:fs'
 
-import { lstat, mkdir, open, stat } from 'node:fs/promises'
+import { lstat, stat } from 'node:fs/promises'
 import { homedir, userInfo } from 'node:os'
 import { dirname, join } from 'node:path'
 
@@ -60,11 +60,6 @@ const DC_LISTENER_PROOF: string = "{{.ListenerProofJS}}"
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST: string = "1"
-// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
-// in the default and permissive policy tiers lets a tool call or result run
-// with a warning and a hook-failures.jsonl row while this account's gateway
-// is not running; "closed" (strict) blocks it. Every other failure blocks.
-const DC_OUTAGE_FAIL_MODE: string = "{{.OutageFailMode}}"
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1"
 const DC_TIMEOUT_MS = 10000
 const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
@@ -208,9 +203,6 @@ type GatewayResponse = {
 	reason?: string
 	additional_context?: string
 	severity?: string
-	// outage_notice is the warning of a per-user call that ran because this
-	// account's gateway is down (perUserOutageOpen); never from the gateway.
-	outage_notice?: string
 }
 
 type TurnState = {
@@ -243,40 +235,6 @@ function utf8Bytes(value: string): number {
 function safeError(error: unknown): string {
 	if (error instanceof Error && error.message) return error.message
 	return String(error)
-}
-
-// gatewayJSON parses a gateway answer and refuses one that repeats a key in
-// any object. JSON.parse keeps the last copy, so {"action":"block",
-// "action":"allow"} would read as allow; the native and shell hooks refuse
-// such an answer too (GAP-1007). The caller's catch closes the call.
-function gatewayJSON(text: string): unknown {
-	const value = JSON.parse(text)
-	const objects: Array<Set<string> | null> = []
-	let keyNext = false
-	for (let i = 0; i < text.length; i++) {
-		const c = text[i]
-		if (c === '"') {
-			let end = i + 1
-			while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1
-			const keys = objects[objects.length - 1]
-			if (keyNext && keys) {
-				const key = JSON.parse(text.slice(i, end + 1)) as string
-				if (keys.has(key)) throw new Error("ambiguous gateway answer (repeated key)")
-				keys.add(key)
-			}
-			keyNext = false
-			i = end
-		} else if (c === "{" || c === "[") {
-			objects.push(c === "{" ? new Set<string>() : null)
-			keyNext = c === "{"
-		} else if (c === "}" || c === "]") {
-			objects.pop()
-			keyNext = false
-		} else if (c === ",") {
-			keyNext = objects[objects.length - 1] instanceof Set
-		}
-	}
-	return value
 }
 
 function trustedSocketOwner(uid: number): boolean {
@@ -373,7 +331,6 @@ async function provenTCPRequest(path: string, init: RequestInit, token: string):
 				const value = response.headers[name.toLowerCase()]
 				return Array.isArray(value) ? value.join(", ") : value ?? null
 			} },
-			text: async () => response.body,
 			json: async () => JSON.parse(response.body),
 		} as Response
 	} finally {
@@ -418,7 +375,7 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 				ok: reply.status >= 200 && reply.status < 300,
 				status: reply.status,
 				headers: { get: (name: string) => name.toLowerCase() === "retry-after" ? reply.retry_after || null : null },
-				text: async () => reply.body,
+				json: async () => JSON.parse(reply.body),
 			} as Response
 		}
 		if (DC_LISTENER_PROOF) return provenTCPRequest(path, init, token)
@@ -581,9 +538,7 @@ const DC_GATEWAY_STOPPED_TEXT = "DefenseClaw blocked this tool call: the Defense
 // running: its hook socket is missing, or nothing accepts the connection
 // (Node ECONNREFUSED, Bun ConnectionRefused).
 function gatewayStopped(error: unknown): boolean {
-	const failure = error as { code?: unknown; status?: unknown; cause?: { code?: unknown } } | null
-	// The per-user native helper exits 7 for a gateway that is not running.
-	if (failure?.status === 7) return true
+	const failure = error as { code?: unknown; cause?: { code?: unknown } } | null
 	const codes = [failure?.code, failure?.cause?.code]
 	return codes.some((code) => code === "ENOENT" || code === "ECONNREFUSED" || code === "ConnectionRefused")
 }
@@ -609,64 +564,6 @@ async function installWindow(): Promise<boolean> {
 // `defenseclaw-gateway stop`, a stopped, busy or failing gateway) and what
 // brings it back, in the words of the native and shell hooks, instead of the
 // runtime's network error alone (GAP-0850).
-// perUserOutageOpen reports a per-user call that may run unchecked: the
-// native helper exited 7 (hookexec.PerUserPostOutageExit: this account's
-// gateway refused or dropped the connection before any status), the outage
-// mode is open and no install holds the data
-// directory. An answer the gateway gave, an unverified listener and every
-// other error keep the call blocked. Like the rest of this plugin it reads
-// no environment, so strict availability does not apply (the strict policy
-// tier closes it).
-async function perUserOutageOpen(error: unknown): Promise<boolean> {
-	if (DC_OUTAGE_FAIL_MODE !== "open" || (error as { status?: unknown } | null)?.status !== 7) return false
-	return !(await installWindow())
-}
-
-// perUserOutageNotice is the one warning of a call that ran because this
-// account's gateway is down: the cause and the fix.
-async function perUserOutageNotice(): Promise<string> {
-	let stopped = false
-	try {
-		await lstat(join(dirname(dirname(DC_TOKEN_FILE)), "gateway.stopped"))
-		stopped = true
-	} catch {
-		// No marker: the gateway is down for another reason.
-	}
-	const cause = stopped
-		? "this account's gateway was stopped with `defenseclaw-gateway stop`"
-		: "this account's gateway is not running"
-	return `DefenseClaw is not checking this session: ${cause}, so tool calls run unchecked (fail mode open for an outage). ` +
-		"Run `defenseclaw-gateway start` to resume protection. `defenseclaw-gateway status` shows its state. " +
-		"If it does not start, run `defenseclaw doctor`."
-}
-
-// logFailOpen appends the hook-failures.jsonl row the shell and native hooks
-// write for a call that ran unchecked, in this install's data directory, so
-// the gateway reports it when it is back. Best effort: a row that cannot be
-// written never changes the verdict.
-async function logFailOpen(reason: string): Promise<void> {
-	try {
-		const dir = join(dirname(dirname(DC_TOKEN_FILE)), "logs")
-		await mkdir(dir, { recursive: true, mode: 0o700 })
-		const file = await open(join(dir, "hook-failures.jsonl"), "a", 0o600)
-		try {
-			await file.appendFile(JSON.stringify({
-				ts: new Date().toISOString().replace(/\.\d{3}Z$/, "Z"),
-				connector: "amp",
-				hook: "amp-plugin",
-				reason,
-				category: "transport",
-				fail_mode: "open",
-				outcome: "fail_open",
-			}) + "\n")
-		} finally {
-			await file.close()
-		}
-	} catch {
-		// A record of a failure never fails the call.
-	}
-}
-
 async function perUserGatewayDownText(error: unknown, status: number): Promise<string> {
 	const data = dirname(dirname(DC_TOKEN_FILE))
 	const present = async (name: string) => {
@@ -926,7 +823,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				return failureResponse(`HTTP ${response.status}`)
 			}
 
-			const data = gatewayJSON(await response.text()) as GatewayResponse
+			const data = await response.json() as GatewayResponse
 			if (actionable && await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
@@ -938,13 +835,6 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
 			}
 			if (DC_PER_USER_NATIVE_POST) {
-				if (await perUserOutageOpen(error)) {
-					if (actionable) await logFailOpen("gateway unreachable")
-					return { action: "allow", outage_notice: actionable ? await perUserOutageNotice() : "" }
-				}
-				if ((error as { status?: unknown } | null)?.status === 7) {
-					return { action: "block", reason: await perUserGatewayDownText(error, 0) }
-				}
 				return { action: "block", reason: "DefenseClaw hook failed closed (per-user gateway peer unverified)" }
 			}
 			if (await deploymentRemoved()) return { action: "allow" }
@@ -1066,7 +956,6 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			await notifyIfForeground(threadID, verdict.additional_context || verdict.reason || "DefenseClaw flagged this tool call.")
 			return { action: "allow" }
 		default:
-			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
 			return { action: "allow" }
 		}
 	})

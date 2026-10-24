@@ -220,8 +220,6 @@ func init() {
 	_ = startCmd.Flags().MarkHidden(rotationConnectorStateFlag)
 	startCmd.Flags().Bool(hookColdStartFlag, false, "start requested by a connector hook after a refused connection")
 	_ = startCmd.Flags().MarkHidden(hookColdStartFlag)
-	startCmd.Flags().Bool(requireEveryConnectorFlag, false, "exit 3 unless every configured connector is guarded")
-	_ = startCmd.Flags().MarkHidden(requireEveryConnectorFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationTransactionFlag)
 	_ = stopCmd.Flags().MarkHidden(rotationCleanupFlag)
 
@@ -357,21 +355,12 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 		if note := movedCLILauncherNote(); note != "" {
 			Warn(note)
 		}
-		running, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg))
-		if healthErr != nil {
+		if _, healthErr := fetchSidecarHealth(client, sidecarHealthURL(cfg)); healthErr != nil {
 			// GAP-1342: a hung gateway; status and start pointed at each other.
 			fmt.Println("It does not answer /health. If it stays that way, restart it with: defenseclaw-gateway restart")
-			if requireEveryConnectorRequested(cmd) {
-				return withExitCode(errors.New("gateway does not answer /health, so no connector is proven guarded"),
-					gatewayStartAdmissionRefusedExitCode)
-			}
 			return nil
 		}
 		fmt.Println("Use 'defenseclaw-gateway status' to check health")
-		if requireEveryConnectorRequested(cmd) {
-			// The installers' wait for a slow first start ends here.
-			return everyConnectorGuardedError(cfg, running)
-		}
 		return nil
 	}
 	if err := gatewayDiskFullError("start", config.DefaultDataPath()); err != nil {
@@ -472,11 +461,7 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	removeRunningGatewayToken(config.DefaultDataPath())
 
 	refused, admissionRefused := guardrailHookContractAdmissionRefusal(snap.Guardrail)
-	var unguarded error
-	if !admissionRefused && requireEveryConnectorRequested(cmd) {
-		unguarded = everyConnectorGuardedError(cfg, snap)
-	}
-	if admissionRefused || unguarded != nil {
+	if admissionRefused {
 		fmt.Printf("%s (PID %d)\n", Style("DEGRADED", "fg=yellow", "bold"), pid)
 		fmt.Printf("  Health: %s\n", summarizeHealthSnapshot(snap))
 		printConnectorsNotStarted(snap)
@@ -502,16 +487,14 @@ func runStartLocked(cmd *cobra.Command, _ []string, coldStart bool) error {
 	if admissionRefused {
 		return hookContractAdmissionStartError(refused, snap.Guardrail.LastError)
 	}
-	return unguarded
+	return nil
 }
 
 // gatewayStartAdmissionRefusedExitCode reports a gateway that is running but
 // refused one or more connectors at the hook-contract admission gate because
 // their agent changed underneath the recorded contract. The previous release
 // would refuse them the same way, so an installer keeps this version and
-// relays the fix instead of rolling back. With --require-every-connector it
-// also reports a running gateway that does not guard every configured
-// connector (GAP-0878).
+// relays the fix instead of rolling back.
 const gatewayStartAdmissionRefusedExitCode = 3
 
 func hookContractAdmissionStartError(connectors []string, detail string) error {
@@ -1804,18 +1787,12 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 				)
 				if expectationErr != nil {
 					err = expectationErr
-				} else if presented, revokedAll, presentedErr := rotationHookTokensStillPresented(
-					requirements.expectedDataDir,
-					expectedHookTokens,
-					requirements.expectedConnectorState.OrphanHookTokenFingerprints,
-				); presentedErr != nil {
-					err = presentedErr
-				} else if !revokedAll {
+				} else {
 					err = verifyRotationConnectorHookAuthentication(
 						client,
 						statusURL,
 						requirements.expectedDataDir,
-						presented,
+						expectedHookTokens,
 					)
 				}
 				if err != nil {
@@ -1884,9 +1861,7 @@ func configuredGuardrailExpectedRunning(cfg *config.Config) bool {
 	return false
 }
 
-// guardedConnectorNames lists, sorted, the connectors cfg guards: the
-// configured roster with the guardrail on and each connector not turned off.
-func guardedConnectorNames(cfg *config.Config) []string {
+func rotationRequiredConnectorNames(cfg *config.Config) []string {
 	if cfg == nil || !cfg.Guardrail.Enabled {
 		return nil
 	}
@@ -2032,7 +2007,7 @@ func rotationConnectorStateFromConfig(cfg *config.Config) (rotationConnectorStat
 		state.Connectors = append(state.Connectors, rotationConnectorPolicy{
 			Name:         name,
 			Mode:         strings.ToLower(strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name))),
-			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookOutageFailModeForConnector(name))),
+			HookFailMode: strings.ToLower(strings.TrimSpace(cfg.EffectiveHookFailModeForConnector(name))),
 			Enabled:      cfg.Guardrail.EffectiveEnabled(name),
 		})
 	}
@@ -2130,40 +2105,6 @@ var loadRotationHookAPIToken = connector.LoadHookAPIToken
 func rotationHookTokenFingerprint(token string) string {
 	digest := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(digest[:])
-}
-
-// rotationHookTokensStillPresented drops the rotated credentials of
-// unconfigured connectors (orphans) that this gateway's own start revoked:
-// its teardown of such a connector removes the credential only after
-// VerifyClean proves no agent registers its hooks (revokePerUserHookAPIToken),
-// so nothing presents it any more. Every other expectation stays, and a
-// present orphan credential must still match and authenticate. revokedAll
-// reports that every expectation was such a revoked orphan. The rotation
-// controller checks again that each vanished orphan's hook is gone.
-func rotationHookTokensStillPresented(
-	dataDir string,
-	expected rotationHookTokenFingerprints,
-	orphans rotationHookTokenFingerprints,
-) (rotationHookTokenFingerprints, bool, error) {
-	if len(orphans) == 0 {
-		return expected, false, nil
-	}
-	presented := make(rotationHookTokenFingerprints, len(expected))
-	revoked := 0
-	for name, fingerprint := range expected {
-		if _, orphan := orphans[name]; orphan {
-			path, err := connector.HookAPITokenFilePath(dataDir, name)
-			if err != nil {
-				return nil, false, fmt.Errorf("connector %s hook credential path is invalid", name)
-			}
-			if _, statErr := os.Lstat(path); errors.Is(statErr, os.ErrNotExist) {
-				revoked++
-				continue
-			}
-		}
-		presented[name] = fingerprint
-	}
-	return presented, len(expected) > 0 && revoked == len(expected), nil
 }
 
 func verifyRotationConnectorHookAuthentication(

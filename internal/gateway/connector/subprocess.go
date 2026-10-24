@@ -72,13 +72,8 @@ type templateData struct {
 	// credential (UserScopedListenerProof); empty skips the proof.
 	ListenerProofJS string
 	FailMode        string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
-	// OutageFailMode is the per-user in-agent plugin's gateway-outage mode
-	// (pluginOutageFailMode): "open" lets a call through with a warning when
-	// the gateway is not running, "closed" blocks it. Empty for every other
-	// render; per-user shell and native hooks read it from hooks/.hookcfg.
-	OutageFailMode string
-	Managed        bool
-	SecureClient   bool // render-time profile marker for Unix shell identity headers
+	Managed         bool
+	SecureClient    bool // render-time profile marker for Unix shell identity headers
 	// SecureClientDelivery marks a Secure Client render on a verified install.
 	// Every shell hook uses the installed mode, never the agent environment.
 	SecureClientDelivery bool
@@ -625,19 +620,16 @@ type renderedHookScript struct {
 // order writeHookScriptsCommonWithTransport writes them. tokenFile is the
 // basename of the token file the connector scripts read.
 func renderHookScripts(apiAddr, failMode, tokenFile string, extras []string, managed bool, connectorName string, scopedToken bool, socketTransport, foreignGuard string, secureClient, secureClientDelivery bool) ([]renderedHookScript, error) {
-	// A per-user script bakes closed for every failure; its outage mode (the
-	// policy tier's, OutageHookFailMode) is the runtime record, and its
-	// derived-from header names it for doctor.
-	outageFailMode := ""
+	// All per-user render paths, including legacy setup helpers, must pin
+	// closed before the hook bytes are written. An old explicit open cannot
+	// authorize a tool call while this account's gateway is unavailable.
 	if !managed {
-		outageFailMode = normalizeHookFailMode(failMode)
 		failMode = "closed"
 	}
 	connectorData := templateData{
 		APIAddr:              apiAddr,
 		APIToken:             "",
 		FailMode:             normalizeHookFailMode(failMode),
-		OutageFailMode:       outageFailMode,
 		Managed:              managed,
 		SecureClient:         secureClient,
 		SecureClientDelivery: secureClient && secureClientDelivery,
@@ -1304,8 +1296,8 @@ type HookFailModeRefresh struct {
 // follows while its gateway is down to mode(connector), the mode the config
 // chooses (OutageHookFailMode). Every hooks/.hookcfg entry and flat record
 // gets that mode with its config source, and a connector script that bakes
-// an open (or lets the environment open it) is closed: a per-user script
-// reads its outage mode from those records. Scripts are only tightened: the gateway renders them when it
+// an open (or lets the environment open it) is closed when its mode is
+// closed. Scripts are only tightened: the gateway renders them when it
 // starts. The installers run it with the new release's gateway before the
 // running gateway stops and again once it is stopped, before the new hooks go
 // in: an earlier release may have recorded or baked open for a mode nobody
@@ -1406,10 +1398,7 @@ func refreshHookFailModesLocked(hookDir string, mode func(connector string) stri
 		scriptOwners[name] = true
 	}
 	for _, name := range sortedNames(scriptOwners) {
-		// A per-user script bakes closed for every failure in every tier: its
-		// outage mode is the runtime record written above, never the script.
-		// An open an earlier release baked is closed whatever the mode.
-		if mode(name) == "" {
+		if mode(name) != "closed" {
 			continue
 		}
 		for _, script := range connectorHookScripts[name] {
@@ -1597,22 +1586,10 @@ func closeBakedHookFailMode(path string, opens *strings.Replacer) (bool, error) 
 }
 
 // OutageHookFailMode is the fail mode conn's hooks follow while the gateway
-// is down. A per-user render takes the outage mode its caller resolved
-// (opts.HookFailMode from config.HookOutageFailMode: open in the default and
-// permissive policy tiers, closed in strict); every other per-user hook
-// failure stays closed (resolveHookFailMode). Managed and Secure Client
-// renders keep their resolved mode.
+// is down. Per-user hooks always fail closed; only Secure Client and an
+// administrator-selected mode on a managed host may render open.
 func OutageHookFailMode(opts SetupOpts, conn Connector) string {
-	if perUserOutageRender(opts) {
-		return normalizeHookFailMode(opts.HookFailMode)
-	}
 	return resolveHookFailMode(opts, conn)
-}
-
-// perUserOutageRender reports a per-user render: neither managed nor the
-// Secure Client delivery contract.
-func perUserOutageRender(opts SetupOpts) bool {
-	return !opts.ManagedEnterprise && !opts.SecureClientHookDelivery
 }
 
 // renderedHookFailMode is the fail mode conn's rendered hooks bake and its
@@ -2031,9 +2008,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // an unset value is closed. A verified Secure Client render honors its
 // explicit mode and defaults open (#1163), with its existing vendor limits.
 //
-// An open choice covers a confirmed gateway outage only: an answered,
-// malformed or unanswered call blocks outside Secure Client.
-// DEFENSECLAW_STRICT_AVAILABILITY=1 can only tighten this choice.
+// Transport-layer failures (gateway unreachable / timeout / 5xx) follow
+// FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
+// force-closed override.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	render := resolveConnectorHookRender(opts, c)
 	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.failModeSource, render.extras, opts.ManagedEnterprise,

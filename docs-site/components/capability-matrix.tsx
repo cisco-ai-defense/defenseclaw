@@ -193,10 +193,8 @@ export function SandboxHarnessTable() {
 type ManagedOpen = 'blocks' | 'runs' | 'blocks-linux-macos' | 'per-user-route-blocks-linux-macos' | 'per-user-route-blocks';
 
 interface OutageRow {
-  // The per-user strict policy tier (outage mode closed) and the default or
-  // permissive tier (outage mode open), Go config.HookOutageFailMode.
-  perUserClosed: 'blocks' | 'runs';
-  perUserOpen: 'blocks' | 'runs';
+  perUserClosed: 'blocks' | 'runs' | 'guardrail-mode';
+  perUserOpen: 'blocks' | 'runs' | 'guardrail-mode';
   // The administrator's open with the default machine policy
   // (foreign_hooks: remove: the foreign-hook guard runs where it covers the
   // connector), and with foreign_hooks report or allow.
@@ -212,6 +210,7 @@ interface OutageRow {
 const outageText: Record<string, string> = {
   blocks: 'Blocks',
   runs: 'Runs',
+  'guardrail-mode': 'Blocks in action mode, runs in observe mode',
   'blocks-linux-macos': 'Blocks on Linux and macOS; runs on Windows',
   'per-user-route-blocks': 'Runs through machine policy (the default); blocks on the per-user route',
   'per-user-route-blocks-linux-macos':
@@ -259,8 +258,8 @@ export function OutageMatrix() {
         <thead>
           <tr className="bg-fd-card text-left">
             <Th>Connector</Th>
-            <Th>Per-user, strict policy</Th>
-            <Th>Per-user, default or permissive policy</Th>
+            <Th>Per-user, fail mode closed</Th>
+            <Th>Per-user, fail mode open</Th>
             <Th>Managed standalone, open, default foreign-hook guard</Th>
             <Th>Managed standalone, open, foreign_hooks report or allow</Th>
             <Th>Secure Client, fail mode closed</Th>

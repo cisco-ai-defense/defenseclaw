@@ -24,7 +24,6 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 	"unsafe"
@@ -32,10 +31,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
-	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -145,9 +142,7 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 	previousBundle, previousPath, previousLifecycle, previousWait, previousArgs := windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs
 	previousChangeSpool := windowsChangeSpool
 	previousManaged := managedHostWindowsStandalone
-	previousLive := windowsSecretGatewayLive
 	t.Cleanup(func() {
-		windowsSecretGatewayLive = previousLive
 		windowsSecretLayout, windowsSecretDeploymentInstalled, windowsSecretIsElevated, windowsSecretRestartGateway, windowsSecretSpawnRecovery, windowsSecretConfigTrusted = previousLayout, previousInstalled, previousElevated, previousRestart, previousRecovery, previousConfigTrusted
 		windowsSecretLockBundleStore, windowsSecretLifecycleLockPath, windowsSecretLifecycleLock, windowsSecretInstallerLockWait, secretRawArgs = previousBundle, previousPath, previousLifecycle, previousWait, previousArgs
 		windowsChangeSpool = previousChangeSpool
@@ -175,7 +170,6 @@ func stubWindowsSecretHost(t *testing.T, layout managed.StandaloneLayout) *windo
 		return true, nil
 	}
 	windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) { return &fakeWindowsSecretRecovery{}, nil }
-	windowsSecretGatewayLive = func() (bool, error) { return true, nil }
 	windowsSecretConfigTrusted = func(string) error { return nil }
 	windowsSecretLockBundleStore = func(_ context.Context, dir string, wait time.Duration) (func(), error) {
 		if dir != layout.LifecycleDir {
@@ -242,24 +236,17 @@ func TestWindowsSecretArmsGatewayRecoveryBeforeChange(t *testing.T) {
 }
 
 func TestWindowsSecretRecoveryRefusesUnreadyOrUnbreakableChild(t *testing.T) {
-	oldStart, oldCommand := windowsSecretStartRecovery, windowsSecretRecoveryCommand
-	t.Cleanup(func() { windowsSecretStartRecovery, windowsSecretRecoveryCommand = oldStart, oldCommand })
-	// A job the child cannot leave: nothing starts, and the change refuses.
-	started := false
-	windowsSecretStartRecovery = func(*exec.Cmd) error {
-		return fmt.Errorf("%w: the job kills its processes when it closes", processutil.ErrChildBoundToJob)
+	if _, err := independentWindowsSecretRecoveryFlagsForJob(windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, nil); err == nil {
+		t.Fatal("a recovery child in an unbreakable kill-on-close job cannot survive its parent")
 	}
-	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
-		started = true
-		return exec.Command(executable, "-test.run=^TestWindowsSecretRecoveryUnreadyHelper$")
+	flags, err := independentWindowsSecretRecoveryFlagsForJob(
+		windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK, nil)
+	if err != nil || flags&windows.CREATE_BREAKAWAY_FROM_JOB == 0 {
+		t.Fatalf("breakaway-capable recovery flags=%#x error=%v", flags, err)
 	}
-	if _, err := spawnWindowsSecretGatewayRecovery(); !errors.Is(err, processutil.ErrChildBoundToJob) || !started {
-		t.Fatalf("a recovery child bound to the job was accepted: %v", err)
-	}
-	windowsSecretStartRecovery = func(child *exec.Cmd) error {
-		child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
-		return child.Start()
-	}
+	oldFlags, oldCommand := windowsSecretRecoveryFlags, windowsSecretRecoveryCommand
+	t.Cleanup(func() { windowsSecretRecoveryFlags, windowsSecretRecoveryCommand = oldFlags, oldCommand })
+	windowsSecretRecoveryFlags = func() (uint32, error) { return windows.DETACHED_PROCESS, nil }
 	windowsSecretRecoveryCommand = func(executable string) *exec.Cmd {
 		child := exec.Command(executable, "-test.run=^TestWindowsSecretRecoveryUnreadyHelper$")
 		child.Env = append(os.Environ(), "DC_WINDOWS_SECRET_UNREADY_HELPER=1")
@@ -269,78 +256,6 @@ func TestWindowsSecretRecoveryRefusesUnreadyOrUnbreakableChild(t *testing.T) {
 	// must refuse even though CreateProcess succeeded.
 	if _, err := spawnWindowsSecretGatewayRecovery(); err == nil {
 		t.Fatal("credential change accepted an unready recovery child")
-	}
-}
-
-// The finding of loop round 2: a LocalSystem caller whose process job
-// cannot be inspected (a scheduled task) could not set or remove a
-// credential at all. A gateway that is stopped or not installed needs no
-// restart and so no recovery child: the change goes through without one. A
-// gateway that starts after that check gets its child at the restart
-// decision, before it is stopped; a child that cannot start there leaves the
-// gateway running and the restart failed, never stopped without recovery.
-func TestWindowsSecretChangeStartsRecoveryOnlyForARestart(t *testing.T) {
-	for _, tc := range []struct {
-		name         string
-		live         bool
-		liveErr      error
-		raceStart    bool
-		wantSpawned  bool
-		wantErr      string
-		wantRestart  bool
-		wantValue    string
-		wantArmed    bool
-		spawnFailure error
-	}{
-		{name: "stopped gateway, unreadable job", live: false, spawnFailure: processutil.ErrChildBoundToJob, wantValue: "new-value"},
-		{name: "stopped gateway", live: false, wantValue: "new-value"},
-		{name: "gateway started after the check", live: false, raceStart: true, wantSpawned: true, wantRestart: true, wantArmed: true, wantValue: "new-value"},
-		{name: "gateway started after the check, unreadable job", live: false, raceStart: true, spawnFailure: processutil.ErrChildBoundToJob,
-			wantSpawned: true, wantErr: "restarting the gateway failed", wantValue: "new-value"},
-		{name: "running gateway, unreadable job", live: true, spawnFailure: processutil.ErrChildBoundToJob, wantSpawned: true,
-			wantErr: "nothing was changed", wantValue: "old-value"},
-		{name: "unknown gateway state, unreadable job", liveErr: errors.New("SCM unavailable"), spawnFailure: processutil.ErrChildBoundToJob,
-			wantSpawned: true, wantErr: "nothing was changed", wantValue: "old-value"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := windowsSecretTestHarness(t)
-			if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "example-key", fromStdin: true}, "old-value\n"); err != nil {
-				t.Fatal(err)
-			}
-			spawned, stopped := false, false
-			recovery := &fakeWindowsSecretRecovery{}
-			windowsSecretGatewayLive = func() (bool, error) { return tc.live, tc.liveErr }
-			windowsSecretSpawnRecovery = func() (windowsSecretRecoveryControl, error) {
-				spawned = true
-				if tc.spawnFailure != nil {
-					return nil, tc.spawnFailure
-				}
-				return recovery, nil
-			}
-			windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
-				if !tc.live && !tc.raceStart && tc.liveErr == nil {
-					return false, nil // stopped: no restart decision
-				}
-				if err := beforeStop(); err != nil {
-					return false, err
-				}
-				stopped = true
-				return true, nil
-			}
-			_, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "example-key", fromStdin: true}, "new-value\n")
-			if tc.wantErr == "" && err != nil || tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
-				t.Fatalf("error = %v, want %q", err, tc.wantErr)
-			}
-			if spawned != tc.wantSpawned || stopped != tc.wantRestart || recovery.armed != tc.wantArmed {
-				t.Fatalf("spawned=%v stopped=%v armed=%v, want %v %v %v", spawned, stopped, recovery.armed, tc.wantSpawned, tc.wantRestart, tc.wantArmed)
-			}
-			if tc.wantArmed && (!recovery.cancelled || recovery.recovered) {
-				t.Fatalf("a completed restart left its recovery armed: %+v", recovery)
-			}
-			if raw, readErr := os.ReadFile(filepath.Join(dir, "example-key")); readErr != nil || string(raw) != tc.wantValue {
-				t.Fatalf("credential = %q %v, want %q", raw, readErr, tc.wantValue)
-			}
-		})
 	}
 }
 
@@ -582,8 +497,7 @@ func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code s
 		}
 	}
 	allowed := map[string]bool{"elevation_required": true, "invalid_arguments": true, "not_installed": true, "lifecycle_busy": true,
-		"credential_in_use": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true,
-		"rotation_confirmed": true, "confirmed_bundle_changed": true}
+		"credential_in_use": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true}
 	exit := commandExitCode(err)
 	if doc.SchemaVersion != 1 || doc.OK || doc.Action != action || doc.GatewayRestarted || len(doc.Errors) != 1 ||
 		doc.Errors[0].Code != code || !allowed[doc.Errors[0].Code] || doc.Errors[0].Message == "" || doc.ExitCode != exit {
@@ -1220,56 +1134,5 @@ func TestWindowsSecretSetStoresOnlyTheValueTheConfirmedBundleSigns(t *testing.T)
 	}
 	if !slices.Contains(host.events, "restart") {
 		t.Fatalf("events %v, want a gateway restart after the change", host.events)
-	}
-}
-
-// Loop round 2 (rc.7), finding 1: the MDM wrapper's put-back of a credential
-// a failed rotation added to a config that references it with no value
-// stored. secret remove refuses credential_in_use, which proves nothing
-// about the rotation. remove --undo-rotation with the bundle confirmed
-// before the rotation removes it; with another bundle confirmed since, it
-// refuses rotation_confirmed and leaves it. A rotation guarded by a bundle
-// that is no longer confirmed writes nothing.
-func TestWindowsSecretUndoRotationRemovesWhatAFailedRotationAdded(t *testing.T) {
-	dir := windowsSecretTestHarness(t)
-	layout, err := windowsSecretLayout()
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg := strings.Replace(standaloneGatewayCheckConfig, "enterprise:\n  profile: standalone\n",
-		"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n", 1)
-	if cfg == standaloneGatewayCheckConfig {
-		t.Fatal("the test config has no enterprise profile line to extend")
-	}
-	if err := os.WriteFile(layout.ConfigPath, []byte(cfg), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	previous := bundleStore
-	t.Cleanup(func() { bundleStore = previous })
-	store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
-	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
-	const name = "ai-defense-api-key"
-	other := strings.Repeat("a", 64)
-	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true, bundle: "unused.dcbundle", ifConfirmed: other}, "new-key\n")
-	windowsSecretFailureDoc(t, out, err, "set", "confirmed_bundle_changed")
-	if windowsSecretStored(dir, name) {
-		t.Fatal("a rotation guarded by a bundle no longer confirmed stored the value")
-	}
-	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
-		t.Fatal(err)
-	}
-	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
-	windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
-	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: other}, "")
-	windowsSecretFailureDoc(t, out, err, "remove", "rotation_confirmed")
-	if !windowsSecretStored(dir, name) {
-		t.Fatal("a refused put-back removed the credential")
-	}
-	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none"}, "")
-	if err != nil {
-		t.Fatalf("put-back: %v\n%s", err, out)
-	}
-	if windowsSecretStored(dir, name) {
-		t.Fatal("the put-back left the credential the failed rotation added")
 	}
 }

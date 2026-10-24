@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -29,10 +28,10 @@ import (
 	"time"
 )
 
-const hermesAdmissionTestRawVersion = "Hermes Agent v0.21.5 (2026.9.24)"
+const hermesAdmissionTestRawVersion = "Hermes Agent v0.20.0 (2026.8.3)"
 
 func TestFirstHermesVersionLineAcceptsCurrentMultilineBanner(t *testing.T) {
-	output := "\r\nHermes Agent v0.21.5 (2026.9.24)\r\n" +
+	output := "\r\nHermes Agent v0.20.0 (2026.8.3)\r\n" +
 		"Install directory: C:\\Users\\tester\\AppData\\Local\\hermes\\hermes-agent\r\n" +
 		"Python: 3.11.15\r\nOpenAI SDK: 2.24.0\r\n"
 
@@ -73,13 +72,6 @@ func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts 
 	if runtime.GOOS != "windows" {
 		return opts
 	}
-	// Verify runs the registered command's execution probe. A per-user
-	// install (no HookExecutable) registers the packaged launcher, which a
-	// test binary does not have: give it one that answers, unless the test
-	// pinned its own first (GAP-1069).
-	if strings.TrimSpace(opts.HookExecutable) == "" && os.Getenv(testHermesProbeLauncherEnv) == "" {
-		answerHermesProbeForTest(t)
-	}
 	if err := ensureManagedBackupDirRestricted(opts.DataDir); err != nil {
 		t.Fatalf("protect Hermes admission data directory: %v", err)
 	}
@@ -113,7 +105,7 @@ func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts 
 				Source:            "setup-selected",
 				Executable:        stablePath,
 				RawVersion:        hermesAdmissionTestRawVersion,
-				NormalizedVersion: "0.21.5",
+				NormalizedVersion: "0.20.0",
 				SHA256:            digest,
 				SelectedAt:        now.Add(-time.Second).Format(time.RFC3339),
 				ExpiresAt:         now.Add(10 * time.Minute).Format(time.RFC3339),
@@ -145,7 +137,7 @@ func prepareHermesSetupAdmissionFixture(t *testing.T, opts SetupOpts) SetupOpts 
 	})
 	opts.AgentExecutable = stablePath
 	opts.AgentVersion = hermesAdmissionTestRawVersion
-	opts.HookContractID = "hermes-hooks-v2"
+	opts.HookContractID = "hermes-hooks-v1"
 	return opts
 }
 

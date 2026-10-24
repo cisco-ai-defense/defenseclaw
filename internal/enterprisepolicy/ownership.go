@@ -17,7 +17,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -207,48 +206,6 @@ func (r *ownershipRecord) capturePreimage(current []byte, exists bool, strip str
 	return nil
 }
 
-// keepCopilotPreimageThroughMalformed retains the last parseable hooks when
-// a published drop-in is damaged. Independent root values added alongside
-// the damage can still be recovered without restoring the broken hooks.
-func (r *ownershipRecord) keepCopilotPreimageThroughMalformed(current []byte) error {
-	doc, err := decodeOrderedObject(current)
-	if err != nil {
-		return nil
-	}
-	admin := newObject()
-	if r.PreimageExisted {
-		admin, err = decodeOrderedObject(r.Preimage)
-		if err != nil {
-			return nil // preserve an original malformed preimage byte for byte
-		}
-	} else {
-		admin.set("version", json.Number("1"))
-	}
-	changed := false
-	for _, key := range doc.keys {
-		if key == "version" || key == "hooks" {
-			continue
-		}
-		value, _ := doc.get(key)
-		old, present := admin.get(key)
-		if !present || !reflect.DeepEqual(old, value) {
-			admin.set(key, value)
-			changed = true
-		}
-	}
-	if !changed {
-		return nil
-	}
-	data, err := encodeOrdered(admin)
-	if err != nil {
-		return err
-	}
-	r.PreimageExisted = true
-	r.Preimage = data
-	r.PreimageSHA256 = sha256Hex(data)
-	return nil
-}
-
 // noteRewrite records that the owned entries were found missing from a
 // file DefenseClaw had written; it returns how many rewrites happened in
 // the flap window.
@@ -312,14 +269,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 			flapConflict(state, connector, path, record.noteRewrite(opts.now()))
 		}
 		// A reserved drop-in keeps the preimage of its first publish.
-		// Copilot's shared drop-in follows parseable administrator edits,
-		// but broken hooks in a previously published file are damage to
-		// repair, not a new administrator preimage for removal.
-		if connector == copilotConnector && publishedByRecord(record, path) && exists && copilotPostPublicationMalformed(current) {
-			if err := record.keepCopilotPreimageThroughMalformed(current); err != nil {
-				return false, err
-			}
-		} else if !reservedDropIn(connector) || !publishedByRecord(record, path) {
+		if !reservedDropIn(connector) || !publishedByRecord(record, path) {
 			if err := record.capturePreimage(current, exists, strip); err != nil {
 				return false, err
 			}
@@ -337,7 +287,7 @@ func publishWithRecord(opts Options, connector, path string, current []byte, exi
 		}
 	}
 	if changed {
-		created, err := writePolicyFileOver(opts, path, state.policyFileBase(opts, path, exists, current), rendered)
+		created, err := writePolicyFile(opts, path, rendered)
 		record.CreatedDirs = appendUnique(record.CreatedDirs, created...)
 		if err != nil {
 			return false, err
@@ -478,9 +428,6 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 	if err != nil {
 		return err
 	}
-	// Every write and removal below is of this read: a save another writer
-	// makes meanwhile is kept, and the caller renders again (GAP-0896).
-	base := policyFileBase{exists: exists, data: current}
 	switch {
 	case !exists:
 	case record == nil && wholeFile:
@@ -496,7 +443,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 			}
 		}
 		if blank(admin) {
-			if err := removePolicyFileOver(opts, path, base); err != nil {
+			if err := removePolicyFile(opts, path); err != nil {
 				return err
 			}
 			if sha256Hex(current) != record.PostimageSHA256 {
@@ -505,7 +452,7 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 				state.detail("removed %s (it held no administrator content besides DefenseClaw's)", path)
 			}
 		} else {
-			if _, err := writePolicyFileOver(opts, path, base, admin); err != nil {
+			if _, err := writePolicyFile(opts, path, admin); err != nil {
 				return err
 			}
 			state.detail("restored the administrator content of %s", path)
@@ -528,13 +475,13 @@ func restoreOrStrip(opts Options, connector, path string, strip stripFunc, whole
 				state.detail("%s no longer holds DefenseClaw entries; left it unchanged", path)
 			}
 		case blank(admin):
-			if err := removePolicyFileOver(opts, path, base); err != nil {
+			if err := removePolicyFile(opts, path); err != nil {
 				return err
 			}
 			state.Changed = true
 			state.detail("removed %s (only DefenseClaw content remained)", path)
 		default:
-			if _, err := writePolicyFileOver(opts, path, base, admin); err != nil {
+			if _, err := writePolicyFile(opts, path, admin); err != nil {
 				return err
 			}
 			state.Changed = true

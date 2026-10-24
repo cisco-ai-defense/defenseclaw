@@ -294,20 +294,17 @@ func TestCompareAndSwapFileRefusesWritersUntilItReplaces(t *testing.T) {
 	requireSwapDirForTest(t, dir, map[string]string{"hooks.json": "new", "other.tmp": "other"})
 }
 
-// GAP-0897: on a volume without POSIX renames an ordinary rename replaces
-// only a file nobody has open, so the swap released its hold on the compared
-// file and an administrator's in-place save made then was overwritten. The
-// swap now refuses there, without the ordinary rename: the file at the path,
-// the in-place save included, is left as it is, and the source stays for the
-// caller to remove.
+// On a volume without POSIX renames the swap replaces the file in one
+// ordinary rename after releasing its hold, and still refuses a file that
+// changed first.
 func TestCompareAndSwapFileWithoutPOSIXRenames(t *testing.T) {
 	for _, test := range []struct {
-		name    string
-		inPlace bool
-		want    map[string]string
+		name   string
+		change bool
+		want   map[string]string
 	}{
-		{name: "unchanged", want: map[string]string{"hooks.json": "old", "source.tmp": "new"}},
-		{name: "saved in place at the release", inPlace: true, want: map[string]string{"hooks.json": "old", "source.tmp": "new"}},
+		{name: "unchanged", want: map[string]string{"hooks.json": "new"}},
+		{name: "replaced first", change: true, want: map[string]string{"hooks.json": "newer save", "source.tmp": "new"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -320,23 +317,26 @@ func TestCompareAndSwapFileWithoutPOSIXRenames(t *testing.T) {
 			previous := swapRenameReplace
 			swapRenameReplace = func(from, to string, class uint32, flags uint32) error {
 				if class == windows.FileRenameInfoEx {
+					if test.change {
+						newer := filepath.Join(dir, "newer.tmp")
+						if err := os.WriteFile(newer, []byte("newer save"), 0o600); err != nil {
+							t.Fatal(err)
+						}
+						posixRenameForTest(t, newer, to)
+					}
 					return windows.ERROR_INVALID_PARAMETER
 				}
 				classic++
-				if test.inPlace {
-					// The instant the old fallback released its hold: an
-					// editor that has the file open saves into it, and the
-					// ordinary rename then replaced that save.
-					if err := os.WriteFile(to, []byte("in-place save"), 0o600); err != nil {
-						t.Fatal(err)
-					}
-				}
 				return renameReplace(from, to, class, flags)
 			}
 			defer func() { swapRenameReplace = previous }()
 			result, err := CompareAndSwapFile(source, destination, SwapExpectation{Exists: true, Data: []byte("old")}, 16, nil)
-			if !errors.Is(err, ErrSwapUnsupported) || result.Swapped || classic != 0 {
-				t.Fatalf("swap without POSIX renames: %+v classic=%d err=%v; want ErrSwapUnsupported and no ordinary rename", result, classic, err)
+			if test.change {
+				if !errors.Is(err, ErrSwapRaced) || result.Swapped || classic != 0 {
+					t.Fatalf("swap over a changed file: %+v classic=%d err=%v", result, classic, err)
+				}
+			} else if err != nil || !result.Swapped || classic != 1 {
+				t.Fatalf("swap: %+v classic=%d err=%v", result, classic, err)
 			}
 			requireSwapDirForTest(t, dir, test.want)
 		})

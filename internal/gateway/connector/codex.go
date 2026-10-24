@@ -3254,23 +3254,10 @@ func mergeOwnedCodexHooks(
 	if err != nil {
 		return fmt.Errorf("inspect predecessor DefenseClaw Codex hooks: %w", err)
 	}
-	var copiedHomeCommands map[string]struct{}
-	if versioned {
-		copiedHomeCommands, err = codexCopiedHomeNativeCommands(opts.DataDir, configPath)
-		if err != nil {
-			return fmt.Errorf("inspect copied-home Codex hooks: %w", err)
-		}
-	}
 	isInferredManaged := func(rawHook interface{}) bool {
 		handler, ok := rawHook.(map[string]interface{})
 		if !ok {
 			return false
-		}
-		for _, key := range []string{"command", "command_windows", "commandWindows"} {
-			command, _ := handler[key].(string)
-			if _, ok := copiedHomeCommands[command]; ok {
-				return true
-			}
 		}
 		command, _ := handler["command"].(string)
 		_, ok = managedCommands[command]

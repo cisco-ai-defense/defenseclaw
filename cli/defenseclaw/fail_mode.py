@@ -51,10 +51,6 @@ _FAIL_MODE_PATTERN = re.compile(
 _ENV_FAIL_MODE_PATTERN = re.compile(r"^[ \t]*(?:export[ \t]+)?FAIL_MODE=[^\n]*DEFENSECLAW_FAIL_MODE", re.MULTILINE)
 _OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _AMP_FAIL_MODE_PATTERN = re.compile(r'\bconst\s+DC_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')
-# A per-user plugin's gateway-outage mode (config.HookOutageFailMode); its
-# DC_FAIL_MODE is closed for every other failure.
-_OPENCODE_OUTAGE_PATTERN = re.compile(r'const\s+DC_OUTAGE_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
-_AMP_OUTAGE_PATTERN = re.compile(r'\bconst\s+DC_OUTAGE_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')
 _EXPECTED_CONTRACTS = {
     "amp": frozenset({"amp-plugin-v1"}),
     "claudecode": frozenset({"claudecode-hooks-v1", "claudecode-hooks-v2"}),
@@ -730,44 +726,8 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
             return "windows-sidecar-legacy", mode
         return "windows-sidecar", mode
     script_name = "claude-code-hook.sh" if connector == "claudecode" else f"{connector}-hook.sh"
-    hook_dir = Path(cfg.data_dir) / "hooks"
-    mode, reads_env = _read_baked_hook_state(hook_dir / script_name)
-    if (
-        mode == "closed"
-        and not reads_env
-        and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
-    ):
-        # A per-user script bakes closed for every failure and reads its
-        # gateway-outage mode from its runtime record (_hardening.sh
-        # defenseclaw_per_user_outage_open).
-        return "hook-script", _read_flat_hook_record_mode(hook_dir, connector)
+    mode, reads_env = _read_baked_hook_state(Path(cfg.data_dir) / "hooks" / script_name)
     return ("hook-script-env" if reads_env else "hook-script"), mode
-
-
-def _read_flat_hook_record_mode(hook_dir: Path, connector: str) -> str | None:
-    """A per-user connector's outage mode in hooks/.hookcfg.<connector>, as the shell hooks read it.
-
-    ``open`` only for a record that names the connector, says open and has the
-    config source; ``closed`` for any other record and for none, as the hook
-    reads it.
-    """
-
-    data = _read_small_file(hook_dir / f".hookcfg.{connector}")
-    if data is None:
-        return "closed"
-    values: dict[str, str] = {}
-    for line in data.splitlines():
-        key, sep, value = line.partition("=")
-        if not sep or key in values:
-            return "closed"
-        values[key] = value
-    if (
-        values.get("DEFENSECLAW_CONNECTOR") == connector
-        and values.get("DEFENSECLAW_FAIL_MODE") == "open"
-        and values.get("FAIL_MODE_SOURCE") == "config"
-    ):
-        return "open"
-    return "closed"
 
 
 # The white space Go's strings.TrimSpace strips (unicode.IsSpace), which the
@@ -1114,7 +1074,7 @@ def _read_opencode_plugin_mode(cfg: Any) -> str | None:
         plugin = _read_small_file(Path(str(raw_path)))
         if plugin is None:
             continue
-        match = _OPENCODE_OUTAGE_PATTERN.search(plugin) or _OPENCODE_FAIL_MODE_PATTERN.search(plugin)
+        match = _OPENCODE_FAIL_MODE_PATTERN.search(plugin)
         if match:
             return match.group(1)
     return None
@@ -1124,7 +1084,7 @@ def _read_amp_plugin_mode(path: Path) -> str | None:
     data = _read_small_file(path)
     if data is None:
         return None
-    match = _AMP_OUTAGE_PATTERN.search(data) or _AMP_FAIL_MODE_PATTERN.search(data)
+    match = _AMP_FAIL_MODE_PATTERN.search(data)
     return match.group(1) if match else None
 
 

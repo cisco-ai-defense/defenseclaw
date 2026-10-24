@@ -2088,9 +2088,9 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// A connector added, removed, enabled or disabled re-runs the connector
 	// setup in-process and restarts the install watcher, which watches the
 	// skill and plugin dirs of the connectors. Secure Client never gets here
-	// with such a change: diffConfigs keeps it restart-required. A hook runtime
-	// policy change no hook guard rewrites re-runs the setup too.
-	guardrailRestart := connectorSetChanged(oldCfg, newCfg) || hookPolicyNeedsSetup(oldCfg, newCfg)
+	// with such a change: diffConfigs keeps it restart-required. Per-user
+	// hooks always render closed, so a legacy open edit cannot change setup.
+	guardrailRestart := connectorSetChanged(oldCfg, newCfg)
 	watcherRestart := watcherNeedsRestart(oldCfg, newCfg) || guardrailRestart
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || discoveryAssetsChanged(previousGen, newCfg)
 	privateUpstreamsReload := !reflect.DeepEqual(
@@ -2575,30 +2575,6 @@ func connectorSetChanged(oldCfg, newCfg *config.Config) bool {
 	return !reflect.DeepEqual(connectorHookSettings(oldCfg.Guardrail.Connectors), connectorHookSettings(newCfg.Guardrail.Connectors))
 }
 
-// hookPolicyNeedsSetup reports a runtime hook-policy change that no hook guard
-// applies. With self-heal off, connector setup runs again so the generated
-// hooks carry the new mode, HILT and fail-mode settings without a restart.
-// The enterprise hook guardian owns managed hooks; Secure Client is unchanged.
-func hookPolicyNeedsSetup(oldCfg, newCfg *config.Config) bool {
-	if oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || newCfg.Guardrail.HookSelfHeal ||
-		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
-		return false
-	}
-	for _, name := range newCfg.ActiveConnectors() {
-		if hookRuntimePolicyChanged(oldCfg, newCfg, name) {
-			return true
-		}
-	}
-	return false
-}
-
-func hookRuntimePolicyChanged(oldCfg, newCfg *config.Config, name string) bool {
-	return oldCfg.EffectiveHookFailModeForConnector(name) != newCfg.EffectiveHookFailModeForConnector(name) ||
-		oldCfg.EffectiveHookOutageFailModeForConnector(name) != newCfg.EffectiveHookOutageFailModeForConnector(name) ||
-		oldCfg.EffectiveGuardrailModeForConnector(name) != newCfg.EffectiveGuardrailModeForConnector(name) ||
-		oldCfg.EffectiveHILTForConnector(name).Enabled != newCfg.EffectiveHILTForConnector(name).Enabled
-}
-
 // connectorHookSettings keeps, per connector, only whether its hooks are
 // installed (membership and enablement).
 func connectorHookSettings(connectors map[string]config.PerConnectorGuardrailConfig) map[string]config.PerConnectorGuardrailConfig {
@@ -2772,17 +2748,20 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			return hookRuntimePolicy{}, nil, false
 		}
 		return hookRuntimePolicy{
-			hookFailMode:  cfg.EffectiveHookOutageFailModeForConnector(connectorName),
-			guardrailMode: cfg.EffectiveGuardrailModeForConnector(connectorName),
-			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
+			hookFailMode:           cfg.EffectiveHookFailModeForConnector(connectorName),
+			configuredHookFailMode: cfg.ConfiguredHookFailModeForConnector(connectorName),
+			guardrailMode:          cfg.EffectiveGuardrailModeForConnector(connectorName),
+			hiltEnabled:            cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
 	})
 }
 
-// refreshHookGuardPolicies re-renders hook-only connectors when the published
-// runtime policy changes. The saved fail mode can change without changing
-// the effective one, so it, the guardrail mode and HILT are compared too.
-// It runs off the reload path: Setup rewrites agent config files.
+// refreshHookGuardPolicies re-renders the hooks of every hook-only connector
+// whose effective hook fail mode the published config changed. The fail mode is
+// baked into the generated hook scripts and the agent's registration, and it
+// follows the guardrail mode (action uses the global fail mode, observe is
+// open), so a mode change through any writer must reach them without a
+// restart. It runs off the reload path: Setup rewrites agent config files.
 func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
 	if s == nil || oldCfg == nil || newCfg == nil || !newCfg.Guardrail.Enabled || !newCfg.Guardrail.HookSelfHeal ||
 		managed.IsManagedEnterprise(newCfg.DeploymentMode) || newCfg.SecureClientIntegration() {
@@ -2796,15 +2775,16 @@ func (s *Sidecar) refreshHookGuardPolicies(oldCfg, newCfg *config.Config) {
 	s.hookGuardsMu.RUnlock()
 	for _, guard := range guards {
 		conn := guard.activeConnector()
-		// A per-user hook's outage mode follows its policy tier
-		// (config.HookOutageFailMode): a rule-pack change alone changes it.
+		// A per-user Cursor's outage mode also follows the config's explicit
+		// value (connector.OutageHookFailMode), which can change alone.
 		if conn == nil || proxyShouldBindForConnector(conn, &newCfg.Guardrail) ||
-			!hookRuntimePolicyChanged(oldCfg, newCfg, conn.Name()) {
+			(oldCfg.EffectiveHookFailModeForConnector(conn.Name()) == newCfg.EffectiveHookFailModeForConnector(conn.Name()) &&
+				oldCfg.ConfiguredHookFailModeForConnector(conn.Name()) == newCfg.ConfiguredHookFailModeForConnector(conn.Name())) {
 			continue
 		}
 		go func() {
 			if err := guard.RefreshPolicy(context.Background()); err != nil {
-				fmt.Fprintf(os.Stderr, "[hook-guard] hook policy refresh for %s: %v\n", conn.Name(), err)
+				fmt.Fprintf(os.Stderr, "[hook-guard] hook fail mode refresh for %s: %v\n", conn.Name(), err)
 			}
 		}()
 	}
@@ -4701,11 +4681,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		!s.currentConfig().Guardrail.EffectiveEnabled(conn.Name())
 	if !s.currentConfig().Guardrail.Enabled || connectorOff {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — running connector teardown for %s\n", conn.Name())
-		teardownErr := conn.Teardown(ctx, setupOpts)
-		if teardownErr != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", teardownErr)
+		if err := conn.Teardown(ctx, setupOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] connector teardown: %v\n", err)
 		}
-		if err := verifyConnectorRemoved(conn, setupOpts, teardownErr); err != nil {
+		if err := conn.VerifyClean(setupOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
 			teardownErr := fmt.Errorf("connector %s teardown incomplete: %w", conn.Name(), err)
 			s.health.SetGuardrail(StateError, teardownErr.Error(), nil)
@@ -5243,11 +5222,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	if !s.currentConfig().Guardrail.Enabled {
 		failedTeardown := append([]string(nil), failedRemoved...)
 		for _, conn := range conns {
-			teardownErr := conn.Teardown(ctx, baseOpts)
-			if teardownErr != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] connector %s teardown: %v\n", conn.Name(), teardownErr)
+			if err := conn.Teardown(ctx, baseOpts); err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] connector %s teardown: %v\n", conn.Name(), err)
 			}
-			if err := verifyConnectorRemoved(conn, baseOpts, teardownErr); err != nil {
+			if err := conn.VerifyClean(baseOpts); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: teardown of %s left stale state: %v\n", conn.Name(), err)
 				failedTeardown = append(failedTeardown, conn.Name())
 				continue
@@ -6313,12 +6291,7 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 					})
 				}
 				rollbackErr := rollbackMultiConnectorPublication(context.WithoutCancel(ctx), transaction)
-				failed := fmt.Errorf("connector %s refresh failed: %w", registration.conn.Name(), err)
-				if !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
-					// A Setup refusal (a known-broken agent, an unsupported
-					// profile topology) names its own next step.
-					failed = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", failed)
-				}
+				failed := fmt.Errorf("connector %s refresh failed: %w; close the agent holding its settings, then run: defenseclaw upgrade", registration.conn.Name(), err)
 				if rollbackErr != nil {
 					failed = fmt.Errorf("%w; connector setup rollback incomplete: %v", failed, rollbackErr)
 				}
@@ -6691,9 +6664,10 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HookAPIToken:         setupTokens.hookToken,
 		HookAPITokenScoped:   setupTokens.hookTokenScoped,
 		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
-		// The hooks' outage mode (config.HookOutageFailMode); Secure Client
-		// renders the resolved mode as is (#1163).
-		HookFailMode:             s.currentConfig().EffectiveHookOutageFailModeForConnector(conn.Name()),
+		HookFailMode:         s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
+		// Per-user Cursor's outage mode is open only with an explicit open.
+		ConfiguredHookFailMode: s.currentConfig().ConfiguredHookFailModeForConnector(conn.Name()),
+		// Secure Client renders the resolved mode as is (#1163).
 		SecureClientHookDelivery: s.currentConfig().SecureClientIntegration(),
 		GuardrailMode:            s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
 		HILTEnabled:              s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
@@ -7240,12 +7214,11 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 		}
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector changed %s → %s — tearing down %s\n", prev, newName, prev)
-	teardownErr := old.Teardown(ctx, opts)
-	if teardownErr != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] teardown of previous connector %s: %v\n", prev, teardownErr)
+	if err := old.Teardown(ctx, opts); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] teardown of previous connector %s: %v\n", prev, err)
 	}
 
-	if err := verifyConnectorRemoved(old, opts, teardownErr); err != nil {
+	if err := old.VerifyClean(opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: previous connector %s left stale state: %v\n", prev, err)
 		return err
 	}
@@ -7314,11 +7287,10 @@ func teardownRemovedConnectorsReport(registry *connector.Registry, previous, cur
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down\n", prevName)
-		teardownErr := old.Teardown(ctx, opts)
-		if teardownErr != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", prevName, teardownErr)
+		if err := old.Teardown(ctx, opts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", prevName, err)
 		}
-		if err := verifyConnectorRemoved(old, opts, teardownErr); err != nil {
+		if err := old.VerifyClean(opts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", prevName, err)
 			failed = append(failed, prevName)
 			continue
@@ -7776,11 +7748,10 @@ func teardownRemovedConnectorCandidates(
 			continue
 		}
 		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down transactionally\n", name)
-		teardownErr := candidate.conn.Teardown(ctx, priorOpts)
-		if teardownErr != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", name, teardownErr)
+		if err := candidate.conn.Teardown(ctx, priorOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", name, err)
 		}
-		if err := verifyConnectorRemoved(candidate.conn, priorOpts, teardownErr); err != nil {
+		if err := candidate.conn.VerifyClean(priorOpts); err != nil {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", name, err)
 			failed = append(failed, name)
 			continue
@@ -7813,7 +7784,7 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] connector %s %s failed: %v\n", conn.Name(), surface, err)
 	previouslyActive := !opts.ManagedEnterprise && len(authority) > 0 && len(authority[0].applied) > 0 && authority[0].applied[0].previouslyActive
-	if previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
+	if previouslyActive {
 		err = fmt.Errorf("%w; close the agent holding its settings, then run: defenseclaw upgrade", err)
 	}
 	if !previouslyActive && !errors.Is(err, connector.ErrSetupRefusedUnchanged) {
@@ -7989,26 +7960,6 @@ func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connect
 	}
 	if !current {
 		return errors.New("fresh runtime registration evidence does not match the active connector contract")
-	}
-	return nil
-}
-
-// verifyConnectorRemoved is the clean-removal proof of a teardown whose error
-// the caller only logs: VerifyClean, and, after a teardown that failed, the
-// absence of the hook credential it issued. A teardown that removed the hook
-// registration but could not delete the connector-scoped token left a
-// credential that still authenticates to its hook route; the removal is then
-// not complete, so the lock entry stays and the next start retries it
-// (GAP-0858).
-func verifyConnectorRemoved(conn connector.Connector, opts connector.SetupOpts, teardownErr error) error {
-	if err := conn.VerifyClean(opts); err != nil {
-		return err
-	}
-	if teardownErr == nil {
-		return nil
-	}
-	if err := connector.HookAPITokenRevocationPending(opts, conn.Name()); err != nil {
-		return fmt.Errorf("%w (teardown: %v)", err, teardownErr)
 	}
 	return nil
 }

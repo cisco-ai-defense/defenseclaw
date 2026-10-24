@@ -416,7 +416,7 @@ Every hook alias takes these flags; run `defenseclaw setup <connector> --help` f
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Hook fail mode for this connector during a gateway outage: open allows, warns and logs; closed blocks. Error, malformed or missing gateway answers block either way.",
+      description: "Hook fail mode for this connector: open allows and logs when the gateway answers with an error; closed blocks.",
     },
     "--workspace / --workspace-dir": {
       type: "path",
@@ -508,7 +508,7 @@ The fields you can override per connector mirror the global guardrail knobs:
 | --- | --- | --- |
 | `enabled` | Per-connector on/off switch (`guardrail disable --connector X`). Drops it from the active set and removes its hooks; re-enable restores it with no re-prompt. | enabled |
 | `mode` | `observe` (log only) or `action` (enforce). | global `guardrail.mode` |
-| `hook_fail_mode` | `open` / `closed` — what to do while the gateway is not running. Error, malformed or missing gateway answers block in either mode. | global `guardrail.hook_fail_mode` |
+| `hook_fail_mode` | `open` / `closed` — what to do when hook delivery/authentication fails or the gateway response is invalid. | global `guardrail.hook_fail_mode` |
 | `hilt` | `{ enabled, min_severity }` — per-connector human-in-the-loop policy. | global `guardrail.hilt` |
 | `block_message` | Custom block text shown to this connector's agent. | global `guardrail.block_message` |
 | `rule_pack` | The rule pack this connector scans against: a preset or a `guardrail.custom_packs` name. | global `guardrail.rule_pack` |

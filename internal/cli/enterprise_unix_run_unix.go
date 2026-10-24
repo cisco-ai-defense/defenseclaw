@@ -500,9 +500,6 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 	if action == "set" && opts.fromStdin == (opts.fromFile != "") {
 		return nil, false, nil, lifecycleFlagError(cmd, errors.New("pass exactly one of --from-stdin or --from-file"))
 	}
-	if err := secretTransactionArguments(opts); err != nil {
-		return nil, false, nil, lifecycleFlagError(cmd, err)
-	}
 	var mutate func(context.Context) error
 	existed := false
 	switch action {
@@ -530,30 +527,18 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 			// An identical value is not rewritten, so the output can say
 			// the credential already holds it (GAP-2373).
 			stored, readErr := os.ReadFile(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
-			if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
-				return err
-			}
 			if existed = readErr == nil && subtle.ConstantTimeCompare(stored, value) == 1; existed {
 				return nil
 			}
-			// A value the signed bundle does not bind is not stored. A
-			// credential that cannot be read counts as stored.
-			replacing := readErr == nil || !errors.Is(readErr, fs.ErrNotExist)
-			if err := checkSecretBinding(ctx, opts.name, value, opts.bundle, replacing); err != nil {
+			// A value the signed bundle does not bind is not stored.
+			if err := checkSecretBinding(ctx, opts.name, value, opts.bundle); err != nil {
 				return err
 			}
 			return env.WriteSecret(ctx, opts.name, value)
 		}
 	case "remove":
 		mutate = func(context.Context) error {
-			path := filepath.Join(env.P(env.Layout.SecretsDir), opts.name)
-			if opts.undoRotation != "" {
-				stored, readErr := os.ReadFile(path)
-				if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
-					return err
-				}
-			}
-			_, statErr := os.Lstat(path)
+			_, statErr := os.Lstat(filepath.Join(env.P(env.Layout.SecretsDir), opts.name))
 			existed = statErr == nil
 			return env.RemoveSecret(opts.name)
 		}

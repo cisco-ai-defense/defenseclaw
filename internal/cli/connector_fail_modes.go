@@ -199,7 +199,8 @@ func refreshFailModeResolver(cmd *cobra.Command) (func(string) string, string, b
 				conn = found
 			}
 			return connector.OutageHookFailMode(connector.SetupOpts{
-				HookFailMode:             loaded.EffectiveHookOutageFailModeForConnector(name),
+				HookFailMode:             loaded.EffectiveHookFailModeForConnector(name),
+				ConfiguredHookFailMode:   loaded.ConfiguredHookFailModeForConnector(name),
 				SecureClientHookDelivery: loaded.SecureClientIntegration(),
 				GuardrailMode:            loaded.EffectiveGuardrailModeForConnector(name),
 			}, conn)

@@ -1515,9 +1515,7 @@ func EffectiveWindowsHookConnectors(cfg *config.Config) []string {
 }
 
 // EffectiveWindowsStandaloneHookConnectors is EffectiveWindowsHookConnectors
-// for a config the caller loaded from the standalone layout. A standalone
-// config also counts every connector its enterprise.machine_policy.connectors
-// names (GAP-0904). A CLI or Setup
+// for a config the caller loaded from the standalone layout. A CLI or Setup
 // lifecycle process does not carry the profile pin, so without this its
 // per-user-only config (opencode, copilot, hermes) counted no connector and
 // verify failed no_connectors_enabled (GAP-1230).
@@ -1565,20 +1563,6 @@ func effectiveWindowsHookConnectors(cfg *config.Config, standalone bool) []strin
 		consider(name, disabled)
 	}
 	consider(cfg.Guardrail.Connector, false)
-	if standalone && cfg.StandaloneEnterprise() {
-		// A connector named only under enterprise.machine_policy.connectors
-		// is protected too, as Linux and macOS protect it
-		// (enterprisepolicy.StandaloneConnectors): Windows publication, the
-		// enumerator and both verifiers use one roster, so policy verify
-		// never expects a machine hook the runtime does not publish
-		// (GAP-0904). guardrail.connectors.<name>.enabled: false still
-		// turns it off.
-		for name := range cfg.Enterprise.MachinePolicy.Connectors {
-			if cfg.Guardrail.EffectiveEnabled(name) {
-				consider(name, false)
-			}
-		}
-	}
 	sort.Strings(ordered)
 	return ordered
 }

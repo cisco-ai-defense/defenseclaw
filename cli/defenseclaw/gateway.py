@@ -627,7 +627,7 @@ def _windows_foreign_listener(host: str, port: int) -> str:
     return f"PID {listener.pid}, a process of another account"
 
 
-def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/self/net", *, host: str = "127.0.0.1") -> str:
+def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/net", *, host: str = "127.0.0.1") -> str:
     import ipaddress
 
     target_host = host.strip("[]")
@@ -699,51 +699,16 @@ def _foreign_loopback_listener_uncached(port: int, proc_net: str = "/proc/self/n
     return ""
 
 
-#: How long the gateway's peer check waits for a managed gateway that socket
-#: activation is still starting (defaultHookRequestTimeout in
-#: internal/gateway/connector/hookexec).
-_CONNECTED_VERIFIER_MAX_WAIT = 10.0
-#: The wait the check had before it followed the caller's budget.
-_CONNECTED_VERIFIER_MIN_WAIT = 3.0
-#: The helper's own start and exit.
-_CONNECTED_VERIFIER_MARGIN = 1.0
-
-
-def _connected_verifier_timeout(budget: object) -> float:
-    """How long the helper may take to prove a connected socket.
-
-    It used to be killed after 3 s while the gateway's check waits up to
-    10 s for a socket-activated gateway to start and accept, so a request
-    the release client answered within its 5 s read timeout was refused
-    (GAP-1138). The helper now gets the caller's timeout, between 3 and
-    10 s, plus its own start-up. The HTTP response keeps its whole read
-    timeout: urllib3 sets it on the socket after the request is written.
-    """
-    try:
-        seconds = float(budget)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        seconds = _CONNECTED_VERIFIER_MAX_WAIT
-    if not seconds > 0 or seconds == float("inf"):
-        seconds = _CONNECTED_VERIFIER_MAX_WAIT
-    return min(max(seconds, _CONNECTED_VERIFIER_MIN_WAIT), _CONNECTED_VERIFIER_MAX_WAIT) + _CONNECTED_VERIFIER_MARGIN
-
-
 def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int) -> None:
-    """Prove the accepted server socket before urllib3 writes request bytes.
-
-    The socket's timeout is still the caller's connect budget, which the
-    helper gets (:func:`_connected_verifier_timeout`).
-    """
+    """Prove the accepted server socket before urllib3 writes request bytes."""
     remote = sock.getpeername()
     local = sock.getsockname()
     if remote[1] != port or (host.strip("[]") != "localhost" and remote[0] != host.strip("[]")):
         raise GatewayListenerNotOwnedError("connected gateway endpoint changed")
     managed = _managed_connected_verifier_spec()
+    binary = managed[0] if managed else canonical_install_path()
     try:
-        if managed:
-            binary = _trusted_connected_verifier_binary(managed[0], managed=True)
-        else:
-            binary = _per_user_connected_verifier()
+        _trusted_connected_verifier_binary(binary, managed=managed is not None)
 
         def format_addr(endpoint) -> str:
             return f"{_url_host(endpoint[0])}:{endpoint[1]}"
@@ -756,7 +721,7 @@ def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int) 
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=_connected_verifier_timeout(getattr(sock, "gettimeout", lambda: None)()),
+            timeout=3,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -781,75 +746,26 @@ def _managed_connected_verifier_spec() -> tuple[str, str] | None:
     return None
 
 
-def _per_user_connected_verifier() -> str:
-    """The gateway that proves a per-user socket, from a supported location.
-
-    Only ``~/.local/bin`` was tried, so an install that runs its gateway
-    from the native Windows package, ``DEFENSECLAW_GATEWAY_BIN``, ``PATH``
-    or the folder of this ``defenseclaw`` launcher refused every request
-    (GAP-1138). These are the locations of :func:`resolve_gateway_binary`,
-    in its order; a corroborated Windows package uses only its own sibling.
-    The first candidate that passes the custody check runs.
-    """
-    if packaged_windows_install_root():
-        candidates = [packaged_windows_gateway_path() or ""]
-    else:
-        candidates = [
-            os.environ.get("DEFENSECLAW_GATEWAY_BIN", "").strip(),
-            shutil.which(GATEWAY_BIN_NAME) or "",
-            _launcher_sibling_gateway() or "",
-            canonical_install_path(),
-        ]
-    for candidate in dict.fromkeys(candidates):
-        if not candidate:
-            continue
-        try:
-            return _trusted_connected_verifier_binary(candidate, managed=False)
-        except OSError:
-            continue
-    raise OSError("gateway verifier binary is unavailable")
-
-
-def _trusted_connected_verifier_binary(binary: str, *, managed: bool) -> str:
-    """Return the path to run, after its custody check.
-
-    The managed package's helper and every folder above it belong to root.
-    A per-user helper passes the check of the gateway lifecycle
-    (:func:`trusted_posix_executable_path`): held, with every folder above
-    it, by root or this account and writable by no other. A symlinked
-    helper is refused on every OS.
-    """
+def _trusted_connected_verifier_binary(binary: str, *, managed: bool) -> None:
     if not binary or not os.path.isabs(binary):
         raise OSError("gateway verifier binary is unavailable")
-    if not managed:
-        info = os.lstat(binary)
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise OSError("gateway helper is not a regular file")
-        if os.name != "nt":
-            from defenseclaw.file_permissions import trusted_posix_executable_path
-
-            return trusted_posix_executable_path(binary)
-        # Windows: no symlinked folder in the last three levels either.
-        path = binary
-        for _ in range(3):
-            path = os.path.dirname(path)
-            if stat.S_ISLNK(os.lstat(path).st_mode):
-                raise OSError("untrusted gateway helper path")
-        return binary
     path = binary
+    parent_count = 0
     while True:
         info = os.lstat(path)
-        if stat.S_ISLNK(info.st_mode) or (os.name != "nt" and (info.st_uid != 0 or info.st_mode & 0o022)):
+        if stat.S_ISLNK(info.st_mode) or (
+            os.name != "nt" and (info.st_uid != (0 if managed else os.geteuid()) or info.st_mode & 0o022)
+        ):
             raise OSError("untrusted gateway helper path")
         if path == binary and not stat.S_ISREG(info.st_mode):
             raise OSError("gateway helper is not a regular file")
         if path == binary and os.name != "nt" and not os.access(binary, os.X_OK):
             raise OSError("gateway helper is not executable")
         parent = os.path.dirname(path)
-        if parent == path:
+        parent_count += 1
+        if parent == path or (not managed and parent_count >= 4):
             break
         path = parent
-    return binary
 
 
 class _GatewayVerifiedConnection(HTTPConnection):

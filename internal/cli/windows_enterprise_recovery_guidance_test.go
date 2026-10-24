@@ -133,14 +133,14 @@ func TestWindowsEnterpriseStandaloneNextStepAfterALocalSystemRecovery(t *testing
 	original := windowsEnterpriseRunningAsLocalSystem
 	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
-	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, false, false, true, nil, nil, nil)
+	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, false, true, nil, nil, nil)
 	if strings.Contains(got, "Next step: run DefenseClaw Setup") || !strings.Contains(got, "running it again unchanged fails the same way") ||
 		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) || strings.Contains(got, "(the path and the account)") ||
 		!strings.Contains(got, "/uninstall FORCE=1 JSON=1") {
 		t.Fatalf("next step = %q", got)
 	}
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
-	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, false, false, true, nil, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
+	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, false, true, nil, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
 		t.Fatalf("an administrator run lost the LocalSystem step: %q", got)
 	}
 }
@@ -156,7 +156,7 @@ func TestWindowsEnterpriseStandaloneNextStepWhileAnotherLifecycleHoldsTheLock(t 
 		windowsEnterpriseRunningAsLocalSystem = func() bool { return system }
 		for _, action := range []string{"ensure", "repair", "uninstall"} {
 			for _, pending := range []bool{true, false} {
-				got := windowsEnterpriseStandaloneNextStep(action, `C:\stage\config.yaml`, false, true, false, pending, nil, nil, nil)
+				got := windowsEnterpriseStandaloneNextStep(action, `C:\stage\config.yaml`, false, true, pending, nil, nil, nil)
 				lower := strings.ToLower(got)
 				if strings.Contains(got, "FORCE=1") || !strings.Contains(lower, "wait") ||
 					!strings.Contains(got, windowsEnterpriseStandaloneSetupCommand(action, `C:\stage\config.yaml`, false)) {
@@ -164,44 +164,6 @@ func TestWindowsEnterpriseStandaloneNextStepWhileAnotherLifecycleHoldsTheLock(t 
 				}
 			}
 		}
-	}
-}
-
-// GAP-0848: a FORCE=1 uninstall that failed printed the LocalSystem step,
-// whose "otherwise, or if it fails the same way" was the same FORCE=1 command
-// that had just failed. A failed forced uninstall names what stops it (a
-// program holding a DefenseClaw file), FORCE=1 again after that, and a
-// restart of Windows as the way out when no program can be named or ended;
-// never a plain /uninstall, which a pending transaction refuses.
-func TestWindowsEnterpriseStandaloneNextStepAfterAFailedForcedUninstall(t *testing.T) {
-	original := windowsEnterpriseRunningAsLocalSystem
-	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
-	for _, localSystem := range []bool{true, false} {
-		windowsEnterpriseRunningAsLocalSystem = func() bool { return localSystem }
-		for _, refusal := range []*windowsEnterpriseRecoveryGatewayRefusal{nil, {Code: "same_binary"}} {
-			got := windowsEnterpriseStandaloneNextStep("uninstall", "", false, false, true, true, nil, refusal, nil)
-			for _, want := range []string{
-				"The forced uninstall did not finish.",
-				"holds a DefenseClaw file",
-				"then run " + windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1 again as LocalSystem",
-				"restart Windows and run " + windowsEnterpriseStandaloneSetupName + " /uninstall FORCE=1 JSON=1 as LocalSystem",
-			} {
-				if !strings.Contains(got, want) {
-					t.Fatalf("localSystem=%t refusal=%v: next step %q does not say %q", localSystem, refusal, got, want)
-				}
-			}
-			for _, unwanted := range []string{"Otherwise, or if it fails the same way", "/uninstall JSON=1", "without recovering the transaction"} {
-				if strings.Contains(got, unwanted) {
-					t.Fatalf("localSystem=%t refusal=%v: next step %q says %q", localSystem, refusal, got, unwanted)
-				}
-			}
-		}
-	}
-	// A plain uninstall keeps FORCE=1 as its last resort.
-	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
-	if got := windowsEnterpriseStandaloneNextStep("uninstall", "", false, false, false, true, nil, nil, nil); !strings.Contains(got, "/uninstall FORCE=1 JSON=1") ||
-		strings.Contains(got, "The forced uninstall did not finish") {
-		t.Fatalf("plain uninstall next step = %q", got)
 	}
 }
 
