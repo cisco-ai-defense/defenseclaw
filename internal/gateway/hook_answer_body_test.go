@@ -13,11 +13,15 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // panickingJSONValue is a connector output value whose encoding panics.
@@ -83,11 +87,21 @@ func injectAnswerEvaluator(t *testing.T, name string, answer func(session string
 // cannot be encoded goes out with its own action, raw action, reason,
 // would_block and correlation keys, and with the callback-free native output
 // of that action. An encodable answer's body is the one writeJSON wrote.
+//
+// Loop round 2 of the continuation (P2): an output whose encoding panics is
+// counted once in defenseclaw.panics.total, as the handler's outer recovery
+// counted it before; an encoding error and a healthy answer count none.
 func TestHookAnswerBodyKeepsTheAnswerOnEveryConnectorEvent(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	cfg := config.DefaultConfig()
 	cfg.DataDir = t.TempDir()
-	profiles := panicTestProfiles(t, &APIServer{scannerCfg: cfg})
+	server := &APIServer{scannerCfg: cfg}
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	server.bindObservabilityV8Runtimes(runtime, nil, nil, runtime)
+	panicsCounted := func() int {
+		return len(generatedMetricByName(capture.metricSnapshot(), observability.TelemetryInstrumentDefenseClawPanicsTotal))
+	}
+	profiles := panicTestProfiles(t, server)
 	answers := []agentHookResponse{
 		{Action: "allow", RawAction: "allow", Severity: "NONE", Mode: "action", Reason: "healthy allow", EvaluationID: "eval-allow"},
 		{Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action", Reason: "policy block", EvaluationID: "eval-block", RuleIDs: []string{"R-1"}, Findings: []string{"finding"}},
@@ -108,8 +122,12 @@ func TestHookAnswerBodyKeepsTheAnswerOnEveryConnectorEvent(t *testing.T) {
 				if err := json.NewEncoder(&encoded).Encode(renderAgentHookResponseForProfile(profile, healthy)); err != nil {
 					t.Fatal(err)
 				}
-				if got := hookAnswerBody(profile, name, req, healthy); !bytes.Equal(got, encoded.Bytes()) {
+				before := panicsCounted()
+				if got := server.hookAnswerBody(t.Context(), profile, name, req, healthy); !bytes.Equal(got, encoded.Bytes()) {
 					t.Errorf("%s/%s %s: body %q, want the writeJSON body %q", name, event, answer.Reason, got, encoded.Bytes())
+				}
+				if counted := panicsCounted() - before; counted != 0 {
+					t.Errorf("%s/%s %s: a healthy answer counted %d panics", name, event, answer.Reason, counted)
 				}
 				want := jsonRoundTrip(t, failedCheckFallbackOutput(profile, req, answer.Action, answer.RawAction, answer.Reason, answer.AdditionalContext))
 				for label, value := range unencodableHookOutputs {
@@ -117,7 +135,16 @@ func TestHookAnswerBodyKeepsTheAnswerOnEveryConnectorEvent(t *testing.T) {
 					resp := answer
 					resp.HookOutput = map[string]interface{}{"value": value}
 					var got map[string]interface{}
-					if err := json.Unmarshal(hookAnswerBody(profile, name, req, resp), &got); err != nil {
+					before := panicsCounted()
+					body := server.hookAnswerBody(t.Context(), profile, name, req, resp)
+					wantPanics := 0
+					if _, panics := value.(panickingJSONValue); panics {
+						wantPanics = 1
+					}
+					if counted := panicsCounted() - before; counted != wantPanics {
+						t.Errorf("%s: defenseclaw.panics.total counted %d, want %d", cell, counted, wantPanics)
+					}
+					if err := json.Unmarshal(body, &got); err != nil {
 						t.Errorf("%s: the native hook cannot read the body: %v", cell, err)
 						continue
 					}
@@ -229,4 +256,67 @@ func TestNativeHookAppliesTheAuditedAnswerAfterALateFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Loop round 2 of the continuation (P2): once hookAnswerBody recovered an
+// answer-encoding panic itself, the panic no longer reached the handler's
+// outer recovery and was logged as a render error only, missing from
+// defenseclaw.panics.total. Through the handler, a Claude Code call whose
+// finalized allow has an output whose encoding panics counts one panic, and
+// its row and its answer keep the finalized allow with result=ok. An output
+// the encoder rejects without a panic, a healthy call and a panic after
+// finalization (counted by the outer recovery) are counted as they are.
+func TestAnswerRenderPanicIsCountedAndKeepsTheFinalizedDecision(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	injectAuditTruthEvaluator(t, "claudecode")
+	injectStagePanic(t, auditTruthStage)
+	for _, tc := range []struct {
+		stage  string
+		panics int
+	}{
+		{"none", 0},
+		{"render", 1},
+		{"render_error", 0},
+		{"finalized", 1},
+	} {
+		t.Run(tc.stage, func(t *testing.T) {
+			store, logger := testStoreAndLogger(t)
+			cfg := config.DefaultConfig()
+			cfg.DataDir = t.TempDir()
+			cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode, cfg.Guardrail.Connector = "action", "closed", "claudecode"
+			api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+			runtime, _ := newProxyGeneratedTraceRuntime(t)
+			metrics := &panicCountingRuntime{Runtime: runtime}
+			api.bindObservabilityV8Runtimes(runtime, nil, nil, metrics)
+			session := "count--" + tc.stage
+			answer, _ := postAuditTruthHook(t, api, "claudecode", "PreToolUse", session)
+			row := newestHookDecision(t, store, session)
+			if answer["action"] != "allow" || row.Structured["action"] != "allow" || row.Structured["result"] != "ok" {
+				t.Errorf("answer action=%v, row action=%v result=%v; want the finalized allow, result ok",
+					answer["action"], row.Structured["action"], row.Structured["result"])
+			}
+			if counted := int(metrics.panics.Load()); counted != tc.panics {
+				t.Errorf("defenseclaw.panics.total counted %d, want %d", counted, tc.panics)
+			}
+		})
+	}
+}
+
+// panicCountingRuntime counts the defenseclaw.panics.total points the gateway
+// records through it, before the runtime builds and delivers them.
+type panicCountingRuntime struct {
+	*observabilityruntime.Runtime
+	panics atomic.Int64
+}
+
+func (r *panicCountingRuntime) RecordGeneratedMetricBatch(
+	ctx context.Context,
+	items []observabilityruntime.GeneratedMetricBatchItem,
+) ([]telemetry.V8MetricRecordResult, error) {
+	for _, item := range items {
+		if item.Family == observability.EventName(observability.TelemetryInstrumentDefenseClawPanicsTotal) {
+			r.panics.Add(1)
+		}
+	}
+	return r.Runtime.RecordGeneratedMetricBatch(ctx, items)
 }

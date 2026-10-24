@@ -35,7 +35,8 @@ func (a *APIServer) profileRefused(ctx context.Context) string {
 // refuseProfileHook answers a hook whose profile decision is Refused. The
 // refusal is a closed answer in the event's native control, chosen as a
 // failed check's closed answer is (failedCheckNativeAction): a block where
-// the connector's hook can deny the event, else the advisory allow with
+// the connector's native hook can deny the event, Claude Code PostToolBatch
+// included, else the advisory allow with
 // would_block, audited as not enforced (Antigravity PostToolUse answers {},
 // Cursor's after* events only observe). A stop, session-end or idle event
 // gets the connector's neutral allow without follow-up context: a denial
@@ -67,7 +68,7 @@ func (a *APIServer) refuseProfileHook(
 		resp.HookOutput = neutralLifecycleHookOutput(ctx, profile, req, rawBody, payload, resp)
 		return resp, true
 	}
-	resp.Action, resp.WouldBlock = failedCheckNativeAction(ctx, profile, connectorName, req, false)
+	resp.Action, resp.WouldBlock = failedCheckNativeAction(ctx, profile, connectorName, req, true)
 	refused = true
 	defer func() {
 		if recovered := recover(); recovered != nil {

@@ -486,7 +486,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
 		defer dedupeTicket.release()
 		if deduped {
-			writeHookAnswer(w, hookAnswerBody(profile, connectorName, req, copilotDedupedResponse(profile, req, earlier)))
+			writeHookAnswer(w, a.hookAnswerBody(r.Context(), profile, connectorName, req, copilotDedupedResponse(profile, req, earlier)))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -589,7 +589,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					func() {
 						defer func() { _ = recover() }()
 						attemptedWrite = true
-						writeHookAnswer(w, hookAnswerBody(profile, connectorName, req, resp))
+						writeHookAnswer(w, a.hookAnswerBody(ctx, profile, connectorName, req, resp))
 					}()
 				}
 			}
@@ -732,7 +732,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if delivery != nil {
 			attemptedWrite = true
 			receipt := delivery.offer(w, func() {
-				writeHookAnswer(w, hookAnswerBody(profile, connectorName, req, wireResp))
+				writeHookAnswer(w, a.hookAnswerBody(ctx, profile, connectorName, req, wireResp))
 			})
 			if receipt == hookexec.HookDeliveryReleased {
 				resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
@@ -801,7 +801,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// connector → field-name mapping. hookAnswerBody cannot
 		// panic, so the native hook always gets the finalized answer.
 		if delivery == nil {
-			body := hookAnswerBody(profile, connectorName, req, wireResp)
+			body := a.hookAnswerBody(ctx, profile, connectorName, req, wireResp)
 			// Mark the write attempt BEFORE writing. A panic from the
 			// writer then signals "do not retry from the defer"; the
 			// response stream may already be partially written, and a
@@ -817,9 +817,20 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 // failed on a value of the connector's output) makes the hook apply its own
 // fail mode, not the answer the audit row, the export and the metrics record
 // (GAP-1014). That answer then goes out with the callback-free native output
-// of its own action (failedCheckFallbackOutput). It cannot panic.
-func hookAnswerBody(profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse) []byte {
-	body, err := encodeHookAnswer(profile, resp)
+// of its own action (failedCheckFallbackOutput). A recovered panic is counted
+// in defenseclaw.panics.total and logged with its stack, once per answer; it
+// does not change the answer, which may already be finalized. It cannot
+// panic.
+func (a *APIServer) hookAnswerBody(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse) []byte {
+	counted := false
+	onPanic := func(recovered any) {
+		defer func() { _ = recover() }()
+		if !counted {
+			counted = true
+			a.recordHookPanic(ctx, connectorName, req.HookEventName, fmt.Sprintf("hook answer render panic: %v", recovered))
+		}
+	}
+	body, err := encodeHookAnswer(profile, resp, onPanic)
 	if err == nil {
 		return body
 	}
@@ -831,25 +842,28 @@ func hookAnswerBody(profile connector.HookProfile, connectorName string, req age
 	fallback := resp
 	fallback.HookOutput = func() (output map[string]interface{}) {
 		defer func() {
-			if recover() != nil {
+			if recovered := recover(); recovered != nil {
+				onPanic(recovered)
 				output = nil
 			}
 		}()
 		return failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
 	}()
-	if body, err = encodeHookAnswer(profile, fallback); err == nil {
+	if body, err = encodeHookAnswer(profile, fallback, onPanic); err == nil {
 		return body
 	}
 	fallback.HookOutput = nil
-	body, _ = encodeHookAnswer(profile, fallback)
+	body, _ = encodeHookAnswer(profile, fallback, onPanic)
 	return body
 }
 
 // encodeHookAnswer renders and encodes resp as writeJSON did (HTML-escaped
-// JSON and a newline), reporting a render panic as an error.
-func encodeHookAnswer(profile connector.HookProfile, resp agentHookResponse) (body []byte, err error) {
+// JSON and a newline). A render panic is reported to onPanic, in the
+// recovery, and returned as an error.
+func encodeHookAnswer(profile connector.HookProfile, resp agentHookResponse, onPanic func(any)) (body []byte, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
+			onPanic(recovered)
 			body, err = nil, fmt.Errorf("render panic: %v", recovered)
 		}
 	}()
@@ -1913,12 +1927,13 @@ func (a *APIServer) hookFailedCheckResponse(
 // the event, and otherwise the advisory allow with would_block, so the agent,
 // the enforced audit field and the export agree. An advisory event's native
 // answer carries no denial: Antigravity PostToolUse answers {}, Cursor
-// afterFileEdit and the other after* events only observe. A recovered panic
-// also blocks the events whose native hook documents a block the policy
-// contract does not list (recoveredPanicNativeBlockEvent). The profile's
-// verdict mapper may be the failing code: if it panics, the capability table
-// answers.
-func failedCheckNativeAction(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, recoveredPanic bool) (action string, wouldBlock bool) {
+// afterFileEdit and the other after* events only observe. With
+// everyNativeBlock (a recovered panic, a profile refusal) it also blocks the
+// events whose native hook documents a block the policy contract does not
+// list (nativeOnlyBlockEvent): neither is a policy verdict the contract maps.
+// The profile's verdict mapper may be the failing code: if it panics, the
+// capability table answers.
+func failedCheckNativeAction(ctx context.Context, profile connector.HookProfile, connectorName string, req agentHookRequest, everyNativeBlock bool) (action string, wouldBlock bool) {
 	func() {
 		defer func() {
 			if recover() != nil {
@@ -1928,19 +1943,19 @@ func failedCheckNativeAction(ctx context.Context, profile connector.HookProfile,
 		}()
 		action, wouldBlock = mapHookActionForProfile("block", "action", req.HookEventName, profile.Capabilities, profile, req.Payload)
 	}()
-	if recoveredPanic && action == "allow" && recoveredPanicNativeBlockEvent(connectorName, req.HookEventName) {
+	if everyNativeBlock && action == "allow" && nativeOnlyBlockEvent(connectorName, req.HookEventName) {
 		return "block", false
 	}
 	return action, wouldBlock
 }
 
-// recoveredPanicNativeBlockEvent names the events whose native hook can block
-// although the resolved policy contract keeps them advisory. Claude Code
+// nativeOnlyBlockEvent names the events whose native hook can block although
+// the resolved policy contract keeps them advisory. Claude Code
 // honors decision:block on PostToolBatch in every certified contract:
 // claudecode-hooks-v2 lists it as a block event, and v1, the contract of an
 // unversioned install, documents that it blocks continuation before the next
 // model call (GAP-0440).
-func recoveredPanicNativeBlockEvent(connectorName, event string) bool {
+func nativeOnlyBlockEvent(connectorName, event string) bool {
 	return connectorName == "claudecode" && event == "PostToolBatch"
 }
 
@@ -2024,6 +2039,12 @@ func nativeFallbackOutput(profile connector.HookProfile, connectorName string, r
 // bounded panic counter and durable content-free health transition.
 func (a *APIServer) handleHookPanic(ctx context.Context, connectorName, eventName string, recovered any) {
 	markHookPanicRecovered(ctx)
+	a.recordHookPanic(ctx, connectorName, eventName, recovered)
+}
+
+// recordHookPanic logs a recovered hook panic with its stack and counts it,
+// without marking the hook's check failed: handleHookPanic does both.
+func (a *APIServer) recordHookPanic(ctx context.Context, connectorName, eventName string, recovered any) {
 	stack := debug.Stack()
 	fmt.Fprintf(os.Stderr, "[gateway] PANIC recovered in hook evaluator connector=%s event=%s value=%v\n%s\n",
 		connectorName, eventName, recovered, stack)

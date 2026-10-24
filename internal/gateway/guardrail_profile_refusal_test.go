@@ -15,21 +15,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
-// refusalNativeActionOracle is the answer a profile refusal may give on an
-// event that is not a lifecycle event, from the capability matrix: a block
-// only where the event's native control carries one. Unlike a recovered
-// panic (panicNativeActionOracle), a refusal follows the resolved contract on
-// Claude Code's PostToolBatch.
-func refusalNativeActionOracle(name, event string, profile connector.HookProfile) string {
-	if name == "claudecode" && event == "PostToolBatch" {
-		if profile.Capabilities.CanBlock && eventIn(event, profile.Capabilities.BlockEvents) {
-			return "block"
-		}
-		return "allow"
-	}
-	return panicNativeActionOracle(name, event, profile)
-}
-
 // Review of Port-0440 loop round 3 (P2): a profile decision that needs an
 // unproven identity fact answered block on every event, whatever the event's
 // native control. Antigravity PostToolUse answers {} and was audited
@@ -41,7 +26,20 @@ func refusalNativeActionOracle(name, event string, profile connector.HookProfile
 // with would_block and no denial where it cannot, and on a stop, session-end
 // or idle event the neutral allow, which neither denies nor asks for another
 // turn. The audit row is enforced only for the block.
+//
+// Loop round 2 of the continuation (P2): a refusal is not a policy verdict,
+// so like a recovered panic it takes every native block control. Claude
+// Code's unversioned v1 contract keeps PostToolBatch advisory, and the
+// refusal answered allow with would_block, audited not enforced, although
+// the native hook stops continuation there. The oracle is the recovered
+// panic's (panicNativeActionOracle).
 func TestProfileRefusalTakesTheEventsNativeControl(t *testing.T) {
+	// The PostToolBatch cell needs the unversioned Claude Code contract: keep
+	// the operator's installed Claude Code and version cache out on every OS.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("DEFENSECLAW_HOME", home)
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
 	const why = "the user's group membership is unconfirmed"
 	cfg := config.DefaultConfig()
@@ -49,6 +47,9 @@ func TestProfileRefusalTakesTheEventsNativeControl(t *testing.T) {
 	cfg.DeploymentMode, cfg.Enterprise.Profile = managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone
 	cfg.Guardrail.Mode, cfg.Guardrail.HookFailMode = "action", "closed"
 	profiles := panicTestProfiles(t, &APIServer{scannerCfg: cfg})
+	if claude := profiles["claudecode"]; eventIn("PostToolBatch", claude.Capabilities.BlockEvents) {
+		t.Fatalf("claudecode block events=%v: this table needs the unversioned v1 contract, which keeps PostToolBatch advisory", claude.Capabilities.BlockEvents)
+	}
 	seen := map[string]bool{}
 	for name, healthy := range profiles {
 		store, logger := testStoreAndLogger(t)
@@ -59,7 +60,7 @@ func TestProfileRefusalTakesTheEventsNativeControl(t *testing.T) {
 			lifecycle := hookexec.LifecycleEvent(name, event)
 			want := "allow"
 			if !lifecycle {
-				want = refusalNativeActionOracle(name, event, healthy)
+				want = panicNativeActionOracle(name, event, healthy)
 			}
 			for _, renderPanics := range []bool{false, true} {
 				if renderPanics && (name == "claudecode" || name == "codex") {
@@ -110,6 +111,9 @@ func TestProfileRefusalTakesTheEventsNativeControl(t *testing.T) {
 						t.Errorf("%s: advisory refusal output=%v carries a native denial", cell, resp.HookOutput)
 						continue
 					}
+				case name == "claudecode" && event == "PostToolBatch" && !panicWireDenies(resp.HookOutput):
+					t.Errorf("%s: refusal output=%v carries no native denial", cell, resp.HookOutput)
+					continue
 				default:
 					// A healthy block of the event, rendered the same way. Some
 					// blocks carry no output (Amp's tool calls, Claude Code's
@@ -141,7 +145,7 @@ func TestProfileRefusalTakesTheEventsNativeControl(t *testing.T) {
 	for _, cell := range []string{
 		"antigravity/PostToolUse", "antigravity/PostToolUse/render-panic",
 		"cursor/stop", "cursor/stop/render-panic",
-		"claudecode/Stop", "claudecode/PreToolUse",
+		"claudecode/Stop", "claudecode/PreToolUse", "claudecode/PostToolBatch",
 		"cursor/beforeShellExecution/render-panic", "hermes/pre_tool_call",
 	} {
 		if !seen[cell] {

@@ -167,7 +167,8 @@ How the keys combine:
   written yet, a Windows group name whose SID lookup is pending, a uid more
   than one account holds, or a pre-1.0.4 `agents` entry the upgrade did not
   bind), the request is refused with the missing fact named. A refused hook
-  call gets the event's own denial where the agent's hook can deny it. An
+  call gets the event's own denial where the agent's hook can deny it
+  (Claude Code `PostToolBatch` included). An
   event the hook can only observe (Antigravity `PostToolUse`, Cursor's
   after-the-fact events) is allowed and audited `would_block`, not enforced,
   and a stop, session-end or idle event gets the agent's plain allow, so the
