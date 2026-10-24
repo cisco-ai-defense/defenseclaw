@@ -6000,13 +6000,12 @@ def _check_connector_version_supported_for_setup(
             if emit:
                 for form in kiro.unprotected():
                     ux.warn(f"{label}: {form.reason}; it is not counted as protected.")
-        elif kiro.every_mode_refusal and compatibility.status != STATUS_UNKNOWN and not allow_drift:
+        elif kiro.every_mode_refusal:
             # A Kiro IDE below its floor reads no global hooks; with no
             # protected form, observe setup would stage hooks it never runs.
             if emit:
                 ux.err(f"{label}: {kiro.every_mode_refusal}")
                 ux.subhead("Refusing Kiro setup in observe and action mode before activation.")
-                ux.subhead("Set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing.")
             _refuse_in_every_mode(_refusal_scope, kiro.every_mode_refusal)
             return False
         elif kiro.forms and not kiro.every_mode_refusal and compatibility.status == STATUS_NOT_GATED:
