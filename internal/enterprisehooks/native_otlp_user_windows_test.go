@@ -166,10 +166,14 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 			t.Fatal(err)
 		}
+		setWindowsTestPathExactOwner(t, filepath.Dir(path), sid)
 		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
+		setWindowsTestPathExactOwner(t, path, sid)
 	}
+	setWindowsTestPathExactOwner(t, home, sid)
+	setWindowsTestPathExactOwner(t, dataDir, sid)
 
 	for _, name := range []string{"codex", "claudecode"} {
 		err := windowsManagedUserNativeOTLPAbsent(name, home, dataDir, sid)
@@ -208,6 +212,72 @@ func TestWindowsManagedRowRefusesAndRemovesStalePerUserNativeOTLP(t *testing.T) 
 	}
 }
 
+// Verify runs as the guardian, not the account that owns its old per-user
+// token. It reports an orphaned token as residue without treating the
+// guardian's different SID as a settings-inspection failure.
+func TestWindowsManagedNativeOTLPVerifyIgnoresOtherUserToken(t *testing.T) {
+	viewer, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _, _, err := windows.LookupSID("", "Guest")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if viewer.User.Sid.Equals(target) {
+		t.Skip("verification must use a SID distinct from the token owner")
+	}
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	operatorSettings := []byte(`{"model":"opus","env":{"OTEL_EXPORTER_OTLP_ENDPOINT":"https://collector.example.test"}}`)
+	if err := os.WriteFile(settingsPath, operatorSettings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tokenPath, err := connector.OTLPPathTokenFilePath(dataDir, connector.OTLPScopeClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(strings.Repeat("a", 64)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, tokenPath, target)
+	if _, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeClaude); err == nil {
+		t.Fatal("foreign-owned token unexpectedly passed the gateway trust check")
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("claudecode", home, dataDir, target); err == nil ||
+		!strings.Contains(err.Error(), "native OTLP exporter") || strings.Contains(err.Error(), "load Claude native OTLP credential") {
+		t.Fatalf("verify did not report only the orphaned token residue: %v", err)
+	}
+	markedSettings := []byte(`{"model":"opus","env":{"OTEL_EXPORTER_OTLP_ENDPOINT":"https://collector.example.test","OTEL_EXPORTER_OTLP_HEADERS":"authorization=Bearer ` +
+		strings.Repeat("a", 64) + `,x-defenseclaw-source=claudecode"}}`)
+	if err := os.WriteFile(settingsPath, markedSettings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("claudecode", home, dataDir, target); err == nil ||
+		!strings.Contains(err.Error(), "native OTLP exporter") || strings.Contains(err.Error(), "load Claude native OTLP credential") {
+		t.Fatalf("marked exporter failed inspection on foreign token: %v", err)
+	}
+	if err := os.WriteFile(settingsPath, operatorSettings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, tokenPath, viewer.User.Sid)
+	if err := connector.WithUserHomeDir(home, func() error {
+		return removeWindowsManagedUserNativeOTLPAsTarget("claudecode", dataDir)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := windowsManagedUserNativeOTLPAbsent("claudecode", home, dataDir, target); err != nil {
+		t.Fatalf("verify after target cleanup: %v", err)
+	}
+}
+
 // The same row through the real Claude Code managed Install and Verify.
 func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{"allowManagedHooksOnly": true})
@@ -232,6 +302,22 @@ func TestWindowsClaudeManagedVerifyAndRepairStalePerUserNativeOTLP(t *testing.T)
 	if err := os.WriteFile(settingsPath+".lock", nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
+	setWindowsTestPathExactOwner(t, filepath.Dir(settingsPath), fixture.targetSID)
+	setWindowsTestPathExactOwner(t, settingsPath, fixture.targetSID)
+	setWindowsTestPathExactOwner(t, settingsPath+".lock", fixture.targetSID)
+	// A released per-user install records this same bearer in its scoped
+	// sidecar; without that evidence a changed operator bearer is retained.
+	tokenPath, err := connector.OTLPPathTokenFilePath(filepath.Join(fixture.home, ".defenseclaw"), connector.OTLPScopeClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(bearer), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	setWindowsTestPathExactOwner(t, tokenPath, fixture.targetSID)
 	if _, err := Verify(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "native OTLP exporter") {
 		t.Fatalf("Verify accepted a stale per-user exporter: %v", err)
 	}
