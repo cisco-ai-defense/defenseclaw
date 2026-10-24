@@ -401,19 +401,21 @@ func TestTamperedCopilotDropInWithCWDIsPutBackByEnsure(t *testing.T) {
 	}
 }
 
-func TestCombinedCopilotDropInEnsureRefusesIndependentContent(t *testing.T) {
-	for _, field := range []string{"command", "operator"} {
+func TestTamperedCopilotDropInEnsureRepairsOwnHandler(t *testing.T) {
+	for _, field := range []string{"command", "operator", "timeoutSec", "type"} {
 		t.Run(field, func(t *testing.T) {
 			h := newTestHost(t, "linux")
 			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0"), ConfigFile: machinePolicyConfig(t, h, "copilot")}))
 			writeFreshLedger(t, h)
 			dropIn := "/etc/github-copilot/policy.d/" + enterprisepolicy.DefenseClawDropInName
+			want := h.read(dropIn)
 			var doc map[string]any
-			if err := json.Unmarshal([]byte(h.read(dropIn)), &doc); err != nil {
+			if err := json.Unmarshal([]byte(want), &doc); err != nil {
 				t.Fatal(err)
 			}
 			pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
-			pre[field] = "operator-tool"
+			pre[field] = "changed"
+			pre["cwd"] = "/tmp"
 			combined, err := json.Marshal(doc)
 			if err != nil {
 				t.Fatal(err)
@@ -423,13 +425,16 @@ func TestCombinedCopilotDropInEnsureRefusesIndependentContent(t *testing.T) {
 			}
 			verify := h.run(Options{Action: ActionVerify})
 			requireError(t, verify, codeVerify)
-			if !strings.Contains(messagesOf(verify.Errors, codeVerify), "move independent content to a separate handler") {
-				t.Fatalf("verify did not identify the combined handler: %+v", verify.Errors)
+			if !strings.Contains(messagesOf(verify.Errors, codeVerify), "next lifecycle run") {
+				t.Fatalf("verify did not identify repairable drift: %+v", verify.Errors)
+			}
+			if got := h.env.TamperedFiles(); !reflect.DeepEqual(got, []string{dropIn}) {
+				t.Fatalf("guardian did not find its changed drop-in: %v", got)
 			}
 			ensure := h.run(Options{Action: ActionEnsure, Reason: "path"})
-			if ensure.OK || ensure.SecurityComplete || h.read(dropIn) != string(combined) ||
-				!strings.Contains(fmt.Sprint(ensure.Errors), "move independent content to a separate handler") {
-				t.Fatalf("ensure changed or claimed the combined handler: %+v", ensure)
+			requireOK(t, ensure)
+			if h.read(dropIn) != want || len(h.env.TamperedFiles()) != 0 {
+				t.Fatalf("ensure did not restore its exact handler: %+v", ensure)
 			}
 		})
 	}
