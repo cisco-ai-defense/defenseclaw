@@ -55,7 +55,7 @@ type renderInputs struct {
 	// by vendor machine policy.
 	MachinePolicy         []string
 	PolicyViewDigests     map[string]string
-	PolicyViewUserSources map[string]map[string]managed.PolicyViewFilePin
+	PolicyViewUserSources map[string]map[string]string
 }
 
 // renderFiles returns every non-binary file the deployment consists of.
@@ -272,7 +272,7 @@ func (e *Env) renderDescriptor(in renderInputs) ([]byte, error) {
 		HookSocket:              e.Layout.HookSocketPath,
 		MachinePolicyConnectors: append([]string{}, in.MachinePolicy...),
 		PolicyViewDigests:       make(map[string]string),
-		PolicyViewUserSources:   make(map[string]map[string]managed.PolicyViewFilePin),
+		PolicyViewUserSources:   make(map[string]map[string]string),
 		DisableSelfUpdate:       true,
 		InstalledAt:             in.InstalledAt,
 	}

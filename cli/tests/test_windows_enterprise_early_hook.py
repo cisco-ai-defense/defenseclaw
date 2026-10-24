@@ -13,13 +13,15 @@ before the snapshot exists puts the prior hook back.
 GAP-1070: a call the replaced hook had already taken (a process still reading
 its input or waiting for its answer) still met the stopped service. After the
 swap the transaction waits, bounded, until every hook process that started
-before it has ended, while the old gateway still answers them.
+before it has ended, while the old gateway still answers them. GAP-1124: the
+bound covers the replaced hook's whole budget for a call.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -249,6 +251,24 @@ def test_the_wait_for_the_replaced_hooks_calls_is_bounded(tmp_path: Path) -> Non
     assert result["threw"] == "", result
     assert result["running"] == [4242], result
     assert result["seconds"] < 30, result
+
+
+def test_the_wait_covers_the_replaced_hooks_whole_budget() -> None:
+    """GAP-1124: the 60 s wait ended before a replaced hook's call could no
+    longer reach the gateway: a 1.0.3 Claude Code Stop, SubagentStop or
+    PostToolBatch call has 90 s, counted from a start up to 30 s after the
+    process was created, and the transaction then stopped the gateway under
+    it. The wait covers both, and is the Linux and macOS lifecycle's wait for
+    their replaced shell hooks (replacedHookCallsBudget)."""
+    body = _function_body(_text(), "Wait-DefenseClawPriorHookCalls")
+    match = re.search(r"\[int\]\$TimeoutSeconds = (\d+)", body)
+    assert match is not None, body
+    windows = int(match.group(1))
+    assert windows >= 90 + 30, windows
+    unix = (ROOT / "internal" / "enterpriseunix" / "replaced_hooks.go").read_text(encoding="utf-8")
+    match = re.search(r"replacedHookCallsBudget = (\d+) \* time\.Second", unix)
+    assert match is not None
+    assert int(match.group(1)) == windows
 
 
 def test_only_hook_processes_started_before_the_swap_are_waited_for(tmp_path: Path) -> None:

@@ -14602,7 +14602,9 @@ function Restore-DefenseClawTransaction {
     # A standalone recovery whose staged gateway fails this cleanup may rerun
     # it with the running Setup's verified gateway (see
     # Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep).
-    $snapshot = Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep `
+    # A cleanup that fails in the standalone profile no longer stops the
+    # rollback (GAP-0856): see Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep.
+    $snapshot = Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep `
         -SnapshotPath $SnapshotPath `
         -Layout $Layout `
         -GatewayServiceName ([string]$snapshot.gateway_service) `
@@ -17938,15 +17940,21 @@ function Wait-DefenseClawPriorHookCalls {
         whose 1.0.2 and 1.0.3 forms let a call run while their gateway service
         is stopped (Hermes in 1.0.2 always, every connector under an
         administrator's open). The gateway still answers them meanwhile. The
-        wait covers a hook's whole answer budget; it returns the ids still
-        running at its end, which the transaction reports and does not stop:
-        ending a hook process gives the agent no answer, which most agents
-        take as an allow.
+        wait covers the replaced hook's whole budget for a call, counted from
+        its own start (GAP-1124): 90 s for a Claude Code Stop, SubagentStop or
+        PostToolBatch call (30 s at most for a tool call), plus the 30 s of
+        launch delay a 1.0.3 hook still counts from its creation. A replaced
+        hook process still running after that has no budget left for the
+        gateway, so stopping it does not change its answer, except for a
+        process whose own start took longer than 30 s. It returns the ids
+        still running at its end, which the transaction reports and does not
+        stop: ending a hook process gives the agent no answer, which most
+        agents take as an allow.
     #>
     param(
         [Parameter(Mandatory)][string]$HookPath,
         [Parameter(Mandatory)][datetime]$StartedBefore,
-        [int]$TimeoutSeconds = 60
+        [int]$TimeoutSeconds = 120
     )
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ($true) {
@@ -21483,6 +21491,78 @@ function Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep {
     }
     $run.outcome = 'succeeded'
     return $result
+}
+
+function Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep {
+    <#
+        The rollback's per-user runtime cleanup
+        (Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep). It runs
+        after the managed-hook journal was restored and retired, so a cleanup
+        that failed with the staged gateway and with the Setup gateway ended
+        the rollback there: no file was restored, no service started, and the
+        transaction stayed pending with every service stopped; the next
+        recovery met the same cleanup (GAP-0856). In the standalone profile the
+        rollback now goes on, so the file rollback puts the previous release
+        back and its services start again. The cleanup removes only the
+        per-user DefenseClaw folders this transaction created (an absent
+        baseline in its plan), which the restored release does not use: each
+        is reported as a rollback leftover with the cleanup's error. With no
+        such folder in the plan nothing was created, and the failure is only
+        logged. Secure Client keeps the failure. Returns the snapshot the
+        rollback goes on with.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    $failure = ''
+    try {
+        return (Invoke-DefenseClawTargetRuntimeRollbackCleanupRecoveryStep `
+            -SnapshotPath $SnapshotPath `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName)
+    }
+    catch {
+        if (-not (Test-DefenseClawStandaloneProfile)) {
+            throw
+        }
+        $failure = ConvertTo-DefenseClawBoundedDiagnostic `
+            -Value $_.Exception.Message `
+            -MaxLength 512
+    }
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath `
+        -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
+    $created = [Collections.Generic.List[string]]::new()
+    $planProperty = $snapshot.PSObject.Properties['target_runtime_plan']
+    if ($null -ne $planProperty -and $null -ne $planProperty.Value) {
+        foreach ($root in @($planProperty.Value.roots)) {
+            if ($null -ne $root -and [string]$root.baseline -ceq 'absent') {
+                $created.Add([string]$root.data_dir + ' (account ' + [string]$root.sid + ')')
+            }
+        }
+    }
+    Write-DefenseClawLifecyclePhase -Stage ('rollback target runtime cleanup failed; the rollback goes on: ' + $failure)
+    if ($created.Count -eq 0) {
+        return $snapshot
+    }
+    $kept = [Collections.Generic.List[string]]::new()
+    foreach ($item in @($script:DefenseClawRollbackLeftovers)) {
+        $kept.Add([string]$item)
+    }
+    foreach ($folder in $created) {
+        if ($kept.Count -lt 256) {
+            $kept.Add(
+                $folder + ', if it exists: a per-user DefenseClaw folder this change created; the rollback could not remove it (' +
+                $failure + ')'
+            )
+        }
+    }
+    $script:DefenseClawRollbackLeftovers = @($kept)
+    return $snapshot
 }
 
 function Add-DefenseClawRecoveryEvidenceToError {
@@ -31156,10 +31236,43 @@ function Invoke-DefenseClawNamespaceRootCleanup {
         )
         throw (
             "native exact-root cleanup failed with exit $($probe.exit_code): " +
-            $detail
+            $detail +
+            (Get-DefenseClawNamespaceRootCleanupHolderText `
+                -Root ([string]$Request.root) `
+                -Failure ([string]$report.error))
         )
     }
     return $report
+}
+
+function Get-DefenseClawNamespaceRootCleanupHolderText {
+    <#
+        When the native exact-root cleanup refused a file another program
+        kept open, the programs that hold files in Root now, as
+        "; programs that hold files in <Root> now: ...". The printed next
+        step of a failed FORCE=1 uninstall says to end or close each program
+        the error names (GAP-0848); the native error names only the file.
+        When none is found any more, it says so: the program has closed the
+        file, and the same command can run again. '' for any other refusal.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [AllowEmptyString()][string]$Failure
+    )
+    if (-not $Failure.Contains('is held open by another program')) {
+        return ''
+    }
+    $holders = @(try {
+            Get-DefenseClawInstallRootHolders -InstallRoot $Root
+        }
+        catch {
+            Microsoft.PowerShell.Utility\Write-Verbose "could not list the programs that hold files in ${Root}: $($_.Exception.Message)"
+        })
+    if ($holders.Count -eq 0) {
+        return "; no program holds a file in $Root now, so the one that held it has closed it"
+    }
+    return '; programs that hold files in ' + $Root + ' now: ' +
+        (ConvertTo-DefenseClawBoundedDiagnostic -Value ($holders -join '; ') -MaxLength 1024)
 }
 
 function Test-DefenseClawExternalInstallCleanupSource {
@@ -32248,6 +32361,28 @@ function Invoke-DefenseClawPreLayoutRecovery {
         handled = $false
         result = $null
     }
+}
+
+function Test-DefenseClawPreLayoutRecoveryPending {
+    <#
+        Whether a record an interrupted lifecycle left is present that
+        Invoke-DefenseClawPreLayoutRecovery recovers before the lifecycle
+        reads the deployment record: a pending transaction, a state-purge
+        intent, a self-uninstall receipt or an install-rollback intent. Their
+        recovery can change the record (a first install interrupted after it
+        wrote the installed record but before it cleared pending.json rolls
+        back to no deployment), so a refusal read from the record waits for
+        that recovery and checks after it (S2 review, loop round 2).
+    #>
+    param([Parameter(Mandatory)][hashtable]$Layout)
+    foreach ($name in @('PendingPath', 'PurgeIntentPath', 'SelfUninstallReceiptPath', 'InstallRollbackIntentPath')) {
+        $path = [string]$Layout[$name]
+        if (-not [string]::IsNullOrWhiteSpace($path) -and
+            (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf)) {
+            return $true
+        }
+    }
+    return $false
 }
 
 function Assert-DefenseClawDeferredInstallIsFresh {
@@ -36816,8 +36951,12 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         # gateway refuses a Secure Client config with fleet.enabled when it
         # loads it (resolveEnterpriseConfig).
     }
+    # Before the lock only without a record to recover: its recovery, after
+    # the lock, can change the deployment record, and the check after it
+    # decides (Test-DefenseClawPreLayoutRecoveryPending).
     if ($Action -eq 'Install' -and $DeferredConfig -and
-        (Test-DefenseClawStandaloneProfile)) {
+        (Test-DefenseClawStandaloneProfile) -and
+        -not (Test-DefenseClawPreLayoutRecoveryPending -Layout $layout)) {
         Assert-DefenseClawDeferredInstallIsFresh -Layout $layout
     }
     Initialize-DefenseClawManagedRoot `

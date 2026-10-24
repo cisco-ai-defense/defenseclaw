@@ -116,7 +116,9 @@ The MDM wrapper scripts print the same document.
 | `destinations[]` | `status` only: each observability destination the installed config compiles to, with `name`, `kind`, `enabled`, `preset`, `signals` and `redaction_profiles` (the same compiler as `defenseclaw observability plan`) |
 
 A healthy `status` from a Linux host, trimmed to two of its `services` entries and
-two of its `machine_policy` connectors:
+two of its `machine_policy` connectors. With Claude Code enabled, `security_complete`
+is `false` and the `hook_process_fail_open` warning names the residual risk of a hook
+process the user stops or kills:
 
 ```json title="enterprise linux status --json (healthy, trimmed)"
 {
@@ -140,7 +142,10 @@ two of its `machine_policy` connectors:
   },
   "enrollment": { "targets": 16, "pending": 0, "failed": 0, "exempt": 0 },
   "coverage_complete": true,
-  "security_complete": true,
+  "security_complete": false,
+  "warnings": [
+    { "code": "hook_process_fail_open", "message": "claudecode: a killed PreToolUse hook or PreToolUse timeout is non-blocking; ..." }
+  ],
   "errors": [],
   "policy": {
     "effective_digest": "sha256:7b38f1df3862914135b0f9e70f9e679793a35e53018b115784002d9c55b8fce2",
@@ -160,7 +165,7 @@ A failed run sets `ok` to `false` and names each problem in `errors[]`. How `cov
 | --- | --- |
 | `verify` exit code | Not `0` |
 | `coverage_complete` | `false` |
-| `security_complete` | `false` for longer than one enumerator cycle. On Windows with Claude Code enabled it stays `false` until the Claude Code attestation is recorded, so every such host alerts until then |
+| `security_complete` | `false` for longer than one enumerator cycle for a reason other than `hook_process_fail_open`. With Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity enabled it stays `false` and names that warning, so alert on the other warnings and errors. On Windows with Claude Code enabled it also stays `false` until the Claude Code attestation is recorded, so every such host alerts until then |
 | `warnings[].code` | `machine_policy_incomplete` (Linux, macOS): DefenseClaw's hooks are missing from a vendor policy file. `agent_unprotected`, `hook_contract_unverified`: an installed agent runs without DefenseClaw hooks. `config_rejected` (Linux, macOS): the config you pushed is not the one running. On Linux and macOS, `status` and changing actions warn with `policy_not_applied` when the gateway reports another effective policy, or `policy_reload_rejected` when it rejected a reload. `verify` reports either as an error and exits nonzero. On Windows also alert on `policy_not_buildable` and `config_edited_outside_lifecycle`. |
 | `policy.applied` | `false` on Linux or macOS: `security_complete` is false; `verify` fails when the gateway reports a different digest or a rejected reload. |
 | `policy.effective_digest` | Differs between hosts of one OS that received the same config |

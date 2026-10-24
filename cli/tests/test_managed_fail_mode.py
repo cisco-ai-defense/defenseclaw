@@ -79,7 +79,9 @@ def test_hook_fail_mode_matrix(connector, deployment, mode, global_mode, connect
     if want is None:
         want = DEPLOYMENTS[deployment][2]
     if deployment == "per-user":
-        want = "closed"
+        # A per-user outage mode follows the policy tier, never the saved
+        # value: the default tier is open (oss-outage-open).
+        want = "open"
     assert cfg.guardrail.effective_hook_fail_mode(connector) == want
     assert cfg.managed_outside_secure_client() is (deployment == "standalone")
 
@@ -105,3 +107,30 @@ def test_machine_marker_makes_any_managed_config_standalone(monkeypatch: pytest.
     assert cfg.guardrail.effective_hook_fail_mode("kiro") == "closed"
     cfg.guardrail.hook_fail_mode = "open"
     assert cfg.guardrail.effective_hook_fail_mode("kiro") == "open"
+
+
+@pytest.mark.parametrize("connector", CONNECTORS)
+@pytest.mark.parametrize(
+    ("global_pack", "connector_pack", "saved", "want"),
+    [
+        ("", "", "closed", "open"),
+        ("default", "", "closed", "open"),
+        ("permissive", "", "closed", "open"),
+        ("strict", "", "open", "closed"),
+        ("strict", "permissive", "closed", "open"),
+        ("default", "strict", "open", "closed"),
+    ],
+)
+def test_per_user_outage_mode_follows_the_policy_tier(connector, global_pack, connector_pack, saved, want):
+    # Owner decision 2026-10-23: a per-user install fails open for a gateway
+    # outage in the default and permissive tiers and closed in strict; the
+    # saved hook_fail_mode does not change it. A managed install keeps its
+    # administrator's mode whatever the tier.
+    guardrail = GuardrailConfig(mode="action", hook_fail_mode=saved, rule_pack=global_pack)
+    if connector_pack:
+        guardrail.connectors = {connector: PerConnectorGuardrailConfig(rule_pack=connector_pack, hook_fail_mode=saved)}
+    cfg = Config(deployment_mode="", enterprise_profile="", guardrail=guardrail)
+    assert cfg.guardrail.effective_hook_fail_mode(connector) == want
+    managed = Config(deployment_mode="managed_enterprise", enterprise_profile="standalone",
+                     guardrail=GuardrailConfig(mode="action", rule_pack=global_pack))
+    assert managed.guardrail.effective_hook_fail_mode(connector) == "closed"

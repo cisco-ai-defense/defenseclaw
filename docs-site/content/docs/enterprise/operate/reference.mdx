@@ -230,8 +230,9 @@ to about 4 seconds, then is blocked the same way. Prompts and session, stop and 
 keep their whole budget. Lifecycle runs run at a lower CPU priority than the hooks on every OS,
 so a repair does not take the CPU the hooks need to answer in time.
 
-The administrator's `hook_fail_mode: open` allows only classified gateway outages:
-the service is stopped, restarting or gives no answer in time. Integrity,
+The administrator's `hook_fail_mode: open` allows only classified connection outages:
+the service is stopped or restarting before it accepts the call. A hook that
+reaches its answer deadline without a decision blocks. Integrity,
 peer-verification, credential and rate-limit refusals still block. Connectors
 whose foreign-hook guard checks the session with the gateway (`foreign_hooks: remove`,
 the default) block outages too
@@ -533,7 +534,7 @@ The two summary fields are computed differently on each OS:
 | Field | Linux and macOS | Windows |
 | --- | --- | --- |
 | `coverage_complete` | The gateway answers its health check on the hook socket and reports its API listener on `127.0.0.1:18970` up, the guardian is active with a fresh authorization ledger, the enumerator is active, and no agent is reported as `hook_contract_unverified` | The deployment is installed, the guardian is ready, no transaction is pending, and no agent is reported as `hook_contract_unverified` |
-| `security_complete` | `coverage_complete`, the sensor helper is active, the run had no errors, no agent is `agent_unprotected` or `hook_contract_unverified`, no user target is `guardian_target_failed`, and the config enables at least one agent when there are eligible users (otherwise `no_connectors_enabled`) | The deployment is installed and healthy, the target manifest has at least one enabled Codex, Claude Code or Cursor row, no agent is `agent_unprotected` or `hook_contract_unverified`, and, when a Claude Code row is enabled, the Claude Code attestation below is recorded |
+| `security_complete` | `coverage_complete`, the sensor helper is active, the run had no errors, no agent is `agent_unprotected` or `hook_contract_unverified`, no user target is `guardian_target_failed`, the config enables at least one agent when there are eligible users (otherwise `no_connectors_enabled`), and no enabled agent is `hook_process_fail_open` (Codex, Claude Code, Copilot, Devin, Hermes, Kiro or Antigravity) | The deployment is installed and healthy, the target manifest has at least one enabled Codex, Claude Code or Cursor row, no agent is `agent_unprotected` or `hook_contract_unverified`, no enabled agent is `hook_process_fail_open` (Codex, Claude Code), and, when a Claude Code row is enabled, the Claude Code attestation below is recorded |
 
 - **Enrollment counts.** Linux and macOS read the counts from the guardian's
   authorization ledger, and `exempt` is always `0` there: accounts that

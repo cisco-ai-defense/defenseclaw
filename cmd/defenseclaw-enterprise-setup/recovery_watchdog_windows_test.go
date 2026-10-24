@@ -8,15 +8,19 @@ package main
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"syscall"
 	"testing"
 
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
@@ -156,24 +160,27 @@ type fakeStandaloneSetupParent struct{ wait func() error }
 func (parent *fakeStandaloneSetupParent) Wait() error  { return parent.wait() }
 func (parent *fakeStandaloneSetupParent) Close() error { return nil }
 
-func TestStandaloneUninstallRecoveryRefusesUnbreakableJob(t *testing.T) {
-	if _, err := standaloneSetupRecoveryFlagsForJob(windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, nil); err == nil {
-		t.Fatal("unbreakable kill-on-close job accepted; a killed Setup would kill its recovery child")
+// The job decisions (an unreadable scheduled-task job included, GAP-0960)
+// are processutil.StartIndependent's; its tests cover them. Setup refuses
+// whatever it refuses before the worker runs.
+func TestStandaloneUninstallRecoveryRefusesAChildBoundToTheJob(t *testing.T) {
+	oldStart := setupRecoveryStart
+	t.Cleanup(func() { setupRecoveryStart = oldStart })
+	setupRecoveryStart = func(*exec.Cmd) error {
+		return fmt.Errorf("%w: the job kills its processes when it closes", processutil.ErrChildBoundToJob)
 	}
-	if flags, err := standaloneSetupRecoveryFlagsForJob(
-		windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|windows.JOB_OBJECT_LIMIT_BREAKAWAY_OK, nil,
-	); err != nil || flags&windows.CREATE_BREAKAWAY_FROM_JOB == 0 {
-		t.Fatalf("breakaway-capable job flags=%#x error=%v", flags, err)
-	}
-	if _, err := standaloneSetupRecoveryFlagsForJob(0, windows.ERROR_ACCESS_DENIED); err == nil {
-		t.Fatal("unknown job ownership accepted")
+	if err := armStandaloneUninstallRecovery(); !errors.Is(err, processutil.ErrChildBoundToJob) {
+		t.Fatalf("uninstall began with a recovery child bound to Setup's job: %v", err)
 	}
 }
 
 func TestStandaloneUninstallRecoveryRefusesChildWithoutReadiness(t *testing.T) {
-	oldFlags := setupRecoveryCreationFlags
-	t.Cleanup(func() { setupRecoveryCreationFlags = oldFlags })
-	setupRecoveryCreationFlags = func() (uint32, error) { return windows.DETACHED_PROCESS, nil }
+	oldStart := setupRecoveryStart
+	t.Cleanup(func() { setupRecoveryStart = oldStart })
+	setupRecoveryStart = func(child *exec.Cmd) error {
+		child.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.DETACHED_PROCESS}
+		return child.Start()
+	}
 	// The Go test binary has no Setup hidden recovery command. CreateProcess
 	// succeeds, but the child exits without READY; the uninstall must refuse.
 	if err := armStandaloneUninstallRecovery(); err == nil {

@@ -56,8 +56,7 @@ func systemdGatewayServiceState(ctx context.Context) (gatewayServiceState, error
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, systemctl, "show", "--property=ActiveState,SubState,NRestarts", standaloneGatewayUnit)
-	cmd.Env = []string{"LC_ALL=C", "SYSTEMD_PAGER=cat"}
+	cmd := standaloneGatewayServiceCommand(ctx, systemctl)
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := processutil.RunTree(cmd); err != nil {
@@ -79,4 +78,10 @@ func systemdGatewayServiceState(ctx context.Context) (gatewayServiceState, error
 		return state, errors.New("systemctl reported no state")
 	}
 	return state, nil
+}
+
+func standaloneGatewayServiceCommand(ctx context.Context, systemctl string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, systemctl, "show", "--property=ActiveState,SubState,NRestarts", standaloneGatewayUnit)
+	cmd.Env = trustedSystemctlEnv()
+	return cmd
 }

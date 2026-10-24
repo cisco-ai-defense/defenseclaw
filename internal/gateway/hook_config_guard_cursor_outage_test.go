@@ -65,8 +65,8 @@ func TestHookConfigGuardRerendersManagedCursorOutageModeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls, opts := state()
-	if calls != before+1 || opts.ConfiguredHookFailMode != "open" || connector.OutageHookFailMode(opts, conn) != "open" {
-		t.Fatalf("explicit open: Setup calls %d (want %d), configured %q", calls, before+1, opts.ConfiguredHookFailMode)
+	if calls != before+1 || opts.HookFailMode != "open" || connector.OutageHookFailMode(opts, conn) != "open" {
+		t.Fatalf("explicit open: Setup calls %d (want %d), mode %q", calls, before+1, opts.HookFailMode)
 	}
 
 	guard.mu.Lock()
@@ -77,7 +77,7 @@ func TestHookConfigGuardRerendersManagedCursorOutageModeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls, opts = state()
-	if calls != before+2 || opts.ConfiguredHookFailMode != "" || connector.OutageHookFailMode(opts, conn) != "closed" {
-		t.Fatalf("explicit open removed: Setup calls %d (want %d), configured %q", calls, before+2, opts.ConfiguredHookFailMode)
+	if calls != before+2 || opts.HookFailMode != "closed" || connector.OutageHookFailMode(opts, conn) != "closed" {
+		t.Fatalf("explicit open removed: Setup calls %d (want %d), mode %q", calls, before+2, opts.HookFailMode)
 	}
 }

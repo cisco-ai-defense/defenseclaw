@@ -69,11 +69,19 @@ The message reads `<connector>'s agent changed`.
 
 ## Every tool call is blocked while the gateway is down
 
-**Cause.** The hook fail mode is `closed`, the default for a new install.
+**Cause.** The connector runs the strict policy (or the install is managed), whose hooks block while the gateway is not running. With the default or permissive policy an outage lets calls run with a warning instead; an install or upgrade in progress blocks in every policy.
 
-**Fix.** Start the gateway. If you want calls to run unchecked during an outage, `defenseclaw guardrail fail-mode open` (your decision; the audit log still records the gap).
+**Fix.** Start the gateway: `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. To let calls run with a warning during an outage, use the default policy: `defenseclaw guardrail use-pack default` (your decision; `hook-failures.jsonl` records each unchecked call).
 
-**Check.** `defenseclaw guardrail status` shows the fail mode.
+**Check.** `defenseclaw guardrail fail-mode` shows each connector's outage mode and policy tier.
+
+## The agent says "DefenseClaw is not checking this session"
+
+**Cause.** This account's gateway is not running (stopped, crashed or not started after a reboot), and the connector runs the default or permissive policy, so its hooks let calls run unchecked and record each one in `~/.defenseclaw/logs/hook-failures.jsonl`.
+
+**Fix.** `defenseclaw-gateway start`. If it does not start, `defenseclaw doctor` names the repair. To block calls during an outage instead: `defenseclaw guardrail use-pack strict`.
+
+**Check.** `defenseclaw-gateway status` shows it running; when it starts, `defenseclaw alerts` lists a `guardrail-degraded` alert for the calls that ran unchecked.
 
 ## A custom rule pack is rejected: `digest ... does not match`
 

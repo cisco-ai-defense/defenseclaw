@@ -54,7 +54,7 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 	if opts.HookContractID == "" {
 		t.Fatal("no default Codex hook contract")
 	}
-	rendered, _, err := reconcileWindowsCodexRequirements(nil, opts)
+	rendered, _, err := reconcileWindowsCodexRequirements(nil, opts, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestWindowsCodexStandaloneRequirementsBindEventAndContract(t *testing.T) {
 
 	// Options without a contract render the pre-1.0 unbound command.
 	secureClient := testWindowsCodexMachineOptions()
-	scRendered, _, err := reconcileWindowsCodexRequirements(nil, secureClient)
+	scRendered, _, err := reconcileWindowsCodexRequirements(nil, secureClient, true)
 	if err != nil {
 		t.Fatal(err)
 	}

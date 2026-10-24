@@ -110,19 +110,17 @@ def test_global_switch_sets_only_guardrail_mode(app) -> None:
     assert app.logger.log_config_change.call_args.args[0] == "guardrail-mode"  # a config-update mutation
 
 
-def test_cursor_mode_switch_restarts_to_rebake_its_fail_mode(app, restarts, rerenders) -> None:
-    # Per-user Cursor follows its guardrail mode (observe open, action
-    # closed), so observe -> action flips its hooks from fail-open to
-    # fail-closed; the gateway restarts and re-bakes its registration. Every
-    # other connector keeps its fail mode across a mode switch
-    # (test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode).
+def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> None:
+    # The guardrail mode no longer pins Cursor's fail mode: like every other
+    # connector its outage mode follows the policy tier (oss-outage-open), so
+    # a mode switch re-renders no hook and restarts nothing.
     app.cfg.claw.mode = "cursor"
     app.cfg.guardrail.connector = "cursor"
-    result, payload = _run(app, "action", "--json")
-    assert payload["gateway"] == "restarted" and restarts == [app.cfg.data_dir] and rerenders == []
-    text, _ = _run(app, "observe")
-    assert "fail open" in text.output
-    assert len(restarts) == 2 and rerenders == []
+    _, payload = _run(app, "action", "--json")
+    assert payload["gateway"] == "live" and restarts == [] and rerenders == []
+    _run(app, "observe")
+    assert restarts == [] and rerenders == []
+    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "open"
 
 
 def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restarts, rerenders) -> None:
@@ -132,7 +130,8 @@ def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restart
     assert payload["gateway"] == "live" and rerenders == [] and restarts == []
     _, payload = _run(app, "observe", "--json")
     assert rerenders == [] and restarts == []
-    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
+    # The default tier's outage mode (oss-outage-open).
+    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "open"
 
 
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:
