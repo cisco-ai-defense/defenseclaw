@@ -752,15 +752,30 @@ func applyWindowsEnterprisePolicyAs(ctx context.Context, result *enterprisestatu
 		result.SecurityComplete, result.Noop, result.NoopReason = false, false, ""
 		result.AddError("lifecycle_error", "config generation is unproven or records a hand edit; run DefenseClawSetup-Enterprise-Standalone-x64.exe /ensure CONFIG=<approved absolute config path> JSON=1 from an elevated prompt")
 	}
-	if state == nil && len(result.Warnings) == warnings {
-		// Name the check that did not run, such as an installed CLI the
-		// custody check refuses (rel-1-0-4 GAP-0594), instead of omitting the
-		// policy block silently.
-		cause := "the installed CLI reported no effective policy digest"
-		if err != nil {
-			cause = err.Error()
+	if state == nil {
+		result.SecurityComplete = false
+		if len(result.Warnings) > warnings {
+			// A digest response with a build error already named the cause.
+			// Verify must fail on that cause rather than echo it as a warning.
+			if result.Action == "verify" {
+				message := result.Warnings[len(result.Warnings)-1]
+				result.Warnings = result.Warnings[:len(result.Warnings)-1]
+				result.AddError(message.Code, message.Message)
+			}
+		} else {
+			// Name a check that never returned a digest, including an installed
+			// CLI the custody check refused to run (GAP-0594).
+			cause := "the installed CLI reported no effective policy digest"
+			if err != nil {
+				cause = err.Error()
+			}
+			message := "the effective policy the gateway enforces could not be checked: " + cause
+			if result.Action == "verify" {
+				result.AddError("policy_unverified", message)
+			} else {
+				result.AddWarning("policy_unverified", message)
+			}
 		}
-		result.AddWarning("policy_unverified", "the effective policy the gateway enforces could not be checked: "+cause)
 	}
 	if state == nil || !state.Applied || !change || len(result.Errors) != 0 {
 		return
