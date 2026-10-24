@@ -476,6 +476,7 @@ async function defenseclawProvenTCPRequest(path, init, token) {
     }
     return { ok: response.status >= 200 && response.status < 300, status: response.status,
       headers: { get: (name) => response.headers[String(name).toLowerCase()] ?? null },
+      text: async () => response.body,
       json: async () => JSON.parse(response.body) };
   } finally {
     agent.destroy();

@@ -420,8 +420,10 @@ func TestRefreshFailModesClosesEveryHookWhileAnInstallHoldsTheDataDirectory(t *t
 		{name: "0.8.x config open, install", config: v7, read: "install", lock: "data", want: "closed"},
 		{name: "config open, install in DEFENSECLAW_HOME", config: v9, read: "install", lock: "home", want: "closed"},
 		{name: "config open, install, hold", config: v9, read: "install", lock: "data", hold: true, want: "closed"},
-		// A per-user hook is closed whatever the config saved (sa-port-peer).
-		{name: "config open, no install", config: v9, read: "loaded", want: "closed"},
+		// Outside an install the runtime record holds the per-user outage mode,
+		// which follows the policy tier (owner decision 2026-10-23: default
+		// tier open); the open a released script baked is closed (TGT-0115).
+		{name: "config open, no install", config: v9, read: "loaded", want: "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			home := t.TempDir()
@@ -462,8 +464,9 @@ func TestRefreshFailModesClosesEveryHookWhileAnInstallHoldsTheDataDirectory(t *t
 			if err != nil {
 				t.Fatal(err)
 			}
-			if baked := bytes.Contains(body, []byte(`FAIL_MODE="open"`)); baked != (test.want == "open") {
-				t.Fatalf("the released Copilot hook still bakes open = %v, want %v", baked, test.want == "open")
+			// A per-user script bakes closed in every tier (TGT-0115).
+			if bytes.Contains(body, []byte(`FAIL_MODE="open"`)) {
+				t.Fatal("the released Copilot hook still bakes open")
 			}
 		})
 	}
