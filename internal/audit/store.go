@@ -239,7 +239,7 @@ type Store struct {
 	checkpointMu sync.Mutex
 	checkpointDB *sql.DB
 	// durableDB is a synchronous=FULL connection that makes committed
-	// writes power-loss durable (syncCommittedWrites). It is opened on
+	// writes power-loss durable (SyncCommittedWrites). It is opened on
 	// first use under checkpointMu and closed with the store.
 	durableDB *sql.DB
 	// walGuardMu guards the checkpoint connection's data_version as of the
@@ -1916,6 +1916,10 @@ var migrations = []migration{
 		description: "guardrails: bind pending credential sources to authoritative results",
 		apply:       migrateToolChainReturnedCredentialSourceState,
 	},
+	{
+		description: configChangeRecordDigestMigrationDescription,
+		apply:       migrateAuditEventRecordDigest,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2065,7 +2069,7 @@ func (s *Store) Init() error {
 	}
 	for _, column := range []string{
 		"bucket", "event_name", "source", "signal", "payload_json", "projected_record_json",
-		"record_schema_version", "projection_hash", "redaction_profile", "mandatory",
+		"record_schema_version", "projection_hash", "redaction_profile", "mandatory", "record_sha256",
 	} {
 		exists, err := s.hasColumn("audit_events", column)
 		if err != nil {
@@ -2164,31 +2168,43 @@ func (s *Store) HasAuditEventID(ctx context.Context, id string) (bool, error) {
 	return one == 1, err
 }
 
-// StoredHookDecisionAction returns the decision a stored hook record holds:
-// the action in a connector hook row's envelope, or the effective action of
-// a hook_decision record. found is false when no row owns id; action is
-// empty when the row holds neither.
-func (s *Store) StoredHookDecisionAction(ctx context.Context, id string) (action string, found bool, err error) {
+// StoredHookVerdict is the decision a stored hook record holds, as the
+// record stores it: the action and the reason in a connector hook row's
+// envelope, or the effective action and the reason of a hook_decision
+// record. A field the row does not hold, or holds in a form that is not
+// text (a redaction profile removed it), is empty.
+type StoredHookVerdict struct {
+	Action, Reason string
+}
+
+// StoredHookVerdict returns the decision the stored hook record id holds.
+// found is false when no row owns id.
+func (s *Store) StoredHookVerdict(ctx context.Context, id string) (verdict StoredHookVerdict, found bool, err error) {
 	if s == nil || !s.Ready() || id == "" {
-		return "", false, errors.New("audit: hook decision lookup requires a ready store and id")
+		return StoredHookVerdict{}, false, errors.New("audit: hook decision lookup requires a ready store and id")
 	}
-	var envelopeAction, decisionAction string
+	var envelope, decision StoredHookVerdict
 	err = s.scanRow(ctx, "audit", s.db.QueryRowContext(ctx, `SELECT
 		CASE WHEN json_valid(COALESCE(structured_json,''))
 			THEN COALESCE(json_extract(structured_json,'$.action'),'') ELSE '' END,
+		CASE WHEN json_valid(COALESCE(structured_json,'')) AND json_type(structured_json,'$.reason') = 'text'
+			THEN json_extract(structured_json,'$.reason') ELSE '' END,
 		CASE WHEN json_valid(COALESCE(projected_record_json,''))
-			THEN COALESCE(json_extract(projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'') ELSE '' END
-		FROM audit_events WHERE id = ?`, id), &envelopeAction, &decisionAction)
+			THEN COALESCE(json_extract(projected_record_json,'$.body."defenseclaw.guardrail.effective_action"'),'') ELSE '' END,
+		CASE WHEN json_valid(COALESCE(projected_record_json,''))
+				AND json_type(projected_record_json,'$.body."defenseclaw.guardrail.reason"') = 'text'
+			THEN json_extract(projected_record_json,'$.body."defenseclaw.guardrail.reason"') ELSE '' END
+		FROM audit_events WHERE id = ?`, id), &envelope.Action, &envelope.Reason, &decision.Action, &decision.Reason)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return StoredHookVerdict{}, false, nil
 	}
 	if err != nil {
-		return "", false, err
+		return StoredHookVerdict{}, false, err
 	}
-	if envelopeAction != "" {
-		return envelopeAction, true, nil
+	if envelope.Action != "" {
+		return envelope, true, nil
 	}
-	return decisionAction, true, nil
+	return decision, true, nil
 }
 
 // DatabaseFileReplaced reports whether the database path no longer names

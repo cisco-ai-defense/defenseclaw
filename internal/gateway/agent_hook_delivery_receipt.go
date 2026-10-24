@@ -89,6 +89,10 @@ func (d *hookDeliveryReceipt) offer(w http.ResponseWriter, answer func()) string
 // enforced result the gateway cannot prove.
 const hookActionUnconfirmed = "unconfirmed"
 
+// hookDeliveryRejectedReason is the reason of the block a managed hook
+// enforced when it refused the proposed answer.
+const hookDeliveryRejectedReason = "managed hook rejected the proposed answer"
+
 // deliveredHookDecision is the decision of a call that asked for a delivery
 // receipt: the offered answer once the hook acknowledged it, and the hook's
 // own block when it refused it. A missing receipt after the answer was offered
@@ -100,7 +104,7 @@ func (a *APIServer) deliveredHookDecision(hungUpBeforeAnswer bool, connectorName
 	case hookexec.HookDeliveryReceiptAck:
 		return resp
 	case hookexec.HookDeliveryReceiptBlock:
-		return failedClosedHookDelivery(resp, "managed hook rejected the proposed answer")
+		return failedClosedHookDelivery(resp, hookDeliveryRejectedReason)
 	}
 	if a.scannerCfg.EffectiveHookFailModeForConnector(connectorName) == "open" {
 		// An outage can allow even if the offered policy answer blocked.

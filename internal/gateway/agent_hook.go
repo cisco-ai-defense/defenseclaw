@@ -85,6 +85,7 @@ type agentHookRequest struct {
 	pendingOccurrenceID         string
 	pendingBodyBytes            int64
 	pendingRecovery             bool
+	pendingProvenance           *pendingHookProvenance // the journaled call was evaluated under it
 	ConnectorName               string
 	AgentID                     string
 	AgentName                   string
@@ -939,6 +940,13 @@ func (a *APIServer) finalizeAgentHook(
 	// otherwise. If identity stamping itself panics, notification stays
 	// fail-closed behind canonical enforcement persistence.
 	result := hookFinalizationResult{Enforced: resp.Action == "block", Response: resp}
+	// live is false for a journaled call that recovery writes
+	// (agent_hook_pending.go): it writes the call's two records only, and
+	// repeats none of the live side effects (health counters, sandbox
+	// observations, the hook join ring, spans, alerts), which belong to the
+	// call when it ran and would name the state and policy of the server
+	// that recovers it.
+	live := !req.pendingRecovery
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -985,12 +993,20 @@ func (a *APIServer) finalizeAgentHook(
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
 	safeSection("identity", func() {
-		a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
+		if req.pendingProvenance != nil {
+			// A journaled call was stamped before its answer was offered.
+			req.pendingProvenance.stamp(&env)
+			env.Enforced = resp.Action == "block"
+		} else {
+			a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
+		}
 		result.Enforced = env.Enforced
 		// These fields describe the already-active HTTP/hook span. They are
 		// independent of metric export and must remain available even when the
 		// destination collects traces but not metrics.
-		enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+		if live {
+			enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
+		}
 	})
 
 	// Compose both durable-audit invariants:
@@ -1064,7 +1080,7 @@ func (a *APIServer) finalizeAgentHook(
 	}
 
 	safeSection("health", func() {
-		if !a.recordsConnectorHealth(ctx) {
+		if !live || !a.recordsConnectorHealth(ctx) {
 			return
 		}
 		a.health.RecordConnectorRequestFor(connectorName)
@@ -1081,10 +1097,12 @@ func (a *APIServer) finalizeAgentHook(
 			a.health.RecordToolInspectionFor(connectorName)
 		}
 	})
-	safeSection("sandbox", func() {
-		a.observeSandboxHookDecision(ctx, req, resp)
-	})
-	if !panicked {
+	if live {
+		safeSection("sandbox", func() {
+			a.observeSandboxHookDecision(ctx, req, resp)
+		})
+	}
+	if live && !panicked {
 		// Before the response is written, so the decision is in the
 		// runtime planes' join ring when the tool's process starts.
 		safeSection("hook_join", func() {
@@ -1094,7 +1112,7 @@ func (a *APIServer) finalizeAgentHook(
 	if replay {
 		return result
 	}
-	if !panicked {
+	if live && !panicked {
 		safeSection("sensitive_result", func() {
 			a.alertSensitiveHookToolResult(ctx, connectorName, req, resp)
 		})
@@ -1118,7 +1136,7 @@ func (a *APIServer) finalizeAgentHook(
 		// With no companion to persist, an enforced hook is
 		// notification-ready as soon as its audit row has landed.
 		result.EnforcementPersisted = env.Enforced
-		if !panicked {
+		if live && !panicked {
 			a.emitHookGuardrailOutcomeV8(ctx, req, resp, elapsed)
 		}
 	})
@@ -2010,12 +2028,25 @@ func enrichAgentHookContext(ctx context.Context, req agentHookRequest) context.C
 	// downstream surface (audit rows, canonical records, and routed exports) can filter by
 	// connector with the same identity. The hook payload's connector is
 	// authoritative on multi-connector installs.
-	if conn := strings.TrimSpace(req.ConnectorName); conn != "" {
-		env := audit.EnvelopeFromContext(ctx)
-		if env.Connector != conn {
-			env.Connector = conn
-			ctx = audit.ContextWithEnvelope(ctx, env)
-		}
+	//
+	// The tool and turn IDs of the request go on the envelope here too, not
+	// only once correlation is written (contextWithHookCorrelation): a hook
+	// whose correlation failed (concurrent hooks of one session, a busy
+	// store) still names its tool call on its connector-hook and
+	// hook_decision records (GAP-0980).
+	env := audit.EnvelopeFromContext(ctx)
+	changed := false
+	if conn := strings.TrimSpace(req.ConnectorName); conn != "" && env.Connector != conn {
+		env.Connector, changed = conn, true
+	}
+	if req.ToolInvocationID != "" && env.ToolID != req.ToolInvocationID {
+		env.ToolID, changed = req.ToolInvocationID, true
+	}
+	if req.TurnID != "" && env.TurnID != req.TurnID {
+		env.TurnID, changed = req.TurnID, true
+	}
+	if changed {
+		ctx = audit.ContextWithEnvelope(ctx, env)
 	}
 	return ctx
 }
