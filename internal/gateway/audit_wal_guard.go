@@ -39,10 +39,9 @@ const (
 	// copy never finished once the log was large, and the log grew without
 	// bound (rel-1-0-2:GAP-0709).
 	auditWALCopyTimeout = 2 * time.Minute
-	// auditWALAlarmBytes is the WAL file size that means checkpoints are not
-	// keeping up. SQLite restarts the log after a pass brings it to its end,
-	// so a healthy gateway stays far below it.
-	auditWALAlarmBytes = 4 * auditWALLimitBytes
+	// Warn as soon as the published flood ceiling is crossed. A failed
+	// checkpoint must not remain silent while the WAL consumes the volume.
+	auditWALAlarmBytes = auditWALLimitBytes
 	// auditWALAlarmRepeat is how often a WAL that stays over the bound is
 	// reported again.
 	auditWALAlarmRepeat = 10 * time.Minute
