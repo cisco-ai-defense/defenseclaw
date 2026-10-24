@@ -307,6 +307,41 @@ async function defenseclawDeploymentRemoved() {
   }
 }
 
+// defenseclawGatewayJSON parses a gateway answer and refuses one that
+// repeats a key in any object. JSON.parse keeps the last copy, so
+// {"action":"block","action":"allow"} would read as allow; the native and
+// shell hooks refuse such an answer too (GAP-1007). The caller's catch closes
+// the call.
+function defenseclawGatewayJSON(text) {
+  const value = JSON.parse(text);
+  const objects = [];
+  let keyNext = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"') {
+      let end = i + 1;
+      while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1;
+      const keys = objects[objects.length - 1];
+      if (keyNext && keys) {
+        const key = JSON.parse(text.slice(i, end + 1));
+        if (keys.has(key)) throw new Error("ambiguous gateway answer (repeated key)");
+        keys.add(key);
+      }
+      keyNext = false;
+      i = end;
+    } else if (c === "{" || c === "[") {
+      objects.push(c === "{" ? new Set() : null);
+      keyNext = c === "{";
+    } else if (c === "}" || c === "]") {
+      objects.pop();
+      keyNext = false;
+    } else if (c === ",") {
+      keyNext = objects[objects.length - 1] instanceof Set;
+    }
+  }
+  return value;
+}
+
 async function defenseclawToken() {
   const file = await open(DC_TOKEN_FILE, "r");
   try {
@@ -370,7 +405,7 @@ async function defenseclawSocketRequest(path, init) {
           ok: res.statusCode >= 200 && res.statusCode < 300,
           status: res.statusCode,
           headers: { get: (name) => res.headers[String(name).toLowerCase()] ?? null },
-          json: async () => JSON.parse(text),
+          text: async () => text,
         });
       });
       res.on("error", reject);
@@ -489,7 +524,7 @@ async function defenseclawFetch(path, init, token) {
         ok: reply.status >= 200 && reply.status < 300,
         status: reply.status,
         headers: { get: (name) => name.toLowerCase() === "retry-after" ? reply.retry_after || null : null },
-        json: async () => JSON.parse(reply.body),
+        text: async () => reply.body,
       };
     }
     if (DC_LISTENER_PROOF) return defenseclawProvenTCPRequest(path, init, token);
@@ -769,7 +804,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       if (actionable) await defenseclawLogFailOpen("gateway returned HTTP " + res.status, res.status >= 500 ? "transport" : "response");
       return null;
     }
-    const data = await res.json();
+    const data = defenseclawGatewayJSON(await res.text());
     if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
 
     if (!data || !["allow", "block", "confirm", "alert"].includes(data.action)) {

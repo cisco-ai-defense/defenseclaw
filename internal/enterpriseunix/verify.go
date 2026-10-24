@@ -1119,8 +1119,12 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
 	if record != nil {
-		for _, problem := range l.policyViewPinProblems(record.MachinePolicyConnectors) {
-			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionEnsure)+"` to publish the verified policy view")
+		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
+		for _, problem := range drift {
+			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionReconcile)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to pin the verified policy view")
+		}
+		for _, problem := range unpinnable {
+			r.AddWarning(codeMachinePolicyIncomplete, problem)
 		}
 	}
 	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
@@ -1150,6 +1154,13 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.Inspection.AIDefense = "unknown"
 	}
 	r.AddAIDefenseWarning()
+	if r.Action == ActionEnsure && record != nil {
+		// Ensure reports the same preventative coverage as status and verify,
+		// while keeping its compact lifecycle result without status blocks.
+		l.describeConnectors(record)
+		r.AddHookProcessFailureWarnings()
+		r.Connectors = nil
+	}
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.

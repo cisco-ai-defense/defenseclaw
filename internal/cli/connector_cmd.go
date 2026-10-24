@@ -83,6 +83,13 @@ var (
 // observe the exit code without terminating the test binary. Production
 // code paths leave this at the default (real os.Exit).
 var connectorExit = os.Exit
+
+// connectorReconcileEvery is reconcile --every-connector.
+var connectorReconcileEvery bool
+
+// connectorReconcileReadBack reads a reconciled registration back; tests
+// replace it to stand for a hook that does not answer.
+var connectorReconcileReadBack = connector.OwnedHooksPresent
 var connectorHookRuntimePaths = hookruntime.CurrentUserPaths
 var connectorSaveOpenCodeActive = connector.SaveActiveConnectors
 var connectorSaveOpenCodeLock = connector.SaveFreshHookContractLockEntry
@@ -167,7 +174,12 @@ var connectorReconcileCmd = &cobra.Command{
 	Long: `Reconcile the named connector from the current DefenseClaw config.
 
 This is the selected-connector setup primitive used by transactional policy
-mutations. It does not restart the gateway and does not setup peer connectors.`,
+mutations. It does not restart the gateway and does not setup peer connectors.
+
+With --every-connector (run by the installers after an upgrade or repair of a
+gateway that is not running) it refreshes every connector the config guards,
+as the gateway's start does, and reads each registration back. It exits 3 and
+names each connector that is not on its current hook, with the cause.`,
 	RunE: runConnectorReconcile,
 }
 
@@ -258,6 +270,10 @@ func init() {
 		"internal authenticated deferred-cleanup transaction binding",
 	)
 	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-transaction")
+
+	connectorReconcileCmd.Flags().BoolVar(&connectorReconcileEvery, "every-connector", false,
+		"refresh and read back every connector the config guards; exit 3 naming each that is not on its current hook")
+	_ = connectorReconcileCmd.Flags().MarkHidden("every-connector")
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
 	connectorCmd.AddCommand(connectorPrepareRollbackCmd)
@@ -590,7 +606,100 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if dataDir == "" {
 		return fmt.Errorf("connector reconcile: no data directory configured")
 	}
+	if connectorReconcileEvery {
+		return runConnectorReconcileEvery(cmd, dataDir)
+	}
 	name := resolveActiveConnectorName(dataDir)
+	return reconcileConnectorRuntime(cmd, dataDir, name, false, func(_ connector.Connector, opts connector.SetupOpts) error {
+		if connectorFlagJSON {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+				"connector": name,
+				"action":    "reconcile",
+				"ok":        true,
+				"fail_mode": opts.HookFailMode,
+			})
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
+		return nil
+	})
+}
+
+// runConnectorReconcileEvery is reconcile --every-connector. An upgrade or
+// repair of a gateway that is not running does not start it, so nothing
+// rendered this release's hooks: a Hermes hook an earlier release wrote
+// cannot answer this release's execution probe, and the install exited 0
+// with Hermes unprotected. This refreshes every connector the config guards,
+// as the gateway's boot does (Setup for each one, not only the connectors a
+// selected policy refresh supports), and reads each registration back. Exit 3
+// names each connector that is not on its current hook, with the cause.
+func runConnectorReconcileEvery(cmd *cobra.Command, dataDir string) error {
+	if strings.TrimSpace(connectorFlagName) != "" || connectorFlagJSON {
+		return errors.New("connector reconcile: --every-connector takes neither --connector nor --json")
+	}
+	var causes []string
+	for _, name := range guardedConnectorNames(cfg) {
+		if err := reconcileOrReadBackConnector(cmd, dataDir, name); err != nil {
+			causes = append(causes, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+	if len(causes) == 0 {
+		return nil
+	}
+	return withExitCode(fmt.Errorf("not every connector is on its current hook: %s", strings.Join(causes, "; ")),
+		gatewayStartAdmissionRefusedExitCode)
+}
+
+func reconcileOrReadBackConnector(cmd *cobra.Command, dataDir, name string) error {
+	readBack := func(conn connector.Connector, opts connector.SetupOpts) error {
+		present, err := connectorReconcileReadBack(conn, opts)
+		if err != nil {
+			return fmt.Errorf("its hook registration could not be read back: %w", err)
+		}
+		if !present {
+			if reason := strings.TrimSpace(connector.OwnedHooksAbsentReason(conn, opts)); reason != "" {
+				return fmt.Errorf("its current hook is not in place: %s", reason)
+			}
+			return errors.New("its current hook is not in place; start the gateway (defenseclaw-gateway start), then check: defenseclaw doctor")
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s %s is on its current hook\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
+		return nil
+	}
+	// A Kiro, OpenClaw, ZeptoClaw or plugin connector kept the hook an
+	// earlier release rendered, and a read-back of its registration passed
+	// with it: refresh every connector, as the gateway's start does.
+	if _, ok := newConnectorRegistryWithPlugins().Get(name); !ok {
+		return errors.New("this DefenseClaw build does not ship it")
+	}
+	return reconcileConnectorRuntime(cmd, dataDir, name, true, readBack)
+}
+
+// reconcileConnectorOpts is the Setup input reconcile renders name with.
+func reconcileConnectorOpts(dataDir, name string) connector.SetupOpts {
+	opts := resolveConnectorOptsFor(dataDir, name)
+	if cfg != nil {
+		opts.CodexOtelEnvironment = cfg.Environment
+		opts.HookFailMode = cfg.EffectiveHookOutageFailModeForConnector(name)
+		opts.SecureClientHookDelivery = cfg.SecureClientIntegration()
+		opts.GuardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled
+		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
+	}
+	opts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, name)
+	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
+	return opts
+}
+
+// reconcileConnectorRuntime refreshes name's runtime registration and calls
+// done with the connector and the options it rendered, while the config
+// home binding is still in place. A selected policy refresh (every false)
+// takes only reconcileSupportedConnectors; --every-connector takes any
+// connector this build or its plugins ship.
+func reconcileConnectorRuntime(
+	cmd *cobra.Command,
+	dataDir, name string,
+	every bool,
+	done func(connector.Connector, connector.SetupOpts) error,
+) error {
 	if name == "codex" && connectorFlagConfigHome == "" {
 		defer connector.PinConnectorConfigRootsForCommand(dataDir)()
 	}
@@ -604,7 +713,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if !ok {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
 	}
-	if !reconcileSupportedConnector(name) {
+	if !every && !reconcileSupportedConnector(name) {
 		return fmt.Errorf("connector reconcile: selected refresh is supported only for %s", strings.Join(reconcileSupportedConnectors, ", "))
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
@@ -612,17 +721,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	} else if warning != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "connector reconcile %s: warning: %s\n", name, warning)
 	}
-	opts := resolveConnectorOpts(dataDir)
-	if cfg != nil {
-		opts.CodexOtelEnvironment = cfg.Environment
-		opts.HookFailMode = cfg.EffectiveHookOutageFailModeForConnector(name)
-		opts.SecureClientHookDelivery = cfg.SecureClientIntegration()
-		opts.GuardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
-		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled
-		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
-	}
-	opts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, name)
-	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
+	opts := reconcileConnectorOpts(dataDir, name)
 	previous := connector.LoadHookContractLockEntry(dataDir, name)
 	if opts.AgentVersion == "" {
 		// A scoped policy refresh must not downgrade a previously verified
@@ -715,16 +814,7 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("connector reconcile %s: publish active runtime state: %w", name, err)
 		}
 	}
-	if connectorFlagJSON {
-		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
-			"connector": name,
-			"action":    "reconcile",
-			"ok":        true,
-			"fail_mode": opts.HookFailMode,
-		})
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style(glyph("✓", "OK"), "fg=green", "bold"), name)
-	return nil
+	return done(conn, opts)
 }
 
 // publishReconciledConnectorActive records name in the active roster, as the

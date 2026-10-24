@@ -13,7 +13,7 @@ import (
 func TestManagedCodexStatusAndVerifyShowHookProcessFailure(t *testing.T) {
 	h := newTestHost(t, "linux")
 	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.4"), ConfigFile: machinePolicyConfig(t, h, "codex")}))
-	for _, action := range []string{ActionStatus, ActionVerify} {
+	for _, action := range []string{ActionStatus, ActionVerify, ActionEnsure} {
 		r := h.run(Options{Action: action})
 		message := messagesOf(r.Warnings, "hook_process_fail_open")
 		if !strings.Contains(message, "codex") || !strings.Contains(message, "timeout") || r.SecurityComplete {

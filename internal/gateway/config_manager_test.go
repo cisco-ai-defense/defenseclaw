@@ -1377,8 +1377,36 @@ func TestLegacyPerUserOpenEditDoesNotChangeConnectorSetup(t *testing.T) {
 	newCfg.Guardrail.HookFailMode = "closed"
 	if oldCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
 		newCfg.EffectiveHookFailModeForConnector("codex") != "closed" ||
-		connectorSetChanged(oldCfg, newCfg) {
+		connectorSetChanged(oldCfg, newCfg) || hookPolicyNeedsSetup(oldCfg, newCfg) {
 		t.Fatal("legacy per-user open edit changed effective setup posture")
+	}
+}
+
+func TestHookModeAndHILTChangeReRunsSetupWithoutSelfHeal(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*config.Config)
+	}{
+		{"mode only", func(c *config.Config) { c.Guardrail.Mode = "action" }},
+		{"HILT only", func(c *config.Config) { c.Guardrail.HILT.Enabled = true }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldCfg := config.DefaultConfig()
+			oldCfg.Guardrail.Enabled = true
+			oldCfg.Guardrail.Connector = "codex"
+			oldCfg.Guardrail.Mode = "observe"
+			oldCfg.Guardrail.HookFailMode = "closed"
+			oldCfg.Guardrail.HookSelfHeal = false
+			newCfg := cloneConfig(oldCfg)
+			tc.edit(newCfg)
+			if !hookPolicyNeedsSetup(oldCfg, newCfg) {
+				t.Fatal("hook policy change with self-heal off did not re-run connector setup")
+			}
+			newCfg.Guardrail.HookSelfHeal = true
+			if hookPolicyNeedsSetup(oldCfg, newCfg) {
+				t.Fatal("hook policy change with self-heal on re-ran connector setup")
+			}
+		})
 	}
 }
 

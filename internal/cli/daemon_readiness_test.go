@@ -167,7 +167,7 @@ func TestDaemonReadinessRequirementsUseEffectiveGuardrailPosture(t *testing.T) {
 	}
 }
 
-func TestRotationRequiredConnectorNamesUsesEnabledConfiguredRoster(t *testing.T) {
+func TestGuardedConnectorNamesUsesEnabledConfiguredRoster(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Guardrail.Enabled = true
 	cfg.Guardrail.Connector = ""
@@ -175,19 +175,19 @@ func TestRotationRequiredConnectorNamesUsesEnabledConfiguredRoster(t *testing.T)
 		"codex":      {},
 		"claudecode": {},
 	}
-	if got := strings.Join(rotationRequiredConnectorNames(cfg), ","); got != "claudecode,codex" {
-		t.Fatalf("rotation required connectors = %q, want claudecode,codex", got)
+	if got := strings.Join(guardedConnectorNames(cfg), ","); got != "claudecode,codex" {
+		t.Fatalf("guarded connectors = %q, want claudecode,codex", got)
 	}
 
 	disabled := false
 	cfg.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Enabled: &disabled}
-	if got := strings.Join(rotationRequiredConnectorNames(cfg), ","); got != "codex" {
-		t.Fatalf("rotation required connectors with Claude disabled = %q, want codex", got)
+	if got := strings.Join(guardedConnectorNames(cfg), ","); got != "codex" {
+		t.Fatalf("guarded connectors with Claude disabled = %q, want codex", got)
 	}
 
 	cfg.Guardrail.Enabled = false
-	if got := rotationRequiredConnectorNames(cfg); len(got) != 0 {
-		t.Fatalf("disabled guardrail rotation required connectors = %v, want none", got)
+	if got := guardedConnectorNames(cfg); len(got) != 0 {
+		t.Fatalf("disabled guardrail guarded connectors = %v, want none", got)
 	}
 }
 

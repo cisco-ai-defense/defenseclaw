@@ -1228,7 +1228,7 @@ func (s *guardScan) scanFlatDir(source hookSource) []Finding {
 	}
 	var findings []Finding
 	for _, entry := range entries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+		if !effectivePolicyDropIn(entry) {
 			continue
 		}
 		child := source.child(filepath.Join(source.path, entry.Name()), formatFlat)

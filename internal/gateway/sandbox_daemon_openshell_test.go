@@ -1216,8 +1216,9 @@ func TestSandboxDaemonReadyStaysInsideThePolicyAdmission(t *testing.T) {
 			asked := []string{}
 			inFlight, maxInFlight, limited := 0, 0, tc.limited
 			f.relay.explainCtx = func(ctx context.Context, req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
-				if req.Harness == "" {
-					// The unclaimed view of the status Ready answers with.
+				if req.Harness == "" || f.os.prepared.Load() > 0 {
+					// The views of the status Ready answers with once it readied
+					// OpenShell (the unclaimed view, and each configured agent's).
 					return sandboxapi.ManagedExplain{Allowed: true}, nil
 				}
 				mu.Lock()

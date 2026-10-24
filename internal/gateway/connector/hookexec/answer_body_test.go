@@ -45,6 +45,12 @@ func partialAllowGateway(t *testing.T, drop bool) string {
 // answer is not a gateway outage and cannot use an open outage preference.
 func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 	shortAnswerBudget(t, 300*time.Millisecond)
+	// Under CPU contention the watchdog can fire before the response-status
+	// goroutine runs. Both closed reasons are valid in that scheduling race;
+	// the direct read-error case below pins the incomplete-response reason.
+	closedReason := func(stderr string) bool {
+		return strings.Contains(stderr, "incomplete gateway response") || strings.Contains(stderr, "did not answer in time")
+	}
 	for _, test := range []struct {
 		name string
 		drop bool
@@ -55,7 +61,7 @@ func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 					result, elapsed := runAgainstGateway(t, connector, partialAllowGateway(t, test.drop), func(opts *Options) {
 						opts.FailMode = mode
 					})
-					if elapsed > 5*time.Second || !blocked(result) {
+					if elapsed > time.Second || !blocked(result) || !closedReason(result.stderr) {
 						t.Fatalf("per-user %s fail mode %q: after %s code=%d stdout=%q stderr=%q, want an incomplete-answer block",
 							connector, mode, elapsed, result.code, result.stdout, result.stderr)
 					}
@@ -64,16 +70,16 @@ func TestAPartialGatewayBodyIsNotADecision(t *testing.T) {
 			managed, elapsed := runAgainstGateway(t, "codex", partialAllowGateway(t, test.drop), func(opts *Options) {
 				managedCodex(opts)
 			})
-			if elapsed > 5*time.Second || !blocked(managed) {
+			if elapsed > time.Second || !blocked(managed) || !closedReason(managed.stderr) {
 				t.Fatalf("managed: after %s code=%d stdout=%q stderr=%q, want an incomplete-answer block",
 					elapsed, managed.code, managed.stdout, managed.stderr)
 			}
 			// An HTTP 200 with a broken body is an unusable answer, not an
 			// unreachable gateway. It cannot become an allow in open mode.
-			open, _ := runAgainstGateway(t, "claudecode", partialAllowGateway(t, test.drop), func(opts *Options) {
+			open, elapsed := runAgainstGateway(t, "claudecode", partialAllowGateway(t, test.drop), func(opts *Options) {
 				opts.FailMode = "open"
 			})
-			if !blocked(open) {
+			if elapsed > time.Second || !blocked(open) || !closedReason(open.stderr) {
 				t.Fatalf("per-user open: code=%d stdout=%q stderr=%q, want a block", open.code, open.stdout, open.stderr)
 			}
 		})
@@ -102,6 +108,9 @@ func TestHTTP200MalformedAnswersCannotUseOpenOutageMode(t *testing.T) {
 				result := run(t, connector, test.rt(), func(opts *Options) { opts.FailMode = "open" })
 				if !blocked(result) {
 					t.Fatalf("%s: code=%d stdout=%q stderr=%q, want block", connector, result.code, result.stdout, result.stderr)
+				}
+				if test.name == "read error after allow" && !strings.Contains(result.stderr, "incomplete gateway response") {
+					t.Fatalf("%s: error after HTTP 200 had reason %q, want incomplete gateway response", connector, result.stderr)
 				}
 			}
 		})

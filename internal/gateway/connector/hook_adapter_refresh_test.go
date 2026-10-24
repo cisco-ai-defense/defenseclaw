@@ -19,6 +19,23 @@ var releasedAdapterOpens = map[string][]string{
 	"copilot-hook.ps1": {copilotAdapterOpenFailure},
 }
 
+func TestPerUserCopilotAdapterLegacyOpenRendersFailureDeny(t *testing.T) {
+	scripts, err := renderHookScripts("127.0.0.1:18970", "open", ".token", []string{"copilot-hook.ps1"}, false, "copilot", true, "", "", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, script := range scripts {
+		if script.name == "copilot-hook.ps1" {
+			body := string(script.body)
+			if strings.Contains(body, "Copilot hook adapter failed open") || !strings.Contains(body, `"permissionDecision":"deny"`) {
+				t.Fatal("legacy per-user open reached Copilot adapter failure handling")
+			}
+			return
+		}
+	}
+	t.Fatal("Copilot adapter was not rendered")
+}
+
 // The Windows Cursor and Copilot adapters answer for themselves when the
 // hook launcher is missing or times out, which an upgrade causes while it
 // swaps defenseclaw-hook.exe and the new hook waits for the install. The
@@ -99,6 +116,7 @@ func TestRefreshOfThisReleasesOpenAdapterIsItsClosedRender(t *testing.T) {
 		}
 		body, err := renderTemplate(string(tmpl), templateData{
 			FailMode:             mode,
+			SecureClient:         mode == "open",
 			HookBinaryPS:         `C:\Users\dc-user\AppData\Local\DefenseClaw\bin\defenseclaw-hook.exe`,
 			HookTimeoutMS:        windowsHookAdapterTimeoutMS,
 			CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,

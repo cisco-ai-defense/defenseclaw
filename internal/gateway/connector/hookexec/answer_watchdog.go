@@ -412,20 +412,34 @@ func (w *answerWatchdog) watch(deadline time.Time) {
 	w.exit(w.fallbackCode)
 }
 
-// gatewayAnsweredError makes the watchdog's answer closed: the gateway
-// answered the call with an error status, so a deadline that passes after it
-// is no outage that an administrator's fail mode open lets through
-// (failAfterErrorStatus). Safe on a nil watchdog.
-func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec) {
+// gatewayAnsweredError makes the watchdog's answer closed after a gateway
+// status has arrived. A 2xx answer whose body is still incomplete at the
+// deadline is a response failure; an error status is no outage either.
+// Safe on a nil watchdog.
+func (w *answerWatchdog) gatewayAnsweredError(opts Options, sp spec, status int) {
 	if w == nil {
 		return
 	}
 	closedOpts := opts
 	closedOpts.FailMode = "closed"
 	out, errb, code, logFailure := renderNoAnswer(closedOpts, sp, "closed")
+	if status >= 200 && status < 300 {
+		// The watchdog may fire while the body read is still waiting. Use
+		// the same response-layer reason the ordinary body-read path uses.
+		var stdout, stderr bytes.Buffer
+		rendered := closedOpts
+		rendered.Stdout, rendered.Stderr = &stdout, &stderr
+		rendered.Home, rendered.FailureLogHome, rendered.answerWatch = "", nil, nil
+		code = failResponse(rendered, sp, "closed", "incomplete gateway response")
+		out, errb = stdout.Bytes(), stderr.Bytes()
+		logged := closedOpts
+		logged.answerWatch = nil
+		logged.Stderr = io.Discard
+		logFailure = func() { logHookFailure(logged, sp, "incomplete gateway response", "response", "closed", true) }
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if w.fired || w.closedKnown {
+	if w.fired || w.failureClosed || (w.closedKnown && (status < 200 || status >= 300)) {
 		return
 	}
 	w.closedKnown = true

@@ -2031,9 +2031,9 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // an unset value is closed. A verified Secure Client render honors its
 // explicit mode and defaults open (#1163), with its existing vendor limits.
 //
-// Transport-layer failures (gateway unreachable / timeout / 5xx) follow
-// FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
-// force-closed override.
+// An open choice covers a confirmed gateway outage only: an answered,
+// malformed or unanswered call blocks outside Secure Client.
+// DEFENSECLAW_STRICT_AVAILABILITY=1 can only tighten this choice.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	render := resolveConnectorHookRender(opts, c)
 	return writeHookScriptsCommonWithTransport(hookDir, opts.APIAddr, render.token, render.failMode, render.failModeSource, render.extras, opts.ManagedEnterprise,

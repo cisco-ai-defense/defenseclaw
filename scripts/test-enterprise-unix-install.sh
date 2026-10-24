@@ -683,6 +683,7 @@ upgrade_lane() {
     lifecycle 06-upgrade ensure --from-package --reason ci-upgrade-lane
     # The version 9 config keeps its bytes, so its generation does not drop.
     check "$results/06-upgrade.json" upgrade --action ensure --changed --installed --version "$version" --ready \
+        --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
         --allow-warning agent_install_scan_incomplete "${policy_checks[@]}" --policy-applied --config-generation-above "$((previous_generation - 1))"
     sandbox_files_present
     launcher_offers_only_sandbox
@@ -712,7 +713,7 @@ else
     cp "$lifecycle_dir/last-package-result.json" "$results/01-package-install.json"
     # Without an administrator config the package enables no connector, so a
     # host with eligible users is honestly security-incomplete (GAP-0266); the
-    # step after this one applies the config and requires --complete.
+    # step after this one applies the config and checks the hook-process warning.
     check "$results/01-package-install.json" package-install --action ensure --changed --installed --version "$version" --ready \
         --allow-warning no_connectors_enabled --allow-warning agent_install_scan_incomplete
     [ "$install_rc" -eq 0 ] || die "the package manager exited $install_rc"
@@ -741,6 +742,7 @@ else
     write_admin_config
     lifecycle 02-ensure-config ensure --from-package --config "$stage/config.yaml" --reason ci-install-lane
     check "$results/02-ensure-config.json" ensure-config --action ensure --changed --installed --version "$version" --ready \
+        --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
         --allow-warning agent_install_scan_incomplete "${policy_checks[@]}"
     [ "$(cksum <"$stage/config.yaml")" = "$(cksum <"$config")" ] || die "$config is not the applied administrator config"
     [ -n "$(policy_entries)" ] || die "no DefenseClaw machine-policy entry was written under ${policy_dirs[*]}"
@@ -757,6 +759,7 @@ fi
 step "ensure again (must be a no-op)"
 lifecycle 03-ensure-noop ensure --from-package --reason ci-install-lane --lock-wait 2m
 check "$results/03-ensure-noop.json" ensure-noop --action ensure --noop --installed --version "$version" --ready \
+    --coverage-complete --security-incomplete --allow-warning hook_process_fail_open \
     --allow-warning agent_install_scan_incomplete
 
 wait_for_install_scan

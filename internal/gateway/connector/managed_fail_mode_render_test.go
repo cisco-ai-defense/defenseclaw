@@ -13,6 +13,8 @@ package connector
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,6 +60,32 @@ func TestManagedStandaloneRenderKeepsClosed(t *testing.T) {
 				t.Fatalf("rendered fail mode = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+// A managed standalone plugin bridge renders closed for every failure, an
+// administrator's open included (config.HookOutageFailMode), so no gateway
+// answer can take an outage-open path.
+func TestManagedStandalonePluginRendersClosed(t *testing.T) {
+	for _, asset := range []string{"amp-plugin.ts", "opencode-plugin.js"} {
+		body, err := renderHookTemplate(asset, templateData{Managed: true, FailMode: "open"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Contains(body, []byte(`DC_FAIL_MODE = "closed"`)) &&
+			!bytes.Contains(body, []byte(`DC_FAIL_MODE: string = "closed"`)) {
+			t.Fatalf("%s renders an administrator's open into a standalone plugin", asset)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	data := openCodePluginTestData(t, server)
+	data.Managed, data.FailMode = true, "open"
+	lines := runOpenCodePluginHarness(t, data, 1)
+	if len(lines) == 0 || !strings.HasPrefix(lines[0], "block:") {
+		t.Fatalf("managed outage-open plugin allowed HTTP 503: %q", lines)
 	}
 }
 

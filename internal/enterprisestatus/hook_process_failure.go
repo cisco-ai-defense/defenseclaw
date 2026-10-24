@@ -17,7 +17,7 @@ const CodeHookProcessFailOpen = "hook_process_fail_open"
 // that setting controls a running DefenseClaw hook's response to a gateway
 // outage, not what the agent does when its hook process cannot answer.
 func (r *Result) AddHookProcessFailureWarnings() {
-	if r == nil || r.Profile != "standalone" || (r.Action != "status" && r.Action != "verify") {
+	if r == nil || r.Profile != "standalone" || (r.Action != "status" && r.Action != "verify" && r.Action != "ensure") {
 		return
 	}
 	for _, name := range []string{"antigravity", "claudecode", "codex", "copilot", "devin", "hermes", "kiro"} {

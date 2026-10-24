@@ -240,6 +240,40 @@ function safeError(error: unknown): string {
 	return String(error)
 }
 
+// gatewayJSON parses a gateway answer and refuses one that repeats a key in
+// any object. JSON.parse keeps the last copy, so {"action":"block",
+// "action":"allow"} would read as allow; the native and shell hooks refuse
+// such an answer too (GAP-1007). The caller's catch closes the call.
+function gatewayJSON(text: string): unknown {
+	const value = JSON.parse(text)
+	const objects: Array<Set<string> | null> = []
+	let keyNext = false
+	for (let i = 0; i < text.length; i++) {
+		const c = text[i]
+		if (c === '"') {
+			let end = i + 1
+			while (text[end] !== '"') end += text[end] === "\\" ? 2 : 1
+			const keys = objects[objects.length - 1]
+			if (keyNext && keys) {
+				const key = JSON.parse(text.slice(i, end + 1)) as string
+				if (keys.has(key)) throw new Error("ambiguous gateway answer (repeated key)")
+				keys.add(key)
+			}
+			keyNext = false
+			i = end
+		} else if (c === "{" || c === "[") {
+			objects.push(c === "{" ? new Set<string>() : null)
+			keyNext = c === "{"
+		} else if (c === "}" || c === "]") {
+			objects.pop()
+			keyNext = false
+		} else if (c === ",") {
+			keyNext = objects[objects.length - 1] instanceof Set
+		}
+	}
+	return value
+}
+
 function trustedSocketOwner(uid: number): boolean {
 	return uid === 0 || (DC_SERVICE_UID > 0 && uid === DC_SERVICE_UID)
 }
@@ -378,7 +412,7 @@ async function gatewayFetch(path: string, init: RequestInit, token: string): Pro
 				ok: reply.status >= 200 && reply.status < 300,
 				status: reply.status,
 				headers: { get: (name: string) => name.toLowerCase() === "retry-after" ? reply.retry_after || null : null },
-				json: async () => JSON.parse(reply.body),
+				text: async () => reply.body,
 			} as Response
 		}
 		if (DC_LISTENER_PROOF) return provenTCPRequest(path, init, token)
@@ -735,7 +769,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				return failureResponse(`HTTP ${response.status}`)
 			}
 
-			const data = await response.json() as GatewayResponse
+			const data = gatewayJSON(await response.text()) as GatewayResponse
 
 			if (!data || !["allow", "block", "confirm", "alert"].includes(data.action || "")) {
 				return failureResponse("invalid gateway verdict")

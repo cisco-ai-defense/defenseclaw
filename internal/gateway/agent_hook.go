@@ -1174,11 +1174,12 @@ func (a *APIServer) finalizeAgentHook(
 // could not be written: the disk is full, or the audit store stayed busy
 // through its busy timeout and retries. Every call DefenseClaw lets go ahead
 // has a durable audit row, so a failed write is a failed check: it follows the
-// connector's resolved fail mode, like a recovered evaluator error. Closed
+// local failure policy, like a recovered evaluator error. Closed
 // (the default everywhere but Secure Client) denies a blockable tool or
-// prompt event; open (Secure Client's unset default, or an explicit open)
-// keeps the verdict, as do a block, a session-ending event and an event the
-// agent cannot block. It reports whether it changed the verdict. rawBody is
+// prompt event. Secure Client's unset default or explicit open keeps the
+// verdict, as do a block, a session-ending event and an event the agent
+// cannot block. A managed outage-open choice does not apply to an audit
+// failure. It reports whether it changed the verdict. rawBody is
 // the hook's request body: Claude Code's native denial
 // (hookSpecificOutput.permissionDecision) is rendered from the event it
 // names, and without it the denial fell back to a generic decision:block.
@@ -1878,19 +1879,18 @@ type hookCheckFailure struct {
 // A failed check produced no usable policy verdict. One rule covers every
 // connector:
 //   - On an enforcement event (any event that is not a lifecycle event,
-//     hookexec.LifecycleEvent), a recovered panic answers the fail-mode
-//     verdict: closed blocks, in observe mode too, advisory events included.
-//     On a standalone managed host an administrator's open applies to
-//     eligible gateway outages, not to a recovered panic.
+//     hookexec.LifecycleEvent), a recovered panic or a failed audit write
+//     answers the closed verdict, in observe mode too, advisory events
+//     included. It is no gateway outage, so neither a per-user outage mode
+//     nor an administrator's outage-open applies; only Secure Client keeps
+//     its open failure verdict.
 //   - On a stop, session-end or idle event a block keeps the agent running
 //     and repeats the failing hook, so no failed check blocks it. It gets the
 //     connector's neutral allow without follow-up context, or its terminal
 //     answer where the connector documents one (Claude Code's continue:false
 //     ends the turn). The audit row still records the evaluator failure.
 //
-// Other failed checks retain the native event-capability mapping. Per-user
-// explicit open and Secure Client's unset-open default retain their open
-// failure verdict.
+// Other failed checks retain the native event-capability mapping.
 func (a *APIServer) hookFailedCheckResponse(
 	ctx context.Context,
 	connectorName string,
@@ -1921,13 +1921,12 @@ func (a *APIServer) hookFailedCheckResponse(
 		return a.failSandboxHookClosed(ctx, profile, connectorName, req, rawBody, payload, resp)
 	}
 	cfg := a.decisionConfig(ctx)
-	// A failed check follows the connector's resolved fail mode, the
-	// administrator's on a managed computer (owner decision 2026-10-20): an
-	// explicit closed wins everywhere, Secure Client included, whose unset
-	// value resolves to open (#1163). A standalone administrator's open is
-	// outage-only; an evaluator panic is an internal failure, not an outage.
-	failOpen := cfg != nil && cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open" &&
-		(!failure.recoveredPanic || !cfg.StandaloneEnterprise())
+	// A local evaluation or audit failure is not a gateway connection outage.
+	// Secure Client retains its configured failure contract, including its
+	// unset open default (#1163). Every other deployment closes this failure,
+	// even with a saved per-user open or managed outage-open preference.
+	failOpen := cfg != nil && cfg.SecureClientIntegration() &&
+		cfg.EffectiveActionHookFailModeForConnector(connectorName) == "open"
 	if !failOpen && action == "block" && !lifecycle {
 		// Observe mode applies to policy verdicts, not failed checks.
 		mode = "action"
