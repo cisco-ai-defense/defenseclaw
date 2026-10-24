@@ -209,11 +209,6 @@ type profileDecision struct {
 	// alone shows Candidates.
 	Unproven   []string
 	Candidates []string
-	// unprovenWhy names the unproven facts for Refused and Uncertain
-	// (identityUncertainty), so a surface whose mode is another
-	// connector's decides its refusal for that connector
-	// (profileRefusedFor).
-	unprovenWhy string
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -534,6 +529,27 @@ type resolvedGuardrailProfile struct {
 
 type resolvedGuardrailProfileKey struct{}
 type profileRouteConnectorKey struct{}
+type profileSurfaceKey struct{}
+
+// withProfileSurface marks ctx as a request of surface (the agent hooks, or
+// the inspect endpoints and the LLM proxy), whose meet of profiles takes
+// its block levels from the members that enforce on it
+// (profileMeet.surfaces). A request with no mark (ACP) applies the meet of
+// every surface.
+func withProfileSurface(ctx context.Context, surface profileSurfaces) context.Context {
+	return context.WithValue(ctx, profileSurfaceKey{}, surface)
+}
+
+// profileSurfaceFrom is the surface ctx is marked with, profileSurfacesAll
+// for none.
+func profileSurfaceFrom(ctx context.Context) profileSurfaces {
+	if ctx != nil {
+		if surface, ok := ctx.Value(profileSurfaceKey{}).(profileSurfaces); ok && surface != 0 {
+			return surface
+		}
+	}
+	return profileSurfacesAll
+}
 
 // withGuardrailProfileDecision resolves the request's profile once, right
 // after authentication, and stores it on ctx. routeConnector is the
@@ -615,7 +631,7 @@ func requestLegacyAgentIdentity(ctx context.Context, agent string) (profileAgent
 // endpoints, whose connector comes from the authenticated hook credential.
 func (a *APIServer) guardrailProfileInspectMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(r.Context(), "")))
+		next.ServeHTTP(w, r.WithContext(a.withGuardrailProfileDecision(withProfileSurface(r.Context(), profileSurfaceInspect), "")))
 	})
 }
 
@@ -663,8 +679,8 @@ func resolveGuardrailProfileFor(ctx context.Context, set *guardrailProfileSet) *
 	decision := set.matchAgent(subject, source, profileRequestConnector(ctx), agent, legacy)
 	resolved := &resolvedGuardrailProfile{decision: decision, set: set}
 	if decision.Name != "" {
-		if derived, ok := set.derivedProfile(decision.Name); ok {
-			resolved.derived = derived.Config
+		if derived, ok := set.derivedConfigOn(decision.Name, profileSurfaceFrom(ctx)); ok {
+			resolved.derived = derived
 		}
 	}
 	return resolved
@@ -1824,9 +1840,11 @@ func (a *APIServer) handleGuardrailProfileResolve(w http.ResponseWriter, r *http
 		out["enrollment"] = enrollment
 		warnings = append(warnings, warning)
 	}
+	// The effective view shows the hook mode, so a meet's block levels are
+	// the ones its hooks apply (profileMeet.surfaces).
 	effective := set.base
-	if derived, ok := set.derivedProfile(decision.Name); ok {
-		effective = derived.Config
+	if derived, ok := set.derivedConfigOn(decision.Name, profileSurfaceHooks); ok {
+		effective = derived
 	}
 	if note := set.pendingRulePackNote(decision.Name, effective, connectorName); note != "" {
 		warnings = append(warnings, note)

@@ -451,27 +451,26 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	decision.Unproven = orderedFacts(needed)
 	decision.Candidates = candidates
-	decision.unprovenWhy = set.identityUncertainty(subject, decision.Unproven, connectorName)
-	set.decideUnproven(&decision, connectorName)
+	set.decideUnproven(&decision, set.identityUncertainty(subject, decision.Unproven, connectorName), connectorName)
 	return decision
 }
 
 // decideUnproven sets, on d, a decision that depends on an unproven
-// identity fact (Unproven, Candidates and unprovenWhy set), where a request
+// identity fact (Unproven and Candidates set; why names the facts), where a request
 // whose mode is connectorName's is refused (Refused, RefusedOn;
 // unprovenRefusal), and where it applies Name, the strictest combination of
 // every profile that may apply, in its own mode (Uncertain), as 1.0.3
 // applied it: a directory outage, a laptop off VPN or a pending upgrade
 // owner map never turns observe into a block (OVERTIGHT-AUDIT item 11,
 // GAP-0653).
-func (set *guardrailProfileSet) decideUnproven(d *profileDecision, connectorName string) {
+func (set *guardrailProfileSet) decideUnproven(d *profileDecision, why, connectorName string) {
 	d.RefusedOn = set.unprovenRefusal(d.Candidates, connectorName)
 	d.Refused, d.Uncertain = "", ""
 	if d.RefusedOn != 0 {
-		d.Refused = "DefenseClaw refused this request: " + d.unprovenWhy
+		d.Refused = "DefenseClaw refused this request: " + why
 	}
 	if d.RefusedOn != profileSurfacesAll {
-		d.Uncertain = "DefenseClaw applied the strictest of every profile that may apply: " + d.unprovenWhy
+		d.Uncertain = "DefenseClaw applied the strictest of every profile that may apply: " + why
 	}
 }
 

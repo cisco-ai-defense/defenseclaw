@@ -463,8 +463,14 @@ func requestPolicyConfig(ctx context.Context) *config.Config {
 func requestThresholds(ctx context.Context) policy.ThresholdsInput {
 	g := requestGeneration(ctx)
 	profile := ""
+	var meet *config.Config
 	if resolved := requestProfile(ctx, g); resolved != nil {
 		profile = resolved.decision.Name
+		if config.IsProfileMeet(profile) {
+			// The meet as the proxy's surface applies it
+			// (profileMeet.surfaces), which no table holds.
+			meet = resolved.derived
+		}
 	}
 	if g != nil && g.Config != nil && g.Config.SecureClientIntegration() {
 		// The 1.0 proxy verdict sent no thresholds, so the policy used the
@@ -473,6 +479,9 @@ func requestThresholds(ctx context.Context) policy.ThresholdsInput {
 		return policy.SecureClientGuardrailThresholds(g.Config.PolicyDir)
 	}
 	resolved := ResolveThresholds(g, thresholdConnectorFrom(ctx), profile)
+	if meet != nil {
+		resolved = resolveThresholds(meet, thresholdConnectorFrom(ctx))
+	}
 	block, alert := guardrailThresholdRanks(resolved)
 	trust := config.CiscoTrustFull
 	if g != nil && g.Config != nil {

@@ -164,7 +164,12 @@ How the keys combine:
   action applies wherever one blocks, with the lowest `block_at` of those that
   block. Hook and inspect modes combine apart: hooks block where a candidate's
   hook mode does, and inspect where its guardrail mode does, so a candidate
-  that inspects in action mode does not make an observe hook block. The strictest HILT applies. The rules of every rule pack are
+  that inspects in action mode does not make an observe hook block. Block
+  levels and HILT combine apart the same way: hooks take the lowest
+  `block_at` and the strictest HILT of the candidates whose hooks block, and
+  inspect and the LLM proxy those of the candidates that inspect in action
+  mode, so the combination blocks only what one of its candidates blocks on
+  that surface. `profile-explain` shows the hooks' levels. The rules of every rule pack are
   enforced; suppressions apply only when all packs share them (allows are the
   intersection). Every sensitive tool any pack inspects is inspected. The
   sandbox limits of all candidates are combined: requirements and blocks are
@@ -195,8 +200,9 @@ How the keys combine:
   (`codex.mode`, `connector_hooks`, else the guardrail mode), inspect and the
   LLM proxy by the guardrail mode. So a strict profile whose global mode is
   action does not refuse a connector it sets to observe. `/api/v1/inspect/tool`
-  called with a token not scoped to a connector applies the mode of the
-  gateway's own connector, and is refused by that connector's settings. An ACP
+  called with a token not scoped to a connector applies the profile and mode
+  of the gateway's own connector: the profile is chosen, and refused, by that
+  connector's settings. An ACP
   pair applies its own ACP mode: in observe mode the refusal is logged as
   would-block and the request goes on. A fact no assignment needs does not make the
   decision uncertain. An account is recognized by its SID (SSSD or

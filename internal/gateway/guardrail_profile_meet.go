@@ -33,7 +33,12 @@ import (
 // rules of every member's rule pack (a rule any member enforces is enforced),
 // the suppressions all members share (allows are the intersection), every
 // sensitive tool any member inspects, and the members' sandbox floors
-// tightened together (config.Config.SandboxFloor). hook_fail_mode and
+// tightened together (config.Config.SandboxFloor). Each surface takes its
+// block levels and HILT only from the members that enforce on it: the agent
+// hooks from those whose hook mode is action, the inspect endpoints and the
+// LLM proxy from those whose inspect mode is (profileMeet.surfaces), so an
+// inspect-only member's lower block level never blocks a hook that no member
+// blocks. hook_fail_mode and
 // enabled are machine settings a profile cannot change, so they are the
 // same for every member. The block message is the base configuration's, so
 // no member's text reaches the caller.
@@ -42,8 +47,14 @@ import (
 type profileMeet struct {
 	members []string
 	once    sync.Once
+	// derived takes its block levels from every member that enforces on any
+	// surface: ACP, sandboxes and explain read it.
 	derived config.DerivedGuardrailProfile
-	ok      bool
+	// surfaces is the meet as a request of one surface applies it
+	// (profileSurfaceFrom): the hooks' and inspect's configurations, whose
+	// block levels and HILT come only from the members that enforce on it.
+	surfaces map[profileSurfaces]*config.Config
+	ok       bool
 	// rules and packs hold the merged rule generations and composed packs
 	// by connector and member sources (meetSourcesKey).
 	rules sync.Map
@@ -99,18 +110,49 @@ func (set *guardrailProfileSet) meet(name string) *profileMeet {
 	value, _ := set.meets.LoadOrStore(name, &profileMeet{members: members})
 	meet := value.(*profileMeet)
 	meet.once.Do(func() {
-		profile, hookModes := set.meetProfile(members)
+		fail := func(err error) {
+			fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles %s: %v\n", strings.Join(members, ", "), err)
+		}
+		profile, hookModes := set.meetProfile(members, profileSurfacesAll)
 		derived, err := set.base.DeriveGuardrailProfileMeet(members, profile, hookModes)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles %s: %v\n", strings.Join(members, ", "), err)
+			fail(err)
 			return
 		}
-		meet.derived, meet.ok = derived, true
+		surfaces := map[profileSurfaces]*config.Config{}
+		for _, surface := range []profileSurfaces{profileSurfaceHooks, profileSurfaceInspect} {
+			surfaceProfile, surfaceHookModes := set.meetProfile(members, surface)
+			if reflect.DeepEqual(surfaceProfile, profile) {
+				surfaces[surface] = derived.Config
+				continue
+			}
+			surfaceDerived, err := set.base.DeriveGuardrailProfileMeet(members, surfaceProfile, surfaceHookModes)
+			if err != nil {
+				fail(err)
+				return
+			}
+			surfaces[surface] = surfaceDerived.Config
+		}
+		meet.derived, meet.surfaces, meet.ok = derived, surfaces, true
 	})
 	if !meet.ok {
 		return nil
 	}
 	return meet
+}
+
+// derivedConfigOn is the configuration profile name applies on surface: a
+// meet's configuration for the hooks or inspect (profileMeet.surfaces), else
+// the profile's own. ok is false when name is no profile of set.
+func (set *guardrailProfileSet) derivedConfigOn(name string, surface profileSurfaces) (cfg *config.Config, ok bool) {
+	if meet := set.meet(strings.TrimSpace(name)); meet != nil {
+		if cfg := meet.surfaces[surface]; cfg != nil {
+			return cfg, true
+		}
+		return meet.derived.Config, true
+	}
+	derived, ok := set.derivedProfile(name)
+	return derived.Config, ok
 }
 
 // meetMembers expands meets among names into their members.
@@ -185,15 +227,18 @@ type meetSettings struct {
 }
 
 // meetSettingsFor is the meet of members' effective settings for
-// connectorName ("" for the global settings): the hook mode is action
-// wherever a member's hook mode is, and the inspect mode wherever a
-// member's inspect mode is, each apart, so a member that inspects in action
-// mode never makes an observe hook block (review of r104 Q-identity,
-// continuation 4, loop round 2); the global mode, which every connector the
-// meet does not name inherits for both, is action wherever either is. The
-// lowest block level and the strictest HILT of the members that block, and
-// the lowest alert level.
-func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName string) meetSettings {
+// connectorName ("" for the global settings) as surfaces apply them: the
+// hook mode is action wherever a member's hook mode is, and the inspect mode
+// wherever a member's inspect mode is, each apart, so a member that inspects
+// in action mode never makes an observe hook block (review of r104
+// Q-identity, continuation 4, loop round 2); the global mode, which every
+// connector the meet does not name inherits for both, is action wherever
+// either is. The lowest block level and the strictest HILT of the members
+// that block on one of surfaces (by the hook mode on the hooks, the inspect
+// mode on inspect), so an inspect-only member's block level never reaches
+// the hooks, nor a hook-only member's inspect (review of r104 Q-identity,
+// rc.7 loop round 1), and the lowest alert level.
+func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName string, surfaces profileSurfaces) meetSettings {
 	out := meetSettings{mode: "observe", hookMode: "observe"}
 	blockRank, alertRank, hiltRank := 0, 0, 0
 	for _, member := range members {
@@ -212,6 +257,9 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 		}
 		if inspectBlock || connectorName == "" {
 			out.mode = "action"
+		}
+		if !(hookBlock && surfaces&profileSurfaceHooks != 0) && !(inspectBlock && surfaces&profileSurfaceInspect != 0) {
+			continue
 		}
 		block, _ := guardrailThresholdRanks(resolveThresholds(cfg, connectorName))
 		proxy, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cfg.Guardrail, connectorName))
@@ -245,20 +293,21 @@ func (set *guardrailProfileSet) meetSettingsFor(members []string, connectorName 
 }
 
 // meetProfile is the guardrail profile whose settings are the meet of
-// members for every connector (meetSettingsFor), and the hook mode of each
+// members for every connector as surfaces apply it (meetSettingsFor), and
+// the hook mode of each
 // connector it names, which the meet sets apart from its inspect mode
 // (config.Config.DeriveGuardrailProfileMeet). Its rule pack is the base
 // configuration's: the meet's rules are merged from every member
 // (meetRuleGeneration), and its block levels are explicit, so no pack
 // posture decides them.
-func (set *guardrailProfileSet) meetProfile(members []string) (config.GuardrailProfile, map[string]string) {
-	global := set.meetSettingsFor(members, "")
+func (set *guardrailProfileSet) meetProfile(members []string, surfaces profileSurfaces) (config.GuardrailProfile, map[string]string) {
+	global := set.meetSettingsFor(members, "", surfaces)
 	hilt := global.hilt
 	profile := config.GuardrailProfile{Mode: global.mode, BlockAt: global.block, AlertAt: global.alert, HILT: &hilt,
 		Connectors: map[string]config.PerConnectorGuardrailConfig{}}
 	hookModes := map[string]string{}
 	for _, name := range set.meetConnectors() {
-		s := set.meetSettingsFor(members, name)
+		s := set.meetSettingsFor(members, name, surfaces)
 		connectorHILT := s.hilt
 		profile.Connectors[name] = config.PerConnectorGuardrailConfig{Mode: s.mode, BlockAt: s.block, AlertAt: s.alert, HILT: &connectorHILT}
 		hookModes[name] = s.hookMode

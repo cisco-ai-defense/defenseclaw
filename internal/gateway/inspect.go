@@ -1554,10 +1554,15 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	if serverConnector == "" {
 		serverConnector = canonicalConnectorRulePackKey(a.connectorName())
 	}
-	// Refused where a strict candidate blocks the connector whose mode the
-	// verdict takes (applyMode below), not the global settings an
-	// unscoped credential's decision read.
-	if a.refuseProfileInspectFor(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool", serverConnector) {
+	// The profile is decided for the connector whose mode the verdict takes
+	// (applyMode below): the whole decision, not only its refusal. Decided
+	// for the global settings of an unscoped credential, overlapping
+	// assignments selected a profile that observes this connector over one
+	// that blocks it (review of r104 Q-identity, rc.7 loop round 1).
+	if config.NormalizeConnectorName(serverConnector) != profileRequestConnector(r.Context()) {
+		r = r.WithContext(withGuardrailProfile(r.Context(), a.requestProfileSet(r.Context()), serverConnector))
+	}
+	if a.refuseProfileInspect(w, r, "/api/v1/inspect/tool", "inspect-tool-block", "tool") {
 		return
 	}
 
