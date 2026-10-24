@@ -174,6 +174,42 @@ func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
 	if len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
 		t.Fatalf("overflow must make signed-in coverage incomplete: %+v", reported)
 	}
+	// An incomplete root cannot enroll its visible extension, but a complete
+	// sibling root must still be inspected and can enroll its own surface.
+	reported = nil
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); got != "" || len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("overflow-only row: version=%q reported=%+v", got, reported)
+	}
+	old := filepath.Join(home, ".cursor", "extensions", "anthropic.claude-code-2.1.100-win32-x64")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode")
+	oldObserved := false
+	for _, surface := range surfaces {
+		oldObserved = oldObserved || surface.Path == old
+	}
+	if err == nil || !oldObserved {
+		t.Fatalf("overflow and complete sibling: surfaces=%+v error=%v", surfaces, err)
+	}
+	reported = nil
+	_ = windowsStandaloneSurfaceVersion(row, nil, ctx, "2.1.300")
+	var incomplete, oldSurface bool
+	for _, agent := range reported {
+		incomplete = incomplete || agent.Code == UnprotectedCodeInstallScanIncomplete
+		oldSurface = oldSurface || agent.Code == UnprotectedCodeSurfaceUnverified && agent.Version == "2.1.100"
+	}
+	if !incomplete || !oldSurface {
+		t.Fatalf("want overflow and old sibling findings: %+v", reported)
+	}
+	known := filepath.Join(home, ".cursor", "extensions", "anthropic.claude-code-2.1.220-win32-x64")
+	if err := os.Mkdir(known, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reported = nil
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); got != "2.1.220" || len(reported) == 0 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("complete sibling row: version=%q reported=%+v", got, reported)
+	}
 }
 
 // A native claude.exe whose build Claude Code has not recorded yet (it

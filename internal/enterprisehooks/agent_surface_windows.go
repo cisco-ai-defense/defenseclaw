@@ -14,6 +14,7 @@ package enterprisehooks
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -120,10 +121,18 @@ const windowsSurfaceMaxEntries = 4096
 // profile under the owner's token. It fails when the owner has no active
 // session.
 func DiscoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]connector.AgentSurface, error) {
+	observed, _, err := discoverWindowsAgentSurfaces(sid, profileHome, connectorName)
+	return observed, err
+}
+
+// discoverWindowsAgentSurfaces distinguishes complete extension roots from
+// overflowing ones. An overflowing root supplies observed warnings but cannot
+// select a row version because an older extension may be beyond its bound.
+func discoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]connector.AgentSurface, []connector.AgentSurface, error) {
 	profileHome = strings.TrimSpace(profileHome)
 	probe, ok := windowsSurfaceExtensions[strings.ToLower(strings.TrimSpace(connectorName))]
 	if !ok || !filepath.IsAbs(profileHome) {
-		return nil, nil
+		return nil, nil, nil
 	}
 	profileHome = filepath.Clean(profileHome)
 	roots := make([]struct{ host, dir string }, 0, len(windowsExtensionRoots)+1)
@@ -137,12 +146,14 @@ func DiscoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 		roots = append(roots, struct{ host, dir string }{"vscode", relocated})
 	}
 	var out []connector.AgentSurface
-	err := windowsSurfaceReadAs(sid, profileHome, func() error {
+	var completeIndexes []int
+	var scanErr error
+	readErr := windowsSurfaceReadAs(sid, profileHome, func() error {
 		seen := map[string]bool{}
 		for _, root := range roots {
 			dir, version, err := newestWindowsExtensionDir(root.dir, probe.id)
 			if err != nil {
-				return err
+				scanErr = errors.Join(scanErr, err)
 			}
 			if dir == "" || seen[strings.ToLower(dir)] {
 				continue
@@ -156,17 +167,18 @@ func DiscoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 				surface.EngineVersion = surface.HostVersion
 			}
 			out = append(out, surface)
+			if err == nil {
+				completeIndexes = append(completeIndexes, len(out)-1)
+			}
 		}
 		for _, prober := range probe.desktopProbers {
 			if surface, ok := prober(profileHome); ok {
 				out = append(out, surface)
+				completeIndexes = append(completeIndexes, len(out)-1)
 			}
 		}
 		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
 	// Administrator-protected package folders are read as LocalSystem.
 	for i := range out {
 		if out[i].Host == "codex-app" {
@@ -175,7 +187,13 @@ func DiscoverWindowsAgentSurfaces(sid, profileHome, connectorName string) ([]con
 			}
 		}
 	}
-	return out, nil
+	var complete []connector.AgentSurface
+	if readErr == nil {
+		for _, i := range completeIndexes {
+			complete = append(complete, out[i])
+		}
+	}
+	return out, complete, errors.Join(scanErr, readErr)
 }
 
 // discoverWindowsClaudeDesktop finds the Claude Code build Claude Desktop
@@ -247,9 +265,6 @@ func discoverWindowsDevinDesktop(profileHome string) (connector.AgentSurface, bo
 // the editor marked obsolete (.obsolete format is a live check).
 func newestWindowsExtensionDir(root, id string) (string, string, error) {
 	entries, overflow := readWindowsDirBounded(root)
-	if overflow {
-		return "", "", fmt.Errorf("extension folder %s has more than %d entries", root, windowsSurfaceMaxEntries)
-	}
 	obsolete := map[string]bool{}
 	if data, err := readBoundedWindowsAgentPackageJSON(filepath.Join(root, ".obsolete")); err == nil {
 		_ = json.Unmarshal(data, &obsolete)
@@ -271,6 +286,9 @@ func newestWindowsExtensionDir(root, id string) (string, string, error) {
 		if best == "" || compareWindowsEnterpriseVersion(version, bestVersion) > 0 {
 			best, bestVersion = filepath.Join(root, name), version
 		}
+	}
+	if overflow {
+		return best, bestVersion, fmt.Errorf("extension folder %s has more than %d entries", root, windowsSurfaceMaxEntries)
 	}
 	return best, bestVersion, nil
 }
@@ -335,16 +353,25 @@ func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowC
 		logfSafely(logf, row.SID, "(SID, "+name+") app and extension discovery waits until the user signs in")
 		return surfaceAdmission{}, false
 	}
-	surfaces, err := DiscoverWindowsAgentSurfaces(canonicalManifestTargetSID(row.SID), row.UserHome, name)
+	surfaces, complete, err := discoverWindowsAgentSurfaces(canonicalManifestTargetSID(row.SID), row.UserHome, name)
 	if err != nil {
 		logfSafely(logf, row.SID, "(SID, "+name+") app and extension discovery failed: "+err.Error())
 		if rowContext.report != nil {
 			rowContext.report(UnprotectedAgent{User: rowContext.user, SID: row.SID, Connector: name,
 				Code: UnprotectedCodeInstallScanIncomplete, Reason: "app and extension inventory is incomplete: " + err.Error()})
 		}
+	}
+	if len(surfaces) == 0 && err != nil {
 		return surfaceAdmission{}, false
 	}
-	return admitSurfaces(name, UnverifiedVersionsFor(name), surfaces), true
+	policy := UnverifiedVersionsFor(name)
+	admission := admitSurfaces(name, policy, complete)
+	if err != nil {
+		// Retain refused observations from incomplete roots alongside the
+		// coverage warning, without enrolling from those roots.
+		admission.rejected = admitSurfaces(name, policy, surfaces).rejected
+	}
+	return admission, true
 }
 
 // windowsStandaloneSurfaceVersion is the row version of a profile whose
