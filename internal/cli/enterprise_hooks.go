@@ -1713,7 +1713,11 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 func runEnterpriseHooksReadiness(cmd *cobra.Command, _ []string) error {
 	if cfg == nil || !cfg.StandaloneEnterprise() ||
 		(runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin") {
-		return fmt.Errorf("enterprise hooks readiness is available only for managed standalone Setup")
+		platform := "Unix"
+		if runtime.GOOS == "windows" {
+			platform = "Windows"
+		}
+		return fmt.Errorf("enterprise hooks readiness is available only for managed standalone %s Setup", platform)
 	}
 	return runEnterpriseHooksVerifyWithScope(cmd, true)
 }
