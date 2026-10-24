@@ -4399,6 +4399,13 @@ func restoreCodexOtelEntries(cfg map[string]interface{}, backup codexConfigBacku
 		// contain one of our exporter endpoints, so preserve it.
 		return nil
 	}
+	// Managed Unix Setup skips the per-user settings precheck. Refuse the same
+	// retired-port ambiguity before its shared restore can retain the exporter.
+	for _, key := range codexOtelExporterKeys {
+		if codexExporterHasAmbiguousLegacyPort(current[key], opts) {
+			return fmt.Errorf("Codex native OTLP exporter ownership is unresolved at otel.%s.otlp-http.endpoint; remove the stale exporter from config.toml before retrying", key) //nolint:staticcheck // Preserve the product name in this operator diagnostic.
+		}
+	}
 
 	currentLooksManaged := codexOtelBlockLooksManaged(current, opts)
 	var originalValue interface{}

@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -66,6 +67,17 @@ func TestCodexUpgradeRefusesPartialMarkerOnRetiredPort(t *testing.T) {
 					}
 					if _, err := UserNativeOTLPResidue("codex", SetupOpts{DataDir: dir, ManagedEnterprise: true}); err == nil || !strings.Contains(err.Error(), "otel.exporter") {
 						t.Fatalf("managed cleanup accepted ambiguous retired-port exporter: %v", err)
+					}
+					if runtime.GOOS != "windows" {
+						managed := upgrade
+						managed.ManagedEnterprise = true
+						if err := c.Setup(context.Background(), managed); err == nil || !strings.Contains(err.Error(), "otel.exporter") {
+							t.Fatalf("managed Setup accepted ambiguous retired-port exporter: %v", err)
+						}
+						got, err = os.ReadFile(configPath)
+						if err != nil || string(got) != string(before) {
+							t.Fatalf("refused managed Setup changed the Codex config: %v", err)
+						}
 					}
 				})
 			}
