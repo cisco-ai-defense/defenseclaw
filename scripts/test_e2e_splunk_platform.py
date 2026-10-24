@@ -4,7 +4,6 @@ import re
 import unittest
 from pathlib import Path
 
-
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/e2e.yml"
 IMAGE_ARCH = {"splunk/splunk:10.2.0": "X64"}
 
