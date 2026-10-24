@@ -556,9 +556,10 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
       ;;
   esac
 fi
-{{end}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+{{end}}{{if not .Sandbox}}if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
+{{end}}
 
 ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
@@ -569,6 +570,14 @@ case "$ACTION" in
   allow|alert|block|confirm) ;;
   *) fail_response "invalid or missing action in gateway response" ;;
 esac
+
+{{if .Sandbox}}if ! defenseclaw_sandbox_confirm_receipt "/api/v1/codex/hook" "$RESULT"; then
+  fail_unreachable "sandbox hook receipt was not acknowledged"
+fi
+if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
+  echo "$OUTPUT"
+fi
+{{end}}
 
 # Codex's hook protocol is strictly EITHER structured JSON on stdout
 # with exit 0 (Codex parses the decision from the JSON) OR exit 2
