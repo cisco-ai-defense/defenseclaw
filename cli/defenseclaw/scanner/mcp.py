@@ -60,6 +60,7 @@ from defenseclaw.models import Finding, ScanResult
 from defenseclaw.paths import bundled_mcp_yara_rules_dir
 from defenseclaw.registries.ssrf import (
     SSRFError,
+    SSRFUnresolvableError,
     analyzer_dns_resolution,
     pinned_async_getaddrinfo,
     pinned_getaddrinfo,
@@ -1451,6 +1452,10 @@ class MCPScannerWrapper:
                 # resolver to it for the duration of the remote scan.
                 ip, host, port = resolve_and_pin(target, allow_private=allow_private)
                 pinned_target = (host, port, ip)
+            except SSRFUnresolvableError as exc:
+                # DNS gave no address to vet or pin. The scan has no verdict;
+                # mcp set and the watcher apply unverified_server to it.
+                raise RuntimeError(f"MCP URL {target!r} could not be scanned: {exc}") from exc
             except SSRFError as exc:
                 raise ValueError(
                     f"refusing to scan MCP URL {target!r}: {exc}"

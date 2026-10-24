@@ -482,7 +482,9 @@ def evaluate_admission(
         from defenseclaw.enforce.asset_lists import path_has_components
 
         configured = policy.field_sources.get("first_party_allow_list", "").startswith("config:")
-        path_matches = (
+        # GAP-1212: the shipped CodeGuard skill is trusted by its content in
+        # every connector's skills folder, not only the folders the entry names.
+        path_matches = (not legacy and _content_verified_first_party(target_type, name)) or (
             any(path_has_components(source_path, marker) for marker in fp_constraints)
             if configured else _matches_provenance(fp_constraints, source_path)
         )
@@ -958,6 +960,13 @@ def _matches_amp_user_home(
     if os.path.normcase(common_path) != os.path.normcase(resolved_home):
         return False
     return os.path.normcase(resolved_source) == os.path.normcase(expected_source)
+
+
+def _content_verified_first_party(target_type: str, name: str) -> bool:
+    """Whether :func:`_own_first_party_content` checks this entry by the asset's
+    bytes, so its folder markers add nothing. Mirrors Go
+    ``contentVerifiedFirstParty``."""
+    return target_type == "skill" and name == "codeguard"
 
 
 def _own_first_party_content(target_type: str, name: str, source_path: str) -> bool:

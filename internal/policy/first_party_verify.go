@@ -46,6 +46,14 @@ var codeGuardSkillSignatures = map[string]bool{
 // and an entry named defenseclaw for a plugin matches nothing here, because
 // the watcher recognizes DefenseClaw's own plugin by its bytes before
 // admission. Other first-party entries keep their name and location match.
+//
+// The shipped CodeGuard skill is trusted by its content wherever a connector
+// keeps skills: `defenseclaw codeguard install-skill` copies it into every
+// active connector's skills folder (Codex, Copilot, OpenCode, Hermes, ...),
+// and the entry's folder markers named only some of them, so the watcher
+// scanned and quarantined the product's own skill there (GAP-1212). A
+// configuration without a codeguard entry, or with allow_list_bypass_scan
+// off (strict), still scans it.
 // The Secure Client admission is not passed through this.
 func (in *AdmissionInput) VerifyFirstParty() {
 	if in == nil || in.Admission == nil || len(in.Admission.FirstPartyAllowList) == 0 {
@@ -53,8 +61,13 @@ func (in *AdmissionInput) VerifyFirstParty() {
 	}
 	kept := make([]CompiledFirstParty, 0, len(in.Admission.FirstPartyAllowList))
 	for _, entry := range in.Admission.FirstPartyAllowList {
-		if entry.Name == in.TargetName && !ownFirstPartyContent(in.TargetType, entry.Name, in.Path) {
-			continue
+		if entry.Name == in.TargetName {
+			if !ownFirstPartyContent(in.TargetType, entry.Name, in.Path) {
+				continue
+			}
+			if contentVerifiedFirstParty(in.TargetType, entry.Name) {
+				entry.SourcePathContains = []string{in.Path}
+			}
 		}
 		kept = append(kept, entry)
 	}
@@ -75,6 +88,13 @@ func ownFirstPartyContent(targetType, name, path string) bool {
 		return false
 	}
 	return true
+}
+
+// contentVerifiedFirstParty reports a first-party entry that
+// ownFirstPartyContent checks by the asset's bytes, so its location adds
+// nothing.
+func contentVerifiedFirstParty(targetType, name string) bool {
+	return strings.EqualFold(targetType, "skill") && name == "codeguard"
 }
 
 const (

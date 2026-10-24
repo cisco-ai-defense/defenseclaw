@@ -7,6 +7,7 @@ package hookruntime
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -17,7 +18,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
@@ -925,5 +928,73 @@ func TestPublishedFullHookHasPrivateHandleSecurity(t *testing.T) {
 	}
 	if err := locked.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// GAP-1211: the launcher of every tool call hashed the whole full hook while
+// it held the account's gateway start mutex, so parallel tool calls (Codex
+// runs them side by side, beside Copilot) waited for each other's hash and
+// spent the hook's answer budget before the gateway was asked. The
+// verification now runs outside the mutex, so parallel calls verify at the
+// same time, and the call still launches the verified generation.
+func TestParallelDelegationsVerifyTheFullHookOutsideTheStartMutex(t *testing.T) {
+	fixture := newDelegationFixture(t)
+	t.Setenv(delegationHelperEnvironment, "1")
+	const calls = 3
+	var mu sync.Mutex
+	type span struct{ start, end time.Time }
+	var spans []span
+	mutexHeld := false
+	previous := lockVerifiedHook
+	t.Cleanup(func() { lockVerifiedHook = previous })
+	lockVerifiedHook = func(state State) (*os.File, error) {
+		// Another OS thread tries the mutex: a Windows mutex is recursive for
+		// the thread that owns it.
+		probe := make(chan error, 1)
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			probe <- WithGatewayStartLock(ctx, func() error { return nil })
+		}()
+		held := <-probe != nil
+		start := time.Now()
+		time.Sleep(300 * time.Millisecond) // a slow hash of a large full hook
+		locked, err := previous(state)
+		mu.Lock()
+		spans = append(spans, span{start, time.Now()})
+		mutexHeld = mutexHeld || held
+		mu.Unlock()
+		return locked, err
+	}
+	codes := make(chan int, calls)
+	for i := 0; i < calls; i++ {
+		go func() {
+			var stdout, stderr bytes.Buffer
+			codes <- delegateAt(fixture.paths, fixture.executable,
+				[]string{"-test.run=^TestHookDelegationHelper$"}, strings.NewReader(""), &stdout, &stderr)
+		}()
+	}
+	for i := 0; i < calls; i++ {
+		if code := <-codes; code != 37 {
+			t.Fatalf("delegated exit code = %d, want 37 (the verified full hook ran)", code)
+		}
+	}
+	if mutexHeld {
+		t.Fatal("the full hook was verified while the gateway start mutex was held")
+	}
+	if len(spans) != calls {
+		t.Fatalf("verifications = %d, want %d (one per call)", len(spans), calls)
+	}
+	latestStart, earliestEnd := spans[0].start, spans[0].end
+	for _, s := range spans[1:] {
+		if s.start.After(latestStart) {
+			latestStart = s.start
+		}
+		if s.end.Before(earliestEnd) {
+			earliestEnd = s.end
+		}
+	}
+	if !latestStart.Before(earliestEnd) {
+		t.Fatalf("parallel calls verified one after another: %+v", spans)
 	}
 }
