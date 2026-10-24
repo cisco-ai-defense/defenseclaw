@@ -2370,6 +2370,33 @@ func TestWindowsEnterpriseFailedLifecycleNamesTheRecoveryStep(t *testing.T) {
 	}
 }
 
+func TestWindowsNativeOTLPCaptureSkipWarning(t *testing.T) {
+	path := `C:\Users\bob\.codex\config.toml`
+	document, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"ok":             true,
+		"action":         "upgrade",
+		"user_native_otlp_capture_skipped": []string{
+			path + ": linked file was not captured",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := parseWindowsEnterpriseInstallerReport(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := enterprisestatus.New("ensure", "standalone", "windows", "1.0.4")
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	addWindowsEnterpriseRecoveryGatewayWarnings(result, report)
+	if len(result.Errors) != 0 || len(result.Warnings) != 1 ||
+		result.Warnings[0].Code != "user_native_otlp_capture_skipped" ||
+		!strings.Contains(result.Warnings[0].Message, path) {
+		t.Fatalf("linked capture skip was not reported once: %+v", result)
+	}
+}
+
 // WIN-R2-03: Setup run from an elevated prompt cannot act as the accounts the
 // guardian registered, so the rollback names that cause and a remedy the
 // administrator can run from that prompt.

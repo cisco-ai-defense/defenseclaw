@@ -216,6 +216,7 @@ $script:DefenseClawCursorAdapterRestored = $false
 # (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
 # run.
 $script:DefenseClawRollbackLeftovers = @()
+$script:DefenseClawUserNativeOTLPCaptureSkipped = @()
 # Standalone: each account whose old managed runtime generations a
 # managed-hook lifecycle retire left in place, because DefenseClaw could not
 # verify or apply the permissions of that account's DefenseClaw folder
@@ -9633,11 +9634,6 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
-    $runtimeEnv = [IO.Path]::Combine([string]$Layout.RuntimeDirectory, '.env')
-    if ((Test-DefenseClawStandaloneProfile) -and
-        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $runtimeEnv -PathType Leaf)) {
-        Set-DefenseClawPathAcl -Path $runtimeEnv -Kind RuntimeFile -GatewayServiceSID $gatewaySID
-    }
     if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) -and
         (-not $AllowTransactionRecordedBrokerAbsence -or
             (Microsoft.PowerShell.Management\Test-Path `
@@ -14670,6 +14666,15 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
                 # Guardian Verify also skips linked or unreadable user files.
                 # A user path must not block the whole machine upgrade.
                 $captured = $false
+                $message = $path + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic `
+                    -Value $_.Exception.Message -MaxLength 512)
+                if (@($script:DefenseClawUserNativeOTLPCaptureSkipped).Count -lt 256) {
+                    $script:DefenseClawUserNativeOTLPCaptureSkipped += $message
+                }
+                Microsoft.PowerShell.Utility\Write-Warning `
+                    -Message ('native OTLP preimage skipped: ' + $message)
+                Write-DefenseClawLifecyclePhase `
+                    -Stage ('native OTLP preimage skipped: ' + $message)
             }
             $exists = $null -ne $before
             $hash = ''
@@ -14717,12 +14722,12 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
 function Add-DefenseClawUserNativeOTLPRollbackLeftover {
     param([Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Reason)
-    $message = $Path + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic `
+    $message = 'native OTLP user rollback: ' + $Path + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic `
         -Value $Reason -MaxLength 512)
     if (@($script:DefenseClawRollbackLeftovers).Count -lt 256) {
         $script:DefenseClawRollbackLeftovers += $message
     }
-    Write-DefenseClawLifecyclePhase -Stage ('native OTLP rollback left ' + $message)
+    Write-DefenseClawLifecyclePhase -Stage ('rollback left ' + $message)
 }
 
 function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
@@ -14771,6 +14776,8 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
             $state = $saved.state_directories[$stateIndex + $agentOffset]
             $stateCaptured = $state.PSObject.Properties['captured']
             if ($null -ne $stateCaptured -and -not [bool]$stateCaptured.Value) {
+                Add-DefenseClawUserNativeOTLPRollbackLeftover `
+                    -Path $statePath -Reason 'preimage could not be captured'
                 $restoreAgent += $false
                 continue
             }
@@ -14831,6 +14838,10 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                         -Path $path -Reason $_.Exception.Message
                 }
             }
+            else {
+                Add-DefenseClawUserNativeOTLPRollbackLeftover `
+                    -Path $path -Reason 'preimage could not be captured'
+            }
             $index++
         }
         foreach ($agent in @('.codex', '.claude')) {
@@ -14853,6 +14864,22 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                     -Path $statePath -Reason $_.Exception.Message
             }
         }
+    }
+}
+
+function Invoke-DefenseClawUserNativeOTLPRestoreBestEffort {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    try {
+        Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+            -Snapshot $Snapshot -SnapshotPath $SnapshotPath -Layout $Layout
+    }
+    catch {
+        Add-DefenseClawUserNativeOTLPRollbackLeftover `
+            -Path $SnapshotPath -Reason $_.Exception.Message
     }
 }
 
@@ -15155,10 +15182,6 @@ function Restore-DefenseClawTransaction {
         -Layout $Layout `
         -GatewayServiceName ([string]$snapshot.gateway_service) `
         -GuardianServiceName ([string]$snapshot.guardian_service)
-    Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
-        -Snapshot $snapshot `
-        -SnapshotPath $SnapshotPath `
-        -Layout $Layout
     $configSidecars = @()
     if (Test-DefenseClawStandaloneProfile) {
         $configSidecars = @(
@@ -15506,6 +15529,12 @@ function Restore-DefenseClawTransaction {
                     -Name $standaloneSensorHelper `
                     -StartMode ([int]$gatewayStartMode)
             }
+        }
+        # A user-owned file or CAS receipt cannot hold back restoration of
+        # the machine files and prior services.
+        if (Test-DefenseClawStandaloneProfile) {
+            Invoke-DefenseClawUserNativeOTLPRestoreBestEffort `
+                -Snapshot $snapshot -SnapshotPath $SnapshotPath -Layout $Layout
         }
     }
 }
@@ -16128,6 +16157,10 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                     -Snapshot $snapshot `
                     -Name $restoredSensorHelper
             }
+        }
+        if (Test-DefenseClawStandaloneProfile) {
+            Invoke-DefenseClawUserNativeOTLPRestoreBestEffort `
+                -Snapshot $snapshot -SnapshotPath $SnapshotPath -Layout $Layout
         }
     }
     return $snapshot
@@ -17215,22 +17248,10 @@ function Complete-DefenseClawInstallRollbackIntent {
             )) `
             -Expected $quarantineAcl
         Assert-DefenseClawManagedTreeNoReparse -Root $path
-        $removalOptions = @{}
-        if ([string]$claim[0] -ceq 'InstallRoot' -and
-            (Test-DefenseClawStandaloneProfile)) {
-            # A hook process already started from this fresh install may
-            # briefly hold its executable after registrations were restored.
-            # The protected rollback receipt and this exact quarantined root
-            # authorize a bounded retry; no other root gets that window.
-            $removalOptions.RetryHeldFileMilliseconds = 60000
-            $removalOptions.ExpectedRootIdentity = [string]$rechecked.Identity
-            $removalOptions.ExpectedRootSecurityDescriptor = [byte[]]$rechecked.SecurityDescriptor
-        }
         Remove-DefenseClawManagedTree `
             -Path $path `
             -RequiredBase ([string]$claim[3]) `
-            -Label ([string]$claim[0]) `
-            @removalOptions
+            -Label ([string]$claim[0])
         if ($null -ne
             $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists(
                 $path
@@ -21356,6 +21377,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawStaleTeardownJournalRemoved = ''
     $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
+    $script:DefenseClawUserNativeOTLPCaptureSkipped = @()
     $script:DefenseClawRetireSkipped = @()
     $script:DefenseClawSignedOutUntrustedFolders = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
@@ -25656,6 +25678,11 @@ function Get-DefenseClawLifecycleStatus {
                 $script:DefenseClawRollbackLeftovers
             )
         }
+        if (@($script:DefenseClawUserNativeOTLPCaptureSkipped).Count -gt 0) {
+            $status['user_native_otlp_capture_skipped'] = [string[]]@(
+                $script:DefenseClawUserNativeOTLPCaptureSkipped
+            )
+        }
         # The accounts whose untrusted DefenseClaw folder a retire skipped.
         if (@($script:DefenseClawRetireSkipped).Count -gt 0) {
             $status['lifecycle_retire_skipped'] = [string[]]@(
@@ -26962,28 +26989,6 @@ function Restore-DefenseClawRetainedStateAclsFromTransaction {
         -Expected $expected
 }
 
-function Test-DefenseClawManagedTreeRetryRoot {
-    param(
-        [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)][string]$ExpectedIdentity,
-        [Parameter(Mandatory)][byte[]]$ExpectedSecurityDescriptor
-    )
-    $nativeSecurity = Initialize-DefenseClawNativeSecurity
-    $current = $nativeSecurity::GetDirectorySecuritySnapshotNoFollowIfExists($Path)
-    if ($null -eq $current) {
-        return $false
-    }
-    if ([string]$current.Identity -cne $ExpectedIdentity) {
-        throw 'transaction-created InstallRoot identity changed during rollback deletion'
-    }
-    if ([Convert]::ToBase64String([byte[]]$current.SecurityDescriptor) -cne
-        [Convert]::ToBase64String($ExpectedSecurityDescriptor)) {
-        throw 'transaction-created InstallRoot security descriptor changed during rollback deletion'
-    }
-    Assert-DefenseClawManagedTreeNoReparse -Root $Path
-    return $true
-}
-
 function Remove-DefenseClawManagedTree {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -26994,32 +26999,10 @@ function Remove-DefenseClawManagedTree {
         # specify the AF_UNIX socket's exact full path so a stale
         # socket-reparse-point does not trip the pre-remove reparse
         # veto. Callers on other trees leave it empty for strict mode.
-        [string]$AllowAFUnixSocketAt = '',
-        [int]$RetryHeldFileMilliseconds = 0,
-        [string]$ExpectedRootIdentity = '',
-        [byte[]]$ExpectedRootSecurityDescriptor
+        [string]$AllowAFUnixSocketAt = ''
     )
-    if ($RetryHeldFileMilliseconds -lt 0 -or
-        $RetryHeldFileMilliseconds -gt 60000) {
-        throw 'rollback InstallRoot holder retry must be between 0 and 60000 milliseconds'
-    }
-    if ($RetryHeldFileMilliseconds -gt 0 -and
-        ($Label -cne 'InstallRoot' -or
-            -not (Test-DefenseClawStandaloneProfile) -or
-            $ExpectedRootIdentity -cnotmatch '^[0-9a-f]{8}:[0-9a-f]{16}$' -or
-            $null -eq $ExpectedRootSecurityDescriptor -or
-            $ExpectedRootSecurityDescriptor.Length -eq 0)) {
-        throw 'rollback InstallRoot holder retry requires the standalone profile and a recorded root identity and descriptor'
-    }
     $safe = Assert-DefenseClawSafeRoot -Path $Path -Label $Label -RequiredBase $RequiredBase
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
-        return
-    }
-    if ($RetryHeldFileMilliseconds -gt 0 -and
-        -not (Test-DefenseClawManagedTreeRetryRoot `
-            -Path $safe `
-            -ExpectedIdentity $ExpectedRootIdentity `
-            -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
         return
     }
     Assert-DefenseClawManagedTreeNoReparse `
@@ -27057,39 +27040,6 @@ function Remove-DefenseClawManagedTree {
             $lastError = $_
             if ($attempt -lt 5) {
                 Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds (500 * $attempt)
-            }
-        }
-    }
-    if ($RetryHeldFileMilliseconds -gt 0 -and
-        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
-        # An executing hook answers AccessDenied even to SYSTEM. Extend the
-        # window only after Restart Manager proves a real holder; a deny ACE
-        # or an unqueryable root keeps the ordinary refusal. The protected
-        # rollback intent remains until the root is actually absent.
-        $holders = @(Get-DefenseClawInstallRootHolders `
-            -InstallRoot $safe `
-            -FailOnQueryError)
-        if ($holders.Count -gt 0) {
-            $clock = [Diagnostics.Stopwatch]::StartNew()
-            while ($clock.ElapsedMilliseconds -lt $RetryHeldFileMilliseconds) {
-                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
-                if (-not (Test-DefenseClawManagedTreeRetryRoot `
-                    -Path $safe `
-                    -ExpectedIdentity $ExpectedRootIdentity `
-                    -ExpectedSecurityDescriptor $ExpectedRootSecurityDescriptor)) {
-                    return
-                }
-                try {
-                    Microsoft.PowerShell.Management\Remove-Item `
-                        -LiteralPath $target `
-                        -Recurse `
-                        -Force `
-                        -ErrorAction Stop
-                    return
-                }
-                catch {
-                    $lastError = $_
-                }
             }
         }
     }

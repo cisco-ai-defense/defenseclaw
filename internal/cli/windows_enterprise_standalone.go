@@ -122,6 +122,10 @@ type windowsEnterpriseInstallerReport struct {
 	// could not remove ("user (SID) [connectors]: item", or a machine item).
 	// Decoded leniently, like the registration lists.
 	RollbackLeftovers json.RawMessage `json:"rollback_leftovers"`
+	// A linked or unreadable user agent file cannot be captured for rollback.
+	// Setup still proceeds with the machine transaction and reports each skip.
+	UserNativeOTLPCaptureSkipped json.RawMessage `json:"user_native_otlp_capture_skipped"`
+
 	// StaleLifecycleJournalRemoved is set when the lifecycle removed a
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
@@ -1663,6 +1667,14 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
 	)
 	warnings = append(warnings, windowsEnterpriseRollbackLeftoverWarnings(report.RollbackLeftovers)...)
+	if skipped := windowsEnterpriseReportStrings(report.UserNativeOTLPCaptureSkipped); len(skipped) != 0 {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "user_native_otlp_capture_skipped",
+			Message: "Setup skipped native OTLP rollback preimages for these user paths; the machine operation continued, " +
+				"but a rollback cannot restore the skipped paths. Inspect their links or access permissions, " +
+				"then run Setup /ensure again: " + windowsEnterpriseBoundedLabels(skipped),
+		})
+	}
 	if removed := strings.TrimSpace(report.StaleLifecycleJournalRemoved); removed != "" {
 		// The lifecycle deleted a protected journal on its own; say so in
 		// the result and the lifecycle log (GAP-1680).
@@ -1789,9 +1801,11 @@ const (
 		"reset its permissions or remove it if that account no longer uses DefenseClaw, then run Setup /ensure again to remove the old copies"
 )
 
-// windowsEnterpriseRollbackLeftoverWarnings names each item the rollback of
-// a failed first install could not remove, with what removes it. A file the
-// account changed after DefenseClaw wrote it is kept whole, so only a manual
+// windowsEnterpriseRollbackLeftoverWarnings names each item a rollback could
+// not restore or remove. A native OTLP user preimage needs manual repair;
+// an upgrade rollback retains the restored release. For a failed first
+// install, a file the account changed after DefenseClaw wrote it is kept
+// whole, so only a manual
 // edit removes DefenseClaw's entries from it. Everything else is removed by a
 // successful install followed by an uninstall, both as LocalSystem while the
 // accounts are signed in (an uninstall acts only for signed-in accounts). An
@@ -1801,10 +1815,19 @@ const (
 // that is a per-user folder the rolled back change created
 // (Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep).
 const windowsEnterpriseRollbackCreatedFolderLeftover = ": a per-user DefenseClaw folder this change created; the rollback could not remove it ("
+const windowsEnterpriseNativeOTLPRollbackLeftover = "native OTLP user rollback: "
 
 func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
 	var warnings []enterprisestatus.Message
 	for _, leftover := range windowsEnterpriseReportStrings(raw) {
+		if detail, ok := strings.CutPrefix(leftover, windowsEnterpriseNativeOTLPRollbackLeftover); ok {
+			warnings = append(warnings, enterprisestatus.Message{
+				Code: "rollback_leftover",
+				Message: "the rollback could not restore " + detail + "; the restored release is running; " +
+					"inspect that link or its permissions and restore it by hand",
+			})
+			continue
+		}
 		if strings.Contains(leftover, windowsEnterpriseRollbackCreatedFolderLeftover) {
 			// A rollback whose per-user runtime cleanup failed went on and
 			// put the previous release back (GAP-0856); the folder is not
