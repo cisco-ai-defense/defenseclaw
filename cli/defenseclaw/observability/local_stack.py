@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import json
 import os
 import platform
@@ -66,6 +67,7 @@ MAX_GRAFANA_PASSWORD_BYTES = 512
 GRAFANA_PASSWORD_RESET_MARKER = "Admin password changed successfully"
 GRAFANA_PASSWORD_CONTAINER_PATH = "/run/secrets/grafana_admin_password"
 GRAFANA_SECRET_NAME = "grafana_admin_password"
+GRAFANA_SEARCH_PATH = "/api/search?type=dash-db"
 
 CONTRACT: dict[str, str] = {
     "otlp_endpoint": "127.0.0.1:4317",
@@ -106,6 +108,69 @@ class LocalStackError(RuntimeError):
 
 class GrafanaAccessPolicyError(LocalStackError):
     """Grafana is reachable in the opposite access mode."""
+
+
+def _grafana_basic_get(password: str, *, timeout: float = 3) -> tuple[int, bytes]:
+    """Send Basic only over the accepted socket of this account or the OS.
+
+    A container-status or listener check before dialing cannot prove the
+    socket that receives the password: the port can change hands between
+    those steps. The installed gateway's local-peer verifier checks the
+    connected tuple before http.client writes the first request byte.
+    """
+
+    from defenseclaw.gateway import (
+        _connected_verifier_timeout,
+        _managed_connected_verifier_spec,
+        _per_user_connected_verifier,
+        _trusted_connected_verifier_binary,
+    )
+
+    connection = http.client.HTTPConnection("127.0.0.1", 3000, timeout=timeout)
+    sock: socket.socket | None = None
+    try:
+        sock = socket.create_connection(("127.0.0.1", 3000), timeout=timeout)
+        local, remote = sock.getsockname(), sock.getpeername()
+        if remote[:2] != ("127.0.0.1", 3000):
+            raise OSError("the connected Grafana endpoint changed; the admin credential was not sent")
+        managed = _managed_connected_verifier_spec()
+        binary = (
+            _trusted_connected_verifier_binary(managed[0], managed=True)
+            if managed
+            else _per_user_connected_verifier()
+        )
+        check = CommandRunner(output_limit=0).run(
+            [
+                binary,
+                "local-peer-verify-connected",
+                "--local",
+                f"{local[0]}:{local[1]}",
+                "--remote",
+                f"{remote[0]}:{remote[1]}",
+            ],
+            timeout=_connected_verifier_timeout(timeout),
+            env=native_command_environment(),
+        )
+        if check.returncode != 0:
+            raise OSError("the connected Grafana peer could not be verified; the admin credential was not sent")
+        connection.sock, sock = sock, None
+        token = base64.b64encode(f"{GRAFANA_ADMIN_USER}:{password}".encode("ascii")).decode("ascii")
+        connection.request(
+            "GET",
+            GRAFANA_SEARCH_PATH,
+            headers={"Authorization": f"Basic {token}"},
+        )
+        response = connection.getresponse()
+        body = response.read(2 * 1024 * 1024 + 1)
+        if len(body) > 2 * 1024 * 1024:
+            raise ValueError("Grafana response is too large")
+        return response.status, body
+    except LocalStackError as exc:
+        raise OSError("the connected Grafana peer could not be verified; the admin credential was not sent") from exc
+    finally:
+        connection.close()
+        if sock is not None:
+            sock.close()
 
 
 @dataclass(frozen=True)
@@ -1131,19 +1196,11 @@ class LocalStackController:
         except (OSError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana anonymous access check failed") from exc
 
-        token = base64.b64encode(f"{GRAFANA_ADMIN_USER}:{password}".encode("ascii")).decode("ascii")
-        authenticated = urllib.request.Request(
-            url,
-            headers={"Authorization": f"Basic {token}"},
-            method="GET",
-        )
         try:
-            with urllib.request.urlopen(authenticated, timeout=3) as response:
-                if not 200 <= response.status < 300:
-                    raise GrafanaAccessPolicyError("Grafana rejected the managed admin credential")
-        except urllib.error.HTTPError as exc:
-            raise GrafanaAccessPolicyError(f"Grafana rejected the managed admin credential (HTTP {exc.code})") from exc
-        except (OSError, urllib.error.URLError) as exc:
+            status, _ = _grafana_basic_get(password)
+            if not 200 <= status < 300:
+                raise GrafanaAccessPolicyError(f"Grafana rejected the managed admin credential (HTTP {status})")
+        except (OSError, ValueError, urllib.error.URLError) as exc:
             raise LocalStackError("Grafana authenticated access check failed") from exc
 
     def _verify_grafana_no_password(self) -> None:

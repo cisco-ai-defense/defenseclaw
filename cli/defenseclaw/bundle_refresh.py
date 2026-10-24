@@ -77,6 +77,7 @@ from defenseclaw.observability.local_stack import (
     GRAFANA_ACCESS_PASSWORD,
     LocalStackController,
     LocalStackError,
+    _grafana_basic_get,
     ensure_grafana_admin_password,
 )
 from defenseclaw.paths import (
@@ -2075,16 +2076,15 @@ def _http_get_json(
     *,
     basic_auth: tuple[str, str] | None = None,
 ) -> object:
-    request: str | urllib.request.Request = url
     if basic_auth is not None:
         username, password = basic_auth
-        encoded = base64.b64encode(f"{username}:{password}".encode("ascii")).decode("ascii")
-        request = urllib.request.Request(
-            url,
-            headers={"Authorization": f"Basic {encoded}"},
-            method="GET",
-        )
-    with urllib.request.urlopen(request, timeout=3) as response:  # noqa: S310 - fixed loopback URL
+        if username != "admin" or url != "http://127.0.0.1:3000/api/search?type=dash-db":
+            raise ValueError("Grafana credential target is not the bundled local endpoint")
+        status, raw = _grafana_basic_get(password)
+        if not 200 <= status < 300:
+            raise OSError("unexpected HTTP status")
+        return json.loads(raw)
+    with urllib.request.urlopen(url, timeout=3) as response:  # noqa: S310 - fixed loopback URL
         if not 200 <= response.status < 300:
             raise OSError("unexpected HTTP status")
         raw = response.read(2 * 1024 * 1024 + 1)

@@ -791,6 +791,41 @@ def test_live_smoke_requires_every_readiness_probe_and_dashboard_uid() -> None:
         assert _live_local_observability_smoke(1) == ["grafana_dashboard_inventory_incomplete"]
 
 
+def test_upgrade_smoke_sends_no_grafana_password_to_an_unverified_connected_peer() -> None:
+    from defenseclaw import bundle_refresh
+
+    sent = []
+
+    def answer(request, *, timeout):  # noqa: ANN001, ANN202
+        sent.append(request.get_header("Authorization"))
+        accepted = MagicMock()
+        accepted.__enter__.return_value.status = 200
+        accepted.__enter__.return_value.read.return_value = b"[]"
+        return accepted
+
+    peer = MagicMock()
+    peer.getsockname.return_value = ("127.0.0.1", 51001)
+    peer.getpeername.return_value = ("127.0.0.1", 3000)
+    refused = False
+    with (
+        patch("defenseclaw.bundle_refresh.urllib.request.urlopen", side_effect=answer),
+        patch("defenseclaw.observability.local_stack.socket.create_connection", return_value=peer),
+        patch("defenseclaw.observability.local_stack.CommandRunner.run", return_value=MagicMock(returncode=1)),
+        patch("defenseclaw.gateway._managed_connected_verifier_spec", return_value=None),
+        patch("defenseclaw.gateway._per_user_connected_verifier", return_value="trusted-gateway"),
+    ):
+        try:
+            bundle_refresh._http_get_json(
+                "http://127.0.0.1:3000/api/search?type=dash-db",
+                basic_auth=("admin", "A" * 40),
+            )
+        except OSError:
+            refused = True
+    assert sent == []
+    peer.sendall.assert_not_called()
+    assert refused
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlink semantics require POSIX")
 def test_managed_parent_symlink_fails_before_stack_state_or_backup(
     installed_bundle: tuple[Path, Path, Path],
