@@ -33,6 +33,7 @@ Usage:
 
 Actions:
   up       Package the app, start Splunk, wait for HEC readiness, and print connection details
+  preflight-image  Resolve the selected image without changing the running stack
   down     Stop the selected compose profile
   status   Show compose status for the selected profile
   logs     Show compose logs for the selected profile
@@ -667,6 +668,7 @@ load_env_contract
 
 case "${ACTION}" in
   up) cmd_up ;;
+  preflight-image) verify_splunk_image ;;
   down) cmd_down ;;
   status) cmd_status ;;
   logs) cmd_logs ;;

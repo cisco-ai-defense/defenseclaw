@@ -17,6 +17,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -83,38 +84,59 @@ func DiscoverUnixKiroIDEForms(home string) []KiroForm {
 	return forms
 }
 
-// kiroIDEDiscoveryKeys are the discovery keys of the two Kiro IDE kinds.
-var kiroIDEDiscoveryKeys = map[KiroFormKind]string{
-	KiroFormUserIDE:    KiroIDEDiscoveryKey,
-	KiroFormMachineIDE: KiroIDEMachineDiscoveryKey,
+// kiroIDEKinds are the two Kiro IDE kinds, the user's own install first.
+var kiroIDEKinds = []KiroFormKind{KiroFormUserIDE, KiroFormMachineIDE}
+
+// kiroIDEFormsPerKind bounds the installs of one kind a discovery result
+// carries: kiroIDEProductCandidates lists at most this many per kind.
+const kiroIDEFormsPerKind = 3
+
+// kiroIDEDiscoveryKey is the discovery key of the index-th install of kind:
+// KiroIDEDiscoveryKey or KiroIDEMachineDiscoveryKey for the first, with
+// ".2", ".3" after it for the next ones; "" past kiroIDEFormsPerKind.
+func kiroIDEDiscoveryKey(kind KiroFormKind, index int) string {
+	base := ""
+	switch kind {
+	case KiroFormUserIDE:
+		base = KiroIDEDiscoveryKey
+	case KiroFormMachineIDE:
+		base = KiroIDEMachineDiscoveryKey
+	}
+	if base == "" || index < 0 || index >= kiroIDEFormsPerKind {
+		return ""
+	}
+	if index == 0 {
+		return base
+	}
+	return base + "." + strconv.Itoa(index+1)
 }
 
-// PutUnixKiroIDEForms records forms in a discovery result: per kind the
-// least protected install (unknown, then below its floor, then protected), so
-// a supported install never hides an unsupported one of the same kind. A
+// KiroIDEDiscoveryKeys lists every discovery key a Kiro IDE install can
+// travel under, so the parent keeps them all next to the kiro-cli one.
+func KiroIDEDiscoveryKeys() []string {
+	var keys []string
+	for _, kind := range kiroIDEKinds {
+		for index := 0; index < kiroIDEFormsPerKind; index++ {
+			keys = append(keys, kiroIDEDiscoveryKey(kind, index))
+		}
+	}
+	return keys
+}
+
+// PutUnixKiroIDEForms records every Kiro IDE install in a discovery result,
+// in discovery order, each kind under its own keys (kiroIDEDiscoveryKey). A
 // version goes under versions; an unknown one's reason under reasons.
+// AssessKiro then judges each install on its own: a supported install
+// enrolls the user even when an older or unreadable one of the same kind is
+// installed too, and that one is still reported.
 func PutUnixKiroIDEForms(forms []KiroForm, versions, reasons map[string]string) {
-	rank := func(form KiroForm) int {
-		switch verdict := JudgeKiroForm(form); {
-		case verdict.Unknown():
-			return 0
-		case !verdict.Protected:
-			return 1
-		default:
-			return 2
-		}
-	}
-	chosen := map[KiroFormKind]KiroForm{}
+	next := map[KiroFormKind]int{}
 	for _, form := range forms {
-		if previous, seen := chosen[form.Kind]; !seen || rank(form) < rank(previous) {
-			chosen[form.Kind] = form
-		}
-	}
-	for kind, form := range chosen {
-		key := kiroIDEDiscoveryKeys[kind]
+		key := kiroIDEDiscoveryKey(form.Kind, next[form.Kind])
 		if key == "" {
 			continue
 		}
+		next[form.Kind]++
 		if form.Version != "" {
 			versions[key] = form.Version
 		} else if reasons != nil {
@@ -124,19 +146,21 @@ func PutUnixKiroIDEForms(forms []KiroForm, versions, reasons map[string]string) 
 }
 
 // takeUnixKiroIDEForms removes the Kiro IDE entries from a discovery result
-// and returns them as forms, the user's install first.
+// and returns them as forms, the user's installs first.
 func takeUnixKiroIDEForms(versions, reasons map[string]string) []KiroForm {
 	var forms []KiroForm
-	for _, kind := range []KiroFormKind{KiroFormUserIDE, KiroFormMachineIDE} {
-		key := kiroIDEDiscoveryKeys[kind]
-		version, unread := strings.TrimSpace(versions[key]), strings.TrimSpace(reasons[key])
-		delete(versions, key)
-		delete(reasons, key)
-		switch {
-		case version != "":
-			forms = append(forms, KiroForm{Kind: kind, Version: version})
-		case strings.Contains(unread, UnixAgentUnversionedReasonPrefix):
-			forms = append(forms, KiroForm{Kind: kind, Unread: unread})
+	for _, kind := range kiroIDEKinds {
+		for index := 0; index < kiroIDEFormsPerKind; index++ {
+			key := kiroIDEDiscoveryKey(kind, index)
+			version, unread := strings.TrimSpace(versions[key]), strings.TrimSpace(reasons[key])
+			delete(versions, key)
+			delete(reasons, key)
+			switch {
+			case version != "":
+				forms = append(forms, KiroForm{Kind: kind, Version: version})
+			case strings.Contains(unread, UnixAgentUnversionedReasonPrefix):
+				forms = append(forms, KiroForm{Kind: kind, Unread: unread})
+			}
 		}
 	}
 	return forms
@@ -174,7 +198,7 @@ func readKiroIDEProductVersion(path string) string {
 }
 
 // applyKiroIDESurface folds the Kiro IDE installs discovery returned
-// (KiroIDEDiscoveryKey, KiroIDEMachineDiscoveryKey) into the kiro result for
+// (kiroIDEDiscoveryKey, every install of each kind) into the kiro result for
 // user, through AssessKiro. When a protected kiro-cli is installed it keeps
 // the row. Otherwise a protected IDE enrolls the user: the row's version is
 // the IDE's, marked with KiroIDEVersionSuffix so the IDE's floor applies, and
