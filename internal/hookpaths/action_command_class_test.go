@@ -317,6 +317,7 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 		`Add-Content -Value marker -Path report.txt, C:\Users\alice\.ssh\authorized_keys`,
 		`Add-Content -Value marker -LiteralPath report.txt, C:\Users\alice\.ssh\authorized_keys`,
 		`Add-Content -Va marker C:\Users\alice\.ssh\authorized_keys`,
+		`Set-Content -Val marker C:\Users\alice\.ssh\authorized_keys`,
 		`Add-Content -Value marker -Path report.txt, $env:USERPROFILE\.ssh\authorized_keys`,
 		`Add-Content -Va marker $env:USERPROFILE\.ssh\authorized_keys`,
 	} {
@@ -327,6 +328,7 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 	for _, command := range []string{
 		`Add-Content -Value C:\Users\alice\.ssh\authorized_keys report.txt`,
 		`Add-Content -Va C:\Users\alice\.ssh\authorized_keys report.txt`,
+		`Set-Content -Val C:\Users\alice\.ssh\authorized_keys report.txt`,
 		`Out-File -Inp C:\Users\alice\.ssh\authorized_keys -FilePath report.txt`,
 	} {
 		if got := ActionCommandDecision(command, cwd, home); got != "" {
