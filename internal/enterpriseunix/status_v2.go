@@ -118,11 +118,14 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 		block["hermes"] = state
 		r.CoverageComplete, r.SecurityComplete = false, false
 		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(env.GOOS, "hermes", true, false); err != nil {
-			message := "connectors.hermes: " + err.Error()
-			if l.opts.Action == ActionVerify {
-				r.AddError(enterprisestatus.CodeStatusDetailUnavailable, message)
-			} else {
-				r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+			message := "connectors.hermes: NOT COVERED: " + err.Error()
+			r.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, message)
+			if env.ReportLaunchCoverage != nil {
+				if auditErr := env.ReportLaunchCoverage(context.Background(), managed.LaunchCoverageReport{
+					Connector: "hermes", Reason: "session_only_hermes_home_unobservable", UID: 0,
+				}); auditErr != nil {
+					r.AddWarning(codeManagedLaunchAuditUnavailable, "could not audit the managed Hermes session-home limit: "+auditErr.Error())
+				}
 			}
 		}
 	}
@@ -134,6 +137,48 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 				"they are not plain version strings", hidden))
 		}
 	}
+}
+
+// verifyManagedHermesRegistration proves the installed default-home hook on
+// lifecycle Verify. The public hooks Verify keeps refusing session-home
+// attestation; the hidden readiness check verifies the same physical hook,
+// render, credentials and protected authorization without that claim.
+func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
+	state, ok := l.result.Connectors["hermes"]
+	if !ok || !state.Enabled || state.HooksInstalled != enterprisestatus.HooksInstalledUnknown {
+		return nil
+	}
+	out, err := l.env.runGatewayCLI(ctx, "enterprise", "hooks", "readiness", "--manifest", l.env.Layout.ManifestPath, "--json")
+	if err != nil {
+		return fmt.Errorf("live registration check failed: %w", err)
+	}
+	var proof struct {
+		OK                    bool   `json:"ok"`
+		Scope                 string `json:"scope"`
+		HermesSessionCoverage string `json:"hermes_session_coverage"`
+		Results               []struct {
+			Connector string `json:"connector"`
+			OK        bool   `json:"ok"`
+			Pending   bool   `json:"pending"`
+		} `json:"results"`
+	}
+	if out.ExitCode != 0 || json.Unmarshal(out.Stdout, &proof) != nil || !proof.OK ||
+		proof.Scope != "machine_hook_registration" || proof.HermesSessionCoverage != "not_covered" {
+		return errors.New("live registration check did not prove the current managed Hermes target")
+	}
+	found := false
+	for _, row := range proof.Results {
+		if row.Connector == "hermes" {
+			found = true
+			if !row.OK && !row.Pending {
+				return errors.New("live registration check reported an unprotected Hermes target")
+			}
+		}
+	}
+	if !found {
+		return errors.New("live registration check omitted the managed Hermes target")
+	}
+	return nil
 }
 
 // machinePolicyCoverage is the hooks_installed value of each connector the

@@ -31,6 +31,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/spf13/cobra"
+
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
@@ -1219,6 +1221,40 @@ func TestStandaloneVerifyRefusesUnattestableHermesHome(t *testing.T) {
 	}
 	if row := run.Rows[1]; row.OK || !row.Pending || row.Error != "" {
 		t.Fatalf("recorded unavailable home must remain pending: %+v", row)
+	}
+	// Setup and the guardian prove the registered persistent home without
+	// claiming that a later shell cannot select a different HERMES_HOME.
+	registration, err := runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.AuthorizationErr != nil || registration.Failures != 0 || registration.Pending != 1 ||
+		!registration.Rows[0].OK || !registration.Rows[1].Pending {
+		t.Fatalf("registered Hermes target must pass the machine check: %+v", registration)
+	}
+	readiness := &cobra.Command{}
+	readiness.SetContext(context.Background())
+	readiness.SetOut(io.Discard)
+	if err := runEnterpriseHooksReadiness(readiness, nil); err != nil {
+		t.Fatalf("standalone Unix Setup readiness rejected a registered Hermes hook: %v", err)
+	}
+	// Registration still depends on the worker's physical hook proof.
+	worker := enterpriseHookWorkerRunner
+	enterpriseHookWorkerRunner = func(ctx context.Context, account enterpriseHookWorkerAccount, request enterpriseHookWorkerRequest) (enterpriseHookWorkerResponse, error) {
+		response, err := worker(ctx, account, request)
+		for i := range response.Targets {
+			response.Targets[i].OK = false
+			response.Targets[i].Result = nil
+			response.Targets[i].Error = "owned Hermes hook command is missing"
+		}
+		return response, err
+	}
+	registration, err = runEnterpriseHookRegistrationAttempt(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registration.Failures != 1 || registration.Rows[0].OK || !strings.Contains(registration.Rows[0].Error, "owned Hermes hook command is missing") {
+		t.Fatalf("missing owned hook passed registration: %+v", registration)
 	}
 }
 

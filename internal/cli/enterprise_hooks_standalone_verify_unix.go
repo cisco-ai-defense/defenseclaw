@@ -31,7 +31,7 @@ import (
 // Unix guardian without mutating anything. Every per-user check runs in
 // the target user's worker; a target whose home is unavailable right now
 // is pending only when the last reconcile recorded it pending too.
-func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpriseHookVerifyRun, error) {
+func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrationOnly bool) (enterpriseHookVerifyRun, error) {
 	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
 	if err := enterpriseHookManifestFileTrustCheck(enterpriseHookManifest); err != nil {
 		return run, fmt.Errorf("enterprise hooks verify: manifest trust check failed: %w", err)
@@ -206,6 +206,9 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context) (enterpri
 	}
 	for index, row := range run.Rows {
 		if row.Connector != "hermes" || !row.OK {
+			continue
+		}
+		if registrationOnly {
 			continue
 		}
 		if err := enterprisehooks.ManagedHermesSessionHomeAttestation(runtime.GOOS, row.Connector, true, false); err != nil {
