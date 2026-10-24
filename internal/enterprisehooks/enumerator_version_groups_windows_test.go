@@ -139,6 +139,35 @@ func TestStandaloneKnownRowReportsAnUnverifiedUpgrade(t *testing.T) {
 	}
 }
 
+func TestEnumerateWindowsInspectsStandaloneMachinePolicyExtension(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	home := t.TempDir()
+	extension := filepath.Join(home, ".vscode", "extensions", "anthropic.claude-code-2.1.100-win32-x64")
+	if err := os.MkdirAll(extension, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	stubActiveSessions(t, map[string][]string{testLocalUserSID: {}})
+	previousProcess, previousReadAs := windowsEnterpriseStandaloneProcess, windowsSurfaceReadAs
+	windowsEnterpriseStandaloneProcess = func() bool { return true }
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsEnterpriseStandaloneProcess, windowsSurfaceReadAs = previousProcess, previousReadAs })
+	var reported []UnprotectedAgent
+	_, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, agent := range reported {
+		if agent.Connector == "claudecode" && agent.Surface == "extension" &&
+			agent.Version == "2.1.100" && agent.Code == UnprotectedCodeSurfaceUnverified {
+			return
+		}
+	}
+	t.Fatalf("old machine-policy extension was not inspected: %+v", reported)
+}
+
 // A CLI found at a version the guardian cannot admit used to be only
 // logged; it is now reported, so status and verify show the gap.
 func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
