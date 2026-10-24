@@ -25,10 +25,13 @@ import (
 // and said result=ok. One real Claude Code hook call per stage, through the
 // handler, with a recording span: the audit row, the hook_decision log, the
 // invocation and latency metrics and the span carry one result. A panic in
-// the bookkeeping after the row (finalize_health) changes none of them.
+// the bookkeeping after the row (finalize_health) changes none of them, and
+// neither does a failure after the finalized answer (round 4, GAP-1014): a
+// panic before the write, or a connector output the encoder cannot write.
+// The native hook still reads the answer the row records.
 func TestSecondaryPanicHasOneResultOnEverySink(t *testing.T) {
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
-	injectRoutedEvaluator(t, "claudecode", func(session string) bool { return auditTruthStage(session) == "evaluator" })
+	injectAuditTruthEvaluator(t, "claudecode")
 	injectStagePanic(t, auditTruthStage)
 	for _, tc := range []struct{ stage, want string }{
 		{"none", "ok"},
@@ -39,6 +42,9 @@ func TestSecondaryPanicHasOneResultOnEverySink(t *testing.T) {
 		{"kernel_notice", "panic"},
 		{"finalize_identity", "panic"},
 		{"finalize_health", "ok"},
+		{"finalized", "ok"},
+		{"render", "ok"},
+		{"render_error", "ok"},
 	} {
 		t.Run(tc.stage, func(t *testing.T) {
 
@@ -79,7 +85,14 @@ func TestSecondaryPanicHasOneResultOnEverySink(t *testing.T) {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 			}
 
+			var answer map[string]interface{}
+			if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("%s: the native hook cannot read the answer %q: %v", tc.stage, w.Body.String(), err)
+			}
 			row := newestHookDecision(t, store, session)
+			if answer["action"] != row.Structured["action"] {
+				t.Errorf("%s: answer action=%v, row action=%v", tc.stage, answer["action"], row.Structured["action"])
+			}
 			sinks := map[string]string{"audit row": hookResultText(row.Structured["result"])}
 			if ended := spans.GetSpans(); len(ended) == 1 {
 				if value, ok := attrByKey(ended[0].Attributes, "defenseclaw.connector.result"); ok {

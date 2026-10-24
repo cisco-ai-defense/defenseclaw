@@ -486,7 +486,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		earlier, deduped, dedupeTicket := a.copilotDedupe.begin(r.Context(), connectorName, req)
 		defer dedupeTicket.release()
 		if deduped {
-			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, copilotDedupedResponse(profile, req, earlier)))
+			writeHookAnswer(w, hookAnswerBody(profile, connectorName, req, copilotDedupedResponse(profile, req, earlier)))
 			return
 		}
 		// From here on the hook is accepted. A managed native hook confirms
@@ -560,13 +560,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					resp = a.hookPanicResponse(ctx, connectorName, req, b, payload)
 				}
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
-				enrichAgentHookSpanPanic(ctx)
+				// A finalized call's row, export and metrics are written: the
+				// span keeps their result, and the late panic is on
+				// defenseclaw.panics.total and the gateway log (GAP-1014).
 				if !finalized {
 					persistCtx, cancelPersist := agentHookPersistenceContext(ctx)
 					defer cancelPersist()
 					// The panic is on the row either way (the hook's panic
 					// capture); only a fail-mode verdict is a panic verdict.
 					finalization := a.finalizeAgentHookAnswer(persistCtx, connectorName, req, resp, rawEventIDs, b, elapsed, answered == nil, sandboxHookAuditExtra(ctx), answered != nil)
+					if finalization.Panicked {
+						enrichAgentHookSpanPanic(ctx)
+					}
 					if finalization.AuditPersisted {
 						if err := a.finalizeHookCorrelationReceipt(persistCtx, req.CorrelationReceipt); err != nil {
 							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
@@ -584,7 +589,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 					func() {
 						defer func() { _ = recover() }()
 						attemptedWrite = true
-						a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, resp))
+						writeHookAnswer(w, hookAnswerBody(profile, connectorName, req, resp))
 					}()
 				}
 			}
@@ -727,7 +732,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		if delivery != nil {
 			attemptedWrite = true
 			receipt := delivery.offer(w, func() {
-				a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
+				writeHookAnswer(w, hookAnswerBody(profile, connectorName, req, wireResp))
 			})
 			if receipt == hookexec.HookDeliveryReleased {
 				resp = a.unreceiptedHookDecision(r.Context(), connectorName, req.HookEventName, resp)
@@ -786,13 +791,6 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
 		)
 
-		// Mark the write attempt BEFORE invoking writeJSON. A panic
-		// from inside renderAgentHookResponseForProfile or json.Encode
-		// then signals "do not retry from the defer"; the response
-		// stream may already be partially written, and a second
-		// attempt against the same writer would just re-panic.
-		attemptedWrite = true
-
 		// Render the wire response with the connector-specific
 		// top-level field name for the output map (e.g.
 		// "claude_code_output", "codex_output", "hook_output").
@@ -800,11 +798,72 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// renders the output under "hook_output", which Claude
 		// Code and Codex agent CLIs reject. See
 		// renderAgentHookResponse() for the canonical
-		// connector → field-name mapping.
+		// connector → field-name mapping. hookAnswerBody cannot
+		// panic, so the native hook always gets the finalized answer.
 		if delivery == nil {
-			a.writeJSON(w, http.StatusOK, renderAgentHookResponseForProfile(profile, wireResp))
+			body := hookAnswerBody(profile, connectorName, req, wireResp)
+			// Mark the write attempt BEFORE writing. A panic from the
+			// writer then signals "do not retry from the defer"; the
+			// response stream may already be partially written, and a
+			// second attempt against the same writer would just re-panic.
+			attemptedWrite = true
+			writeHookAnswer(w, body)
 		}
 	}
+}
+
+// hookAnswerBody is the wire body of the hook answer resp, ready to write.
+// A body the native hook cannot read (the render panicked, or the encoder
+// failed on a value of the connector's output) makes the hook apply its own
+// fail mode, not the answer the audit row, the export and the metrics record
+// (GAP-1014). That answer then goes out with the callback-free native output
+// of its own action (failedCheckFallbackOutput). It cannot panic.
+func hookAnswerBody(profile connector.HookProfile, connectorName string, req agentHookRequest, resp agentHookResponse) []byte {
+	body, err := encodeHookAnswer(profile, resp)
+	if err == nil {
+		return body
+	}
+	fmt.Fprintf(os.Stderr, "[gateway] hook answer render failed connector=%s event=%s action=%s: %v; answering with its native fallback output\n",
+		connectorName, req.HookEventName, resp.Action, err)
+	if req.ConnectorName == "" {
+		req.ConnectorName = connectorName
+	}
+	fallback := resp
+	fallback.HookOutput = func() (output map[string]interface{}) {
+		defer func() {
+			if recover() != nil {
+				output = nil
+			}
+		}()
+		return failedCheckFallbackOutput(profile, req, resp.Action, resp.RawAction, resp.Reason, resp.AdditionalContext)
+	}()
+	if body, err = encodeHookAnswer(profile, fallback); err == nil {
+		return body
+	}
+	fallback.HookOutput = nil
+	body, _ = encodeHookAnswer(profile, fallback)
+	return body
+}
+
+// encodeHookAnswer renders and encodes resp as writeJSON did (HTML-escaped
+// JSON and a newline), reporting a render panic as an error.
+func encodeHookAnswer(profile connector.HookProfile, resp agentHookResponse) (body []byte, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			body, err = nil, fmt.Errorf("render panic: %v", recovered)
+		}
+	}()
+	if body, err = json.Marshal(renderAgentHookResponseForProfile(profile, resp)); err != nil {
+		return nil, err
+	}
+	return append(body, '\n'), nil
+}
+
+// writeHookAnswer writes an encoded hook answer.
+func writeHookAnswer(w http.ResponseWriter, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(body)
 }
 
 func validAntigravityHookEvent(event string) bool {
