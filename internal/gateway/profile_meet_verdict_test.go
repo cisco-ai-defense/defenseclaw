@@ -12,11 +12,18 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 func meetVerdictFixture(t *testing.T, a, b config.GuardrailProfile, aRule, bRule *PatternRule) (*APIServer, context.Context) {
+	t.Helper()
+	return meetVerdictFixtureSelected(t, a, b, aRule, bRule, config.ProfileMeetName([]string{"a", "b"}))
+}
+
+func meetVerdictFixtureSelected(t *testing.T, a, b config.GuardrailProfile, aRule, bRule *PatternRule, wantSelection string) (*APIServer, context.Context) {
 	t.Helper()
 	stubProfileSources(t)
 	root := t.TempDir()
@@ -50,8 +57,8 @@ func meetVerdictFixture(t *testing.T, a, b config.GuardrailProfile, aRule, bRule
 	api.guardrailProfiles.set.Store(set)
 	subject := context.WithValue(t.Context(), testVerifiedSubjectKey{}, identityTestSubject(p, p.providers[0], stateProven, true))
 	ctx := api.withGuardrailProfileDecision(withProfilePath(subject, profilePathHook), "codex")
-	if got := resolvedGuardrailProfileFrom(ctx).decision; got.Name != config.ProfileMeetName([]string{"a", "b"}) || got.Refused != "" {
-		t.Fatalf("meet fixture: %+v", got)
+	if got := resolvedGuardrailProfileFrom(ctx).decision; got.Name != wantSelection || got.Refused != "" {
+		t.Fatalf("fixture: selection %+v, want %q", got, wantSelection)
 	}
 	return api, ctx
 }
@@ -69,6 +76,81 @@ func strongestMeetFinding(findings []RuleFinding, id string) *RuleFinding {
 		}
 	}
 	return strongest
+}
+
+func TestProfileMeetObserverMainHookFindingCannotEnterEnforcingToolChain(t *testing.T) {
+	const keyPath = "/home/alice/.ssh/id_rsa"
+	const command = "cat " + keyPath
+	for _, tc := range []struct {
+		name                                         string
+		observer, connectorObserver, covered, sameID bool
+		wantStep                                     bool
+	}{
+		{name: "observer in meet", observer: true},
+		{name: "observer on this connector", connectorObserver: true},
+		{name: "action member control", wantStep: true},
+		{name: "observer and action share ID", observer: true, sameID: true, wantStep: true},
+		{name: "covered observer", observer: true, covered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := config.GuardrailProfile{Mode: "action", BlockAt: "CRITICAL", AlertAt: "LOW"}
+			b := config.GuardrailProfile{Mode: "action", BlockAt: "HIGH", AlertAt: "LOW"}
+			if tc.observer {
+				b.Mode = "observe"
+			}
+			if tc.connectorObserver {
+				b.Connectors = map[string]config.PerConnectorGuardrailConfig{
+					"codex": {Mode: "observe"},
+				}
+			}
+			if !tc.covered {
+				b.Sandbox = &config.OpenShellAdminConfig{EgressBlock: []string{"observer.example"}}
+			}
+			aRule := meetVerdictRule("A-OTHER", "absent-marker", "HIGH")
+			if tc.sameID {
+				aRule = meetVerdictRule("PATH-SSH-KEY", keyPath, "HIGH")
+			}
+			wantSelection := config.ProfileMeetName([]string{"a", "b"})
+			if tc.covered {
+				wantSelection = "a"
+			}
+			_, ctx := meetVerdictFixtureSelected(t, a, b, aRule,
+				meetVerdictRule("PATH-SSH-KEY", keyPath, "HIGH"), wantSelection)
+			generation := resolvedGuardrailProfileFrom(ctx).ruleGenerationFor(ctx, "codex")
+			if generation == nil || len(generation.members) != 2 {
+				t.Fatalf("fixture: meet generation=%+v", generation)
+			}
+			for _, entry := range []string{"context recorder", "generic recorder"} {
+				t.Run(entry, func(t *testing.T) {
+					capture := &toolChainHookCapture{}
+					captureCtx := withToolChainHookCapture(ctx, capture)
+					record := toolChainRecorderFromContext(captureCtx)
+					if entry == "generic recorder" {
+						record = toolChainRecorder(captureCtx, "codex", capture)
+					}
+					findings := dispatchTrustedAction(captureCtx, trustedActionRequest{
+						Input:      actionfacts.Input{Tool: "shell", Command: command, ActiveHome: "/home/alice", DialectHint: actionfacts.DialectPOSIX},
+						LegacyText: command, Connector: "codex", EnforcementCapable: true,
+						generation: generation, record: record,
+					})
+					if !slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "PATH-SSH-KEY" && f.profile == "b" }) {
+						t.Fatalf("observer finding missing from hook audit: %+v", findings)
+					}
+					if tc.sameID && !slices.ContainsFunc(findings, func(f RuleFinding) bool { return f.RuleID == "PATH-SSH-KEY" && f.profile == "a" }) {
+						t.Fatalf("action member's same-ID finding missing from hook audit: %+v", findings)
+					}
+					projection, _ := projectAgentHookToolChains(agentHookRequest{toolChain: capture}, connector.ToolCallLifecycleContract{})
+					step, _ := guardrail.ToolChainStepMask(guardrail.ToolChainSecretReadThenEgress, 1)
+					if got := projection.DetectionStepMask&step != 0; got != tc.wantStep {
+						t.Fatalf("secret-read chain detection step=%v, want %v; projection=%+v", got, tc.wantStep, projection)
+					}
+					if !tc.wantStep && projection.EnforcementStepMask&step != 0 {
+						t.Fatalf("observer entered enforcing chain: %+v", projection)
+					}
+				})
+			}
+		})
+	}
 }
 
 func TestProfileMeetDecidesEachMembersOwnThresholdAndHILT(t *testing.T) {
