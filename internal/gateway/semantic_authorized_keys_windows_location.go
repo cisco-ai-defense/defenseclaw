@@ -404,13 +404,26 @@ func windowsLocationWriteTarget(tokens []windowsLocationToken, dialect actionfac
 			return tokens[i+1].text, true
 		}
 	}
-	for _, token := range tokens[1:] {
-		if !strings.HasPrefix(token.text, "-") {
-			if token.singleQuoted && strings.Contains(token.text, "$") {
-				return "", false
+	for i := 1; i < len(tokens); i++ {
+		token := tokens[i]
+		if strings.HasPrefix(token.text, "-") {
+			switch strings.ToLower(token.text) {
+			case "-value", "-inputobject", "-encoding", "-delimiter", "-stream", "-width":
+				if i+1 >= len(tokens) {
+					return "", false
+				}
+				i++ // content or option value, not the write path
+			case "-append", "-force", "-nonewline", "-passthru", "-whatif", "-confirm":
+				// A switch does not consume the first positional path.
+			default:
+				return "", false // unknown operand binding is audit-only
 			}
-			return token.text, true
+			continue
 		}
+		if token.singleQuoted && strings.Contains(token.text, "$") {
+			return "", false
+		}
+		return token.text, true
 	}
 	return "", false
 }

@@ -50,6 +50,8 @@ func TestR104ActionClassWindowsProtectedSpellings(t *testing.T) {
 		{"ordinary archive glob", `Compress-Archive -Path .\docs\* -DestinationPath .\out\docs.zip`, actionfacts.DialectPowerShell, false},
 		{"ordinary fd duplication", `Get-ChildItem .\src 2>&1 > .\logs\list.log`, actionfacts.DialectPowerShell, false},
 		{"ordinary assigned target", `$dst = ".\out\variable.txt"; Set-Content $dst ready`, actionfacts.DialectPowerShell, false},
+		{"Join-Path positional protected target", `$dir = Join-Path $HOME '.ssh'; $dst = Join-Path $dir 'authorized_keys'; Add-Content -Value marker $dst`, actionfacts.DialectPowerShell, true},
+		{"Join-Path positional data", `$dir = Join-Path $HOME '.ssh'; $dst = Join-Path $dir 'authorized_keys'; Add-Content -Value $dst report.txt`, actionfacts.DialectPowerShell, false},
 		{"MSYS ordinary", `echo marker >> /c/Users/Alice/project/report.txt`, actionfacts.DialectPOSIX, false},
 		{"CMD ordinary", `echo marker >> %USERPROFILE%\project\report.txt`, actionfacts.DialectCMD, false},
 	} {
