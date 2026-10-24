@@ -52,6 +52,9 @@ type guestRead struct {
 	phase audit.SandboxPhase
 	gone  bool
 	err   string
+	// word is the box's word count (box.word) when the read began: a
+	// lookup of its place or a phase given since outranks it.
+	word uint64
 }
 
 // found is the phase the read proves: phaseMissing for a guest gone.
@@ -89,22 +92,24 @@ func atConnectedPlace(b *box, here *Gateway) bool {
 }
 
 // provenPhase is the phase of b that its own place proves, and whether one
-// does. At the connected place that is its lookups' (phase, and missing
-// when the lookup was of that place: elsewhere unset), else a read of the
-// place since the daemon started; elsewhere only a read of that place
-// proves anything, and the phase returned unproven is the last known one.
-// The caller holds m.mu.
+// does: the newest word of that place. At the connected place that is a
+// read of the place no lookup or phase has come after (one taken while
+// DefenseClaw was connected elsewhere, whose word the phase cached before
+// the switch does not outrank), else its lookups' (phase, and missing when
+// the lookup was of that place: elsewhere unset); elsewhere only a read of
+// that place proves anything, and the phase returned unproven is the last
+// known one. The caller holds m.mu.
 func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
 	r := b.read
 	read := !r.at.IsZero() && r.err == "" && r.place == recordPlace(b.rec)
 	if atConnectedPlace(b, here) {
 		switch {
+		case read && r.word == b.word:
+			return r.found(), true
 		case b.missing && b.elsewhere == "":
 			return phaseMissing, true
 		case b.phase != "":
 			return b.phase, true
-		case read:
-			return r.found(), true
 		}
 		return "", false
 	}
@@ -121,7 +126,9 @@ func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
 // gateway is opened for it (Options.GatewayAt). A read stands for
 // proofFresh. A place that cannot be read leaves the guest unproven, and a
 // failed read does not undo a read that found the guest gone, whose
-// identity does not come back.
+// identity does not come back, on whichever gateway DefenseClaw connects to
+// next. A read that a lookup of its place or a phase came after while it
+// ran is dropped: the place said something newer.
 func (m *Manager) proveGuests(ctx context.Context) {
 	m.proveMu.Lock()
 	defer m.proveMu.Unlock()
@@ -131,6 +138,7 @@ func (m *Manager) proveGuests(ctx context.Context) {
 		b     *box
 		rec   record
 		place string
+		word  uint64
 	}
 	var local []guest
 	away := map[string][]guest{}
@@ -139,7 +147,7 @@ func (m *Manager) proveGuests(ctx context.Context) {
 		if b.deleted || b.retained || b.creating || !mayBeUnprotected(b.rec) {
 			continue
 		}
-		g := guest{b: b, rec: b.rec, place: recordPlace(b.rec)}
+		g := guest{b: b, rec: b.rec, place: recordPlace(b.rec), word: b.word}
 		if r := b.read; r.place == g.place && !r.at.IsZero() && now.Sub(r.at) < proofFresh {
 			continue
 		}
@@ -159,9 +167,9 @@ func (m *Manager) proveGuests(ctx context.Context) {
 		for _, g := range local {
 			switch {
 			case err != nil:
-				reads[g.b] = guestRead{place: g.place, at: now, err: truncate(err.Error(), 200)}
+				reads[g.b] = guestRead{place: g.place, at: now, err: truncate(err.Error(), 200), word: g.word}
 			case gatewayMismatch(g.rec, gw) == "":
-				reads[g.b] = m.readGuest(rctx, gw, g.b, g.rec, g.place)
+				reads[g.b] = m.readGuest(rctx, gw, g.b, g.rec, g.place, g.word)
 			}
 		}
 		cancel()
@@ -171,10 +179,10 @@ func (m *Manager) proveGuests(ctx context.Context) {
 		gw, done, err := m.openPlace(pctx, guests[0].rec, here)
 		for _, g := range guests {
 			if err != nil {
-				reads[g.b] = guestRead{place: place, at: now, err: truncate(err.Error(), 200)}
+				reads[g.b] = guestRead{place: place, at: now, err: truncate(err.Error(), 200), word: g.word}
 				continue
 			}
-			reads[g.b] = m.readGuest(pctx, gw, g.b, g.rec, place)
+			reads[g.b] = m.readGuest(pctx, gw, g.b, g.rec, place, g.word)
 		}
 		if done != nil {
 			done()
@@ -184,8 +192,8 @@ func (m *Manager) proveGuests(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for b, r := range reads {
-		if recordPlace(b.rec) != r.place {
-			continue // the record moved meanwhile: the read was of another place
+		if recordPlace(b.rec) != r.place || b.word != r.word {
+			continue // the record moved meanwhile, or its place said something since
 		}
 		if r.err != "" && b.read.place == r.place && b.read.gone {
 			b.read.at = r.at
@@ -196,9 +204,9 @@ func (m *Manager) proveGuests(ctx context.Context) {
 }
 
 // readGuest asks gw, the gateway of place, what it holds of b's sandbox
-// (rec is b's record as read).
-func (m *Manager) readGuest(ctx context.Context, gw *Gateway, b *box, rec record, place string) guestRead {
-	r := guestRead{place: place, at: m.now()}
+// (rec is b's record and word its word count, as read).
+func (m *Manager) readGuest(ctx context.Context, gw *Gateway, b *box, rec record, place string, word uint64) guestRead {
+	r := guestRead{place: place, at: m.now(), word: word}
 	sb, err := gw.Client.GetSandbox(ctx, rec.Name)
 	switch {
 	case openshell.IsNotFound(err):
@@ -242,6 +250,17 @@ func (m *Manager) openPlace(ctx context.Context, rec record, here *Gateway) (*Ga
 		return nil, nil, fmt.Errorf("that gateway runs the %s compute driver now, which does not see a %s sandbox", gw.Driver.Name, recordDriver(rec))
 	}
 	return gw, done, nil
+}
+
+// heardLocked counts a word of b's own place about b, a lookup of it or a
+// phase given while DefenseClaw is connected to it (here, as in
+// atConnectedPlace): a read taken before no longer outranks the box's
+// lookups (provenPhase). A phase given while DefenseClaw is connected
+// elsewhere is not its place's word. The caller holds m.mu.
+func heardLocked(b *box, here *Gateway) {
+	if atConnectedPlace(b, here) {
+		b.word++
+	}
 }
 
 // unknownWhy says what DefenseClaw cannot see of the unknown guest b

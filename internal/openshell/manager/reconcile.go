@@ -779,6 +779,9 @@ func (m *Manager) missingFromLocked(gw *Gateway, b *box) func(context.Context) {
 	otherDriver := where != "" && samePlace(rec, gw)
 	changed := b.elsewhere != where
 	b.missing, b.elsewhere, b.otherDriver = true, where, otherDriver
+	if where == "" {
+		b.word++ // its own place says it is gone
+	}
 	if where == "" || !changed {
 		return func(context.Context) {}
 	}
@@ -799,11 +802,16 @@ func (m *Manager) missingFromLocked(gw *Gateway, b *box) func(context.Context) {
 // foundOnLocked records sb, which a lookup on gw found as b's sandbox
 // (sameSandboxLocked): b is not missing, and it lives on gw's place, so
 // only a compute driver gw no longer runs is still reported (elsewhere,
-// otherDriver). The caller holds m.mu.
+// otherDriver). A lookup of the place b's record names is that place's
+// newest read of it (provenPhase). The caller holds m.mu.
 func foundOnLocked(b *box, gw *Gateway, sb *openshell.Sandbox) {
 	b.sb, b.missing = sb, false
 	b.elsewhere = gatewayMismatch(record{Driver: b.rec.Driver}, gw)
 	b.otherDriver = b.elsewhere != ""
+	if place := recordPlace(b.rec); sb != nil && b.read.place == place && gatewayMismatch(b.rec, gw) == "" {
+		b.word++
+		b.read = guestRead{place: place, at: b.read.at, phase: auditPhase(sb.Status.Phase), word: b.word}
+	}
 }
 
 // gatewayMismatch describes where rec's sandbox was created when that is

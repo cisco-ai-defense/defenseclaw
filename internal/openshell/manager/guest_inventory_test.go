@@ -256,3 +256,97 @@ func TestAReconcileDoesNotTakeAnotherSandboxForAGuestOfTheSameName(t *testing.T)
 		t.Fatalf("the guest on its own gateway: entry %+v, refusal %q", entry, refusal)
 	}
 }
+
+// G-openshell review (continuation 2, loop round 2): a read of a guest's
+// own gateway, taken while DefenseClaw was connected to another one, was
+// outranked by the phase cached before the switch once DefenseClaw
+// connected back. A guest its gateway had deleted, or its user had stopped
+// there, was named running and refused every new run until a reconcile,
+// and one its user had started there was not named. The newest word of the
+// guest's own place decides: a read no lookup of that place, or phase given
+// there, came after; else the lookups. None is stopped.
+func TestTheNewestWordOfAGuestsOwnGatewayDecidesAfterASwitchBack(t *testing.T) {
+	t.Run("a contained VM its own gateway deleted", func(t *testing.T) {
+		e := newVMEnv(t, nil)
+		containedVM(t, e, "vmback")
+		own := e.gw
+		var down atomic.Bool
+		homeGatewayAt(e, own, &down)
+		away, _ := awayGateway(e)
+		switchGateway(t, e, away)
+		_, err := e.client.DeleteSandbox(t.Context(), "vmback")
+		must(t, err)
+		if entry, refusal, _ := guestAccount(t, e, "vmback"); entry != nil || refusal != "" {
+			t.Fatalf("its own gateway says it is gone, read from another: entry %+v, refusal %q", entry, refusal)
+		}
+		// A failed read of its gateway keeps the proof, on whichever gateway
+		// DefenseClaw connects to next.
+		down.Store(true)
+		forgetReads(e)
+		if entry, refusal, _ := guestAccount(t, e, "vmback"); entry != nil || refusal != "" {
+			t.Fatalf("a gone guest whose gateway no longer answers: entry %+v, refusal %q", entry, refusal)
+		}
+		stops := e.fake.Calls(openshelltest.MethodStopSandbox)
+		switchGateway(t, e, own)
+		if entry, refusal, warnings := guestAccount(t, e, "vmback"); entry != nil || refusal != "" || hasPrefix(warnings, containedUnprotected) {
+			t.Fatalf("back on the gateway that deleted it: entry %+v, refusal %q, warnings %q", entry, refusal, warnings)
+		}
+		if n := e.fake.Calls(openshelltest.MethodStopSandbox) - stops; n != 0 {
+			t.Fatalf("%d stops", n)
+		}
+	})
+
+	t.Run("a legacy session its user stopped there", func(t *testing.T) {
+		e, _ := legacyGuest(t, "oldstop", true, nil)
+		own := e.gw
+		var down atomic.Bool
+		homeGatewayAt(e, own, &down)
+		away, _ := awayGateway(e)
+		switchGateway(t, e, away)
+		if entry, refusal, _ := guestAccount(t, e, "oldstop"); entry == nil || refusal == "" {
+			t.Fatalf("running on its own gateway, read from another: entry %+v, refusal %q", entry, refusal)
+		}
+		_, err := e.client.StopSandbox(t.Context(), "oldstop")
+		must(t, err)
+		forgetReads(e)
+		if entry, refusal, _ := guestAccount(t, e, "oldstop"); entry != nil || refusal != "" {
+			t.Fatalf("stopped on its own gateway, read from another: entry %+v, refusal %q", entry, refusal)
+		}
+		switchGateway(t, e, own)
+		if entry, refusal, _ := guestAccount(t, e, "oldstop"); entry != nil || refusal != "" {
+			t.Fatalf("back on the gateway it was stopped on: entry %+v, refusal %q", entry, refusal)
+		}
+		// A lookup of its place after the read outranks it: started there
+		// again, the next get finds it running.
+		_, err = e.client.StartSandbox(t.Context(), "oldstop")
+		must(t, err)
+		_, err = e.m.Get(t.Context(), "oldstop")
+		must(t, err)
+		if entry, refusal, _ := guestAccount(t, e, "oldstop"); entry == nil || entry.Phase != string(audit.SandboxPhaseReady) || refusal == "" {
+			t.Fatalf("found running by a later lookup: entry %+v, refusal %q", entry, refusal)
+		}
+	})
+
+	t.Run("a legacy session its user started there", func(t *testing.T) {
+		e, _ := legacyGuest(t, "oldstart", false, nil)
+		_, err := e.m.Stop(t.Context(), "oldstart")
+		must(t, err)
+		if entry, refusal, _ := guestAccount(t, e, "oldstart"); entry != nil || refusal != "" {
+			t.Fatalf("stopped: entry %+v, refusal %q", entry, refusal)
+		}
+		own := e.gw
+		var down atomic.Bool
+		homeGatewayAt(e, own, &down)
+		away, _ := awayGateway(e)
+		switchGateway(t, e, away)
+		_, err = e.client.StartSandbox(t.Context(), "oldstart")
+		must(t, err)
+		if entry, refusal, _ := guestAccount(t, e, "oldstart"); entry == nil || entry.Reason != "" || refusal == "" {
+			t.Fatalf("started on its own gateway, read from another: entry %+v, refusal %q", entry, refusal)
+		}
+		switchGateway(t, e, own)
+		if entry, refusal, _ := guestAccount(t, e, "oldstart"); entry == nil || entry.Reason != "" || entry.Phase != string(audit.SandboxPhaseReady) || refusal == "" {
+			t.Fatalf("back on the gateway it was started on: entry %+v, refusal %q", entry, refusal)
+		}
+	})
+}

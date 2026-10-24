@@ -89,8 +89,11 @@ type box struct {
 	otherDriver bool
 	// read is the latest read of the sandbox at the place its record names
 	// (proveGuests), which the guest inventory goes on where no lookup of
-	// the connected gateway does (provenPhase).
+	// the connected gateway does, or none since the read (provenPhase).
+	// word counts the lookups of that place and the phases given at it
+	// (heardLocked), which tells which came last.
 	read    guestRead
+	word    uint64
 	started time.Time
 
 	watchCancel context.CancelFunc
@@ -422,6 +425,7 @@ func (m *Manager) lifecycle(ctx context.Context, b *box, phase audit.SandboxPhas
 	force bool, cond *audit.SandboxCondition, exit *int32) {
 	release := m.gatewayRelease()
 	m.mu.Lock()
+	heardLocked(b, m.lastGw.Load())
 	if b.phase == phase && !force {
 		m.mu.Unlock()
 		return
