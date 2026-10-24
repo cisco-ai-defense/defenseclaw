@@ -295,7 +295,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		// Leave time to write the manifest and coverage record. A timed-out
 		// profile must never discard rows already decided in this cycle.
 		if standalone && windowsPrivateProfileBudget(ctx, len(profiles)-profileIndex) <= 0 {
-			reportWindowsProfilesNotInspected(profiles[profileIndex:], connectors, opts, exclude, previous, visited, judged, &targets)
+			reportWindowsProfilesNotInspected(profiles[profileIndex:], connectors, opts, exclude, previous, running, visited, judged, &targets)
 			break
 		}
 		if err := ctx.Err(); err != nil {
@@ -311,6 +311,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			if _, enrolled := opts.ManifestSubjects[sid]; !enrolled {
 				// Manifest enrollment: only the administrator's enabled
 				// targets are enrolled, so no one else's installs count.
+				reportWindowsUnenrolledManifestRunningAgents(profile, connectors, running[sid], opts.ReportUnprotected)
 				judged[sid] = true
 				continue
 			}
@@ -527,7 +528,8 @@ func windowsPrivateProfileBudget(ctx context.Context, profilesLeft int) time.Dur
 // Preserve rows already published for profiles the cycle could not reach,
 // and name their incomplete inspection in the protected coverage record.
 func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors []string, opts EnumerateOptions,
-	exclude map[string]struct{}, previous map[string]ManifestTarget, visited, judged map[string]bool, targets *[]ManifestTarget) {
+	exclude map[string]struct{}, previous map[string]ManifestTarget, running map[string]map[string]string,
+	visited, judged map[string]bool, targets *[]ManifestTarget) {
 	for _, profile := range profiles {
 		sid := canonicalManifestTargetSID(profile.SID)
 		user := filepath.Base(filepath.Clean(profile.Home))
@@ -539,6 +541,7 @@ func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors
 		if opts.ManifestSubjects != nil {
 			subject, enrolled := opts.ManifestSubjects[sid]
 			if !enrolled {
+				reportWindowsUnenrolledManifestRunningAgents(profile, connectors, running[sid], opts.ReportUnprotected)
 				judged[sid] = true
 				continue
 			}
@@ -556,6 +559,26 @@ func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors
 			}
 		}
 		judged[sid] = true
+	}
+}
+
+// A manifest subject check does not inspect unselected profiles. A running
+// agent there still needs an explicit coverage report before the SID is
+// marked judged, including when the cycle has no profile time left.
+func reportWindowsUnenrolledManifestRunningAgents(profile windowsUserProfile, connectors []string,
+	running map[string]string, report func(UnprotectedAgent)) {
+	if report == nil {
+		return
+	}
+	for _, conn := range connectors {
+		if label := strings.TrimSpace(running[conn]); label != "" {
+			report(UnprotectedAgent{
+				User: filepath.Base(filepath.Clean(profile.Home)), SID: profile.SID, Connector: conn,
+				Code: UnprotectedCodeAgentUnprotected,
+				Reason: fmt.Sprintf("%s runs for this account, which has no enabled enrollment manifest target; %s",
+					label, windowsUnenrolledConsequence(conn)),
+			})
+		}
 	}
 }
 

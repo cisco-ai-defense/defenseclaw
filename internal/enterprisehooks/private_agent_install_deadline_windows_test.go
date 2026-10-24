@@ -117,6 +117,54 @@ func TestWindowsPrivateProfileBudgetReservesPublicationTime(t *testing.T) {
 	}
 }
 
+func TestWindowsUnenrolledRunningAgentIsReportedBeforeAndAfterDeadline(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	home := t.TempDir()
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	for _, tc := range []struct {
+		name     string
+		deadline bool
+		excluded bool
+	}{
+		{name: "normal cycle"},
+		{name: "no profile time left", deadline: true},
+		{name: "explicitly excluded", deadline: true, excluded: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.deadline {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, 9*time.Second)
+				defer cancel()
+			}
+			var reported []UnprotectedAgent
+			opts := EnumerateOptions{
+				ManifestSubjects:  map[string]WindowsManifestSubject{},
+				RunningAgents:     map[string]map[string]string{testLocalUserSID: {"codex": "codex (pid 42)"}},
+				ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+			}
+			if tc.excluded {
+				opts.ExcludeUsers = []string{testLocalUserSID}
+			}
+			manifest, err := EnumerateWindows(ctx, standaloneEnumeratorConfig("codex"), opts)
+			if err != nil || len(manifest.Targets) != 0 {
+				t.Fatalf("unenrolled profile acquired rows: %+v, err=%v", manifest.Targets, err)
+			}
+			if tc.excluded {
+				if len(reported) != 0 {
+					t.Fatalf("excluded profile was reported: %+v", reported)
+				}
+				return
+			}
+			if len(reported) != 1 || reported[0].SID != testLocalUserSID ||
+				reported[0].Connector != "codex" || reported[0].Code != UnprotectedCodeAgentUnprotected ||
+				!strings.Contains(reported[0].Reason, "no enabled enrollment manifest target") {
+				t.Fatalf("running unenrolled agent was not reported: %+v", reported)
+			}
+		})
+	}
+}
+
 func TestWindowsPrivateWalkChildKeepsHeldParentAcrossJunctionSwap(t *testing.T) {
 	home, outside := t.TempDir(), t.TempDir()
 	parent := filepath.Join(home, "parent")
