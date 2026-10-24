@@ -469,9 +469,9 @@ var managedHookIdentityHeaders = []string{
 // only be an attempt to borrow another authority.
 var managedHookCredentialHeaders = []string{"Authorization", "X-DefenseClaw-Token", "X-DC-Auth"}
 
-// managedHookPeerIdentityMiddleware is the outermost handler on the hook
-// socket. It rewrites the request so every downstream layer sees one
-// trustworthy identity: RemoteAddr becomes loopback (the socket is
+// managedHookPeerIdentityMiddleware runs after the socket's early receipt
+// hint and before authorization. It rewrites the request so every downstream
+// layer sees one trustworthy identity: RemoteAddr becomes loopback (the socket is
 // host-local, and loopback-only handlers and the loopback-exempt rate
 // limiter must treat it as such), caller-supplied identity and credential
 // headers are removed, and the kernel-verified uid and account name are set

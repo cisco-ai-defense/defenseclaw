@@ -99,13 +99,14 @@ func (a *APIServer) newManagedHookSocketServer(ctx context.Context, base func(ht
 	return server, listener, nil
 }
 
-// managedHookSocketHandler is the hook socket's handler chain. until 1.1: a
-// removed connector's hook route blocks every call before the peer checks
+// managedHookSocketHandler is the hook socket's handler chain. Until 1.1, a
+// removed connector's hook route blocks every call after the informational
+// receipt hint and before the peer checks
 // (retired_connector_hook.go), so a caller the kernel names or not gets the
 // block, never the 403 an old hook in fail mode open allows on.
 func (a *APIServer) managedHookSocketHandler(authorizer *managedHookAuthorizer, base func(http.Handler) http.Handler) http.Handler {
 	handler := base(managedHookSocketHealth(a.handleHealth, a.managedHookPeerAuth(authorizer, a.managedHookSocketMux())))
-	return retiredConnectorHookFirst(managedHookPeerIdentityMiddleware(handler))
+	return managedHookEarlyReceipt(retiredConnectorHookFirst(managedHookPeerIdentityMiddleware(handler)))
 }
 
 // managedHookSocketHealth answers GET /health on the hook socket with the

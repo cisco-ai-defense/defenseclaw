@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -22,23 +23,47 @@ type hookDeliveryReceipt struct {
 	length string
 }
 
+type hookDeliveryAdvertisedKey struct{}
+
+// managedHookEarlyReceipt advertises full duplex before the socket's first
+// account lookup. A directory lookup can exceed the native hook's bounded
+// capability wait even when the gateway is healthy. Only a connection whose
+// kernel peer credentials were read can receive this informational response;
+// all authorization and the final verdict remain in the ordinary handler.
+func managedHookEarlyReceipt(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peer, verified := r.Context().Value(managedHookConnPeerContextKey{}).(*managedHookConnPeer)
+		if r.Method == http.MethodPost && r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
+			verified && peer != nil && http.NewResponseController(w).EnableFullDuplex() == nil {
+			if r.ProtoMajor == 1 {
+				w.Header().Set("Connection", "close")
+			}
+			w.WriteHeader(http.StatusEarlyHints)
+			r = r.WithContext(context.WithValue(r.Context(), hookDeliveryAdvertisedKey{}, true))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (a *APIServer) beginHookDeliveryReceipt(w http.ResponseWriter, r *http.Request) *hookDeliveryReceipt {
 	if a == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() ||
 		r.Header.Get(hookexec.HookDeliveryReceiptHeader) != "1" {
 		return nil
 	}
-	if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
-		// Without full duplex the hook closes its request body after the
-		// short capability wait, so the ordinary bounded request still works.
-		return nil
+	if advertised, _ := r.Context().Value(hookDeliveryAdvertisedKey{}).(bool); !advertised {
+		if err := http.NewResponseController(w).EnableFullDuplex(); err != nil {
+			// Without full duplex the hook closes its request body after the
+			// short capability wait, so the ordinary bounded request still works.
+			return nil
+		}
+		if r.ProtoMajor == 1 {
+			// The request body stays open across the response. Reusing this
+			// HTTP/1 connection can race the server's next-request reader with
+			// the final receipt read when the hook closes at its deadline.
+			w.Header().Set("Connection", "close")
+		}
+		w.WriteHeader(http.StatusEarlyHints)
 	}
-	if r.ProtoMajor == 1 {
-		// The request body stays open across the response. Reusing this
-		// HTTP/1 connection can race the server's next-request reader with
-		// the final receipt read when the hook closes at its deadline.
-		w.Header().Set("Connection", "close")
-	}
-	w.WriteHeader(http.StatusEarlyHints)
 	return &hookDeliveryReceipt{reader: bufio.NewReader(r.Body),
 		length: r.Header.Get(hookexec.HookDeliveryPayloadBytesHeader)}
 }
