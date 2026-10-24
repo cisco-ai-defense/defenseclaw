@@ -555,7 +555,8 @@ func TestShellHooksRefuseAMalformedToken(t *testing.T) {
 			for _, tc := range l.cases {
 				for _, mode := range []string{"open", "closed"} {
 					home := t.TempDir()
-					installNativeGatewayForHookTest(t, home, hookDir)
+					// The reference run's hooks need their recorded helper too.
+					installNativeGatewayForHookTest(t, home, hookDir, rejectDir)
 					env := []string{"HOME=" + home, "DEFENSECLAW_HOME=" + home, "DEFENSECLAW_FAIL_MODE=" + mode}
 					rec.reset(t)
 					gateway.take()

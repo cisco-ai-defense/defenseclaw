@@ -49,11 +49,13 @@ func TestPerUserPluginsRefuseARepeatedKeyInTheAnswer(t *testing.T) {
 				}))
 				defer server.Close()
 				home := t.TempDir()
-				installNativeGatewayForHookTest(t, home)
 				token := filepath.Join(home, ".defenseclaw", "hooks", ".hook-"+plugin.connector+".token")
 				if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
 					t.Fatal(err)
 				}
+				// The plugin posts through the helper its hook directory
+				// records (.gateway-helper), as a rendered install has.
+				installNativeGatewayForHookTest(t, home, filepath.Dir(token))
 				if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 					t.Fatal(err)
 				}

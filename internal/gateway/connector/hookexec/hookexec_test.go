@@ -1189,6 +1189,8 @@ func TestPerUserColdStartOutlivesTheCall(t *testing.T) {
 	release := make(chan struct{})
 	r := run(t, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
 		opts.Event = "MessageDisplay"
+		// The default tier opens a per-user outage (its config, at call time).
+		opts.OutageFailModeNow = func() string { return "open" }
 		opts.StartedAt = time.Now().Add(-gatewayRestartBudget + 200*time.Millisecond)
 		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
 			startCtx <- ctx

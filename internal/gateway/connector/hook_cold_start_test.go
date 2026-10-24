@@ -103,7 +103,14 @@ func runHookForColdStart(t *testing.T, c Connector, script string, args []string
 
 func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, args []string, prepare func(dataDir string), managed bool, extraEnv ...string) coldStartHookRun {
 	t.Helper()
-	hooksDir := t.TempDir()
+	// The hooks live in the account's data directory, as an install renders
+	// them: a cold start reads that runtime's config and recorded helper.
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	hooksDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	apiAddr := freeAPIAddr(t)
 	// Bind the endpoint as this account to let these retry tests reach the
 	// native transport stub; free and foreign listeners have separate tests.
@@ -136,8 +143,6 @@ func runHookForColdStartWithManaged(t *testing.T, c Connector, script string, ar
 		bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
 	}
 
-	home := t.TempDir()
-	dataDir := filepath.Join(home, ".defenseclaw")
 	binDir := filepath.Join(home, ".local", "bin")
 	for _, dir := range []string{dataDir, binDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {

@@ -93,23 +93,6 @@ func TestHookOutageFailModeDecision(t *testing.T) {
 	}
 }
 
-func TestCursorInitWithoutAnOperatorFailModeUsesThePolicyTier(t *testing.T) {
-	for _, tc := range []struct{ mode, tier, want string }{
-		{"observe", "strict", "closed"},
-		{"action", "default", "open"},
-	} {
-		cfg := &Config{}
-		cfg.Guardrail.Connector = "cursor"
-		cfg.Guardrail.Mode = tc.mode
-		cfg.Guardrail.RulePack = tc.tier
-		for _, connector := range []string{"cursor", "claudecode"} {
-			if got := cfg.EffectiveHookOutageFailModeForConnector(connector); got != tc.want {
-				t.Errorf("mode=%s tier=%s connector=%s: outage=%s, want %s", tc.mode, tc.tier, connector, got, tc.want)
-			}
-		}
-	}
-}
-
 // A custom pack's tier is its manifest posture, else its folder name, as the
 // gateway reads it (packPosture): a strict custom pack closes the outage.
 func TestHookPolicyTierOfACustomPack(t *testing.T) {

@@ -178,6 +178,7 @@ func TestHostHookDoesNotSendAfterASeparatePeerCheck(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$DC_NATIVE_MARKER\"\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	recordGatewayHelperForTest(t, hookDir, binary)
 	// The earlier listener check passes, then that listener vanishes. The
 	// native post refuses its newly connected peer; curl must never run.
 	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
@@ -227,6 +228,7 @@ func TestHostHookNativePostCarriesHeadersAndBodyOnStdin(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\ncat > \"$DC_NATIVE_INPUT\"\nprintf '{\"action\":\"allow\"}\\n200'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	recordGatewayHelperForTest(t, hookDir, binary)
 	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
 defenseclaw_api_listener_unproven() { return 1; }
 curl() { echo leaked; }
