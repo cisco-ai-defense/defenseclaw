@@ -1003,9 +1003,12 @@ off the device. The agent does not read `/health` itself (section 7); the
   The rotation passes it as `secret set --bundle B --if-confirmed <sha|none>`
   (refused `confirmed_bundle_changed`, nothing written, once another bundle
   is confirmed), and the put-back as `secret set|remove --undo-rotation
-  <sha|none> --if-stored <value-sha256>`: it runs only while the credential
-  still holds the rotation's value and that bundle is still confirmed and
-  does not sign the value stored now. A later direct credential change
+  <sha|none> --if-stored <value-sha256>`: it changes the credential only while
+  the credential still holds the rotation's value and that bundle is still
+  confirmed and does not sign the value stored now. On Windows, if the
+  journaled old value is still stored, or a journaled absence is still absent, replay
+  succeeds without changing the credential or restarting the gateway and
+  retires the entry. A later direct credential change
   returns `credential_changed`; the journal and that later value stay.
   Linux and macOS also use `--if-stored` on their in-run put-back under the
   lifecycle lock. An entry for a credential that was not

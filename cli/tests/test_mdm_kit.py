@@ -343,7 +343,11 @@ function Invoke-DefenseClawNative {
     $script:calls += $line
     $stored = Get-WrapperStoredSecretPath -Name $SecretName
     $refuse = { param($code) [pscustomobject]@{ ExitCode = 1603; StdErr = ''; StdOut = (@{ schema_version = 1; errors = @(@{ code = $code; message = $code }) } | ConvertTo-Json -Compress -Depth 4) } }
-    if ($script:failNext) { $code = $script:failNext; $script:failNext = ''; return (& $refuse $code) }
+    if ($script:failNext) {
+        $code = $script:failNext; $script:failNext = ''
+        if ($code -eq 'throw') { throw 'the CLI could not be launched' }
+        return (& $refuse $code)
+    }
     $flag = { param($name) $at = [array]::IndexOf($ArgumentList, $name); if ($at -ge 0) { $ArgumentList[$at + 1] } else { '' } }
     $current = if (Test-Path -LiteralPath $stored) { [System.IO.File]::ReadAllText($stored) } else { $null }
     if ($ArgumentList[1] -eq 'bundle' -and $ArgumentList[2] -eq 'status') {
@@ -355,6 +359,11 @@ function Invoke-DefenseClawNative {
     if ($ifConfirmed -and $ifConfirmed -ne $script:digest) { return (& $refuse 'confirmed_bundle_changed') }
     $undo = & $flag '--undo-rotation'
     $expectedValue = & $flag '--if-stored'
+    if ($undo -and (($ArgumentList[2] -eq 'set' -and $null -ne $current -and
+        [System.IO.File]::ReadAllText($StandardInputPath) -ceq $current) -or
+        ($ArgumentList[2] -eq 'remove' -and $null -eq $current))) {
+        return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
+    }
     if ($expectedValue -and ($null -eq $current -or
         (Get-FileHash -LiteralPath $stored -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expectedValue)) {
         return (& $refuse 'credential_changed')
@@ -680,6 +689,34 @@ $entry = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File)
 $out.absentEntryNoConfig = [System.IO.File]::ReadAllText($entry.FullName)
 [void](Complete-WrapperSecretJournal -Name $SecretName)
 
+# A failed set, a launch exception and an interruption immediately after
+# journaling all leave the old value untouched. Replay must retire that entry
+# and allow the next rotation, for both a prior value and prior absence.
+foreach ($previous in @('old-key', '<none>')) {
+    foreach ($case in @('change_failed', 'state_invalid', 'elevation_required', 'throw', 'interrupted')) {
+        $script:inUse = $false
+        if ($previous -eq '<none>') { Reset-Device $null; Use-OldBundle $null }
+        else { Reset-Device 'old-key'; Use-OldBundle 'old-key' }
+        $confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
+        Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
+        if ($case -ne 'interrupted') {
+            $script:failNext = $case
+            $failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)
+            if ($case -eq 'throw' -and $failure.Code -ne '') { throw 'the launch exception was not reported' }
+            if ($case -ne 'throw' -and $failure.Code -ne $case) { throw 'the failed set was not reported' }
+        }
+        if ($case -eq 'interrupted') {
+            $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+        } else {
+            Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+            $problems = @()
+        }
+        $settled = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+        $next = Rotate
+        $out["beforeWrite_${previous}_$case"] = "$settled $($null -eq $next) $(Get-Stored)"
+    }
+}
+
 # 19. An .absent entry that names no config (as an earlier rc wrote it) is
 #     never put back or deleted, and it is reported.
 foreach ($content in @('', ('x' * 64), ($expected + "`n"))) {
@@ -808,6 +845,16 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "adminChanged_resumed": "admin-new-key 1 1",
         "absentEntry": f"ai-defense-api-key@none+{value}.absent True 1",
         "absentEntryNoConfig": "none",
+        "beforeWrite_old-key_change_failed": "old-key 0 0 True new-key",
+        "beforeWrite_old-key_state_invalid": "old-key 0 0 True new-key",
+        "beforeWrite_old-key_elevation_required": "old-key 0 0 True new-key",
+        "beforeWrite_old-key_throw": "old-key 0 0 True new-key",
+        "beforeWrite_old-key_interrupted": "old-key 0 0 True new-key",
+        "beforeWrite_<none>_change_failed": "<none> 0 0 True new-key",
+        "beforeWrite_<none>_state_invalid": "<none> 0 0 True new-key",
+        "beforeWrite_<none>_elevation_required": "<none> 0 0 True new-key",
+        "beforeWrite_<none>_throw": "<none> 0 0 True new-key",
+        "beforeWrite_<none>_interrupted": "<none> 0 0 True new-key",
         "noConfigEntry_0": "new-key True 0 1",
         "noConfigEntry_64": "new-key True 0 1",
         "noConfigEntry_65": "new-key True 0 1",

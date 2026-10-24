@@ -307,6 +307,26 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if err := requireWindowsSecretDeployment(); err != nil {
 		return windowsSecretChange{}, err
 	}
+	if opts.undoRotation != "" {
+		// The wrapper writes its journal before secret set. If that set
+		// never wrote its value, the old value (or absence) is already
+		// restored. Check through the pinned store under both locks; no
+		// credential or gateway change is needed. Every other value still
+		// has to pass --if-stored below, including a later admin value.
+		prior, err := openWindowsSecretStore(layout.SecretsDir, false)
+		if err != nil {
+			return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
+		}
+		entry, stored, readErr := prior.openCredential(opts.name)
+		if readErr == nil {
+			_ = windows.CloseHandle(entry)
+		}
+		prior.close()
+		if (action == "set" && readErr == nil && bytes.Equal(bytes.TrimSpace(stored), value)) ||
+			(action == "remove" && (errors.Is(readErr, os.ErrNotExist) || errors.Is(readErr, windows.STATUS_OBJECT_NAME_NOT_FOUND))) {
+			return windowsSecretChange{noop: true}, nil
+		}
+	}
 	var installedConfig []byte
 	var inUse error
 	if action == "remove" {
