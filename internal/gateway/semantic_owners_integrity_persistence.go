@@ -1513,6 +1513,10 @@ func appendTrustedHomeResolvedSSHKeyWriteFinding(
 // call writes an authorized-keys file. input is the request's input with
 // the command text of a shell tool filled in.
 func trustedAuthorizedKeysWriteProof(input actionfacts.Input, facts actionfacts.Facts, symlinkWrite bool) bool {
+	if input.Command != "" &&
+		hookpaths.ActionCommandDecision(input.Command, input.CWD, facts.ActiveHome) == "protected-target" {
+		return true
+	}
 	enforcementFacts := facts.EnforcementProjection()
 	return enforcementFacts.EnforcementEligible() &&
 		(sshAuthorizedKeysCommandPrerequisite(enforcementFacts) ||
