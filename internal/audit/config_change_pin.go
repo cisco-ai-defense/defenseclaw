@@ -63,13 +63,15 @@ func (pin ConfigChangePin) valid() bool {
 // id, in a folder of the gateway's data directory.
 type ConfigChangePins struct {
 	dir string
+	// mkdir makes the pin folder so its entry survives a power loss.
+	mkdir func(dir string) error
 	// writeFile writes and flushes a pin file and its folder.
 	writeFile func(path string, data []byte, mode os.FileMode) error
 }
 
 // NewConfigChangePins returns the pins kept in dir.
 func NewConfigChangePins(dir string) *ConfigChangePins {
-	return &ConfigChangePins{dir: dir, writeFile: configwrite.WriteFileDurable}
+	return &ConfigChangePins{dir: dir, mkdir: configwrite.MkdirDurable, writeFile: configwrite.WriteFileDurable}
 }
 
 func (pins *ConfigChangePins) path(eventID string) (string, error) {
@@ -118,9 +120,10 @@ func (pins *ConfigChangePins) load(eventID string) (ConfigChangePin, bool, error
 	return pin, true, nil
 }
 
-// store writes the pin of eventID and flushes it and its folder (a new
-// folder's parent too), so it survives a power loss before any sink gets
-// the record.
+// store writes the pin of eventID and flushes it and its folder (the
+// folder's entry in its parent too, on Windows as well), so it survives a
+// power loss before any sink gets the record: a lost pin would let a later
+// offer build another record under the change's id.
 func (pins *ConfigChangePins) store(eventID string, pin ConfigChangePin) error {
 	path, err := pins.path(eventID)
 	if err != nil {
@@ -129,13 +132,8 @@ func (pins *ConfigChangePins) store(eventID string, pin ConfigChangePin) error {
 	if !pin.valid() {
 		return fmt.Errorf("audit: the record pin of change %s is invalid", eventID)
 	}
-	if _, statErr := os.Lstat(pins.dir); errors.Is(statErr, os.ErrNotExist) {
-		if err := os.MkdirAll(pins.dir, 0o700); err != nil {
-			return fmt.Errorf("audit: create the record pin folder: %w", err)
-		}
-		if err := configwrite.SyncDir(filepath.Dir(pins.dir)); err != nil {
-			return fmt.Errorf("audit: flush the record pin folder: %w", err)
-		}
+	if err := pins.mkdir(pins.dir); err != nil {
+		return fmt.Errorf("audit: create the record pin folder: %w", err)
 	}
 	encoded, err := json.Marshal(pin)
 	if err != nil {

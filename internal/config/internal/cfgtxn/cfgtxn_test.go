@@ -222,3 +222,33 @@ func TestWriteFileDurablePublishedFlushesTheTempFileAfterPublish(t *testing.T) {
 		t.Fatalf("files left: %v", entries)
 	}
 }
+
+// MkdirDurable makes a folder, keeps one already there, and refuses a file
+// at its path and a missing parent; it leaves nothing else beside the
+// folder.
+func TestMkdirDurableMakesTheFolderAndLeavesNothingElse(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "pins")
+	for range 2 {
+		if err := MkdirDurable(dir); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("no folder at %s: %v", dir, err)
+		}
+	}
+	file := filepath.Join(parent, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MkdirDurable(file); err == nil {
+		t.Fatal("a file at the path was taken as the folder")
+	}
+	if err := MkdirDurable(filepath.Join(parent, "missing", "pins")); err == nil {
+		t.Fatal("a folder was made under a missing parent")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 2 || entries[0].Name() != "file" || entries[1].Name() != "pins" {
+		t.Fatalf("beside the folder: %v (%v), want only file and pins", entries, err)
+	}
+}

@@ -254,6 +254,9 @@ func (r *bundleReceiptReporter) hasSeen(id string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
+// mkdirMarkers is configwrite.MkdirDurable; a test replaces it.
+var mkdirMarkers = configwrite.MkdirDurable
+
 // markSeen records that id is reported and reports whether its marker is on
 // disk. An id whose marker write failed is kept in unmarked, so it is not
 // reported again, and retryMarkers writes its marker at the next poll.
@@ -261,7 +264,10 @@ func (r *bundleReceiptReporter) markSeen(id string) bool {
 	if !reportableID(id) {
 		return false
 	}
-	err := os.MkdirAll(r.seenDir(), 0o700)
+	// Made durably: the record pin of a change goes once its marker is on
+	// disk (markedChange), so a marker folder a power loss took back would
+	// leave the change unreported and unpinned.
+	err := mkdirMarkers(r.seenDir())
 	if err == nil {
 		err = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600)
 	}
