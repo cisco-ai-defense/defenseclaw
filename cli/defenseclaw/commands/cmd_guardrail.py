@@ -5472,7 +5472,10 @@ def mode_cmd(
         _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
     )
 
-    plain = {"action": "blocks findings at or above the block-at severity", "observe": "logs findings, blocks nothing"}
+    observe_effect = "logs policy findings without blocking on them"
+    if any(mode == "closed" for mode in fail_after.values()):
+        observe_effect += "; a gateway outage can still deny a call when hook fail mode is closed"
+    plain = {"action": "blocks findings at or above the block-at severity", "observe": observe_effect}
     if connector_key is None:
         message = f"The global guardrail mode is now {new_mode}: it {plain[new_mode]}."
         not_covered = [c for c in actives if _override(c) and policy_catalog.mode_label(_override(c)) != new_mode]
