@@ -709,6 +709,120 @@ func TestStandaloneConfigManagerAppliesOnlyRecordedNoAnchorLifecycleGenerations(
 	}
 }
 
+func TestStandaloneStartupReconcilesLifecycleGenerationCommittedAfterBootRead(t *testing.T) {
+	for _, signed := range []bool{false, true} {
+		for _, commentOnly := range []bool{false, true} {
+			name := fmt.Sprintf("signed=%t/comment_only=%t", signed, commentOnly)
+			t.Run(name, func(t *testing.T) {
+				dir := t.TempDir()
+				path := filepath.Join(dir, config.DefaultConfigName)
+				writeConfigForManagerTest(t, path, dir, "observe")
+				bootRaw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if signed {
+					anchorDir := filepath.Join(dir, "trust")
+					if err := os.MkdirAll(anchorDir, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(filepath.Join(anchorDir, "bundle-anchors.json"), []byte("present"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				write := func(raw []byte, generation uint64) uint64 {
+					t.Helper()
+					opt := configwrite.Options{Actor: configwrite.ActorLifecycle, Lifecycle: true, Reason: "enterprise ensure"}
+					if signed {
+						opt.Bundle = configwrite.BundleRef{ID: fmt.Sprintf("b-01J9ZZZZZZZZZZZZZZZZZZZZZ%d", generation), Version: generation, SignerKeyID: "k1"}
+					}
+					result, err := configwrite.ReplaceDocument(t.Context(), path, raw, opt)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return result.Generation
+				}
+				bootGeneration := write(bootRaw, 1)
+				initial, err := config.LoadRuntimeV8File(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				initial.DeploymentMode = "managed_enterprise"
+				initial.Enterprise.Profile = "standalone"
+				matched := newConfigManagerWithSnapshot(path, initial, nil, nil, "", nil)
+				matched.setStartupSource(path, bootRaw)
+				if !matched.appliedGenerationKnown || matched.appliedGeneration != bootGeneration {
+					t.Fatalf("matching boot record: generation=%d known=%t, want %d", matched.appliedGeneration, matched.appliedGenerationKnown, bootGeneration)
+				}
+				// The gateway has captured bootRaw. Commit the next valid
+				// lifecycle generation before it reads config.generation.json.
+				nextRaw := bytes.Replace(bootRaw, []byte("mode: observe"), []byte("mode: action"), 1)
+				if commentOnly {
+					nextRaw = append([]byte("# lifecycle update\n"), bootRaw...)
+				}
+				nextGeneration := write(nextRaw, 2)
+				if nextGeneration <= bootGeneration {
+					t.Fatalf("next generation %d did not advance past boot generation %d", nextGeneration, bootGeneration)
+				}
+				applied := 0
+				mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
+					if !bytes.Equal(source.raw, nextRaw) || source.proveUnchanged {
+						return fmt.Errorf("startup applied unexpected source: %q, proof=%t", source.raw, source.proveUnchanged)
+					}
+					applied++
+					if commentOnly {
+						return errGenerationUnchanged
+					}
+					return nil
+				})
+				loader := mgr.loadSnapshot
+				mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+					candidate, err := loader(source, raw)
+					if err == nil {
+						candidate.DeploymentMode = "managed_enterprise"
+						candidate.Enterprise.Profile = "standalone"
+					}
+					return candidate, err
+				}
+				mgr.setStartupSource(path, bootRaw)
+				ctx, cancel := context.WithCancel(t.Context())
+				ready := make(chan error, 1)
+				done := make(chan error, 1)
+				go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+				select {
+				case err := <-ready:
+					if err != nil {
+						cancel()
+						<-done
+						t.Fatalf("valid lifecycle generation prevented startup: %v", err)
+					}
+				case <-time.After(5 * time.Second):
+					cancel()
+					<-done
+					t.Fatal("startup reconciliation did not report readiness")
+				}
+				cancel()
+				<-done
+				if applied != 1 || !bytes.Equal(mgr.appliedRaw, nextRaw) || mgr.appliedGeneration != nextGeneration || mgr.rejected {
+					t.Fatalf("startup state: applies=%d generation=%d want=%d rejected=%t", applied, mgr.appliedGeneration, nextGeneration, mgr.rejected)
+				}
+				if err := os.WriteFile(path, append([]byte("# unrecorded edit\n"), nextRaw...), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := mgr.Reload(t.Context(), "fsnotify"); err == nil || !strings.Contains(err.Error(), "lifecycle-recorded generation") {
+					t.Fatalf("unrecorded edit after startup = %v, want lifecycle cause", err)
+				}
+				if applied != 1 || mgr.appliedGeneration != nextGeneration {
+					t.Fatalf("unrecorded edit applied: applies=%d generation=%d", applied, mgr.appliedGeneration)
+				}
+			})
+		}
+	}
+}
+
 // A lifecycle write may change only comments. Its rebuilt policy is unchanged,
 // but that successful proof must consume the writer's generation. Otherwise a
 // later asset edit can reuse the still-pending record (GAP-1279).
