@@ -254,7 +254,11 @@ defenseclaw_sandbox_post() {
       "${auth_args[@]+"${auth_args[@]}"}" \
       --connect-timeout "$DC_SANDBOX_CONNECT_TIMEOUT" \
       --max-time "$max_time" \
-      --data-binary @- 2>/dev/null 7< <(printf 'header = "%s"\n' "$auth"))" || status=$?
+      --data-binary @- 2>/dev/null 7< <(printf 'header = "%s"\n' "$auth") |
+      tr '\000' '\001'
+      # Command substitution drops NUL bytes: keep them visible as U+0001,
+      # which jq refuses unescaped, so "al<NUL>low" is no allow (GAP-1008).
+      exit "${PIPESTATUS[1]}")" || status=$?
     if [ "$status" -eq 0 ]; then
       code="${out##*$'\n'}"
       case "$code" in

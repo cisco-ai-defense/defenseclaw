@@ -17,8 +17,8 @@ function successfulResponse(body) {
   return {
     ok: true,
     status: 200,
-    async json() {
-      return body;
+    async text() {
+      return JSON.stringify(body);
     },
   };
 }
@@ -53,8 +53,8 @@ async function runScenario({
       return {
         ok: true,
         status: 200,
-        async json() {
-          throw new SyntaxError("fixture malformed gateway JSON");
+        async text() {
+          return "{fixture malformed gateway JSON";
         },
       };
     }

@@ -2505,6 +2505,15 @@ defenseclaw_payload_tool_gate_max_time() {
   defenseclaw_tool_gate_max_time "$event" "$2"
 }
 
+# defenseclaw_keep_nul_visible copies a gateway answer with each NUL byte
+# turned into U+0001. Command substitution drops NUL bytes, so an answer with
+# "al<NUL>low" read as "allow" (GAP-1008). No JSON parser here (the strict
+# validator, jq, Python) accepts an unescaped control character, so such an
+# answer now fails as malformed.
+defenseclaw_keep_nul_visible() {
+  tr '\000' '\001'
+}
+
 # defenseclaw_gateway_post URL MAX_TIME BODY [CURL_ARGS...]
 #
 # POSTs BODY to the gateway at URL and prints "<response body>\n<http code>"
@@ -2637,7 +2646,9 @@ defenseclaw_gateway_post() {
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
           fi
           exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
-        ) 2>/dev/null
+        ) 2>/dev/null |
+        defenseclaw_keep_nul_visible
+      exit "${PIPESTATUS[1]}"
     )" || {
       _dc_listener_status=0
       defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
@@ -2660,5 +2671,7 @@ defenseclaw_gateway_post() {
     --max-time "$_dc_post_max_time" \
     --data-binary @/dev/fd/9 2>/dev/null \
     8< <(printf 'header = "%s"\n' "$_dc_post_auth") \
-    9< <(printf '%s' "$_dc_post_body")
+    9< <(printf '%s' "$_dc_post_body") |
+    defenseclaw_keep_nul_visible
+  return "${PIPESTATUS[0]}"
 }

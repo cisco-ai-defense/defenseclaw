@@ -58,15 +58,14 @@ const result = await handlers["tool.call"]({ thread: { id: "T" }, toolUseID: "U1
 console.log(result.action === "allow" ? "allow" : "block:" + (result.message || ""));
 `
 
-// A managed administrator's hook_fail_mode open lets an in-agent plugin
-// bridge (Amp, OpenCode) run a tool call during an outage only when the
-// hook socket is proven absent from its verified directories, the native
-// hook's rule (validateStandaloneHookSocketPath). DEFENSECLAW_STRICT_AVAILABILITY
-// closes that outage too, and an installed closed mode closes every case.
-// A missing socket directory or parent, an untrusted directory, a stale
-// socket that refuses the connection after verification and a path that
-// is not a socket prove nothing about who would answer, so they block.
-func TestManagedPluginOutageOpenNeedsAVerifiedSocketAbsence(t *testing.T) {
+// A managed standalone in-agent plugin bridge (Amp, OpenCode) renders closed
+// for every failure (config.HookOutageFailMode, fix/r104-oss-outage-open):
+// an administrator's open, strict availability or not, lets no failure of
+// the hook socket through. That covers a socket proven absent, a missing or
+// untrusted directory, a stale socket that refuses after verification, a
+// path that is not a socket, and a live gateway's ambiguous answer
+// (GAP-1007). The live-socket control proves the harness reaches it.
+func TestManagedPluginSocketFailuresCloseInEveryMode(t *testing.T) {
 	nodeForTest(t)
 	type layout struct {
 		socket   string
@@ -105,6 +104,21 @@ func TestManagedPluginOutageOpenNeedsAVerifiedSocketAbsence(t *testing.T) {
 				t.Fatal(err)
 			}
 			return layout{socket: socket}
+		},
+		"live socket repeats the action": func(t *testing.T, root string) layout {
+			socket := filepath.Join(mkTrustedDir(t, root, "run"), "hook.sock")
+			listener, err := net.Listen("unix", socket)
+			if err != nil {
+				t.Fatal(err)
+			}
+			answered := new(atomic.Int32)
+			server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				answered.Add(1)
+				_, _ = w.Write([]byte(`{"action":"block","action":"allow","hook_output":{"decision":"allow"}}`))
+			})}
+			go func() { _ = server.Serve(listener) }()
+			t.Cleanup(func() { _ = server.Close() })
+			return layout{socket: socket, answered: answered}
 		},
 		// The control: the harness reaches a live gateway over the socket.
 		"live socket allows": func(t *testing.T, root string) layout {
@@ -157,7 +171,7 @@ func TestManagedPluginOutageOpenNeedsAVerifiedSocketAbsence(t *testing.T) {
 					if len(lines) == 0 {
 						t.Fatal("no verdict")
 					}
-					wantAllow := name == "live socket allows" || (name == "socket absent" && tc.installed == "open" && tc.strict == "")
+					wantAllow := name == "live socket allows"
 					if allowed := lines[0] == "allow"; allowed != wantAllow {
 						t.Fatalf("verdict %q, want allowed=%v", lines[0], wantAllow)
 					}

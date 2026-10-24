@@ -61,6 +61,7 @@ line="$(sed -n "${n}p" "$dir/responses")"
 case "$line" in
   exit:*) exit "${line#exit:}" ;;
   '') exit 7 ;;
+  b64:*) printf '%s' "${line#b64:}" | base64 -d ;;
   *) printf '%s\n%s' "${line#*|}" "${line%%|*}" ;;
 esac
 `
