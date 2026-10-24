@@ -200,6 +200,12 @@ func TestLauncherHelpShowsOnlySandbox(t *testing.T) {
 				t.Errorf("%v: help mentions %q:\n%s", args, hidden, out)
 			}
 		}
+		for _, line := range strings.Split(out, "\n") {
+			if line == "  status" || strings.HasPrefix(line, "  status ") || strings.HasPrefix(line, "  status\t") ||
+				line == "  defenseclaw status" || strings.HasPrefix(line, "  defenseclaw status ") {
+				t.Errorf("%v: help offers the administrator-only status command:\n%s", args, out)
+			}
+		}
 		if len(ran) != 0 {
 			t.Errorf("%v: ran %v", args, ran)
 		}
