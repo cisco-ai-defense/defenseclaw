@@ -146,11 +146,14 @@ def openclaw_only_implied(cfg: Any) -> bool:
 
 
 def openclaw_fleet_link_configured(cfg: Any) -> bool:
-    """Whether a remote gateway host or explicit fleet mode keeps OpenClaw."""
+    """Whether a remote gateway host or enabled fleet mode keeps OpenClaw."""
     gateway = getattr(cfg, "gateway", None)
     if gateway is None:
         return False
-    fleet_mode = str(getattr(gateway, "fleet_mode", "") or "").strip().lower()
+    raw_mode = getattr(gateway, "fleet_mode", "")
+    fleet_mode = str(raw_mode if raw_mode is not None else "").strip().lower()
+    if fleet_mode in {"disabled", "off", "false", "0"}:
+        return False
     return fleet_mode not in {"", "auto"} or not _is_loopback_gateway_host(getattr(gateway, "host", ""))
 
 
@@ -167,10 +170,11 @@ def openclaw_setup_fleet_link_configured(cfg: Any) -> bool:
     gateway = getattr(cfg, "gateway", None)
     if gateway is None:
         return False
-    fleet_mode = str(getattr(gateway, "fleet_mode", "") or "").strip().lower()
+    raw_mode = getattr(gateway, "fleet_mode", "")
+    fleet_mode = str(raw_mode if raw_mode is not None else "").strip().lower()
     if fleet_mode in {"enabled", "on", "true"}:
         return True
-    if fleet_mode in {"disabled", "off", "false"}:
+    if fleet_mode in {"disabled", "off", "false", "0"}:
         return False
     return not _is_loopback_gateway_host(getattr(gateway, "host", ""))
 
@@ -180,8 +184,8 @@ def openclaw_implied_but_not_installed(cfg: Any) -> bool:
 
     Mirrors ``openClawImpliedButNotInstalled`` in the gateway. All of:
 
-    * ``gateway.fleet_mode`` is unset (``""`` or ``"auto"``),
-    * ``gateway.host`` is loopback,
+    * ``gateway.fleet_mode`` is unset, ``"auto"`` or explicitly disabled,
+    * ``gateway.host`` is loopback unless fleet mode is disabled,
     * ``guardrail.connector`` and the connector roster are empty, so only
       ``claw.mode`` names OpenClaw, and
     * no openclaw.json candidate exists and no openclaw binary is found.
