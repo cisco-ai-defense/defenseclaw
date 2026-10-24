@@ -44,4 +44,18 @@ func TestManagedCodexSessionStartSendsLoadedInstructionIdentity(t *testing.T) {
 		loaded[file] != hookpaths.FileIdentity(file) {
 		t.Fatalf("managed Codex startup identities = %v, err = %v", loaded, err)
 	}
+	toolBody, err := json.Marshal(map[string]interface{}{
+		"hook_event_name": "PreToolUse", "session_id": "loaded", "cwd": project,
+		"tool_name": "exec_command", "tool_input": map[string]string{"cmd": "printf x >> AGENTS.md"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	header = make(http.Header)
+	setHookRequestFacts(header, Options{Connector: "codex", Event: "PreToolUse", ManagedEnterprise: true}, toolBody)
+	facts, ok = hookpaths.Decode(header.Get(hookpaths.Header))
+	if !ok || facts[hookpaths.InstructionIdentityKey] != file ||
+		facts["\x00write-identity:"+file] != loaded[file] {
+		t.Fatalf("managed Codex write identity evidence = %v, ok = %t", facts, ok)
+	}
 }
