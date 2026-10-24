@@ -13,6 +13,7 @@
 package enterprisehooks
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -174,6 +175,10 @@ func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
 	if len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
 		t.Fatalf("overflow must make signed-in coverage incomplete: %+v", reported)
 	}
+	reported = nil
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); got != "" || len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("only an overflowing root must not enroll a surface-only row: version=%q reported=%+v", got, reported)
+	}
 }
 
 func TestWindowsOverflowKeepsOtherExtensionRoots(t *testing.T) {
@@ -216,18 +221,39 @@ func TestWindowsOverflowKeepsOtherExtensionRoots(t *testing.T) {
 	if !incomplete || !oldSurface {
 		t.Fatalf("want incomplete and old-surface findings, got %+v", reported)
 	}
-	// A known surface found after the overflow is evidence for a warning,
-	// but an incomplete inventory cannot select a new row version.
+	// A complete sibling root can enroll a surface-only row while the
+	// overflowing root still reports incomplete coverage. Even a known
+	// candidate within that incomplete root cannot select the row version.
 	known := filepath.Join(home, ".cursor", "extensions", "anthropic.claude-code-2.1.220-win32-x64")
 	if err := os.MkdirAll(known, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	partial := filepath.Join(large, "anthropic.claude-code-2.1.230-win32-x64")
+	if err := os.Mkdir(partial, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	reported = nil
-	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); got != "" {
-		t.Fatalf("partial inventory enrolled a surface-only row at %q", got)
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); got != "2.1.220" {
+		t.Fatalf("complete sibling root version = %q, want 2.1.220", got)
 	}
 	if len(reported) == 0 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
 		t.Fatalf("partial inventory lost its incomplete warning: %+v", reported)
+	}
+	stubMachineWinGet(t, nil)
+	stubActiveSessions(t, map[string][]string{sid: {}})
+	injectWindowsProfileList(t, map[string]string{sid: home})
+	reported = nil
+	manifest, err := EnumerateWindows(context.Background(), standaloneEnumeratorConfig("claudecode"), EnumerateOptions{
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != sid || manifest.Targets[0].AgentVersion != "2.1.220" {
+		t.Fatalf("extension-only signed-in row = %+v, want complete sibling root at 2.1.220", manifest.Targets)
+	}
+	if len(reported) == 0 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("enumeration lost the overflowing root's incomplete warning: %+v", reported)
 	}
 }
 
