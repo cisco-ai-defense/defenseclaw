@@ -182,7 +182,7 @@ async def test_search_keeps_capitals_and_digits_leave_the_config_editor(tmp_path
         status = app.query_one("#status")
         assert status.region.bottom <= app.size.height
         row = "".join(segment.text for segment in status.render_lines(Region(0, 0, status.size.width, 1))[0])
-        assert all(label in row for label in ("Gateway", "gen 1", "Watchdog", "Guardrail", "Ready.")), row
+        assert all(label in row for label in ("Gateway", "gen 1", "Watchdog", "Guardrail", "Command palette")), row
         assert "…" not in row, row
         assert "Tab complete" in app.hint_text
         app._close_command_palette()
