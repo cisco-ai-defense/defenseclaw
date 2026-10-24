@@ -603,13 +603,20 @@ func apiError(err error) error {
 	switch e.Code {
 	case sandboxapi.CodeUnavailable:
 		if daemonUnreachable(e) {
-			// The HTTP client's error, with the loopback API port, is no
-			// news to the user (GAP-0336); `sandbox doctor` has the detail.
+			// Keep the transport cause: a verified peer failure and a refused
+			// dial need different repairs, even if the gateway reports ready.
+			detail := strings.TrimSpace(e.Detail)
 			if onManagedHost() {
 				// A managed computer disables per-user gateways: the way on
 				// is the organization's service, never a gateway command
 				// (GAP-0451).
+				if detail != "" {
+					return fmt.Errorf("your sandbox service does not answer (%s); %s", detail, managedServiceFix)
+				}
 				return errors.New("your sandbox service does not answer; " + managedServiceFix)
+			}
+			if detail != "" {
+				return fmt.Errorf("the DefenseClaw daemon did not answer or could not be verified (%s); run `defenseclaw sandbox doctor`, and if it is stopped, start it with `defenseclaw-gateway start`", detail)
 			}
 			return errors.New("the DefenseClaw daemon is not running (start it with `defenseclaw-gateway start`)")
 		}
