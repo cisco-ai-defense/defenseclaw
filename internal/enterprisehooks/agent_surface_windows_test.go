@@ -181,6 +181,7 @@ func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
 // and the account is reported with what is missing instead of being left
 // without a row and without a reason (GAP-0597).
 func TestWindowsStandaloneNativeClaudeWithoutRecordedBuildSaysWhatIsMissing(t *testing.T) {
+	stubWindowsSurfaceReadAs(t)
 	home := t.TempDir()
 	bin := filepath.Join(home, ".local", "bin")
 	if err := os.MkdirAll(bin, 0o700); err != nil {
