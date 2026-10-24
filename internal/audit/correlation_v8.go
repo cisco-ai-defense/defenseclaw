@@ -608,20 +608,23 @@ func (repo *CorrelationRepository) resolveConnectorInstance(
 		if custody == ConnectorCustodyDefenseClaw {
 			effectiveCustody = ConnectorCustodyDefenseClaw
 		}
-		_, err = txExecContextObserved(ctx, tx, "correlation_connector_resolve_update",
-			repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_connector_instances SET
-				export_custody=?, profile_version=?, updated_time_unix_nano=?
-				WHERE connector_instance_id=?`, string(effectiveCustody), profileVersion, unixNano(now),
-			string(instance.ConnectorInstanceID))
-		if err != nil {
-			return ConnectorInstance{}, fmt.Errorf("audit: refresh %s: %w", label, err)
-		}
-		instance.ExportCustody = effectiveCustody
-		instance.ProfileVersion = profileVersion
 		instance.ManagedConfigDigest = digest.String
 		instance.Default = isDefault != 0
 		instance.CreatedAt = time.Unix(0, created).UTC()
-		instance.UpdatedAt = now
+		instance.UpdatedAt = time.Unix(0, updated).UTC()
+		if effectiveCustody != instance.ExportCustody || profileVersion != instance.ProfileVersion {
+			_, err = txExecContextObserved(ctx, tx, "correlation_connector_resolve_update",
+				repo.store.sqliteBusyObservabilityV8(), `UPDATE correlation_connector_instances SET
+					export_custody=?, profile_version=?, updated_time_unix_nano=?
+					WHERE connector_instance_id=?`, string(effectiveCustody), profileVersion, unixNano(now),
+				string(instance.ConnectorInstanceID))
+			if err != nil {
+				return ConnectorInstance{}, fmt.Errorf("audit: refresh %s: %w", label, err)
+			}
+			instance.ExportCustody = effectiveCustody
+			instance.ProfileVersion = profileVersion
+			instance.UpdatedAt = now
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return ConnectorInstance{}, fmt.Errorf("audit: commit connector instance resolution: %w", err)
