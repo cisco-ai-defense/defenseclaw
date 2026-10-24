@@ -396,15 +396,18 @@ rules:
 	}
 }
 
-// The default is a fallback, not a proven assignment. Two profiles that
-// currently enforce the same settings can still have different identities;
-// a named-user assignment needs its account fact before replacing default.
-func TestUncertainDifferentProfileNeedsProofWithoutProvenAssignment(t *testing.T) {
+// Without a proven assignment, an uncertain profile needs its account fact
+// only when it could change enforcement on the request's path. Two observe
+// profiles with different names make the same hook decision.
+func TestUncertainObserveProfileUsesDefaultWithoutProvenAssignment(t *testing.T) {
+	stubProfileSources(t)
 	p := identityTestPlatforms[0]
 	subject := identityTestSubject(p, p.providers[0], stateProven, false)
 	subject.holderUnproven = true
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Connector = "codex"
+	cfg.Codex.Mode = "observe"
 	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
 		"watch": {Mode: "observe"}, "other-watch": {Mode: "observe"},
 	}
@@ -412,13 +415,67 @@ func TestUncertainDifferentProfileNeedsProofWithoutProvenAssignment(t *testing.T
 	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{
 		{Profile: "other-watch", Match: config.ProfileMatch{Users: []string{p.name}}},
 	}
-	set, err := newGuardrailProfileSet(cfg, nil, true)
-	if err != nil {
-		t.Fatal(err)
+	set := newGuardrailProfileSetFor(t, cfg)
+	for _, path := range []profilePath{profilePathHook, profilePathInspect} {
+		got := set.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, path, "")
+		if got.Name != "watch" || got.Refused != "" {
+			t.Errorf("observe on path %d = %+v; want unrefused default", path, got)
+		}
 	}
-	got := set.match(&subject, profileSubjectVerified, "codex", "")
+	pathless := set.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathAny, "")
+	if pathless.Refused == "" {
+		t.Fatalf("pathless selection = %+v; want proof before naming another profile", pathless)
+	}
+
+	// An inspect-only uncertain profile also cannot change the hook decision,
+	// even though its unconfirmed account would matter to an inspect request.
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Profiles["other-watch"] = config.GuardrailProfile{}
+	inspectOnly := newGuardrailProfileSetFor(t, cfg)
+	if configBlocksOn(inspectOnly.profileConfig("other-watch"), "codex", profilePathHook) ||
+		!configBlocksOn(inspectOnly.profileConfig("other-watch"), "codex", profilePathInspect) {
+		t.Fatal("fixture: uncertain profile must observe hooks and act on inspection")
+	}
+	if got := inspectOnly.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathHook, ""); got.Name != "watch" || got.Refused != "" {
+		t.Errorf("inspect-only uncertain profile on hook = %+v; want unrefused default", got)
+	}
+	if got := inspectOnly.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathInspect, ""); got.Refused == "" {
+		t.Errorf("inspect-only uncertain profile on inspect = %+v; want account proof", got)
+	}
+
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	ctx := context.WithValue(t.Context(), testVerifiedSubjectKey{}, subject)
+	for _, source := range []*guardrailProfileSet{set, inspectOnly} {
+		api.guardrailProfiles.set.Store(source)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/hook", strings.NewReader(`{"session_id":"observe-session","hook_event_name":"UserPromptSubmit","prompt":"echo hi"}`)).WithContext(ctx)
+		setTestCodexHookBinding(req, "UserPromptSubmit", defaultTestCodexHookContract)
+		rec := httptest.NewRecorder()
+		api.handleAgentHook("codex").ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"action":"allow"`) || strings.Contains(rec.Body.String(), "refused this request") {
+			t.Fatalf("observe hook = %d %s; want allow without identity refusal", rec.Code, rec.Body.String())
+		}
+	}
+
+	// A different name remains relevant when its mode can block this hook.
+	cfg.Guardrail.Mode = "observe"
+	cfg.Codex.Mode = ""
+	cfg.Guardrail.Profiles["other-watch"] = config.GuardrailProfile{Mode: "action"}
+	acting := newGuardrailProfileSetFor(t, cfg)
+	if !configBlocksOn(acting.profileConfig("other-watch"), "codex", profilePathHook) {
+		t.Fatal("fixture: uncertain profile does not act on the hook")
+	}
+	got := acting.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathHook, "")
 	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
-		t.Fatalf("uncertain assignment over default = %+v; want account-only refusal", got)
+		t.Fatalf("uncertain enforcing assignment = %+v; want account-only refusal", got)
+	}
+	// The fallback itself may act. An uncertain observe profile could weaken
+	// it, so their different enforcement still needs the account fact.
+	cfg.Guardrail.Profiles["watch"] = config.GuardrailProfile{Mode: "action"}
+	cfg.Guardrail.Profiles["other-watch"] = config.GuardrailProfile{Mode: "observe"}
+	weaker := newGuardrailProfileSetFor(t, cfg)
+	got = weaker.selectProfile(&subject, resolveIdentity(&subject, nil), profileSubjectVerified, "codex", nil, profilePathHook, "")
+	if !slices.Equal(got.Unproven, []string{"account:unknown"}) || !strings.Contains(got.Refused, "account holder is unconfirmed") {
+		t.Fatalf("uncertain weaker assignment = %+v; want account-only refusal", got)
 	}
 }
 

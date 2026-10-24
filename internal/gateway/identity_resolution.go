@@ -29,10 +29,11 @@ import (
 //     LDAP, winbind or Windows token chain, an ambiguous name or uid, a
 //     pre-1.0.4 agents entry the upgrade did not bind, a group fact newer
 //     than the last macOS account listing).
-//   - A maybe changes nothing when the proven assignments' profile covers
-//     its profile on the request's path (a hook, or an inspect or proxy
-//     request; both for a request on no single path), or when it names the
-//     default and no assignment is proven.
+//   - A maybe changes nothing when the profile selected by proven
+//     assignments covers its profile on the request's path, or when no
+//     assignment is proven and its profile enforces equivalently to the
+//     default on a concrete hook, inspect or proxy request. A selection
+//     without a single request path needs proof to name a different profile.
 //     Otherwise the request is refused, naming the facts those maybes need
 //     (profileDecision.Refused); Name is then the strictest combination of
 //     default_profile and every profile that matches or could match, for
@@ -378,10 +379,11 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		return profileDecision{}, false
 	}
 	// An assignment that may apply changes nothing when the profile selected
-	// by proven assignments already covers it on the request's path. With no
-	// proven assignment, only an uncertain assignment naming the default
-	// changes nothing. The decision needs only facts that could change the
-	// selected profile.
+	// by proven assignments already covers it on the request's path. Without
+	// a proven assignment, the default is only a fallback: on a concrete
+	// request path the two profiles must enforce equivalently so an unproven
+	// weaker assignment cannot silently replace a stronger default. A
+	// pathless selection still needs proof before naming a different profile.
 	proven := set.defaultProfile
 	if len(yes) > 0 {
 		matched := make([]string, 0, len(yes))
@@ -392,7 +394,9 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 	}
 	var needed []string
 	for i, name := range maybe {
-		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, scans, path) {
+		if set.provenProfileCovers(proven, name, scans, path) &&
+			(len(yes) > 0 || name == proven ||
+				(path != profilePathAny && set.provenProfileCovers(name, proven, scans, path))) {
 			continue
 		}
 		for _, fact := range maybeNeeds[i] {
