@@ -132,3 +132,68 @@ func TestReconcileWindowsCodexKeepsAnAdministratorNarrowedSessionStart(t *testin
 		})
 	}
 }
+
+// Continuation 2 review: a repair that adopts the file (no trusted ownership
+// record) keeps the administrator's narrowed SessionStart group in place,
+// but the preimage it recorded had it stripped as DefenseClaw's, so a later
+// removal that restores the preimage deleted it. The preimage now keeps it.
+func TestWindowsCodexAdoptionKeepsAnAdministratorNarrowedSessionStartInThePreimage(t *testing.T) {
+	for _, contract := range KnownHookContracts("codex") {
+		if !codexContractCertifiesCompactSessionStart(contract.ContractID) {
+			continue
+		}
+		t.Run(contract.ContractID, func(t *testing.T) {
+			current := testWindowsCodexMachineOptions()
+			current.HookContractID = contract.ContractID
+			command := windowsCodexBoundManagedHookCommand(current.HookBinary, "SessionStart", contract.ContractID)
+			compact := windowsCodexTestGroup(codexCompactSessionStartMatcher, windowsCodexMachineHandler(command, 30))
+			var earlierMatcher string
+			for _, group := range codexHookGroups {
+				if group.eventType == "SessionStart" {
+					earlierMatcher = group.matcher
+				}
+			}
+			narrowed := windowsCodexTestGroup(earlierMatcher, windowsCodexMachineHandler(command, 30))
+			wantNarrowed := windowsCodexTestNormalized(t, narrowed)
+			wantCompact := windowsCodexTestNormalized(t, compact)
+			installed, _, err := reconcileWindowsCodexRequirements([]byte("approval_policy_floor = \"on-request\"\n"), current, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, tc := range []struct {
+				name   string
+				groups []interface{}
+			}{
+				{"narrowed in place", []interface{}{narrowed}},
+				{"a narrowed copy next to the compact group", []interface{}{narrowed, compact}},
+			} {
+				cfg, err := parseWindowsCodexRequirements(installed)
+				if err != nil {
+					t.Fatal(err)
+				}
+				cfg["hooks"].(map[string]interface{})["SessionStart"] = tc.groups
+				file, err := toml.Marshal(cfg)
+				if err != nil {
+					t.Fatal(err)
+				}
+				adoption, err := windowsCodexAdoptRequirements(file, true, nil, current)
+				if err != nil {
+					t.Fatalf("%s: %v", tc.name, err)
+				}
+				if n := windowsCodexTestCountGroup(t, adoption.preimage, "SessionStart", wantNarrowed); n != 1 {
+					t.Fatalf("%s: the adopted preimage holds %d narrowed groups, want 1:\n%s", tc.name, n, adoption.preimage)
+				}
+				if c := windowsCodexTestCountGroup(t, adoption.preimage, "SessionStart", wantCompact); c != 0 {
+					t.Fatalf("%s: the adopted preimage holds DefenseClaw's compact group:\n%s", tc.name, adoption.preimage)
+				}
+				repaired, _, err := reconcileWindowsCodexRequirements(adoption.base, current, false)
+				if err != nil {
+					t.Fatalf("%s: %v", tc.name, err)
+				}
+				if n, c := windowsCodexTestCountGroup(t, repaired, "SessionStart", wantNarrowed), windowsCodexTestCountGroup(t, repaired, "SessionStart", wantCompact); n != 1 || c != 1 {
+					t.Fatalf("%s: the adopting repair left %d narrowed and %d compact groups, want 1 and 1:\n%s", tc.name, n, c, repaired)
+				}
+			}
+		})
+	}
+}

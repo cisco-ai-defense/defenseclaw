@@ -1266,7 +1266,15 @@ func windowsCodexAdoptRequirements(
 	if opts.SecureClient {
 		currentDir = opts.ManagedDir
 	}
-	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayout(adoption.base, opts.HookBinary, currentDir)
+	// This install's own command in a shape only an earlier release renders
+	// is the administrator's edit as far as anything here can prove
+	// (windowsCodexEditedCurrentGroup): reconcile keeps it in an adopted
+	// file, so the preimage keeps it too, and a removal that restores the
+	// preimage does not delete it.
+	keepEdited := func(group interface{}, event string) bool {
+		return !opts.SecureClient && windowsCodexEditedCurrentGroup(group, event, opts)
+	}
+	withoutCurrent, strippedCurrent, err := stripWindowsCodexLayoutKeeping(adoption.base, opts.HookBinary, currentDir, keepEdited)
 	if err != nil {
 		return windowsCodexAdoption{}, fmt.Errorf("strip current Codex managed layout: %w", err)
 	}
@@ -1354,6 +1362,12 @@ func windowsCodexDiscardedPreimageTrusted(
 // that kind. It reports whether anything was removed; the document is
 // re-rendered only then.
 func stripWindowsCodexLayout(raw []byte, hookBinary, managedDir string) ([]byte, bool, error) {
+	return stripWindowsCodexLayoutKeeping(raw, hookBinary, managedDir, nil)
+}
+
+// stripWindowsCodexLayoutKeeping is stripWindowsCodexLayout that leaves
+// every group keep reports (nil keeps none).
+func stripWindowsCodexLayoutKeeping(raw []byte, hookBinary, managedDir string, keep func(group interface{}, event string) bool) ([]byte, bool, error) {
 	if strings.TrimSpace(hookBinary) == "" && strings.TrimSpace(managedDir) == "" {
 		return raw, false, nil
 	}
@@ -1380,7 +1394,7 @@ func stripWindowsCodexLayout(raw []byte, hookBinary, managedDir string) ([]byte,
 			}
 			kept := make([]interface{}, 0, len(groups))
 			for _, candidate := range groups {
-				if windowsCodexOwnedHookGroup(candidate, key, hookBinary) {
+				if windowsCodexOwnedHookGroup(candidate, key, hookBinary) && (keep == nil || !keep(candidate, key)) {
 					stripped = true
 					continue
 				}
