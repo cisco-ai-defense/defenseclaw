@@ -1181,11 +1181,7 @@ func TestStandaloneVerifyAcceptsOnlyRecordedPendingTargets(t *testing.T) {
 	}
 }
 
-// The session-only HERMES_HOME limit is a coverage verdict of the lifecycle
-// result, not a hook failure: a verified Hermes target stays verified, so
-// the guardian's verify does not fail every managed Hermes deployment and
-// roll back its upgrade.
-func TestStandaloneVerifyKeepsAVerifiedHermesTarget(t *testing.T) {
+func TestStandaloneVerifyRefusesUnattestableHermesHome(t *testing.T) {
 	uid, gid := os.Getuid(), os.Getgid()
 	resolver := standaloneTestResolver{accounts: map[string]unixidentity.Account{}}
 	f := newStandaloneFixture(t, resolver)
@@ -1215,11 +1211,11 @@ func TestStandaloneVerifyKeepsAVerifiedHermesTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(run.Rows) != 2 || run.Failures != 0 || run.Pending != 1 {
-		t.Fatalf("a verified Hermes target must pass and recorded pending must remain: rows=%+v failures=%d pending=%d", run.Rows, run.Failures, run.Pending)
+	if len(run.Rows) != 2 || run.Failures != 1 || run.Pending != 1 {
+		t.Fatalf("unobservable session home must fail a successful Hermes target and preserve recorded pending: rows=%+v failures=%d pending=%d", run.Rows, run.Failures, run.Pending)
 	}
-	if row := run.Rows[0]; !row.OK || row.Pending || row.Error != "" || row.Result == nil {
-		t.Fatalf("verified Hermes target failed: %+v", row)
+	if row := run.Rows[0]; row.OK || row.Pending || !strings.Contains(row.Error, "session-only HERMES_HOME") {
+		t.Fatalf("Hermes target was certified or the cause was hidden: %+v", row)
 	}
 	if row := run.Rows[1]; row.OK || !row.Pending || row.Error != "" {
 		t.Fatalf("recorded unavailable home must remain pending: %+v", row)

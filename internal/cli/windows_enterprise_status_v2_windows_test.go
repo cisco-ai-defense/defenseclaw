@@ -110,10 +110,7 @@ func TestWindowsStatusV2Blocks(t *testing.T) {
 	}
 }
 
-// The session-only HERMES_HOME limit keeps coverage and security incomplete
-// with a warning. It is not a verify error, so Setup /ensure of a verified
-// managed Hermes deployment is not rolled back for it.
-func TestWindowsVerifyV2ReportsUnobservableHermesSessionHomeAsIncomplete(t *testing.T) {
+func TestWindowsVerifyV2RefusesUnobservableHermesSessionHome(t *testing.T) {
 	cfg := windowsStatusV2Config()
 	fakeWindowsStatusV2(t, windowsEnterpriseStatusV2Inputs{
 		cfg: cfg,
@@ -126,20 +123,13 @@ func TestWindowsVerifyV2ReportsUnobservableHermesSessionHomeAsIncomplete(t *test
 	result := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
 	result.Installed, result.CoverageComplete, result.SecurityComplete = true, true, true
 	applyWindowsEnterpriseStatusV2(result)
-	if code := result.Finish("windows", 0); code != 0 || !result.OK || len(result.Errors) != 0 ||
+	if code := result.Finish("windows", 0); code != enterprisestatus.WindowsExitFailure || result.OK ||
 		result.SecurityComplete || result.CoverageComplete {
-		t.Fatalf("unverified Hermes verify result: code=%d ok=%v errors=%+v security=%v coverage=%v",
-			code, result.OK, result.Errors, result.SecurityComplete, result.CoverageComplete)
+		t.Fatalf("unverified Hermes verify result: code=%d ok=%v security=%v coverage=%v", code, result.OK, result.SecurityComplete, result.CoverageComplete)
 	}
-	var warned string
-	for _, warning := range result.Warnings {
-		if warning.Code == enterprisestatus.CodeStatusDetailUnavailable {
-			warned += warning.Message + "; "
-		}
-	}
-	if !strings.Contains(warned, "session-only HERMES_HOME") ||
+	if len(result.Errors) == 0 || !strings.Contains(result.Errors[0].Message, "session-only HERMES_HOME") ||
 		result.Connectors["hermes"].HooksInstalled != enterprisestatus.HooksInstalledUnknown {
-		t.Fatalf("unverified Hermes cause or coverage missing: warnings=%+v connector=%+v", result.Warnings, result.Connectors["hermes"])
+		t.Fatalf("unverified Hermes cause or coverage missing: errors=%+v connector=%+v", result.Errors, result.Connectors["hermes"])
 	}
 	// The unknown state publishes no targets: the lifecycle schema forbids them.
 	document, err := json.Marshal(result)

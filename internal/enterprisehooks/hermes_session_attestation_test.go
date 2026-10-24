@@ -8,14 +8,13 @@ import (
 	"testing"
 )
 
-// An account can start Hermes with HERMES_HOME set only for one shell. No
-// persistent setting or hook record names that unhooked home, so managed
-// Hermes coverage is reported incomplete on every OS. It is a coverage
-// message and never a verification failure.
-func TestManagedHermesSessionHomeIsACoverageLimit(t *testing.T) {
+// An account can start Hermes with HERMES_HOME set only for one shell.
+// No persistent setting or hook record names that unhooked home, so a live
+// managed Verify must refuse attestation even if the default home is hooked.
+func TestManagedHermesSessionHomeCannotBeAttested(t *testing.T) {
 	for _, tc := range []struct {
-		name, goos, connector  string
-		managed, secure, limit bool
+		name, goos, connector   string
+		managed, secure, refuse bool
 	}{
 		{"standalone Hermes", "windows", "hermes", true, false, true},
 		{"Secure Client Hermes", "windows", "hermes", true, true, false},
@@ -26,9 +25,13 @@ func TestManagedHermesSessionHomeIsACoverageLimit(t *testing.T) {
 		{"Linux per-user Hermes", "linux", "hermes", false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			limit := ManagedHermesSessionHomeCoverageLimit(tc.goos, tc.connector, tc.managed, tc.secure)
-			if tc.limit != strings.Contains(limit, "session-only HERMES_HOME") || !tc.limit && limit != "" {
-				t.Fatalf("coverage limit = %q, want limit=%t", limit, tc.limit)
+			err := ManagedHermesSessionHomeAttestation(tc.goos, tc.connector, tc.managed, tc.secure)
+			if tc.refuse {
+				if err == nil || !strings.Contains(err.Error(), "session-only HERMES_HOME") {
+					t.Fatalf("attestation = %v, want the unobservable home named", err)
+				}
+			} else if err != nil {
+				t.Fatalf("attestation = %v, want no new restriction", err)
 			}
 		})
 	}
