@@ -3498,7 +3498,12 @@ function Assert-DefenseClawRegularSource {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$Label,
         [switch]$Authenticode,
-        [switch]$AllowUnsigned
+        [switch]$AllowUnsigned,
+        # The payload manifest name the file is admitted under in HashPinned
+        # mode; its own name when not given. A copy of an admitted payload
+        # file under another name (a transaction's early-hook-closed.exe) is
+        # admitted only by the pin of the file it was copied from (GAP-1381).
+        [string]$PinnedName = ''
     )
     $full = Resolve-DefenseClawFullPath -Path $Path -MustExist -Leaf
     Assert-DefenseClawNoReparsePath -Path $full
@@ -3513,7 +3518,7 @@ function Assert-DefenseClawRegularSource {
             # allowed signers) or, in HashPinned mode, an exact SHA-256 from
             # the administrator's payload manifest.
             if (-not $AllowUnsigned -and
-                -not (Test-DefenseClawStandalonePayloadTrusted -Path $full -Signature $signature)) {
+                -not (Test-DefenseClawStandalonePayloadTrusted -Path $full -Signature $signature -PinnedName $PinnedName)) {
                 throw (
                     "$Label is not admitted by the standalone payload trust policy " +
                     "(Authenticode $($signature.Status); trust mode $($script:DefenseClawTrustMode)): $full"
@@ -3692,11 +3697,16 @@ function Install-DefenseClawSourceDescriptor {
         }
     }
     if ([bool]$Source.authenticode) {
+        # The copy is admitted as the source was: in HashPinned mode by the
+        # pin of the source's own name, which a destination with another name
+        # (the transaction's early-hook-closed.exe guard) does not have in the
+        # payload manifest (GAP-1381). Its bytes must still be the pinned ones.
         [void](Assert-DefenseClawRegularSource `
             -Path $destinationPath `
             -Label ([string]$Source.label) `
             -Authenticode `
-            -AllowUnsigned:([bool]$Source.allow_unsigned))
+            -AllowUnsigned:([bool]$Source.allow_unsigned) `
+            -PinnedName ([IO.Path]::GetFileName($sourcePath)))
         $installedSignature = Microsoft.PowerShell.Security\Get-AuthenticodeSignature `
             -LiteralPath $destinationPath
         $installedThumbprint = if ($null -eq $installedSignature.SignerCertificate) {
@@ -17951,11 +17961,18 @@ function Publish-DefenseClawEarlyHook {
     if (Test-DefenseClawStandaloneProfile) {
         $guardCopy = Microsoft.PowerShell.Management\Join-Path $TransactionDirectory 'early-hook-closed.exe'
         Install-DefenseClawSourceDescriptor -Source $Source -Destination $guardCopy
-        $Intent['early_hook_preimage_sha256'] = $copiedHash.ToLowerInvariant()
-        $Intent['early_hook_guard_copy'] = $guardCopy
-        $Intent['early_hook_guard_sha256'] = (
+        # The guard is recorded with the digest its source was admitted by,
+        # and only when the copy still has those bytes.
+        $guardSHA256 = ([string]$Source.sha256).ToLowerInvariant()
+        $guardCopied = (
             Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $guardCopy -Algorithm SHA256
         ).Hash.ToLowerInvariant()
+        if ($guardCopied -cne $guardSHA256) {
+            throw 'the closed hook guard copy does not match its admitted source'
+        }
+        $Intent['early_hook_preimage_sha256'] = $copiedHash.ToLowerInvariant()
+        $Intent['early_hook_guard_copy'] = $guardCopy
+        $Intent['early_hook_guard_sha256'] = $guardSHA256
     }
     Write-DefenseClawJsonAtomic -Value $Intent -Path $Layout.PendingPath
     Install-DefenseClawSourceDescriptor -Source $Source -Destination $Layout.HookPath
@@ -36554,7 +36571,8 @@ function Test-DefenseClawStandalonePayloadTrusted {
     #>
     param(
         [Parameter(Mandatory)][string]$Path,
-        [Parameter(Mandatory)]$Signature
+        [Parameter(Mandatory)]$Signature,
+        [string]$PinnedName = ''
     )
     if (-not (Test-DefenseClawStandaloneProfile)) {
         return $false
@@ -36580,7 +36598,12 @@ function Test-DefenseClawStandalonePayloadTrusted {
     if ([string]$script:DefenseClawTrustMode -cne 'HashPinned') {
         return $false
     }
-    $leaf = [IO.Path]::GetFileName($Path).ToLowerInvariant()
+    $leaf = if ([string]::IsNullOrEmpty($PinnedName)) {
+        [IO.Path]::GetFileName($Path).ToLowerInvariant()
+    }
+    else {
+        $PinnedName.ToLowerInvariant()
+    }
     if (-not $script:DefenseClawPinnedPayloadSHA256.ContainsKey($leaf)) {
         return $false
     }
