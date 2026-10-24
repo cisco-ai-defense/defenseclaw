@@ -75,12 +75,91 @@ func main() {
 		os.Exit(0)
 	}
 	if !isHookEntrypoint(os.Args[1:]) {
-		fmt.Fprintln(os.Stderr, "defenseclaw-hook: expected hook, hook-post or notify subcommand")
-		os.Exit(2)
+		os.Exit(nonHookInvocationExit(os.Args[1:], os.Stdin, os.Stderr))
 	}
 	cli.SetVersion(version)
 	cli.SetBuildInfo(commit, date)
 	os.Exit(cli.Execute())
+}
+
+// nonHookInvocationExit answers a start without a hook subcommand. Cursor
+// imports the hooks in ~/.claude/settings.json (its third-party hooks, on by
+// default) and runs only each handler's command, without the handler's args.
+// For a Windows exec-form Claude Code handler that is this launcher with no
+// arguments and a Cursor event on stdin. Its exit 2 made Cursor block every
+// tool call, also with no Cursor hooks set up (GAP-1011). That call is no
+// Claude Code event, so it gets no answer (exit 0, no output); Cursor's own
+// DefenseClaw hooks, when set up, decide its events. Any other start without
+// a subcommand is still refused with exit 2.
+func nonHookInvocationExit(args []string, stdin *os.File, stderr io.Writer) int {
+	if len(args) == 0 && stdinIsPiped(stdin) && isCursorEvent(stdin) {
+		return 0
+	}
+	fmt.Fprintln(stderr, "defenseclaw-hook: expected hook, hook-post or notify subcommand")
+	return 2
+}
+
+// stdinIsPiped is false for a console or terminal, where a person who typed
+// the command would otherwise wait on a read.
+func stdinIsPiped(stdin *os.File) bool {
+	if stdin == nil {
+		return false
+	}
+	info, err := stdin.Stat()
+	return err == nil && info.Mode()&os.ModeCharDevice == 0
+}
+
+// isCursorEvent reports whether r holds one JSON object with a top-level
+// cursor_version string, the marker of every Cursor hook event (the same
+// marker hookexec reads for an imported Claude Code call). The object is read
+// as a stream, value by value, so a large tool input is not held whole.
+func isCursorEvent(r io.Reader) bool {
+	decoder := json.NewDecoder(r)
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return false
+	}
+	found := false
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		if key, _ := token.(string); key == "cursor_version" {
+			var value string
+			if decoder.Decode(&value) != nil {
+				return false
+			}
+			found = found || value != ""
+			continue
+		}
+		if !skipJSONValue(decoder) {
+			return false
+		}
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return false
+	}
+	return found
+}
+
+// skipJSONValue reads one JSON value token by token.
+func skipJSONValue(decoder *json.Decoder) bool {
+	depth := 0
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return false
+		}
+		switch token {
+		case json.Delim('{'), json.Delim('['):
+			depth++
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
+		if depth == 0 {
+			return true
+		}
+	}
 }
 
 func isHookEntrypoint(args []string) bool {

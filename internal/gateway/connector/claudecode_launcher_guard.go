@@ -164,6 +164,29 @@ func claudeCodeWindowsHookInvocation(opts SetupOpts, executable string) (string,
 	return executable, args
 }
 
+// claudeCodeHandlerInvocation is the argv of the handler Setup writes for
+// eventType. Cursor imports the hooks in ~/.claude/settings.json (its
+// third-party hooks, on by default) and runs only a handler's command,
+// without its args. For the cmd.exe guard that started an interactive
+// cmd.exe, which printed its banner instead of JSON, and Cursor blocks a
+// tool call whose pre-tool hook answers with something other than JSON: every
+// Cursor tool call was blocked, also with no Cursor hooks set up (GAP-1011).
+// PreToolUse is the only Claude Code event Cursor runs as a pre-tool check,
+// so that handler runs the launcher directly; started by Cursor with no
+// arguments the launcher gives no answer. Every other event keeps the guard,
+// and with the launcher missing UserPromptSubmit and PermissionRequest still
+// block, so no new prompt runs unguarded (GAP-1091).
+func claudeCodeHandlerInvocation(eventType, command string, args []string) (string, []string) {
+	if eventType != "PreToolUse" {
+		return command, args
+	}
+	hook := map[string]interface{}{"command": command, "args": args}
+	if launcher, hookArgs, ok := claudeCodeLauncherGuardParts(hook); ok {
+		return launcher, hookArgs
+	}
+	return command, args
+}
+
 // claudeCodeRollbackBackupName is the copy of settings.json taken before
 // ConvertHooksForRollback rewrites it, under <data dir>/backups.
 const claudeCodeRollbackBackupName = "claudecode-settings.before-rollback.json"

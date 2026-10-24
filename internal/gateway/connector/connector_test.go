@@ -2752,12 +2752,22 @@ func TestClaudeCode_Setup_WindowsUsesShellFreeExecForm(t *testing.T) {
 		t.Fatal(err)
 	}
 	hooks := settings["hooks"].(map[string]interface{})
-	entries := hooks["PreToolUse"].([]interface{})
-	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	prompt := hooks["UserPromptSubmit"].([]interface{})[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
 	// Per-user Setup runs the launcher through cmd.exe so a missing launcher
 	// blocks (GAP-1091); the handler still reads as the exec form it runs.
-	if got := handler["command"]; got != claudeCodeWindowsCommandProcessor() {
-		t.Fatalf("command = %q, want %q", got, claudeCodeWindowsCommandProcessor())
+	if got := prompt["command"]; got != claudeCodeWindowsCommandProcessor() {
+		t.Fatalf("UserPromptSubmit command = %q, want %q", got, claudeCodeWindowsCommandProcessor())
+	}
+	if view := claudeCodeExecView(prompt).(map[string]interface{}); view["command"] != defenseclawHookBinaryOverride {
+		t.Fatalf("UserPromptSubmit launcher = %q, want %q", view["command"], defenseclawHookBinaryOverride)
+	}
+	entries := hooks["PreToolUse"].([]interface{})
+	handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+	// PreToolUse runs the launcher directly: Cursor imports this file and
+	// runs only the command, and cmd.exe without its args blocked every
+	// Cursor tool call (GAP-1011).
+	if got := handler["command"]; got != defenseclawHookBinaryOverride {
+		t.Fatalf("PreToolUse command = %q, want the launcher %q", got, defenseclawHookBinaryOverride)
 	}
 	view := claudeCodeExecView(handler).(map[string]interface{})
 	if got := view["command"]; got != defenseclawHookBinaryOverride {
