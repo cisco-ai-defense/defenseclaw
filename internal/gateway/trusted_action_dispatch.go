@@ -106,6 +106,14 @@ func (t *trustedActionTelemetry) merge(other trustedActionTelemetry) {
 	t.ParserUncertaintyShadowFindingCount += other.ParserUncertaintyShadowFindingCount
 }
 
+// widen raises each count of t to other's where that is larger: a call
+// judged with the rules of several generations counts its parse once.
+func (t *trustedActionTelemetry) widen(other trustedActionTelemetry) {
+	t.ParserUncertaintyCount = max(t.ParserUncertaintyCount, other.ParserUncertaintyCount)
+	t.ParserUncertaintyCatalogMatchCount = max(t.ParserUncertaintyCatalogMatchCount, other.ParserUncertaintyCatalogMatchCount)
+	t.ParserUncertaintyShadowFindingCount = max(t.ParserUncertaintyShadowFindingCount, other.ParserUncertaintyShadowFindingCount)
+}
+
 func (t trustedActionTelemetry) empty() bool {
 	return t.ParserUncertaintyCount == 0 &&
 		t.ParserUncertaintyCatalogMatchCount == 0 &&
@@ -152,9 +160,30 @@ func dispatchTrustedAction(
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)
 	}
-	ctx := parent
+	generation := snapshotRulePackGenerationFor(parent, request.Connector)
+	if generation == nil || len(generation.members) == 0 {
+		return dispatchTrustedActionWith(parent, request, facts, generation, &telemetry)
+	}
+	// A strictest combination of profiles judges the call with each
+	// member's own rules and keeps the strongest finding of each rule.
+	lists := make([][]RuleFinding, 0, len(generation.members))
+	for _, member := range generation.members {
+		var memberTelemetry trustedActionTelemetry
+		lists = append(lists, dispatchTrustedActionWith(parent, request, facts, member, &memberTelemetry))
+		telemetry.widen(memberTelemetry)
+	}
+	return strongestRuleFindings(lists, trustedActionFindingKey)
+}
 
-	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
+// dispatchTrustedActionWith is dispatchTrustedAction's judgment of the
+// call's facts with the rules of one generation.
+func dispatchTrustedActionWith(
+	ctx context.Context,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+	generation *compiledRulePackCategories,
+	telemetry *trustedActionTelemetry,
+) (findings []RuleFinding) {
 	// After every lane below, on what it returns (GAP-1469, GAP-1478).
 	defer func() {
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)

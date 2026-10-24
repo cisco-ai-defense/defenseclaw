@@ -229,6 +229,14 @@ type compiledRulePackCategories struct {
 	ruleIdentityTitles map[string]map[string]struct{}
 	overridden         int
 	added              int
+	// members are the generations of the profiles of a strictest
+	// combination (a meet) whose rules it scans with. A scan of the meet is
+	// each member's own scan, the strongest finding of a rule kept
+	// (strongestRuleFindings), so a rule ID two packs define differently
+	// keeps both definitions. categories, semanticRules and
+	// ruleIdentityTitles then hold their union, for lookups only. nil for
+	// the generation of one pack.
+	members []*compiledRulePackCategories
 }
 
 const (
@@ -983,6 +991,13 @@ func scanRuleCategoriesWithOptions(
 ) []RuleFinding {
 	if generation == nil {
 		return nil
+	}
+	if len(generation.members) > 0 {
+		lists := make([][]RuleFinding, 0, len(generation.members))
+		for _, member := range generation.members {
+			lists = append(lists, scanRuleCategoriesWithOptions(member, text, toolName, options))
+		}
+		return strongestRuleFindings(lists, func(ruleID string) string { return ruleID })
 	}
 	var findings []RuleFinding
 	// The hard-coded Windows recognizers cover only command and sensitive-path
