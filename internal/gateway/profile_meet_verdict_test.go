@@ -5,9 +5,12 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"regexp"
 	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
@@ -187,6 +190,60 @@ func TestProfileMeetHookJudgeKeepsEachMembersFinding(t *testing.T) {
 	}
 	if !seen["a"] || !seen["b"] {
 		t.Fatalf("judge audit findings lack member provenance: %+v", audit)
+	}
+}
+
+type delayedMemberJudgeProvider struct {
+	mu      sync.Mutex
+	members []string
+}
+
+func (p *delayedMemberJudgeProvider) ChatCompletion(ctx context.Context, _ *ChatRequest) (*ChatResponse, error) {
+	member := ""
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
+		member = resolved.decision.Name
+	}
+	p.mu.Lock()
+	p.members = append(p.members, member)
+	p.mu.Unlock()
+	if member == "a" {
+		select {
+		case <-time.After(1500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return &ChatResponse{Model: "test-model", Choices: []ChatChoice{{Message: &ChatMessage{Content: hookInjectionHitJSON}}}}, nil
+}
+
+func (*delayedMemberJudgeProvider) ChatCompletionStream(context.Context, *ChatRequest, func(StreamChunk)) (*ChatUsage, error) {
+	return nil, errors.New("stream not supported")
+}
+
+func TestProfileMeetHookJudgePreservesLaterActionMemberUnderSharedDeadline(t *testing.T) {
+	a := config.GuardrailProfile{Mode: "observe", Sandbox: &config.OpenShellAdminConfig{EgressBlock: []string{"observer.example"}}}
+	b := config.GuardrailProfile{Mode: "action", BlockAt: "HIGH", AlertAt: "LOW"}
+	api, ctx := meetVerdictFixture(t, a, b, nil, nil)
+	judgeConfig := config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"codex"}, HookTimeout: 2}
+	api.scannerCfg.Guardrail.Judge = judgeConfig
+	api.scannerCfg.Guardrail.DetectionStrategy = "judge_first"
+	resolved := resolvedGuardrailProfileFrom(ctx)
+	resolved.derived.Guardrail.Judge = judgeConfig
+	resolved.derived.Guardrail.DetectionStrategy = "judge_first"
+	for _, member := range []string{"a", "b"} {
+		cfg := resolved.set.profileConfig(member)
+		cfg.Guardrail.Judge = judgeConfig
+		cfg.Guardrail.DetectionStrategy = "judge_first"
+	}
+	provider := &delayedMemberJudgeProvider{}
+	api.SetHookJudge(&LLMJudge{cfg: &api.scannerCfg.Guardrail.Judge, model: "test-model", provider: provider, rp: &guardrail.RulePack{}})
+	verdict := api.runHookJudge(ctx, "prompt", "prompt", "codex", "hello there, lovely weather today", "", nil)
+	provider.mu.Lock()
+	members := slices.Clone(provider.members)
+	provider.mu.Unlock()
+	if !slices.Contains(members, "b") || verdict == nil || verdict.Action != guardrailActionBlock ||
+		!slices.Contains(verdict.findingProfiles, "b") {
+		t.Fatalf("judge calls=%v verdict=%+v; want b's blocking finding under the shared deadline", members, verdict)
 	}
 }
 

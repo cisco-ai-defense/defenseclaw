@@ -201,15 +201,33 @@ func promotedArtifactFindings(
 			recordTelemetry(observed)
 		}
 		if req.toolChain != nil {
-			matched := lists[0]
-			if len(lists) > 1 {
-				matched = strongestRuleFindings(lists, trustedActionFindingKey)
+			chainLists := lists
+			chainEnabled := true
+			if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
+				if meet := resolved.evaluationMeet(); meet != nil {
+					chainEnabled = false
+					chainLists = nil
+					for _, member := range meet.members {
+						chainEnabled = chainEnabled || configBlocksOn(resolved.set.profileConfig(member), req.ConnectorName, profilePathHook)
+					}
+					if generation != nil && len(generation.memberNames) == len(lists) {
+						for i, member := range generation.memberNames {
+							if configBlocksOn(resolved.set.profileConfig(member), req.ConnectorName, profilePathHook) {
+								chainLists = append(chainLists, lists[i])
+							}
+						}
+					}
+				}
 			}
-			req.toolChain.recordArtifactTrustedAction(
-				artifactFacts,
-				matched,
-				enforcementCapable,
-			)
+			if chainEnabled {
+				var matched []RuleFinding
+				if len(chainLists) == 1 {
+					matched = chainLists[0]
+				} else if len(chainLists) > 1 {
+					matched = strongestRuleFindings(chainLists, trustedActionFindingKey)
+				}
+				req.toolChain.recordArtifactTrustedAction(artifactFacts, matched, enforcementCapable)
+			}
 		}
 	}
 	var all []RuleFinding

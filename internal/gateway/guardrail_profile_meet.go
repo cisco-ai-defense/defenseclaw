@@ -55,6 +55,7 @@ func meetMemberContext(ctx context.Context, resolved *resolvedGuardrailProfile, 
 		derived:  resolved.set.profileConfig(member),
 	}
 	memberResolved.decision.Name = member
+	memberResolved.decision.provenMembers = nil
 	return context.WithValue(ctx, resolvedGuardrailProfileKey{}, memberResolved)
 }
 
@@ -405,9 +406,13 @@ func (m *profileMeet) ruleGeneration(ctx context.Context, set *guardrailProfileS
 	// assignment must get its rules judged before other members spend the
 	// shared semantic budget.
 	order := m.members
-	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set == set && set.meet(resolved.decision.Name) == m {
+	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set == set && resolved.evaluationMeet() == m {
 		order = make([]string, 0, len(m.members))
-		for _, candidate := range resolved.decision.Candidates {
+		candidates := resolved.decision.provenMembers
+		if len(candidates) == 0 {
+			candidates = resolved.decision.Candidates
+		}
+		for _, candidate := range candidates {
 			if slices.Contains(m.members, candidate) && !slices.Contains(order, candidate) {
 				order = append(order, candidate)
 			}

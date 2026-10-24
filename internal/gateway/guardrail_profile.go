@@ -198,6 +198,9 @@ type profileDecision struct {
 	// alone shows Candidates.
 	Unproven   []string
 	Candidates []string
+	// provenMembers keeps every proven assignment's rule and audit scope
+	// even when one profile covers the others for policy selection.
+	provenMembers []string
 }
 
 // guardrailProfileSet is every profile derived from one configuration.
@@ -514,6 +517,16 @@ type resolvedGuardrailProfile struct {
 	decision profileDecision
 	set      *guardrailProfileSet
 	derived  *config.Config
+}
+
+func (r *resolvedGuardrailProfile) evaluationMeet() *profileMeet {
+	if r == nil || r.set == nil {
+		return nil
+	}
+	if len(r.decision.provenMembers) > 1 {
+		return r.set.meet(config.ProfileMeetName(r.decision.provenMembers))
+	}
+	return r.set.meet(r.decision.Name)
 }
 
 type resolvedGuardrailProfileKey struct{}
@@ -1344,7 +1357,7 @@ func scanContentRulesForConnectorFor(ctx context.Context, connectorName, text, t
 // with every rule of its members' packs, the base generation's included.
 func (r *resolvedGuardrailProfile) ruleGenerationFor(ctx context.Context, connectorName string) *compiledRulePackCategories {
 	if r != nil && r.set != nil {
-		if meet := r.set.meet(r.decision.Name); meet != nil {
+		if meet := r.evaluationMeet(); meet != nil {
 			return meet.ruleGeneration(ctx, r.set, connectorName)
 		}
 	}

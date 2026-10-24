@@ -754,7 +754,7 @@ func (g *GuardrailInspector) inspect(ctx context.Context, direction, content, ra
 func (g *GuardrailInspector) inspectStrategy(ctx context.Context, strategy, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	if !g.managedMode {
 		if resolved := proxyProfileFor(ctx); resolved != nil && resolved.set != nil {
-			if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
+			if meet := resolved.evaluationMeet(); meet != nil {
 				var combined *ScanVerdict
 				connector := profileRequestConnector(ctx)
 				for _, member := range meet.members {

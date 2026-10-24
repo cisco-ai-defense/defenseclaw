@@ -498,7 +498,7 @@ func toolResultAlertSeverity(severity string) string {
 // prove a sensitive value; only matched entity values count.
 func (a *APIServer) sensitiveToolResultAlert(ctx context.Context, connectorName, tool, severity string, findings []string, output string) (string, bool) {
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
-		if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
+		if meet := resolved.evaluationMeet(); meet != nil {
 			for _, member := range meet.members {
 				if reason, alert := a.sensitiveToolResultAlertSingle(meetMemberContext(ctx, resolved, member), connectorName, tool, severity, findings, output); alert {
 					return reason, true

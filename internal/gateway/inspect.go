@@ -1424,20 +1424,31 @@ func (a *APIServer) connectorRulePack(ctx context.Context, connector string) *gu
 // substitutes a clean pass.
 func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDirection, connector, content, toolName string, current *ToolInspectVerdict) *ScanVerdict {
 	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil && resolved.set != nil {
-		if meet := resolved.set.meet(resolved.decision.Name); meet != nil {
+		if meet := resolved.evaluationMeet(); meet != nil {
 			// The hook client has one round-trip budget even when several
-			// profiles judge. Each member inherits the same deadline.
+			// profiles judge. Start every member under that same deadline so
+			// a slow observer cannot spend an action member's entire budget.
 			timeout := defaultHookJudgeTimeout
 			if cfg := a.decisionConfig(ctx); cfg != nil && cfg.Guardrail.Judge.HookTimeout > 0 {
 				timeout = time.Duration(cfg.Guardrail.Judge.HookTimeout * float64(time.Second))
 			}
 			judgeCtx, cancel := context.WithTimeout(ctx, timeout)
 			defer cancel()
+			results := make([]*ScanVerdict, len(meet.members))
+			var judges sync.WaitGroup
+			for i, member := range meet.members {
+				judges.Add(1)
+				go func() {
+					defer judges.Done()
+					memberCtx := meetMemberContext(judgeCtx, resolved, member)
+					memberCurrent := meetMemberJudgeCurrent(memberCtx, connector, current, member)
+					results[i] = a.runHookJudgeSingle(memberCtx, strategyDirection, judgeDirection, connector, content, toolName, memberCurrent)
+				}()
+			}
+			judges.Wait()
 			var combined *ScanVerdict
-			for _, member := range meet.members {
-				memberCtx := meetMemberContext(judgeCtx, resolved, member)
-				memberCurrent := meetMemberJudgeCurrent(memberCtx, connector, current, member)
-				verdict := a.runHookJudgeSingle(memberCtx, strategyDirection, judgeDirection, connector, content, toolName, memberCurrent)
+			for i, member := range meet.members {
+				verdict := results[i]
 				if verdict == nil {
 					continue
 				}
@@ -1541,6 +1552,8 @@ func (a *APIServer) runHookJudgeSingle(ctx context.Context, strategyDirection, j
 	// tool lanes pass a deadline-free context.Background() so they are
 	// never gated out here (J3-3c).
 	if dl, ok := ctx.Deadline(); ok && time.Until(dl) < time.Second {
+		fmt.Fprintf(os.Stderr, "[inspect] hook judge skipped (deadline too short) connector=%s direction=%s; keeping regex/AID verdict\n",
+			connector, strategyDirection)
 		return nil
 	}
 

@@ -435,6 +435,9 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 				decision.Assignment = yes[0].index
 				decision.Candidates = matched
 			}
+			if len(matched) > 1 {
+				decision.provenMembers = matched
+			}
 		}
 		if verified && res.proven() {
 			set.provenProfiles.note(res.Incarnation, decision.Name)
@@ -734,7 +737,8 @@ func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []st
 	return set.profileCoverage(a, b, connectors, path, true)
 }
 
-// profileCoverage checks sandbox enforcement for a pathless sandbox decision.
+// profileCoverage checks the sandbox floor for a pathless decision and the
+// host-run requirement on a standalone enterprise concrete path.
 // On path (on both the hook and inspect path for profilePathAny) where b blocks, a
 // blocks there too with what it decides that path with (profilePathConfig),
 // scanning every rule pack b scans there (scansRulePacksOf, and for
@@ -753,7 +757,11 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 	if ca == nil || cb == nil {
 		return false
 	}
-	if effectiveSandbox && path == profilePathAny {
+	if effectiveSandbox && (path == profilePathAny ||
+		set.base.StandaloneEnterprise() && (set.profileRequiresSandbox(a) || set.profileRequiresSandbox(b))) {
+		// A standalone host hook reads required_for from the selected
+		// profile's floor after this choice. Even on a concrete path, an
+		// uncertain floor that requires a sandbox cannot be dropped.
 		if !set.sandboxFloorCovers(a, b) {
 			return false
 		}
@@ -772,6 +780,14 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 		}
 	}
 	return true
+}
+
+func (set *guardrailProfileSet) profileRequiresSandbox(name string) bool {
+	if name == "" {
+		return len(set.base.OpenShell.Admin.RequiredFor) > 0
+	}
+	derived, ok := set.derivedProfile(name)
+	return ok && len(derived.Sandbox.RequiredFor) > 0
 }
 
 // pathCovers is profileCoverage on one connector and path, for a request on

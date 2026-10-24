@@ -141,13 +141,12 @@ func TestConnectorAliasScansTheGenerationItsMeetChecked(t *testing.T) {
 	}
 }
 
-// A request compares profiles on the scopes it scans, and a meet adds only
-// the rules of members that block on the scanned connector. a blocks on
+// A request compares profiles on the scopes it scans, and a meet audits
+// every member's rules on the scanned connector. a blocks on
 // Codex and observes elsewhere; b observes on Codex and blocks elsewhere.
 // Neither turns the other's observation into a block: a Codex request
 // gets a, a Claude Code or global request gets b, and the meet an unscoped
-// decision takes (it may scan either scope) scans Codex with a's rules
-// only and the global scope with b's only.
+// decision takes (it may scan either scope) scans both members.
 func TestObserveOnlyProfileAddsNoBlockingRulesToItsConnector(t *testing.T) {
 	stubProfileSources(t)
 	for _, order := range [][2]string{{"a", "b"}, {"b", "a"}} {
@@ -238,11 +237,22 @@ func TestObserveOnlyProfileAddsNoBlockingRulesToItsConnector(t *testing.T) {
 					}
 				}
 			}
-			// A single covering profile scans only its own pack. The explicit
-			// meet above scans and audits both members.
+			// Coverage retains a's decision name, while b's observing rule
+			// still reaches the hook audit with b's provenance.
 			hook := api.withGuardrailProfileDecision(withAuthenticatedHookConnector(ctx, "codex"), "codex")
 			if findings := scanAllRulesForConnectorFor(hook, "codex", meetPlainMarker("OBS-A-CODEX"), "message"); len(findings) == 0 {
 				t.Error("Codex hook scan missed a's blocking rule")
+			}
+			observed := scanAllRulesForConnectorFor(hook, "codex", meetPlainMarker("OBS-B"), "message")
+			if len(observed) != 1 || observed[0].RuleID != "OBS-B-PLAIN" || observed[0].profile != "b" {
+				t.Errorf("Codex hook lost b's observe finding: %+v", observed)
+			} else {
+				if audit := ruleFindingsToInspect(observed, "message"); len(audit) != 1 || !slices.Contains(audit[0].Tags, "profile:b") {
+					t.Errorf("Codex hook audit lost b's profile tag: %+v", audit)
+				}
+				if action := profileMeetActionForFindings(hook, api.decisionConfig(hook), "codex", observed, true, false); action == guardrailActionBlock || action == guardrailActionConfirm {
+					t.Errorf("b's observe finding enforced on the Codex hook: %s", action)
+				}
 			}
 		})
 	}

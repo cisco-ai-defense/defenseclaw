@@ -147,7 +147,7 @@ func profileMeetActionForFindings(
 	if resolved == nil || resolved.set == nil {
 		return singleProfileActionForFindings(cfg, connector, findings, confirmable, content)
 	}
-	meet := resolved.set.meet(resolved.decision.Name)
+	meet := resolved.evaluationMeet()
 	if meet == nil {
 		return singleProfileActionForFindings(cfg, connector, findings, confirmable, content)
 	}
