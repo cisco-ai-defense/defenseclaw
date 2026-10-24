@@ -2127,15 +2127,6 @@ def fail_mode_cmd(
                     f"{mode} is saved for when it is turned on again"
                 )
                 continue
-            if desired_modes[name] != mode:
-                click.echo(
-                    f"      - {_connector_label(name)} ({name}): stays {desired_modes[name]} "
-                    + ux.dim(
-                        f"(Cursor {'action' if desired_modes[name] == 'closed' else 'observe'} mode "
-                        f"keeps hook failures {desired_modes[name]})"
-                    )
-                )
-                continue
             # Show what guardrail status shows: an observe connector without
             # its own value already runs fail-open, and a hook-installed
             # connector shows its installed runtime value (GAP-1370).
@@ -5306,14 +5297,9 @@ def mode_cmd(
     Sets only ``guardrail.mode``, or with ``--connector X`` only
     ``guardrail.connectors.X.mode`` (creating that block if needed); ``--clear
     --connector X`` removes X's override. The guardrail's on/off state, rule
-    pack and port are never touched. A connector without its own fail mode
-    fails open in observe mode and uses the global hook fail mode
-    (``guardrail fail-mode``) in action mode; the command says when that
-    changes. The running gateway applies a mode change on its next reload.
-    A changed hook fail mode is re-rendered into the hook scripts of Claude
-    Code, Codex, Amp and OpenCode in place; the other hook connectors need a
-    gateway restart (``--no-restart`` to skip; a stopped gateway is never
-    started). Cursor's hook fail mode follows its guardrail mode.
+    pack and port are never touched, and neither is any hook fail mode: only
+    ``guardrail fail-mode`` saves one (owner decision 2026-10-23). The
+    running gateway applies a mode change on its next reload.
     """
     from defenseclaw import policy_catalog
 
@@ -5386,7 +5372,6 @@ def mode_cmd(
         return (getattr(block, "mode", "") or "").strip() if block is not None else ""
 
     affected = [connector_key] if connector_key else [c for c in actives if not _override(c)]
-    fail_before = {c: gc.effective_hook_fail_mode(c) for c in affected}
     previous = _effective(connector_key)
     becomes_action = mode == "action" or (clear and policy_catalog.mode_label(gc.mode) == "action")
 
@@ -5497,22 +5482,6 @@ def mode_cmd(
         _connector_block_for_write(gc, connector_key).mode = mode
     new_mode = _effective(connector_key)
     source = "override" if connector_key and not clear else "global"
-    fail_after = {c: gc.effective_hook_fail_mode(c) for c in affected}
-    # Keep the persisted Cursor value in sync so later setup, status and
-    # migration reads cannot see the previous mode's hook posture.
-    for c in affected:
-        if normalize_connector(c) == "cursor":
-            if gc.connectors:
-                _connector_block_for_write(gc, c).hook_fail_mode = fail_after[c]
-            else:
-                gc.hook_fail_mode = fail_after[c]
-    fail_flips = {c: fm for c, fm in fail_after.items() if fm != fail_before[c]}
-    if fail_flips:
-        # Only hook connectors bake a fail mode into their registration.
-        from defenseclaw.commands.cmd_setup import _HOOK_ENFORCED_CONNECTORS
-
-        fail_flips = {c: fm for c, fm in fail_flips.items() if normalize_connector(c) in _HOOK_ENFORCED_CONNECTORS}
-
     try:
         app.cfg.save()
     except (OSError, ValueError, ConfigWriteError) as exc:
@@ -5521,11 +5490,9 @@ def mode_cmd(
         app, "guardrail-mode", f"scope={scope} mode={new_mode} previous={previous} cleared={str(clear).lower()}"
     )
     # Decisions read the gateway's live configuration generation, so a mode
-    # change reloads hot. Only per-user Cursor's hook fail mode follows the
-    # guardrail mode (observe open, action closed; every other hook keeps its
-    # fail mode across a mode switch, owner rule): its registration bakes the
-    # value, so a flip restarts the gateway, which re-bakes it.
-    outcome = _apply_to_running_gateway(app, needs_restart=bool(fail_flips), restart=restart, quiet=json_out)
+    # change reloads hot. No hook fail mode follows the guardrail mode, so no
+    # hook is re-rendered.
+    outcome = _apply_to_running_gateway(app, needs_restart=False, restart=restart, quiet=json_out)
     unguarded = (
         _unguarded_hook_connectors(app, affected) if new_mode == "action" and outcome in ("live", "restarted") else []
     )
@@ -5540,19 +5507,11 @@ def mode_cmd(
     else:
         message = f"{_connector_label(scope)} is now in {new_mode} mode: it {plain[new_mode]}."
         not_covered = []
-    consequence = {
-        "closed": "the action is blocked if the hook can't reach the gateway",
-        "open": "the action goes ahead if the hook can't reach the gateway",
-    }
     notes = [
-        f"Hook failures for {_connector_label(c)} now fail {fm}: {consequence.get(fm, fm)}."
-        for c, fm in fail_flips.items()
-    ]
-    notes.extend(
         f"{_connector_label(c)} keeps its own mode ({policy_catalog.mode_label(_override(c))}); "
         f"change it with: defenseclaw guardrail mode {new_mode} --connector {c}"
         for c in not_covered
-    )
+    ]
     if unguarded:
         # Action mode without registered hooks blocks nothing; the command must
         # not report success then (GAP-1035).

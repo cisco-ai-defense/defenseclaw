@@ -4195,9 +4195,12 @@ def _pending_migration_steps(
         if step is None:
             raise MigrationError(f"no migration from config_version {number} to {number + 1}")
         steps.append((f"config_version {number} → {number + 1}", _config_version_step(step, number + 1, config_path)))
-    # 1.0.0-1.0.3 init wrote Cursor's fail mode from observe/action without
+    if not steps and current >= 9 and _legacy_providers_overlay_pending(config_path, data_dir):
+        steps.append((_PROVIDERS_FOLD_STEP_NAME, _fold_legacy_providers_overlay))
+    # 1.0.0-1.0.3 setup wrote Cursor's fail mode from observe/action without
     # an operator choice. The installer supplies the release that wrote this
     # config, so that provenance is available here even for version 9 YAML.
+    # Added after the providers fold check, which runs only with no other step.
     if (
         from_version
         and not _version_before(from_version, (1, 0, 0))
@@ -4205,15 +4208,19 @@ def _pending_migration_steps(
         and _legacy_cursor_outage_pin_paths(config_path)
     ):
         steps.append(("remove old automatic Cursor outage setting", _remove_legacy_cursor_outage_pins))
-    if not steps and current >= 9 and _legacy_providers_overlay_pending(config_path, data_dir):
-        steps.append((_PROVIDERS_FOLD_STEP_NAME, _fold_legacy_providers_overlay))
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
     return steps
 
 
 def _legacy_cursor_outage_pin_paths(config_path: str) -> list[str]:
-    """Find only the two values old init generated, on an OSS document."""
+    """Find the open Cursor values old setup generated, on an OSS document.
+
+    Only an ``open`` pin (written from observe mode) is removed, so the policy
+    tier decides it: the same open in default and permissive, closed in
+    strict. A ``closed`` pin stays: 1.0.x action mode blocked Cursor during an
+    outage, and an upgrade never loosens a 1.0.x config.
+    """
     source = _read_config_text(config_path)
     if source is None or _guardrail_runtime_migration_is_managed(source):
         return []
@@ -4227,17 +4234,18 @@ def _legacy_cursor_outage_pin_paths(config_path: str) -> list[str]:
     mode = str(guardrail.get("mode") or "observe").strip().lower()
     paths: list[str] = []
     connectors = guardrail.get("connectors")
+    cursor_entry = False
     if isinstance(connectors, dict):
         for name, entry in connectors.items():
             if str(name).strip().lower() != "cursor" or not isinstance(entry, dict):
                 continue
+            cursor_entry = True
             own_mode = str(entry.get("mode") or mode).strip().lower()
-            pinned = "closed" if own_mode == "action" else "open"
-            if str(entry.get("hook_fail_mode") or "").strip().lower() == pinned:
+            if own_mode != "action" and str(entry.get("hook_fail_mode") or "").strip().lower() == "open":
                 paths.append(f"guardrail.connectors.{name}.hook_fail_mode")
-    if str(guardrail.get("connector") or "").strip().lower() == "cursor":
-        pinned = "closed" if mode == "action" else "open"
-        if str(guardrail.get("hook_fail_mode") or "").strip().lower() == pinned:
+    # Old setup wrote the global value only for a Cursor without its own entry.
+    if str(guardrail.get("connector") or "").strip().lower() == "cursor" and mode != "action" and not cursor_entry:
+        if str(guardrail.get("hook_fail_mode") or "").strip().lower() == "open":
             paths.append("guardrail.hook_fail_mode")
     return paths
 

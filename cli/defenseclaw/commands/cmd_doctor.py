@@ -9709,7 +9709,7 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     if not upstream_fail_open(cfg, name):
         lock_mode_target = str(fail_mode.get("desired") or configured_mode)
     if name == "cursor":
-        configured_mode = "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
+        configured_mode = _cursor_lock_fail_mode(cfg)
         lock_mode_target = configured_mode
     if lock_mode != lock_mode_target:
         effective = str(fail_mode.get("effective") or "unknown")
@@ -9731,7 +9731,8 @@ def connector_setup_readiness(cfg, connector: str) -> ConnectorSetupReadiness:
     # bytes and custody receipt before Setup can report ready.
     call_time_opencode = (
         name == "opencode"
-        and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() not in {"managed_enterprise", "secure_client"}
+        and str(getattr(cfg, "deployment_mode", "") or "").strip().lower()
+        not in {"managed_enterprise", "secure_client"}
         and callable(getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None))
     )
     if report_renders_fail_mode(fail_mode) and rendered != lock_mode_target and not call_time_opencode:
@@ -10381,6 +10382,24 @@ def _guardrail_proxy_intentionally_closed(cfg) -> str:
             parts.append(f"{connector} (mode=observe)")
     prefix = "enforced" if all(mode == "action" for mode in modes.values()) else "native-driven"
     return f"{prefix} for {', '.join(parts)} — proxy port intentionally closed"
+
+
+def _cursor_lock_fail_mode(cfg) -> str:
+    """The fail mode Cursor's hook contract lock records.
+
+    A per-user lock records the outage mode its config gives (Go
+    connector.OutageHookFailMode): a saved choice, else the policy tier. No
+    setup or mode switch writes a Cursor fail mode any more (owner decision
+    2026-10-23), so the guardrail mode no longer predicts it. A managed lock
+    keeps its guardrail-mode reading.
+    """
+    gc = cfg.guardrail
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise":
+        resolver = getattr(gc, "effective_hook_fail_mode", None)
+        mode = resolver("cursor") if callable(resolver) else None
+        if isinstance(mode, str) and mode.strip().lower() in ("open", "closed"):
+            return mode.strip().lower()
+    return "closed" if _doctor_effective_guardrail_mode(gc, "cursor") == "action" else "open"
 
 
 def _doctor_effective_guardrail_mode(gc, connector: str) -> str:
@@ -15928,9 +15947,7 @@ def _check_hook_contract_lock(
             f" `defenseclaw setup {connector}` or the next gateway start refreshes the lock"
         )
     if connector == "cursor":
-        expected_cursor_fail_mode = (
-            "closed" if _doctor_effective_guardrail_mode(cfg.guardrail, "cursor") == "action" else "open"
-        )
+        expected_cursor_fail_mode = _cursor_lock_fail_mode(cfg)
         detail += " priority_conflict_detection=unavailable none_inferred=true"
         if str(entry.get("hook_fail_mode") or "") != expected_cursor_fail_mode:
             _emit("fail", "Hook contract", detail + f" expected_hook_fail_mode={expected_cursor_fail_mode}", r=r)

@@ -138,11 +138,10 @@ def refuse_first_run_when_managed() -> None:
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
-        "'closed' (the default on a new install) = block where the hook supports "
-        "a blocking response; 'open' = allow + log. It applies in observe and action "
-        "mode alike (Cursor follows its guardrail mode). Omitted, the wizard asks and "
-        "--non-interactive keeps the current setting (closed on a new install). "
+        "Saves your choice for a gateway outage: 'open' lets calls run with a warning "
+        "and an audit entry, 'closed' blocks them. A saved choice wins over the policy "
+        "tier. Omitted, nothing is saved: default and permissive policy open an outage, "
+        "strict closes it. Every other hook failure blocks. "
         "DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
         "transport and missing-token failures closed."
     ),

@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""The outage prompt defaults to the effective tier mode and saves the answer."""
+"""The outage prompt saves only a typed answer; Enter keeps what is there."""
 
 from __future__ import annotations
 
@@ -26,37 +26,40 @@ def _run(current: str, tier: str = "default") -> tuple[str, str]:
     return result.output, gc.hook_fail_mode
 
 
-def test_new_install_defaults_to_effective_outage_mode() -> None:
-    output, chosen = _run("")
-    assert "Current setting" not in output
-    assert chosen == "open"
-    assert "default on a new install" not in output
+def test_enter_on_a_new_install_keeps_the_policy_default() -> None:
+    gc = GuardrailConfig(rule_pack="default")
+
+    @click.command()
+    def run() -> None:
+        _prompt_hook_fail_mode(gc)
+
+    result = CliRunner().invoke(run, [], input="\n", catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert "default on a new install" not in result.output
+    assert not gc._hook_fail_mode_saved
+    assert gc.effective_hook_fail_mode("codex") == "open"
+    gc.rule_pack = "strict"
+    assert gc.effective_hook_fail_mode("codex") == "closed"
 
 
-def test_strict_install_defaults_closed() -> None:
-    _, chosen = _run("", "strict")
-    assert chosen == "closed"
-
-
-def test_enter_on_strict_default_persists_an_explicit_closed_choice(tmp_path, monkeypatch) -> None:
+def test_typed_closed_on_a_default_install_persists(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path))
     cfg = prepare_fresh_v8_config(default_config())
-    cfg.guardrail.rule_pack = "strict"
 
     @click.command()
     def run() -> None:
         _prompt_hook_fail_mode(cfg.guardrail)
 
-    result = CliRunner().invoke(run, [], input="\n", catch_exceptions=False)
+    result = CliRunner().invoke(run, [], input="2\n", catch_exceptions=False)
     assert result.exit_code == 0, result.output
     cfg.save()
     saved = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
     assert saved["guardrail"]["hook_fail_mode"] == "closed"
 
 
-def test_saved_open_default_is_named_as_the_current_setting() -> None:
+def test_saved_open_is_named_and_kept_on_enter() -> None:
     output, chosen = _run("open")
-    assert "Current setting: open" in output
+    assert "Enter to keep open" in output
     assert chosen == "open"
 
 

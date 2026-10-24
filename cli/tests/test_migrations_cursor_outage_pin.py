@@ -12,7 +12,7 @@ from defenseclaw.migrations import migrate
 @pytest.mark.parametrize("release", ["1.0.0", "1.0.1", "1.0.2", "1.0.3"])
 @pytest.mark.parametrize(
     "mode,tier,pin,expected",
-    [("observe", "strict", "open", "closed"), ("action", "default", "closed", "open")],
+    [("observe", "strict", "open", "closed"), ("observe", "default", "open", "open")],
 )
 @pytest.mark.parametrize("shape", ["global", "connector"])
 def test_upgrade_removes_setup_written_cursor_fail_mode(tmp_path, release, mode, tier, pin, expected, shape):
@@ -31,6 +31,20 @@ def test_upgrade_removes_setup_written_cursor_fail_mode(tmp_path, release, mode,
     else:
         assert "hook_fail_mode" not in saved["connectors"]["cursor"]
     assert load(data_dir=str(tmp_path)).guardrail.effective_hook_fail_mode("cursor") == expected
+
+
+@pytest.mark.parametrize("shape", ["global", "connector"])
+def test_upgrade_keeps_an_action_mode_closed_cursor_value(tmp_path, shape):
+    # No loosening on upgrade: 1.0.x action mode blocked Cursor outages.
+    guardrail = {"mode": "action", "rule_pack": "default"}
+    if shape == "global":
+        guardrail.update({"connector": "cursor", "hook_fail_mode": "closed"})
+    else:
+        guardrail["connectors"] = {"cursor": {"hook_fail_mode": "closed"}}
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump({"config_version": 9, "guardrail": guardrail, "observability": {}}), encoding="utf-8")
+    migrate(str(tmp_path), from_version="1.0.3")
+    assert load(data_dir=str(tmp_path)).guardrail.effective_hook_fail_mode("cursor") == "closed"
 
 
 def test_upgrade_preserves_non_pin_user_choice(tmp_path):
