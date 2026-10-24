@@ -1455,3 +1455,68 @@ func TestWindowsSecretUndoRotationKeepsALaterCredentialValue(t *testing.T) {
 		})
 	}
 }
+
+// The wrapper journals before secret set writes the delivered value. A
+// refused launch or an interrupted run can therefore replay while the old
+// value (or its absence) is still in the store. That replay is already done;
+// it must not strand the entry behind --if-stored's digest of the new value.
+func TestWindowsSecretUndoRotationAlreadyRestoredBeforeSet(t *testing.T) {
+	for _, oldPresent := range []bool{true, false} {
+		t.Run(fmt.Sprint("old-present=", oldPresent), func(t *testing.T) {
+			dir := windowsSecretTestHarness(t)
+			layout, err := windowsSecretLayout()
+			if err != nil {
+				t.Fatal(err)
+			}
+			previous := bundleStore
+			t.Cleanup(func() { bundleStore = previous })
+			store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+			bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+			const name = "ai-defense-api-key"
+			if oldPresent {
+				if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "old-key\n"); err != nil {
+					t.Fatal(err)
+				}
+				// Older stores can retain source whitespace. The replay's
+				// input is normalized, but the exact old bytes stay in place.
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(" old-key\r\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				// Even a config installed since the journal cannot cause a
+				// removal: there is still nothing stored to remove.
+				cfg := strings.Replace(standaloneGatewayCheckConfig, "enterprise:\n  profile: standalone\n",
+					"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      enabled: true\n      credential: ai-defense-api-key\n", 1)
+				if cfg == standaloneGatewayCheckConfig {
+					t.Fatal("the later config did not gain a credential reference")
+				}
+				if err := os.WriteFile(layout.ConfigPath, []byte(cfg), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			windowsSecretRestartGateway = func(func() error) (bool, error) {
+				t.Fatal("an already-undone replay restarted the gateway")
+				return false, nil
+			}
+			opts := enterpriseSecretOptions{name: name, json: true, undoRotation: "none", ifStored: windowsTestSHA256("new-key")}
+			action, input := "remove", ""
+			if oldPresent {
+				action, input, opts.fromStdin = "set", "old-key\n", true
+			} else {
+				opts.undoConfig = windowsTestSHA256(standaloneGatewayCheckConfig)
+			}
+			out, err := runWindowsSecretCommand(t, action, opts, input)
+			if err != nil || !strings.Contains(out, `"gateway_restarted":false`) {
+				t.Fatalf("already-undone replay: %v\n%s", err, out)
+			}
+			if oldPresent {
+				raw, err := os.ReadFile(filepath.Join(dir, name))
+				if err != nil || string(raw) != " old-key\r\n" {
+					t.Fatalf("old credential changed to %q: %v", raw, err)
+				}
+			} else if windowsSecretStored(dir, name) {
+				t.Fatal("replay created a credential that was absent before the rotation")
+			}
+		})
+	}
+}
