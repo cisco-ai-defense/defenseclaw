@@ -28,6 +28,34 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 )
 
+func TestEnrolledPerUserRowReportsOnlyExplicitlyBelowFloorSurface(t *testing.T) {
+	account := unixidentity.Account{Name: "alice", UID: 1001}
+	for _, tc := range []struct {
+		name, version string
+		wantReport    bool
+	}{
+		{name: "old Devin Desktop engine", version: "3000.1.0", wantReport: true},
+		{name: "unknown engine version", version: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			admission := admitSurfaces("devin", connector.UnverifiedVersionsReport, []connector.AgentSurface{{
+				Surface: connector.HostSurfaceDesktop, Host: "devin-desktop", EngineVersion: tc.version,
+			}})
+			got := unixRejectedSurfaces(account, "devin", false, true, admission)
+			if !tc.wantReport {
+				if len(got) != 0 {
+					t.Fatalf("unknown surface beside enrolled CLI was reported as unprotected: %+v", got)
+				}
+				return
+			}
+			if len(got) != 1 || got[0].Code != UnprotectedCodeSurfaceUnverified ||
+				got[0].Version != tc.version || got[0].Refusal != "" {
+				t.Fatalf("old surface beside enrolled CLI = %+v, want one non-refusal warning", got)
+			}
+		})
+	}
+}
+
 // trustedTestDir returns a directory whose ancestors are not
 // world-writable (t.TempDir() lives under /tmp on Linux and under the
 // /var symlink on macOS, which the home checks rightly refuse).

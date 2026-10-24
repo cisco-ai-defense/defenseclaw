@@ -351,7 +351,8 @@ func windowsStandaloneSurfaces(row *ManifestTarget, logf EnumerationLogger, rowC
 // agent CLI is at cliVersion ("" when there is none): the older of the CLI
 // version and the oldest engine version among its admitted app and
 // extension surfaces, or "". While the owner is signed out it is
-// cliVersion. Rejected surfaces are reported, also next to a CLI.
+// cliVersion. Refused and explicitly below-contract surfaces are reported
+// beside a CLI; an unversioned surface beside a CLI remains a known limit.
 func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger, rowContext windowsStandaloneRowContext, cliVersion string) string {
 	if cliVersion != "" && !rowContext.sessionActive {
 		// The CLI enrolls the row; its surfaces are read in the owner's
@@ -367,8 +368,10 @@ func windowsStandaloneSurfaceVersion(row *ManifestTarget, logf EnumerationLogger
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "", RefusalMissing
 		switch {
-		case enrolled && !rejected.refused:
+		case enrolled && !rejected.refused && !rejected.belowMinimum:
 			continue
+		case enrolled && !rejected.refused:
+			consequence = "its engine is below the first known hook contract, so the enrolled CLI's hooks cannot be assumed to protect it"
 		case enrolled:
 			consequence, refusal = surfaceRefusalConsequence(name, rejected)
 		case windowsStandaloneMachinePolicyConnector(name):

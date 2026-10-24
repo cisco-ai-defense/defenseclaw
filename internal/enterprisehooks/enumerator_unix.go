@@ -1296,15 +1296,17 @@ func unixNewRowVersionRefused(connectorName, version string) string {
 // unixRejectedSurfaces reports the surfaces of one (user, connector) that
 // were not admitted. With a row (enrolled) a surface the report policy did
 // not admit still runs the hooks rendered for the row, so it is reported
-// only when it is refused: the gateway refuses the hook calls that name it
-// (surfaceRefusalConsequence).
+// when it is refused or its explicit engine version predates every known
+// hook contract. The latter is a report without a new refusal.
 func unixRejectedSurfaces(account unixidentity.Account, conn string, isMachine, enrolled bool, admission surfaceAdmission) []UnprotectedAgent {
 	var out []UnprotectedAgent
 	for _, rejected := range admission.rejected {
 		consequence, refusal := "it runs without DefenseClaw hooks", RefusalMissing
 		switch {
-		case enrolled && !rejected.refused:
+		case enrolled && !rejected.refused && !rejected.belowMinimum:
 			continue
+		case enrolled && !rejected.refused:
+			consequence = "its engine is below the first known hook contract, so the enrolled CLI's hooks cannot be assumed to protect it"
 		case enrolled:
 			consequence, refusal = surfaceRefusalConsequence(conn, rejected)
 		case isMachine:

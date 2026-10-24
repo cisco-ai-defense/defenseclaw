@@ -117,6 +117,28 @@ func TestWindowsStandaloneSurfaceOnlyProfile(t *testing.T) {
 	}
 }
 
+func TestWindowsEnrolledCLIReportsExplicitlyOldExtension(t *testing.T) {
+	home := t.TempDir()
+	extension := filepath.Join(home, ".vscode", "extensions", "anthropic.claude-code-2.1.100-win32-x64")
+	if err := os.MkdirAll(extension, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-2-3-1001"
+	previous := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previous })
+	var reported []UnprotectedAgent
+	row := &ManifestTarget{SID: sid, UserHome: home, Connector: "claudecode"}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, "2.1.300"); got != "2.1.300" {
+		t.Fatalf("CLI row version = %q, want 2.1.300", got)
+	}
+	if len(reported) != 1 || reported[0].Code != UnprotectedCodeSurfaceUnverified ||
+		reported[0].Version != "2.1.100" || reported[0].Refusal != "" {
+		t.Fatalf("old extension beside enrolled CLI = %+v, want one non-refusal warning", reported)
+	}
+}
+
 func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
 	home := t.TempDir()
 	root := filepath.Join(home, ".vscode", "extensions")
