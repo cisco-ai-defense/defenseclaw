@@ -1745,6 +1745,7 @@ func (d *SandboxDaemon) managedStatusFor(ctx context.Context, s sandboxrelay.Dae
 	}
 	if d.openShell != nil {
 		out.OtherGateways = d.openShell.OtherGateways(ctx, s)
+		out.RenderedConfigDrift = d.openShell.RenderedConfigDrift(s)
 	}
 	// A running sandbox keeps its driver. Without one, report the managed
 	// gateway's refreshed choice for the next run. The last create's choice

@@ -897,6 +897,21 @@ func TestManagedStatusAndDoctorNameAnotherGatewayOfTheAccount(t *testing.T) {
 	has(t, c.Detail, "another OpenShell gateway runs in your account", "pid 520")
 }
 
+func TestManagedStatusAndDoctorReportEditedGatewayRender(t *testing.T) {
+	withManagedHost(t)
+	ta := newTestApp(t, "")
+	ta.daemon.status.Managed = managedStatusFixture()
+	ta.daemon.status.Managed.RenderedConfigDrift = true
+	ta.ok(t, ta.Status(bg, "", OutputText))
+	has(t, ta.output(), "Settings drift", "OpenShell gateway configuration changed outside DefenseClaw")
+	rep := ta.runDoctor(bg)
+	row := rep.Get(CheckIDManagedRuntime)
+	if row == nil || row.Status != openshell.StatusFail || row.Fix == nil || rep.OK() {
+		t.Fatalf("edited render doctor = %+v, report OK=%t", row, rep.OK())
+	}
+	has(t, row.Detail, "configuration changed outside DefenseClaw")
+}
+
 // An account sandboxes can't run for (not in the docker group) was told to
 // build the harness images now, which could only fail (GAP-0460).
 func TestManagedDoctorBuildsNoImagesWhileSandboxesAreUnavailable(t *testing.T) {

@@ -376,6 +376,10 @@ func TestSandboxFilesForEachModeAndDriver(t *testing.T) {
 			if got := h.mode(h.env.renderedTOMLPath()); got != 0o644 {
 				t.Errorf("gateway.toml mode %04o", got)
 			}
+			pinPath := filepath.Join(h.env.openshellDir(), openshell.GatewayRenderedDigestFile)
+			if pin := h.read(pinPath); strings.TrimSpace(pin) != openshell.RenderedDigest([]byte(toml), []byte(h.read(h.env.renderedEnvPath()))) || h.mode(pinPath) != 0o644 {
+				t.Errorf("independent lifecycle render digest = %q, mode %04o", pin, h.mode(pinPath))
+			}
 			if env := h.read(h.env.renderedEnvPath()); !strings.Contains(env, "OPENSHELL_TELEMETRY_ENABLED=false") {
 				t.Errorf("gateway.env = %q", env)
 			}

@@ -199,6 +199,9 @@ type ManagedStatus struct {
 	// PendingRestart says an upgrade or setting change waits for the
 	// caller's sandboxes to stop.
 	PendingRestart bool `json:"pending_restart,omitempty"`
+	// RenderedConfigDrift says the root-owned OpenShell gateway render no
+	// longer matches the lifecycle's independently pinned digest.
+	RenderedConfigDrift bool `json:"rendered_config_drift,omitempty"`
 	// OtherGateways are the OpenShell gateways the caller's account runs
 	// besides the one the organization's service runs, each as "pid N:
 	// command": they share the account's MicroVM state with the managed
