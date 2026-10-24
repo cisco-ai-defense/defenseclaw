@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/netip"
 	"os"
@@ -40,12 +41,89 @@ import (
 )
 
 // trustedActionDispatchMaxCost bounds the semantic rules' total CEL cost per
-// action (each program also has its own cost limit). The bound is on cost,
-// not wall-clock time: a 50 ms deadline here skipped every semantic rule
-// left when a loaded host stalled the gateway, so a CRITICAL command rule
-// only alerted and the call ran (GAP-2140). The caller's context still
-// cancels the evaluation.
-const trustedActionDispatchMaxCost = uint64(24_000_000)
+// action (each program also has its own cost limit), for one profile and for
+// a strictest combination of profiles alike (trustedActionBudget). The bound
+// is on cost, not wall-clock time: a 50 ms deadline here skipped every
+// semantic rule left when a loaded host stalled the gateway, so a CRITICAL
+// command rule only alerted and the call ran (GAP-2140). The caller's
+// context still cancels the evaluation. A variable only so tests can lower it.
+var trustedActionDispatchMaxCost = uint64(24_000_000)
+
+// trustedActionBudget is the semantic CEL cost one action has used. The
+// members of a strictest combination of profiles share one
+// (newTrustedActionBudget(true)): together they cost no more than one
+// profile, and an expression several members have is judged once on each
+// view of the action (evals), so overlapping packs do not spend the budget
+// twice. A rule the budget does not reach keeps its fallback lane, as in one
+// profile, and a combination that reaches it says so once (noteMeetBudget).
+type trustedActionBudget struct {
+	consumed uint64
+	reached  bool
+	evals    map[trustedActionEvalKey]trustedActionEval
+}
+
+// trustedActionEvalKey is one expression on one projection of the action:
+// view 0 is the judged view, 1 its enforcement projection, 2 and 3 the same
+// for the PowerShell body view.
+type trustedActionEvalKey struct {
+	expression string
+	view       int
+}
+
+type trustedActionEval struct {
+	result semantic.Result
+	code   semantic.EvalCode
+}
+
+// newTrustedActionBudget is an empty budget; shared is set for the members of
+// a strictest combination, which judge a shared expression once.
+func newTrustedActionBudget(shared bool) *trustedActionBudget {
+	budget := &trustedActionBudget{}
+	if shared {
+		budget.evals = make(map[trustedActionEvalKey]trustedActionEval)
+	}
+	return budget
+}
+
+// spent reports whether the budget leaves no cost for another rule
+// (over: whether the last evaluation went past it).
+func (b *trustedActionBudget) spent(over bool) bool {
+	done := b.consumed >= trustedActionDispatchMaxCost
+	if over {
+		done = b.consumed > trustedActionDispatchMaxCost
+	}
+	b.reached = b.reached || done
+	return done
+}
+
+// eval judges candidate on projection, the view numbered view
+// (trustedActionEvalKey), and charges its cost; for a shared budget once per
+// expression and view.
+func (b *trustedActionBudget) eval(ctx context.Context, candidate compiledSemanticRule, view int, projection *semanticpb.Facts) (semantic.Result, semantic.EvalCode) {
+	key := trustedActionEvalKey{expression: candidate.rule.Expression, view: view}
+	if hit, ok := b.evals[key]; ok {
+		return hit.result, hit.code
+	}
+	result, code := candidate.program.EvalBool(ctx, projection)
+	b.consumed += result.Cost
+	if b.evals != nil && code == semantic.EvalOK {
+		b.evals[key] = trustedActionEval{result: result, code: code}
+	}
+	return result, code
+}
+
+// noteMeetBudget says once per combination that its members' semantic rules
+// of one action reached the budget, so rules past it were judged by their
+// fallback lanes only.
+func noteMeetBudget(generation *compiledRulePackCategories, budget *trustedActionBudget) {
+	if generation == nil || generation.budgetNote == nil || budget == nil || !budget.reached {
+		return
+	}
+	generation.budgetNote.Do(func() {
+		fmt.Fprintf(os.Stderr, "[guardrail] strictest combination of profiles: the semantic rules of one action reached their cost budget (%d); the rules past it were judged by their fallback patterns\n",
+			trustedActionDispatchMaxCost)
+	})
+}
 
 // trustedActionRequest is private so a remote payload cannot assert that an
 // arbitrary body is a trusted or enforcement-capable action. Only adapters
@@ -98,6 +176,16 @@ type trustedActionRequest struct {
 	// a command judged on its own (inspectSandboxShellToolPolicyCtx) then
 	// has its hint inferred again from that command (GAP-0686).
 	windowsShellDialect bool
+	// generation is the rule generation the call is judged with; nil: the
+	// request profile's (snapshotRulePackGenerationFor). A caller that
+	// combines several dispatches of one request judges each with each
+	// member's generation of a strictest combination of profiles
+	// (promotedArtifactFindings).
+	generation *compiledRulePackCategories
+	// budget is the semantic cost budget the call is judged within; nil: a
+	// new one. The dispatches of the members of a strictest combination of
+	// profiles for one action share one (trustedActionBudget).
+	budget *trustedActionBudget
 }
 
 // trustedActionTelemetry is value-free dispatch telemetry. It deliberately
@@ -114,6 +202,14 @@ func (t *trustedActionTelemetry) merge(other trustedActionTelemetry) {
 	t.ParserUncertaintyCount += other.ParserUncertaintyCount
 	t.ParserUncertaintyCatalogMatchCount += other.ParserUncertaintyCatalogMatchCount
 	t.ParserUncertaintyShadowFindingCount += other.ParserUncertaintyShadowFindingCount
+}
+
+// widen raises each count of t to other's where that is larger: a call
+// judged with the rules of several generations counts its parse once.
+func (t *trustedActionTelemetry) widen(other trustedActionTelemetry) {
+	t.ParserUncertaintyCount = max(t.ParserUncertaintyCount, other.ParserUncertaintyCount)
+	t.ParserUncertaintyCatalogMatchCount = max(t.ParserUncertaintyCatalogMatchCount, other.ParserUncertaintyCatalogMatchCount)
+	t.ParserUncertaintyShadowFindingCount = max(t.ParserUncertaintyShadowFindingCount, other.ParserUncertaintyShadowFindingCount)
 }
 
 func (t trustedActionTelemetry) empty() bool {
@@ -162,9 +258,43 @@ func dispatchTrustedAction(
 		// Two argument keys name one field: judge each candidate (GAP-0678).
 		return dispatchConflictingToolArguments(parent, request, conflict)
 	}
-	ctx := parent
+	generation := request.generation
+	if generation == nil {
+		generation = snapshotRulePackGenerationFor(parent, request.Connector)
+	}
+	budget := request.budget
+	if generation == nil || len(generation.members) == 0 {
+		if budget == nil {
+			budget = newTrustedActionBudget(false)
+		}
+		return dispatchTrustedActionWith(parent, request, facts, generation, budget, &telemetry)
+	}
+	// A strictest combination of profiles judges the call with each
+	// member's own rules, within one budget, and keeps the strongest finding
+	// of each rule.
+	if budget == nil {
+		budget = newTrustedActionBudget(true)
+	}
+	lists := make([][]RuleFinding, 0, len(generation.members))
+	for _, member := range generation.members {
+		var memberTelemetry trustedActionTelemetry
+		lists = append(lists, dispatchTrustedActionWith(parent, request, facts, member, budget, &memberTelemetry))
+		telemetry.widen(memberTelemetry)
+	}
+	noteMeetBudget(generation, budget)
+	return strongestRuleFindings(lists, trustedActionFindingKey)
+}
 
-	generation := snapshotRulePackGenerationFor(ctx, request.Connector)
+// dispatchTrustedActionWith is dispatchTrustedAction's judgment of the
+// call's facts with the rules of one generation, within budget.
+func dispatchTrustedActionWith(
+	ctx context.Context,
+	request trustedActionRequest,
+	facts actionfacts.Facts,
+	generation *compiledRulePackCategories,
+	budget *trustedActionBudget,
+	telemetry *trustedActionTelemetry,
+) (findings []RuleFinding) {
 	// After every lane below, on what it returns (GAP-1469, GAP-1478).
 	defer func() {
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
@@ -373,13 +503,13 @@ func dispatchTrustedAction(
 	excluded := make(map[string]struct{})
 	semanticFindings := make([]RuleFinding, 0, len(generation.semanticRules))
 	matchedSemanticOwnerIDs := make(map[string]struct{})
-	var consumedCost uint64
 
 	// evaluateSemanticRules runs the semantic rules that candidateOK admits
 	// on view (projection is its projection) and reports whether the view's
 	// enforcement projection failed, in which case no finding was added
 	// after the failure and the caller decides what that means.
 	evaluateSemanticRules := func(
+		viewID int,
 		view actionfacts.Facts,
 		projection *semanticpb.Facts,
 		candidateOK func(compiledSemanticRule) bool,
@@ -391,8 +521,7 @@ func dispatchTrustedAction(
 		enforcementProjected := false
 		projectionCode := semantic.ProjectionOK
 		for _, candidate := range generation.semanticRules {
-			if ctx.Err() != nil ||
-				consumedCost >= trustedActionDispatchMaxCost {
+			if ctx.Err() != nil || budget.spent(false) {
 				break
 			}
 			if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
@@ -411,9 +540,8 @@ func dispatchTrustedAction(
 			if staticTargetTwin != nil && !candidate.owner.eligible(*staticTargetTwin) {
 				continue
 			}
-			result, evalCode := candidate.program.EvalBool(ctx, projection)
-			consumedCost += result.Cost
-			if consumedCost > trustedActionDispatchMaxCost {
+			result, evalCode := budget.eval(ctx, candidate, viewID, projection)
+			if budget.spent(true) {
 				break
 			}
 			if evalCode != semantic.EvalOK {
@@ -437,12 +565,8 @@ func dispatchTrustedAction(
 			if projectionCode != semantic.ProjectionOK {
 				return true
 			}
-			enforcementResult, enforcementCode := candidate.program.EvalBool(
-				ctx,
-				enforcementProjection,
-			)
-			consumedCost += enforcementResult.Cost
-			if consumedCost > trustedActionDispatchMaxCost {
+			enforcementResult, enforcementCode := budget.eval(ctx, candidate, viewID+1, enforcementProjection)
+			if budget.spent(true) {
 				break
 			}
 			if enforcementCode != semantic.EvalOK {
@@ -494,6 +618,7 @@ func dispatchTrustedAction(
 	}
 
 	if evaluateSemanticRules(
+		0,
 		semanticFacts,
 		fullProjection,
 		viewCandidate,
@@ -508,6 +633,7 @@ func dispatchTrustedAction(
 	if powerShellView != nil {
 		if projection, code := semantic.Project(*powerShellView); code == semantic.ProjectionOK {
 			evaluateSemanticRules(
+				2,
 				*powerShellView,
 				projection,
 				argvSubsetReductionCandidate,
