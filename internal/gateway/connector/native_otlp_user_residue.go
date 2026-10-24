@@ -351,10 +351,6 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 	if helper, present := settings[claudeCodeOTLPHeadersHelperKey]; present {
 		helperOwned = claudeCodeOTLPHeadersHelperOwned(helper, backup.ManagedOTLPHeadersHelper)
 	}
-	productToken, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeClaude)
-	if err != nil {
-		return nil, nil, fmt.Errorf("load Claude native OTLP credential: %w", err)
-	}
 	proof := helperOwned
 	for key, value := range env {
 		got, _ := value.(string)
@@ -444,12 +440,17 @@ func claudeCodeWithoutUserNativeOTLP(raw []byte, backup claudeCodeBackup, opts S
 		case claudeCodeOTLPHeadersKey(key):
 			// The exact token in the backup, or the scoped token sidecar,
 			// proves which Authorization DefenseClaw wrote. A changed bearer
-			// belongs to the operator even if a product marker remains.
+			// belongs to the operator even if a product marker remains. Verify
+			// may run as SYSTEM against a target-user-owned sidecar, so a token
+			// read failure cannot prove ownership or fail the entire inspection.
 			recordedToken := claudeCodeBearerToken(backup.ManagedEnv[key])
-			if recordedToken == "" {
-				recordedToken = productToken
+			_, marked := claudeCodeWithoutDefenseClawHeaders(got, "")
+			if marked && recordedToken == "" && claudeCodeBearerToken(got) != "" {
+				if token, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeClaude); err == nil {
+					recordedToken = token
+				}
 			}
-			rest, marked := claudeCodeWithoutDefenseClawHeaders(got, recordedToken)
+			rest, _ := claudeCodeWithoutDefenseClawHeaders(got, recordedToken)
 			owned = marked || recorded(key, got)
 			replacement, keepRest = rest, marked && rest != ""
 		default:
