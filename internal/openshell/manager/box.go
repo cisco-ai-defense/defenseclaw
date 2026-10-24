@@ -996,8 +996,16 @@ func (m *Manager) reconcileOldSupervisor(ctx context.Context, b *box) {
 // --end-vm). The refusal names each guest with the command that ends it.
 // So does one that may be either, whose own place cannot say whether it
 // runs (sandboxapi.UnprotectedUnknown): it is read first (proveGuests).
+// The create or start checks again, reading no place, right before its
+// gateway call (lockRun).
 func (m *Manager) legacyRunRefusal(ctx context.Context, except string) error {
 	m.proveGuests(ctx)
+	return m.unprotectedRunRefusal(except)
+}
+
+// unprotectedRunRefusal is legacyRunRefusal's refusal on what the guest
+// inventory holds now, without reading any guest's place.
+func (m *Manager) unprotectedRunRefusal(except string) error {
 	here := m.lastGw.Load()
 	m.mu.Lock()
 	var legacy, contained, unknown []string

@@ -316,6 +316,10 @@ type Manager struct {
 	// guests' places (proveGuests).
 	lastGw  atomic.Pointer[Gateway]
 	proveMu sync.Mutex
+	// runGate orders the last run check of a create or a start and its
+	// gateway call (lockRun, shared) against a guest recorded contained
+	// (containUnsynced, exclusive). Taken after the start lock, before mu.
+	runGate sync.RWMutex
 
 	mu    sync.Mutex
 	boxes map[string]*box

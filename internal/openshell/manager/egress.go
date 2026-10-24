@@ -403,12 +403,16 @@ func (m *Manager) closeNetworkLocked(ctx context.Context, b *box) error {
 // lives (containedLive), and the feed says so. It returns what could not
 // be done or confirmed. The caller holds b's operation lock.
 func (m *Manager) containUnsynced(ctx context.Context, b *box, why string) error {
+	// Exclusive: a create or start past its last run check (lockRun) runs
+	// its sandbox first, and every later one is refused.
+	m.runGate.Lock()
 	m.mu.Lock()
 	first := b.rec.Contained == ""
 	if first {
 		b.rec.Contained = why
 	}
 	m.mu.Unlock()
+	m.runGate.Unlock()
 	var errs []error
 	if first {
 		// Kept in memory when the record cannot say so: it fails closed.
@@ -468,13 +472,6 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 	if err != nil {
 		return err
 	}
-	global, err := gw.Client.GlobalPolicy(ctx)
-	if err != nil {
-		return err
-	}
-	if global != nil {
-		return fmt.Errorf("a gateway-global policy prevents changing this sandbox's network rules")
-	}
 	sb, err := gw.Client.GetSandbox(ctx, name)
 	if err != nil {
 		return err
@@ -517,6 +514,29 @@ func (m *Manager) withdrawOldSupervisorRules(ctx context.Context, b *box) error 
 		if _, err := gw.Client.DetachProvider(ctx, name, provider); err != nil && !openshell.IsNotFound(err) {
 			return fmt.Errorf("detach the direct network of provider %s: %w", provider, err)
 		}
+	}
+	// Confirmed detached: OpenShell reports no provider attached any more.
+	if len(active) > 0 {
+		if sb, err = gw.Client.GetSandbox(ctx, name); err != nil {
+			return err
+		}
+		if sb == nil {
+			return fmt.Errorf("OpenShell no longer reports this sandbox live")
+		}
+		if len(sb.Spec.Providers) > 0 {
+			return fmt.Errorf("OpenShell still attaches provider %s, whose direct network stays open", strings.Join(sb.Spec.Providers, ", "))
+		}
+	}
+	// A gateway-global policy overrides every sandbox policy and locks it:
+	// it does not lock the providers, detached above, but nothing here can
+	// close the network it allows, so the withdrawal is not confirmed.
+	global, err := gw.Client.GlobalPolicy(ctx)
+	if err != nil {
+		return err
+	}
+	if global != nil {
+		return fmt.Errorf("a gateway-global policy (version %d) overrides this sandbox's network rules and locks them, so the network it allows "+
+			"stays open to the sandbox (its providers' direct network is detached)", global.Version)
 	}
 	cfg, err := gw.Client.SandboxConfig(ctx, name)
 	if err != nil {

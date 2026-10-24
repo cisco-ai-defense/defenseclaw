@@ -97,9 +97,10 @@ func atConnectedPlace(b *box, here *Gateway) bool {
 // that place: at the connected place a read of the place no lookup or
 // phase has come after (one taken while DefenseClaw was connected
 // elsewhere, whose word the phase cached before the switch does not
-// outrank), else its lookups' phase; elsewhere only a read of that place
-// proves anything, and the phase returned unproven is the last known one.
-// The caller holds m.mu.
+// outrank), else its lookups' phase; elsewhere only such a read proves
+// anything (one a lookup or phase of that place came after is stale, and
+// is read again: proveGuests), and the phase returned unproven is the last
+// known one. The caller holds m.mu.
 func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
 	if b.gone {
 		return phaseMissing, true
@@ -115,7 +116,7 @@ func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
 		}
 		return "", false
 	}
-	if read {
+	if read && r.word == b.word {
 		return r.found(), true
 	}
 	return b.phase, false
@@ -126,7 +127,8 @@ func provenPhase(b *box, here *Gateway) (audit.SandboxPhase, bool) {
 // otherwise (provenPhase): one at the connected place that no lookup has
 // found since the daemon started, and one that lives elsewhere, whose own
 // gateway is opened for it (Options.GatewayAt). A read stands for
-// proofFresh. A place that cannot be read leaves the guest unproven. A read
+// proofFresh, until its place says something newer (box.word). A place
+// that cannot be read leaves the guest unproven. A read
 // that found the guest gone proves it gone for good (box.gone), and a guest
 // so proven is not read again. A read that a lookup of its place or a phase
 // came after while it ran is dropped: the place said something newer.
@@ -149,7 +151,7 @@ func (m *Manager) proveGuests(ctx context.Context) {
 			continue
 		}
 		g := guest{b: b, rec: b.rec, place: recordPlace(b.rec), word: b.word}
-		if r := b.read; r.place == g.place && !r.at.IsZero() && now.Sub(r.at) < proofFresh {
+		if r := b.read; r.place == g.place && r.word == b.word && !r.at.IsZero() && now.Sub(r.at) < proofFresh {
 			continue
 		}
 		if atConnectedPlace(b, here) {

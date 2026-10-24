@@ -540,6 +540,8 @@ func emergencyStop(ctx context.Context) (string, bool) {
 // DefenseClaw restarts or upgrades the gateway (doctor --fix, setup, the
 // OpenShell upgrade), whose check of the sandboxes would not see one
 // started after it, the call is refused.
+//
+// Only lockRun takes it.
 func (m *Manager) lockStart() (func(), error) {
 	if m.opts.StartLock == nil {
 		return func() {}, nil
@@ -553,6 +555,32 @@ func (m *Manager) lockStart() (func(), error) {
 		return nil, sandboxapi.Errorf(sandboxapi.CodeInternal, "take the OpenShell gateway's lifecycle lock: %v", err)
 	}
 	return unlock, nil
+}
+
+// lockRun takes the start lock (lockStart) for the gateway call that runs
+// a new sandbox or session (CreateSandbox, StartSandbox), checks once more
+// that no guest DefenseClaw cannot show protected runs
+// (unprotectedRunRefusal; except as for legacyRunRefusal), and holds
+// runGate shared until the returned func. A guest recorded contained
+// (containUnsynced) after the create's or start's first check is so
+// refused here, and one contained while the call runs is recorded only
+// once it returned: that sandbox then ran before it, as one already
+// running does. The caller unlocks right after the call.
+func (m *Manager) lockRun(except string) (func(), error) {
+	unlockStart, err := m.lockStart()
+	if err != nil {
+		return nil, err
+	}
+	m.runGate.RLock()
+	if err := m.unprotectedRunRefusal(except); err != nil {
+		m.runGate.RUnlock()
+		unlockStart()
+		return nil, err
+	}
+	return func() {
+		m.runGate.RUnlock()
+		unlockStart()
+	}, nil
 }
 
 // stoppedAsIs is the phase of a sandbox OpenShell's stop returned as it
@@ -1053,14 +1081,15 @@ func (m *Manager) start(ctx context.Context, b *box, req sandboxapi.StartRequest
 			return sandboxapi.Errorf(sandboxapi.CodeInternal, "save sandbox state: %v", err)
 		}
 	}
-	// Not while DefenseClaw restarts or upgrades the gateway (lockStart).
-	unlockStart, err := m.lockStart()
+	// Not while DefenseClaw restarts or upgrades the gateway, nor beside a
+	// guest contained since the run check above (lockRun).
+	unlockRun, err := m.lockRun(rec.Name)
 	if err != nil {
 		return err
 	}
 	m.lifecycle(ctx, b, audit.SandboxPhaseStarting, audit.SandboxTriggerStart, false, nil, nil)
 	_, err = gw.Client.StartSandbox(ctx, rec.Name)
-	unlockStart()
+	unlockRun()
 	if err != nil {
 		m.dropGateway(gw, err)
 		m.restorePhase(ctx, gw, b, audit.SandboxTriggerStart, audit.SandboxPhaseStarting)
