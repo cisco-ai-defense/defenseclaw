@@ -3779,7 +3779,82 @@ def test_a_windows_agent_is_told_only_by_its_recorded_entry() -> None:
     assert result.returncode == 0, result.stderr
     got = [line for line in result.stdout.splitlines() if line.startswith("[")]
     assert got == [f"[{agent}]" for _, _, agent in _WINDOWS_AGENT_ROWS], list(zip(_WINDOWS_AGENT_ROWS, got))
-    assert "audit: PID 13 executable path unreadable" in result.stdout
+    assert "audit: PID 13" not in result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_agent_scan_with_no_installed_entry_skips_process_rows() -> None:
+    script = (
+        "function Get-InstalledAgentPrograms { return @{} }\n"
+        "function Get-CimInstance { param($Class, $ErrorAction) "
+        "return @([pscustomobject]@{ ProcessId = 1; ExecutablePath = $null; CommandLine = '' }, "
+        "[pscustomobject]@{ ProcessId = 2; ExecutablePath = 'C:\\Windows\\notepad.exe'; CommandLine = '' }) }\n"
+        "function Get-LoadedPluginAgent($Process) { Write-Host 'scanned'; return '' }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        "function Die([string]$Message) { throw $Message }\n"
+        + _ps1_function("Assert-NoLoadedPluginAgents")
+        + "Assert-NoLoadedPluginAgents\n'scan-passed'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "scan-passed", result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_windows_unrelated_executable_needs_no_path_resolution() -> None:
+    script = (
+        "function Resolve-AgentPath([string]$Path) { Write-Host 'resolved'; return $Path }\n"
+        "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Split-CommandLine")
+        + "$script:InstalledAgentPrograms = @{ 'c:\\users\\u\\.opencode\\bin\\opencode.exe' = 'opencode' }\n"
+        + "$p = [pscustomobject]@{ ProcessId = 1; ExecutablePath = 'C:\\Windows\\notepad.exe'; CommandLine = 'notepad.exe' }\n"
+        + "'[' + (Get-LoadedPluginAgent $p) + ']'\n"
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]", result.stdout
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize(("name", "package", "entry_name", "shim", "want"), [
+    ("opencode", "opencode-ai", "bin/opencode", True, "opencode"),
+    ("amp", "@sourcegraph/amp", "dist/main.js", True, "amp"),
+    ("opencode", "opencode-ai", "bin/opencode", False, ""),
+    ("opencode", "opencode-ai", "bin/worker.js", True, ""),
+])
+def test_windows_node_adjacent_npm_entry_counts_without_appdata(
+    tmp_path: Path, name: str, package: str, entry_name: str, shim: bool, want: str,
+) -> None:
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    node = runtime / "node.exe"
+    node.write_bytes(b"MZ")
+    if shim:
+        (runtime / f"{name}.cmd").write_text("@echo off", encoding="utf-8")
+    entry = runtime / "node_modules" / package / entry_name
+    entry.parent.mkdir(parents=True)
+    entry.write_text("entry", encoding="utf-8")
+    data = tmp_path / "data"
+    data.mkdir()
+    script = (
+        _ps1_function("Resolve-AgentPath") + _ps1_function("Get-InstalledAgentPrograms")
+        + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Split-CommandLine")
+        + "function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) { Write-Host \"audit: $Reason\" }\n"
+        + f"$env:USERPROFILE = '{tmp_path / 'profile'}'\n$env:APPDATA = '{tmp_path / 'roaming'}'\n"
+        + f"$env:LOCALAPPDATA = '{tmp_path / 'local'}'\n$DataDir = '{data}'\n"
+        + f"$p = [pscustomobject]@{{ ProcessId = 1; ExecutablePath = '{node}'; CommandLine = 'node " +
+          f'"{entry}"' + "' }\n"
+        + "$script:InstalledAgentPrograms = Get-InstalledAgentPrograms @($p)\n"
+        + f"$script:InstalledAgentPrograms.ContainsKey((Resolve-AgentPath '{entry}').ToLowerInvariant())\n"
+        + ("'[' + (Get-LoadedPluginAgent $p) + ']'\n" if os.name == "nt" else "")
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    expected = [str(bool(want))] + ([f"[{want}]"] if os.name == "nt" else [])
+    assert result.stdout.strip().splitlines() == expected, (result.stdout, result.stderr)
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
@@ -3891,6 +3966,7 @@ def test_windows_vanished_agent_process_is_audited_without_refusal() -> None:
     # check. Its old row cannot establish that an agent is still live.
     script = (
         "Set-StrictMode -Version Latest\n"
+        "function Get-InstalledAgentPrograms { return @{ 'c:\\agent.exe' = 'opencode' } }\n"
         "function Get-CimInstance { param($Class, $Filter, $ErrorAction) "
         "if ($Filter) { return $null }; "
         "return [pscustomobject]@{ ProcessId = 123; ExecutablePath = 'C:\\agent.exe'; CommandLine = 'agent' } }\n"

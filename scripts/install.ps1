@@ -806,8 +806,8 @@ function Get-GatewayProcess {
 }
 
 # Older OpenCode and Amp processes retain their plugin in memory. Only the
-# exact installed entry may defer a gateway swap. Unproven identity is audited
-# and the upgrade proceeds with the configured hook outage behavior.
+# exact installed entry may defer a gateway swap. Unproven candidates are
+# audited and the upgrade proceeds with the configured hook outage behavior.
 function Write-AgentIdentityAudit([int]$ProcessId, [string]$Reason) {
     Write-Warn "audit: live-agent identity unproven for PID ${ProcessId}: $Reason"
 }
@@ -843,10 +843,11 @@ function Resolve-AgentPath([string]$Path) {
 }
 
 # Native installer paths, the fixed WinGet/npm OpenCode image, npm's exact
-# Node entry when its command shim exists, and any setup-selected executable
-# sealed in the previous hook lock. No package name, manifest or PATH lookup
-# establishes an entry.
-function Get-InstalledAgentPrograms {
+# Node entry when its command shim exists beside a running runtime or in the
+# roaming npm directory, and any setup-selected executable sealed in the
+# previous hook lock. No package name, manifest or PATH lookup establishes
+# an entry.
+function Get-InstalledAgentPrograms([object[]]$Processes = @()) {
     $installed = @{}
     $profile = [string]$env:USERPROFILE
     if ($profile) {
@@ -874,6 +875,18 @@ function Get-InstalledAgentPrograms {
             if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
         }
     }
+    foreach ($process in $Processes) {
+        $runtime = [string]$process.ExecutablePath
+        if ($runtime -notmatch '[/\\]node(js)?\.exe$') { continue }
+        $folder = [IO.Path]::GetDirectoryName($runtime)
+        if (-not $folder) { continue }
+        foreach ($name in @("opencode", "amp")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $folder ($name + ".cmd")) -PathType Leaf)) { continue }
+            $relative = if ($name -eq "opencode") { "node_modules\opencode-ai\bin\opencode" } else { "node_modules\@sourcegraph\amp\dist\main.js" }
+            $entry = Resolve-AgentPath (Join-Path $folder $relative)
+            if ($entry) { $installed[$entry.ToLowerInvariant()] = $name }
+        }
+    }
     try {
         $lock = Get-Content -Raw -LiteralPath (Join-Path $DataDir "hook_contract_lock.json") -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
         foreach ($name in @("opencode", "amp")) {
@@ -891,19 +904,32 @@ function Get-InstalledAgentPrograms {
 function Get-LoadedPluginAgent($Process) {
     $processId = 0
     try { $processId = [int]$Process.ProcessId } catch { }
-    $program = Resolve-AgentPath ([string]$Process.ExecutablePath)
-    if (-not $program) {
-        Write-AgentIdentityAudit $processId "executable path unreadable"
-        return ""
-    }
+    $raw = [string]$Process.ExecutablePath
+    if (-not $raw) { return "" }
     $installed = Get-Variable -Name InstalledAgentPrograms -Scope Script -ValueOnly -ErrorAction SilentlyContinue
     if ($null -eq $installed) {
         $installed = Get-InstalledAgentPrograms
         Set-Variable -Name InstalledAgentPrograms -Scope Script -Value $installed
     }
+    if ($installed.Count -eq 0) { return "" }
+    $rawKey = $raw.Replace('/', '\').ToLowerInvariant()
+    $node = $rawKey.EndsWith("\node.exe") -or $rawKey.EndsWith("\nodejs.exe")
+    if (-not $node -and -not $installed.ContainsKey($rawKey)) {
+        $leaf = ($rawKey -split '\\')[-1]
+        $recordedLeaf = $false
+        foreach ($path in $installed.Keys) {
+            if (([string]$path).Replace('/', '\').EndsWith("\$leaf")) { $recordedLeaf = $true; break }
+        }
+        if (-not $recordedLeaf) { return "" }
+    }
+    $program = Resolve-AgentPath $raw
+    if (-not $program) {
+        Write-AgentIdentityAudit $processId "candidate executable unreadable"
+        return ""
+    }
     $key = $program.ToLowerInvariant()
     if ($installed.ContainsKey($key)) { return $installed[$key] }
-    if (-not $key.EndsWith("\node.exe") -and -not $key.EndsWith("\nodejs.exe")) { return "" }
+    if (-not $node) { return "" }
     $words = @(Split-CommandLine ([string]$Process.CommandLine))
     if ($words.Count -lt 2 -or -not $words[1]) {
         Write-AgentIdentityAudit $processId "Node script argument unavailable"
@@ -989,6 +1015,8 @@ function Assert-NoLoadedPluginAgents {
         Write-AgentIdentityAudit 0 "process list unreadable"
         return
     }
+    $script:InstalledAgentPrograms = Get-InstalledAgentPrograms $processes
+    if ($script:InstalledAgentPrograms.Count -eq 0) { return }
     foreach ($process in $processes) {
         $agent = Get-LoadedPluginAgent $process
         if (-not $agent) { continue }

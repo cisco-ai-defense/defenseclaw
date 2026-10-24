@@ -1399,7 +1399,8 @@ def _install_sh_functions(*names: str) -> str:
 
 
 _AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "process_programs", "resolved_agent_path",
-               "agent_identity_audit", "installed_agent_programs", "agent_of", "assert_no_loaded_plugin_agents")
+               "agent_identity_audit", "installed_agent_programs", "runtime_agent_programs", "agent_of",
+               "assert_no_loaded_plugin_agents")
 
 
 def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str]:
@@ -1410,6 +1411,26 @@ def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str
         env={"HOME": str(home), "PATH": ":".join([*map(str, path), "/usr/bin", "/bin"])},
         capture_output=True, text=True, timeout=60, check=False,
     )
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_agent_scan_skips_unreadable_unrelated_processes_without_audit(tmp_path: Path, installed: bool) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    if installed:
+        entry = home / ".opencode" / "bin" / "opencode"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("entry", encoding="utf-8")
+    script = (
+        _install_sh_functions(*_AGENT_SCAN)
+        + "ps() { printf '%s\\n' \"$$\"; }\n"
+        + "process_programs() { printf '%s\\t\\n' \"$$\"; }\n"
+        + "assert_no_loaded_plugin_agents\necho scan-passed\n"
+    )
+    result = subprocess.run([BASH, "-c", script], env={"HOME": str(home), "PATH": "/usr/bin:/bin"},
+                            capture_output=True, text=True, timeout=30, check=False)
+    assert result.returncode == 0 and result.stdout.strip() == "scan-passed", (result.stdout, result.stderr)
+    assert "audit:" not in result.stderr
 
 
 def _program(path: Path, source: str) -> Path:
@@ -1474,7 +1495,11 @@ def _started(argv: list[str], program: Path, executable: str | None = None) -> s
         ("opencode npm binary", None),
         ("opencode npm launcher through its PATH link", "OpenCode"),
         ("opencode npm launcher under bun", None),
-        ("opencode replaced while running", None),
+        ("opencode npm launcher beside nvm node", "OpenCode"),
+        ("amp npm launcher beside fnm node", "Amp"),
+        ("nvm launcher points to another script", None),
+        ("pnpm shell shim", None),
+        ("opencode replaced while running", "OpenCode"),
         ("amp npm package", "Amp"),
         ("native installer amp", "Amp"),
     ],
@@ -1563,6 +1588,29 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         else:
             path.append(link.parent)
             program, argv = node, [str(node), str(link)]
+    elif case in ("opencode npm launcher beside nvm node", "amp npm launcher beside fnm node",
+                  "nvm launcher points to another script", "pnpm shell shim"):
+        if case.startswith("opencode") or case.startswith("nvm"):
+            agent_name, package = "opencode", "opencode-ai"
+            entry_name = "bin/worker.js" if case.startswith("nvm") else "bin/opencode"
+            runtime = home / ".nvm" / "versions" / "node" / "v22.0.0" / "bin"
+        elif case.startswith("amp"):
+            agent_name, package, entry_name = "amp", "@sourcegraph/amp", "dist/main.js"
+            runtime = home / ".local" / "share" / "fnm" / "node-versions" / "v22" / "installation" / "bin"
+        else:
+            agent_name, package, entry_name = "opencode", "opencode-ai", "bin/opencode"
+            runtime = home / ".local" / "share" / "pnpm"
+        entry = runtime.parent / "lib" / "node_modules" / package / entry_name
+        entry.parent.mkdir(parents=True, exist_ok=True)
+        entry.write_text(script_body, encoding="utf-8")
+        link = runtime / agent_name
+        link.parent.mkdir(parents=True, exist_ok=True)
+        if case == "pnpm shell shim":
+            link.write_text("#!/bin/sh\nexec node \"$0\"\n", encoding="utf-8")
+        else:
+            link.symlink_to(entry)
+        program = _program(runtime / "node", BASH)
+        argv = [str(program), str(entry)]
     elif case == "opencode replaced while running":
         program = _program(home / ".opencode" / "bin" / "opencode", sleep)
         argv = [str(program), "60"]
@@ -1607,7 +1655,7 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
     ("option value with entry path", ""),
     ("later argument", ""),
     ("Bun script", ""),
-    ("deleted binary", ""),
+    ("deleted binary", "OpenCode"),
 ])
 def test_live_agent_identity_uses_only_an_exact_entry(tmp_path: Path, case: str, want: str) -> None:
     entry = tmp_path / "node_modules" / "opencode-ai" / "bin" / "opencode"
@@ -1813,7 +1861,8 @@ def test_a_relative_script_is_the_process_folders_not_the_installers(tmp_path: P
 
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
-def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Path) -> None:
+@pytest.mark.parametrize("installed", [False, True])
+def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Path, installed: bool) -> None:
     # R1 review: a matched process that exited after the ps snapshot sent
     # Linux to the macOS lsof lookup, a scan of seconds per process.
     gone = subprocess.Popen(["true"])
@@ -1824,24 +1873,41 @@ def test_a_process_gone_since_ps_listed_it_is_skipped_without_lsof(tmp_path: Pat
     (stubs / "lsof").write_text(f"#!/bin/sh\ntouch '{marker}'\nsleep 30\n", encoding="utf-8")
     for stub in stubs.iterdir():
         stub.chmod(0o755)
+    home = tmp_path / "home"
+    if installed:
+        entry = home / ".opencode" / "bin" / "opencode"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("entry", encoding="utf-8")
     started = time.monotonic()
-    result = _agent_scan(tmp_path / "home", [stubs])
+    result = _agent_scan(home, [stubs])
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "scan-passed" in result.stdout
-    assert f"audit: live-agent identity unproven for PID {gone.pid}" in result.stderr
+    if installed:
+        assert f"audit: live-agent identity unproven for PID {gone.pid}: process vanished during lookup" in result.stderr
+    else:
+        assert "audit:" not in result.stderr
     assert not marker.exists()
     assert time.monotonic() - started < 10
 
 
-def test_an_unreadable_process_list_is_audited_without_refusal(tmp_path: Path) -> None:
+@pytest.mark.parametrize("installed", [False, True])
+def test_an_unreadable_process_list_is_audited_without_refusal(tmp_path: Path, installed: bool) -> None:
     stubs = tmp_path / "stubs"
     stubs.mkdir()
     ps = stubs / "ps"
     ps.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
     ps.chmod(0o755)
-    result = _agent_scan(tmp_path / "home", [stubs])
+    home = tmp_path / "home"
+    if installed:
+        entry = home / ".opencode" / "bin" / "opencode"
+        entry.parent.mkdir(parents=True)
+        entry.write_text("entry", encoding="utf-8")
+    result = _agent_scan(home, [stubs])
     assert result.returncode == 0 and "scan-passed" in result.stdout, (result.stdout, result.stderr)
-    assert "audit: live-agent identity unproven for PID 0: process list unreadable" in result.stderr
+    if installed:
+        assert "audit: live-agent identity unproven for PID 0: process list unreadable" in result.stderr
+    else:
+        assert "audit:" not in result.stderr
 
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")

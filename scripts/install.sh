@@ -497,7 +497,7 @@ installed_version() {
 
 # Older OpenCode and Amp processes retain their plugin in memory. Refuse a
 # gateway swap only when the process is the exact entry installed for that
-# agent. Unproven process identity is audited and does not block the upgrade.
+# agent. Unproven candidates are audited and do not block the upgrade.
 agent_identity_audit() {
     printf 'audit: live-agent identity unproven for PID %s: %s\n' "$1" "$2" >&2
 }
@@ -514,7 +514,7 @@ resolved_agent_path() {
     fi
 }
 
-# The installer's entry evidence: native fixed locations; npm/Bun/pnpm
+# The installer's entry evidence: native fixed locations and npm/Bun
 # launcher symlinks to their exact Node entry. A folder name, manifest or
 # command on PATH is not an entry record.
 installed_agent_programs() {
@@ -527,7 +527,7 @@ installed_agent_programs() {
     done
     for agent in OpenCode:opencode Amp:amp; do
         name="${agent#*:}"
-        for base in "${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" "${HOME}/.local/share/pnpm" /usr/local/bin /opt/homebrew/bin; do
+        for base in "${HOME}/.npm-global/bin" "${HOME}/.local/bin" "${HOME}/.bun/bin" /usr/local/bin /opt/homebrew/bin; do
             link="${base}/${name}"
             [[ -L "${link}" ]] || continue
             target="$(resolved_agent_path "${link}")" || continue
@@ -536,6 +536,24 @@ installed_agent_programs() {
                     printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
             esac
         done
+    done
+}
+
+# npm also puts its launcher beside the Node runtime selected by nvm, fnm,
+# asdf, mise or a system prefix. Only that launcher's exact target is evidence.
+runtime_agent_programs() {
+    local program="${1% (deleted)}" agent name base link target
+    case "${program##*/}" in node | nodejs) ;; *) return 0 ;; esac
+    base="${program%/*}"
+    for agent in OpenCode:opencode Amp:amp; do
+        name="${agent#*:}"
+        link="${base}/${name}"
+        [[ -L "${link}" ]] || continue
+        target="$(resolved_agent_path "${link}")" || continue
+        case "${agent}:${target}" in
+            OpenCode:*/node_modules/opencode-ai/bin/opencode | Amp:*/node_modules/@sourcegraph/amp/dist/main.js)
+                printf '%s\t%s\n' "${agent%%:*}" "${target}" ;;
+        esac
     done
 }
 
@@ -614,7 +632,7 @@ process_cwd() {
 agent_of() {
     local program="$1" installed="$2" pid="$3" agent path script cwd
     shift 3
-    [[ "${program}" != *' (deleted)' ]] || { agent_identity_audit "${pid}" 'executable was removed'; return 0; }
+    program="${program% (deleted)}"
     while IFS=$'\t' read -r agent path; do
         [[ -n "${path}" && "${program}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"
@@ -634,13 +652,20 @@ agent_of() {
 }
 
 loaded_plugin_agents() {
-    local pids installed pid program agent word
+    local pids installed rows runtime pid program agent word fresh
     local -a argv
-    pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { agent_identity_audit 0 'process list unreadable'; return 0; }
     installed="$(installed_agent_programs)"
+    pids="$(ps -u "$(id -u)" -o pid= 2>/dev/null)" || { [[ -z "${installed}" ]] || agent_identity_audit 0 'process list unreadable'; return 0; }
+    rows="$(process_programs "${pids}")"
+    runtime="$(while IFS=$'\t' read -r pid program; do runtime_agent_programs "${program}"; done <<< "${rows}")"
+    [[ -z "${runtime}" ]] || installed+="${installed:+$'\n'}${runtime}"
+    [[ -n "${installed}" ]] || return 0
     while IFS=$'\t' read -r pid program; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
-        [[ -n "${program}" ]] || { agent_identity_audit "${pid}" 'executable path unreadable'; continue; }
+        if [[ -z "${program}" ]]; then
+            kill -0 "${pid}" 2>/dev/null || agent_identity_audit "${pid}" 'process vanished during lookup'
+            continue
+        fi
         argv=()
         case "${program##*/}" in
             node | nodejs)
@@ -653,12 +678,15 @@ loaded_plugin_agents() {
         esac
         agent="$(agent_of "${program}" "${installed}" "${pid}" ${argv[@]+"${argv[@]}"})"
         [[ -n "${agent}" ]] || continue
-        if [[ "${OSTYPE:-}" == linux* && ! "/proc/${pid}/exe" -ef "${program}" ]]; then
-            agent_identity_audit "${pid}" 'executable changed during lookup'
-            continue
+        if [[ "${OSTYPE:-}" == linux* ]]; then
+            fresh="$(readlink "/proc/${pid}/exe" 2>/dev/null)" || fresh=""
+            if [[ "${fresh}" != "${program}" ]] || { [[ "${program}" != *' (deleted)' ]] && [[ ! "/proc/${pid}/exe" -ef "${program}" ]]; }; then
+                agent_identity_audit "${pid}" 'executable changed during lookup'
+                continue
+            fi
         fi
         printf '%s (PID %s)\n' "${agent}" "${pid}"
-    done < <(process_programs "${pids}")
+    done <<< "${rows}"
 }
 
 assert_no_loaded_plugin_agents() {
