@@ -52,8 +52,8 @@ type auditWALCheckpointer interface {
 	CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writerBudget time.Duration) (audit.WALCheckpoint, error)
 }
 
-// runAuditWALGuard keeps the audit database's write-ahead log bounded under
-// sustained hook traffic (see audit.Store.CheckpointWALIfLarge).
+// runAuditWALGuard checkpoints the audit database's write-ahead log and
+// alarms if a flood outpaces the checkpoint (see audit.Store.CheckpointWALIfLarge).
 func (s *Sidecar) runAuditWALGuard(ctx context.Context) {
 	if s == nil || s.store == nil || s.currentConfig().SecureClientIntegration() {
 		return

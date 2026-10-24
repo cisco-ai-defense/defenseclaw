@@ -133,9 +133,10 @@ type WALCheckpoint struct {
 	SyncLongest time.Duration
 }
 
-// CheckpointWALIfLarge keeps the write-ahead log bounded under sustained hook
-// traffic. The store runs with wal_autocheckpoint=0, so nothing else copies
-// the log while hooks keep writing.
+// CheckpointWALIfLarge copies the write-ahead log and attempts to restart it
+// under sustained hook traffic. The store runs with wal_autocheckpoint=0, so
+// nothing else copies the log while hooks keep writing. A flood whose final
+// copy cannot finish inside the writer hold can still outgrow the limit.
 //
 // All copying runs on the dedicated checkpoint connection with PASSIVE
 // checkpoints, which never hold off the writer. A copy is bounded only by
@@ -169,11 +170,10 @@ type WALCheckpoint struct {
 //     reaches the end. It gives the writer back at walCatchUpCap whether or
 //     not that copy finished; an unfinished copy goes on without the writer
 //     and the next pass tries again.
-//   - A log over the limit first tries the writer without an idle gap. After
-//     a miss, the next pass settles the copied pages off the writer before
-//     its short catch-up. The writer hold never escalates; only the wait to
-//     acquire a free writer does. A PASSIVE copy continues after a hold that
-//     reaches its cap, and background writes wait while the log is over.
+//   - A log over the limit tries the writer without an idle gap on every
+//     pass. The writer hold never escalates; only the wait to acquire a free
+//     writer does. A PASSIVE copy continues after a hold that reaches its
+//     cap, and background writes wait while the log is over.
 //   - A fully copied log whose file is at least walIdleTrimBytes (or whose
 //     log is over the limit) is cut to zero bytes with a TRUNCATE checkpoint
 //     on the writer when the hooks are not flooding the store: nothing was
@@ -244,8 +244,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	if logBytes <= limitBytes/walCatchUpFraction {
 		return result, nil
 	}
-	// Under the limit, or after an over-limit catch-up missed, sync the pages
-	// the copies left, off the writer, and
+	// Under the limit, sync the pages the copies left, off the writer, and
 	// copy and sync again while the hooks write more during a sync than the
 	// copy under the writer can write and sync within walCatchUpCap (rel-1-0-3
 	// GAP-0247, GAP-0136). A log over the limit, from the start or after a
@@ -253,12 +252,9 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	// syncs took 8-26 s each, so the pass could run out of time before it
 	// held the writer while the hooks kept writing (G-flood-wal round 3). Its
 	// copy syncs under the writer, and a copy that outruns the hold goes on
-	// and syncs without it. A first over-limit pass tries immediately; later
-	// passes settle off-writer so the short writer hold can finish the copy.
-	s.walGuardMu.Lock()
-	settleAfterMiss := s.walBoundedMisses > 0
-	s.walGuardMu.Unlock()
-	for round := 0; logBytes <= limitBytes || settleAfterMiss; round++ {
+	// and syncs without it. Every over-limit pass instead tries the writer
+	// immediately, including after a previous miss.
+	for round := 0; logBytes <= limitBytes; round++ {
 		began := time.Now()
 		if walSyncPhaseHook != nil {
 			walSyncPhaseHook(ctx)
@@ -322,8 +318,7 @@ func (s *Store) boundedCatchUpPolicy(writerBudget time.Duration) walCatchUpPolic
 // limitBytes; a pass that never measured it (logBytes < 0) keeps the last
 // pass's record. Over marks the store for background writers
 // (awaitWALHeadroom). A log that is not over resets the misses; an over-limit
-// miss or failed pass increases the next acquisition wait and starts an
-// off-writer settle on the next pass.
+// miss or failed pass increases only the next acquisition wait.
 func (s *Store) noteWALGuardPass(result WALCheckpoint, err error, logBytes, limitBytes int64) {
 	over := !result.Restarted && logBytes > limitBytes
 	if logBytes < 0 {

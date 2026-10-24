@@ -955,6 +955,31 @@ func TestCheckpointWALIfLargeOverTheLimitHoldsTheWriterWithoutSettling(t *testin
 	}
 }
 
+// A missed bounded pass remains over the limit. Its next pass must still
+// attempt the writer promptly: a slow off-writer sync in this branch used to
+// consume the pass deadline while hooks kept appending frames.
+func TestCheckpointWALIfLargeRepeatedOverLimitPassesNeverSettleBeforeTheWriter(t *testing.T) {
+	store, cleanup := newTestStore(t)
+	defer cleanup()
+	logWALGuardEvents(t, store, 200)
+	writeDuringEveryCopy(t, store)
+	overrideWALDuration(t, &walCatchUpCap, 40*time.Millisecond)
+	originalWriter, originalSync := walWriterPhaseHook, walSyncPhaseHook
+	walWriterPhaseHook = func(ctx context.Context) { <-ctx.Done() }
+	var syncs atomic.Int64
+	walSyncPhaseHook = func(context.Context) { syncs.Add(1) }
+	t.Cleanup(func() { walWriterPhaseHook, walSyncPhaseHook = originalWriter, originalSync })
+	for passNumber := range 3 {
+		pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
+		if err != nil || !pass.Bounded || !pass.WriterDeferred || pass.Syncs != 0 || syncs.Load() != 0 {
+			t.Fatalf("over-limit pass %d: %+v, %v; sync hooks %d, want immediate bounded catch-up", passNumber, pass, err, syncs.Load())
+		}
+		if !store.WALOverLimit() || pass.WriterHeld > testWALWriterBudget {
+			t.Fatalf("over-limit pass %d lost pressure or exceeded writer budget: %+v", passNumber, pass)
+		}
+	}
+}
+
 // Review of G-flood-wal round 3 (P1): a pass that ran out of time while the
 // log was over the limit cleared the store's over-the-limit mark and left the
 // bounded catch-up's misses as they were, so background writers went on and
