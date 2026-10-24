@@ -307,6 +307,21 @@ $script:enabled = @('cursor')
 "RECORDED=$(@(Get-RecordedAcceptedConnectors $manifest $true) -join ',')"
 "UNRECORDED_STOPPED=$(@(Get-RecordedAcceptedConnectors ([pscustomobject]@{ Schema = 1 }) $true) -join ',')"
 "UNRECORDED_RUNNING=$(@(Get-RecordedAcceptedConnectors ([pscustomobject]@{ Schema = 1 }) $false) -join ',')"
+# Loop round 1 (rc.7): a persisted list that is empty, null or names none
+# proves nothing, so a stopped gateway is held to the effective config.
+foreach ($recordedList in @('[]', 'null', '[""]', '["none"]')) {
+    $persisted = ('{"Schema": 1, "ReplacementConnectors": ' + $recordedList + '}') | ConvertFrom-Json
+    "EMPTY_STOPPED[$recordedList]=$(@(Get-RecordedAcceptedConnectors $persisted $true) -join ',')"
+    "EMPTY_RUNNING[$recordedList]=$(@(Get-RecordedAcceptedConnectors $persisted $false) -join ',')"
+}
+# ... and Save-AcceptedConnectors holds a stopped gateway over such a record
+# to the effective config too.
+$emptyRecord = $record.Clone(); $emptyRecord.ReplacementConnectors = @()
+Write-DurableText $LifecycleManifest ($emptyRecord | ConvertTo-Json -Depth 4)
+$Run.UnprovenConnectors = @(); $Run.UnprovenGatewayWasRunning = $true
+Save-AcceptedConnectors (Join-Path $LifecycleCloser 'defenseclaw-gateway.exe') $null
+"SAVED_EMPTY=$(@(Get-Field (Read-LifecycleManifest) 'ReplacementConnectors') -join ',')"
+Write-DurableText $LifecycleManifest ($record | ConvertTo-Json -Depth 4)
 [IO.File]::WriteAllText((Join-Path $BinDir 'defenseclaw-gateway.exe'), 'older gateway')
 $Run.UnprovenReplacement = $manifest; $Run.UnprovenGatewayWasRunning = $true
 $Run.UnprovenAcceptedBins = Get-BinariesState $BinDir
@@ -322,6 +337,9 @@ $script:gateway = $null
     out = result.stdout + result.stderr
     assert result.returncode == 0, out
     assert "RECORDED=claudecode,codex\n" in out and "UNRECORDED_STOPPED=cursor\n" in out and "UNRECORDED_RUNNING=\n" in out, out
+    for recorded in ('[]', 'null', '[""]', '["none"]'):
+        assert f"EMPTY_STOPPED[{recorded}]=cursor\n" in out and f"EMPTY_RUNNING[{recorded}]=\n" in out, out
+    assert "SAVED_EMPTY=cursor\n" in out, out
     assert "DOWN= The accepted install's gateway is not proven running" in out and "claudecode" in out.split("DOWN=")[1].split("\n")[0], out
     assert "UP= The accepted install's gateway is running.\n" in out, out
     resume = _ps1_function("Resume-InterruptedRun")
@@ -5212,7 +5230,7 @@ _TXN_FUNCTIONS = (
     "Read-LifecycleManifest", "Complete-LifecycleManifest", "Remove-LifecycleManifest", "Test-LifecycleProof",
     "Set-RecoveryPending", "Wait-LifecycleProof", "Get-LifecycleNextStep", "Assert-LifecycleRestored", "Get-Field", "Get-Sha256", "New-RecoveryManifest",
     "Close-AllHooks", "Save-LifecycleCloser", "Test-SameBinaries",
-    "Set-RecoverySetupRoot", "Start-RecoveredGateway", "Read-Json", "Get-HeldConnectors", "Get-RecordedAcceptedConnectors",
+    "Set-RecoverySetupRoot", "Start-RecoveredGateway", "Read-Json", "Get-HeldConnectors", "Get-ManifestAcceptedConnectors", "Get-RecordedAcceptedConnectors",
     "Save-AcceptedConnectors",
 )
 

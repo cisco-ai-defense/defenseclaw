@@ -347,7 +347,7 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		unchanged = keepIdenticalWindowsSecret(store, opts.name, value)
 		if !unchanged {
 			// A value the signed bundle does not bind is not stored.
-			if err := checkSecretBinding(cmd.Context(), opts.name, value, opts.bundle); err != nil {
+			if err := checkSecretBinding(cmd.Context(), opts.name, value, opts.bundle, windowsSecretStored(layout.SecretsDir, opts.name)); err != nil {
 				return change, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
 			}
 			if err := writeWindowsSecret(store, opts.name, value); err != nil {

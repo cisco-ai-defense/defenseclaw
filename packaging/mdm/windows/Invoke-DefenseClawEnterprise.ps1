@@ -335,6 +335,10 @@ $script:ResultAction = 'ensure'
 # The installed CLI while a credential this run rotated waits for its
 # lifecycle to settle (credential rotation journal); every exit puts it back.
 $script:RotationCli = ''
+# This run's hold on the credential journal (rotation.lock): until it exits,
+# no other wrapper run puts back or drops an entry this run still settles.
+$script:RotationLock = $null
+$script:RotationLockWaitSeconds = 60
 
 function Write-WrapperLog {
     param([string]$Message)
@@ -459,13 +463,20 @@ function Assert-WrapperEngine {
     }
 }
 
+function New-WrapperAdminOnlyDirectory {
+    # Creates a folder only SYSTEM and Administrators can open, owned by
+    # Administrators, with no inherited entries.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $security = [System.Security.AccessControl.DirectorySecurity]::new()
+    $security.SetSecurityDescriptorSddlForm('O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
+    [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($Path), $security)
+}
+
 function New-WrapperStaging {
     $windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
     $path = Join-Path $windows ('Temp\defenseclaw-mdm-' + [Guid]::NewGuid().ToString('N'))
     if (Test-Path -LiteralPath $path) { Exit-Wrapper $script:ExitFailure 'mdm_staging_untrusted' "staging folder $path already exists" }
-    $security = [System.Security.AccessControl.DirectorySecurity]::new()
-    $security.SetSecurityDescriptorSddlForm('O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
-    [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($path), $security)
+    New-WrapperAdminOnlyDirectory -Path $path
     $script:Staging = $path
     if (-not (Test-DefenseClawAdminOnlyItem -Path $path)) {
         Exit-Wrapper $script:ExitFailure 'mdm_staging_untrusted' "staging folder $path is not administrator-only"
@@ -781,7 +792,14 @@ function Set-WrapperSecret {
 # when this run stopped before it settled. The CLI decides each put-back:
 # secret set stores only a value the confirmed bundle signs, and secret
 # remove refuses a credential the installed config uses. Either refusal means
-# the delivered bundle was confirmed after all, so its value stays.
+# the delivered bundle was confirmed after all, so its value stays. A bundle
+# signed before 1.0.4 signs only the name (secret_ref_unbound), which proves
+# nothing: the CLI refuses a rotation from it that would replace a stored
+# value, and a put-back refused that way stays journaled. The journal is used
+# only after its folders and entries pass the administrator-only check
+# (Initialize-WrapperRotationJournal, Test-WrapperJournalEntry) and while
+# this run holds rotation.lock (Enter-WrapperRotationLock), so a concurrent
+# ensure never settles an entry a run still in flight wrote.
 
 function Get-WrapperProgramData {
     $value = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
@@ -800,14 +818,22 @@ function Get-WrapperStoredSecretPath {
 }
 
 function Initialize-WrapperRotationJournal {
+    # The journal folder, once it and the folders above it are checked: its
+    # two folders administrator-only (an administrator owns them, no link,
+    # no other account can write), the folders above them not changeable by
+    # another account. Every read, put-back and delete of an entry comes
+    # after this check, so a folder another account created or can change is
+    # refused and nothing in it is used or removed. With -Create the missing
+    # folders are made administrator-only; without it a journal that does not
+    # exist is $null.
+    param([switch]$Create)
     $journal = Get-WrapperRotationJournal
     foreach ($directory in @((Split-Path -Parent $journal), $journal)) {
         if (-not (Test-Path -LiteralPath $directory)) {
-            $security = [System.Security.AccessControl.DirectorySecurity]::new()
-            $security.SetSecurityDescriptorSddlForm('O:BAG:SYD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)')
-            [System.IO.FileSystemAclExtensions]::Create([System.IO.DirectoryInfo]::new($directory), $security)
+            if (-not $Create) { return $null }
+            New-WrapperAdminOnlyDirectory -Path $directory
         }
-        if (-not (Test-DefenseClawAdminOnlyItem -Path $directory)) {
+        if (-not (Test-Path -LiteralPath $directory -PathType Container) -or -not (Test-DefenseClawAdminOnlyItem -Path $directory)) {
             throw "the credential journal folder $directory is not administrator-only"
         }
     }
@@ -817,14 +843,67 @@ function Initialize-WrapperRotationJournal {
     return $journal
 }
 
+function Test-WrapperJournalEntry {
+    # True for what this wrapper writes in the journal: a regular file, not
+    # a link or a folder, that only administrators can change.
+    param([Parameter(Mandatory = $true)]$Item)
+    if ($Item.PSIsContainer -or ($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
+    return [bool](Test-DefenseClawAdminOnlyItem -Path $Item.FullName)
+}
+
+function Enter-WrapperRotationLock {
+    # Holds rotation.lock beside the journal until this run exits. Journaling
+    # a credential, storing the new value, the lifecycle and its settle are
+    # one transaction, so a concurrent ensure waits instead of putting back
+    # or dropping an entry a run still in flight wrote. Still busy after
+    # $script:RotationLockWaitSeconds: lifecycle_busy (1618, retry), with
+    # nothing changed. With no journal and no -Create: $false.
+    param([switch]$Create)
+    if ($null -ne $script:RotationLock) { return $true }
+    $journal = Initialize-WrapperRotationJournal -Create:$Create
+    if (-not $journal) { return $false }
+    $path = Join-Path (Split-Path -Parent $journal) 'rotation.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds($script:RotationLockWaitSeconds)
+    while ($true) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        if ($null -ne $item -and -not (Test-WrapperJournalEntry -Item $item)) {
+            throw "the credential journal lock $path is not a regular administrator-only file"
+        }
+        try {
+            $script:RotationLock = [System.IO.FileStream]::new($path, [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+            return $true
+        } catch {
+            # Only a sharing violation (another run holds it) is waited for.
+            $failure = $_.Exception
+            while ($failure -is [System.Management.Automation.MethodInvocationException] -and $null -ne $failure.InnerException) {
+                $failure = $failure.InnerException
+            }
+            if ($failure -isnot [System.IO.IOException] -or $failure -is [System.IO.FileNotFoundException] -or
+                $failure -is [System.IO.DirectoryNotFoundException]) { throw }
+        }
+        if ([DateTime]::UtcNow -ge $deadline) {
+            Exit-Wrapper $script:ExitBusy 'lifecycle_busy' "another DefenseClaw MDM ensure holds the credential journal ($path) while it settles a credential rotation; nothing was changed, so run this ensure again after it finishes"
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
 function Save-WrapperSecretJournal {
     # Journals credential $Name as it is stored now, before a rotation
     # replaces it. An entry an earlier run left is older, so it is kept: it
     # holds the value from before that run's rotation.
     param([Parameter(Mandatory = $true)][string]$Name)
-    $journal = Initialize-WrapperRotationJournal
+    $journal = Initialize-WrapperRotationJournal -Create
     $entry = Join-Path $journal $Name
-    if ((Test-Path -LiteralPath $entry) -or (Test-Path -LiteralPath "$entry.absent")) { return }
+    foreach ($existing in @($entry, "$entry.absent")) {
+        $item = Get-Item -LiteralPath $existing -Force -ErrorAction SilentlyContinue
+        if ($null -eq $item) { continue }
+        if (-not (Test-WrapperJournalEntry -Item $item)) {
+            throw "the credential journal entry $existing is not a regular administrator-only file"
+        }
+        return
+    }
     $stored = Get-WrapperStoredSecretPath -Name $Name
     $item = Get-Item -LiteralPath $stored -Force -ErrorAction SilentlyContinue
     $target = "$entry.absent"
@@ -863,10 +942,19 @@ function Complete-WrapperSecretJournal {
     # put back. -Name limits it to one credential. Returns what could not be
     # put back; those entries stay for the next ensure.
     param([string]$Cli = '', [string]$Name = '', [switch]$Restore)
-    $journal = Get-WrapperRotationJournal
-    if (-not (Test-Path -LiteralPath $journal -PathType Container)) { return @() }
+    try {
+        $journal = Initialize-WrapperRotationJournal
+    } catch {
+        return @("the credential journal was not used, and nothing in it was put back or removed: $($_.Exception.Message)")
+    }
+    if (-not $journal) { return @() }
     $problems = @()
-    foreach ($file in @(Get-ChildItem -LiteralPath $journal -Force -File)) {
+    foreach ($file in @(Get-ChildItem -LiteralPath $journal -Force)) {
+        if (-not (Test-WrapperJournalEntry -Item $file)) {
+            # Not written by this wrapper: never read, put back or deleted.
+            $problems += "the credential journal entry $($file.FullName) is not a regular administrator-only file, so it was not used and was left as it is"
+            continue
+        }
         if ($file.Name.EndsWith('.partial')) {
             # A journal write that never finished: the rotation never ran.
             Remove-WrapperJournalEntry -Path $file.FullName
@@ -892,7 +980,10 @@ function Complete-WrapperSecretJournal {
                 Write-WrapperLog -Message "put back credential ${entryName}: the lifecycle did not confirm the bundle that signs its new value"
             } else {
                 $code = Get-WrapperSecretErrorCode -Run $run
-                if (@('secret_ref_mismatch', 'secret_ref_unbound', 'credential_in_use', 'not_installed') -notcontains $code) {
+                # A confirmed bundle that signs only the credential's name
+                # (secret_ref_unbound) proves nothing about the delivered
+                # one: the entry stays and is reported.
+                if (@('secret_ref_mismatch', 'credential_in_use', 'not_installed') -notcontains $code) {
                     $problems += "putting back credential '$entryName' failed (exit $($run.ExitCode) $code); the next ensure tries again"
                     continue
                 }
@@ -930,22 +1021,35 @@ function Test-WrapperSecretSetBundle {
     }
 }
 
-# An earlier ensure that stopped between storing a credential and settling
-# its lifecycle left a journal entry: put that credential back first. A
-# deployment this run cannot trust keeps the entry for a later run.
-if ($normalizedAction -eq 'ensure') {
-    $resumeCli = $null
+function Resume-WrapperSecretJournal {
+    # An earlier ensure that stopped between storing a credential and
+    # settling its lifecycle left a journal entry: put that credential back
+    # first. The journal is held first (Enter-WrapperRotationLock), so an
+    # entry a concurrent run is still settling is waited for, never taken. A
+    # journal that fails its check, or a deployment this run cannot trust,
+    # keeps every entry for a later run.
+    $problems = @()
     try {
-        $resumeDeployment = Get-DefenseClawInstalledDeployment
-        $resumeCli = if ($null -ne $resumeDeployment) { $resumeDeployment.Cli } else { '' }
-    } catch { $resumeCli = $null }
-    if ($null -ne $resumeCli) {
-        foreach ($problem in @(Complete-WrapperSecretJournal -Cli $resumeCli -Restore)) {
-            Write-WrapperLog -Message $problem
-            [Console]::Error.WriteLine($problem)
-        }
+        $held = Enter-WrapperRotationLock
+    } catch {
+        $held = $false
+        $problems += "the credential journal was not used, and nothing in it was put back or removed: $($_.Exception.Message)"
+    }
+    if ($held) {
+        $cli = $null
+        try {
+            $deployment = Get-DefenseClawInstalledDeployment
+            $cli = if ($null -ne $deployment) { $deployment.Cli } else { '' }
+        } catch { $cli = $null }
+        if ($null -ne $cli) { $problems += @(Complete-WrapperSecretJournal -Cli $cli -Restore) }
+    }
+    foreach ($problem in $problems) {
+        Write-WrapperLog -Message $problem
+        [Console]::Error.WriteLine($problem)
     }
 }
+
+if ($normalizedAction -eq 'ensure') { Resume-WrapperSecretJournal }
 
 # A credential delivered with a bundle to an installed deployment is stored
 # first, with the bundle: the apply refuses a stored value the bundle does
@@ -960,6 +1064,7 @@ $installedDeployment = $null
 if ($secret -and $bundle -and -not $SetupPath) { $installedDeployment = Get-DefenseClawInstalledDeployment }
 if ($null -ne $installedDeployment -and (Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)) {
     try {
+        [void](Enter-WrapperRotationLock -Create)
         Save-WrapperSecretJournal -Name $SecretName
     } catch {
         Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "journaling credential '$SecretName' before its rotation failed, so nothing was changed: $($_.Exception.Message)"

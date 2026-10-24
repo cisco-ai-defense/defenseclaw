@@ -992,7 +992,12 @@ off the device. The agent does not read `/health` itself (section 7); the
   administrator-only folder (`%ProgramData%\Cisco\DefenseClaw-MDM\rotation`)
   before the rotation and puts it back when the lifecycle fails or the run
   stops early for any other reason, or at the start of the next ensure when
-  the run was killed. `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
+  the run was killed. It holds `rotation.lock` beside that folder for the
+  whole run, so a concurrent ensure waits (after 60 seconds it exits
+  `lifecycle_busy`, 1618) instead of settling an entry still in flight, and
+  it uses an entry only after the folders and the entry pass the
+  administrator-only check (an entry it did not write is left as it is).
+  `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
   old value in memory only and puts it back when the bundle apply or the
   ensure before it fails, the run stops early, or the MDM stops it (HUP, INT,
   TERM); a run killed outright (`SIGKILL`) cannot, so redeliver the bundle.
@@ -1001,6 +1006,10 @@ off the device. The agent does not read `/health` itself (section 7); the
   delivery of the confirmed bundle, which an older build answered
   `already_applied`) and `secret set` for its credentials refuse
   `secret_ref_unbound`, exit 1 / 1603, until a re-signed bundle is applied.
+  A rotation (`secret set --bundle`) that would replace a stored value is
+  refused the same way before anything is written, since a failed apply
+  could not put that value back: apply a bundle re-signed for the value
+  stored now first, then rotate with a newer one.
   The confirmed config keeps enforcing; `ensure` and repair do not verify
   the bundle. 1.0.2 and 1.0.3 refuse a bundle signed by 1.0.4 with
   `value_sha256` (`manifest_invalid`), so one bundle cannot serve both:

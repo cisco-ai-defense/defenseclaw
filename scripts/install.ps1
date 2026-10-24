@@ -2436,16 +2436,25 @@ function Save-HookCloser([string]$Slot, [string]$Gateway) {
     }
 }
 
+function Get-ManifestAcceptedConnectors($Manifest) {
+    # The connectors a record lists for the gateway an earlier
+    # -AcceptCurrentInstall run accepted (ReplacementConnectors). A list that
+    # is missing, null, empty or names none proves nothing, so it is no
+    # roster: the callers fall back as for an unrecorded gateway.
+    if (-not $Manifest -or -not $Manifest.PSObject.Properties["ReplacementConnectors"]) { return @() }
+    return @(@($Manifest.ReplacementConnectors) | Where-Object { $_ -and [string]$_ -ne "none" } |
+        ForEach-Object { [string]$_ } | Sort-Object -Unique)
+}
+
 function Get-RecordedAcceptedConnectors($Manifest, [bool]$GatewayStopped) {
     # The connectors an earlier -AcceptCurrentInstall run recorded for the
     # gateway it accepted (Save-AcceptedConnectors). A retry's restore proves
     # them from the start, also one that fails before this run asks that
-    # gateway again. A gateway an earlier run stopped without recording them
+    # gateway again. A gateway an earlier run stopped without recording any
     # is held to every connector the effective config enables, as
     # Save-AcceptedConnectors holds it.
-    if ($Manifest -and $Manifest.PSObject.Properties["ReplacementConnectors"]) {
-        return @(@($Manifest.ReplacementConnectors) | Where-Object { $_ } | ForEach-Object { [string]$_ } | Sort-Object -Unique)
-    }
+    $names = @(Get-ManifestAcceptedConnectors $Manifest)
+    if ($names.Count) { return $names }
     if ($GatewayStopped) { return @(Get-HeldConnectors $null) }
     return @()
 }
@@ -2465,8 +2474,9 @@ function Save-AcceptedConnectors([string]$Closer, $Running) {
     # after it still proves them.
     $names = @(if ($Run.ContainsKey("UnprovenConnectors")) { $Run.UnprovenConnectors })
     $record = Read-LifecycleManifest
-    $recorded = $record -and $record.PSObject.Properties["ReplacementConnectors"]
-    if ($recorded) { $names += @($record.ReplacementConnectors) }
+    $recordedNames = @(Get-ManifestAcceptedConnectors $record)
+    $recorded = $recordedNames.Count -gt 0
+    $names += $recordedNames
     if ($Running) {
         $names += @(Get-HeldConnectors (Get-GatewayHealthReport $Closer))
     } elseif ($Run.ContainsKey("UnprovenGatewayWasRunning") -and $Run.UnprovenGatewayWasRunning -and -not $recorded) {

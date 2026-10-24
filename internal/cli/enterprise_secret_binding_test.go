@@ -152,7 +152,7 @@ func TestSecretSetStoresOnlyAValueASignedBundleBinds(t *testing.T) {
 	ctx := context.Background()
 	key := filepath.Join(e.dir, "key.pem")
 	v5 := e.signCredentialBundle(t, "5", "key-1", key)
-	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("any"), ""); err != nil {
+	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("any"), "", true); err != nil {
 		t.Fatalf("no bundle confirmed: %v", err)
 	}
 	confirmSignedBundle(t, store, v5)
@@ -183,7 +183,7 @@ func TestSecretSetStoresOnlyAValueASignedBundleBinds(t *testing.T) {
 			if tc.name == "a credential the bundle does not reference" {
 				name = "splunk-token"
 			}
-			err := checkSecretBinding(ctx, name, []byte(tc.value), tc.bundle)
+			err := checkSecretBinding(ctx, name, []byte(tc.value), tc.bundle, true)
 			if enterprisebundle.CodeOf(err) != tc.want || (tc.want == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.reason)) {
 				t.Fatalf("got %v, want %q naming %q", err, tc.want, tc.reason)
 			}
@@ -196,8 +196,12 @@ func TestSecretSetStoresOnlyAValueASignedBundleBinds(t *testing.T) {
 
 // After an upgrade from a release whose bundles signed credential names
 // only, the confirmed bundle binds no value: secret set refuses to change
-// the credential (secret_ref_unbound) until a bundle that binds the value
-// is given with --bundle.
+// the credential (secret_ref_unbound). A rotation with a bundle that binds
+// the new value is refused too while a value is stored (loop round 1,
+// rc.7): a failed apply puts the old value back with secret set, which that
+// bundle refuses, so the old config would keep the new credential. With
+// nothing stored there is nothing to put back, and the bundle authorizes
+// the value.
 func TestSecretSetRefusesACredentialALegacyBundleSignsByNameOnly(t *testing.T) {
 	e, store := credentialBundleEnv(t)
 	key := filepath.Join(e.dir, "key.pem")
@@ -229,14 +233,21 @@ func TestSecretSetRefusesACredentialALegacyBundleSignsByNameOnly(t *testing.T) {
 	}
 	confirmSignedBundle(t, store, legacy)
 	ctx := context.Background()
-	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-1"), ""); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefUnbound {
+	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-1"), "", true); enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefUnbound {
 		t.Fatalf("legacy confirmed bundle: got %v, want secret_ref_unbound", err)
 	}
-	if code := secretBindingCode(checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-1"), "")); code != "secret_ref_unbound" {
+	if code := secretBindingCode(checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-1"), "", true)); code != "secret_ref_unbound" {
 		t.Fatalf("errors[].code %q", code)
 	}
 	v6 := e.signCredentialBundle(t, "6", "key-2", key)
-	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-2"), v6); err != nil {
-		t.Fatalf("rotation with a bundle that binds the value: %v", err)
+	err = checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-2"), v6, true)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeSecretRefUnbound || !strings.Contains(err.Error(), "could not put the stored value back") {
+		t.Fatalf("rotation over a stored value: got %v, want secret_ref_unbound naming the put-back", err)
+	}
+	if strings.Contains(err.Error(), "key-2") {
+		t.Fatalf("the refusal prints the value: %v", err)
+	}
+	if err := checkSecretBinding(ctx, "ai-defense-api-key", []byte("key-2"), v6, false); err != nil {
+		t.Fatalf("rotation with nothing stored, with a bundle that binds the value: %v", err)
 	}
 }

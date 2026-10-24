@@ -8,6 +8,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"runtime"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
@@ -20,10 +21,13 @@ import (
 // the new value instead, once it verifies on this device as an apply would,
 // apart from the stored credentials. The MDM wrappers pass the bundle they
 // deliver, which needs no trust anchors yet when nothing is confirmed.
-// secret set calls it under the lock bundle apply takes, so the confirmed
-// bundle cannot change in between. A state or manifest it cannot read
-// refuses.
-func checkSecretBinding(ctx context.Context, name string, value []byte, rotationPath string) error {
+// replacing is true when a value is stored now: a rotation from a confirmed
+// bundle that signs only the name (secret_ref_unbound, signed before 1.0.4)
+// is refused then, because a failed apply could not put that value back
+// (secret set refuses every value such a bundle names). secret set calls it
+// under the lock bundle apply takes, so the confirmed bundle cannot change in
+// between. A state or manifest it cannot read refuses.
+func checkSecretBinding(ctx context.Context, name string, value []byte, rotationPath string, replacing bool) error {
 	store, err := bundleStore()
 	if err != nil {
 		return err
@@ -38,6 +42,11 @@ func checkSecretBinding(ctx context.Context, name string, value []byte, rotation
 	err = enterprisebundle.CheckCredentialChange(confirmed, nil, name, value)
 	if err == nil || rotationPath == "" {
 		return err
+	}
+	if replacing && enterprisebundle.CodeOf(err) == enterprisebundle.CodeSecretRefUnbound {
+		return &enterprisebundle.Error{Code: enterprisebundle.CodeSecretRefUnbound, Path: "secret_refs", Detail: fmt.Sprintf(
+			"the confirmed policy bundle signs the name of credential %s but not its value, so a failed apply could not put the stored value back; "+
+				"first apply a bundle signed with --secret-file %s=<file> for the value stored now, then rotate it with a newer bundle", name, name)}
 	}
 	res := &bundleVerifyResult{Warnings: []enterprisebundle.Warning{}, Errors: []bundleError{}}
 	if err := bundleVerify(ctx, &bundleVerifyOptions{bundle: rotationPath, platform: runtime.GOOS, skipSecretStore: true}, res); err != nil {

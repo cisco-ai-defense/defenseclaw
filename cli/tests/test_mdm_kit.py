@@ -309,11 +309,17 @@ $secret = Join-Path $script:root 'staged-secret'
 $bundle = Join-Path $script:root 'policy.dcbundle'
 $script:DefenseClawAdminSids = @()
 function Get-WrapperProgramData { return (Join-Path $script:root 'ProgramData') }
-function Initialize-WrapperRotationJournal {
-    $journal = Get-WrapperRotationJournal
-    [void][System.IO.Directory]::CreateDirectory($journal)
-    return $journal
+# The ACL reads the journal checks rely on: a link, or a path listed in
+# $script:untrusted, is not administrator-only; folders get no descriptor.
+$script:untrusted = @()
+function Test-DefenseClawAdminOnlyItem {
+    param([string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force
+    if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    return ($script:untrusted -notcontains [System.IO.Path]::GetFullPath($Path))
 }
+function Test-WrapperAdminOnlyAncestors { param([string]$Path) return $true }
+function New-WrapperAdminOnlyDirectory { param([string]$Path) [void][System.IO.Directory]::CreateDirectory($Path) }
 function Get-DefenseClawInstalledDeployment { return [pscustomobject]@{ Cli = 'defenseclaw.exe' } }
 function Write-WrapperLog { param([string]$Message) }
 
@@ -354,6 +360,7 @@ __FUNCTIONS__
 
 function Reset-Device($Stored) {
     Remove-Item -LiteralPath (Join-Path $script:root 'ProgramData') -Recurse -Force -ErrorAction SilentlyContinue
+    $script:untrusted = @()
     if ($null -ne $Stored) {
         $path = Get-WrapperStoredSecretPath -Name $SecretName
         [void][System.IO.Directory]::CreateDirectory((Split-Path -Parent $path))
@@ -450,24 +457,90 @@ Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:delivered = 'new-
 $script:calls = @()
 [void](Complete-WrapperSecretJournal -Cli '' -Restore)
 $out.uninstalled = "$(Get-Journal) $(@($script:calls).Count)"
+
+# Loop round 1 (rc.7). 11. A put-back refused secret_ref_unbound (the
+#     confirmed bundle signs only the name) proves nothing: it stays
+#     journaled and is reported.
+Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:delivered = 'new-key'; $script:inUse = $true
+[void](Rotate)
+$script:failNext = 'secret_ref_unbound'
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.unbound = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+
+# 12. An entry another account planted (a config-only device, so nothing
+#     binds the credential): with the journal folder, the folder above it or
+#     the entry not administrator-only, the entry is never read, put back or
+#     removed, and no rotation journals beside it.
+foreach ($case in @('folder', 'parent', 'entry')) {
+    Reset-Device 'old-key'; $script:confirmed = $null; $script:inUse = $true
+    $journal = Get-WrapperRotationJournal
+    [void][System.IO.Directory]::CreateDirectory($journal)
+    $planted = Join-Path $journal $SecretName
+    [System.IO.File]::WriteAllText($planted, 'attacker-key')
+    $script:untrusted = @(switch ($case) {
+        'folder' { [System.IO.Path]::GetFullPath($journal) }
+        'parent' { [System.IO.Path]::GetFullPath((Split-Path -Parent $journal)) }
+        'entry' { [System.IO.Path]::GetFullPath($planted) }
+    })
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $journaled = try { Save-WrapperSecretJournal -Name $SecretName; 'journaled' } catch { 'refused' }
+    $out["untrusted_$case"] = "$(Get-Stored) $([System.IO.File]::ReadAllText($planted)) $(@($script:calls).Count) $($problems.Count) $journaled"
+}
+
+# 13. A folder where an entry belongs is not an entry either.
+Reset-Device 'old-key'; $script:confirmed = $null
+$planted = Join-Path (Get-WrapperRotationJournal) $SecretName
+[void][System.IO.Directory]::CreateDirectory($planted)
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$journaled = try { Save-WrapperSecretJournal -Name $SecretName; 'journaled' } catch { 'refused' }
+$out.folderEntry = "$(Get-Stored) $(Test-Path -LiteralPath $planted -PathType Container) $(@($script:calls).Count) $($problems.Count) $journaled"
+
+# 14. Nor is a link to a file elsewhere (where this account can make one).
+Reset-Device 'old-key'; $script:confirmed = $null
+$journal = Get-WrapperRotationJournal
+[void][System.IO.Directory]::CreateDirectory($journal)
+$target = Join-Path $script:root 'attacker-file'
+[System.IO.File]::WriteAllText($target, 'attacker-key')
+$linked = try { [void](New-Item -ItemType SymbolicLink -Path (Join-Path $journal $SecretName) -Target $target -ErrorAction Stop); $true } catch { $false }
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.linkEntry = "$linked $(Get-Stored) $([System.IO.File]::ReadAllText($target)) $(@($script:calls).Count) $($problems.Count) $(Test-Path -LiteralPath (Join-Path $journal $SecretName))"
 $out | ConvertTo-Json -Compress
 """
 
 
-@pytest.mark.skipif(os.name != "nt", reason="runs PowerShell 7")
-def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_confirms_it(tmp_path: Path) -> None:
-    engine = _pwsh7()
-    assert engine, "Windows CI must provide PowerShell 7"
+def _any_pwsh7() -> str | None:
+    # PowerShell 7 on Windows, or pwsh on Linux and macOS: the probes use no
+    # Windows-only API.
+    candidates = [shutil.which("pwsh.exe"), shutil.which("pwsh")]
+    program_files = os.environ.get("ProgramFiles")
+    if program_files:
+        candidates.append(str(Path(program_files) / "PowerShell" / "7" / "pwsh.exe"))
+    return next((c for c in candidates if c and Path(c).is_file()), None)
+
+
+_ROTATION_FUNCTIONS = ("Get-WrapperSecretErrorCode", "Set-WrapperSecret", "Get-WrapperRotationJournal",
+                       "Get-WrapperStoredSecretPath", "Initialize-WrapperRotationJournal", "Test-WrapperJournalEntry",
+                       "Save-WrapperSecretJournal", "Remove-WrapperJournalEntry", "Complete-WrapperSecretJournal",
+                       "Undo-WrapperSecretRotation")
+
+
+def _rotation_functions(*names: str) -> str:
     text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
     functions = []
-    for name in ("Get-WrapperSecretErrorCode", "Set-WrapperSecret", "Get-WrapperRotationJournal",
-                 "Get-WrapperStoredSecretPath", "Save-WrapperSecretJournal", "Remove-WrapperJournalEntry",
-                 "Complete-WrapperSecretJournal", "Undo-WrapperSecretRotation"):
+    for name in names:
         start = text.index(f"function {name} {{")
         functions.append(text[start : text.index("\n}\n", start) + 3])
+    return "\n".join(functions)
+
+
+@pytest.mark.skipif(_any_pwsh7() is None and os.name != "nt", reason="needs PowerShell 7")
+def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_confirms_it(tmp_path: Path) -> None:
+    engine = _any_pwsh7()
+    assert engine, "Windows CI must provide PowerShell 7"
     probe = tmp_path / "rotation-probe.ps1"
     probe.write_text(
-        _ROTATION_PROBE.replace("__ROOT__", str(tmp_path).replace("'", "''")).replace("__FUNCTIONS__", "\n".join(functions)),
+        _ROTATION_PROBE.replace("__ROOT__", str(tmp_path).replace("'", "''"))
+        .replace("__FUNCTIONS__", _rotation_functions(*_ROTATION_FUNCTIONS)),
         encoding="utf-8",
     )
     result = subprocess.run(
@@ -490,7 +563,17 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
         "twice": "old-key 0",
         "refused": "secret_ref_mismatch old-key 0 1",
         "uninstalled": "0 0",
+        "unbound": "new-key 1 1",
+        "untrusted_folder": "old-key attacker-key 0 1 refused",
+        "untrusted_parent": "old-key attacker-key 0 1 refused",
+        "untrusted_entry": "old-key attacker-key 0 1 refused",
+        "folderEntry": "old-key True 0 1 refused",
+        "linkEntry": out["linkEntry"],
     }, out
+    # Where this account can make a link, it is refused and left in place.
+    linked = "True old-key attacker-key 0 1 True"
+    assert out["linkEntry"] in (linked, "False old-key attacker-key 0 0 False"), out
+    assert os.name == "nt" or out["linkEntry"] == linked, out
 
 
 def test_windows_wrapper_settles_the_credential_journal_around_the_lifecycle() -> None:
@@ -500,16 +583,19 @@ def test_windows_wrapper_settles_the_credential_journal_around_the_lifecycle() -
     # failure, success).
     text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
     main = text[text.index("$staging = New-WrapperStaging"):]
-    resume = main.index("Complete-WrapperSecretJournal -Cli $resumeCli -Restore")
-    journal = main.index("Save-WrapperSecretJournal -Name $SecretName")
+    resume = main.index("if ($normalizedAction -eq 'ensure') { Resume-WrapperSecretJournal }")
+    lock = main.index("[void](Enter-WrapperRotationLock -Create)", resume)
+    journal = main.index("Save-WrapperSecretJournal -Name $SecretName", lock)
     rotate = main.index("$failure = Set-WrapperSecret -Extra @('--bundle', $bundle)")
     armed = main.index("$script:RotationCli = $installedDeployment.Cli")
     lifecycle = main.index("$arguments = @('enterprise', 'windows', $normalizedAction")
     disarmed = main.index("$script:RotationCli = ''", lifecycle)
     settle = main.index("[void](Complete-WrapperSecretJournal -Name $SecretName)", disarmed)
     undo = main.index("Undo-WrapperSecretRotation -Cli $installedDeployment.Cli", settle)
-    assert resume < journal < rotate < armed < lifecycle < disarmed < settle < undo
-    assert main.index("if ($normalizedAction -eq 'ensure')") < resume
+    assert resume < lock < journal < rotate < armed < lifecycle < disarmed < settle < undo
+    body = main[main.index("function Resume-WrapperSecretJournal {"):]
+    body = body[: body.index("\n}\n")]
+    assert body.index("Enter-WrapperRotationLock") < body.index("Complete-WrapperSecretJournal -Cli $cli -Restore")
 
 
 # Continuation 2, loop round 1 (Windows consolidation, GAP-1095): the
@@ -532,15 +618,6 @@ Exit-Wrapper 1603 'mdm_not_installed' 'the deployment is not installed'
 """
 
 
-def _any_pwsh7() -> str | None:
-    # PowerShell 7 on Windows, or pwsh on Linux and macOS: the probe uses no
-    # Windows-only API.
-    candidates = [shutil.which("pwsh.exe"), shutil.which("pwsh")]
-    program_files = os.environ.get("ProgramFiles")
-    if program_files:
-        candidates.append(str(Path(program_files) / "PowerShell" / "7" / "pwsh.exe"))
-    return next((c for c in candidates if c and Path(c).is_file()), None)
-
 
 @pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
 @pytest.mark.parametrize(("case", "stored", "journal"), [("armed", "old-key", 0), ("settled", "new-key", 0)])
@@ -548,18 +625,12 @@ def test_windows_wrapper_exit_puts_back_a_credential_rotated_before_the_lifecycl
     tmp_path: Path, case: str, stored: str, journal: int,
 ) -> None:
     engine = _any_pwsh7()
-    text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
-    functions = []
-    for name in ("Get-WrapperSecretErrorCode", "Set-WrapperSecret", "Get-WrapperRotationJournal",
-                 "Get-WrapperStoredSecretPath", "Save-WrapperSecretJournal", "Remove-WrapperJournalEntry",
-                 "Complete-WrapperSecretJournal", "Undo-WrapperSecretRotation", "Exit-Wrapper"):
-        start = text.index(f"function {name} {{")
-        functions.append(text[start : text.index("\n}\n", start) + 3])
     prefix = _ROTATION_PROBE[: _ROTATION_PROBE.index("$out = [ordered]@{}")]
     probe = tmp_path / "exit-probe.ps1"
     probe.write_text(
         (prefix + _EXIT_PROBE_TAIL.replace("__CASE__", case))
-        .replace("__ROOT__", str(tmp_path).replace("'", "''")).replace("__FUNCTIONS__", "\n".join(functions)),
+        .replace("__ROOT__", str(tmp_path).replace("'", "''"))
+        .replace("__FUNCTIONS__", _rotation_functions(*_ROTATION_FUNCTIONS, "Exit-Wrapper")),
         encoding="utf-8",
     )
     result = subprocess.run(
@@ -576,6 +647,78 @@ def test_windows_wrapper_exit_puts_back_a_credential_rotated_before_the_lifecycl
     assert secret.read_text(encoding="utf-8") == stored
     entries = [path for path in store.rglob("*") if path.is_file() and "rotation" in str(path)]
     assert len(entries) == journal, entries
+
+
+# Loop round 1 (rc.7), finding 1: two wrapper runs shared the journal with
+# no lock. Run A journaled the old value; run B's resume put that value back
+# (still stored, so the CLI took it) and deleted the entry; A then stored the
+# new value, its lifecycle failed, and nothing was left to put back. Every
+# ensure now holds rotation.lock from its resume to its exit.
+_LOCK_PROBE_TAIL = r"""
+function ConvertTo-DefenseClawResultJson { param($Action, $ExitCode, $Code, $Message) return "{""code"":""$Code""}" }
+function Remove-WrapperStaging { }
+$script:ResultAction = 'ensure'
+$script:RotationCli = ''
+$script:RotationLock = $null
+$script:ExitBusy = 1618
+$script:RotationLockWaitSeconds = 1
+$script:confirmed = 'old-key'; $script:delivered = 'new-key'; $script:inUse = $true
+if ('__ROLE__' -eq 'b') {
+    # Run B: a concurrent ensure settles what an earlier run left.
+    Resume-WrapperSecretJournal
+    [Console]::Out.WriteLine("resumed $(Get-Stored) $(Get-Journal) $(@($script:calls).Count)")
+    exit 0
+}
+# Run A journals the old value and pauses before it stores the new one.
+Reset-Device 'old-key'
+[void](Enter-WrapperRotationLock -Create)
+Save-WrapperSecretJournal -Name $SecretName
+$b = @(& '__ENGINE__' -NoLogo -NoProfile -NonInteractive -File '__CHILD__' 2>&1 | ForEach-Object { "$_" })
+"B1=$LASTEXITCODE $($b | Where-Object { $_ -match '^(\{|resumed)' } | Select-Object -Last 1) $(Get-Stored) $(Get-Journal)"
+"LOG1=$($b -join ' | ')"
+# A goes on: it stores the new value, its lifecycle fails, the put-back finds its entry.
+$failure = Set-WrapperSecret -Extra @('--bundle', $bundle)
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+"A=$($null -eq $failure) $(Get-Stored) $(Get-Journal)"
+# A exits (its hold goes): the next ensure runs.
+$script:RotationLock.Dispose(); $script:RotationLock = $null
+$b = @(& '__ENGINE__' -NoLogo -NoProfile -NonInteractive -File '__CHILD__' 2>&1 | ForEach-Object { "$_" })
+"B2=$LASTEXITCODE $($b | Where-Object { $_ -match '^(\{|resumed)' } | Select-Object -Last 1)"
+"LOG2=$($b -join ' | ')"
+"""
+
+
+@pytest.mark.skipif(_any_pwsh7() is None, reason="needs PowerShell 7")
+def test_windows_wrapper_holds_the_credential_journal_until_its_rotation_settles(tmp_path: Path) -> None:
+    engine = _any_pwsh7()
+    assert engine
+    prefix = _ROTATION_PROBE[: _ROTATION_PROBE.index("$out = [ordered]@{}")]
+    functions = _rotation_functions(*_ROTATION_FUNCTIONS, "Exit-Wrapper", "Enter-WrapperRotationLock",
+                                    "Resume-WrapperSecretJournal")
+    child = tmp_path / "run-b.ps1"
+    parent = tmp_path / "run-a.ps1"
+    for path, role in ((child, "b"), (parent, "a")):
+        path.write_text(
+            (prefix + _LOCK_PROBE_TAIL.replace("__ROLE__", role))
+            .replace("__ROOT__", str(tmp_path).replace("'", "''"))
+            .replace("__ENGINE__", engine.replace("'", "''"))
+            .replace("__CHILD__", str(child).replace("'", "''"))
+            .replace("__FUNCTIONS__", functions),
+            encoding="utf-8",
+        )
+    result = subprocess.run(
+        [engine, "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(parent)],
+        capture_output=True, text=True, timeout=180, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    lines = {line.split("=", 1)[0]: line.split("=", 1)[1] for line in result.stdout.splitlines() if "=" in line[:3]}
+    # B waits for A's hold, then gives up busy (1618, or 1618 mod 256 on
+    # Linux) with A's entry and the stored value untouched.
+    assert lines.get("B1") in ('1618 {"code":"lifecycle_busy"} old-key 1', '82 {"code":"lifecycle_busy"} old-key 1'), result.stdout + result.stderr
+    # A's failed lifecycle still finds its entry and puts the old value back.
+    assert lines.get("A") == "True old-key 0", result.stdout + result.stderr
+    # Once A is gone, B runs: nothing is left to settle.
+    assert lines.get("B2") == "0 resumed old-key 0 0", result.stdout + result.stderr
 
 
 def test_windows_wrapper_every_exit_after_the_rotation_settles_it() -> None:

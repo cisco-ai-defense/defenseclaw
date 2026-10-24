@@ -530,8 +530,10 @@ func changeUnixSecret(cmd *cobra.Command, action string, opts *enterpriseSecretO
 			if existed = readErr == nil && subtle.ConstantTimeCompare(stored, value) == 1; existed {
 				return nil
 			}
-			// A value the signed bundle does not bind is not stored.
-			if err := checkSecretBinding(ctx, opts.name, value, opts.bundle); err != nil {
+			// A value the signed bundle does not bind is not stored. A
+			// credential that cannot be read counts as stored.
+			replacing := readErr == nil || !errors.Is(readErr, fs.ErrNotExist)
+			if err := checkSecretBinding(ctx, opts.name, value, opts.bundle, replacing); err != nil {
 				return err
 			}
 			return env.WriteSecret(ctx, opts.name, value)
