@@ -440,6 +440,47 @@ func TestHandleAgentHook_NotificationPanicDoesNotFinalizeTwice(t *testing.T) {
 	}
 }
 
+func TestHandleAgentHook_NotificationPanicKeepsFinalizedAnswer(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	api := &APIServer{store: store, logger: logger}
+	api.webhookSource = func() *WebhookDispatcher { panic("synthetic notification panic after finalized block") }
+	previous, had := hookProfileRuntimes["hermes"]
+	hookProfileRuntimes["hermes"] = func(profile connector.HookProfile) hookProfileRuntime {
+		runtime := defaultHookProfileRuntime(profile)
+		runtime.Evaluate = func(*APIServer, context.Context, agentHookRequest, []byte, map[string]interface{}) agentHookResponse {
+			return agentHookResponse{Action: "block", RawAction: "block", Mode: "action", Reason: "finalized policy block"}
+		}
+		return runtime
+	}
+	t.Cleanup(func() {
+		if had {
+			hookProfileRuntimes["hermes"] = previous
+		} else {
+			delete(hookProfileRuntimes, "hermes")
+		}
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", strings.NewReader(
+		`{"hook_event_name":"pre_tool_call","session_id":"sess-notify-allow","tool_name":"shell"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleAgentHook("hermes").ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var answer struct {
+		Action string `json:"action"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &answer); err != nil {
+		t.Fatalf("answer=%q: %v", w.Body.String(), err)
+	}
+	row := soleHookDecisionForTest(t, store)
+	if answer.Action != "block" || answer.Reason != "finalized policy block" || row.Structured["action"] != answer.Action {
+		t.Fatalf("answer=%+v, audit=%+v; want one matching finalized block", answer, row)
+	}
+}
+
 func TestHandleAgentHook_AntigravityConfirmSurvivesOutputEncodingFailure(t *testing.T) {
 	previous, had := hookProfileRuntimes["antigravity"]
 	hookProfileRuntimes["antigravity"] = func(profile connector.HookProfile) hookProfileRuntime {

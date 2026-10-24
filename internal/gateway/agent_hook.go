@@ -583,6 +583,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// finalizeAgentHook, doubling audit rows, hook-outcome metrics,
 		// and the connector telemetry log for a single request.
 		finalized := false
+		var wireResp agentHookResponse
 		// pending is the journal row of a receipt-capable call
 		// (agent_hook_pending.go); its records carry its IDs.
 		var pending *pendingHookOccurrence
@@ -590,7 +591,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				elapsed := time.Since(t0)
-				resp := a.hookPanicResponse(ctx, connectorName, req, b, payload)
+				resp := wireResp
+				if !finalized || attemptedWrite {
+					resp = a.hookPanicResponse(ctx, connectorName, req, b, payload)
+				}
 				if pending != nil && attemptedWrite {
 					// The proposal may have reached the hook; nothing
 					// proves which answer the hook gave.
@@ -768,7 +772,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// A managed answer is only an evaluated proposal until the hook
 		// commits it to its agent: the audit row, hook_decision and
 		// dedupe get the decision the agent was given (GAP-0286).
-		wireResp := resp
+		wireResp = resp
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
