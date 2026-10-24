@@ -1438,7 +1438,10 @@ func HookRuntimeRegistrationCurrent(
 	if runtimeState.Version != 2 {
 		return false, fmt.Errorf("unsupported Codex hook runtime evidence version %d", runtimeState.Version)
 	}
-	wantMode := setupHookFailMode(opts)
+	// The sidecar records the rendered outage mode. A per-user hook can
+	// record an explicitly resolved outage mode while its other failures
+	// remain closed, so compare the registration with what Setup wrote.
+	wantMode := renderedHookFailMode(opts, conn)
 	if strings.TrimSpace(runtimeState.GatewayAddr) != strings.TrimSpace(opts.APIAddr) ||
 		runtimeState.FailModes["codex"] != wantMode ||
 		runtimeState.Managed != opts.ManagedEnterprise {

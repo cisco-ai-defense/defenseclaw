@@ -197,6 +197,8 @@ func TestWindowsCodexFailModePolicyRefreshIsNotTampering(t *testing.T) {
 	action := cloneConfig(cfg)
 	action.Guardrail.Mode = "action"
 	action.Guardrail.HookFailMode = "closed"
+	// Per-user outage mode follows the rule-pack tier, not HookFailMode.
+	action.Guardrail.RulePack = "strict"
 	policySidecar.publishConfig(action)
 	if err := guard.RefreshPolicy(ctx); err != nil {
 		t.Fatalf("refresh Codex policy: %v", err)
