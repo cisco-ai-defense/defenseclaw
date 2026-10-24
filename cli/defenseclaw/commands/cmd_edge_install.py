@@ -56,7 +56,7 @@ def _fleet_api_request(api_base: str, method: str, suffix: str, token: str, body
             raise OSError("Fleet API socket is unavailable")
         peer_host = connection.sock.getpeername()[0]
         if ipaddress.ip_address(peer_host.split("%", 1)[0]).is_loopback:
-            _verify_connected_gateway_socket(connection.sock, peer_host, port)
+            _verify_connected_gateway_socket(connection.sock, peer_host, port, connection.timeout)
         elif endpoint.scheme != "https":
             raise OSError("Fleet API plaintext endpoint is not local")
         headers = {"X-DefenseClaw-Client": "true"}

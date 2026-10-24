@@ -3758,10 +3758,12 @@ def _linux_foreign_listener_accounts(port: int, proc_root: str = "/proc") -> str
     """Name the other accounts whose sockets listen on ``port`` (Linux only)."""
     if not sys.platform.startswith("linux"):
         return ""
+    from defenseclaw.doctor_gateway import linux_proc_net_table
+
     uids: set[int] = set()
     for table_name in ("tcp", "tcp6"):
         try:
-            with open(os.path.join(proc_root, "net", table_name), encoding="ascii") as table:
+            with open(linux_proc_net_table(table_name, proc_root), encoding="ascii") as table:
                 rows = table.readlines()[1:]
         except (OSError, UnicodeError):
             continue
@@ -5912,11 +5914,13 @@ def _linux_gateway_listener_evidence(
 ) -> ListenerEvidence:
     """Resolve one Linux TCP listener owner without optional userland tools.
 
-    Linux exposes listening socket inodes in ``/proc/net/tcp*`` and each
+    Linux exposes listening socket inodes in ``/proc/self/net/tcp*`` and each
     process's descriptors as ``socket:[inode]`` links.  Require every socket
     inode for the port to resolve to the same PID; partial visibility and
     ``SO_REUSEPORT`` ambiguity fail closed.
     """
+    from defenseclaw.doctor_gateway import linux_proc_net_table
+
     if not 1 <= port <= 65_535:
         return ListenerEvidence("unavailable", reason="configured API port is invalid")
 
@@ -5935,7 +5939,7 @@ def _linux_gateway_listener_evidence(
     socket_inodes: set[str] = set()
     table_found = False
     for table_name in ("tcp", "tcp6"):
-        table_path = os.path.join(proc_root, "net", table_name)
+        table_path = linux_proc_net_table(table_name, proc_root)
         try:
             with open(table_path, encoding="ascii") as table:
                 rows = table.readlines()[1:]
