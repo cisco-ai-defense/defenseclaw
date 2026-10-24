@@ -6,6 +6,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"io"
@@ -58,27 +59,20 @@ const (
 // check: an agent that never loads its managed hook still has no invocation
 // to check, which status reports separately.
 var standaloneLinuxHookContext = func() string {
-	return linuxManagedHookContextReason(os.Readlink, readLinuxHookContextFile)
+	return linuxManagedHookContextReason(os.Readlink, openLinuxHookContextFile)
 }
 
-func readLinuxHookContextFile(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	// Bound every read so a replaced proc file cannot consume unbounded
-	// memory; uid_map and status are a few hundred bytes.
-	const maxBytes = int64(16 * 1024)
-	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
-	if err != nil || int64(len(data)) > maxBytes {
-		return nil, errors.New("cannot read bounded Linux process context")
-	}
-	return data, nil
-}
+func openLinuxHookContextFile(path string) (io.ReadCloser, error) { return os.Open(path) }
 
-func linuxManagedHookContextReason(readlink func(string) (string, error), readFile func(string) ([]byte, error)) string {
-	uidMap, err := readFile("/proc/self/uid_map")
+// linuxHookContextMaxBytes bounds every proc read so a replaced proc file
+// cannot consume unbounded memory. In the host user namespace uid_map is one
+// line. Only the head of status is read: TracerPid is its eighth line, while
+// later lines such as Groups grow with the account (up to 65,536
+// supplementary groups), and a large file must not refuse a valid call.
+const linuxHookContextMaxBytes = 16 * 1024
+
+func linuxManagedHookContextReason(readlink func(string) (string, error), open func(string) (io.ReadCloser, error)) string {
+	uidMap, err := readLinuxHookContextFile(open, "/proc/self/uid_map")
 	if err != nil {
 		return hookexec.ManagedProcessContextUnknownReason
 	}
@@ -97,15 +91,44 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 	if host, err := readlink("/proc/1/ns/user"); err == nil && host != "" && host != self {
 		return hookexec.ManagedUserNamespaceReason
 	}
-	status, err := readFile("/proc/self/status")
+	return linuxTracerPidReason(open)
+}
+
+func readLinuxHookContextFile(open func(string) (io.ReadCloser, error), path string) ([]byte, error) {
+	f, err := open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, linuxHookContextMaxBytes+1))
+	if err != nil || len(data) > linuxHookContextMaxBytes {
+		return nil, errors.New("cannot read bounded Linux process context")
+	}
+	return data, nil
+}
+
+// linuxTracerPidReason reads /proc/self/status only up to its first complete
+// TracerPid line. A status with no complete TracerPid line in its first
+// linuxHookContextMaxBytes, or an unparsable one, is unverifiable.
+func linuxTracerPidReason(open func(string) (io.ReadCloser, error)) string {
+	f, err := open("/proc/self/status")
 	if err != nil {
 		return hookexec.ManagedProcessContextUnknownReason
 	}
-	for _, line := range strings.Split(string(status), "\n") {
-		if !strings.HasPrefix(line, "TracerPid:") {
+	defer f.Close()
+	head := bufio.NewReader(io.LimitReader(f, linuxHookContextMaxBytes))
+	for {
+		line, err := head.ReadString('\n')
+		if err != nil {
+			// EOF or the bound before a complete TracerPid line: a cut
+			// line is never trusted.
+			return hookexec.ManagedProcessContextUnknownReason
+		}
+		value, ok := strings.CutPrefix(line, "TracerPid:")
+		if !ok {
 			continue
 		}
-		pid, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "TracerPid:")))
+		pid, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil || pid < 0 {
 			return hookexec.ManagedProcessContextUnknownReason
 		}
@@ -114,7 +137,6 @@ func linuxManagedHookContextReason(readlink func(string) (string, error), readFi
 		}
 		return ""
 	}
-	return hookexec.ManagedProcessContextUnknownReason
 }
 
 // reportStandaloneHookRefusal tells the gateway, over the hook socket, that

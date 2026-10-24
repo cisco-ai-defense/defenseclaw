@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -314,6 +315,18 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 		{name: "unverifiable context", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\thook\n", want: hookexec.ManagedProcessContextUnknownReason},
 		{name: "unreadable own user namespace", uidMap: "0 0 4294967295\n", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedProcessContextUnknownReason},
 		{name: "protected host namespace links", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", hostLinksDenied: true},
+		// Only the head of status is read: lines after TracerPid, such as
+		// a long Groups line, never refuse a valid call.
+		{name: "65,536 supplementary groups", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: linuxStatusWithGroups("0", 65536)},
+		{name: "traced with 65,536 supplementary groups", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: linuxStatusWithGroups("42", 65536), want: hookexec.ManagedTracedProcessReason},
+		// A TracerPid line cut by end of file or by the read bound (here
+		// right after its 0) is never trusted, and neither is one past the
+		// bound.
+		{name: "cut TracerPid line", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\thook\nTracerPid:\t0", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "TracerPid cut by the bound", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\t" + strings.Repeat("x", linuxHookContextMaxBytes-len("Name:\t\nTracerPid:\t0")) + "\nTracerPid:\t0\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "TracerPid past the bound", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "Name:\t" + strings.Repeat("x", 2*linuxHookContextMaxBytes) + "\nTracerPid:\t0\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "oversized uid_map", uidMap: "0 0 4294967295\n" + strings.Repeat(" ", linuxHookContextMaxBytes), selfUser: "user:[1]", selfMount: "mnt:[2]", status: "TracerPid:\t0\n", want: hookexec.ManagedProcessContextUnknownReason},
+		{name: "unparsable TracerPid", uidMap: "0 0 4294967295\n", selfUser: "user:[1]", selfMount: "mnt:[2]", status: "TracerPid:\tx\n", want: hookexec.ManagedProcessContextUnknownReason},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			links := map[string]string{
@@ -328,12 +341,12 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 					return target, nil
 				}
 				return "", os.ErrNotExist
-			}, func(path string) ([]byte, error) {
+			}, func(path string) (io.ReadCloser, error) {
 				switch path {
 				case "/proc/self/uid_map":
-					return []byte(tc.uidMap), nil
+					return io.NopCloser(strings.NewReader(tc.uidMap)), nil
 				case "/proc/self/status":
-					return []byte(tc.status), nil
+					return io.NopCloser(strings.NewReader(tc.status)), nil
 				default:
 					return nil, os.ErrNotExist
 				}
@@ -342,6 +355,69 @@ func TestLinuxManagedHookContextReason(t *testing.T) {
 				t.Fatalf("reason = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// linuxStatusWithGroups is a /proc/self/status in the kernel's line order
+// (TracerPid before Groups) for an account with groups supplementary
+// seven-digit group ids.
+func linuxStatusWithGroups(tracerPid string, groups int) string {
+	var b strings.Builder
+	b.WriteString("Name:\thook\nUmask:\t0022\nState:\tR (running)\nTgid:\t4242\nNgid:\t0\nPid:\t4242\nPPid:\t4200\n")
+	b.WriteString("TracerPid:\t" + tracerPid + "\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\nFDSize:\t64\nGroups:\t")
+	for i := 0; i < groups; i++ {
+		fmt.Fprintf(&b, "%d ", 1000000+i)
+	}
+	b.WriteString("\nNStgid:\t4242\nNSpid:\t4242\nNSpgid:\t4242\nNSsid:\t4200\nKthread:\t0\n")
+	for _, field := range []string{"VmPeak", "VmSize", "VmLck", "VmPin", "VmHWM", "VmRSS", "RssAnon", "RssFile", "RssShmem",
+		"VmData", "VmStk", "VmExe", "VmLib", "VmPTE", "VmSwap", "HugetlbPages"} {
+		b.WriteString(field + ":\t  123456 kB\n")
+	}
+	b.WriteString("CoreDumping:\t0\nTHP_enabled:\t1\nuntag_mask:\t0xffffffffffffffff\nThreads:\t1\nSigQ:\t0/63432\n" +
+		"SigPnd:\t0000000000000000\nShdPnd:\t0000000000000000\nSigBlk:\t0000000000000000\nSigIgn:\t0000000000000000\n" +
+		"SigCgt:\t0000000000000000\nCapInh:\t0000000000000000\nCapPrm:\t0000000000000000\nCapEff:\t0000000000000000\n" +
+		"CapBnd:\t000001ffffffffff\nCapAmb:\t0000000000000000\nNoNewPrivs:\t0\nSeccomp:\t0\nSeccomp_filters:\t0\n" +
+		"Speculation_Store_Bypass:\tthread vulnerable\nSpeculationIndirectBranch:\tconditional enabled\n" +
+		"Cpus_allowed:\tffff\nCpus_allowed_list:\t0-15\nMems_allowed:\t00000000,00000001\nMems_allowed_list:\t0\n" +
+		"voluntary_ctxt_switches:\t1\nnonvoluntary_ctxt_switches:\t0\n")
+	return b.String()
+}
+
+// A host login whose account has about 2,000 supplementary groups has a
+// /proc/self/status over the read bound. The hook reads, from the real
+// files, only through TracerPid and takes the call.
+func TestLinuxManagedHookContextReadsOnlyTheStatusHead(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"/proc/self/uid_map": "         0          0 4294967295\n",
+		"/proc/self/status":  linuxStatusWithGroups("0", 2000),
+	}
+	if len(files["/proc/self/status"]) <= linuxHookContextMaxBytes {
+		t.Fatalf("fixture status is %d bytes; it must exceed the %d-byte bound", len(files["/proc/self/status"]), linuxHookContextMaxBytes)
+	}
+	paths := map[string]string{}
+	for name, body := range files {
+		path := filepath.Join(dir, filepath.Base(name))
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		paths[name] = path
+	}
+	open := func(path string) (io.ReadCloser, error) {
+		if paths[path] == "" {
+			return nil, os.ErrNotExist
+		}
+		return openLinuxHookContextFile(paths[path])
+	}
+	readlink := func(string) (string, error) { return "user:[1]", nil }
+	if got := linuxManagedHookContextReason(readlink, open); got != "" {
+		t.Fatalf("host login with 2,000 groups: reason = %q, want none", got)
+	}
+	if err := os.WriteFile(paths["/proc/self/status"], []byte(linuxStatusWithGroups("42", 2000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := linuxManagedHookContextReason(readlink, open); got != hookexec.ManagedTracedProcessReason {
+		t.Fatalf("traced hook with 2,000 groups: reason = %q, want %q", got, hookexec.ManagedTracedProcessReason)
 	}
 }
 
