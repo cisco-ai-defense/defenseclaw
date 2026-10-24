@@ -1711,8 +1711,9 @@ func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
 }
 
 func runEnterpriseHooksReadiness(cmd *cobra.Command, _ []string) error {
-	if runtime.GOOS != "windows" || cfg == nil || !cfg.StandaloneEnterprise() {
-		return fmt.Errorf("enterprise hooks readiness is available only for managed standalone Windows Setup")
+	if cfg == nil || !cfg.StandaloneEnterprise() ||
+		(runtime.GOOS != "windows" && runtime.GOOS != "linux" && runtime.GOOS != "darwin") {
+		return fmt.Errorf("enterprise hooks readiness is available only for managed standalone Setup")
 	}
 	return runEnterpriseHooksVerifyWithScope(cmd, true)
 }
@@ -1963,7 +1964,7 @@ func runEnterpriseHookVerifyAttemptWithScope(ctx context.Context, registrationOn
 		return run, fmt.Errorf("enterprise hooks verify: config is not loaded")
 	}
 	if enterpriseHooksStandaloneUnixActive() {
-		return runEnterpriseHookVerifyAttemptStandaloneUnix(ctx)
+		return runEnterpriseHookVerifyAttemptStandaloneUnix(ctx, registrationOnly)
 	}
 	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := enterpriseHookManifestFileTrustCheck(enterpriseHookManifest); err != nil {
