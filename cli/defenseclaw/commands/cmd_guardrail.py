@@ -6019,7 +6019,19 @@ def profile_explain_cmd(app: AppContext, user: str, connector: str, agent: str, 
             f"the directory lookup for {user or 'this account'} may be slow (SSSD or the domain controller). Try again."
         )
         raise SystemExit(1) from None
-    except Exception as exc:  # noqa: BLE001 - report any transport or HTTP failure
+    except requests.exceptions.HTTPError as exc:
+        # The gateway answered, so starting it cannot repair this error.
+        # Its 400 response names an unknown connector and the valid names.
+        detail = None
+        try:
+            payload = exc.response.json() if exc.response is not None else None
+            if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+                detail = payload["error"][:300]
+        except ValueError:
+            pass
+        ux.err(f"Gateway rejected profile resolution: {detail or exc}")
+        raise SystemExit(1) from None
+    except Exception as exc:  # noqa: BLE001 - report transport and client failures
         ux.err(f"Could not ask the gateway: {exc}")
         # A running gateway still on its previous port is not "stopped".
         notice = gateway_reload_notice(app.cfg)
