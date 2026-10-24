@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/spf13/cobra"
 )
 
 // The guardian needs proof of the hooks it installed, while Verify still
@@ -57,5 +58,56 @@ func TestManagedWindowsHermesGuardianKeepsSessionHomeOutOfMachineReadiness(t *te
 	_, err = enterpriseHookGuardianVerify(context.Background(), enterprisehooks.InstallOptions{ConnectorName: "hermes"})
 	if err == nil || calls != 2 {
 		t.Fatalf("Secure Client used standalone registration proof: err=%v calls=%d", err, calls)
+	}
+}
+
+func TestManagedWindowsHermesLiveReadinessKeepsPublicVerifyStrict(t *testing.T) {
+	previousPublic := enterpriseHookLivePublicVerifier
+	previousRegistration := enterpriseHookLiveRegistrationVerifier
+	previousConfig := cfg
+	t.Cleanup(func() {
+		enterpriseHookLivePublicVerifier = previousPublic
+		enterpriseHookLiveRegistrationVerifier = previousRegistration
+		cfg = previousConfig
+	})
+	cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+	cfg.Enterprise.Profile = managed.ProfileStandalone
+	publicCalls, registrationCalls := 0, 0
+	publicErr := errors.New("Hermes NOT COVERED: session-only HERMES_HOME cannot be observed")
+	enterpriseHookLivePublicVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		publicCalls++
+		return enterprisehooks.InstallResult{}, publicErr
+	}
+	registrationErr := error(nil)
+	enterpriseHookLiveRegistrationVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		registrationCalls++
+		if !strings.EqualFold(opts.ConnectorName, "hermes") {
+			t.Fatalf("registration verifier used for %q", opts.ConnectorName)
+		}
+		return enterprisehooks.InstallResult{Connector: "hermes"}, registrationErr
+	}
+
+	ctx := context.Background()
+	hermes := enterprisehooks.InstallOptions{ConnectorName: "hermes"}
+	if _, err := enterpriseHookLiveTargetVerifier(ctx, hermes, false); !errors.Is(err, publicErr) {
+		t.Fatalf("public Verify accepted a session-only Hermes home: %v", err)
+	}
+	if result, err := enterpriseHookLiveTargetVerifier(ctx, hermes, true); err != nil || result.Connector != "hermes" {
+		t.Fatalf("Setup registration of physically hooked Hermes = (%+v, %v)", result, err)
+	}
+	registrationErr = errors.New("owned hook command not present")
+	if _, err := enterpriseHookLiveTargetVerifier(ctx, hermes, true); !errors.Is(err, registrationErr) {
+		t.Fatalf("Setup accepted an absent owned Hermes hook: %v", err)
+	}
+	if _, err := enterpriseHookLiveTargetVerifier(ctx, enterprisehooks.InstallOptions{ConnectorName: "codex"}, true); !errors.Is(err, publicErr) {
+		t.Fatalf("Setup weakened a non-Hermes verification: %v", err)
+	}
+	if publicCalls != 2 || registrationCalls != 2 {
+		t.Fatalf("verifier calls: public=%d registration=%d, want 2 each", publicCalls, registrationCalls)
+	}
+	cfg.Enterprise.Profile = managed.ProfileSecureClient
+	if err := runEnterpriseHooksReadiness(&cobra.Command{}, nil); err == nil ||
+		!strings.Contains(err.Error(), "only for managed standalone Windows Setup") {
+		t.Fatalf("Secure Client entered standalone readiness: %v", err)
 	}
 }

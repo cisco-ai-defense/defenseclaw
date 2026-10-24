@@ -378,7 +378,8 @@ func TestWindowsManagedLaunchCoverageWritesCanonicalGatewayAuditWithoutArguments
 	t.Cleanup(func() { windowsManagedLaunchAuditEndpoint = priorEndpoint })
 	bodies := make(chan []byte, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/observability/cli" || r.Header.Get("Authorization") != "Bearer managed-token" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/observability/cli" ||
+			r.Header.Get("Authorization") != "Bearer managed-token" || r.Header.Get("X-DefenseClaw-Client") != "cli" {
 			t.Errorf("unexpected gateway request: %s %s", r.Method, r.URL)
 			w.WriteHeader(http.StatusForbidden)
 			return
