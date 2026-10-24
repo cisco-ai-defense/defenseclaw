@@ -463,7 +463,7 @@ def test_linux_listener_owner_filters_the_exact_connect_address(tmp_path):
     net = proc_root / "self" / "net"
     for pid in ("4242", "9001"):
         (proc_root / pid / "fd").mkdir(parents=True)
-    net.mkdir(exist_ok=True)
+    net.mkdir(parents=True, exist_ok=True)
     port = 18_970
     header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
     rows = (

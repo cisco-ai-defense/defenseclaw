@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import textwrap
@@ -33,6 +32,12 @@ _linux_foreign_listener_accounts = cmd_doctor._linux_foreign_listener_accounts
 
 
 class _ConnectedSocket:
+    def __init__(self, timeout: float | None = None) -> None:
+        self._timeout = timeout
+
+    def gettimeout(self):
+        return self._timeout
+
     def getpeername(self):
         return ("127.0.0.1", 18970)
 
@@ -155,6 +160,17 @@ def test_verifier_gets_the_callers_budget(budget, expected) -> None:
     assert gateway._connected_verifier_timeout(budget) == expected
 
 
+@posix_only
+@pytest.mark.parametrize(("socket_timeout", "expected"), [(5.0, 6.0), (60.0, 11.0), (None, 11.0)])
+def test_verifier_budget_is_the_connected_sockets_timeout(per_user_host, monkeypatch, socket_timeout, expected) -> None:
+    # urllib3 and http.client create the socket with the caller's connect
+    # timeout; that is the budget the helper gets.
+    monkeypatch.setenv("DEFENSECLAW_GATEWAY_BIN", _helper(per_user_host / "opt-bin" / "defenseclaw-gateway"))
+    with mock.patch.object(gateway.subprocess, "run", return_value=mock.Mock(returncode=0)) as run:
+        gateway._verify_connected_gateway_socket(_ConnectedSocket(socket_timeout), "127.0.0.1", 18970)
+    assert run.call_args.kwargs["timeout"] == expected
+
+
 class _Gateway(BaseHTTPRequestHandler):
     received: list[str] = []
 
@@ -193,7 +209,9 @@ def test_cli_waits_for_a_gateway_that_accepts_after_three_seconds(
     # CLI sent nothing; the release client got its answer within its 5 s.
     helper = _helper(per_user_host / "opt-bin" / "defenseclaw-gateway", f"{_SLEEP} 3.3\n")
     if deployment == "managed":
-        monkeypatch.setattr(gateway, "_managed_connected_verifier_spec", lambda: (helper, "defenseclaw-gateway.service"))
+        monkeypatch.setattr(
+            gateway, "_managed_connected_verifier_spec", lambda: (helper, "defenseclaw-gateway.service")
+        )
         monkeypatch.setattr(gateway, "_trusted_connected_verifier_binary", lambda binary, *, managed: binary)
     else:
         monkeypatch.setenv("DEFENSECLAW_GATEWAY_BIN", helper)
@@ -230,13 +248,16 @@ def _self_net_only(tmp_path, port: int, *, state: str = "0A", remote: str = "000
     net = proc_root / "self" / "net"
     net.mkdir(parents=True)
     (proc_root / "4242" / "fd").mkdir(parents=True)
-    row = f"   0: 0100007F:{port:04X} {remote} {state} 00000000:00000000 00:00000000 00000000 {uid:5d}        0 12345 1\n"
+    row = (
+        f"   0: 0100007F:{port:04X} {remote} {state} 00000000:00000000 00:00000000 00000000 {uid:5d}        0 12345 1\n"
+    )
     (net / "tcp").write_text(_TABLE_HEADER + row, encoding="ascii")
     (net / "tcp6").write_text(_TABLE_HEADER, encoding="ascii")
     os.symlink("socket:[12345]", proc_root / "4242" / "fd" / "3")
     return proc_root
 
 
+@posix_only
 def test_socket_tables_are_read_through_proc_self() -> None:
     assert doctor_gateway.linux_proc_net_table("tcp6") == "/proc/self/net/tcp6"
     assert gateway._foreign_loopback_listener_uncached.__defaults__ == ("/proc/self/net",)
@@ -300,8 +321,14 @@ def test_preflight_under_a_hardened_proc_mount(tmp_path, options) -> None:
     tools = ["/usr/bin/unshare", "/usr/bin/setpriv", "/usr/bin/timeout"]
     if os.geteuid() == 0 or not all(os.path.exists(tool) for tool in tools):
         pytest.skip("needs an ordinary account with unshare, setpriv and timeout")
-    if subprocess.run(["sudo", "-n", "/usr/bin/unshare", "--mount", "--propagation", "private", "true"],
-                      capture_output=True, check=False).returncode != 0:
+    if (
+        subprocess.run(
+            ["sudo", "-n", "/usr/bin/unshare", "--mount", "--propagation", "private", "true"],
+            capture_output=True,
+            check=False,
+        ).returncode
+        != 0
+    ):
         pytest.skip("a private mount namespace is unavailable without a password")
     script = tmp_path / "in_namespace.py"
     script.write_text(_IN_NAMESPACE, encoding="utf-8")
@@ -311,10 +338,35 @@ def test_preflight_under_a_hardened_proc_mount(tmp_path, options) -> None:
         '"$5" -I -c "import sys; sys.path.insert(0, sys.argv[1]); exec(open(sys.argv[2]).read())" "$4" "$6"'
     )
     run = subprocess.run(
-        ["sudo", "-n", "/usr/bin/timeout", "-k", "5", "60", "/usr/bin/unshare", "--mount", "--propagation",
-         "private", "--pid", "--fork", "--kill-child", "/bin/sh", "-c", shell, "sh", options,
-         str(os.geteuid()), str(os.getegid()), package_root, sys.executable, str(script)],
-        capture_output=True, text=True, timeout=90, check=False,
+        [
+            "sudo",
+            "-n",
+            "/usr/bin/timeout",
+            "-k",
+            "5",
+            "60",
+            "/usr/bin/unshare",
+            "--mount",
+            "--propagation",
+            "private",
+            "--pid",
+            "--fork",
+            "--kill-child",
+            "/bin/sh",
+            "-c",
+            shell,
+            "sh",
+            options,
+            str(os.geteuid()),
+            str(os.getegid()),
+            package_root,
+            sys.executable,
+            str(script),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=90,
+        check=False,
     )
     assert run.returncode == 0, run.stdout + run.stderr
     result = json.loads(run.stdout.strip().splitlines()[-1])

@@ -728,11 +728,11 @@ def _connected_verifier_timeout(budget: object) -> float:
     return min(max(seconds, _CONNECTED_VERIFIER_MIN_WAIT), _CONNECTED_VERIFIER_MAX_WAIT) + _CONNECTED_VERIFIER_MARGIN
 
 
-def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int, timeout: object = None) -> None:
+def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int) -> None:
     """Prove the accepted server socket before urllib3 writes request bytes.
 
-    ``timeout`` is the caller's budget for the connection (None: the
-    gateway's own wait).
+    The socket's timeout is still the caller's connect budget, which the
+    helper gets (:func:`_connected_verifier_timeout`).
     """
     remote = sock.getpeername()
     local = sock.getsockname()
@@ -756,7 +756,7 @@ def _verify_connected_gateway_socket(sock: socket.socket, host: str, port: int, 
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=_connected_verifier_timeout(timeout),
+            timeout=_connected_verifier_timeout(getattr(sock, "gettimeout", lambda: None)()),
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
@@ -856,7 +856,7 @@ class _GatewayVerifiedConnection(HTTPConnection):
     def connect(self) -> None:
         super().connect()
         try:
-            _verify_connected_gateway_socket(self.sock, self.host, self.port, self.timeout)
+            _verify_connected_gateway_socket(self.sock, self.host, self.port)
         except Exception:
             self.close()
             raise
