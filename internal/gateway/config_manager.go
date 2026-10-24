@@ -1146,35 +1146,58 @@ var errNoRecordedGeneration = errors.New("no lifecycle-recorded generation is wa
 // ReloadRecordedGeneration is the managed /policy/reload: it rebuilds the
 // generation, assets included, only when the lifecycle recorded one for the
 // installed config.yaml that the gateway has not applied
-// (pendingManagedGeneration). A generation the watcher already applied
-// answers nil. Anything else, such as a hand edit or an unsigned asset
-// change, is refused with errNoRecordedGeneration before any state changes.
+// (pendingManagedGeneration). A repeat request for the generation already
+// applied rebuilds it only to prove that config.yaml and every referenced
+// asset still match the live generation (proveUnchanged), so a policy asset
+// edited without a record, whose watcher event was missed, is refused
+// instead of answered as reloaded. Anything else, such as a hand edit or an
+// unsigned record, is refused before any state changes. Every refusal wraps
+// errNoRecordedGeneration and names its cause.
 func (m *ConfigManager) ReloadRecordedGeneration(ctx context.Context, reason string) error {
 	if m == nil {
-		return errNoRecordedGeneration
+		return fmt.Errorf("%w: the config manager is not running", errNoRecordedGeneration)
 	}
-	return m.reload(ctx, reason, true, m.recordedGenerationAdmission)
+	repeat := false
+	err := m.reload(ctx, reason, true, func() (bool, error) {
+		load, again, err := m.recordedGenerationAdmission()
+		repeat = again
+		return load || again, err
+	})
+	if err != nil && repeat && !errors.Is(err, errNoRecordedGeneration) {
+		return fmt.Errorf("%w: %w", errNoRecordedGeneration, err)
+	}
+	return err
 }
 
 // recordedGenerationAdmission reports whether the installed config.yaml
-// holds a recorded generation to load (load), one already applied (nil
-// error, no load), or neither. Callers hold mu.
-func (m *ConfigManager) recordedGenerationAdmission() (load bool, err error) {
+// holds a recorded generation to load (load), is the applied generation
+// again (repeat: the reload proves it unchanged, assets included), or
+// neither (an error naming why). Callers hold mu.
+func (m *ConfigManager) recordedGenerationAdmission() (load, repeat bool, err error) {
+	refuse := func(format string, args ...any) (bool, bool, error) {
+		return false, false, fmt.Errorf("%w: "+format, append([]any{errNoRecordedGeneration}, args...)...)
+	}
 	if m.readSnapshot == nil {
-		return false, errNoRecordedGeneration
+		return refuse("config.yaml cannot be read by this gateway")
 	}
 	snapshot, err := m.readSnapshot(m.path)
 	if err != nil {
-		return false, fmt.Errorf("%w: config.yaml could not be read: %v", errNoRecordedGeneration, err)
+		return refuse("config.yaml could not be read: %v", err)
 	}
 	if m.pendingManagedGeneration(snapshot.raw) {
-		return true, nil
+		return true, false, nil
 	}
-	if state, err := configwrite.ReadGenerationState(m.path); err == nil && !m.rejected &&
-		m.appliedGenerationKnown && state.Generation == m.appliedGeneration && bytes.Equal(m.appliedRaw, snapshot.raw) {
-		return false, nil
+	if m.appliedRaw == nil || !bytes.Equal(m.appliedRaw, snapshot.raw) {
+		return refuse("config.yaml differs from the applied generation and no lifecycle-recorded generation binds it")
 	}
-	return false, errNoRecordedGeneration
+	state, err := configwrite.ReadGenerationState(m.path)
+	if err != nil {
+		return refuse("the recorded generation could not be read: %v", err)
+	}
+	if !m.appliedGenerationKnown || state.Generation != m.appliedGeneration {
+		return refuse("recorded generation %d is neither the applied generation nor a newer one this computer accepts", state.Generation)
+	}
+	return false, true, nil
 }
 
 // reload rebuilds the generation from config.yaml. admit, when set, runs
