@@ -671,7 +671,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 	// A connector can name the shell text "cmd" while ActionFacts requires
 	// its canonical command field. Resolve that exact string as a shell too.
 	truncated := facts.Parse.Status == actionfacts.StatusLimitExceeded || toolConflict || argsConflict
-	var operands, literalOperands []string
+	var operands, literalOperands, assignedOperands []string
 	var directoryOperands []RedirectOccurrence
 	var directoryUnknown bool
 	links := shellLinks{known: true}
@@ -701,6 +701,7 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				var parsed bool
 				operands, parsed, _ = ShellWriteOperands(command, cwd, home)
 				literalOperands = LiteralWriteOperands(command, cwd, home)
+				assignedOperands = AdjacentAssignedWriteOperands(command, cwd, home)
 				// A bound pathname pattern has no fixed operand to list; the
 				// gateway reads the same result and fails closed on it.
 				boundedOperands, _ := BoundedShellWriteOperands(command, cwd, home)
@@ -715,7 +716,9 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 				if !isApplyPatchToolName(tool) {
 					links = commandLinksWithFacts(command, cwd, home, sourceFacts, true)
 					safeRedirects = SafeShellRedirectOccurrencesWithFacts(command, cwd, home, sourceFacts)
-					truncated = truncated || !links.known
+					// An unresolved program word alone does not make a
+					// concrete write operand or its link walk incomplete.
+					truncated = truncated || links.opaque
 				}
 				break
 			}
@@ -752,6 +755,13 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		if aliasKnown && links.known {
 			resolved, ok = links.resolve(resolutionPath, protected)
+		} else if aliasKnown && !links.opaque {
+			// The command may name an unknown program, but it has no
+			// proved link operation. Resolve this operand in the caller's
+			// filesystem instead of carrying a false unknown-target fact.
+			if direct, directOK := resolveWritePath(resolutionPath, 0); directOK {
+				resolved, ok = protected.target(direct)
+			}
 		} else if aliasKnown && safeRedirect {
 			if direct, directOK := resolveWritePath(resolutionPath, 0); directOK {
 				resolved, ok = protected.target(direct)
@@ -774,6 +784,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		size += entry
 		targets[path] = resolved
+	}
+	// A bounded assignment at the end of a long AND-list is listed first so
+	// ordinary preceding redirects cannot exhaust the client's target map.
+	for _, operand := range assignedOperands {
+		add(operand, true, false)
 	}
 	// Exact shell operands take precedence over a duplicate PathFact. Their
 	// early-redirect exemption must not cover a later command writer.

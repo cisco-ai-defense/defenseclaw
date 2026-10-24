@@ -293,8 +293,8 @@ func TestR103B36ManagedClaudeHeaderUsesProcCWDProofOnly(t *testing.T) {
 			hookpaths.CWDKey: cwd, hookpaths.DirectoryFactPrefix + cwd: cwd,
 			hookpaths.TruncatedKey: "1", os.DevNull: os.DevNull,
 		}}
-	if !trustedExistingAuthorizedKeysSymlinkWrite(temporaryRequest, actionfacts.Analyze(temporaryInput)) {
-		t.Fatal("mktemp output cannot certify a later write target")
+	if trustedExistingAuthorizedKeysSymlinkWrite(temporaryRequest, actionfacts.Analyze(temporaryInput)) {
+		t.Fatal("mktemp output without a resolved protected target blocked")
 	}
 	if err := os.Symlink(protected, filepath.Join(cwd, "disklink")); err != nil {
 		t.Fatal(err)
@@ -1214,10 +1214,10 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`ln -s ~/.ssh/authorized_keys freshlink; sed -i 's/marker/k/' freshlink`,
 		`cp --archive disklink notes.txt`,
 		`cp -a -t copy tree`,
-		`tar "$o" xenial.tar > log`,
-		`"$PY" x.py > out.txt`,
 	}
 	allowed := []string{
+		`tar "$o" xenial.tar > log`,
+		`"$PY" x.py > out.txt`,
 		`cd build && echo ok >> notes.txt`,
 		`cd build && echo ok > notes.txt; tar xf keys.tar`,
 		`cd dirlink && cat authorized_keys`,
@@ -1368,9 +1368,8 @@ func TestR103B07FalsePositiveRows(t *testing.T) {
 			input := actionfacts.Input{Tool: "Bash", Command: tc.command, CWD: cwd,
 				ActiveHome: home, DialectHint: actionfacts.DialectPOSIX}
 			request := trustedActionRequest{Input: input}
-			// FP-0004/0005 have unknown copy source operands. The shared
-			// action decision closes them under the new class rule.
-			wantBlock := tc.id == "FP-0004" || tc.id == "FP-0005"
+			// Unknown copy sources do not make an ordinary destination protected.
+			wantBlock := false
 			if got := trustedExistingAuthorizedKeysSymlinkWrite(request, actionfacts.Analyze(input)); got != wantBlock {
 				t.Fatalf("%s blocked=%t, want %t", tc.command, got, wantBlock)
 			}

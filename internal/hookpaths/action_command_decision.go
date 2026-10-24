@@ -23,7 +23,6 @@ import (
 // dynamic command and blocked every one of them (GAP-0958). A launcher with
 // an empty child has an audit reason but no resolved protected target.
 func ActionCommandDecision(command, cwd, home string) string {
-	reason := ActionCommandAuditReason(command, cwd, home)
 	if actionPureMake(command, home) {
 		if actionMakeProtectedRecipe(command, cwd, home) {
 			return "protected-target"
@@ -36,10 +35,13 @@ func ActionCommandDecision(command, cwd, home string) string {
 	if actionConcreteProtectedWrite(command, cwd, home) {
 		return "protected-target"
 	}
-	if reason == "" || !actionResolvedProtectedTarget(command, cwd, home) {
-		return ""
+	if ActionCommandAuditReason(command, cwd, home) != "" {
+		if actionWindowsHome(home) && actionWindowsResolvedProtectedTarget(command, cwd, home, 0) ||
+			!actionWindowsHome(home) && actionResolvedProtectedTarget(command, cwd, home) {
+			return "protected-target"
+		}
 	}
-	return reason
+	return ""
 }
 
 func actionConcreteProtectedWrite(command, cwd, home string) bool {
@@ -50,12 +52,55 @@ func actionConcreteProtectedWrite(command, cwd, home string) bool {
 	ssh := filepath.Join(home, ".ssh")
 	writes, _, _ := ShellWriteOperands(command, cwd, home)
 	writes = append(writes, LiteralWriteOperands(command, cwd, home)...)
+	writes = append(writes, AdjacentAssignedWriteOperands(command, cwd, home)...)
 	bounded, _ := BoundedShellWriteOperands(command, cwd, home)
 	writes = append(writes, bounded...)
 	patches, _ := ApplyPatchWriteTargets("Bash", nil, command, cwd, home)
 	writes = append(writes, patches...)
 	for _, target := range writes {
 		if protectedReachPath(OperandPath(target, cwd), protected, ssh) {
+			return true
+		}
+	}
+	if file, ok := parseShell(command); ok {
+		values := actionValues{"HOME": home, "PWD": cwd}
+		for _, stmt := range file.Stmts {
+			actionUpdateValues(stmt, values, cwd, home)
+			for _, redirect := range stmt.Redirs {
+				if redirect.Word == nil || redirect.Op == syntax.RdrIn {
+					continue
+				}
+				if value, known := actionWordValue(redirect.Word, values, cwd, home); known &&
+					protectedReachPath(OperandPath(value, cwd), protected, ssh) {
+					return true
+				}
+			}
+		}
+		called := calledFunctions(file, home)
+		matched := false
+		syntax.Walk(file, func(node syntax.Node) bool {
+			if declaration, ok := node.(*syntax.FuncDecl); ok {
+				return declaration.Name != nil && called[declaration.Name.Value]
+			}
+			redirect, ok := node.(*syntax.Redirect)
+			if !ok || redirect.Word == nil || redirect.Op == syntax.RdrIn {
+				return !matched
+			}
+			start, end := int(redirect.Word.Pos().Offset()), int(redirect.Word.End().Offset())
+			if start < 0 || end > len(command) || start >= end {
+				return true
+			}
+			pattern := command[start:end]
+			if strings.ContainsAny(pattern, "'\"\\$`") || !strings.ContainsAny(pattern, "*?[") {
+				return true
+			}
+			if strings.HasPrefix(pattern, "~/") {
+				pattern = filepath.Join(home, strings.TrimPrefix(pattern, "~/"))
+			}
+			matched = boundedProtectedGlobReach(pattern, cwd, protected, ssh)
+			return !matched
+		})
+		if matched {
 			return true
 		}
 	}
@@ -119,6 +164,21 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 		if !fixed {
 			return !found
 		}
+		if posixShellProgram(programBase(program)) {
+			words := make([]string, len(call.Args))
+			for i, arg := range call.Args {
+				value, known := StaticWord(arg, home)
+				if !known {
+					return !found
+				}
+				words[i] = value
+			}
+			if body, known := shellCommandBodyIndex(words); known && body < len(words) &&
+				ActionPrivateKeyRead(words[body], cwd, home) {
+				found = true
+			}
+			return !found
+		}
 		if base := programBase(program); base == "cp" || base == "gcp" {
 			args := make([]string, 0, len(call.Args)-1)
 			for _, arg := range call.Args[1:] {
@@ -155,18 +215,6 @@ func ActionPrivateKeyRead(command, cwd, home string) bool {
 }
 
 func actionResolvedProtectedTarget(command, cwd, home string) bool {
-	if actionWindowsHome(home) {
-		words, ok := actionWindowsWords(command)
-		if !ok {
-			return false
-		}
-		for _, word := range words {
-			if protected, _ := actionWindowsProtected(word, cwd, home, false); protected {
-				return true
-			}
-		}
-		return false
-	}
 	if home == "" || !filepath.IsAbs(cwd) {
 		return false
 	}
@@ -185,6 +233,9 @@ func actionResolvedProtectedTarget(command, cwd, home string) bool {
 					return true
 				}
 			}
+		}
+		if actionOnlyReadOnlyCommands(file, home) {
+			return false
 		}
 	}
 	text := strings.ReplaceAll(strings.ReplaceAll(command, "${HOME}/", home+"/"), "$HOME/", home+"/")
@@ -206,6 +257,52 @@ func actionResolvedProtectedTarget(command, cwd, home string) bool {
 		}
 	}
 	return false
+}
+
+func actionOnlyReadOnlyCommands(file *syntax.File, home string) bool {
+	seen, readOnly := false, true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !readOnly {
+			return false
+		}
+		if _, declaration := node.(*syntax.FuncDecl); declaration {
+			readOnly = false
+			return false
+		}
+		if _, declaration := node.(*syntax.DeclClause); declaration {
+			readOnly = false
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok {
+			return true
+		}
+		seen = true
+		if len(call.Args) == 0 {
+			readOnly = false
+			return false
+		}
+		program, fixed := staticProgramWord(call.Args[0], home)
+		if !fixed {
+			readOnly = false
+			return false
+		}
+		switch programBase(program) {
+		case "echo", "printf", "cat", "grep", "rg", "head", "tail", "wc", "source", ".":
+			if programBase(program) == "printf" {
+				for _, argument := range call.Args[1:] {
+					if value, known := StaticWord(argument, home); known && value == "-v" {
+						readOnly = false
+						return false
+					}
+				}
+			}
+		default:
+			readOnly = false
+		}
+		return readOnly
+	})
+	return seen && readOnly
 }
 
 // "[" is a literal shell test builtin in program position. StaticWord
@@ -637,7 +734,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 			return "dynamic-argument"
 		}
 	}
-	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home) {
+	for _, target := range directLiteralProgramOperands(words, stmt, cwd, home, false) {
 		if protectedReachPath(target, protected, ssh) {
 			return "dynamic-argument"
 		}
@@ -734,7 +831,7 @@ func actionChildDecision(words []string, stmt *syntax.Stmt, cwd, home string, de
 				if class, _ := unprovenInterpreterCode(code, program, cwd, home, true); class != "" {
 					return class
 				}
-				for _, target := range literalInterpreterWrites(code, program, home) {
+				for _, target := range literalInterpreterWrites(code, program, cwd, home) {
 					if protectedReachPath(OperandPath(target, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 						return "interpreter-path"
 					}

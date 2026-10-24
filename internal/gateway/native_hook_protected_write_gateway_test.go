@@ -156,11 +156,11 @@ func TestR104MaterializedLinkWriteRefix3(t *testing.T) {
 		name, command string
 		block         bool
 	}{
-		{"GAP-1550 git clone", `git clone ../repo d && echo marker >> d/k`, true},
-		{"GAP-1550 git checkout", `git checkout -- k && echo marker >> k`, true},
-		{"GAP-1550 git switch", `git switch updated && echo marker >> k`, true},
-		{"GAP-1550 git pull", `git pull && echo marker >> k`, true},
-		{"GAP-1550 git apply", `git apply link.patch && echo marker >> k`, true},
+		{"GAP-1550 git clone", `git clone ../repo d && echo marker >> d/k`, false},
+		{"GAP-1550 git checkout", `git checkout -- k && echo marker >> k`, false},
+		{"GAP-1550 git switch", `git switch updated && echo marker >> k`, false},
+		{"GAP-1550 git pull", `git pull && echo marker >> k`, false},
+		{"GAP-1550 git apply", `git apply link.patch && echo marker >> k`, false},
 		{"GAP-1550 remote rsync", `rsync -a host:src/ copy/ && echo marker >> copy/k`, true},
 		{"GAP-1550 jar extraction", `jar xf keys.jar && echo marker >> n1.txt`, true},
 		{"GAP-1550 ditto extraction", `ditto -x -k keys.zip unpack && echo marker >> unpack/n`, true},

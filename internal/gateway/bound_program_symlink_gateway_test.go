@@ -29,8 +29,8 @@ func TestR104GAP0696BoundProgramOrdinaryAndProtectedLinks(t *testing.T) {
 		{"ordinary direct ln", `ln -sf ordinary.txt ordinary.link; echo marker >> ordinary.link`, false},
 		{"protected bound ln", `L=/bin/ln; "$L" -sf ../.ssh/authorized_keys protected.link; echo marker >> protected.link`, true},
 		{"protected direct ln", `ln -sf ../.ssh/authorized_keys protected.link; echo marker >> protected.link`, true},
-		{"unknown ln program", `"$L" -sf ordinary.txt ordinary.link; echo marker >> ordinary.link`, true},
-		{"computed ln program", `L=$(printf ln); "$L" -sf ordinary.txt ordinary.link; echo marker >> ordinary.link`, true},
+		{"unknown ln program", `"$L" -sf ordinary.txt ordinary.link; echo marker >> ordinary.link`, false},
+		{"computed ln program", `L=$(printf ln); "$L" -sf ordinary.txt ordinary.link; echo marker >> ordinary.link`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for i, blocked := range r104ReviewProtectedWrite(t, tc.command, cwd, home) {

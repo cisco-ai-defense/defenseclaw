@@ -238,7 +238,7 @@ func unprovenProtectedWriteDepth(command, cwd, home string, depth int) string {
 					set(class, dynamic)
 					return true
 				}
-				for _, destination := range literalInterpreterWrites(code, language, home) {
+				for _, destination := range literalInterpreterWrites(code, language, cwd, home) {
 					if protectedReachPath(OperandPath(destination, cwd), newProtectedFiles(home), filepath.Join(home, ".ssh")) {
 						set("dynamic-argument", true)
 						return true
@@ -1252,7 +1252,7 @@ func functionBodyMayWrite(body *syntax.Stmt, cwd, home string) bool {
 			if program == "python" || strings.HasPrefix(program, "python3") ||
 				program == "node" || program == "nodejs" || program == "ruby" || program == "perl" {
 				code, _, fixed := interpreterCodeOperand(call, program, home)
-				if !fixed || len(literalInterpreterWrites(code, program, home)) > 0 {
+				if !fixed || len(literalInterpreterWrites(code, program, cwd, home)) > 0 {
 					mayWrite = true
 				} else if class, _ := unprovenInterpreterCode(code, program, cwd, home, !pythonCallSetsImportPath(call)); class != "" {
 					mayWrite = true

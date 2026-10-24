@@ -16,6 +16,66 @@ import (
 // redirect after an unset, append, read or command substitution changed it.
 type actionValues map[string]string
 
+// AdjacentAssignedWriteOperands proves a redirect whose immediately preceding
+// AND-list statement assigns its path. Earlier commands may create files, but
+// cannot change the value between that assignment and the redirect.
+func AdjacentAssignedWriteOperands(command, cwd, home string) []string {
+	file, ok := parseShell(command)
+	if !ok || !filepath.IsAbs(cwd) {
+		return nil
+	}
+	var statements []*syntax.Stmt
+	var collect func(*syntax.Stmt) bool
+	collect = func(stmt *syntax.Stmt) bool {
+		if stmt == nil || stmt.Background || stmt.Negated || len(statements) > 512 {
+			return false
+		}
+		if pair, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+			return len(stmt.Redirs) == 0 && pair.Op == syntax.AndStmt && collect(pair.X) && collect(pair.Y)
+		}
+		if _, ok := stmt.Cmd.(*syntax.CallExpr); !ok {
+			return false
+		}
+		statements = append(statements, stmt)
+		return true
+	}
+	for _, stmt := range file.Stmts {
+		if !collect(stmt) {
+			return nil
+		}
+	}
+	var paths []string
+	for i := 1; i < len(statements); i++ {
+		previous, ok := statements[i-1].Cmd.(*syntax.CallExpr)
+		if !ok || len(previous.Args) != 0 || len(previous.Assigns) != 1 || len(statements[i-1].Redirs) != 0 {
+			continue
+		}
+		assignment := previous.Assigns[0]
+		if assignment.Name == nil || assignment.Value == nil || assignment.Append || assignment.Array != nil || assignment.Index != nil {
+			continue
+		}
+		value, fixed := StaticWord(assignment.Value, home)
+		if !fixed || value == "" {
+			continue
+		}
+		values := actionValues{"HOME": home, assignment.Name.Value: value}
+		for _, redirect := range statements[i].Redirs {
+			if redirect.Word == nil {
+				continue
+			}
+			switch redirect.Op {
+			case syntax.RdrOut, syntax.AppOut, syntax.RdrClob, syntax.RdrAll, syntax.AppAll, syntax.RdrInOut:
+			default:
+				continue
+			}
+			if name, fixed := actionWordValue(redirect.Word, values, cwd, home); fixed && name != "" {
+				paths = append(paths, OperandPath(name, cwd))
+			}
+		}
+	}
+	return paths
+}
+
 // A generated basename is bounded by its literal parent directory, but its
 // exact spelling is not known until execution. Never replace it with a fake
 // filename: that would miss an existing protected symlink with another name.

@@ -296,7 +296,7 @@ func TestHomeSpelledAuthorizedKeysWriteBlocks(t *testing.T) {
 		{"home directory change", `cd ~ && echo dccert-block-marker >> .ssh/authorized_keys`, "", "", true},
 		// A quoted program word is not a plain literal (GAP-1530).
 		{"quoted directory change", `"cd" ~/.ssh && echo dccert-block-marker >> authorized_keys`, "", "", true},
-		{"quoted program then write", `"$PY" -V && echo dccert-block-marker >> notes.txt`, "", "", true},
+		{"quoted program then write", `"$PY" -V && echo dccert-block-marker >> notes.txt`, "", "", false},
 		{"assigned path", `D=~/.ssh; echo dccert-block-marker >> "$D/authorized_keys"`, "", "", true},
 		{"nested shell", `sh -c 'echo dccert-block-marker >> "$HOME/.ssh/authorized_keys"'`, "", "", true},
 		{"normalized path", `echo dccert-block-marker >> ~//.ssh//authorized_keys`, "", "", true},

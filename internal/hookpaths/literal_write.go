@@ -4,6 +4,7 @@
 package hookpaths
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -207,7 +208,7 @@ func sedInPlaceFiles(words []string) []string {
 	return files
 }
 
-func literalInterpreterWrites(code, language, home string) []string {
+func literalInterpreterWrites(code, language, cwd, home string) []string {
 	if len(code) > 16<<10 {
 		return nil
 	}
@@ -323,6 +324,14 @@ func literalInterpreterWrites(code, language, home string) []string {
 				}
 				if path, ok := pathString(destination); ok {
 					paths = append(paths, path)
+					if language == "python" && (name == "shutil.copy" || name == "shutil.copy2") {
+						source := literalCallArgument(args, 0, "src")
+						if sourcePath, fixed := pathString(source); fixed {
+							if info, err := os.Stat(OperandPath(path, cwd)); err == nil && info.IsDir() {
+								paths = append(paths, filepath.Join(path, filepath.Base(sourcePath)))
+							}
+						}
+					}
 				}
 			}
 		}

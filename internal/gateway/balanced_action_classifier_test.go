@@ -40,6 +40,11 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 		"echo \"$(id)\" > report.txt", "for f in regular.txt; do cp \"$f\" copy/; done; echo ok > second-report.txt",
 		"git -C sub pull --ff-only && echo benign > notes.txt",
 		"cat ~/.ssh/authorized_keys", "grep marker ~/.ssh/authorized_keys",
+		"echo " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"printf '%s\\n' " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"cat " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"grep marker " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
+		"rg marker " + filepath.Join(home, ".ssh", "authorized_keys") + " > out-*.txt",
 		"f=report.txt; echo marker >> \"${f:-alias}\"",
 		"out=report-0509.txt; awk \"BEGIN {print \\\"marker\\\" >> \\\"$out\\\"}\"",
 	} {
@@ -51,12 +56,16 @@ func TestBalancedActionOnlyResolvedProtectedTargets(t *testing.T) {
 			}
 		})
 	}
+	if err := os.Symlink(filepath.Join(home, ".ssh", "authorized_keys"), filepath.Join(cwd, "out-protected.txt")); err != nil {
+		t.Fatal(err)
+	}
 	for _, command := range []string{
 		"echo marker >> ~/.ssh/authorized_keys",
 		"echo marker >> alias",
 		"cp payload alias",
 		"f=other; unset f; echo marker >> \"${f:-alias}\"",
 		"f=other; unset f; echo marker >> \"${f:-disklink}\"",
+		"echo marker > out-*.txt",
 	} {
 		t.Run("protected/"+command, func(t *testing.T) {
 			for route, denied := range r104ReviewProtectedWrite(t, command, cwd, home) {
@@ -102,6 +111,9 @@ func TestBalancedActionWindowsOrdinaryCommands(t *testing.T) {
 		"py -m unittest -q",
 		"make safe", "npm test", "go test ./...", "cargo test", "pip install -e .", "gradle test",
 		"pwsh.exe -NoProfile -File C:/work/build.ps1",
+		"pwsh.exe -NoProfile -File C:/work/build.ps1 C:/Users/alice/.ssh/authorized_keys",
+		"python C:/work/build.py C:/Users/alice/.ssh/authorized_keys",
+		"Write-Output C:/Users/alice/.ssh/authorized_keys; pwsh -File C:/work/build.ps1",
 		".\\gradlew.bat test",
 		"cmd.exe /c \"echo hello > benign.txt\" && type benign.txt",
 	} {

@@ -86,6 +86,88 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 	return false, true
 }
 
+// A quoted nested command is one outer argument but contains its own target
+// words. Inspect those words as paths; encoded PowerShell bodies are decoded
+// with the same bounded UTF-16 form as the action parser.
+func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) bool {
+	if depth >= 8 || len(command) > MaxPayloadBytes {
+		return false
+	}
+	words, ok := actionWindowsWords(command)
+	if !ok || len(words) == 0 {
+		return false
+	}
+	for i, word := range words {
+		if word == ";" || word == "&" || word == "&&" || word == "|" || word == "||" {
+			return actionWindowsResolvedProtectedTarget(strings.Join(words[:i], " "), cwd, home, depth+1) ||
+				actionWindowsResolvedProtectedTarget(strings.Join(words[i+1:], " "), cwd, home, depth+1)
+		}
+	}
+	program := strings.TrimSuffix(strings.ToLower(programBase(words[0])), ".exe")
+	switch program {
+	case "echo", "printf", "write-output", "cat", "type", "get-content", "grep", "rg", "head", "tail", "wc":
+		for i, word := range words {
+			if (word == ">" || word == ">>") && i+1 < len(words) {
+				if protected, _ := actionWindowsProtected(words[i+1], cwd, home, false); protected {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if program == "source" || program == "." {
+		return false
+	}
+	for _, extension := range []string{".ps1", ".psm1", ".cmd", ".bat", ".sh", ".bash", ".py", ".js", ".rb", ".pl"} {
+		if strings.HasSuffix(program, extension) {
+			return false // A script's argv is data, not its write target.
+		}
+	}
+	if program == "python" || strings.HasPrefix(program, "python3") || program == "py" ||
+		program == "node" || program == "nodejs" || program == "ruby" || program == "perl" ||
+		program == "pwsh" || program == "powershell" || program == "sh" || program == "bash" ||
+		program == "cmd" {
+		for i, word := range words[1:] {
+			switch strings.ToLower(word) {
+			case "-c", "-e", "-command", "/c", "/k":
+				if i+2 < len(words) {
+					return actionWindowsResolvedProtectedTarget(strings.Join(words[i+2:], " "), cwd, home, depth+1)
+				}
+				return false
+			case "-file":
+				return false
+			}
+		}
+		if program != "pwsh" && program != "powershell" {
+			return false
+		}
+	}
+	for i, word := range words {
+		for _, token := range strings.FieldsFunc(word, func(r rune) bool {
+			return r == ' ' || r == '\t' || r == '>' || r == '<' || r == ';' || r == '|' || r == '&' || r == '(' || r == ')' || r == '{' || r == '}' || r == '\'' || r == '"'
+		}) {
+			if protected, _ := actionWindowsProtected(token, cwd, home, false); protected {
+				return true
+			}
+		}
+		if !strings.EqualFold(word, "-encodedcommand") && !strings.EqualFold(word, "-enc") || i+1 >= len(words) {
+			continue
+		}
+		encoded, err := base64.StdEncoding.DecodeString(words[i+1])
+		if err != nil || len(encoded)%2 != 0 || len(encoded) == 0 {
+			continue
+		}
+		letters := make([]uint16, len(encoded)/2)
+		for j := range letters {
+			letters[j] = uint16(encoded[j*2]) | uint16(encoded[j*2+1])<<8
+		}
+		if actionWindowsResolvedProtectedTarget(string(utf16.Decode(letters)), cwd, home, depth+1) {
+			return true
+		}
+	}
+	return false
+}
+
 // actionWindowsWords treats a quoted command body as one word and emits each
 // redirection separately. An unclosed quote leaves the command unproved.
 func actionWindowsWords(command string) ([]string, bool) {

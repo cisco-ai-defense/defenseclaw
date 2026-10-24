@@ -601,8 +601,8 @@ func TestTrustedActionRedirectReductionDecidesNegationOnCompleteFacts(t *testing
 // TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget is the
 // corpus differential for built-in rules (#925): a POSIX corpus action that
 // blocks with an absolute redirect target also blocks with a target the
-// shell expands at run time. A glob in a write target is unresolvable and
-// must block even when the corresponding absolute target is ordinary.
+// shell expands at run time. A glob without a resolved protected target does
+// not create a hard block when the corresponding absolute target is ordinary.
 // It also pins the review of every built-in code prerequisite: one that
 // holds on a redirect-target view and its static-target twin holds on the
 // action with a concrete target too. A rule whose prerequisite needs a
@@ -684,9 +684,6 @@ func TestTrustedActionCorpusBlocksWithRuntimeExpandedRedirectTarget(t *testing.T
 					want := blocks(test, base+" > /home/alice/out.txt", home)
 					for _, target := range []string{"~/out.txt", `"$HOME/out.txt"`, "out-*.txt"} {
 						wantTarget := want
-						if target == "out-*.txt" && home != "" {
-							wantTarget = true
-						}
 						if got := blocks(test, base+" > "+target, home); got != wantTarget {
 							t.Errorf("%s home=%q target %s: block = %t, want %t",
 								test.ID, home, target, got, wantTarget)

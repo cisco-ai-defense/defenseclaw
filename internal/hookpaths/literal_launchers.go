@@ -171,7 +171,7 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 				return nil
 			}
 			words = words[index+1:]
-		case "sh", "bash":
+		case "sh", "bash", "dash", "ash", "zsh", "ksh":
 			if body, ok := shellCommandBodyIndex(words); ok {
 				var operands []string
 				if redirects, parsed, _ := ShellWriteOperands(words[body], cwd, home); parsed {
@@ -182,6 +182,11 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 					operands = append(operands, literalPositionalShellRedirects(words[body], words[body+2], cwd, home)...)
 				}
 				return operands
+			}
+			if allowFileRead {
+				if script, ok := shellScriptOperand(words); ok && actionScriptInsideCWD(script, cwd) {
+					return literalLocalShellScriptOperands(script, cwd, home, depth)
+				}
 			}
 			return nil
 		case "find":
@@ -204,10 +209,22 @@ func literalProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string,
 		case "xargs":
 			return nil // A producer must prove the replacement text first.
 		default:
-			return directLiteralProgramOperands(words, stmt, cwd, home)
+			if allowFileRead && strings.HasSuffix(program, ".sh") && actionScriptInsideCWD(words[0], cwd) {
+				return literalLocalShellScriptOperands(words[0], cwd, home, depth)
+			}
+			return directLiteralProgramOperands(words, stmt, cwd, home, allowFileRead)
 		}
 	}
 	return nil
+}
+
+func literalLocalShellScriptOperands(script, cwd, home string, depth int) []string {
+	content, read := readIndirectSource(script, cwd)
+	if !read {
+		return nil
+	}
+	writes, _, _ := ShellWriteOperands(content, cwd, home)
+	return append(writes, literalWriteOperandsDepth(content, cwd, home, depth+1)...)
 }
 
 func literalInteger(value string) bool {
@@ -224,7 +241,7 @@ func literalDuration(value string) bool {
 	return err == nil
 }
 
-func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string) []string {
+func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home string, allowFileRead bool) []string {
 	if len(words) == 0 {
 		return nil
 	}
@@ -239,7 +256,7 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 	case program == "python" || strings.HasPrefix(program, "python3") || program == "perl" || program == "ruby" || program == "node" || program == "nodejs":
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if code, ok := pythonLiteralCode(words); ok {
-				return add(literalInterpreterWrites(code, "python", home))
+				return add(literalInterpreterWrites(code, "python", cwd, home))
 			}
 		}
 		if len(words) >= 3 && (program == "perl" || program == "ruby" || program == "node" || program == "nodejs") && words[1] == "-e" {
@@ -247,13 +264,13 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 			if language == "nodejs" {
 				language = "node"
 			}
-			return add(literalInterpreterWrites(words[2], language, home))
+			return add(literalInterpreterWrites(words[2], language, cwd, home))
 		}
 		if program == "python" || strings.HasPrefix(program, "python3") {
 			if len(words) >= 2 && words[1] == "-" && stmt != nil {
 				for _, redirect := range stmt.Redirs {
 					if code, ok := literalQuotedHereDocument(redirect); ok {
-						return add(literalInterpreterWrites(code, "python", home))
+						return add(literalInterpreterWrites(code, "python", cwd, home))
 					}
 				}
 			}
@@ -263,6 +280,28 @@ func directLiteralProgramOperands(words []string, stmt *syntax.Stmt, cwd, home s
 		for _, code := range awkInlineProgramText(words) {
 			_, _, targets := awkOutputProof(code, cwd, home)
 			names = append(names, targets...)
+		}
+		if allowFileRead {
+			for i := 1; i < len(words); i++ {
+				option, value, attached := awkOptionValue(words[i])
+				if option != "f" {
+					continue
+				}
+				if !attached {
+					i++
+					if i >= len(words) {
+						break
+					}
+					value = words[i]
+				}
+				if !actionScriptInsideCWD(value, cwd) {
+					continue
+				}
+				if code, read := readIndirectSource(value, cwd); read {
+					_, _, targets := awkOutputProof(code, cwd, home)
+					names = append(names, targets...)
+				}
+			}
 		}
 		return add(names)
 	case program == "sed" || program == "gsed":

@@ -1231,6 +1231,11 @@ func trustedExistingAuthorizedKeysSymlinkWrite(request trustedActionRequest, fac
 				return true
 			}
 		}
+		for _, operand := range hookpaths.AdjacentAssignedWriteOperands(input.Command, input.CWD, input.ActiveHome) {
+			if writeTarget(operand, false, false) {
+				return true
+			}
+		}
 		boundedOperands, boundedPattern := hookpaths.BoundedShellWriteOperands(input.Command, input.CWD, input.ActiveHome)
 		if boundedPattern {
 			// Bash expands the bound redirect as a pathname pattern at run

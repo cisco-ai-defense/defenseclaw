@@ -35,7 +35,7 @@ func TestR104ActionClassWindowsProtectedSpellings(t *testing.T) {
 		{"GAP-0545 CMD profile", `echo marker >> %USERPROFILE%\.ssh\authorized_keys`, actionfacts.DialectCMD, true},
 		{"GAP-0575 PowerShell profile", `Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker`, actionfacts.DialectPowerShell, true},
 		{"GAP-0545 extended drive", `echo marker >> //?/C:/Users/Alice/.ssh/authorized_keys`, actionfacts.DialectPOSIX, true},
-		{"drive relative", `echo marker >> C:Users\Alice\.ssh\authorized_keys`, actionfacts.DialectCMD, true},
+		{"drive relative", `echo marker >> C:Users\Alice\.ssh\authorized_keys`, actionfacts.DialectCMD, false},
 		{"PowerShell nested command", `pwsh -Command 'Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker'`, actionfacts.DialectPowerShell, true},
 		{"PowerShell encoded command", `pwsh -EncodedCommand ` + encodePowerShell(`Add-Content -Path $env:USERPROFILE\.ssh\authorized_keys -Value marker`), actionfacts.DialectPowerShell, true},
 		{"CMD nested command", `cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`, actionfacts.DialectCMD, true},

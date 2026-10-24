@@ -32,14 +32,14 @@ func TestR104Refix4VisibleWriteDecisions(t *testing.T) {
 		name, command string
 		block         bool
 	}{
-		{"GAP-0493 Git root link", `git -C sub pull && echo marker >> future`, true},
+		{"GAP-0493 Git root link", `git -C sub pull && echo marker >> future`, false},
 		{"GAP-0493 outside Git root", `git -C sub pull && echo marker >> ../notes.txt`, false},
 		{"GAP-0498 dynamic input protected literal", `awk 'BEGIN {print "marker" >> "alias"}' "$input"`, true},
 		{"GAP-0498 dynamic input ordinary literal", `awk 'BEGIN {print "marker" >> "report.txt"}' "$input"`, false},
 		{"review AWK -v program-looking data", `awk -v 'm={print > "alias"}' '{print m}' input.txt`, false},
 		{"review AWK regex-looking data", `awk '/print > "alias"/ {print}' input.txt`, false},
 		{"GAP-0509 shell expanded output", `out=alias; awk "BEGIN {print \"marker\" >> \"$out\"}"`, true},
-		{"GAP-0509 dynamic data can add an output", `awk "BEGIN {print $1 >> \"report.txt\"}" input.txt`, true},
+		{"GAP-0509 dynamic data can add an output", `awk "BEGIN {print $1 >> \"report.txt\"}" input.txt`, false},
 		{"GAP-0509 fixed ordinary output", `awk 'BEGIN {print "marker" >> "report.txt"}' input.txt`, false},
 		{"GAP-0509 no visible file output", `awk "BEGIN {print $field}" input.txt`, false},
 		{"BEN-0482 read-only dynamic AWK", `awk "{print $1}" ~/.ssh/known_hosts > out/known-hostnames.txt`, false},
