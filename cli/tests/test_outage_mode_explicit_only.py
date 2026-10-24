@@ -7,7 +7,9 @@ Setup, init, the TUI first-run form, ``guardrail mode`` and adding a connector
 never write ``hook_fail_mode`` as a side effect, so a later switch to the
 strict tier closes a gateway outage unless the operator explicitly saved open.
 An explicit saved choice is never dropped: an init rerun keeps it unless the
-run supplies a new one. An upgrade from 1.0.0-1.0.3 never loosens the config it finds.
+run supplies a new one, and an upgrade from 1.0.0-1.0.3 keeps every saved
+value it finds (a 1.0.x Cursor ``open`` may have been written by setup, so the
+upgrade names it instead of guessing).
 """
 
 from __future__ import annotations
@@ -227,13 +229,31 @@ def test_upgrade_never_loosens_a_closed_cursor_value(tmp_path, release, tier, sh
     assert load(data_dir=str(tmp_path)).guardrail.effective_hook_fail_mode("cursor") == "closed"
 
 
-@pytest.mark.parametrize("release", ["1.0.0", "1.0.3"])
+@pytest.mark.parametrize("release", ["1.0.0", "1.0.3", "1.0.4"])
 @pytest.mark.parametrize("tier", list(TIERS))
-def test_upgrade_lets_the_tier_decide_an_old_automatic_open_cursor_value(tmp_path, release, tier) -> None:
-    _write(tmp_path, {"mode": "observe", "rule_pack": tier, "connector": "cursor", "hook_fail_mode": "open"})
+@pytest.mark.parametrize("shape", ["global", "connector"])
+def test_upgrade_keeps_a_1_0_x_cursor_open_and_names_it(tmp_path, capsys, release, tier, shape) -> None:
+    # Loop round 2 P2: 1.0.x `guardrail fail-mode open` and `config set`
+    # saved the same bytes setup wrote for an observe Cursor, so the upgrade
+    # cannot tell them apart. It keeps the value (1.0.3 failed open here in
+    # every tier, strict included) and names the command that hands the
+    # decision to the tier.
+    guardrail = {"mode": "observe", "rule_pack": tier, "connector": "cursor"}
+    if shape == "global":
+        guardrail["hook_fail_mode"] = "open"
+        path = "guardrail.hook_fail_mode"
+    else:
+        guardrail["connectors"] = {"cursor": {"hook_fail_mode": "open"}, "codex": {}}
+        path = "guardrail.connectors.cursor.hook_fail_mode"
+    _write(tmp_path, guardrail)
+    capsys.readouterr()
     migrate(str(tmp_path), from_version=release)
-    assert "hook_fail_mode" not in _guardrail(tmp_path)
-    assert load(data_dir=str(tmp_path)).guardrail.effective_hook_fail_mode("cursor") == TIERS[tier]
+    saved = _guardrail(tmp_path)
+    assert (saved if shape == "global" else saved["connectors"]["cursor"])["hook_fail_mode"] == "open"
+    assert load(data_dir=str(tmp_path)).guardrail.effective_hook_fail_mode("cursor") == "open"
+    out = capsys.readouterr()
+    named = f"defenseclaw config unset {path}" in out.out + out.err
+    assert named is (release != "1.0.4")
 
 
 def test_upgrade_keeps_a_global_choice_beside_a_cursor_entry(tmp_path) -> None:
@@ -261,8 +281,7 @@ def test_cursor_upgrade_step_does_not_hide_the_providers_fold(tmp_path) -> None:
         json.dumps({"providers": [{"name": "acme", "domains": ["acme.example.test"]}]}), encoding="utf-8"
     )
     steps = [name for name, _fn in _pending_migration_steps(9, "1.0.3", str(tmp_path), str(tmp_path / "config.yaml"), 9)]
-    assert "fold the legacy custom-providers.json into config.yaml" in steps
-    assert "remove old automatic Cursor outage setting" in steps
+    assert steps == ["fold the legacy custom-providers.json into config.yaml"]
 
 
 def _first_run_env(tmp_path, monkeypatch) -> None:

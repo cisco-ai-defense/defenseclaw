@@ -3807,6 +3807,7 @@ def migrate(
             raise MigrationError(f"{name} failed: {exc}") from exc
     for change in ctx.changes:
         ux.ok(change, indent="    ")
+    _report_legacy_cursor_open(config_path, from_version or "")
     try:
         reached = source_config_version(path=config_path)
     except ConfigVersionError as exc:
@@ -4197,29 +4198,19 @@ def _pending_migration_steps(
         steps.append((f"config_version {number} → {number + 1}", _config_version_step(step, number + 1, config_path)))
     if not steps and current >= 9 and _legacy_providers_overlay_pending(config_path, data_dir):
         steps.append((_PROVIDERS_FOLD_STEP_NAME, _fold_legacy_providers_overlay))
-    # 1.0.0-1.0.3 setup wrote Cursor's fail mode from observe/action without
-    # an operator choice. The installer supplies the release that wrote this
-    # config, so that provenance is available here even for version 9 YAML.
-    # Added after the providers fold check, which runs only with no other step.
-    if (
-        from_version
-        and not _version_before(from_version, (1, 0, 0))
-        and _version_before(from_version, (1, 0, 4))
-        and _legacy_cursor_outage_pin_paths(config_path)
-    ):
-        steps.append(("remove old automatic Cursor outage setting", _remove_legacy_cursor_outage_pins))
     if _connector_roster_pending(config_path, data_dir):
         steps.append(("update renamed and removed connectors", _migrate_connector_roster))
     return steps
 
 
-def _legacy_cursor_outage_pin_paths(config_path: str) -> list[str]:
-    """Find the open Cursor values old setup generated, on an OSS document.
+def _legacy_cursor_open_paths(config_path: str) -> list[str]:
+    """Find a saved ``open`` Cursor outage mode that 1.0.x setup may have written.
 
-    Only an ``open`` pin (written from observe mode) is removed, so the policy
-    tier decides it: the same open in default and permissive, closed in
-    strict. A ``closed`` pin stays: 1.0.x action mode blocked Cursor during an
-    outage, and an upgrade never loosens a 1.0.x config.
+    DefenseClaw 1.0.0-1.0.3 setup saved ``open`` for an observe-mode Cursor,
+    and ``guardrail fail-mode open`` or ``config set`` saved the same bytes;
+    those releases did not record which one did. The value is kept (a saved
+    mode wins, and 1.0.x Cursor in observe failed open in every tier) and the
+    upgrade names it, so the operator can let the policy tier decide.
     """
     source = _read_config_text(config_path)
     if source is None or _guardrail_runtime_migration_is_managed(source):
@@ -4250,19 +4241,17 @@ def _legacy_cursor_outage_pin_paths(config_path: str) -> list[str]:
     return paths
 
 
-def _remove_legacy_cursor_outage_pins(ctx: MigrationContext) -> None:
-    from defenseclaw.config_writer import ACTOR_MIGRATION, Change, apply
-
-    paths = _legacy_cursor_outage_pin_paths(ctx.active_config_path())
-    if not paths:
+def _report_legacy_cursor_open(config_path: str, from_version: str) -> None:
+    """Name a kept 1.0.x Cursor ``open`` whose author is unknown (no write)."""
+    if not from_version or _version_before(from_version, (1, 0, 0)) or not _version_before(from_version, (1, 0, 4)):
         return
-    apply(
-        [Change(path, unset=True) for path in paths],
-        ACTOR_MIGRATION,
-        "remove Cursor fail mode written automatically by DefenseClaw 1.0.0-1.0.3",
-        path=ctx.active_config_path(),
-    )
-    ctx.changes.append("removed old automatic Cursor outage mode; policy tier now decides")
+    for path in _legacy_cursor_open_paths(config_path):
+        ux.warn(
+            f"Cursor keeps its saved gateway-outage mode open ({path}). DefenseClaw {from_version} setup "
+            "also saved this value on its own in observe mode, so it may not be your choice. A saved mode "
+            "wins over the policy tier: strict does not close it. To let the policy tier decide, run: "
+            f"defenseclaw config unset {path}"
+        )
 
 
 def _config_version_step(

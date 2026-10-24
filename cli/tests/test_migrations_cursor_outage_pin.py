@@ -1,7 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Old first-run Cursor pins must not become outage choices on upgrade."""
+"""A saved Cursor fail mode survives an upgrade; an ambiguous 1.0.x open is named."""
 
 import pytest
 import yaml
@@ -10,27 +10,29 @@ from defenseclaw.migrations import migrate
 
 
 @pytest.mark.parametrize("release", ["1.0.0", "1.0.1", "1.0.2", "1.0.3"])
-@pytest.mark.parametrize(
-    "mode,tier,pin,expected",
-    [("observe", "strict", "open", "closed"), ("observe", "default", "open", "open")],
-)
+@pytest.mark.parametrize("tier", ["strict", "default"])
 @pytest.mark.parametrize("shape", ["global", "connector"])
-def test_upgrade_removes_setup_written_cursor_fail_mode(tmp_path, release, mode, tier, pin, expected, shape):
-    guardrail = {"mode": mode, "rule_pack": tier}
+def test_upgrade_keeps_a_cursor_open_it_cannot_attribute(tmp_path, capsys, release, tier, shape):
+    # 1.0.x setup wrote open for an observe Cursor, and `guardrail fail-mode
+    # open` or `config set` wrote the same bytes. The upgrade does not guess:
+    # the value stays (1.0.x failed open here, strict included) and the
+    # migration names the command that lets the policy tier decide.
+    guardrail = {"mode": "observe", "rule_pack": tier}
     if shape == "global":
-        guardrail.update({"connector": "cursor", "hook_fail_mode": pin})
+        guardrail.update({"connector": "cursor", "hook_fail_mode": "open"})
+        key = "guardrail.hook_fail_mode"
     else:
-        guardrail["connectors"] = {"cursor": {"hook_fail_mode": pin}}
+        guardrail["connectors"] = {"cursor": {"hook_fail_mode": "open"}}
+        key = "guardrail.connectors.cursor.hook_fail_mode"
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump({"config_version": 9, "guardrail": guardrail, "observability": {}}), encoding="utf-8")
     result = migrate(str(tmp_path), from_version=release)
-    assert result.changed
+    assert not result.changed
     saved = yaml.safe_load(path.read_text(encoding="utf-8"))["guardrail"]
-    if shape == "global":
-        assert "hook_fail_mode" not in saved
-    else:
-        assert "hook_fail_mode" not in saved["connectors"]["cursor"]
-    assert load(data_dir=str(tmp_path)).guardrail.effective_hook_fail_mode("cursor") == expected
+    assert (saved if shape == "global" else saved["connectors"]["cursor"])["hook_fail_mode"] == "open"
+    assert load(data_dir=str(tmp_path)).guardrail.effective_hook_fail_mode("cursor") == "open"
+    out = capsys.readouterr()
+    assert f"defenseclaw config unset {key}" in out.out + out.err
 
 
 @pytest.mark.parametrize("shape", ["global", "connector"])

@@ -444,9 +444,10 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     }
   });
 
-  it('says an upgrade preserves explicit choices and clears old automatic Cursor pins', () => {
+  it('says an upgrade preserves saved choices, including a 1.0.x Cursor open', () => {
     assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks honor an explicitly saved outage mode'));
-    assert.ok(page('get-started/upgrade.mdx').includes('migration removes the matching Cursor fail mode that first-run setup wrote automatically'));
+    assert.ok(page('get-started/upgrade.mdx').includes('The upgrade keeps that saved `open`, so strict does not close it'));
+    assert.ok(source('cli/defenseclaw/migrations.py').includes('defenseclaw config unset {path}'));
     assert.ok(page('get-started/upgrade.mdx').includes('Every other failure blocks'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user 1.0.4 hook reads `config.yaml` next to its own hooks on each call'));
