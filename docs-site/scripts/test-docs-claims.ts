@@ -806,14 +806,18 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(row, /DEFENSECLAW_FAIL_MODE[^|]*honored only when stricter/i);
   });
 
-  it('describes the managed Unix hook socket directory and listener checks', () => {
+  it('distinguishes native and shell/plugin managed Unix hook socket checks', () => {
     const transport = source('internal/gateway/connector/hookexec/managed_standalone_transport.go');
+    const shell = source('internal/gateway/connector/hook_socket_transport.go');
+    const plugin = source('internal/gateway/connector/codex.go');
     const row = source('docs-site/content/docs/troubleshooting/enterprise/index.mdx')
       .split('\n').find((line) => line.startsWith('| `enterprise_managed_gateway_peer_unverified` |')) ?? '';
     assert.match(transport, /hook socket directory .* is not owned by root or the gateway service account/);
     assert.match(transport, /hook socket listener uid .* is neither root nor the gateway service uid/);
-    assert.match(row, /Linux and macOS:.*socket directory.*root or the gateway account.*listener UID.*kernel/i);
-    assert.doesNotMatch(row, /hook socket is not owned by root or the gateway account/);
+    assert.match(shell, /defenseclaw_hook_socket_trusted\(\)[\s\S]*?ls -ln -- "\$DEFENSECLAW_HOOK_SOCKET"[\s\S]*?defenseclaw_hook_socket_owner_trusted "\$owner"/);
+    assert.match(plugin, /shellHookSocketTrust\(socket, serviceUID\)[\s\S]*?defenseclaw_hook_socket_trusted/);
+    assert.match(row, /Linux and macOS:.*native.*socket directory.*root or the gateway account.*kernel.*listener UID/i);
+    assert.match(row, /shell hooks.*plugins.*socket inode.*owned by root or the gateway account/i);
   });
 
   it('does not advertise local files as MCP scan targets', () => {
