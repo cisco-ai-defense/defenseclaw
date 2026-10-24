@@ -3758,10 +3758,12 @@ def _linux_foreign_listener_accounts(port: int, proc_root: str = "/proc") -> str
     """Name the other accounts whose sockets listen on ``port`` (Linux only)."""
     if not sys.platform.startswith("linux"):
         return ""
+    from defenseclaw.doctor_gateway import linux_proc_net_table
+
     uids: set[int] = set()
     for table_name in ("tcp", "tcp6"):
         try:
-            with open(os.path.join(proc_root, "net", table_name), encoding="ascii") as table:
+            with open(linux_proc_net_table(table_name, proc_root), encoding="ascii") as table:
                 rows = table.readlines()[1:]
         except (OSError, UnicodeError):
             continue
@@ -5912,11 +5914,13 @@ def _linux_gateway_listener_evidence(
 ) -> ListenerEvidence:
     """Resolve one Linux TCP listener owner without optional userland tools.
 
-    Linux exposes listening socket inodes in ``/proc/net/tcp*`` and each
+    Linux exposes listening socket inodes in ``/proc/self/net/tcp*`` and each
     process's descriptors as ``socket:[inode]`` links.  Require every socket
     inode for the port to resolve to the same PID; partial visibility and
     ``SO_REUSEPORT`` ambiguity fail closed.
     """
+    from defenseclaw.doctor_gateway import linux_proc_net_table
+
     if not 1 <= port <= 65_535:
         return ListenerEvidence("unavailable", reason="configured API port is invalid")
 
@@ -5935,7 +5939,7 @@ def _linux_gateway_listener_evidence(
     socket_inodes: set[str] = set()
     table_found = False
     for table_name in ("tcp", "tcp6"):
-        table_path = os.path.join(proc_root, "net", table_name)
+        table_path = linux_proc_net_table(table_name, proc_root)
         try:
             with open(table_path, encoding="ascii") as table:
                 rows = table.readlines()[1:]
@@ -8560,15 +8564,23 @@ def _check_cursor_configured_runtime(
     mode = str(mode_resolver("cursor") if callable(mode_resolver) else "observe").strip().lower()
     fail_mode = str(fail_resolver("cursor") if callable(fail_resolver) else "open").strip().lower()
     mode = "action" if mode == "action" else "observe"
-    # Cursor observe hooks fail open, except on a managed deployment outside
-    # Secure Client, where the Cursor registration carries the
-    # administrator's fail mode (unset closed) in either guardrail mode.
+    # On a managed deployment outside Secure Client the Cursor registration
+    # carries the administrator's fail mode (unset closed) in either
+    # guardrail mode. A per-user registration has failClosed: true in both
+    # modes, and its hook's outage mode follows the policy tier
+    # (oss-outage-open), so no guardrail mode makes it inconsistent. Secure
+    # Client keeps its observe-open, action-closed registration.
     standalone = getattr(cfg, "managed_outside_secure_client", None)
+    per_user = str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
     if callable(standalone) and standalone() is True:
         expected_fail_mode = "open" if fail_mode == "open" else "closed"
+        expected_fail_closed = expected_fail_mode == "closed"
+    elif per_user:
+        expected_fail_mode = fail_mode
+        expected_fail_closed = True
     else:
         expected_fail_mode = "closed" if mode == "action" else "open"
-    expected_fail_closed = expected_fail_mode == "closed"
+        expected_fail_closed = expected_fail_mode == "closed"
     hilt = None
     hilt_resolver = getattr(guardrail, "effective_hilt", None)
     if callable(hilt_resolver):

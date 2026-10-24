@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -46,6 +47,15 @@ var (
 	// Tests use the node-aware seam to prove the final file link-count check.
 	// Production leaves it nil.
 	windowsNamespacePurgePostValidation func(*windowsNamespacePurgeNode) error
+	// How long one purge waits, in total, for other programs to close what
+	// it must open with no sharing. A scanner, an indexer or a hash check
+	// opens a product file for a moment, and the printed FORCE uninstall
+	// failed on such a reader of defenseclaw-hook.exe with every service
+	// stopped (GAP-0848). The open still demands exclusive access, so a
+	// program that keeps the file open still refuses the purge, by its full
+	// path. Tests shorten it.
+	windowsNamespacePurgeSharingWait = 30 * time.Second
+	windowsNamespacePurgeSharingPoll = 50 * time.Millisecond
 )
 
 type windowsNamespacePurgeDescriptorSet struct {
@@ -82,6 +92,10 @@ func (node *windowsNamespacePurgeNode) close() {
 
 type windowsNamespacePurgeBudget struct {
 	entries int
+	// sharingDeadline ends the wait for other programs to close an entry
+	// (openWindowsNamespacePurgeExclusive). It is set at the first sharing
+	// violation, so one purge waits windowsNamespacePurgeSharingWait at most.
+	sharingDeadline time.Time
 }
 
 // PurgeWindowsNamespaceRoot validates and, when requested, removes one exact
@@ -498,12 +512,15 @@ func purgeWindowsNamespaceRootPrivileged(
 	rootAccess := uint32(windows.FILE_LIST_DIRECTORY | windows.FILE_READ_ATTRIBUTES |
 		windows.READ_CONTROL | windows.SYNCHRONIZE | windows.DELETE |
 		windows.FILE_WRITE_ATTRIBUTES | windows.WRITE_DAC | windows.WRITE_OWNER)
-	rootHandle, err := openWindowsNamespacePurgeChild(
+	budget := &windowsNamespacePurgeBudget{entries: 1}
+	rootHandle, err := openWindowsNamespacePurgeExclusive(
+		budget,
 		parent,
 		filepath.Base(request.Root),
+		request.Root,
 		rootAccess,
 		true,
-		0,
+		false,
 	)
 	if err != nil {
 		if windowsNamespacePurgeChildMissing(err) {
@@ -537,7 +554,6 @@ func purgeWindowsNamespaceRootPrivileged(
 		identity:  rootIdentity,
 	}
 	defer root.close()
-	budget := &windowsNamespacePurgeBudget{entries: 1}
 	socketPath := ""
 	if installPurge {
 		socketPath = filepath.Join(request.Root, "ipc", "defenseclaw_ipc.sock")
@@ -759,6 +775,44 @@ func openWindowsNamespacePurgeChildWithSocket(
 	return handle, err
 }
 
+// openWindowsNamespacePurgeExclusive opens one entry of a purge with no
+// sharing, as openWindowsNamespacePurgeChildWithSocket does. While another
+// program holds the entry open (a sharing violation) it tries again until
+// the purge's sharing deadline; the entries pinned so far stay pinned, so
+// nothing can change under the purge in the meantime. An entry still held at
+// the deadline refuses the purge with its full path.
+func openWindowsNamespacePurgeExclusive(
+	budget *windowsNamespacePurgeBudget,
+	parent windows.Handle,
+	name string,
+	label string,
+	access uint32,
+	directoryOnly bool,
+	allowUnixSocket bool,
+) (windows.Handle, error) {
+	for {
+		handle, err := openWindowsNamespacePurgeChildWithSocket(parent, name, access, directoryOnly, 0, allowUnixSocket)
+		if err == nil || !windowsNamespacePurgeSharingViolation(err) {
+			return handle, err
+		}
+		now := time.Now()
+		if budget.sharingDeadline.IsZero() {
+			budget.sharingDeadline = now.Add(windowsNamespacePurgeSharingWait)
+		}
+		if !now.Before(budget.sharingDeadline) {
+			return 0, fmt.Errorf(
+				"%s is held open by another program (still open after waiting %s; close or end that program and run the same command again): %w",
+				label, windowsNamespacePurgeSharingWait, err,
+			)
+		}
+		time.Sleep(windowsNamespacePurgeSharingPoll)
+	}
+}
+
+func windowsNamespacePurgeSharingViolation(err error) bool {
+	return errors.Is(err, windows.STATUS_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_SHARING_VIOLATION)
+}
+
 func windowsNamespacePurgeChildMissing(err error) bool {
 	return errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) ||
 		errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND) ||
@@ -815,7 +869,7 @@ func pinWindowsNamespacePurgeTree(
 		}
 		label := filepath.Join(node.label, name)
 		allowUnixSocket := socketPath != "" && strings.EqualFold(label, socketPath)
-		handle, err := openWindowsNamespacePurgeChildWithSocket(node.handle, name, access, false, 0, allowUnixSocket)
+		handle, err := openWindowsNamespacePurgeExclusive(budget, node.handle, name, label, access, false, allowUnixSocket)
 		if err != nil {
 			return fmt.Errorf("enterprise hooks: pin Windows namespace purge child %q without following: %w", name, err)
 		}

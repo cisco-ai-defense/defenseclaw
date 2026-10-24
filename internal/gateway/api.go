@@ -263,6 +263,10 @@ type APIServer struct {
 	// policyReloader, when set, is called by the /policy/reload handler to
 	// rebuild the configuration generation now.
 	policyReloader func() error
+	// recordedGenerationReloader is /policy/reload on a standalone managed
+	// computer: it loads only the generation the lifecycle recorded for the
+	// installed config.yaml and the gateway has not applied yet.
+	recordedGenerationReloader func() error
 	// configApply is the config.yaml writer /enforce/* uses; nil is
 	// configwrite.Apply (tests substitute a recorder).
 	configApply func(context.Context, string, []configwrite.Change, configwrite.Options) (configwrite.Result, error)
@@ -917,6 +921,13 @@ func (a *APIServer) preparedPolicyForGeneration(ctx context.Context, g *Generati
 // shared OPA policy engine.  It is called by the /policy/reload handler.
 func (a *APIServer) SetPolicyReloader(fn func() error) {
 	a.policyReloader = fn
+}
+
+// SetRecordedGenerationReloader sets the managed /policy/reload. It returns
+// an error wrapping errNoRecordedGeneration when nothing the lifecycle
+// recorded is waiting to load.
+func (a *APIServer) SetRecordedGenerationReloader(fn func() error) {
+	a.recordedGenerationReloader = fn
 }
 
 // SetConnectorRegistry attaches the connector registry so the
@@ -1928,8 +1939,9 @@ func (a *APIServer) handleShutdown(w http.ResponseWriter, r *http.Request) {
 const managedShutdownRefusal = "this gateway is managed by the computer's administrator and runs as a system service; it is not stopped over the API"
 
 // managedBundlePolicyReloadRefusal answers /policy/reload on a managed
-// standalone computer that takes its policy from signed bundles.
-const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles; deliver a new signed bundle instead of reloading the policy over the API"
+// standalone computer when no generation the lifecycle recorded is waiting
+// to load (a hand edit, an unsigned asset change, or nothing new).
+const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles, and no generation recorded by the lifecycle is waiting to load; deliver a new signed bundle instead of reloading the policy over the API"
 
 func sameRuntimeDataDir(left, right string) bool {
 	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
@@ -2082,7 +2094,9 @@ func connectorModeForDecision(cfg, decisionCfg *config.Config, name string) map[
 		if decisionCfg != nil {
 			guardrailMode = decisionCfg.EffectiveGuardrailModeForConnector(name)
 		}
-		hookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		// What the installed hooks do while the gateway is down
+		// (config.HookOutageFailMode); every other per-user failure closes.
+		hookFailMode = cfg.EffectiveHookOutageFailModeForConnector(name)
 		enabled = cfg.Guardrail.EffectiveEnabled(name)
 	}
 	out := connectorModeFor(name, guardrailMode)
@@ -4556,14 +4570,25 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 		_ = a.recordAPIPolicyReloadMetricV8(r.Context(), "failed")
 		_ = a.emitAPIPolicyReloadRejectedV8(r.Context(), reason)
 	}
-	// With signed bundles, a policy becomes active only through a verified
-	// bundle apply, which the lifecycle confirms against the running gateway.
+	// On a standalone managed computer only the lifecycle records a new
+	// config or policy generation (a signed bundle once trust anchors are
+	// installed). The API loads that recorded generation and nothing else:
+	// the Windows lifecycle asks for it because a directory notification can
+	// be lost during the atomic config replacement. The lifecycle still
+	// confirms the generation the gateway then reports.
+	reload, managedHost := a.policyReloader, false
 	if cfg := a.runtimeConfigSnapshot(); policyCfg.StandaloneEnterprise() || cfg != nil && cfg.StandaloneEnterprise() {
+		reload, managedHost = a.recordedGenerationReloader, true
+	}
+	refuse := func() {
 		recordFailure(managedBundlePolicyReloadRefusal)
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
 			"error":  managedBundlePolicyReloadRefusal,
 			"status": "refused",
 		})
+	}
+	if managedHost && reload == nil {
+		refuse()
 		return
 	}
 
@@ -4582,11 +4607,15 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 
 	// Rebuild the configuration generation now: Rego modules and rule packs
 	// are prepared once and swapped atomically, or the live generation stays.
-	if a.policyReloader == nil {
+	if reload == nil {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "policy reload is not available"})
 		return
 	}
-	if err := a.policyReloader(); err != nil {
+	if err := reload(); err != nil {
+		if managedHost && errors.Is(err, errNoRecordedGeneration) {
+			refuse()
+			return
+		}
 		recordFailure(err.Error())
 		a.writeJSON(w, http.StatusInternalServerError, map[string]string{
 			"error":  "reload failed: " + err.Error(),

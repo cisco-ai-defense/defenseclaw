@@ -443,7 +443,7 @@ def test_http_probe_normalizes_malformed_ipv6_authority() -> None:
 @pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
 def test_linux_listener_owner_falls_back_to_proc_without_lsof(tmp_path):
     proc_root = tmp_path / "proc"
-    net = proc_root / "net"
+    net = proc_root / "self" / "net"
     descriptors = proc_root / "4242" / "fd"
     net.mkdir(parents=True)
     descriptors.mkdir(parents=True)
@@ -460,10 +460,10 @@ def test_linux_listener_owner_falls_back_to_proc_without_lsof(tmp_path):
 @pytest.mark.skipif(os.name == "nt", reason="/proc socket layout is POSIX-only")
 def test_linux_listener_owner_filters_the_exact_connect_address(tmp_path):
     proc_root = tmp_path / "proc"
-    net = proc_root / "net"
+    net = proc_root / "self" / "net"
     for pid in ("4242", "9001"):
         (proc_root / pid / "fd").mkdir(parents=True)
-    net.mkdir(exist_ok=True)
+    net.mkdir(parents=True, exist_ok=True)
     port = 18_970
     header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
     rows = (
@@ -499,11 +499,11 @@ def _proc_process(proc_root, pid: int, parent: int, executable, argv: bytes, soc
 
 def _proc_listener(tmp_path, port: int):
     proc_root = tmp_path / "proc"
-    (proc_root / "net").mkdir(parents=True)
+    (proc_root / "self" / "net").mkdir(parents=True)
     header = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
     row = f"   0: 0100007F:{port:04X} 00000000:0000 0A 00000000:00000000 00:00000000 00000000 1000 0 12345 1\n"
-    (proc_root / "net" / "tcp").write_text(header + row, encoding="ascii")
-    (proc_root / "net" / "tcp6").write_text(header, encoding="ascii")
+    (proc_root / "self" / "net" / "tcp").write_text(header + row, encoding="ascii")
+    (proc_root / "self" / "net" / "tcp6").write_text(header, encoding="ascii")
     gateway = tmp_path / "defenseclaw-gateway"
     gateway.write_bytes(b"gateway")
     return proc_root, gateway

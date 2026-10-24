@@ -80,6 +80,9 @@ const (
 	CodeBundleRequired Code = "bundle_required"
 	CodeNotManaged     Code = "not_managed"
 	CodeNotAdmin       Code = "not_admin"
+	// CodeNotRoot: a standard account on Linux or macOS cannot read the
+	// root-only bundle state.
+	CodeNotRoot Code = "not_root"
 	// CodeStateInvalid: bundle-state.json cannot be read. Nothing is
 	// applied: an unreadable state must not lower the version floor.
 	CodeStateInvalid Code = "state_invalid"

@@ -32,8 +32,7 @@ def _lines(text: str) -> list[str]:
 
 def _page_example() -> list[str]:
     section = PAGE.read_text(encoding="utf-8").split("## Persisted fail mode", 1)[1]
-    after = section.split("after the second command:", 1)[1]
-    return _lines(after.split("```text", 1)[1].split("```", 1)[0])
+    return _lines(section.split("```text", 1)[1].split("```", 1)[0])
 
 
 def _run(cfg, args: list[str]):
@@ -58,26 +57,23 @@ def _run(cfg, args: list[str]):
 
 
 def test_the_persisted_fail_mode_example_is_the_command_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # The page's own setup: Claude Code and Codex, `guardrail.hook_fail_mode: open`,
-    # then its `closed --connector codex --yes`. The page showed the footer of a
-    # closed global value (BLOCK, "Still fail-open", "Switch to open").
-    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
-    _run(cfg, ["closed", "--connector", "codex", "--yes"])
-    assert cfg.guardrail.connectors["codex"].hook_fail_mode == "closed"
+    # The page's own setup: Claude Code in the default policy tier and Codex in
+    # the strict one (oss-outage-open); the saved hook_fail_mode does not
+    # change what a per-user hook does.
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": "open"})
+    cfg.guardrail.connectors["codex"].rule_pack = "strict"
     assert _lines(_run(cfg, [])) == _page_example()
 
 
-def test_the_closed_global_footer_the_page_quotes_is_the_command_output(
+def test_a_per_user_value_the_tier_does_not_give_is_refused_as_the_page_says(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": ""})
-    cfg.guardrail.hook_fail_mode = "closed"
-    output = _lines(_run(cfg, []))
-    page = PAGE.read_text(encoding="utf-8").split("## Persisted fail mode", 1)[1].split("\n## ", 1)[0]
-    # A per-user connector is closed whatever it saved (sa-port-peer): the
-    # footer is the BLOCK line alone, with no "Still fail-open" warning.
-    footer = "  Invalid, unauthorized, incomplete, and unreachable gateway responses BLOCK connectors that are closed above."
-    assert output[-1] == footer, output
-    assert f"```text\n{footer}\n```" in page
-    assert not any("Still fail-open" in line for line in output), output
-    assert "Still fail-open" not in page
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": ""})
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+    result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--connector", "codex", "--yes"], obj=app)
+    assert result.exit_code == 1, result.output
+    assert "use-pack strict" in result.output
+    page = " ".join(PAGE.read_text(encoding="utf-8").split())
+    assert "Another value changes nothing, explains the rule and exits 1." in page
