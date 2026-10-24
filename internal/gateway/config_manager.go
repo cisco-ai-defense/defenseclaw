@@ -1493,6 +1493,13 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool, 
 		// swap, but an earlier rejected edit is resolved (a pack restored
 		// after a digest mismatch), so clear its last_reload_error and error
 		// state; otherwise they stay until an unrelated config write.
+		if pendingGeneration {
+			// A lifecycle write can change only comments or other saved intent.
+			// The rebuild proved its assets unchanged, so consume its record;
+			// leaving it pending would authorize a later unrecorded asset edit.
+			m.appliedRaw = source.raw
+			m.noteAppliedGeneration(source.raw)
+		}
 		m.rejected = false
 		m.rejectedAssets.Store(nil)
 		clearGenerationBuildError()

@@ -444,7 +444,7 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
     assert report["note"] == ""
     assert "caller_env" not in report
 
-    # GAP-0129: closed in config.yaml with open hooks is intended in observe mode, and the report says so.
+    # The per-user default-tier outage mode can differ from the saved value.
     observe = ConnectorFailModeState(
         connector="claudecode",
         desired="open",
@@ -452,10 +452,68 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
         runtime="open",
         sources=(("config", "closed"), ("hook-script", "open"), ("claude-env", "open")),
         drift=(),
+        deployment="per-user",
+        policy_tier="default",
     ).to_report()
     assert observe["effective"] == "open" and observe["drift"] == []
     assert (
-        observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
+        observe["note"] == "the default per-user policy tier keeps gateway outages fail-open; "
+        "guardrail.hook_fail_mode=closed does not control hook failures here"
+    )
+
+
+def test_closed_per_user_hook_note_does_not_claim_observe_mode() -> None:
+    # A saved open preference on a per-user action-mode host is overridden by
+    # the closed hook rule. Status must name that rule, not observe mode.
+    state = ConnectorFailModeState(
+        connector="codex",
+        desired="closed",
+        configured="open",
+        runtime="closed",
+        sources=(("config", "open"), ("hook-script", "closed")),
+        drift=(),
+        deployment="per-user",
+    )
+    report = state.to_report()
+    assert report["effective"] == "closed"
+    assert report["note"] == (
+        "this per-user deployment keeps hooks fail-closed; "
+        "guardrail.hook_fail_mode=open does not control hook failures here"
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "tier", "configured", "desired", "reason"),
+    [
+        ("per-user", "default", "closed", "open", "the default per-user policy tier keeps gateway outages fail-open"),
+        ("per-user", "strict", "open", "closed", "the strict per-user policy tier keeps gateway outages fail-closed"),
+        ("managed", "default", "open", "closed", "managed application protection selects hooks fail-closed"),
+        ("secure-client", "default", "closed", "open", "Secure Client policy selects hooks fail-open"),
+    ],
+)
+def test_fail_mode_note_names_deployment_and_tier_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    deployment: str,
+    tier: str,
+    configured: str,
+    desired: str,
+    reason: str,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"cursor": ""})
+    cfg.guardrail.hook_fail_mode = configured
+    cfg.guardrail.effective_hook_fail_mode = lambda _name: desired
+    cfg.guardrail.hook_policy_tier = lambda _name: tier
+    cfg.managed_outside_secure_client = lambda: deployment == "managed"
+    cfg.guardrail.secure_client_hook_fail_modes = lambda: deployment == "secure-client"
+    monkeypatch.setattr(fail_mode_runtime, "_platform_runtime_source", lambda _cfg, _name: ("hook-script", desired))
+
+    state = resolve_connector_fail_mode(cfg, "cursor")
+
+    assert state.desired == desired
+    assert state.effective == desired
+    assert state.note == (
+        f"{reason}; guardrail.hook_fail_mode={configured} does not control hook failures here"
     )
 
 
