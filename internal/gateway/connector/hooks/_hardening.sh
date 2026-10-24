@@ -2647,9 +2647,9 @@ defenseclaw_keep_nul_visible() {
 defenseclaw_gateway_post() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
   local _dc_post_auth="" _dc_post_arg _dc_listener_status=0
-  local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path
-  local _dc_post_headers="" _dc_post_sep="" _dc_header_name _dc_header_value _dc_post_output
-  local -a _dc_post_args _dc_post_auth_args
+  local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path _dc_legacy_post=1
+  local _dc_header_name _dc_header_value _dc_post_output _dc_post_headers _dc_post_sep _dc_field_index
+  local -a _dc_post_args _dc_post_auth_args _dc_post_fields
   # This probe still distinguishes a free port for cold start. The native
   # helper proves the actual connection again before it sends any data.
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -2708,11 +2708,56 @@ defenseclaw_gateway_post() {
     # harden_env moved HOME to a private scratch directory. Use the account
     # home it retained before that move, then verify every path component.
     local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
+    local _dc_recovery_home="" _dc_recovery_path="" _dc_secure_meta="" _dc_secure_uid=""
+    local _dc_secure_path _dc_secure_mode
     case "$_dc_agent_home" in /*) ;; *) return 1 ;; esac
     _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-gateway"
+    # The small helper has the same connected-socket peer check as the full
+    # CLI. An older installation without it keeps the verified CLI path.
+    # A present but untrusted helper is refused below, never bypassed.
+    if [ -e "${_dc_agent_home}/.local/bin/defenseclaw-hook-post" ] ||
+       [ -L "${_dc_agent_home}/.local/bin/defenseclaw-hook-post" ]; then
+      _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-hook-post"
+      _dc_legacy_post=0
+    else
+      # An older installer's roll-forward restores its saved installer folder
+      # but does not know this new binary name. That folder carries a checked
+      # recovery copy, so the 10 Hz path remains fast after the roll-forward.
+      _dc_recovery_home="${DEFENSECLAW_HOME:-${_dc_agent_home}/.defenseclaw}"
+      case "$_dc_recovery_home" in
+        /*)
+          _dc_recovery_path="${_dc_recovery_home%/}/installer/defenseclaw-hook-post"
+          if [ -e "$_dc_recovery_path" ] || [ -L "$_dc_recovery_path" ]; then
+            _dc_post_bin="$_dc_recovery_path"
+            _dc_legacy_post=0
+            # Prove every parent, including custom data-dir ancestors. A
+            # root-owned sticky temporary parent is safe; a writable
+            # non-sticky or foreign-owned parent can replace this executable.
+            _dc_secure_path="${_dc_recovery_home%/}/installer"
+            while [ "$_dc_secure_path" != / ]; do
+              [ -d "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
+              _dc_secure_meta="$(stat -c '%a:%u' "$_dc_secure_path" 2>/dev/null || stat -f '%Lp:%u' "$_dc_secure_path" 2>/dev/null)" || return 1
+              _dc_secure_mode="${_dc_secure_meta%%:*}"
+              _dc_secure_uid="${_dc_secure_meta#*:}"
+              case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
+              case "$_dc_secure_uid" in ""|*[!0-9]*) return 1 ;; esac
+              if [ -O "$_dc_secure_path" ]; then
+                [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+              else
+                [ "$_dc_secure_uid" = 0 ] || return 1
+                if [ $((8#${_dc_secure_mode} & 8#022)) -ne 0 ]; then
+                  [ $((8#${_dc_secure_mode} & 8#1000)) -ne 0 ] || return 1
+                fi
+              fi
+              _dc_secure_path="${_dc_secure_path%/*}"
+              [ -n "$_dc_secure_path" ] || _dc_secure_path=/
+            done
+          fi
+          ;;
+      esac
+    fi
     # This binary receives the bearer on stdin. A stale PID record, PATH
     # entry, writable path, or symlink cannot select a different executable.
-    local _dc_secure_path _dc_secure_mode
     for _dc_secure_path in "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin"; do
       [ -d "$_dc_secure_path" ] && [ -O "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
       _dc_secure_mode="$(stat -c %a "$_dc_secure_path" 2>/dev/null || stat -f %Lp "$_dc_secure_path" 2>/dev/null)" || return 1
@@ -2723,6 +2768,7 @@ defenseclaw_gateway_post() {
     [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
     _dc_post_prefix="http://${API_ADDR}"
     _dc_post_path="${_dc_post_url:${#_dc_post_prefix}}"
+    _dc_post_fields=()
     set -- "${_dc_post_args[@]+"${_dc_post_args[@]}"}"
     while [ "$#" -gt 0 ]; do
       case "$1" in
@@ -2737,17 +2783,27 @@ defenseclaw_gateway_post() {
       _dc_header_value="${_dc_header_value# }"
       case "$_dc_header_name" in ""|*[!A-Za-z0-9-]*) return 1 ;; esac
       case "$_dc_header_value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "$_dc_header_name")\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
-      _dc_post_sep=,
+      _dc_post_fields+=("$_dc_header_name" "$_dc_header_value")
     done
     if [ -n "$_dc_post_auth" ]; then
       _dc_header_value="${_dc_post_auth#*:}"
       _dc_header_value="${_dc_header_value# }"
-      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"Authorization\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
+      _dc_post_fields+=("Authorization" "$_dc_header_value")
     fi
     _dc_post_output="$(
-      printf '{"path":"%s","headers":{%s},"body":"%s"}' \
-        "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")" |
+      if [ "$_dc_legacy_post" -eq 1 ]; then
+        # A hook can run during an upgrade before the small helper exists.
+        # The existing gateway CLI accepts the original JSON envelope.
+        _dc_post_headers="" _dc_post_sep=""
+        for ((_dc_field_index=0; _dc_field_index<${#_dc_post_fields[@]}; _dc_field_index+=2)); do
+          _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "${_dc_post_fields[_dc_field_index]}")\":\"$(defenseclaw_json_escape "${_dc_post_fields[_dc_field_index+1]}")\""
+          _dc_post_sep=,
+        done
+        printf '{"path":"%s","headers":{%s},"body":"%s"}' \
+          "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")"
+      else
+        printf '%s\0' 'DCPOST1' "$_dc_post_path" "$_dc_post_body" "${_dc_post_fields[@]+"${_dc_post_fields[@]}"}"
+      fi |
         (
           if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1

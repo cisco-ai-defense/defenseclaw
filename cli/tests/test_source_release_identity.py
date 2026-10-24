@@ -603,6 +603,25 @@ def test_same_source_identity_allows_acp_rebuild(tmp_path: Path) -> None:
     assert installed_acp.read_bytes() == b"acp-v2\n"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell hooks use this transport")
+def test_same_source_identity_publishes_hook_transport(tmp_path: Path) -> None:
+    repo, install_dir, _source_gateway, _installed_gateway = _source_install_fixture(tmp_path)
+    source = repo / "defenseclaw-hook-post"
+    installed = install_dir / "defenseclaw-hook-post"
+    _write_executable(source, b"transport-v1\n")
+
+    claimed = _preflight(tmp_path, repo, install_dir, "claim")
+    assert claimed.returncode == 0, claimed.stdout + claimed.stderr
+    published = _preflight(tmp_path, repo, install_dir, "publish-hook-post")
+    assert published.returncode == 0, published.stdout + published.stderr
+    assert installed.read_bytes() == b"transport-v1\n"
+
+    _write_executable(source, b"transport-v2\n")
+    rebuilt = _preflight(tmp_path, repo, install_dir, "publish-hook-post")
+    assert rebuilt.returncode == 0, rebuilt.stdout + rebuilt.stderr
+    assert installed.read_bytes() == b"transport-v2\n"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
 def test_unowned_acp_refuses_before_mutation(tmp_path: Path) -> None:
     repo = _copy_source_fixture(tmp_path)
