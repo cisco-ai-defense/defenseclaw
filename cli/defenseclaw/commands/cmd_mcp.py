@@ -2662,8 +2662,8 @@ def set_server(
     with --connector) — not a single shared config.
 
     Scans the server before adding unless --skip-scan is set.
-    Rejects servers with HIGH/CRITICAL findings. A server whose scan cannot
-    finish (a timeout, an unreachable URL) is added with a warning and an
+    Balanced warns on HIGH findings; strict may reject them. A server whose
+    scan cannot finish (a timeout, an unreachable URL) is added with a warning and an
     audit record; set scanners.mcp_scanner.unverified_server to block to
     refuse it instead.
 
@@ -2819,6 +2819,7 @@ def set_server(
     updated: list[str] = []          # applied connectors that already had it
     for c in connectors:
         pre_c = pre[c]
+        post_c = None
         if pre_c.verdict == "blocked":
             click.secho(f"  blocked [{c}]: {pre_c.reason}", fg="red")
             policy_blocked.append(c)
@@ -2894,6 +2895,19 @@ def set_server(
             existed = _connector_has_server_quiet(app, c, name)
             _set_mcp_via_connector(app.cfg, name, entry, connector=c)
             applied.append(c)
+            if post_c is not None and post_c.verdict == "warning":
+                severity = result.max_severity()
+                ux.warn(
+                    f"Warning: {name!r} [{c}] was added with {severity} scanner findings. "
+                    f"Review the scan and set admission.mcp.actions.{severity.lower()} "
+                    f"to quarantine to refuse {severity} findings."
+                )
+                if app.logger:
+                    saved_change_audit(app.logger).log_action(
+                        "install-warning", name,
+                        f"connector={c} source=scan-warning severity={severity} "
+                        f"findings={len(result.findings)}",
+                    )
             note_asset_policy_observed(
                 app.logger, pre_c, target_type="mcp", name=name, connector=c,
             )

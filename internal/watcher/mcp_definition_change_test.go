@@ -29,6 +29,7 @@ func newDefinitionChangeHarness(t *testing.T, servers ...config.MCPServerEntry) 
 	t.Helper()
 	cfg, store, logger, _ := setupTestEnv(t)
 	cfg.Gateway.Watcher.MCP.TakeAction = true
+	cfg.Admission.MCP.Actions.High = &config.AdmissionAction{Shorthand: config.AdmissionActionQuarantine}
 	h := &definitionChangeHarness{t: t, store: store, servers: servers}
 	h.w = New(cfg, nil, nil, store, logger, nil, func(r AdmissionResult) { h.admitted = append(h.admitted, r) })
 	h.w.scannerFactory = func(evt InstallEvent) scanner.Scanner {

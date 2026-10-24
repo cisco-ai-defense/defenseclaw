@@ -299,6 +299,10 @@ def compile_admission(cfg: Any, target_type: str) -> CompiledAdmission:
     if asset_lists.is_secure_client(cfg):
         return _secure_client_admission(str(getattr(cfg, "policy_dir", "") or ""), target_type)
     out = _builtin_admission(target_type)
+    if target_type == "mcp":
+        # Balanced MCP scans keep findings visible without refusing ordinary
+        # tools. Secure Client keeps its separate 1.0 action map above.
+        out.actions.update({sev: (_WARN, False) for sev in ("HIGH", "MEDIUM", "LOW")})
     adm = getattr(cfg, "admission", None)
     if adm is None:
         return out

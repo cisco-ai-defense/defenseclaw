@@ -227,6 +227,13 @@ func AdmissionFor(compiled map[string]CompiledAdmission, assetType string) *Comp
 
 func compileAssetType(assetType string, own, defaults config.AdmissionAssetType, derived map[string]CompiledAction) CompiledAdmission {
 	out := builtinAdmission(assetType)
+	if assetType == config.AdmissionTypeMCP {
+		// Balanced MCP scans report findings without refusing ordinary tools.
+		// Secure Client compiles the unchanged 1.0 actions separately.
+		for _, severity := range []string{"HIGH", "MEDIUM", "LOW"} {
+			out.Actions[severity] = actionWarn
+		}
+	}
 	out.ScanOnInstall = firstBool(out.ScanOnInstall, own.ScanOnInstall, defaults.ScanOnInstall)
 	out.AllowListBypassScan = firstBool(out.AllowListBypassScan, own.AllowListBypassScan, defaults.AllowListBypassScan)
 
