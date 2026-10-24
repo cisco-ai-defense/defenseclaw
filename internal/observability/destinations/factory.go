@@ -175,20 +175,42 @@ type preparedIdentityAdapter struct {
 
 func (adapter *preparedIdentityAdapter) RecordedDeliveryIdentity() string { return adapter.digest }
 
-// preparedIdentity binds acknowledgement tracking to the same resolved
-// values used to prepare the transport. Only their digest leaves this scope.
-func preparedIdentity(adapter delivery.Adapter, token, bearer string, headers map[string]string, ca []byte) delivery.Adapter {
+// preparedIdentity binds acknowledgement tracking to resolved recipient and
+// trust material. Static diagnostic headers do not change the recipient.
+func preparedIdentity(
+	adapter delivery.Adapter, token, bearer string,
+	headers map[string]string, sourceHeaders map[string]config.ObservabilityV8HeaderValue, ca []byte,
+) delivery.Adapter {
+	var recipientHeaders map[string]string
+	if headers != nil {
+		recipientHeaders = make(map[string]string, len(headers))
+	}
+	for name, value := range headers {
+		if source, ok := sourceHeaders[name]; ok && source.Static != nil && nonRoutingHeader(name) {
+			continue
+		}
+		recipientHeaders[name] = value
+	}
 	encoded, err := json.Marshal(struct {
 		Token   string            `json:"token"`
 		Bearer  string            `json:"bearer"`
 		Headers map[string]string `json:"headers"`
 		CA      []byte            `json:"ca"`
-	}{token, bearer, headers, ca})
+	}{token, bearer, recipientHeaders, ca})
 	if err != nil {
 		return &preparedIdentityAdapter{Adapter: adapter}
 	}
 	sum := sha256.Sum256(encoded)
 	return &preparedIdentityAdapter{Adapter: adapter, digest: hex.EncodeToString(sum[:])}
+}
+
+func nonRoutingHeader(name string) bool {
+	// Keep arbitrary static headers in the key: collectors may route by them.
+	// These standard trace/request fields describe a delivery, not its tenant.
+	name = strings.ToLower(name)
+	return strings.HasPrefix(name, "x-trace-") || name == "traceparent" ||
+		name == "tracestate" || name == "baggage" || name == "x-request-id" ||
+		name == "x-correlation-id"
 }
 
 var _ observabilityruntime.DestinationAdapterFactory = (*Factory)(nil)
@@ -397,7 +419,7 @@ func (factory *Factory) prepareOTLPLogs(
 		return nil, cleanup, err
 	}
 	factory.emitOTLPWarnings(destination, hasSecretHeaderReferences(destination.Transport.Headers) || hasAuthenticationLikeHeader(headers))
-	return preparedIdentity(adapter, "", "", headers, tlsConfig.CABundle), cleanup, nil
+	return preparedIdentity(adapter, "", "", headers, destination.Transport.Headers, tlsConfig.CABundle), cleanup, nil
 }
 
 func prepareOTLPSafely(ctx context.Context, config otlp.Config, dependencies otlp.Dependencies) (factory *otlp.Factory, err error) {
@@ -465,7 +487,7 @@ func (factory *Factory) prepareSplunk(
 	if err := ctx.Err(); err != nil {
 		return nil, cleanup, err
 	}
-	return preparedIdentity(adapter, token, "", nil, tlsOptions.CABundle), cleanup, nil
+	return preparedIdentity(adapter, token, "", nil, nil, tlsOptions.CABundle), cleanup, nil
 }
 
 func (factory *Factory) prepareHTTPJSONL(
@@ -512,7 +534,7 @@ func (factory *Factory) prepareHTTPJSONL(
 	if err := ctx.Err(); err != nil {
 		return nil, cleanup, err
 	}
-	return preparedIdentity(adapter, "", bearer, headers, tlsOptions.CABundle), cleanup, nil
+	return preparedIdentity(adapter, "", bearer, headers, destination.Transport.Headers, tlsOptions.CABundle), cleanup, nil
 }
 
 func hasSecretHeaderReferences(source map[string]config.ObservabilityV8HeaderValue) bool {

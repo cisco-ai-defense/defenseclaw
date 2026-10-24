@@ -9,9 +9,11 @@ import contextlib
 import copy
 import hashlib
 import io
+import ipaddress
 import json
 import ntpath
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -22,6 +24,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import click
 
@@ -40,6 +43,11 @@ from defenseclaw.file_permissions import (
 
 _SCHEMA_VERSION = ACP_REGISTRY["protocol"]["release"]
 _SCHEMA_SHA256 = ACP_REGISTRY["protocol"]["sha256"]
+# Go strings.TrimSpace excludes U+001C-U+001F, which Python str.strip removes.
+_GO_WHITESPACE = (
+    " \t\n\v\f\r\x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a"
+    "\u2028\u2029\u202f\u205f\u3000"
+)
 _REGISTRY = ACP_REGISTRY
 _CLIENTS = set(ACP_CLIENT_IDS)
 _AGENTS = {agent_id: (command, list(args)) for agent_id, (command, args) in ACP_AGENT_ENTRY_POINTS.items()}
@@ -812,6 +820,159 @@ def _guard_contract_lock_problem(path: Path) -> str | None:
     return None
 
 
+def _guard_token_problem(value: str) -> str | None:
+    """Check a pinned guard's token without starting the guarded agent."""
+    if not value:
+        return "it has no --token-file"
+    path = Path(os.path.normpath(value))
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return f"its --token-file {path} is not a regular file"
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+            return f"its --token-file {path} permissions are too broad"
+        if os.name == "nt":
+            protection = windows_private_file_protection_error(path)
+            if protection:
+                return f"its --token-file {path} protection is unsafe: {protection}"
+        if info.st_size > 16 << 10:
+            return f"its --token-file {path} is unexpectedly large"
+        with path.open("rb") as stream:
+            body = stream.read((16 << 10) + 1)
+        if len(body) > 16 << 10:
+            return f"its --token-file {path} is unexpectedly large"
+        if not body.decode("utf-8", errors="surrogateescape").strip(_GO_WHITESPACE):
+            return f"its --token-file {path} is empty"
+    except OSError:
+        return f"its --token-file {path} cannot be read"
+    return None
+
+
+def _guard_gateway_problem(value: str) -> str | None:
+    """Check the literal HTTP loopback rule used by the release guard."""
+    endpoint = value.strip(_GO_WHITESPACE)
+    if any(ord(character) < 32 or ord(character) == 127 for character in endpoint):
+        return "its --gateway is not an HTTP literal loopback URL"
+    for index, character in enumerate(endpoint):
+        if character == "%" and (
+            index + 2 >= len(endpoint)
+            or any(digit not in "0123456789abcdefABCDEF" for digit in endpoint[index + 1:index + 3])
+        ):
+            return "its --gateway is not an HTTP literal loopback URL"
+    try:
+        parsed = urlsplit(endpoint)
+        host = parsed.hostname
+        if parsed.scheme != "http" or not host or parsed.username is not None or parsed.query or parsed.fragment:
+            return "its --gateway is not an HTTP literal loopback URL"
+        if "%" in host:
+            return "its --gateway is not an HTTP literal loopback URL"
+        authority = parsed.netloc
+        port = authority[authority.find("]") + 1:] if authority.startswith("[") else authority[len(host):]
+        if port and (not port.startswith(":") or (port[1:] and (not port[1:].isascii() or not port[1:].isdigit()))):
+            return "its --gateway is not an HTTP literal loopback URL"
+        address = ipaddress.ip_address(host)
+        loopback = address.is_loopback or (
+            isinstance(address, ipaddress.IPv6Address)
+            and address.ipv4_mapped is not None
+            and address.ipv4_mapped.is_loopback
+        )
+    except ValueError:
+        return "its --gateway is not an HTTP literal loopback URL"
+    return None if loopback else "its --gateway is not an HTTP literal loopback URL"
+
+
+def _guard_supports_binding_check(guard: str) -> bool | None:
+    """Read the pinned executable's flags before invoking its diagnostic mode."""
+    help_result = subprocess.run(
+        [guard, "--help"], stdin=subprocess.DEVNULL, capture_output=True,
+        text=True, errors="replace", timeout=15, check=False,
+    )
+    usage = help_result.stdout + help_result.stderr
+    if help_result.returncode not in (0, 1) or not all(
+        re.search(rf"(?m)^\s+-{name}(?:\s|$)", usage) for name in ("agent", "contract-lock")
+    ):
+        return None
+    return re.search(r"(?m)^\s+-check-binding(?:\s|$)", usage) is not None
+
+
+def _guard_catalog(guard: str) -> dict[str, Any] | None:
+    result = subprocess.run(
+        [guard, "--catalog"], stdin=subprocess.DEVNULL, capture_output=True,
+        text=True, errors="replace", timeout=15, check=False,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        catalog = json.loads(result.stdout)
+    except ValueError:
+        return None
+    return catalog if isinstance(catalog, dict) else None
+
+
+def _guard_entry_digest(path: str, client: str, agent: str) -> str | None:
+    try:
+        servers = _read_json_object(Path(path)).get("agent_servers")
+        entry = servers[_managed_name(agent)] if isinstance(servers, dict) else None
+        if entry is None:
+            return None
+        if isinstance(entry, dict) and client == "zed":
+            editor_owned = {
+                "default_mode", "default_model", "favorite_models",
+                "default_config_options", "favorite_config_option_values",
+            }
+            entry = {key: value for key, value in entry.items() if key not in editor_owned}
+        canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        canonical = (canonical.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+                     .replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+        return hashlib.sha256(canonical.encode()).hexdigest()
+    except (OSError, ValueError, click.ClickException):
+        return None
+
+
+def _legacy_guard_entry_refusal(
+    values: dict[str, str], launch: list[str], lock: dict[str, Any], catalog: dict[str, Any],
+) -> str | None:
+    """Check startup acceptance for a pinned release guard without diagnostic mode."""
+    lock_problem = _guard_contract_lock_problem(Path(values["contract-lock"]))
+    if lock_problem:
+        return f"its --contract-lock {lock_problem}"
+    agents = catalog.get("agents")
+    if (
+        not isinstance(catalog.get("schema_version"), str)
+        or not isinstance(catalog.get("schema_sha256"), str)
+        or not isinstance(agents, list)
+    ):
+        return "the pinned guard catalog is unavailable"
+    if lock.get("protocol") != {
+        "schema_version": catalog["schema_version"], "schema_sha256": catalog["schema_sha256"],
+    }:
+        return "the lock protocol does not match the pinned guard"
+    if launch:
+        command = launch[0]
+    else:
+        command = next((item.get("command") for item in agents if isinstance(item, dict)
+                        and item.get("id") == values["agent"]), None)
+        if not isinstance(command, str):
+            return "it names no agent command"
+    lock_client, lock_agent = lock["client"], lock["agent"]
+    if [lock_client["id"], lock_agent["id"], lock["profile"], lock["mode"]] != [
+        values["client"], values["agent"], values["profile"], values["mode"],
+    ]:
+        return "its --client, --agent, --profile or --mode does not match the lock"
+    if not _same_guard_path(command, lock_agent["path"]):
+        return "it launches another agent executable than the lock"
+    pinned = lock_client["config_sha256"]
+    if pinned.startswith("entry-sha256:"):
+        observed = _guard_entry_digest(lock_client["config_path"], values["client"], values["agent"])
+        if observed is None or observed.lower() != pinned.removeprefix("entry-sha256:").lower():
+            return "the guarded editor entry changed after setup"
+    elif _client_digest(Path(lock_client["config_path"])).lower() != pinned.lower():
+        return "the editor settings file changed after setup"
+    if values["mode"] not in ("observe", "action"):
+        return "its --mode is not observe or action"
+    return _guard_token_problem(values["token-file"]) or _guard_gateway_problem(values["gateway"])
+
+
 def _guard_entry_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path: Path) -> str | None:
     """Ask the pinned guard whether this entry would pass its startup checks.
 
@@ -822,7 +983,7 @@ def _guard_entry_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path:
     parsed = _guard_argv(args)
     if parsed is None:
         return "the guard does not accept its arguments" if _entry_names_lock(entry, lock_path) else None
-    values, _ = parsed
+    values, launch = parsed
     if not _names_file(values["contract-lock"], lock_path):
         if not values["contract-lock"] and _entry_names_lock(entry, lock_path):
             return "its --contract-lock is not parsed by the guard"
@@ -850,6 +1011,14 @@ def _guard_entry_refusal(entry: dict[str, Any], lock: dict[str, Any], lock_path:
             lock_guard.get("managed_custody") is True and _managed_guard_custody_is_trusted(guard)
         ):
             return "the guard executable digest has drifted"
+        capability = _guard_supports_binding_check(guard)
+        if capability is None:
+            return "the guard executable cannot report its supported flags"
+        if not capability:
+            catalog = _guard_catalog(guard)
+            if catalog is None:
+                return "the pinned guard catalog is unavailable"
+            return _legacy_guard_entry_refusal(values, launch, lock, catalog)
         result = subprocess.run(
             [guard, "--check-binding", *args], stdin=subprocess.DEVNULL,
             capture_output=True, text=True, errors="replace", timeout=15, check=False,

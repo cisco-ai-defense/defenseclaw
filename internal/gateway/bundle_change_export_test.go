@@ -451,6 +451,7 @@ func TestBundleReceiptReporterDeliversEachChangeOncePerCurrentEndpoint(t *testin
 		collectionOff      bool
 		tenMinuteRetry     bool
 		credentialRotation bool
+		staticHeaderEdit   bool
 	}{
 		{name: "endpoint replacement"},
 		{name: "endpoint replacement after restart", restartReporter: true},
@@ -458,6 +459,8 @@ func TestBundleReceiptReporterDeliversEachChangeOncePerCurrentEndpoint(t *testin
 		{name: "collection reload", collectionOff: true},
 		{name: "ten-minute retry", tenMinuteRetry: true},
 		{name: "credential rotation", credentialRotation: true, restartReporter: true},
+		{name: "static trace header edit", staticHeaderEdit: true},
+		{name: "static trace header edit after restart", staticHeaderEdit: true, restartReporter: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			f := newChangeExportFixture(t)
@@ -471,6 +474,15 @@ func TestBundleReceiptReporterDeliversEachChangeOncePerCurrentEndpoint(t *testin
 				if result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath, raw); err != nil ||
 					result.Status() != runtimegraph.ReloadApplied {
 					t.Fatalf("configure recipient: status=%v error=%v", result.Status(), err)
+				}
+			}
+			if test.staticHeaderEdit {
+				raw := hookModelV8BootstrapRaw(f.dataDir, f.endpoint, []string{"logs"})
+				raw = bytes.Replace(raw, []byte("      protocol: http/protobuf\n"),
+					[]byte("      protocol: http/protobuf\n      headers:\n        X-Trace-Label: before\n"), 1)
+				if result, err := f.sidecar.ReloadObservabilityRuntime(t.Context(), f.configPath, raw); err != nil ||
+					result.Status() != runtimegraph.ReloadApplied {
+					t.Fatalf("configure trace label: status=%v error=%v", result.Status(), err)
 				}
 			}
 			f.slow.Store(true)
@@ -508,7 +520,7 @@ func TestBundleReceiptReporterDeliversEachChangeOncePerCurrentEndpoint(t *testin
 
 			var secondCapture *hookModelV8OTLPCapture
 			endpoint := f.endpoint
-			if !test.routeOnly && !test.collectionOff && !test.credentialRotation {
+			if !test.routeOnly && !test.collectionOff && !test.credentialRotation && !test.staticHeaderEdit {
 				secondCapture = &hookModelV8OTLPCapture{}
 				secondServer := httptest.NewServer(http.HandlerFunc(secondCapture.handler))
 				t.Cleanup(secondServer.Close)
@@ -521,6 +533,10 @@ func TestBundleReceiptReporterDeliversEachChangeOncePerCurrentEndpoint(t *testin
 					[]byte("      protocol: http/protobuf\n      headers:\n        X-Recipient: {env: "+credential+"}\n"), 1)
 				raw = bytes.Replace(raw, []byte("export_interval_seconds: 1"),
 					[]byte("export_interval_seconds: 2"), 1)
+			}
+			if test.staticHeaderEdit {
+				raw = bytes.Replace(raw, []byte("      protocol: http/protobuf\n"),
+					[]byte("      protocol: http/protobuf\n      headers:\n        X-Trace-Label: after\n"), 1)
 			}
 			if test.routeOnly {
 				changed := bytes.Replace(raw, []byte("        buckets: ['*']\n"),
@@ -553,7 +569,7 @@ func TestBundleReceiptReporterDeliversEachChangeOncePerCurrentEndpoint(t *testin
 				}
 			}
 			wantA, wantB := 1, 1
-			if test.routeOnly || test.collectionOff {
+			if test.routeOnly || test.collectionOff || test.staticHeaderEdit {
 				wantB = 0
 			}
 			if test.credentialRotation {

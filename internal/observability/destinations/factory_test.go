@@ -748,6 +748,49 @@ func TestFactoryPreparedIdentityChangesWithResolvedAuthentication(t *testing.T) 
 	}
 }
 
+func TestPreparedIdentityIgnoresStaticDiagnosticHeadersButKeepsRecipientMaterial(t *testing.T) {
+	source := map[string]config.ObservabilityV8HeaderValue{
+		"X-Trace-Label": config.ObservabilityV8StaticHeader("first"),
+		"X-Tenant":      config.ObservabilityV8StaticHeader("tenant-a"),
+		"X-Secret":      config.ObservabilityV8CredentialHeader("tenant-secret"),
+	}
+	base := map[string]string{"X-Trace-Label": "first", "X-Tenant": "tenant-a", "X-Secret": "resolved-a"}
+	identity := func(token, bearer string, headers map[string]string, ca []byte) string {
+		return preparedIdentity(nil, token, bearer, headers, source, ca).(observabilityruntime.PreparedDestinationIdentity).RecordedDeliveryIdentity()
+	}
+	first := identity("token-a", "bearer-a", base, []byte("ca-a"))
+	for _, test := range []struct {
+		name    string
+		key     string
+		value   string
+		changed bool
+	}{
+		{"static trace label", "X-Trace-Label", "second", false},
+		{"static tenant selector", "X-Tenant", "tenant-b", true},
+		{"resolved secret header", "X-Secret", "resolved-b", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			headers := make(map[string]string, len(base))
+			for key, value := range base {
+				headers[key] = value
+			}
+			headers[test.key] = test.value
+			if changed := identity("token-a", "bearer-a", headers, []byte("ca-a")) != first; changed != test.changed {
+				t.Fatalf("recipient identity changed=%t, want %t", changed, test.changed)
+			}
+		})
+	}
+	for _, changed := range []string{
+		identity("token-b", "bearer-a", base, []byte("ca-a")),
+		identity("token-a", "bearer-b", base, []byte("ca-a")),
+		identity("token-a", "bearer-a", base, []byte("ca-b")),
+	} {
+		if changed == first {
+			t.Fatal("resolved authentication or CA rotation kept an old acknowledgement key")
+		}
+	}
+}
+
 func TestFactoryLoadsCABundleOnceAndDoesNotRequestDuringPrepare(t *testing.T) {
 	var requests atomic.Int64
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

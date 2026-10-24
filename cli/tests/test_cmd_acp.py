@@ -359,6 +359,72 @@ def test_verify_accepts_an_unchanged_entry_digest_lock(tmp_path, monkeypatch):
         cleanup_app(app, db_path, data_dir)
 
 
+def test_verify_accepts_a_binding_pinned_to_a_guard_without_diagnostic_mode(tmp_path, monkeypatch):
+    """An upgraded CLI must keep accepting a release guard pinned before --check-binding."""
+    from defenseclaw.commands.cmd_doctor import _check_acp_bindings, _DoctorResult
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    real_run = subprocess.run
+    diagnostic_calls = []
+
+    def old_guard_run(argv, *args, **kwargs):
+        if argv[0] == guard and argv[1:] == ["--help"]:
+            return subprocess.CompletedProcess(argv, 1, "", "Usage of defenseclaw-acp:\n  -agent string\n  -contract-lock string\n")
+        if argv[0] == guard and "--check-binding" in argv:
+            diagnostic_calls.append(argv)
+            return subprocess.CompletedProcess(argv, 1, "", "flag provided but not defined: -check-binding\n")
+        return real_run(argv, *args, **kwargs)
+
+    try:
+        result = CliRunner().invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        entry = json.loads(_zed_settings(tmp_path).read_text())["agent_servers"]["DefenseClaw · Kiro"]
+        assert _guard_accepts(entry)
+        with patch("defenseclaw.commands.cmd_acp.subprocess.run", side_effect=old_guard_run):
+            verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+            status = CliRunner().invoke(acp_cmd, ["status", "--json"], obj=app)
+            doctor = _DoctorResult()
+            _check_acp_bindings(app.cfg, doctor)
+        assert verified.exit_code == 0, verified.output
+        assert json.loads(status.output)["bindings"]["zed/kiro"]["healthy"] is True
+        assert doctor.checks[0]["status"] == "pass", doctor.checks
+
+        settings = _zed_settings(tmp_path)
+        document = json.loads(settings.read_text())
+        entry = document["agent_servers"]["DefenseClaw · Kiro"]
+        canonical = json.dumps(entry, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
+        lock_path = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        lock = json.loads(lock_path.read_text())
+        lock["client"]["config_sha256"] = "entry-sha256:" + hashlib.sha256(canonical).hexdigest()
+        atomic_write_private_bytes(lock_path, json.dumps(lock).encode())
+        entry["default_mode"] = "acceptEdits"
+        settings.write_text(json.dumps(document))
+        assert _guard_accepts(entry)
+        with patch("defenseclaw.commands.cmd_acp.subprocess.run", side_effect=old_guard_run):
+            verified = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert verified.exit_code == 0, verified.output
+
+        refused = dict(entry, args=list(entry["args"]))
+        refused["args"][refused["args"].index("--profile") + 1] = "watch"
+        document["agent_servers"]["Watch copy"] = refused
+        settings.write_text(json.dumps(document))
+        cmd_acp_module._refresh_client_contract_digests(str(data_dir), "zed", settings)
+        assert not _guard_accepts(refused)
+        with patch("defenseclaw.commands.cmd_acp.subprocess.run", side_effect=old_guard_run):
+            rejected = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert rejected.exit_code != 0 and "'Watch copy' cannot start" in rejected.output, rejected.output
+        assert diagnostic_calls == []
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
 def test_verify_uses_guard_acceptance_for_an_adopted_alias_with_a_custom_guard_name(tmp_path, monkeypatch):
     _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
