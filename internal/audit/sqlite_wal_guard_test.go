@@ -443,13 +443,10 @@ func floodTheStore(t *testing.T, store *Store) (stop func()) {
 	return func() { once.Do(func() { close(done); flood.Wait() }) }
 }
 
-// Review of G-flood-wal (P1), rel-1-0-3 GAP-0320, GAP-0136: on a slow Windows
-// disk the copy under the writer needs more than walCatchUpCap and a flood
-// leaves no idle gap, so no catch-up ever completed and the WAL grew until the
-// disk could fill. A log over the limit is bounded: the pass takes the writer
-// under the flood and holds it past walCatchUpCap until its copy reaches the
-// end, and SQLite restarts the log. The hooks wait for that copy, and no
-// record is lost.
+// A continuous flood still permits a restart when the final copy fits inside
+// walCatchUpCap. The persistent slow-copy case from rel-1-0-3 GAP-0320 and
+// GAP-0136 exceeds that cap and remains an open WAL ceiling regression; this
+// test does not model that slow disk.
 func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()

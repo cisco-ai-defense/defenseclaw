@@ -78,9 +78,9 @@ var (
 // Above the limit, a pass waits for the writer even without an idle gap. A
 // missed pass may wait longer to acquire it next time, but never holds it
 // beyond walCatchUpCap: hooks need that sole connection within their answer
-// budget. The next pass settles checkpoint pages off the writer before trying
-// again. A restart, or a log back under the limit, resets the acquisition
-// wait. Variables so tests can shorten them.
+// budget. The next over-limit pass retries the writer directly. A restart, or
+// a log back under the limit, resets the acquisition wait. Variables so tests
+// can shorten them.
 var (
 	walBoundedAcquireWait = time.Second
 	walBoundedAcquireMax  = 10 * time.Second
