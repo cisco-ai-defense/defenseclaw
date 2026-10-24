@@ -377,21 +377,33 @@ async function provenTCPRequest(path: string, init: RequestInit, token: string):
 }
 
 function perUserNativePostBinary(): string {
-	const home = homedir()
-	const directory = join(home, ".local", "bin")
-	const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
-	const paths = [home, join(home, ".local"), directory, binary]
-	const uid = userInfo().uid
-	for (let index = 0; index < paths.length; index++) {
-		const info = lstatSync(paths[index])
-		if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
-			throw new Error("per-user gateway helper path is untrusted")
-		}
-		if (process.platform !== "win32" && (info.uid !== uid || (info.mode & 0o022) !== 0)) {
-			throw new Error("per-user gateway helper path is writable by another account")
+	const account = userInfo()
+	const dataDir = dirname(dirname(DC_TOKEN_FILE))
+	const dataHome = dirname(dataDir)
+	// The token path is baked into this plugin at setup. A custom data
+	// directory uses the OS account home. Neither path follows the agent's HOME.
+	const homes = dataDir === join(dataHome, ".defenseclaw") ? [dataHome, account.homedir] : [account.homedir]
+	let lastError: unknown = new Error("per-user gateway helper path is missing")
+	for (const home of new Set(homes)) {
+		const directory = join(home, ".local", "bin")
+		const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway")
+		const paths = [home, join(home, ".local"), directory, binary]
+		try {
+			for (let index = 0; index < paths.length; index++) {
+				const info = lstatSync(paths[index])
+				if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
+					throw new Error("per-user gateway helper path is untrusted")
+				}
+				if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) {
+					throw new Error("per-user gateway helper path is writable by another account")
+				}
+			}
+			return binary
+		} catch (error) {
+			lastError = error
 		}
 	}
-	return binary
+	throw lastError
 }
 
 // gatewayFetch posts over the verified managed hook socket when one is
@@ -946,7 +958,10 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			)
 			return
 		default:
-			// Returning void preserves Amp's original status and output.
+			// A result kept because this account's gateway is down carries the
+			// same one warning as the call. Returning void preserves Amp's
+			// original status and output.
+			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
 			return
 		}
 	})

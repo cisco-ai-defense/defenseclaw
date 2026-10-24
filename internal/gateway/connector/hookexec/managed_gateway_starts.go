@@ -102,7 +102,10 @@ func newManagedHookHTTPClient(ctx context.Context, opts Options, timeout time.Du
 // the connection closed before any answer. Any other peer-verification
 // failure is final: a listener that is not the gateway gets no second try.
 func gatewayRestartShaped(err error) bool {
-	if err == nil {
+	if err == nil || errors.Is(err, errPerUserPeerUnverified) {
+		// A listener accepted a per-user connection whose owner could not be
+		// proven: never an outage, even when connectBy's deadline or an
+		// ENOENT from the socket table rides on the error.
 		return false
 	}
 	if errors.Is(err, errManagedGatewayNotRunning) || errors.Is(err, errGatewayNotConnected) {
@@ -325,8 +328,13 @@ func connectBy(ctx context.Context, deadline time.Time) (tryCtx context.Context,
 	}
 	connected := make(chan struct{})
 	var once sync.Once
-	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { once.Do(func() { close(connected) }) }}
-	tryCtx, cancel := context.WithCancelCause(httptrace.WithClientTrace(ctx, trace))
+	markConnected := func() { once.Do(func() { close(connected) }) }
+	trace := &httptrace.ClientTrace{GotConn: func(httptrace.GotConnInfo) { markConnected() }}
+	// A listener that accepted the connection connected the try, also while
+	// the per-user transport still checks its owner: a slow check must not
+	// turn into errGatewayNotConnected, an outage.
+	accepted := context.WithValue(httptrace.WithClientTrace(ctx, trace), gatewayAcceptedKey{}, markConnected)
+	tryCtx, cancel := context.WithCancelCause(accepted)
 	go func() {
 		timer := time.NewTimer(time.Until(deadline))
 		defer timer.Stop()
@@ -364,6 +372,18 @@ func firstTryConnectDeadline(restartDeadline, now time.Time) time.Time {
 		return floor
 	}
 	return restartDeadline
+}
+
+// gatewayAcceptedKey carries connectBy's mark of a try whose connection a
+// listener accepted (markGatewayAccepted).
+type gatewayAcceptedKey struct{}
+
+// markGatewayAccepted tells connectBy that a listener accepted the try's
+// connection; the per-user transport calls it before it checks the owner.
+func markGatewayAccepted(ctx context.Context) {
+	if mark, ok := ctx.Value(gatewayAcceptedKey{}).(func()); ok {
+		mark()
+	}
 }
 
 // notConnectedError keeps errGatewayNotConnected on the error of a try that
