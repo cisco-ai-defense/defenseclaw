@@ -72,6 +72,13 @@ func TestManagedHookReceiptWaitDoesNotHoldCallerRunSlot(t *testing.T) {
 	if err != nil || !strings.Contains(line, `"action":"allow"`) {
 		t.Fatalf("first offered answer = %q, %v", line, err)
 	}
+	// The flushed answer puts the first handler in delivery.offer, waiting
+	// for the receipt. Inspect the run slot while that wait is held instead
+	// of timing how long a second full handler takes on a shared build box.
+	f.api.hookCallerLimits.mu.Lock()
+	run := f.api.hookCallerLimits.callers["same-uid"].running
+	slotHeldBeforeReceipt := len(run) != 0
+	f.api.hookCallerLimits.mu.Unlock()
 
 	second, err := http.NewRequestWithContext(ctx, http.MethodPost, server.URL+"/api/v1/claudecode/hook",
 		strings.NewReader(managedHookBody("second-while-first-waits", "PreToolUse")))
@@ -84,15 +91,6 @@ func TestManagedHookReceiptWaitDoesNotHoldCallerRunSlot(t *testing.T) {
 		response, requestErr := server.Client().Do(second)
 		secondAnswer <- answer{response, requestErr}
 	}()
-	timer := time.NewTimer(time.Second)
-	defer timer.Stop()
-	var next answer
-	answeredBeforeReceipt := false
-	select {
-	case next = <-secondAnswer:
-		answeredBeforeReceipt = true
-	case <-timer.C:
-	}
 	// Release the first hook even if the assertion failed, so the test does
 	// not leave a live handler behind on its red run.
 	if _, err := io.WriteString(writer, hookexec.HookDeliveryReceiptAck); err != nil {
@@ -100,8 +98,14 @@ func TestManagedHookReceiptWaitDoesNotHoldCallerRunSlot(t *testing.T) {
 	}
 	_ = writer.Close()
 	_, _ = io.Copy(io.Discard, offered.response.Body)
-	if !answeredBeforeReceipt {
-		t.Fatal("second hook waited for the first client's delivery receipt")
+	if slotHeldBeforeReceipt {
+		t.Fatal("first hook held its caller run slot while waiting for the delivery receipt")
+	}
+	var next answer
+	select {
+	case next = <-secondAnswer:
+	case <-ctx.Done():
+		t.Fatal("second hook did not answer")
 	}
 	if next.err != nil {
 		t.Fatal(next.err)
