@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
@@ -43,6 +44,11 @@ func TestManagedCodexSessionStartSendsLoadedInstructionIdentity(t *testing.T) {
 	if err := json.Unmarshal([]byte(facts["\x00startup-instructions"]), &loaded); err != nil ||
 		loaded[file] != hookpaths.FileIdentity(file) {
 		t.Fatalf("managed Codex startup identities = %v, err = %v", loaded, err)
+	}
+	if runtime.GOOS == "windows" {
+		// The Windows gateway reads the call-time file identity itself;
+		// the native hook sends no pre-tool path evidence on that OS.
+		return
 	}
 	toolBody, err := json.Marshal(map[string]interface{}{
 		"hook_event_name": "PreToolUse", "session_id": "loaded", "cwd": project,
