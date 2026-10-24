@@ -419,17 +419,29 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 	case "echo", "printf", "write-output":
 		return false
 	case "add-content", "set-content", "out-file":
-		if index == 0 {
+		if index == 0 || strings.HasPrefix(words[index], "-") {
 			return false
 		}
 		switch strings.ToLower(words[index-1]) {
 		case "-path", "-literalpath", "-filepath":
 			return true
+		case "-value", "-inputobject", "-encoding", "-delimiter", "-stream", "-width":
+			return false
 		}
-		if index == 1 && !strings.HasPrefix(words[index], "-") {
-			return true // first positional path
+		for i := 1; i < index; i++ {
+			switch strings.ToLower(words[i]) {
+			case "-value", "-inputobject", "-encoding", "-delimiter", "-stream", "-width":
+				if i+1 >= index {
+					return false
+				}
+				i++ // named data or option value
+			case "-append", "-force", "-nonewline", "-passthru", "-whatif", "-confirm":
+				// Switches do not consume the first positional path.
+			default:
+				return false // another path or an option we cannot bind
+			}
 		}
-		return false // value or an option operand, not a write target
+		return true // first positional path, including after named data
 	}
 	return true
 }

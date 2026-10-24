@@ -301,9 +301,17 @@ func TestR104ActionWindowsJoinPathAssignment(t *testing.T) {
 	if ActionCommandDecision(protected, cwd, home) == "" {
 		t.Fatal("resolved Windows authorized-keys target allowed")
 	}
+	positional := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -Value 'dummy-key' $target`
+	if ActionCommandDecision(positional, cwd, home) == "" {
+		t.Fatal("resolved Windows authorized-keys positional target allowed after -Value")
+	}
 	data := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -LiteralPath report.txt -Value $target`
 	if got := ActionCommandDecision(data, cwd, home); got != "" {
 		t.Fatalf("protected path used only as data blocked: %q", got)
+	}
+	positionalData := `$output = Join-Path $HOME '.ssh'; $target = Join-Path $output 'authorized_keys'; Add-Content -Value $target report.txt`
+	if got := ActionCommandDecision(positionalData, cwd, home); got != "" {
+		t.Fatalf("protected path used only as positional data blocked: %q", got)
 	}
 }
 
