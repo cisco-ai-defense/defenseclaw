@@ -70,3 +70,51 @@ func TestDiscoverWindowsPrivateInstallsFindCopiesAtAnyDepth(t *testing.T) {
 		})
 	}
 }
+
+// A directory opened below a junction must not be read through that junction.
+// The same rule closes a rename race that replaces a listed child with a
+// junction before its directory handle is opened.
+func TestOpenWindowsPrivateWalkDirRejectsReparseAncestors(t *testing.T) {
+	home, outside := t.TempDir(), t.TempDir()
+	inside := filepath.Join(home, "plain", "nested")
+	remote := filepath.Join(outside, "nested")
+	for _, dir := range []string{inside, remote} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(remote, "outside-only"), []byte("fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inside, "inside-only"), []byte("fixture"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if file, err := openWindowsPrivateWalkDir(inside); err != nil {
+		t.Fatalf("open plain directory: %v", err)
+	} else {
+		defer file.Close()
+		if err := os.Rename(inside, inside+"-held"); err != nil {
+			t.Fatalf("rename held directory: %v", err)
+		}
+		if out, err := exec.Command("cmd", "/c", "mklink", "/J", inside, remote).CombinedOutput(); err != nil {
+			t.Fatalf("replace directory with junction: %v: %s", err, out)
+		}
+		entries, err := file.ReadDir(-1)
+		if err != nil || len(entries) != 1 || entries[0].Name() != "inside-only" {
+			t.Fatalf("held handle listed the replacement: entries=%v error=%v", entries, err)
+		}
+	}
+	link := filepath.Join(home, "linked")
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", link, outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+	for _, dir := range []string{link, filepath.Join(link, "nested")} {
+		file, err := openWindowsPrivateWalkDir(dir)
+		if file != nil {
+			_ = file.Close()
+		}
+		if err == nil {
+			t.Errorf("opened a directory through reparse path %s", dir)
+		}
+	}
+}
