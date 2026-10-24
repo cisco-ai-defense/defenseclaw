@@ -81,14 +81,14 @@ func TestLauncherStartedWithoutArgumentsByCursorGivesNoAnswer(t *testing.T) {
 		// test above covers Windows.
 		t.Skip("no per-user hook runtime on the test host")
 	}
-	if os.Getenv("DEFENSECLAW_HOOK_MAIN_UNDER_TEST") == "1" {
+	if os.Getenv("GO_WANT_HOOK_MAIN_PROCESS") == "1" {
 		os.Args = os.Args[:1]
 		main()
 		return
 	}
 	run := func(payload string) (int, string, string) {
 		cmd := exec.Command(os.Args[0], "-test.run=^TestLauncherStartedWithoutArgumentsByCursorGivesNoAnswer$")
-		cmd.Env = append(os.Environ(), "DEFENSECLAW_HOOK_MAIN_UNDER_TEST=1")
+		cmd.Env = append(os.Environ(), "GO_WANT_HOOK_MAIN_PROCESS=1")
 		cmd.Stdin = strings.NewReader(payload)
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout, cmd.Stderr = &stdout, &stderr
