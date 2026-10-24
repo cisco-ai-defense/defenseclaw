@@ -172,8 +172,10 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 		return instructionLoadRecord{}, false
 	}
 	for _, dir := range record.StartupDirs {
-		if dir == "" || len(dir) > maxActiveAgentContextPathSize || strings.TrimSpace(dir) != dir ||
-			!filepath.IsAbs(dir) && !path.IsAbs(dir) {
+		// A directory is recorded as instructionDirectoryKey spells it: the
+		// parent of an instruction file, so "c:" for a Windows drive root.
+		if dir == "" || strings.HasSuffix(dir, "/") && dir != "/" ||
+			!recordedInstructionFile(strings.TrimSuffix(dir, "/")+"/AGENTS.md") {
 			return instructionLoadRecord{}, false
 		}
 	}

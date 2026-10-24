@@ -113,6 +113,11 @@ func TestInstructionProtectionInspectSnapshotPerDirectory(t *testing.T) {
 // An inspect call of a connector whose hooks took the session's snapshot is
 // judged with that same snapshot.
 func TestInstructionProtectionInspectSharesHookSnapshot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// OpenCode's bash tool is read as POSIX; the OpenClaw inspect test
+		// above covers the Windows inspect path.
+		t.Skip("OpenCode's bash tool takes POSIX commands")
+	}
 	first, second := t.TempDir(), t.TempDir()
 	existing := writeActiveAgentTestFile(t, second, "AGENTS.md")
 	api := testAPIServerWithConfig(t, "action")
