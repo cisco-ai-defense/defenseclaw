@@ -345,7 +345,8 @@ func (set *guardrailProfileSet) groupsState(entries []string, subject *profileSu
 
 // selectProfile is the one profile selection rule (see the top of this
 // file) for subject, verified by source, on connectorName for agent.
-func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res identityResolution, source, connectorName, agent string) profileDecision {
+func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res identityResolution, source, connectorName string, scans []string, agent string) profileDecision {
+	scans = set.scanScopes(connectorName, scans)
 	verified := subject != nil && source != ""
 	type hit struct {
 		index         int
@@ -385,12 +386,11 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		for _, h := range yes {
 			matched = append(matched, h.profile)
 		}
-		proven, _ = set.meetOf(compactProfiles(matched), connectorName)
+		proven, _ = set.meetOf(compactProfiles(matched), scans)
 	}
-	connectors := set.profileCoverConnectors(connectorName)
 	var needed []string
 	for i, name := range maybe {
-		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, connectors) {
+		if len(yes) == 0 && name == set.defaultProfile || len(yes) > 0 && set.provenProfileCovers(proven, name, scans) {
 			continue
 		}
 		for _, fact := range maybeNeeds[i] {
@@ -420,7 +420,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 				matched = append(matched, h.profile)
 			}
 			matched = compactProfiles(matched)
-			name, single := set.meetOf(matched, connectorName)
+			name, single := set.meetOf(matched, scans)
 			var ok bool
 			if decision, ok = definite(name); !ok || !single {
 				// Overlapping assignments whose profiles enforce different
@@ -449,7 +449,7 @@ func (set *guardrailProfileSet) selectProfile(subject *profileSubject, res ident
 		candidates = append(candidates, last)
 	}
 	candidates = meetMembers(candidates)
-	name, single := set.meetOf(candidates, connectorName)
+	name, single := set.meetOf(candidates, scans)
 	decision, ok := definite(name)
 	if !ok || !single {
 		// A profile the proven facts select keeps its reason when it covers
@@ -561,24 +561,28 @@ func compactProfiles(names []string) []string {
 	return out
 }
 
-// strictestOf picks the strictest of candidates for connectorName: the
-// first that enforces at least what each of the others does
-// (profileCovers), with covers true; when none does, the strictest by hook
-// mode and block_at (profileStricter, the first of equals), with covers
-// false, which meetOf replaces with the candidates' meet.
-func (set *guardrailProfileSet) strictestOf(candidates []string, connectorName string) (name string, covers bool) {
+// strictestOf picks the strictest of candidates on the scopes a request
+// scans (scans): the first that enforces at least what each of the others
+// does there (profileCovers), with covers true; when none does, the
+// strictest by hook mode and block_at on the first scope (profileStricter,
+// the first of equals), with covers false, which meetOf replaces with the
+// candidates' meet.
+func (set *guardrailProfileSet) strictestOf(candidates, scans []string) (name string, covers bool) {
 	if len(candidates) == 0 {
 		return set.defaultProfile, true
 	}
-	connectors := set.profileCoverConnectors(connectorName)
 	for _, candidate := range candidates {
-		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(candidate, other, connectors) }) {
+		if !slices.ContainsFunc(candidates, func(other string) bool { return !set.profileCovers(candidate, other, scans) }) {
 			return candidate, true
 		}
 	}
+	first := ""
+	if len(scans) > 0 {
+		first = scans[0]
+	}
 	strictest := candidates[0]
 	for _, candidate := range candidates[1:] {
-		if set.profileStricter(candidate, strictest, connectorName) {
+		if set.profileStricter(candidate, strictest, first) {
 			strictest = candidate
 		}
 	}
@@ -682,13 +686,29 @@ func (s *provenProfileStore) forgetLocked(key string) {
 	s.order = slices.DeleteFunc(s.order, func(k string) bool { return k == key })
 }
 
-// profileCoverConnectors includes the gateway connector for an unscoped
-// inspect request: its profile is selected before the scan uses that scope.
+// profileCoverConnectors are the scopes a decision on connectorName may
+// scan when no inspect route recorded its scope (requestScanScopes). A
+// connector's request scans that connector's rules and settings, which
+// already inherit the global ones, so the global scope is not compared:
+// a profile that blocks only globally does not apply to it. An unscoped
+// decision may scan the global scope or the gateway connector's.
 func (set *guardrailProfileSet) profileCoverConnectors(connectorName string) []string {
-	if connectorName == "" {
-		return []string{"", config.NormalizeConnectorName(connectorNameForConfig(set.base))}
+	if connectorName = canonicalConnectorRulePackKey(connectorName); connectorName != "" {
+		return []string{connectorName}
 	}
-	return []string{connectorName, ""}
+	if gateway := canonicalConnectorRulePackKey(connectorNameForConfig(set.base)); gateway != "" {
+		return []string{"", gateway}
+	}
+	return []string{""}
+}
+
+// scanScopes is scans, or profileCoverConnectors(connectorName) when the
+// caller recorded none.
+func (set *guardrailProfileSet) scanScopes(connectorName string, scans []string) []string {
+	if scans != nil {
+		return scans
+	}
+	return set.profileCoverConnectors(connectorName)
 }
 
 // profileCovers compares candidates when choosing a profile. Equal sandbox
@@ -708,9 +728,11 @@ func (set *guardrailProfileSet) provenProfileCovers(a, b string, connectors []st
 	return set.profileCoverage(a, b, connectors, true)
 }
 
-// profileCoverage checks sandbox enforcement and wherever b blocks by hook,
-// inspect or proxy mode: a blocks there too, with b's rule pack and rules,
-// from a block level at or below b's and a HILT that asks wherever b's asks.
+// profileCoverage checks sandbox enforcement and, on each path (hook, or
+// inspect and proxy) where b blocks, that a blocks there too with what it
+// decides that path with (profilePathConfig), scanning every rule pack b
+// scans there (scansRulePacksOf, also for a request on no one path), from a
+// block level at or below b's and a HILT that asks wherever b's asks.
 // Where b only observes, its guardrail settings do not matter. A name that
 // is not a profile is the base configuration. alert_at and block_message do
 // not enforce anything and are not compared.
@@ -731,26 +753,100 @@ func (set *guardrailProfileSet) profileCoverage(a, b string, connectors []string
 		return false
 	}
 	for _, name := range connectors {
-		hookB, inspectB := cb.HookModeForConnector(name) == "action", inspectMode(cb, name) == "action"
-		if !hookB && !inspectB {
-			continue
+		for _, path := range []profilePath{profilePathHook, profilePathInspect} {
+			if !set.pathCovers(a, b, name, path) {
+				return false
+			}
 		}
-		if (hookB && ca.HookModeForConnector(name) != "action") || (inspectB && inspectMode(ca, name) != "action") {
-			return false
+	}
+	return true
+}
+
+// pathCovers is profileCoverage on one connector and path.
+func (set *guardrailProfileSet) pathCovers(a, b, name string, path profilePath) bool {
+	ca, cb := set.profilePathConfig(a, path), set.profilePathConfig(b, path)
+	if !configBlocksOn(cb, name, path) {
+		return true
+	}
+	if !configBlocksOn(ca, name, path) {
+		return false
+	}
+	if !set.scansRulePacksOf(a, b, name, path) || !set.scansRulePacksOf(a, b, name, profilePathAny) {
+		return false
+	}
+	blockA, _ := guardrailThresholdRanks(resolveThresholds(ca, name))
+	blockB, _ := guardrailThresholdRanks(resolveThresholds(cb, name))
+	proxyA, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&ca.Guardrail, name))
+	proxyB, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cb.Guardrail, name))
+	if blockA > blockB || proxyA > proxyB {
+		return false
+	}
+	return hiltCovers(hiltEnabledForConfig(ca, name), hiltMinRankForConfig(ca, name), hiltEnabledForConfig(cb, name), hiltMinRankForConfig(cb, name)) &&
+		hiltCovers(hiltEnabled(&ca.Guardrail, name), hiltMinRank(&ca.Guardrail, name), hiltEnabled(&cb.Guardrail, name), hiltMinRank(&cb.Guardrail, name))
+}
+
+// profilePathConfig is the configuration profile name decides a request on
+// path with: a meet's for that path (profileMeet.pathConfig), else
+// profileConfig's.
+func (set *guardrailProfileSet) profilePathConfig(name string, path profilePath) *config.Config {
+	if meet := set.meet(strings.TrimSpace(name)); meet != nil {
+		return meet.pathConfig(path)
+	}
+	return set.profileConfig(name)
+}
+
+// rulePackID is the composed rule pack a profile scans one connector with:
+// its scope key (directory and rules) and its named reference.
+type rulePackID struct {
+	key string
+	ref config.RulePackRef
+}
+
+// scannedRulePacks are the rule packs name scans connectorName with on
+// path, in the order its scan composes them: a profile's own (the base
+// configuration's for a name that is no profile), or, for a meet, the packs
+// of its members that block there on path (enforcingMembers), as
+// profileMeet.ruleGeneration and profileMeet.rulePack take them. A meet's
+// own configuration names the base pack, which the meet never scans by that
+// reference, so it is never read here. ok is false for a meet this set
+// cannot derive.
+func (set *guardrailProfileSet) scannedRulePacks(name, connectorName string, path profilePath) (packs []rulePackID, ok bool) {
+	members := []string{strings.TrimSpace(name)}
+	if config.IsProfileMeet(members[0]) {
+		meet := set.meet(members[0])
+		if meet == nil {
+			return nil, false
 		}
-		if effectiveRulePackKey(ca, name) != effectiveRulePackKey(cb, name) ||
-			!reflect.DeepEqual(ca.Guardrail.EffectiveRulePackRef(name), cb.Guardrail.EffectiveRulePackRef(name)) {
-			return false
+		members = set.enforcingMembers(meet.members, connectorName, path)
+	}
+	for _, member := range members {
+		cfg := set.profileConfig(member)
+		if cfg == nil {
+			return nil, false
 		}
-		blockA, _ := guardrailThresholdRanks(resolveThresholds(ca, name))
-		blockB, _ := guardrailThresholdRanks(resolveThresholds(cb, name))
-		proxyA, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&ca.Guardrail, name))
-		proxyB, _ := guardrailThresholdRanks(resolveGuardrailThresholds(&cb.Guardrail, name))
-		if blockA > blockB || proxyA > proxyB {
-			return false
+		id := rulePackID{key: effectiveRulePackKey(cfg, connectorName), ref: cfg.Guardrail.EffectiveRulePackRef(connectorName)}
+		if !slices.ContainsFunc(packs, func(have rulePackID) bool { return reflect.DeepEqual(have, id) }) {
+			packs = append(packs, id)
 		}
-		if !hiltCovers(hiltEnabledForConfig(ca, name), hiltMinRankForConfig(ca, name), hiltEnabledForConfig(cb, name), hiltMinRankForConfig(cb, name)) ||
-			!hiltCovers(hiltEnabled(&ca.Guardrail, name), hiltMinRank(&ca.Guardrail, name), hiltEnabled(&cb.Guardrail, name), hiltMinRank(&cb.Guardrail, name)) {
+	}
+	return packs, len(packs) > 0
+}
+
+// scansRulePacksOf reports whether a scans connectorName on path with
+// everything b scans there: every rule pack of b's is one of a's (so every rule b
+// enforces is in a's rules, every sensitive tool b inspects is inspected,
+// and a allows only what b allows), and both compose their pack from the
+// same first one, whose judge prompts and local patterns a composed pack
+// keeps (mergeRulePacks). Anything else is not proved: an uncertain
+// assignment it decides keeps its missing fact.
+func (set *guardrailProfileSet) scansRulePacksOf(a, b, connectorName string, path profilePath) bool {
+	packsA, okA := set.scannedRulePacks(a, connectorName, path)
+	packsB, okB := set.scannedRulePacks(b, connectorName, path)
+	if !okA || !okB || !reflect.DeepEqual(packsA[0], packsB[0]) {
+		return false
+	}
+	for _, pack := range packsB {
+		if !slices.ContainsFunc(packsA, func(have rulePackID) bool { return reflect.DeepEqual(have, pack) }) {
 			return false
 		}
 	}

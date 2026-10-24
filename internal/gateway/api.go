@@ -1940,8 +1940,19 @@ const managedShutdownRefusal = "this gateway is managed by the computer's admini
 
 // managedBundlePolicyReloadRefusal answers /policy/reload on a managed
 // standalone computer when no generation the lifecycle recorded is waiting
-// to load (a hand edit, an unsigned asset change, or nothing new).
+// to load (a hand edit, an unrecorded asset change, an unsigned record);
+// managedPolicyReloadRefusal appends the cause.
 const managedBundlePolicyReloadRefusal = "this computer takes its policy from signed policy bundles, and no generation recorded by the lifecycle is waiting to load; deliver a new signed bundle instead of reloading the policy over the API"
+
+// managedPolicyReloadRefusal is managedBundlePolicyReloadRefusal naming its
+// cause.
+func managedPolicyReloadRefusal(cause string) string {
+	cause = strings.TrimSpace(cause)
+	if cause == "" || cause == errNoRecordedGeneration.Error() {
+		return managedBundlePolicyReloadRefusal
+	}
+	return managedBundlePolicyReloadRefusal + " (cause: " + cause + ")"
+}
 
 func sameRuntimeDataDir(left, right string) bool {
 	if strings.TrimSpace(left) == "" || strings.TrimSpace(right) == "" {
@@ -4580,15 +4591,16 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	if cfg := a.runtimeConfigSnapshot(); policyCfg.StandaloneEnterprise() || cfg != nil && cfg.StandaloneEnterprise() {
 		reload, managedHost = a.recordedGenerationReloader, true
 	}
-	refuse := func() {
-		recordFailure(managedBundlePolicyReloadRefusal)
+	refuse := func(cause string) {
+		message := managedPolicyReloadRefusal(cause)
+		recordFailure(message)
 		a.writeJSON(w, http.StatusForbidden, map[string]string{
-			"error":  managedBundlePolicyReloadRefusal,
+			"error":  message,
 			"status": "refused",
 		})
 	}
 	if managedHost && reload == nil {
-		refuse()
+		refuse("this gateway cannot load a recorded generation over the API")
 		return
 	}
 
@@ -4613,7 +4625,7 @@ func (a *APIServer) handlePolicyReload(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := reload(); err != nil {
 		if managedHost && errors.Is(err, errNoRecordedGeneration) {
-			refuse()
+			refuse(strings.TrimPrefix(err.Error(), errNoRecordedGeneration.Error()+": "))
 			return
 		}
 		recordFailure(err.Error())
