@@ -714,6 +714,13 @@ func recognizeURLQueries(input string) ([]candidate, error) {
 		if !ok {
 			continue
 		}
+		if (parsed.scheme == "http" || parsed.scheme == "https") && parsed.passwordEnd > parsed.passwordStart {
+			result = append(result, candidate{
+				start: uri[0] + parsed.passwordStart,
+				end: uri[0] + parsed.passwordEnd,
+				accepted: true,
+			})
+		}
 		queryMatches, err := queryCandidates(uriValue, uri[0], parsed)
 		if err != nil {
 			return nil, err
