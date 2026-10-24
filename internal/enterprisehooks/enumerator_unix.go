@@ -623,6 +623,22 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 				report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
 					Code: UnprotectedCodeHookContractUnverified, Reason: reason + "; its managed hook contract cannot be verified"})
 			}
+			// An editor extension or desktop app runs its own engine: one
+			// below the hook contract may ignore the managed hooks as an
+			// old CLI does (GAP-1076).
+			// It is judged as the CLI is; an engine whose version cannot be
+			// read is left to the surface checks, as before.
+			for _, surface := range surfaces[conn] {
+				if surface.Surface == "" || surface.Surface == connector.HostSurfaceCLI || surface.EngineVersion == "" {
+					continue
+				}
+				if refused := unixNewRowVersionRefused(conn, surface.EngineVersion); refused != "" {
+					report.Unprotected = append(report.Unprotected, UnprotectedAgent{User: name, UID: intPointer(account.UID), Connector: conn,
+						Version: surface.EngineVersion, Surface: surface.Surface, Host: surface.Host, HostVersion: surface.HostVersion,
+						Code:   UnprotectedCodeHookContractUnverified,
+						Reason: refused + "; this " + surface.Surface + " runs its own engine, which may ignore managed hooks and the version floor, so its tool calls are not protected"})
+				}
+			}
 		}
 		for _, install := range privateInstalls {
 			if agent, ok := privateInstallUnprotected(install); ok {
@@ -830,6 +846,7 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			// for any account while sssd, nslcd or ypbind cannot reach the
 			// directory; nothing shows the directory answering this cycle.
 			logfSafely(opts.Logger, userName, fmt.Sprintf("account not found, but the directory could not be confirmed reachable; keeping (%s, %s) unchanged", userName, prev.Connector))
+			notInspected[userName] = "it was not found, and the directory could not be confirmed reachable"
 			targets = append(targets, prev)
 			continue
 		}
@@ -841,6 +858,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 			opts.State.Misses[key]++
 			if opts.State.Misses[key] < UnixRevokeAfterMisses {
 				logfSafely(opts.Logger, userName, fmt.Sprintf("%s (%d/%d); keeping (%s, %s) for now", what, opts.State.Misses[key], UnixRevokeAfterMisses, userName, prev.Connector))
+				if filteredOut {
+					// Its kept rows still enroll an account that exists.
+					notInspected[userName] = "it " + what + ", but its rows are kept until that is confirmed"
+				}
 				targets = append(targets, prev)
 				continue
 			}
@@ -863,10 +884,10 @@ func EnumerateUnix(ctx context.Context, cfg *config.Config, registry *connector.
 		if inspected[user] || hasKey(exclude, user) || hasKey(exempt, user) || authored.excludedByUID(exclude, exempt, user) {
 			continue
 		}
-		if _, gone := missing[user]; gone {
-			continue // no such account: nothing it could run
-		}
 		why, kept := notInspected[user]
+		if _, gone := missing[user]; gone && !kept {
+			continue // confirmed gone: nothing it could run
+		}
 		if !manifestMode && !kept {
 			continue
 		}

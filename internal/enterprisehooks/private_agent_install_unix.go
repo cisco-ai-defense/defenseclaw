@@ -15,8 +15,6 @@ import (
 	"syscall"
 )
 
-var errPrivateInstallLimit = errors.New("private agent install scan exceeded its entry limit")
-
 var privateUnixNPMPackages = map[string]string{
 	"claudecode": "@anthropic-ai/claude-code",
 	"copilot":    "@github/copilot",
@@ -45,10 +43,10 @@ func privateInstallContractReason(connector, version string) string {
 // worker, with the user's credentials. It reads metadata only; no user
 // executable runs. It inspects every npm-style prefix the version probe
 // knows (per-user, version managers without truncation, Volta package
-// images, the vendor's local install and the machine prefixes), each
-// directory one level below the home (npm install --prefix
-// "$HOME/private"), the native installer's versions and the Homebrew
-// casks. Every unsupported or unversioned copy is listed with its path; a
+// images, the vendor's local install and the machine prefixes), every npm
+// prefix at any depth below the home (npm install --prefix
+// "$HOME/a/b/private", a project's dependencies, GAP-0988), the native
+// installer's versions and the Homebrew casks. Every unsupported or unversioned copy is listed with its path; a
 // part of the scan that could not finish is listed as incomplete with the
 // reason.
 func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []PrivateAgentInstall {
@@ -69,13 +67,11 @@ func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []Privat
 		scan.skipAll(wanted, PrivateInstallSkippedVersionManagers)
 	}
 	roots = append(roots, prefixes...)
-	entries, err := boundedPrivateHomeDirs(home)
-	if err != nil {
+	nested, complete := walkPrivateNPMPrefixes(home, privateInstallWalk{open: os.Open, unreachable: unixPrivateWalkUnreachable, homeLinks: true})
+	if !complete {
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
 	}
-	for _, name := range entries {
-		roots = append(roots, filepath.Join(home, name))
-	}
+	roots = append(roots, nested...)
 	machine := privateInstallMachinePrefixes()
 	roots = append(roots, machine...)
 	for _, connector := range wanted {
@@ -152,6 +148,27 @@ func unixNPMPackageRunnable(connector, dir string) (runnable, known bool) {
 func unixEntryAbsent(err error) bool {
 	return errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) ||
 		errors.Is(err, syscall.ELOOP) || errors.Is(err, fs.ErrPermission)
+}
+
+// unixPrivateWalkUnreachable reports a listing error of the home walk that
+// hides nothing the account can run: the folder is gone or is no folder, or
+// macOS privacy protection (EPERM) keeps the account's own tools out too,
+// a documented limit. A folder the account owns but cannot list (mode
+// 0300) still lets it start a copy whose path it knows, so it leaves the
+// scan incomplete; another account's unlistable folder does not.
+func unixPrivateWalkUnreachable(dir string, err error) bool {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) || errors.Is(err, syscall.ELOOP) || errors.Is(err, syscall.EPERM) {
+		return true
+	}
+	if !errors.Is(err, syscall.EACCES) {
+		return false
+	}
+	info, statErr := os.Lstat(dir)
+	if statErr != nil {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) != os.Geteuid()
 }
 
 // readBoundedUnixFile reads a regular file of at most
@@ -260,43 +277,37 @@ func scanUnixVersionDir(scan *privateInstallScan, home, connector, dir string, c
 }
 
 // unixCaskReleaseRunnable reports whether a cask release folder holds an
-// executable file at its top level (claude, codex-<arch>, copilot).
+// executable file at its top level (claude, codex-<arch>, copilot) or up
+// to two folders below it (bin/codex, GAP-0989). A folder with more
+// entries than the bound counts as runnable, so the release is judged by
+// its version instead of being skipped.
 func unixCaskReleaseRunnable(dir string) bool {
+	return unixExecutableWithin(dir, 2)
+}
+
+func unixExecutableWithin(dir string, depth int) bool {
 	f, err := os.Open(dir)
 	if err != nil {
 		return false
 	}
-	names, _ := f.Readdirnames(privateAgentInstallMaxVersionDirs)
+	entries, _ := f.ReadDir(privateAgentInstallMaxVersionDirs + 1)
 	_ = f.Close()
-	for _, name := range names {
-		if unixAgentExecutablePresent(filepath.Join(dir, name)) {
+	if len(entries) > privateAgentInstallMaxVersionDirs {
+		return true
+	}
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		if entry.Type() == fs.ModeDir {
+			if depth > 0 && unixExecutableWithin(path, depth-1) {
+				return true
+			}
+			continue
+		}
+		if unixAgentExecutablePresent(path) {
 			return true
 		}
 	}
 	return false
-}
-
-func boundedPrivateHomeDirs(home string) ([]string, error) {
-	f, err := os.Open(home)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	names, err := f.Readdirnames(privateAgentInstallMaxEntries + 1)
-	if err != nil && err != io.EOF {
-		return nil, err
-	}
-	if len(names) > privateAgentInstallMaxEntries {
-		return nil, errPrivateInstallLimit
-	}
-	var out []string
-	for _, name := range names {
-		info, err := os.Stat(filepath.Join(home, name))
-		if err == nil && info.IsDir() {
-			out = append(out, name)
-		}
-	}
-	return out, nil
 }
 
 // UnixPrivateInstallPathAllowed reports whether a copy the per-user worker

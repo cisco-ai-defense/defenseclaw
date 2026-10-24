@@ -157,18 +157,22 @@ var unixSurfaceGOOS = unixAgentAppBundleGOOS
 const unixExtensionMaxEntries = 4096
 
 // DiscoverUnixAgentSurfaces lists connectorName's app and extension
-// installs for home.
-func DiscoverUnixAgentSurfaces(ctx context.Context, home, connectorName string, allowExec bool) []connector.AgentSurface {
+// installs for home. complete is false when an extensions folder holds more
+// entries than the scan reads or could not be read: an extension the
+// listing missed must leave coverage incomplete, never clean (GAP-1077).
+func DiscoverUnixAgentSurfaces(ctx context.Context, home, connectorName string, allowExec bool) (surfaces []connector.AgentSurface, complete bool) {
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	probe, ok := unixSurfaceProbes[connectorName]
 	if !ok {
-		return nil
+		return nil, true
 	}
 	home = filepath.Clean(home)
 	var out []connector.AgentSurface
+	complete = true
 	if probe.extension != "" {
 		for _, root := range unixExtensionRoots {
-			dir := newestUnixExtensionDir(filepath.Join(home, filepath.FromSlash(root.dir)), probe.extension)
+			dir, listed := newestUnixExtensionDir(filepath.Join(home, filepath.FromSlash(root.dir)), probe.extension)
+			complete = complete && listed
 			if dir == "" {
 				continue
 			}
@@ -197,7 +201,7 @@ func DiscoverUnixAgentSurfaces(ctx context.Context, home, connectorName string, 
 			out = append(out, surface)
 		}
 	}
-	return out
+	return out, complete
 }
 
 func unixHomePath(home, path string) string {
@@ -264,12 +268,15 @@ func discoverUnixDesktop(ctx context.Context, home string, probe unixDesktopProb
 
 // newestUnixExtensionDir returns the newest "<id>-<version>[-<platform>]"
 // folder of extension id under root, leaving out folders the editor has
-// marked obsolete (removed, pending deletion).
-func newestUnixExtensionDir(root, id string) string {
+// marked obsolete (removed, pending deletion). complete is false when root
+// holds more entries than the bound or could not be read for another
+// reason than being absent or out of the account's reach.
+func newestUnixExtensionDir(root, id string) (dir string, complete bool) {
 	entries, err := readUnixDirBounded(root, unixExtensionMaxEntries)
 	if err != nil {
-		return ""
+		return "", unixEntryAbsent(err)
 	}
+	complete = len(entries) <= unixExtensionMaxEntries
 	obsolete := readUnixObsoleteExtensions(filepath.Join(root, ".obsolete"))
 	prefix := strings.ToLower(id) + "-"
 	best, bestVersion := "", ""
@@ -291,16 +298,18 @@ func newestUnixExtensionDir(root, id string) string {
 			best, bestVersion = filepath.Join(root, name), version
 		}
 	}
-	return best
+	return best, complete
 }
 
+// readUnixDirBounded lists at most limit+1 entries of dir, so a caller can
+// tell a folder over the bound from one at it.
 func readUnixDirBounded(dir string, limit int) ([]os.DirEntry, error) {
 	file, err := os.Open(dir)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	entries, err := file.ReadDir(limit)
+	entries, err := file.ReadDir(limit + 1)
 	if err != nil && err != io.EOF {
 		return nil, err
 	}

@@ -42,8 +42,9 @@ var windowsPrivateInstallMachineRoots = func() []string {
 // DiscoverWindowsPrivateAgentInstalls checks the fixed npm roots, every
 // installed Node of the version managers (not only the newest few), the
 // Volta package images, the vendor's local install, the native installer's
-// versions, the machine npm prefix and one directory below a profile,
-// where npm --prefix leaves a runnable local copy. It performs bounded
+// versions, the machine npm prefix and every npm prefix at any depth below
+// a profile, where npm --prefix or a project leaves a runnable local copy
+// (GAP-0988). It performs bounded
 // static reads and refuses reparse chains while the enumerator runs as
 // LocalSystem; a part it cannot read or that exceeds its bound is reported
 // incomplete with the reason.
@@ -68,28 +69,15 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 	for _, modules := range modulesRoots {
 		roots = append(roots, filepath.Dir(modules))
 	}
-	f, err := os.Open(home)
-	var entries []string
-	if err == nil {
-		entries, err = f.Readdirnames(privateAgentInstallMaxEntries + 1)
-		_ = f.Close()
-		if err == io.EOF {
-			err = nil
-		}
-	}
-	if err != nil || len(entries) > privateAgentInstallMaxEntries {
+	// The walk never descends through a reparse point: the profile's
+	// compatibility junctions name folders it reads through their own
+	// paths, and LocalSystem must not follow a user's link anywhere else.
+	nested, complete := walkPrivateNPMPrefixes(home, privateInstallWalk{open: openWindowsPrivateWalkDir,
+		unreachable: func(_ string, err error) bool { return errors.Is(err, fs.ErrNotExist) }})
+	if !complete {
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
-		entries = nil
 	}
-	for _, entry := range entries {
-		child := filepath.Join(home, entry)
-		if winpath.RejectReparseChain(child) != nil {
-			continue // the profile's compatibility junctions name folders scanned through their own roots
-		}
-		if info, err := os.Lstat(child); err == nil && info.IsDir() {
-			roots = append(roots, child)
-		}
-	}
+	roots = append(roots, nested...)
 	for _, machine := range windowsPrivateInstallMachineRoots() {
 		info, err := os.Lstat(machine)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || winpath.RejectReparseChain(machine) != nil {
@@ -139,6 +127,23 @@ func DiscoverWindowsPrivateAgentInstalls(home string, names []string) []PrivateA
 		scanWindowsClaudeVersions(scan, filepath.Join(home, ".local", "share", "claude", "versions"))
 	}
 	return scan.result()
+}
+
+// errPrivateWalkReparse refuses a folder that became a reparse point after
+// the walk listed it as a plain folder.
+var errPrivateWalkReparse = errors.New("the folder is a reparse point")
+
+// openWindowsPrivateWalkDir opens a folder the home walk listed as a plain
+// folder, unless it has since become a reparse point.
+func openWindowsPrivateWalkDir(dir string) (*os.File, error) {
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode().Type() != fs.ModeDir {
+		return nil, errPrivateWalkReparse
+	}
+	return os.Open(dir)
 }
 
 // windowsCopyIdentity names one copy: the scan refuses reparse points, so

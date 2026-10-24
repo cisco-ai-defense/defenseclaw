@@ -360,9 +360,11 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 			return err
 		}
 		// GAP-1196: name the administrator's form of the command too, so
-		// `audit export` reads as an administrator command here.
+		// `audit export` reads as an administrator command here. Only where
+		// that form reads the managed deployment, and never to an
+		// administrator, who just ran it (GAP-1037).
 		asAdmin := ""
-		if command != "this command" {
+		if _, admin := managedStandaloneAdminCaller(nil); !admin && managedHostAdminFormWorks(command) {
 			asAdmin = fmt.Sprintf("run `sudo %s %s` or ", managedHostGatewayCommand(), command)
 		}
 		if errors.Is(err, fs.ErrPermission) {
@@ -371,10 +373,24 @@ func managedWindowsConfigLoadError(cmd *cobra.Command, err error) error {
 		}
 		return fmt.Errorf("this computer's DefenseClaw is managed by your organization (%s), so `%s` has no "+
 			"per-user gateway to check; an administrator can %scheck the managed deployment with "+
-			"`sudo %s enterprise %s status`. Nothing was changed.",
-			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform())
+			"`sudo %s enterprise %s status` or `sudo %s enterprise %s verify`. Nothing was changed.",
+			record, command, asAdmin, managedHostGatewayCommand(), managedHostPlatform(), managedHostGatewayCommand(), managedHostPlatform())
 	}
 	return managedWindowsAdminCommandAnswer(where, command)
+}
+
+// managedHostAdminFormWorks reports whether an administrator's run of
+// command reads the managed deployment (applyManagedStandaloneAdminEnv):
+// status, audit, policy and the enterprise hooks and acp commands. Any
+// other command, connector verify among them, has no managed form, so the
+// answer above must not send the administrator to it.
+func managedHostAdminFormWorks(command string) bool {
+	for _, prefix := range []string{"status", "audit", "policy", "enterprise hooks", "enterprise acp"} {
+		if command == prefix || strings.HasPrefix(command, prefix+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // managedWindowsSetupRefusal is the answer to `defenseclaw setup <args>` on a
