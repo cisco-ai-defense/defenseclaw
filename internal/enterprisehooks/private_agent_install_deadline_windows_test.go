@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -18,6 +19,69 @@ import (
 
 	"golang.org/x/sys/windows"
 )
+
+func TestWindowsPrivateWalkInspectsAnACLProtectedOrdinaryDirectory(t *testing.T) {
+	home := t.TempDir()
+	blocked := filepath.Join(home, "private")
+	if err := os.Mkdir(blocked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "ordinary-file"), []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	current := currentWindowsTestSID(t)
+	oldDescriptor, err := windows.GetNamedSecurityInfo(blocked, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldDACL, _, err := oldDescriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := windows.SetNamedSecurityInfo(blocked, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, oldDACL, nil); err != nil {
+			t.Errorf("restore test ACL: %v", err)
+		}
+	})
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(D;;GR;;;" + current.String() + ")(A;;FA;;;" + current.String() + ")(A;;FA;;;SY)(A;;FA;;;BA)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(blocked, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	oldRoots := windowsPrivateInstallMachineRoots
+	t.Cleanup(func() { windowsPrivateInstallMachineRoots = oldRoots })
+	windowsPrivateInstallMachineRoots = func() []string { return nil }
+	found := DiscoverWindowsPrivateAgentInstalls(context.Background(), home, []string{"codex"})
+	for _, item := range found {
+		if item.Incomplete {
+			t.Fatalf("ACL-protected ordinary directory remained uninspected: %+v", found)
+		}
+	}
+}
+
+func TestWindowsPrivateWalkKeepsCallerImpersonation(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+		t.Fatal(err)
+	}
+	defer windows.RevertToSelf()
+	leave := enterWindowsPrivateWalkBackup()
+	leave()
+	var token windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &token); err != nil {
+		t.Fatalf("private walk replaced the caller's thread token: %v", err)
+	}
+	_ = token.Close()
+}
 
 func TestWindowsDeadlineDropsOnlyDefinitelyDeletedLocalAccountRows(t *testing.T) {
 	stubMachineWinGet(t, nil)

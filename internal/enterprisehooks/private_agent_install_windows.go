@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"unsafe"
 
@@ -79,6 +80,7 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 	// compatibility junctions name folders it reads through their own
 	// paths, and LocalSystem must not follow a user's link anywhere else.
 	nested, complete := walkPrivateNPMPrefixes(ctx, home, privateInstallWalk{open: openWindowsPrivateWalkDir, openChild: openWindowsPrivateWalkChild,
+		enter:       enterWindowsPrivateWalkBackup,
 		unreachable: func(_ string, err error) bool { return errors.Is(err, fs.ErrNotExist) }})
 	if !complete {
 		scan.skipAll(wanted, PrivateInstallSkippedHome)
@@ -169,6 +171,56 @@ func DiscoverWindowsPrivateAgentInstalls(ctx context.Context, home string, names
 // ordinary local directories from the drive root.
 var errPrivateWalkReparse = errors.New("the folder is a reparse point")
 
+// The SYSTEM service can hold SeBackupPrivilege without enabling it for the
+// whole process. Give each bounded walk branch its own thread token so a
+// private application directory can be listed without changing the access
+// of concurrent service work. If the privilege is unavailable, ordinary
+// opens still work and a denied subtree remains honestly incomplete.
+func enterWindowsPrivateWalkBackup() func() {
+	runtime.LockOSThread()
+	var existing windows.Token
+	err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &existing)
+	if err == nil {
+		_ = existing.Close()
+		runtime.UnlockOSThread()
+		return func() {} // never replace a caller's impersonation token
+	}
+	if !errors.Is(err, windows.ERROR_NO_TOKEN) {
+		runtime.UnlockOSThread()
+		return func() {}
+	}
+	if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+		runtime.UnlockOSThread()
+		return func() {}
+	}
+	var token windows.Token
+	if err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_ADJUST_PRIVILEGES|windows.TOKEN_QUERY, true, &token); err != nil {
+		_ = windows.RevertToSelf()
+		runtime.UnlockOSThread()
+		return func() {}
+	}
+	name, err := windows.UTF16PtrFromString("SeBackupPrivilege")
+	var privilege windows.LUID
+	if err == nil {
+		err = windows.LookupPrivilegeValue(nil, name, &privilege)
+	}
+	if err == nil {
+		state := windows.Tokenprivileges{PrivilegeCount: 1, Privileges: [1]windows.LUIDAndAttributes{{Luid: privilege, Attributes: windows.SE_PRIVILEGE_ENABLED}}}
+		err = windows.AdjustTokenPrivileges(token, false, &state, 0, nil, nil)
+	}
+	if err != nil {
+		_ = token.Close()
+		_ = windows.RevertToSelf()
+		runtime.UnlockOSThread()
+		return func() {}
+	}
+	return func() {
+		_ = token.Close()
+		_ = windows.RevertToSelf()
+		runtime.UnlockOSThread()
+	}
+}
+
 // openWindowsPrivateWalkDir opens a profile root, checking the drive root's
 // final path once. Children of this handle use openWindowsPrivateWalkChild.
 // A pathname check followed by os.Open can follow a junction planted between
@@ -248,7 +300,7 @@ func openWindowsPrivateWalkChildHandle(parent windows.Handle, name string) (wind
 	var child windows.Handle
 	var status windows.IO_STATUS_BLOCK
 	err = windows.NtCreateFile(&child, access, &attributes, &status, nil, 0, share, windows.FILE_OPEN,
-		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+		windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	if err != nil {
 		if errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) || errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND) {
 			return 0, fs.ErrNotExist
