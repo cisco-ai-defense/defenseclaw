@@ -44,10 +44,9 @@ const (
 	hookFloodCheckedTail   = 5
 	hookFloodFlatRatio     = 1.25
 	hookFloodMaxCall       = 5 * time.Second
-	// hookFloodWALBound is the sampled WAL file bound of the flood cells
-	// (rel-1-0-3 GAP-0136): the 256 MiB log limit plus about four seconds of
-	// flood writes.
-	hookFloodWALBound = 320 << 20
+	// hookFloodWALBound is the published sampled WAL file ceiling of the
+	// registered 10 Hz flood cells (GAP-0952).
+	hookFloodWALBound = auditWALLimitBytes
 	// hookFloodWALSample is how often the probe samples the WAL file size.
 	hookFloodWALSample = 250 * time.Millisecond
 )
@@ -149,7 +148,7 @@ type hookFloodGuardMinute struct {
 // guard passes that ended in it (how often and how long a pass held the audit
 // writer connection, and how often and how long it synced the database file
 // off the writer) and the largest WAL file sampled every 250 ms. The probe
-// also fails when a sample is over 320 MiB (hookFloodWALBound).
+// also fails when a sample is over 256 MiB (hookFloodWALBound).
 func TestHookFloodProbe(t *testing.T) {
 	if os.Getenv("DEFENSECLAW_HOOK_FLOOD_PROBE") != "1" {
 		t.Skip("set DEFENSECLAW_HOOK_FLOOD_PROBE=1 to run the hook flood probe")
@@ -242,7 +241,7 @@ func TestHookFloodProbe(t *testing.T) {
 			}
 			began := time.Now()
 			pass, passCancel := context.WithTimeout(ctx, auditWALCopyTimeout)
-			result, err := fixture.store.CheckpointWALIfLarge(pass, auditWALLimitBytes, auditWALWriterBudget)
+			result, err := fixture.store.CheckpointWALIfLarge(pass, auditWALGuardTriggerBytes, auditWALWriterBudget)
 			passCancel()
 			guardMu.Lock()
 			if !guardStart.IsZero() {
