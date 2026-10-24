@@ -466,6 +466,18 @@ class TestMCPConnectorScope(MCPCommandTestBase):
             self.app.store.has_action("mcp", "http://demo.example.com", "install", "block", "codex")
         )
 
+    def test_unblock_clears_scan_rejections_without_configured_servers(self):
+        for connector in ("claudecode", "codex", "copilot"):
+            self.app.store.set_action_field(
+                "mcp", "context7", "install", "block", "scan rejected", connector,
+            )
+
+        result = self.invoke(["unblock", "context7"])
+        self.assertEqual(result.exit_code, 0, result.output)
+        for connector in ("claudecode", "codex", "copilot"):
+            self.assertIn(f"Unblocked 'context7' ({connector})", result.output)
+            self.assertFalse(self.app.store.has_action("mcp", "context7", "install", "block", connector))
+
     def test_bare_unblock_clears_unscoped_and_connector_block(self):
         pe = PolicyEngine(self.app.store, self.app.cfg)
         pe.block("mcp", "http://demo.example.com", "global")

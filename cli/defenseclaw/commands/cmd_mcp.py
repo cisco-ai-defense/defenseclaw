@@ -1559,6 +1559,7 @@ def _mcp_has_connector_enforcement(
     return (
         asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "block")
         or asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "allow")
+        or app.store.has_action("mcp", target, "install", "block", connector)
         or app.store.has_action("mcp", target, "file", "quarantine", connector)
         or app.store.has_action("mcp", target, "runtime", "disable", connector)
     )
@@ -2214,6 +2215,7 @@ def _mcp_only_allow_entry(app: AppContext, pe, target: str, connector: str) -> b
     if connector:
         restrictive = (
             asset_lists.has_entry(app.cfg, app.store, "mcp", target, connector, "block")
+            or app.store.has_action("mcp", target, "install", "block", connector)
             or app.store.has_action("mcp", target, "file", "quarantine", connector)
             or app.store.has_action("mcp", target, "runtime", "disable", connector)
         )
