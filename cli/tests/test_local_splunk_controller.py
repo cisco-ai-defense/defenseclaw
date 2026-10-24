@@ -326,6 +326,39 @@ def test_port_checks_allow_exact_owned_project_and_reject_foreign_owner(
         subject.verify_port_ownership()
 
 
+def test_hec_readiness_never_sends_the_local_token_to_an_unverified_listener(
+    stack: Path, docker_exe: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    subject = NativeLocalSplunkController(stack, docker_path=docker_exe, runner=FakeDockerRunner(), os_name="linux")
+    token = "readiness-secret-that-must-stay-local"
+    monkeypatch.setattr(local_splunk, "_parse_dotenv", lambda *_args, **_kwargs: {
+        "DEFENSECLAW_HEC_URL": local_splunk.DEFAULT_HEC_URL,
+        "DEFENSECLAW_HEC_TOKEN": token,
+    })
+    requests = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    class Opener:
+        def open(self, request, *, timeout):
+            requests.append(request)
+            return Response()
+
+    monkeypatch.setattr(local_splunk.urllib.request, "build_opener", lambda *_args: Opener())
+    assert subject._hec_ready(0.5)
+    assert len(requests) == 1
+    assert token not in requests[0].full_url
+    assert all(token not in value for value in requests[0].headers.values())
+    assert "Authorization" not in requests[0].headers
+
+
 def test_foreign_named_volume_is_rejected_before_compose_up(stack: Path, docker_exe: Path) -> None:
     runner = FakeDockerRunner()
     runner.volume_labels["defenseclaw_splunk_local_etc"] = {
