@@ -627,6 +627,10 @@ const (
 	// with the registration's sandbox and the verified peer (GAP-0003).
 	EventSandboxLifecycle = "sandbox_lifecycle"
 	EventSandboxEgress    = "sandbox_egress"
+	// EventSandboxAskDecision carries only decisions the manager resolves
+	// without calling the gateway's decisions route: a rejection or a
+	// policy-bounded approval attempt.
+	EventSandboxAskDecision = "sandbox_ask_decision"
 )
 
 // EventTelemetry reports a kind that carries the daemon's sandbox

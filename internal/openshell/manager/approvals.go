@@ -725,6 +725,20 @@ func (m *Manager) recordApproval(ctx context.Context, id audit.SandboxIdentity, 
 	m.tel.RecordSandboxApproval(ctx, ev)
 }
 
+// The gateway records approvals that reach its decisions route. A plain
+// rejection and a floor-bounded attempt never reach it, so relay those two
+// outcomes once under the sandbox's registered identity.
+func (m *Manager) recordManagedAskDecision(ctx context.Context, b *box, a *approval, reason string) {
+	if m.authority() == nil {
+		return
+	}
+	m.tel.RecordManagedAskDecision(ctx, audit.SandboxAskDecidedEvent{
+		Sandbox: b.identity(), ApprovalID: a.id, Kind: audit.SandboxApprovalKind(a.decision.Kind),
+		Host: a.decision.Host, Port: a.decision.Port, Result: audit.SandboxApprovalDenied,
+		Reason: reason, Timestamp: m.now(),
+	})
+}
+
 // approvalsApplied receives the batcher's results.
 func (m *Manager) approvalsApplied(results []triage.Result) {
 	ctx := context.Background()
@@ -994,6 +1008,7 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		f := m.floor(eff)
 		if err := sandboxreg.CheckApprovals(f, sandboxrelay.DecisionEgressAllow, scope); err != nil {
 			m.recordAdminRefusal(ctx, a.sandbox, audit.SandboxPolicyRuleAdd, host)
+			m.recordManagedAskDecision(ctx, b, a, "floor_denied")
 			return nil, m.decisionRefusal(err, b, f, host)
 		}
 		if d.Always {
@@ -1119,6 +1134,9 @@ func (m *Manager) DecideApproval(ctx context.Context, id string, d sandboxapi.Ap
 		m.mu.Unlock()
 		decided = true
 		m.recordApproval(ctx, ident, a, audit.SandboxApprovalResolved, audit.SandboxApprovalDenied, actorOperator)
+		if !d.Always || len(hosts) == 0 {
+			m.recordManagedAskDecision(ctx, b, a, "")
+		}
 		// The feed names the port as the approval does, the reply says what
 		// the reject leaves, and the agent's next hook says the user
 		// declined, not a network error (GAP-0236, GAP-0260).

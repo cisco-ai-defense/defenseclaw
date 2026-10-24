@@ -383,6 +383,8 @@ type sandboxEventPayload struct {
 	Port        int      `json:"port"`
 	Rule        string   `json:"rule"`
 	Reason      string   `json:"reason"`
+	ApprovalID  string   `json:"approval_id"`
+	Outcome     string   `json:"outcome"`
 	// Harness is the agent harness the daemon found running in a foreign
 	// container, or the harness label of a foreign sandbox.
 	Harness string `json:"harness"`
@@ -480,6 +482,23 @@ func emitSandboxDaemonEvent(ctx context.Context, a *APIServer, reg sandboxreg.Re
 	case sandboxrelay.EventSettingsDrift:
 		sandboxRecordFailed(ev.Kind, r.RecordSandboxSettingsDrift(ctx, audit.SandboxSettingsDriftEvent{
 			Sandbox: identity, Subject: subject, Field: p.Field, Timestamp: at}))
+	case sandboxrelay.EventSandboxAskDecision:
+		if p.Sandbox != reg.SandboxName || (p.SandboxID != "" && p.SandboxID != reg.SandboxID) {
+			sandboxRecordFailed(ev.Kind, fmt.Errorf("ask decision names another sandbox"))
+			return
+		}
+		req := sandboxrelay.DecisionRequest{Registration: reg.ID, Host: p.Host, Port: p.Port, ApprovalID: p.ApprovalID}
+		var out sandboxAskOutcome
+		switch p.Outcome {
+		case "rejected":
+			req.Kind = sandboxrelay.DecisionEgressBlock
+		case sandboxAskReasonFloorDenied:
+			req.Kind, out.Refused = sandboxrelay.DecisionEgressAllow, true
+		default:
+			sandboxRecordFailed(ev.Kind, fmt.Errorf("ask decision has invalid outcome"))
+			return
+		}
+		sandboxRecordAskDecided(ctx, a, reg, req, out)
 	case sandboxrelay.EventAccessRefused:
 		sandboxRecordFailed(ev.Kind, r.RecordSandboxAccessRefused(ctx, audit.SandboxAccessRefusedEvent{
 			Sandbox: identity, Subject: subject, Host: p.Host, Port: p.Port, Rule: p.Rule, Reason: p.Reason, Timestamp: at}))
