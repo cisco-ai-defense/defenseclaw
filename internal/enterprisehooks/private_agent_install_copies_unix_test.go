@@ -385,10 +385,15 @@ func TestDiscoverUnixPrivateInstallsReportsTheFindingLimit(t *testing.T) {
 	}
 }
 
-func TestPrivateInstallScanReportsSearchableUnlistableHomeChild(t *testing.T) {
+func TestPrivateInstallScanDoesNotListSearchableHomeChild(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can list directories regardless of their read mode")
+	}
 	withPrivateInstallMachinePrefixes(t)
 	home := makeHome(t, filepath.Join(trustedTestDir(t), "homes"), "alice")
 	opaque := filepath.Join(home, "opaque")
+	known := claudePackage(opaque, true)
+	npmCopy(t, known, "@anthropic-ai/claude-code", "2.0.77", "cli.js")
 	copy := filepath.Join(opaque, "nested", "lib", "node_modules", "@anthropic-ai", "claude-code")
 	if err := os.MkdirAll(filepath.Join(copy, "bin"), 0o755); err != nil {
 		t.Fatal(err)
@@ -398,9 +403,9 @@ func TestPrivateInstallScanReportsSearchableUnlistableHomeChild(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chmod(opaque, 0o700) })
 	for _, tc := range []struct {
-		name       string
-		mode       os.FileMode
-		incomplete bool
+		name      string
+		mode      os.FileMode
+		knownCopy bool
 	}{
 		{"searchable_without_list", 0o311, true},
 		{"not_searchable", 0o200, false},
@@ -410,14 +415,20 @@ func TestPrivateInstallScanReportsSearchableUnlistableHomeChild(t *testing.T) {
 				t.Fatal(err)
 			}
 			found := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
-			incomplete := false
+			incomplete, detected := false, false
 			for _, install := range found {
 				if install.Connector == "claudecode" && install.Incomplete && install.Skipped == PrivateInstallSkippedHome {
 					incomplete = true
 				}
+				if install.Connector == "claudecode" && !install.Incomplete {
+					if install.Path != known {
+						t.Fatalf("copy outside the documented one-level scan reported: %+v", install)
+					}
+					detected = true
+				}
 			}
-			if incomplete != tc.incomplete {
-				t.Fatalf("scan incomplete = %t, want %t: %+v", incomplete, tc.incomplete, found)
+			if incomplete || detected != tc.knownCopy {
+				t.Fatalf("scan incomplete=%t known copy=%t, want complete with known copy=%t: %+v", incomplete, detected, tc.knownCopy, found)
 			}
 		})
 	}

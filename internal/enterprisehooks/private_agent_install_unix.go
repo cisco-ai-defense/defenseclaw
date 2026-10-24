@@ -48,9 +48,10 @@ func privateInstallContractReason(connector, version string) string {
 // images, the vendor's local install and the machine prefixes), each
 // directory one level below the home (npm install --prefix
 // "$HOME/private"), the native installer's versions and the Homebrew
-// casks. Every unsupported or unversioned copy is listed with its path; a
-// part of the scan that could not finish is listed as incomplete with the
-// reason.
+// casks. The home-child prefix scan does not recurse into arbitrary nested
+// directories. Every unsupported or unversioned copy in the supported
+// locations is listed with its path; a part of the scan that could not
+// finish is listed as incomplete with the reason.
 func DiscoverUnixPrivateAgentInstalls(home string, connectors []string) []PrivateAgentInstall {
 	wanted := privateInstallConnectors(connectors, func(name string) bool { return privateUnixNPMPackages[name] != "" })
 	if len(wanted) == 0 {
@@ -290,28 +291,12 @@ func boundedPrivateHomeDirs(home string) ([]string, error) {
 		return nil, errPrivateInstallLimit
 	}
 	var out []string
-	unlistable := false
 	for _, name := range names {
 		path := filepath.Join(home, name)
 		info, err := os.Stat(path)
 		if err == nil && info.IsDir() {
 			out = append(out, name)
-			// A user can run a known path inside a searchable directory even
-			// when they cannot list it. The scan cannot prove absence there.
-			if _, err := os.Stat(path + string(os.PathSeparator) + "."); err == nil {
-				child, readErr := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
-				if readErr == nil {
-					_, readErr = child.Readdirnames(1)
-					_ = child.Close()
-				}
-				if readErr != nil && !errors.Is(readErr, io.EOF) {
-					unlistable = true
-				}
-			}
 		}
-	}
-	if unlistable {
-		return out, fs.ErrPermission
 	}
 	return out, nil
 }
