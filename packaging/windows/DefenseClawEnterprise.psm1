@@ -14310,6 +14310,257 @@ function Restore-DefenseClawTransactionConfigPreimage {
             -ServiceName ([string]$Snapshot.gateway_service))
 }
 
+# The guardian edits these user-owned files after Setup has opened its machine
+# transaction. Keep their exact preimages in that transaction so a failed
+# upgrade does not restore 1.0.2 with the old native exporter removed.
+function Get-DefenseClawUserNativeOTLPTransactionPaths {
+    param([Parameter(Mandatory)][string]$UserHome)
+    return @(
+        [IO.Path]::Combine($UserHome, '.codex', 'config.toml'),
+        [IO.Path]::Combine($UserHome, '.claude', 'settings.json'),
+        [IO.Path]::Combine($UserHome, '.defenseclaw', 'hooks', '.otlp-codex.token'),
+        [IO.Path]::Combine($UserHome, '.defenseclaw', 'hooks', '.otlp-claudecode.token')
+    )
+}
+
+function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
+    param(
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)]$Plan
+    )
+    Assert-DefenseClawDescendant -Path $SnapshotPath -Root $Layout.StateRoot `
+        -Label 'native OTLP transaction snapshot' | Microsoft.PowerShell.Core\Out-Null
+    Assert-DefenseClawNoReparsePath -Path $SnapshotPath
+    $snapshot = Microsoft.PowerShell.Management\Get-Content `
+        -LiteralPath $SnapshotPath -Raw |
+        Microsoft.PowerShell.Utility\ConvertFrom-Json
+    if ([string]$Plan.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        @($Plan.roots).Count -gt 128) {
+        throw 'native OTLP preimages require a validated target plan'
+    }
+    $directory = [IO.Path]::GetDirectoryName($SnapshotPath)
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $files = [Collections.Generic.List[object]]::new()
+    $states = [Collections.Generic.List[object]]::new()
+    $index = 0
+    foreach ($root in @($Plan.roots)) {
+        $userHome = [string]$root.user_home
+        foreach ($agent in @('.codex', '.claude')) {
+            $statePath = [IO.Path]::Combine(
+                $userHome, $agent, '.defenseclaw-cas-state')
+            Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
+            $states.Add([ordered]@{
+                existed = [bool](Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $statePath -PathType Container)
+            })
+        }
+        foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                    -UserHome $userHome)) {
+            Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
+            $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                $path)
+            $exists = $null -ne $before
+            $hash = ''
+            $sddl = ''
+            if ($exists) {
+                $item = Microsoft.PowerShell.Management\Get-Item `
+                    -LiteralPath $path -Force
+                if ([int64]$item.Length -gt 4194304) {
+                    throw 'user native OTLP preimage exceeds the 4194304-byte check limit'
+                }
+                $hash = (Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+                $sddl = (Microsoft.PowerShell.Security\Get-Acl `
+                    -LiteralPath $path).GetSecurityDescriptorSddlForm(
+                    [Security.AccessControl.AccessControlSections]::All)
+                $backup = [IO.Path]::Combine(
+                    $directory, ('native-otlp-{0:D3}.bak' -f $index))
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
+                    throw 'native OTLP transaction backup already exists'
+                }
+                Microsoft.PowerShell.Management\Copy-Item `
+                    -LiteralPath $path -Destination $backup
+                Set-DefenseClawPathAcl -Path $backup -Kind AdminFile `
+                    -GatewayServiceSID $script:AdministratorsSID
+                Assert-DefenseClawNoReparsePath -Path $path
+                Assert-DefenseClawNoReparsePath -Path $backup
+                $after = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                    $path)
+                if ($null -eq $after -or
+                    [string]$after.Identity -cne [string]$before.Identity -or
+                    (Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash -or
+                    (Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $backup -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash) {
+                    throw 'user native OTLP preimage changed during transaction capture'
+                }
+            }
+            $files.Add([ordered]@{
+                existed = $exists
+                sha256 = $hash
+                security_descriptor = $sddl
+            })
+            $index++
+        }
+    }
+    $snapshot | Microsoft.PowerShell.Utility\Add-Member `
+        -NotePropertyName user_native_otlp_preimages `
+        -NotePropertyValue ([ordered]@{
+            schema_version = 1
+            manifest_sha256 = [string]$Plan.manifest_sha256
+            roots = @($Plan.roots)
+            files = @($files)
+            state_directories = @($states)
+        }) -Force
+    Write-DefenseClawJsonAtomic -Value $snapshot -Path $SnapshotPath
+}
+
+function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $property = $Snapshot.PSObject.Properties['user_native_otlp_preimages']
+    if ($null -eq $property) { return }
+    $saved = $property.Value
+    if ($saved.schema_version -ne 1 -or
+        [string]$saved.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        @($saved.roots).Count -gt 128 -or
+        @($saved.files).Count -ne 4 * @($saved.roots).Count -or
+        @($saved.state_directories).Count -ne
+            2 * @($saved.roots).Count) {
+        throw 'invalid user native OTLP rollback preimages'
+    }
+    $directory = [IO.Path]::GetDirectoryName($SnapshotPath)
+    $nativeSecurity = Initialize-DefenseClawNativeSecurity
+    $index = 0
+    $stateIndex = 0
+    foreach ($root in @($saved.roots)) {
+        $userHome = [string]$root.user_home
+        if (-not [string]::Equals(
+                [IO.Path]::GetFullPath($userHome).TrimEnd('\'),
+                $userHome,
+                [StringComparison]::OrdinalIgnoreCase) -or
+            -not [string]::Equals(
+                [string]$root.data_dir,
+                [IO.Path]::Combine($userHome, '.defenseclaw'),
+                [StringComparison]::OrdinalIgnoreCase) -or
+            [string]$root.sid -cnotmatch '^S-1-[0-9-]+$') {
+            throw 'native OTLP rollback target root is not canonical'
+        }
+        # An absent CAS directory that stayed absent means Guardian never
+        # edited this agent config. Preserve any user change made while
+        # Setup was open. A newly created CAS directory is the cleanup's
+        # witness; an existing one is conservatively restorable.
+        $restoreAgent = @()
+        foreach ($agentOffset in 0, 1) {
+            $agent = @('.codex', '.claude')[$agentOffset]
+            $statePath = [IO.Path]::Combine(
+                $userHome, $agent, '.defenseclaw-cas-state')
+            Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
+            $restoreAgent += [bool](
+                [bool]$saved.state_directories[$stateIndex + $agentOffset].existed -or
+                (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $statePath -PathType Container))
+        }
+        foreach ($path in @(Get-DefenseClawUserNativeOTLPTransactionPaths `
+                    -UserHome $userHome)) {
+            $entry = $saved.files[$index]
+            if ($entry.existed -isnot [bool] -or
+                [string]$entry.sha256 -cnotmatch '^[0-9a-f]{64}$' -and
+                [bool]$entry.existed) {
+                throw 'invalid user native OTLP rollback file record'
+            }
+            Assert-DefenseClawNoReparsePath -Path $path -AllowMissingLeaf
+            # Guardian can revoke an orphaned scoped credential without
+            # editing the agent config, so that path has no CAS witness.
+            # It only deletes the credential; a still-present token is a
+            # concurrent user change and is left alone.
+            $restoreThisFile = $restoreAgent[$index % 2]
+            if ($index % 4 -ge 2) {
+                $restoreThisFile = -not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $path -PathType Leaf)
+            }
+            if ([bool]$entry.existed -and $restoreThisFile) {
+                $current = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                    $path)
+                $backup = [IO.Path]::Combine(
+                    $directory, ('native-otlp-{0:D3}.bak' -f $index))
+                Assert-DefenseClawDescendant -Path $backup `
+                    -Root $Layout.StateRoot -Label 'native OTLP rollback backup' |
+                    Microsoft.PowerShell.Core\Out-Null
+                Assert-DefenseClawNoReparsePath -Path $backup
+                if ((Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $backup -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                    [string]$entry.sha256) {
+                    throw 'user native OTLP rollback backup digest mismatch'
+                }
+                $contentMatches = $null -ne $current -and
+                    (Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -ceq
+                    [string]$entry.sha256
+                if (-not $contentMatches) {
+                    Microsoft.PowerShell.Management\Copy-Item `
+                        -LiteralPath $backup -Destination $path -Force
+                }
+                $actualSDDL = (Microsoft.PowerShell.Security\Get-Acl `
+                    -LiteralPath $path).GetSecurityDescriptorSddlForm(
+                    [Security.AccessControl.AccessControlSections]::All)
+                if ($actualSDDL -cne [string]$entry.security_descriptor) {
+                    $security = [Security.AccessControl.FileSecurity]::new()
+                    $security.SetSecurityDescriptorSddlForm(
+                        [string]$entry.security_descriptor,
+                        [Security.AccessControl.AccessControlSections]::All)
+                    Microsoft.PowerShell.Security\Set-Acl `
+                        -LiteralPath $path -AclObject $security
+                }
+                Assert-DefenseClawNoReparsePath -Path $path
+                if ($null -eq $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                        $path) -or
+                    (Microsoft.PowerShell.Utility\Get-FileHash `
+                        -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+                    [string]$entry.sha256 -or
+                    (Microsoft.PowerShell.Security\Get-Acl `
+                        -LiteralPath $path).GetSecurityDescriptorSddlForm(
+                        [Security.AccessControl.AccessControlSections]::All) -cne
+                    [string]$entry.security_descriptor) {
+                    throw 'user native OTLP rollback did not restore exact bytes and ACL'
+                }
+            }
+            $index++
+        }
+        foreach ($agent in @('.codex', '.claude')) {
+            $state = $saved.state_directories[$stateIndex]
+            $stateIndex++
+            if ($state.existed -isnot [bool]) {
+                throw 'invalid user native OTLP rollback state record'
+            }
+            if ([bool]$state.existed) { continue }
+            $statePath = [IO.Path]::Combine(
+                $userHome, $agent, '.defenseclaw-cas-state')
+            Assert-DefenseClawNoReparsePath -Path $statePath -AllowMissingLeaf
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $statePath -PathType Container)) {
+                continue
+            }
+            $children = @(Microsoft.PowerShell.Management\Get-ChildItem `
+                -LiteralPath $statePath -Force)
+            if ($children.Count -ne 1 -or
+                [string]$children[0].Name -cne '.defenseclaw-v2-protocol.lock' -or
+                [int64]$children[0].Length -ne 0) {
+                throw 'native OTLP rollback found unexpected compare-and-swap state'
+            }
+            Assert-DefenseClawNoReparsePath -Path ([string]$children[0].FullName)
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath ([string]$children[0].FullName) -Force
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $statePath -Force
+        }
+    }
+}
+
 function Restore-DefenseClawTransaction {
     param(
         [Parameter(Mandatory)][string]$SnapshotPath,
@@ -14609,6 +14860,10 @@ function Restore-DefenseClawTransaction {
         -Layout $Layout `
         -GatewayServiceName ([string]$snapshot.gateway_service) `
         -GuardianServiceName ([string]$snapshot.guardian_service)
+    Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+        -Snapshot $snapshot `
+        -SnapshotPath $SnapshotPath `
+        -Layout $Layout
     $configSidecars = @()
     if (Test-DefenseClawStandaloneProfile) {
         $configSidecars = @(
@@ -32935,6 +33190,12 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $expectedGuardianManifestSHA256 = [string]$targetRuntimePlan.manifest_sha256
         if ($expectedGuardianManifestSHA256 -cnotmatch '^[0-9a-f]{64}$') {
             throw 'target runtime plan did not bind an exact manifest SHA-256'
+        }
+        if (Test-DefenseClawStandaloneProfile) {
+            Add-DefenseClawUserNativeOTLPTransactionSnapshot `
+                -SnapshotPath $snapshot `
+                -Layout $Layout `
+                -Plan $targetRuntimePlan
         }
         if ($Action -eq 'Install') {
             # The service/SID boundary was established before enumeration.

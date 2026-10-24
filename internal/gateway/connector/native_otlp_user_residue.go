@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -92,6 +93,18 @@ func withUserAgentConfigLock(path string, opts SetupOpts, fn func() error) error
 		return fn()
 	}
 	return withFileLock(path, fn)
+}
+
+// A managed Windows user's .defenseclaw directory has a protected DACL that
+// lets the user edit runtime files but reserves WRITE_DAC for SYSTEM. The
+// compare-and-swap helper's private-state setup would try to replace that
+// DACL under the user's impersonated token. Keep this edit's private recovery
+// state beside the user's agent config instead.
+func userNativeOTLPTransactionDir(configPath string, opts SetupOpts) string {
+	if opts.ManagedEnterprise && runtime.GOOS == "windows" {
+		return filepath.Join(filepath.Dir(configPath), ".defenseclaw-cas-state")
+	}
+	return opts.DataDir
 }
 
 // userNativeOTLPReadLimit bounds every file the check reads: the agent
@@ -182,7 +195,7 @@ func codexUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 		return removed, err
 	}
 	err = withUserAgentConfigLock(configPath, opts, func() error {
-		return atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
+		return atomicTransformFileWithStateDir(configPath, userNativeOTLPTransactionDir(configPath, opts), 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
 			if !exists {
 				removed = nil
 				return atomicTransformResult{Remove: true}, nil
@@ -287,7 +300,7 @@ func claudeCodeUserNativeOTLP(opts SetupOpts, apply bool) ([]string, error) {
 		return removed, err
 	}
 	err = withUserAgentConfigLock(settingsPath, opts, func() error {
-		return atomicTransformFileWithStateDir(settingsPath, opts.DataDir, 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
+		return atomicTransformFileWithStateDir(settingsPath, userNativeOTLPTransactionDir(settingsPath, opts), 0o600, func(current []byte, exists bool) (atomicTransformResult, error) {
 			if !exists {
 				removed = nil
 				return atomicTransformResult{Remove: true}, nil
