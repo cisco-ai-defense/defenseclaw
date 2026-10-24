@@ -4,11 +4,14 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
@@ -22,9 +25,16 @@ type perUserHookInput struct {
 }
 
 const maxPerUserHookInput = 6 << 20
+const maxFramedHookHeaders = 64
 
-func postPerUserPluginHook(ctx context.Context, apiAddr string, source io.Reader, output io.Writer, curlOutput bool) error {
-	request, err := readPluginHookInput(source)
+func postPerUserHookInput(ctx context.Context, apiAddr string, source io.Reader, output io.Writer, curlOutput, framed bool) error {
+	var request perUserHookInput
+	var err error
+	if framed {
+		request, err = readFramedHookInput(source)
+	} else {
+		request, err = readPluginHookInput(source)
+	}
 	if err != nil {
 		return err
 	}
@@ -33,6 +43,44 @@ func postPerUserPluginHook(ctx context.Context, apiAddr string, source io.Reader
 		return err
 	}
 	return writePluginHookReply(output, response, curlOutput)
+}
+
+// Shell hooks can send fields directly as NUL-separated bytes without a
+// tr/sed process pair for every header and payload field. The final field is
+// the body. Shell variables cannot contain NUL; the frame has an exact field
+// count and the same total size bound as the plugin JSON request.
+func readFramedHookInput(source io.Reader) (perUserHookInput, error) {
+	input, err := io.ReadAll(io.LimitReader(source, maxPerUserHookInput+1))
+	if err != nil {
+		return perUserHookInput{}, err
+	}
+	if len(input) > maxPerUserHookInput {
+		return perUserHookInput{}, fmt.Errorf("shell hook input is too large")
+	}
+	// Limit split allocation even when an untrusted caller supplies millions
+	// of separators. One extra field is enough to reject an overlong frame.
+	fields := bytes.SplitN(input, []byte{0}, 3+2*maxFramedHookHeaders+1)
+	if len(fields) < 3 {
+		return perUserHookInput{}, fmt.Errorf("shell hook input frame is incomplete")
+	}
+	count, err := strconv.Atoi(string(fields[1]))
+	if err != nil || count < 0 || count > maxFramedHookHeaders || len(fields) != 3+2*count {
+		return perUserHookInput{}, fmt.Errorf("shell hook input frame has invalid headers")
+	}
+	request := perUserHookInput{Path: string(fields[0]), Headers: make(map[string]string, count), Body: string(fields[len(fields)-1])}
+	for i := 0; i < count; i++ {
+		name, value := string(fields[2+2*i]), string(fields[3+2*i])
+		if name == "" || strings.ContainsAny(value, "\r\n") {
+			return perUserHookInput{}, fmt.Errorf("shell hook input frame has invalid header")
+		}
+		for _, c := range name {
+			if !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-", c) {
+				return perUserHookInput{}, fmt.Errorf("shell hook input frame has invalid header")
+			}
+		}
+		request.Headers[name] = value
+	}
+	return request, nil
 }
 
 // postSecureClientPluginHook uses the protected gateway service identity,
@@ -80,6 +128,7 @@ func init() {
 	var apiAddr string
 	var maxTime int
 	var curlOutput bool
+	var framedInput bool
 	var secureClientService bool
 	cmd := &cobra.Command{
 		Use:         "hook-post",
@@ -98,7 +147,7 @@ func init() {
 				}
 				return postSecureClientPluginHook(ctx, apiAddr, os.Stdin, cmd.OutOrStdout())
 			}
-			err := postPerUserPluginHook(ctx, apiAddr, os.Stdin, cmd.OutOrStdout(), curlOutput)
+			err := postPerUserHookInput(ctx, apiAddr, os.Stdin, cmd.OutOrStdout(), curlOutput, framedInput)
 			cancel()
 			if hookexec.PerUserPostOutage(err) {
 				// This account's gateway is not running: the status the shell
@@ -112,6 +161,7 @@ func init() {
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway loopback host:port")
 	cmd.Flags().IntVar(&maxTime, "max-time", 10, "maximum request time in seconds")
 	cmd.Flags().BoolVar(&curlOutput, "curl-output", false, "print response body and trailing HTTP code")
+	cmd.Flags().BoolVar(&framedInput, "framed-input", false, "read the shell hook field frame")
 	cmd.Flags().BoolVar(&secureClientService, "secure-client-service", false, "verify the Secure Client gateway service peer")
 	_ = cmd.MarkFlagRequired("api-addr")
 	rootCmd.AddCommand(cmd)

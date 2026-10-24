@@ -7,6 +7,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -79,6 +80,20 @@ func TestCodexPerUserUpgradeRevokesNativeExporterWithoutRemovingOperatorOTel(t *
 // /v1/<signal> URLs with the paired product headers. An API port change during
 // upgrade must not strand their bearer on a listener another account can hold.
 func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
+	// Upgrade fixtures are per-user and must not inherit this test host's
+	// enterprise Codex requirements (for example a managed Mac lane).
+	if runtime.GOOS != "windows" {
+		previousRequirements := codexSystemRequirementsPathForInspection
+		t.Cleanup(func() { codexSystemRequirementsPathForInspection = previousRequirements })
+		systemPath, err := codexSystemRequirementsPath()
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The absent child has no user-owned parent for managed-path trust
+		// validation, and no actual machine policy can change this fixture.
+		requirementsPath := filepath.Join(filepath.Dir(systemPath), "defenseclaw-test-absent-released-upgrade", "requirements.toml")
+		codexSystemRequirementsPathForInspection = func() (string, error) { return requirementsPath, nil }
+	}
 	for _, release := range []string{"0.8.10", "1.0.0-1.0.3"} {
 		for _, goos := range []string{"linux", "darwin", "windows"} {
 			t.Run(release+"/"+goos, func(t *testing.T) {
@@ -93,7 +108,7 @@ func TestCodexReleasedNativeExporterUpgradeAcrossOS(t *testing.T) {
 				CodexConfigPathOverride = configPath
 				t.Cleanup(func() { CodexConfigPathOverride = prior })
 				c := NewCodexConnector()
-				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos, ManagedEnterprise: true}
+				earlier := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:19081", APIToken: "test-hook-token", GOOS: goos}
 				if err := c.Setup(context.Background(), earlier); err != nil {
 					t.Fatalf("seed earlier setup backup: %v", err)
 				}

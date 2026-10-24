@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -33,7 +34,7 @@ func TestHookPostCommandUsesConnectedSameAccountSocket(t *testing.T) {
 	addr := strings.TrimPrefix(server.URL, "http://")
 	input := `{"path":"/api/v1/amp/hook","headers":{"Authorization":"Bearer secret","Content-Type":"application/json"},"body":"{\"tool_name\":\"Bash\"}"}`
 	var output bytes.Buffer
-	if err := postPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, false); err != nil {
+	if err := postPerUserHookInput(context.Background(), addr, strings.NewReader(input), &output, false, false); err != nil {
 		t.Fatalf("same-account listener rejected: %v", err)
 	}
 	var reply struct {
@@ -45,17 +46,78 @@ func TestHookPostCommandUsesConnectedSameAccountSocket(t *testing.T) {
 		t.Fatalf("native plugin response = %+v, requests=%d, parse error=%v", reply, seen, err)
 	}
 	output.Reset()
-	if err := postPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, true); err != nil ||
+	if err := postPerUserHookInput(context.Background(), addr, strings.NewReader(input), &output, true, false); err != nil ||
 		output.String() != "{\"action\":\"allow\"}\n200" || seen != 2 {
 		t.Fatalf("native shell response = %q, requests=%d, error=%v", output.String(), seen, err)
 	}
 	server.Close()
 	output.Reset()
-	if err := postPerUserPluginHook(context.Background(), addr, strings.NewReader(input), &output, false); err == nil || seen != 2 || output.Len() != 0 {
+	if err := postPerUserHookInput(context.Background(), addr, strings.NewReader(input), &output, false, false); err == nil || seen != 2 || output.Len() != 0 {
 		t.Fatalf("stopped gateway was trusted: requests=%d output=%q error=%v", seen, output.String(), err)
 	}
-	if err := postPerUserPluginHook(context.Background(), addr, strings.NewReader(`{"path":"/status"}`), &output, false); err == nil {
+	if err := postPerUserHookInput(context.Background(), addr, strings.NewReader(`{"path":"/status"}`), &output, false, false); err == nil {
 		t.Fatal("non-hook endpoint was accepted")
+	}
+}
+
+func TestFramedShellHookInputIsBoundedAndExact(t *testing.T) {
+	frame := func(fields ...string) string { return strings.Join(fields, "\x00") }
+	for _, tc := range []struct {
+		name, input string
+		valid       bool
+	}{
+		{"valid with quoted content", frame("/api/v1/codex/hook", "2", "Authorization", "Bearer example", "X-Trace", `a"b\c`, `{"command":"echo ok"}`), true},
+		{"missing body", frame("/api/v1/codex/hook", "1", "Authorization", "Bearer example"), false},
+		{"extra field", frame("/api/v1/codex/hook", "0", "{}", "extra"), false},
+		{"bad count", frame("/api/v1/codex/hook", "65", "{}"), false},
+		{"header injection", frame("/api/v1/codex/hook", "1", "X-Test", "one\r\nEvil: true", "{}"), false},
+		{"body with NUL", frame("/api/v1/codex/hook", "0", "{", "}"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			request, err := readFramedHookInput(strings.NewReader(tc.input))
+			if tc.valid != (err == nil) {
+				t.Fatalf("read frame: valid=%v error=%v", tc.valid, err)
+			}
+			if tc.valid && (request.Path != "/api/v1/codex/hook" || request.Headers["Authorization"] != "Bearer example" ||
+				request.Headers["X-Trace"] != `a"b\c` || request.Body != `{"command":"echo ok"}`) {
+				t.Fatalf("frame changed hook fields: %+v", request)
+			}
+		})
+	}
+	_, err := readFramedHookInput(strings.NewReader(strings.Repeat("x", maxPerUserHookInput+1)))
+	if err == nil {
+		t.Fatal("oversized frame accepted")
+	}
+	nulFlood := strings.Repeat("\x00", 200_000)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	if _, err := readFramedHookInput(strings.NewReader(nulFlood)); err == nil {
+		t.Fatal("separator flood accepted")
+	}
+	runtime.ReadMemStats(&after)
+	if used := after.TotalAlloc - before.TotalAlloc; used > 2<<20 {
+		t.Fatalf("separator flood allocated %d bytes", used)
+	}
+}
+
+func TestFramedShellPostUsesConnectedPeer(t *testing.T) {
+	seen := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen++
+		data, _ := io.ReadAll(r.Body)
+		if r.URL.Path != "/api/v1/codex/hook" || r.Header.Get("Authorization") != "Bearer example" ||
+			string(data) != `{"command":"echo ok"}` {
+			t.Errorf("framed request changed: path=%q auth=%q body=%q", r.URL.Path, r.Header.Get("Authorization"), data)
+		}
+		_, _ = io.WriteString(w, `{"action":"allow"}`)
+	}))
+	defer server.Close()
+	frame := strings.Join([]string{"/api/v1/codex/hook", "1", "Authorization", "Bearer example", `{"command":"echo ok"}`}, "\x00")
+	var output bytes.Buffer
+	if err := postPerUserHookInput(context.Background(), strings.TrimPrefix(server.URL, "http://"),
+		strings.NewReader(frame), &output, true, true); err != nil ||
+		output.String() != "{\"action\":\"allow\"}\n200" || seen != 1 {
+		t.Fatalf("framed post: output=%q requests=%d error=%v", output.String(), seen, err)
 	}
 }
 

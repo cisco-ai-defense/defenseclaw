@@ -185,7 +185,7 @@ func runPerUserHookForStop(t *testing.T, c Connector, script string, args []stri
 	}
 	hookPath := filepath.Join(hooksDir, script)
 	home := t.TempDir()
-	installNativeGatewayForHookTest(t, home)
+	installNativeGatewayForHookTest(t, home, hooksDir)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatal(err)

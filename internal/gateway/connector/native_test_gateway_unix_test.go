@@ -24,7 +24,7 @@ var nativeGatewayForHookTests struct {
 // installNativeGatewayForHookTest runs the same account-bound hook-post
 // command as a shipped per-user shell hook. A curl stub bypasses that command
 // and cannot exercise the connected listener proof.
-func installNativeGatewayForHookTest(t *testing.T, home string) {
+func installNativeGatewayForHookTest(t *testing.T, home string, hookDirs ...string) {
 	t.Helper()
 	nativeGatewayForHookTests.Do(func() {
 		var err error
@@ -49,5 +49,46 @@ func installNativeGatewayForHookTest(t *testing.T, home string) {
 	}
 	if err := os.Link(nativeGatewayForHookTests.path, filepath.Join(binDir, "defenseclaw-gateway")); err != nil {
 		t.Fatal(err)
+	}
+	for _, hookDir := range hookDirs {
+		linkGatewayBinaryToHookDirForTest(t, hookDir, nativeGatewayForHookTests.path)
+	}
+}
+
+// A rendered hook selects its POST helper from its physical data directory.
+// Tests with a separate HOME must place their fixture binary there as well;
+// inherited HOME must never select the helper that receives a bearer.
+func linkGatewayBinaryToHookDirForTest(t *testing.T, hookDir, binary string) {
+	t.Helper()
+	dataDir := filepath.Dir(hookDir)
+	trustedHome := dataDir
+	if filepath.Base(dataDir) == ".defenseclaw" {
+		trustedHome = filepath.Dir(dataDir)
+	}
+	binDir := filepath.Join(trustedHome, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(binDir, "defenseclaw-gateway")
+	if err := os.Link(binary, target); err != nil {
+		if !os.IsExist(err) {
+			t.Fatal(err)
+		}
+		installed, installedErr := os.Stat(target)
+		source, sourceErr := os.Stat(binary)
+		if installedErr != nil || sourceErr != nil {
+			t.Fatalf("inspect hook helper %s and fixture %s: %v, %v", target, binary, installedErr, sourceErr)
+		}
+		if os.SameFile(installed, source) {
+			return
+		}
+		// A test may render another hook beside this one with a different
+		// stub. Each call is sequential; replace the previous fixture.
+		if err := os.Remove(target); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(binary, target); err != nil {
+			t.Fatal(err)
+		}
 	}
 }

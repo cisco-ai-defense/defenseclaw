@@ -1205,7 +1205,9 @@ defenseclaw_log_hook_failure() {
 # payload reader fallbacks must not claim that inspection was bypassed.
 defenseclaw_log_hook_delivery_failure() {
   local outcome mode="$5"
-  outcome="$(defenseclaw_hook_delivery_outcome "$4" "$5")"
+  # Keep the call-time tier in this shell for logging, warning and verdict.
+  defenseclaw_resolve_hook_delivery_outcome "$4" "$5"
+  outcome="$_DC_HOOK_DELIVERY_OUTCOME"
   # A per-user outage the hook lets through records the open outage mode it
   # followed, so the gateway reports the unchecked call when it is back.
   [ "$outcome" != fail_open ] || mode=open
@@ -1294,18 +1296,22 @@ defenseclaw_config_outage_open() {
 }
 
 defenseclaw_hook_delivery_outcome() {
-  local outcome=fail_closed
+  defenseclaw_resolve_hook_delivery_outcome "$1" "$2"
+  printf '%s' "$_DC_HOOK_DELIVERY_OUTCOME"
+}
+
+defenseclaw_resolve_hook_delivery_outcome() {
+  _DC_HOOK_DELIVERY_OUTCOME=fail_closed
   if [ "${1:-response}" = "transport" ] && defenseclaw_per_user_outage_open; then
-    printf fail_open
+    _DC_HOOK_DELIVERY_OUTCOME=fail_open
     return 0
   fi
   if [ "${2:-${FAIL_MODE:-closed}}" = "open" ] && ! defenseclaw_install_in_progress; then
-    outcome=fail_open
+    _DC_HOOK_DELIVERY_OUTCOME=fail_open
     if [ "${1:-response}" = "transport" ] && defenseclaw_should_fail_closed_on_unreachable; then
-      outcome=fail_closed
+      _DC_HOOK_DELIVERY_OUTCOME=fail_closed
     fi
   fi
-  printf '%s' "$outcome"
 }
 
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
@@ -1663,11 +1669,12 @@ _dc_hook_elapsed_ms() {
 # while this account's gateway restarts or starts (GAP-0094, GAP-0102,
 # GAP-0107). CURL_STATUS is the status of the first try; POST is a function
 # that sends the same call again and sets RESPONSE. A refused connection
-# (curl 7: nobody listens on the port yet), or one the gateway dropped
-# unanswered as it stopped (52, 55, 56), is sent again every 0.2 s until 3 s
-# after the hook started, so a restart that is over by then is answered by
-# the gateway that comes up, from its policy; the first refusal also starts
-# the gateway (defenseclaw_gateway_cold_start). Returns 0 when RESPONSE holds
+# (curl 7: nobody listens on the port yet) is sent again every 0.2 s until
+# 3 s after the hook started, so a restart that is over by then is answered
+# by the gateway that comes up, from its policy; the first refusal also starts
+# the gateway (defenseclaw_gateway_cold_start). A dropped or cut-off answer
+# may have processed the request, so it stays closed and is never retried
+# into a later outage status. Returns 0 when RESPONSE holds
 # an answer; otherwise the last curl status, and the caller fails as
 # unreachable within about 3 s instead of waiting for the restart to end:
 # blocked when the fail mode is closed, never allowed then. A timeout (28),
@@ -1690,7 +1697,7 @@ defenseclaw_await_gateway() {
     _DC_TRANSPORT_STATUS="$status"
     case "$status" in
       0) return 0 ;;
-      7|52|55|56) ;;
+      7) ;;
       *) return "$status" ;;
     esac
     # An operator stop is not a restart: the fail mode applies at once. An
@@ -1752,29 +1759,44 @@ defenseclaw_api_listener_unproven() {
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
   # The second and third arguments (tests only) replace /proc/net and lsof.
   local port="${1##*:}" host="${1%:*}" net="${2:-/proc/net}" lsof="${3:-/usr/sbin/lsof}"
-  local uid="${EUID:-}" hex="" table="" owner="" own=""
-  local _sl="" addr="" _rem="" st="" _q="" _t="" _r="" u="" _rest=""
+  local uid="${EUID:-}" result="" table="" awk_bin=/usr/bin/awk
+  local -a tables=()
   case "$port" in ''|*[!0-9]*) return 0 ;; esac
   [ -n "$uid" ] || return 0
   if [ -r "${net}/tcp" ]; then
-    hex="$(printf '%04X' "$port")"
-    for table in "${net}/tcp" "${net}/tcp6"; do
-      [ -r "$table" ] || continue
-      while read -r _sl addr _rem st _q _t _r u _rest; do
-        [ "$st" = "0A" ] || continue
-        case "$addr" in
-          # 127.0.0.0/8, 0.0.0.0, ::, ::1 and v4-mapped loopback, kernel byte order.
-          ??????7F:"$hex"|00000000:"$hex"|00000000000000000000000000000000:"$hex"|00000000000000000000000001000000:"$hex"|0000000000000000FFFF0000??????7F:"$hex") ;;
-          *) continue ;;
-        esac
-        if [ "$u" = "$uid" ]; then own=1; else owner="$u"; fi
-      done < "$table"
+    # A busy gateway leaves thousands of TIME_WAIT rows. Parse the kernel
+    # table in one native process, not a Bash read loop on every hook call.
+    # A missing/failed parser remains an unverified listener.
+    [ -x "$awk_bin" ] || awk_bin=/bin/awk
+    [ -x "$awk_bin" ] || return 0
+    tables=("${net}/tcp")
+    for table in "${net}/tcp6"; do
+      [ ! -r "$table" ] || tables+=("$table")
     done
-    [ -n "$owner" ] && return 0
-    [ -n "$own" ] && return 1
-    # No listener: the caller may cold-start this account's gateway, then
-    # retry ownership proof before it sends. Never send on this status.
-    return 2
+    result="$("$awk_bin" -v port="$port" -v account="$uid" '
+      BEGIN { hex=sprintf("%04X", port) }
+      $4=="0A" {
+        split($2, endpoint, ":")
+        address=endpoint[1]
+        if (endpoint[2]!=hex) next
+        if (length(address)==8) {
+          if (address!="00000000" && substr(address,7,2)!="7F") next
+        } else if (length(address)==32) {
+          if (address!="00000000000000000000000000000000" &&
+              address!="00000000000000000000000001000000" &&
+              !(substr(address,1,24)=="0000000000000000FFFF0000" && substr(address,31,2)=="7F")) next
+        } else next
+        if ($8==account) own=1
+        else foreign=1
+      }
+      END { if (foreign) print "foreign"; else if (own) print "own"; else print "free" }
+    ' "${tables[@]}")" || return 0
+    case "$result" in
+      foreign) return 0 ;;
+      own) return 1 ;;
+      free) return 2 ;; # Proven free port; cold start may run.
+      *) return 0 ;;
+    esac
   fi
   if [ -x "$lsof" ]; then
     # A socket this account owns on another address is not proof for the
@@ -2697,8 +2719,8 @@ defenseclaw_gateway_post() {
   local _dc_post_url="$1" _dc_post_max_time="$2" _dc_post_body="$3"
   local _dc_post_auth="" _dc_post_arg _dc_listener_status=0
   local _dc_native_post=0 _dc_post_bin _dc_post_prefix _dc_post_path
-  local _dc_post_headers="" _dc_post_sep="" _dc_header_name _dc_header_value _dc_post_output
-  local -a _dc_post_args _dc_post_auth_args
+  local _dc_header_name _dc_header_value _dc_post_output _dc_post_status
+  local -a _dc_post_args _dc_post_auth_args _dc_frame_headers
   # This probe still distinguishes a free port for cold start. The native
   # helper proves the actual connection again before it sends any data.
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
@@ -2754,22 +2776,33 @@ defenseclaw_gateway_post() {
     if [ "$_dc_post_max_time" -le 4 ] && [ "$_dc_post_remaining" -gt 2 ]; then
       _dc_post_remaining=$((_dc_post_remaining - 1))
     fi
-    # harden_env moved HOME to a private scratch directory. Use the account
-    # home it retained before that move, then verify every path component.
-    local _dc_agent_home="${DEFENSECLAW_AGENT_HOME:-}"
-    case "$_dc_agent_home" in /*) ;; *) return 1 ;; esac
+    # The resolved installed hook path, not the agent's inherited HOME,
+    # identifies the account installation allowed to receive the bearer.
+    case "${HOOK_DIR:-}" in /*) ;; *) return 1 ;; esac
+    local _dc_agent_home="" _dc_hook_data=""
+    _dc_hook_data="$(cd -P -- "${HOOK_DIR}/.." 2>/dev/null && pwd)" || return 1
+    case "$_dc_hook_data" in
+      */.defenseclaw) _dc_agent_home="${_dc_hook_data%/.defenseclaw}" ;;
+      *) _dc_agent_home="$(defenseclaw_outage_account_home "$_dc_hook_data")" || return 1 ;;
+    esac
+    [ -n "$_dc_agent_home" ] || return 1
+    _dc_agent_home="$(cd -P -- "$_dc_agent_home" 2>/dev/null && pwd)" || return 1
     _dc_post_bin="${_dc_agent_home}/.local/bin/defenseclaw-gateway"
-    # This binary receives the bearer on stdin. A stale PID record, PATH
-    # entry, writable path, or symlink cannot select a different executable.
-    local _dc_secure_path _dc_secure_mode
+    # No PID record, PATH entry, symlink or group-writable component may
+    # select a different executable. One stat call checks all four modes.
+    local _dc_secure_path _dc_secure_mode _dc_secure_modes _dc_secure_count=0
     for _dc_secure_path in "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin"; do
       [ -d "$_dc_secure_path" ] && [ -O "$_dc_secure_path" ] && [ ! -L "$_dc_secure_path" ] || return 1
-      _dc_secure_mode="$(stat -c %a "$_dc_secure_path" 2>/dev/null || stat -f %Lp "$_dc_secure_path" 2>/dev/null)" || return 1
-      [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
     done
     [ -f "$_dc_post_bin" ] && [ -x "$_dc_post_bin" ] && [ -O "$_dc_post_bin" ] && [ ! -L "$_dc_post_bin" ] || return 1
-    _dc_secure_mode="$(stat -c %a "$_dc_post_bin" 2>/dev/null || stat -f %Lp "$_dc_post_bin" 2>/dev/null)" || return 1
-    [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+    _dc_secure_modes="$(stat -c %a "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin" "$_dc_post_bin" 2>/dev/null)" ||
+      _dc_secure_modes="$(stat -f %Lp "$_dc_agent_home" "$_dc_agent_home/.local" "$_dc_agent_home/.local/bin" "$_dc_post_bin" 2>/dev/null)" || return 1
+    while IFS= read -r _dc_secure_mode; do
+      case "$_dc_secure_mode" in ""|*[!0-7]*) return 1 ;; esac
+      [ $((8#${_dc_secure_mode} & 8#022)) -eq 0 ] || return 1
+      _dc_secure_count=$((_dc_secure_count + 1))
+    done <<< "$_dc_secure_modes"
+    [ "$_dc_secure_count" -eq 4 ] || return 1
     _dc_post_prefix="http://${API_ADDR}"
     _dc_post_path="${_dc_post_url:${#_dc_post_prefix}}"
     set -- "${_dc_post_args[@]+"${_dc_post_args[@]}"}"
@@ -2786,31 +2819,40 @@ defenseclaw_gateway_post() {
       _dc_header_value="${_dc_header_value# }"
       case "$_dc_header_name" in ""|*[!A-Za-z0-9-]*) return 1 ;; esac
       case "$_dc_header_value" in *$'\n'*|*$'\r'*) return 1 ;; esac
-      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"$(defenseclaw_json_escape "$_dc_header_name")\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
-      _dc_post_sep=,
+      _dc_frame_headers+=("$_dc_header_name" "$_dc_header_value")
     done
     if [ -n "$_dc_post_auth" ]; then
       _dc_header_value="${_dc_post_auth#*:}"
       _dc_header_value="${_dc_header_value# }"
-      _dc_post_headers="${_dc_post_headers}${_dc_post_sep}\"Authorization\":\"$(defenseclaw_json_escape "$_dc_header_value")\""
+      _dc_frame_headers+=("Authorization" "$_dc_header_value")
     fi
+    _dc_post_status=0
     _dc_post_output="$(
-      printf '{"path":"%s","headers":{%s},"body":"%s"}' \
-        "$(defenseclaw_json_escape "$_dc_post_path")" "$_dc_post_headers" "$(defenseclaw_json_escape "$_dc_post_body")" |
+      {
+        # NUL cannot occur in shell variables. The last field is the body;
+        # neither it nor the bearer is placed on argv or in the environment.
+        printf '%s\0' "$_dc_post_path" "$((${#_dc_frame_headers[@]} / 2))" "${_dc_frame_headers[@]}"
+        printf '%s' "$_dc_post_body"
+      } |
         (
           if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
             ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
           fi
-          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
+          exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output --framed-input
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"
-    )" || {
+    )" || _dc_post_status=$?
+    if [ "$_dc_post_status" -eq 7 ]; then
+      # A refused connect is retryable only while the port is still free.
+      # A listener present after the attempt could be a different peer;
+      # do not resend the credential to it during cold start. Keep every
+      # other helper classification, especially a partial answer, intact.
       _dc_listener_status=0
       defenseclaw_api_listener_unproven "$API_ADDR" || _dc_listener_status=$?
-      [ "$_dc_listener_status" -eq 2 ] && return 7
-      return 1
-    }
+      [ "$_dc_listener_status" -eq 2 ] || return 1
+    fi
+    [ "$_dc_post_status" -eq 0 ] || return "$_dc_post_status"
     printf '%s' "$_dc_post_output"
     return 0
   fi

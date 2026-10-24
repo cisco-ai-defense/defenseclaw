@@ -992,6 +992,24 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 		}
 	}
 
+	async function warnUncheckedThread(
+		threadID: string,
+		message: string,
+		ctx: { thread: { id: string; append(messages: { type: "user-message"; content: string }[]): Promise<void> }; ui: { notify(message: string): Promise<void> } },
+	) {
+		if (!message) return
+		try {
+			// A toast follows the foreground UI and disappears. Append to the
+			// event's thread so a background call keeps its own visible warning.
+			if (ctx.thread.id !== threadID) throw new Error("thread mismatch")
+			await ctx.thread.append([{ type: "user-message", content: message }])
+		} catch {
+			// Preserve the allow decision and surface the warning if Amp cannot
+			// append while this thread is processing the tool event.
+			try { await ctx.ui.notify(message) } catch { /* audit row still records the bypass */ }
+		}
+	}
+
 	amp.on("session.start", async (event, ctx) => {
 		const threadID = stringID(event.thread.id)
 		// SessionStartEvent reports only thread.id. Amp may emit it again when
@@ -1088,7 +1106,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			await notifyIfForeground(threadID, verdict.additional_context || verdict.reason || "DefenseClaw flagged this tool call.")
 			return { action: "allow" }
 		default:
-			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
+			if (verdict.outage_notice) await warnUncheckedThread(threadID, verdict.outage_notice, ctx)
 			return { action: "allow" }
 		}
 	})
@@ -1139,7 +1157,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			// A result kept because this account's gateway is down carries the
 			// same one warning as the call. Returning void preserves Amp's
 			// original status and output.
-			if (verdict.outage_notice) await notifyIfForeground(threadID, verdict.outage_notice)
+			if (verdict.outage_notice) await warnUncheckedThread(threadID, verdict.outage_notice, ctx)
 			return
 		}
 	})

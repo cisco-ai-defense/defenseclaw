@@ -4,7 +4,6 @@
 package connector
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,7 +40,9 @@ func TestHookAPIListenerForeignNamesAnotherAccountsListener(t *testing.T) {
 	}{
 		{name: "another account on 127.0.0.1", tcp: row("0100007F", own+4242), want: "foreign"},
 		{name: "another account on ::1", tcp6: row("00000000000000000000000001000000", own+4242), want: "foreign"},
+		{name: "another account on IPv6 mapped loopback", tcp6: row("0000000000000000FFFF00000100007F", own+4242), want: "foreign"},
 		{name: "this account", tcp: row("0100007F", own), want: "send"},
+		{name: "foreign owner takes precedence over own", tcp: row("0100007F", own) + row("0100007F", own+4242), want: "foreign"},
 		{name: "another address only", tcp: row("0500000A", own+4242), want: "free"},
 		{name: "free port", want: "free"},
 		{name: "own gateway running but listener foreign", tcp: row("0100007F", own+4242), running: true, want: "foreign"},
@@ -168,6 +169,10 @@ func TestHostHookDoesNotSendAfterASeparatePeerCheck(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	binary := filepath.Join(binDir, "defenseclaw-gateway")
 	marker := filepath.Join(dir, "native-args")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$DC_NATIVE_MARKER\"\nexit 1\n"), 0o700); err != nil {
@@ -175,11 +180,11 @@ func TestHostHookDoesNotSendAfterASeparatePeerCheck(t *testing.T) {
 	}
 	// The earlier listener check passes, then that listener vanishes. The
 	// native post refuses its newly connected peer; curl must never run.
-	script := `set -euo pipefail; . "$1"; API_ADDR=127.0.0.1:18960
+	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
 defenseclaw_api_listener_unproven() { return 1; }
 curl() { echo leaked; }
 if defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 'secret payload' -H 'Authorization: Bearer secret'; then echo sent; else echo blocked; fi`
-	cmd := exec.Command("bash", "-c", script, "bash", helper)
+	cmd := exec.Command("bash", "-c", script, "bash", helper, hookDir)
 	cmd.Env = append(os.Environ(), "HOME="+home, "DEFENSECLAW_AGENT_HOME="+home, "DC_NATIVE_MARKER="+marker)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -189,8 +194,8 @@ if defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 'secret pay
 		t.Fatalf("separate preflight leaked through curl: %q", got)
 	}
 	if args, err := os.ReadFile(marker); err != nil ||
-		(string(args) != "hook-post --api-addr 127.0.0.1:18960 --max-time 1 --curl-output\n" &&
-			string(args) != "hook-post --api-addr 127.0.0.1:18960 --max-time 2 --curl-output\n") {
+		(string(args) != "hook-post --api-addr 127.0.0.1:18960 --max-time 1 --curl-output --framed-input\n" &&
+			string(args) != "hook-post --api-addr 127.0.0.1:18960 --max-time 2 --curl-output --framed-input\n") {
 		t.Fatalf("native post was not invoked without credentials on argv: %q, %v", args, err)
 	}
 }
@@ -213,17 +218,21 @@ func TestHostHookNativePostCarriesHeadersAndBodyOnStdin(t *testing.T) {
 	if err := os.MkdirAll(binDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	inputPath := filepath.Join(dir, "native-input.json")
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	inputPath := filepath.Join(dir, "native-input.frame")
 	binary := filepath.Join(binDir, "defenseclaw-gateway")
 	if err := os.WriteFile(binary, []byte("#!/bin/sh\ncat > \"$DC_NATIVE_INPUT\"\nprintf '{\"action\":\"allow\"}\\n200'\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	script := `set -euo pipefail; . "$1"; API_ADDR=127.0.0.1:18960
+	script := `set -euo pipefail; . "$1"; HOOK_DIR="$2"; API_ADDR=127.0.0.1:18960
 defenseclaw_api_listener_unproven() { return 1; }
 curl() { echo leaked; }
 defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{"private":"tool event"}' \
   -H 'Content-Type: application/json' -H 'Authorization: Bearer private-token'`
-	cmd := exec.Command("bash", "-c", script, "bash", helper)
+	cmd := exec.Command("bash", "-c", script, "bash", helper, hookDir)
 	cmd.Env = append(os.Environ(), "HOME="+home, "DEFENSECLAW_AGENT_HOME="+home, "DC_NATIVE_INPUT="+inputPath)
 	out, err := cmd.CombinedOutput()
 	if err != nil || string(out) != "{\"action\":\"allow\"}\n200" {
@@ -233,14 +242,12 @@ defenseclaw_gateway_post "http://${API_ADDR}/api/v1/codex/hook" 2 '{"private":"t
 	if err != nil {
 		t.Fatal(err)
 	}
-	var input struct {
-		Path    string            `json:"path"`
-		Headers map[string]string `json:"headers"`
-		Body    string            `json:"body"`
-	}
-	if err := json.Unmarshal(data, &input); err != nil || input.Path != "/api/v1/codex/hook" ||
-		input.Headers["Authorization"] != "Bearer private-token" || input.Body != `{"private":"tool event"}` {
-		t.Fatalf("native hook stdin = %+v, parse error=%v", input, err)
+	fields := strings.Split(string(data), "\x00")
+	if len(fields) != 7 || fields[0] != "/api/v1/codex/hook" || fields[1] != "2" ||
+		fields[2] != "Content-Type" || fields[3] != "application/json" ||
+		fields[4] != "Authorization" || fields[5] != "Bearer private-token" ||
+		fields[6] != `{"private":"tool event"}` {
+		t.Fatalf("native hook frame = %q", fields)
 	}
 }
 

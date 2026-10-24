@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // procSelfNet holds this network namespace's socket tables. /proc/net is
@@ -23,14 +24,24 @@ import (
 const procSelfNet = "/proc/self/net"
 
 func verifyPerUserConnectedTuple(client, server *net.TCPAddr) error {
-	uid, err := findConnectedTCPUID(procSelfNet, client, server)
-	if err != nil {
-		return err
+	// On Linux the established server row can briefly have UID 0 before the
+	// listening process accepts it. Wait only for that provisional owner on
+	// this same connected tuple; never send a byte until the account matches.
+	accountUID := os.Geteuid()
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		uid, err := findConnectedTCPUID(procSelfNet, client, server)
+		if err != nil {
+			return err
+		}
+		if uid == accountUID {
+			return nil
+		}
+		if uid != 0 || !time.Now().Before(deadline) {
+			return errors.New("connected gateway socket belongs to another account")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	if uid != os.Geteuid() {
-		return errors.New("connected gateway socket belongs to another account")
-	}
-	return nil
 }
 
 // findConnectedTCPUID reads the kernel's accepted server socket, identified

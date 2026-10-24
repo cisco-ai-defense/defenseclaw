@@ -45,11 +45,98 @@ const amp = {
   on: (event, handler) => { handlers.set(event, handler); return { unsubscribe() {} }; },
 };
 (await import(pathToFileURL(process.argv[1]).href)).default(amp);
-const ctx = { thread: { agent: async () => ({ definition: { kind: "builtin-agent", mode: "medium" } }) }, ui: { confirm: async () => true, notify: async (message) => { notices.push(message); } } };
+const ctx = { thread: { id: "S", agent: async () => ({ definition: { kind: "builtin-agent", mode: "medium" } }),
+  append: async messages => { notices.push(...messages.map(message => message.content)); } },
+  ui: { confirm: async () => true, notify: async (message) => { notices.push(message); } } };
 const call = await handlers.get("tool.call")({ thread: { id: "S" }, toolUseID: "C", tool: "Bash", input: { command: "echo marker" } }, ctx);
 const verdict = call.action === "allow" ? "allow" : "block:" + (call.message || call.action);
 console.log(JSON.stringify({ verdict, notices }));
 `
+
+const ampBackgroundOutageHarness = `
+import { pathToFileURL } from "node:url";
+globalThis.Bun = { file: () => ({ slice: () => ({ text: async () => "a".repeat(64) + "\n" }) }) };
+const handlers = new Map();
+const notices = [];
+const appended = [];
+const amp = {
+  system: { workspaceRoot: "", executor: { kind: "local" }, user: {} },
+  helpers: { filePathFromURI: value => value, isPluginUINotAvailableError: () => false },
+  activeThread: { current: { id: "OTHER" } },
+  ui: { notify: async message => { notices.push(message); } },
+  on: (event, handler) => { handlers.set(event, handler); return { unsubscribe() {} }; },
+};
+(await import(pathToFileURL(process.argv[1]).href)).default(amp);
+const ctx = {
+  thread: { id: "S", agent: async () => ({ definition: { kind: "builtin-agent", mode: "medium" } }),
+    append: async messages => { appended.push(...messages); } },
+  ui: { confirm: async () => true, notify: async message => { notices.push(message); } },
+};
+const event = { thread: { id: "S" }, toolUseID: "C", tool: "Bash", input: { command: "echo marker" } };
+const call = await handlers.get("tool.call")(event, ctx);
+const result = await handlers.get("tool.result")({ ...event, output: "marker", status: "success", error: "" }, ctx);
+console.log(JSON.stringify({ call, result: result ?? null, notices, appended }));
+`
+
+func TestAmpBackgroundOutageWarnsAffectedThreadForCallAndResult(t *testing.T) {
+	nodeForTest(t)
+	home := t.TempDir()
+	binDir := filepath.Join(home, ".local", "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fake := "#!/bin/sh\nif [ \"$1\" = hook-post ]; then exit 7; fi\nif [ \"$1\" = hook-outage-mode ]; then printf 'open\\n'; exit 0; fi\nexit 1\n"
+	if err := os.WriteFile(filepath.Join(binDir, "defenseclaw-gateway"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dataDir := filepath.Join(home, ".defenseclaw")
+	writeOutageTierConfig(t, dataDir, outageDefaultTierConfig)
+	token := filepath.Join(dataDir, "hooks", ".hook-amp.token")
+	if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(token, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	body := renderPluginAssetForTest(t, "amp-plugin.ts", templateData{APIAddr: freeLoopbackAddrForOutageTest(t),
+		TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
+	path := filepath.Join(home, "defenseclaw.mts")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", ampBackgroundOutageHarness, path)
+	cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	var result struct {
+		Call struct {
+			Action string `json:"action"`
+		} `json:"call"`
+		Result   any      `json:"result"`
+		Notices  []string `json:"notices"`
+		Appended []struct {
+			Type    string `json:"type"`
+			Content string `json:"content"`
+		} `json:"appended"`
+	}
+	if err := json.Unmarshal(out, &result); err != nil {
+		t.Fatalf("harness output %q: %v", out, err)
+	}
+	if result.Call.Action != "allow" || result.Result != nil || len(result.Notices) != 0 || len(result.Appended) != 2 {
+		t.Fatalf("unchecked background call/result lacked two durable warnings: %+v", result)
+	}
+	for _, message := range result.Appended {
+		if message.Type != "user-message" || !strings.Contains(message.Content, "fail mode open for an outage") ||
+			!strings.Contains(message.Content, "defenseclaw-gateway start") {
+			t.Fatalf("background warning missing cause or recovery step: %+v", message)
+		}
+	}
+	if rows := hookFailureRecords(t, dataDir); len(rows) != 2 {
+		t.Fatalf("background call/result audit rows = %+v, want two", rows)
+	}
+}
 
 // oss-outage-open for the in-agent plugins: a per-user OpenCode or Amp plugin
 // in the default or permissive tier lets a tool call run with one warning and
