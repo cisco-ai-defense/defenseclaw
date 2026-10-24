@@ -789,13 +789,21 @@ function Set-WrapperSecret {
 # confirmed bundle signs only the value stored before. So that value (or
 # that none was stored) is journaled first, in an administrator-only folder,
 # and put back when the lifecycle fails, or at the start of the next ensure
-# when this run stopped before it settled. The CLI decides each put-back:
-# secret set stores only a value the confirmed bundle signs, and secret
-# remove refuses a credential the installed config uses. Either refusal means
-# the delivered bundle was confirmed after all, so its value stays. A bundle
-# signed before 1.0.4 signs only the name (secret_ref_unbound), which proves
-# nothing: the CLI refuses a rotation from it that would replace a stored
-# value, and a put-back refused that way stays journaled. The journal is used
+# when this run stopped before it settled. Each entry also names the bundle
+# confirmed before the rotation (bundle status), and the rotation runs only
+# while that bundle is confirmed (--if-confirmed). The put-back passes it
+# too (--undo-rotation): the CLI puts the value back, or removes a credential
+# the rotation added even though the old config references it, only while
+# that bundle is still confirmed and does not sign the value stored now.
+# Only its refusal rotation_confirmed proves the rotation committed (a
+# bundle confirmed since uses the stored value), so only then does the new
+# value stay. Any other refusal (credential_in_use, secret_ref_mismatch,
+# secret_ref_unbound) proves nothing: the entry stays and is reported, and
+# no other rotation runs while it does. A settled entry is first renamed
+# .retired in one step, then overwritten and deleted, so an interrupted
+# cleanup never leaves a bytes-gone entry a later run could put back. A
+# bundle signed before 1.0.4 signs only the name (secret_ref_unbound): the
+# CLI refuses a rotation from it that would replace a stored value. The journal is used
 # only after its folders and entries pass the administrator-only check
 # (Initialize-WrapperRotationJournal, Test-WrapperJournalEntry) and while
 # this run holds rotation.lock (Enter-WrapperRotationLock), so a concurrent
@@ -889,21 +897,49 @@ function Enter-WrapperRotationLock {
     }
 }
 
-function Save-WrapperSecretJournal {
-    # Journals credential $Name as it is stored now, before a rotation
-    # replaces it. An entry an earlier run left is older, so it is kept: it
-    # holds the value from before that run's rotation.
-    param([Parameter(Mandatory = $true)][string]$Name)
-    $journal = Initialize-WrapperRotationJournal -Create
-    $entry = Join-Path $journal $Name
-    foreach ($existing in @($entry, "$entry.absent")) {
-        $item = Get-Item -LiteralPath $existing -Force -ErrorAction SilentlyContinue
-        if ($null -eq $item) { continue }
-        if (-not (Test-WrapperJournalEntry -Item $item)) {
-            throw "the credential journal entry $existing is not a regular administrator-only file"
-        }
-        return
+function Get-WrapperConfirmedBundle {
+    # The manifest SHA-256 of the confirmed policy bundle (bundle status
+    # --json), or 'none' when no bundle is confirmed: what a journal entry
+    # records as the bundle confirmed before its rotation.
+    param([Parameter(Mandatory = $true)][string]$Cli)
+    $run = Invoke-DefenseClawNative -FilePath $Cli -ArgumentList @('enterprise', 'bundle', 'status', '--json')
+    if ($run.ExitCode -ne 0) {
+        throw "bundle status failed (exit $($run.ExitCode) $(Get-WrapperSecretErrorCode -Run $run)), so the confirmed bundle is unknown"
     }
+    $document = ([string]$run.StdOut).Trim() | ConvertFrom-Json -ErrorAction Stop
+    $current = $document.PSObject.Properties['current']
+    if ($document.ok -ne $true -or $null -eq $current) { throw 'bundle status did not report the confirmed bundle' }
+    if ($null -eq $current.Value) { return 'none' }
+    $digest = $current.Value.PSObject.Properties['manifest_sha256']
+    if ($null -eq $digest -or [string]$digest.Value -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'bundle status reported no valid manifest digest for the confirmed bundle'
+    }
+    return [string]$digest.Value
+}
+
+function Get-WrapperJournalEntryName {
+    # The credential and the bundle confirmed before its rotation, from a
+    # journal entry name (<name>@<manifest SHA-256 | none>[.absent]), or
+    # $null for a name this wrapper does not write.
+    param([Parameter(Mandatory = $true)][string]$FileName)
+    if ($FileName -cnotmatch '^(?<name>[a-z0-9][a-z0-9-]{0,62})@(?<confirmed>[0-9a-f]{64}|none)(?<absent>\.absent)?$') { return $null }
+    return [pscustomobject]@{ Name = $Matches.name; Confirmed = $Matches.confirmed; Absent = $Matches.ContainsKey('absent') }
+}
+
+function Save-WrapperSecretJournal {
+    # Journals credential $Name as it is stored now, with $Confirmed (the
+    # bundle confirmed now), before a rotation replaces it. Refused while
+    # the journal holds anything: an entry an earlier run could not settle
+    # or one this wrapper did not write must be resolved first, so a second
+    # rotation never runs over an entry it could not put back.
+    param([Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Confirmed)
+    if ($Confirmed -cnotmatch '^([0-9a-f]{64}|none)$') { throw "unexpected confirmed bundle '$Confirmed'" }
+    $journal = Initialize-WrapperRotationJournal -Create
+    $left = @(Get-ChildItem -LiteralPath $journal -Force)
+    if ($left.Count -gt 0) {
+        throw "an earlier credential rotation is not settled ($(@($left | ForEach-Object { $_.Name }) -join ', ') in $journal): each ensure tries to settle it first and logs why it could not; no credential is rotated until it is"
+    }
+    $entry = Join-Path $journal ($Name + '@' + $Confirmed)
     $stored = Get-WrapperStoredSecretPath -Name $Name
     $item = Get-Item -LiteralPath $stored -Force -ErrorAction SilentlyContinue
     $target = "$entry.absent"
@@ -919,7 +955,7 @@ function Save-WrapperSecretJournal {
     }
     $partial = "$entry.partial"
     try {
-        $stream = [System.IO.FileStream]::new($partial, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write,
+        $stream = [System.IO.FileStream]::new($partial, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write,
             [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::WriteThrough)
         try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
     } finally { [Array]::Clear($bytes, 0, $bytes.Length) }
@@ -927,20 +963,36 @@ function Save-WrapperSecretJournal {
 }
 
 function Remove-WrapperJournalEntry {
+    # Retires a settled entry: renamed .retired first (one step, so no later
+    # run reads it as a recovery entry), then overwritten and deleted. A run
+    # stopped in between leaves a .retired or .partial file, which the next
+    # settle only deletes.
     param([Parameter(Mandatory = $true)][string]$Path)
     $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
     if ($null -eq $item) { return }
+    $retired = $Path
+    if (-not ($Path.EndsWith('.retired') -or $Path.EndsWith('.partial'))) {
+        $retired = "$Path.retired"
+        $existing = Get-Item -LiteralPath $retired -Force -ErrorAction SilentlyContinue
+        if ($null -ne $existing) {
+            if (-not (Test-WrapperJournalEntry -Item $existing)) { throw "$retired is not a regular administrator-only file" }
+            Remove-WrapperJournalEntry -Path $retired
+        }
+        [System.IO.File]::Move($Path, $retired)
+    }
     # Overwrite a journaled credential before deleting it.
-    if ($item.Length -gt 0) { [System.IO.File]::WriteAllBytes($Path, [byte[]]::new($item.Length)) }
-    Remove-Item -LiteralPath $Path -Force
+    if ($item.Length -gt 0) { [System.IO.File]::WriteAllBytes($retired, [byte[]]::new($item.Length)) }
+    Remove-Item -LiteralPath $retired -Force
 }
 
 function Complete-WrapperSecretJournal {
     # Settles the journal: -Restore puts each journaled credential back with
-    # $Cli, and without it (the lifecycle confirmed the bundle) the entries
-    # go. With no $Cli (nothing is installed any more) there is nothing to
-    # put back. -Name limits it to one credential. Returns what could not be
-    # put back; those entries stay for the next ensure.
+    # $Cli (secret set|remove --undo-rotation <bundle confirmed before the
+    # rotation>), and without it (the lifecycle confirmed the bundle) the
+    # entries go. With no $Cli (nothing is installed any more) there is
+    # nothing to put back. -Name limits it to one credential. Retired
+    # entries and unfinished journal writes are only deleted. Returns what
+    # could not be settled; those entries stay for the next ensure.
     param([string]$Cli = '', [string]$Name = '', [switch]$Restore)
     try {
         $journal = Initialize-WrapperRotationJournal
@@ -955,42 +1007,50 @@ function Complete-WrapperSecretJournal {
             $problems += "the credential journal entry $($file.FullName) is not a regular administrator-only file, so it was not used and was left as it is"
             continue
         }
-        if ($file.Name.EndsWith('.partial')) {
-            # A journal write that never finished: the rotation never ran.
-            Remove-WrapperJournalEntry -Path $file.FullName
+        if ($file.Name.EndsWith('.retired') -or $file.Name.EndsWith('.partial')) {
+            # A settled entry whose cleanup stopped, or a journal write that
+            # never finished (the rotation never ran): never put back.
+            try { Remove-WrapperJournalEntry -Path $file.FullName } catch {
+                $problems += "removing the settled credential journal entry $($file.FullName) failed: $($_.Exception.Message)"
+            }
             continue
         }
-        $absent = $file.Name.EndsWith('.absent')
-        $entryName = if ($absent) { $file.Name.Substring(0, $file.Name.Length - 7) } else { $file.Name }
-        if ($entryName -cnotmatch '^[a-z0-9][a-z0-9-]{0,62}$' -or ($Name -and $entryName -ne $Name)) { continue }
+        $entry = Get-WrapperJournalEntryName -FileName $file.Name
+        if ($null -eq $entry) {
+            $problems += "the credential journal entry $($file.FullName) is not one this wrapper writes, so it was not used and was left as it is; check the credential, then delete it"
+            continue
+        }
+        if ($Name -and $entry.Name -ne $Name) { continue }
         if ($Restore -and $Cli) {
-            $arguments = @('enterprise', 'secret', 'set', '--name', $entryName, '--from-stdin', '--json')
+            $arguments = @('enterprise', 'secret', 'set', '--name', $entry.Name, '--from-stdin', '--json', '--undo-rotation', $entry.Confirmed)
             $standardInput = $file.FullName
-            if ($absent) {
-                $arguments = @('enterprise', 'secret', 'remove', '--name', $entryName, '--json')
+            if ($entry.Absent) {
+                $arguments = @('enterprise', 'secret', 'remove', '--name', $entry.Name, '--json', '--undo-rotation', $entry.Confirmed)
                 $standardInput = ''
             }
             try {
                 $run = Invoke-DefenseClawNative -FilePath $Cli -StandardInputPath $standardInput -ArgumentList $arguments
             } catch {
-                $problems += "putting back credential '$entryName' failed: $($_.Exception.Message); the next ensure tries again"
+                $problems += "putting back credential '$($entry.Name)' failed: $($_.Exception.Message); the next ensure tries again"
                 continue
             }
             if ($run.ExitCode -eq 0) {
-                Write-WrapperLog -Message "put back credential ${entryName}: the lifecycle did not confirm the bundle that signs its new value"
+                Write-WrapperLog -Message "put back credential $($entry.Name): the lifecycle did not confirm the bundle that signs its new value"
             } else {
                 $code = Get-WrapperSecretErrorCode -Run $run
-                # A confirmed bundle that signs only the credential's name
-                # (secret_ref_unbound) proves nothing about the delivered
-                # one: the entry stays and is reported.
-                if (@('secret_ref_mismatch', 'credential_in_use', 'not_installed') -notcontains $code) {
-                    $problems += "putting back credential '$entryName' failed (exit $($run.ExitCode) $code); the next ensure tries again"
+                # Only rotation_confirmed proves the rotation committed (and
+                # not_installed that nothing is left to put back); any other
+                # refusal keeps the entry.
+                if (@('rotation_confirmed', 'not_installed') -notcontains $code) {
+                    $problems += "putting back credential '$($entry.Name)' failed (exit $($run.ExitCode) $code); the next ensure tries again"
                     continue
                 }
-                Write-WrapperLog -Message "kept credential ${entryName}: the confirmed bundle uses the delivered value ($code)"
+                Write-WrapperLog -Message "kept credential $($entry.Name): $code"
             }
         }
-        Remove-WrapperJournalEntry -Path $file.FullName
+        try { Remove-WrapperJournalEntry -Path $file.FullName } catch {
+            $problems += "retiring the credential journal entry $($file.FullName) failed: $($_.Exception.Message); the next ensure settles it again"
+        }
     }
     return @($problems)
 }
@@ -1065,15 +1125,16 @@ if ($secret -and $bundle -and -not $SetupPath) { $installedDeployment = Get-Defe
 if ($null -ne $installedDeployment -and (Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)) {
     try {
         [void](Enter-WrapperRotationLock -Create)
-        Save-WrapperSecretJournal -Name $SecretName
+        $confirmedBundle = Get-WrapperConfirmedBundle -Cli $installedDeployment.Cli
+        Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
     } catch {
         Exit-Wrapper $script:ExitFailure 'mdm_secret_failed' "journaling credential '$SecretName' before its rotation failed, so nothing was changed: $($_.Exception.Message)"
     }
-    $failure = Set-WrapperSecret -Extra @('--bundle', $bundle)
+    $failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)
     if ($null -ne $failure) {
         # These refusals come before anything is written; after any other
         # failure the new value may be stored, so the old one goes back.
-        if (@('secret_ref_mismatch', 'secret_ref_unbound', 'invalid_arguments', 'lifecycle_busy') -contains $failure.Code) {
+        if (@('secret_ref_mismatch', 'secret_ref_unbound', 'invalid_arguments', 'lifecycle_busy', 'confirmed_bundle_changed') -contains $failure.Code) {
             [void](Complete-WrapperSecretJournal -Name $SecretName)
         } else {
             Undo-WrapperSecretRotation -Cli $installedDeployment.Cli

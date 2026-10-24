@@ -263,6 +263,9 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 	if !managed.ValidCredentialName(opts.name) {
 		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, fmt.Errorf("--name %q must be lowercase letters, digits and dashes", opts.name))
 	}
+	if err := secretTransactionArguments(opts); err != nil {
+		return windowsSecretChange{}, secretFailed("invalid_arguments", windowsSecretExitInvalid, err)
+	}
 	if err := requireWindowsSecretDeployment(); err != nil {
 		return windowsSecretChange{}, err
 	}
@@ -307,7 +310,10 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		if err != nil {
 			return windowsSecretChange{}, err
 		}
-		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" {
+		// A put-back (--undo-rotation) removes what a failed rotation added
+		// to the config confirmed before it, which may reference the
+		// credential with no value stored (checkSecretTransaction decides).
+		if at := config.InstalledCredentialReference(layout.ConfigPath, installedConfig, layout.DataDir, opts.name); at != "" && opts.undoRotation == "" {
 			return windowsSecretChange{}, secretFailed("credential_in_use", windowsSecretExitFailure,
 				fmt.Errorf("the installed config still references credential %s at %s; remove that reference and apply the config first", opts.name, at))
 		}
@@ -332,6 +338,17 @@ func changeWindowsSecret(cmd *cobra.Command, action string, opts *enterpriseSecr
 		return windowsSecretChange{}, secretFailed(string(enterprisebundle.CodeStateInvalid), windowsSecretExitFailure, err)
 	}
 	defer store.close()
+	if opts.ifConfirmed != "" || opts.undoRotation != "" {
+		var stored []byte
+		entry, raw, readErr := store.openCredential(opts.name)
+		if readErr == nil {
+			_ = windows.CloseHandle(entry)
+			stored = raw
+		}
+		if err := checkSecretTransaction(opts.name, opts, stored, readErr == nil); err != nil {
+			return windowsSecretChange{}, secretFailed(secretBindingCode(err), windowsSecretExitFailure, err)
+		}
+	}
 	// A change this computer could not audit is not made: the spool must
 	// hold room for its change event before the credential is written or
 	// removed, until the event is written. A concurrent command cannot take

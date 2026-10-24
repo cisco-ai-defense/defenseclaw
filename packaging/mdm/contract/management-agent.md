@@ -997,6 +997,21 @@ off the device. The agent does not read `/health` itself (section 7); the
   `lifecycle_busy`, 1618) instead of settling an entry still in flight, and
   it uses an entry only after the folders and the entry pass the
   administrator-only check (an entry it did not write is left as it is).
+  Each entry also records the bundle confirmed before the rotation (the
+  manifest SHA-256 `bundle status --json` reports as `current`, or `none`).
+  The rotation passes it as `secret set --bundle B --if-confirmed <sha|none>`
+  (refused `confirmed_bundle_changed`, nothing written, once another bundle
+  is confirmed), and the put-back as `secret set|remove --undo-rotation
+  <sha|none>`: it runs only while that bundle is still confirmed and does
+  not sign the value stored now, and `remove` then also takes a credential
+  the old config references with no value stored. Its refusal
+  `rotation_confirmed` is the only proof the rotation committed (the
+  confirmed bundle uses the stored value), so only then does the new value
+  stay; any other refusal (`credential_in_use`, `secret_ref_mismatch`,
+  `secret_ref_unbound`) keeps the entry, is reported, and no other rotation
+  runs until it is settled. A settled entry is renamed `.retired` in one
+  step before it is overwritten and deleted, so a cleanup that stops never
+  leaves an entry a later run would put back.
   `defenseclaw-enterprise.sh` (Linux, macOS) keeps the
   old value in memory only and puts it back when the bundle apply or the
   ensure before it fails, the run stops early, or the MDM stops it (HUP, INT,

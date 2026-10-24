@@ -32,6 +32,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/processutil"
@@ -581,7 +582,8 @@ func windowsSecretFailureDoc(t *testing.T, out string, err error, action, code s
 		}
 	}
 	allowed := map[string]bool{"elevation_required": true, "invalid_arguments": true, "not_installed": true, "lifecycle_busy": true,
-		"credential_in_use": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true}
+		"credential_in_use": true, "change_failed": true, "restart_failed": true, "state_invalid": true, "not_supported_secure_client": true,
+		"rotation_confirmed": true, "confirmed_bundle_changed": true}
 	exit := commandExitCode(err)
 	if doc.SchemaVersion != 1 || doc.OK || doc.Action != action || doc.GatewayRestarted || len(doc.Errors) != 1 ||
 		doc.Errors[0].Code != code || !allowed[doc.Errors[0].Code] || doc.Errors[0].Message == "" || doc.ExitCode != exit {
@@ -1218,5 +1220,56 @@ func TestWindowsSecretSetStoresOnlyTheValueTheConfirmedBundleSigns(t *testing.T)
 	}
 	if !slices.Contains(host.events, "restart") {
 		t.Fatalf("events %v, want a gateway restart after the change", host.events)
+	}
+}
+
+// Loop round 2 (rc.7), finding 1: the MDM wrapper's put-back of a credential
+// a failed rotation added to a config that references it with no value
+// stored. secret remove refuses credential_in_use, which proves nothing
+// about the rotation. remove --undo-rotation with the bundle confirmed
+// before the rotation removes it; with another bundle confirmed since, it
+// refuses rotation_confirmed and leaves it. A rotation guarded by a bundle
+// that is no longer confirmed writes nothing.
+func TestWindowsSecretUndoRotationRemovesWhatAFailedRotationAdded(t *testing.T) {
+	dir := windowsSecretTestHarness(t)
+	layout, err := windowsSecretLayout()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := strings.Replace(standaloneGatewayCheckConfig, "enterprise:\n  profile: standalone\n",
+		"enterprise:\n  profile: standalone\n  inspection:\n    ai_defense:\n      credential: ai-defense-api-key\n", 1)
+	if cfg == standaloneGatewayCheckConfig {
+		t.Fatal("the test config has no enterprise profile line to extend")
+	}
+	if err := os.WriteFile(layout.ConfigPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := bundleStore
+	t.Cleanup(func() { bundleStore = previous })
+	store := enterprisebundle.NewStore(filepath.Join(t.TempDir(), "bundles"), filepath.Join(t.TempDir(), "lifecycle"))
+	bundleStore = func() (*enterprisebundle.Store, error) { return store, nil }
+	const name = "ai-defense-api-key"
+	other := strings.Repeat("a", 64)
+	out, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true, json: true, bundle: "unused.dcbundle", ifConfirmed: other}, "new-key\n")
+	windowsSecretFailureDoc(t, out, err, "set", "confirmed_bundle_changed")
+	if windowsSecretStored(dir, name) {
+		t.Fatal("a rotation guarded by a bundle no longer confirmed stored the value")
+	}
+	if _, err := runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: name, fromStdin: true}, "new-key\n"); err != nil {
+		t.Fatal(err)
+	}
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "credential_in_use")
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: other}, "")
+	windowsSecretFailureDoc(t, out, err, "remove", "rotation_confirmed")
+	if !windowsSecretStored(dir, name) {
+		t.Fatal("a refused put-back removed the credential")
+	}
+	out, err = runWindowsSecretCommand(t, "remove", enterpriseSecretOptions{name: name, json: true, undoRotation: "none"}, "")
+	if err != nil {
+		t.Fatalf("put-back: %v\n%s", err, out)
+	}
+	if windowsSecretStored(dir, name) {
+		t.Fatal("the put-back left the credential the failed rotation added")
 	}
 }

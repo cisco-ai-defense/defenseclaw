@@ -278,7 +278,7 @@ def test_unix_wrapper_stores_a_credential_with_the_bundle_it_delivers(tmp_path: 
 
 def test_windows_wrapper_stores_a_bundled_credential_before_the_apply() -> None:
     text = _text(MDM / "windows" / "Invoke-DefenseClawEnterprise.ps1")
-    first = text.index("Set-WrapperSecret -Extra @('--bundle', $bundle)")
+    first = text.index("Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)")
     guard = text.rindex("if ($secret -and $bundle -and -not $SetupPath", 0, first)
     # Only a CLI that reports secret_set_bundle (1.0.4 and later) gets --bundle.
     probe = text.rindex("(Test-WrapperSecretSetBundle -Cli $installedDeployment.Cli)", guard, first)
@@ -324,11 +324,17 @@ function Get-DefenseClawInstalledDeployment { return [pscustomobject]@{ Cli = 'd
 function Write-WrapperLog { param([string]$Message) }
 
 # The fake CLI: the confirmed bundle signs $script:confirmed (a value, or
-# $null for "references no credential"), the delivered bundle signs
-# $script:delivered, and the installed config uses the credential when
-# $script:inUse is set.
+# $null for "references no credential") and has manifest $script:digest
+# ('none': nothing confirmed); bundle status reports $script:statusDigest
+# when set. The delivered bundle signs $script:delivered, and the installed
+# config uses the credential when $script:inUse is set. --if-confirmed and
+# --undo-rotation follow checkSecretTransaction; an empty value is invalid.
 $script:calls = @()
 $script:failNext = ''
+$script:digestA = 'a' * 64
+$script:digestB = 'b' * 64
+$script:digest = 'none'
+$script:statusDigest = ''
 function Invoke-DefenseClawNative {
     param([string]$FilePath, [string[]]$ArgumentList = @(), [string]$StandardInputPath = '', [int]$TimeoutSeconds = 0)
     $line = $ArgumentList -join ' '
@@ -336,9 +342,22 @@ function Invoke-DefenseClawNative {
     $stored = Get-WrapperStoredSecretPath -Name $SecretName
     $refuse = { param($code) [pscustomobject]@{ ExitCode = 1603; StdErr = ''; StdOut = (@{ schema_version = 1; errors = @(@{ code = $code; message = $code }) } | ConvertTo-Json -Compress -Depth 4) } }
     if ($script:failNext) { $code = $script:failNext; $script:failNext = ''; return (& $refuse $code) }
+    $flag = { param($name) $at = [array]::IndexOf($ArgumentList, $name); if ($at -ge 0) { $ArgumentList[$at + 1] } else { '' } }
+    $current = if (Test-Path -LiteralPath $stored) { [System.IO.File]::ReadAllText($stored) } else { $null }
+    if ($ArgumentList[1] -eq 'bundle' -and $ArgumentList[2] -eq 'status') {
+        $reported = if ($script:statusDigest) { $script:statusDigest } else { $script:digest }
+        $document = if ($reported -eq 'none') { '{"ok":true,"current":null}' } else { "{""ok"":true,""current"":{""manifest_sha256"":""$reported""}}" }
+        return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = $document }
+    }
+    $ifConfirmed = & $flag '--if-confirmed'
+    if ($ifConfirmed -and $ifConfirmed -ne $script:digest) { return (& $refuse 'confirmed_bundle_changed') }
+    $undo = & $flag '--undo-rotation'
+    if ($undo -and ($undo -ne $script:digest -or ($null -ne $current -and $null -ne $script:confirmed -and $current -eq $script:confirmed))) {
+        return (& $refuse 'rotation_confirmed')
+    }
     if ($ArgumentList[2] -eq 'set') {
         $value = [System.IO.File]::ReadAllText($StandardInputPath)
-        $current = if (Test-Path -LiteralPath $stored) { [System.IO.File]::ReadAllText($stored) } else { $null }
+        if (-not $value) { return (& $refuse 'invalid_arguments') }
         if ($value -ne $current) {
             $signed = $null -eq $script:confirmed -or $value -eq $script:confirmed
             if (-not $signed -and $ArgumentList -contains '--bundle') { $signed = $value -eq $script:delivered }
@@ -349,7 +368,7 @@ function Invoke-DefenseClawNative {
         return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
     }
     if ($ArgumentList[2] -eq 'remove') {
-        if ($script:inUse) { return (& $refuse 'credential_in_use') }
+        if ($script:inUse -and -not $undo) { return (& $refuse 'credential_in_use') }
         Remove-Item -LiteralPath $stored -Force -ErrorAction SilentlyContinue
         return [pscustomobject]@{ ExitCode = 0; StdErr = ''; StdOut = '{"ok":true}' }
     }
@@ -367,6 +386,8 @@ function Reset-Device($Stored) {
         [System.IO.File]::WriteAllText($path, $Stored)
     }
     [System.IO.File]::WriteAllText($secret, 'new-key')
+    $script:delivered = 'new-key'
+    $script:statusDigest = ''
     $script:calls = @()
 }
 function Get-Stored {
@@ -375,59 +396,104 @@ function Get-Stored {
     return '<none>'
 }
 function Get-Journal { return @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force -File -ErrorAction SilentlyContinue).Count }
+# The old bundle (manifest A) is confirmed, signing $Signs.
+function Use-OldBundle($Signs) { $script:confirmed = $Signs; $script:digest = if ($null -eq $Signs -and -not $script:inUse) { 'none' } else { $script:digestA } }
+# The lifecycle confirmed the delivered bundle (manifest B).
+function Confirm-Delivered { $script:confirmed = $script:delivered; $script:digest = $script:digestB }
 # Rotate is the wrapper's step before the lifecycle; it returns the failure.
 function Rotate {
-    Save-WrapperSecretJournal -Name $SecretName
-    return (Set-WrapperSecret -Extra @('--bundle', $bundle))
+    $confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
+    Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
+    return (Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle))
 }
 $out = [ordered]@{}
 
 # 1. The lifecycle fails: the old value goes back, the journal goes.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:delivered = 'new-key'; $script:inUse = $true
+$script:inUse = $true; Reset-Device 'old-key'; Use-OldBundle 'old-key'
 $failure = Rotate
 $out.rotated = "$($null -eq $failure) $(Get-Stored)"
 Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
 $out.failed = "$(Get-Stored) $(Get-Journal)"
 
 # 2. The lifecycle succeeds: the new value stays, the journal goes, no put-back.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
 [void](Rotate)
-$script:confirmed = 'new-key'
+Confirm-Delivered
 [void](Complete-WrapperSecretJournal -Name $SecretName)
 $out.succeeded = "$(Get-Stored) $(Get-Journal) $(@($script:calls).Count)"
 
 # 3. The run stops after the rotation: the next ensure puts the old value back.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
 [void](Rotate)
 $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
 $out.interrupted = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
 
 # 4. The run stops after the lifecycle confirmed the new bundle: the CLI
-#    refuses the old value, which the confirmed bundle no longer signs.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'
+#    refuses the put-back rotation_confirmed, and the new value stays.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
 [void](Rotate)
-$script:confirmed = 'new-key'
+Confirm-Delivered
 $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
 $out.confirmed = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
 
 # 5. No credential was stored and the old config does not use it: a failed
 #    lifecycle removes it again.
-Reset-Device $null; $script:confirmed = $null; $script:inUse = $false
+$script:inUse = $false; Reset-Device $null; Use-OldBundle $null
 [void](Rotate)
 $out.absentRotated = Get-Stored
 Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
 $out.absentFailed = "$(Get-Stored) $(Get-Journal)"
 
-# 6. ... and once the new config uses it, the next ensure keeps it.
-Reset-Device $null; $script:confirmed = $null; $script:inUse = $false
+# 6. ... and once the new bundle is confirmed and uses it, the next ensure keeps it.
+Reset-Device $null; Use-OldBundle $null
 [void](Rotate)
-$script:inUse = $true
+Confirm-Delivered; $script:inUse = $true
 [void](Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
 $out.absentConfirmed = "$(Get-Stored) $(Get-Journal)"
 
+# Loop round 2 (rc.7), finding 1. 6a. The old config references the
+#    credential but no value was stored: secret remove refuses
+#    credential_in_use, which proved nothing. The put-back with the old
+#    bundle's manifest removes what the failed rotation added, on the
+#    failed lifecycle and at the next ensure.
+foreach ($when in @('failed', 'resumed')) {
+    $script:inUse = $true; Reset-Device $null; Use-OldBundle 'never-stored'
+    $failure = Rotate
+    $rotated = "$($null -eq $failure) $(Get-Stored)"
+    $problems = @()
+    if ($when -eq 'failed') { Undo-WrapperSecretRotation -Cli 'defenseclaw.exe' } else {
+        $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    }
+    $out["inUseAbsent_$when"] = "$rotated $(Get-Stored) $(Get-Journal) $($problems.Count)"
+}
+
+# 6b. Any other refusal of the put-back proves nothing either: the entry
+#    stays and is reported (secret_ref_mismatch, credential_in_use).
+foreach ($code in @('secret_ref_mismatch', 'credential_in_use')) {
+    $script:inUse = $true; Reset-Device 'old-key'; Use-OldBundle 'old-key'
+    [void](Rotate)
+    $script:failNext = $code
+    $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+    $out["refusedPutBack_$code"] = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
+}
+
+# 6c. A redelivery of the confirmed bundle, which signs the delivered value:
+#    the confirmed bundle uses what is stored now, so a failed lifecycle keeps it.
+Reset-Device 'old-key'; Use-OldBundle 'new-key'
+[void](Rotate)
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+$out.redelivered = "$(Get-Stored) $(Get-Journal)"
+
+# 6d. Another bundle was confirmed between bundle status and the rotation:
+#    the CLI refuses the rotation, nothing changed and nothing is put back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'; $script:statusDigest = 'c' * 64
+$failure = Rotate
+[void](Complete-WrapperSecretJournal -Name $SecretName)
+$out.changedUnderneath = "$($failure.Code) $(Get-Stored) $(Get-Journal)"
+
 # 7. A put-back the CLI cannot do now stays journaled, and the next ensure
 #    finishes it.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:inUse = $true
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
 [void](Rotate)
 $script:failNext = 'lifecycle_busy'
 $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
@@ -435,24 +501,24 @@ $out.busy = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
 $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
 $out.busyRetried = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
 
-# 8. A second rotation before the first settled keeps the first journal
-#    entry: it holds the value the confirmed bundle signs.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'
+# 8. Loop round 2, finding 2: a second rotation while the first is not
+#    settled is refused; the first entry still puts the old value back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
 [void](Rotate)
 [System.IO.File]::WriteAllText($secret, 'newer-key'); $script:delivered = 'newer-key'
-[void](Rotate)
+$second = try { [void](Rotate); 'rotated' } catch { 'refused' }
+$storedThen = Get-Stored
 Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
-$out.twice = "$(Get-Stored) $(Get-Journal)"
-$script:delivered = 'new-key'
+$out.twice = "$second $storedThen $(Get-Stored) $(Get-Journal)"
 
 # 9. The CLI refuses the rotation itself: nothing changed, nothing is put back.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:delivered = 'other-key'
+Reset-Device 'old-key'; Use-OldBundle 'old-key'; $script:delivered = 'other-key'
 $failure = Rotate
 [void](Complete-WrapperSecretJournal -Name $SecretName)
 $out.refused = "$($failure.Code) $(Get-Stored) $(Get-Journal) $(@($script:calls).Count)"
 
 # 10. Nothing is installed any more: the journal goes with nothing put back.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:delivered = 'new-key'
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
 [void](Rotate)
 $script:calls = @()
 [void](Complete-WrapperSecretJournal -Cli '' -Restore)
@@ -461,7 +527,7 @@ $out.uninstalled = "$(Get-Journal) $(@($script:calls).Count)"
 # Loop round 1 (rc.7). 11. A put-back refused secret_ref_unbound (the
 #     confirmed bundle signs only the name) proves nothing: it stays
 #     journaled and is reported.
-Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:delivered = 'new-key'; $script:inUse = $true
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
 [void](Rotate)
 $script:failNext = 'secret_ref_unbound'
 $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
@@ -472,10 +538,10 @@ $out.unbound = "$(Get-Stored) $(Get-Journal) $($problems.Count)"
 #     the entry not administrator-only, the entry is never read, put back or
 #     removed, and no rotation journals beside it.
 foreach ($case in @('folder', 'parent', 'entry')) {
-    Reset-Device 'old-key'; $script:confirmed = $null; $script:inUse = $true
+    Reset-Device 'old-key'; $script:confirmed = $null; $script:digest = 'none'
     $journal = Get-WrapperRotationJournal
     [void][System.IO.Directory]::CreateDirectory($journal)
-    $planted = Join-Path $journal $SecretName
+    $planted = Join-Path $journal "$SecretName@none"
     [System.IO.File]::WriteAllText($planted, 'attacker-key')
     $script:untrusted = @(switch ($case) {
         'folder' { [System.IO.Path]::GetFullPath($journal) }
@@ -483,27 +549,62 @@ foreach ($case in @('folder', 'parent', 'entry')) {
         'entry' { [System.IO.Path]::GetFullPath($planted) }
     })
     $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
-    $journaled = try { Save-WrapperSecretJournal -Name $SecretName; 'journaled' } catch { 'refused' }
+    $journaled = try { Save-WrapperSecretJournal -Name $SecretName -Confirmed none; 'journaled' } catch { 'refused' }
     $out["untrusted_$case"] = "$(Get-Stored) $([System.IO.File]::ReadAllText($planted)) $(@($script:calls).Count) $($problems.Count) $journaled"
 }
 
 # 13. A folder where an entry belongs is not an entry either.
-Reset-Device 'old-key'; $script:confirmed = $null
-$planted = Join-Path (Get-WrapperRotationJournal) $SecretName
+Reset-Device 'old-key'; $script:confirmed = $null; $script:digest = 'none'
+$planted = Join-Path (Get-WrapperRotationJournal) "$SecretName@none"
 [void][System.IO.Directory]::CreateDirectory($planted)
 $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
-$journaled = try { Save-WrapperSecretJournal -Name $SecretName; 'journaled' } catch { 'refused' }
+$journaled = try { Save-WrapperSecretJournal -Name $SecretName -Confirmed none; 'journaled' } catch { 'refused' }
 $out.folderEntry = "$(Get-Stored) $(Test-Path -LiteralPath $planted -PathType Container) $(@($script:calls).Count) $($problems.Count) $journaled"
 
 # 14. Nor is a link to a file elsewhere (where this account can make one).
-Reset-Device 'old-key'; $script:confirmed = $null
+Reset-Device 'old-key'; $script:confirmed = $null; $script:digest = 'none'
 $journal = Get-WrapperRotationJournal
 [void][System.IO.Directory]::CreateDirectory($journal)
 $target = Join-Path $script:root 'attacker-file'
 [System.IO.File]::WriteAllText($target, 'attacker-key')
-$linked = try { [void](New-Item -ItemType SymbolicLink -Path (Join-Path $journal $SecretName) -Target $target -ErrorAction Stop); $true } catch { $false }
+$link = Join-Path $journal "$SecretName@none"
+$linked = try { [void](New-Item -ItemType SymbolicLink -Path $link -Target $target -ErrorAction Stop); $true } catch { $false }
 $problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
-$out.linkEntry = "$linked $(Get-Stored) $([System.IO.File]::ReadAllText($target)) $(@($script:calls).Count) $($problems.Count) $(Test-Path -LiteralPath (Join-Path $journal $SecretName))"
+$out.linkEntry = "$linked $(Get-Stored) $([System.IO.File]::ReadAllText($target)) $(@($script:calls).Count) $($problems.Count) $(Test-Path -LiteralPath $link)"
+
+# Loop round 2 (rc.7), finding 2. 15. A trusted file whose name this wrapper
+#     does not write (an entry an earlier build left, zeroed by a cleanup
+#     that stopped before its delete) is never put back or deleted, and no
+#     rotation runs beside it.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+$journal = Get-WrapperRotationJournal
+[void][System.IO.Directory]::CreateDirectory($journal)
+$leftover = Join-Path $journal $SecretName
+[System.IO.File]::WriteAllBytes($leftover, [byte[]]::new(7))
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$second = try { [void](Rotate); 'rotated' } catch { 'refused' }
+$out.foreignEntry = "$(Get-Stored) $((Get-Item -LiteralPath $leftover).Length) $(@($script:calls | Where-Object { $_ -match 'secret' }).Count) $($problems.Count) $second"
+
+# 16. A cleanup that stops after the retire rename (here: the delete fails)
+#     leaves only a .retired file. The next ensure deletes it without a
+#     put-back, and the next rotation journals the value stored now, so its
+#     failed lifecycle puts that value back.
+Reset-Device 'old-key'; Use-OldBundle 'old-key'
+[void](Rotate)
+Confirm-Delivered
+function Remove-Item { throw 'stopped before the delete' }
+$problems = @(Complete-WrapperSecretJournal -Name $SecretName)
+Microsoft.PowerShell.Management\Remove-Item -LiteralPath function:\Remove-Item
+$left = @(Get-ChildItem -LiteralPath (Get-WrapperRotationJournal) -Force | ForEach-Object { $_.Name + ':' + [int](([System.IO.File]::ReadAllBytes($_.FullName) | Measure-Object -Sum).Sum) })
+$out.retireStopped = "$(Get-Stored) $($left -join ',') $($problems.Count)"
+$script:calls = @()
+$problems = @(Complete-WrapperSecretJournal -Cli 'defenseclaw.exe' -Restore)
+$out.retireResumed = "$(Get-Stored) $(Get-Journal) $(@($script:calls).Count) $($problems.Count)"
+[System.IO.File]::WriteAllText($secret, 'newer-key'); $script:delivered = 'newer-key'
+$failure = Rotate
+$rotated = Get-Stored
+Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
+$out.retireNext = "$($null -eq $failure) $rotated $(Get-Stored) $(Get-Journal)"
 $out | ConvertTo-Json -Compress
 """
 
@@ -519,6 +620,7 @@ def _any_pwsh7() -> str | None:
 
 
 _ROTATION_FUNCTIONS = ("Get-WrapperSecretErrorCode", "Set-WrapperSecret", "Get-WrapperRotationJournal",
+                       "Get-WrapperConfirmedBundle", "Get-WrapperJournalEntryName",
                        "Get-WrapperStoredSecretPath", "Initialize-WrapperRotationJournal", "Test-WrapperJournalEntry",
                        "Save-WrapperSecretJournal", "Remove-WrapperJournalEntry", "Complete-WrapperSecretJournal",
                        "Undo-WrapperSecretRotation")
@@ -549,25 +651,36 @@ def test_windows_wrapper_puts_back_a_rotated_credential_unless_the_lifecycle_con
     )
     assert result.returncode == 0, result.stdout + result.stderr
     out = json.loads(result.stdout.strip().splitlines()[-1])
+    a = "a" * 64
     assert out == {
         "rotated": "True new-key",
         "failed": "old-key 0",
-        "succeeded": "new-key 0 1",
+        "succeeded": "new-key 0 2",
         "interrupted": "old-key 0 0",
         "confirmed": "new-key 0 0",
         "absentRotated": "new-key",
         "absentFailed": "<none> 0",
         "absentConfirmed": "new-key 0",
+        "inUseAbsent_failed": "True new-key <none> 0 0",
+        "inUseAbsent_resumed": "True new-key <none> 0 0",
+        "refusedPutBack_secret_ref_mismatch": "new-key 1 1",
+        "refusedPutBack_credential_in_use": "new-key 1 1",
+        "redelivered": "new-key 0",
+        "changedUnderneath": "confirmed_bundle_changed old-key 0",
         "busy": "new-key 1 1",
         "busyRetried": "old-key 0 0",
-        "twice": "old-key 0",
-        "refused": "secret_ref_mismatch old-key 0 1",
+        "twice": "refused new-key old-key 0",
+        "refused": "secret_ref_mismatch old-key 0 2",
         "uninstalled": "0 0",
         "unbound": "new-key 1 1",
         "untrusted_folder": "old-key attacker-key 0 1 refused",
         "untrusted_parent": "old-key attacker-key 0 1 refused",
         "untrusted_entry": "old-key attacker-key 0 1 refused",
         "folderEntry": "old-key True 0 1 refused",
+        "foreignEntry": "old-key 7 0 1 refused",
+        "retireStopped": f"new-key ai-defense-api-key@{a}.retired:0 1",
+        "retireResumed": "new-key 0 0 0",
+        "retireNext": "True newer-key new-key 0",
         "linkEntry": out["linkEntry"],
     }, out
     # Where this account can make a link, it is refused and left in place.
@@ -585,14 +698,17 @@ def test_windows_wrapper_settles_the_credential_journal_around_the_lifecycle() -
     main = text[text.index("$staging = New-WrapperStaging"):]
     resume = main.index("if ($normalizedAction -eq 'ensure') { Resume-WrapperSecretJournal }")
     lock = main.index("[void](Enter-WrapperRotationLock -Create)", resume)
-    journal = main.index("Save-WrapperSecretJournal -Name $SecretName", lock)
-    rotate = main.index("$failure = Set-WrapperSecret -Extra @('--bundle', $bundle)")
+    # The bundle confirmed before the rotation is read under the lock,
+    # journaled with the old value, and guards the rotation (--if-confirmed).
+    confirmed = main.index("$confirmedBundle = Get-WrapperConfirmedBundle -Cli $installedDeployment.Cli", lock)
+    journal = main.index("Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle", confirmed)
+    rotate = main.index("$failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)")
     armed = main.index("$script:RotationCli = $installedDeployment.Cli")
     lifecycle = main.index("$arguments = @('enterprise', 'windows', $normalizedAction")
     disarmed = main.index("$script:RotationCli = ''", lifecycle)
     settle = main.index("[void](Complete-WrapperSecretJournal -Name $SecretName)", disarmed)
     undo = main.index("Undo-WrapperSecretRotation -Cli $installedDeployment.Cli", settle)
-    assert resume < lock < journal < rotate < armed < lifecycle < disarmed < settle < undo
+    assert resume < lock < confirmed < journal < rotate < armed < lifecycle < disarmed < settle < undo
     body = main[main.index("function Resume-WrapperSecretJournal {"):]
     body = body[: body.index("\n}\n")]
     assert body.index("Enter-WrapperRotationLock") < body.index("Complete-WrapperSecretJournal -Cli $cli -Restore")
@@ -609,11 +725,11 @@ function ConvertTo-DefenseClawResultJson { param($Action, $ExitCode, $Code, $Mes
 function Remove-WrapperStaging { }
 $script:ResultAction = 'ensure'
 $script:RotationCli = ''
-Reset-Device 'old-key'; $script:confirmed = 'old-key'; $script:delivered = 'new-key'; $script:inUse = $true
+$script:inUse = $true; Reset-Device 'old-key'; Use-OldBundle 'old-key'
 [void](Rotate)
 [Console]::Error.WriteLine("ROTATED=$(Get-Stored)")
 if ('__CASE__' -eq 'armed') { $script:RotationCli = 'defenseclaw.exe' }
-if ('__CASE__' -eq 'settled') { $script:RotationCli = ''; $script:confirmed = 'new-key'; [void](Complete-WrapperSecretJournal -Name $SecretName) }
+if ('__CASE__' -eq 'settled') { $script:RotationCli = ''; Confirm-Delivered; [void](Complete-WrapperSecretJournal -Name $SecretName) }
 Exit-Wrapper 1603 'mdm_not_installed' 'the deployment is not installed'
 """
 
@@ -662,7 +778,7 @@ $script:RotationCli = ''
 $script:RotationLock = $null
 $script:ExitBusy = 1618
 $script:RotationLockWaitSeconds = 1
-$script:confirmed = 'old-key'; $script:delivered = 'new-key'; $script:inUse = $true
+$script:inUse = $true; $script:confirmed = 'old-key'; $script:digest = $script:digestA; $script:delivered = 'new-key'
 if ('__ROLE__' -eq 'b') {
     # Run B: a concurrent ensure settles what an earlier run left.
     Resume-WrapperSecretJournal
@@ -672,12 +788,13 @@ if ('__ROLE__' -eq 'b') {
 # Run A journals the old value and pauses before it stores the new one.
 Reset-Device 'old-key'
 [void](Enter-WrapperRotationLock -Create)
-Save-WrapperSecretJournal -Name $SecretName
+$confirmedBundle = Get-WrapperConfirmedBundle -Cli 'defenseclaw.exe'
+Save-WrapperSecretJournal -Name $SecretName -Confirmed $confirmedBundle
 $b = @(& '__ENGINE__' -NoLogo -NoProfile -NonInteractive -File '__CHILD__' 2>&1 | ForEach-Object { "$_" })
 "B1=$LASTEXITCODE $($b | Where-Object { $_ -match '^(\{|resumed)' } | Select-Object -Last 1) $(Get-Stored) $(Get-Journal)"
 "LOG1=$($b -join ' | ')"
 # A goes on: it stores the new value, its lifecycle fails, the put-back finds its entry.
-$failure = Set-WrapperSecret -Extra @('--bundle', $bundle)
+$failure = Set-WrapperSecret -Extra @('--bundle', $bundle, '--if-confirmed', $confirmedBundle)
 Undo-WrapperSecretRotation -Cli 'defenseclaw.exe'
 "A=$($null -eq $failure) $(Get-Stored) $(Get-Journal)"
 # A exits (its hold goes): the next ensure runs.
