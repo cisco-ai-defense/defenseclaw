@@ -552,3 +552,45 @@ func TestDecodeClientIdentityFacts(t *testing.T) {
 		t.Fatalf("the authorized-keys proof must see only operands, got %v", rest)
 	}
 }
+
+// An instruction-named file is protected only where agents load it from:
+// a hard link of that name elsewhere to one of the call's instruction files
+// is that file (Alias reports it), while the same name in a fixture
+// directory is an ordinary file. Located finds a load location's directory
+// through a symlinked spelling of it.
+func TestInstructionAliasAndLocationOfInstructionNames(t *testing.T) {
+	root := instructionIdentityRoot(t)
+	project := filepath.Join(root, "project")
+	home := filepath.Join(root, "home")
+	instruction := instructionIdentityFile(t, project, "CLAUDE.md")
+	fixture := instructionIdentityFile(t, filepath.Join(root, "fixtures"), "SOUL.md")
+	named := instructionIdentityLink(t, instruction, filepath.Join(root, "linked", "CLAUDE.md"))
+	workdir := instructionIdentitySymlink(t, project, filepath.Join(root, "workdir"))
+	files := NewInstructionFiles(workdir, home, nil)
+	if got := files.Alias(named); !sameInstructionPath(got, filepath.Join(workdir, "CLAUDE.md")) {
+		t.Fatalf("Alias(%q) = %q, want the project's CLAUDE.md", named, got)
+	}
+	if got := NewInstructionFiles(project, home, nil).Alias(instruction); got != "" {
+		t.Fatalf("Alias of the instruction file itself = %q, want none", got)
+	}
+	if got := files.Alias(fixture); got != "" {
+		t.Fatalf("Alias(%q) = %q, want an ordinary file", fixture, got)
+	}
+	for _, tc := range []struct {
+		name, path string
+		loaded     []string
+		want       bool
+	}{
+		{"working directory through its symlink", instruction, nil, true},
+		{"new file in that directory", filepath.Join(project, "AGENTS.md"), nil, true},
+		{"fixture directory", fixture, nil, false},
+		{"fixture directory, loaded", fixture, []string{fixture}, true},
+		{"ordinary name", filepath.Join(project, "notes.md"), nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := NewInstructionFiles(workdir, home, tc.loaded).Located(tc.path); got != tc.want {
+				t.Fatalf("Located(%q) = %t, want %t", tc.path, got, tc.want)
+			}
+		})
+	}
+}

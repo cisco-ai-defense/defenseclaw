@@ -184,12 +184,13 @@ func (f *InstructionFiles) identify() {
 
 // Alias reports the protected instruction file that an existing write target
 // is under another name: a symlink or hard link to one of the call's
-// instruction files, the physical file a symlinked one reaches, or a case,
-// short-name or stream variant of one. Only the call's instruction files
-// count: an instruction-named file in no load location that the session did
-// not load is ordinary, and so is every other name of it. A missing file,
-// one that is not regular and one already spelled as an instruction name
-// report nothing: the name rules judge the last.
+// instruction files (whatever the link is named), the physical file a
+// symlinked one reaches, a path through a symlinked or case-variant
+// directory, or a case, short-name or stream variant of one. Only the call's
+// instruction files count: an instruction-named file in no load location
+// that the session did not load is ordinary, and so is every other name of
+// it. A missing file, one that is not regular and an instruction file named
+// as the call names it report nothing: the name rules judge the last.
 func (f *InstructionFiles) Alias(path string) string {
 	if f == nil || !filepath.IsAbs(path) {
 		return ""
@@ -203,24 +204,60 @@ func (f *InstructionFiles) Alias(path string) string {
 	if err != nil || !info.Mode().IsRegular() {
 		return ""
 	}
-	if _, named := InstructionFileName(filepath.Base(real), instructionNameFold()); named && real == path {
-		return ""
-	}
 	f.identify()
 	for _, file := range f.files {
 		if os.SameFile(info, file.info) {
+			if file.path == path || instructionNameFold() && strings.EqualFold(file.path, path) {
+				return ""
+			}
 			return file.path
 		}
 	}
 	return ""
 }
 
-// instructionHomeFolders are the home-relative folders agents load global
-// instruction files from.
-var instructionHomeFolders = []string{
-	"", ".claude", ".codex", ".openclaw", filepath.Join(".openclaw", "workspace"),
-	".config", filepath.Join(".config", "amp"), filepath.Join(".config", "opencode"),
+// Located reports whether path, spelled as an instruction file name, is in
+// the directory of a file the session loaded or in a load location
+// (instructionDirectories), reached through another spelling of that
+// directory: a symlinked or case-variant one. The file itself need not
+// exist. The gateway checks the spelling first (instructionLoadLocation);
+// this is the file-system check for the rest.
+func (f *InstructionFiles) Located(path string) bool {
+	if f == nil || !filepath.IsAbs(path) {
+		return false
+	}
+	path = filepath.Clean(path)
+	name, named := InstructionFileName(filepath.Base(path), instructionNameFold())
+	if !named {
+		return false
+	}
+	directory, err := os.Stat(filepath.Dir(path))
+	if err != nil || !directory.IsDir() {
+		return false
+	}
+	sameDirectory := func(candidate string) bool {
+		info, err := os.Stat(candidate)
+		return err == nil && os.SameFile(info, directory)
+	}
+	for _, loaded := range f.loaded {
+		if loadedName, named := InstructionFileName(filepath.Base(loaded), instructionNameFold()); named &&
+			loadedName == name && filepath.IsAbs(loaded) && sameDirectory(filepath.Dir(filepath.Clean(loaded))) {
+			return true
+		}
+	}
+	return slices.ContainsFunc(instructionDirectories(f.cwd, f.home), sameDirectory)
 }
+
+// InstructionHomeFolders are the home-relative folders, slash separated,
+// that agents load global instruction files from.
+var InstructionHomeFolders = [...]string{
+	"", ".claude", ".codex", ".openclaw", ".openclaw/workspace",
+	".config", ".config/amp", ".config/opencode",
+}
+
+// InstructionHomeVariables name the agents' configured homes, which hold
+// their global instruction files.
+var InstructionHomeVariables = [...]string{"CLAUDE_CONFIG_DIR", "CODEX_HOME"}
 
 // instructionDirectories are the places agents load instruction files from:
 // the working directory and its parents with their .claude folders, the home
@@ -245,11 +282,11 @@ func instructionDirectories(cwd, home string) []string {
 		}
 	}
 	if filepath.IsAbs(home) {
-		for _, sub := range instructionHomeFolders {
-			add(filepath.Join(home, sub))
+		for _, sub := range InstructionHomeFolders {
+			add(filepath.Join(home, filepath.FromSlash(sub)))
 		}
 	}
-	for _, variable := range []string{"CLAUDE_CONFIG_DIR", "CODEX_HOME"} {
+	for _, variable := range InstructionHomeVariables {
 		if value := os.Getenv(variable); value != "" {
 			add(filepath.Clean(value))
 		}

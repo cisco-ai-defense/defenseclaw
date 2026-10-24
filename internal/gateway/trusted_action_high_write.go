@@ -5,6 +5,7 @@ package gateway
 
 import (
 	"context"
+	"os"
 	"path"
 	"path/filepath"
 	"runtime"
@@ -43,8 +44,10 @@ const instructionAliasTitle = " (written through another name of the file)"
 // symlinked instruction file reaches (GAP-0971), is a write to the file.
 // Another name is matched by file identity against the instruction files
 // agents load and the files the session loaded (hookpaths.InstructionFiles).
-// Every other file is ordinary, however many links it has, and creating a
-// link writes nothing.
+// A file spelled with an instruction name is an instruction file only there
+// (instructionLoadLocation): a SOUL.md fixture or template elsewhere that the
+// session did not load is ordinary. Every other file is ordinary, however
+// many links it has, and creating a link writes nothing.
 func provedHighWriteFindings(
 	ctx context.Context,
 	request trustedActionRequest,
@@ -59,7 +62,6 @@ func provedHighWriteFindings(
 	}
 	facts := actionfacts.Analyze(request.Input)
 	proved := append([]RuleFinding(nil), findings...)
-	seenTargets := make(map[string]struct{})
 	hostFlavor := actionfacts.PathFlavorPOSIX
 	if runtime.GOOS == "windows" {
 		hostFlavor = actionfacts.PathFlavorWindows
@@ -67,14 +69,46 @@ func provedHighWriteFindings(
 	exactProof := func(ruleID string) findingProof {
 		return newExactFallbackFindingProof(ruleID, true, true, true, true)
 	}
+	instructions := hookpaths.NewInstructionFiles(request.Input.CWD, request.Input.ActiveHome, request.Input.ActiveAgentFiles)
+	// The places a call's instruction files are in: the working directory,
+	// also as the sandbox guest and the managed hook's physical directory
+	// name it, and the files the session loaded, also those the hook client
+	// identified for a gateway that cannot read them.
+	locations := instructionLocations{
+		cwds: []string{
+			request.Input.CWD, request.SandboxGuestCWD,
+			request.ResolvedWriteTargets[hookpaths.DirectoryFactPrefix+request.Input.CWD],
+		},
+		home:   request.Input.ActiveHome,
+		loaded: append([]string(nil), request.Input.ActiveAgentFiles...),
+	}
+	for _, loaded := range request.ActiveAgentFileIdentities {
+		locations.loaded = append(locations.loaded, loaded)
+	}
+	instructionTarget := func(resolved string, flavor actionfacts.PathFlavor) bool {
+		if instructionLoadLocation(resolved, flavor, locations) {
+			return true
+		}
+		// A symlinked or case-variant spelling of a load location's
+		// directory, on this host's file system.
+		return flavor == hostFlavor && !isSandboxHookRequest(ctx) &&
+			instructions.Located(filepath.FromSlash(resolved))
+	}
+	// seenTargets records whether a target was checked as an instruction
+	// file. Identity evidence for a target already checked as an ordinary
+	// file checks it again.
+	seenTargets := make(map[string]bool)
 	addTarget := func(resolved string, flavor actionfacts.PathFlavor, proofForRule func(string) findingProof, note string) {
-		if _, seen := seenTargets[resolved]; seen {
+		// A note marks file-identity evidence: the target is one of the
+		// call's instruction files under its own name.
+		instruction := note != "" || instructionTarget(resolved, flavor)
+		if checked, seen := seenTargets[resolved]; seen && (checked || !instruction) {
 			return
 		}
-		seenTargets[resolved] = struct{}{}
+		seenTargets[resolved] = instruction
 		for _, category := range generation.categories {
 			for _, rule := range category.Rules {
-				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor) {
+				if !highWriteCatalogRule(rule) || !highWriteRuleMatchesTarget(rule, resolved, flavor, instruction) {
 					continue
 				}
 				proof := proofForRule(rule.ID)
@@ -102,7 +136,6 @@ func provedHighWriteFindings(
 	// gatewayIdentity checks a write target on this host's file system. A
 	// managed gateway that cannot read the user's home sees no file and
 	// relies on the hook client's InstructionIdentityKey below.
-	instructions := hookpaths.NewInstructionFiles(request.Input.CWD, request.Input.ActiveHome, request.Input.ActiveAgentFiles)
 	gatewayIdentity := func(resolved string, flavor actionfacts.PathFlavor) {
 		// A sandboxed agent's paths name its own file system, not this
 		// host's; its hook client's evidence speaks for it.
@@ -199,15 +232,96 @@ func provedHighWriteFindings(
 
 // An active instruction file may be loaded by a session that predates this
 // gateway process. Its in-memory load event is unavailable after a restart,
-// so a proved write to one of the catalog's instruction filenames must still
-// enforce that catalog rule. Another name of the same file reaches this
-// check as the file's own path (hookpaths.InstructionFiles).
-func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor actionfacts.PathFlavor) bool {
-	if instruction, ok := instructionRuleFiles[rule.ID]; ok {
-		name := path.Base(strings.ReplaceAll(resolved, `\`, "/"))
-		return activeAgentInstructionBaseMatches(name, flavor, instruction)
+// so a proved write to one of the catalog's instruction filenames in a place
+// agents load it from must still enforce that catalog rule. instruction
+// reports that place (instructionLoadLocation) or file-identity evidence;
+// without it the name is an ordinary file's. Another name of the same file
+// reaches this check as the file's own path (hookpaths.InstructionFiles).
+func highWriteRuleMatchesTarget(rule PatternRule, resolved string, flavor actionfacts.PathFlavor, instruction bool) bool {
+	if name, ok := instructionRuleFiles[rule.ID]; ok {
+		return instruction && activeAgentInstructionBaseMatches(
+			path.Base(strings.ReplaceAll(resolved, `\`, "/")), flavor, name)
 	}
 	return rule.Pattern.MatchString(resolved)
+}
+
+// instructionLocations are the places of one call that agents load
+// instruction files from, as the call names them.
+type instructionLocations struct {
+	cwds   []string
+	home   string
+	loaded []string
+}
+
+// instructionLoadLocation reports whether target, spelled with an
+// instruction file name, is in a place agents load it from, by its
+// spelling in flavor: a file the session loaded, the working directory or
+// one of its parents or their .claude folders, an agent folder of the home
+// (hookpaths.InstructionHomeFolders) or an agent's configured home
+// (hookpaths.InstructionHomeVariables). Windows spellings compare without
+// case. Any other file of that name is ordinary.
+func instructionLoadLocation(target string, flavor actionfacts.PathFlavor, locations instructionLocations) bool {
+	normal := func(value string) string {
+		normalized, ok := activeAgentInstructionPath(value, flavor)
+		if !ok {
+			return ""
+		}
+		return normalized
+	}
+	file := normal(target)
+	if file == "" {
+		return false
+	}
+	if _, named := hookpaths.InstructionFileName(path.Base(file), flavor == actionfacts.PathFlavorWindows); !named {
+		return false
+	}
+	for _, loaded := range locations.loaded {
+		if normal(loaded) == file {
+			return true
+		}
+	}
+	directory := instructionParent(file)
+	// within reports whether the working directory is base or under it.
+	within := func(base string) bool {
+		for _, cwd := range locations.cwds {
+			if cwd = normal(cwd); cwd != "" &&
+				(cwd == base || strings.HasPrefix(cwd, strings.TrimSuffix(base, "/")+"/")) {
+				return true
+			}
+		}
+		return false
+	}
+	if within(directory) || path.Base(directory) == ".claude" && within(instructionParent(directory)) {
+		return true
+	}
+	if home := normal(locations.home); home != "" {
+		for _, folder := range hookpaths.InstructionHomeFolders {
+			candidate := home
+			if folder != "" {
+				candidate = normal(home + "/" + folder)
+			}
+			if candidate == directory {
+				return true
+			}
+		}
+	}
+	for _, variable := range hookpaths.InstructionHomeVariables {
+		if value := normal(os.Getenv(variable)); value != "" && value == directory {
+			return true
+		}
+	}
+	return false
+}
+
+// instructionParent is the directory of a path activeAgentInstructionPath
+// normalized: "/" for a file at the POSIX root and the drive ("c:") for one
+// at a Windows drive root.
+func instructionParent(normalized string) string {
+	index := strings.LastIndex(normalized, "/")
+	if index <= 0 {
+		return "/"
+	}
+	return normalized[:index]
 }
 
 func highWriteCatalogRule(rule PatternRule) bool {
