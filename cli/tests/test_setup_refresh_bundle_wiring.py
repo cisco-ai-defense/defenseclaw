@@ -488,6 +488,27 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
 class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
     """Direct coverage of the stop → refresh decision logic."""
 
+    def test_refreshed_bundle_message_names_custom_home(self) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup import _refresh_and_maybe_restart_splunk_bridge
+
+        with tempfile.TemporaryDirectory(prefix="dclaw-custom-home-") as data_dir:
+            dest = os.path.join(data_dir, "splunk-bridge")
+            refresh_result = RefreshResult(
+                bundle_kind="splunk-bridge", seeded_dest=dest, bundle_source="/src",
+                refreshed=True, refreshed_paths=["(initial seed)"],
+            )
+            output = io.StringIO()
+            with (
+                patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}),
+                patch("defenseclaw.commands.cmd_setup.is_compose_project_running", return_value=False),
+                patch("defenseclaw.commands.cmd_setup.refresh_splunk_bridge", return_value=refresh_result),
+                redirect_stdout(output),
+            ):
+                _refresh_and_maybe_restart_splunk_bridge(data_dir)
+            self.assertIn(f"Bundle refreshed: {dest}{os.sep}", output.getvalue())
+            self.assertNotIn("~/.defenseclaw/splunk-bridge/", output.getvalue())
+
     @patch(
         "defenseclaw.commands.cmd_setup.refresh_splunk_bridge",
     )
@@ -1014,6 +1035,27 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
 
 class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
     """Direct coverage for local-observability refresh messaging."""
+
+    @patch("defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack")
+    def test_refreshed_bundle_message_names_custom_home(self, mock_refresh: MagicMock) -> None:
+        from defenseclaw.bundle_refresh import RefreshResult
+        from defenseclaw.commands.cmd_setup_local_observability import _refresh_and_maybe_restart_local_observability
+
+        with tempfile.TemporaryDirectory(prefix="dclaw-custom-home-") as data_dir:
+            dest = os.path.join(data_dir, "observability-stack")
+            mock_refresh.return_value = RefreshResult(
+                bundle_kind="observability-stack", seeded_dest=dest, bundle_source="/src",
+                refreshed=True, refreshed_paths=["bin/launcher"],
+            )
+            controller = MagicMock()
+            controller.is_running.return_value = False
+            output = io.StringIO()
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}), redirect_stdout(output):
+                _refresh_and_maybe_restart_local_observability(
+                    data_dir, refresh_config=False, controller=controller,
+                )
+            self.assertIn(f"Bundle refreshed: {dest}{os.sep}", output.getvalue())
+            self.assertNotIn("~/.defenseclaw/observability-stack/", output.getvalue())
 
     @patch(
         "defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack",
