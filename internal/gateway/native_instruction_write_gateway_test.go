@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -125,6 +126,9 @@ func TestR104GAP0777ExistingSessionAfterGatewayRestart(t *testing.T) {
 }
 
 func TestR104GAP0768NativePOSIXHookRoutes(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell hook routes; Windows PowerShell and cmd routes have native coverage")
+	}
 	for _, tc := range []struct {
 		connector, file, rule, blockAt string
 	}{

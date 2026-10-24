@@ -6,6 +6,7 @@ package gateway
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -28,18 +29,28 @@ func TestInstructionProtectionCreatingAbsentStartupFile(t *testing.T) {
 			}
 			target := filepath.Join(project, tc.name)
 			api := instructionProtectionTestAPI(t, tc.connector, "action", "HIGH")
-			for _, form := range []struct{ name, command string }{
+			forms := []struct{ name, command string }{
 				{"redirect", "printf x > '" + target + "'"},
 				{"append", "printf x >> '" + target + "'"},
 				{"tee", "printf x | tee '" + target + "'"},
-			} {
+			}
+			dialect := actionfacts.DialectPOSIX
+			if runtime.GOOS == "windows" {
+				forms = []struct{ name, command string }{
+					{"write", "Set-Content -LiteralPath '" + target + "' -Value x"},
+					{"append", "Add-Content -LiteralPath '" + target + "' -Value x"},
+					{"tee", "'x' | Tee-Object -FilePath '" + target + "'"},
+				}
+				dialect = actionfacts.DialectPowerShell
+			}
+			for _, form := range forms {
 				for _, withClientProof := range []bool{false, true} {
 					name := form.name
 					if withClientProof {
 						name += "/client resolver"
 					}
 					t.Run(name, func(t *testing.T) {
-						input := actionfacts.Input{Tool: "Bash", Command: form.command, CWD: project, ActiveHome: root}
+						input := actionfacts.Input{Tool: "Bash", Command: form.command, CWD: project, ActiveHome: root, DialectHint: dialect}
 						request := trustedActionRequest{Input: input, LegacyText: form.command,
 							Connector: tc.connector, EnforcementCapable: true}
 						if withClientProof {
@@ -65,9 +76,12 @@ func TestInstructionProtectionCreatingAbsentStartupFile(t *testing.T) {
 				t.Fatal(err)
 			}
 			command := "printf x >> '" + target + "'"
+			if runtime.GOOS == "windows" {
+				command = "Add-Content -LiteralPath '" + target + "' -Value x"
+			}
 			verdict := api.inspectTrustedToolPolicyCtx(t.Context(),
 				&ToolInspectRequest{Tool: "Bash", Direction: "tool_call", Connector: tc.connector},
-				trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: project, ActiveHome: root},
+				trustedActionRequest{Input: actionfacts.Input{Tool: "Bash", Command: command, CWD: project, ActiveHome: root, DialectHint: dialect},
 					LegacyText: command, Connector: tc.connector, EnforcementCapable: true})
 			if verdict.Action != guardrailActionBlock || !findingStringHasRuleID(verdict.Findings, tc.rule) {
 				t.Fatalf("existing startup %s lost protection: %+v", tc.name, verdict)
