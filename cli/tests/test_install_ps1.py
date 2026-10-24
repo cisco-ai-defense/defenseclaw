@@ -1334,6 +1334,7 @@ function Die([string]$Message) {{ throw $Message }}
 function Invoke-Quietly([scriptblock]$Block) {{ & $Block }}
 function Remove-Tree([string]$Path) {{ if (Test-Path -LiteralPath $Path) {{ Remove-Item -LiteralPath $Path -Recurse -Force }} }}
 function Get-InstalledVersion {{ return '1.0.3' }}
+function Assert-NoLoadedPluginAgents {{ }}
 function Assert-NoActiveConnectorRecovery {{ }}
 function Save-Url([string]$Url, [string]$To) {{ [IO.File]::WriteAllText($To.Replace([char]92, [IO.Path]::DirectorySeparatorChar), '{installer.replace("'", "''")}'); return $true }}
 function Get-ListedSha256 {{ return 'verified' }}
@@ -3569,6 +3570,7 @@ def test_a_rollback_is_done_only_once_its_gateway_runs_and_is_proven(tmp_path: P
         "function Write-Ok([string]$m) { Write-Host \"ok: $m\" }\nfunction Write-Warn([string]$m) { Write-Host \"warn: $m\" }\n"
         "function Die([string]$m) { throw $m }\n"
         "function Get-InstalledVersion { return '1.0.4' }\n"
+        "function Assert-NoLoadedPluginAgents { }\n"
         "function Assert-NoActiveConnectorRecovery { }\nfunction Confirm-Step { return $true }\n"
         "function Test-HookRollbackRestoreAvailable { return $false }\nfunction Wait-VenvFree { }\n"
         "function Test-RollbackData { return $false }\nfunction Get-GatewayProcess { return $true }\n"
