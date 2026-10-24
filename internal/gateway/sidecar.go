@@ -6612,6 +6612,37 @@ func verifyPreviouslyActiveConnectorRollback(applied multiConnectorSetupRollback
 		return err
 	}
 	defenseClawVersion := applied.previousLock.DefenseClawVersion
+	if connector.RequiresHookRuntimeRegistrationEvidence(applied.conn) &&
+		!prior.ManagedEnterprise &&
+		supportedLegacyHookLockRelease(defenseClawVersion) {
+		// This binary re-renders a supported predecessor's registration
+		// and can change its artifact digests regardless of the old mode.
+		// Verify the restored artifacts with the current strict
+		// contract, then put the old lock back for the predecessor binary.
+		previous, err := connector.CaptureHookContractLockSnapshot(prior.DataDir)
+		if err != nil {
+			return fmt.Errorf("capture prior hook contract lock for rollback verification: %w", err)
+		}
+		restore := func(checkErr error) error {
+			if restoreErr := previous.Restore(); restoreErr != nil {
+				return errors.Join(checkErr, fmt.Errorf("restore prior hook contract lock after verification: %w", restoreErr))
+			}
+			return checkErr
+		}
+		currentVersion := version.Current().BinaryVersion
+		entry := connector.NewHookContractLockEntry(prior, applied.conn, currentVersion)
+		if err := connector.SaveFreshHookContractLockEntry(prior.DataDir, entry); err != nil {
+			return restore(fmt.Errorf("seal restored hook registration for verification: %w", err))
+		}
+		current, err := connector.HookRuntimeRegistrationCurrent(prior, applied.conn, currentVersion)
+		if err != nil {
+			return restore(err)
+		}
+		if !current {
+			return restore(errors.New("restored runtime registration does not match the prior hook contract lock"))
+		}
+		return restore(nil)
+	}
 	if strings.TrimSpace(defenseClawVersion) == "" {
 		defenseClawVersion = version.Current().BinaryVersion
 	}
@@ -6623,6 +6654,14 @@ func verifyPreviouslyActiveConnectorRollback(applied multiConnectorSetupRollback
 		return errors.New("restored runtime registration does not match the prior hook contract lock")
 	}
 	return nil
+}
+
+func supportedLegacyHookLockRelease(release string) bool {
+	switch strings.TrimSpace(release) {
+	case "1.0.0", "1.0.1", "1.0.2", "1.0.3":
+		return true
+	}
+	return false
 }
 
 func (s *Sidecar) publishMultiConnectorReadyState(
