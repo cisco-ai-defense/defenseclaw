@@ -5,7 +5,6 @@ package gateway
 
 import (
 	"bufio"
-	"context"
 	"io"
 	"net/http"
 	"strconv"
@@ -24,26 +23,6 @@ type hookDeliveryReceipt struct {
 }
 
 type hookDeliveryAdvertisedKey struct{}
-
-// managedHookEarlyReceipt advertises full duplex before the socket's first
-// account lookup. A directory lookup can exceed the native hook's bounded
-// capability wait even when the gateway is healthy. Only a connection whose
-// kernel peer credentials were read can receive this informational response;
-// all authorization and the final verdict remain in the ordinary handler.
-func managedHookEarlyReceipt(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		peer, verified := r.Context().Value(managedHookConnPeerContextKey{}).(*managedHookConnPeer)
-		if r.Method == http.MethodPost && r.Header.Get(hookexec.HookDeliveryReceiptHeader) == "1" &&
-			verified && peer != nil && http.NewResponseController(w).EnableFullDuplex() == nil {
-			if r.ProtoMajor == 1 {
-				w.Header().Set("Connection", "close")
-			}
-			w.WriteHeader(http.StatusEarlyHints)
-			r = r.WithContext(context.WithValue(r.Context(), hookDeliveryAdvertisedKey{}, true))
-		}
-		next.ServeHTTP(w, r)
-	})
-}
 
 func (a *APIServer) beginHookDeliveryReceipt(w http.ResponseWriter, r *http.Request) *hookDeliveryReceipt {
 	if a == nil || a.scannerCfg == nil || !a.scannerCfg.StandaloneEnterprise() ||
