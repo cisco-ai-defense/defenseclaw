@@ -1153,6 +1153,17 @@ def _socket_endpoint(address: object) -> _Endpoint | None:
     return ip, port
 
 
+def linux_proc_net_table(name: str, proc_root: str = "/proc") -> str:
+    """Path of one socket table (``tcp`` or ``tcp6``) of this network namespace.
+
+    ``/proc/net`` is only a link to ``self/net``. A ``/proc`` mounted with
+    ``subset=pid`` (systemd's ``ProcSubset=pid``) has no such link, so every
+    check that read it refused a healthy gateway (GAP-1138). ``/proc/self``
+    is always there, with ``hidepid`` too, and shows the same tables.
+    """
+    return os.path.join(proc_root, "self", "net", name)
+
+
 def _linux_proc_net_endpoint(field: str) -> _Endpoint | None:
     """Decode one ``/proc/net/tcp*`` ``ADDRESS:PORT`` field."""
     raw_address, separator, raw_port = field.rpartition(":")
@@ -1181,7 +1192,7 @@ def _linux_connection_owner(
     table_found = False
     for table_name in ("tcp", "tcp6"):
         try:
-            with open(os.path.join(proc_root, "net", table_name), encoding="ascii") as table:
+            with open(linux_proc_net_table(table_name, proc_root), encoding="ascii") as table:
                 rows = table.readlines()[1:]
         except FileNotFoundError:
             continue

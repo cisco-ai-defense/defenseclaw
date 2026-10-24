@@ -78,6 +78,50 @@ func UsersCanRead(metadata FileMetadata) error {
 	return nil
 }
 
+// PathUsersCanRead is UsersCanRead for the regular file at path.
+func PathUsersCanRead(path string) error {
+	metadata, err := ReadPathMetadata(path)
+	if err != nil {
+		return err
+	}
+	return UsersCanRead(metadata)
+}
+
+// ProtectReadableByUsers gives the file at path, a machine policy about to be
+// published, its access: keep, the metadata of the file it replaces, or
+// protect's protection when keep is nil. The agent reads the policy with each
+// user's own token, so the result must let every ordinary user read it
+// (UsersCanRead). A kept access list that does not gets the BUILTIN\Users
+// read entry added and keeps every other entry (GrantUsersRead); one that
+// still refuses a user the read, a deny entry, gets protect's protection.
+func ProtectReadableByUsers(path string, keep *FileMetadata, protect func(string) error) error {
+	var err error
+	if keep == nil {
+		err = protect(path)
+	} else {
+		err = ApplyFileMetadata(path, *keep)
+	}
+	if err != nil {
+		return err
+	}
+	if PathUsersCanRead(path) == nil {
+		return nil
+	}
+	if err := GrantUsersRead(path); err != nil {
+		return err
+	}
+	if PathUsersCanRead(path) == nil {
+		return nil
+	}
+	if err := protect(path); err != nil {
+		return err
+	}
+	if err := PathUsersCanRead(path); err != nil {
+		return fmt.Errorf("safefile: ordinary users cannot read %s after its protection: %w", path, err)
+	}
+	return nil
+}
+
 // GrantUsersRead adds an allow entry for BUILTIN\Users with UsersRead to the
 // access list of the file at path and keeps every other entry, its
 // protection from inheritance included.

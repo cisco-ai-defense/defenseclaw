@@ -26,6 +26,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 )
@@ -152,8 +153,13 @@ var allRuleCategories = allRuleGeneration.categories
 var connectorRuleCategories = map[string][]ruleCategory{}
 var connectorRuleGenerations = map[string]*compiledRulePackCategories{}
 
+// canonicalConnectorRulePackKey is the one name a connector's rule scope,
+// profile decision and scans use: the configuration's canonical connector
+// name, aliases included ("claude-code" and "claude_code" are
+// "claudecode"). A scope checked under one spelling and scanned under
+// another could validate one rule generation and scan another.
 func canonicalConnectorRulePackKey(connector string) string {
-	return strings.ToLower(strings.TrimSpace(connector))
+	return config.NormalizeConnectorName(connector)
 }
 
 // maxRegexCompileTime caps how long a single user-supplied regex may take to
@@ -223,6 +229,18 @@ type compiledRulePackCategories struct {
 	ruleIdentityTitles map[string]map[string]struct{}
 	overridden         int
 	added              int
+	// budgetNote says once that the members' semantic rules of one action
+	// reached their shared cost budget (noteMeetBudget); nil for one pack.
+	budgetNote *sync.Once
+	// members are the generations of the profiles of a strictest
+	// combination (a meet) whose rules it scans with. A scan of the meet is
+	// each member's own scan, the strongest finding of a rule kept
+	// (strongestRuleFindings), so a rule ID two packs define differently
+	// keeps both definitions. categories and ruleIdentityTitles then hold
+	// their union, for lookups only, and semanticRules is empty: every lane
+	// that judges with rules runs each member's. nil for the generation of
+	// one pack.
+	members []*compiledRulePackCategories
 }
 
 const (
@@ -983,6 +1001,13 @@ func scanRuleCategoriesWithOptions(
 ) []RuleFinding {
 	if generation == nil {
 		return nil
+	}
+	if len(generation.members) > 0 {
+		lists := make([][]RuleFinding, 0, len(generation.members))
+		for _, member := range generation.members {
+			lists = append(lists, scanRuleCategoriesWithOptions(member, text, toolName, options))
+		}
+		return strongestRuleFindings(lists, func(ruleID string) string { return ruleID })
 	}
 	var findings []RuleFinding
 	// The hard-coded Windows recognizers cover only command and sensitive-path

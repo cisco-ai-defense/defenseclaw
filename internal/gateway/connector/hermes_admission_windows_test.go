@@ -133,7 +133,7 @@ func TestHermesSetupAdmissionRejectsChangedPathBytesVersionAndCustodyBeforeMutat
 			mutate: func(t *testing.T, _ *SetupOpts) {
 				t.Helper()
 				hermesAgentVersionProbe = func(context.Context, string) (string, error) {
-					return "Hermes Agent v0.19.0", nil
+					return "Hermes Agent v0.21.3 (2026.9.14)", nil
 				}
 			},
 			wantError: "fresh version probe does not match protected raw, normalized, and contract evidence",

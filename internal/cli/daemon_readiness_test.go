@@ -18,6 +18,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strings"
@@ -167,7 +168,7 @@ func TestDaemonReadinessRequirementsUseEffectiveGuardrailPosture(t *testing.T) {
 	}
 }
 
-func TestRotationRequiredConnectorNamesUsesEnabledConfiguredRoster(t *testing.T) {
+func TestGuardedConnectorNamesUsesEnabledConfiguredRoster(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.Guardrail.Enabled = true
 	cfg.Guardrail.Connector = ""
@@ -175,19 +176,19 @@ func TestRotationRequiredConnectorNamesUsesEnabledConfiguredRoster(t *testing.T)
 		"codex":      {},
 		"claudecode": {},
 	}
-	if got := strings.Join(rotationRequiredConnectorNames(cfg), ","); got != "claudecode,codex" {
-		t.Fatalf("rotation required connectors = %q, want claudecode,codex", got)
+	if got := strings.Join(guardedConnectorNames(cfg), ","); got != "claudecode,codex" {
+		t.Fatalf("guarded connectors = %q, want claudecode,codex", got)
 	}
 
 	disabled := false
 	cfg.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Enabled: &disabled}
-	if got := strings.Join(rotationRequiredConnectorNames(cfg), ","); got != "codex" {
-		t.Fatalf("rotation required connectors with Claude disabled = %q, want codex", got)
+	if got := strings.Join(guardedConnectorNames(cfg), ","); got != "codex" {
+		t.Fatalf("guarded connectors with Claude disabled = %q, want codex", got)
 	}
 
 	cfg.Guardrail.Enabled = false
-	if got := rotationRequiredConnectorNames(cfg); len(got) != 0 {
-		t.Fatalf("disabled guardrail rotation required connectors = %v, want none", got)
+	if got := guardedConnectorNames(cfg); len(got) != 0 {
+		t.Fatalf("disabled guardrail guarded connectors = %v, want none", got)
 	}
 }
 
@@ -195,8 +196,8 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	expected := rotationConnectorState{
 		Version: 1,
 		Connectors: []rotationConnectorPolicy{
-			{Name: "claudecode", Mode: "action", HookFailMode: "closed", Enabled: true},
-			{Name: "codex", Mode: "action", HookFailMode: "closed", Enabled: true},
+			{Name: "claudecode", Mode: "action", HookFailMode: "open", Enabled: true}, // the default tier outage mode
+			{Name: "codex", Mode: "action", HookFailMode: "open", Enabled: true},      // the default tier outage mode
 		},
 	}
 	fallback := config.DefaultConfig()
@@ -218,7 +219,7 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	mixed := expected
 	mixed.Connectors = append([]rotationConnectorPolicy(nil), expected.Connectors...)
 	mixed.Connectors[0].Mode = "observe"
-	mixed.Connectors[0].HookFailMode = "closed"
+	mixed.Connectors[0].HookFailMode = "open"
 	fallback.Guardrail.Connectors["claudecode"] = config.PerConnectorGuardrailConfig{Mode: "observe", HookFailMode: "open"}
 	if err := verifyRotationConfigState(fallback, mixed); err != nil {
 		t.Fatalf("exact mixed connector state rejected: %v", err)
@@ -2032,5 +2033,66 @@ func TestVerifyRotationConnectorHookAuthenticationRequiresRemovedConnectorRefusa
 	}
 	if probes := seen(); len(probes) != 0 {
 		t.Fatalf("probes after a fingerprint or file failure = %v, want none", probes)
+	}
+}
+
+// Review (loop round 3): rotation now rotates the credential of an
+// unconfigured connector whose hook may still run. Gateway B's own start can
+// finish removing that connector and revoke the credential after VerifyClean;
+// readiness must accept that instead of failing every such rotation, while a
+// present orphan credential and every configured one stay fully checked.
+func TestRotationHookTokensStillPresentedDropsOnlyRevokedOrphans(t *testing.T) {
+	dataDir := t.TempDir()
+	present := map[string]string{}
+	for _, name := range []string{"claudecode", "cursor"} {
+		token, err := connector.EnsureHookAPIToken(dataDir, name)
+		if err != nil {
+			t.Fatalf("EnsureHookAPIToken(%s): %v", name, err)
+		}
+		present[name] = rotationHookTokenFingerprint(token)
+	}
+	missing := strings.Repeat("a", 64)
+
+	expected := rotationHookTokenFingerprints{
+		"claudecode": present["claudecode"],
+		"codex":      missing,
+		"cursor":     present["cursor"],
+	}
+	got, revokedAll, err := rotationHookTokensStillPresented(dataDir, expected, rotationHookTokenFingerprints{
+		"codex": missing, "cursor": present["cursor"],
+	})
+	if err != nil || revokedAll {
+		t.Fatalf("rotationHookTokensStillPresented() = %v, %v, %v", got, revokedAll, err)
+	}
+	want := rotationHookTokenFingerprints{"claudecode": present["claudecode"], "cursor": present["cursor"]}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("presented = %v, want %v (only the revoked orphan dropped)", got, want)
+	}
+
+	// A configured credential that is missing is never dropped: readiness
+	// still fails closed on it.
+	got, revokedAll, err = rotationHookTokensStillPresented(dataDir,
+		rotationHookTokenFingerprints{"codex": missing}, rotationHookTokenFingerprints{"thirdparty": missing})
+	if err != nil || revokedAll || !reflect.DeepEqual(got, rotationHookTokenFingerprints{"codex": missing}) {
+		t.Fatalf("configured missing credential = %v, %v, %v; want kept", got, revokedAll, err)
+	}
+	if err := verifyRotationConnectorHookAuthentication(
+		&http.Client{}, "http://127.0.0.1:18970/status", dataDir, got,
+	); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("missing configured credential error = %v, want fail-closed rejection", err)
+	}
+
+	// Every expectation a revoked orphan: nothing is left to present.
+	got, revokedAll, err = rotationHookTokensStillPresented(dataDir,
+		rotationHookTokenFingerprints{"codex": missing}, rotationHookTokenFingerprints{"codex": missing})
+	if err != nil || !revokedAll || len(got) != 0 {
+		t.Fatalf("all-revoked orphans = %v, %v, %v; want revokedAll", got, revokedAll, err)
+	}
+
+	// Without orphans the expectations pass through unchanged, including an
+	// explicit empty set that readiness rejects.
+	got, revokedAll, err = rotationHookTokensStillPresented(dataDir, rotationHookTokenFingerprints{}, nil)
+	if err != nil || revokedAll || got == nil || len(got) != 0 {
+		t.Fatalf("empty expectations = %v, %v, %v; want unchanged", got, revokedAll, err)
 	}
 }

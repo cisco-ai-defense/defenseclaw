@@ -21,6 +21,8 @@ Mirrors internal/cli/setup.go.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import hashlib
 import json as _json
@@ -52,6 +54,7 @@ import click
 # ``ux.section("Hook fail mode")`` and the source of the color
 # convention is obvious to anybody auditing this file.
 from defenseclaw import (
+    codex_toml,
     connector_paths,
     envvars,
     openclaw_presence,
@@ -103,6 +106,7 @@ from defenseclaw.connector_contracts import (
     assess_kiro_signal,
     compare_agent_versions,
     connector_lock_contract_invariant,
+    known_broken_entry,
     normalize_agent_version,
     normalize_connector,
     openclaw_needs_interception_advisory,
@@ -3582,6 +3586,157 @@ def _rotate_token_scoped_connectors(cfg: Any, data_dir: str) -> list[str]:
     return sorted(result)
 
 
+_TOKEN_ROTATION_HOOK_PROOF_TIMEOUT_SECONDS = 120
+_TOKEN_ROTATION_RUNTIME_STATE_MAX_BYTES = 64 << 10
+
+
+def _rotate_token_true(value: Any) -> bool:
+    """Read a config boolean as the gateway does (strconv.ParseBool)."""
+
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "t", "true"}
+
+
+def _rotate_token_hook_enabled_scopes(config_bytes: bytes) -> set[str] | None:
+    """Return the connectors whose hook requests the gateway evaluates outside the roster.
+
+    ``connector_hooks.<name>.enabled`` (and the legacy top-level
+    ``claude_code.enabled`` / ``codex.enabled``) opts a connector's hook route
+    in even when ``guardrail.connectors`` does not name it (agentHookEnabled
+    in internal/gateway/agent_hook.go). ``None`` means the config could not be
+    read, so every hook is taken to be enabled.
+    """
+
+    import yaml
+
+    try:
+        raw = yaml.safe_load(config_bytes.decode("utf-8")) if config_bytes else {}
+    except (UnicodeDecodeError, yaml.YAMLError):
+        return None
+    if raw is None:
+        return set()
+    if not isinstance(raw, dict):
+        return None
+    scopes: set[str] = set()
+    hooks = raw.get("connector_hooks")
+    if isinstance(hooks, dict):
+        for name, hook in hooks.items():
+            if isinstance(name, str) and isinstance(hook, dict) and _rotate_token_true(hook.get("enabled")):
+                scopes.add(normalize_connector(name))
+    for key, name in (("claude_code", "claudecode"), ("codex", "codex")):
+        legacy = raw.get(key)
+        if isinstance(legacy, dict) and _rotate_token_true(legacy.get("enabled")):
+            scopes.add(name)
+    return scopes
+
+
+def _rotate_token_runtime_roster(data_dir: str) -> set[str] | None:
+    """Return the connectors the gateway's runtime state still owns.
+
+    The gateway keeps a connector in ``active_connector.json`` while it is
+    active and while its removal is still being retried, so its hooks may
+    still be registered. ``None`` means the state could not be read.
+    """
+
+    path = os.path.join(data_dir, "active_connector.json")
+    if not os.path.lexists(path):
+        return set()
+    try:
+        reject_symlink(path)
+        with open(path, "rb") as stream:
+            body = stream.read(_TOKEN_ROTATION_RUNTIME_STATE_MAX_BYTES + 1)
+        if len(body) > _TOKEN_ROTATION_RUNTIME_STATE_MAX_BYTES:
+            return None
+        state = _json.loads(body.decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    names = state.get("names")
+    raw_names = list(names) if isinstance(names, list) else []
+    raw_names.append(state.get("name"))
+    return {normalize_connector(name) for name in raw_names if isinstance(name, str) and name.strip()}
+
+
+def _rotate_token_hook_registration_clean(data_dir: str, config_file: str, connector: str) -> bool:
+    """Whether the gateway proves that no agent registers *connector*'s hooks any more.
+
+    Runs ``defenseclaw-gateway connector verify`` (VerifyClean), the proof
+    per-user teardown gives before it revokes a credential
+    (revokePerUserHookAPIToken). An unknown connector, which neither this
+    build nor a plugin ships, has no DefenseClaw hook and no gateway route
+    that accepts its sidecar. Anything else, including a proof that cannot
+    run, is not clean.
+    """
+
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        return False
+    env = _rotate_token_child_environment(data_dir, config_file, "")
+    env.pop(_GATEWAY_TOKEN_ENV, None)
+    command = [executable, "connector", "verify", "--connector", connector, "--data-dir", data_dir, "--json"]
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            timeout=_TOKEN_ROTATION_HOOK_PROOF_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    if result.returncode == 2:
+        return f'unknown connector "{connector}"' in (result.stderr or "")
+    if result.returncode != 0:
+        return False
+    lines = (result.stdout or "").strip().splitlines()
+    try:
+        payload = _json.loads(lines[-1]) if lines else None
+    except ValueError:
+        return False
+    return isinstance(payload, dict) and payload.get("connector") == connector and payload.get("clean") is True
+
+
+def _rotate_token_live_unconfigured_scopes(
+    cfg: Any,
+    config_bytes: bytes,
+    data_dir: str,
+    config_file: str,
+    connectors: list[str],
+) -> list[str]:
+    """Return the unconfigured sidecar owners whose hooks may still call the gateway.
+
+    A registered hook that finds no credential lets every call through in
+    fail mode open, so rotation revokes a sidecar only after proving its hook
+    can no longer run: the gateway's runtime state does not own the
+    connector, no config enables its hook route, application protection
+    cannot activate it, and VerifyClean proves no agent registers its hooks.
+    Every other sidecar is rotated like a configured one.
+    """
+
+    if not connectors:
+        return []
+    runtime = _rotate_token_runtime_roster(data_dir)
+    enabled_hooks = _rotate_token_hook_enabled_scopes(config_bytes)
+    application = getattr(cfg, "application_protection", None)
+    application_enabled = getattr(application, "effective_enabled", None)
+    live: list[str] = []
+    for connector in connectors:
+        if (
+            runtime is None
+            or connector in runtime
+            or enabled_hooks is None
+            or connector in enabled_hooks
+            or (callable(application_enabled) and bool(application_enabled(connector)))
+            or not _rotate_token_hook_registration_clean(data_dir, config_file, connector)
+        ):
+            live.append(connector)
+    return live
+
+
 def _rotate_token_hook_path(data_dir: str, connector: str) -> str:
     scope = _rotate_token_hook_scope(connector)
     return os.path.join(data_dir, "hooks", f".hook-{scope}.token")
@@ -3903,6 +4058,32 @@ def _rotate_token_verify_restored_hook_snapshots_locked(snapshots: list[_RotateT
         ) from first_error
 
 
+@dataclass(frozen=True)
+class _RotateTokenOutcome:
+    rotated_unconfigured: tuple[str, ...] = ()
+    revoked: tuple[str, ...] = ()
+
+
+def _rotate_token_verify_live_orphans_locked(data_dir: str, config_file: str, values: dict[str, str]) -> None:
+    """Prove each rotated unconfigured sidecar converged or its hook is gone.
+
+    Gateway B may finish removing such a connector while it starts, and that
+    teardown revokes the credential only after VerifyClean. A credential that
+    is gone while a hook still registers would let that hook allow every call
+    in fail mode open, so it fails the rotation and A is restored.
+    """
+
+    for connector, expected in sorted(values.items()):
+        snapshot = _rotate_token_hook_snapshot_locked(data_dir, connector)
+        if snapshot.existed:
+            if snapshot.fingerprint != _rotate_token_hook_fingerprint(expected):
+                raise click.ClickException("A connector hook credential did not converge during token rotation.")
+        elif not _rotate_token_hook_registration_clean(data_dir, config_file, connector):
+            raise click.ClickException(
+                f"The {connector} hook is still registered but lost its credential during token rotation."
+            )
+
+
 def _rotate_token_verify_hook_values_locked(data_dir: str, values: dict[str, str]) -> None:
     for connector, expected in sorted(values.items()):
         snapshot = _rotate_token_hook_snapshot_locked(data_dir, connector)
@@ -4141,8 +4322,14 @@ class _RotateTokenConnectorPolicy:
 def _rotate_token_connector_state(
     cfg: Any,
     hook_token_fingerprints: dict[str, str] | None = None,
+    orphan_hook_token_fingerprints: dict[str, str] | None = None,
 ) -> str:
-    """Serialize the complete configured connector posture for A/B verification."""
+    """Serialize the complete configured connector posture for A/B verification.
+
+    ``orphan_hook_token_fingerprints`` names the rotated credentials of
+    unconfigured connectors whose hooks may still run. Readiness proves the
+    gateway accepts each one, unless the gateway's own teardown revoked it.
+    """
 
     if hasattr(cfg, "active_connectors"):
         configured = cfg.active_connectors()
@@ -4188,9 +4375,12 @@ def _rotate_token_connector_state(
             for policy in sorted(policies.values(), key=lambda policy: policy.name)
         ],
     }
-    if hook_token_fingerprints:
-        configured_fingerprints: dict[str, str] = {}
-        for raw_name, fingerprint in hook_token_fingerprints.items():
+    for key, fingerprints, configured in (
+        ("hook_token_fingerprints", hook_token_fingerprints, True),
+        ("orphan_hook_token_fingerprints", orphan_hook_token_fingerprints, False),
+    ):
+        checked: dict[str, str] = {}
+        for raw_name, fingerprint in (fingerprints or {}).items():
             name = _rotate_token_hook_scope(raw_name)
             if name != raw_name:
                 raise click.ClickException(
@@ -4204,15 +4394,13 @@ def _rotate_token_connector_state(
                 raise click.ClickException(
                     "Connector hook credential fingerprint is invalid; refusing token rotation."
                 )
-            if name not in policies:
+            if (name in policies) != configured:
                 raise click.ClickException(
-                    "An unconfigured connector has a hook credential in the rotation state; refusing token rotation."
+                    "A connector hook credential is in the wrong rotation roster; refusing token rotation."
                 )
-            configured_fingerprints[name] = fingerprint
-        if configured_fingerprints:
-            payload["hook_token_fingerprints"] = {
-                name: configured_fingerprints[name] for name in sorted(configured_fingerprints)
-            }
+            checked[name] = fingerprint
+        if checked:
+            payload[key] = {name: checked[name] for name in sorted(checked)}
     return _json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -4332,7 +4520,7 @@ def _rotate_token_transaction(
     recover_previous_runtime: bool = True,
     scoped_connectors: tuple[str, ...] = (),
     require_complete_scoped_roster: bool = False,
-) -> None:
+) -> _RotateTokenOutcome:
     """Commit gateway and scoped token B only between stop(A) and start(B).
 
     Normal operator-initiated rotation restores ready gateway A if B cannot
@@ -4373,18 +4561,28 @@ def _rotate_token_transaction(
             raise click.ClickException(
                 "Connector hook credential scope changed before rotation; no credentials were modified."
             )
-        # An unconfigured sidecar can still authenticate against a gateway
-        # hook route. Revoke it without presenting it as a runtime owner.
         persisted_scopes = set(_rotate_token_persisted_hook_scopes(data_dir))
         # Removed hooks that fail open without their credential still need the
         # kept sidecar to reach the gateway's blocking retired route.
-        orphan_scopes = sorted(persisted_scopes - configured_scopes - KEPT_HOOK_TOKEN_NAMES)
+        unconfigured_scopes = sorted(persisted_scopes - configured_scopes - KEPT_HOOK_TOKEN_NAMES)
         tracked_scopes = sorted(configured_scopes | persisted_scopes)
         for connector in tracked_scopes:
             hook_locks.enter_context(locked_file_update(_rotate_token_hook_path(data_dir, connector)))
         _rotate_token_preflight_writable(
-            [_rotate_token_hook_path(data_dir, connector) for connector in orphan_scopes]
+            [_rotate_token_hook_path(data_dir, connector) for connector in unconfigured_scopes]
         )
+        # An unconfigured sidecar can still authenticate against a gateway
+        # hook route, so it is revoked once its hook can no longer run. One
+        # whose hook may still run is rotated: deleting it would let that hook
+        # allow every call in fail mode open.
+        live_orphan_scopes = _rotate_token_live_unconfigured_scopes(
+            authoritative_cfg,
+            config_snapshot,
+            data_dir,
+            config_file,
+            unconfigured_scopes,
+        )
+        orphan_scopes = [connector for connector in unconfigured_scopes if connector not in live_orphan_scopes]
         if require_complete_scoped_roster and set(requested_scopes) != set(
             _rotate_token_scoped_connectors(authoritative_cfg, data_dir)
         ):
@@ -4407,6 +4605,11 @@ def _rotate_token_transaction(
             hook_snapshot.connector: hook_snapshot.fingerprint
             for hook_snapshot in hook_snapshots
             if hook_snapshot.connector in requested_scopes and hook_snapshot.fingerprint is not None
+        }
+        old_orphan_fingerprints = {
+            hook_snapshot.connector: hook_snapshot.fingerprint
+            for hook_snapshot in hook_snapshots
+            if hook_snapshot.connector in live_orphan_scopes and hook_snapshot.fingerprint is not None
         }
         hook_windows_security = {
             hook_snapshot.connector: hook_snapshot.windows_security for hook_snapshot in hook_snapshots
@@ -4442,14 +4645,18 @@ def _rotate_token_transaction(
             old_stopped = True
 
             new_hook_values = _rotate_token_new_hook_values(
-                requested_scopes,
+                [*requested_scopes, *live_orphan_scopes],
                 new_token,
-                old_hook_fingerprints,
+                {**old_hook_fingerprints, **old_orphan_fingerprints},
             )
             new_hook_fingerprints = {
                 connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
             }
-            connector_state_b = _rotate_token_connector_state(authoritative_cfg, new_hook_fingerprints)
+            connector_state_b = _rotate_token_connector_state(
+                authoritative_cfg,
+                {name: value for name, value in new_hook_fingerprints.items() if name in requested_scopes},
+                {name: value for name, value in new_hook_fingerprints.items() if name in live_orphan_scopes},
+            )
             mutation_attempted = True
             atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
             for connector, value in sorted(new_hook_values.items()):
@@ -4472,7 +4679,15 @@ def _rotate_token_transaction(
                 config_file=config_file,
                 connector_state=connector_state_b,
             )
-            _rotate_token_verify_hook_values_locked(data_dir, new_hook_values)
+            _rotate_token_verify_hook_values_locked(
+                data_dir,
+                {name: value for name, value in new_hook_values.items() if name in requested_scopes},
+            )
+            _rotate_token_verify_live_orphans_locked(
+                data_dir,
+                config_file,
+                {name: value for name, value in new_hook_values.items() if name in live_orphan_scopes},
+            )
             if any(os.path.lexists(_rotate_token_hook_path(data_dir, connector)) for connector in orphan_scopes):
                 raise click.ClickException("A removed connector hook credential was recreated during rotation.")
             current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
@@ -4484,6 +4699,7 @@ def _rotate_token_transaction(
                 audit_details,
                 allow_offline=False,
             )
+            return _RotateTokenOutcome(rotated_unconfigured=tuple(live_orphan_scopes), revoked=tuple(orphan_scopes))
         except BaseException as primary_error:
             if not old_stopped:
                 raise
@@ -4589,7 +4805,8 @@ def _refuse_rotate_token_on_managed_host() -> None:
     "--connector",
     default=None,
     help=(
-        "Optional presentation hint (rotation covers configured scopes and revokes unconfigured sidecars)."
+        "Optional presentation hint (rotation covers configured scopes and every hook that may still run, "
+        "and revokes unconfigured sidecars whose hooks are gone)."
     ),
 )
 @click.option(
@@ -4609,10 +4826,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     refreshes every affected hook/plugin and verifies gateway B. Any post-stop
     failure restores the exact credential snapshots and prior ready generation.
 
-    Rotation is global by design: configured scoped-hook credentials receive
-    distinct replacements, and safely discovered unconfigured sidecars are
-    revoked in the same transaction. ``--connector`` remains a presentation
-    hint and never narrows this security boundary.
+    Rotation is global by design: configured scoped-hook credentials, and
+    those of unconfigured connectors whose hooks may still run, receive
+    distinct replacements; an unconfigured sidecar is revoked in the same
+    transaction once the gateway proves its hook is gone. ``--connector``
+    remains a presentation hint and never narrows this security boundary.
 
     Plan B5 / S0.5.
     """
@@ -4656,7 +4874,8 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
         scope = f"{len(scoped_actives)} scoped-hook credential(s)" if scoped_actives else "no scoped-hook credential"
         click.confirm(
             f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path},\n"
-            f"replace configured scoped-hook credentials and revoke unconfigured sidecars ({scope}),\n"
+            f"replace configured scoped-hook credentials ({scope}) and those of hooks that may still run,\n"
+            "revoke unconfigured sidecars whose hooks are gone,\n"
             "refresh their hooks/plugins, and restart the gateway. Continue?",
             abort=True,
         )
@@ -4669,10 +4888,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
     # The transaction lets this typed error escape only before mutation or
     # after generation A's exact snapshots and required ready runtime have
     # been restored. Unsafe rollback/recovery failures become fatal Click errors.
+    outcome = _RotateTokenOutcome()
     for attempt in range(2):
         new_token = secrets.token_hex(32)
         try:
-            _rotate_token_transaction(
+            outcome = _rotate_token_transaction(
                 app,
                 dotenv_path,
                 new_token,
@@ -4702,6 +4922,11 @@ def rotate_token_cmd(app: AppContext, connector: str | None, yes: bool) -> None:
         ux.subhead("no connector-scoped hook credentials to rotate")
     else:
         ux.subhead("active connector roster: none")
+    for name in outcome.rotated_unconfigured:
+        ux.warn(
+            f"{name} is not configured, but its hook may still run, so its credential was rotated "
+            f"too. Remove its hook with: defenseclaw setup remove {name}"
+        )
     click.echo()
     ux.subhead("Next step: restart each agent so it picks up the new token in its")
     ux.subhead("inspect / hook subprocess invocations.")
@@ -5552,6 +5777,9 @@ def _connector_contract_upgrade_guidance(
 
     key = normalize_connector(connector)
     rerun = rerun or f"defenseclaw setup {'claude-code' if key == 'claudecode' else key}"
+    broken, _ = known_broken_entry(key, normalized_version)
+    if broken is not None:
+        return f"Install a {label} release that is not known broken ({broken['issue']}), then run: {rerun}."
     contracts = HOOK_CONTRACTS.get(key, ())
     if key == "kiro":
         return f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then run: {rerun}."
@@ -5825,6 +6053,9 @@ def _check_connector_version_supported_for_setup(
             )
         elif emit:
             ux.ok(f"{label}: version {version_display} is supported by {contract}.")
+        if emit and compatibility.warning:
+            # Hermes 0.19.0-0.21.0: guarded, except their TUI and dashboard chat.
+            ux.warn(f"{label} {version_display}: {compatibility.warning}.")
         return True
 
     if compatibility.status == STATUS_NOT_GATED:
@@ -7757,6 +7988,201 @@ def _codex_registration_path(lock_body: bytes) -> str | None:
     return os.path.abspath(matches[0])
 
 
+def _codex_config_matches_backup(path: str, expected_sha256: str | None) -> bool:
+    """Match a bounded regular config against the pre-setup installed hash."""
+    if not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", expected_sha256) is None:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    except OSError:
+        return False
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _SETUP_CODEX_BACKUP_MAX_BYTES:
+            return False
+        digest = hashlib.sha256()
+        remaining = _SETUP_CODEX_BACKUP_MAX_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(fd)
+        stable = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) == (
+            after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns
+        )
+        return stable and remaining > 0 and digest.hexdigest() == expected_sha256
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+
+
+def _codex_config_has_managed_hooks(
+    path: str, data_dir: str | None, copied_data_dir: str | None = None,
+) -> bool:
+    """Find Codex hook commands in one stable bounded config, ignoring user edits."""
+    try:
+        config = codex_toml.loads(read_regular_file_no_follow(path, max_bytes=_SETUP_CODEX_BACKUP_MAX_BYTES))
+    except (OSError, ValueError, UnicodeError):
+        return False
+    hooks = config.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    expected_scripts = tuple(
+        os.path.join(root, "hooks", "codex-hook.sh").replace("\\", "/")
+        for root in (data_dir, copied_data_dir) if root is not None
+    )
+    for event, groups in hooks.items():
+        if event == "state" or not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                continue
+            for handler in group["hooks"]:
+                if not isinstance(handler, dict):
+                    continue
+                for key in ("command", "command_windows", "commandWindows"):
+                    command = handler.get(key)
+                    if not isinstance(command, str):
+                        continue
+                    if os.name != "nt":
+                        try:
+                            words = shlex.split(command)
+                        except ValueError:
+                            continue
+                        if len(words) >= 3 and words[1] == "--event":
+                            script = words[0].replace("\\", "/")
+                            if script in expected_scripts or (
+                                not expected_scripts and script.endswith("/hooks/codex-hook.sh")
+                            ):
+                                return True
+                        continue
+                    normalized = command.replace("\\", "/").casefold()
+                    scripts = expected_scripts or ("/hooks/codex-hook.sh",)
+                    if "--event" in command and any(
+                        re.search(re.escape(script.casefold()) + r"(?=['\"\s])", normalized)
+                        for script in scripts
+                    ):
+                        return True
+                    # Windows writes an encoded native launcher command, which
+                    # has no data-dir path. Its Codex hook signature is root proof.
+                    encoded = re.search(r"-EncodedCommand\s+([A-Za-z0-9+/=]+)", command, re.IGNORECASE)
+                    if encoded is None or len(encoded.group(1)) > 65536:
+                        continue
+                    try:
+                        script = base64.b64decode(encoded.group(1), validate=True).decode("utf-16-le")
+                    except (ValueError, UnicodeError, binascii.Error):
+                        continue
+                    if (
+                        "$env:NoDefaultCurrentDirectoryInExePath='1'" in script
+                        and "[System.Diagnostics.ProcessStartInfo]::new" in script
+                        and "'hook' '--connector' 'codex'" in script
+                        and "'--hook-contract'" in script
+                        and "defenseclaw-hook.exe" in script.casefold()
+                    ):
+                        return True
+    return False
+
+
+def _effective_codex_rollback_path(
+    record_path: str, captured: str, *, installed_sha256: str | None = None,
+) -> str:
+    """Resolve the installed Codex config before a failed root migration.
+
+    A copied backup can still name an obsolete home even if that home has
+    unrelated files or an empty .codex directory. The installed hash or this
+    data dir's or copied receipt's hook commands prove which file moved, even
+    after Codex writes unrelated settings. An old home with hooks keeps its root.
+    """
+    home = os.path.abspath(os.path.expanduser("~"))
+    captured = os.path.normpath(captured)
+
+    def within(path: str, root: str) -> bool:
+        try:
+            relative = os.path.relpath(path, root)
+        except ValueError:  # Different Windows volumes.
+            return False
+        return relative == "." or (relative != ".." and not relative.startswith(".." + os.sep))
+
+    if not (within(os.path.abspath(record_path), home) and not within(captured, home)):
+        return captured
+
+    if installed_sha256 and not _codex_config_matches_backup(captured, installed_sha256):
+        matches: set[str] = set()
+        if not _codex_config_has_managed_hooks(captured, None):
+            data_dir = os.path.dirname(os.path.dirname(os.path.dirname(record_path)))
+            copied_data_dir = None
+            if os.path.basename(os.path.dirname(captured)).casefold() == ".codex" and within(data_dir, home):
+                old_home = os.path.dirname(os.path.dirname(captured))
+                copied_data_dir = os.path.join(old_home, os.path.relpath(data_dir, home))
+            ancestor = os.path.dirname(captured)
+            for _ in range(32):
+                parent = os.path.dirname(ancestor)
+                if parent == ancestor:
+                    break
+                try:
+                    candidate = os.path.join(home, os.path.relpath(captured, ancestor))
+                except ValueError:  # Different Windows volumes.
+                    break
+                if within(candidate, home) and (
+                    _codex_config_matches_backup(candidate, installed_sha256)
+                    or _codex_config_has_managed_hooks(candidate, data_dir, copied_data_dir)
+                ):
+                    matches.add(os.path.normpath(candidate))
+                ancestor = parent
+        if len(matches) == 1:
+            return matches.pop()
+        if len(matches) > 1:
+            raise OSError("Codex rollback root is ambiguous after an account home move")
+
+    def target_under(old_root: str) -> str | None:
+        if within(home, old_root) or within(old_root, home):
+            return None
+        relative = os.path.relpath(captured, old_root)
+        if relative in (".", "..") or relative.startswith(".." + os.sep):
+            return None
+        candidate = os.path.join(home, relative)
+        return candidate if os.path.lexists(candidate) else None
+
+    ancestors: list[str] = []
+    parent = os.path.dirname(captured)
+    while parent != os.path.dirname(parent):
+        ancestors.append(parent)
+        parent = os.path.dirname(parent)
+    missing = None
+    for ancestor in reversed(ancestors):
+        try:
+            os.lstat(ancestor)
+        except FileNotFoundError:
+            missing = ancestor
+            break
+        except OSError:
+            return captured
+    if missing is None:
+        return captured
+    target = target_under(missing)
+    if target is not None:
+        return target
+    previous_home = os.path.dirname(missing)
+    try:
+        previous_info = os.lstat(previous_home)
+        if (
+            stat.S_ISDIR(previous_info.st_mode)
+            and not (
+                os.name == "nt"
+                and getattr(previous_info, "st_file_attributes", 0) & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            )
+        ):
+            with os.scandir(previous_home) as entries:
+                if next(entries, None) is None:
+                    target = target_under(previous_home)
+    except OSError:
+        pass
+    return target if target is not None else captured
+
+
 @dataclass(frozen=True)
 class _SetupRegistrationLocationEvidence:
     connector: str
@@ -8528,14 +8954,25 @@ def _capture_setup_desired_snapshot_once(cfg, *, capture_codex_backup: bool = Fa
         )
     codex_rollback = None
     if capture_codex_backup and data_dir:
+        backup_record = _codex_backup_path(data_dir)
         backup_existed, backup_body, backup_generation = _capture_protected_setup_file(
-            _codex_backup_path(data_dir),
+            backup_record,
             _SETUP_CODEX_BACKUP_MAX_BYTES,
             "Codex managed backup",
             trust_windows_administrators=True,
         )
-        backup_path = _codex_backup_identity(backup_body)["path"] if backup_existed else None
+        backup = _codex_backup_identity(backup_body) if backup_existed else None
+        backup_path = (
+            _effective_codex_rollback_path(
+                backup_record, backup["path"], installed_sha256=backup.get("post_sha256")
+            ) if backup is not None else None
+        )
         registration_path = _codex_registration_path(lock_body) if lock_existed else None
+        if backup_existed and registration_path is not None:
+            registration_path = _effective_codex_rollback_path(
+                backup_record, registration_path,
+                installed_sha256=backup.get("post_sha256") if registration_path == backup["path"] else None,
+            )
         prior_path = registration_path or backup_path
         codex_rollback = _SetupCodexRollbackPoint(
             backup_existed=backup_existed,
@@ -8935,18 +9372,30 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
     if prior is None or prior.root is None:
         return []
     failures: list[str] = []
+    backup_record = _codex_backup_path(cfg.data_dir)
+    current: dict[str, Any] | None = None
     try:
         existed, body, _generation = _capture_protected_setup_file(
-            _codex_backup_path(cfg.data_dir), _SETUP_CODEX_BACKUP_MAX_BYTES, "Codex managed backup",
+            backup_record, _SETUP_CODEX_BACKUP_MAX_BYTES, "Codex managed backup",
             trust_windows_administrators=True,
         )
         if not existed:
             failures.append("Codex managed backup is missing after rollback")
         else:
             current = _codex_backup_identity(body)
-            current_root = os.path.dirname(current["path"])
+            # Resolve the same installed-hash and managed-hook evidence as
+            # Go's loader before judging a copied-home receipt.
+            current_root = os.path.dirname(_effective_codex_rollback_path(
+                backup_record, current["path"], installed_sha256=current.get("post_sha256"),
+            ))
             if os.path.normcase(os.path.normpath(current_root)) != os.path.normcase(os.path.normpath(prior.root)):
-                failures.append("Codex managed backup still names the new root")
+                selected = os.environ.get("CODEX_HOME")
+                is_new = selected is not None and (
+                    os.path.normcase(os.path.normpath(current_root))
+                    == os.path.normcase(os.path.normpath(selected))
+                )
+                location = "new root" if is_new else "old root"
+                failures.append(f"Codex managed backup still names an unresolved or obsolete root ({location})")
             if prior.backup_existed:
                 original = _codex_backup_identity(prior.backup_bytes)
                 for key in ("existed", "mode", "pristine_sha256", "pristine_bytes"):
@@ -8963,6 +9412,11 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
                 "hook_contract_lock.json",
             )
             current_path = _codex_registration_path(body) if existed else None
+            if prior.backup_existed and current_path is not None and current is not None:
+                current_path = _effective_codex_rollback_path(
+                    backup_record, current_path,
+                    installed_sha256=current.get("post_sha256") if current_path == current["path"] else None,
+                )
             if current_path is None or (
                 os.path.normcase(os.path.normpath(current_path))
                 != os.path.normcase(os.path.normpath(prior.registration_path))
@@ -8973,6 +9427,36 @@ def _verify_restored_codex_root(cfg, snapshot: _SetupConfigSnapshot) -> list[str
                 f"Codex hook registration verification unavailable [{_setup_runtime_ref(type(exc).__name__)}]"
             )
     return failures
+
+
+def _restore_setup_codex_backup_snapshot(cfg, snapshot: _SetupConfigSnapshot) -> None:
+    """Return the prior Codex restore point after the gateway has restored hooks."""
+    prior = getattr(snapshot, "codex_rollback", None)
+    if prior is None or not prior.backup_existed or prior.root is None:
+        return
+    original = _codex_backup_identity(prior.backup_bytes)
+    if not isinstance(original.get("post_sha256"), str):
+        return  # Older receipts do not have the installed-file evidence.
+    backup_record = _codex_backup_path(cfg.data_dir)
+    existed, body, _generation = _capture_protected_setup_file(
+        backup_record, _SETUP_CODEX_BACKUP_MAX_BYTES, "Codex managed backup",
+        trust_windows_administrators=True,
+    )
+    if not existed:
+        raise OSError("Codex managed backup is missing after gateway rollback")
+    if body == prior.backup_bytes:
+        return
+    current = _codex_backup_identity(body)
+    effective = _effective_codex_rollback_path(
+        backup_record, current["path"], installed_sha256=current.get("post_sha256"),
+    )
+    expected = os.path.join(prior.root, "config.toml")
+    if (
+        os.path.normcase(os.path.normpath(effective)) != os.path.normcase(os.path.normpath(expected))
+        or not _codex_config_has_managed_hooks(expected, os.path.abspath(os.fspath(cfg.data_dir)))
+    ):
+        raise OSError("Codex gateway rollback did not restore the prior managed hooks")
+    atomic_write_private_bytes(backup_record, prior.backup_bytes)
 
 
 def _verify_preserved_setup_hook_contract_lock(
@@ -9730,11 +10214,13 @@ def _rollback_failed_connector_application(
                     _restore_setup_hook_contract_lock_snapshot(app.cfg, snapshot)
                     if lifecycle_error is not None:
                         raise lifecycle_error
+                    _restore_setup_codex_backup_snapshot(app.cfg, snapshot)
                 else:
                     restore_kwargs: dict[str, Any] = {"skip_openclaw": isinstance(cause, _OpenClawGatewayNotRunning)}
                     if isinstance(cause, _GatewayRestartFailed) and not isinstance(cause, _OpenClawGatewayNotRunning):
                         restore_kwargs["same_failure"] = cause
                     _restart_restored_connector_runtime(app, **restore_kwargs)
+                    _restore_setup_codex_backup_snapshot(app.cfg, snapshot)
         except BaseException as exc:  # Report both non-secret transaction failures.
             if _secret_safe:
                 secret_rollback_failed = True
@@ -10010,13 +10496,18 @@ def _write_connector_identity(
             # a later `setup <it> --mode action` stay fail-open under a closed
             # global default (GAP-1109), so it inherits instead.
             seeded_mode = gc.effective_mode(existing_single)
+            # A per-user effective_hook_fail_mode is the outage mode of the
+            # policy tier, not the saved value: pin what was saved (owner
+            # decision 2026-10-23; managed configs resolve the saved value).
+            managed = cfg.managed_outside_secure_client() or gc.secure_client_hook_fail_modes()
+            pinned = (
+                gc.effective_hook_fail_mode(existing_single)
+                if managed
+                else (getattr(gc, "hook_fail_mode", "") or "").strip().lower()
+            )
             gc.connectors[existing_single] = PerConnectorGuardrailConfig(
                 mode=seeded_mode,
-                hook_fail_mode=(
-                    gc.effective_hook_fail_mode(existing_single)
-                    if str(seeded_mode).strip().lower() == "action"
-                    else ""
-                ),
+                hook_fail_mode=pinned if str(seeded_mode).strip().lower() == "action" else "",
             )
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()
@@ -10417,16 +10908,11 @@ def _apply_hook_connector_setup(
             gc.connectors[connector].block_message = block_message
         else:
             gc.block_message = block_message
-    if fail_mode is not None or connector == "cursor":
+    if fail_mode is not None:
+        # Saved as given. The guardrail mode no longer pins Cursor's value:
+        # every hook's outage mode is the policy tier's on a per-user install
+        # (oss-outage-open) and the administrator's on a managed one.
         normalized_fail = "closed" if str(fail_mode).strip().lower() == "closed" else "open"
-        if connector == "cursor":
-            mode_fail = "closed" if desired_mode == "action" else "open"
-            if fail_mode is not None and normalized_fail != mode_fail:
-                ux.echo(
-                    f"  ⚠ Cursor {desired_mode} mode pins hook failures={mode_fail}; "
-                    f"ignoring --fail-mode {normalized_fail}."
-                )
-            normalized_fail = mode_fail
         if per_connector:
             gc.connectors[connector].hook_fail_mode = normalized_fail
         else:
@@ -10441,8 +10927,8 @@ def _apply_hook_connector_setup(
             _batch_summary.setdefault("fail_open", []).append(connector)
         else:
             ux.echo(
-                f"  ⚠ {connector} hook failures are fail-open: while the gateway is down or "
-                "unreachable, tool calls run uninspected. Pass --fail-mode closed to block them."
+                f"  ⚠ {connector} hooks let tool calls run with a warning while the gateway is not "
+                "running (default policy). To block them: defenseclaw guardrail use-pack strict"
             )
     if connector == "cursor":
         if hilt:
@@ -10583,11 +11069,9 @@ def _apply_hook_connector_setup(
         # toward unsafe global edits on multi-connector installs.
         ux.echo(f"  ✓ {connector} mode={desired_mode}")
     if connector == "cursor":
-        effective_fail_mode = "closed" if desired_mode == "action" else "open"
-        ux.echo(
-            f"  ✓ cursor hook failures={effective_fail_mode} "
-            f"(failClosed={'true' if desired_mode == 'action' else 'false'})"
-        )
+        # Cursor registers failClosed: true in both modes; while the gateway
+        # is down its hook follows the outage mode (oss-outage-open).
+        ux.echo(f"  ✓ cursor gateway outage={gc.effective_hook_fail_mode('cursor')} (failClosed=true)")
         ux.echo(
             "  ℹ Cursor runs all matching hooks and merges Enterprise > Team > Project > User; "
             "DefenseClaw cannot safely detect an actual higher-priority conflict, so none is inferred"
@@ -10651,9 +11135,8 @@ def _echo_batch_setup_summary(applied: list[str], summary: dict[str, Any], *, re
     fail_open = summary.get("fail_open") or []
     if fail_open:
         ux.echo(
-            f"  ⚠ Hook failures are fail-open for {', '.join(fail_open)}: while the gateway is down or "
-            "unreachable, their tool calls run uninspected. Block them with: "
-            "defenseclaw guardrail fail-mode closed"
+            f"  ⚠ While the gateway is not running, {', '.join(fail_open)} hooks let tool calls run "
+            "with a warning (default policy). To block them: defenseclaw guardrail use-pack strict"
         )
     if not restart:
         _echo_saved_without_restart(plural=True)
@@ -18139,6 +18622,7 @@ def _apply_v8_observability_preset(
     signals: tuple[str, ...] | None = None,
     secret_value: str | None = None,
     local_stack: dict[str, str] | None = None,
+    legacy_local_destination: tuple[dict[str, Any], str] | None = None,
     allow_private_networks: bool = False,
 ) -> str:
     """Write one setup alias through the canonical v8 destination writer.
@@ -18170,6 +18654,7 @@ def _apply_v8_observability_preset(
         dry_run=False,
         allow_private_networks=allow_private_networks,
         local_stack=local_stack,
+        legacy_local_destination=legacy_local_destination,
     )
     return resolved_name
 
@@ -18250,10 +18735,14 @@ def _apply_logs_config(
         )
         return
 
-    # Refuse a destination local setup did not record before the stack is
-    # refreshed, restarted or started. The name comes from the address the
-    # bridge will report, which a custom bridge env file can change.
-    _local_splunk_sink_name_or_exit(app, local_splunk_destination_name(_planned_local_splunk_hec_url(app.cfg.data_dir)))
+    # Prove an unrecorded legacy sink belongs to this exact bridge before the
+    # stack is refreshed or stopped. A matching name or loopback URL alone is
+    # also possible for a remote destination reached through a tunnel.
+    preferred = local_splunk_destination_name(_planned_local_splunk_hec_url(app.cfg.data_dir))
+    legacy_local_destination = _verified_legacy_local_splunk_destination(
+        app.cfg.data_dir, preferred, native_windows=False, gateway_token_env=gateway_token_env,
+    )
+    _local_splunk_sink_name_or_exit(app, preferred, legacy_local_destination=legacy_local_destination)
     contract = _bootstrap_bridge(
         app.cfg.data_dir,
         gateway_token_env=gateway_token_env,
@@ -18290,9 +18779,12 @@ def _apply_logs_config(
             "sourcetype": sourcetype,
             "verify_tls": "false",
         },
-        name=_local_splunk_sink_name_or_exit(app, local_splunk_destination_name(hec_url)),
+        name=_local_splunk_sink_name_or_exit(
+            app, local_splunk_destination_name(hec_url), legacy_local_destination=legacy_local_destination,
+        ),
         secret_value=hec_token or None,
         local_stack=record,
+        legacy_local_destination=legacy_local_destination,
         # The local Splunk container listens on this computer.
         allow_private_networks=True,
     )
@@ -18312,15 +18804,107 @@ def _planned_local_splunk_hec_url(data_dir: str) -> str:
     return entries.get("DEFENSECLAW_HEC_URL") or _SPLUNK_BRIDGE_DEFAULT_HEC_URL
 
 
-def _local_splunk_sink_name_or_exit(app: AppContext, preferred: str) -> str:
+def _local_splunk_sink_name_or_exit(
+    app: AppContext, preferred: str, *, legacy_local_destination: tuple[dict[str, Any], str] | None = None,
+) -> str:
     """The destination local setup writes; refuse one it did not record."""
 
     from defenseclaw.commands.cmd_setup_observability import _local_splunk_sink_name, _v8_authored_destinations
 
     try:
-        return _local_splunk_sink_name(_v8_authored_destinations(app.cfg.data_dir), preferred)
+        return _local_splunk_sink_name(
+            _v8_authored_destinations(app.cfg.data_dir), preferred,
+            legacy_local_destination=legacy_local_destination[0] if legacy_local_destination else None,
+        )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _verified_legacy_local_splunk_destination(
+    data_dir: str, preferred: str, *, native_windows: bool, gateway_token_env: str,
+) -> tuple[dict[str, Any], str] | None:
+    """Identify a pre-record sink only with its bridge contract and exact Docker ownership."""
+    from defenseclaw.commands.cmd_setup_observability import _stored_secret, _v8_authored_destination_snapshot
+    from defenseclaw.observability.local_splunk import COMPOSE_PROJECT, LOCAL_TOKEN_ENV
+    from defenseclaw.observability.local_stack import CommandRunner, LocalStackError
+    from defenseclaw.observability.v8_config import load_masked_v8_with_source
+    from defenseclaw.observability.v8_presets import is_recorded_local_splunk
+
+    authored, source_sha256 = _v8_authored_destination_snapshot(data_dir)
+    masked_existing = next((item for item in authored if item.get("name") == preferred), None)
+    if masked_existing is None:
+        return None
+    source_bytes = config_path_for_data_dir(data_dir).read_bytes()
+    if hashlib.sha256(source_bytes).hexdigest() != source_sha256:
+        return None
+    _, source = load_masked_v8_with_source(source_bytes)
+    destinations = source.get("observability", {}).get("destinations", [])
+    existing = next((item for item in destinations if isinstance(item, dict) and item.get("name") == preferred), None)
+    expected_ref = LOCAL_TOKEN_ENV if native_windows else "DEFENSECLAW_SPLUNK_HEC_TOKEN"
+    if (
+        existing is None or is_recorded_local_splunk(existing) or "local_stack" in existing
+        or existing.get("kind") != "splunk_hec" or existing.get("token_env") != expected_ref
+    ):
+        return None
+    stack_dir = Path(data_dir) / "splunk-bridge"
+    bin_dir = stack_dir / "bin"
+    compose_dir = stack_dir / "compose"
+    env_dir = stack_dir / "env"
+    bridge = bin_dir / "splunk-claw-bridge"
+    compose = compose_dir / "docker-compose.local.yml"
+    env_file = env_dir / ".env"
+    try:
+        for path in (stack_dir, bin_dir, compose_dir, env_dir, bridge, compose, env_file):
+            reject_symlink(path, what="local Splunk bridge ownership path")
+            if not path.exists():
+                return None
+        if not all(path.is_dir() for path in (stack_dir, bin_dir, compose_dir, env_dir)):
+            return None
+        if not all(path.is_file() for path in (bridge, compose, env_file)):
+            return None
+        contract = _load_dotenv(str(env_file))
+        credential = _stored_secret(data_dir, expected_ref)
+        if (
+            not credential or contract.get("DEFENSECLAW_HEC_TOKEN") != credential
+            or existing.get("endpoint") != contract.get("DEFENSECLAW_HEC_URL")
+        ):
+            return None
+        docker = shutil.which("docker")
+        if not docker:
+            return None
+        runner = CommandRunner()
+        environment = _splunk_bridge_child_env(gateway_token_env, platform_name="nt" if native_windows else None)
+        listed = runner.run(
+            [docker, "ps", "--all", "--no-trunc", "--filter", f"label=com.docker.compose.project={COMPOSE_PROJECT}",
+             "--filter", "label=com.docker.compose.service=splunk", "--format", "{{.ID}}"],
+            timeout=10, env=environment,
+        )
+        ids = listed.stdout.splitlines() if listed.returncode == 0 else []
+        if len(ids) != 1 or not re.fullmatch(r"[0-9a-f]{64}", ids[0]):
+            return None
+        inspected = runner.run(
+            [docker, "inspect", "--format", "{{json .Config.Labels}}", ids[0]],
+            timeout=8, env=environment,
+        )
+        labels = _json.loads(inspected.stdout) if inspected.returncode == 0 else None
+        if not isinstance(labels, dict):
+            return None
+        def same_path(raw: str, expected: Path) -> bool:
+            return os.path.normcase(os.path.abspath(raw)) == os.path.normcase(os.path.abspath(expected))
+        config_files = str(labels.get("com.docker.compose.project.config_files", ""))
+        if (
+            labels.get("com.docker.compose.project") != COMPOSE_PROJECT
+            or labels.get("com.docker.compose.service") != "splunk"
+            or not same_path(
+                str(labels.get("com.docker.compose.project.working_dir", "")),
+                stack_dir if native_windows else compose_dir,
+            )
+            or not any(same_path(item.strip(), compose) for item in config_files.split(",") if item.strip())
+        ):
+            return None
+    except (OSError, ValueError, LocalStackError):
+        return None
+    return masked_existing, source_sha256
 
 
 def _local_splunk_container_id(gateway_token_env: str) -> str:
@@ -18383,7 +18967,13 @@ def _apply_native_windows_logs_config(
     contract = None
     config_mutated = False
     # Refuse a destination local setup did not record before the stack starts.
-    sink_name = _local_splunk_sink_name_or_exit(app, NATIVE_LOCAL_SPLUNK_DESTINATION)
+    legacy_local_destination = _verified_legacy_local_splunk_destination(
+        app.cfg.data_dir, NATIVE_LOCAL_SPLUNK_DESTINATION,
+        native_windows=True, gateway_token_env=gateway_token_env,
+    )
+    sink_name = _local_splunk_sink_name_or_exit(
+        app, NATIVE_LOCAL_SPLUNK_DESTINATION, legacy_local_destination=legacy_local_destination,
+    )
     click.echo("  Pre-flight checks:")
     try:
         transaction = start_native_local_splunk(
@@ -18426,6 +19016,7 @@ def _apply_native_windows_logs_config(
             name=sink_name,
             secret_value=contract.hec_token,
             local_stack=record,
+            legacy_local_destination=legacy_local_destination,
             allow_private_networks=True,
         )
         _reload_cfg_from_data_dir(app)
@@ -18666,33 +19257,46 @@ def _splunk_bridge_child_env(
     return child_env
 
 
+def _preflight_splunk_bridge_image(
+    env_file: str,
+    child_env: dict[str, str],
+    *,
+    image_override: str | None = None,
+) -> None:
+    """Resolve an image before changing the private env or running Compose stack."""
+    preflight = str(bundled_splunk_bridge_dir() / "bin" / "splunk-claw-bridge")
+    preflight_args = [preflight, "preflight-image", "--env-file", env_file]
+    if image_override:
+        preflight_args.extend(["--image", image_override])
+    try:
+        preflight_kwargs = {
+            "capture_output": True, "text": True, "timeout": 10800, "check": False,
+            "env": child_env,
+        }
+        if click.get_text_stream("stderr").isatty():
+            # A registry download may take hours; show daemon progress.
+            preflight_kwargs.pop("capture_output")
+            preflight_kwargs.update(stdout=subprocess.PIPE, stderr=None)
+        checked = subprocess.run(preflight_args, **preflight_kwargs)
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise click.ClickException(
+            f"Local Splunk image preflight failed; local stack was left untouched: {exc}"
+        ) from exc
+    if checked.returncode != 0:
+        _echo_bridge_output_tail(checked)
+        raise click.ClickException("Local Splunk image is unavailable; local stack was left untouched")
+
+
 def _refresh_and_maybe_restart_splunk_bridge(
     data_dir: str,
     *,
     env_file: str | None = None,
     child_env: dict[str, str] | None = None,
     gateway_token_env: str = "",
+    image_override: str | None = None,
+    image_preflighted: bool = False,
 ) -> RefreshResult:
-    """Refresh the seeded Splunk bridge, stopping any running stack first.
-
-    Sequence (all best-effort — refresh failures don't abort the parent
-    setup flow because the operator can still run with a stale bundle):
-
-    1. Detect a running ``defenseclaw-splunk-local`` compose project.
-    2. If running and a bridge binary exists, invoke ``bridge down``
-       to release the compose project (named volumes survive, so user
-       data is preserved across the bounce).
-    3. Refresh ``~/.defenseclaw/splunk-bridge/`` from the bundle. The
-       refresh preserves operator secrets (``env/.env``) and the
-       generated app tarball (``splunk/build/``).
-    4. The caller then runs ``bridge up`` so the freshly refreshed
-       bundle (compose, bin, s3_exporter Dockerfile, app source) is
-       what materializes the next stack.
-
-    Surface every step inline so an operator sees exactly what
-    happened and never has to wonder why a previously-running stack
-    came back up on a different image.
-    """
+    """Resolve the image before stopping a running stack, then refresh its bundle."""
     effective_child_env = _splunk_bridge_child_env(
         gateway_token_env,
         environment=child_env,
@@ -18703,6 +19307,12 @@ def _refresh_and_maybe_restart_splunk_bridge(
     )
     stopped = False
     if was_running:
+        if not image_preflighted:
+            _preflight_splunk_bridge_image(
+                env_file or os.path.join(data_dir, _SPLUNK_BRIDGE_ENV_REL),
+                effective_child_env,
+                image_override=image_override,
+            )
         ux.echo(f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle...")
         bridge = _resolve_bridge_bin(data_dir)
         if bridge:
@@ -18772,12 +19382,17 @@ def _bootstrap_bridge(
     """
     env = _splunk_bridge_child_env(gateway_token_env)
     env_file = _ensure_private_splunk_bridge_env(data_dir)
+    replacement_image = _replacement_splunk_image(env_file)
+    if replacement_image:
+        _preflight_splunk_bridge_image(env_file, env, image_override=replacement_image)
     if refresh_bundle:
         _refresh_and_maybe_restart_splunk_bridge(
             data_dir,
             env_file=env_file,
             child_env=env,
             gateway_token_env=gateway_token_env,
+            image_override=replacement_image,
+            image_preflighted=bool(replacement_image),
         )
     _migrate_retired_splunk_image(env_file)
 
@@ -18908,17 +19523,26 @@ def _ensure_private_splunk_bridge_env(data_dir: str) -> str:
 
 def _migrate_retired_splunk_image(env_file: str) -> None:
     """Upgrade 0.8.10 and 1.0.0-1.0.3 private envs; remove after the 1.0.x bridge."""
+    image = _replacement_splunk_image(env_file)
+    if image is None:
+        return
+    entries = _load_dotenv(env_file)
+    entries["SPLUNK_IMAGE"] = image
+    _write_dotenv(env_file, entries)
+
+
+def _replacement_splunk_image(env_file: str) -> str | None:
+    """Find the retired image's replacement without changing the private env."""
     from defenseclaw.observability.local_splunk import RETIRED_SPLUNK_IMAGE
 
     entries = _load_dotenv(env_file)
     if entries.get("SPLUNK_IMAGE") != RETIRED_SPLUNK_IMAGE:
-        return
+        return None
     current_template = _load_dotenv(str(bundled_splunk_bridge_dir() / "env" / ".env.example"))
     image = current_template.get("SPLUNK_IMAGE", "")
     if not image or image == RETIRED_SPLUNK_IMAGE:
         raise click.ClickException("Bundled Splunk image reference is unavailable")
-    entries["SPLUNK_IMAGE"] = image
-    _write_dotenv(env_file, entries)
+    return image
 
 
 def _load_splunk_bridge_example_env(data_dir: str) -> dict[str, str]:

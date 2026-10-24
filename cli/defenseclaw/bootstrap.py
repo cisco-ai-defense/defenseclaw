@@ -1798,14 +1798,8 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
             if hasattr(app.cfg.guardrail, "effective_hook_fail_mode")
             else app.cfg.guardrail.hook_fail_mode
         )
-        configured = str(getattr(app.cfg.guardrail, "hook_fail_mode", "") or "closed").strip().lower()
-        observe_note = (
-            f" (observe mode keeps hooks fail-open; guardrail.hook_fail_mode={configured} applies in action mode)"
-            if str(mode).strip().lower() != "action" and fail_mode == "open" and configured == "closed"
-            else ""
-        )
         return StepResult(
-            "Guardrail", "pass", f"{connector}, mode={mode}, fail mode={fail_mode}{observe_note}{port_note}"
+            "Guardrail", "pass", f"{connector}, mode={mode}, fail mode={fail_mode}{port_note}"
         )
     if ok:
         return StepResult("Guardrail", "warn", "; ".join(warnings), "defenseclaw doctor")

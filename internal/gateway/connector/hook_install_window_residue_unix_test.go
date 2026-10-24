@@ -415,3 +415,56 @@ func TestShellHooksForwardANativeObjectThatAgrees(t *testing.T) {
 		})
 	}
 }
+
+// GAP-0983 in the shell hooks: a 2xx confirm with no native object (absent
+// or null) fell through to exit 0 with nothing on stdout, which Claude Code
+// and Codex run as an allow, during an install too. The Claude Code and
+// Codex hooks now refuse it closed in every fail mode, with the agent's own
+// block for the event, as the native hook does.
+func TestShellHooksRefuseAConfirmWithoutItsNativeAsk(t *testing.T) {
+	claude := installInFlightShellCase{"claudecode", NewClaudeCodeConnector(), hookArgvCase{script: "claude-code-hook.sh"}}
+	codex := installInFlightShellCase{"codex", NewCodexConnector(), hookArgvCase{script: "codex-hook.sh"}}
+	modes := []struct {
+		name     string
+		failMode string
+		install  bool
+	}{
+		{"fail mode open", "open", false},
+		{"fail mode open during an install", "open", true},
+		{"fail mode closed", "closed", false},
+	}
+	for _, tc := range []installInFlightShellCase{claude, codex} {
+		for _, event := range []string{"PreToolUse", "PermissionRequest", "UserPromptSubmit"} {
+			for _, body := range []string{`{"action":"confirm","reason":"sure?"}`, `{"action":"confirm","reason":"sure?","claude_code_output":null,"codex_output":null}`} {
+				for _, mode := range modes {
+					t.Run(tc.conn.Name()+"/"+event+"/"+body+"/"+mode.name, func(t *testing.T) {
+						t.Parallel()
+						data := t.TempDir()
+						if mode.install {
+							if err := os.Mkdir(filepath.Join(data, ".install.lock"), 0o700); err != nil {
+								t.Fatal(err)
+							}
+						}
+						server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+						t.Cleanup(server.Close)
+						hooks := renderPerUserShellHooksAt(t, tc, data, mode.failMode, strings.TrimPrefix(server.URL, "http://"))
+						var args []string
+						if tc.conn.Name() == "codex" {
+							args = codexBoundShellHookArgsForTest(t, "codex-hook.sh", event)[1:]
+						}
+						payload := `{"hook_event_name":"` + event + `","session_id":"s1","cwd":"/work/proj","prompt":"hello","tool_name":"Bash","tool_input":{"command":"echo hi"}}`
+						code, stdout, stderr := runShellHookWith(t, filepath.Join(hooks, tc.invoke.script), args,
+							[]string{"HOME=" + data, "DEFENSECLAW_HOME=" + data}, payload)
+						blocks := claudeBlockAnswer(event, code, stdout)
+						if tc.conn.Name() == "codex" {
+							blocks = codexBlockAnswer(event, code, stdout)
+						}
+						if !blocks {
+							t.Fatalf("exit %d stdout %q stderr %q, want one block of the %s", code, stdout, stderr, event)
+						}
+					})
+				}
+			}
+		}
+	}
+}

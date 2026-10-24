@@ -107,7 +107,7 @@ def test_ipv6_loopback_probe_is_local_and_cached():
 @pytest.mark.skipif(os.name == "nt", reason="/proc socket fixture uses POSIX symlinks")
 def test_linux_listener_evidence_accepts_ipv6_wildcard_for_ipv6_client_host(tmp_path):
     proc_root = tmp_path / "proc"
-    net = proc_root / "net"
+    net = proc_root / "self" / "net"
     descriptors = proc_root / "4242" / "fd"
     net.mkdir(parents=True)
     descriptors.mkdir(parents=True)

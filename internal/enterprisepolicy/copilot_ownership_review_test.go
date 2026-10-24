@@ -106,7 +106,7 @@ func TestCopilotPolicyRemovalStripsTamperedOwnCommand(t *testing.T) {
 			} else {
 				prior = strings.TrimPrefix(prior, connector.CopilotRemovedDeploymentGuardPOSIX(binary))
 			}
-			if !copilotHandlerIsRemovable(opts, "preToolUse", map[string]any{
+			if !copilotHandlerIsOwned(opts, map[string]any{
 				"type": "command", field: prior, "timeoutSec": 30,
 			}) {
 				t.Fatal("prior release handler must remain removable during upgrade")
@@ -158,7 +158,7 @@ func TestCopilotPolicyRemovalStripsTamperedOwnCommand(t *testing.T) {
 	}
 }
 
-func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *testing.T) {
+func TestCopilotManagedReconcileRepairsOwnHandler(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows"} {
 		t.Run(goos, func(t *testing.T) {
 			binary := "/opt/defenseclaw/bin/defenseclaw-hook"
@@ -168,7 +168,7 @@ func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *te
 				field, other = "powershell", "bash"
 			}
 			opts := Options{GOOS: goos, HookBinary: binary}
-			for _, variant := range []string{"suffix", "suffix with cwd", "suffix with env", "extra field", "second executable", "suffix with second executable"} {
+			for _, variant := range []string{"suffix", "suffix with cwd", "suffix with env", "extra field", "timeout with extra field", "type with extra field", "second executable", "suffix with second executable"} {
 				t.Run(variant, func(t *testing.T) {
 					document, err := renderCopilotDropIn(opts)
 					if err != nil {
@@ -190,6 +190,12 @@ func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *te
 						handler["env"] = map[string]any{}
 					case "extra field":
 						handler["operator"] = map[string]any{"command": "operator-tool"}
+					case "timeout with extra field":
+						handler["timeoutSec"] = 1
+						handler["cwd"] = "/tmp"
+					case "type with extra field":
+						handler["type"] = "prompt"
+						handler["env"] = map[string]any{"MODE": "changed"}
 					case "second executable":
 						handler[other] = "operator-tool"
 					case "suffix with second executable":
@@ -201,13 +207,8 @@ func TestCopilotManagedReconcileRepairsOwnCommandAndRefusesCombinedHandler(t *te
 						t.Fatal(err)
 					}
 					merged, err := mergeCopilotDropIn(opts, current)
-					if variant == "suffix" || variant == "suffix with cwd" || variant == "suffix with env" {
-						if err != nil || string(merged) != string(document) {
-							t.Fatalf("reconcile did not restore its %s handler: returned_document=%s, err=%v", variant, merged, err)
-						}
-					} else if err == nil || merged != nil ||
-						!strings.Contains(err.Error(), "move independent content to a separate handler") {
-						t.Fatalf("reconcile claimed a combined %s handler: returned_document=%t, err=%v", variant, merged != nil, err)
+					if err != nil || string(merged) != string(document) {
+						t.Fatalf("reconcile did not restore its %s handler: returned_document=%s, err=%v", variant, merged, err)
 					}
 				})
 			}
@@ -337,6 +338,50 @@ func TestCopilotMalformedEventDoesNotClaimCoverage(t *testing.T) {
 	}
 }
 
+func TestCopilotForeignMalformedEventIsNotRepairDrift(t *testing.T) {
+	opts := testOptions(t)
+	opts.CopilotCLIPolicyOnly = true
+	target := copilotTarget{}
+	if _, err := target.Reconcile(opts); err != nil {
+		t.Fatal(err)
+	}
+	dir, err := CopilotPolicyDir(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreign := filepath.Join(dir, "operator.json")
+	const original = `{"hooks":{"operatorEvent":"not a handler list"}}`
+	writeFile(t, foreign, original)
+	state, err := target.Verify(opts)
+	if err != nil || state.Covered || state.Drift || !hasConflict(state, "outside DefenseClaw ownership") {
+		t.Fatalf("verify treated an unowned malformed event as repairable drift: %+v, %v", state, err)
+	}
+	if state, err := target.Reconcile(opts); err != nil || state.Drift || readFile(t, foreign) != original {
+		t.Fatalf("reconcile changed unowned policy: %+v, %v", state, err)
+	}
+	ownedPath, err := copilotDropInPath(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, ownedPath)), &published); err != nil {
+		t.Fatal(err)
+	}
+	copy := published["hooks"].(map[string]any)["preToolUse"]
+	foreignDoc, err := json.Marshal(map[string]any{"hooks": map[string]any{"preToolUse": copy, "operatorEvent": "malformed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, foreign, string(foreignDoc))
+	if err := os.Remove(ownedPath); err != nil {
+		t.Fatal(err)
+	}
+	state, err = target.Verify(opts)
+	if err != nil || state.Covered || state.OwnedEntries != 0 || !hasConflict(state, "outside DefenseClaw ownership") {
+		t.Fatalf("a copy in an unowned file claimed DefenseClaw coverage or repair: %+v, %v", state, err)
+	}
+}
+
 func TestCopilotExtraFieldVerifyAndReconcileAgree(t *testing.T) {
 	opts := testOptions(t)
 	opts.CopilotCLIPolicyOnly = true
@@ -354,24 +399,40 @@ func TestCopilotExtraFieldVerifyAndReconcileAgree(t *testing.T) {
 	}
 	pre := doc["hooks"].(map[string]any)["preToolUse"].([]any)[0].(map[string]any)
 	pre["operator"] = map[string]any{"command": "operator-tool"}
+	doc["hooks"].(map[string]any)["preToolUse"] = append(doc["hooks"].(map[string]any)["preToolUse"].([]any),
+		map[string]any{"type": "command", "bash": "/opt/operator/audit.sh"})
 	edited, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, path, string(edited))
 	verified, err := target.Verify(opts)
-	if err != nil || verified.Covered || !hasConflict(verified, "move independent content to a separate handler") {
-		t.Fatalf("verify claimed a handler reconcile cannot safely replace: %+v, %v", verified, err)
+	if err != nil || verified.Covered || !hasConflict(verified, "next lifecycle run") {
+		t.Fatalf("verify did not report repairable drift: %+v, %v", verified, err)
 	}
-	if _, err := target.Reconcile(opts); err == nil || !strings.Contains(err.Error(), "move independent content to a separate handler") {
-		t.Fatalf("reconcile did not refuse the extra field: %v", err)
+	if state, err := target.Reconcile(opts); err != nil || !state.Covered {
+		t.Fatalf("reconcile did not repair the extra field: %+v, %v", state, err)
 	}
-	if published, err := Publish(opts, []string{copilotConnector}); err == nil ||
-		len(published.MachinePolicyConnectors) != 0 {
-		t.Fatalf("publish claimed the combined handler: %+v, %v", published, err)
+	var repaired map[string]any
+	if err := json.Unmarshal([]byte(readFile(t, path)), &repaired); err != nil {
+		t.Fatal(err)
 	}
-	if got := readFile(t, path); got != string(edited) {
-		t.Fatalf("reconcile changed the combined handler: %s", got)
+	entries := repaired["hooks"].(map[string]any)["preToolUse"].([]any)
+	if len(entries) != 2 || entries[0].(map[string]any)["bash"] != "/opt/operator/audit.sh" ||
+		entries[1].(map[string]any)["operator"] != nil || !copilotHandlerIsOwned(opts, entries[1]) {
+		t.Fatalf("repair did not preserve the separate operator hook: %v", entries)
+	}
+	entries[1].(map[string]any)["timeoutSec"] = "30"
+	changedType, err := json.Marshal(repaired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, string(changedType))
+	if state, err := target.Verify(opts); err != nil || state.Covered || !hasConflict(state, "timeoutSec") {
+		t.Fatalf("verify accepted a string timeout instead of the published number: %+v, %v", state, err)
+	}
+	if state, err := target.Reconcile(opts); err != nil || !state.Covered {
+		t.Fatalf("reconcile did not restore the numeric timeout: %+v, %v", state, err)
 	}
 }
 

@@ -454,7 +454,6 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
-
         ux.section("Activity")
         if counts is not None:
             for label, val in (
@@ -466,6 +465,10 @@ def status(app: AppContext, as_json: bool) -> None:
                 ux.echo(f"    {_label((label + ':').ljust(16))} {val}")
         else:
             ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {db_error})')}")
+    elif app.audit_db_error:
+        for section in ("Enforcement", "Activity"):
+            ux.section(section)
+            ux.echo(f"    {ux._style('unavailable', fg='yellow')} {ux.dim(f'(audit DB error: {app.audit_db_error})')}")
 
     _print_moved_audit_store(str(getattr(cfg, "audit_db", "") or ""))
 
@@ -2007,6 +2010,8 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
             row["state"] = health_map[name]["state"]
         elif not row.get("enabled"):
             row["state"] = "disabled"
+        if name in health_map:
+            row["tool_blocks"] = max(0, _safe_int(health_map[name].get("tool_blocks")))
         if row.get("enabled") and _agent_missing(cfg, name, health_map.get(name)):
             # As the text output: not running while doctor fails it (GAP-0513).
             row["state"] = "off"
@@ -2108,6 +2113,8 @@ def _status_payload(app) -> dict:
     else:
         payload["enforcement"] = None
         payload["activity"] = None
+        if app.audit_db_error:
+            payload["audit_db_error"] = app.audit_db_error
 
     config_invalid = bool(getattr(app, "config_problems", None))
     skip_live_health = config_invalid and profile != "secure_client"
@@ -2151,6 +2158,13 @@ def _status_payload(app) -> dict:
             else:
                 running, reason = _sidecar_listener_state(cfg.gateway.api_port, bind)
                 payload["sidecar"] = {"running": running, "reason": reason}
+    if health is not None:
+        payload["tool_blocks"] = sum(
+            max(0, _safe_int(connector.get("tool_blocks")))
+            for connector in _fetch_health_connectors(health=health).values()
+        )
+        if failure := _gateway_audit_write_failure(health):
+            payload["audit_write_failure"] = failure
     if (policy := _policy_status(health)) is not None:
         payload["policy"] = policy
     payload["connectors"] = _connector_roster(cfg, health=health)

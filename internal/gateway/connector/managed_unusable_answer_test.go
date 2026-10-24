@@ -68,14 +68,10 @@ func TestManagedStandaloneShellHooksBlockAnUnusableAnswer(t *testing.T) {
 	}
 }
 
-// rel-1-0-3 GAP-0153: a per-user shell hook in fail mode closed let the call
-// run on a successful gateway answer with no usable verdict (Hermes printed
-// its neutral {}), because the response validation was rendered for sandbox
-// and managed hooks only. In fail mode closed it now blocks like a managed
-// hook; in fail mode open the call still runs, and the allow and alert
-// answers run in both. Each case logs the unusable answer as a response
-// failure.
-func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
+// rel-1-0-3 GAP-0153 and rel-1-0-4 GAP-0818: a per-user shell hook blocks a
+// successful gateway answer with no usable verdict in either outage mode.
+// Valid allow and alert answers still run, and unusable answers are logged.
+func TestPerUserShellHooksBlockAnUnusableAnswer(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq is required to run the shell hooks")
 	}
@@ -119,8 +115,7 @@ func TestPerUserShellHooksHonorClosedOnAnUnusableAnswer(t *testing.T) {
 						HookAPITokenScoped: true,
 						HookFailMode:       failMode,
 						// The operator's choice: Cursor's open outage needs it.
-						ConfiguredHookFailMode: failMode,
-						GuardrailMode:          "observe",
+						GuardrailMode: "observe",
 					}
 					if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {
 						t.Fatal(err)

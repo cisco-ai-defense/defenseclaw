@@ -1,8 +1,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 #
 # SPDX-License-Identifier: Apache-2.0
-"""GAP-0003: init says why an observe-mode connector's hooks are fail-open
-while guardrail.hook_fail_mode (the action-mode value) is closed."""
+"""Init reports the effective hook mode without attributing it to observe mode."""
 
 from __future__ import annotations
 
@@ -10,7 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 
-def test_init_says_why_an_observe_connector_is_fail_open() -> None:
+def test_init_reports_effective_mode_without_a_stale_observe_explanation() -> None:
     from defenseclaw import bootstrap
 
     guardrail = SimpleNamespace(
@@ -20,7 +19,5 @@ def test_init_says_why_an_observe_connector_is_fail_open() -> None:
     with patch("defenseclaw.commands.cmd_setup.execute_guardrail_setup", return_value=(True, [])):
         step = bootstrap._quiet_guardrail_setup(SimpleNamespace(cfg=cfg), "codex", verbose=False)
     assert step.status == "pass"
-    assert (
-        "fail mode=open (observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode)"
-        in (step.detail)
-    )
+    assert "fail mode=open" in step.detail
+    assert "observe mode keeps hooks fail-open" not in step.detail

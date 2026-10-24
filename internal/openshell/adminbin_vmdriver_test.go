@@ -51,7 +51,7 @@ func TestAdminVMDriver(t *testing.T) {
 			t.Fatalf("found %q, refused %v", found, refused)
 		}
 	})
-	if dirs := UserVMDriverDirs("/home/u", ""); strings.Join(dirs[1:], ",") != strings.Join(AdminVMDriverDirs("linux"), ",") {
+	if dirs := UserVMDriverDirs("/home/u", "", ""); strings.Join(dirs[1:], ",") != strings.Join(AdminVMDriverDirs("linux"), ",") {
 		t.Errorf("UserVMDriverDirs system tail = %v, want AdminVMDriverDirs", dirs[1:])
 	}
 }

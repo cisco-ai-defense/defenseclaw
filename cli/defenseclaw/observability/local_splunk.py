@@ -1224,6 +1224,14 @@ def start_native_local_splunk(
 
     try:
         if stage_dir is not None:
+            staged = NativeLocalSplunkController(
+                stage_dir,
+                docker_path=resolved_docker,
+                runner=resolved_runner,
+                os_name=resolved_os,
+                environment=base_environment,
+            )
+            staged.verify_splunk_image()
             if previous_running and previous is not None:
                 previous.down()
             if stable_dir.exists():

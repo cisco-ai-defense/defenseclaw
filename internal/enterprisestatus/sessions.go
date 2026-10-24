@@ -126,6 +126,14 @@ func (r *Result) SetBundleReceiptWarnings() {
 	}
 }
 
+// BundleReceiptWarningMessage explains a receipt warning code that a
+// lifecycle result also lists in warnings[]; false for any other code.
+// bundle status uses the same words.
+func BundleReceiptWarningMessage(code string) (string, bool) {
+	message, ok := bundleReceiptWarningMessages[code]
+	return message, ok
+}
+
 // bundleReceiptWarningMessages are the receipt warning codes a lifecycle
 // result also lists in warnings[].
 var bundleReceiptWarningMessages = map[string]string{

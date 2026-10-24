@@ -41,11 +41,32 @@ func TestAuditWALGuardPassGivesTheCopyMoreThanTheWriterBudget(t *testing.T) {
 	if fake.deadline < auditWALCopyTimeout-time.Second {
 		t.Fatalf("copy deadline = %s, want about %s", fake.deadline, auditWALCopyTimeout)
 	}
-	if fake.budget != auditWALWriterBudget || fake.limit != auditWALLimitBytes {
-		t.Fatalf("writer budget %s, limit %d; want %s, %d", fake.budget, fake.limit, auditWALWriterBudget, int64(auditWALLimitBytes))
+	if fake.budget != auditWALWriterBudget || fake.limit != auditWALGuardTriggerBytes {
+		t.Fatalf("writer budget %s, trigger %d; want %s, %d", fake.budget, fake.limit, auditWALWriterBudget, int64(auditWALGuardTriggerBytes))
 	}
 	if log.Len() != 0 {
 		t.Fatalf("a clean pass logged %q", log.String())
+	}
+}
+
+// GAP-0952: the T9 10 Hz registered hook flood added up to about 2 MB per call.
+// Waiting until the WAL reaches the published 256 MiB ceiling to request a
+// bounded catch-up lets the next few ticks push the on-disk file past it.
+func TestAuditWALGuardKeepsFloodHeadroomBelowThePublishedCeiling(t *testing.T) {
+	const floodBytesPerCall = 2_000_000
+	const floodCallsPerSecond = 10
+	const missedTicks = 2
+	neededHeadroom := int64(floodBytesPerCall * floodCallsPerSecond * missedTicks * int(auditWALGuardInterval/time.Second))
+	fake := &fakeWALCheckpointer{}
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &bytes.Buffer{})
+	if headroom := int64(auditWALLimitBytes) - fake.limit; headroom < neededHeadroom {
+		t.Fatalf("WAL guard starts bounded catch-up at %d bytes: %d bytes of headroom, want at least %d for two 10 Hz flood ticks before the %d-byte ceiling", fake.limit, headroom, neededHeadroom, int64(auditWALLimitBytes))
+	}
+	fake.result = audit.WALCheckpoint{Bounded: true, Restarted: true, LogBytes: 224 << 20, WriterHeld: 100 * time.Millisecond, HoldCap: 2 * time.Second}
+	var log bytes.Buffer
+	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
+	if !strings.Contains(log.String(), "audit WAL nearing its 256 MiB ceiling (224 MiB)") {
+		t.Fatalf("preemptive catch-up log misstates the published ceiling: %q", log.String())
 	}
 }
 

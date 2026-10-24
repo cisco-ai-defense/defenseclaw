@@ -156,6 +156,11 @@ DC_ANCHORS_RESULT=""   # its result: installed, replaced or unchanged
 DC_DEPLOYMENT_RECORD="" # committed binary digests for same-version repair
 DC_PACKAGE_RESULT=""   # the result the package's own install scripts write
 DC_TRUST_ACL=""        # the ACL entry dc_trusted_path refused, for messages (set -u: read before any check ran)
+DC_SECRETS_DIR=""      # the deployment's credential store (dc_layout)
+DC_SECRET_ROTATED=0    # 1 while a credential stored with --bundle waits for that bundle to apply
+DC_SECRET_PREVIOUS=""  # the value it replaced, kept in memory only
+DC_SECRET_PREVIOUS_SET=0 # 1 when a value was stored before it, 0 when none was
+DC_SECRET_GATEWAY=""   # the gateway that stored it, which puts the old value back
 
 dc_platform() {
     case "$(uname -s)" in
@@ -208,6 +213,10 @@ dc_log() {
 }
 
 dc_cleanup() {
+    # A failed or interrupted run puts back the credential it rotated, with
+    # the gateway that stored it, before the stage (which may hold that
+    # gateway) goes.
+    dc_restore_secret || true
     [ -z "$DC_ANCHORS_SOURCE" ] || rm -f "$DC_ANCHORS_SOURCE"
     # A failed or interrupted apply must leave the as-found trust anchors.
     if ! dc_restore_anchors; then
@@ -624,6 +633,7 @@ dc_layout() {
         DC_INSTALL_ROOT=/opt/cisco/defenseclaw
         DC_DEPLOYMENT_RECORD=/opt/cisco/defenseclaw/lifecycle/deployment.json
         DC_ANCHORS=/opt/cisco/defenseclaw/etc/trust/bundle-anchors.json
+        DC_SECRETS_DIR=/opt/cisco/defenseclaw/etc/secrets
         DC_PACKAGE_RESULT=/opt/cisco/defenseclaw/lifecycle/last-package-result.json
         DC_OS_GROUP=macos
         [ -n "$DC_LOG" ] || DC_LOG=/Library/Logs/Cisco/DefenseClaw/mdm-wrapper.log
@@ -632,6 +642,7 @@ dc_layout() {
         DC_INSTALL_ROOT=/opt/defenseclaw
         DC_DEPLOYMENT_RECORD=/var/lib/defenseclaw-enterprise/deployment.json
         DC_ANCHORS=/etc/defenseclaw/trust/bundle-anchors.json
+        DC_SECRETS_DIR=/etc/defenseclaw/secrets
         DC_PACKAGE_RESULT=/var/lib/defenseclaw-enterprise/last-package-result.json
         DC_OS_GROUP=linux
         [ -n "$DC_LOG" ] || DC_LOG=/var/log/defenseclaw-enterprise-mdm.log
@@ -1613,15 +1624,89 @@ dc_secret_set_bundle() {
     printf '%s\n' "$probe" | grep -q '"secret_set_bundle":[[:space:]]*true'
 }
 
+# dc_read_stored_secret: print credential DC_SECRET_NAME as the deployment
+# stores it. Returns 1 when none is stored and 2 when the path is a link,
+# not a regular file, or cannot be read.
+dc_read_stored_secret() {
+    dc_stored="$DC_SECRETS_DIR/$DC_SECRET_NAME"
+    if [ ! -e "$dc_stored" ] && [ ! -L "$dc_stored" ]; then return 1; fi
+    if [ -L "$dc_stored" ] || [ ! -f "$dc_stored" ]; then return 2; fi
+    head -c "$DC_MAX_SECRET_BYTES" "$dc_stored" 2>/dev/null || return 2
+}
+
+# dc_save_secret_previous <gateway>: before a credential is stored with the
+# bundle it came with (secret set --bundle), keep the value it replaces, or
+# that none was stored, in memory. The credential rotation and that bundle's
+# apply are one transaction: until the apply succeeds the confirmed bundle
+# signs only the old value, so a failed or interrupted run puts it back
+# (dc_restore_secret). A stored credential that is not a regular file is
+# not rotated.
+dc_save_secret_previous() {
+    dc_saved_status=0
+    DC_SECRET_PREVIOUS=$(dc_read_stored_secret) || dc_saved_status=$?
+    case "$dc_saved_status" in
+        0) DC_SECRET_PREVIOUS_SET=1 ;;
+        1) DC_SECRET_PREVIOUS="" DC_SECRET_PREVIOUS_SET=0 ;;
+        *)
+            DC_SECRET_PREVIOUS=""
+            dc_fail_result "$DC_EXIT_FAILURE" mdm_secret_failed "the stored credential $DC_SECRETS_DIR/$DC_SECRET_NAME is a link, not a regular file, or cannot be read, so it was not rotated and the config was not applied"
+            ;;
+    esac
+    DC_SECRET_GATEWAY=$1
+    DC_SECRET_ROTATED=1
+}
+
+# dc_restore_secret: after a failed or interrupted run that stored a
+# credential with --bundle, put back the value it replaced with `secret set`
+# (no --bundle), or remove the one it added with `secret remove`, using the
+# gateway that stored it. The gateway decides: secret set stores only a value
+# the confirmed bundle signs, so a refusal means the delivered bundle was
+# confirmed after all and its value stays. A credential the run left as it
+# was is not touched.
+dc_restore_secret() {
+    [ "$DC_SECRET_ROTATED" = 1 ] || return 0
+    DC_SECRET_ROTATED=0
+    dc_current_status=0
+    dc_current=$(dc_read_stored_secret) || dc_current_status=$?
+    dc_current_set=0
+    [ "$dc_current_status" != 0 ] || dc_current_set=1
+    if [ "$dc_current_status" != 2 ] && [ "$dc_current_set" = "$DC_SECRET_PREVIOUS_SET" ] &&
+        [ "$dc_current" = "$DC_SECRET_PREVIOUS" ]; then
+        dc_current="" DC_SECRET_PREVIOUS=""
+        return 0
+    fi
+    dc_current=""
+    set +e
+    if [ "$DC_SECRET_PREVIOUS_SET" = 1 ]; then
+        printf '%s' "$DC_SECRET_PREVIOUS" |
+            "$DC_SECRET_GATEWAY" enterprise secret set --name "$DC_SECRET_NAME" --from-stdin --lock-wait 10m --json >"$DC_STAGE/secret-restore.json" 2>"$DC_STAGE/secret-restore.err"
+    else
+        "$DC_SECRET_GATEWAY" enterprise secret remove --name "$DC_SECRET_NAME" --lock-wait 10m --json </dev/null >"$DC_STAGE/secret-restore.json" 2>"$DC_STAGE/secret-restore.err"
+    fi
+    dc_restore_status=$?
+    set -e
+    DC_SECRET_PREVIOUS=""
+    if [ "$dc_restore_status" = 0 ]; then
+        dc_log "put back credential $DC_SECRET_NAME: the bundle that signs its new value did not apply"
+        return 0
+    fi
+    dc_restore_detail=$(dc_secret_json_error "$DC_STAGE/secret-restore.json" || true)
+    [ -n "$dc_restore_detail" ] || dc_restore_detail=$(head -c 1024 "$DC_STAGE/secret-restore.err" 2>/dev/null || true)
+    dc_log "kept the delivered value of credential $DC_SECRET_NAME: the gateway refused the old one (exit $dc_restore_status): $dc_restore_detail"
+    return 1
+}
+
 dc_store_secret() {
     gateway=$1
     # A credential delivered with a bundle goes with it: a value the
     # confirmed bundle does not sign is stored only when this bundle signs it
-    # (secret set --bundle). A gateway before 1.0.4 takes no --bundle and
-    # stores the credential as before.
+    # (secret set --bundle), and the value it replaces goes back unless that
+    # bundle applies (dc_save_secret_previous). A gateway before 1.0.4 takes
+    # no --bundle and stores the credential as before.
     set --
     if [ -n "${bundle:-}" ] && dc_secret_set_bundle "$gateway"; then
         set -- --bundle "$bundle"
+        dc_save_secret_previous "$gateway"
     fi
     set +e
     printf '%s' "$secret_data" |
@@ -1801,12 +1886,15 @@ dc_main() {
         dc_run_lifecycle_retry "$gateway" bundle apply --bundle "$bundle" --reason mdm --lock-wait 10m || status=$?
     fi
     if [ "$status" = 0 ]; then
+        # The applied bundle signs the credential this run stored.
+        DC_SECRET_ROTATED=0 DC_SECRET_PREVIOUS=""
         DC_ANCHORS_COMMITTED=$DC_ANCHORS_CHANGED
         DC_ANCHORS_CHANGED=0
         dc_annotate_package_step
         dc_annotate_anchors_step
     else
         dc_restore_anchors || true
+        dc_restore_secret || true
     fi
     dc_emit_result
     return "$status"

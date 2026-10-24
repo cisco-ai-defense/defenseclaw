@@ -264,20 +264,7 @@ func stripCopilotVSCodeOwnedHooks(data []byte, goos, hookBinary string) ([]byte,
 		}
 		remaining := make([]any, 0, len(list))
 		for _, handler := range list {
-			entry, ok := handler.(*object)
-			if !ok || stringField(entry, "type") != "command" ||
-				!copilotVSCodeLocalCommandOwned(goos, hookBinary, stringField(entry, "command")) {
-				foreign = true
-				remaining = append(remaining, handler)
-				continue
-			}
-			independentField := false
-			for _, key := range entry.keys {
-				if key != "type" && key != "command" && key != "timeout" && key != "timeoutSec" {
-					independentField = true
-				}
-			}
-			if independentField {
+			if !copilotVSCodeHandlerOwned(handler, goos, hookBinary) {
 				foreign = true
 				remaining = append(remaining, handler)
 				continue
@@ -308,6 +295,60 @@ func stripCopilotVSCodeOwnedHooks(data []byte, goos, hookBinary string) ([]byte,
 	return remaining, true, true, err
 }
 
+func copilotVSCodeHandlerOwned(handler any, goos, hookBinary string) bool {
+	entry, ok := handler.(*object)
+	if !ok || stringField(entry, "type") != "command" ||
+		!copilotVSCodeLocalCommandOwned(goos, hookBinary, stringField(entry, "command")) {
+		return false
+	}
+	for _, key := range entry.keys {
+		if key != "type" && key != "command" && key != "timeout" && key != "timeoutSec" {
+			return false
+		}
+	}
+	return true
+}
+
+// repairMalformedCopilotHookDocument salvages root-level independent content
+// from a damaged document. A parseable independent handler makes the file
+// ambiguous, so the caller leaves it untouched.
+func repairMalformedCopilotHookDocument(current, want []byte, goos, hookBinary string) (repaired, admin []byte, repairable bool, err error) {
+	doc, err := decodeOrderedObject(current)
+	if err != nil {
+		return want, nil, true, nil
+	}
+	value, _ := doc.get("hooks")
+	if hooks, ok := value.(*object); ok {
+		for _, event := range hooks.keys {
+			value, _ := hooks.get(event)
+			list, ok := value.([]any)
+			if !ok {
+				continue
+			}
+			for _, handler := range list {
+				if !copilotVSCodeHandlerOwned(handler, goos, hookBinary) {
+					return nil, nil, false, nil
+				}
+			}
+		}
+	}
+	doc.delete("hooks")
+	if doc.len() > 0 && (doc.len() != 1 || doc.keys[0] != "version") {
+		admin, err = encodeOrdered(doc)
+		if err != nil {
+			return nil, nil, false, err
+		}
+	}
+	wantDoc, err := decodeOrderedObject(want)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	wantHooks, _ := wantDoc.get("hooks")
+	doc.set("hooks", wantHooks)
+	repaired, err = encodeOrdered(doc)
+	return repaired, admin, true, err
+}
+
 func ensureCopilotHookDocument(result *CopilotVSCodeUserResult, path string, want []byte, goos, hookBinary string, outright, keep, dryRun bool) (bool, error) {
 	current, exists, regular, err := readUserFile(path, int64(policyFileLimit))
 	if err != nil {
@@ -334,6 +375,25 @@ func ensureCopilotHookDocument(result *CopilotVSCodeUserResult, path string, wan
 	}
 	admin, owned, foreign, err := stripCopilotVSCodeOwnedHooks(current, goos, hookBinary)
 	if err != nil {
+		repaired, remaining, repairable, repairErr := repairMalformedCopilotHookDocument(current, want, goos, hookBinary)
+		if repairErr != nil {
+			return false, repairErr
+		}
+		if repairable {
+			if keep {
+				return ensureOwnedUserFile(result, path, repaired, true, nil, true, dryRun)
+			}
+			if len(remaining) == 0 {
+				return ensureOwnedUserFile(result, path, want, true, nil, false, dryRun)
+			}
+			if !dryRun {
+				if err := writePrivateUserFile(path, remaining); err != nil {
+					return false, err
+				}
+			}
+			result.Removed = append(result.Removed, path)
+			return false, nil
+		}
 		result.Kept = append(result.Kept, path)
 		return false, nil
 	}

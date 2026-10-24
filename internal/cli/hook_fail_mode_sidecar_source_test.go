@@ -58,15 +58,14 @@ func TestNativeHookIgnoresAnEarlierReleasesSidecarOpen(t *testing.T) {
 			if got := buildHookOptions(test.connector, "PreToolUse", "", "").FailMode; got != test.want {
 				t.Fatalf("fail mode = %q, want %q", got, test.want)
 			}
-			if got := hookPreRunFailsClosed(hookFailureContext{connector: test.connector}); got != (test.want == "closed") {
-				t.Fatalf("pre-run failure fails closed = %v, want %v", got, test.want == "closed")
+			if got := hookPreRunFailsClosed(hookFailureContext{connector: test.connector}); got != true {
+				t.Fatalf("pre-run failure fails closed = %v, want %v", got, true)
 			}
 		})
 	}
 }
 
-// The environment cannot point the check at another config: only the data
-// directory's own config.yaml can confirm an earlier release's open.
+// The environment cannot point the check at another config to reopen a hook.
 func TestNativeHookSidecarOpenIsNotConfirmedByDefenseclawConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("DEFENSECLAW_HOME", home)

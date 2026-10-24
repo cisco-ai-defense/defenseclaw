@@ -256,14 +256,10 @@ func runWindowsEnterprisePowerShell7(
 	}
 	environment := func(temp string) ([]string, error) {
 		env, err := trustedWindowsEnterprisePowerShell7Environment(temp, engine)
-		if err == nil && windowsEnterpriseForcedUninstallRequested(ctx) {
-			env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+		if err != nil {
+			return env, err
 		}
-		if err == nil && windowsEnterpriseCollectGenerationsRequested(ctx) &&
-			windowsEnterpriseInstallerAction(args) == "Verify" {
-			env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
-		}
-		return env, err
+		return append(env, windowsEnterpriseInstallerRequestEnvironment(ctx, args)...), nil
 	}
 	stderr := &windowsEnterpriseOutputCapture{}
 	console := &windowsEnterprisePhaseFilter{writer: cmd.ErrOrStderr()}
@@ -469,6 +465,61 @@ func windowsEnterpriseCollectGenerationsRequested(ctx context.Context) bool {
 	return requested
 }
 
+// windowsEnterpriseInstallerRequestEnvironment is what a run asks the
+// standalone installer for in its environment: a forced uninstall and the
+// generation collect of a Verify.
+func windowsEnterpriseInstallerRequestEnvironment(ctx context.Context, args []string) []string {
+	var env []string
+	if windowsEnterpriseForcedUninstallRequested(ctx) {
+		env = append(env, windowsEnterpriseForcedUninstallVariable+"=1")
+	}
+	action := windowsEnterpriseInstallerAction(args)
+	if windowsEnterpriseCollectGenerationsRequested(ctx) && action == "Verify" {
+		env = append(env, windowsEnterpriseCollectGenerationsVariable+"=1")
+	}
+	return env
+}
+
+// refuseWindowsEnterpriseStandaloneDeferredState refuses the install,
+// upgrade and repair requests the installer refuses for the recorded
+// deployment before it changes anything (Assert-DefenseClawDeferredInstallIsFresh
+// and the deferred-configuration checks of Invoke-DefenseClawInstallLikeLifecycle),
+// so they come before the run's first change, the repair of the hook runtime
+// access included (q-win-lifecycle review, loop round 3): a deferred install over an installed deployment and, while the
+// deployment waits for its deferred configuration, an install or upgrade,
+// or a repair without both --config and --manifest or with --no-start. With
+// a record of an interrupted lifecycle of this run's scope
+// (windowsEnterpriseStandaloneRecoveryPending) the installer recovers it
+// first, which can change the record (a first install interrupted before
+// its pending transaction cleared rolls back to no deployment), so the
+// installer decides; so it does for a deployment record this cannot read.
+func refuseWindowsEnterpriseStandaloneDeferredState(action string, opts *windowsEnterpriseLifecycleOptions) error {
+	if opts == nil || (action != "install" && action != "upgrade" && action != "repair") {
+		return nil
+	}
+	deployment, err := windowsEnterpriseTargetDeployment(opts)
+	if err != nil || deployment.State != winpath.EnterpriseDeploymentInstalled || windowsEnterpriseStandaloneRecoveryPending(opts) {
+		return nil
+	}
+	if action == "install" && opts.deferredConfig {
+		return windowsEnterpriseInvalidArguments("deferred Install without Config and Manifest requires an empty deployment; " +
+			"use Repair or Ensure for the installed deployment (nothing was changed)")
+	}
+	if !deployment.DeferredConfigPending {
+		return nil
+	}
+	switch {
+	case action != "repair":
+		return windowsEnterpriseInvalidArguments("this deployment waits for its deferred configuration, which only a repair with "+
+			"--config and --manifest completes; the %s was refused (nothing was changed)", action)
+	case strings.TrimSpace(opts.configPath) == "" || strings.TrimSpace(opts.manifestPath) == "":
+		return windowsEnterpriseInvalidArguments("the repair that completes a deferred configuration needs both --config and --manifest (nothing was changed)")
+	case opts.noStart:
+		return windowsEnterpriseInvalidArguments("the repair that completes a deferred configuration starts the services and cannot use --no-start (nothing was changed)")
+	}
+	return nil
+}
+
 // windowsEnterpriseInstallerAction is the -Action value of installer args.
 func windowsEnterpriseInstallerAction(args []string) string {
 	for i := 0; i+1 < len(args); i++ {
@@ -539,6 +590,15 @@ func runWindowsEnterpriseStandaloneAction(
 		if err := refuseWindowsEnterpriseAPIPortChange(opts); err != nil {
 			return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 		}
+	}
+	// The installer refuses these for the recorded deployment, or for an
+	// untrusted scanner runtime it cannot remove, before it changes
+	// anything: refused here, they come before this run's first change too.
+	if err := refuseWindowsEnterpriseStandaloneDeferredState(action, opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
+	}
+	if err := refuseUntrustedWindowsScannerRuntimeBeforeChange(canonicalWindowsEnterpriseAction(action), opts); err != nil {
+		return writeWindowsEnterpriseStandalonePreflightFailure(cmd, action, opts, err)
 	}
 	if action == "uninstall" {
 		present, err := windowsEnterpriseStandaloneFootprint()
@@ -1371,16 +1431,17 @@ func applyWindowsEnterpriseInstallerReport(
 	}
 	if lifecycle && !report.OK && len(result.Errors) > firstError {
 		configPath := ""
-		purge := false
+		purge, force := false, false
 		if opts != nil {
 			configPath = opts.configPath
-			purge = opts.purge
+			purge, force = opts.purge, opts.force
 		}
 		if next := windowsEnterpriseStandaloneNextStep(
 			result.Action,
 			configPath,
 			purge,
 			windowsBundleHasCode(result.Errors[firstError:], "lifecycle_busy"),
+			force,
 			report.TransactionPending,
 			decodeWindowsEnterpriseRecoveryGatewayRuns(report.RecoveryGatewayRuns),
 			decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
@@ -1699,9 +1760,25 @@ const (
 // accounts are signed in (an uninstall acts only for signed-in accounts). An
 // administrator at an elevated prompt gets LocalSystem from a one-time
 // scheduled task, which the remedy names.
+// windowsEnterpriseRollbackCreatedFolderLeftover marks a rollback leftover
+// that is a per-user folder the rolled back change created
+// (Invoke-DefenseClawTargetRuntimeRollbackCleanupOrKeep).
+const windowsEnterpriseRollbackCreatedFolderLeftover = ": a per-user DefenseClaw folder this change created; the rollback could not remove it ("
+
 func windowsEnterpriseRollbackLeftoverWarnings(raw json.RawMessage) []enterprisestatus.Message {
 	var warnings []enterprisestatus.Message
 	for _, leftover := range windowsEnterpriseReportStrings(raw) {
+		if strings.Contains(leftover, windowsEnterpriseRollbackCreatedFolderLeftover) {
+			// A rollback whose per-user runtime cleanup failed went on and
+			// put the previous release back (GAP-0856); the folder is not
+			// one that release uses.
+			warnings = append(warnings, enterprisestatus.Message{
+				Code: "rollback_leftover",
+				Message: "the rollback left " + leftover + "; the restored release does not use that folder, " +
+					"so remove it as an administrator after that account signs out",
+			})
+			continue
+		}
 		remedy := "to remove it, run DefenseClaw Setup /ensure and then /uninstall, both as LocalSystem " + windowsEnterpriseActiveSessionWhen + " " +
 			"(an MDM system context, or from an elevated prompt a one-time scheduled task that runs as SYSTEM; " +
 			"see \"Run Setup as LocalSystem\" in the Windows enterprise guide)"
@@ -2438,6 +2515,12 @@ func finishWindowsEnterpriseStandalone(
 	result *enterprisestatus.Result,
 	failureCode int,
 ) error {
+	if len(opts.recoveryChanges) != 0 {
+		// The recovery before the config check changed the host: not a
+		// no-op, whatever the run decided after it.
+		result.Changes = append(append([]string{}, opts.recoveryChanges...), result.Changes...)
+		result.Noop, result.NoopReason = false, ""
+	}
 	if windowsBundleHasCode(result.Errors, "powershell7_untrusted") {
 		for i := range result.Warnings {
 			if result.Warnings[i].Code == windowsEnterpriseHealthNotChecked {
@@ -2618,11 +2701,17 @@ func writeWindowsEnterpriseStandaloneConfigRefusal(
 // when the config passes. An interrupted upgrade leaves a pending
 // transaction with the services stopped, and only a lifecycle run recovers
 // it: refusing a supplied config before that run left the host stopped on
-// every MDM retry (GAP-1433, GAP-0705). Each action first runs a source-free
-// repair to recover a pending transaction, which restores the previous
-// deployment and its services, and check the config again: the restored
-// rule packs can make it load. A config still refused is refused, and the
-// refusal reports the restored host.
+// every MDM retry (GAP-1433, GAP-0705). Each action first recovers a pending
+// transaction, which restores the previous deployment and its services, and
+// checks the config again: the restored rule packs can make it load. Ensure
+// and upgrade recover with the source-free repair GAP-1433 gave them. A
+// repair recovers with the transaction recovery alone (Recover): the full
+// repair went on past the recovery and changed services, access lists and
+// hooks for a request it then refused, which the 1.0.3 lifecycle never did
+// for a repair; the requested repair runs only once its config passes. A
+// config still refused is refused, and the refusal reports the restored
+// host. The result reports what the recovery changed, whichever way the run
+// goes on (noteWindowsEnterpriseRefusalRecovery).
 func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 	ctx context.Context,
 	cmd *cobra.Command,
@@ -2637,13 +2726,17 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 		err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
 	}
 	if err != nil && (action == "ensure" || action == "upgrade" || action == "repair") && windowsEnterpriseStandaloneTransactionPending() {
-		recovery := *opts
-		recovery.jsonOutput = true
-		clearWindowsEnterpriseSources(&recovery)
-		// The refusal below probes the host, so the recovery report adds
-		// nothing: a recovery that failed leaves transaction_pending there.
-		_, _, _ = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
-			windowsEnterprisePowerShellArgs("repair", windowsEnterpriseRepairRecordingOptions("repair", &recovery)))
+		recoveryArgs := windowsEnterprisePowerShellArgs("recover", windowsEnterpriseEnsureProbeOptions(opts))
+		if action != "repair" {
+			recovery := *opts
+			recovery.jsonOutput = true
+			clearWindowsEnterpriseSources(&recovery)
+			recoveryArgs = windowsEnterprisePowerShellArgs("repair", windowsEnterpriseRepairRecordingOptions("repair", &recovery))
+		}
+		// A recovery that failed leaves transaction_pending, which the
+		// refusal's probe of the host reports.
+		_, _, _ = runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script, recoveryArgs)
+		noteWindowsEnterpriseRefusalRecovery(opts, windowsEnterpriseInstallerAction(recoveryArgs))
 		if opts.suppliedConfigRefusal == nil {
 			err = windowsEnterpriseStandaloneConfigPreflight(opts.configPath)
 		}
@@ -2655,6 +2748,22 @@ func refuseWindowsEnterpriseStandaloneSuppliedConfig(
 		err = fmt.Errorf("%w: %w", errWindowsEnterpriseInvalidArguments, err)
 	}
 	return true, writeWindowsEnterpriseStandaloneConfigRefusal(ctx, cmd, action, opts, script, err)
+}
+
+// noteWindowsEnterpriseRefusalRecovery records, for the result of the run
+// (finishWindowsEnterpriseStandalone), that the recovery before a config
+// check settled the pending transaction, whether the run then refuses the
+// config or goes on with it. A recovery that left the transaction pending
+// changed nothing this can name; the result reports transaction_pending.
+func noteWindowsEnterpriseRefusalRecovery(opts *windowsEnterpriseLifecycleOptions, moduleAction string) {
+	if windowsEnterpriseStandaloneTransactionPending() {
+		return
+	}
+	change := "recovered the interrupted lifecycle transaction before checking the supplied config, which restored the previous deployment and its services"
+	if moduleAction == "Repair" {
+		change += ", and repaired it without new sources"
+	}
+	opts.recoveryChanges = append(opts.recoveryChanges, change)
 }
 
 // writeWindowsEnterpriseStandaloneRefusal writes the schema-2 result of a

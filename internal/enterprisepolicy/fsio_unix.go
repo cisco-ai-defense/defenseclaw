@@ -249,7 +249,13 @@ func validatePolicyLeafDir(Options, string) error { return nil }
 
 // atomicWrite writes data to a same-directory temporary file and renames
 // it over path. public selects 0644 (vendor policy) versus 0600 (records).
-func atomicWrite(_ Options, path string, data []byte, public bool) error {
+func atomicWrite(opts Options, path string, data []byte, public bool) error {
+	return atomicWriteChecked(opts, path, data, public, nil)
+}
+
+// atomicWriteChecked is atomicWrite with check run just before the rename;
+// its error stops the write with path as it is.
+func atomicWriteChecked(_ Options, path string, data []byte, public bool, check func() error) error {
 	dir := filepath.Dir(path)
 	suffix := make([]byte, 8)
 	if _, err := rand.Read(suffix); err != nil {
@@ -290,6 +296,12 @@ func atomicWrite(_ Options, path string, data []byte, public bool) error {
 	if err := file.Close(); err != nil {
 		cleanup()
 		return err
+	}
+	if check != nil {
+		if err := check(); err != nil {
+			cleanup()
+			return err
+		}
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		cleanup()
