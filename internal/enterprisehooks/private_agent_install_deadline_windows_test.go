@@ -7,6 +7,7 @@ package enterprisehooks
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,7 +15,52 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
+
+func TestWindowsDeadlineDropsOnlyDefinitelyDeletedLocalAccountRows(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	stubActiveSessions(t, map[string][]string{})
+	oldDomain, oldLookup := windowsMachineAccountDomainSID, windowsEnrollmentLookupAccountSID
+	t.Cleanup(func() { windowsMachineAccountDomainSID, windowsEnrollmentLookupAccountSID = oldDomain, oldLookup })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	home := codexProfile(t, "0.150.0")
+	injectWindowsProfileList(t, map[string]string{testDeletedLocalSID: home})
+	enabled := true
+	prior := writeWindowsTestManifest(t, ManifestTarget{
+		SID: testDeletedLocalSID, Connector: "codex", UserHome: home,
+		DataDir: filepath.Join(home, ".defenseclaw"), AgentVersion: "0.150.0", Enabled: &enabled,
+	})
+	for _, tc := range []struct {
+		name string
+		err  error
+		kept bool
+	}{
+		{name: "deleted local account", err: windows.ERROR_NONE_MAPPED},
+		{name: "uncertain lookup", err: errors.New("directory unavailable"), kept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			windowsEnrollmentLookupAccountSID = func(string) (string, string, error) { return "", "", tc.err }
+			ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+			defer cancel()
+			var reported []UnprotectedAgent
+			manifest, err := EnumerateWindows(ctx, standaloneEnumeratorConfig("codex"), EnumerateOptions{
+				ExistingManifestPath: prior,
+				ReportUnprotected:    func(agent UnprotectedAgent) { reported = append(reported, agent) },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := len(manifest.Targets); (got == 1) != tc.kept {
+				t.Fatalf("retained rows = %+v, want kept=%v", manifest.Targets, tc.kept)
+			}
+			if tc.kept && (len(reported) != 1 || reported[0].Code != UnprotectedCodeInstallScanIncomplete) {
+				t.Fatalf("uncertain account lost its incomplete report: %+v", reported)
+			}
+		})
+	}
+}
 
 func TestWindowsPrivateInstallDeadlineKeepsOtherProfilesAndRows(t *testing.T) {
 	stubMachineWinGet(t, nil)

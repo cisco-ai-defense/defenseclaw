@@ -548,6 +548,13 @@ func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors
 			visited[sid] = true
 			profileConnectors = subject.Connectors
 		}
+		if windowsDeletedLocalAccount(profile.SID, lookup) {
+			// A stale local profile cannot be repaired by the guardian.
+			// Keep a lookup failure uncertain, as in the normal profile path.
+			logfSafely(opts.Logger, profile.SID,
+				"the local account no longer exists; its rows are revoked although its profile folder remains")
+			continue
+		}
 		for _, conn := range profileConnectors {
 			if row, known := previous[previousManifestKey(sid, conn)]; known {
 				*targets = append(*targets, row)
