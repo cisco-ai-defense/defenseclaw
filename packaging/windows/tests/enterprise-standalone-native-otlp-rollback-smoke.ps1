@@ -10,7 +10,7 @@ param(
     [string]$ModulePath = [IO.Path]::GetFullPath(
         (Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1')),
     [string]$ScratchRoot = [IO.Path]::GetTempPath(),
-    [ValidateSet('All', 'Baseline', 'Linked', 'Junction', 'Interrupted')]
+    [ValidateSet('All', 'Baseline', 'Linked', 'Junction', 'Interrupted', 'Order')]
     [string]$Case = 'All'
 )
 
@@ -21,7 +21,7 @@ $scratch = Join-Path $ScratchRoot ('native-otlp-rollback-' + [Guid]::NewGuid().T
 New-Item -ItemType Directory -Path $scratch | Out-Null
 try {
     & $module {
-        param([string]$Scratch, [string]$SelectedCase)
+        param([string]$Scratch, [string]$SelectedCase, [string]$ModulePath)
         Set-DefenseClawEnterpriseProfile -EnterpriseProfile Standalone
         if ($SelectedCase -in @('All', 'Baseline')) {
         $userProfile = Join-Path $Scratch 'user'
@@ -207,9 +207,20 @@ try {
                 $saved.user_native_otlp_preimages.files[2].existed -ne $false) {
                 throw 'linked and absent user paths were not captured distinctly'
             }
+            $skipped = Get-Variable `
+                -Name DefenseClawUserNativeOTLPCaptureSkipped `
+                -Scope Script -ErrorAction SilentlyContinue
+            if ($null -eq $skipped -or @($skipped.Value).Count -ne 2) {
+                throw 'linked user files were not reported to Setup'
+            }
             Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
                 -Snapshot $saved -SnapshotPath $fixture.snapshot `
                 -Layout $fixture.layout
+            if (@($script:DefenseClawRollbackLeftovers | Where-Object {
+                $_ -match 'preimage could not be captured'
+            }).Count -lt 2) {
+                throw 'uncaptured linked user files were not reported on rollback'
+            }
             if ([IO.File]::ReadAllText((Join-Path $outside 'config.toml')) -cne
                     'outside Codex stays unchanged' -or
                 [IO.File]::ReadAllText((Join-Path $outside 'settings.json')) -cne
@@ -307,7 +318,45 @@ try {
                 throw 'interrupted CAS stopped rollback or lost its leftover'
             }
         }
-    } $scratch $Case
+        if ($SelectedCase -in @('All', 'Order')) {
+            # A malformed per-user receipt must be handled only after the
+            # machine files and the previous services have been restored.
+            # Both the direct and managed-hooks deferred restart paths matter.
+            $tokens = $null
+            $errors = $null
+            $ast = [Management.Automation.Language.Parser]::ParseFile(
+                $ModulePath, [ref]$tokens, [ref]$errors)
+            foreach ($name in @(
+                    'Restore-DefenseClawTransaction',
+                    'Restore-DefenseClawTransactionWithManagedHooksRollback')) {
+                $body = $ast.Find({
+                    param($node)
+                    $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                        $node.Name -ceq $name
+                }, $true).Body.Extent.Text
+                $machine = $body.LastIndexOf('Start-DefenseClawTransactionServices')
+                $user = $body.LastIndexOf('Invoke-DefenseClawUserNativeOTLPRestoreBestEffort')
+                if ($machine -lt 0 -or $user -le $machine -or
+                    $body.Contains('Restore-DefenseClawUserNativeOTLPTransactionSnapshot')) {
+                    throw "$name restores user files before the machine services"
+                }
+            }
+            $bad = [pscustomobject]@{
+                user_native_otlp_preimages = [pscustomobject]@{
+                    schema_version = -1
+                }
+            }
+            $script:DefenseClawRollbackLeftovers = @()
+            Invoke-DefenseClawUserNativeOTLPRestoreBestEffort `
+                -Snapshot $bad -SnapshotPath (Join-Path $Scratch 'bad.json') `
+                -Layout @{ StateRoot = $Scratch }
+            if (@($script:DefenseClawRollbackLeftovers).Count -ne 1 -or
+                $script:DefenseClawRollbackLeftovers[0] -notmatch
+                    'invalid user native OTLP rollback preimages') {
+                throw 'unsettled user rollback was not reported'
+            }
+        }
+    } $scratch $Case $ModulePath
     'PASS: native OTLP user preimages restored'
 }
 finally {

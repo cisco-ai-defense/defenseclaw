@@ -122,6 +122,10 @@ type windowsEnterpriseInstallerReport struct {
 	// could not remove ("user (SID) [connectors]: item", or a machine item).
 	// Decoded leniently, like the registration lists.
 	RollbackLeftovers json.RawMessage `json:"rollback_leftovers"`
+	// A linked or unreadable user agent file cannot be captured for rollback.
+	// Setup still proceeds with the machine transaction and reports each skip.
+	UserNativeOTLPCaptureSkipped json.RawMessage `json:"user_native_otlp_capture_skipped"`
+
 	// StaleLifecycleJournalRemoved is set when the lifecycle removed a
 	// stale committed managed-hook lifecycle journal itself (GAP-1322); it
 	// holds the retire failure that made the journal stale.
@@ -1626,6 +1630,14 @@ func addWindowsEnterpriseRecoveryGatewayWarnings(result *enterprisestatus.Result
 		decodeWindowsEnterpriseRecoveryGatewayRefusal(report.RecoveryGatewayRefusal),
 	)
 	warnings = append(warnings, windowsEnterpriseRollbackLeftoverWarnings(report.RollbackLeftovers)...)
+	if skipped := windowsEnterpriseReportStrings(report.UserNativeOTLPCaptureSkipped); len(skipped) != 0 {
+		warnings = append(warnings, enterprisestatus.Message{
+			Code: "user_native_otlp_capture_skipped",
+			Message: "Setup skipped native OTLP rollback preimages for these user paths; the machine operation continued, " +
+				"but a rollback cannot restore the skipped paths. Inspect their links or access permissions, " +
+				"then run Setup /ensure again: " + windowsEnterpriseBoundedLabels(skipped),
+		})
+	}
 	if removed := strings.TrimSpace(report.StaleLifecycleJournalRemoved); removed != "" {
 		// The lifecycle deleted a protected journal on its own; say so in
 		// the result and the lifecycle log (GAP-1680).

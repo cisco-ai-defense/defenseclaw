@@ -216,6 +216,7 @@ $script:DefenseClawCursorAdapterRestored = $false
 # (the managed-hook lifecycle retire report's leftovers). Reset per lifecycle
 # run.
 $script:DefenseClawRollbackLeftovers = @()
+$script:DefenseClawUserNativeOTLPCaptureSkipped = @()
 # Standalone: each account whose old managed runtime generations a
 # managed-hook lifecycle retire left in place, because DefenseClaw could not
 # verify or apply the permissions of that account's DefenseClaw folder
@@ -14665,6 +14666,15 @@ function Add-DefenseClawUserNativeOTLPTransactionSnapshot {
                 # Guardian Verify also skips linked or unreadable user files.
                 # A user path must not block the whole machine upgrade.
                 $captured = $false
+                $message = $path + ': ' + (ConvertTo-DefenseClawBoundedDiagnostic `
+                    -Value $_.Exception.Message -MaxLength 512)
+                if (@($script:DefenseClawUserNativeOTLPCaptureSkipped).Count -lt 256) {
+                    $script:DefenseClawUserNativeOTLPCaptureSkipped += $message
+                }
+                Microsoft.PowerShell.Utility\Write-Warning `
+                    -Message ('native OTLP preimage skipped: ' + $message)
+                Write-DefenseClawLifecyclePhase `
+                    -Stage ('native OTLP preimage skipped: ' + $message)
             }
             $exists = $null -ne $before
             $hash = ''
@@ -14766,6 +14776,8 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
             $state = $saved.state_directories[$stateIndex + $agentOffset]
             $stateCaptured = $state.PSObject.Properties['captured']
             if ($null -ne $stateCaptured -and -not [bool]$stateCaptured.Value) {
+                Add-DefenseClawUserNativeOTLPRollbackLeftover `
+                    -Path $statePath -Reason 'preimage could not be captured'
                 $restoreAgent += $false
                 continue
             }
@@ -14826,6 +14838,10 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                         -Path $path -Reason $_.Exception.Message
                 }
             }
+            else {
+                Add-DefenseClawUserNativeOTLPRollbackLeftover `
+                    -Path $path -Reason 'preimage could not be captured'
+            }
             $index++
         }
         foreach ($agent in @('.codex', '.claude')) {
@@ -14848,6 +14864,22 @@ function Restore-DefenseClawUserNativeOTLPTransactionSnapshot {
                     -Path $statePath -Reason $_.Exception.Message
             }
         }
+    }
+}
+
+function Invoke-DefenseClawUserNativeOTLPRestoreBestEffort {
+    param(
+        [Parameter(Mandatory)]$Snapshot,
+        [Parameter(Mandatory)][string]$SnapshotPath,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    try {
+        Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
+            -Snapshot $Snapshot -SnapshotPath $SnapshotPath -Layout $Layout
+    }
+    catch {
+        Add-DefenseClawUserNativeOTLPRollbackLeftover `
+            -Path $SnapshotPath -Reason $_.Exception.Message
     }
 }
 
@@ -15150,10 +15182,6 @@ function Restore-DefenseClawTransaction {
         -Layout $Layout `
         -GatewayServiceName ([string]$snapshot.gateway_service) `
         -GuardianServiceName ([string]$snapshot.guardian_service)
-    Restore-DefenseClawUserNativeOTLPTransactionSnapshot `
-        -Snapshot $snapshot `
-        -SnapshotPath $SnapshotPath `
-        -Layout $Layout
     $configSidecars = @()
     if (Test-DefenseClawStandaloneProfile) {
         $configSidecars = @(
@@ -15501,6 +15529,12 @@ function Restore-DefenseClawTransaction {
                     -Name $standaloneSensorHelper `
                     -StartMode ([int]$gatewayStartMode)
             }
+        }
+        # A user-owned file or CAS receipt cannot hold back restoration of
+        # the machine files and prior services.
+        if (Test-DefenseClawStandaloneProfile) {
+            Invoke-DefenseClawUserNativeOTLPRestoreBestEffort `
+                -Snapshot $snapshot -SnapshotPath $SnapshotPath -Layout $Layout
         }
     }
 }
@@ -16123,6 +16157,10 @@ function Restore-DefenseClawTransactionWithManagedHooksRollback {
                     -Snapshot $snapshot `
                     -Name $restoredSensorHelper
             }
+        }
+        if (Test-DefenseClawStandaloneProfile) {
+            Invoke-DefenseClawUserNativeOTLPRestoreBestEffort `
+                -Snapshot $snapshot -SnapshotPath $SnapshotPath -Layout $Layout
         }
     }
     return $snapshot
@@ -21339,6 +21377,7 @@ function Set-DefenseClawRecoveryGatewayCandidate {
     $script:DefenseClawStaleTeardownJournalRemoved = ''
     $script:DefenseClawCursorAdapterRestored = $false
     $script:DefenseClawRollbackLeftovers = @()
+    $script:DefenseClawUserNativeOTLPCaptureSkipped = @()
     $script:DefenseClawRetireSkipped = @()
     $script:DefenseClawSignedOutUntrustedFolders = @()
     $script:DefenseClawRecoveryActivationDeferrable = $false
@@ -25637,6 +25676,11 @@ function Get-DefenseClawLifecycleStatus {
         if (@($script:DefenseClawRollbackLeftovers).Count -gt 0) {
             $status['rollback_leftovers'] = [string[]]@(
                 $script:DefenseClawRollbackLeftovers
+            )
+        }
+        if (@($script:DefenseClawUserNativeOTLPCaptureSkipped).Count -gt 0) {
+            $status['user_native_otlp_capture_skipped'] = [string[]]@(
+                $script:DefenseClawUserNativeOTLPCaptureSkipped
             )
         }
         # The accounts whose untrusted DefenseClaw folder a retire skipped.
