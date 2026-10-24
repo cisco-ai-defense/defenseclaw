@@ -568,3 +568,57 @@ func TestLogConfigChangeWithoutAPinWaitsForTheStoreToAnswer(t *testing.T) {
 		})
 	}
 }
+
+// The first offer of a change makes the pin folder durably, its entry in
+// its parent flushed (a write-through move on Windows), before it writes
+// the pin, so before any sink gets the record: a power loss after a
+// destination got the record cannot take the pin back with its folder, and
+// a later offer never builds another record under the change's id. A
+// folder that cannot be made that way sends nothing. Before, a new folder
+// was made in place and only its parent was flushed, a no-op on Windows.
+func TestLogConfigChangeMakesThePinFolderDurablyBeforeAnySinkGetsIt(t *testing.T) {
+	setTestProcess(t, "run-a", "sidecar-a", "1.0.4-dev.1")
+	t.Run("made", func(t *testing.T) {
+		logger := newTestLogger(t)
+		emitter := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+		logger.SetRuntimeV8Emitter(emitter)
+		pins := testConfigChangePins(t)
+		mkdir, write := pins.mkdir, pins.writeFile
+		var made []string
+		sinksAtMake, pinsBeforeMake := -1, 0
+		pins.mkdir = func(dir string) error {
+			made = append(made, dir)
+			sinksAtMake = len(builtRecords(emitter))
+			return mkdir(dir)
+		}
+		pins.writeFile = func(path string, data []byte, mode os.FileMode) error {
+			if len(made) == 0 {
+				pinsBeforeMake++
+			}
+			return write(path, data, mode)
+		}
+		if err := logger.LogConfigChange(testAnchorChange(), nil, pins); err != nil {
+			t.Fatal(err)
+		}
+		if len(made) != 1 || made[0] != pins.dir || sinksAtMake != 0 || pinsBeforeMake != 0 {
+			t.Fatalf("pin folder made %v with %d records out, %d pins written before; want one make of %s before any record and pin",
+				made, sinksAtMake, pinsBeforeMake, pins.dir)
+		}
+		if _, err := os.Stat(filepath.Join(pins.dir, testConfigChangeID+".json")); err != nil {
+			t.Fatalf("the pin is not in the folder: %v", err)
+		}
+	})
+	t.Run("not made", func(t *testing.T) {
+		logger := newTestLogger(t)
+		emitter := newTestRuntimeV8Emitter(t, logger.store, router.AdmissionOrdinary)
+		logger.SetRuntimeV8Emitter(emitter)
+		pins := testConfigChangePins(t)
+		pins.mkdir = func(string) error { return errors.New("disk I/O error") }
+		if err := logger.LogConfigChange(testAnchorChange(), nil, pins); err == nil {
+			t.Fatal("the offer succeeded without a durable pin folder")
+		}
+		if built := builtRecords(emitter); len(built) != 0 {
+			t.Fatalf("the offer built %d records for the sinks, want none", len(built))
+		}
+	})
+}

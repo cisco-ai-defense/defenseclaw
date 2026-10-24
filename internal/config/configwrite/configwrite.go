@@ -297,6 +297,11 @@ func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publi
 // on POSIX; a no-op on Windows, where NTFS journals the directory).
 func SyncDir(dir string) error { return cfgtxn.SyncDir(dir) }
 
+// MkdirDurable makes dir, whose parent exists, a folder whose entry
+// survives a power loss before it returns (a write-through move on
+// Windows). A folder already there is not an error.
+func MkdirDurable(dir string) error { return cfgtxn.MkdirDurable(dir) }
+
 // SyncFile flushes path, its owner and access included, after they were
 // changed on a file already written.
 func SyncFile(path string) error { return cfgtxn.SyncFile(path) }
