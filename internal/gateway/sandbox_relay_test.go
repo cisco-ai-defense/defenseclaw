@@ -1156,11 +1156,10 @@ func TestSandboxRelayThroughTheHookSocketServer(t *testing.T) {
 	}
 }
 
-// A relayed hook of a live registration whose caller's groups are unknown
-// now is answered by the hook handler with its native block, which names
-// the missing fact and no profile (GAP-0522, record, never infer): the
-// registration's last proven profile is not the caller's policy now.
-func TestSandboxRelayRefusesAnUnprovenIdentity(t *testing.T) {
+// A relayed hook with an unproven group uses the observe default when the
+// possible group profile also only observes. The registration's last proven
+// profile is not assumed to be the caller's current policy (GAP-0522).
+func TestSandboxRelayUsesObserveDefaultForUnprovenGroup(t *testing.T) {
 	restoreFacts, restoreBlocking := identityFactsEnabled.Load(), identityLookupBlocking.Load()
 	prevDirectory, prevRematched := managedHookPeerDirectory, sandboxRecordRematched
 	identityFactsEnabled.Store(true)
@@ -1197,9 +1196,9 @@ func TestSandboxRelayRefusesAnUnprovenIdentity(t *testing.T) {
 	resp, body := f.post(t, sandboxrelay.PathHookPrefix+"claudecode", reg.ID,
 		`{"hook_event_name":"UserPromptSubmit","session_id":"u1","prompt":"hello"}`)
 	d, ok := relayTrailer(t, resp)
-	if resp.StatusCode != http.StatusOK || !ok || d.Action != "block" ||
-		!strings.Contains(body, "DefenseClaw refused this request: group membership is unconfirmed") ||
+	if resp.StatusCode != http.StatusOK || !ok || d.Action != "allow" || d.FailedClosed ||
+		strings.Contains(body, "DefenseClaw refused this request") ||
 		strings.Contains(body, "contractors") || strings.Contains(body, "offline-floor") {
-		t.Fatalf("relayed hook: %d %s trailer %+v; want the native block naming the group fact and no profile", resp.StatusCode, body, d)
+		t.Fatalf("relayed hook: %d %s trailer %+v; want observe default without a profile name", resp.StatusCode, body, d)
 	}
 }
