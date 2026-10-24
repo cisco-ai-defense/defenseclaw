@@ -322,8 +322,16 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 		}
 	}
 	switch program {
-	case "echo", "printf", "write-output", "cat", "type", "get-content", "grep", "rg", "head", "tail", "wc":
+	case "echo", "printf", "write-output", "cat", "type", "get-content", "get-childitem",
+		"get-item", "get-acl", "get-filehash", "resolve-path", "test-path", "select-string",
+		"grep", "rg", "head", "tail", "wc", "dir", "ls", "stat", "readlink", "diff", "cmp", "file", "findstr":
 		return false
+	}
+	if program == "git" && len(words) > 1 {
+		switch strings.ToLower(words[1]) {
+		case "status", "diff", "log", "show":
+			return false
+		}
 	}
 	if program == "source" || program == "." {
 		return false
@@ -370,11 +378,14 @@ func actionWindowsResolvedProtectedTarget(command, cwd, home string, depth int) 
 		}
 		return false
 	}
-	if !actionWindowsWriteProgram(program) {
-		return false
-	}
 	for i, word := range words {
 		if actionWindowsPathPosition(program, i, words) {
+			if program == "dd" {
+				if !strings.HasPrefix(strings.ToLower(word), "of=") {
+					continue
+				}
+				word = word[3:]
+			}
 			for _, token := range strings.FieldsFunc(word, func(r rune) bool {
 				return r == ' ' || r == '\t' || r == '>' || r == '<' || r == ';' || r == '|' || r == '&' || r == '(' || r == ')' || r == '{' || r == '}' || r == '\'' || r == '"'
 			}) {
@@ -411,6 +422,8 @@ func actionWindowsResolvedWrapperTarget(program string, words []string, cwd, hom
 			switch {
 			case option == "-s" || option == "--split-string":
 				return index+1 < len(words) && actionWindowsResolvedProtectedTarget(words[index+1], cwd, home, depth+1)
+			case strings.HasPrefix(option, "--split-string="):
+				return actionWindowsResolvedProtectedTarget(rawOption[len("--split-string="):], cwd, home, depth+1)
 			case option == "-i" || option == "--ignore-environment" || option == "-v" || option == "-0" ||
 				strings.HasPrefix(option, "--unset=") || strings.HasPrefix(option, "-u") && len(option) > 2:
 				index++
@@ -436,7 +449,7 @@ func actionWindowsResolvedWrapperTarget(program string, words []string, cwd, hom
 			case strings.Contains(option, "=") && !strings.HasPrefix(option, "-"):
 				index++
 			case strings.HasPrefix(option, "-"):
-				return false
+				return index+1 < len(words) && actionWindowsResolvedProtectedTarget(strings.Join(words[index+1:], " "), cwd, home, depth+1)
 			default:
 				return actionWindowsResolvedProtectedTarget(strings.Join(words[index:], " "), cwd, home, depth+1)
 			}
@@ -447,7 +460,8 @@ func actionWindowsResolvedWrapperTarget(program string, words []string, cwd, hom
 		}
 		value, known := actionWindowsResolvedWrapperOption(program, rawOption)
 		if !known || value && index+1 >= len(words) {
-			return false
+			return !known && index+1 < len(words) &&
+				actionWindowsResolvedProtectedTarget(strings.Join(words[index+1:], " "), cwd, home, depth+1)
 		}
 		if program == "sudo" && (rawOption == "-D" || option == "--chdir") {
 			var resolved bool
@@ -478,10 +492,12 @@ func actionWindowsResolvedWrapperOption(program, option string) (value, known bo
 	}
 	switch program {
 	case "nice":
-		return option == "-n" || option == "--adjustment", strings.HasPrefix(option, "-n") || strings.HasPrefix(option, "--adjustment")
+		return option == "-n" || option == "--adjustment", strings.HasPrefix(option, "-n") || strings.HasPrefix(option, "--adjustment") ||
+			len(option) > 1 && option[0] == '-' && strings.Trim(option[1:], "0123456789") == ""
 	case "ionice":
 		value = option == "-c" || option == "-n" || option == "-p" || option == "-P"
-		return value, value || option == "-t" || strings.Contains(option, "=")
+		return value, value || option == "-t" || strings.Contains(option, "=") ||
+			len(option) > 2 && strings.HasPrefix(option, "-c") && strings.Trim(option[2:], "0123456789") == ""
 	case "timeout":
 		value = option == "-s" || option == "--signal" || option == "-k" || option == "--kill-after"
 		return value, value || option == "--foreground" || option == "--preserve-status" || option == "-v" || strings.Contains(option, "=")
@@ -506,7 +522,8 @@ func actionWindowsResolvedWrapperOption(program, option string) (value, known bo
 		value = strings.Contains(" -u -g -h -p -C -D -r -t --user --group --host --prompt --close-from --chdir --role --type ", " "+option+" ")
 		return value, value || strings.Contains(" -n -E -H -S -b -k -K -v -i -s --login --shell --non-interactive --preserve-env ", " "+option+" ") ||
 			strings.HasPrefix(option, "--user=") || strings.HasPrefix(option, "--group=") || strings.HasPrefix(option, "--preserve-env=") ||
-			len(option) > 2 && (strings.HasPrefix(option, "-u") || strings.HasPrefix(option, "-g"))
+			len(option) > 2 && (strings.HasPrefix(option, "-u") || strings.HasPrefix(option, "-g")) ||
+			len(option) > 2 && option[0] == '-' && strings.Trim(option[1:], "nEHsbkKvi") == ""
 	case "time":
 		return option == "-f" || option == "--format", option == "-p" || option == "-f" || option == "--format" || strings.HasPrefix(option, "--format=")
 	case "command":
@@ -517,16 +534,6 @@ func actionWindowsResolvedWrapperOption(program, option string) (value, known bo
 		return false, false
 	}
 	return false, false
-}
-
-func actionWindowsWriteProgram(program string) bool {
-	switch program {
-	case "add-content", "set-content", "out-file", "clear-content", "copy-item", "move-item",
-		"remove-item", "new-item", "rename-item", "tee-object", "copy", "move", "del",
-		"erase", "rm", "unlink", "truncate", "tee":
-		return true
-	}
-	return false
 }
 
 // actionWindowsWords treats a quoted command body as one word and emits each
@@ -773,11 +780,12 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 	switch program {
 	case "echo", "printf", "write-output":
 		return false
-	case "copy-item", "copy":
+	case "copy-item", "copy", "cp", "cpi", "move-item", "move", "mv", "mi", "rni",
+		"ln", "rsync", "install", "xcopy", "robocopy":
 		if index == 0 || strings.HasPrefix(words[index], "-") {
 			return false
 		}
-		sourceSeen := false
+		sourceSeen, unknownOption := false, false
 		for i := 1; i <= index; i++ {
 			word := strings.ToLower(words[i])
 			switch word {
@@ -790,18 +798,52 @@ func actionWindowsPathPosition(program string, index int, words []string) bool {
 				i++
 				sourceSeen = true
 				continue
-			case "-force", "-recurse":
+			case "-force", "-recurse", "-verbose", "-container", "-confirm", "-whatif", "-passthru":
+				continue
+			case "-exclude", "-filter", "-erroraction":
+				if i+1 == index {
+					return false
+				}
+				i++
+				continue
+			case "-t", "--target-directory":
+				if program == "cp" || program == "mv" || program == "ln" || program == "install" {
+					return i+1 == index
+				}
+			}
+			if (program == "cp" || program == "mv" || program == "ln" || program == "rsync" || program == "install") &&
+				len(word) > 1 && word[0] == '-' && strings.Trim(word[1:], "aAbBcCdDfFghHiIlLmMnNoOpPrRsStTuUvVxXzZ") == "" {
+				continue
+			}
+			if (program == "xcopy" || program == "robocopy") && strings.HasPrefix(word, "/") {
 				continue
 			}
 			if strings.HasPrefix(word, "-") {
-				return false
+				unknownOption = true
+				continue
 			}
 			if i == index {
-				return sourceSeen
+				if !unknownOption && (program == "cp" || program == "mv" || program == "ln" || program == "rsync" || program == "install" || program == "xcopy") {
+					for _, next := range words[index+1:] {
+						if next != "" && next[0] != '-' && (program != "xcopy" || next[0] != '/') {
+							return false // A later positional operand is the destination.
+						}
+					}
+				}
+				return unknownOption || sourceSeen
 			}
 			sourceSeen = true
 		}
 		return false
+	case "sed":
+		for _, word := range words[1:] {
+			if word == "-i" || strings.HasPrefix(word, "--in-place") {
+				return index > 0 && !strings.HasPrefix(words[index], "-")
+			}
+		}
+		return false
+	case "invoke-webrequest", "iwr":
+		return index > 0 && strings.EqualFold(words[index-1], "-OutFile")
 	case "add-content", "set-content", "out-file":
 		if index == 0 || strings.HasPrefix(words[index], "-") {
 			return false

@@ -401,6 +401,89 @@ func TestR104ActionWindowsKnownWrapperChildren(t *testing.T) {
 	}
 }
 
+func TestR104ActionWindowsProtectedWriterSweep(t *testing.T) {
+	home, cwd := `C:\Users\Alice`, `C:\Users\Alice\project`
+	target := `C:\Users\Alice\.ssh\authorized_keys`
+	for _, command := range []string{
+		`cp report.pub /c/Users/Alice/.ssh/authorized_keys`,
+		`cp -t ` + target + ` report.pub`,
+		`mv report.pub ` + target,
+		`mv -t ` + target + ` report.pub`,
+		`ln -sf /c/Users/Alice/project/a.pub ~/.ssh/authorized_keys`,
+		`rsync report.pub ~/.ssh/authorized_keys`,
+		`install report.pub ` + target,
+		`install -t ` + target + ` report.pub`,
+		`sed -i s/a/b/ ~/.ssh/authorized_keys`,
+		`dd if=report.pub of=` + target,
+		`xcopy report.pub ` + target,
+		`robocopy . ` + target + ` report.pub`,
+		`cpi report.pub ` + target,
+		`mi report.pub ` + target,
+		`ni ` + target + ` -ItemType File`,
+		`sc ` + target + ` marker`,
+		`ac ` + target + ` marker`,
+		`ri ` + target,
+		`rni report.pub ` + target,
+		`iwr https://example.com/a.pub -OutFile ` + target,
+		`Invoke-WebRequest https://example.com/a.pub -OutFile $env:USERPROFILE\.ssh\authorized_keys`,
+		`ssh-keygen -f ` + target,
+		`icacls ` + target + ` /grant Everyone:F`,
+		`Copy-Item -Verbose report.pub ` + target,
+		`Copy-Item -Container report.pub ` + target,
+		`Copy-Item -WhatIf report.pub ` + target,
+		`Copy-Item -Filter *.pub report.pub ` + target,
+		`Copy-Item -Exclude *.tmp report.pub ` + target,
+		`Copy-Item -ErrorAction Stop report.pub ` + target,
+		`Copy-Item -FutureSwitch report.pub ` + target,
+		`timeout 5 cp report.pub ~/.ssh/authorized_keys`,
+		`nice -10 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`sudo -nE cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`sudo -Ei cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`ionice -c2 cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`env --split-string="cmd /c echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`sudo --future-option cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+		`env --future-option cmd /c "echo marker >> %USERPROFILE%\.ssh\authorized_keys"`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got == "" {
+			t.Errorf("protected Windows write allowed: %q", command)
+		}
+	}
+	for _, command := range []string{
+		`Get-ChildItem ` + target,
+		`Get-Content ` + target,
+		`Get-Item ` + target,
+		`Get-Acl ` + target,
+		`Resolve-Path ` + target,
+		`Test-Path ` + target,
+		`git status --short ` + target,
+		`echo ` + target,
+		`cp ` + target + ` report.pub`,
+		`cp -a ` + target + ` report.pub`,
+		`cp -t report.pub ` + target,
+		`mv ` + target + ` report.pub`,
+		`ln -sf ` + target + ` report.pub`,
+		`rsync -av ` + target + ` report.pub`,
+		`install -m 644 ` + target + ` report.pub`,
+		`xcopy /y ` + target + ` report.pub`,
+		`dd if=` + target + ` of=report.pub`,
+		`sed s/a/b/ ` + target,
+		`iwr https://example.com/a.pub -Body ` + target + ` -OutFile report.pub`,
+		`Copy-Item -Verbose ` + target + ` report.pub`,
+		`Copy-Item -Container ` + target + ` report.pub`,
+		`Copy-Item -WhatIf ` + target + ` report.pub`,
+		`Copy-Item -Filter *.pub ` + target + ` report.pub`,
+		`Copy-Item -Exclude *.tmp ` + target + ` report.pub`,
+		`Copy-Item -ErrorAction Stop ` + target + ` report.pub`,
+		`nice -10 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`,
+		`sudo -nE cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`,
+		`ionice -c2 cmd /c "echo %USERPROFILE%\.ssh\authorized_keys"`,
+	} {
+		if got := ActionCommandDecision(command, cwd, home); got != "" {
+			t.Errorf("Windows path used only as data blocked: %q: %q", command, got)
+		}
+	}
+}
+
 func TestR104ActionWindowsUninspectedScripts(t *testing.T) {
 	const cwd = `C:\Users\alice\project`
 	const home = `C:\Users\alice`
