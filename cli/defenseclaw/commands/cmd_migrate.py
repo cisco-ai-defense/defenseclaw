@@ -172,33 +172,34 @@ def _upgraded_from_0x(result) -> bool:
 
 
 def _report_hook_fail_mode_changes(data_dir: str) -> None:
-    """Name each connector whose hooks change from fail-closed to fail-open.
+    """Name each connector whose hooks change from blocking to running a call during a gateway outage.
 
-    0.8.x sealed the global fail mode into the hooks of observe-mode
-    connectors. This release applies the documented rule that observe-mode
-    hooks fail open, so say so before the gateway rewrites the hooks.
+    An earlier release sealed closed into the hooks. In 1.0.4 a per-user
+    hook's outage mode follows the policy tier (default and permissive run the
+    call with a warning, strict blocks it), so say so before the gateway
+    rewrites the hooks.
     """
     try:
         with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as stream:
             lock = json.load(stream)
         from defenseclaw.config import load
 
-        guardrail = load(data_dir=data_dir).guardrail
+        cfg = load(data_dir=data_dir)
+        guardrail = cfg.guardrail
     except Exception:  # noqa: BLE001 - a notice must never fail the migration
+        return
+    if str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise":
+        # A managed host keeps its administrator's mode.
         return
     connectors = lock.get("connectors") if isinstance(lock, dict) else None
     if not isinstance(connectors, dict):
         return
     for name, entry in sorted(connectors.items()):
         sealed = str(entry.get("hook_fail_mode", "")).strip().lower() if isinstance(entry, dict) else ""
-        if (
-            sealed != "closed"
-            or guardrail.effective_mode(name).strip().lower() != "observe"
-            or guardrail.effective_hook_fail_mode(name) != "open"
-        ):
+        if sealed != "closed" or guardrail.effective_hook_fail_mode(name) != "open":
             continue
         ux.warn(
-            f"{name} hooks now fail open: in observe mode they let a call through when "
-            "inspection is unavailable, where the previous release blocked it."
+            f"{name} hooks now let a call run with a warning while the gateway is not running "
+            "(default policy), where the previous release blocked it. Every other hook failure still blocks."
         )
-        ux.subhead(f"To block such calls, enforce policy: defenseclaw setup {name} --mode action", indent="    ")
+        ux.subhead("To block calls during an outage: defenseclaw guardrail use-pack strict", indent="    ")

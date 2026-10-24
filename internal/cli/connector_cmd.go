@@ -678,8 +678,7 @@ func reconcileConnectorOpts(dataDir, name string) connector.SetupOpts {
 	opts := resolveConnectorOptsFor(dataDir, name)
 	if cfg != nil {
 		opts.CodexOtelEnvironment = cfg.Environment
-		opts.HookFailMode = cfg.EffectiveHookFailModeForConnector(name)
-		opts.ConfiguredHookFailMode = cfg.ConfiguredHookFailModeForConnector(name)
+		opts.HookFailMode = cfg.EffectiveHookOutageFailModeForConnector(name)
 		opts.SecureClientHookDelivery = cfg.SecureClientIntegration()
 		opts.GuardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
 		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled

@@ -1154,6 +1154,13 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.Inspection.AIDefense = "unknown"
 	}
 	r.AddAIDefenseWarning()
+	if r.Action == ActionEnsure && record != nil {
+		// Ensure reports the same preventative coverage as status and verify,
+		// while keeping its compact lifecycle result without status blocks.
+		l.describeConnectors(record)
+		r.AddHookProcessFailureWarnings()
+		r.Connectors = nil
+	}
 }
 
 // runningDeploymentPrefix starts each warning describeRunning adds.

@@ -759,9 +759,13 @@ func TestSandboxDaemonReadyFromAnOlderCLIJudgesTheDaemonsAgent(t *testing.T) {
 			f := newSandboxDaemonFixture(t, func(o *SandboxDaemonOptions) {
 				o.Settings.Operational.Harnesses = []string{"codex", "claudecode"}
 			})
+			// Ready asks the candidates' views concurrently (readyViewsInFlight).
+			var mu sync.Mutex
 			var asked []string
 			f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				mu.Lock()
 				asked = append(asked, req.Connector+"/"+req.Harness)
+				mu.Unlock()
 				return sandboxapi.ManagedExplain{Allowed: tc.allowed, AllowedHarnesses: tc.harnesses}, nil
 			}
 			f.run(t)
@@ -784,6 +788,8 @@ func TestSandboxDaemonReadyFromAnOlderCLIJudgesTheDaemonsAgent(t *testing.T) {
 				t.Fatalf("older CLI ready: HTTP %d, prepared %d; want HTTP %d, prepared %d",
 					resp.StatusCode, f.os.prepared.Load(), tc.wantCode, tc.wantPrepared)
 			}
+			mu.Lock()
+			defer mu.Unlock()
 			if !slices.Contains(asked, "codex/codex") {
 				t.Fatalf("policy asked for %v, want the daemon's own agent codex", asked)
 			}
@@ -823,9 +829,12 @@ func TestSandboxDaemonReadyFromAnOlderCLIReadiesForAnyAllowedAgent(t *testing.T)
 				}},
 				defaultProfile: "other-profile",
 			}
+			var mu sync.Mutex
 			var asked []string
 			f.relay.explain = func(req sandboxrelay.ExplainRequest) (sandboxapi.ManagedExplain, error) {
+				mu.Lock()
 				asked = append(asked, req.Harness)
+				mu.Unlock()
 				if tc.explainErr {
 					return sandboxapi.ManagedExplain{}, errors.New("the managed gateway is down")
 				}
@@ -849,12 +858,16 @@ func TestSandboxDaemonReadyFromAnOlderCLIReadiesForAnyAllowedAgent(t *testing.T)
 				t.Fatal(err)
 			}
 			defer resp.Body.Close()
+			mu.Lock()
+			defer mu.Unlock()
 			if resp.StatusCode != tc.wantCode || f.os.prepared.Load() != tc.wantPrepared {
 				t.Fatalf("ready %q: HTTP %d, prepared %d; want HTTP %d, prepared %d (asked %v)",
 					tc.body, resp.StatusCode, f.os.prepared.Load(), tc.wantCode, tc.wantPrepared, asked)
 			}
-			if len(asked) == 0 || asked[0] != "codex" {
-				t.Fatalf("policy asked for %v, want the daemon's own agent codex first", asked)
+			// The daemon's own agent is the first candidate; the views go
+			// concurrently, so it is asked, not necessarily answered first.
+			if !slices.Contains(asked, "codex") {
+				t.Fatalf("policy asked for %v, want the daemon's own agent codex", asked)
 			}
 		})
 	}

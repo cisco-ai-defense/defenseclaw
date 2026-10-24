@@ -20,6 +20,7 @@ from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context
 from tests.test_fail_mode_runtime import _runtime_cfg
+from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 
 def _app(cfg) -> AppContext:
@@ -30,8 +31,12 @@ def _app(cfg) -> AppContext:
 
 
 def _roster(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """claudecode and cursor in action mode, codex in observe mode, no fail-mode overrides."""
+    """claudecode and cursor in action mode, codex in observe mode, no fail-mode overrides.
+
+    Secure Client, where the saved fail mode is the hooks' mode: a per-user
+    install takes its outage mode from the policy tier (oss-outage-open)."""
     cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "", "codex": "", "cursor": ""})
+    object.__setattr__(cfg.guardrail, "_secure_client", True)
     cfg.guardrail.mode = "observe"
     cfg.guardrail.connectors["claudecode"].mode = "action"
     cfg.guardrail.connectors["cursor"].mode = "action"
