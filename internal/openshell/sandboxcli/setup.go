@@ -1124,7 +1124,7 @@ func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []strin
 	if known && len(running) > 0 {
 		names = " (" + shortList(running) + ")"
 	}
-	stop := "`" + CommandName + " stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes"
+	stop := "`" + CommandName + " stop NAME` for DefenseClaw sandboxes or, for raw OpenShell sandboxes, save work outside the guest first on a gateway older than 0.1.5 because raw stop may not flush it, then `openshell sandbox stop NAME`"
 	switch {
 	case !microVM && names != "":
 		return "restarting it stops every sandbox on it, and " + plural(int64(len(running)), "sandbox runs", "sandboxes run") + " on it now" + names
@@ -1134,11 +1134,11 @@ func (a *App) manualRestartStops(ctx context.Context, microVM bool, gone []strin
 		return "restarting it stops every MicroVM on it with no flush, so first stop each sandbox that OpenShell does not report stopped, " +
 			"or what it wrote since its last sync is lost: " + strings.Join(held, "; ")
 	case known:
-		return "restarting it stops every sandbox on it (none runs now): stop a MicroVM sandbox you start before then first (" + stop +
-			", which flushes its disk), or what it wrote since its last sync is lost"
+		return "restarting it stops every sandbox on it (none runs now): save or sync a MicroVM guest's work first, then stop it before the restart (" + stop +
+			"; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop); if a flush fails, changes after the last successful disk sync may be lost"
 	}
-	return "restarting it stops every sandbox on it: first stop the MicroVM sandboxes running on it with " + stop +
-		", which flushes their disks, or what they wrote since their last sync is lost"
+	return "restarting it stops every sandbox on it: save or sync each MicroVM guest's work first, then stop the sandboxes running on it with " + stop +
+		"; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop; if a flush fails, changes after the last successful disk sync may be lost"
 }
 
 // shortList names at most five of names.
@@ -1184,7 +1184,8 @@ func (a *App) restartSandboxes(ctx context.Context, microVM bool) (running, held
 			stopFlushes = d.StopFlushes
 		}
 	}
-	var runs *bool
+	var release string
+	checkedRelease := false
 	for _, sb := range list {
 		said := openshell.FailureReason(sb)
 		if !openshell.HoldsGateway(sb.Status.Phase, said, stopFlushes) {
@@ -1194,16 +1195,18 @@ func (a *App) restartSandboxes(ctx context.Context, microVM bool) (running, held
 		if stopFlushes {
 			continue
 		}
-		if runs == nil {
+		if !checkedRelease {
 			h, err := c.Health(ctx)
-			ok := err == nil && h != nil && openshell.RunsSandboxes(h.RawVersion)
-			runs = &ok
+			if err == nil && h != nil {
+				release = h.RawVersion
+			}
+			checkedRelease = true
 		}
 		phase := strings.ToLower(string(sb.Status.Phase))
 		if phase == "" {
 			phase = "unknown"
 		}
-		held = append(held, sb.Name+" ("+phase+"): "+openshell.StopWayOn(sb.Name, sb.Status.Phase, said, *runs))
+		held = append(held, sb.Name+" ("+phase+"): "+openshell.StopWayOn(sb.Name, sb.Status.Phase, said, release))
 	}
 	sort.Strings(running)
 	sort.Strings(held)
@@ -1684,15 +1687,29 @@ func (a *App) waitDaemon(ctx context.Context, driver openshell.ComputeDriver) (r
 		if err == nil && st.Gateway != nil && st.Gateway.Driver != "" {
 			drives = openshell.ComputeDriver(st.Gateway.Driver)
 		}
+		missingListeners := err == nil && st.Enabled &&
+			(st.Available || strings.Contains(st.Reason, "listener is not running in this process")) &&
+			(st.IngressAddr == "" || st.EgressAddr == "")
 		switch {
 		case err != nil:
 			return false, false, true
-		case st.Enabled && st.Available && (driver == "" || drives == driver):
+		case st.Enabled && st.Available && !missingListeners && (driver == "" || drives == driver):
 			a.ok("the daemon runs the sandbox subsystem (ingress " + st.IngressAddr + ", egress proxy " + st.EgressAddr + ")")
 			return true, st.DockerGroupMissing, false
 		}
 		// The polls bound the wait when the clock does not move.
 		if a.Now().After(deadline) || time.Duration(polls)*poll >= wait {
+			if missingListeners {
+				var missing []string
+				if st.IngressAddr == "" {
+					missing = append(missing, "ingress (openshell.ingress_port)")
+				}
+				if st.EgressAddr == "" {
+					missing = append(missing, "egress (openshell.egress_port)")
+				}
+				a.warn("the daemon does not hold its sandbox " + strings.Join(missing, " and ") + " listener; another process may hold the port. Free or move the port, then restart it with `defenseclaw-gateway restart` and rerun setup")
+				return false, false, false
+			}
 			if st.Enabled && st.Available {
 				a.warn(fmt.Sprintf("the daemon still drives the OpenShell gateway as the %s driver, not %s; restart it (`defenseclaw-gateway restart`) "+
 					"if `%s doctor` says the same", drives, driver, CommandName))

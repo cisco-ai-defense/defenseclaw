@@ -10,13 +10,20 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"io/fs"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 )
+
+// ErrConfirmationPrerequisiteMissing means an applied receipt cannot be
+// confirmed until a later delivery repairs a missing local prerequisite.
+// SettleRun keeps that receipt pending so the repairing delivery can proceed.
+var ErrConfirmationPrerequisiteMissing = errors.New("bundle confirmation prerequisite missing")
 
 // Driver applies a bundle around a lifecycle transaction it does not run
 // itself: the Windows lifecycle, whose transaction is the installer module.
@@ -26,8 +33,9 @@ import (
 // then installs that config with its own ensure transaction, which rolls
 // back on its own failure. Finish confirms the bundle only once the running
 // gateway reports the effective policy of the installed config with no
-// reload error; anything else fails the receipt, and the caller installs
-// the last good config again. Until the confirm, bundle-state.json still
+// reload error. A committed config whose gateway cannot answer stays
+// applied and pending; a rejected candidate fails and the caller restores
+// the last good config. Until confirmation, bundle-state.json still
 // names the last good bundle, so a run that stops in between is settled by
 // SettleRun at the start of the next one.
 type Driver struct {
@@ -73,6 +81,10 @@ type Prepared struct {
 	// ConfigSHA256 its hex SHA-256.
 	Config       []byte
 	ConfigSHA256 string
+	// EffectivePolicyDigest is the policy verified from this build's staged
+	// bundle. A committed config keeps this digest while its gateway is down
+	// and the receipt waits in applied for a later live confirmation.
+	EffectivePolicyDigest string
 	// AlreadyApplied is a repeated delivery of the current bundle: its
 	// receipt was discarded and Config is the current bundle config.
 	AlreadyApplied bool
@@ -140,13 +152,12 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	}
 	receipt, err := d.Store.Receive(id, version, d.DeliveryID)
 	if err != nil {
-		return nil, &Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()}
+		return nil, StateWriteError("cannot write the policy bundle receipt", err)
 	}
 	p := &Prepared{Receipt: receipt}
 	refuse := func(err error) (*Prepared, error) {
-		code := CodeOf(err)
-		if code == "" {
-			code = CodeApplyFailed
+		code := FailureCode(err)
+		if CodeOf(err) == "" {
 			err = &Error{Code: code, Detail: err.Error()}
 		}
 		_ = d.Store.Fail(receipt, code, err.Error())
@@ -186,6 +197,7 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 		return refuse(err)
 	}
 	p.Manifest = res.Manifest
+	p.EffectivePolicyDigest = res.EffectivePolicyDigest
 	if res.AlreadyApplied {
 		raw, _, err := d.CurrentConfig()
 		if err != nil {
@@ -270,8 +282,17 @@ func (d *Driver) Prepare(ctx context.Context, b *Bundle, readErr error) (*Prepar
 	if d.EnforcedConfig != nil {
 		receipt.BaseConfigSHA256 = sha256Hex(d.EnforcedConfig)
 	}
+	if d.ConfigPath != "" {
+		base, err := configwrite.ReadGenerationState(d.ConfigPath)
+		if err == nil {
+			receipt.BaseConfigGeneration = base.Generation
+			receipt.BaseConfigGenerationKnown = true
+		} else if errors.Is(err, fs.ErrNotExist) {
+			receipt.BaseConfigGenerationKnown = true
+		}
+	}
 	if err := d.Store.writeReceipt(receipt); err != nil {
-		return refuse(&Error{Code: CodeStateInvalid, Detail: "cannot write the policy bundle receipt: " + err.Error()})
+		return refuse(StateWriteError("cannot write the policy bundle receipt", err))
 	}
 	return p, nil
 }
@@ -296,11 +317,12 @@ func (d *Driver) CurrentConfig() ([]byte, *Ref, error) {
 // cannot be read), failure the lifecycle error codes of a transaction that
 // failed (empty when it succeeded). The bundle is confirmed only when the
 // transaction installed its config and policy shows the gateway enforcing
-// it; otherwise the receipt fails (apply_failed, not_confirmed) and the
-// returned error carries the code. When the bundle config was installed but
-// not confirmed, rollback (when not nil) installs the last good config again
-// before the receipt fails; it returns the digest the gateway then enforces
-// and whether the rollback finished.
+// it. If its config was committed but the gateway cannot answer, the receipt
+// stays applied for later confirmation. A rejected or uncommitted candidate
+// fails (apply_failed, not_confirmed) and the returned error carries the
+// code. For a failed candidate, rollback (when not nil) installs the last
+// good config again; it returns the digest then enforced and whether the
+// rollback finished.
 func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy GatewayPolicy, restart bool,
 	rollback func() (enforcing string, ok bool)) (State, error) {
 	rc := p.Receipt
@@ -331,6 +353,20 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 		return State{}, d.fail(rc, CodeApplyFailed, message)
 	}
 	rc.EffectivePolicyDigest = policy.EffectiveDigest
+	if policy.Unavailable() {
+		if generation, committed := d.committedGeneration(rc, installed); committed && digestPattern.MatchString(p.EffectivePolicyDigest) {
+			at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
+			if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
+				r.EffectivePolicyDigest, r.ConfigGeneration, r.ConfigSHA256 = p.EffectivePolicyDigest, generation.Generation, p.ConfigSHA256
+				r.AppliedAt, r.Restart, r.RestartRequired = at, restart, restart
+			}); err != nil {
+				return State{}, err
+			}
+			return State{}, &Error{Code: CodeNotConfirmed, Detail: "the bundle config is installed, but the gateway is unavailable; its receipt stays applied until the gateway reports the verified policy"}
+		}
+		return State{}, d.failAfterRollback(rc, CodeNotConfirmed,
+			"the gateway is unavailable and the bundle transaction was not committed", rollback)
+	}
 	if err := ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable); err != nil {
 		return State{}, d.failAfterRollback(rc, CodeDigestMismatch, err.Error(), rollback)
 	}
@@ -359,16 +395,23 @@ func (d *Driver) Finish(p *Prepared, installed string, failure []string, policy 
 		// next run (Store.Settle), one that stopped before it is checked
 		// against the gateway again. It is never failed or rolled back here
 		// (GAP-0485).
-		return st, &Error{Code: CodeStateInvalid, Detail: "the gateway enforces this bundle, but recording its confirmation failed (" +
-			boundedDetail(err.Error()) + "); the bundle stays applied: run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it"}
+		code := CodeStateInvalid
+		recovery := "run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it"
+		if diskFull(err) {
+			code = CodeDiskFull
+			recovery = "free space on that volume, then " + recovery
+		}
+		return st, &Error{Code: code, cause: err, Detail: "the gateway enforces this bundle, but recording its confirmation failed (" +
+			boundedDetail(err.Error()) + "); the bundle stays applied: " + recovery}
 	}
 	return st, nil
 }
 
 // SettleRun finishes what an interrupted run left (Store.Settle) and then
 // each applied but unconfirmed receipt: confirmed when the deployment holds
-// its config and the gateway enforces its digest, failed(not_confirmed)
-// otherwise. An applied receipt bundle-state.json already names as current
+// its config and the gateway enforces its digest, pending while the gateway
+// cannot answer, and failed(not_confirmed) when live evidence disproves it.
+// An applied receipt bundle-state.json already names as current
 // (Store.Confirm stopped after its state write) completes from that proof in
 // Store.Settle: its apply was proven before the state write, so a gateway
 // that is down or not ready now neither fails it nor makes it a rollback
@@ -397,34 +440,57 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 	// conservative over-keep); it is never evidence of a commit.
 	keep := VersionDirsNamed(installedConfig, d.Store.BundlesDir)
 	open := map[string]bool{}
-	for _, rc := range pending {
-		open[rc.ReceiptID] = true
-		keep = append(keep, rc.Dir)
+	for _, item := range pending {
+		open[item.receipt.ReceiptID] = true
+		keep = append(keep, item.receipt.Dir)
 	}
 	report, err = d.Store.SettleOpen(open, keep...)
 	report.Completed = append(completed, report.Completed...)
 	report.Interrupted = append(interrupted, report.Interrupted...)
-	for _, rc := range pending {
-		report.Pending = append(report.Pending, rc.ReceiptID)
+	for _, item := range pending {
+		report.addPending(item.receipt.ReceiptID, item.reason)
 	}
 	if err != nil {
 		return report, rollback, err
 	}
 	for _, rc := range report.Unconfirmed {
 		holds := installed != "" && installed == rc.ConfigSHA256
-		if _, committed := d.committedGeneration(rc, installed); holds && committed && policy.Unavailable() {
+		_, committed := d.committedGeneration(rc, installed)
+		if holds && committed && policy.Unavailable() {
 			// Proven by the run that applied it, committed for the installed
 			// bytes, and the gateway cannot be read now: retry, never fail.
-			report.Pending = append(report.Pending, rc.ReceiptID)
+			report.addPending(rc.ReceiptID, "")
 			continue
 		}
+		if holds && !committed {
+			// The applied state records a previous successful transaction.
+			// Lost generation evidence cannot disprove that apply.
+			report.addPending(rc.ReceiptID, "the signed bundle's committed generation cannot be verified")
+			continue
+		}
+		currentDigest := ""
+		comparable := false
 		var digestErr error
-		if policy != nil {
-			digestErr = ConfirmPolicyDigests(rc.ExpectedDigest, rc.EffectivePolicyDigest, policy.Digest, rc.DigestComparable)
+		if holds && committed && !policy.Unavailable() {
+			var verifyErr error
+			currentDigest, comparable, verifyErr = d.VerifiedReceiptDigest(rc)
+			if verifyErr != nil {
+				report.addPending(rc.ReceiptID, "the stored signed bundle's current digest cannot be verified: "+verifyErr.Error())
+				continue
+			}
+			if d.gatewayReportsHistoricalReceipt(rc, installed, policy, currentDigest) {
+				report.addPending(rc.ReceiptID, "the gateway still reports this bundle's historical policy digest; retry after the gateway upgrade")
+				continue
+			}
+			digestErr = ConfirmPolicyDigests(rc.ExpectedDigest, currentDigest, policy.Digest, comparable)
 		}
 		if holds && d.TransactionApplied(rc, installed, policy) && digestErr == nil &&
-			policy.EffectiveDigest == rc.EffectivePolicyDigest && policy.Digest == rc.EffectivePolicyDigest {
+			policy.EffectiveDigest == currentDigest && policy.Digest == currentDigest {
 			if _, err := d.Store.Confirm(rc); err != nil {
+				if errors.Is(err, ErrConfirmationPrerequisiteMissing) {
+					report.addPending(rc.ReceiptID, err.Error())
+					continue
+				}
 				return report, rollback, err
 			}
 			report.Completed = append(report.Completed, rc.ReceiptID)
@@ -445,6 +511,52 @@ func (d *Driver) SettleRun(installedConfig []byte, policy *GatewayPolicy) (repor
 		}
 	}
 	return report, rollback, nil
+}
+
+func (r *SettleReport) addPending(id, reason string) {
+	r.Pending = append(r.Pending, id)
+	if reason != "" {
+		if r.PendingReasons == nil {
+			r.PendingReasons = map[string]string{}
+		}
+		r.PendingReasons[id] = reason
+	}
+}
+
+// VerifiedReceiptDigest reads the immutable version named by a pending
+// receipt and computes the digest with this build. The receipt's old digest
+// stays historical; it is not a comparison target after an upgrade.
+func (d *Driver) VerifiedReceiptDigest(rc *Receipt) (string, bool, error) {
+	layout, err := StandardDeviceLayout(d.Platform)
+	if err != nil {
+		return "", false, err
+	}
+	if d.DeviceLayout != nil {
+		layout = *d.DeviceLayout
+	}
+	return VerifiedReceiptDigest(context.Background(), d.Store, rc, d.Platform, layout, d.ProductVersion,
+		d.Store.VersionDir(rc.Dir), d.Digester)
+}
+
+// A gateway still running the earlier build can report the receipt's old
+// digest while attributing it to the same committed bundle generation. That
+// proves the policy has not been displaced, so settle must await the new
+// gateway's digest instead of failing and rolling it back.
+func (d *Driver) gatewayReportsHistoricalReceipt(rc *Receipt, installed string, policy *GatewayPolicy, currentDigest string) bool {
+	if rc == nil || policy == nil {
+		return false
+	}
+	historical := rc.EffectivePolicyDigest
+	if rc.State == StateStaged {
+		historical = rc.ExpectedDigest
+	}
+	if (rc.State != StateApplied && rc.State != StateStaged) || currentDigest == historical ||
+		!digestPattern.MatchString(historical) || policy.Digest != historical {
+		return false
+	}
+	generation, committed := d.committedGeneration(rc, installed)
+	return committed && policy.Generation == generation.Generation && policy.BundleID == rc.BundleID &&
+		policy.BundleVersion == rc.Version
 }
 
 // TransactionApplied proves that the lifecycle committed this signed bundle,
@@ -468,9 +580,42 @@ func (d *Driver) committedGeneration(rc *Receipt, installed string) (configwrite
 		return configwrite.GenerationState{}, false
 	}
 	generation, err := configwrite.ReadGenerationState(d.ConfigPath)
+	// Matching bytes and bundle identity may belong to an earlier delivery.
+	// The generation must advance after this receipt was staged to prove a
+	// repeat's own transaction. Legacy receipts without the snapshot are
+	// conservative when their starting config had the same bytes.
+	if rc.State == StateStaged && rc.BaseConfigSHA256 == installed &&
+		(!rc.BaseConfigGenerationKnown || generation.Generation <= rc.BaseConfigGeneration) {
+		return configwrite.GenerationState{}, false
+	}
 	return generation, err == nil && generation.Generation > 0 && generation.ConfigSHA256 == installed &&
 		generation.BundleID == rc.BundleID && generation.BundleVersion == rc.Version &&
 		generation.SignerKeyID == rc.SignerKeyID && generation.Actor == rc.Principal
+}
+
+// CommittedPendingConfig reports an unfinished receipt whose signed config
+// is still installed with its lifecycle generation. A staged receipt can
+// have that commit when a run stopped before Finish advanced it to applied.
+// Callers must not replace those bytes while gateway evidence is unavailable:
+// SettleRun can still confirm the receipt when the gateway returns.
+func (d *Driver) CommittedPendingConfig(installedConfig []byte) (*Receipt, error) {
+	if installedConfig == nil {
+		return nil, nil
+	}
+	receipts, err := d.Store.Unsettled()
+	if err != nil {
+		return nil, err
+	}
+	installed := sha256Hex(installedConfig)
+	for _, rc := range receipts {
+		if rc.State != StateStaged && rc.State != StateApplied {
+			continue
+		}
+		if _, committed := d.committedGeneration(rc, installed); committed {
+			return rc, nil
+		}
+	}
+	return nil, nil
 }
 
 // settleCommitted settles the staged receipts whose rendered config is the
@@ -483,7 +628,12 @@ func (d *Driver) committedGeneration(rc *Receipt, installed string) (configwrite
 // good config of the next run. A committed receipt is confirmed only from
 // the gateway's live report; with the gateway unavailable it stays open
 // (pending).
-func (d *Driver) settleCommitted(installedConfig []byte, installed string, policy *GatewayPolicy) (completed, interrupted []string, pending, rollback []*Receipt, err error) {
+type settlePending struct {
+	receipt *Receipt
+	reason  string
+}
+
+func (d *Driver) settleCommitted(installedConfig []byte, installed string, policy *GatewayPolicy) (completed, interrupted []string, pending []settlePending, rollback []*Receipt, err error) {
 	if installed == "" {
 		return nil, nil, nil, nil, nil
 	}
@@ -512,12 +662,31 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 			continue
 		}
 		if policy.Unavailable() {
-			pending = append(pending, rc)
+			pending = append(pending, settlePending{receipt: rc})
 			continue
 		}
-		digestErr := ConfirmPolicyDigests(rc.ExpectedDigest, policy.EffectiveDigest, policy.Digest, rc.DigestComparable)
+		currentDigest, comparable, verifyErr := d.VerifiedReceiptDigest(rc)
+		if verifyErr != nil {
+			pending = append(pending, settlePending{receipt: rc, reason: "the stored signed bundle's current digest cannot be verified: " + verifyErr.Error()})
+			continue
+		}
+		if d.gatewayReportsHistoricalReceipt(rc, installed, policy, currentDigest) {
+			// The committed generation and the old signed digest prove the
+			// gateway adopted this bundle, even though the new build cannot
+			// yet compare the older gateway with its current digest.
+			at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
+			if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
+				r.EffectivePolicyDigest, r.ConfigGeneration, r.AppliedAt = policy.Digest, policy.Generation, at
+			}); err != nil {
+				return completed, interrupted, pending, rollback, err
+			}
+			pending = append(pending, settlePending{receipt: rc,
+				reason: "the gateway still reports this bundle's historical policy digest; retry after the gateway upgrade"})
+			continue
+		}
+		digestErr := ConfirmPolicyDigests(rc.ExpectedDigest, currentDigest, policy.Digest, comparable)
 		enforces := d.TransactionApplied(rc, installed, policy) && digestPattern.MatchString(policy.Digest) &&
-			digestPattern.MatchString(policy.EffectiveDigest) && digestErr == nil
+			policy.EffectiveDigest == currentDigest && policy.Digest == currentDigest && digestErr == nil
 		if enforces {
 			at := d.now().UTC().Format("2006-01-02T15:04:05.000Z07:00")
 			if err := d.Store.Advance(rc, StateApplied, func(r *Receipt) {
@@ -530,6 +699,10 @@ func (d *Driver) settleCommitted(installedConfig []byte, installed string, polic
 			// it never falls through to fail it or name it for rollback
 			// (GAP-0485).
 			if _, err := d.Store.Confirm(rc); err != nil {
+				if errors.Is(err, ErrConfirmationPrerequisiteMissing) {
+					pending = append(pending, settlePending{receipt: rc, reason: err.Error()})
+					continue
+				}
 				return completed, interrupted, pending, rollback, fmt.Errorf("confirm the proven bundle %s version %d: %w", rc.BundleID, rc.Version, err)
 			}
 			completed = append(completed, rc.ReceiptID)

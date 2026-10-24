@@ -6,6 +6,8 @@ package cli
 import (
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,5 +104,64 @@ func TestManagedHookArmsTheWatchdogThenPrefetchesTheProfileLookup(t *testing.T) 
 	case <-looked:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the armed hook did not start the profile lookup of its failure rows")
+	}
+}
+
+// GAP-0862: a per-user hook in fail mode open armed its watchdog with an
+// open answer and no data directory, so a deadline that passed before Run
+// (a stalled runtime resolution) allowed the tool call during an install or
+// upgrade. The hook command arms the watchdog with this account's data
+// directory (DEFENSECLAW_HOME included), and its install lock closes the
+// early answer. Without the lock the call blocks too: since
+// fix/r104-sa-hook-pause no answer closes every hook outside Secure Client.
+func TestPerUserHookEarlyAnswerIsClosedWhileTheInstallerHoldsTheDataDirectory(t *testing.T) {
+	savedSecureClient := secureClientHost
+	secureClientHost = func() bool { return false }
+	t.Cleanup(func() { secureClientHost = savedSecureClient })
+	for _, installing := range []bool{false, true} {
+		home := t.TempDir()
+		t.Setenv("DEFENSECLAW_HOME", home)
+		if installing {
+			if err := os.Mkdir(filepath.Join(home, ".install.lock"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		reader, writer, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.WriteString(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo ok"}}`); err != nil {
+			t.Fatal(err)
+		}
+		_ = writer.Close()
+		answer, err := os.Create(filepath.Join(t.TempDir(), "answer"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		savedStdin, savedStdout, savedStderr := os.Stdin, os.Stdout, os.Stderr
+		os.Stdin, os.Stdout, os.Stderr = reader, answer, answer
+		exited := make(chan int, 1)
+		// The 3.5 s answer budget is nearly spent: the deadline passes
+		// while the work before Run is held.
+		started := time.Now().Add(-3400 * time.Millisecond)
+		_, watchdog := armHookAnswerWatchdog("claudecode", "PreToolUse", "open", "", false, started, func(code int) { exited <- code })
+		os.Stdin, os.Stdout, os.Stderr = savedStdin, savedStdout, savedStderr
+		_ = reader.Close()
+		if watchdog == nil {
+			t.Fatal("the per-user tool call armed no watchdog")
+		}
+		var code int
+		select {
+		case code = <-exited:
+		case <-time.After(5 * time.Second):
+			t.Fatal("no answer at the deadline")
+		}
+		_ = answer.Close()
+		out, _ := os.ReadFile(answer.Name())
+		// Claude Code blocks with exit 2 or a structured deny.
+		blocked := code == 2 || strings.Contains(string(out), `"permissionDecision":"deny"`)
+		if !blocked {
+			t.Fatalf("installing=%v: exit %d output %q, want blocked", installing, code, out)
+		}
 	}
 }

@@ -216,6 +216,23 @@ type record struct {
 	// until it stops (openshell.SupportedMin). Empty in records from before
 	// it was kept, whose sessions all began on an older release.
 	SessionRelease string `json:"session_release,omitempty"`
+	// OldSupervisorNetworkClosed records that DefenseClaw withdrew the
+	// network rules and providers of a live legacy guest (oldSupervisorLive),
+	// confirmed loaded: what it added, not a containment of the old broker
+	// (GAP-0831). The next successful start restores only its create-time
+	// policy, after OpenShell has replaced that supervisor; it survives a
+	// daemon restart.
+	OldSupervisorNetworkClosed bool `json:"old_supervisor_network_closed,omitempty"`
+	// OldSupervisorProviders are the providers DefenseClaw detached while
+	// closing that legacy VM's direct network routes. They are restored only
+	// after a new supervisor is ready, and only if current policy allows them.
+	OldSupervisorProviders []string `json:"old_supervisor_providers,omitempty"`
+	// OldSupervisorNetworkRestore says the next session must get its
+	// create-time network back. DefenseClaw records it before it changes
+	// any provider or rule of a legacy guest, so a withdrawal cut short
+	// after a change (a policy OpenShell did not load, a record that could
+	// not be saved) still has the next start restore it.
+	OldSupervisorNetworkRestore bool `json:"old_supervisor_network_restore,omitempty"`
 	// HookCounts are the hook counters as the daemon last kept them
 	// (keepHookCounts): a restarted daemon goes on from them. Copies of a
 	// record share them, so they are replaced, never changed in place.

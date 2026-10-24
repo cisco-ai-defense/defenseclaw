@@ -138,6 +138,15 @@ func TestApplicationProtectionModeMatrixPreservesUnmanagedBaselineRepair(t *test
 				"127.0.0.1:18970",
 				"master-token",
 			)
+			stopGuards := func() int {
+				controller.mu.Lock()
+				defer controller.mu.Unlock()
+				for _, guard := range controller.guards {
+					guard.Stop()
+				}
+				return len(controller.guards)
+			}
+			t.Cleanup(func() { stopGuards() })
 
 			now := time.Now().UTC()
 			controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
@@ -151,14 +160,27 @@ func TestApplicationProtectionModeMatrixPreservesUnmanagedBaselineRepair(t *test
 					LastSeen:           now,
 				}},
 			})
+			// Drain (join) self-heal before inspecting calls or removing the
+			// fixture home, and count the gateway guards it started.
+			guardsStarted := stopGuards()
 
-			if conn.setupCalls != tc.wantSetupCalls {
+			wantGuards := 1
+			if tc.wantGuardianOwn {
+				wantGuards = 0
+			}
+			if guardsStarted != wantGuards {
+				t.Fatalf("mode=%q started %d gateway guards, want %d", tc.mode, guardsStarted, wantGuards)
+			}
+			if tc.wantGuardianOwn && conn.setupCalls != 0 {
 				t.Fatalf(
-					"mode=%q automatic repair Setup calls = %d, want %d",
+					"mode=%q automatic repair Setup calls = %d, want none under guardian ownership",
 					tc.mode,
 					conn.setupCalls,
-					tc.wantSetupCalls,
 				)
+			}
+			if !tc.wantGuardianOwn && conn.setupCalls < tc.wantSetupCalls {
+				t.Fatalf("mode=%q automatic repair Setup calls = %d, want at least %d",
+					tc.mode, conn.setupCalls, tc.wantSetupCalls)
 			}
 			if tc.wantGuardianOwn {
 				snapshot := sidecar.health.Snapshot()

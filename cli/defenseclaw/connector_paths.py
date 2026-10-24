@@ -38,7 +38,7 @@ Public surface
   a matching dispatch arm in each ``*_for_connector`` function below
   and a Go-side ``connector.NewDefaultRegistry`` registration.
 * :func:`normalize` — canonicalize an operator-supplied connector name
-  (trim, lowercase, default to ``"openclaw"``). Mirrors
+  (trim, lowercase, empty when unset). Mirrors
   ``Config.activeConnector`` semantics in claw.go.
 * :func:`is_known` — connector-name allow-list check.
 * :func:`skill_dirs` / :func:`plugin_dirs` / :func:`agent_dirs` /
@@ -407,16 +407,15 @@ def _flag_claude_unloadable(
 def normalize(connector: str | None) -> str:
     """Return the canonical lowercase connector name.
 
-    Empty / whitespace-only / None values default to ``"openclaw"`` for
-    backward compatibility with pre-S1.x deployments. Matches the
+    Empty / whitespace-only / None values select no connector. Matches the
     precedence rule in ``Config.activeConnector`` (Go).
     """
     if not connector:
-        return "openclaw"
+        return ""
     name = connector.strip().lower()
     if name in {"claude-code", "claude_code"}:
         return "claudecode"
-    return name or "openclaw"
+    return name
 
 
 def is_known(connector: str | None) -> bool:
@@ -1485,6 +1484,36 @@ def _read_hermes_config_bounded(path: str | None = None) -> tuple[dict[str, Any]
     return document, ""
 
 
+_HERMES_PROFILE_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def hermes_profile_entry_name(name: str) -> bool:
+    """Return whether an entry under profiles/ is one Hermes can run as a named profile.
+
+    The same rule as hermesProfileEntryName in
+    internal/gateway/connector/hook_only.go, and tested against the same
+    cases (internal/gateway/connector/testdata/hermes_profile_names.json).
+    Hermes lists, serves and resolves the names its id pattern
+    ``^[a-z0-9][a-z0-9_-]{0,63}$`` admits under ``re.match``, whose ``$``
+    also matches before one final newline. Only the exact name ``default``
+    is the root home; Hermes' own metadata (the ``.deleted`` that
+    ``hermes profile delete`` leaves, other dot directories) and any other
+    name are never a profile. The name is lowercased first, as Go's
+    strings.ToLower does it (a case-insensitive file system opens
+    profiles/Coder for ``hermes -p coder``).
+    """
+    lowered = name.replace("\u0130", "i").lower()
+    newline = lowered.endswith("\n")
+    profile_id = lowered[:-1] if newline else lowered
+    if (profile_id == "default" and not newline) or not 0 < len(profile_id) <= 64:
+        return False
+    for index, char in enumerate(profile_id):
+        if char in _HERMES_PROFILE_ID_CHARS or (index > 0 and char in "_-"):
+            continue
+        return False
+    return True
+
+
 def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     """Return why a selected Hermes home is outside the single-profile contract."""
 
@@ -1526,8 +1555,10 @@ def hermes_profile_unsupported_reason(config_path: str | None = None) -> str:
     if len(entries) > _HERMES_PROFILE_ENTRY_LIMIT:
         return "Hermes profiles directory exceeds the bounded inspection limit"
     for entry in entries:
+        if not hermes_profile_entry_name(entry.name):
+            continue
         try:
-            if entry.is_dir(follow_symlinks=False):
+            if entry.is_dir(follow_symlinks=False) or entry.is_symlink():
                 return (
                     f"Hermes named profile {entry.name!r} is unsupported by the "
                     f"single-HERMES_HOME connector; remove it with 'hermes profile "
@@ -1861,14 +1892,12 @@ def skill_dirs(
     at every repository directory from the active workspace to the project
     root, then ``$HOME/.agents/skills``. Its own managed installer and bundled
     system cache live under ``$CODEX_HOME/skills``; the Unix admin directory is
-    ``/etc/codex/skills``. For OpenClaw — and any unknown
-    name — we walk ``openclaw.json`` to honor any ``skills.load.extraDirs``
-    overrides, then add the home_dir/skills fallback.
+    ``/etc/codex/skills``. For OpenClaw we walk ``openclaw.json`` to honor
+    any ``skills.load.extraDirs`` overrides, then add the home_dir/skills
+    fallback. Empty and unknown names return no paths.
 
     *openclaw_home* and *openclaw_config* are only consulted on the
-    OpenClaw branch. Callers that pass ``None`` get the documented
-    OpenClaw defaults (``~/.openclaw`` and
-    ``~/.openclaw/openclaw.json``).
+    OpenClaw branch, which uses the documented ``~/.openclaw`` defaults.
     """
     name = normalize(connector)
     if name == "claudecode":
@@ -1896,7 +1925,9 @@ def skill_dirs(
         # skills root. Returning [] keeps doctor from pointing an operator at
         # OpenClaw's directories.
         return []
-    return _openclaw_skill_dirs(openclaw_home, openclaw_config)
+    if name == "openclaw":
+        return _openclaw_skill_dirs(openclaw_home, openclaw_config)
+    return []
 
 
 def skill_write_dirs(
@@ -1978,7 +2009,9 @@ def plugin_dirs(
         return []
     if name == "kiro":
         return []
-    return _openclaw_plugin_dirs(openclaw_home)
+    if name == "openclaw":
+        return _openclaw_plugin_dirs(openclaw_home)
+    return []
 
 
 def plugin_inventory_dirs(
@@ -2198,11 +2231,13 @@ def mcp_servers(
             infer_from_cwd=infer,
             diagnostic_sink=diagnostic_sink,
         )
-    return _openclaw_mcp_servers(
-        openclaw_config,
-        openclaw_bin_resolver=openclaw_bin_resolver,
-        diagnostic_sink=diagnostic_sink,
-    )
+    if name == "openclaw":
+        return _openclaw_mcp_servers(
+            openclaw_config,
+            openclaw_bin_resolver=openclaw_bin_resolver,
+            diagnostic_sink=diagnostic_sink,
+        )
+    return []
 
 
 def mcp_source_locations(
@@ -2305,15 +2340,8 @@ def mcp_source_locations(
             ]
         )
 
-    # Deliberately NOT mirroring mcp_servers here. That function ends in an
-    # unconditional `return _openclaw_mcp_servers(...)`, so an unrecognised
-    # --connector reads OpenClaw's config and reports "no servers for
-    # <name>" — a silent read of the wrong file, which is the failure this
-    # whole change is about. Returning [] lets the caller say so.
-    #
-    # It also catches the realistic regression: a connector added to
-    # KNOWN_CONNECTORS and to mcp_servers but not here shows up as zero
-    # locations on its first run, rather than after months of clean reports.
+    # An unknown connector has no known MCP source. A new connector must add
+    # its reader and its source locations together.
     return []
 
 

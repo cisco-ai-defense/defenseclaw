@@ -147,10 +147,6 @@ func isLocalDriveLetterSyntax(path string) bool {
 		!strings.Contains(path[2:], ":")
 }
 
-func isASCIIDriveLetter(value byte) bool {
-	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
-}
-
 func validVolumeGUIDName(value string) bool {
 	const prefix = `\\?\Volume{`
 	if !strings.HasPrefix(strings.ToUpper(value), strings.ToUpper(prefix)) ||

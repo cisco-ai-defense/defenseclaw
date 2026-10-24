@@ -41,8 +41,39 @@ func TestErrorPhaseWayOnFollowsTheGatewayRelease(t *testing.T) {
 	if !strings.Contains(old, "neither stop nor start") || !strings.Contains(old, "upgrade OpenShell, then `defenseclaw sandbox stop box`") {
 		t.Errorf("before %s: %q", openshell.SupportedMin, old)
 	}
+	oldVM := errorPhaseWayOn("box", "MainProcessFailed: exited 1", "upgrade OpenShell", true)
+	if save, del := strings.Index(oldVM, "save or sync any accessible work outside the guest first"), strings.Index(oldVM, "`defenseclaw sandbox delete box`"); save < 0 || del < save {
+		t.Errorf("old MicroVM deletion lacks save-first advice: %q", oldVM)
+	}
 	if got := errorPhaseWayOn("box", overlayDiskFullText, "", false); got != overlayDiskWayOn("box") {
 		t.Errorf("a full disk: %q", got)
+	}
+}
+
+func TestStoppedUnverifiedAdviceQualifiesMicroVMWork(t *testing.T) {
+	err := sessionRulesLeft("box", errors.New("policy store busy"), nil, false)
+	if !strings.Contains(err.Error(), "last successful disk sync") || strings.Contains(err.Error(), "(its work is kept)") {
+		t.Fatalf("failed start promises unsynced MicroVM work: %v", err)
+	}
+	if msg := unflushedStopMessage("box"); !strings.Contains(msg, "last successful disk sync") || strings.Contains(msg, "flushes first") {
+		t.Fatalf("unflushed stop advice promises a successful sync: %q", msg)
+	}
+}
+
+func TestFailedMicroVMRecoveryDoesNotPromiseUnsyncedWork(t *testing.T) {
+	for _, upgrade := range []string{"", "upgrade OpenShell"} {
+		for _, reason := range []string{"ProcessExited: VM process exited with status 1", "ProcessPollFailed: Bad file descriptor"} {
+			got := errorPhaseWayOn("box", reason, upgrade, true)
+			if upgrade != "" && !openshell.VMGone(reason) {
+				continue // an older gateway must wait for the user's delete
+			}
+			if !strings.Contains(got, "last successful disk sync") {
+				t.Errorf("failed VM reason %q, upgrade %q has no sync limit: %s", reason, upgrade, got)
+			}
+			if strings.Contains(got, "which keep the sandbox and its work") || strings.Contains(got, "start Docker again") {
+				t.Errorf("failed VM reason %q, upgrade %q: %s", reason, upgrade, got)
+			}
+		}
 	}
 }
 

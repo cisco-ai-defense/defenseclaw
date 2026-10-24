@@ -65,6 +65,7 @@ from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.logger import CanonicalObservabilityError, CanonicalObservabilityUnavailableError
 
 from tests.helpers import cleanup_app, make_app_context, record_test_setup_agent_selections
+from tests.permissions import set_known_windows_directory_acl
 
 
 def test_unsupported_codex_batch_refuses_without_roster_change():
@@ -128,6 +129,48 @@ def test_batch_rollback_restores_prior_cursor_discovery_version():
         cmd_setup._restore_setup_config_snapshot(app, snapshot)
         with open(cache, "rb") as source:
             assert source.read() == prior
+    finally:
+        cleanup_app(app, db_path, root)
+
+
+def test_failed_setup_restores_discovery_cache_from_before_version_preflight(tmp_path):
+    root_dir = tmp_path / "setup"
+    root_dir.mkdir()
+    if os.name == "nt":
+        set_known_windows_directory_acl(root_dir)
+    app, root, db_path = make_app_context(str(root_dir))
+    try:
+        cache = os.path.join(root, "agent_discovery.json")
+        prior = b'{"agents":{"claudecode":{"version":"2.1.286 (Claude Code)"}}}\n'
+        atomic_write_private_bytes(cache, prior)
+        if os.name != "nt":
+            os.chmod(cache, 0o644)  # an older release's readable cache
+        app.cfg.guardrail.connector = "claudecode"
+        app.cfg.guardrail.connectors = {
+            "claudecode": PerConnectorGuardrailConfig(mode="action", hook_fail_mode="closed")
+        }
+
+        def preflight(*_args, **_kwargs):
+            atomic_write_private_bytes(cache, b'{"agents":{"claudecode":{"version":""}}}\n')
+            return True
+
+        def rollback(_app, snapshot, _cause):
+            cmd_setup._restore_setup_agent_discovery_snapshot(_app.cfg, snapshot)
+            raise click.ClickException("injected restart failure")
+
+        with (
+            patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", side_effect=preflight),
+            patch.object(app.cfg, "save", return_value=None),
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="linux"),
+            patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=OSError("injected restart failure")),
+            patch("defenseclaw.commands.cmd_setup._rollback_failed_connector_application", side_effect=rollback),
+            pytest.raises(click.ClickException, match="injected restart failure"),
+        ):
+            cmd_setup._apply_hook_connector_setup(
+                app, connector="codex", mode="action", restart=True, write_mode="add"
+            )
+        with open(cache, "rb") as stream:
+            assert stream.read() == prior
     finally:
         cleanup_app(app, db_path, root)
 
@@ -1473,7 +1516,22 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertRegex(out, r"connectors:\s+claudecode, codex, opencode\n")
         self.assertRegex(out, r"not guarded now:\s+hermes ")
         self.assertIn("This install now has 4 connectors configured; 3 guarded now: claudecode, codex, opencode.", out)
-        self.assertIn("Not guarded now: hermes. To guard it again, run: defenseclaw setup hermes", out)
+        self.assertIn("Not guarded now: hermes.", out)
+        self.assertIn("To guard hermes again, run: defenseclaw setup hermes", out)
+
+    def test_summary_does_not_offer_setup_for_a_refused_retired_peer(self):
+        self._seed_map("codex", "hermes", "omnigent")
+        buf = io.StringIO()
+        with click.Context(click.Command("setup")), contextlib.redirect_stdout(buf):
+            cmd_setup._remember_runtime_skipped_peers({"hermes", "omnigent"})
+            _print_observability_summary("codex", self.app.cfg, mode="action", os_name="posix")
+        out = buf.getvalue()
+
+        self.assertIn("not guarded now:", out)
+        self.assertIn("omnigent", out)
+        self.assertIn("defenseclaw setup hermes", out)
+        self.assertIn("defenseclaw doctor", out)
+        self.assertNotIn("defenseclaw setup omnigent", out)
 
 
 class TestConfiguredConnectorSet(unittest.TestCase):

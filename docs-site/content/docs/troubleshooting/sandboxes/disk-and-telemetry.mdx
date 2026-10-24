@@ -54,7 +54,7 @@ These are the disk, telemetry and MicroVM resource checks of `defenseclaw sandbo
 
 **Cause:** the OpenShell gateway restarted under the MicroVM (`brew services restart`, an upgrade, a crash), which stops it without flushing its disk.
 
-**Fix:** check those files and have the agent write them again before you bring the work back. `defenseclaw sandbox stop`, and the restarts DefenseClaw makes, flush first.
+**Fix:** check those files and have the agent write them again before you bring the work back. For a future running MicroVM, `defenseclaw sandbox stop` requests a disk sync first; a stop after the VM went down cannot recover unsynced changes. If a disk sync fails, changes after the last successful disk sync may be lost.
 
 **Check:** the next pull shows the files complete.
 

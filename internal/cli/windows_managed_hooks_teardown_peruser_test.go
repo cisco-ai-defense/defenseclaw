@@ -186,11 +186,11 @@ func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing
 	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
 	windowsManagedClaudeCurrentUserSID = func() (string, error) { return "S-1-5-21-1-2-3-1000", nil }
 	present := false
-	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, error) {
+	windowsManagedClaudeRegistrationProbe = func(home, sid string) (bool, []string, error) {
 		if home != manifest.Targets[0].UserHome || sid != manifest.Targets[0].SID {
 			t.Fatalf("probed %s %s", home, sid)
 		}
-		return present, nil
+		return present, nil, nil
 	}
 	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
 		t.Fatal("another user's settings were edited")
@@ -210,6 +210,40 @@ func TestWindowsStandaloneAdministratorReportsOnlyRemainingClaudeHook(t *testing
 	result = removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
 	if len(result.Removed) != 1 || len(result.Pending) != 0 || len(result.Failed) != 0 {
 		t.Fatalf("administrator's own legacy hook = %+v", result)
+	}
+}
+
+// An uninstall that cannot edit another user's settings still reports the
+// DefenseClaw hooks the remover would keep there; the real probe finds them
+// in a file with nothing removable.
+func TestWindowsStandaloneUninstallReportsAnotherUsersUnremovableClaudeHooks(t *testing.T) {
+	t.Setenv(managed.EnterpriseProfileEnv, managed.ProfileStandalone)
+	t.Setenv("SystemRoot", `C:\Windows`)
+	runtimeDir := useUserCleanupStateDir(t)
+	manifest := perUserTeardownManifest("claudecode")
+	target := manifest.Targets[0]
+	originalIdentity, originalSID := enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeCurrentUserSID
+	originalReader, originalRemover := windowsManagedClaudeUserSettingsReader, windowsManagedClaudeSettingsRemover
+	t.Cleanup(func() {
+		enterpriseHookWindowsUserCleanupIdentity, windowsManagedClaudeCurrentUserSID = originalIdentity, originalSID
+		windowsManagedClaudeUserSettingsReader, windowsManagedClaudeSettingsRemover = originalReader, originalRemover
+	})
+	enterpriseHookWindowsUserCleanupIdentity = func() error { return errors.New("not LocalSystem") }
+	windowsManagedClaudeCurrentUserSID = func() (string, error) { return "S-1-5-21-1-2-3-1000", nil }
+	edited := windowsClaudeGuardFixture(filepath.Join(target.UserHome, ".local", "bin", "defenseclaw-hook.exe"), "claudecode", "0")
+	raw, err := json.Marshal(map[string]any{"hooks": map[string]any{"Stop": []any{map[string]any{"hooks": []any{edited}}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowsManagedClaudeUserSettingsReader = func(string, string) ([]byte, error) { return raw, nil }
+	windowsManagedClaudeSettingsRemover = func(string, string, string) (int, []string, error) {
+		t.Fatal("another user's settings were edited")
+		return 0, nil, nil
+	}
+	result := removeWindowsManagedHooksStandalonePerUserRegistrations(context.Background(), runtimeDir, manifest)
+	want := filepath.Join(target.UserHome, ".claude", "settings.json") + ": Stop: a hook command naming defenseclaw-hook (arguments not shown)"
+	if len(result.Pending) != 0 || len(result.Failed) != 0 || len(result.SettingsLeft) != 1 || result.SettingsLeft[0] != want {
+		t.Fatalf("unremovable leftover = %+v", result)
 	}
 }
 

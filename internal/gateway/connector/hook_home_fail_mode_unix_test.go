@@ -51,10 +51,10 @@ func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 			env       []string
 			wantBlock bool
 		}{
-			{"no-env", nil, false},
-			{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=Closed"}, false},
+			{"no-env", nil, true},
+			{"env-closed", []string{"DEFENSECLAW_FAIL_MODE=Closed"}, true},
 			{"strict", []string{"DEFENSECLAW_STRICT_AVAILABILITY=yes"}, true},
-			{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, false},
+			{"env-open", []string{"DEFENSECLAW_FAIL_MODE=open"}, true},
 		} {
 			t.Run(agent.script+"/"+tc.name, func(t *testing.T) {
 				cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, agent.script)}, agent.args...)...)
@@ -63,7 +63,7 @@ func TestPerUserHookHomeUnavailableFollowsTheInstalledMode(t *testing.T) {
 					"DEFENSECLAW_HOME=" + filepath.Join(home, "missing"), "DEFENSECLAW_GATEWAY_AUTOSTART=0"}, tc.env...)
 				out, err := cmd.CombinedOutput()
 				text := string(out)
-				blocked := err != nil || strings.Contains(text, `"decision":"deny"`) ||
+				blocked := err != nil || strings.Contains(text, `"decision":"deny"`) || strings.Contains(text, `"permissionDecision":"deny"`) ||
 					strings.Contains(text, `"action":"block"`) || strings.Contains(text, `"permission":"deny"`)
 				if blocked != tc.wantBlock {
 					t.Fatalf("blocked=%v want %v err=%v\n%s", blocked, tc.wantBlock, err, text)

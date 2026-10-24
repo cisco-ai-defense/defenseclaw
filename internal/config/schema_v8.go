@@ -527,6 +527,10 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 			// A severity or level spelled in any case (GAP-0760).
 			return words
 		}
+		if v8SchemaPathPatterns[fmt.Sprint(current)] {
+			// openshell.trusted_ca_bundle and pack_dir (rel-1-0-4 GAP-0590).
+			return "an absolute path or one starting with ~/"
+		}
 		return "a value matching the schema-declared pattern"
 	case "minimum", "maximum":
 		return v8SchemaNumberRange(parent)
@@ -541,6 +545,12 @@ func v8SchemaDeclaredExpectation(validation *jsonschema.ValidationError) string 
 		return "a value within the declared size limit"
 	}
 	return ""
+}
+
+// v8SchemaPathPatterns are the patterns of the path settings.
+var v8SchemaPathPatterns = map[string]bool{
+	`^(|~/.+|/.+)$`:                        true,
+	`^(|~|~/.*|[/\\].*|[A-Za-z]:[/\\].*)$`: true,
 }
 
 // v8SchemaPatternWords names the words a ^(a|b|c)$ pattern allows, as the

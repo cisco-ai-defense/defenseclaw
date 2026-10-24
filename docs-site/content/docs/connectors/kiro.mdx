@@ -15,14 +15,25 @@ DefenseClaw installs hooks for Kiro IDE and Kiro CLI under one Kiro connector. T
 
 <ConnectorSupport id="kiro" />
 
+## Supported versions
+
+- **kiro-cli 2.27.1 or later.** Before 2.27.1 a non-interactive `kiro-cli chat --v3` run loads no hooks, so its tool calls never reach DefenseClaw. Setup refuses an older kiro-cli in observe and action mode when no supported Kiro IDE is installed beside it, and `defenseclaw doctor` reports it as unsupported.
+- **Kiro IDE 1.0.182 or later.** An older IDE reads only workspace hooks, so DefenseClaw's global hooks never run in it. Every setup refuses an older IDE, in observe and action mode, when no supported kiro-cli or Kiro IDE is installed beside it.
+- With a supported Kiro IDE beside an older kiro-cli, setup installs the global hooks for the IDE and reports the CLI separately as unsupported.
+- A Kiro install whose version could not be read is unknown and not protected. Action setup refuses it unless a supported form is installed; observe setup warns.
+
 ## Set up
 
+On a new install, run `defenseclaw init --connector kiro` first. Until DefenseClaw is initialized, `defenseclaw setup kiro` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
-defenseclaw setup kiro                # observe (default)
+defenseclaw setup kiro                # first setup defaults to observe
 defenseclaw setup kiro --mode action  # block where Kiro honors a veto
 ```
 
-On Windows, run the same commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so `/hooks` lists the hooks.
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Restart Kiro CLI, or run `/agent swap defenseclaw`, so
+`/hooks` lists the hooks.
 
 ## Check it
 
@@ -59,7 +70,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 ## Limits
 
 - On `kiro-cli --v3`, a blocked prompt still reaches the model with DefenseClaw's reason attached, and the audit log records the block.
-- Kiro IDE before 1.0.182 reads only workspace hooks. Set `claw.workspace_dir` to the project root before setup.
+- Kiro IDE before 1.0.182 reads only workspace hooks and is not counted as protected: update it to 1.0.182 or later ([Supported versions](#supported-versions)). When a supported kiro-cli is installed beside it, `defenseclaw setup kiro --workspace <project-root> --mode action --yes` also writes the project's workspace copy.
 - A hook that does not answer within Kiro's timeout is ignored and the tool runs.
 - An agent you pick with `--agent` or `/agent swap` runs without DefenseClaw's hooks.
 - In enterprise managed mode, ACP editors are enrolled with `defenseclaw-gateway enterprise acp enroll`; it is preview, not yet verified live. Windows ARM64 is not certified.
@@ -72,7 +83,12 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Kiro's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force` if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert stub until Kiro restarts.
+With the default gateway restart, disabling removes DefenseClaw's hook
+registrations from Kiro's hook and agent files and preserves your other Kiro
+settings. `defenseclaw guardrail enable` restores DefenseClaw's hooks. To
+remove the connector, run `defenseclaw setup remove kiro --yes` (add `--force`
+if it is the last one). On Linux and macOS, `kiro-hook.sh` stays as an inert
+stub until Kiro restarts.
 
 On a multi-connector install, add `--connector kiro` to `guardrail disable` and `guardrail enable` to change only this agent.
 

@@ -61,7 +61,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 
 class _IsolatedHome:
-    """Context manager that pins DEFENSECLAW_HOME / HOME to a temp dir.
+    """Context manager that pins the user identity to a temp dir.
 
     Mirrors the install lifecycle's contract: every persisted artefact
     must land under DEFENSECLAW_HOME. Used by every parametrised case
@@ -74,17 +74,28 @@ class _IsolatedHome:
         self._patches: list[unittest.mock._patch] = []
 
     def __enter__(self) -> str:
+        from tests.environment import isolated_home_env
+
         path = self._tmp.name
         os.makedirs(os.path.join(path, ".defenseclaw"), exist_ok=True)
+        if os.name == "nt":
+            from tests.permissions import set_known_windows_directory_acl
+
+            set_known_windows_directory_acl(path)
+            set_known_windows_directory_acl(os.path.join(path, ".defenseclaw"))
+        # Model a personal install even when the runner or an earlier test
+        # exposes machine deployment pins or a managed-host descriptor.
         self._patches = [
             patch.dict(
                 os.environ,
                 {
-                    "DEFENSECLAW_HOME": os.path.join(path, ".defenseclaw"),
-                    "HOME": path,
+                    **isolated_home_env(path),
+                    "DEFENSECLAW_DEPLOYMENT_MODE": "",
+                    "DEFENSECLAW_ENTERPRISE_PROFILE": "",
                 },
                 clear=False,
             ),
+            patch("defenseclaw.upgrade_shim.managed_deployment", return_value=None),
         ]
         for p in self._patches:
             p.start()
@@ -132,6 +143,7 @@ class InstallSmokeMatrixTests(unittest.TestCase):
                 ok,
                 f"{connector_name}: execute_guardrail_setup returned False; warnings={warnings}",
             )
+            self.assertEqual(warnings, [], f"{connector_name}: config save warned")
 
             cfg_path = os.path.join(home, ".defenseclaw", "config.yaml")
             self.assertTrue(

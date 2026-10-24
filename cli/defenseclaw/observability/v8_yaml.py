@@ -121,6 +121,7 @@ _DESTINATION_NESTED: Final = {
         }
     ),
     "network_safety": frozenset({"allow_private_networks", "allow_cgnat"}),
+    "local_stack": frozenset({"marker", "container_id"}),
 }
 _MISSING: Final = object()
 

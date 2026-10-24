@@ -183,9 +183,9 @@ func (l *lifecycle) readOnly(ctx context.Context) int {
 	if machinePolicyIncomplete(r) {
 		r.SecurityComplete = false
 	}
-	if strict {
-		l.warnUnprivilegedUserNamespaces()
-	}
+	// This is the observed host setting. The hook proves its managed policy
+	// view separately on each invocation.
+	l.warnOpenPolicyViews()
 	if strict {
 		// An agent the guardian or the enumerator could not protect for one
 		// account (an unverified hook contract, an agent it could not enroll)
@@ -1118,7 +1118,17 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 		r.AddWarning(codeConfigRejected, problem)
 	}
 	r.CoverageComplete = r.Readiness.Gateway && r.Readiness.Guardian && r.Readiness.Enumerator
-	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 && !machinePolicyIncomplete(r)
+	if record != nil {
+		drift, unpinnable := l.policyViewPinProblems(record.MachinePolicyConnectors)
+		for _, problem := range drift {
+			r.AddWarning(codeMachinePolicyIncomplete, problem+"; run `"+env.lifecycleCommand(ActionReconcile)+"` or `"+env.lifecycleCommand(ActionEnsure)+"` to pin the verified policy view")
+		}
+		for _, problem := range unpinnable {
+			r.AddWarning(codeMachinePolicyIncomplete, problem)
+		}
+	}
+	r.SecurityComplete = r.CoverageComplete && r.Readiness.SensorHelper && len(r.Errors) == 0 &&
+		!machinePolicyIncomplete(r) && !l.gatewayAuditFailure
 	l.describeHookContracts(ctx)
 	l.describeUnprotectedAgents()
 	l.describeChangedGuardianFiles()
@@ -1132,6 +1142,7 @@ func (l *lifecycle) describe(ctx context.Context, record *Deployment, _ bool) {
 	if record != nil {
 		l.describePerUserGateways(ctx)
 		l.describeAgentSessionsBeforeActivation(ctx, record)
+		l.describePluginLaunchCoverage(ctx, record)
 	}
 	if exists(env.rotationIntentPath()) {
 		r.AddWarning(codeRotationIncomplete, "a credential rotation did not finish; run rotate-credentials, or any other lifecycle action, to complete it or roll it back")
@@ -1216,6 +1227,7 @@ func (l *lifecycle) warnDirectoryUnreachable() {
 }
 
 const codeOptionalDestination = "optional_destination_failing"
+const codeAuditWriteFailed = "audit_write_failed"
 
 // codeJudgeFailing names an LLM judge whose recent calls all failed, or that
 // could not start.
@@ -1223,8 +1235,8 @@ const codeJudgeFailing = enterprisestatus.CodeJudgeFailing
 
 // readGatewayPosture copies the gateway's inspection posture from /health
 // when the gateway publishes it, and warns when it reports directory lookups
-// that fail: the accounts without cached facts then run under the default
-// guardrail profile, and nothing else in status or verify showed it (GAP-0216).
+// that fail: requests whose assignments need the missing facts are refused
+// and name them, and nothing else in status or verify showed it (GAP-0216).
 func (l *lifecycle) readGatewayPosture(body []byte) {
 	l.noteIdentityHealth(body)
 	var health struct {
@@ -1236,8 +1248,10 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		ProfileWarningCount           int `json:"profile_warning_count"`
 		Telemetry                     struct {
 			Details struct {
-				OptionalState  string `json:"optional_destination_state"`
-				FailureSummary string `json:"optional_destination_failure_summary"`
+				OptionalState       string `json:"optional_destination_state"`
+				FailureSummary      string `json:"optional_destination_failure_summary"`
+				EventHistoryFailure string `json:"event_history_failure"`
+				LastSQLiteClass     string `json:"event_history_last_sqlite_class"`
 			} `json:"details"`
 		} `json:"telemetry"`
 		Inspection *struct {
@@ -1257,6 +1271,22 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 	}
 	if json.Unmarshal(body, &health) != nil {
 		return
+	}
+	l.gatewayAuditFailure = health.Telemetry.Details.EventHistoryFailure != ""
+	if l.gatewayAuditFailure {
+		failure := health.Telemetry.Details.EventHistoryFailure
+		switch failure {
+		case "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed":
+		default:
+			failure = "unknown"
+		}
+		message := "the gateway cannot write mandatory audit records (" + failure + ")"
+		class := health.Telemetry.Details.LastSQLiteClass
+		switch class {
+		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
+			message += "; last SQLite failure class: " + class
+		}
+		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
 	}
 	// A judge that stops answering silently downgrades detection to the
 	// static rules; only /health and the journal said so (GAP-0626).
@@ -1289,8 +1319,8 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 		if ids := directoryLookupAccounts(d.Accounts); ids != "" {
 			which = " (" + ids + ")"
 		}
-		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; accounts without cached facts get the "+
-			"default guardrail profile (default_lookup_failed)", d.Failing, which, d.Since)
+		message := fmt.Sprintf("directory lookups are failing for %d account(s)%s since %s; requests whose assignments need missing identity facts are refused "+
+			"(default_lookup_failed), and the refusal names the missing fact", d.Failing, which, d.Since)
 		if d.Stale > 0 {
 			message += fmt.Sprintf(", and %d account(s) are served older facts that are dropped after an hour", d.Stale)
 		}

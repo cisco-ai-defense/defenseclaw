@@ -136,8 +136,31 @@ func TestShellHookFailureRecordsNameTheOutcomeTheHookApplied(t *testing.T) {
 					if last["outcome"] != want {
 						t.Fatalf("blocked=%v but the record says %q: %+v\n%s", blocked, last["outcome"], last, output)
 					}
-					if scenario == "strict-outage" && run.name != "copilot" && !blocked {
-						t.Fatalf("strict availability did not block the outage:\n%s", output)
+					// The per-user outage outcome and the strict availability
+					// column of the gateway outage table (HookOutage). The run
+					// sets no guardrail mode, so a hook that follows it is in
+					// observe mode and lets the call run.
+					outage := ConnectorHookOutage(run.conn)
+					perUser := outage.PerUserOpen
+					if mode == "closed" {
+						perUser = outage.PerUserClosed
+					}
+					if perUser == OutageFollowsGuardrailMode {
+						// Cursor: the run sets no guardrail mode, and the
+						// train renders such a hook in its closed (action)
+						// posture, so the outage blocks.
+						perUser = OutageBlocks
+					}
+					switch scenario {
+					case "outage":
+						if want := perUser == OutageBlocks; blocked != want {
+							t.Fatalf("installed %s, gateway down: blocked=%v, HookOutage says %s:\n%s", mode, blocked, perUser, output)
+						}
+					case "strict-outage":
+						if want := perUser == OutageBlocks || outage.StrictAvailability == StrictAvailabilityRead; blocked != want {
+							t.Fatalf("installed %s, strict availability, gateway down: blocked=%v, HookOutage says %s, strict %s:\n%s",
+								mode, blocked, perUser, outage.StrictAvailability, output)
+						}
 					}
 				})
 			}
@@ -157,6 +180,7 @@ func TestShellHookDiagnosticRecordsAreNotDeliveryOutcomes(t *testing.T) {
 		t.Run(conn.Name(), func(t *testing.T) {
 			invoke := hookArgvConnectorCase(t, conn.Name())
 			home := t.TempDir()
+			installNativeGatewayForHookTest(t, home)
 			hookDir := filepath.Join(home, "hooks")
 			opts := SetupOpts{DataDir: home, APIAddr: strings.TrimPrefix(server.URL, "http://"), APIToken: "scoped-test-token", HookFailMode: "open"}
 			if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, conn); err != nil {

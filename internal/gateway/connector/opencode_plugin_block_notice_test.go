@@ -65,13 +65,17 @@ func TestOpenCodePluginKeepsDefenseClawReasons(t *testing.T) {
 	}
 }
 
-// The Secure Client render keeps its pinned behavior.
-func TestOpenCodePluginSecureClientRenderKeepsItsText(t *testing.T) {
+// Without the administrator-owned native verifier, even a Secure Client
+// plugin refuses a fake local listener before accepting its policy response.
+func TestOpenCodePluginSecureClientRenderRefusesMissingServiceVerifier(t *testing.T) {
 	server := openCodeStubGateway(t, openCodeGatewayBlock, openCodeGatewayConfirm)
 	data := openCodePluginTestData(t, server)
 	data.Managed = true
 	lines := runOpenCodePluginAssetHarness(t, secureClientPluginAssets["opencode-plugin.js"], data, 2)
-	if len(lines) != 3 || lines[0] != "block:matched: TEST-MARKER" || lines[1] != "allow" || lines[2] != "toasts:[]" {
+	if len(lines) != 3 ||
+		!strings.Contains(lines[0], "no service peer verifier") ||
+		!strings.Contains(lines[1], "no service peer verifier") ||
+		lines[2] != "toasts:[]" {
 		t.Fatalf("harness output = %q", lines)
 	}
 }

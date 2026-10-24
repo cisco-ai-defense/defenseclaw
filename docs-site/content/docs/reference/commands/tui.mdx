@@ -49,7 +49,7 @@ to filter.
 
 | Key | Panel | What it shows |
 | --- | --- | --- |
-| `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied policy generation and digest](#policy-generation-and-digest), at-a-glance health |
+| `1` | Overview | Gateway status, the active connector roster (every wired connector on a multi-connector install), the active policy and its posture, the [applied config generation and policy digest](#config-generation-and-policy-digest), at-a-glance health |
 | `2` | Alerts | Recent guardrail and hook alerts. A rule that matched a call it could not decide (a detection-only finding) is not an alert: the panel says how many the last 24 hours had, as `defenseclaw alerts` does, and `defenseclaw audit export --since 24h` lists them. The details of an alert raised in an OpenShell sandbox name it in a **Sandbox** fact |
 | `3` | Skills | Scanned skill inventory, with [block and allow actions](#block-and-allow-from-the-panels) |
 | `4` | MCPs | Scanned MCP servers, with block and allow actions |
@@ -137,7 +137,7 @@ without showing any values. See the
 [Doctor cache reference](/docs/reference/configuration#doctor-cache) for the
 file format.
 
-### Policy generation and digest
+### Config generation and policy digest
 
 The status line at the bottom of every panel ends with the policy the running
 gateway applies. With the guardrail off it reads:
@@ -148,16 +148,22 @@ gateway applies. With the guardrail off it reads:
 
 With the guardrail on, the first part is the active policy and mode, for
 example `policy strict · action · gen 10 · 8b19ede82344`. `gen` is the
-gateway's policy generation: it goes up each time the gateway applies a changed
-`config.yaml`, and it restarts at 1 when the gateway starts. The hex is the
-first 12 characters of the effective policy digest, a SHA-256 over the
-configuration and the policy assets it names. It is the same pair that
-`defenseclaw status` prints on its Policy line and that `defenseclaw-gateway
-policy digest` computes from disk, so you can compare the three.
+applied config generation counter from `config.generation.json`, reported as
+`policy.config_generation` by the gateway. It survives a gateway restart;
+when the counter is unknown or zero, the footer shows only the digest. The hex
+is the first 12 characters of the effective policy digest, a SHA-256 over the
+configuration and the policy assets it names. Compare the pair with
+`policy.config_generation` and `policy.effective_digest` in
+`defenseclaw status --json`. The Policy line in plain `defenseclaw status`
+shows the same `policy.config_generation` as `config generation N`. The raw
+`policy.generation` field is a separate gateway-local counter that restarts at
+1; `defenseclaw-gateway policy digest` computes the digest from disk.
 
-A save from the TUI, a CLI command or a hand edit of `config.yaml` moves the
-number once the gateway has applied it. When the gateway rejects a change it
-keeps enforcing the previous generation, so the pair stays where it was; run
+A save through the TUI or CLI config writer moves the counter once the gateway
+has applied it. On a per-user install, an applied hand edit also moves the
+counter: the gateway records the next config generation with actor
+`hand-edit:<user>`. When the gateway rejects a change it keeps enforcing the
+previous policy, so the footer stays where it was; run
 `defenseclaw doctor`, whose Policy row names the reason. The status line is cut
 from the right on a narrow terminal. See
 [Policy generation and digest](/docs/reference/commands/cli#policy-generation-and-digest)
@@ -263,7 +269,7 @@ block-at`); for any other policy it saves the preset until you activate it
 activates it, which copies its admission actions, levels and Cisco trust level
 into `config.yaml`. Overview's **Policy posture** reads, for example, `strict ·
 block MEDIUM+ · alert LOW+`, and the status line shows `policy <name> ·
-<mode>` followed by the [generation and digest](#policy-generation-and-digest).
+<mode>` followed by the [generation and digest](#config-generation-and-policy-digest).
 
 ## Setup panel
 
@@ -402,9 +408,9 @@ the details window takes the keys of its view, and `Esc` closes it.
 | `a` / `A` / `x` | Approve the selected ask once, always approve it (asks again; every future sandbox may reach it too, and a toast confirms what was saved), or reject it. An approval applies when the agent is idle. `A` is not offered for a port on this machine, a private or IP-literal address, or a proposal with allowed IPs: those open for one sandbox only. Outside Asks, `a` switches to Asks when one waits |
 | `c` | Connect: start the sandbox if it is stopped and attach its harness |
 | `n` | New run: open the [launch dialog](#start-a-run-from-the-tui) |
-| `s` | Stop the sandbox (asks first); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
+| `s` | Save or sync accessible work first, then stop the sandbox (asks first); it is kept, so `c` resumes it. `defenseclaw sandbox stop <name>` runs in this terminal and asks again while a detached run is still going; DefenseClaw marks that run interrupted and keeps its log for `defenseclaw sandbox logs <name>` |
 | `d` | Delete the sandbox (asks first) with its providers, credentials and snapshot. Undo is no longer possible; your project folder keeps its current contents |
-| `U` | Undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot. For a sandbox that works on a copy, `U` reverts its last `pull --apply` instead: `defenseclaw sandbox undo <name>` previews the revert in this terminal and asks, and edits you made since stay |
+| `U` | Save work you want to keep first, then undo: preview the changes, ask, stop a running sandbox, and put the project folder back to its pre-session snapshot. For a sandbox that works on a copy, `U` reverts its last `pull --apply` instead: `defenseclaw sandbox undo <name>` previews the revert in this terminal and asks, and edits you made since stay |
 | `R` | Review the changed files that can run code on your machine (a sandbox that mounts its folder) |
 | `P` | Pull the work of a sandbox that works on a copy: **Show what comes back** (`defenseclaw sandbox pull <name>`, which changes nothing), **Apply it to the project folder** (`--apply`, a 3-way merge that `U` reverts) or **Put it on branch** `dc/<name>` (`--branch`, which leaves your working tree alone). The command runs in this terminal: it shows the changes first and asks before it brings back a change that can run code on your machine. `p` still opens Policies |
 | `w` | Sandboxed by default: turn the shell wrapper on or off per harness (`defenseclaw sandbox enable` or `defenseclaw sandbox disable`) |
@@ -587,7 +593,7 @@ Actions for the selected sandbox:
 
 | Button | Runs |
 | --- | --- |
-| **Stop…** | `defenseclaw sandbox stop <name> --yes` after asking. `defenseclaw sandbox connect <name>` resumes it. A full-disk MicroVM with work not yet pulled keeps running and the stop exits `5`, even with `--yes`. |
+| **Stop…** | Save or sync accessible work first, then `defenseclaw sandbox stop <name> --yes` after asking. `defenseclaw sandbox connect <name>` resumes it. A full-disk MicroVM with work not yet pulled keeps running and the stop exits `5`, even with `--yes`. |
 | **Review changes** | `defenseclaw sandbox review <name>` (sandboxes that mount their folder). |
 | **Undo…** | `defenseclaw sandbox undo <name> --yes` after asking. On a mounting sandbox it restores the pre-session snapshot. On a copy-mode sandbox it reverts the last `pull --apply`; later edits stay, and if one touched the same files nothing is reverted and Activity says why. |
 | **Copy connect command** | Copies the resume command. |
@@ -606,7 +612,7 @@ The app never installs OpenShell. When OpenShell or e2fsprogs is missing, run th
 defenseclaw sandbox setup --install-openshell
 ```
 
-On OpenShell 0.1.1 to 0.1.4, which run no sandbox, the same command upgrades OpenShell to 0.1.5 in place, which restarts the gateway. Setup keeps the release you have while a MicroVM sandbox runs, so stop them first with `defenseclaw sandbox stop NAME`.
+On OpenShell 0.1.1 to 0.1.4, which run no sandbox, the same command upgrades OpenShell to 0.1.5 in place, which restarts the gateway. Setup keeps the release you have while a MicroVM sandbox runs, so save or sync each guest’s work first, then stop it with `defenseclaw sandbox stop NAME`; a failed disk sync can lose later changes.
 
 ### Config editor
 

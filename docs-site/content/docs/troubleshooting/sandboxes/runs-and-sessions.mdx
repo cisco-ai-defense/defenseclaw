@@ -8,7 +8,7 @@ keywords:
   - EROFS
 ---
 
-These problems appear while a sandbox runs or when you pull its work back.
+These problems appear while a sandbox runs or when you pull its work back. Before following a stop step below, save or sync accessible guest work; on a copy-mode MicroVM, pull work you need on the host. Then use `defenseclaw sandbox stop NAME`, which requests a disk sync before stopping a running MicroVM. A failed sync can lose changes since the last successful one.
 
 ## Copy mode, `--context` and the copy limit
 
@@ -82,7 +82,7 @@ These problems appear while a sandbox runs or when you pull its work back.
 
 ## A sandbox is not as DefenseClaw prepared it
 
-**You see:** ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again (its work is kept)`` (a start).
+**You see:** ``sandbox <name> does not run as DefenseClaw prepared it; DefenseClaw deleted it`` (a run or create), or ``…; DefenseClaw stopped it again`` (a start). For a MicroVM, only work through the last successful disk sync is kept; a failed sync can lose later changes.
 
 **Cause:** the check after ready found the workload running as another uid or holding capabilities, or a hook, launcher or managed-settings file missing, changed or writable.
 
@@ -92,13 +92,15 @@ These problems appear while a sandbox runs or when you pull its work back.
 
 ## A sandbox is in OpenShell's error state
 
-**You see:** ``<name> is in OpenShell's error state``, or the session ended with ``<name>'s container stopped under the session``.
+**You see:** ``<name> is in OpenShell's error state``, or the session ended with ``<name>'s container stopped under the session`` or ``<name>'s MicroVM stopped under the session``.
 
-**Cause:** the container stopped while it ran (a Docker restart stops every one, or the workload failed). `defenseclaw sandbox doctor` names it under **Sandbox hooks**.
+**Cause:** a Docker container stopped while it ran (a Docker restart stops every one, or the workload failed), or a MicroVM's workload or VM process exited. `defenseclaw sandbox doctor` names the cause under **Sandbox hooks**. For a MicroVM, `defenseclaw sandbox status NAME` shows whether the phase reason is `MainProcessFailed` or `ProcessExited`.
 
-**Fix:** fix what stopped it (start Docker again, for one), then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`, which keep the sandbox and its work. For a provisioning timeout, see [The first run seems to hang](#the-first-run-seems-to-hang).
+**Fix:** for a Docker sandbox, fix what stopped its container (start Docker again, for one), then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`; these keep the sandbox and its work. For a MicroVM whose process exited (`ProcessExited`), fix the cause, then run `defenseclaw sandbox stop NAME` and `defenseclaw sandbox start NAME`. The sandbox remains, but its MicroVM work is kept only through the last successful disk sync; changes since then may be lost. For a MicroVM whose main process failed (`MainProcessFailed`), the VM may still run what the workload left running. DefenseClaw does not stop that still-running failed VM for you. `defenseclaw sandbox start NAME --end-vm` ends that VM without flushing it, so what the VM has not written to its disk is lost; run `defenseclaw sandbox stop NAME` once it is ready. Or run `defenseclaw sandbox delete NAME`, which deletes it and its work. For a provisioning timeout, see [The first run seems to hang](#the-first-run-seems-to-hang).
 
-**Check:** `defenseclaw sandbox list` shows it running again.
+**Check:** `defenseclaw sandbox list` shows it running again after the Docker or exited-VM recovery, stopped after ending and stopping a failed VM, or absent after deletion.
+
+For another MicroVM error reason, such as `ProcessPollFailed`, OpenShell may still hold the VM. Check `defenseclaw sandbox status NAME` and use the stop or delete guidance it shows; a stop that OpenShell refuses does not release the VM. Its work is kept only through the last successful disk sync.
 
 ## A network rule from the last session was not removed
 

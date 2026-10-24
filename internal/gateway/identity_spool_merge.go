@@ -266,6 +266,8 @@ func mergeSpoolFacts(own useridentity.DirectoryFacts, record enterprisehooks.Ide
 	}
 	if spool.UPN != "" {
 		merged.UPN = spool.UPN
+		// Agent identity rows only; profile matching ignores the mark.
+		merged.UPNKept = record.UPNKept()
 	}
 	if spool.Principal != "" {
 		// One principal form per account, whichever guardian build wrote

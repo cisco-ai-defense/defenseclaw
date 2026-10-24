@@ -958,6 +958,25 @@ func TestRulePackDirectoryUnreadableNamesTheReason(t *testing.T) {
 	}
 }
 
+func TestRulePackFileUnreadableNamesAccountAccessLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name, action string
+		err          error
+		want         string
+	}{
+		{name: "denied open", action: "read", err: &fs.PathError{Op: "open", Path: "/private/pack", Err: fs.ErrPermission}, want: "access denied"},
+		{name: "denied stat", action: "inspected", err: &fs.PathError{Op: "stat", Path: "/private/pack", Err: fs.ErrPermission}, want: "access denied"},
+		{name: "other read error", action: "read", err: errors.New("I/O failure"), want: "component cannot be read"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := rulePackFileUnreadable("rules/a.yaml", tc.action, tc.err)
+			if got.Code != "file_unreadable" || !strings.Contains(got.Reason, tc.want) || strings.Contains(got.Reason, "/private/pack") {
+				t.Fatalf("refusal = %+v", got)
+			}
+		})
+	}
+}
+
 // GAP-1898: a refused expression names the rule by id and entry and says
 // what is wrong, without echoing the expression.
 func TestLoadRulePackNamesTheInvalidSemanticRule(t *testing.T) {

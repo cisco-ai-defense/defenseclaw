@@ -15,7 +15,7 @@ For an ordinary agent on macOS, Linux or Windows, use the [core install](/docs/g
 ## Before you start
 
 - A Linux device with Git, a C compiler, CMake 3.22 or newer, Make, Python 3 and PyYAML.
-- For Fleet: the core gateway installed, and an MQTT broker with TLS and per-device topic ACLs. The broker steps are in the [configuration reference](/docs/reference/edge-connector/configuration#mqtt-broker-setup).
+- For Fleet: the core gateway and a trusted TLS proxy on the same host, with a valid certificate for the Fleet hostname, and an MQTT broker with TLS and per-device topic ACLs. The proxy must connect to the gateway over loopback and send `X-Forwarded-Proto: https`. The broker steps are in the [configuration reference](/docs/reference/edge-connector/configuration#mqtt-broker-setup).
 
 ## Local-only smoke test
 
@@ -47,33 +47,31 @@ All tests passing means the local engine works. Nothing is installed as a servic
 1. On the gateway host, extract the matching `defenseclaw-fleet-assets.tar.gz` release asset and run the setup.
 
    ```bash
-   defenseclaw setup edge-connector --source-dir /path/to/extracted-assets
+   defenseclaw setup edge-connector --source-dir /path/to/extracted-assets \
+     --endpoint https://fleet.example.com/api/v1/fleet
+   defenseclaw config set fleet.trust_proxy_headers true
+   defenseclaw-gateway restart
    ```
 
-   It saves the Fleet API token, the signing keys and the registration endpoint, then enables Fleet. On Linux it also prepares the local service environment through `sudo`. On macOS and Windows it configures the gateway only; the C engine runs on Linux.
+   Replace the example hostname with your TLS proxy's real hostname. The proxy must run on the gateway host, connect to the gateway at `127.0.0.1:18970`, and set `X-Forwarded-Proto: https` on forwarded requests. Keep the gateway API inaccessible except through loopback and the TLS proxy. Setup saves the Fleet API token, the signing keys and the HTTPS registration endpoint, then enables Fleet. The second command explicitly permits this same-host proxy to attest to HTTPS; the restart applies the Fleet setup before installation registers the device. On Linux setup also prepares the local service environment through `sudo`. On macOS and Windows it configures the gateway only; the C engine runs on Linux.
 
 2. Build and install the engine on the device. Use the `STANDARD` profile for Raspberry Pi, Jetson and single-board computers, or `EDGE` for edge gateways.
 
    ```bash
    defenseclaw setup edge-connector install --source-dir /path/to/extracted-assets \
+     --target DEVICE --user USER \
      --profile standard --broker-url mqtts://broker.example.com:8883
    ```
 
-   Add `--target DEVICE --user USER` to build on a remote device over SSH. The install copies the source, builds it, writes `/etc/defenseclaw/edge-connector.env`, installs the `edge-connector` systemd unit and starts it.
+   Replace `DEVICE` and `USER` with the SSH host and account. The remote install copies the source, builds it, automatically registers the device through the configured HTTPS Fleet API, writes the returned key to `/etc/defenseclaw/edge-connector.env`, creates the `defenseclaw` system service account if needed, installs the `edge-connector` systemd unit and starts it. The install needs `sudo` rights for account and service setup. Do not register the same device again: re-registration replaces its key.
 
-3. Register the device and provision the key it returns.
-
-   ```bash
-   defenseclaw edge-connector register 1001 --tenant-id 1 --fleet-id 2
-   ```
-
-   The device key is shown once. Production devices use registration-issued per-device keys.
-
-4. Push a policy. See [Edge Connector policies](/docs/reference/edge-connector/policies).
+3. Push a policy. See [Edge Connector policies](/docs/reference/edge-connector/policies).
 
    ```bash
    defenseclaw edge-connector policy push policy.yaml --tenant-id 1 --fleet-id 2
    ```
+
+The `defenseclaw edge-connector register` command uses the Fleet endpoint saved by setup, so it can register through the configured HTTPS URL. The default loopback HTTP endpoint is for loopback-only test mode: on a dedicated test gateway, run `defenseclaw config set fleet.allow_key_over_http true` before registering, then run `defenseclaw config set fleet.allow_key_over_http false` when the test ends. Production key delivery requires TLS or the trusted same-host TLS proxy above. For manual production registration, use this CLI command after saving the HTTPS endpoint, or call the [Fleet API over HTTPS](/docs/reference/edge-connector/api#register-a-device) and provision the returned key on the device.
 
 ## Check it worked
 

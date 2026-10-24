@@ -3882,7 +3882,13 @@ func cleanupCommittedSetupTransactionWithReconciliationReader(
 		// Preserve DataRoot when third-party configuration could not be cleaned;
 		// setup reports the precise residue after the core transaction completes.
 		if residue == nil || len(residue.Failures) == 0 {
-			if err := removeAllSafe(transaction.DataRoot, filepath.Dir(transaction.DataRoot)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			// until 1.1: the removed connectors' backups stay, beside it.
+			if err := removeDataRootKeepingRemovedConnectorBackups(transaction.DataRoot, func() error {
+				if err := removeAllSafe(transaction.DataRoot, filepath.Dir(transaction.DataRoot)); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+				return nil
+			}); err != nil {
 				return err
 			}
 		}

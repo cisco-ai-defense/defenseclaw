@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/peercred"
 )
@@ -175,6 +176,11 @@ const (
 	// TrustRulePack is an administrator rule pack: its folders above, and
 	// every folder and file in it (see rulePackTrust).
 	TrustRulePack
+	// TrustRuntimeFile is a policy-tree file the service account may own.
+	TrustRuntimeFile
+	// TrustAdminDir is an administrator-owned directory and all its
+	// ancestors. Host security files are written only below such a path.
+	TrustAdminDir
 )
 
 // Env binds the lifecycle to one host. Zero values are replaced by
@@ -215,15 +221,17 @@ type Env struct {
 	// APIHealthGet fetches /health from the TCP API address. Only a gateway
 	// that does not answer /health on its hook socket (an earlier release,
 	// between a package upgrade and the restart or after a rollback) is
-	// probed there.
+	// probed there, after the connected peer is matched to the service.
 	APIHealthGet func(ctx context.Context) (int, []byte, error)
 	// HookSocketPeer connects to the hook socket and returns the kernel
 	// credentials of the process serving it.
 	HookSocketPeer func(ctx context.Context) (peercred.Credentials, error)
-	// ListenerProof asks the gateway's loopback API to prove it accepts the
-	// per-user hook credential named by keyID (its SHA-256) for
-	// connectorName, over the route the standalone plugins use, and returns
-	// the proof (see rotation.go).
+	// ReportLaunchCoverage sends a root-only, content-free observation to the
+	// gateway audit when a running agent can omit its managed plugin.
+	ReportLaunchCoverage func(context.Context, managed.LaunchCoverageReport) error
+	// ListenerProof asks the gateway over the protected hook socket to prove
+	// it accepts the per-user hook credential named by keyID (its SHA-256).
+	// The root lifecycle cannot use the TCP route bound to the user's UID.
 	ListenerProof func(ctx context.Context, connectorName, keyID, nonce string) (string, error)
 	// DiskSpace reports the available bytes, size and device of the
 	// filesystem holding a path (see diskSpace).
@@ -231,6 +239,9 @@ type Env struct {
 	// ProcessExecPath returns the executable path the kernel recorded when
 	// process pid started (macOS only; see gatewayProcesses).
 	ProcessExecPath func(pid int) (string, error)
+	// ProcessImagePath returns the kernel's absolute path of the image
+	// process pid runs (macOS only; see absoluteExecPath).
+	ProcessImagePath func(pid int) (string, error)
 	// DockerEngine connects to the Docker engine socket at the rooted path
 	// and returns nil when the engine accepts the connection (see
 	// dockerEngineAnswers); status and verify use it for the openshell block
@@ -243,6 +254,10 @@ type Env struct {
 	// SandboxUsers is how the lifecycle acts in user accounts for the sandbox
 	// subsystem (default: commands run as the user); tests replace it.
 	SandboxUsers SandboxUserOps
+	// agentDigest is the SHA-256 of the gateway the plan being applied
+	// installs, which tags the macOS LaunchAgent labels (launchAgentLabel);
+	// "" outside a plan, where the installed gateway is read.
+	agentDigest string
 
 	// ProductVersion is the version of the running lifecycle binary.
 	ProductVersion string
@@ -260,7 +275,9 @@ type Env struct {
 	// bundleFault is a test seam: it runs at each named phase of a bundle
 	// apply (received, verified, staged, transaction, applied, committed)
 	// and an error fails the apply there; at committed the run stops before
-	// the swap, as a crash after the commit would. Production leaves it nil.
+	// the swap, as a crash after the commit would; "private-dir <name>"
+	// runs before the bundle store creates its private directory <name>
+	// (receipts). Production leaves it nil.
 	bundleFault func(phase string) error
 
 	// SelfUnit names the service unit or launchd job this lifecycle run
@@ -278,6 +295,10 @@ type Env struct {
 	// GuardianReportTimeout bounds how long a change waits for the hook
 	// guardian's report on its targets.
 	GuardianReportTimeout time.Duration
+	// ReplacedHookCallsTimeout bounds how long a run waits, before it stops
+	// the gateway, for the calls the replaced release's shell hooks already
+	// run (fenceReplacedHooks).
+	ReplacedHookCallsTimeout time.Duration
 }
 
 // lifecycleNice is the nice value of a lifecycle run. A config or bundle
@@ -366,20 +387,36 @@ func (e *Env) fillDefaults() {
 	}
 	if e.APIHealthGet == nil {
 		addr := e.Layout.APIAddr
-		e.APIHealthGet = func(ctx context.Context) (int, []byte, error) { return getHealth(ctx, "tcp", addr, addr) }
+		goos := e.GOOS
+		e.APIHealthGet = func(ctx context.Context) (int, []byte, error) { return getProtectedAPIHealth(ctx, goos, addr) }
 	}
 	if e.HookSocketPeer == nil {
 		path := e.P(e.Layout.HookSocketPath)
 		e.HookSocketPeer = func(ctx context.Context) (peercred.Credentials, error) { return hookSocketPeer(ctx, path) }
 	}
+	if e.ReportLaunchCoverage == nil {
+		path := e.P(e.Layout.HookSocketPath)
+		e.ReportLaunchCoverage = func(ctx context.Context, report managed.LaunchCoverageReport) error {
+			return managed.ReportLaunchCoverage(ctx, path, report)
+		}
+	}
 	if e.ListenerProof == nil {
-		addr := e.Layout.APIAddr
 		e.ListenerProof = func(ctx context.Context, connectorName, keyID, nonce string) (string, error) {
-			return listenerProof(ctx, addr, connectorName, keyID, nonce)
+			account, found, err := e.Accounts.Lookup(ctx, e.Layout.ServiceUser)
+			if err != nil {
+				return "", fmt.Errorf("verify gateway hook socket service account %s: %w", e.Layout.ServiceUser, err)
+			}
+			if !found || account.UID < 1 {
+				return "", fmt.Errorf("gateway hook socket service account %s is unavailable", e.Layout.ServiceUser)
+			}
+			return listenerProof(ctx, e.P(e.Layout.HookSocketPath), e.Layout.APIAddr, account.UID, connectorName, keyID, nonce)
 		}
 	}
 	if e.ProcessExecPath == nil {
 		e.ProcessExecPath = processExecPath
+	}
+	if e.ProcessImagePath == nil {
+		e.ProcessImagePath = processImagePath
 	}
 	if e.DiskSpace == nil {
 		e.DiskSpace = diskSpace
@@ -407,6 +444,9 @@ func (e *Env) fillDefaults() {
 	}
 	if e.GuardianReportTimeout <= 0 {
 		e.GuardianReportTimeout = 30 * time.Second
+	}
+	if e.ReplacedHookCallsTimeout <= 0 {
+		e.ReplacedHookCallsTimeout = replacedHookCallsBudget
 	}
 }
 
@@ -465,8 +505,12 @@ func defaultTrust(path string, kind TrustKind) error {
 		return managed.ValidateTrustedFilePath(path, "managed file")
 	case TrustRuntimeDir:
 		return managed.ValidateTrustedRuntimeDir(path, "managed runtime directory")
+	case TrustRuntimeFile:
+		return managed.ValidateTrustedServiceRuntimeFilePath(path, "managed runtime file", "")
 	case TrustRulePack:
 		return rulePackTrust(path)
+	case TrustAdminDir:
+		return managed.ValidateTrustedInstallMarkerDir(path, "managed host security directory")
 	}
 	return fmt.Errorf("unknown trust kind %d", kind)
 }
@@ -491,6 +535,34 @@ func getHealth(ctx context.Context, network, address, host string) (int, []byte,
 	resp, err := client.Do(req)
 	if err != nil {
 		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode, body, err
+}
+
+// getProtectedAPIHealth is the upgrade fallback for an earlier gateway that
+// does not answer /health on its hook socket. Verify the accepted TCP socket
+// against the active systemd or launchd service before sending the request or
+// accepting a health decision from the listener.
+func getProtectedAPIHealth(ctx context.Context, goos, address string) (int, []byte, error) {
+	service := unitGateway
+	if goos == "darwin" {
+		service = labelGateway
+	} else if goos != "linux" {
+		return 0, nil, fmt.Errorf("gateway API listener unverified on %s", goos)
+	}
+	client, err := hookexec.NewManagedEnterpriseGatewayHTTPClient(5*time.Second, address, service)
+	if err != nil {
+		return 0, nil, fmt.Errorf("gateway API listener unverified: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+address+"/health", nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, fmt.Errorf("gateway API listener unverified or unavailable: %w", err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))

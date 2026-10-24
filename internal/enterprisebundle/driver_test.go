@@ -9,9 +9,11 @@ package enterprisebundle_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -23,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 )
@@ -256,6 +259,7 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {
 		for _, tc := range []struct {
 			name            string
+			sourceVersion   string
 			comparable      bool
 			mismatch        bool
 			gatewayMismatch bool
@@ -266,15 +270,23 @@ func TestDriverConfirmationChecksSignedDigestOnAllPlatforms(t *testing.T) {
 			{name: "gateway differs from receipt effective", comparable: true, gatewayMismatch: true, wantCode: enterprisebundle.CodeDigestMismatch},
 			{name: "non-comparable", mismatch: true},
 			{name: "non-comparable equal digest"},
+			{name: "upgrade from 0.8.10", sourceVersion: "0.8.10", mismatch: true},
+			{name: "upgrade from 1.0.0", sourceVersion: "1.0.0", mismatch: true},
+			{name: "upgrade from 1.0.1", sourceVersion: "1.0.1", mismatch: true},
+			{name: "upgrade from 1.0.2", sourceVersion: "1.0.2", mismatch: true},
+			{name: "upgrade from 1.0.3", sourceVersion: "1.0.3", mismatch: true},
 		} {
 			t.Run(platform+"/"+tc.name, func(t *testing.T) {
 				f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
 					in.HostPlatform = platform
+					if tc.sourceVersion != "" {
+						in.ProductVersion = tc.sourceVersion
+					}
 				})
 				d := driverFor(t, f)
 				d.Platform = platform
 				if !tc.comparable {
-					d.ProductVersion = "1.0.3"
+					d.ProductVersion = "1.0.4"
 				}
 				p, err := d.Prepare(context.Background(), f.bundle, nil)
 				if err != nil {
@@ -613,6 +625,154 @@ func TestDriverSettleRunConfirmsOrRollsBackAnAppliedReceipt(t *testing.T) {
 	}
 }
 
+// The config writer committed the signed candidate, but the gateway was
+// stopped before it could answer. The receipt is applied and pending, with
+// no current-bundle swap until a later run proves the live policy.
+func TestDriverFinishKeepsGatewayOutagePending(t *testing.T) {
+	ctx := context.Background()
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	p, err := d.Prepare(ctx, f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	confirmedPolicy := installPreparedBundle(t, d, p)
+	rolledBack := false
+	_, err = d.Finish(p, p.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{}, false,
+		func() (string, bool) { rolledBack = true; return "", true })
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed || rolledBack ||
+		p.Receipt.State != enterprisebundle.StateApplied || p.Receipt.EffectivePolicyDigest == "" {
+		t.Fatalf("outage: receipt=%+v rollback=%t error=%v", p.Receipt, rolledBack, err)
+	}
+	if state, err := d.Store.LoadState(); err != nil || state.Current != nil {
+		t.Fatalf("outage moved current: state=%+v error=%v", state, err)
+	}
+	report, rollback, err := d.SettleRun(p.Config, nil)
+	if err != nil || len(report.Pending) != 1 || len(rollback) != 0 {
+		t.Fatalf("gateway still down: report=%+v rollback=%+v error=%v", report, rollback, err)
+	}
+	report, rollback, err = d.SettleRun(p.Config, &confirmedPolicy)
+	state, stateErr := d.Store.LoadState()
+	if err != nil || len(report.Completed) != 1 || len(rollback) != 0 || stateErr != nil ||
+		state.Current == nil || state.Current.BundleID != p.Receipt.BundleID {
+		t.Fatalf("gateway recovered: report=%+v rollback=%+v state=%+v errors=%v/%v", report, rollback, state, err, stateErr)
+	}
+}
+
+// A receipt written before an upgrade keeps its historical digest. Settle
+// must compare the gateway with this build's verified digest of its stored
+// bundle before deciding whether the receipt is confirmed or failed.
+func TestDriverSettleAfterProductUpgradeUsesVerifiedDigest(t *testing.T) {
+	for _, platform := range []string{enterprisebundle.PlatformLinux, enterprisebundle.PlatformDarwin, enterprisebundle.PlatformWindows} {
+		if runtime.GOOS == "windows" && platform != enterprisebundle.PlatformWindows {
+			// This fixture stores the rendered config under a host-native
+			// temporary path. Windows separators cannot model Unix install
+			// paths; the Unix cases run on the Linux build host.
+			continue
+		}
+		for _, sourceVersion := range []string{"0.8.10", "1.0.0", "1.0.1", "1.0.2", "1.0.3"} {
+			scenarios := []string{"applied/enforced"}
+			if sourceVersion == "1.0.3" {
+				scenarios = append(scenarios, "staged/enforced", "applied/historical gateway", "staged/historical gateway",
+					"applied/wrong gateway", "applied/unverifiable",
+					"staged/unverifiable", "applied/missing generation")
+			}
+			for _, scenario := range scenarios {
+				t.Run(platform+"/"+sourceVersion+"/"+scenario, func(t *testing.T) {
+					f := newFixture(t, bundleConfig(t), func(in *enterprisebundle.ComposeInput) {
+						in.HostPlatform, in.ProductVersion = platform, sourceVersion
+					})
+					d := driverFor(t, f)
+					d.Platform, d.ProductVersion = platform, sourceVersion
+					p, err := d.Prepare(t.Context(), f.bundle, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !p.Receipt.DigestComparable {
+						t.Fatal("the old signer and product digest must be comparable before upgrade")
+					}
+					proof := installPreparedBundle(t, d, p)
+					if !strings.HasPrefix(scenario, "staged/") {
+						if _, err := d.Finish(p, p.ConfigSHA256, nil, enterprisebundle.GatewayPolicy{}, false, nil); enterprisebundle.CodeOf(err) != enterprisebundle.CodeNotConfirmed {
+							t.Fatalf("outage did not leave an applied receipt: %v", err)
+						}
+					}
+					if scenario == "applied/missing generation" {
+						if err := os.Remove(configwrite.GenerationPath(d.ConfigPath)); err != nil {
+							t.Fatal(err)
+						}
+					}
+					oldDigest := p.EffectivePolicyDigest
+					sum := sha256.Sum256([]byte(oldDigest + ":1.0.4"))
+					currentDigest := fmt.Sprintf("sha256:%x", sum)
+					baseDigester := d.Digester
+					d.Digester = func(ctx context.Context, cfg *config.Config, raw []byte, goos, root string) (string, error) {
+						if strings.HasSuffix(scenario, "/unverifiable") {
+							return "", fmt.Errorf("current policy digest is unavailable")
+						}
+						base, err := baseDigester(ctx, cfg, raw, goos, root)
+						if err != nil {
+							return "", err
+						}
+						changed := sha256.Sum256([]byte(base + ":1.0.4"))
+						return fmt.Sprintf("sha256:%x", changed), nil
+					}
+					d.ProductVersion = "1.0.4"
+					proof.EffectiveDigest, proof.Digest = currentDigest, currentDigest
+					if strings.HasSuffix(scenario, "/historical gateway") {
+						proof.Digest = oldDigest
+					} else if scenario == "applied/wrong gateway" {
+						proof.Digest = "sha256:" + strings.Repeat("f", 64)
+					}
+					report, rollback, err := d.SettleRun(p.Config, &proof)
+					if err != nil {
+						t.Fatal(err)
+					}
+					rc := receiptOf(t, d, p.Receipt.ReceiptID)
+					switch scenario {
+					case "applied/wrong gateway":
+						if rc.State != enterprisebundle.StateFailed || len(rollback) != 1 || rollback[0].ReceiptID != rc.ReceiptID {
+							t.Fatalf("disproved receipt = %s, rollback = %+v, report = %+v", rc.State, rollback, report)
+						}
+					case "staged/historical gateway":
+						if rc.State != enterprisebundle.StateApplied || rc.EffectivePolicyDigest != oldDigest ||
+							len(rollback) != 0 || !slices.Contains(report.Pending, rc.ReceiptID) {
+							t.Fatalf("old gateway did not record its proven apply: receipt=%+v rollback=%+v report=%+v", rc, rollback, report)
+						}
+						proof.Digest, proof.Applied = currentDigest, true
+						complete, rolledBack, settleErr := d.SettleRun(p.Config, &proof)
+						confirmed := receiptOf(t, d, rc.ReceiptID)
+						if settleErr != nil || confirmed.State != enterprisebundle.StateConfirmed ||
+							confirmed.EffectivePolicyDigest != oldDigest || len(rolledBack) != 0 ||
+							!slices.Contains(complete.Completed, rc.ReceiptID) {
+							t.Fatalf("recovered staged receipt=%+v rollback=%+v report=%+v error=%v", confirmed, rolledBack, complete, settleErr)
+						}
+					case "applied/historical gateway", "applied/unverifiable", "staged/unverifiable", "applied/missing generation":
+						wantState := enterprisebundle.StateApplied
+						if strings.HasPrefix(scenario, "staged/") {
+							wantState = enterprisebundle.StateStaged
+						}
+						if rc.State != wantState || len(rollback) != 0 || !slices.Contains(report.Pending, rc.ReceiptID) {
+							t.Fatalf("unverifiable receipt = %s, rollback = %+v, report = %+v", rc.State, rollback, report)
+						}
+					default:
+						state, stateErr := d.Store.LoadState()
+						wantReceiptDigest := oldDigest
+						if strings.HasPrefix(scenario, "staged/") {
+							wantReceiptDigest = currentDigest
+						}
+						if stateErr != nil || rc.State != enterprisebundle.StateConfirmed || len(rollback) != 0 ||
+							!slices.Contains(report.Completed, rc.ReceiptID) || rc.EffectivePolicyDigest != wantReceiptDigest ||
+							state.Current == nil || state.Current.BundleID != rc.BundleID {
+							t.Fatalf("enforced receipt = %+v, rollback = %+v, report = %+v, state = %+v, error = %v", rc, rollback, report, state, stateErr)
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestDriverSettleRunKeepsInterruptedReceiptOnRetry(t *testing.T) {
 	f := newFixture(t, bundleConfig(t), nil)
 	d := driverFor(t, f)
@@ -753,5 +913,51 @@ func TestDriverRecordsDeliveryID(t *testing.T) {
 	}
 	if p.Receipt.DeliveryID != d.DeliveryID || p.Receipt.Status(nil).DeliveryID != d.DeliveryID {
 		t.Fatalf("receipt delivery id = %q", p.Receipt.DeliveryID)
+	}
+}
+
+// GAP-0609: a receipt the driver cannot write on a full volume is disk_full
+// with the write cause, not state_invalid (a state that cannot be read).
+func TestDriverReceiptWriteOnAFullVolumeIsDiskFull(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	d.Store.EnsurePrivateDirectory = func(path string) error {
+		return &os.PathError{Op: "mkdir", Path: path, Err: syscall.ENOSPC}
+	}
+	_, err := d.Prepare(t.Context(), f.bundle, nil)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeDiskFull || !strings.Contains(err.Error(), "cannot write the policy bundle receipt") ||
+		!strings.Contains(err.Error(), "free space on that volume") {
+		t.Fatalf("receipt write error = %v; want disk_full naming the receipt", err)
+	}
+	if got := enterprisebundle.FailureCode(fmt.Errorf("write: %w", syscall.ENOSPC)); got != enterprisebundle.CodeDiskFull {
+		t.Fatalf("FailureCode(ENOSPC) = %s", got)
+	}
+	if got := enterprisebundle.FailureCode(errors.New("other")); got != enterprisebundle.CodeApplyFailed {
+		t.Fatalf("FailureCode(other) = %s", got)
+	}
+}
+
+func TestDriverConfirmWriteOnAFullVolumeNamesTheRecoveryStep(t *testing.T) {
+	f := newFixture(t, bundleConfig(t), nil)
+	d := driverFor(t, f)
+	p, err := d.Prepare(t.Context(), f.bundle, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy := installPreparedBundle(t, d, p)
+	d.Store.PublishPrivateFile = func(path string) error {
+		if path == d.Store.StatePath() {
+			return &os.PathError{Op: "publish", Path: path, Err: syscall.ENOSPC}
+		}
+		return nil
+	}
+	_, err = d.Finish(p, p.ConfigSHA256, nil, policy, false, nil)
+	if enterprisebundle.CodeOf(err) != enterprisebundle.CodeDiskFull ||
+		!strings.Contains(err.Error(), "recording its confirmation failed") ||
+		!strings.Contains(err.Error(), "free space on that volume, then run `defenseclaw enterprise windows ensure --profile standalone` to finish confirming it") {
+		t.Fatalf("confirmation error = %v; want disk_full and a free-space recovery step", err)
+	}
+	if p.Receipt.State != enterprisebundle.StateApplied {
+		t.Fatalf("receipt state = %s; want applied for recovery", p.Receipt.State)
 	}
 }

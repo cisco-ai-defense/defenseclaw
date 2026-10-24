@@ -426,8 +426,27 @@ class TestErrorPath(SyncTestBase):
 
         idx = load_index(self.cfg.data_dir, self.source.id)
         self.assertEqual(idx.find("mcp", "demo-mcp").status, "pending")
-        self.assertEqual(report.scanned, 1)
+        self.assertEqual(report.scanned, 0)
+        self.assertEqual(report.skipped, 1)
+        self.assertIn("scanner returned no result", report.skip_reasons[0])
+        self.assertEqual(report.to_dict()["skipped"], 1)
+        self.assertEqual(self.source.last_status, "partial")
         self.assertEqual(report.errors, [])
+
+    def test_mixed_scan_counts_only_completed_entries(self):
+        self.stub_fetch(_fresh_skill_manifest())
+        report = sync_source(
+            self.cfg,
+            self.cfg.data_dir,
+            self.source,
+            scan_callback=lambda _source, entry: None if entry.name == "demo-skill" else _scan_result(entry.name),
+            auto_promote=False,
+            save=False,
+        )
+        idx = load_index(self.cfg.data_dir, self.source.id)
+        self.assertEqual((report.fetched, report.scanned, report.skipped), (2, 1, 1))
+        self.assertEqual(idx.find("skill", "demo-skill").status, "pending")
+        self.assertEqual(idx.find("skill", "another-skill").status, "clean")
 
     def test_fetch_failure_recorded_on_source(self):
         from defenseclaw.registries.adapters import IngestError
@@ -526,8 +545,8 @@ def test_sync_table_spells_out_promoted_skills_and_mcps(capsys):
     assert cmd_registry._promoted_label(0, 1) == "1 MCP"
     assert cmd_registry._promoted_label(2, 3) == "2 skills, 3 MCPs"
     report = SimpleNamespace(
-        source_id="sf1-local", fetched=1, scanned=1, promoted_skills=0, promoted_mcps=1,
-        errors=[], ok=lambda: True,
+        source_id="sf1-local", fetched=1, scanned=1, skipped=0, skip_reasons=[], partial=[],
+        promoted_skills=0, promoted_mcps=1, errors=[], ok=lambda: True,
     )
     cmd_registry._print_sync_reports([report])
     out = capsys.readouterr().out

@@ -326,7 +326,7 @@ func TestAgentIdentityAfterAnUpgradeNeedsContinuityForTheIDsOfBefore(t *testing.
 			t.Fatalf("row %s retired %v; want only the row of before retired", row.AgentID, row.Retired)
 		}
 	}
-	incarnation, changed := adminViewAccountProvenance([]string{id})
+	incarnation, changed := adminViewAccountProvenance([]string{id}, "")
 	filter := inventory.AgentIdentityFilter{User: `OTHER\alice`, UserIDs: []string{id}, UserIncarnation: incarnation, HolderChanged: changed}
 	var selected []string
 	for _, row := range rows {

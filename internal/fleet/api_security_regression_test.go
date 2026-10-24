@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -91,6 +93,70 @@ func securityTestRequest(api *API, method, path, token, body string, tlsEnabled 
 	recorder := httptest.NewRecorder()
 	api.Handler().ServeHTTP(recorder, req)
 	return recorder
+}
+
+func TestFleetRegistrationThroughLocalTLSProxy(t *testing.T) {
+	t.Setenv("DCLAW_FLEET_API_TOKEN", testFleetToken)
+	for _, tc := range []struct {
+		name       string
+		trustProxy bool
+		wantStatus int
+	}{
+		{"default refuses forwarded TLS", false, http.StatusForbidden},
+		{"documented proxy setting delivers key", true, http.StatusCreated},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store := NewMemoryStore()
+			mgr := manager.New(nil)
+			mgr.SetStore(store)
+			api := NewAPI(ctx, mgr, securityTestCache(), WithDeviceKeyStore(store),
+				WithAuditEmitter(&passingCredentialAudit{}),
+				WithFleetSettings(FleetSettings{APIToken: testFleetToken, TrustProxyHeaders: tc.trustProxy}))
+			backend := httptest.NewServer(api.Handler())
+			defer backend.Close()
+			backendURL, err := url.Parse(backend.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxy := &httputil.ReverseProxy{Rewrite: func(req *httputil.ProxyRequest) {
+				req.SetURL(backendURL)
+				req.Out.URL.Path = strings.TrimPrefix(req.In.URL.Path, "/api/v1/fleet")
+				req.Out.Header.Set("X-Forwarded-Proto", "https")
+			}}
+			tlsProxy := httptest.NewTLSServer(proxy)
+			defer tlsProxy.Close()
+
+			body := strings.NewReader(`{"tenant_id":1,"fleet_id":1,"device_id":42}`)
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+				tlsProxy.URL+"/api/v1/fleet/devices", body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Authorization", "Bearer "+testFleetToken)
+			req.Header.Set("X-Requested-With", "XMLHttpRequest")
+			response, err := tlsProxy.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			var got map[string]any
+			if err := json.NewDecoder(response.Body).Decode(&got); err != nil {
+				t.Fatal(err)
+			}
+			if response.StatusCode != tc.wantStatus {
+				t.Fatalf("status=%d want=%d response=%v", response.StatusCode, tc.wantStatus, got)
+			}
+			if tc.trustProxy {
+				if key, ok := got["device_key"].(string); !ok || len(key) != 64 {
+					t.Fatalf("registration did not deliver a device key: %v", got)
+				}
+			} else if _, ok := mgr.GetDevice(manager.ComposeID(1, 1, 42)); ok {
+				t.Fatal("TLS proxy was trusted without fleet.trust_proxy_headers")
+			}
+		})
+	}
 }
 
 func TestFleetZeroTenantTokenCannotActAsAdmin(t *testing.T) {

@@ -285,6 +285,10 @@ func TestSandboxHardeningBakesPathAndWorkloadLogDir(t *testing.T) {
 	want := strings.Replace(string(host), `DEFENSECLAW_BAKED_HOOK_PATH=""`, `DEFENSECLAW_BAKED_HOOK_PATH="`+SandboxHookPATH+`"`, 1)
 	want = strings.Replace(want, `  local log_dir="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}/logs"`,
 		`  local log_dir="`+SandboxHookLogDir+`"`, 1)
+	// The workload log directory is made with its parents; the host helper
+	// creates only logs, never the folder a purge removed (GAP-0654).
+	want = strings.Replace(want, `  [ -d "$log_dir" ] || mkdir "$log_dir" 2>/dev/null || return 0`,
+		`  mkdir -p "$log_dir" 2>/dev/null || return 0`, 1)
 	if string(sandbox) != want {
 		t.Fatal("sandbox _hardening.sh differs from the host helper beyond PATH and the workload log directory")
 	}

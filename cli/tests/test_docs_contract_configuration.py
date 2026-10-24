@@ -297,20 +297,24 @@ def test_windows_bundle_mode_edit_is_restored_by_a_later_ensure_or_repair():
 
 
 def test_observability_reference_header_version_is_explained(monkeypatch):
-    # GAP-0540: the reference header names the schema family, not config_version.
+    # GAP-0540 with GAP-0617 (w24-setup-perf): the header names the current
+    # config_version; the page says which schema family covers it.
     from click.testing import CliRunner
     from defenseclaw.commands import cmd_config
+    from defenseclaw.config import CURRENT_CONFIG_VERSION
 
     root = DOCS.parents[2]
     embedded = (root / 'schemas/config/v8/reference/observability.yaml').read_text()
     monkeypatch.setattr(cmd_config, 'config_v8_reference', lambda fmt, section: embedded)
     res = CliRunner().invoke(cmd_config.config_reference, ['observability'])
     assert res.exit_code == 0, res.output
-    family = re.match(r'# (DEFENSECLAW CONFIGURATION (v\d+))', res.output)
+    family = re.match(r'# (DEFENSECLAW CONFIGURATION v(\d+))', res.output)
     assert family, res.output.splitlines()[0]
-    schema = json.loads((root / f'schemas/config/{family[2]}/defenseclaw-config.schema.json').read_text())
+    assert int(family[2]) == CURRENT_CONFIG_VERSION
+    schema = json.loads((root / 'schemas/config/v8/defenseclaw-config.schema.json').read_text())
     versions = schema['properties']['config_version']['enum']
+    assert CURRENT_CONFIG_VERSION in versions
     text = flat('reference/observability/index.mdx')
     assert f'`{family[1]}`' in text
     covers = ' and '.join(str(v) for v in versions)
-    assert f'`{family[2]}` names the schema family, which covers `config_version` {covers}' in text
+    assert f'schema family `v8`, which covers `config_version` {covers}' in text

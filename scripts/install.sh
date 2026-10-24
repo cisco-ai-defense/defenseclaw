@@ -161,6 +161,39 @@ sha256_of() {
     fi
 }
 
+# stage_binary NAME: on macOS, sign the verified archive binary in staging ad
+# hoc with its stable identifier and check the new signature. Signing changes
+# the file, so checksums.txt describes the archive, not the file that runs:
+# record the digest of the binary as it will run (GAP-0641).
+stage_binary() {
+    local file="${STAGING}/bin/$1" archive_sha="" sha=""
+    if [[ "${OS}" == darwin ]]; then
+        archive_sha="$(sha256_of "${file}")"
+        /usr/bin/codesign -f -s - -i "com.cisco.defenseclaw.${1#defenseclaw-}" "${file}" >/dev/null 2>&1 \
+            && /usr/bin/codesign --verify --strict "${file}" >/dev/null 2>&1 \
+            || die "Could not sign $1 for this Mac"
+    fi
+    sha="$(sha256_of "${file}")"
+    printf '%s  %s\n' "${sha}" "$1" >> "${STAGING}/binaries.sha256" || die "Could not record the digest of $1"
+    [[ -z "${archive_sha}" ]] || info "Signed $1 for this Mac: sha256 ${sha} (archive ${archive_sha})"
+}
+
+# record_binaries: keep the digests of the binaries that now run in the
+# installer folder, which upgrades snapshot and rollbacks restore, and check
+# that every installed binary is the one recorded.
+record_binaries() {
+    local sha name
+    cp "${STAGING}/binaries.sha256" "${INSTALLER_DIR}/.binaries.sha256.new" \
+        && chmod 600 "${INSTALLER_DIR}/.binaries.sha256.new" \
+        && mv -f "${INSTALLER_DIR}/.binaries.sha256.new" "${INSTALLER_DIR}/binaries.sha256" || return 1
+    while read -r sha name; do
+        [[ "$(sha256_of "${BIN_DIR}/${name}")" == "${sha}" ]] || {
+            warn "The installed ${name} is not the binary this install staged"
+            return 1
+        }
+    done < "${INSTALLER_DIR}/binaries.sha256"
+}
+
 # Read one answer from the terminal. A terminal left in -icrnl by an earlier
 # program sends Enter as a bare carriage return, so map CR to NL for this
 # read only, and drop a stray trailing CR from the answer.
@@ -492,6 +525,38 @@ installed_version() {
     done
 }
 
+# Older OpenCode and Amp processes retain their plugin in memory. Releases
+# before this one do not inspect .install.lock, so stopping the gateway under
+# one would let an open-mode tool call through. Inspect this account's native
+# agent processes immediately before a gateway swap; an unreadable process
+# list cannot establish that the swap is safe.
+loaded_plugin_agents() {
+    local processes
+    processes="$(ps -u "$(id -u)" -o pid= -o ucomm= -o args= 2>/dev/null)" || return 2
+    printf '%s\n' "$processes" | awk '
+        {
+            pid=$1; executable=tolower($2); sub(/^.*\//, "", executable)
+            # macOS can truncate the middle column to a launch-path prefix.
+            # argv[0] still carries the executable path in that case.
+            command=tolower($3); sub(/^.*\//, "", command)
+            agent=""
+            if (executable == "opencode" || executable == "opencode.exe" || command == "opencode" || command == "opencode.exe") agent="OpenCode"
+            else if (executable == "amp" || executable == "amp.exe" || command == "amp" || command == "amp.exe") agent="Amp"
+            else if (executable ~ /^(node|bun)(\.exe)?$/) {
+                args=tolower($0)
+                if (args ~ /(^|[\/[:space:]])opencode([\/[:space:]]|$)/) agent="OpenCode"
+                else if (args ~ /@sourcegraph\/amp([\/[:space:]]|$)/ || args ~ /(^|[\/[:space:]])amp([\/[:space:]]|$)/) agent="Amp"
+            }
+            if (agent != "") print agent " (PID " pid ")"
+        }'
+}
+
+assert_no_loaded_plugin_agents() {
+    local agents
+    agents="$(loaded_plugin_agents)" || die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    [[ -z "$agents" ]] || die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: ${agents//$'\n'/, }"
+}
+
 stop_gateway() {
     # stop_gateway BINARY: stop the running gateway, preferring its own binary.
     # The stop is the install's, not the operator's: the gateway.stopped
@@ -653,6 +718,20 @@ PY
     esac
 }
 
+# other_build_installed: the installed gateway reports another build of this
+# version (its commit or build date) than the staged one (GAP-1063). An
+# installed gateway that does not answer is repaired, as before. Sets
+# INSTALLED_BUILD and STAGED_BUILD to the commit each one names.
+other_build_installed() {
+    local installed staged
+    installed="$("${BIN_DIR}/defenseclaw-gateway" --version 2>/dev/null)" || return 1
+    staged="$("${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null)" || return 1
+    [[ "${installed}" == *"${VERSION}"* && "${installed}" != "${staged}" ]] || return 1
+    INSTALLED_BUILD="$(sed -n 's/.*(commit=\([^,)]*\).*/commit \1/p' <<<"${installed}" | head -1)"
+    STAGED_BUILD="$(sed -n 's/.*(commit=\([^,)]*\).*/commit \1/p' <<<"${staged}" | head -1)"
+    INSTALLED_BUILD="${INSTALLED_BUILD:-${installed}}" STAGED_BUILD="${STAGED_BUILD:-${staged}}"
+}
+
 # sandbox_state_carries V1 V2: both releases keep the sandbox setup as this one does.
 sandbox_state_carries() {
     is_version "$1" && is_version "$2" \
@@ -712,6 +791,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     saved_was_running="$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null || true)"
     restart="${was_running}"
     [[ "${saved_was_running}" == true ]] && restart=true
+    assert_no_loaded_plugin_agents
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
         remove_connector_registrations_for_legacy
@@ -859,7 +939,12 @@ checksum_ok() {
     [[ -n "${expected}" && "$(sha256_of "${file}")" == "${expected}" ]]
 }
 verify() {
-    checksum_ok "$@" || die "$(basename "$1") does not match checksums.txt; nothing was changed"
+    if ! checksum_ok "$@"; then
+        local asset
+        asset="$(basename "$1")"
+        rm -rf "${STAGING}" || die "${asset} does not match checksums.txt; could not remove staged assets at ${STAGING}; installed files were not changed"
+        die "${asset} does not match checksums.txt; staged assets were removed; nothing was changed"
+    fi
 }
 cosign_major="$(cosign version 2>/dev/null | awk '/GitVersion/{print $2}' | sed 's/^v//' | cut -d. -f1 || true)"
 if [[ "${cosign_major:-0}" =~ ^[0-9]+$ ]] && [[ "${cosign_major:-0}" -ge 2 ]]; then
@@ -899,10 +984,7 @@ tar -xzf "${STAGING}/${ARCHIVE}" -C "${STAGING}/bin" || die "Could not unpack ${
 for binary in ${MANAGED_BINARIES}; do
     [[ -f "${STAGING}/bin/${binary}" ]] || continue
     chmod 755 "${STAGING}/bin/${binary}"
-    if [[ "${OS}" == darwin ]]; then
-        /usr/bin/codesign -f -s - -i "com.cisco.defenseclaw.${binary#defenseclaw-}" "${STAGING}/bin/${binary}" >/dev/null 2>&1 \
-            || die "Could not sign ${binary} for this Mac"
-    fi
+    stage_binary "${binary}"
 done
 "${STAGING}/bin/defenseclaw-gateway" --version 2>/dev/null | grep -qF "${VERSION}" \
     || die "The gateway in ${ARCHIVE} does not report version ${VERSION}"
@@ -961,9 +1043,20 @@ ok "DefenseClaw ${VERSION} is staged and checked"
 
 # ── Swap ─────────────────────────────────────────────────────────────────────
 
+# A same-version run over the installed build is a repair: previous/ stays
+# the rollback copy. Another build of this version (a release candidate the
+# next one replaces) is replaced as an upgrade is: the replaced build becomes
+# the rollback copy, and this says so before the swap (GAP-1063).
+REPAIR=false
+if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]] && ! other_build_installed; then
+    REPAIR=true
+fi
 warn_running_sandboxes
-if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
+if [[ "${REPAIR}" == true ]]; then
     ask_yes_no "Reinstall DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
+elif [[ "${PREV_VERSION}" == "${VERSION}" ]]; then
+    info "The installed DefenseClaw ${VERSION} is another build (${INSTALLED_BUILD}) than this one (${STAGED_BUILD}); it is kept in ${PREVIOUS}, so 'defenseclaw rollback' returns to it"
+    ask_yes_no "Replace the installed build of DefenseClaw ${VERSION}?" || die "Cancelled; nothing was changed"
 elif [[ -n "${PREV_VERSION}" ]]; then
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${DEFENSECLAW_HOME}/audit.db" ]]; then
         # Audit migration 33 (privacy cutover) empties the pre-1.0 history.
@@ -984,6 +1077,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
+assert_no_loaded_plugin_agents
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
 OLD_GATEWAY_PID="$(gateway_pid || true)"
@@ -1008,7 +1102,7 @@ else
         || die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
 fi
 
-if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" == "${VERSION}" ]]; then
+if [[ "${REPAIR}" == true ]]; then
     SNAP="${DEFENSECLAW_HOME}/.repair"
 else
     SNAP="${DEFENSECLAW_HOME}/previous.new"
@@ -1053,7 +1147,15 @@ if [[ "${WAS_RUNNING}" == true ]]; then
     rm -f "${SNAP}/GATEWAY_RESTART_UNPROVEN"
 fi
 finish_swap
+# until 1.1: an upgrade or repair never ends with a removed connector's hook
+# left unsealed, whether or not its gateway was running before it.
+if [[ -n "${PREV_VERSION}" ]] && ! finish_retired_connector_cleanup; then
+    START_RC=3
+fi
 report_retired_connector_leftovers
+if [[ -n "${PREV_VERSION}" && "${WAS_RUNNING}" != true ]] && ! reconcile_stopped_connectors; then
+    START_RC=3
+fi
 trap - HUP PIPE
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
@@ -1095,10 +1197,11 @@ fi
 rm -rf "${STAGING}"
 ensure_path_hint
 printf "\n${BOLD}${GREEN}  DefenseClaw ${VERSION} is installed.${NC}\n"
-if [[ -n "${PREV_VERSION}" && "${PREV_VERSION}" != "${VERSION}" ]]; then
-    changed="Upgraded"
-    version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded"
-    printf "  ${changed} from ${PREV_VERSION}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
+if [[ -n "${PREV_VERSION}" && "${REPAIR}" != true ]]; then
+    changed="Upgraded from ${PREV_VERSION}"
+    version_lt "${VERSION}" "${PREV_VERSION}" && changed="Downgraded from ${PREV_VERSION}"
+    [[ "${PREV_VERSION}" == "${VERSION}" ]] && changed="Replaced the other build of ${VERSION}"
+    printf "  ${changed}. Undo with: ${CYAN}defenseclaw rollback${NC}\n"
     if version_lt "${PREV_VERSION}" 1.0.0 && [[ -f "${PREVIOUS}/data/audit.db" ]]; then
         printf "  The audit history ${PREV_VERSION} recorded is not carried over to 1.0; a copy is in ${PREVIOUS}/data/audit.db\n"
     fi
@@ -1134,13 +1237,10 @@ if [[ -n "${PREV_VERSION}" && -z "$(gateway_pid || true)" ]] \
 fi
 if [[ -n "${PREV_VERSION}" && "${RUN_QUICKSTART}" != true && ! -f "${DEFENSECLAW_HOME}/config.yaml" && -z "${DEFENSECLAW_CONFIG:-}" ]]; then
     # An earlier install that was never initialized: say how to start, as a
-    # fresh install does, with the connector picked back then.
-    NEXT_CONNECTOR="${CONNECTOR}"
-    if [[ -z "${NEXT_CONNECTOR}" && -f "${DEFENSECLAW_HOME}/picked_connector" ]]; then
-        NEXT_CONNECTOR="$(head -n 1 "${DEFENSECLAW_HOME}/picked_connector" | tr -cd 'a-z0-9_-')"
-    fi
-    if [[ -n "${NEXT_CONNECTOR}" && "${NEXT_CONNECTOR}" != none ]]; then
-        printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init --connector %s${NC}\n" "${NEXT_CONNECTOR}"
+    # fresh install does. The connector an earlier install recorded is not
+    # named: it may be the codex picked with no terminal to ask on (GAP-0568).
+    if [[ -n "${CONNECTOR}" && "${CONNECTOR}" != none ]]; then
+        printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init --connector %s${NC}\n" "${CONNECTOR}"
     else
         printf "  DefenseClaw is not set up yet. Next: ${CYAN}defenseclaw init${NC}\n"
     fi
@@ -1568,6 +1668,7 @@ swap_in() {
         cp -p "${STAGING}/bin/${binary}" "${BIN_DIR}/.${binary}.new" \
             && mv -f "${BIN_DIR}/.${binary}.new" "${BIN_DIR}/${binary}" || return 1
     done
+    mkdir -p "${INSTALLER_DIR}" && record_binaries || return 1
     for link in ${MANAGED_LINKS}; do
         target="${VENV}/bin/${link}"
         [[ -x "${target}" ]] || continue
@@ -1754,7 +1855,16 @@ restart_old() {
         return 0
     fi
     if [[ "${WAS_RUNNING}" == true ]]; then
-        start_gateway >/dev/null 2>&1 && return 0
+        local rc=0
+        start_gateway >/dev/null 2>&1 || rc=$?
+        [[ ${rc} -ne 0 ]] || return 0
+        if [[ ${rc} -eq 3 ]]; then
+            # It runs, but does not guard every connector (GAP-0878).
+            RESTORED_NOTE="Your previous install is back and its gateway runs, but a connector needs attention before it is guarded again."
+            warn "${RESTORED_NOTE}"
+            info "See which with: defenseclaw doctor"
+            return 0
+        fi
         # Say plainly that the gateway that ran before is down now (GAP-1349).
         RESTORED_NOTE="Your previous install is back, but its gateway is not running (see above)."
         warn "The gateway that was running before did not start again, so agent hooks are not guarded until it runs (connectors in fail-closed mode block tool calls)"
@@ -1775,7 +1885,7 @@ reset_audit_journal_mode() {
 }
 
 start_gateway() {
-    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate=""
+    local log="${DEFENSECLAW_HOME}/gateway.log" from=0 rc=0 deadline up=0 version delegate="" every=""
     # Each start explains only itself: the explanation of a failed new
     # gateway skipped the wait for the restored one, which was then
     # reported as not running while it came up (GAP-1241).
@@ -1789,10 +1899,16 @@ start_gateway() {
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.0; then delegate=1; fi
     if [[ -n "${version}" ]] && version_lt "${version}" 1.0.1; then reset_audit_journal_mode; fi
     [[ -f "${log}" ]] && from="$(wc -c < "${log}" | tr -d ' ')"
+    # GAP-0878: a gateway that has --require-every-connector exits 3, not 0,
+    # when its boot left a configured connector unguarded. An older one (a
+    # restored or rolled-back install) refuses the flag, so ask it first.
+    if [[ -z "${delegate}" ]] && "${BIN_DIR}/defenseclaw-gateway" start --require-every-connector --help >/dev/null 2>&1; then
+        every=--require-every-connector
+    fi
     if [[ -n "${delegate}" ]]; then
         PATH="${BIN_DIR}:${PATH}" DEFENSECLAW_UPGRADE_FRESH_PROCESS=1 "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
     else
-        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start || rc=$?
+        PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start ${every:+"${every}"} || rc=$?
     fi
     if [[ -n "${delegate}" && ${rc} -eq 0 ]]; then
         # Launched, not yet ready: it is up only once the loop below says so.
@@ -1814,7 +1930,12 @@ start_gateway() {
         if [[ -z "${START_EXPLAINED:-}" ]] && "${BIN_DIR}/defenseclaw-gateway" status >/dev/null 2>&1; then
             # Answering twice in a row, without a refusal in between: it is up.
             up=$((up + 1))
-            [[ ${up} -lt 2 ]] || { ok "The gateway finished starting"; return 0; }
+            if [[ ${up} -ge 2 ]]; then
+                ok "The gateway finished starting"
+                # Its start gave up before it could check the connectors.
+                [[ -z "${every}" ]] || PATH="${BIN_DIR}:${PATH}" "${BIN_DIR}/defenseclaw-gateway" start "${every}" >/dev/null || return 3
+                return 0
+            fi
         else
             up=0
         fi
@@ -1881,6 +2002,7 @@ finish_swap() {
         cp "${BASH_SOURCE[0]}" "${INSTALLER_DIR}/install.sh"
     fi
     rm -f "${tmp}"
+    record_saved_installer
     rm -rf "${DEFENSECLAW_HOME}/.upgrade-recovery" "${DEFENSECLAW_HOME}/.upgrade-receipts" \
         "${HOME}/.defenseclaw-install-custody" "$(dirname "${DEFENSECLAW_HOME}")/.defenseclaw-install-custody"
     # Pre-1.0 installers kept retired binaries in the temp folder they ran
@@ -1890,6 +2012,73 @@ finish_swap() {
     find -H "${TMPDIR:-/tmp}" /tmp -maxdepth 1 -user "$(id -u)" -name '.defenseclaw-install-custody-*' \
         -exec rm -rf {} + 2>/dev/null || true
     ok "Installed DefenseClaw ${VERSION}"
+}
+
+# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
+# down when it starts, but a start that brings the other connectors up only
+# logs one it could not finish, and an upgrade of a stopped gateway does not
+# start it. Check each here: one not done is torn down again, and one still
+# not done (an agent config that runs a hook DefenseClaw could not put the
+# sealed stub under) is named with its cause and step, and the install exits
+# 3, not 0. Without a config nothing was set up and the gateway cannot read
+# one, so there is nothing to check.
+finish_retired_connector_cleanup() {
+    local gateway="${BIN_DIR}/defenseclaw-gateway" name why failed=0
+    [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]] || return 0
+    if [[ ! -x "${gateway}" ]]; then
+        err "DefenseClaw ${VERSION} could not check that the removed OpenHands and OmniGent connectors are blocked: ${gateway} is missing"
+        return 1
+    fi
+    for name in openhands omnigent; do
+        "${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 && continue
+        "${gateway}" connector teardown --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" >>"${LOG}" 2>&1 || true
+        why="$("${gateway}" connector verify --connector "${name}" --data-dir "${DEFENSECLAW_HOME}" 2>&1)" && continue
+        printf '%s\n' "${why}" >>"${LOG}"
+        why="$(printf '%s' "${why}" | tr '\n' ' ' | sed -E 's/^[[:space:]]*(✗|X)[[:space:]]+//; s/[[:space:]]+$//')"
+        err "DefenseClaw ${VERSION} could not finish removing the ${name} connector, so its agent may not be blocked: ${why:-see ${LOG}}"
+        failed=1
+    done
+    return "${failed}"
+}
+
+# record_saved_installer: the SHA-256 of the saved installer, which
+# 'defenseclaw rollback' checks before it runs that file (GAP-1067). It is
+# kept with the data, in receipts/ (a DefenseClaw security-state folder the
+# tamper rule watches), so it moves with the install it belongs to on every
+# swap.
+record_saved_installer() {
+    local record="${DEFENSECLAW_HOME}/receipts/installer.sha256"
+    rm -f "${record}"
+    [[ -f "${INSTALLER_DIR}/install.sh" ]] || return 0
+    mkdir -p "${DEFENSECLAW_HOME}/receipts" \
+        && printf '%s  install.sh\n' "$(sha256_of "${INSTALLER_DIR}/install.sh")" > "${record}.new" \
+        && mv -f "${record}.new" "${record}" \
+        || warn "Could not record the digest of the saved installer, so 'defenseclaw rollback' will not run it; record it again with: defenseclaw upgrade --version ${VERSION} --yes"
+}
+
+# A gateway that was not running before an upgrade or repair is not started,
+# so nothing rendered this release's hooks: a connector kept the hook an
+# earlier release wrote (a 1.0.3 Hermes hook cannot answer this release's
+# execution probe) and the install exited 0 with it unprotected. The new
+# gateway puts every connector the config guards on its current hook and
+# reads each back; one it cannot is named with the cause, and the install
+# exits 3. Without a config nothing was set up. An older gateway (a
+# downgrade) has no --every-connector and renders its hooks when it starts.
+reconcile_stopped_connectors() {
+    local gateway="${BIN_DIR}/defenseclaw-gateway" out rc=0 why
+    [[ -f "${DEFENSECLAW_HOME}/config.yaml" || -n "${DEFENSECLAW_CONFIG:-}" ]] || return 0
+    if [[ ! -x "${gateway}" ]]; then
+        err "DefenseClaw ${VERSION} could not put the connectors on their current hooks: ${gateway} is missing"
+        return 1
+    fi
+    "${gateway}" connector reconcile --every-connector --help >/dev/null 2>&1 || return 0
+    out="$(DEFENSECLAW_CONFIG="${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}" \
+        "${gateway}" connector reconcile --every-connector --data-dir "${DEFENSECLAW_HOME}" 2>&1)" || rc=$?
+    printf '%s\n' "${out}" >>"${LOG}"
+    [[ ${rc} -ne 0 ]] || return 0
+    why="$(printf '%s\n' "${out}" | sed -n 's/^Error: //p' | tail -n 1)"
+    err "DefenseClaw ${VERSION} could not put every connector on its current hook while the gateway is stopped: ${why:-exit ${rc}, see ${LOG}}"
+    return 1
 }
 
 # until 1.1: the removed connectors' teardown deliberately keeps vendor
@@ -2353,10 +2542,12 @@ pick_connector() {
     # An answer that is neither a number on the list nor a name is asked
     # again, never replaced with another agent (GAP-0333).
     while :; do
-        printf "  Choice (number or name) [default 1=codex]: " >&2
-        # No terminal to answer on: the default, as before.
+        printf "  Choice (number or name) [default none]: " >&2
+        # Enter, or no terminal to answer on: no agent. A default never picks
+        # one the machine may not have; 'defenseclaw init' finds the installed
+        # agents (GAP-0568).
         choice=$(read_tty_line) || choice=""
-        CONNECTOR="$(connector_choice "${choice:-1}")" && break
+        CONNECTOR="$(connector_choice "${choice:-none}")" && break
         tries=$((tries + 1))
         if [[ ${tries} -ge 3 ]]; then
             rm -rf "${STAGING}"

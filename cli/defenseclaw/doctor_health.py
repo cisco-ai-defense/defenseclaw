@@ -36,12 +36,20 @@ from typing import Any
 
 from defenseclaw.connector_contracts import (
     HOOK_CONTRACTS,
+    KIRO_CLI_HOOK_FLOOR,
+    KIRO_FORM_IDE,
+    KIRO_IDE_GLOBAL_HOOKS_FLOOR,
     PROXY_CONNECTORS,
     REGISTERED_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
     STATUS_UNVERSIONED,
     ConnectorContract,
+    KiroFormVerdict,
+    assess_kiro_signal,
+    kiro_cli_below_hook_floor_reason,
+    known_broken_entry,
+    known_warning_entry,
     normalize_agent_version,
     normalize_connector,
     resolve_connector_contract,
@@ -401,6 +409,98 @@ def assess_component_health(
     return tuple(findings)
 
 
+def _kiro_floor_finding(
+    normalized: str, ranges: tuple[str, ...], *, auxiliary: bool = False
+) -> ConnectorHealthFinding:
+    return ConnectorHealthFinding(
+        connector="kiro",
+        status=HealthStatus.UNSUPPORTED,
+        reason_code="kiro-cli-below-hook-floor-auxiliary" if auxiliary else "connector-version-outside-contract",
+        summary=kiro_cli_below_hook_floor_reason(normalized),
+        installed_version=normalized,
+        supported_agent_ranges=ranges,
+        remediations=(
+            RemediationChoice(
+                choice_id="install-supported-connector-version",
+                summary=f"Update Kiro CLI to {KIRO_CLI_HOOK_FLOOR} or later, then rerun setup",
+                kind=RemediationKind.MANUAL,
+                changes_state=True,
+                requires_confirmation=True,
+                unattended_allowed=False,
+            ),
+            _refresh_discovery_choice(),
+        ),
+    )
+
+
+def _kiro_form_finding(form: KiroFormVerdict, ranges: tuple[str, ...], *, auxiliary: bool) -> ConnectorHealthFinding:
+    """The finding of one Kiro form assess_kiro does not protect.
+
+    An auxiliary form sits beside the protected form setup covers: it is
+    reported, but it does not block repairing that form.
+    """
+
+    if form.below_floor and form.kind != KIRO_FORM_IDE:
+        return _kiro_floor_finding(form.normalized, ranges, auxiliary=auxiliary)
+    if form.below_floor:
+        return ConnectorHealthFinding(
+            connector="kiro",
+            status=HealthStatus.UNSUPPORTED,
+            reason_code="kiro-ide-below-global-hooks-floor" + ("-auxiliary" if auxiliary else ""),
+            summary=(
+                f"Kiro IDE {form.normalized} is below {KIRO_IDE_GLOBAL_HOOKS_FLOOR}, the first build that reads "
+                "the global ~/.kiro/hooks file, so its agent sessions run without DefenseClaw hooks"
+            ),
+            installed_version=form.normalized,
+            supported_agent_ranges=ranges,
+            remediations=(
+                RemediationChoice(
+                    choice_id="install-supported-connector-version",
+                    summary=f"Update Kiro IDE to {KIRO_IDE_GLOBAL_HOOKS_FLOOR} or later, then rerun setup",
+                    kind=RemediationKind.MANUAL,
+                    changes_state=True,
+                    requires_confirmation=True,
+                    unattended_allowed=False,
+                ),
+                _refresh_discovery_choice(),
+            ),
+        )
+    product = "a Kiro IDE install" if form.kind == KIRO_FORM_IDE else "kiro-cli"
+    return ConnectorHealthFinding(
+        connector="kiro",
+        status=HealthStatus.UNTESTED,
+        reason_code="kiro-version-unknown-auxiliary" if auxiliary else "connector-version-not-observed",
+        summary=(
+            f"{product} is installed, but its version could not be read, so DefenseClaw cannot check it "
+            "against its hook floor and does not count it as protected"
+        ),
+        supported_agent_ranges=ranges,
+        remediations=_untested_connector_remediations("kiro"),
+    )
+
+
+def _kiro_health_findings(signal: Any, ranges: tuple[str, ...]) -> list[ConnectorHealthFinding]:
+    """Kiro's findings from assess_kiro: the protected form setup covers is
+    supported, and every other installed form gets its own finding, so a
+    supported IDE never hides an old or unreadable kiro-cli (or the reverse)."""
+
+    kiro = assess_kiro_signal(signal)
+    if kiro.selected is None:
+        return [_kiro_form_finding(form, ranges, auxiliary=False) for form in kiro.forms]
+    findings = [
+        ConnectorHealthFinding(
+            connector="kiro",
+            status=HealthStatus.SUPPORTED,
+            reason_code="connector-not-version-gated",
+            summary="kiro is not agent-version gated",
+            installed_version=_safe_semver_from_agent(kiro.selected.normalized),
+            capabilities=ConnectorCapabilities(connection_kind="hook"),
+        )
+    ]
+    findings.extend(_kiro_form_finding(form, ranges, auxiliary=True) for form in kiro.unprotected())
+    return findings
+
+
 def assess_connector_health(
     active_connectors: Iterable[str],
     discovery: Any | None,
@@ -460,6 +560,10 @@ def assess_connector_health(
             )
             continue
 
+        if connector == "kiro":
+            findings.extend(_kiro_health_findings(signal, ranges))
+            continue
+
         raw_version = getattr(signal, "version", "")
         raw_version = raw_version if isinstance(raw_version, str) else ""
         compatibility = resolve_connector_contract(connector, raw_version)
@@ -478,6 +582,27 @@ def assess_connector_health(
                     ),
                     installed_version=_safe_semver_from_agent(raw_version),
                     capabilities=ConnectorCapabilities(connection_kind="proxy" if proxy else "hook"),
+                )
+            )
+            continue
+
+        warned = known_warning_entry(connector, raw_version) if compatibility.warning else None
+        if compatibility.status == STATUS_KNOWN and compatibility.contract is not None and warned is not None:
+            # Hermes 0.19.0-0.21.0 are guarded except in their TUI and
+            # dashboard chat, which run tools without the hooks: a warning
+            # that points past those releases, not a failure.
+            contract = compatibility.contract
+            findings.append(
+                ConnectorHealthFinding(
+                    connector=public_name,
+                    status=HealthStatus.UNTESTED,
+                    reason_code="connector-version-partly-guarded",
+                    summary=f"{public_name} is guarded, but {warned['reason']}",
+                    installed_version=_safe_semver_from_agent(raw_version),
+                    contract_id=_safe_token(contract.contract_id),
+                    supported_agent_ranges=ranges,
+                    capabilities=_contract_capabilities(contract),
+                    remediations=_known_broken_connector_remediations(public_name, warned),
                 )
             )
             continue
@@ -536,20 +661,27 @@ def assess_connector_health(
             continue
 
         normalized = _safe_semver_from_agent(raw_version)
-        if normalized:
+        broken, _ = known_broken_entry(connector, raw_version)
+        if normalized or broken is not None:
+            # A known-broken version says why, and points past the broken
+            # releases instead of at a range that holds them.
             findings.append(
                 ConnectorHealthFinding(
                     connector=public_name,
                     status=HealthStatus.UNSUPPORTED,
                     reason_code="connector-version-outside-contract",
                     summary=(
-                        f"{public_name} agent version is on the known-broken list"
-                        if "known broken" in (compatibility.reason or "")
+                        f"{public_name} agent version is on the known-broken list: {broken['reason']}"
+                        if broken is not None
                         else f"{public_name} agent version is not covered by a tested connector contract"
                     ),
                     installed_version=normalized,
                     supported_agent_ranges=ranges,
-                    remediations=_unsupported_connector_remediations(public_name, ranges),
+                    remediations=(
+                        _known_broken_connector_remediations(public_name, broken)
+                        if broken is not None
+                        else _unsupported_connector_remediations(public_name, ranges)
+                    ),
                 )
             )
         else:
@@ -560,7 +692,7 @@ def assess_connector_health(
                     reason_code="connector-version-unparseable",
                     summary=f"{public_name} agent version could not be verified",
                     supported_agent_ranges=ranges,
-                    remediations=_untested_connector_remediations(public_name),
+                    remediations=_unreadable_connector_version_remediations(public_name, ranges),
                 )
             )
     return tuple(findings)
@@ -885,6 +1017,15 @@ def _untested_connector_remediations(connector: str) -> tuple[RemediationChoice,
     )
 
 
+def _unreadable_connector_version_remediations(
+    connector: str,
+    ranges: tuple[VersionRange, ...],
+) -> tuple[RemediationChoice, ...]:
+    # Setup refuses a version it cannot read in observe and action mode, so
+    # setup is not a next step: read it again, or install a covered version.
+    return (_refresh_discovery_choice(), *_unsupported_connector_remediations(connector, ranges)[:1])
+
+
 def _unavailable_connector_remediations(connector: str) -> tuple[RemediationChoice, ...]:
     return (
         RemediationChoice(
@@ -908,6 +1049,21 @@ def _unsupported_connector_remediations(
         RemediationChoice(
             choice_id="install-supported-connector-version",
             summary=f"Install {connector} {range_text} from its trusted vendor distribution",
+            kind=RemediationKind.MANUAL,
+            changes_state=True,
+            requires_confirmation=True,
+            unattended_allowed=False,
+        ),
+        _refresh_discovery_choice(),
+    )
+
+
+def _known_broken_connector_remediations(connector: str, broken: dict[str, Any]) -> tuple[RemediationChoice, ...]:
+    return (
+        RemediationChoice(
+            choice_id="install-supported-connector-version",
+            summary=f"Install a {connector} release that is not known broken ({broken['issue']}), "
+            f"then run: defenseclaw setup {connector}",
             kind=RemediationKind.MANUAL,
             changes_state=True,
             requires_confirmation=True,

@@ -61,6 +61,39 @@ func TestRestorePublishedDirsAddsOnlyTheMissingModeBits(t *testing.T) {
 	}
 }
 
+func TestRestorePublishedDirsRemovesWriteWithoutMissingReadOrSearch(t *testing.T) {
+	withHigherSources(t)
+	for _, platform := range []string{"linux", "darwin"} {
+		for _, mode := range []os.FileMode{0o775, 0o757, 0o777} {
+			t.Run(fmt.Sprintf("%s/%04o", platform, mode), func(t *testing.T) {
+				opts := publishTestOptions(t)
+				opts.GOOS = platform
+				if _, err := Publish(opts, []string{"claudecode"}); err != nil {
+					t.Fatal(err)
+				}
+				dir := filepath.Join(claudeDir(t, opts), "managed-settings.d")
+				if err := os.Chmod(dir, mode); err != nil {
+					t.Fatal(err)
+				}
+				restored, err := RestorePublishedPolicyDirs(opts)
+				if err != nil || !containsString(restored, dir) {
+					t.Fatalf("restore writable published dir = %v, %v", restored, err)
+				}
+				if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != mode&^0o022 {
+					t.Fatalf("repaired directory = %v, %v; want %04o", info, err, mode&^0o022)
+				}
+				result, err := VerifyAll(opts, []string{"claudecode"})
+				if err != nil || !containsString(result.MachinePolicyConnectors, "claudecode") {
+					t.Fatalf("verify repaired policy: %+v, %v", result, err)
+				}
+				if again, err := RestorePublishedPolicyDirs(opts); err != nil || len(again) != 0 {
+					t.Fatalf("second repair = %v, %v", again, err)
+				}
+			})
+		}
+	}
+}
+
 // GAP-0924: Codex opens /etc/codex/requirements.toml by name, so the repair
 // of an administrator's 0700 /etc/codex adds search only: listing it showed
 // its unrelated files to every account. Search alone lets any account open
@@ -128,6 +161,9 @@ func TestRestorePublishedDirsRemovesOnlyTheDenyingMacOSACLEntries(t *testing.T) 
 		t.Fatal(err)
 	}
 	dir := filepath.Join(opts.Root, "Library/Application Support/ClaudeCode/managed-settings.d")
+	if err := os.Chmod(dir, 0o775); err != nil {
+		t.Fatal(err)
+	}
 	acl := []managed.DarwinACLEntry{
 		{Index: 0, Text: "user:admin allow read,write", Allow: true, Rights: []string{"read", "write"}},
 		{Index: 1, Text: "group:everyone deny list,search", Rights: []string{"list", "search"}},
@@ -167,6 +203,9 @@ func TestRestorePublishedDirsRemovesOnlyTheDenyingMacOSACLEntries(t *testing.T) 
 	restored, err := RestorePublishedPolicyDirs(opts)
 	if err != nil || !containsString(restored, dir) {
 		t.Fatalf("restore published dirs = %v, %v", restored, err)
+	}
+	if info, err := os.Stat(dir); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("ACL repair left a writable directory: %v, %v", info, err)
 	}
 	if !reflect.DeepEqual(removed, []int{3, 1, 0}) {
 		t.Fatalf("removed ACL entries %v, want only the denying and the write ones, highest first: [3 1 0]", removed)

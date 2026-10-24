@@ -118,7 +118,14 @@ func TestManagementContractWindowsSecret(t *testing.T) {
 	previousRestart := windowsSecretRestartGateway
 	t.Cleanup(func() { windowsSecretRestartGateway = previousRestart })
 	for _, running := range []bool{false, true} {
-		windowsSecretRestartGateway = func() (bool, error) { return running, nil }
+		windowsSecretRestartGateway = func(beforeStop func() error) (bool, error) {
+			if running {
+				if err := beforeStop(); err != nil {
+					return false, err
+				}
+			}
+			return running, nil
+		}
 		out, err = runWindowsSecretCommand(t, "set", enterpriseSecretOptions{name: "ai-defense-api-key", fromStdin: true, json: true}, value+"\r\n")
 		if err != nil {
 			t.Fatalf("identical set (gateway running %v): %v", running, err)

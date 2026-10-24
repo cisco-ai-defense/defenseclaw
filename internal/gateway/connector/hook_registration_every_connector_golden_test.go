@@ -44,6 +44,10 @@ type hookRegistrationCase struct {
 	Scope     string                 `json:"scope"`
 	OS        string                 `json:"os"`
 	Files     []hookRegistrationFile `json:"files"`
+	// Agent files Setup writes beside the hook files that register no hook:
+	// the Hermes shell-hooks-allowlist.json approvals, without which Hermes
+	// skips the hooks (rel-1-0-4 GAP-0339).
+	AgentFiles []hookRegistrationFile `json:"agent_files,omitempty"`
 }
 
 type hookRegistrationGoldenFile struct {
@@ -61,7 +65,7 @@ func TestEveryHookConnectorSetupMatchesTheSharedGolden(t *testing.T) {
 	setHookBinaryOverride(t, "/opt/defenseclaw/bin/defenseclaw-gateway")
 	golden := hookRegistrationGoldenFile{
 		About: "Agent hook files per-user Setup writes, by connector and scope; {home} and {data_dir} stand for the " +
-			"account home and DefenseClaw data directory, {otlp_token} and {digest} for per-run values. Written by TestEveryHookConnectorSetupMatchesTheSharedGolden " +
+			"account home and DefenseClaw data directory, {otlp_token}, {digest} and {time} for per-run values; agent_files are the files Setup writes beside them that register no hook. Written by TestEveryHookConnectorSetupMatchesTheSharedGolden " +
 			"(internal/gateway/connector); read by cli/tests/test_hook_registration_every_connector.py (GAP-0489).",
 	}
 	for _, conn := range newBuiltinConnectors() {
@@ -170,6 +174,17 @@ func hookRegistrationSetupCase(t *testing.T, conn Connector, scope string) (hook
 	}
 	if len(c.Files) == 0 {
 		t.Fatalf("%s %s Setup wrote none of its hook config paths %v", conn.Name(), scope, paths)
+	}
+	if conn.Name() == "hermes" {
+		allowlist := filepath.Join(filepath.Dir(hermesConfigPath(opts)), hermesAllowlistFileName)
+		data, err := os.ReadFile(allowlist)
+		if err != nil {
+			t.Fatalf("hermes %s Setup wrote no %s: %v", scope, hermesAllowlistFileName, err)
+		}
+		c.AgentFiles = append(c.AgentFiles, hookRegistrationFile{
+			Path:    hookRegistrationTemplate(allowlist, home, dataDir),
+			Content: hookRegistrationTemplate(string(data), home, dataDir),
+		})
 	}
 	return c, true
 }
@@ -290,16 +305,18 @@ func windowsRegistrationCases(t *testing.T) []hookRegistrationCase {
 	return cases
 }
 
-// The OTLP bearer token and the Codex trusted hashes (which hash the absolute
-// config path) differ on every run.
+// The OTLP bearer token, the Codex trusted hashes (which hash the absolute
+// config path) and the Hermes approval times differ on every run.
 var (
 	hookRegistrationBearer = regexp.MustCompile(`Bearer [0-9a-f]{64}`)
 	hookRegistrationDigest = regexp.MustCompile(`sha256:[0-9a-f]{64}`)
+	hookRegistrationTime   = regexp.MustCompile(`"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z"`)
 )
 
 func hookRegistrationTemplate(text, home, dataDir string) string {
 	text = strings.ReplaceAll(strings.ReplaceAll(text, dataDir, "{data_dir}"), home, "{home}")
 	text = hookRegistrationBearer.ReplaceAllString(text, "Bearer {otlp_token}")
+	text = hookRegistrationTime.ReplaceAllString(text, `"{time}"`)
 	return hookRegistrationDigest.ReplaceAllString(text, "sha256:{digest}")
 }
 

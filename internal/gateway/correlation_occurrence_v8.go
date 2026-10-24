@@ -19,6 +19,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sandboxauth"
 	"github.com/google/uuid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -87,15 +88,35 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		return ctx, req, err
 	}
 	custody := audit.ConnectorCustodyHookOnly
+	nativePerUserHookOnly := false
 	if spec.NativeTelemetry.Stability != connector.NativeTelemetryNone {
-		// Migration never rewrites a connector's exporter. Authenticated native
-		// ingestion promotes this to defenseclaw; hook traffic only records the
-		// unchanged external topology.
+		// On managed hosts, authenticated native ingestion promotes this to
+		// defenseclaw; hook traffic alone records external custody.
 		custody = audit.ConnectorCustodyExternal
+		// Per-user Codex and Claude Code no longer install a native exporter:
+		// it cannot prove the account behind a loopback port. A previous
+		// release's native custody is historical after this upgrade.
+		_, sandboxed := sandboxauth.FromContext(ctx)
+		if cfg := a.runtimeConfigSnapshot(); !sandboxed && cfg != nil && cfg.EnterpriseProfile() == "" &&
+			(req.ConnectorName == "codex" || req.ConnectorName == "claudecode") {
+			custody = audit.ConnectorCustodyHookOnly
+			nativePerUserHookOnly = true
+		}
 	}
 	instance, err := resolveConnectorInstanceForRequest(ctx, repo, req.ConnectorName, string(spec.ProfileVersion), custody)
 	if err != nil {
 		return ctx, req, err
+	}
+	if nativePerUserHookOnly && instance.ExportCustody != custody {
+		// Resolve never downgrades an authenticated native stream from an older
+		// release. The verified per-user profile transition explicitly does.
+		instance.ExportCustody = custody
+		instance.ManagedConfigDigest = ""
+		instance.UpdatedAt = time.Now().UTC()
+		instance, err = repo.UpsertConnectorInstance(ctx, instance)
+		if err != nil {
+			return ctx, req, err
+		}
 	}
 
 	now := time.Now().UTC()
@@ -258,6 +279,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 	receipt := correlationReceiptForHook(
 		spec,
 		instance.ConnectorInstanceID,
+		hookReceiptCaller(ctx),
 		sourceDigest,
 		fingerprintHex,
 		now,
@@ -382,7 +404,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		}
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleToolStart && req.ToolInvocationID != "" {
-		identity := hookOperationIdentityForValue(instance.ConnectorInstanceID,
+		identity := hookSessionOperationIdentityForValue(instance.ConnectorInstanceID, req.SessionID,
 			req.CorrelationValues[connector.CorrelationTargetTool], connector.CorrelationTargetTool)
 		if !identity.valid() {
 			return ctx, req, errors.New("tool start is missing a typed pending-operation identity")
@@ -400,7 +422,7 @@ func (a *APIServer) correlateHookOccurrenceOnce(
 		}
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleModelStart && req.ModelRequestID != "" {
-		identity := hookOperationIdentityForValue(instance.ConnectorInstanceID,
+		identity := hookSessionOperationIdentityForValue(instance.ConnectorInstanceID, req.SessionID,
 			req.CorrelationValues[connector.CorrelationTargetModelRequest], connector.CorrelationTargetModelRequest)
 		if !identity.valid() {
 			return ctx, req, errors.New("model start is missing a typed pending-operation identity")
@@ -589,12 +611,11 @@ func (identity hookOperationIdentity) locator(
 	}
 }
 
-// Pending-operation identity is always scoped by the authenticated connector
-// instance in addition to the provider namespace and canonical ID kind. This
-// permits an exact terminal ID to recover its start even when the terminal
-// hook omits session/turn context, while a provider reusing the same ID in a
-// second session fails closed as an identity collision instead of merging two
-// operations.
+// The connector instance, provider namespace and canonical ID kind scope
+// every pending operation. Hook starts with a session add that recorded
+// session to the key: a provider may reuse a tool ID in another session.
+// A terminal lacking its session may recover a start only when the exact ID
+// names one active operation across those sessions.
 func hookOperationIdentityForValue(
 	instance audit.ConnectorInstanceID,
 	value connector.CorrelationValue,
@@ -619,6 +640,20 @@ func hookOperationIdentityForValue(
 	}
 }
 
+func hookSessionOperationIdentityForValue(
+	instance audit.ConnectorInstanceID,
+	sessionID string,
+	value connector.CorrelationValue,
+	target connector.CorrelationTarget,
+) hookOperationIdentity {
+	identity := hookOperationIdentityForValue(instance, value, target)
+	if identity.valid() && sessionID != "" {
+		identity.scopeKind = audit.CorrelationOperationScopeSession
+		identity.scopeID = sessionID
+	}
+	return identity
+}
+
 func hookOperationIdentityCandidates(
 	instance audit.ConnectorInstanceID,
 	req agentHookRequest,
@@ -627,7 +662,9 @@ func hookOperationIdentityCandidates(
 	exactOperationID string,
 ) []hookOperationIdentity {
 	if exactOperationID != "" {
-		return []hookOperationIdentity{hookOperationIdentityForValue(instance, req.CorrelationValues[target], target)}
+		return []hookOperationIdentity{hookSessionOperationIdentityForValue(
+			instance, req.SessionID, req.CorrelationValues[target], target,
+		)}
 	}
 	values := make([]connector.CorrelationValue, 0, len(spec.HookBindings)+1)
 	for _, binding := range spec.HookBindings {
@@ -643,16 +680,21 @@ func hookOperationIdentityCandidates(
 	values = append(values, connector.CorrelationValue{
 		Target: target, Namespace: "defenseclaw", IDKind: string(target),
 	})
-	identities := make([]hookOperationIdentity, 0, len(values))
+	identities := make([]hookOperationIdentity, 0, 2*len(values))
 	seen := make(map[string]bool, len(values))
 	for _, value := range values {
-		identity := hookOperationIdentityForValue(instance, value, target)
-		key := identity.namespace + "\x00" + string(identity.kind) + "\x00" + identity.scopeID
-		if !identity.valid() || seen[key] {
-			continue
+		for _, identity := range []hookOperationIdentity{
+			hookSessionOperationIdentityForValue(instance, req.SessionID, value, target),
+			hookOperationIdentityForValue(instance, value, target),
+		} {
+			key := identity.namespace + "\x00" + string(identity.kind) + "\x00" +
+				string(identity.scopeKind) + "\x00" + identity.scopeID
+			if !identity.valid() || seen[key] {
+				continue
+			}
+			seen[key] = true
+			identities = append(identities, identity)
 		}
-		seen[key] = true
-		identities = append(identities, identity)
 	}
 	return identities
 }
@@ -675,18 +717,55 @@ func findHookPendingOperation(
 	var matched audit.CorrelationPendingOperation
 	var matchedIdentity hookOperationIdentity
 	found := false
+	if exactOperationID != "" {
+		// An exact provider ID is sufficient only when it identifies one
+		// active operation. A reported session must match a recorded session,
+		// or a start with no recorded session. A terminal that omits its
+		// session may still recover a unique start across all sessions.
+		seen := make(map[string]bool, len(identities))
+		for _, identity := range identities {
+			key := identity.namespace + "\x00" + string(identity.kind)
+			if !identity.valid() || seen[key] {
+				continue
+			}
+			seen[key] = true
+			query := audit.CorrelationPendingQuery{
+				ConnectorInstanceID: instance, Namespace: identity.namespace, Kind: identity.kind,
+				OperationID: exactOperationID, Type: operationType,
+				SessionID: req.SessionID, SessionIDOrAbsent: req.SessionID != "",
+				Status: audit.CorrelationOperationActive, Limit: 2,
+			}
+			operations, err := repo.ListPendingOperations(ctx, query)
+			if err != nil {
+				return audit.CorrelationPendingOperation{}, identity, false, err
+			}
+			if len(operations) > 1 {
+				return audit.CorrelationPendingOperation{}, identity, false, audit.ErrCorrelationConflict
+			}
+			if len(operations) == 0 {
+				continue
+			}
+			operation := operations[0]
+			if found {
+				return audit.CorrelationPendingOperation{}, identity, false, audit.ErrCorrelationConflict
+			}
+			matched = operation
+			matchedIdentity = hookOperationIdentity{namespace: operation.Namespace, kind: operation.Kind,
+				scopeKind: operation.ScopeKind, scopeID: operation.ScopeID}
+			found = true
+		}
+		if found {
+			return matched, matchedIdentity, true, nil
+		}
+		return audit.CorrelationPendingOperation{}, identities[0], false, audit.ErrCorrelationNotFound
+	}
 	for _, identity := range identities {
 		query := audit.CorrelationPendingQuery{
 			ConnectorInstanceID: instance, Namespace: identity.namespace, Kind: identity.kind,
-			OperationID: exactOperationID, Type: operationType,
+			Type:      operationType,
 			ScopeKind: identity.scopeKind, ScopeID: identity.scopeID,
-		}
-		if exactOperationID == "" {
-			query.Name = name
-			query.SessionID = req.SessionID
-			query.TurnID = req.TurnID
-			query.AgentID = req.AgentID
-			query.ExecutionID = req.ExecutionID
+			Name: name, SessionID: req.SessionID, TurnID: req.TurnID,
+			AgentID: req.AgentID, ExecutionID: req.ExecutionID,
 		}
 		operation, err := repo.FindUniquePendingOperation(ctx, query)
 		if errors.Is(err, audit.ErrCorrelationNotFound) {
@@ -705,11 +784,6 @@ func findHookPendingOperation(
 	}
 	if found {
 		return matched, matchedIdentity, true, nil
-	}
-	// Retain an exact provider identity as unresolved evidence. Crucially, it
-	// never falls through to the current cursor or a name/time-only operation.
-	if exactOperationID != "" {
-		return audit.CorrelationPendingOperation{}, identities[0], false, audit.ErrCorrelationNotFound
 	}
 	return audit.CorrelationPendingOperation{}, hookOperationIdentity{}, false, audit.ErrCorrelationNotFound
 }
@@ -947,20 +1021,40 @@ func dedupeCorrelationValues(slices []connector.CorrelationValue, canonical map[
 	return out
 }
 
+// correlationReceiptForHook is the delivery receipt of a hook occurrence.
+// caller (hookReceiptCaller) scopes it to the verified account that sent
+// the hook: on a managed host every account's hooks share one connector
+// instance, and the same body from another account is that account's own
+// call, never a replay of the first one's, so it keeps its own decision
+// records (GAP-1028).
 func correlationReceiptForHook(
 	spec connector.CorrelationSpec,
 	instance audit.ConnectorInstanceID,
-	sourceDigest, fingerprint string,
+	caller, sourceDigest, fingerprint string,
 	now time.Time,
 ) *audit.CorrelationReceiptClaim {
 	if sourceDigest == "" ||
 		!spec.AllowsReceiptTarget(connector.CorrelationTargetSourceEvent) {
 		return nil
 	}
+	channel := string(connector.CorrelationSurfaceHook)
+	if caller != "" {
+		channel += "/caller=" + caller
+	}
 	return &audit.CorrelationReceiptClaim{SourceKeyDigest: correlationReceiptSourceKey(
-		instance, audit.CorrelationRailHook, string(connector.CorrelationSurfaceHook), sourceDigest,
+		instance, audit.CorrelationRailHook, channel, sourceDigest,
 	), FingerprintSHA256: fingerprint,
 		ReceivedAt: now, ExpiresAt: now.Add(correlationReceiptTTL)}
+}
+
+// hookReceiptCaller is the verified caller of a hook (verifiedAuditCaller),
+// "" when the gateway has none.
+func hookReceiptCaller(ctx context.Context) string {
+	caller, ok := verifiedAuditCaller(ctx)
+	if !ok || caller.ID == "" {
+		return ""
+	}
+	return caller.IDKind + ":" + caller.ID
 }
 
 // reviewedHookToolRetryDigest admits a provider tool invocation ID as an

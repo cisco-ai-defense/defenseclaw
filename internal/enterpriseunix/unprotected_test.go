@@ -7,11 +7,15 @@
 package enterpriseunix
 
 import (
+	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // An agent the enumerator found installed for a user but could not enroll
@@ -63,5 +67,202 @@ func TestUnprotectedAgentsAreVisible(t *testing.T) {
 		if w.Code == codeAgentUnprotected {
 			t.Fatalf("an empty record still reports: %+v", w)
 		}
+	}
+}
+
+func TestPrivateClaudeInstallMakesUnixStatusAndVerifyIncomplete(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			uid := 1001
+			install := "/home/alice/private/node_modules/@anthropic-ai/claude-code"
+			if platform == "darwin" {
+				install = "/Users/alice/private/node_modules/@anthropic-ai/claude-code"
+			}
+			data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+				User: "alice", UID: &uid, Connector: "claudecode", Version: "2.0.77", InstallPath: install,
+				Code:   enterprisehooks.UnprotectedCodeHookContractUnverified,
+				Reason: "version 2.0.77 has no managed hook contract",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var audited []managed.LaunchCoverageReport
+			h.env.ReportLaunchCoverage = func(_ context.Context, report managed.LaunchCoverageReport) error {
+				audited = append(audited, report)
+				return nil
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				if result.SecurityComplete || result.CoverageComplete || !strings.Contains(messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeHookContractUnverified), install) {
+					t.Fatalf("%s %s hid private Claude: coverage=%v security=%v warnings=%+v", platform, action, result.CoverageComplete, result.SecurityComplete, result.Warnings)
+				}
+			}
+			if len(audited) != 2 || audited[0].InstallPath != install || audited[0].Version != "2.0.77" || audited[0].Reason != "unsupported_installed_version" {
+				t.Fatalf("private install audit = %+v", audited)
+			}
+		})
+	}
+}
+
+func TestMissingUnprotectedRecordMakesUnixCoverageUnknown(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				messages := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if action == ActionVerify {
+					messages = messagesOf(result.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				}
+				if result.CoverageComplete || result.SecurityComplete ||
+					!strings.Contains(messages, "unprotected-agents record") {
+					t.Fatalf("%s %s hid missing install evidence: %+v", platform, action, result)
+				}
+			}
+		})
+	}
+}
+
+// A manifest-mode install starts the enumerator but does not itself publish
+// its scan. Run bypasses testHost.run, whose fake adds an empty record after
+// install, so status and verify exercise the real first-cycle contract.
+func TestManifestModeStatusAndVerifyWaitForPrivateInstallScan(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			body := strings.Replace(string(DefaultConfig(h.env.Layout)),
+				"enterprise:\n  profile: standalone\n",
+				"enterprise:\n  profile: standalone\n  enrollment:\n    mode: manifest\n", 1)
+			configPath := filepath.Join(t.TempDir(), "manifest-config.yaml")
+			if err := os.WriteFile(configPath, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			install := Run(context.Background(), h.env, Options{Action: ActionInstall,
+				PayloadDir: h.payload("1.0.4"), ConfigFile: configPath})
+			requireOK(t, install)
+			writeFreshLedger(t, h)
+			recordPath := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+			if _, err := os.Stat(recordPath); !os.IsNotExist(err) {
+				t.Fatalf("fake install unexpectedly published scan: %v", err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := Run(context.Background(), h.env, Options{Action: action})
+				messages := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if action == ActionVerify {
+					messages = messagesOf(result.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				}
+				if result.CoverageComplete || result.SecurityComplete || messages == "" {
+					t.Fatalf("%s %s claimed complete coverage before its scan: %+v", platform, action, result)
+				}
+			}
+			data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+				User: "alice", Connector: "claudecode", Version: "2.0.77",
+				Code:   enterprisehooks.UnprotectedCodeHookContractUnverified,
+				Reason: "version 2.0.77 has no managed hook contract",
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(recordPath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := Run(context.Background(), h.env, Options{Action: action})
+				if result.CoverageComplete || result.SecurityComplete ||
+					messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeHookContractUnverified) == "" ||
+					messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete) != "" ||
+					messagesOf(result.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete) != "" {
+					t.Fatalf("%s %s hid the manifest-mode private copy: %+v", platform, action, result)
+				}
+			}
+		})
+	}
+}
+
+func TestStaleUnprotectedRecordMakesUnixCoverageUnknown(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			h := newTestHost(t, platform)
+			requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+			writeFreshLedger(t, h)
+			path := h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath))
+			old := time.Now().Add(-time.Hour)
+			if err := os.Chtimes(path, old, old); err != nil {
+				t.Fatal(err)
+			}
+			for _, action := range []string{ActionStatus, ActionVerify} {
+				result := h.run(Options{Action: action})
+				messages := messagesOf(result.Warnings, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				if action == ActionVerify {
+					messages = messagesOf(result.Errors, enterprisehooks.UnprotectedCodeInstallScanIncomplete)
+				}
+				if result.CoverageComplete || result.SecurityComplete || !strings.Contains(messages, "stale") {
+					t.Fatalf("%s %s hid stale scan evidence: %+v", platform, action, result)
+				}
+			}
+		})
+	}
+}
+
+func TestEnrolledKiroCLIBelowHookFloorIsUncoveredInStatusAndVerify(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+		User: "alice", Connector: "kiro", Version: "2.24.1", Code: "kiro_cli_below_hook_floor",
+		Reason: "kiro-cli 2.24.1 is below 2.27.1: non-interactive runs do not load hooks; the earlier enrollment remains installed",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{ActionStatus, ActionVerify} {
+		r := h.run(Options{Action: action})
+		messages := messagesOf(r.Warnings, "kiro_cli_below_hook_floor")
+		if action == ActionVerify {
+			messages = messagesOf(r.Errors, "kiro_cli_below_hook_floor")
+		}
+		if r.CoverageComplete || r.SecurityComplete ||
+			!strings.Contains(messages, "kiro 2.24.1 for user alice is not protected") ||
+			(action == ActionVerify && (r.OK || r.ExitCode == 0)) ||
+			(action == ActionStatus && (!r.OK || r.ExitCode != 0)) {
+			t.Fatalf("%s counted an unhooked Kiro CLI as covered: coverage=%t security=%t warnings=%+v",
+				action, r.CoverageComplete, r.SecurityComplete, r.Warnings)
+		}
+	}
+}
+
+func TestKiroIDEBelowGlobalHookFloorFailsVerify(t *testing.T) {
+	h := newTestHost(t, "linux")
+	requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+	writeFreshLedger(t, h)
+	data, err := enterprisehooks.MarshalUnprotectedAgents([]enterprisehooks.UnprotectedAgent{{
+		User: "alice", Connector: "kiro", Version: "1.0.181", Code: enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor,
+		Reason: "Kiro IDE 1.0.181 cannot read the global hooks file",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(h.env.P(enterprisehooks.UnprotectedAgentsPath(h.env.Layout.ManifestPath)), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status := h.run(Options{Action: ActionStatus})
+	verify := h.run(Options{Action: ActionVerify})
+	if status.CoverageComplete || !status.OK || verify.CoverageComplete || verify.OK || verify.ExitCode == 0 ||
+		!strings.Contains(messagesOf(verify.Errors, enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor), "Kiro IDE 1.0.181") {
+		t.Fatalf("old IDE appears covered: status=%+v verify=%+v", status, verify)
 	}
 }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,12 +93,17 @@ def _fixture(
                 "raw_agent_version": agent_version,
                 "normalized_agent_version": agent_version,
                 "hook_script_version": "v7",
+                "hook_script_digests": {adapter.name: _digest(adapter)},
                 "locations": locations,
             }
         },
     }
     (data / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
     return install, data, config
+
+
+def _digest(path: Path) -> str:
+    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _validate(install: Path, data: Path, config: Path, *, configured_mode: str = ""):
@@ -449,3 +455,240 @@ def test_copilot_adapter_rejected_when_input_encoding_follows_read(tmp_path):
         "$process.StandardInput.Write($payload)",
     ):
         assert marker in broken
+
+
+# rel-1-0-4 GAP-0600: only DefenseClaw's own current adapter, at the path
+# Setup registers and with the bytes it sealed, is a healthy registration.
+_OLD_ADAPTER_LINE = "# an earlier release's adapter\n"
+
+
+@pytest.mark.parametrize("tamper", ["old-copy-in-place", "repointed-every-event", "repointed-beside", "unsealed"])
+def test_windows_copilot_doctor_requires_the_current_sealed_adapter(tmp_path: Path, tamper: str) -> None:
+    install, data, config = _fixture(tmp_path)
+    adapter = data / "hooks" / "copilot-hook.ps1"
+    lane = tmp_path / "lane" / "copilot-hook.ps1"
+    lane.parent.mkdir()
+    lane.write_text(_OLD_ADAPTER_LINE + adapter.read_text(encoding="utf-8"), encoding="utf-8")
+    document = json.loads(config.read_text(encoding="utf-8"))
+    if tamper == "old-copy-in-place":
+        adapter.write_text(lane.read_text(encoding="utf-8"), encoding="utf-8")
+        expected = "changed since setup"
+    elif tamper == "repointed-every-event":
+        for event, entries in document["hooks"].items():
+            entries[0]["powershell"] = _powershell_command(lane, event)
+        expected = "outside the DefenseClaw runtime"
+    elif tamper == "repointed-beside":
+        repointed = dict(document["hooks"]["preToolUse"][0], powershell=_powershell_command(lane, "preToolUse"))
+        document["hooks"]["preToolUse"].insert(0, repointed)
+        expected = "2 DefenseClaw handlers"
+    else:
+        lock_path = data / "hook_contract_lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        del lock["connectors"]["copilot"]["hook_script_digests"]
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        expected = "no digest for the Copilot adapter"
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert not check.healthy
+    assert expected in check.detail, check.detail
+    assert "setup copilot --yes --restart" in check.detail
+
+
+def test_windows_copilot_doctor_rejects_another_handler_in_defenseclaws_file(tmp_path: Path) -> None:
+    # defenseclaw.json is DefenseClaw's file: a wrapper around an old adapter
+    # copy beside DefenseClaw's handler runs too (rel-1-0-4 GAP-0600).
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    document["hooks"]["preToolUse"].append(
+        {"type": "command", "powershell": "pwsh -File C:/lane/copilot-hook.ps1 -Event preToolUse", "timeoutSec": 30}
+    )
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "foreign", check
+    assert "other handler" in check.detail
+
+
+@pytest.mark.parametrize("entry_shape", ["list", "mapping", "nested"])
+def test_windows_copilot_doctor_rejects_wrapped_adapter_on_unexpected_event(tmp_path: Path, entry_shape: str) -> None:
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    adapter = data / "hooks" / "copilot-hook.ps1"
+    handler = {
+        "type": "command",
+        "powershell": _powershell_command(adapter, "preToolUse") + "; Write-Output x",
+        "timeoutSec": 30,
+    }
+    document["hooks"]["unexpectedEvent"] = (
+        [handler] if entry_shape == "list" else {"handlers": [handler]} if entry_shape == "nested" else handler
+    )
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "stale", check
+    assert "unexpected Copilot event" in check.detail
+
+
+@pytest.mark.parametrize("entry_shape", ["list", "mapping", "nested", "nested-powershell"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        r"& 'C:\Old\hooks\copilot-hook.ps1' -Event 'myEvent'",
+        r"& 'C:\Old\DefenseClaw\defenseclaw-hook.exe' hook --connector copilot",
+        r"Start-Process -FilePath 'C:\Old\DefenseClaw\defenseclaw-hook.exe' -ArgumentList 'hook --connector copilot' -Wait",
+        r"Start-Process -FilePath 'C:\Old\DefenseClaw\defenseclaw-hook.exe' -ArgumentList 'hook','--connector','copilot' -Wait",
+    ],
+    ids=["old-adapter", "old-direct", "old-process", "old-argv"],
+)
+def test_windows_copilot_doctor_rejects_legacy_handlers_until_setup(
+    tmp_path: Path, entry_shape: str, command: str
+) -> None:
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    handler = {"type": "command", "powershell": command, "timeoutSec": 30}
+    document["hooks"]["extraEvent"] = {
+        "list": [handler],
+        "mapping": handler,
+        "nested": {"handlers": [handler]},
+        "nested-powershell": {"powershell": {"handlers": [handler]}},
+    }[entry_shape]
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "stale", check
+    assert "extraEvent" in check.detail or "legacy" in check.detail
+
+    # Go Setup removes the owned unexpected-event handler in each shape.
+    document["hooks"].pop("extraEvent")
+    config.write_text(json.dumps(document), encoding="utf-8")
+    assert _validate(install, data, config).state == "healthy"
+
+
+def test_windows_copilot_doctor_accepts_cleaned_data_dir(tmp_path: Path) -> None:
+    install, data, config = _fixture(tmp_path)
+    (data / "detour").mkdir()
+
+    check = validate_windows_copilot_hook_registration(
+        config_path=str(config),
+        data_dir=str(data / "detour" / ".."),
+        install_root=str(install),
+        search_path=str(install),
+        pathext=".EXE;.CMD",
+    )
+
+    assert check.state == "healthy", check
+
+
+@pytest.mark.parametrize("key, value", [("env", {"DEFENSECLAW_HOME": "C:/lane"}), ("cwd", "C:/lane")])
+def test_windows_copilot_doctor_rejects_a_changed_defenseclaw_handler(tmp_path: Path, key: str, value: object) -> None:
+    # DefenseClaw's own handler with Setup's command but a key Setup does not
+    # write runs the hook under the user's environment or folder.
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    document["hooks"]["preToolUse"][0][key] = value
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "foreign", check
+    assert key in check.detail
+
+
+@pytest.mark.parametrize("tamper", ["command-whitespace", "command-case"])
+def test_windows_copilot_doctor_requires_the_exact_setup_command(tmp_path: Path, tamper: str) -> None:
+    install, data, config = _fixture(tmp_path)
+    document = json.loads(config.read_text(encoding="utf-8"))
+    entry = document["hooks"]["preToolUse"][0]
+    original = entry["powershell"]
+    entry["powershell"] = f" {original} " if tamper == "command-whitespace" else original.replace(" -Event ", " -event ")
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    check = _validate(install, data, config)
+
+    assert check.state == "foreign", check
+    assert "Setup's command" in check.detail
+
+
+@pytest.mark.parametrize("tamper", ["command-whitespace", "unexpected-wrapper"])
+def test_windows_copilot_command_tamper_degrades_status_and_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str
+) -> None:
+    from defenseclaw import bootstrap, fail_mode, hook_integrity
+    from defenseclaw.commands import cmd_doctor, cmd_status
+
+    install, data, config = _fixture(tmp_path)
+    cfg = SimpleNamespace(data_dir=str(data), claw=SimpleNamespace(workspace_dir=""), deployment_mode="single_user")
+    monkeypatch.setattr(hook_integrity, "_is_windows", lambda: True)
+    monkeypatch.setattr(fail_mode, "_is_windows", lambda: True)
+    monkeypatch.setattr(cmd_doctor, "_packaged_windows_install_root", lambda _data: str(install))
+    monkeypatch.setattr("defenseclaw.inventory.agent_discovery._windows_acl_write_error", lambda _path: None)
+    monkeypatch.setenv("PATH", str(install))
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+
+    assert cmd_status._hook_runtime_degraded_suffix(cfg, "copilot") == ""
+    document = json.loads(config.read_text(encoding="utf-8"))
+    if tamper == "command-whitespace":
+        document["hooks"]["preToolUse"][0]["powershell"] += " "
+    else:
+        adapter = data / "hooks" / "copilot-hook.ps1"
+        document["hooks"]["unexpectedEvent"] = [
+            {
+                "type": "command",
+                "powershell": _powershell_command(adapter, "preToolUse") + "; Write-Output x",
+                "timeoutSec": 30,
+            }
+        ]
+    config.write_text(json.dumps(document), encoding="utf-8")
+
+    assert "DEGRADED" in cmd_status._hook_runtime_degraded_suffix(cfg, "copilot")
+    step = bootstrap._connector_runtime_readiness(cfg, "copilot")
+    assert step is not None and step.status == "fail", step
+    expected_drift = "registration-foreign" if tamper == "command-whitespace" else "hook-runtime-stale"
+    assert fail_mode.registration_integrity_drift(cfg, "copilot") == [expected_drift]
+
+
+@pytest.mark.parametrize(
+    "tamper, drift",
+    [
+        ("pristine", None),
+        ("old-copy-in-place", "hook-runtime-stale"),
+        ("repointed-one-event", "hook-runtime-stale"),
+        ("repointed-every-event", "registration-foreign"),
+    ],
+)
+def test_windows_copilot_fail_mode_runs_the_doctor_validator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tamper: str, drift: str | None
+) -> None:
+    # guardrail fail-mode and the verify behind `fail-mode closed --yes`
+    # returned before any Windows Copilot check, so an old adapter or a
+    # repointed event reported no drift (rel-1-0-4 GAP-0600).
+    from defenseclaw import fail_mode
+    from defenseclaw.commands import cmd_doctor
+
+    install, data, config = _fixture(tmp_path)
+    adapter = data / "hooks" / "copilot-hook.ps1"
+    lane = tmp_path / "lane" / "copilot-hook.ps1"
+    lane.parent.mkdir()
+    lane.write_text(_OLD_ADAPTER_LINE + adapter.read_text(encoding="utf-8"), encoding="utf-8")
+    if tamper == "old-copy-in-place":
+        adapter.write_text(lane.read_text(encoding="utf-8"), encoding="utf-8")
+    elif tamper.startswith("repointed-"):
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for event, entries in document["hooks"].items():
+            if tamper == "repointed-every-event" or event == "preToolUse":
+                entries[0]["powershell"] = _powershell_command(lane, event)
+        config.write_text(json.dumps(document), encoding="utf-8")
+    cfg = SimpleNamespace(data_dir=str(data), claw=SimpleNamespace(workspace_dir=""), deployment_mode="single_user")
+    monkeypatch.setattr(fail_mode, "_is_windows", lambda: True)
+    monkeypatch.setattr(fail_mode, "registration_unguarded", lambda *_a: False)
+    monkeypatch.setattr(cmd_doctor, "_packaged_windows_install_root", lambda _data: str(install))
+    monkeypatch.setattr("defenseclaw.inventory.agent_discovery._windows_acl_write_error", lambda _path: None)
+    monkeypatch.setenv("PATH", str(install))
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+
+    assert fail_mode.registration_integrity_drift(cfg, "copilot") == ([drift] if drift else [])

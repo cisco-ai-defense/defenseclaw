@@ -435,7 +435,10 @@ func prepareCompiledObservabilityV8Startup(c *config.Config, loaded *loadedConfi
 	c.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
 	return &observabilityV8Startup{
 		sourceName: loaded.source,
-		raw:        append([]byte(nil), loaded.raw...),
+		// Reconciliation compares this with the exact file on disk. The
+		// runtime bootstrap normalizes a legacy v8 source in memory, using
+		// the same path as a later reload.
+		raw: append([]byte(nil), loaded.sourceRaw...),
 	}, nil
 }
 
@@ -637,6 +640,7 @@ func dotEnvKeyIsProcessControl(key string) bool {
 		"DEFENSECLAW_REVEAL_PII",
 		"DEFENSECLAW_SANDBOX_ID", "DEFENSECLAW_SANDBOX_NAME", "DEFENSECLAW_SANDBOX_TOKEN",
 		"DEFENSECLAW_STRICT_AVAILABILITY",
+		"DEFENSECLAW_TRACKED_HOST_STAT_FD",
 		"DEFENSECLAW_TEST", "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
 		"DEFENSECLAW_TRUSTED_PROXY_CIDRS", "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
 		"DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",

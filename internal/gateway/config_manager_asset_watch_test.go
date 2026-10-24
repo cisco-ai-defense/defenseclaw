@@ -59,10 +59,10 @@ func TestConfigManagerWatchesTheRejectedCandidateAssets(t *testing.T) {
 	mgr.assetDirs = func() []string { return []string{live} }
 	mgr.candidateAssets = func(*config.Config) ([]string, []string) { return []string{candidate}, nil }
 	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
 	ready := make(chan error, 1)
 	done := make(chan error, 1)
 	go func() { done <- mgr.runWithStartupReconcile(ctx, ready) }()
+	t.Cleanup(func() { cancel(); <-done })
 	if err := <-ready; err != nil {
 		t.Fatal(err)
 	}
@@ -98,16 +98,19 @@ func TestConfigManagerWatchesTheRejectedCandidateAssets(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("repairing the rejected candidate's asset did not rebuild the generation")
 	}
-	// The callback sends applied before reload commits its final state.
-	// Wait for that reload to return before checking its rejected assets.
-	mgr.mu.Lock()
-	stillRejected := mgr.rejectedAssets.Load() != nil
-	mgr.mu.Unlock()
-	if stillRejected {
-		t.Fatal("a reload that built still watches the rejected candidate's assets")
+	// The apply callback sends before the manager records the successful
+	// reload. Wait for that terminal state, not just the callback's send.
+	settled := time.NewTimer(10 * time.Second)
+	defer settled.Stop()
+	check := time.NewTicker(10 * time.Millisecond)
+	defer check.Stop()
+	for mgr.rejectedAssets.Load() != nil {
+		select {
+		case <-check.C:
+		case <-settled.C:
+			t.Fatal("a reload that built still watches the rejected candidate's assets")
+		}
 	}
-	cancel()
-	<-done
 }
 
 // GAP-0879: an asset folder the watcher cannot watch degrades config health

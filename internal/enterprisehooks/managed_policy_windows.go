@@ -313,12 +313,13 @@ func ReadWindowsClaudeManagedPolicyTargets() ([]string, bool, error) {
 // PublishWindowsClaudeManagedPolicyTargets narrows an already active policy to
 // an exact canonical set. It cannot enroll a SID that is not already present;
 // additions remain the responsibility of the per-target secure Install path,
-// which publishes only after runtime verification.
+// which publishes only after runtime verification. On standalone hosts an
+// empty set keeps the machine hook in force for unenrolled accounts.
 func PublishWindowsClaudeManagedPolicyTargets(rawTargets []string) error {
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
 		return err
 	}
-	targets := []string(nil)
+	targets := []string{}
 	var err error
 	if len(rawTargets) > 0 {
 		targets, err = canonicalWindowsClaudeTargetSIDs(rawTargets)
@@ -384,7 +385,7 @@ func PublishWindowsClaudeManagedPolicyTargets(rawTargets []string) error {
 			}
 			return cause
 		}
-		if len(targets) == 0 {
+		if len(targets) == 0 && !windowsEnterpriseStandaloneProcess() {
 			if err := os.Remove(path); err != nil {
 				return rollback(err)
 			}
@@ -403,6 +404,73 @@ func PublishWindowsClaudeManagedPolicyTargets(rawTargets []string) error {
 			return rollback(err)
 		}
 		if err := verifyWindowsClaudeManagedPolicy(path, policySnapshot.data); err != nil {
+			return rollback(err)
+		}
+		return nil
+	})
+}
+
+// EnsureWindowsStandaloneClaudeManagedPolicy publishes the configured hook
+// before the first account is enrolled and restores it after an older release
+// removed the final target. An active policy is left on its current contract.
+func EnsureWindowsStandaloneClaudeManagedPolicy(setup connector.SetupOpts) error {
+	if !windowsEnterpriseStandaloneProcess() {
+		return errors.New("enterprise hooks: empty-enrollment Claude policy is standalone-only")
+	}
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return err
+	}
+	if err := windowsEnterpriseHookTrustCheck(setup.HookExecutable); err != nil {
+		return fmt.Errorf("enterprise hooks: Claude machine hook executable is untrusted: %w", err)
+	}
+	setup.ManagedEnterprise = true
+	setup.HookFailMode = "closed"
+	setup = withWindowsClaudeManagedHooksOnly(setup)
+	provider := connector.NewClaudeCodeConnector()
+	body, err := provider.ManagedHookPolicy(setup)
+	if err != nil {
+		return err
+	}
+	if err := provider.VerifyManagedHookPolicy(body, setup); err != nil {
+		return err
+	}
+	_, _, err = installWindowsClaudeManagedPolicy(body, setup, nil)
+	return err
+}
+
+// DeactivateWindowsClaudeManagedPolicy removes the machine hook only when the
+// administrator has removed the connector from the protected configuration.
+func DeactivateWindowsClaudeManagedPolicy() error {
+	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
+		return err
+	}
+	return windowsClaudeManagedPolicyTransaction(func() error {
+		path, err := windowsClaudeManagedPolicyPath()
+		if err != nil {
+			return err
+		}
+		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
+		policy, err := snapshotWindowsManagedFile(path)
+		if err != nil {
+			return err
+		}
+		state, err := snapshotWindowsManagedFile(statePath)
+		if err != nil {
+			return err
+		}
+		if _, err := validateExistingWindowsManagedPolicyOwnership(policy, state); err != nil {
+			return err
+		}
+		if !policy.existed {
+			return nil
+		}
+		rollback := func(cause error) error {
+			return errors.Join(cause, restoreWindowsManagedFile(policy), restoreWindowsManagedFile(state))
+		}
+		if err := os.Remove(path); err != nil {
+			return rollback(err)
+		}
+		if err := os.Remove(statePath); err != nil {
 			return rollback(err)
 		}
 		return nil
@@ -1027,6 +1095,9 @@ type windowsClaudeManagedRuntimeVersionReport struct {
 	// ManagementContract is the management agent contract the gateway
 	// implements; accepted, not checked.
 	ManagementContract int `json:"management_contract,omitempty"`
+	// Older installed gateways can omit this capability; a present value
+	// must still be a boolean under the strict identity decoder.
+	SecretSetBundle bool `json:"secret_set_bundle,omitempty"`
 }
 
 func validateWindowsClaudeManagedRuntimeVersion(target windowsClaudeManagedPolicyTarget, expectedVersion string) error {
@@ -1515,6 +1586,18 @@ func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.Setup
 	if err != nil {
 		return "", nil, err
 	}
+	// A configured connector needs a guard before any account enrolls. An
+	// ensure pass must not replace a newer contract another reconcile already
+	// published while it waited for this transaction lock.
+	if targetSID == nil && policySnapshot.existed {
+		if existingState.SchemaVersion != 2 ||
+			!sameWindowsEnterprisePath(existingState.HookExecutable, opts.HookExecutable) ||
+			existingState.GatewayAddr != opts.APIAddr ||
+			existingState.GatewayServiceName != os.Getenv(connector.WindowsGatewayServiceNameEnv) {
+			return "", nil, errors.New("enterprise hooks: existing Claude machine policy belongs to another protected deployment")
+		}
+		return path, nil, nil
+	}
 	policyDir := filepath.Dir(path)
 	policyRoot := filepath.Dir(policyDir)
 	createdPolicyDir := !windowsPathExists(policyDir)
@@ -1532,9 +1615,11 @@ func installWindowsClaudeManagedPolicyUnlocked(body []byte, opts connector.Setup
 		return "", nil, err
 	}
 
-	targets, err := canonicalWindowsClaudeTargetSIDs(
-		append(append([]string(nil), existingState.TargetSIDs...), targetSID.String()),
-	)
+	targets := append([]string{}, existingState.TargetSIDs...)
+	if targetSID != nil {
+		targets = append(targets, targetSID.String())
+	}
+	targets, err = canonicalWindowsClaudeTargetSIDs(targets)
 	if err != nil {
 		return "", nil, err
 	}
@@ -1656,7 +1741,7 @@ func removeWindowsClaudeManagedPolicyTargetUnlocked(targetSID *windows.SID) erro
 		return cause
 	}
 
-	if len(remaining) > 0 {
+	if len(remaining) > 0 || windowsEnterpriseStandaloneProcess() {
 		state.TargetSIDs = remaining
 		stateBody, marshalErr := json.MarshalIndent(state, "", "  ")
 		if marshalErr != nil {
@@ -1742,11 +1827,6 @@ func validateWindowsClaudeMissingPolicyRecovery(
 			"enterprise hooks: missing-policy recovery requires an absent policy and existing ownership metadata",
 		)
 	}
-	if targetSID == nil {
-		return windowsClaudeManagedPolicyState{}, errors.New(
-			"enterprise hooks: missing-policy recovery requires an exact target SID",
-		)
-	}
 	if err := windowsManagedPolicyFileTrustCheck(state.path); err != nil {
 		return windowsClaudeManagedPolicyState{}, fmt.Errorf(
 			"enterprise hooks: missing-policy recovery state is untrusted: %w",
@@ -1795,11 +1875,16 @@ func validateWindowsClaudeMissingPolicyRecovery(
 			"enterprise hooks: missing-policy recovery gateway service identity mismatch",
 		)
 	}
-	targetEnrolled := false
-	for _, sid := range canonicalTargets {
-		if sid == targetSID.String() {
-			targetEnrolled = true
-			break
+	// A machine-policy ensure has no target SID. Its authority is limited to
+	// restoring the exact authenticated set in this ownership state; the
+	// caller below also rejects any change to that set during recovery.
+	targetEnrolled := targetSID == nil
+	if targetSID != nil {
+		for _, sid := range canonicalTargets {
+			if sid == targetSID.String() {
+				targetEnrolled = true
+				break
+			}
 		}
 	}
 	if !targetEnrolled {
@@ -1838,7 +1923,7 @@ func decodeWindowsClaudeManagedPolicyState(data []byte, state *windowsClaudeMana
 
 func canonicalWindowsClaudeTargetSIDs(values []string) ([]string, error) {
 	if len(values) == 0 {
-		return nil, fmt.Errorf("enterprise hooks: Claude Code managed policy ownership metadata has no target SIDs")
+		return []string{}, nil
 	}
 	seen := make(map[string]struct{}, len(values))
 	result := make([]string, 0, len(values))

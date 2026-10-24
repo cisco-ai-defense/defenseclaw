@@ -75,18 +75,21 @@ func TestAPrereleaseOfSandboxMinRunsNoSandbox(t *testing.T) {
 		}
 	}
 	// A session that starts on a prerelease (outside DefenseClaw) runs its
-	// supervisor, is named and stopped (the gateway the manager last reached
-	// runs 0.1.5-pre.7, which has the broker fix but is still a prerelease).
+	// supervisor, and is named unprotected and kept until its user stops it
+	// (the gateway the manager last reached runs 0.1.5-pre.7, which has the
+	// broker fix but is still a prerelease).
+	must(t, e.fake.SetPhase(openshell.DefaultWorkspace, "kept", openshell.PhaseReady))
 	e.m.statusEvent(t.Context(), e.boxOf("kept"), &stream.Status{Phase: openshell.PhaseProvisioning})
 	e.m.statusEvent(t.Context(), e.boxOf("kept"), &stream.Status{Phase: openshell.PhaseReady})
 	e.m.tamperStops.Wait()
 	if found := e.events("kept", sandboxapi.ActivityFinding, sandboxapi.ReasonOldSupervisor); len(found) != 1 ||
-		!strings.Contains(found[0].Message, "kept's session started on OpenShell 0.1.5-pre.7") {
+		!strings.Contains(found[0].Message, "kept: "+legacyUnprotected+": its session started on OpenShell 0.1.5-pre.7") {
 		t.Fatalf("old-supervisor findings on a prerelease = %+v", found)
 	}
-	if got := e.get("kept").Phase; got != "stopped" {
-		t.Fatalf("a session on the 0.1.5-pre.7 supervisor is %s, want stopped", got)
+	if got := e.get("kept"); got.Phase != "ready" || !got.OldSupervisor {
+		t.Fatalf("a session on the 0.1.5-pre.7 supervisor is %s (old supervisor %v), want kept ready", got.Phase, got.OldSupervisor)
 	}
+	e.stopBox("kept")
 	e.fake.SetRelease("0.1.6-pre.1")
 	e.startBox("kept", sandboxapi.StartRequest{})
 	if got := e.boxOf("kept").rec.SessionRelease; got != "0.1.6-pre.1" || !openshell.RunsSandboxes(got) {
@@ -103,7 +106,7 @@ func TestAPrereleaseOfSandboxMinRunsNoSandbox(t *testing.T) {
 func TestOldGatewayTimeoutWayOnStartsWithoutAStop(t *testing.T) {
 	upgrade := "upgrade OpenShell 0.1.3 to " + openshell.InstallerVersion + " in place with `defenseclaw sandbox setup --install-openshell`"
 	deleteFirst := "this OpenShell can neither stop nor start a sandbox in its error state, and DefenseClaw stops no OpenShell gateway, so upgrades none, " +
-		"while OpenShell has not reported a MicroVM on it stopped: `defenseclaw sandbox delete box` deletes it and its work, after which " + upgrade
+		"while OpenShell has not reported a MicroVM on it stopped: save or sync any accessible work outside the guest first; `defenseclaw sandbox delete box` deletes it and its work, after which " + upgrade
 	timedOut := func(got string) bool {
 		return strings.Contains(got, "this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+", then wait a minute") &&
 			strings.Contains(got, "`defenseclaw sandbox start box` (no stop: OpenShell "+openshell.SupportedMin+" refuses to stop a sandbox whose provisioning timed out)") &&
@@ -137,7 +140,7 @@ func TestOldGatewayTimeoutWayOnStartsWithoutAStop(t *testing.T) {
 		}
 	}
 	if got := errorPhaseWayOn("box", "ProcessExited: VM process exited with status 1", upgrade, true); got !=
-		"this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+", then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`, which keep the sandbox and its work" {
+		"this OpenShell can neither stop nor start a sandbox in its error state: "+upgrade+", then fix why its MicroVM exited; then `defenseclaw sandbox stop box` and `defenseclaw sandbox start box`; the sandbox remains, but its MicroVM work is kept only through the last successful disk sync" {
 		t.Errorf("a MicroVM whose VM is gone on an old gateway: %q", got)
 	}
 

@@ -88,5 +88,6 @@ func InspectEnterpriseDeploymentAt(profile, metadataPath string) (EnterpriseDepl
 	}
 	deployment.State, deployment.ProductVersion = classifyEnterpriseMetadata(body)
 	deployment.TrustMode = enterpriseMetadataTrustMode(body)
+	deployment.DeferredConfigPending = deployment.State == EnterpriseDeploymentInstalled && enterpriseMetadataDeferredConfigPending(body)
 	return deployment, nil
 }

@@ -17,13 +17,16 @@ DefenseClaw installs a TypeScript policy plugin in Amp's user plugin directory. 
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector amp` first. Until DefenseClaw is initialized, `defenseclaw setup amp` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
-defenseclaw setup amp                                  # observe, global
+defenseclaw setup amp                                  # first setup defaults to observe, global
 defenseclaw setup amp --mode action                    # enforce calls and results
 defenseclaw setup amp --workspace /path/to/repo        # also inventory the repository
 ```
 
-On Windows, use a Windows path. The plugin is per user in every case.
+A re-run without `--mode` keeps the current mode. On Windows, use a Windows
+path. The plugin is per user in every case.
 `--workspace` sets the workspace for the whole DefenseClaw install, including
 Amp's project inventory. Use it on a single-Amp install: if it would move peer connectors
 from their current scope, setup refuses and changes nothing. On a multi-connector
@@ -46,6 +49,8 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 ## What it can block or ask
 
+What a gateway outage does to an Amp call, per install and fail mode, is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
+
 <HookEventsList connector="amp" />
 
 - `tool.call` runs before the tool. DefenseClaw can allow it, reject it or ask through Amp's confirmation UI.
@@ -53,6 +58,16 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 - `session.start`, `agent.start` and `agent.end` are observed only.
 - A prompt has no hook, so a matching prompt reaches the model. Tool-call rules still block.
 - Ask works only for the active foreground thread. A background thread or missing UI rejects the call instead of allowing it.
+
+### Rejected command display
+
+In the tested Amp 0.0.1790798464 build, a policy-rejected shell call can still have
+a checked, collapsed **Ran 1 command** summary. This counts an attempted tool
+call; the command did not execute. Expand the tool result to see **Tool rejected
+by plugin** and the DefenseClaw policy reason. The matching DefenseClaw audit
+block and absent command output confirm the rejection. The plugin sends Amp
+`reject-and-continue` with that reason before execution; Amp's [plugin API](https://ampcode.com/docs/plugin-api)
+does not provide a field for changing the collapsed summary.
 
 ## Files it changes
 
@@ -78,7 +93,15 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps Amp's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove amp --yes` (add `--force` if it is the last one). A modified bridge makes `defenseclaw setup remove amp` refuse before saving configuration. Preserve your edits, run `defenseclaw setup amp --yes --restart`, then retry removal. Relaunch Amp afterwards.
+With the default gateway restart, disabling removes DefenseClaw's plugin file
+when it is unchanged since setup. An edited plugin is left in place to preserve
+your edits; `defenseclaw doctor` reports it. This preserves your other Amp
+settings. `defenseclaw guardrail enable` reinstalls DefenseClaw's plugin. To
+remove the connector, run `defenseclaw setup remove amp --yes` (add `--force`
+if it is the last one). A modified bridge makes `defenseclaw setup remove amp`
+refuse before saving configuration. Preserve your edits, run
+`defenseclaw setup amp --yes --restart`, then retry removal. Relaunch Amp
+afterwards.
 
 On a multi-connector install, add `--connector amp` to `guardrail disable` and `guardrail enable` to change only this agent.
 

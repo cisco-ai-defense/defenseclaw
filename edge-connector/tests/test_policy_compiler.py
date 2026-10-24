@@ -18,6 +18,7 @@
 
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -93,6 +94,50 @@ class PolicyCompilerExitTest(unittest.TestCase):
             result = self.compile(work, VALID)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertGreater((work / 'policy.bin').stat().st_size, 64)
+
+    def test_ipv6_allowlist_entries_are_written_without_brackets(self):
+        # rel-1-0-4 GAP-0592: dclaw_policy_check_destination compares the
+        # destination host with its brackets removed, so only the bare
+        # literal can match; a bracketed entry is refused with the form to use.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            for dest in ('2606:4700:4700::1111', '2001:4860:4860::8888'):
+                with self.subTest(dest=dest):
+                    policy = work / 'ipv6.yaml'
+                    policy.write_text(f'iot_extensions:\n  destination_allowlist:\n    - "[{dest}]"\n')
+                    result = self.compile(work, policy)
+                    self.assertEqual(result.returncode, 65, result.stderr)
+                    self.assertIn(f"without brackets ('{dest}')", result.stderr)
+                    self.assertFalse((work / 'policy.bin').exists())
+                    policy.write_text(f'iot_extensions:\n  destination_allowlist:\n    - "{dest}"\n')
+                    result = self.compile(work, policy)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn(f'"{dest}"', (work / 'policy_tables.h').read_text())
+                    (work / 'policy.bin').unlink()
+
+    def test_the_policies_page_examples_compile(self):
+        # Every policy on docs-site .../reference/edge-connector/policies.mdx compiles
+        # with the command the page shows, and the bracketed form of each
+        # IPv6 entry it lists is refused, as the page says (GAP-0592).
+        docs_dir = ROOT.parent / 'docs-site' / 'content' / 'docs'
+        page = (docs_dir / 'reference' / 'edge-connector' / 'policies.mdx').read_text()
+        blocks = re.findall(r'```yaml[^\n]*\n(.*?)```', page, re.S)
+        self.assertGreaterEqual(len(blocks), 4)
+        ipv6 = [dest for block in blocks for dest in re.findall(r'- "([0-9a-f:]*:[0-9a-f:]*)"', block)]
+        self.assertTrue(ipv6, 'the page shows no IPv6 allowlist entry')
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            for index, block in enumerate(blocks):
+                with self.subTest(block=index):
+                    policy = work / f'page-{index}.yaml'
+                    policy.write_text(block)
+                    result = self.compile(work, policy, '--profile', 'standard', '--version', '1')
+                    self.assertEqual(result.returncode, 0, f'{block}\n{result.stderr}')
+            for dest in ipv6:
+                policy = work / 'bracketed.yaml'
+                policy.write_text(f'iot_extensions:\n  destination_allowlist:\n    - "[{dest}]"\n')
+                self.assertEqual(self.compile(work, policy).returncode, 65)
+                self.assertIn(f'`[{dest}]`', page)
 
 
 if __name__ == '__main__':

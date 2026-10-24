@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"slices"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"golang.org/x/mod/semver"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // Warning codes verify adds.
@@ -316,6 +318,9 @@ func Verify(ctx context.Context, in VerifyInput) (*VerifyResult, error) {
 	res.Rendered = rendered
 	ruleWarnings, _, err := RuleNotBlockingWarnings(cfg)
 	if err != nil {
+		if refusal := unreadableRulePackForAccount(err); refusal != nil {
+			return res, refusal
+		}
 		return res, refuse(CodeConfigInvalid, ConfigName, "custom rule pack: %s", boundedDetail(err.Error()))
 	}
 	if err := validateTargetConfig(b, cfg, rendered, []string{in.Platform}); err != nil {
@@ -409,10 +414,28 @@ func computeDigest(ctx context.Context, in VerifyInput, cfg *config.Config, rend
 	var out computedDigest
 	digest, err := in.Digester(withPolicyComponents(ctx, func(got map[string]string) { out.components = got }), cfg, rendered, in.Platform, root)
 	if err != nil {
+		if refusal := unreadableRulePackForAccount(err); refusal != nil {
+			return computedDigest{}, refusal
+		}
 		return computedDigest{}, refuse(CodeConfigInvalid, ConfigName, "effective policy for %s%s: %s", in.Platform, where, boundedDetail(err.Error()))
 	}
 	out.digest = digest
 	return out, nil
+}
+
+func unreadableRulePackForAccount(err error) error {
+	var packErr *guardrail.RulePackError
+	if !errors.As(err, &packErr) {
+		return nil
+	}
+	if packErr.Code != "directory_unreadable" && packErr.Code != "inventory_unreadable" && packErr.Code != "file_unreadable" {
+		return nil
+	}
+	if !strings.Contains(packErr.Reason, "access denied") && !strings.Contains(packErr.Reason, "permission denied") {
+		return nil
+	}
+	return refuse(CodeNotAdmin, ConfigName,
+		"this account cannot read and list a rule pack referenced by the signed config; run the same enterprise bundle verify command as root on Linux/macOS or as an elevated administrator/SYSTEM on Windows, or ask an administrator to grant this account read and list access to that pack and its parent directories")
 }
 
 // compareSignedDigest is the signed-digest rule for every signer and device

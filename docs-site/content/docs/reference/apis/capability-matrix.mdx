@@ -50,28 +50,73 @@ The component renders from `docs-site/data/capability-matrix.json`. Go tests in 
 
 One with **Block**, **Native ask** and **Fail-closed** all yes, and a managed-tier sandbox verified end to end. Of the current connectors that is [Claude Code](/docs/connectors/claudecode): it asks inside the agent, and in a sandbox its hooks sit in a root-owned policy file.
 
+## Gateway outage
+
+What each connector's hooks do with a call they can't check because the
+gateway is not running, is still restarting or gives no answer in time. This
+table is the only place the docs give it per connector, and it is checked
+against the hook code on every change.
+
+<OutageMatrix />
+
+- **Per-user** is an install without a managed deployment: the fail mode is
+  the one `defenseclaw guardrail fail-mode` installed with the hooks.
+- **Managed standalone** is an enterprise host outside Secure Client. Its fail
+  mode is the administrator's `hook_fail_mode`: `closed`, the default, blocks
+  the outage on every connector, and the two managed columns give `open`. A
+  managed connector runs either through vendor
+  [machine policy](/docs/enterprise/configure/machine-policy) (the
+  administrator-owned `defenseclaw-hook --enterprise-managed`) or through a
+  hook or plugin the guardian writes into the user's home (the per-user route,
+  for the connectors without machine policy and for one whose machine policy
+  is off).
+- **Default foreign-hook guard**: with `foreign_hooks: remove`, the machine
+  policy default, the
+  [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard) checks
+  each call of a connector it covers against the agent session's hook record,
+  which only the gateway holds. While the gateway cannot answer, the guard
+  blocks that call in every fail mode, before the hook's own fail mode
+  applies. With `foreign_hooks: report` or `allow` the guard does not ask the
+  gateway, and the next column applies.
+- **Secure Client** hooks let an outage run in `open`, which is also their
+  default when no fail mode is set.
+- **`DEFENSECLAW_STRICT_AVAILABILITY=1`** makes an outage block on a hook that
+  reads it, whatever the fail mode.
+- **`DEFENSECLAW_FAIL_MODE`** is not read by any 1.0.4 hook: the installed
+  mode is the fail mode
+  ([Fail modes](/docs/reference/configuration/fail-modes#the-environment-does-not-set-the-fail-mode)).
+- A proxy-backed connector has no hooks: its requests are blocked while the
+  gateway is down.
+- `status --json` reports the administrator's resolved value as
+  `effective_hook_fail_mode`, also for a hook that blocks the outage anyway.
+
+Refusals that are not an outage block in every fail mode: an unapproved hook
+the [foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard) finds,
+an invalid managed runtime, a refused credential, and, on a managed standalone
+host, input over the size limit and an answer DefenseClaw cannot use. See
+[Fail modes](/docs/reference/configuration/fail-modes).
+
 ### Which connectors enforce through the agent's own hooks?
 
 [Claude Code](/docs/connectors/claudecode), [Codex](/docs/connectors/codex), [Cursor](/docs/connectors/cursor), [Hermes](/docs/connectors/hermes), [Devin](/docs/connectors/devin), [Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), [OpenCode](/docs/connectors/opencode) and [Kiro](/docs/connectors/kiro). [Amp](/docs/connectors/amp) uses a policy plugin. None of them can block a request the agent has not yet shown to its hook or plugin surface.
 
 ### Which connectors can ask me inside the agent?
 
-Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread) and OpenClaw. Cursor is not counted: DefenseClaw does not turn on its native ask. Every other confirm verdict takes a connector-specific fallback, and there is no TUI approval queue.
+Claude Code (`PreToolUse`, in Manual mode only; other permission modes block), Antigravity (`PreToolUse` only), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread) and OpenClaw. Copilot CLI is not counted: its hook does not prove that an approval prompt is available, so DefenseClaw blocks action-mode confirmations. The separate VS Code Local harness retains native ask. Cursor is not counted: DefenseClaw does not turn on its native ask. Every other confirm verdict takes a connector-specific fallback, and there is no TUI approval queue.
 
 ### Which connectors fail closed?
 
 Every listed connector can block a gateway outage. Copilot CLI, Antigravity and
 Hermes hooks block delivery failures when the effective mode is `closed`, the default.
-Those agents can still allow a call when the hook times out or cannot start; the
-table marks that limit separately from the hook's deny response.
+Hermes 0.21+ blocks a `pre_tool_call` on hook spawn error or timeout when Setup has written `fail_closed: true`; it can still run after a killed hook exits non-2 with empty stdout. Earlier Hermes contracts also fail open on timeout. Other agents may still allow a call when the hook process times out or cannot start. The table marks gateway delivery behavior separately from agent-side process failure.
 
-- Fail-closed means the hook blocks when it cannot reach the gateway. A hook process that dies or times out is non-blocking in Claude Code, Codex and Devin (see the [enterprise threat model](/docs/enterprise/plan/threat-model#residual-risks)).
+- Fail-closed in this matrix means the running hook blocks when it cannot reach the gateway. A killed or timed-out pre-tool hook is non-blocking in Claude Code and Codex; a killed pre-tool hook can be non-blocking in Devin. Kiro CLI 2.x can run after hook timeout, and Antigravity has no documented timeout-deny setting. See the [enterprise threat model](/docs/enterprise/plan/threat-model#residual-risks).
 - On a managed standalone host, hooks use the administrator's resolved fail mode,
   also in observe mode. The default is `closed`. If the administrator explicitly selects `open`,
   a gateway outage can allow the call. Oversized input, a gateway 5xx, an unusable
   answer and other transport errors still block. See [Fail modes](/docs/reference/configuration/fail-modes).
 - On a per-user install, fail-open calls recorded by the shell hooks, native hook and OpenCode plugin become a `guardrail-degraded` alert when the gateway starts again. Amp does not write these failure records ([Fail modes](/docs/reference/configuration/fail-modes#reporting-and-diagnosis)).
-- Cursor is mode-matched: action writes `failClosed: true` and observe writes `failClosed: false`.
+- Cursor writes `failClosed: true` outside Secure Client in action and observe mode. Observe still allows ordinary calls and records `would_block` findings; the host flag covers a hook process that cannot answer.
 
 ### I want to run the agent in an OpenShell sandbox
 

@@ -13,23 +13,22 @@ import (
 
 // The Secure Client profile renders the OpenCode and Amp plugins (macOS
 // supports both) as a managed install without the standalone foreign-hook
-// guard. It keeps the templates its release pins: the *-secure-client copies
-// are the bdcb9cf6 templates byte for byte (their SHA-256 values are also the
-// ones the plugin scanner recognizes, cli/defenseclaw/scanner/plugin_scanner/
-// self_identity.py), and their render with these inputs is pinned.
+// guard. It pins the reviewed *-secure-client copies, including the native
+// connected-service verifier (their SHA-256 values are also recognized by
+// cli/defenseclaw/scanner/plugin_scanner/self_identity.py).
 func TestSecureClientPluginTemplatesArePinned(t *testing.T) {
 	for _, tc := range []struct {
 		current, pinned, templateSHA, renderSHA string
 	}{
 		{
 			current: "opencode-plugin.js", pinned: "opencode-plugin-secure-client.js",
-			templateSHA: "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",
-			renderSHA:   "359d66dfab43e5fb75c16aaa6c6742bf8f5f0dfe38a5286108c4c844a4e235bb",
+			templateSHA: "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",
+			renderSHA:   "9c3ec7c17b6c90885982c08ea5a6347a5121360bfb8f822b7528d84e72d87a12",
 		},
 		{
 			current: "amp-plugin.ts", pinned: "amp-plugin-secure-client.ts",
-			templateSHA: "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",
-			renderSHA:   "32c9be305de4484034ed6b18524864d85c2db9d268eb9afc6ad7cfe1aa94aa02",
+			templateSHA: "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",
+			renderSHA:   "fb90d638dda2013520e7719776ee009a82bc3b72c0b49b8512e485aa128b4630",
 		},
 	} {
 		if got := secureClientPluginAssets[tc.current]; got != tc.pinned {
@@ -43,10 +42,11 @@ func TestSecureClientPluginTemplatesArePinned(t *testing.T) {
 			t.Fatalf("%s changed: sha256 %x, want %s", tc.pinned, sum, tc.templateSHA)
 		}
 		rendered, err := renderTemplate(string(tmpl), templateData{
-			APIAddr:     "127.0.0.1:18970",
-			TokenFileJS: javaScriptStringContent("/Users/sc-user/.defenseclaw/hooks/.hook-" + tc.current + ".token"),
-			FailMode:    "closed",
-			Managed:     true,
+			APIAddr:            "127.0.0.1:18970",
+			TokenFileJS:        javaScriptStringContent("/Users/sc-user/.defenseclaw/hooks/.hook-" + tc.current + ".token"),
+			NativePostBinaryJS: javaScriptStringContent("/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway"),
+			FailMode:           "closed",
+			Managed:            true,
 		})
 		if err != nil {
 			t.Fatal(err)

@@ -13,7 +13,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"testing"
 
@@ -1271,9 +1270,9 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 		`cp -a src dst && echo hi > report.txt`,
 		`grep -rn "os.symlink(" src | head -5 > hits.txt`,
 	}
-	// The managed gateway also fails closed on a program word that is not
-	// static, which this change leaves as it is.
-	allowedPerUser := []string{`bash -lc "cp a b" > out.txt`}
+	// Login startup input can change the directory, so the child walk cannot
+	// assert a protected write through this ordinary relative redirect.
+	const uncertainLoginShell = `bash -lc "cp a b" > out.txt`
 	// "action" (not "raw_action") is the enforced decision.
 	const block, allow = `{"action":"block"`, `{"action":"allow"`
 	for _, connector := range []string{"claudecode", "codex"} {
@@ -1318,14 +1317,13 @@ func TestCommandLinkWriteFailsClosedInEveryMode(t *testing.T) {
 						t.Errorf("%s = %.300s, want archive chain guidance", command, got)
 					}
 				}
-				expectAllowed := allowed
-				if !managed {
-					expectAllowed = append(slices.Clone(allowed), allowedPerUser...)
-				}
-				for _, command := range expectAllowed {
+				for _, command := range allowed {
 					if got := post(t, command); !strings.HasPrefix(got, allow) {
 						t.Errorf("%s = %.300s, want allow", command, got)
 					}
+				}
+				if got := post(t, uncertainLoginShell); !strings.HasPrefix(got, allow) {
+					t.Errorf("%s = %.300s, want allow for ordinary write", uncertainLoginShell, got)
 				}
 			})
 		}

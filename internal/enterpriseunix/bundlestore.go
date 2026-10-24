@@ -11,6 +11,7 @@ package enterpriseunix
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
@@ -40,6 +41,14 @@ func (e *Env) bundleStore() *enterprisebundle.Store {
 		}
 		return e.fixMetadata(path, 0o644, rootOwner())
 	}
+	if e.bundleFault != nil {
+		s.EnsurePrivateDirectory = func(path string) error {
+			if err := e.bundleFault("private-dir " + filepath.Base(path)); err != nil {
+				return err
+			}
+			return os.MkdirAll(path, 0o700)
+		}
+	}
 	return s
 }
 
@@ -58,20 +67,27 @@ func (e *Env) bundleStoreForGroup(gid int) *enterprisebundle.Store {
 // failed(interrupted) and its staging copy goes; the last good bundle keeps
 // enforcing. An applied bundle that was not confirmed is confirmed or failed
 // against the deployment and the gateway (settleUnconfirmedBundle).
-func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) {
+func (l *lifecycle) settleBundles(ctx context.Context, record *Deployment) (pending bool) {
 	store := l.env.bundleStore()
 	report, err := store.Settle(l.env.installedBundleDirs()...)
 	if err != nil {
-		l.result.AddWarning(codeBundleStateUnreadable, "could not settle the policy bundle store: "+err.Error())
-		return
+		l.result.AddWarning(stateWriteCode(err, codeBundleStateUnreadable), "could not settle the policy bundle store: "+err.Error()+stateWriteAction(err))
+		return true
 	}
 	if n := len(report.Interrupted); n > 0 {
 		l.result.AddWarning(codeBundleInterrupted, fmt.Sprintf(
 			"%d policy bundle(s) a previous run received were not applied (failed: interrupted); the last good bundle keeps enforcing", n))
 	}
-	for _, rc := range report.Unconfirmed {
-		l.settleUnconfirmedBundle(ctx, store, record, rc)
+	if len(report.Pending) > 0 {
+		pending = true
+		l.result.AddWarning(enterprisebundle.WarnBundlePending, "an applied policy bundle remains pending because its confirmation prerequisite is unavailable")
 	}
+	for _, rc := range report.Unconfirmed {
+		if l.settleUnconfirmedBundle(ctx, store, record, rc) {
+			pending = true
+		}
+	}
+	return pending
 }
 
 // describeBundle fills Result.Bundle from the store; nil when this device

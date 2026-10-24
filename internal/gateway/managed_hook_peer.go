@@ -257,14 +257,37 @@ func (z *managedHookAuthorizer) exempt(peer managedHookPeer) bool {
 	if !named || peer.Name == "" || !identityFactsEnabled.Load() {
 		return false
 	}
-	facts, _ := managedHookExemptFacts(peer.UID)
-	if facts.ResolvedAt.IsZero() {
+	matches := func(facts useridentity.DirectoryFacts) bool {
+		if facts.ResolvedAt.IsZero() {
+			return false
+		}
+		subject := profileSubjectFromVerified(VerifiedSubject{
+			UserID: uid, IDKind: useridentity.KindPOSIXUID, UserName: peer.Name, Directory: facts,
+		}, false)
+		return anyMatches(z.enrollment.ExemptUsers, func(entry string) bool { return userEntryMatches(&subject, entry) })
+	}
+	// The facts the cache holds now for the account that holds the uid decide
+	// without waiting: names they give that match an entry exempt the caller,
+	// and settled facts that match none reject it. Only missing or unsettled
+	// facts (an answer without its UPN or domain yet) that match no entry wait
+	// for a current answer, within identityDirectoryBudget, as a cold read did
+	// before. Entries select by account names (userEntryMatches), never by
+	// group, so a cached match needs none of the fresh Open Directory answer a
+	// managed Mac waits for on group decisions; the cache's own bounds
+	// (lifetime, maxAge, the account holding the uid now, the guardian's
+	// record) still apply. Waiting for a fresh answer on every hook, up to 2 s
+	// and then 750 ms, either held every caller or denied a named exemption
+	// whenever a healthy directory answered after the wait (review of r104
+	// Q-identity, loop rounds 1 and 2).
+	cached, settled := managedHookExemptFacts(peer.UID, true)
+	if matches(cached) {
+		return true
+	}
+	if settled {
 		return false
 	}
-	subject := profileSubjectFromVerified(VerifiedSubject{
-		UserID: uid, IDKind: useridentity.KindPOSIXUID, UserName: peer.Name, Directory: facts,
-	}, false)
-	return anyMatches(z.enrollment.ExemptUsers, func(entry string) bool { return userEntryMatches(&subject, entry) })
+	facts, _ := managedHookExemptFacts(peer.UID, false)
+	return matches(facts)
 }
 
 // hostRunExempt reports whether the caller is exempt from enrollment as decide
@@ -278,10 +301,11 @@ func (z *managedHookAuthorizer) hostRunExempt(peer managedHookPeer) bool {
 
 // managedHookExemptFacts are the verified directory facts exempt matches a
 // caller's names with, from the cache the caller's hook requests use; tests
-// replace it.
-var managedHookExemptFacts = func(uid int) (useridentity.DirectoryFacts, bool) {
-	return verifiedIdentityDirectory(strconv.Itoa(uid), identityLookupBlocking.Load())
-}
+// replace it. cached returns the facts the cache holds now, without waiting,
+// and whether they are settled (a nonmatch then rejects); otherwise the
+// facts are read as a blocking hook read gets them (exemptIdentityDirectory),
+// so the first hook after a restart can use a UPN or DOMAIN\name exemption.
+var managedHookExemptFacts = exemptIdentityDirectory
 
 // decide authorizes one hook call. surface is the caller's
 // hookexec.AgentSurfaceHeader: under unverified_versions: refuse a call
@@ -515,6 +539,16 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			a.serveSandboxRoute(authorizer, peer, route, w, r, next)
 			return
 		}
+		if r.URL.Path == connector.UserScopedRotationProofPath {
+			// A root lifecycle can prove a large roster during key rotation.
+			// Hook-call budgets must not make that transaction fail mid-roster.
+			if peer.UID != 0 {
+				writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonGuardianOnly)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
 		r, release := a.admitHookCaller(w, r, strconv.Itoa(peer.UID), route)
 		if release == nil {
 			return
@@ -536,16 +570,31 @@ func (a *APIServer) managedHookPeerAuth(authorizer *managedHookAuthorizer, next 
 			next.ServeHTTP(w, r)
 			return
 		}
-		if r.Header.Get(hookexec.ClientRefusalHeader) == hookexec.ManagedUserNamespaceReason {
-			// A hook in a private user namespace refused its agent before it
-			// could check the runtime state; the refusal left no audit row or
-			// log line, unlike a refused unenrolled account (GAP-0923).
+		if r.URL.Path == managed.LaunchCoverageReportPath {
+			if peer.UID != 0 {
+				writeManagedHookRefusal(w, http.StatusForbidden, managedHookReasonGuardianOnly)
+				return
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+		if connectorName, _ := a.managedHookRouteScope(r); a.managedPolicyView.Load().unproven(connectorName, peer.Name) {
+			// The gateway can not prove the vendor policy this connector's
+			// managed hooks enforce (managedPolicyView, published when the
+			// policy changes). The call is still served and inspected under
+			// the managed policy below; this queues the alert without
+			// waiting on it (GAP-0922, GAP-0923, GAP-1061).
+			a.recordManagedPolicyViewAlert(r, peer, route)
+		}
+		if reason := r.Header.Get(hookexec.ClientRefusalHeader); hookexec.IsManagedProcessContextReason(reason) {
+			// A hook refused an unsafe or unverified process context before it
+			// could inspect the event. Keep the refusal in the audit and log.
 			connectorName, _ := a.managedHookRouteScope(r)
 			fmt.Fprintf(os.Stderr,
-				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent runs in a private user namespace\n",
-				peer.UID, connectorName, route, hookexec.ManagedUserNamespaceReason)
-			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, hookexec.ManagedUserNamespaceReason, connectorName)
-			writeManagedHookRefusal(w, http.StatusForbidden, hookexec.ManagedUserNamespaceReason)
+				"[sidecar-api] hook socket refused uid=%d connector=%q route=%s reason=%s: the agent process context is unsafe or unverified\n",
+				peer.UID, connectorName, route, reason)
+			a.emitHTTPAuthFailureForConnector(r.Context(), r, route, gatewaylog.ErrCodeAuthInvalidToken, reason, connectorName)
+			writeManagedHookRefusal(w, http.StatusForbidden, reason)
 			return
 		}
 		connectorName, inspect := a.managedHookRouteScope(r)
@@ -651,9 +700,10 @@ var loadStandaloneRuntimeDescriptor = func(goos string) (*managed.RuntimeDescrip
 // managedHookSocketMux registers only the agent-facing routes on the hook
 // socket: connector hook endpoints, the inspect endpoints, the Codex
 // notifier, the refused-write report of a standard user CLI, the root
-// guardian's repair report and the managed sandbox authority routes a user's
-// sandbox daemon calls. Management, status, configuration, policy and scan
-// routes are not reachable through it at all.
+// guardian's repair report, the root lifecycle's credential rotation proof,
+// and the managed sandbox authority routes a user's sandbox daemon calls.
+// Management, status, configuration, policy and scan routes are not reachable
+// through it at all.
 func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc(enterprisepolicy.ForeignHookSessionPathPrefix+"{connector}", a.handleForeignHookSession)
@@ -668,6 +718,8 @@ func (a *APIServer) managedHookSocketMux() http.Handler {
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc(managedRefusalAuditPath, a.handleManagedRefusalAudit)
 	mux.HandleFunc(managedGuardianRepairAuditPath, a.handleManagedGuardianRepairAudit)
+	mux.HandleFunc(managed.LaunchCoverageReportPath, a.handleManagedLaunchCoverageAudit)
+	mux.HandleFunc(connector.UserScopedRotationProofPath, a.serveRotationListenerProof)
 	a.registerSandboxAuthorityRoutes(mux)
 	a.registerSandboxRelayRoutes(mux)
 	handler := bodyLimitMiddleware(mux, func(r *http.Request) int64 {

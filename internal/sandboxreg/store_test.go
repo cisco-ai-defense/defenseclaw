@@ -699,3 +699,115 @@ func TestStoreEvictionRetiresGatewayTombstones(t *testing.T) {
 		t.Fatalf("an evicted gateway tombstone's sandbox registers again: %v", err)
 	}
 }
+
+// GAP-0367: every relayed hook call reads its registration, and the store
+// wrote a uid's file (an fsync, which on macOS flushes the whole disk cache
+// and took seconds while the audit log was busy) holding the lock those
+// reads take. A read now returns the stored records while a write is still
+// on disk, and sees the write's records once it is stored.
+func TestFileStoreReadsDoNotWaitForAWrite(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	r := pending(t)
+	if err := s.Create(7, r); err != nil {
+		t.Fatal(err)
+	}
+	inWrite, finish := make(chan struct{}), make(chan struct{})
+	saved := storeFileWrite
+	t.Cleanup(func() { storeFileWrite = saved })
+	storeFileWrite = func(dir, path string, v any) error {
+		close(inWrite)
+		<-finish
+		return saved(dir, path, v)
+	}
+	revoked := make(chan error, 1)
+	go func() { revoked <- s.Revoke(7, r.ID, "test") }()
+	<-inWrite
+	read := make(chan Registration, 1)
+	go func() {
+		got, _, _ := s.Get(7, r.ID)
+		read <- got
+	}()
+	select {
+	case got := <-read:
+		if got.State != StatePending {
+			t.Fatalf("read during the write = %s, want the stored pending record", got.State)
+		}
+	case <-time.After(2 * time.Second):
+		close(finish)
+		t.Fatal("a read waited for the write to reach the disk")
+	}
+	close(finish)
+	if err := <-revoked; err != nil {
+		t.Fatal(err)
+	}
+	if got, _, _ := s.Get(7, r.ID); got.State != StateRevoked {
+		t.Fatalf("read after the write = %s, want revoked", got.State)
+	}
+}
+
+// Admission must not observe a live registration after a stop or revoke has
+// started but before its durable file replacement has completed.
+func TestFileStoreAdmissionWaitsForAuthorityWithdrawal(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		withdraw func(*FileStore, Registration) error
+		want     string
+	}{
+		{"stop report", func(s *FileStore, r Registration) error { _, err := s.Report(7, r.ID, false); return err }, StateStopped},
+		{"revoke sandbox", func(s *FileStore, r Registration) error {
+			_, err := s.RevokeSandbox(7, bind(1).SandboxID, "", "test")
+			return err
+		}, StateRevoked},
+		{"revoke registration", func(s *FileStore, r Registration) error { return s.Revoke(7, r.ID, "test") }, StateRevoked},
+		{"deleted sandbox", func(s *FileStore, r Registration) error { return s.Deleted(7, r.ID) }, StateRevoked},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _, _ := newTestStore(t)
+			r := pending(t)
+			if err := s.Create(7, r); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.Bind(7, r.ID, bind(1)); err != nil {
+				t.Fatal(err)
+			}
+			entered, finish := make(chan struct{}), make(chan struct{})
+			saved := storeFileWrite
+			t.Cleanup(func() { storeFileWrite = saved })
+			storeFileWrite = func(dir, path string, v any) error {
+				close(entered)
+				<-finish
+				return saved(dir, path, v)
+			}
+			written := make(chan error, 1)
+			go func() { written <- tc.withdraw(s, r) }()
+			<-entered
+			started := make(chan struct{})
+			read := make(chan Registration, 1)
+			go func() {
+				close(started)
+				got, _, _, _, _ := s.GetWithRun(7, r.ID)
+				read <- got
+			}()
+			<-started
+			select {
+			case got := <-read:
+				close(finish)
+				<-written
+				t.Fatalf("admission saw %s while authority withdrawal was in flight", got.State)
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(finish)
+			if err := <-written; err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case got := <-read:
+				if got.State != tc.want {
+					t.Fatalf("after withdrawal = %s, want %s", got.State, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("admission remained blocked after withdrawal completed")
+			}
+		})
+	}
+}

@@ -45,6 +45,8 @@ Close your agent sessions first. A session that stays open goes on without Defen
    defenseclaw uninstall --all --binaries --yes
    ```
 
+   If you already ran `defenseclaw sandbox teardown`, add `--stop-sandboxes` to this command. Review or pull any remaining sandbox work first: `--stop-sandboxes` stops and deletes running sandboxes.
+
 An agent config file you have not changed since setup is restored from its checked backup. If you edited it, only DefenseClaw's entries are removed.
 
 <Callout type="warn">

@@ -72,8 +72,8 @@ func TestApplicationProtectionPolicyOverlay(t *testing.T) {
 	if got := cfg.EffectiveGuardrailModeForConnector("codex"); got != "action" {
 		t.Errorf("EffectiveGuardrailModeForConnector(codex) = %q, want action", got)
 	}
-	if got := cfg.EffectiveHookFailModeForConnector("codex"); got != "open" {
-		t.Errorf("EffectiveHookFailModeForConnector(codex) = %q, want open", got)
+	if got := cfg.EffectiveHookFailModeForConnector("codex"); got != "closed" {
+		t.Errorf("EffectiveHookFailModeForConnector(codex) = %q, want closed on a per-user host", got)
 	}
 	if got := cfg.EffectiveBlockMessageForConnector("codex"); got != "auto block" {
 		t.Errorf("EffectiveBlockMessageForConnector(codex) = %q, want auto block", got)
@@ -128,8 +128,8 @@ observability: {}
 // Every managed connector follows the owner rule (2026-10-20): the
 // administrator's explicit open wins on the standalone profile too, and
 // under Secure Client the native Codex and Claude Code hooks take an
-// explicit open like every other connector (#1163); an unmanaged install
-// keeps the operator's open.
+// explicit open like every other connector (#1163). A per-user install
+// remains closed even if an older config contains open.
 func TestManagedEnterpriseNativeHookFailModesFollowTheAdministrator(t *testing.T) {
 	cfg := &Config{DeploymentMode: "managed_enterprise", Enterprise: EnterpriseConfig{Profile: "standalone"}}
 	cfg.Guardrail.Mode = "observe"
@@ -154,8 +154,8 @@ func TestManagedEnterpriseNativeHookFailModesFollowTheAdministrator(t *testing.T
 
 	cfg.DeploymentMode = "unmanaged_byod"
 	cfg.Enterprise.Profile = ""
-	if got := cfg.EffectiveHookFailModeForConnector("claudecode"); got != "open" {
-		t.Errorf("unmanaged Claude fail mode = %q, want operator-configured open", got)
+	if got := cfg.EffectiveHookFailModeForConnector("claudecode"); got != "closed" {
+		t.Errorf("unmanaged Claude fail mode = %q, want closed", got)
 	}
 }
 
@@ -280,15 +280,15 @@ func TestApplicationProtectionEffectiveEnabled(t *testing.T) {
 // --enterprise-managed, which takes its fail mode from the runtime
 // descriptor the lifecycle writes from this value (owner decision
 // 2026-10-20), so an administrator's hook_fail_mode open for Devin is open
-// in the config, the lock, status and the hook alike. Every profile keeps
-// the configured value.
+// in the config, the lock, status and the hook alike. A per-user host stays
+// closed even with a legacy open in its config.
 func TestStandaloneDevinHookFailModeFollowsTheConfig(t *testing.T) {
 	for _, test := range []struct {
 		name, mode, profile, want string
 	}{
 		{"standalone", managed.DeploymentModeManagedEnterprise, managed.ProfileStandalone, "open"},
 		{"secure client", managed.DeploymentModeManagedEnterprise, managed.ProfileSecureClient, "open"},
-		{"per-user", "", "", "open"},
+		{"per-user", "", "", "closed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := &Config{DeploymentMode: test.mode}

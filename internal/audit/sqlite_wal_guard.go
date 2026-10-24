@@ -679,7 +679,7 @@ func (s *Store) syncDatabaseFile() error {
 	if s.dbPathGuard == nil || s.dbPathGuard.inMemory || s.dbPathGuard.pinned == nil {
 		return nil
 	}
-	return s.dbPathGuard.pinned.Sync()
+	return syncDatabaseFileData(s.dbPathGuard.pinned)
 }
 
 // walBackgroundWait bounds how long a background writer waits for the WAL

@@ -299,6 +299,13 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         )
         self._native_local_splunk.start()
         self.addCleanup(self._native_local_splunk.stop)
+        # Local setup records the container it started; no Docker here.
+        self._container = patch(
+            "defenseclaw.commands.cmd_setup._local_splunk_container_id",
+            return_value="0123456789abcdef" * 4,
+        )
+        self._container.start()
+        self.addCleanup(self._container.stop)
 
     def tearDown(self) -> None:
         import shutil
@@ -535,10 +542,16 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
                 env_file=env_file,
                 child_env=os.environ.copy(),
                 gateway_token_env=custom_name,
+                image_override="splunk/splunk:10.2.0",
             )
 
         self.assertTrue(result.was_running)
         self.assertTrue(result.stopped)
+        self.assertEqual(
+            mock_run.call_args_list[0].args[0][1:],
+            ["preflight-image", "--env-file", env_file, "--image", "splunk/splunk:10.2.0"],
+        )
+        self.assertEqual(mock_run.call_args_list[1].args[0][1:], ["down", "--env-file", env_file])
         # The down call must precede the refresh call. Pull the
         # subprocess args to confirm we asked the bridge for `down`.
         self.assertTrue(

@@ -650,16 +650,16 @@ func TestGatewayConfigWritesForAGatewayRunAnotherWay(t *testing.T) {
 		t.Fatalf("plan:\n%s", text)
 	}
 	// The restart of a MicroVM gateway it does not make, DefenseClaw
-	// cannot flush first: the plan says to stop its sandboxes, which
-	// flushes them (fu2 review 5). A switch from docker stops docker
-	// sandboxes, which keep what they wrote.
+	// cannot flush first: the plan says to stop its sandboxes. The raw
+	// OpenShell stop flushes a guest only on 0.1.5 or later. A switch
+	// from docker stops docker sandboxes, which keep what they wrote.
 	files := []*openshell.FileChange{{Path: "/cfg/gateway.toml", Summary: []string{"sandbox_uid = 501"}}}
 	for _, tc := range []struct {
 		from, to openshell.ComputeDriver
 		want     string
 	}{
 		{openshell.DriverVM, openshell.DriverVM, "so it loads the change (DefenseClaw cannot restart it); restarting it stops every sandbox on it: " +
-			"first stop the MicroVM sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes, which flushes their disks, or what they wrote since their last sync is lost\n"},
+			"save or sync each MicroVM guest's work first, then stop the sandboxes running on it with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or, for raw OpenShell sandboxes, save work outside the guest first on a gateway older than 0.1.5 because raw stop may not flush it, then `openshell sandbox stop NAME`; DefenseClaw's stop requests a disk sync; raw OpenShell stop on a gateway running 0.1.5 or later requests a guest flush before a planned stop; if a flush fails, changes after the last successful disk sync may be lost\n"},
 		{openshell.DriverDocker, openshell.DriverVM, "on the vm compute driver (DefenseClaw cannot restart it), which stops every sandbox on it; " +
 			"sandboxes made on the docker driver cannot start again"},
 	} {

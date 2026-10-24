@@ -1,4 +1,4 @@
-# DEFENSECLAW CONFIGURATION v8 — OBSERVABILITY REFERENCE
+# DEFENSECLAW CONFIGURATION v9 — OBSERVABILITY REFERENCE
 #
 # GENERATED FILE. DO NOT EDIT.
 # Canonical schema: schemas/config/v8/defenseclaw-config.schema.json
@@ -36,10 +36,10 @@
 #   defenseclaw config reference observability
 #   defenseclaw observability plan
 
-# Selects the strict v8 configuration contract; unknown keys are errors.
-config_version: 8
+# Selects the strict v9 configuration contract; unknown keys are errors.
+config_version: 9
 observability:
-  # Optional in source. Version 8 currently resolves catalog 1; pin it only
+  # Optional in source. Version 9 currently resolves catalog 1; pin it only
   # when deliberately binding the file to this reviewed bucket taxonomy.
   bucket_catalog_version: 1
   # OpenTelemetry resource attributes shared by emitted signals. Keep values
@@ -417,6 +417,20 @@ observability:
     endpoint: https://splunk.example.test:8088/services/collector/event
     # HEC token from a protected credential; use it instead of token_env.
     token_credential: splunk-hec-token
+  - name: local-splunk
+    kind: splunk_hec
+    # Presence normally defaults true. Disabled examples retain policy without
+    # initializing transports or resolving their secrets.
+    enabled: false
+    endpoint: http://127.0.0.1:8088/services/collector/event
+    token_env: DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN
+    # Private and CGNAT destinations require separate explicit opt-ins. DNS is
+    # rechecked at connect time; metadata/link-local targets are always blocked.
+    network_safety:
+      allow_private_networks: true
+    local_stack:
+      marker: defenseclaw-local-splunk
+      container_id: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
   - name: http-standalone
     kind: http_jsonl
     # Presence normally defaults true. Disabled examples retain policy without

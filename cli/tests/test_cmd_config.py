@@ -61,6 +61,15 @@ def test_token_env_change_reports_broken_config_before_writer(monkeypatch) -> No
     writer.assert_not_called()
 
 
+def test_config_migrate_dry_run_ack_is_refused_before_anything_runs() -> None:
+    # --dry-run writes nothing; --ack would mark migration-v9.json read (GAP-0627).
+    with patch("defenseclaw.config_inspect.migrate_config_v9") as migrate:
+        res = CliRunner().invoke(cmd_config.config_migrate, ["--dry-run", "--ack"])
+    assert res.exit_code == 2
+    assert "use one of them" in res.output
+    migrate.assert_not_called()
+
+
 class _IsolatedHome:
     """Context manager that redirects ``DEFENSECLAW_HOME`` to a tmpdir.
 

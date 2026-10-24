@@ -112,6 +112,18 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 			if _, keep := features[feature]; !keep {
 				continue
 			}
+			if feature == "hooks" && features["hooks"] == true {
+				// Managed reconciliation may have to undo a user preference
+				// that contradicts the administrator's pinned hooks=true.
+				// Replace just the boolean token; retain the user's spelling,
+				// whitespace, comments and the rest of config.toml.
+				if equals := strings.IndexByte(visible, '='); equals >= 0 &&
+					strings.TrimSpace(visible[equals+1:]) == "false" {
+					value := equals + 1 + strings.Index(visible[equals+1:], "false")
+					out.WriteString(line[:value] + "true" + line[value+len("false"):])
+					continue
+				}
+			}
 		}
 		out.WriteString(line)
 	}
@@ -124,6 +136,90 @@ func editCodexOwnedTOML(raw []byte, desired map[string]interface{}) ([]byte, err
 	}
 	result := strings.ReplaceAll(out.String(), "\n", newline)
 	return append(bom, []byte(result)...), nil
+}
+
+// RemoveCodexManagedHookFeature removes a user preference for the hooks
+// feature when machine requirements own that feature. Codex can write
+// features.hooks=false despite the managed true value, then reject an
+// unrelated project-trust write because the user key is disallowed.
+func RemoveCodexManagedHookFeature(raw []byte) ([]byte, error) {
+	bom := []byte(nil)
+	if bytes.HasPrefix(raw, []byte{0xef, 0xbb, 0xbf}) {
+		bom, raw = raw[:3], raw[3:]
+	}
+	var document map[string]interface{}
+	if err := toml.Unmarshal(raw, &document); err != nil {
+		return nil, fmt.Errorf("parse Codex user config: %w", err)
+	}
+	features, ok := document["features"].(map[string]interface{})
+	if !ok {
+		if _, present := document["features"]; present {
+			return nil, fmt.Errorf("codex user config features is not a table")
+		}
+		return append(bom, raw...), nil
+	}
+	if _, present := features["hooks"]; !present {
+		return append(bom, raw...), nil
+	}
+	newline := "\n"
+	if bytes.Contains(raw, []byte("\r\n")) {
+		newline = "\r\n"
+		raw = bytes.ReplaceAll(raw, []byte("\r\n"), []byte("\n"))
+	}
+	var syntax tomlEditSyntax
+	section := []string(nil)
+	removed, inline := false, false
+	var out strings.Builder
+	for _, line := range strings.SplitAfter(string(raw), "\n") {
+		complex := syntax.multiline != 0 || syntax.arrayDepth != 0
+		visible := strings.TrimSpace(syntax.visible(line))
+		if !complex && strings.HasPrefix(visible, "[") && strings.HasSuffix(visible, "]") {
+			header := strings.TrimSpace(line)
+			if end := strings.IndexByte(header, ']'); end >= 0 {
+				section = tomlKeyPath(header[1:end])
+			}
+		}
+		if !complex && strings.Contains(visible, "=") && !strings.HasPrefix(visible, "[") {
+			key := tomlKeyPath(line)
+			if len(section) == 0 && len(key) == 1 && key[0] == "features" {
+				removed, inline = true, true
+				continue
+			}
+			if len(section) == 0 && len(key) == 2 && key[0] == "features" && key[1] == "hooks" ||
+				len(section) == 1 && section[0] == "features" && len(key) == 1 && key[0] == "hooks" {
+				removed = true
+				continue
+			}
+		}
+		out.WriteString(line)
+	}
+	if !removed {
+		return nil, fmt.Errorf("codex user config defines features.hooks in an unsupported layout")
+	}
+	if inline {
+		delete(features, "hooks")
+		if len(features) != 0 {
+			encoded, err := toml.Marshal(map[string]interface{}{"features": features})
+			if err != nil {
+				return nil, fmt.Errorf("render remaining Codex features: %w", err)
+			}
+			if out.Len() != 0 && !strings.HasSuffix(out.String(), "\n") {
+				out.WriteByte('\n')
+			}
+			out.Write(encoded)
+		}
+	}
+	result := []byte(strings.ReplaceAll(out.String(), "\n", newline))
+	var checked map[string]interface{}
+	if err := toml.Unmarshal(result, &checked); err != nil {
+		return nil, fmt.Errorf("codex user config after removing features.hooks: %w", err)
+	}
+	if found, ok := checked["features"].(map[string]interface{}); ok {
+		if _, present := found["hooks"]; present {
+			return nil, fmt.Errorf("codex user config still defines features.hooks after repair")
+		}
+	}
+	return append(bom, result...), nil
 }
 
 // tomlKeyPath decodes the dotted TOML key at the start of s: bare, "basic"

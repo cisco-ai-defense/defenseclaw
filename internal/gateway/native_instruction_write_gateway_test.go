@@ -23,7 +23,7 @@ func TestR104GAP0768NativeHighSeverityWrites(t *testing.T) {
 		block                                                      bool
 	}{
 		{"claude Unix active CLAUDE", "claudecode", "printf changed > /repo/CLAUDE.md", "/repo", "/home/alice", "COG-CLAUDE-MD", "HIGH", "/other/CLAUDE.md", actionfacts.DialectPOSIX, true},
-		{"claude Windows active CLAUDE", "claudecode", `Set-Content -LiteralPath 'C:\Repo\CLAUDE.md' -Value changed`, `C:\Repo`, `C:\Users\alice`, "COG-CLAUDE-MD", "CRITICAL", `C:\Other\CLAUDE.md`, actionfacts.DialectPowerShell, true},
+		{"claude Windows active CLAUDE", "claudecode", `Set-Content -LiteralPath 'C:\Repo\CLAUDE.md' -Value changed`, `C:\Repo`, `C:\Users\alice`, "COG-CLAUDE-MD", "HIGH", `C:\Other\CLAUDE.md`, actionfacts.DialectPowerShell, true},
 		{"codex Unix SOUL", "codex", "printf changed > /repo/SOUL.md", "/repo", "/home/alice", "COG-SOUL", "CRITICAL", "/other/SOUL.md", actionfacts.DialectPOSIX, true},
 		{"codex Windows absolute SOUL", "codex", `Set-Content -LiteralPath 'C:\Users\alice\scratch\SOUL.md' -Value changed`, `C:\Users\alice\scratch`, `C:\Users\alice`, "COG-SOUL", "CRITICAL", `C:\Other\SOUL.md`, actionfacts.DialectPowerShell, true},
 		{"claude Unix AGENTS", "claudecode", "printf changed > /repo/AGENTS.md", "/repo", "/home/alice", "COG-AGENTS-MD", "HIGH", "/other/AGENTS.md", actionfacts.DialectPOSIX, true},
@@ -88,15 +88,17 @@ func TestR104GAP0777ExistingSessionAfterGatewayRestart(t *testing.T) {
 			if len(before.activeAgentContext.snapshot("claudecode", "existing-session").files) == 0 {
 				t.Fatal("the original gateway did not authenticate the loaded file")
 			}
+			toolInput := map[string]interface{}{"command": "printf changed >> " + tc.name}
+			ctx := withAuthenticatedHookConnector(
+				instructionResolvedWriteContext(t, root, "Bash", toolInput), "claudecode",
+			)
 			// A new APIServer models a healthy gateway restart, while the
 			// agent continues to send the same session ID.
 			after := &APIServer{scannerCfg: cfg}
 			for _, session := range []string{"existing-session", "new-session"} {
-				response := after.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+				response := after.evaluateClaudeCodeHook(ctx, claudeCodeHookRequest{
 					HookEventName: "PreToolUse", SessionID: session, CWD: root,
-					ToolName: "Bash", ToolInput: map[string]interface{}{
-						"command": "printf changed >> " + file,
-					},
+					ToolName: "Bash", ToolInput: toolInput,
 				})
 				if response.Action != guardrailActionBlock ||
 					!findingStringHasRuleID(response.Findings, tc.rule) {

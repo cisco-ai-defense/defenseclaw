@@ -11,7 +11,6 @@ package cli
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -57,7 +56,8 @@ func readWindowsBundleEnforcement() (bundleEnforcement, managed.StandaloneLayout
 		return bundleEnforcement{}, layout, nil, false
 	}
 	driver := newWindowsBundleDriver(layout)
-	if _, err := os.Lstat(driver.AnchorsPath); err != nil {
+	bundleMode, err := windowsBundleMode(driver)
+	if err != nil || !bundleMode {
 		return bundleEnforcement{}, layout, driver, false
 	}
 	// A store this account cannot read (a standard user's status) or a
@@ -68,7 +68,8 @@ func readWindowsBundleEnforcement() (bundleEnforcement, managed.StandaloneLayout
 		return bundleEnforcement{}, layout, driver, false
 	}
 	e := bundleEnforcement{Current: st.Current}
-	e.CurrentConfig, _, e.CurrentErr = driver.CurrentConfig()
+	e.CurrentDigest, e.CurrentConfig, e.CurrentErr = enterprisebundle.VerifiedCurrentDigest(context.Background(), driver.Store,
+		st.Current, enterprisebundle.PlatformWindows, enterprisebundle.DeviceLayoutFromManaged(layout), bundleDigester)
 	if installed, err := readBoundedConfigFile(layout.ConfigPath, windowsBundleMaxConfig); err == nil {
 		e.InstalledConfig = installed
 	}
@@ -84,12 +85,19 @@ func addWindowsBundleEnforcementError(result *enterprisestatus.Result, opts *win
 		!bundleEnforcementCheckedAction(result.Action) || !windowsEnterpriseIsElevated() {
 		return
 	}
-	e, _, _, ok := readWindowsBundleEnforcement()
+	e, _, driver, ok := readWindowsBundleEnforcement()
 	if !ok {
 		return
 	}
 	e.GatewayReady, e.Policy = result.Readiness.Gateway, result.Policy
-	if problem := e.Problem(); problem != "" && !windowsBundleHasCode(result.Errors, bundleNotAppliedCode) {
+	problem := e.Problem()
+	if e.ConfigReplaced() && driver != nil {
+		if pending, err := driver.CommittedPendingConfig(e.InstalledConfig); err == nil && pending != nil {
+			problem = "config.yaml is the committed config of policy bundle " + pending.BundleID +
+				" whose receipt remains pending; the gateway has not confirmed it yet, so " + bundleLabel(e.Current) + " remains current"
+		}
+	}
+	if problem != "" && !windowsBundleHasCode(result.Errors, bundleNotAppliedCode) {
 		result.AddError(bundleNotAppliedCode, problem)
 	}
 }
@@ -145,6 +153,13 @@ func windowsBundleRestoreRequested(action string, opts *windowsEnterpriseLifecyc
 // replacing names the bundle a killed run installed and the gateway never
 // confirmed, when this run settled it (windowsBundleSettle.replacing): the
 // change says that config is what the restore replaced, not an edit.
+// windowsBundleRestoreGenerationOptions binds the confirmed bundle config to
+// its principal (enterprisebundle.Driver.ConfigGenerationOptions); a seam
+// for tests.
+var windowsBundleRestoreGenerationOptions = func(driver *enterprisebundle.Driver, config []byte) (configwrite.Options, bool, error) {
+	return driver.ConfigGenerationOptions(config)
+}
+
 func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBundleRestore {
 	var out windowsBundleRestore
 	fail := func(code, message string) windowsBundleRestore {
@@ -203,14 +218,21 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 	if !plan.Write {
 		return out
 	}
-	missing := plan.Missing
-	kept, was := "", "missing"
-	if !missing {
-		kept, was = keepWindowsEnterpriseRejectedConfig(layout, previous), "not the config of "+label
+	// A plain ensure already tried to settle unfinished receipts. If the
+	// gateway could not answer, a committed candidate remains pending even
+	// though the previous confirmed bundle is still current. Replacing the
+	// candidate here would turn a confirmable receipt into a later failure.
+	if pending, err := driver.CommittedPendingConfig(previous); err != nil {
+		return fail("bundle_restore_failed", "cannot check pending policy bundle receipts before re-applying "+label+": "+windowsEnterpriseBoundedDiagnostic(err.Error()))
+	} else if pending != nil {
+		return out
 	}
+	// Every read comes before the first write: a restore that cannot prove
+	// the bundle principal changed nothing, the edited config.yaml and its
+	// rejected copy included (q-win-lifecycle review, loop round 3).
 	restoreEnvironment := setTemporaryEnvironment(windowsEnterpriseServicePins(layout))
 	defer restoreEnvironment()
-	writeOptions, ok, err := driver.ConfigGenerationOptions(e.CurrentConfig)
+	writeOptions, ok, err := windowsBundleRestoreGenerationOptions(driver, e.CurrentConfig)
 	if err != nil || !ok {
 		detail := "the confirmed bundle config changed while waiting for the lifecycle lock"
 		if err != nil {
@@ -219,6 +241,11 @@ func restoreWindowsBundleConfig(ctx context.Context, replacing string) windowsBu
 		return fail("bundle_restore_failed", "cannot prove the confirmed bundle principal ("+detail+"); run defenseclaw.exe enterprise windows ensure --profile standalone from an elevated prompt")
 	}
 	writeOptions.ExpectSHA256 = plan.ExpectSHA256
+	missing := plan.Missing
+	kept, was := "", "missing"
+	if !missing {
+		kept, was = keepWindowsEnterpriseRejectedConfig(layout, previous), "not the config of "+label
+	}
 	if err := windowsEnterpriseHotConfigWrite(ctx, layout.ConfigPath, e.CurrentConfig, writeOptions); err != nil {
 		return fail("bundle_restore_failed", "config.yaml is "+was+" and re-applying "+label+" from the bundle store failed: "+
 			windowsEnterpriseBoundedDiagnostic(err.Error()))

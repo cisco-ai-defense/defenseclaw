@@ -9,8 +9,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -82,6 +86,101 @@ func TestHermesVerifyFailsWhenHermesRunsANamedProfile(t *testing.T) {
 	}
 }
 
+// Hermes lists profiles/coder\n as a named profile (Python's $ matches
+// before a final newline). After it appears, Verify (per user and managed)
+// fails and Setup (the ensure, upgrade and repair path) refuses, so neither
+// reports the default profile sealed while that profile runs unhooked.
+func TestHermesVerifyAndSetupRefuseANamedProfileWithATrailingNewline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows file names cannot hold a newline")
+	}
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = configPath
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	conn := NewHermesConnector()
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
+		DataDir:  filepath.Join(root, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	profile := filepath.Join(filepath.Dir(configPath), "profiles", "coder\n")
+	if err := os.MkdirAll(profile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profile, "config.yaml"), []byte("model: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, managed := range []bool{false, true} {
+		check := opts
+		check.ManagedEnterprise = managed
+		if present, err := OwnedHooksPresent(conn, check); present || err == nil {
+			t.Fatalf("managed=%v: OwnedHooksPresent with profiles/coder\\n = %v, %v; want unverified", managed, present, err)
+		}
+	}
+	if err := conn.Setup(context.Background(), opts); err == nil || !strings.Contains(err.Error(), "named profile") {
+		t.Fatalf("Setup with profiles/coder\\n = %v; want the named profile refused", err)
+	}
+}
+
+// 'hermes profile delete' leaves profiles/.deleted behind. An intact
+// default-profile registration stays verified, per user and managed, and a
+// second Setup (the no-op ensure) succeeds without changing it.
+func TestHermesVerifyAndEnsureAcceptDeletedProfileMetadata(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = configPath
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	conn := NewHermesConnector()
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
+		DataDir:  filepath.Join(root, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("OwnedHooksPresent after Setup = %v, %v; want present", present, err)
+	}
+	if err := os.MkdirAll(filepath.Join(filepath.Dir(configPath), "profiles", ".deleted", "coder"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	registered, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, managed := range []bool{false, true} {
+		check := opts
+		check.ManagedEnterprise = managed
+		if present, err := OwnedHooksPresent(conn, check); err != nil || !present {
+			t.Fatalf("managed=%v: OwnedHooksPresent with profiles/.deleted = %v, %v; want present", managed, present, err)
+		}
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("second Setup with profiles/.deleted: %v", err)
+	}
+	if after, err := os.ReadFile(configPath); err != nil || string(after) != string(registered) {
+		t.Fatalf("second Setup changed the registration (err %v)", err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("OwnedHooksPresent after the second Setup = %v, %v; want present", present, err)
+	}
+}
+
 // GAP-0499: a service acting for an account (the managed guardian) sets up
 // and verifies the Hermes home the account configured. When that home
 // cannot be resolved, Setup refuses and Verify fails; only the lists of
@@ -127,4 +226,245 @@ func TestManagedHermesSetupAndVerifyUseTheAccountsHermesHome(t *testing.T) {
 	if _, statErr := os.Stat(dataDir); !os.IsNotExist(statErr) {
 		t.Fatalf("a refused Setup must not write: %v", statErr)
 	}
+}
+
+// GAP-0499: the guardian verifies the Hermes home it resolved for an
+// account only while nothing names another one. A HERMES_HOME the
+// DefenseClaw hooks recorded the account's agents running with, or (on
+// Linux and macOS) one the account's environment.d sets, makes Verify fail
+// instead of reporting the hooks of the resolved home.
+func TestManagedHermesVerifyFailsWhenTheAccountNamesAnotherHermesHome(t *testing.T) {
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+	root := testenv.PrivateTempDir(t)
+	t.Cleanup(hermespath.OverrideAccountHomeForTest(nil))
+	t.Cleanup(hermespath.OverrideAccountEnvironmentForTest(filepath.Join(root, "system")))
+	home := filepath.Join(root, "Users", "target")
+	other := filepath.Join(home, "work-hermes")
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
+		DataDir:  filepath.Join(home, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	stubHermesAdmissionInstalledVersion(t)
+	answerHermesProbeForTest(t)
+	conn := NewHermesConnector()
+	evidence := []struct{ name, file, body string }{
+		{"recorded redirect", filepath.Join(home, ".defenseclaw", "foreign-hook-env.json"),
+			`{"v":1,"connectors":{"claudecode":[{"vars":{"HERMES_HOME":"` + strings.ReplaceAll(other, `\`, `\\`) + `"}}]}}`},
+	}
+	if runtime.GOOS != "windows" {
+		evidence = append(evidence, struct{ name, file, body string }{
+			"environment.d", filepath.Join(home, ".config", "environment.d", "hermes.conf"), "HERMES_HOME=$HOME/work-hermes\n"})
+	}
+	if err := WithUserHomeDir(home, func() error {
+		if err := conn.Setup(context.Background(), opts); err != nil {
+			return err
+		}
+		if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+			t.Fatalf("OwnedHooksPresent after Setup = %v, %v; want present", present, err)
+		}
+		for _, tc := range evidence {
+			if err := os.MkdirAll(filepath.Dir(tc.file), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(tc.file, []byte(tc.body), 0o600); err != nil {
+				return err
+			}
+			present, err := OwnedHooksPresent(conn, opts)
+			if present || err == nil || !strings.Contains(err.Error(), "not verified") || !strings.Contains(err.Error(), "HERMES_HOME unproven") || !strings.Contains(err.Error(), other) {
+				t.Errorf("%s: OwnedHooksPresent = %v, %v; want not verified naming %s", tc.name, present, err, other)
+			}
+			if err := os.Remove(tc.file); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A recorded redirect stops failing Verify once a Setup of the home
+// supersedes it: the DefenseClaw hooks refresh a redirect they see again
+// after a day, so one last seen a day or more before Setup has not been
+// used since. One `HERMES_HOME=/tmp/h hermes` run left Hermes unverified
+// forever. A redirect seen since, or less than a day before Setup, still
+// fails.
+func TestManagedHermesVerifyIgnoresARedirectSetupSuperseded(t *testing.T) {
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+	root := testenv.PrivateTempDir(t)
+	t.Cleanup(hermespath.OverrideAccountHomeForTest(nil))
+	t.Cleanup(hermespath.OverrideAccountEnvironmentForTest(filepath.Join(root, "system")))
+	home := filepath.Join(root, "Users", "target")
+	other := filepath.Join(root, "tmp", "h")
+	record := filepath.Join(home, ".defenseclaw", "foreign-hook-env.json")
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
+		DataDir:  filepath.Join(home, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	stubHermesAdmissionInstalledVersion(t)
+	answerHermesProbeForTest(t)
+	conn := NewHermesConnector()
+	writeRecord := func(seen time.Time) error {
+		body := `{"v":1,"connectors":{"hermes":[{"vars":{"HERMES_HOME":"` + strings.ReplaceAll(other, `\`, `\\`) + `"},"seen":"` + seen.UTC().Format(time.RFC3339) + `"}]}}`
+		if err := os.MkdirAll(filepath.Dir(record), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(record, []byte(body), 0o600)
+	}
+	if err := WithUserHomeDir(home, func() error {
+		if err := writeRecord(time.Now().Add(-48 * time.Hour)); err != nil {
+			return err
+		}
+		if err := conn.Setup(context.Background(), opts); err != nil {
+			return err
+		}
+		if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+			t.Errorf("a redirect last seen two days before Setup: OwnedHooksPresent = %v, %v; want present", present, err)
+		}
+		for name, seen := range map[string]time.Time{
+			"seen after Setup":          time.Now(),
+			"seen an hour before Setup": time.Now().Add(-time.Hour),
+		} {
+			if err := writeRecord(seen); err != nil {
+				return err
+			}
+			present, err := OwnedHooksPresent(conn, opts)
+			if present || err == nil || !strings.Contains(err.Error(), "HERMES_HOME unproven") || !strings.Contains(err.Error(), other) {
+				t.Errorf("%s: OwnedHooksPresent = %v, %v; want not verified naming %s", name, present, err, other)
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// GAP-0499 upgrade: up to 1.0.3 the Windows guardian set up the profile
+// default Hermes home whatever HERMES_HOME the account configured, and
+// bound the receipts to it. Setup of the configured home then failed on the
+// receipt's target mismatch, and the default home kept hooks that run a
+// removed executable after uninstall. Setup releases the earlier home, and
+// Teardown, VerifyClean and the orphan scan cover the profile default.
+func TestManagedHermesReleasesTheEarlierDefaultHome(t *testing.T) {
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = ""
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+	root := testenv.PrivateTempDir(t)
+	t.Cleanup(hermespath.OverrideAccountEnvironmentForTest(filepath.Join(root, "system")))
+	home := filepath.Join(root, "Users", "target")
+	custom := filepath.Join(home, "hermes-work")
+	defaultConfig := hermespath.ConfigPathForUserHome(home)
+	customConfig := filepath.Join(custom, "config.yaml")
+	allowlist := func(config string) string { return filepath.Join(filepath.Dir(config), hermesAllowlistFileName) }
+	opts := prepareHermesSetupAdmissionFixture(t, SetupOpts{
+		DataDir:  filepath.Join(home, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	})
+	stubHermesAdmissionInstalledVersion(t)
+	answerHermesProbeForTest(t)
+	conn := NewHermesConnector()
+	// The hook command names the account's executable, so it is resolved
+	// for the account (WithUserHomeDir) as Setup and Teardown resolve it.
+	var hookScript, command string
+	if err := os.MkdirAll(filepath.Dir(defaultConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(defaultConfig, []byte("model: default\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	owned := func(config string) bool {
+		t.Helper()
+		hooks, approvals, err := hermesHomeHoldsOwnedEntries(config, hookScript, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return hooks || approvals
+	}
+
+	if err := WithUserHomeDir(home, func() error {
+		hookScript = conn.hookCommand(opts)
+		command = hermesConfiguredHookCommand(hookScript, opts.HookExecutable)
+		// The 1.0.3 guardian: the profile default home.
+		restore := hermespath.OverrideAccountHomeForTest(nil)
+		if err := conn.Setup(context.Background(), opts); err != nil {
+			restore()
+			return err
+		}
+		restore()
+		if !owned(defaultConfig) {
+			t.Fatal("fixture: Setup did not register the default home")
+		}
+
+		// 1.0.4 resolves the account's HERMES_HOME.
+		t.Cleanup(hermespath.OverrideAccountHomeForTest(func(string) (string, error) { return custom, nil }))
+		if err := conn.Setup(context.Background(), opts); err != nil {
+			t.Fatalf("Setup of the configured home after the default one: %v", err)
+		}
+		if owned(defaultConfig) {
+			t.Fatal("Setup left DefenseClaw's entries in the earlier default home")
+		}
+		if data, err := os.ReadFile(defaultConfig); err != nil || string(data) != "model: default\n" {
+			t.Fatalf("the earlier default home's config = %q, %v; want the account's copy back", data, err)
+		}
+		if !owned(customConfig) {
+			t.Fatal("Setup did not register the configured home")
+		}
+		if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+			t.Fatalf("OwnedHooksPresent = %v, %v; want present", present, err)
+		}
+
+		// Entries no receipt is bound to in the profile default.
+		for _, path := range []string{customConfig, allowlist(customConfig)} {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			target := defaultConfig
+			if path != customConfig {
+				target = allowlist(defaultConfig)
+			}
+			if err := os.WriteFile(target, data, 0o600); err != nil {
+				return err
+			}
+		}
+		orphans, err := OrphanedHookConfigPaths(conn, opts)
+		if err != nil || !slices.Contains(orphans, defaultConfig) {
+			t.Fatalf("OrphanedHookConfigPaths = %v, %v; want the profile default %s", orphans, err, defaultConfig)
+		}
+		if err := conn.Teardown(context.Background(), opts); err != nil {
+			t.Fatalf("Teardown: %v", err)
+		}
+		if owned(defaultConfig) || owned(customConfig) {
+			t.Fatal("Teardown left DefenseClaw's entries in a Hermes home")
+		}
+		if err := conn.VerifyClean(opts); err != nil {
+			t.Fatalf("VerifyClean after Teardown: %v", err)
+		}
+		if err := os.WriteFile(allowlist(defaultConfig), []byte(`{"approvals":[{"event":"pre_tool_call","command":`+strconv.Quote(command)+`,"`+hermesAllowlistOwnerField+`":true}]}`), 0o600); err != nil {
+			return err
+		}
+		if err := conn.VerifyClean(opts); err == nil || !strings.Contains(err.Error(), defaultConfig) {
+			t.Fatalf("VerifyClean with an approval left in the default home = %v; want incomplete naming it", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// stubHermesAdmissionInstalledVersion reports the admission fixture's
+// release as the installed one: a service acting for an account reads the
+// updater's install stamp on Windows instead of probing the executable.
+func stubHermesAdmissionInstalledVersion(t *testing.T) {
+	t.Helper()
+	previous := hermesInstalledVersionReader
+	hermesInstalledVersionReader = func(string) (string, error) { return hermesAdmissionTestRawVersion, nil }
+	t.Cleanup(func() { hermesInstalledVersionReader = previous })
 }

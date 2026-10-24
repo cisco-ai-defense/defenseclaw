@@ -124,6 +124,15 @@ func (l *Lifecycle) dockerRunArgs() ([]string, error) {
 	return args, nil
 }
 
+// removeContainerArgs removes this instance's container together with the
+// anonymous volumes Docker created for it. The router image declares
+// /app/models a volume, so every run gets a fresh one, and a plain rm -f left
+// the replaced one behind on every gateway restart (GAP-0842). Docker never
+// removes a named volume this way.
+func (l *Lifecycle) removeContainerArgs() []string {
+	return []string{"rm", "-f", "-v", l.containerName}
+}
+
 // Start launches only the router container via Docker.
 // This gives us the /api/v1/classify/intent API without Envoy or extras.
 func (l *Lifecycle) Start(ctx context.Context) error {
@@ -132,7 +141,7 @@ func (l *Lifecycle) Start(ctx context.Context) error {
 		return err
 	}
 	// Stop any existing container with this instance name.
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", l.containerName).Run()
+	_ = exec.CommandContext(ctx, "docker", l.removeContainerArgs()...).Run()
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Stdout = os.Stderr
@@ -177,7 +186,7 @@ func (l *Lifecycle) WaitForHealth(ctx context.Context, timeout time.Duration) er
 func (l *Lifecycle) Stop() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, "docker", "rm", "-f", l.containerName).Run()
+	_ = exec.CommandContext(ctx, "docker", l.removeContainerArgs()...).Run()
 	fmt.Fprintf(os.Stderr, "[routing] router container %s stopped\n", l.containerName)
 	return nil
 }

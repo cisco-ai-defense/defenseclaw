@@ -60,7 +60,7 @@ Amp and DefenseClaw must run on the same host with the gateway reachable over lo
 
 The guardian writes the managed plugin into each enrolled user's `~/.config/amp/plugins/defenseclaw.ts` (or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`) and repairs it when the user changes it. Amp has no machine-wide plugin location, so coverage is advisory against a user who sets out to avoid it.
 
-- Amp loads plugins from the `amp/plugins` folder under `XDG_CONFIG_HOME` (default `~/.config`). A session started with `XDG_CONFIG_HOME` or `HOME` pointing elsewhere does not load the plugin (`amp plugins list` shows only Amp's own). Its tool calls are not inspected or logged, the guardian never repairs that session, and status and verify keep reporting the user's Amp ready. `DEFENSECLAW_*` overrides do not turn the plugin off.
+- Amp loads plugins from the `amp/plugins` folder under `XDG_CONFIG_HOME` (default `~/.config`). A session started with `XDG_CONFIG_HOME` or `HOME` pointing elsewhere does not load the plugin (`amp plugins list` shows only Amp's own). Its tool calls are not inspected, and the guardian cannot repair that session. Managed status and verify now report a running relocated or unverified launch as incomplete and audit the observation. `DEFENSECLAW_*` overrides do not turn the plugin off.
 - Amp does not define plugin order.
 
 To reduce this, prefer agents DefenseClaw governs through machine policy (Claude Code, Codex, Cursor, GitHub Copilot, OpenCode), and use application control so users start Amp only through an administrator-owned launcher that resets `XDG_CONFIG_HOME` and `HOME`. See R1 and R3 in the [threat model](/docs/enterprise/plan/threat-model#residual-risks).
@@ -107,7 +107,7 @@ The contract is `amp-plugin-v1`, plugin script `v2`. DefenseClaw pins the normal
 | `tool.result` | Inspect status and output after execution, before model delivery | Preserve, withhold or replace, or native confirm |
 | `agent.end` | Close the turn and record its status | Observe only |
 
-Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable UI rejects a pending call or withholds a pending result. Gateway errors honor the configured open or closed hook failure mode. Fail-closed applies once the plugin has loaded, and a killed or stopped check blocks the call.
+Amp documents no `session.end` and no separate subagent events. Oracle, Task launchers, MCP tools and plugin-defined tools are governed at their parent `tool.call`. If Amp emits events from a child thread, DefenseClaw enforces that child's calls under its thread ID and invents no parent-child edge. For a `confirm` decision, the plugin calls Amp's confirmation UI only when the thread is active in the foreground. Denial, a background thread or unavailable UI rejects a pending call or withholds a pending result. Per-user gateway failures and unverified listeners fail closed once the plugin has loaded. A managed administrator may select open for classified outages only; no bearer or event is sent to an unverified listener.
 
 ## Native ask
 
@@ -115,7 +115,7 @@ Amp can ask in the active foreground thread during `tool.call` and before a `too
 
 ## Fail mode
 
-Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. Gateway errors honor the configured open or closed mode. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed: yes. Per-user host failures block the events that support a block response, including when an older sidecar says `open`. A managed administrator may choose open for a classified gateway outage only. The default is `closed`, and an unverified listener receives no bearer or event. Secure Client uses an administrator-owned native helper to verify the connected gateway service and blocks an unverified peer even when its outage mode is open. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

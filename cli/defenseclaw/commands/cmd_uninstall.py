@@ -41,12 +41,14 @@ OpenClaw, never against the other adapters — calling
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import errno
 import glob
 import json
 import ntpath
 import os
+import posixpath
 import re
 import shutil
 import stat
@@ -853,8 +855,8 @@ def _installed_mac_app(platform_name: str) -> str:
 # DefenseClaw Setup keeps its hook launcher and transaction log under
 # %LOCALAPPDATA%\DefenseClaw. When the installer replaces Setup it keeps the
 # launcher, because agent hooks that Setup wrote may still run it until each
-# connector is set up again (it moves the launcher's state file aside, which
-# turns the launcher off), so nothing else removes these folders.
+# connector is set up again, and points it at a copy of this install's hook
+# (GAP-1000), so nothing else removes these folders.
 _WINDOWS_SETUP_LEFTOVERS = ("HookRuntime", "InstallerState")
 
 
@@ -866,17 +868,33 @@ def _windows_setup_leftovers(platform_name: str) -> tuple[str, ...]:
     except Exception:  # noqa: BLE001 - no Known Folder means nothing to clean.
         return ()
     root = os.path.join(local_app_data, "DefenseClaw") if local_app_data else ""
+    state = os.path.join(root, "HookRuntime", "hook-runtime-state.json") if root else ""
     if (
         not root
         or os.path.lexists(os.path.join(local_app_data, "Programs", "DefenseClaw"))
         or os.path.lexists(os.path.join(root, "InstallerCache"))
-        or os.path.lexists(os.path.join(root, "HookRuntime", "hook-runtime-state.json"))
+        or (os.path.lexists(state) and not _installer_launcher_trampoline(state, root))
     ):
         # A Setup install, or its cleanup after the next sign-in, still owns them.
         return ()
     return tuple(
         path for path in (os.path.join(root, name) for name in _WINDOWS_SETUP_LEFTOVERS) if os.path.lexists(path)
     )
+
+
+def _installer_launcher_trampoline(state_path: str, root: str) -> bool:
+    """True for the launcher state install.ps1 publishes once it replaces
+    Setup: it delegates to a copy of this install's hook under
+    HookRuntime\\delegated (GAP-1000), so it goes with this install."""
+    delegated = os.path.normcase(os.path.join(root, "HookRuntime", "delegated")) + os.sep
+    try:
+        if os.path.islink(state_path) or os.path.getsize(state_path) > 64 * 1024:
+            return False
+        with open(state_path, encoding="utf-8-sig") as handle:
+            hook = json.load(handle).get("hook_path")
+    except (OSError, ValueError, AttributeError):
+        return False
+    return isinstance(hook, str) and os.path.normcase(os.path.abspath(hook)).startswith(delegated)
 
 
 def _remove_setup_leftovers(paths: tuple[str, ...]) -> None:
@@ -1825,32 +1843,93 @@ _DATA_REMOVED_LEFTOVER_NOTE = (
 _LEFTOVER_HEADER = re.compile(r"^\S.* support was removed in DefenseClaw 1\.0\.4\. Left for you to remove by hand:$")
 
 
-def _removed_connector_leftover_lines(data_dir: str, *, data_removed: bool) -> list[str]:
-    """until 1.1: the lines that list what a removed connector left (none when nothing is)."""
+def _removed_connector_leftover_lines(
+    data_dir: str,
+    *,
+    data_removed: bool,
+    found: list | None = None,
+    moved: dict[str, str] | None = None,
+) -> list[str]:
+    """until 1.1: the lines that list what a removed connector left (none when nothing is).
+
+    *found* is a list read earlier (removed_connectors.leftovers); *moved*
+    names the backups moved out of the data folder at their new path.
+    """
     if not data_dir:
         return []
     from defenseclaw.removed_connectors import leftovers
 
     lines: list[str] = []
-    for left in leftovers(data_dir):
-        lines.extend(left.lines(without_under=data_dir if data_removed else ""))
+    for left in leftovers(data_dir) if found is None else found:
+        lines.extend(left.lines(without_under=data_dir if data_removed else "", moved=moved))
     return lines
 
 
-def _print_removed_connector_leftovers(data_dir: str, *, data_removed: bool) -> None:
+def _print_removed_connector_leftovers(
+    data_dir: str,
+    *,
+    data_removed: bool,
+    found: list | None = None,
+    moved: dict[str, str] | None = None,
+) -> None:
     """until 1.1: list what the removed OpenHands/OmniGent teardown left, with the steps.
 
     The teardown only replaces DefenseClaw's hook script with a stub that
     blocks every call and revokes the tokens; the agent's own config still
     names it. Every uninstall form prints this. What a data folder removal
-    takes away (*data_removed*) is not listed.
+    takes away (*data_removed*) is not listed; the backups it keeps are, at
+    the place they moved to (*moved*).
     """
-    lines = _removed_connector_leftover_lines(data_dir, data_removed=data_removed)
+    lines = _removed_connector_leftover_lines(data_dir, data_removed=data_removed, found=found, moved=moved)
     if not lines:
         return
     if data_removed:
         lines.append(_DATA_REMOVED_LEFTOVER_NOTE)
     click.echo("\n".join(lines))
+
+
+def _move_removed_connector_backups_out(data_dir: str) -> dict[str, str]:
+    """until 1.1: move each removed connector's backups out of a data folder that is about to go.
+
+    The leftover list tells the user to copy back what they need from
+    ``connector_backups/<connector>``, so the data removal must not take it
+    (removed_connectors.kept_backups_root). Returns old path to new path.
+    A link or reparse point there is not DefenseClaw's copy, and the data
+    removal unlinks it without following it. A folder that cannot be moved
+    stops the uninstall before any data or binary is removed.
+    """
+    from defenseclaw.removed_connectors import backup_dirs, kept_backups_root
+
+    moved: dict[str, str] = {}
+    root = kept_backups_root(data_dir)
+    for name, path in backup_dirs(data_dir):
+        if _is_reparse_path(path) or _is_reparse_path(os.path.dirname(path)) or not os.path.isdir(path):
+            continue
+        try:
+            if os.path.lexists(root) and (_is_reparse_path(root) or not os.path.isdir(root)):
+                raise OSError(f"{root} is in the way and is not a folder")
+            os.makedirs(root, mode=0o700, exist_ok=True)
+            target = os.path.join(root, name)
+            count = 2
+            while os.path.lexists(target):
+                target = os.path.join(root, f"{name}-{count}")
+                count += 1
+            try:
+                os.rename(path, target)
+            except OSError as exc:
+                if exc.errno != errno.EXDEV:
+                    raise
+                # A data folder on its own filesystem (GAP-1447): the copy
+                # stays, and the data removal takes the original.
+                shutil.copytree(path, target, symlinks=True)
+        except OSError as exc:
+            raise click.ClickException(
+                f"could not move {path} (your files as they were before DefenseClaw's setup) out of the data "
+                f"folder to {root}: {exc}. No data or binaries were removed: move it out yourself, then run the "
+                "same uninstall command again"
+            ) from exc
+        moved[path] = target
+    return moved
 
 
 def _setup_removed_connector_leftover_lines(stdout: str) -> list[str]:
@@ -2039,6 +2118,14 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
         )
         ux.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
     ux.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
+    if plan.remove_data_dir and plan.data_dir:
+        from defenseclaw.removed_connectors import backup_dirs, kept_backups_root
+
+        for _name, path in backup_dirs(plan.data_dir):
+            ux.echo(
+                f"      {ux.dim('·')} kept: {path} (your files as they were before DefenseClaw's setup) "
+                f"moves to {kept_backups_root(plan.data_dir)}"
+            )
     if plan.quarantined:
         # GAP-0422: often the only copy of a skill or plugin; say so before it goes.
         ux.echo(
@@ -2148,7 +2235,20 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
         if not plan.remove_data_dir:
             _turn_guardrail_off(plan.data_dir)
-    _print_removed_connector_leftovers(plan.data_dir, data_removed=plan.remove_data_dir)
+    # until 1.1: read what a removed connector left before its backups move:
+    # their records name the agent configs outside the data folder.
+    from defenseclaw.removed_connectors import backup_dirs, leftovers
+
+    removed_left = leftovers(plan.data_dir) if plan.data_dir else []
+    moved: dict[str, str] = {}
+    if plan.remove_data_dir and plan.data_dir and backup_dirs(plan.data_dir):
+        run_phase(
+            "removed connector backups",
+            lambda: moved.update(_move_removed_connector_backups_out(plan.data_dir)),
+        )
+    _print_removed_connector_leftovers(
+        plan.data_dir, data_removed=plan.remove_data_dir, found=removed_left, moved=moved
+    )
     if plan.stop_gateway and plan.data_dir:
         _remove_probe_created_state(plan.data_dir)
         # The gateway is stopped, so its watcher no longer uses them.
@@ -2295,6 +2395,84 @@ _COPILOT_PLUGIN_MANIFEST = {
 }
 
 
+def _orphan_copilot_handler_owned(handler: object) -> bool:
+    """Recognize the published managed Local hook commands, including 1.0.0 Windows."""
+    if not isinstance(handler, dict) or handler.get("type") != "command":
+        return False
+    if handler.keys() - {"type", "command", "timeout", "timeoutSec"}:
+        return False
+    command = handler.get("command")
+    if not isinstance(command, str) or len(command) > 65536:
+        return False
+    windows = re.fullmatch(
+        r"(?i)[A-Z]:\\Windows\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe "
+        r"-NoLogo -NoProfile -NonInteractive -EncodedCommand ([A-Za-z0-9+/=]+)",
+        command,
+    )
+    if windows:
+        try:
+            script = base64.b64decode(windows.group(1), validate=True).decode("utf-16le")
+        except (ValueError, UnicodeError):
+            return False
+        bound = re.search(
+            r"& ('(?:[^']|'')+defenseclaw-hook\.exe') 'hook' '--connector' 'copilot' "
+            r"'--event' '([A-Za-z]+)' '--enterprise-managed' '--hook-surface' 'vscode-local' "
+            r"\| Microsoft\.PowerShell\.Core\\Out-Host",
+            script,
+            re.IGNORECASE,
+        )
+        if not bound:
+            return False
+        binary, event = bound.groups()
+        args = (
+            f"'hook' '--connector' 'copilot' '--event' '{event}' "
+            "'--enterprise-managed' '--hook-surface' 'vscode-local'"
+        )
+        argv = f"hook --connector copilot --event {event} --enterprise-managed --hook-surface vscode-local"
+        statements = [
+            "$ErrorActionPreference='Stop'",
+            "$env:NoDefaultCurrentDirectoryInExePath='1'",
+        ]
+        run = [
+            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+            f"$ErrorActionPreference='Continue'; & {binary} {args} | Microsoft.PowerShell.Core\\Out-Host; "
+            "exit $LASTEXITCODE }",
+            f"$hookStart=[System.Diagnostics.ProcessStartInfo]::new({binary},'{argv}')",
+            "$hookStart.UseShellExecute=$false",
+            "$hookStart.RedirectStandardError=$true",
+            "$hookProcess=[System.Diagnostics.Process]::Start($hookStart)",
+            "$hookProcess.StandardError.BaseStream.CopyTo([Console]::OpenStandardError())",
+            "$hookProcess.WaitForExit()",
+            "exit $hookProcess.ExitCode",
+        ]
+        if script == "; ".join([*statements, *run]):
+            return True  # 1.0.0 render, before the removed-deployment guard
+        unquoted = binary[1:-1].replace("''", "'")
+        gateway = "'" + ntpath.join(ntpath.dirname(unquoted), "defenseclaw-gateway.exe").replace("'", "''") + "'"
+        guard = (
+            "if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { "
+            f"if (-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {binary}) -and "
+            f"-not (Microsoft.PowerShell.Management\\Test-Path -LiteralPath {gateway})) {{ exit 0 }} }} "
+            f"elseif (-not [System.IO.File]::Exists({binary}) -and "
+            f"-not [System.IO.File]::Exists({gateway})) {{ exit 0 }}"
+        )
+        return script == "; ".join([*statements, guard, *run])
+
+    prefix, sep, tail = command.partition(" hook --connector copilot --enterprise-managed --event '")
+    if not sep:
+        return False
+    event = re.fullmatch(r"([A-Za-z]+)' --hook-surface vscode-local", tail)
+    binary = re.search(r"'([^']*/defenseclaw-hook)'$", prefix)
+    if not event or not binary:
+        return False
+    quoted = "'" + binary.group(1) + "'"
+    render = quoted + sep + tail
+    if command == render:
+        return True  # 1.0.0 render
+    marker = "'" + posixpath.join(posixpath.dirname(binary.group(1)), "defenseclaw-gateway") + "'"
+    return command == f"[ -e {quoted} ] || [ -e {marker} ] || exit 0; exec {render}"
+
+
 def _remove_mcp_writer_backups(data_dir: str) -> None:
     """Remove the agent-config backups the MCP writer left next to each config (GAP-1699).
 
@@ -2365,10 +2543,8 @@ def _remove_orphan_copilot_plugin() -> None:
 
     A managed deployment renders this plugin into each account and its own
     uninstall removes it. On a host with no managed deployment a leftover
-    copy only names a hook binary that may be gone, so the per-user
-    uninstall removes it. The plugin must hold exactly DefenseClaw's
-    rendered manifest and managed Copilot hook commands; anything else is
-    the user's and stays.
+    copy may name a hook binary that is gone. Remove only the commands
+    rendered by DefenseClaw and keep any independent plugin handlers.
     """
     from defenseclaw import upgrade_shim
 
@@ -2389,14 +2565,41 @@ def _remove_orphan_copilot_plugin() -> None:
             if json.load(handle) != _COPILOT_PLUGIN_MANIFEST:
                 return
         with open(hooks_file, encoding="utf-8") as handle:
-            events = json.load(handle).get("hooks")
-        handlers = [h for group in events.values() for h in group] if isinstance(events, dict) else []
-        if not handlers or not all(
-            isinstance(h, dict)
-            and "copilot" in str(h.get("command", ""))
-            and "enterprise-managed" in str(h.get("command", ""))
-            for h in handlers
-        ):
+            document = json.load(handle)
+        if not isinstance(document, dict):
+            return
+        events = document.get("hooks")
+        if not isinstance(events, dict) or not all(isinstance(group, list) for group in events.values()):
+            return
+        changed = False
+        for event, group in list(events.items()):
+            remaining = [handler for handler in group if not _orphan_copilot_handler_owned(handler)]
+            if len(remaining) == len(group):
+                continue
+            changed = True
+            if remaining:
+                events[event] = remaining
+            else:
+                del events[event]
+        if not changed:
+            return
+        if events or document.keys() - {"hooks", "version"}:
+            temp_path = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8", dir=hooks_dir, prefix=".hooks-", delete=False
+                ) as temp:
+                    temp_path = temp.name
+                    json.dump(document, temp, indent=2)
+                    temp.write("\n")
+                    temp.flush()
+                    os.fsync(temp.fileno())
+                os.replace(temp_path, hooks_file)
+            finally:
+                if temp_path:
+                    with contextlib.suppress(OSError):
+                        os.unlink(temp_path)
+            ux.ok(f"removed DefenseClaw handlers from orphaned Copilot plugin {plugin}")
             return
         os.unlink(hooks_file)
         os.unlink(manifest)
@@ -3443,11 +3646,21 @@ def _run_gateway_connector_teardown(
         ux.warn(f"gateway connector teardown failed to launch: {exc}")
         return failed(f"teardown did not run: {exc}")
     if proc.stdout:
+        in_leftovers = False
         for line in proc.stdout.splitlines():
+            plain = _ANSI_ESCAPE.sub("", line).rstrip()
             # The gateway's own "✓ <connector> teardown complete" line would
             # double the verified line printed below.
-            if _ANSI_ESCAPE.sub("", line).strip().endswith(f"{connector} teardown complete"):
+            if plain.strip().endswith(f"{connector} teardown complete"):
                 continue
+            # until 1.1: a removed connector's leftovers. The uninstall lists
+            # them once every teardown ran, without what its data removal
+            # takes and with the backups where it moves them
+            # (_print_removed_connector_leftovers).
+            if _LEFTOVER_HEADER.match(plain) or (in_leftovers and plain.startswith("  - ")):
+                in_leftovers = True
+                continue
+            in_leftovers = False
             ux.echo(f"  {ux.dim('·')} {line.strip()}")
     if proc.stderr:
         for line in proc.stderr.splitlines():

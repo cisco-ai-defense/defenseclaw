@@ -307,6 +307,43 @@ func TestEndedChangeReservationsAreTheCommandsThatEndedAfterTheirChange(t *testi
 	}
 }
 
+// A writer can publish an outcome while the gateway walks a directory of
+// reservations. The gateway must check the spool after it locks each one:
+// the settlement map it read for an earlier reservation is already stale.
+func TestEndedChangeReservationsSeeOutcomesWrittenDuringTheScan(t *testing.T) {
+	spool := newTestSpool(t)
+	left, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	right, err := spool.Reserve(ChangeKindTrustAnchors, ChangeActionInstall, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, second := left, right
+	if first.id > second.id {
+		first, second = second, first
+	}
+	first.abandon()
+	originalFlush := flushEndedReservation
+	t.Cleanup(func() { flushEndedReservation = originalFlush })
+	flushEndedReservation = func(file *os.File) error {
+		if file.Name() == first.path {
+			outcome, data := outcomeFor(t, second.id,
+				NewChangeEvent(ChangeKindTrustAnchors, ChangeActionInstall, ChangeApplied, ""))
+			if err := spool.writeEvent(outcome.EventID, data); err != nil {
+				t.Fatal(err)
+			}
+			second.abandon() // The command stopped before cleaning up.
+		}
+		return originalFlush(file)
+	}
+	got := EndedChangeReservations(spool.Dir)
+	if len(got) != 1 || got[0].EventID != first.id {
+		t.Fatalf("ended reservations = %+v, want only %s", got, first.id)
+	}
+}
+
 // The spool needs its existing state directory: without one nothing is
 // written.
 func TestChangeSpoolNeedsItsStateDirectory(t *testing.T) {

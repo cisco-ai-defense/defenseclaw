@@ -231,6 +231,34 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
 
         self.assertIs(client._session.trust_env, False)
 
+    @unittest.skipIf(os.name == "nt", "the POSIX helper path is checked by uid and mode")
+    def test_connected_socket_proof_refuses_symlinked_helper(self):
+        with tempfile.TemporaryDirectory() as home:
+            binary_dir = os.path.join(home, ".local", "bin")
+            os.makedirs(binary_dir, mode=0o700)
+            binary = os.path.join(binary_dir, "defenseclaw-gateway")
+            marker = os.path.join(home, "foreign-helper-ran")
+            foreign = os.path.join(home, "foreign-helper")
+            with open(foreign, "w", encoding="utf-8") as stream:
+                stream.write(f"#!/bin/sh\nprintf reached > '{marker}'\n")
+            os.chmod(foreign, 0o700)
+            os.symlink(foreign, binary)
+
+            class ConnectedSocket:
+                def getpeername(self):
+                    return ("127.0.0.1", 18970)
+
+                def getsockname(self):
+                    return ("127.0.0.1", 43000)
+
+            with (
+                patch.object(gateway, "canonical_install_path", return_value=binary),
+                patch("defenseclaw.upgrade_shim.managed_descriptor", return_value=""),
+            ):
+                with self.assertRaises(gateway.GatewayListenerNotOwnedError):
+                    gateway._verify_connected_gateway_socket(ConnectedSocket(), "127.0.0.1", 18970)
+            self.assertFalse(os.path.exists(marker))
+
     def test_redirect_refusal_is_a_session_hook_not_a_per_method_check(self):
         """Redirect safety must stay central.
 
@@ -319,13 +347,19 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
                 port=origin_server.server_port,
                 token="gateway-secret",
             )
-            with self.assertRaises(gateway.requests.HTTPError):
-                client.status()
-            with self.assertRaises(gateway.requests.HTTPError):
-                client.health()
-            with self.assertRaises(gateway.requests.HTTPError):
-                client.reload_provider_registry()
-            self.assertFalse(client.is_running())
+            # The local origin server stands in for a proven same-account
+            # gateway; this case tests refusal of its redirect target.
+            with (
+                patch.object(gateway, "_unproven_per_user_gateway_target", return_value=""),
+                patch.object(gateway, "_verify_connected_gateway_socket", return_value=None),
+            ):
+                with self.assertRaises(gateway.requests.HTTPError):
+                    client.status()
+                with self.assertRaises(gateway.requests.HTTPError):
+                    client.health()
+                with self.assertRaises(gateway.requests.HTTPError):
+                    client.reload_provider_registry()
+                self.assertFalse(client.is_running())
         finally:
             origin_server.shutdown()
             origin_server.server_close()

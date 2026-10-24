@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1155,12 +1156,27 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 					}
 				}
 			}
-			// Admit again what a failed scan or quarantine left in place.
-			for _, issue := range w.state.dueIssues(time.Now(), AdmissionUnscanned, AdmissionNotQuarantined) {
-				w.queuePending(issue.Path)
-			}
+			w.queueDueIssues(time.Now())
 			w.processPending(ctx)
 		}
+	}
+}
+
+// queueDueIssues admits again what a failed scan or quarantine left in
+// place. An issue an earlier watcher recorded under a folder this one does
+// not watch (a connector that was removed or is no longer set up, a folder
+// taken out of gateway.watcher) stays recorded but is not admitted: its
+// quarantine can only fail as outside the watched folders, and it raised a
+// HIGH alert on every retry (GAP-0574). Its install block and runtime
+// disable stay in the journal; a watcher that watches the folder again
+// retries it.
+func (w *InstallWatcher) queueDueIssues(now time.Time) {
+	for _, issue := range w.state.dueIssues(now, AdmissionUnscanned, AdmissionNotQuarantined) {
+		roots := w.sourceRootsFor(InstallType(issue.Type))
+		if !slices.ContainsFunc(roots, func(root string) bool { return watcherPathAtOrBelow(issue.Path, root) }) {
+			continue
+		}
+		w.queuePending(issue.Path)
 	}
 }
 

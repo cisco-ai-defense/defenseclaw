@@ -109,7 +109,7 @@ Claude Code fields such as `systemMessage`, `additionalContext` and `permissionD
 
 ## Verdict mapping
 
-`observe` records findings and always permits tool execution. `action` may deny or ask only at `PreToolUse`. The [official hooks documentation](https://antigravity.google/docs/hooks) defines `PreToolUse` as a synchronous pre-execution hook whose stdout carries one of `allow`, `deny`, `ask` or `force_ask` in `decision`. DefenseClaw sends `{ "decision": "deny", "reason": "policy denied" }` for a hard block and `{ "decision": "force_ask", "reason": "operator confirmation required" }` for native confirmation. This synchronous `PreToolUse` decision is the only hard-blocking claim for the connector.
+`observe` records policy findings without blocking on those findings. With the default fail mode `closed`, when the gateway is unreachable the running hook denies `PreToolUse`. `action` may deny or ask on policy findings only at `PreToolUse`. The [official hooks documentation](https://antigravity.google/docs/hooks) defines `PreToolUse` as a synchronous pre-execution hook whose stdout carries one of `allow`, `deny`, `ask` or `force_ask` in `decision`. DefenseClaw sends `{ "decision": "deny", "reason": "policy denied" }` for a hard block and `{ "decision": "force_ask", "reason": "operator confirmation required" }` for native confirmation. This synchronous `PreToolUse` decision is the only hard-blocking claim for the connector.
 
 ## Native ask
 
@@ -117,7 +117,7 @@ Only `PreToolUse` supports native ask. DefenseClaw sends `force_ask`, which alwa
 
 ## Fail mode
 
-Antigravity does not document non-zero hook exit status as enforcement, so DefenseClaw does not advertise connector-wide fail-closed support. In fail mode `closed`, the default, a gateway, authentication or decoding failure denies `PreToolUse` with `decision: "deny"`; with `open` it gets the event's no-op answer. Antigravity itself still runs a call when the hook times out or cannot start. Under Secure Client the hook stays open. Other events keep their documented non-blocking shapes. DefenseClaw does not claim it can override Antigravity's own permission bypass.
+Antigravity does not document non-zero hook exit status as enforcement, so DefenseClaw does not advertise connector-wide fail-closed support. In fail mode `closed`, the default, a gateway, authentication or decoding failure denies `PreToolUse` with `decision: "deny"`; with `open` it gets the event's no-op answer. Antigravity itself may run a call when the hook times out or cannot start. A T7 stopped-hook drill blocked in its tested build, but that is not a vendor timeout-deny contract. Standalone status and verify warn `hook_process_fail_open` and set `security_complete: false` while Antigravity is enabled. Under Secure Client the hook stays open. Other events keep their documented non-blocking shapes. DefenseClaw does not claim it can override Antigravity's own permission bypass.
 
 ## Limits
 

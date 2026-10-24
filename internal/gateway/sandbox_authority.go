@@ -118,6 +118,9 @@ type sandboxRegistrationStore interface {
 	sandboxreg.GuestStore
 	CreateRun(uid int, r sandboxreg.Registration, run *sandboxreg.Run) error
 	Run(uid int, id string) (sandboxreg.Run, bool, error)
+	// GetWithRun reads a registration and its run record as one write
+	// stored them.
+	GetWithRun(uid int, id string) (sandboxreg.Registration, bool, sandboxreg.Run, bool, error)
 	UpdateRun(uid int, r sandboxreg.Registration, run *sandboxreg.Run) error
 	// Report records whether the daemon sees the registration's sandbox
 	// running; RevokeSandbox revokes the registrations bound to a sandbox
@@ -795,7 +798,9 @@ func (a *APIServer) sandboxMatchPeer(ctx context.Context, peer managedHookPeer, 
 		UserID: id, IDKind: useridentity.KindForID(id), UserName: verifiedAccountName(id, peer.Name),
 		Directory: facts, Source: subjectSourcePeerCredentials,
 	}, lookup)
-	decision := set.match(&subject, profileSubjectVerified, config.NormalizeConnectorName(connectorName), "")
+	connectorName = config.NormalizeConnectorName(connectorName)
+	decision := set.match(&subject, profileSubjectVerified, connectorName, "")
+	decision = set.refuseUncompiledMeet(ctx, decision, connectorName)
 	return sandboxMatch{
 		decision: decision, resolved: resolved, facts: facts,
 		provisional: decision.Match == profileMatchDefaultLookupFailed,

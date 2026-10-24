@@ -1739,7 +1739,7 @@ func (r *doctorRun) upgradeFix() *Fix {
 		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " the way you installed it: DefenseClaw upgrades only the OpenShell NVIDIA's installer installs"}
 	}
 	if r.configured == DriverVM {
-		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway; stop running MicroVM sandboxes first with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes)",
+		return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this restarts the gateway; save or sync each MicroVM guest's work first; raw stop on OpenShell older than 0.1.5 may not flush the guest, so save its work outside the guest before it; then stop running sandboxes with `defenseclaw sandbox stop NAME` for DefenseClaw sandboxes or `openshell sandbox stop NAME` for raw OpenShell sandboxes; a failed sync can lose later changes)",
 			Command: installOpenShellCommand}
 	}
 	return &Fix{Summary: "upgrade OpenShell to " + InstallerVersion + " in place (this pulls its supervisor images from ghcr.io and restarts the gateway, " +
@@ -1912,7 +1912,7 @@ func (r *doctorRun) checkGateway(ctx context.Context) {
 		r.client = client
 		r.gateway, err = client.Health(ctx)
 	}
-	if err != nil || !r.gateway.Healthy {
+	if err != nil || r.gateway == nil || !r.gateway.Healthy {
 		if err == nil || !credentialFailure(err) {
 			r.forgetReleaseRestart()
 		}

@@ -53,12 +53,13 @@ A sandboxed agent's hooks run inside the sandbox and reach the gateway through a
 | **macOS, managed** | Yes | Yes, MicroVM driver on Apple silicon; copy mode only, under the administrator's [sandbox policy](/docs/enterprise/runtime/sandboxes). Intel Macs refuse | A, B and C (Endpoint Security, notify only) | Not available |
 | **Windows** | Yes; native hook runner | No: sandboxes are refused | A and B. C needs an elevated token and the Advanced Audit Policy | Not available |
 
-Hooks fail closed by default everywhere except Secure Client. On a managed
+Hooks fail closed by default everywhere except Secure Client. Per-user Cursor
+in observe mode registers `failClosed: true`, and its running hook blocks
+supported events during a gateway outage by default (see the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). On a managed
 standalone computer, the administrator may choose `hook_fail_mode: open`, an
 outage-only exception for a gateway service that is stopped, restarting or gives
-no answer in time. A connector whose foreign-hook guard checks the session with
-the gateway (`foreign_hooks: remove`, the default) blocks outages too; see
-[Foreign-hook guard](/docs/enterprise/configure/foreign-hook-guard#session-records-and-gateway-outages).
+no answer in time. With `foreign_hooks: remove`, a guarded call needs fresh,
+trusted records for its agent process and session to follow that outage mode.
 A missing or invalid administrator-owned runtime, an unverified gateway peer,
 missing or refused credentials, rate limits (HTTP 429, also when the resends
 run out) and unusable responses still block. Secure Client keeps its separate open default and honors an explicit
@@ -200,7 +201,7 @@ The layers divide the work so that two of them never make the same decision:
 
 | Layer and failure | What happens |
 | --- | --- |
-| A hook cannot reach the gateway | The hook's fail mode decides, in observe and action mode alike: `closed` (the default everywhere except Secure Client) denies the call; `open` runs it and records the failure |
+| A hook cannot reach the gateway | The running hook's fail mode decides, in observe and action mode alike: `closed` (the default everywhere except Secure Client) denies a supported event; `open` runs it and records the failure. Per-user Cursor observe registration has `failClosed: true` outside Secure Client, and its running hook blocks a gateway outage by default. |
 | Managed hooks on a standalone computer, every connector | Closed by default. The administrator's `open` covers a gateway outage only, and not for a connector whose foreign-hook guard checks the session with the gateway. Rate limits, refusals and unusable answers always block |
 | Secure Client hooks | Open by default; an explicit `closed` is kept |
 | Sandbox hooks | Always closed; silence is detected and can stop the sandbox |

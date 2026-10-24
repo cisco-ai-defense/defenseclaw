@@ -398,6 +398,106 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     assert disc.agents["openclaw"].installed is True
 
 
+def test_restricted_setup_scan_probes_its_active_peer(monkeypatch, tmp_path):
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+    (tmp_path / "config.yaml").write_text(
+        "guardrail:\n  enabled: true\n  connector: claude-code\n"
+        "  connectors:\n    claude-code:\n      enabled: true\n"
+        "    cursor:\n      enabled: false\n",
+        encoding="utf-8",
+    )
+    probed = {}
+
+    def scan(name, **kwargs):
+        probed[name] = kwargs["probe"]
+        signal = _signal(name, installed=name in {"claudecode", "codex"})
+        if kwargs["probe"] and name == "claudecode":
+            signal.version = "2.1.286 (Claude Code)"
+        return signal
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path)
+
+    assert probed["codex"] is True
+    assert probed["claudecode"] is True
+    assert probed["cursor"] is False
+    assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
+    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == "2.1.286 (Claude Code)"
+
+
+@pytest.mark.parametrize(
+    "config_text",
+    (
+        # A 0.8.x single-connector config names its connector only in claw.mode.
+        "claw:\n  mode: claude-code\nguardrail:\n  enabled: true\n",
+        # A map entry written without a body is enabled.
+        "guardrail:\n  enabled: true\n  connectors:\n    claudecode:\n",
+    ),
+    ids=("legacy-claw-mode", "bare-map-entry"),
+)
+def test_restricted_setup_scan_probes_every_form_of_an_active_peer(monkeypatch, tmp_path, config_text):
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+    (tmp_path / "config.yaml").write_text(config_text, encoding="utf-8")
+    probed = {}
+
+    def scan(name, **kwargs):
+        probed[name] = kwargs["probe"]
+        signal = _signal(name, installed=name in {"claudecode", "codex"})
+        if kwargs["probe"] and name == "claudecode":
+            signal.version = "2.1.286 (Claude Code)"
+        return signal
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path)
+
+    assert probed["claudecode"] is True
+    assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
+
+
+@pytest.mark.parametrize("old_schema", (3, 6))
+@pytest.mark.parametrize("windows_semantics", (False, True))
+def test_release_cache_keeps_unchanged_peer_version_during_schema_upgrade(
+    monkeypatch, tmp_path, old_schema, windows_semantics
+):
+    if os.name == "nt":
+        set_known_windows_directory_acl(tmp_path)
+    binary = tmp_path / "claude"
+    binary.write_text("agent binary", encoding="utf-8")
+    old = os.stat(binary).st_mtime - 600
+    os.utime(binary, (old, old))
+    cached = _discovery("claudecode")
+    cached.scanned_at = ad._format_rfc3339(ad._now_utc())
+    cached.agents["claudecode"].binary_path = str(binary)
+    cached.agents["claudecode"].version = "2.1.286 (Claude Code)"
+    assert ad._write_cache(cached, data_dir=tmp_path)
+    path = tmp_path / ad.CACHE_FILENAME
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["version"] = old_schema
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def scan(name, **kwargs):
+        signal = _signal(name, installed=name == "claudecode")
+        if name == "claudecode":
+            signal.binary_path = str(binary)
+            signal.error = ad.VERSION_NOT_PROBED
+        return signal
+
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: windows_semantics)
+    monkeypatch.setattr(ad, "_windows_configured_package_manager_bin_prefixes", lambda: ())
+    monkeypatch.setattr(ad, "_scan_agent", scan)
+    result = ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path)
+
+    assert result.agents["claudecode"].version == "2.1.286 (Claude Code)"
+    assert ad._read_cache(data_dir=tmp_path).agents["claudecode"].version == "2.1.286 (Claude Code)"
+
+    os.utime(binary, None)
+    assert ad.discover_with_probes(["codex"], use_cache=False, refresh=True, data_dir=tmp_path).agents["claudecode"].version == ""
+
+
 def test_empty_connector_home_does_not_detect_opencode(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     monkeypatch.chdir(tmp_path)
@@ -1097,6 +1197,155 @@ def test_kiro_path_discovery_prefers_cli_then_app(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    ("ide_version", "selected"),
+    (("1.0.182", "ide"), ("1.0.181", "cli")),
+)
+def test_kiro_discovery_uses_supported_ide_when_cli_cannot_load_hooks(monkeypatch, ide_version, selected):
+    cli = "/usr/local/bin/kiro-cli"
+    ide = "/usr/local/bin/kiro"
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: (cli, ide))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+    monkeypatch.setattr(
+        ad, "_version_for_agent_binary",
+        lambda _name, path, _args, **_kwargs: (("2.26.1", "") if path == cli else (ide_version, "")),
+    )
+
+    signal = ad._scan_agent("kiro")
+    assert signal.installed
+    assert signal.binary_path == (ide if selected == "ide" else cli)
+    assert signal.version == (ide_version if selected == "ide" else "kiro-cli 2.26.1")
+    assert signal.kiro_cli_version == "kiro-cli 2.26.1"
+    assert signal.kiro_ide_version == ide_version
+
+
+def test_kiro_cli_metadata_version_is_identified_as_cli(monkeypatch):
+    cli = "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli"
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: (cli,))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+    monkeypatch.setattr(ad, "_version_for_agent_binary", lambda *_args, **_kwargs: ("2.26.1", ""))
+
+    signal = ad._scan_agent("kiro")
+    assert signal.version == "kiro-cli 2.26.1"
+    assert signal.kiro_cli_version == signal.version
+
+
+def test_kiro_alias_to_old_cli_does_not_impersonate_supported_ide(monkeypatch):
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: ("/usr/local/bin/kiro",))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+    monkeypatch.setattr(ad, "_version_for_agent_binary", lambda *_args, **_kwargs: ("kiro-cli 2.26.1", ""))
+
+    signal = ad._scan_agent("kiro")
+    assert signal.version == "kiro-cli 2.26.1"
+    assert signal.kiro_cli_version == signal.version
+    assert signal.kiro_ide_version == ""
+
+
+def test_kiro_supported_ide_gets_a_retry_when_older_cli_answered(monkeypatch):
+    cli, ide = "/usr/local/bin/kiro-cli", "/usr/local/bin/kiro"
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: (cli, ide))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+    ide_calls = 0
+
+    def probe(_name, path, _args, **_kwargs):
+        nonlocal ide_calls
+        if path == cli:
+            return "2.26.1", ""
+        ide_calls += 1
+        return ("", ad.VERSION_PROBE_TIMED_OUT) if ide_calls == 1 else ("1.0.182", "")
+
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    signal = ad._scan_agent("kiro")
+    assert ide_calls == 2
+    assert signal.version == "1.0.182"
+    assert signal.kiro_cli_version == "kiro-cli 2.26.1"
+
+
+def test_kiro_surface_versions_survive_discovery_cache(tmp_path):
+    cache_dir = tmp_path / "kiro cache"
+    cache_dir.mkdir()
+    if os.name == "nt":
+        set_known_windows_directory_acl(cache_dir)
+    discovery = _discovery("kiro")
+    discovery.scanned_at = ad._format_rfc3339(ad._now_utc())
+    discovery.agents["kiro"].version = "1.0.182"
+    discovery.agents["kiro"].kiro_cli_version = "kiro-cli 2.26.1"
+    discovery.agents["kiro"].kiro_ide_version = "1.0.182"
+    assert ad._write_cache(discovery, data_dir=cache_dir)
+    cached = ad._read_cache(data_dir=cache_dir)
+    assert cached is not None
+    signal = cached.agents["kiro"]
+    assert (signal.version, signal.kiro_cli_version, signal.kiro_ide_version) == (
+        "1.0.182", "kiro-cli 2.26.1", "1.0.182",
+    )
+
+
+@pytest.mark.parametrize(
+    ("product", "expected_ide"),
+    (
+        ({"nameShort": "Kiro", "applicationName": "kiro", "version": "1.0.182"}, True),
+        ({"nameShort": "Other", "applicationName": "kiro", "version": "1.0.182"}, False),
+        ({"nameShort": "Kiro", "applicationName": "kiro", "version": "1.0.181"}, False),
+        ({"nameShort": "Kiro", "applicationName": "kiro", "version": "1.0.182junk"}, False),
+    ),
+)
+@pytest.mark.parametrize("scope", ("per_user", "machine"))
+def test_kiro_windows_official_ide_is_discovered_beside_old_cli_without_launch(
+    monkeypatch, tmp_path, windows_host_no_path, product, expected_ide, scope,
+):
+    local = tmp_path / "local"
+    cli = local / "Kiro-Cli" / "kiro-cli.exe"
+    cli.parent.mkdir(parents=True)
+    cli.write_bytes(b"CLI")
+    machine = tmp_path / "programfiles"
+    ide_root = local / "Programs" if scope == "per_user" else machine
+    ide = ide_root / "Kiro" / "Kiro.exe"
+    ide.parent.mkdir(parents=True)
+    ide.write_bytes(b"IDE")
+    metadata = ide.parent / "resources" / "app" / "product.json"
+    metadata.parent.mkdir(parents=True)
+    metadata.write_text(json.dumps(product), encoding="utf-8")
+    monkeypatch.setattr(ad, "_windows_current_user_local_app_data_roots", lambda: (str(local),))
+    monkeypatch.setattr(
+        ad,
+        "_windows_current_user_known_folder",
+        lambda identifier: str(machine) if identifier == "6D809377-6AF0-444B-8957-A3773F02200E" else "",
+    )
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+
+    def probe(path, *_args, **_kwargs):
+        assert ad._path_key(path) == ad._path_key(str(cli)), "Kiro IDE GUI must not be launched"
+        return "2.26.1", ""
+
+    monkeypatch.setattr(ad, "_version_for_binary", probe)
+    signal = ad._scan_agent("kiro")
+
+    assert signal.kiro_cli_version == "kiro-cli 2.26.1"
+    assert signal.kiro_ide_version == (product["version"] if product["version"] == "1.0.181" or expected_ide else "")
+    assert signal.binary_path == str(ide if expected_ide else cli)
+    assert signal.version == ("1.0.182" if expected_ide else "kiro-cli 2.26.1")
+
+
+def test_kiro_windows_official_cli_reparse_candidate_is_not_run(
+    monkeypatch, tmp_path, windows_host_no_path,
+):
+    local = tmp_path / "local"
+    launcher = local / "Kiro-Cli" / "kiro-cli.exe"
+    launcher.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.exe"
+    outside.write_bytes(b"not Kiro")
+    launcher.symlink_to(outside)
+    monkeypatch.setattr(ad, "_windows_current_user_local_app_data_roots", lambda: (str(local),))
+    monkeypatch.setattr(ad, "_windows_current_user_known_folder", lambda _identifier: "")
+
+    assert str(launcher) not in ad._binary_candidates_for_agent("kiro", ad._SPECS["kiro"])
+
+
 def test_kiro_macos_app_fallback_reads_metadata_without_launch(
     monkeypatch,
     tmp_path,
@@ -1160,7 +1409,7 @@ def test_kiro_macos_cli_app_bundle_is_the_same_connector(
     assert signal.name == "kiro"
     assert signal.installed is True
     assert signal.binary_path == str(binary)
-    assert signal.version == "2.22.0"
+    assert signal.version == "kiro-cli 2.22.0"
 
 
 def test_cursor_standalone_agent_alias_is_detected(monkeypatch, tmp_path):
@@ -2609,8 +2858,8 @@ def test_trust_check_codex_standalone_symlink_requires_opt_in(monkeypatch, tmp_p
 def test_first_installed_precedence():
     assert ad.first_installed(_discovery("claudecode"), "claudecode") == "claudecode"
     assert ad.first_installed(_discovery(*ad.DISCOVERABLE_CONNECTORS), "codex") == "codex"
-    assert ad.first_installed(_discovery(), "retired-example") == "codex"
-    assert ad.first_installed(_discovery(), "codex") == "codex"
+    assert ad.first_installed(_discovery(), "retired-example") == ""
+    assert ad.first_installed(_discovery(), "codex") == ""
     assert ad.first_installed(_discovery("openclaw"), "not-real") == "openclaw"
 
 
@@ -2937,3 +3186,100 @@ def test_version_probe_never_reads_the_terminal(monkeypatch, tmp_path):
     ad._version_for_binary(str(binary), ("--version",), require_trusted_binary_paths=False)
     assert seen.get("stdin") is subprocess.DEVNULL
     assert seen.get("start_new_session") is True
+
+
+# Review loop round 2: an older kiro-cli found first kept signal.version (and
+# the discovery cache the gateway writes its lock from) at the older version
+# while setup preflight selected the supported form from kiro_forms, so the
+# gateway's not-gated lock no longer matched what setup accepts. The cached
+# version is now the form assess_kiro selects, whatever the probe order; the
+# older forms are still recorded for reporting.
+_KIRO_CLI_OLD, _KIRO_CLI_NEW = "/usr/local/bin/kiro-cli", "/opt/kiro/bin/kiro-cli"
+_KIRO_IDE_OLD, _KIRO_IDE_NEW = "/usr/local/bin/kiro", "/opt/Kiro/bin/kiro"
+
+
+@pytest.mark.parametrize(
+    ("answers", "expected", "unprotected"),
+    (
+        pytest.param({_KIRO_CLI_OLD: "2.26.1", _KIRO_CLI_NEW: "2.27.1"}, (_KIRO_CLI_NEW, "kiro-cli 2.27.1"), 1, id="old-cli-then-cli"),
+        pytest.param({_KIRO_CLI_OLD: "", _KIRO_CLI_NEW: "2.27.1"}, (_KIRO_CLI_NEW, "kiro-cli 2.27.1"), 1, id="unread-cli-then-cli"),
+        pytest.param({_KIRO_IDE_OLD: "1.0.181", _KIRO_IDE_NEW: "1.2.4"}, (_KIRO_IDE_NEW, "1.2.4"), 1, id="old-ide-then-ide"),
+        pytest.param(
+            {_KIRO_CLI_OLD: "2.26.1", _KIRO_IDE_OLD: "1.0.181", _KIRO_IDE_NEW: "1.2.4"},
+            (_KIRO_IDE_NEW, "1.2.4"),
+            2,
+            id="old-cli-old-ide-then-ide",
+        ),
+        pytest.param(
+            {_KIRO_CLI_OLD: "2.26.1", _KIRO_CLI_NEW: "slow"},
+            (_KIRO_CLI_NEW, "kiro-cli 2.27.1"),
+            1,
+            id="old-cli-then-slow-cli",
+        ),
+        pytest.param(
+            {_KIRO_CLI_NEW: "2.27.1", _KIRO_CLI_OLD: "2.26.1"}, (_KIRO_CLI_NEW, "kiro-cli 2.27.1"), 1, id="cli-then-old-cli"
+        ),
+    ),
+)
+def test_kiro_cached_version_is_the_form_setup_protects(monkeypatch, answers, expected, unprotected):
+    from defenseclaw.connector_contracts import (
+        STATUS_NOT_GATED,
+        assess_kiro_signal,
+        connector_lock_contract_invariant,
+    )
+
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: tuple(answers))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+    slow_calls: dict[str, int] = {}
+
+    def probe(_name, path, _args, **_kwargs):
+        answer = answers[path]
+        if answer == "slow":
+            slow_calls[path] = slow_calls.get(path, 0) + 1
+            return ("", ad.VERSION_PROBE_TIMED_OUT) if slow_calls[path] == 1 else ("2.27.1", "")
+        return (answer, "") if answer else ("", "exit status 1")
+
+    monkeypatch.setattr(ad, "_version_for_agent_binary", probe)
+    signal = ad._scan_agent("kiro")
+
+    assert (signal.binary_path, signal.version) == expected
+    kiro = assess_kiro_signal(signal)
+    assert kiro.selected is not None
+    assert (kiro.selected.path, kiro.selected.version) == expected
+    # The surface version setup and doctor read is the protected one too.
+    surface = signal.kiro_cli_version if expected[1].startswith("kiro-cli ") else signal.kiro_ide_version
+    assert surface == expected[1]
+    # Every install is still a form, and each older one is reported.
+    assert {form["path"] for form in signal.kiro_forms} == set(answers)
+    assert len(kiro.unprotected()) == unprotected
+    # The lock the gateway writes for the cached version passes setup's
+    # readiness check.
+    lock = {
+        "connector": "kiro",
+        "raw_agent_version": signal.version,
+        "compatibility_status": STATUS_NOT_GATED,
+        "hook_fail_mode": "closed",
+    }
+    assert connector_lock_contract_invariant("kiro", lock) == ""
+
+
+def test_kiro_without_a_protected_form_caches_the_cli_version_setup_refuses(monkeypatch):
+    from defenseclaw.connector_contracts import STATUS_NOT_GATED, assess_kiro_signal, connector_lock_contract_invariant
+
+    answers = {_KIRO_CLI_OLD: "2.26.1", _KIRO_CLI_NEW: "2.25.0", _KIRO_IDE_OLD: "1.0.181"}
+    monkeypatch.setattr(ad, "_agent_config_path", lambda *_args, **_kwargs: "")
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args: tuple(answers))
+    monkeypatch.setattr(ad, "_missing_probe_state", lambda *_args: ([], []))
+    monkeypatch.setattr(ad, "_version_for_agent_binary", lambda _name, path, _args, **_kwargs: (answers[path], ""))
+
+    signal = ad._scan_agent("kiro")
+    assert (signal.binary_path, signal.version) == (_KIRO_CLI_OLD, "kiro-cli 2.26.1")
+    assert assess_kiro_signal(signal).selected is None
+    lock = {
+        "connector": "kiro",
+        "raw_agent_version": signal.version,
+        "compatibility_status": STATUS_NOT_GATED,
+        "hook_fail_mode": "closed",
+    }
+    assert connector_lock_contract_invariant("kiro", lock) != ""

@@ -124,7 +124,7 @@ Top panels, from identity to health:
 
 | Panel | Meaning |
 | --- | --- |
-| **Agent Directory**, **Last seen** | Agents seen for the connector and range with root and parent; age of the newest signal. |
+| **Agent Directory** | Agents seen for the connector and range, with their root and parent IDs, name, type and observation count. |
 | **Turns**, **Model calls**, **Tool calls** | Distinct logical completed operations. Exact hook and native mirrors count once. |
 | **Descendants in selected root tree** | Transitive child agents under the root. |
 | **Input/output tokens**, **Reported cost** | Connector- or provider-reported usage only. |
@@ -143,7 +143,7 @@ Top panels, from identity to health:
 - A native hook confirms the answer to a tool call with a delivery receipt on the same local request, after it gives the answer to the agent. The decision is recorded only then. The managed OpenCode plugin runs the native hook, so its `tool.execute.before` calls are confirmed this way too.
 - If the hook's answer budget runs out first, or the caller hangs up before the decision is recorded, a closed hook blocked the call. The decision is recorded as `block` with the reason `enterprise_managed_gateway_no_answer`, even when the gateway had evaluated an allow.
 - The action is `unconfirmed` when the gateway cannot prove the result: a tool call from a hook binary older than 1.0.4 while a package upgrade is in progress, a tool call whose hook stopped waiting for the receipt handshake before the gateway started it (the hook still takes the answer), or an administrator-selected open outage.
-- The Amp in-agent plugin, the Omnigent policy bridge and events without an answer budget (prompts, lifecycle events) send no receipt. They record the gateway's decision.
+- The Amp in-agent plugin and events without an answer budget (prompts, lifecycle events) send no receipt. They record the gateway's decision.
 
 Each `hook_decision` record has:
 
@@ -177,7 +177,7 @@ See the [gateway API reference](/docs/reference/apis/gateway-api#auth) for the t
 
 | Question | Start with | Then |
 | --- | --- | --- |
-| Why is an agent still running? | Last seen and the execution phase timeline | Lifecycle logs and the newest trace. |
+| Why is an agent still running? | The execution phase timeline and ordered lifecycle sequence | Lifecycle logs and the newest trace. |
 | Which tool made it slow? | Top tools and tool p95 | The trace waterfall and ordered sequence. |
 | Did a subagent cause the failure? | Agent tree and lifecycle DAG | The child's work, errors and decisions, then its trace. |
 | Why did tokens or cost spike? | Tokens and cost over time | The provider and model breakdown. |

@@ -12,6 +12,11 @@ func WindowsProtectedTargetFromOtherRelease(InstallOptions) (string, bool, error
 	return "", false, nil
 }
 
+// WindowsProtectedTargetHookFailModeChange is the native Windows check.
+func WindowsProtectedTargetHookFailModeChange(InstallOptions) (string, string, error) {
+	return "", "", nil
+}
+
 // WindowsSecureClientProfileProcess is the native Windows check.
 func WindowsSecureClientProfileProcess() bool {
 	return false

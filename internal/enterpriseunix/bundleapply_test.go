@@ -171,6 +171,23 @@ func installedPolicy(h *bundleHost) (string, uint64) {
 	return "sha256:" + sha256Bytes(raw), state.Generation
 }
 
+func upgradeBundleHostDigest(b *bundleHost) {
+	originalDigester := b.env.BundleDigester
+	b.env.ProductVersion = "1.0.4"
+	b.env.BundleDigester = func(ctx context.Context, cfg *config.Config, raw []byte, platform, root string) (string, error) {
+		value, err := originalDigester(ctx, cfg, raw, platform, root)
+		return "sha256:" + sha256Bytes([]byte(value+"/1.0.4")), err
+	}
+	b.installedDigest = func(raw []byte) string {
+		bundlesDir := filepath.Join(b.env.Layout.ConfigDir, enterprisebundle.BundlesDirName)
+		for _, name := range enterprisebundle.VersionDirsNamed(raw, bundlesDir) {
+			raw = bytes.ReplaceAll(raw, []byte(filepath.Join(bundlesDir, name)), []byte("${bundle_root}"))
+		}
+		value := "sha256:" + sha256Bytes(raw)
+		return "sha256:" + sha256Bytes([]byte(value+"/1.0.4"))
+	}
+}
+
 func newBundleHost(t *testing.T, platforms ...string) *bundleHost {
 	t.Helper()
 	goos := "linux"
@@ -454,6 +471,182 @@ func TestBundleRepeatRefusesCachedConfirmationWhenGatewayDigestDiffers(t *testin
 		r := b.apply(path)
 		if r.OK || r.Bundle != nil && r.Bundle.State == enterprisebundle.StateConfirmed {
 			t.Fatalf("drift=%v: repeat reused confirmation while gateway policy differs: %+v", drift, r)
+		}
+	}
+}
+
+// A confirmed receipt records the policy of its original product build.
+// After an upgrade, verifying and enforcing the same signed bundle can have
+// a new digest. A repeat must use this build's verified digest, including
+// when it repairs a restart-required setting on Linux or macOS.
+func TestBundleRepeatAfterProductUpgradeUsesVerifiedDigest(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, fromVersion := range []string{"0.8.10", "1.0.0", "1.0.1", "1.0.2", "1.0.3"} {
+			t.Run(goos+"/"+fromVersion, func(t *testing.T) {
+				b := newBundleHost(t, goos)
+				b.env.ProductVersion = fromVersion
+				_, _, restart := bundleConfigs(b.testHost)
+				path := b.dir(1, restart)
+				requireOK(t, b.apply(path))
+				first := b.receipt(bundleID(1))
+				oldDigest := first.EffectivePolicyDigest
+				upgradeBundleHostDigest(b)
+				if err := os.WriteFile(b.env.P(b.env.Layout.ConfigPath), []byte(strings.Replace(restart,
+					"hook_self_heal: false", "hook_self_heal: true", 1)), 0o640); err != nil {
+					t.Fatal(err)
+				}
+				repeated := b.apply(path)
+				requireOK(t, repeated)
+				if repeated.Policy == nil || !repeated.Policy.Applied || repeated.Policy.EffectiveDigest == oldDigest ||
+					repeated.Policy.GatewayReportedDigest != repeated.Policy.EffectiveDigest ||
+					repeated.Bundle == nil || repeated.Bundle.State != enterprisebundle.StateConfirmed {
+					t.Fatalf("repeat policy=%+v bundle=%+v errors=%+v", repeated.Policy, repeated.Bundle, repeated.Errors)
+				}
+			})
+		}
+	}
+}
+
+// Match the managed restart-drift cell: an authorized package ensure changes
+// the config while anchors are absent, then the same signed bundle restores
+// its restart setting after a deferred attempt. The repair must be attributed
+// to that bundle and its original confirmed receipt remains current.
+func TestBundleRepeatAfterAuthorizedRestartDrift(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			_, _, restart := bundleConfigs(b.testHost)
+			path := b.dir(1, restart)
+			requireOK(t, b.apply(path))
+			first := b.receipt(bundleID(1))
+			anchorsPath := b.env.bundleAnchorsPath()
+			anchors, err := os.ReadFile(anchorsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(anchorsPath); err != nil {
+				t.Fatal(err)
+			}
+			drift := strings.Replace(restart, "hook_self_heal: false", "hook_self_heal: true", 1)
+			if drift == restart {
+				t.Fatal("restart setting missing")
+			}
+			ensure := Options{Action: ActionEnsure, ConfigFile: writeTempConfig(t, []byte(drift))}
+			if goos == "linux" {
+				stagePackage(t, b.testHost, "1.0.0")
+				ensure.FromPackage = true
+			}
+			requireOK(t, b.run(ensure))
+			writeRooted(t, anchorsPath, string(anchors))
+			b.env.DeferRestart = true
+			deferred := b.apply(path)
+			requireError(t, deferred, string(enterprisebundle.CodeRestartDeferred))
+			if deferred.ExitCode != enterprisestatus.BusyExitCode(goos) {
+				t.Fatalf("deferred exit=%d", deferred.ExitCode)
+			}
+			b.env.DeferRestart = false
+			before, err := b.env.bundleStore().Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			repeated := b.apply(path)
+			requireOK(t, repeated)
+			after, err := b.env.bundleStore().Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			generation, err := configwrite.ReadGenerationState(b.env.P(b.env.Layout.ConfigPath))
+			if err != nil || generation.BundleID != bundleID(1) || generation.BundleVersion != 1 {
+				t.Fatalf("repeat generation=%+v error=%v", generation, err)
+			}
+			if repeated.Bundle == nil || repeated.Bundle.State != enterprisebundle.StateConfirmed ||
+				repeated.Bundle.ReceiptID != first.ReceiptID || repeated.Policy == nil || !repeated.Policy.Applied ||
+				repeated.Policy.GatewayReportedDigest != repeated.Policy.EffectiveDigest || len(after) != len(before) {
+				t.Fatalf("repeat result=%+v receipts %d -> %d", repeated, len(before), len(after))
+			}
+		})
+	}
+}
+
+// A plain ensure in bundle mode repairs an in-place edit from the current
+// signed bundle. Its generation must retain that bundle's identity; a later
+// delivery of the same bundle must use the original confirmed receipt.
+func TestBundlePlainEnsureRepairKeepsConfirmedGeneration(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			b := newBundleHost(t, goos)
+			_, _, restart := bundleConfigs(b.testHost)
+			path := b.dir(1, restart)
+			requireOK(t, b.apply(path))
+			first := b.receipt(bundleID(1))
+			configPath := b.env.P(b.env.Layout.ConfigPath)
+			drift := strings.Replace(restart, "hook_self_heal: false", "hook_self_heal: true", 1)
+			if drift == restart {
+				t.Fatal("restart setting missing")
+			}
+			if err := os.WriteFile(configPath, []byte(drift), 0o640); err != nil {
+				t.Fatal(err)
+			}
+			requireOK(t, b.run(Options{Action: ActionEnsure}))
+			generation, err := configwrite.ReadGenerationState(configPath)
+			if err != nil || generation.BundleID != bundleID(1) || generation.BundleVersion != 1 ||
+				generation.Actor != first.Principal || generation.SignerKeyID != first.SignerKeyID {
+				t.Fatalf("plain ensure generation=%+v error=%v", generation, err)
+			}
+			before, err := b.env.bundleStore().Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			repeated := b.apply(path)
+			requireOK(t, repeated)
+			after, err := b.env.bundleStore().Receipts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if repeated.Bundle == nil || repeated.Bundle.State != enterprisebundle.StateConfirmed ||
+				repeated.Bundle.ReceiptID != first.ReceiptID || len(after) != len(before) {
+				t.Fatalf("repeat=%+v receipts %d -> %d", repeated, len(before), len(after))
+			}
+		})
+	}
+}
+
+// An older lifecycle could leave equal config bytes under an unattributed
+// generation. Reapplying the current signed bundle must bind that generation
+// without requiring a byte change, including after an upgrade.
+func TestBundleRepeatRebindsUnattributedEqualBytes(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, fromVersion := range []string{"0.8.10", "1.0.0", "1.0.1", "1.0.2", "1.0.3"} {
+			t.Run(goos+"/"+fromVersion, func(t *testing.T) {
+				b := newBundleHost(t, goos)
+				b.env.ProductVersion = fromVersion
+				v1, _, _ := bundleConfigs(b.testHost)
+				path := b.dir(1, v1)
+				requireOK(t, b.apply(path))
+				b.env.ProductVersion = "1.0.4"
+				first := b.receipt(bundleID(1))
+				configPath := b.env.P(b.env.Layout.ConfigPath)
+				_, err := configwrite.Locked(t.Context(), configPath, configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "pre-upgrade ensure"},
+					func() (bool, error) { return true, nil })
+				if err != nil {
+					t.Fatal(err)
+				}
+				before, err := configwrite.ReadGenerationState(configPath)
+				if err != nil || before.BundleID != "" {
+					t.Fatalf("unattributed setup=%+v error=%v", before, err)
+				}
+				repeated := b.apply(path)
+				requireOK(t, repeated)
+				generation, err := configwrite.ReadGenerationState(configPath)
+				if err != nil || generation.Generation <= before.Generation || generation.BundleID != bundleID(1) ||
+					generation.BundleVersion != 1 || generation.Actor != first.Principal || generation.SignerKeyID != first.SignerKeyID {
+					t.Fatalf("rebound generation=%+v previous=%+v error=%v", generation, before, err)
+				}
+				if repeated.Bundle == nil || repeated.Bundle.State != enterprisebundle.StateConfirmed ||
+					repeated.Bundle.ReceiptID != first.ReceiptID {
+					t.Fatalf("repeat=%+v", repeated)
+				}
+			})
 		}
 	}
 }
@@ -1142,6 +1335,58 @@ func TestBundleRecoveryKeepsPendingWhenGatewayRetainsUnconfirmedPolicy(t *testin
 	}
 }
 
+// Recovery must confirm the last good bundle using the upgraded gateway's
+// digest, while leaving the original confirmed receipt's digest intact.
+func TestBundleRecoveryAfterProductUpgradeUsesCurrentDigest(t *testing.T) {
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, sourceVersion := range []string{"1.0.2", "1.0.3"} {
+			t.Run(goos+"/"+sourceVersion, func(t *testing.T) {
+				b := newBundleHost(t, goos)
+				b.env.ProductVersion = sourceVersion
+				v1, v2, _ := bundleConfigs(b.testHost)
+				requireOK(t, b.apply(b.dir(1, v1)))
+				oldDigest := b.state().Current.EffectivePolicyDigest
+				upgradeBundleHostDigest(b)
+				if digest, _ := installedPolicy(b); digest == oldDigest {
+					t.Fatal("the upgraded gateway still reports the old product's digest")
+				}
+				// This is the confirmation step after rollback has restored the
+				// current bundle's config, deployment and generation. Calling it
+				// directly keeps the test focused on that proof.
+				l := &lifecycle{env: b.env}
+				if err := l.confirmRecoveredBundle(t.Context()); err != nil {
+					t.Fatalf("recovered signed bundle was not confirmed: %v", err)
+				}
+				if current := b.state().Current; current == nil || current.BundleID != bundleID(1) || current.EffectivePolicyDigest != oldDigest {
+					t.Fatalf("recovery changed the confirmed receipt: %+v", current)
+				}
+				path := b.dir(2, v2)
+				b.env.bundleFault = func(phase string) error {
+					if phase == enterprisebundle.StateApplied {
+						panic("killed after applied receipt")
+					}
+					return nil
+				}
+				func() {
+					defer func() { _ = recover() }()
+					b.apply(path)
+				}()
+				b.env.bundleFault = nil
+				if pending, err := b.env.loadPending(); err != nil || pending == nil {
+					t.Fatalf("interrupted transaction is not pending: %+v, %v", pending, err)
+				}
+				requireOK(t, b.run(Options{Action: ActionEnsure}))
+				if current := b.state().Current; current == nil || current.BundleID != bundleID(1) || current.EffectivePolicyDigest != oldDigest {
+					t.Fatalf("rollback changed the confirmed receipt: %+v", current)
+				}
+				if pending, err := b.env.loadPending(); err != nil || pending != nil {
+					t.Fatalf("successful recovery left the transaction pending: %+v, %v", pending, err)
+				}
+			})
+		}
+	}
+}
+
 func TestBundleRetryDigestMarkerComesFromThisDelivery(t *testing.T) {
 	for _, signerMatches := range []bool{true, false} {
 		for _, phase := range []string{enterprisebundle.StateVerified, enterprisebundle.StateStaged, enterprisebundle.StateApplied} {
@@ -1419,10 +1664,10 @@ func TestBundleUnconfirmedFirstBundleKeepsItsVersionDirectory(t *testing.T) {
 	b.apply(b.dir(1, cfg))
 	b.env.bundleFault = nil
 	b.frozen = "sha256:" + strings.Repeat("0", 64)
-	b.run(Options{Action: ActionEnsure})
+	settled := b.run(Options{Action: ActionEnsure})
 	rc := b.receipt(bundleID(1))
 	if rc.State != enterprisebundle.StateFailed || rc.ErrorCode != enterprisebundle.CodeDigestMismatch {
-		t.Fatalf("receipt = %+v", rc)
+		t.Fatalf("receipt = %+v, settle warnings = %+v", rc, settled.Warnings)
 	}
 	b.run(Options{Action: ActionEnsure})
 	dir := b.env.bundleVersionDir(rc.Dir)

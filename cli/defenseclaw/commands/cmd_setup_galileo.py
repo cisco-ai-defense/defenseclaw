@@ -20,11 +20,10 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
 from urllib.parse import urlparse, urlunparse
 
 import click
+import requests
 
 from defenseclaw import ux
 from defenseclaw.commands.cmd_setup_observability import (
@@ -36,6 +35,7 @@ from defenseclaw.commands.cmd_setup_observability import (
 )
 from defenseclaw.config import config_path_for_data_dir
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 from defenseclaw.observability import resolve_preset
 from defenseclaw.observability.trace_canary import TraceCanaryError, run_trace_canary
 
@@ -483,22 +483,15 @@ def _status_next_step(payload: dict) -> str:
     return ""
 
 
-def _gateway_api_base(app: AppContext) -> str:
-    host = str(getattr(app.cfg.gateway, "api_bind", "") or "127.0.0.1")
-    if host in {"0.0.0.0", "::", "[::]", "localhost"}:
-        host = "127.0.0.1"
-    port = int(getattr(app.cfg.gateway, "api_port", 18970) or 18970)
-    return f"http://{host}:{port}"
-
-
-
-
 def _gateway_health_snapshot(app: AppContext) -> dict:
-    request = urllib.request.Request(_gateway_api_base(app) + "/health", method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=1.5) as response:  # noqa: S310 - loopback gateway
-            body = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=int(app.cfg.gateway.api_port),
+            timeout=2,
+        )
+        body = client.health()
+    except (requests.RequestException, OSError, ValueError, TypeError):
         return {}
     return body if isinstance(body, dict) else {}
 

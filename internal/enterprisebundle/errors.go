@@ -145,10 +145,33 @@ func refuse(code Code, path, format string, args ...any) *Error {
 // not be copied into the private stage. The receipt and CLI use the same code.
 func StageError(err error) *Error {
 	code := CodeArchiveInvalid
-	if stageDiskFull(err) {
+	if diskFull(err) {
 		code = CodeDiskFull
 	}
 	return &Error{Code: code, Detail: "cannot stage the bundle: " + err.Error(), cause: err}
+}
+
+// StateWriteError is a bundle-state write (a receipt, the state file) that
+// failed: disk_full when the volume or quota is exhausted, state_invalid
+// otherwise, so a full disk is never reported as a state that cannot be
+// read (GAP-0609). what says what could not be written.
+func StateWriteError(what string, err error) *Error {
+	if diskFull(err) {
+		return &Error{Code: CodeDiskFull, Detail: what + ": " + err.Error() + "; free space on that volume, then deliver the bundle again", cause: err}
+	}
+	return &Error{Code: CodeStateInvalid, Detail: what + ": " + err.Error(), cause: err}
+}
+
+// FailureCode is the code a refusal is recorded with: its own bundle code,
+// disk_full for an exhausted volume or quota, apply_failed otherwise.
+func FailureCode(err error) Code {
+	if code := CodeOf(err); code != "" {
+		return code
+	}
+	if diskFull(err) {
+		return CodeDiskFull
+	}
+	return CodeApplyFailed
 }
 
 // safePath quotes a path taken from untrusted input when it holds anything

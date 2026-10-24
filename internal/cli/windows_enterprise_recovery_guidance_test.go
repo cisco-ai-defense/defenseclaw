@@ -133,15 +133,37 @@ func TestWindowsEnterpriseStandaloneNextStepAfterALocalSystemRecovery(t *testing
 	original := windowsEnterpriseRunningAsLocalSystem
 	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return true }
-	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil, nil)
+	got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, false, true, nil, nil, nil)
 	if strings.Contains(got, "Next step: run DefenseClaw Setup") || !strings.Contains(got, "running it again unchanged fails the same way") ||
 		!strings.Contains(got, `/ensure CONFIG=C:\stage\config.yaml JSON=1`) || strings.Contains(got, "(the path and the account)") ||
 		!strings.Contains(got, "/uninstall FORCE=1 JSON=1") {
 		t.Fatalf("next step = %q", got)
 	}
 	windowsEnterpriseRunningAsLocalSystem = func() bool { return false }
-	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, true, nil, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
+	if got := windowsEnterpriseStandaloneNextStep("ensure", `C:\stage\config.yaml`, false, false, true, nil, nil, nil); !strings.Contains(got, "Next step: run DefenseClaw Setup") {
 		t.Fatalf("an administrator run lost the LocalSystem step: %q", got)
+	}
+}
+
+// GAP-0622: a run refused lifecycle_busy recovered nothing; the pending
+// transaction is the lock holder's. It is told to wait and run again, not
+// the FORCE=1 last resort that would remove a deployment an upgrade is
+// still changing, for every action and whoever ran it.
+func TestWindowsEnterpriseStandaloneNextStepWhileAnotherLifecycleHoldsTheLock(t *testing.T) {
+	original := windowsEnterpriseRunningAsLocalSystem
+	t.Cleanup(func() { windowsEnterpriseRunningAsLocalSystem = original })
+	for _, system := range []bool{true, false} {
+		windowsEnterpriseRunningAsLocalSystem = func() bool { return system }
+		for _, action := range []string{"ensure", "repair", "uninstall"} {
+			for _, pending := range []bool{true, false} {
+				got := windowsEnterpriseStandaloneNextStep(action, `C:\stage\config.yaml`, false, true, pending, nil, nil, nil)
+				lower := strings.ToLower(got)
+				if strings.Contains(got, "FORCE=1") || !strings.Contains(lower, "wait") ||
+					!strings.Contains(got, windowsEnterpriseStandaloneSetupCommand(action, `C:\stage\config.yaml`, false)) {
+					t.Fatalf("system=%v %s pending=%v: next step = %q", system, action, pending, got)
+				}
+			}
+		}
 	}
 }
 

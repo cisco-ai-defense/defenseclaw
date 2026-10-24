@@ -308,35 +308,59 @@ func TestBundleReceiptReporterSendsOneRecordUnderAChangeID(t *testing.T) {
 }
 
 // While the audit store cannot say whether it holds a change (its lookup
-// fails), the healthy destination still gets the change, once however
-// often it is offered, and the change stays unmarked; once the store
-// answers, the row is written once and the change is marked reported, not
-// sent again. Before, the failed lookup returned before the change was
-// built, so no destination got it at any poll.
+// fails), the healthy destination still gets a change that entered the
+// spool while the gateway ran, once however often it is offered, and the
+// change stays unmarked; once the store answers, the row is written once
+// and the change is marked reported, not sent again. Before, the failed
+// lookup returned before the change was built, so no destination got it at
+// any poll. A change that was in the spool when the gateway started may
+// have been sent by an earlier gateway whose record pin is gone, so it
+// goes to no sink, and gets no pin, until the store answers whether it
+// holds that record; then it is stored and sent once.
 func TestBundleReceiptReporterSendsAChangeWhileTheStoreCannotAnswer(t *testing.T) {
-	f := newChangeExportFixture(t)
-	reporter := f.reporter()
-	if _, err := f.database.Exec(`ALTER TABLE audit_events RENAME TO audit_events_unreadable`); err != nil {
-		t.Fatal(err)
-	}
-	pollUntil(t, reporter, func() bool { return f.exported() > 0 })
-	for range 3 {
-		reporter.poll(t.Context())
-	}
-	time.Sleep(300 * time.Millisecond)
-	if reporter.hasSeen(f.ev.EventID) {
-		t.Fatal("a change the audit store could not answer for was marked reported")
-	}
-	if n := f.exported(); n != 1 {
-		t.Fatalf("while the store could not answer: exported %d, want 1", n)
-	}
-	if _, err := f.database.Exec(`ALTER TABLE audit_events_unreadable RENAME TO audit_events`); err != nil {
-		t.Fatal(err)
-	}
-	pollUntil(t, reporter, func() bool { return reporter.hasSeen(f.ev.EventID) })
-	time.Sleep(300 * time.Millisecond)
-	if n, rows := f.exported(), f.storedRows(t); n != 1 || rows != 1 {
-		t.Fatalf("after the report: exported %d, stored %d; want 1 and 1", n, rows)
+	for _, tc := range []struct {
+		name     string
+		atStart  bool
+		exported int
+	}{
+		{"the change entered the spool while the gateway ran", false, 1},
+		{"the change was in the spool at the start", true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newChangeExportFixture(t)
+			reporter := f.reporter()
+			if !tc.atStart {
+				// The reporter read the spool before the change entered it.
+				reporter.spoolAtStart, reporter.spoolScanned = map[string]bool{}, true
+			}
+			if _, err := f.database.Exec(`ALTER TABLE audit_events RENAME TO audit_events_unreadable`); err != nil {
+				t.Fatal(err)
+			}
+			if tc.exported > 0 {
+				pollUntil(t, reporter, func() bool { return f.exported() > 0 })
+			}
+			for range 3 {
+				reporter.poll(t.Context())
+			}
+			time.Sleep(300 * time.Millisecond)
+			if reporter.hasSeen(f.ev.EventID) {
+				t.Fatal("a change the audit store could not answer for was marked reported")
+			}
+			if n := f.exported(); n != tc.exported {
+				t.Fatalf("while the store could not answer: exported %d, want %d", n, tc.exported)
+			}
+			if pinned := f.pinned(); pinned != (tc.exported > 0) {
+				t.Fatalf("while the store could not answer: pinned %t, want %t", pinned, tc.exported > 0)
+			}
+			if _, err := f.database.Exec(`ALTER TABLE audit_events_unreadable RENAME TO audit_events`); err != nil {
+				t.Fatal(err)
+			}
+			pollUntil(t, reporter, func() bool { return reporter.hasSeen(f.ev.EventID) })
+			time.Sleep(300 * time.Millisecond)
+			if n, rows := f.exported(), f.storedRows(t); n != 1 || rows != 1 {
+				t.Fatalf("after the report: exported %d, stored %d; want 1 and 1", n, rows)
+			}
+		})
 	}
 }
 

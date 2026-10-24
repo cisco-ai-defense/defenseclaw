@@ -7,6 +7,7 @@ import (
 	"context"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,37 @@ func TestSoleLegacyRowCannotGrantItsRecordedNamesakePolicy(t *testing.T) {
 	}
 }
 
+func TestLegacyOwnerRefusalNamesAnExplainCommandForTheCurrentAgent(t *testing.T) {
+	legacy := agentidentity.LegacyAgentID(legacyBridgeInputs("alice@corp.example"))
+	current := agentidentity.AgentID(legacyBridgeInputs("alice@corp.example"))
+	records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, "alice@corp.example")}
+	legacyBridgeLedger(t, &records)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.Profiles = map[string]config.GuardrailProfile{
+		"strict": {Mode: "action"}, "relaxed": {Mode: "observe"},
+	}
+	cfg.Guardrail.DefaultProfile = "strict"
+	cfg.Guardrail.ProfileAssignments = []config.ProfileAssignment{{
+		Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}},
+	}}
+	set := NewAPIServer("127.0.0.1:0", nil, nil, nil, nil, cfg).guardrailProfileSet()
+	subject := &profileSubject{UserID: "70001", UserName: "alice"}
+	hook := set.matchAgent(subject, profileSubjectLookup, "codex", current, func() (profileAgentClaim, bool) {
+		return profileAgentClaim{ID: legacy, UserID: "70001", Account: "alice@corp.example"}, true
+	})
+	if !strings.Contains(hook.Refused, "ownership of a pre-upgrade agent identity is unconfirmed") {
+		t.Fatalf("hook decision did not name the missing owner: %+v", hook)
+	}
+	if !strings.Contains(hook.Refused, " --agent "+current+"`") {
+		t.Fatalf("refusal's explain command omits the current agent: %q", hook.Refused)
+	}
+	explained := set.matchAgent(subject, profileSubjectLookup, "codex", current, nil)
+	if explained.Refused == "" || !slices.Contains(explained.Unproven, "agent:unknown") {
+		t.Fatalf("the named explain command lost the hook's missing fact: %+v", explained)
+	}
+}
+
 // A legacy row cannot prove the assignment owner; a current-ID assignment
 // remains explicit and can select its account.
 func TestLegacyAgentAssignmentNeedsACurrentIDRebind(t *testing.T) {
@@ -96,8 +128,8 @@ func TestLegacyAgentAssignmentNeedsACurrentIDRebind(t *testing.T) {
 	if got, _, _ := set.profileAgent(lab, nil); got != lab {
 		t.Errorf("the lab namesake's agent matches as %q, want its own identity %q", got, lab)
 	}
-	if *asked != 1 {
-		t.Errorf("ledger read %d times, want once for both requests", *asked)
+	if *asked != 2 {
+		t.Errorf("ledger read %d times, want a fresh check for the unseen agent", *asked)
 	}
 	named := &guardrailProfileSet{assignments: []config.ProfileAssignment{
 		{Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}}},
@@ -105,6 +137,33 @@ func TestLegacyAgentAssignmentNeedsACurrentIDRebind(t *testing.T) {
 	}}
 	if got, _, _ := named.profileAgent(corp, nil); got != corp {
 		t.Errorf("an assignment naming the current identity lost to the legacy one: %q", got)
+	}
+}
+
+// A hook can enroll an agent while the administrator's explain view keeps a
+// profile set whose ledger snapshot predates that hook.
+func TestProfileExplainReadsANewAgentAfterItsFirstHook(t *testing.T) {
+	old := legacyBridgeInputs("alice@corp.example")
+	legacy := agentidentity.LegacyAgentID(old)
+	newAgent := legacyBridgeInputs("alice@lab.example")
+	newAgent.UserID = "70002"
+	newID := agentidentity.AgentID(newAgent)
+	records := []inventory.AgentIdentityRecord{legacyBridgeRecord(legacy, old.Account)}
+	reads := legacyBridgeLedger(t, &records)
+	set := &guardrailProfileSet{assignments: []config.ProfileAssignment{{
+		Profile: "relaxed", Match: config.ProfileMatch{Agents: []string{legacy}},
+	}}}
+	_, uncertain, _ := set.profileAgent(newID, nil)
+	if uncertain == nil || !uncertain(legacy) {
+		t.Fatal("the unenrolled agent was not treated as uncertain")
+	}
+	records = append(records, inventory.AgentIdentityRecord{
+		AgentID: newID, UserID: newAgent.UserID, UserName: newAgent.Account,
+		Connector: newAgent.Connector, InstallFP: newAgent.InstallFP, MachineHash: newAgent.MachineHash,
+	})
+	_, uncertain, owned := set.profileAgent(newID, nil)
+	if uncertain != nil || owned != nil || *reads != 2 {
+		t.Fatalf("enrolled agent kept stale legacy uncertainty: unresolved=%v owned=%v reads=%d", uncertain != nil, owned != nil, *reads)
 	}
 }
 

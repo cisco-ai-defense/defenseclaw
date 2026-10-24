@@ -188,6 +188,32 @@ func TestWriteWindowsClaudeMCPSpoolMarksUnreadableState(t *testing.T) {
 	}
 }
 
+// GAP-0643: a user whose projects cannot be read as them because they signed
+// out gets a record that says so, which the refusals name.
+func TestWriteWindowsClaudeMCPSpoolMarksASignedOutUser(t *testing.T) {
+	const sid = "S-1-5-21-1-1001"
+	original := windowsClaudeProjectWithUserToken
+	windowsClaudeProjectWithUserToken = func(*windows.SID, string, func() error) error {
+		return &WindowsTargetSessionUnavailableError{SID: sid}
+	}
+	t.Cleanup(func() { windowsClaudeProjectWithUserToken = original })
+	home := t.TempDir()
+	raw, _ := json.Marshal(map[string]any{"projects": map[string]any{filepath.Join(home, "proj"): map[string]any{}}})
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(t.TempDir(), ClaudeMCPSpoolDirName)
+	manifest := Manifest{Targets: []ManifestTarget{{SID: sid, User: `DCLAB\dcw-std2`, UserHome: home, Connector: "claudecode"}}}
+	if err := WriteWindowsClaudeMCPSpool(dir, manifest, nil, t.Logf); err != nil {
+		t.Fatal(err)
+	}
+	_, unreadable, err := ReadClaudeMCPSpool(dir, sid, nil)
+	if err != nil || unreadable == nil || !unreadable.SignedOut ||
+		!strings.Contains(unreadable.Blocked("Claude Code"), `DCLAB\dcw-std2 is not signed in`) {
+		t.Fatalf("unreadable %+v (err %v); want the user marked signed out", unreadable, err)
+	}
+}
+
 // A rejected project file leaves the account unreadable instead of silently
 // publishing a partial server set.
 func TestWriteWindowsClaudeMCPSpoolMarksRejectedProject(t *testing.T) {

@@ -565,8 +565,9 @@ func (r GuardRequest) ownedCommand(command string) bool {
 	return ownedCommand(command, r.HookBinary)
 }
 
-// ownedHandlerKeys are the only keys DefenseClaw's own handlers carry
-// besides their command fields. Any other key (an OS-specific override, an
+// ownedHandlerKeys are the shared keys DefenseClaw's own handlers carry
+// besides their command fields. Hermes fail_closed has its own strict check
+// below. Any other key (an OS-specific override, an
 // environment block, a working directory, an http url, a prompt) can change
 // what the agent runs, so a handler that carries one is foreign.
 var ownedHandlerKeys = map[string]bool{
@@ -613,6 +614,13 @@ func (r GuardRequest) ownedHandler(handler any) bool {
 			// Claude's Windows exec form: the admin binary in command with
 			// its arguments listed separately.
 			if !ownedExecArgs(value) || !strings.EqualFold(strings.TrimSpace(stringField(handler, "command")), strings.TrimSpace(r.HookBinary)) {
+				return false
+			}
+		case key == "fail_closed":
+			// Reviewed Hermes v2 Setup writes this only as true. A false
+			// value weakens its timeout/spawn failure contract and is foreign.
+			closed, ok := value.(bool)
+			if r.Connector != ConnectorHermes || !ok || !closed {
 				return false
 			}
 		case !ownedHandlerKeys[key]:
@@ -1220,7 +1228,7 @@ func (s *guardScan) scanFlatDir(source hookSource) []Finding {
 	}
 	var findings []Finding
 	for _, entry := range entries {
-		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") || !strings.HasSuffix(strings.ToLower(entry.Name()), ".json") {
+		if !effectivePolicyDropIn(entry) {
 			continue
 		}
 		child := source.child(filepath.Join(source.path, entry.Name()), formatFlat)

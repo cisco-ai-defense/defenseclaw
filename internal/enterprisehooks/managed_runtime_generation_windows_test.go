@@ -19,6 +19,7 @@ import (
 	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
@@ -28,11 +29,7 @@ func TestWindowsManagedRuntimeGenerationOldOrNewPublication(t *testing.T) {
 	if err := os.MkdirAll(hookDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	target := user.User.Sid
+	target := currentWindowsTestSID(t)
 	for _, path := range []string{dataDir, hookDir} {
 		if err := setWindowsUserPathProtection(path, target, true); err != nil {
 			t.Fatalf("protect target directory %s: %v", path, err)
@@ -464,11 +461,7 @@ func newWindowsManagedRuntimeGenerationMissingHooksGCFixture(
 	t *testing.T,
 ) windowsManagedRuntimeGenerationMissingHooksGCFixture {
 	t.Helper()
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve test SID: %v", err)
-	}
-	target := user.User.Sid
+	target := currentWindowsTestSID(t)
 	home := newWindowsTargetOwnedTestHome(t, target)
 	dataDir := filepath.Join(home, ".defenseclaw")
 	descriptor, err := windowsTargetOwnedDirectorySecurityDescriptor(target)
@@ -746,6 +739,8 @@ func TestWindowsManagedRuntimeGenerationEqualityUsesConnectorScopedContractIdent
 }
 
 func TestWindowsManagedRuntimeGenerationEqualityRejectsEveryAuthenticatedContractDrift(t *testing.T) {
+	// The Secure Client profile of a verified install (GAP-0606).
+	setStandaloneProfileForTest(t, false)
 	desired := WindowsManagedRuntimeGenerationDesired{
 		Connector:                  "codex",
 		TargetSID:                  "S-1-5-21-1000-1000-1000-1001",
@@ -930,5 +925,217 @@ func TestWindowsManagedRuntimeGenerationGCCollectsLegacyContractlessBundle(t *te
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
 		t.Fatalf("legacy bundle survived GC: %v", err)
+	}
+}
+
+// A replacement gateway retires the committed journal before Setup opens the
+// next transaction. This table is the same GC path used after a commit: only
+// the identity in the owned file name and target may authorize collection.
+func TestWindowsManagedRuntimeGenerationGCClassifiesPriorInstallState(t *testing.T) {
+	cases := []struct {
+		name       string
+		mutate     func(*windowsManagedRuntimeBundle)
+		mutateRaw  func([]byte) []byte
+		absentRoot bool
+		absentHook bool
+		selected   bool
+		extraID    string // another, collectable open generation beside it
+		strict     bool
+		invalid    bool
+		reason     string
+	}{
+		{name: "absent data root", absentRoot: true},
+		{name: "absent hooks folder", absentHook: true},
+		{name: "selected missing hooks folder", absentHook: true, selected: true, invalid: true},
+		{name: "selected closed generation stays in use", selected: true, mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
+		// GC lists names in sorted order: a prior generation that sorts
+		// after or before the refused one must survive the refusal.
+		{name: "selected unsupported schema beside prior open generation", selected: true, extraID: strings.Repeat("f", 32), mutate: func(b *windowsManagedRuntimeBundle) {
+			b.FailMode = "closed"
+			b.SchemaVersion = 2
+		}, invalid: true, reason: "unsupported schema version"},
+		{name: "selected unsupported schema after prior open generation", selected: true, extraID: strings.Repeat("0", 32), mutate: func(b *windowsManagedRuntimeBundle) {
+			b.FailMode = "closed"
+			b.SchemaVersion = 2
+		}, invalid: true, reason: "unsupported schema version"},
+		{name: "selected malformed JSON beside prior open generation", selected: true, extraID: strings.Repeat("f", 32),
+			mutate:    func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" },
+			mutateRaw: func([]byte) []byte { return []byte("{\n") },
+			invalid:   true, reason: "decode managed runtime bundle"},
+		{name: "selected malformed JSON after prior open generation", selected: true, extraID: strings.Repeat("0", 32),
+			mutate:    func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" },
+			mutateRaw: func([]byte) []byte { return []byte("{\n") },
+			invalid:   true, reason: "decode managed runtime bundle"},
+		{name: "unsupported schema after collectable generation", extraID: strings.Repeat("0", 32),
+			mutate:  func(b *windowsManagedRuntimeBundle) { b.SchemaVersion = 2 },
+			invalid: true, reason: "unsupported schema version"},
+		{name: "invalid fail mode after collectable generation", extraID: strings.Repeat("0", 32),
+			mutate:  func(b *windowsManagedRuntimeBundle) { b.FailMode = "permissive" },
+			invalid: true, reason: "invalid fail mode"},
+		{name: "open generations on both sides", extraID: strings.Repeat("0", 32)},
+		{name: "selected closed generation beside prior open generation", selected: true, extraID: strings.Repeat("0", 32),
+			mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
+		{name: "open generation"},
+		{name: "closed generation", mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "closed" }},
+		{name: "prior data directory", mutate: func(b *windowsManagedRuntimeBundle) {
+			b.DataDir = filepath.Join(filepath.Dir(b.DataDir), "old", ".defenseclaw")
+		}},
+		{name: "prior hook binary", mutate: func(b *windowsManagedRuntimeBundle) {
+			b.HookExecutable = filepath.Join(filepath.Dir(b.HookExecutable), "old-hook.exe")
+		}},
+		{name: "strict prior data directory", strict: true, mutate: func(b *windowsManagedRuntimeBundle) {
+			b.DataDir = filepath.Join(filepath.Dir(b.DataDir), "old", ".defenseclaw")
+		}, invalid: true, reason: "does not match current install"},
+		{name: "strict prior hook binary", strict: true, mutate: func(b *windowsManagedRuntimeBundle) {
+			b.HookExecutable = filepath.Join(filepath.Dir(b.HookExecutable), "old-hook.exe")
+		}, invalid: true, reason: "does not match current install"},
+		{name: "prior gateway address", mutate: func(b *windowsManagedRuntimeBundle) { b.GatewayAddr = "127.0.0.1:18971" }},
+		{name: "prior gateway service", mutate: func(b *windowsManagedRuntimeBundle) { b.GatewayServiceName = "PriorGateway" }},
+		{name: "foreign generation", mutate: func(b *windowsManagedRuntimeBundle) { b.GenerationID = strings.Repeat("f", 32) }, invalid: true},
+		{name: "foreign connector", mutate: func(b *windowsManagedRuntimeBundle) { b.Connector = "cursor" }, invalid: true},
+		{name: "foreign SID", mutate: func(b *windowsManagedRuntimeBundle) { b.TargetSID = "S-1-5-21-1-2-3-1018" }, invalid: true},
+		{name: "schema 2", mutate: func(b *windowsManagedRuntimeBundle) { b.SchemaVersion = 2 }, invalid: true, reason: "unsupported schema version"},
+		{name: "schema string", mutateRaw: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"schema_version":1`), []byte(`"schema_version":"1"`), 1)
+		}, invalid: true},
+		{name: "invalid fail mode", mutate: func(b *windowsManagedRuntimeBundle) { b.FailMode = "permissive" }, invalid: true, reason: "invalid fail mode"},
+		{name: "nonstring token", mutateRaw: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"scoped_token":"test token"`), []byte(`"scoped_token":1`), 1)
+		}, invalid: true},
+		{name: "unknown field", mutateRaw: func(data []byte) []byte {
+			return bytes.Replace(data, []byte("}\n"), []byte(",\"unexpected\":\"value\"}\n"), 1)
+		}, invalid: true},
+		{name: "duplicate key", mutateRaw: func(data []byte) []byte {
+			return bytes.Replace(data, []byte(`"schema_version":1,`), []byte(`"schema_version":1,"schema_version":1,`), 1)
+		}, invalid: true},
+		{name: "malformed JSON", mutateRaw: func([]byte) []byte { return []byte("{\n") }, invalid: true},
+		{name: "noncanonical whitespace", mutateRaw: func(data []byte) []byte {
+			return append(data, ' ')
+		}, invalid: true},
+		{name: "extra newline", mutateRaw: func(data []byte) []byte {
+			return append(data, '\n')
+		}, invalid: true},
+		{name: "UTF-16", mutateRaw: func(data []byte) []byte {
+			encoded := []byte{0xff, 0xfe}
+			for _, b := range data {
+				encoded = append(encoded, b, 0)
+			}
+			return encoded
+		}, invalid: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			withWindowsStandaloneProcess(t)
+			if tc.strict {
+				t.Setenv(managed.TrustStrictAncestorsEnv, "1")
+			}
+			fixture := newWindowsManagedRuntimeGenerationMissingHooksGCFixture(t)
+			selector := windowsManagedRuntimeSelector{
+				SchemaVersion: windowsManagedRuntimeGenerationSchema,
+				Connector:     fixture.options.Connector,
+				Targets:       []windowsManagedRuntimeSelectorTarget{},
+			}
+			if tc.selected {
+				selector.Targets = []windowsManagedRuntimeSelectorTarget{{
+					Connector: fixture.options.Connector, SID: fixture.options.TargetSID,
+					DataDir: fixture.options.DataDir, HookExecutable: fixture.options.HookExecutable,
+					GatewayAddr: "127.0.0.1:18970", GatewayServiceName: "DefenseClawGateway",
+					GenerationID: strings.Repeat("a", 32), BundleSHA256: "sha256:" + strings.Repeat("b", 64),
+				}}
+			}
+			if err := publishWindowsManagedRuntimeSelector(selector); err != nil {
+				t.Fatal(err)
+			}
+			if tc.absentRoot {
+				if err := os.Remove(fixture.options.DataDir); err != nil {
+					t.Fatal(err)
+				}
+			} else if !tc.absentHook {
+				hookDir := filepath.Join(fixture.options.DataDir, "hooks")
+				if _, err := ensureWindowsTargetOwnedDirectoryTree(filepath.Dir(fixture.options.DataDir), hookDir, fixture.target); err != nil {
+					t.Fatal(err)
+				}
+				generationID := strings.Repeat("a", 32)
+				bundle := windowsManagedRuntimeBundle{
+					SchemaVersion: windowsManagedRuntimeGenerationSchema,
+					GenerationID:  generationID, Connector: fixture.options.Connector,
+					TargetSID: fixture.options.TargetSID, DataDir: fixture.options.DataDir,
+					HookExecutable: fixture.options.HookExecutable,
+					GatewayAddr:    "127.0.0.1:18970", GatewayServiceName: "DefenseClawGateway",
+					FailMode: "open", ScopedToken: "test token", HookContractID: "codex-hooks-v1",
+				}
+				if tc.mutate != nil {
+					tc.mutate(&bundle)
+				}
+				data, err := marshalWindowsManagedRuntimeBundle(bundle)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if tc.mutateRaw != nil {
+					data = tc.mutateRaw(data)
+				}
+				path, err := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, generationID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+					t.Fatal(err)
+				}
+				if tc.extraID != "" {
+					bundle.GenerationID = tc.extraID
+					bundle.SchemaVersion = windowsManagedRuntimeGenerationSchema
+					bundle.FailMode = "open"
+					data, err = marshalWindowsManagedRuntimeBundle(bundle)
+					if err != nil {
+						t.Fatal(err)
+					}
+					path, err = windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, bundle.GenerationID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := connector.PublishManagedTargetRuntimeFileNoReplace(path, data); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			removed, err := GarbageCollectWindowsManagedRuntimeGenerations(fixture.options)
+			if tc.invalid {
+				if err == nil || removed != 0 {
+					t.Fatalf("incompatible state: removed=%d err=%v", removed, err)
+				}
+				if tc.extraID != "" {
+					path, pathErr := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, tc.extraID)
+					if pathErr != nil {
+						t.Fatal(pathErr)
+					}
+					if _, statErr := os.Lstat(path); statErr != nil {
+						t.Fatalf("a refused GC deleted the prior open generation %s: %v", tc.extraID, statErr)
+					}
+				}
+				if tc.reason != "" && !strings.Contains(err.Error(), tc.reason) {
+					t.Fatalf("incompatible state lost reason %q: %v", tc.reason, err)
+				}
+				return
+			}
+			want := 1
+			if tc.absentRoot || tc.absentHook || tc.selected {
+				want = 0
+			}
+			if tc.extraID != "" {
+				want++
+			}
+			if err != nil || removed != want {
+				t.Fatalf("recoverable state: removed=%d, want=%d err=%v", removed, want, err)
+			}
+			if tc.selected && !tc.absentHook {
+				path, pathErr := windowsManagedRuntimeBundlePath(fixture.options.DataDir, fixture.options.Connector, strings.Repeat("a", 32))
+				if pathErr != nil {
+					t.Fatal(pathErr)
+				}
+				if _, statErr := os.Lstat(path); statErr != nil {
+					t.Fatalf("selected bundle was changed by preflight GC: %v", statErr)
+				}
+			}
+		})
 	}
 }

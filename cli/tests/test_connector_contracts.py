@@ -37,6 +37,9 @@ from defenseclaw.connector_contracts import (
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
     _load_contracts_from_manifest,
+    has_native_approval_prompt,
+    known_broken_entry,
+    known_warning_entry,
     openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
@@ -46,6 +49,11 @@ from defenseclaw.platform_support import ACP_ONLY_CONNECTORS
 from tests.helpers import cleanup_app, make_app_context
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def test_copilot_cli_does_not_claim_a_native_approval_prompt():
+    assert has_native_approval_prompt("claudecode")
+    assert not has_native_approval_prompt("copilot")
 
 
 def _discovery(connector: str, *, installed: bool, version: str, error: str = ""):
@@ -115,7 +123,7 @@ class TestConnectorContractManifest(unittest.TestCase):
             self.assertTrue(compat.supported)
 
     def test_kiro_is_not_hook_gated(self) -> None:
-        compat = resolve_connector_contract("kiro", "kiro-cli 2.22.0")
+        compat = resolve_connector_contract("kiro", "kiro-cli 2.27.1")
         self.assertEqual(compat.status, STATUS_NOT_GATED)
         self.assertTrue(compat.supported)
         self.assertIsNone(compat.contract)
@@ -300,13 +308,23 @@ class TestConnectorContractManifest(unittest.TestCase):
 
     def test_codex_setup_banner_describes_scoped_otlp_routes(self) -> None:
         with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
-            _print_connector_observability_banner("codex")
+            _print_connector_observability_banner("codex", native_export_expected=True)
         rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
         self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
         self.assertNotIn("/otlp/codex/<token>", rendered)
         self.assertNotIn("/api/v1/codex/notify", rendered)
         self.assertNotIn("otel / notify", rendered)
         self.assertNotIn("notify bridge", rendered)
+
+    def test_per_user_setup_banner_describes_hook_only_telemetry(self) -> None:
+        for connector in ("codex", "claudecode"):
+            with self.subTest(connector=connector):
+                with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
+                    _print_connector_observability_banner(connector)
+                rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
+                self.assertIn("Restart agents and background servers", rendered)
+                self.assertNotIn("Native OTel", rendered)
+                self.assertIn("cleanup of older DefenseClaw", rendered)
 
     def test_setup_banner_prints_the_gateway_hook_route(self) -> None:
         # GAP-1611: the gateway serves Claude Code on /api/v1/claude-code/hook.
@@ -484,26 +502,25 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(installed_but_unsupported.status, STATUS_UNKNOWN)
         self.assertFalse(installed_but_unsupported.supported)
 
-        audited = resolve_connector_contract("hermes", "Hermes Agent v0.19.0")
-        self.assertEqual(audited.status, STATUS_KNOWN)
-        self.assertTrue(audited.supported)
-        self.assertEqual(audited.contract.contract_id, "hermes-hooks-v1")
+        # 0.19.0-0.21.0 keep their reviewed contract with a warning: their
+        # TUI runs tools without the shell hooks (GAP-0978), their classic
+        # interface runs them.
+        for raw, contract_id in (
+            ("Hermes Agent v0.19.0", "hermes-hooks-v1"),
+            ("Hermes Agent v0.19.1", "hermes-hooks-v1"),
+            ("Hermes Agent v0.20.0 (2026.8.3)", "hermes-hooks-v1"),
+            ("Hermes Agent v0.21.0", "hermes-hooks-v2"),
+        ):
+            warned = resolve_connector_contract("hermes", raw)
+            self.assertEqual(warned.status, STATUS_KNOWN, raw)
+            self.assertTrue(warned.supported, raw)
+            self.assertEqual(warned.contract.contract_id, contract_id, raw)
+            self.assertIn("hermes --tui", warned.warning, raw)
 
-        latest_rechecked = resolve_connector_contract("hermes", "Hermes Agent v0.19.1")
-        self.assertEqual(latest_rechecked.status, STATUS_KNOWN)
-        self.assertTrue(latest_rechecked.supported)
-        self.assertEqual(latest_rechecked.contract.contract_id, "hermes-hooks-v1")
-
-        v020 = resolve_connector_contract("hermes", "Hermes Agent v0.20.0 (2026.8.3)")
-        self.assertEqual(v020.normalized_version, "0.20.0")
-        self.assertEqual(v020.status, STATUS_KNOWN)
-        self.assertTrue(v020.supported)
-        self.assertEqual(v020.contract.contract_id, "hermes-hooks-v1")
-
-        v021 = resolve_connector_contract("hermes", "Hermes Agent v0.21.0")
-        self.assertEqual(v021.status, STATUS_KNOWN)
-        self.assertTrue(v021.supported)
-        self.assertEqual(v021.contract.contract_id, "hermes-hooks-v2")
+        v0211 = resolve_connector_contract("hermes", "Hermes Agent v0.21.1 (2026.9.7)")
+        self.assertEqual(v0211.status, STATUS_KNOWN)
+        self.assertTrue(v0211.supported)
+        self.assertEqual(v0211.contract.contract_id, "hermes-hooks-v2")
 
         current = resolve_connector_contract("hermes", "Hermes Agent v0.21.3 (2026.9.14)")
         self.assertEqual(current.status, STATUS_KNOWN)
@@ -512,6 +529,50 @@ class TestConnectorContractManifest(unittest.TestCase):
         unreviewed = resolve_connector_contract("hermes", "Hermes Agent v0.22.0")
         self.assertEqual((unreviewed.status, unreviewed.untested), (STATUS_KNOWN, True))
         self.assertEqual(unreviewed.contract.contract_id, "hermes-hooks-v2")
+
+    def test_hermes_before_its_tui_runs_shell_hooks_keeps_its_contract_with_a_warning(self) -> None:
+        # GAP-0978: Hermes' TUI (hermes --tui) and dashboard chat built their
+        # agent without registering config.yaml shell hooks before 0.21.1
+        # (v2026.9.7), so a terminal call ran with no pre_tool_call there; the
+        # classic interface runs them. Every spelling of those releases keeps
+        # its contract on the host with a warning naming the cause and the fix
+        # (they were refused, 1.0.4 review); 0.21.1 and later have none.
+        warned = (
+            "0.19.0",
+            "Hermes Agent v0.19.0 (2026.7.20)",
+            "Hermes Agent v0.20.6 (2026.8.27)",
+            "0.21.0",
+            "2026.7.20",
+            "2026.8.16.2",
+            "2026.8.31",
+            "2026.9.6",
+            "Hermes Agent vgit.5bba024 (2026.8.27)",
+            "Hermes Agent vgit.5bba024 (2026.8.31)",
+        )
+        for raw in warned:
+            compat = resolve_connector_contract("hermes", raw)
+            self.assertEqual(compat.status, STATUS_KNOWN, raw)
+            self.assertIsNotNone(compat.contract, raw)
+            self.assertNotIn("known broken", compat.reason, raw)
+            self.assertIn("hermes --tui", compat.warning, raw)
+            self.assertIn("0.21.1", compat.warning, raw)
+            self.assertEqual(known_broken_entry("hermes", raw), (None, ""), raw)
+            self.assertIsNotNone(known_warning_entry("hermes", raw), raw)
+        for raw in (
+            "0.21.1",
+            "Hermes Agent v0.21.5 (2026.10.1)",
+            "2026.9.7",
+            "2026.9.24",
+            "Hermes Agent vgit.5bba024 (2026.9.24)",
+            "Hermes Agent vgit.5bba024",
+        ):
+            compat = resolve_connector_contract("hermes", raw)
+            self.assertEqual(compat.status, STATUS_KNOWN, raw)
+            self.assertEqual(compat.contract.contract_id, "hermes-hooks-v2", raw)
+            self.assertEqual(compat.warning, "", raw)
+            self.assertEqual(known_broken_entry("hermes", raw), (None, ""), raw)
+        # Below the first reviewed release keeps its own "upgrade" answer.
+        self.assertNotIn("known broken", resolve_connector_contract("hermes", "0.18.2").reason)
 
     def test_manifest_loader_preserves_unversioned_default_marker(self) -> None:
         _, contracts = _load_contracts_from_manifest(

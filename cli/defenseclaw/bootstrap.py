@@ -112,7 +112,7 @@ class StepResult:
 class FirstRunOptions:
     """Structured input for the guided first-run backend."""
 
-    connector: str = "codex"
+    connector: str = "none"
     rerun_command: str = "defenseclaw init"
     # Complete ordered connector selection for this first-run transaction.
     # ``None`` preserves single-connector callers by using ``connector``.
@@ -800,6 +800,25 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             next_commands=["defenseclaw init"],
             connector_mode_warnings=connector_mode_warnings,
         )
+
+    # Before any write: a connector setup refuses in every mode is not
+    # configured in observe either (GAP-0554).
+    refusal = ""
+    if connector != "none":
+        refusal = _first_run_setup_refusal(connector, getattr(cfg, "data_dir", ""), options.rerun_command)
+    if refusal:
+        setup.append(StepResult("Hook contract", "fail", f"{refusal} Nothing was changed.", options.rerun_command))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=[options.rerun_command],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+
     selection_targets: tuple[str, ...] | None = None
     if platform_support.host_os() == "windows":
         from defenseclaw.agent_selection import setup_agent_selection_connectors
@@ -830,6 +849,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         )
 
 
+    kiro_refusal = ""
     try:
         if protected_selection is not None:
             from defenseclaw.commands.cmd_setup import _revalidate_setup_agent_selections
@@ -868,8 +888,18 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             if mode_warning:
                 connector_mode_warnings.append(mode_warning)
                 profile = "observe"
+        if connector == "kiro" and profile == "observe":
+            # GAP-0828: a kiro-cli below its hook floor is refused in every
+            # mode, so neither an observe profile nor the observe fallback of
+            # a refused action request may configure it. An admitted action
+            # check already proved the version, so only observe asks.
+            from defenseclaw.commands.cmd_setup import _kiro_setup_refusal
 
-        if connector != "none":
+            kiro_refusal = _kiro_setup_refusal(data_dir=getattr(cfg, "data_dir", ""))
+
+        if kiro_refusal:
+            pass
+        elif connector != "none":
             _apply_first_run_choices(
                 cfg,
                 options,
@@ -899,6 +929,22 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 f"first-run choice application failed ({exc}); rollback was incomplete: {rollback_error}"
             ) from exc
         raise
+
+    if kiro_refusal:
+        setup.append(StepResult("Connector version", "fail", kiro_refusal, "defenseclaw init"))
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw init"],
+            connector_mode_warnings=connector_mode_warnings,
+        )
 
     try:
         cfg.save()
@@ -1214,11 +1260,11 @@ def _normalize_connector(raw: str | None) -> str:
     if value == "none":
         return "none"
     if value == "":
-        value = "codex"
+        return "none"
     try:
         return connector_paths.normalize(value)
     except Exception:
-        return value or "openclaw"
+        return value
 
 
 def _normalize_profile(raw: str, connector: str) -> str:
@@ -1300,11 +1346,62 @@ def _preflight_first_run_agent_selections(
     return verified, ""
 
 
+def _first_run_setup_refusal(connector: str, data_dir, rerun: str = "defenseclaw init") -> str:
+    """Say why setup refuses *connector* in observe and action mode, or "".
+
+    Setup refuses an installed agent version with no hook contract in both
+    modes, and a gateway started with that connector alone refuses it too
+    (GAP-0554). First run must not write such a connector in either mode, so
+    it is left out instead of downgraded to observe. A version that is only
+    unverified (not probed, or outside a trusted prefix) still gets observe.
+    *rerun* is the command the refusal names for after the upgrade.
+    """
+    from defenseclaw import envvars
+    from defenseclaw.agent_selection import codex_setup_version_problem
+    from defenseclaw.commands.cmd_setup import (
+        _CONNECTOR_META,
+        _connector_contract_upgrade_guidance,
+        _no_hook_contract_detail,
+    )
+    from defenseclaw.connector_contracts import STATUS_UNKNOWN, resolve_connector_contract
+
+    key = _normalize_connector(connector)
+    if key == "none" or envvars.lookup("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1":
+        return ""
+    if key == "opencode" and platform_support.host_os() == "windows":
+        # The exact SST selection gates native-Windows OpenCode.
+        return ""
+    try:
+        discovery = agent_discovery.discover_with_probes(
+            [key], use_cache=False, refresh=True, data_dir=data_dir, persist_cache=False
+        )
+    except Exception:  # noqa: BLE001 - setup continues in observe without discovery too
+        return ""
+    signal = discovery.agents.get(key)
+    if signal is None or not signal.installed:
+        return ""
+    raw_version = signal.version or ""
+    label = _CONNECTOR_META.get(key, {}).get("label", key)
+    if key == "codex" and (problem := codex_setup_version_problem(raw_version)):
+        return f"{problem}. Then run: {rerun}."
+    compatibility = resolve_connector_contract(key, raw_version)
+    if compatibility.status != STATUS_UNKNOWN:
+        return ""
+    return (
+        _no_hook_contract_detail(label, raw_version.rstrip(".") or "(not probed)", compatibility)
+        + " Setup refuses it in observe and action mode, and a gateway started with it alone refuses it. "
+        + _connector_contract_upgrade_guidance(key, label, compatibility.normalized_version, rerun)
+    )
+
+
 def _first_run_action_mode_warning(
     connector: str,
     data_dir: str,
 ) -> dict | None:
-    """Return structured action-to-observe remediation for first-run flows."""
+    """Return structured action-to-observe remediation for first-run flows.
+
+    Called only for a connector :func:`_first_run_setup_refusal` accepted, so
+    observe is a mode setup and the gateway run."""
     from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
 
     if _check_connector_version_supported_for_setup(
@@ -1764,7 +1861,13 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
     if connector in ("", "none"):
         return None
     from defenseclaw.commands.cmd_setup import _CONNECTOR_META
-    from defenseclaw.hook_integrity import hook_registration_problems, hook_runtime_problems, repair_command
+    from defenseclaw.hook_integrity import (
+        agent_hook_switch_problems,
+        hook_registration_problems,
+        hook_runtime_problems,
+        repair_command,
+        unguarded_tool_call_hooks,
+    )
 
     label = _CONNECTOR_META.get(connector, {}).get("label", connector)
     roster = _running_connectors_from_state_file(cfg.data_dir)
@@ -1781,10 +1884,20 @@ def _connector_runtime_readiness(cfg: Config, connector: str) -> StepResult | No
         return None
     if not problems:
         return None
+    # A hook command the shell cannot run guards nothing (GAP-0382), and an
+    # agent setting that turns its hooks off, a hook file another account
+    # can change, or a hook entry edited so tool calls run unchecked is not
+    # repaired by a gateway restart (rel-1-0-4 GAP-0580, GAP-0600).
+    blocking = (
+        getattr(problems[0], "blocking", False)
+        or problems[0].startswith("hook command ")
+        or "another account can change" in problems[0]
+        or problems[0] in agent_hook_switch_problems(cfg, connector)
+        or problems[0] in unguarded_tool_call_hooks(cfg, connector)
+    )
     return StepResult(
         "Connector runtime",
-        # A hook command the shell cannot run guards nothing (GAP-0382).
-        "fail" if problems[0].startswith("hook command ") else "warn",
+        "fail" if blocking else "warn",
         f"{label} is not guarded: {problems[0]}",
         repair_command(connector, problems[0]),
     )

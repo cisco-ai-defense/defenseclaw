@@ -54,7 +54,7 @@ func TestManagedSetupSwitchIsANoticeWithoutTheContact(t *testing.T) {
 		t.Fatalf("missing setup = %q, %t", text, ok)
 	}
 	row := managedRuntimeCheck(&sandboxapi.ManagedStatus{Unavailable: sandboxrelay.UnavailableSetupChanging, RequestAccess: "it-help@example.com"})
-	if row.Status != openshell.StatusWarn || row.Fix == nil || strings.Contains(row.Fix.Summary, "it-help") {
+	if row.Status != openshell.StatusFail || row.Fix == nil || strings.Contains(row.Fix.Summary, "it-help") {
 		t.Fatalf("doctor row = %+v", row)
 	}
 	row = managedRuntimeCheck(&sandboxapi.ManagedStatus{Unavailable: "OpenShell is not set up on this computer", RequestAccess: "it-help@example.com"})

@@ -687,8 +687,8 @@ class Store:
 
     def list_events(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            f"""SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector,
-                      enforced
+            f"""SELECT id, timestamp, action, target, actor, details, severity, run_id,
+                      {self._structured_sql()} AS structured_json, connector, enforced
                FROM audit_events ORDER BY {self._audit_event_order()} LIMIT ?""",
             (max(limit, 1),),
         )
@@ -975,6 +975,24 @@ class Store:
             self._audit_schema_version = schema_version
         return self._audit_event_columns_cache, self._audit_tables_cache
 
+    def _structured_sql(self, alias: str = "") -> str:
+        """Read a row's structured fields.
+
+        A native v8 row stores them once, in payload_json, and leaves
+        structured_json NULL (GAP-0614); legacy and ``legacy.audit.*``
+        compatibility rows keep their own structured_json.
+        """
+        columns, _ = self._audit_projection_schema()
+        prefix = f"{alias}." if alias else ""
+        if "structured_json" not in columns:
+            return "NULL"
+        if not {"payload_json", "event_name"}.issubset(columns):
+            return f"{prefix}structured_json"
+        return (
+            f"COALESCE(NULLIF({prefix}structured_json, ''), CASE WHEN {prefix}event_name IS NOT NULL"
+            f" AND {prefix}event_name NOT LIKE 'legacy.audit.%' THEN {prefix}payload_json END)"
+        )
+
     def _audit_event_order(self, alias: str = "", *, newest: bool = True) -> str:
         """Order audit rows by their exact instant, with stable insert ties."""
         columns, _ = self._audit_projection_schema()
@@ -1012,7 +1030,7 @@ class Store:
 
     def _legacy_explicit_alert_clause(self, columns: frozenset[str]) -> str:
         outcome_values = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
-        structured = "structured_json" if "structured_json" in columns else "NULL"
+        structured = self._structured_sql() if "structured_json" in columns else "NULL"
         enforced = "enforced" if "enforced" in columns else "NULL"
         details = "COALESCE(details, '')" if "details" in columns else "''"
         legacy_decision = f"dc_hook_decision({details}, {structured}, {enforced})"
@@ -1264,7 +1282,7 @@ class Store:
         cur = self.db.execute(
             f"""SELECT id, timestamp, action, target, actor, details,
                       {display_severity} AS severity,
-                      run_id, structured_json, connector
+                      run_id, {self._structured_sql()} AS structured_json, connector
                FROM audit_events
                WHERE {where}
                ORDER BY {self._audit_event_order()} LIMIT ?""",
@@ -1517,7 +1535,7 @@ class Store:
         def row_facts(alias: str) -> str:
             cols = [f"{alias}.{name}" if name in columns else "NULL" for name in ("session_id", "agent_instance_id")]
             cols += [
-                self._safe_json_extract(f"{alias}.structured_json", f'$."{key}"') for key in self._ALERT_AGENT_KEYS
+                self._safe_json_extract(self._structured_sql(alias), f'$."{key}"') for key in self._ALERT_AGENT_KEYS
             ]
             return ", ".join(cols)
 
@@ -1526,8 +1544,8 @@ class Store:
         if "request_id" in columns:
             # Request IDs are client supplied. Borrow hook facts only when
             # both records identify the same user independently of that ID.
-            f_user = self._safe_json_extract("f.structured_json", '$."user.id"')
-            h_user = self._safe_json_extract("h.structured_json", '$."user.id"')
+            f_user = self._safe_json_extract(self._structured_sql("f"), '$."user.id"')
+            h_user = self._safe_json_extract(self._structured_sql("h"), '$."user.id"')
             join = (
                 "LEFT JOIN audit_events AS h ON COALESCE(f.request_id, '') <> '' AND h.request_id = f.request_id "
                 "AND h.action IN ('hook_decision', 'action') AND h.id <> f.id "

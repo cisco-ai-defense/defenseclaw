@@ -49,7 +49,15 @@ func OrphanedHookConfigPaths(conn Connector, opts SetupOpts) ([]string, error) {
 	if len(exact) == 0 && len(scripts) == 0 {
 		return found, nil
 	}
-	for _, path := range HookConfigPathsForConnector(conn, opts) {
+	paths := HookConfigPathsForConnector(conn, opts)
+	if hermes, ok := conn.(*hookOnlyConnector); ok && hermes.name == "hermes" {
+		other, err := hermes.orphanedOtherHermesHomes(opts)
+		if err != nil {
+			return nil, err
+		}
+		found = append(found, other...)
+	}
+	for _, path := range paths {
 		if slices.Contains(found, path) {
 			continue
 		}
@@ -192,4 +200,34 @@ func commandNamesScript(command string, scripts []string) bool {
 		}
 	}
 	return false
+}
+
+// orphanedOtherHermesHomes returns the Hermes configs besides the resolved
+// one (otherHermesHomes: an earlier Setup's home, the profile default) that
+// hold this data directory's hooks or approvals.
+func (c *hookOnlyConnector) orphanedOtherHermesHomes(opts SetupOpts) ([]string, error) {
+	configPath := hermesConfigPath(opts)
+	if validateHermesWindowsConfigPath(configPath) != nil {
+		return nil, nil
+	}
+	bound, profileDefault, err := otherHermesHomes(opts, configPath)
+	if err != nil {
+		return nil, err
+	}
+	hookScript := c.hookCommand(opts)
+	command := hermesConfiguredHookCommand(hookScript, opts.HookExecutable)
+	var found []string
+	for _, other := range []string{bound, profileDefault} {
+		if other == "" {
+			continue
+		}
+		hooks, approvals, err := hermesHomeHoldsOwnedEntries(other, hookScript, command)
+		if err != nil {
+			return nil, err
+		}
+		if hooks || approvals {
+			found = append(found, other)
+		}
+	}
+	return found, nil
 }

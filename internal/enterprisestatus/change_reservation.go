@@ -468,20 +468,19 @@ func EndedChangeReservations(dir string) []ChangeEvent {
 		return nil
 	}
 	var out []ChangeEvent
-	settled := lazyChangeSettlements(dir)
 	for _, entry := range entries {
 		id, ok := strings.CutSuffix(entry.Name(), ".json")
 		if !ok || !ValidChangeEventID(id) || !entry.Type().IsRegular() {
 			continue
 		}
-		if ev, ok := readEndedReservation(filepath.Join(reserved, entry.Name()), id, settled); ok {
+		if ev, ok := readEndedReservation(filepath.Join(reserved, entry.Name()), id, dir); ok {
 			out = append(out, ev)
 		}
 	}
 	return out
 }
 
-func readEndedReservation(path, id string, settled func(id string) (string, bool)) (ChangeEvent, bool) {
+func readEndedReservation(path, id, dir string) (ChangeEvent, bool) {
 	file, err := openChangeFile(path, os.O_RDONLY)
 	if err != nil {
 		return ChangeEvent{}, false
@@ -495,7 +494,7 @@ func readEndedReservation(path, id string, settled func(id string) (string, bool
 	// lets go of the reservation, so an event there that the gateway reads
 	// is the outcome. One it cannot read or validate settles nothing, so the
 	// reservation is reported.
-	if _, ok := settled(id); ok {
+	if _, ok := changeSettlements(dir)[id]; ok {
 		return ChangeEvent{}, false
 	}
 	_, ev, ok := readReservation(file, id)

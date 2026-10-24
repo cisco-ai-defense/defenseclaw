@@ -510,6 +510,10 @@ def validate_webhook_url(url: str) -> None:
     host = parsed.hostname or ""
     if not host:
         raise ValueError("empty hostname")
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ValueError(f"invalid webhook URL port: {exc}") from exc
 
     allow_local = envvars.lookup("DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST") == "1"
 
@@ -588,8 +592,12 @@ def redact_webhook_url(url: str) -> str:
         # risk echoing an opaque secret token.
         return "***"
     host = parts.hostname or ""
-    if parts.port:
-        host = f"{host}:{parts.port}"
+    try:
+        port = parts.port
+    except ValueError:
+        return "***"
+    if port:
+        host = f"{host}:{port}"
     netloc = f"***@{host}" if (parts.username or parts.password) else host
     redacted = f"{parts.scheme}://{netloc}"
     if parts.path and parts.path != "/":

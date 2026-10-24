@@ -45,9 +45,9 @@ The message reads `<connector>'s agent changed`.
 
 ## A connector was switched to observe with a warning
 
-**Cause.** Its installed version has no hook contract (below the tested floor or known broken). Action mode needs one.
+**Cause.** `init` could not read its installed version (not probed, or the binary is outside a trusted install prefix), and action mode needs a verified version. A version with no hook contract (below the tested floor or known broken) is not switched to observe: setup, `init` and `quickstart` refuse it in both modes ([Hook contracts](/docs/reference/apis/hook-contracts#setup-time-checks)).
 
-**Fix.** Update the agent to a supported version ([Hook contracts](/docs/reference/apis/hook-contracts)). `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` overrides the check for exploratory testing only.
+**Fix.** Run the command the warning names: `defenseclaw setup trusted-paths add <dir>` for a binary outside a trusted prefix, or the `setup` command it prints to choose action mode again. For a version with no contract, update the agent to a supported version, then run `defenseclaw setup <connector>`. `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` overrides the check for exploratory testing only.
 
 **Check.** `defenseclaw doctor` shows `Connector compatibility` as `[PASS]`.
 

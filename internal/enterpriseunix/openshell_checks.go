@@ -76,11 +76,11 @@ func (l *lifecycle) currentOpenShellSettings() (openshellSettings, bool) {
 		return l.osPlan.settings, l.osPlan.settings.Enabled
 	}
 	applied := l.env.loadOpenShellState().Applied
-	if applied == nil || !applied.Enabled {
+	if applied == nil {
 		return openshellSettings{}, false
 	}
-	return openshellSettings{Enabled: true, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
-		GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, true
+	return openshellSettings{Enabled: applied.Enabled, Install: applied.Install, Driver: applied.Driver, Fallback: applied.Fallback, Version: applied.Version,
+		RaisedFrom: applied.RaisedFrom, GatewayPort: applied.GatewayPort, E2fsprogsDir: applied.E2fsprogsDir}, applied.Enabled
 }
 
 // describeOpenShell adds the sandbox rows to the result and warns for every
@@ -91,6 +91,9 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	settings, on := l.currentOpenShellSettings()
 	state := env.loadOpenShellState()
 	if !on {
+		if settings.Install == config.EnterpriseOpenShellInstallSetup && strings.TrimSpace(settings.Version) == "" {
+			r.AddWarning(codeOpenShellPrerequisite, "sandboxes remain off: enterprise.openshell.install: setup has no pin; set enterprise.openshell.version to an exact supported OpenShell release before enabling openshell.enabled")
+		}
 		for _, entry := range state.sortedPending() {
 			if entry.Kind == "stop" {
 				l.describePending(ctx, entry)
@@ -166,9 +169,9 @@ func (l *lifecycle) describeOpenShell(ctx context.Context) {
 	l.describeMacOSAgents(ctx)
 	// The gateway reads this to say, in its own words, why a host run of a
 	// required agent cannot move into a sandbox. status and verify only read.
-	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify {
+	if l.opts.Action != ActionStatus && l.opts.Action != ActionVerify && (l.osPlan != nil || len(r.Errors) == 0) {
 		if err := env.publishPrerequisites(ctx, settings); err != nil {
-			r.AddWarning(codeState, "could not record "+openshell.PrerequisitesFile+": "+err.Error())
+			r.AddWarning(stateWriteCode(err, codeState), "could not record "+openshell.PrerequisitesFile+": "+err.Error())
 		}
 	}
 }
@@ -224,6 +227,9 @@ func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 	switch {
 	case entry.Sandboxes < 0:
 		waiting = "the lifecycle could not tell whether sandboxes run"
+		if entry.Hold != "" {
+			waiting += ": " + entry.Hold
+		}
 	case entry.Sandboxes == 1:
 		waiting = "1 sandbox runs (or is starting, stopping, or a MicroVM that OpenShell does not report stopped)"
 	case entry.Sandboxes == 0:
@@ -261,9 +267,9 @@ func (l *lifecycle) describePending(ctx context.Context, entry pending) {
 		return
 	}
 	l.result.AddWarning(codeSandboxPending, fmt.Sprintf("pending %s for user %s since %s (%s): %s; it is applied by the first run of `%s` or the user's next `defenseclaw sandbox` command that finds no sandbox running. "+
-		"The user's `defenseclaw sandbox stop NAME` flushes and stops a running one; a MicroVM whose workload completed or that is in OpenShell's error state, "+
+		"Save or sync any accessible guest work first; the user's `defenseclaw sandbox stop NAME` requests a disk sync before stopping a running one (a failed sync can lose later changes); a MicroVM whose workload completed or that is in OpenShell's error state, "+
 		"which OpenShell does not stop and whose VM may still run, holds the change until OpenShell reports it stopped (the user's `defenseclaw sandbox stop NAME` says how) "+
-		"or the user deletes it (`defenseclaw sandbox delete NAME`)",
+		"or, after saving accessible work outside the guest, the user deletes it (`defenseclaw sandbox delete NAME`)",
 		entry.Kind, entry.User, entry.Since, entry.reasonBase(), waiting, l.env.lifecycleCommand(ActionEnsure)))
 }
 

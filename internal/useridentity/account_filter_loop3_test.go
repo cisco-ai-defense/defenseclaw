@@ -34,7 +34,11 @@ func TestAccountFilterMatchesRowsOfTheResolvedAccountOnly(t *testing.T) {
 		{"row with domains but no token after the uid moved", `OTHER\alice`, otherToken, true, other, "", false},
 		{"row without provenance, one holder known", `OTHER\alice`, otherToken, false, "", "", true},
 		{"no token known now: domains decide", `OTHER\alice`, "", false, other, otherToken, true},
-		{"bare filter", "alice", otherToken, true, corp, corpToken, true},
+		// GAP-0422: a bare filter given the uid its name names now does not
+		// list that uid's rows of another holder; without the uid it names
+		// every alice, as before.
+		{"bare filter given the uid", "alice", otherToken, true, corp, corpToken, false},
+		{"bare filter given the uid, own row", "alice", otherToken, true, other, otherToken, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := NewAccountFilter(tc.filter, uid).WithAccountDomains(other).WithAccountIncarnation(tc.incarnation, tc.holderChanged)
@@ -42,6 +46,12 @@ func TestAccountFilterMatchesRowsOfTheResolvedAccountOnly(t *testing.T) {
 				t.Fatalf("filter %q on a row of %q (%q) = %v, want %v", tc.filter, tc.rowDomains, tc.rowInc, got, tc.want)
 			}
 		})
+	}
+	if f := NewAccountFilter("alice").WithAccountIncarnation(otherToken, true); !f.MatchesIn(uid, "alice", corp, corpToken) {
+		t.Fatal("a bare filter without the uid no longer names every alice")
+	}
+	if f := NewAccountFilter("alice", uid).WithAccountIncarnation(otherToken, true); !f.MatchesIn("5001", "alice", corp, corpToken) {
+		t.Fatal("a bare filter given one uid dropped another uid's alice")
 	}
 	// A Windows SID is never handed on: its rows match by the SID.
 	sid := "S-1-5-21-1-1-1-1105"

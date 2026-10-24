@@ -1670,6 +1670,7 @@ func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
 		"commit mismatch":  []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"1123456789abcdef0123456789abcdef01234567"}`),
 		"trailing":         append(append([]byte(nil), valid...), []byte(` {}`)...),
 		"unknown":          []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","surprise":true}`),
+		"bundle type":      []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","secret_set_bundle":"true"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateMachineVersion(body, "defenseclaw-gateway", "1.2.3-rc.1", commit); err == nil {
@@ -1681,6 +1682,10 @@ func TestValidateMachineVersionRequiresExactIdentityAndVersion(t *testing.T) {
 	contract := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now","management_contract":1}`)
 	if err := validateMachineVersion(contract, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
 		t.Fatalf("validateMachineVersion with management_contract: %v", err)
+	}
+	bundle := []byte(`{"schema_version":1,"name":"defenseclaw-gateway","version":"1.2.3-rc.1","commit":"0123456789abcdef0123456789abcdef01234567","built":"now","management_contract":1,"secret_set_bundle":true}`)
+	if err := validateMachineVersion(bundle, "defenseclaw-gateway", "1.2.3-rc.1", commit); err != nil {
+		t.Fatalf("validateMachineVersion with secret_set_bundle: %v", err)
 	}
 	cli := []byte(`{"schema_version":1,"name":"defenseclaw-cli","version":"1.2.3-rc.1"}`)
 	if err := validateMachineVersion(cli, "defenseclaw-cli", "1.2.3-rc.1", ""); err != nil {

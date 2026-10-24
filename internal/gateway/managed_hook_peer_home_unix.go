@@ -20,16 +20,20 @@ import (
 	"fmt"
 	"math/bits"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/unixidentity"
 	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
+
+var managedHookDirectoryNeedsFresh = runtime.GOOS == "darwin"
 
 // managedHookPeerHomeTTL bounds how long a resolved home is reused, so a
 // moved or recreated account is picked up without restarting the gateway.
@@ -150,6 +154,12 @@ type managedHookPeerHomeCache struct {
 	// adopted yet (agentIncarnation). It is kept across restarts with the
 	// homes.
 	legacy map[int]bool
+	// homeProofs keeps, per uid, the first proof of its holder's home
+	// directory this gateway read from the root guardian's identity record
+	// (holderToken), persisted with the homes. proofReads memoizes the
+	// record reads for managedHookPeerAccountRecheck.
+	homeProofs map[int]string
+	proofReads map[int]managedHookPeerProofRead
 	// homesFile persists homes and names in the gateway's data directory,
 	// so a gateway that starts while the directory is away still has the
 	// last home and name of each uid and keeps its agent identity
@@ -161,6 +171,13 @@ type managedHookPeerHomeCache struct {
 	// still served. Outside Secure Client, a local account database change
 	// also rechecks a holder before it can make a live namesake ambiguous.
 	holders map[int]managedHookPeerHolder
+}
+
+// managedHookPeerProofRead is one read of a uid's home proof
+// (managedHookPeerHomeProof) for the account name of incarnation.
+type managedHookPeerProofRead struct {
+	name, incarnation, proof string
+	at                       time.Time
 }
 
 // managedHookPeerIncarnations are the first and the last account token a
@@ -238,6 +255,9 @@ type managedHookPeerLast struct {
 	// LegacyHolder marks a uid an older build saw for which no account
 	// token was adopted yet (managedHookPeerHomeCache.legacy).
 	LegacyHolder bool `json:"legacy_holder,omitempty"`
+	// HomeProof is the first proof of the uid's holder's home this gateway
+	// read (managedHookPeerHomeCache.homeProofs). Other builds ignore it.
+	HomeProof string `json:"home_proof,omitempty"`
 	// Format is set on the managedHookPeerHomesFormatKey entry only.
 	Format int `json:"format,omitempty"`
 }
@@ -291,6 +311,13 @@ func (c *managedHookPeerHomeCache) loadHomesLocked() {
 			}
 			c.incarnations[uid] = managedHookPeerIncarnations{base: last.BaseIncarnation, last: firstNonEmpty(last.Incarnation, last.BaseIncarnation)}
 		}
+		if _, known := c.homeProofs[uid]; !known && validHomeProof(last.HomeProof) &&
+			len(c.homeProofs) < managedHookPeerHomesMax {
+			if c.homeProofs == nil {
+				c.homeProofs = make(map[int]string)
+			}
+			c.homeProofs[uid] = last.HomeProof
+		}
 	}
 }
 
@@ -317,6 +344,11 @@ func (c *managedHookPeerHomeCache) saveHomesLocked() {
 	for uid := range c.legacy {
 		last := stored[strconv.Itoa(uid)]
 		last.LegacyHolder = true
+		stored[strconv.Itoa(uid)] = last
+	}
+	for uid, proof := range c.homeProofs {
+		last := stored[strconv.Itoa(uid)]
+		last.HomeProof = proof
 		stored[strconv.Itoa(uid)] = last
 	}
 	stored[managedHookPeerHomesFormatKey] = managedHookPeerLast{Format: 1}
@@ -529,10 +561,44 @@ func forgetOnSpoolAccountChange(cache *identityDirectoryCache, key string, now t
 }
 
 // directory returns uid's verified directory facts from the cache, waiting
-// for a cold lookup up to its budget only when block is set.
+// for a cold lookup up to its budget only when block is set. A blocking read
+// on a managed Mac waits up to the budget for a current answer (getFresh).
 func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.DirectoryFacts, bool) {
-	if uid < 0 {
+	cache, key, ok := c.directoryOf(uid)
+	if !ok {
 		return useridentity.DirectoryFacts{}, false
+	}
+	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+		if !block {
+			return cache.getNonblocking(key)
+		}
+		return cache.getFresh(key, identityDirectoryBudget)
+	}
+	return cache.get(key, block)
+}
+
+// cachedDirectory returns uid's cached directory facts without waiting (a
+// cold or expired entry starts one background lookup), and whether they are
+// settled: an incomplete or settling answer (a UPN or a group not given yet)
+// may miss a name that a current answer has.
+func (c *managedHookPeerHomeCache) cachedDirectory(uid int) (useridentity.DirectoryFacts, bool) {
+	cache, key, ok := c.directoryOf(uid)
+	if !ok {
+		return useridentity.DirectoryFacts{}, false
+	}
+	facts, ok := cache.getNonblocking(key)
+	if !ok || facts.ResolvedAt.IsZero() {
+		return useridentity.DirectoryFacts{}, false
+	}
+	return facts, !cache.unsettled(facts)
+}
+
+// directoryOf returns the cache and key of uid's directory facts after the
+// checks every read makes first: the account that holds the uid now, and
+// the guardian's record of it.
+func (c *managedHookPeerHomeCache) directoryOf(uid int) (*identityDirectoryCache, string, bool) {
+	if uid < 0 {
+		return nil, "", false
 	}
 	key := strconv.Itoa(uid)
 	c.noteHolder(uid, key)
@@ -542,11 +608,24 @@ func (c *managedHookPeerHomeCache) directory(uid int, block bool) (useridentity.
 		// account holding the uid now has not ended (GAP-0392, GAP-0494).
 		// An assignment that needs the unproven account or group fact
 		// refuses the request with that fact named.
-		return useridentity.DirectoryFacts{}, false
+		return nil, "", false
 	}
 	cache := c.directoryCache()
 	forgetOnSpoolAccountChange(cache, key, time.Now())
-	return cache.get(key, block)
+	return cache, key, true
+}
+
+// exemptIdentityDirectory returns the directory facts exempt matches uid's
+// names with. cached returns the facts already cached and whether they are
+// settled (cachedDirectory); otherwise they are read as a blocking hook read
+// gets them (directory): a cold lookup is waited for up to
+// identityDirectoryBudget, and a managed Mac waits that long for a current
+// answer. A lookup that finishes after the wait serves the next hook.
+func exemptIdentityDirectory(uid int, cached bool) (useridentity.DirectoryFacts, bool) {
+	if cached {
+		return managedHookPeerHomes.cachedDirectory(uid)
+	}
+	return managedHookPeerHomes.directory(uid, true)
 }
 
 // explainDirectory is directory for `guardrail profile explain`: the facts a
@@ -563,6 +642,15 @@ func (c *managedHookPeerHomeCache) explainDirectory(uid int) (useridentity.Direc
 	c.noteHolder(uid, key)
 	cache := c.directoryCache()
 	forgetOnSpoolAccountChange(cache, key, time.Now())
+	if managedHookDirectoryNeedsFresh && identityFactsEnabled.Load() && managedServiceHosted.Load() {
+		if facts, ok := cache.getFresh(key, identityDirectoryBudget); ok {
+			return facts, nil
+		}
+		if _, reason, failed := cache.failing(key); failed {
+			return useridentity.DirectoryFacts{}, fmt.Errorf("current directory facts for uid %s are unavailable: %s", key, reason)
+		}
+		return useridentity.DirectoryFacts{}, fmt.Errorf("current directory facts for uid %s did not answer within %s", key, identityDirectoryBudget)
+	}
 	return explainDirectoryFacts(cache, key)
 }
 
@@ -996,20 +1084,219 @@ func (c *managedHookPeerHomeCache) lastName(uid int) string {
 }
 
 // accountToken names the account that holds uid now where its name, uid and
-// home cannot: its account incarnation (Linux), or else its listed record
-// (macOS). false when neither is known.
+// home cannot: its account incarnation (Linux), with the proof of its home
+// where the incarnation names no account of its own (holderToken), or else
+// its listed record (macOS). false when neither is known.
 func (c *managedHookPeerHomeCache) accountToken(uid int) (string, bool) {
 	account, ok := c.account(uid)
 	if !ok {
 		return "", false
 	}
 	if incarnation, known := c.incarnation(uid); known && validAccountToken(incarnation) {
-		return incarnation, true
+		return c.holderToken(uid, account.Name, incarnation), true
 	}
 	if record := managedHookPeerAccountRecord(account.Name); record != "" && validAccountToken("record:"+record) {
 		return "record:" + record, true
 	}
 	return "", false
+}
+
+// holderToken is the account token of the account named name, of account
+// incarnation incarnation (unixidentity.AccountIncarnation), that holds uid
+// now. A SID names one account. The other incarnations name only the NSS
+// service that answers the uid ("files", "sss", "nss:<service>"), the same
+// for an account deleted and created again under the same name, uid and
+// home path (userdel, then useradd), which therefore got the agent
+// identities, inventory rows and history of the account before it, also in
+// the first inventory view of the new account (T8r, GAP-0422). The root
+// guardian's identity record of the uid proves the account's home directory
+// (managedHookPeerHomeProof), which the gateway cannot stat itself under
+// ProtectHome. The first proof this gateway reads for the uid keeps the
+// plain incarnation, so accounts keep the agent identities they had; an
+// account whose home is another directory is another account, and its token
+// names the home too (incarnation|proof), so it derives agent identities of
+// its own and the rows of before are not taken for its own. While no proof
+// can be read, the last token of the incarnation stands, as agentIncarnation
+// keeps one through an outage. A home moved or restored into a new
+// directory therefore starts new agent identities, which only ever falls
+// back to the default profile, never to another account's.
+func (c *managedHookPeerHomeCache) holderToken(uid int, name, incarnation string) string {
+	if strings.HasPrefix(incarnation, "sid:") {
+		return incarnation
+	}
+	proof := c.homeProof(uid, name, incarnation)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadHomesLocked()
+	first, seen := c.homeProofs[uid]
+	switch {
+	case proof == "":
+		if last := c.incarnations[uid].last; strings.HasPrefix(last, incarnation+"|") {
+			return last
+		}
+		return incarnation
+	case !seen:
+		if len(c.homeProofs) < managedHookPeerHomesMax {
+			if c.homeProofs == nil {
+				c.homeProofs = make(map[int]string)
+			}
+			c.homeProofs[uid] = proof
+			c.saveHomesLocked()
+		}
+		return incarnation
+	case sameHomeProof(proof, first):
+		return incarnation
+	}
+	return incarnation + "|" + proof
+}
+
+// homeProof is managedHookPeerHomeProof, read at most once per
+// managedHookPeerAccountRecheck for one account of uid: hook requests ask
+// for the token several times each.
+func (c *managedHookPeerHomeCache) homeProof(uid int, name, incarnation string) string {
+	c.mu.Lock()
+	now := c.now()
+	if read, ok := c.proofReads[uid]; ok && read.name == name && read.incarnation == incarnation &&
+		!now.Before(read.at) && now.Sub(read.at) < managedHookPeerAccountRecheck {
+		c.mu.Unlock()
+		return read.proof
+	}
+	c.mu.Unlock()
+	proof := managedHookPeerHomeProof(uid, name, incarnation)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, known := c.proofReads[uid]; known || len(c.proofReads) < managedHookPeerHomesMax {
+		if c.proofReads == nil {
+			c.proofReads = make(map[int]managedHookPeerProofRead)
+		}
+		c.proofReads[uid] = managedHookPeerProofRead{name: name, incarnation: incarnation, proof: proof, at: now}
+	}
+	return proof
+}
+
+// adminHolderToken is the account token of the account that holds uid now
+// as proof, the administrator's own root proof of its home
+// (enterprisehooks.LegacyAgentOwnerToken, from the view's root CLI), shows
+// it, and whether it is another token than the last one the hooks recorded
+// for the uid. The root guardian rewrites its identity records at its next
+// pass, so the first inventory view after an account was deleted and created
+// again can come before the gateway reads the new home; the administrator's
+// proof then tells the new account from the one before it (GAP-0422, T8r).
+// The proof is compared with the first proof the gateway read for the uid,
+// or, before it read one, with the guardian's current record. It decides
+// only the view: nothing the hooks read changes. false when it tells
+// nothing: no proof, a SID or an unknown incarnation, or no proof to
+// compare with.
+func (c *managedHookPeerHomeCache) adminHolderToken(uid int, proof string) (string, bool) {
+	proof = normalizeHomeProof(proof)
+	if proof == "" {
+		return "", false
+	}
+	account, ok := c.account(uid)
+	if !ok {
+		return "", false
+	}
+	incarnation, known := c.incarnation(uid)
+	if !known || !validAccountToken(incarnation) || strings.HasPrefix(incarnation, "sid:") {
+		return "", false
+	}
+	reference := c.homeProof(uid, account.Name, incarnation)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.loadHomesLocked()
+	if first, seen := c.homeProofs[uid]; seen {
+		reference = first
+	}
+	if reference == "" {
+		return "", false
+	}
+	token := incarnation
+	if !sameHomeProof(proof, reference) {
+		token = incarnation + "|" + proof
+	}
+	if !validAccountToken(token) {
+		return "", false
+	}
+	return token, token != c.incarnations[uid].last
+}
+
+// managedHookPeerHomeProof is the root guardian's proof of the home
+// directory of the account named name, of account incarnation incarnation,
+// that holds uid: the LegacyOwnerToken of the uid's trusted identity record
+// when the record is current and names that account
+// (normalizeHomeProof); "" otherwise. Tests replace it.
+var managedHookPeerHomeProof = func(uid int, name, incarnation string) string {
+	dir := currentIdentitySpoolDir()
+	if dir == "" || uid <= 0 {
+		return ""
+	}
+	record, err := enterprisehooks.ReadIdentitySpoolRecord(dir, strconv.Itoa(uid), validateManagedGuardianAuthorization)
+	if err != nil || !legacyAgentOwnerSameAccount(record.User, name) || record.UpdatedAt.IsZero() {
+		return ""
+	}
+	now := time.Now()
+	if record.UpdatedAt.After(now.Add(time.Minute)) || now.Sub(record.UpdatedAt) > enterprisehooks.IdentitySpoolMaxAge {
+		return ""
+	}
+	if record.AccountIncarnation != "" && record.AccountIncarnation != incarnation {
+		return ""
+	}
+	return normalizeHomeProof(record.LegacyOwnerToken)
+}
+
+// normalizeHomeProof is a home proof, enterprisehooks.LegacyAgentOwnerToken's
+// home:<device>:<inode>[:<creation time>], without its device:
+// home:<inode>[:<creation time>] (validHomeProof). An automounted network
+// home gets another device number at each mount, while its inode and
+// creation time stay. "" for anything else.
+func normalizeHomeProof(token string) string {
+	rest, ok := strings.CutPrefix(strings.TrimSpace(token), "home:")
+	if !ok {
+		return ""
+	}
+	device, proof, ok := strings.Cut(rest, ":")
+	if _, err := strconv.ParseUint(device, 10, 64); err != nil || !ok {
+		return ""
+	}
+	if proof = "home:" + proof; !validHomeProof(proof) {
+		return ""
+	}
+	return proof
+}
+
+// validHomeProof reports whether proof is home:<inode>[:<creation time>].
+func validHomeProof(proof string) bool {
+	_, _, ok := homeProofParts(proof)
+	return ok
+}
+
+// homeProofParts are the inode and the creation time ("" when the file
+// system keeps none) of a proof validHomeProof accepts.
+func homeProofParts(proof string) (inode, birth string, ok bool) {
+	rest, found := strings.CutPrefix(proof, "home:")
+	if !found {
+		return "", "", false
+	}
+	inode, birth, _ = strings.Cut(rest, ":")
+	if _, err := strconv.ParseUint(inode, 10, 64); err != nil {
+		return "", "", false
+	}
+	if _, err := strconv.ParseInt(birth, 10, 64); birth != "" && err != nil {
+		return "", "", false
+	}
+	if strings.Contains(birth, ":") {
+		return "", "", false
+	}
+	return inode, birth, true
+}
+
+// sameHomeProof reports whether two proofs name one home directory: the
+// same inode, and the same creation time where both give one (a new home
+// can get the inode a removed one freed, never its creation time).
+func sameHomeProof(a, b string) bool {
+	inodeA, birthA, okA := homeProofParts(a)
+	inodeB, birthB, okB := homeProofParts(b)
+	return okA && okB && inodeA == inodeB && (birthA == "" || birthB == "" || birthA == birthB)
 }
 
 // agentIncarnation is the account incarnation uid's agent identities are

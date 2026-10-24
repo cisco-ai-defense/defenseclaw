@@ -257,7 +257,7 @@ def _scan_one_connector(
     )
 
     label = connector or (
-        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw"
+        app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else ""
     )
     if not as_json:
         # Neutral wording: some connectors (Hermes) are read from disk, and the

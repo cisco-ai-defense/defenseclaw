@@ -178,14 +178,14 @@ type SandboxArtifactProvider interface {
 func ResolveSandboxHookContract(connectorName, agentVersion string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if contracts := sandboxOnlyHookContracts(name); len(contracts) > 0 {
-		resolution := strictHookContractResolutionOf(resolveHookContractAgainst(name, agentVersion, contracts))
+		resolution := strictHookContractResolutionOf(resolveHookContractAgainstIn(name, agentVersion, contracts, true))
 		if why := sandboxOnlyRefusals[name]; why != "" && resolution.Status == HookCompatibilityUnknown &&
-			resolveHookContractForOSMode(name, agentVersion, "linux", true).Status == HookCompatibilityKnown {
+			resolveHookContractForOSModeIn(name, agentVersion, "linux", true, true).Status == HookCompatibilityKnown {
 			resolution.Reason = why
 		}
 		return resolution
 	}
-	return resolveHookContractForOSMode(connectorName, agentVersion, "linux", true)
+	return resolveHookContractForOSModeIn(connectorName, agentVersion, "linux", true, true)
 }
 
 // sandboxOnlyHookContractsByConnector are reviewed hook contracts that apply
@@ -409,7 +409,15 @@ func renderSandboxHardening() ([]byte, error) {
 		return nil, fmt.Errorf("_hardening.sh must carry exactly one hook-failure log directory")
 	}
 	logDir := `  local log_dir="` + SandboxHookLogDir + `"`
-	return bytes.Replace(content, []byte(logSentinel), []byte(logDir), 1), nil
+	content = bytes.Replace(content, []byte(logSentinel), []byte(logDir), 1)
+	// The per-user helper creates only logs, never the DefenseClaw folder a
+	// purge removed (GAP-0654). The workload data home is the sandbox's own
+	// and has no purge, so its log directory is created with its parents.
+	const mkdirSentinel = `  [ -d "$log_dir" ] || mkdir "$log_dir" 2>/dev/null || return 0`
+	if bytes.Count(content, []byte(mkdirSentinel)) != 1 {
+		return nil, fmt.Errorf("_hardening.sh must create the hook-failure log directory once")
+	}
+	return bytes.Replace(content, []byte(mkdirSentinel), []byte(`  mkdir -p "$log_dir" 2>/dev/null || return 0`), 1), nil
 }
 
 // finalizeSandboxArtifacts validates paths, rejects duplicates and sorts the

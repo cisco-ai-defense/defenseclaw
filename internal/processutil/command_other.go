@@ -37,7 +37,8 @@ func runTree(cmd *exec.Cmd, _ bool) error {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	exitWithParent(cmd)
-	if err := cmd.Start(); err != nil {
+	err := cmd.Start()
+	if err != nil {
 		return err
 	}
 	killDescendantsAtExit(cmd)

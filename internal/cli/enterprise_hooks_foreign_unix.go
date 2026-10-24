@@ -134,6 +134,32 @@ func enterpriseHookPerUserEnrolled(manifest enterprisehooks.Manifest, machinePol
 	return out
 }
 
+// copilotVSCodeScopedAccounts selects the accounts that may receive the
+// managed Local hook. Auto enrollment with inspect has no per-user Copilot
+// rows, while manifest enrollment and unenrolled_users: deny require one.
+// The eligible-accounts record can lag an exclude_users or exempt_users
+// edit, so apply those current settings before writing into a home.
+func copilotVSCodeScopedAccounts(ctx context.Context, accounts []enterprisehooks.UnixEligibleAccount, manifest enterprisehooks.Manifest) []enterprisehooks.UnixEligibleAccount {
+	if enterpriseHookManifestEnrollment() || cfg.Enterprise.Enrollment.UnenrolledUsers == config.EnterpriseUnenrolledDeny {
+		targets := make([]enterprisehooks.ManifestTarget, 0, len(manifest.Targets))
+		for _, target := range manifest.Targets {
+			if strings.EqualFold(strings.TrimSpace(target.Connector), enterprisepolicy.ConnectorCopilot) &&
+				(target.Enabled == nil || *target.Enabled) {
+				targets = append(targets, target)
+			}
+		}
+		accounts = enterprisehooks.ManifestEnrolledAccounts(accounts, enterprisehooks.Manifest{Targets: targets})
+	}
+	leftOut := enterpriseHookEnrollmentLeftOut(ctx, enterpriseHookIdentitySpoolDirForConfig())
+	scoped := make([]enterprisehooks.UnixEligibleAccount, 0, len(accounts))
+	for _, account := range accounts {
+		if !leftOut.has(account.UID, account.User) {
+			scoped = append(scoped, account)
+		}
+	}
+	return scoped
+}
+
 // runEnterpriseHookStandaloneForeignCleanup is called at the end of every
 // standalone reconcile; it does the work at most once per interval unless
 // the eligible accounts or policies changed. Cleanup is best effort: the
@@ -156,6 +182,14 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	if enterpriseHookManifestEnrollment() {
 		accounts = enterprisehooks.ManifestEnrolledAccounts(accounts, manifest)
 	}
+	var vscodeAccounts []enterprisehooks.UnixEligibleAccount
+	if vscode != nil && (vscode.HookFile || vscode.Plugin) {
+		vscodeAccounts = copilotVSCodeScopedAccounts(ctx, accounts, manifest)
+	}
+	vscodeScoped := make(map[int]bool, len(vscodeAccounts))
+	for _, account := range vscodeAccounts {
+		vscodeScoped[account.UID] = true
+	}
 	// Accounts the guardian wrote VS Code Local hooks for that are no
 	// longer eligible (excluded, removed from the groups): their files call
 	// the hook for an account DefenseClaw no longer covers, and remove-all
@@ -165,6 +199,16 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: VS Code Local accounts record: %v\n", recordErr)
 		recorded = nil
 	}
+	// A removed Copilot connector still has per-user files to reconcile.
+	// Check every eligible home, including installations from before the
+	// accounts record, and the recorded homes that became ineligible.
+	var vscodeRemovalErr error
+	if vscode == nil {
+		vscode, vscodeRemovalErr = enterpriseHookCopilotVSCodeRemoval()
+		if vscodeRemovalErr != nil {
+			fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: VS Code Local removal: %v\n", vscodeRemovalErr)
+		}
+	}
 	recordedDirs := copilotVSCodeCreatedDirs(recorded)
 	// vscodeFor is the account's VS Code Local request: what its home should
 	// hold, and the folders the guardian created there, which go once empty.
@@ -173,21 +217,16 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			return nil
 		}
 		request := *want
+		if !vscodeScoped[uid] {
+			request.HookFile, request.Plugin = false, false
+		}
 		request.RemoveDirs = recordedDirs[uid]
 		return &request
 	}
 	stale := staleCopilotVSCodeAccounts(recorded, accounts)
 	var staleRemoval *enterpriseHookWorkerCopilotVSCode
-	if len(stale) > 0 {
-		binary := ""
-		if vscode != nil {
-			binary = vscode.HookBinary
-		} else if removal, err := enterpriseHookCopilotVSCodeRemoval(); err == nil {
-			binary = removal.HookBinary
-		}
-		if strings.TrimSpace(binary) != "" {
-			staleRemoval = &enterpriseHookWorkerCopilotVSCode{HookBinary: binary}
-		}
+	if len(stale) > 0 && vscode != nil && strings.TrimSpace(vscode.HookBinary) != "" {
+		staleRemoval = &enterpriseHookWorkerCopilotVSCode{HookBinary: vscode.HookBinary}
 	}
 	vendor := enterprisepolicy.VendorMachinePolicyConnectors(runtime.GOOS)
 	// The descriptor names policy actually published by the lifecycle;
@@ -216,6 +255,9 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	for _, account := range accounts {
 		fingerprint += account.User + "=" + strings.Join(leftovers(account.User), ",") + ";"
 	}
+	for _, account := range vscodeAccounts {
+		fingerprint += fmt.Sprintf("vscode-enrolled:%s:%d;", account.User, account.UID)
+	}
 	for _, account := range stale {
 		fingerprint += fmt.Sprintf("vscode-stale:%s:%d;", account.User, account.UID)
 	}
@@ -223,7 +265,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 		if vscode == nil || !vscode.HookFile {
 			return nil
 		}
-		return enterpriseHookCopilotVSCodeHookFileDrift(accounts, vscode.HookBinary)
+		return enterpriseHookCopilotVSCodeHookFileDrift(vscodeAccounts, vscode.HookBinary)
 	}
 	drifted := hookFileDrift()
 	recordedByUID := map[int]enterprisehooks.UnixEligibleAccount{}
@@ -262,7 +304,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 
 	jobs := []enterpriseHookWorkerJob{}
-	clean := true
+	clean := vscodeRemovalErr == nil && recordErr == nil
 	for _, account := range accounts {
 		check := enterpriseHookCheckHome(account.Home, account.UID)
 		if check.State != enterprisehooks.HomeAvailable {
@@ -446,10 +488,31 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 			for _, path := range boundedStrings(report.Kept, 8) {
 				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: left %s for %s in place: it holds hooks DefenseClaw did not write\n", boundedString(path, 512), user)
 			}
+			requestedCoverageKept := false
+			if request := outcome.Job.Request.CopilotVSCode; request != nil {
+				localPath := filepath.Clean(enterprisepolicy.CopilotVSCodeLocalHookFilePath(outcome.Job.Account.Home))
+				pluginDir := filepath.Clean(enterprisepolicy.CopilotPluginDir(outcome.Job.Account.Home))
+				for _, path := range report.Kept {
+					path = filepath.Clean(path)
+					if request.HookFile && path == localPath ||
+						request.Plugin && (path == pluginDir || strings.HasPrefix(path, pluginDir+string(filepath.Separator))) {
+						requestedCoverageKept = true
+						break
+					}
+				}
+			}
+			if requestedCoverageKept {
+				clean = false
+				dropped[outcome.Job.Account.UID] = true
+				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: cannot claim VS Code Local coverage for %s while independent handlers occupy DefenseClaw's hook files\n", user)
+			}
 			if report.Error != "" {
 				clean = false
+				if request := outcome.Job.Request.CopilotVSCode; request != nil && (request.HookFile || request.Plugin) {
+					dropped[outcome.Job.Account.UID] = true
+				}
 				fmt.Fprintf(stderr, "defenseclaw: enterprise hooks: VS Code Local hooks for %s: %s\n", user, boundedString(report.Error, 512))
-			} else if !governed || staleUIDs[outcome.Job.Account.UID] {
+			} else if !requestedCoverageKept && (!governed || staleUIDs[outcome.Job.Account.UID] || !vscodeScoped[outcome.Job.Account.UID]) {
 				dropped[outcome.Job.Account.UID] = true
 			}
 		}
@@ -470,7 +533,7 @@ func runEnterpriseHookStandaloneForeignCleanup(ctx context.Context, stderr io.Wr
 	}
 	reportEnterpriseHookGuardianRepairs(ctx, hookSocket, auditRepairs)
 	if recordErr == nil {
-		next := nextCopilotVSCodeAccounts(recorded, accounts, governed, dropped, createdDirs)
+		next := nextCopilotVSCodeAccounts(recorded, vscodeAccounts, governed, dropped, createdDirs)
 		if !sameCopilotVSCodeAccounts(recorded, next) {
 			var err error
 			if len(next) == 0 {
@@ -509,7 +572,7 @@ func staleCopilotVSCodeAccounts(recorded, eligible []enterprisehooks.UnixEligibl
 }
 
 // nextCopilotVSCodeAccounts is the record after a pass: while the Local
-// harness is governed every eligible account may hold its files; an account
+// harness is governed every enrolled account may hold its files; an account
 // is dropped once its files are removed (dropped). Each account keeps the
 // folders the guardian created in its home (the recorded ones plus this
 // pass's created), so the removal can take them out again.

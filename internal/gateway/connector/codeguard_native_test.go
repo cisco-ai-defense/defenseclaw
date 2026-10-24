@@ -395,8 +395,8 @@ func TestCodexSetupUserConfigFailureRollsBackManagedAndRuntime(t *testing.T) {
 		APIAddr:        "127.0.0.1:18970",
 		HookContractID: "codex-hooks-v3",
 	})
-	if err == nil || !strings.Contains(err.Error(), "Codex hooks are disabled") {
-		t.Fatalf("Setup disabled user config error = %v, want config-patch refusal", err)
+	if err == nil || !strings.Contains(err.Error(), "Codex hooks are turned off") {
+		t.Fatalf("Setup disabled user config error = %v, want a refusal", err)
 	}
 	assertCodexFailedSetupRestored(t, dataDir, configPath, managedPath, configBefore, managedBefore)
 }

@@ -43,8 +43,23 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 		{name: "destructive", body: "#!/bin/sh\nrm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true},
 		{name: "benign", body: "#!/bin/sh\nprintf '%s\\n' build-complete\n"},
 		{
-			name: "control flow remains detection only",
-			body: "#!/bin/sh\nfalse && rm -rf /\n", wantRule: "CMD-RM-RF",
+			// A list or subshell in the script is judged as the same
+			// commands in the tool call would be.
+			name: "list is enforced",
+			body: "#!/bin/sh\nfalse && rm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
+			name: "subshell is enforced",
+			body: "#!/bin/sh\n(rm -rf /)\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
+			name: "redirected group is enforced",
+			body: "#!/bin/sh\n{ rm -rf /; } 2>/dev/null\n", wantRule: "CMD-RM-RF", enforceable: true,
+		},
+		{
+			// An exit in a subshell ends only the subshell.
+			name: "exit in a subshell leaves later command reachable",
+			body: "#!/bin/sh\n(exit 0)\nrm -rf /\n", wantRule: "CMD-RM-RF", enforceable: true,
 		},
 		{
 			name: "exit makes later command unreachable",
@@ -552,6 +567,11 @@ func TestPromotedArtifactRevokesNoExecPreviewAfterConflictingSources(t *testing.
 			command: fmt.Sprintf("bash -n %q", script),
 			argv:    []string{"bash", script},
 		},
+		{
+			name:    "raw noexec redirect structured executes",
+			command: fmt.Sprintf("bash -n %q > /dev/null", script),
+			argv:    []string{"bash", script},
+		},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -575,7 +595,7 @@ func TestPromotedArtifactRevokesNoExecPreviewAfterConflictingSources(t *testing.
 				t.Fatalf("source conflict lost tamper finding: %v facts=%+v", FindingStrings(findings), facts)
 			}
 			if matched.contributesToEnforcement() {
-				t.Fatalf("source-conflict artifact unexpectedly enforceable: %+v", *matched)
+				t.Fatalf("source-conflict artifact unexpectedly enforceable: %+v parse=%+v commands=%+v", *matched, facts.Parse, facts.Commands)
 			}
 		})
 	}
@@ -891,34 +911,155 @@ func TestExperimentalArtifactPromotionRequiresReviewedStructuredRoute(t *testing
 	}
 }
 
-func TestPromotedArtifactOuterControlFlowIsDetectionOnly(t *testing.T) {
-	requireNativePOSIXArtifactHost(t)
-	const connectorName = "artifact-outer-control-test"
-	installDefaultProfileConnector(t, connectorName)
-	path := filepath.Join(t.TempDir(), "destructive.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nrm -rf /\n"), 0o700); err != nil {
+func TestExperimentalArtifactPromotionPanicUsesFailMode(t *testing.T) {
+	installDefaultProfileConnector(t, "claudecode")
+	dir := t.TempDir()
+	name, body := "assembled.sh", "#!/bin/sh\nrm -rf /\n"
+	if runtime.GOOS == "windows" {
+		name, body = "assembled.ps1", "Remove-Item -Recurse -Force C:\\\r\n"
+	}
+	path := filepath.Join(dir, name)
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, command := range []string{
-		fmt.Sprintf("false && bash %q", path),
-		fmt.Sprintf("true || bash %q", path),
+	input := actionfacts.Input{
+		Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: filepath.Dir(path),
+	}
+	if runtime.GOOS == "windows" {
+		quotedPath := strings.ReplaceAll(path, "'", "''")
+		input = actionfacts.Input{
+			Tool: "powershell", Command: "powershell -NoProfile -File '" + quotedPath + "'",
+			CWD: dir, DialectHint: actionfacts.DialectPowerShell,
+		}
+	}
+	facts := actionfacts.Analyze(input)
+	capture := &toolChainHookCapture{}
+	capture.recordTrustedAction(facts, nil)
+	req := agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", toolChain: capture,
+	}
+	original := agentHookResponse{Action: "allow", RawAction: "allow", Severity: "NONE", Mode: "action"}
+	for _, tc := range []struct {
+		name, failMode, wantAction string
+		wantWouldBlock             bool
+		perUser                    bool
+	}{
+		{name: "closed", failMode: "closed", wantAction: "block"},
+		// A per-user install is always closed (sa-port-peer).
+		{name: "per-user explicit open", failMode: "open", perUser: true, wantAction: "block"},
+		{name: "explicit open", failMode: "open", wantAction: "allow", wantWouldBlock: true},
 	} {
-		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: command})
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			if !tc.perUser {
+				// An administrator's explicit open covers a panic on a managed host.
+				cfg.DeploymentMode = "managed_enterprise"
+			}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = "claudecode"
+			cfg.Guardrail.HookFailMode = tc.failMode
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+			api := &APIServer{scannerCfg: cfg}
+			profile := api.hookProfileForConnector("claudecode")
+			panicked := false
+			profile.Respond = func(connector.HookRespondInput) connector.HookRespondOutput {
+				panicked = true
+				panic("artifact response shaper panic")
+			}
+			got := api.safeApplyExperimentalArtifactPromotion(t.Context(), profile, req, original, 0)
+			if !panicked || got.Action != tc.wantAction || got.Mode != "action" || got.WouldBlock != tc.wantWouldBlock {
+				t.Fatalf("panicked=%t response=%+v, want %s", panicked, got, tc.wantAction)
+			}
+		})
+	}
+}
+
+// GAP-0616: a script call inside a compound command is judged as if it ran
+// alone, so a migrated 0.8.x literal rule that blocks `bash heredoc.sh` also
+// blocks it in a list, a sequence, a pipeline, a subshell or the background.
+func TestPromotedArtifactInCompoundCommandIsEnforced(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	old := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(old, "rules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	own := "version: 1\ncategory: acme-markers\nrules:\n" +
+		"  - id: ACME-OWN-MARKER\n    pattern: 'acme\\.own-7f3c'\n    title: \"Own marker\"\n    severity: CRITICAL\n    confidence: 0.99\n    tags: [marker]\n"
+	if err := os.WriteFile(filepath.Join(old, "rules", "acme.yaml"), []byte(own), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := guardrail.PlanRulePackRebase(old)
+	if err != nil || plan == nil || len(plan.Expressed) != 1 {
+		t.Fatalf("PlanRulePackRebase = %+v, %v", plan, err)
+	}
+	rebased := t.TempDir()
+	for rel, data := range plan.Files {
+		target := filepath.Join(rebased, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pack, err := guardrail.LoadRulePack(rebased)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const connectorName = "artifact-compound-command-test"
+	if err := ApplyConnectorRulePackOverrides(connectorName, pack); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { RemoveConnectorRulePackOverrides(connectorName) })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "heredoc.sh")
+	body := "#!/bin/sh\ncat > /tmp/acme-marker.txt <<'EOF'\nacme.own-7f3c\nEOF\n"
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		{"bash heredoc.sh", true},
+		{"bash heredoc.sh && cat /tmp/acme-marker.txt", true},
+		{"bash heredoc.sh; echo done", true},
+		{"bash heredoc.sh || echo failed", true},
+		{"bash heredoc.sh | cat", true},
+		{"bash heredoc.sh > /dev/null", true},
+		{"bash heredoc.sh 2>&1 | tail -5", true},
+		{"X=1 bash heredoc.sh", true},
+		{"X=1 bash heredoc.sh > /dev/null", true},
+		{"(X=1 bash heredoc.sh) 2>&1", true},
+		{"(bash heredoc.sh)", true},
+		{"{ bash heredoc.sh; }", true},
+		{"{ bash heredoc.sh; } > /dev/null", true},
+		{"(bash heredoc.sh) 2>&1", true},
+		{"if true; then bash heredoc.sh; fi", true},
+		{"case x in x) bash heredoc.sh;; esac", true},
+		{"while true; do bash heredoc.sh; done", true},
+		{"for i in 1; do bash heredoc.sh; done", true},
+		{"! bash heredoc.sh", true},
+		{"bash heredoc.sh; echo $HOME", true},
+		{"bash heredoc.sh &", true},
+		{"echo start; bash heredoc.sh", true},
+		{fmt.Sprintf("false && bash %q", path), true},
+		{fmt.Sprintf("true || bash %q", path), true},
+		{fmt.Sprintf("cd /tmp && bash %q", path), true},
+		// After a cd the relative name may be another file.
+		{"cd /tmp && bash heredoc.sh", false},
+	} {
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "shell", Command: test.command, CWD: dir})
 		findings := promotedArtifactFindings(t.Context(), agentHookRequest{
 			ConnectorName: connectorName,
 		}, facts, true, nil)
-		var matched *RuleFinding
-		for index := range findings {
-			if findings[index].RuleID == "CMD-RM-RF" {
-				matched = &findings[index]
-				break
-			}
-		}
+		matched := findingWithID(findings, "ACME-OWN-MARKER")
 		if matched == nil {
-			t.Fatalf("outer control flow lost detection for %q", command)
+			t.Errorf("%q lost detection: %v", test.command, FindingStrings(findings))
+			continue
 		}
-		if matched.contributesToEnforcement() {
-			t.Fatalf("outer control flow became enforceable for %q: %+v", command, *matched)
+		if got := matched.contributesToEnforcement(); got != test.want {
+			t.Errorf("%q: enforced=%t, want %t", test.command, got, test.want)
 		}
 	}
 }

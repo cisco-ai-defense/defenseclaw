@@ -294,15 +294,16 @@ def test_sidecar_row_does_not_pass_for_a_listener_that_is_not_the_verified_gatew
             return_value=_GatewayTrust("missing", "managed gateway PID file is missing"),
         ),
         patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, _healthy_document())),
+        patch("defenseclaw.commands.cmd_doctor._foreign_gateway_port_holder", return_value="PID 4242 (foreign listener)"),
     ):
         health = _check_sidecar(cfg, result)
 
     sidecar_row = next(row for row in result.checks if row["label"] == "Sidecar API")
-    assert sidecar_row["status"] == "warn"
-    assert "not as this account's verified gateway" in sidecar_row["detail"]
+    assert sidecar_row["status"] == "fail"
+    assert "PID 4242" in sidecar_row["detail"]
     # GAP-0384: its effective policy fed the Policy row, which failed on
     # another account's digest.
-    assert result.sidecar_unverified is True
+    assert result.gateway_down == "foreign"
     _check_policy_state(cfg, result, live_health=health)
     policy_row = next(row for row in result.checks if row["label"] == "Policy")
     assert policy_row["status"] == "skip" and "not served by this account's verified gateway" in policy_row["detail"]

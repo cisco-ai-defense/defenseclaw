@@ -55,6 +55,21 @@ type agentIdentityRecorder struct {
 	// bound loses its exclusion too, so a write that keeps failing cannot
 	// grow them past agentIdentityRecorderMaxPending (GAP-1128).
 	exclusions map[string]inventory.AgentIdentitySession
+	// subagents are the sub-agent instances (ais-) seen since the last
+	// write, per agent identity and instance: a sub-agent that shares its
+	// parent's session, or one in a child session. Past
+	// agentIdentityRecorderMaxPending new ones wait for the next window.
+	subagents map[string]inventory.AgentIdentitySubagent
+	// upns is the newest UPN sighting applied per agent identity, by its
+	// read number (agentIdentityFacts.UPNRead). It outlives flushes, so a
+	// hook that read the UPN before another never writes its older UPN,
+	// before or after the newer one is written. Past
+	// agentIdentityRecorderMaxPending identities the oldest sighting is
+	// dropped and upnFloor raised to its read: a sighting of an identity
+	// not tracked that was read no later than upnFloor may be older than a
+	// dropped one, so the row lists no UPN until a newer read.
+	upns     map[string]agentIdentityUPN
+	upnFloor uint64
 
 	// persistErr is why the last write to inventory.db failed, "" after
 	// one succeeded: the ledger then runs from memory, and its counts and
@@ -111,6 +126,7 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	if facts.UserIncarnation != "" {
 		rec.UserIncarnation = facts.UserIncarnation
 	}
+	r.applyUPNLocked(rec, facts)
 	sessionID = strings.TrimSpace(sessionID)
 	if _, sub := r.subSessions[subSessionKey(facts.ID, sessionID)]; sub {
 		sessionID = ""
@@ -127,7 +143,87 @@ func (r *agentIdentityRecorder) observe(facts agentIdentityFacts, sessionID stri
 	}
 }
 
+// agentIdentityUPN is one UPN sighting of an agent identity.
+type agentIdentityUPN struct {
+	read        uint64
+	upn         string
+	unavailable bool
+}
+
+// applyUPNLocked sets rec's UPN to the newest sighting: facts's, unless a
+// hook that read the UPN later was applied first. A sighting that may be
+// older than a dropped one sets no UPN (upnFloor).
+func (r *agentIdentityRecorder) applyUPNLocked(rec *inventory.AgentIdentityRecord, facts agentIdentityFacts) {
+	sighting := agentIdentityUPN{read: facts.UPNRead, upn: facts.UserUPN, unavailable: facts.UPNUnavailable}
+	newest, tracked := r.upns[facts.ID]
+	switch {
+	case tracked && newest.read > sighting.read:
+		sighting = newest
+	case !tracked && r.upnFloor > 0 && sighting.read <= r.upnFloor:
+		sighting = agentIdentityUPN{unavailable: true}
+	default:
+		if r.upns == nil {
+			r.upns = make(map[string]agentIdentityUPN)
+		}
+		if !tracked && len(r.upns) >= agentIdentityRecorderMaxPending {
+			oldestID, oldest := "", uint64(0)
+			for id, s := range r.upns {
+				if oldestID == "" || s.read < oldest {
+					oldestID, oldest = id, s.read
+				}
+			}
+			delete(r.upns, oldestID)
+			r.upnFloor = max(r.upnFloor, oldest)
+		}
+		r.upns[facts.ID] = sighting
+	}
+	rec.UPN, rec.UPNUnavailable = sighting.upn, sighting.unavailable
+}
+
 func subSessionKey(agentID, sessionID string) string { return agentID + "\x00" + sessionID }
+
+// observeSubagent records the sub-agent instance (ais-) a hook of agentID
+// in sessionID ran as, the one its records carry: subagentInstance for a
+// sub-agent that shares its parent's session, else sessionInstance when
+// sessionID is a child session (markSubagentSession). A hook of the main
+// agent records none.
+func (r *agentIdentityRecorder) observeSubagent(agentID, sessionID, subagentInstance, sessionInstance string) {
+	if r == nil || agentID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	instance := subagentInstance
+	if _, child := r.subSessions[subSessionKey(agentID, strings.TrimSpace(sessionID))]; instance == "" && child {
+		instance = sessionInstance
+	}
+	if instance == "" {
+		return
+	}
+	seen := time.Now().UTC()
+	r.noteSubagentLocked(inventory.AgentIdentitySubagent{AgentID: agentID, InstanceID: instance, FirstSeen: seen, LastSeen: seen})
+}
+
+func (r *agentIdentityRecorder) noteSubagentLocked(sub inventory.AgentIdentitySubagent) {
+	key := subSessionKey(sub.AgentID, sub.InstanceID)
+	if known, ok := r.subagents[key]; ok {
+		if sub.FirstSeen.Before(known.FirstSeen) {
+			known.FirstSeen = sub.FirstSeen
+		}
+		if sub.LastSeen.After(known.LastSeen) {
+			known.LastSeen = sub.LastSeen
+		}
+		r.subagents[key] = known
+		return
+	}
+	if len(r.subagents) >= agentIdentityRecorderMaxPending {
+		return
+	}
+	if r.subagents == nil {
+		r.subagents = make(map[string]inventory.AgentIdentitySubagent)
+	}
+	r.subagents[key] = sub
+}
 
 // markSubagentSession records that sessionID belongs to a sub-agent of
 // agentID, which may have counted it already: the link to the parent can be
@@ -161,8 +257,9 @@ func (r *agentIdentityRecorder) markSubagentSession(agentID, sessionID string) {
 	}
 }
 
-// take removes and returns the buffered sightings and child exclusions.
-func (r *agentIdentityRecorder) take() ([]inventory.AgentIdentityRecord, []inventory.AgentIdentitySession) {
+// take removes and returns the buffered sightings, child exclusions and
+// sub-agent sightings.
+func (r *agentIdentityRecorder) take() ([]inventory.AgentIdentityRecord, []inventory.AgentIdentitySession, []inventory.AgentIdentitySubagent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	batch := make([]inventory.AgentIdentityRecord, 0, len(r.pending))
@@ -173,16 +270,26 @@ func (r *agentIdentityRecorder) take() ([]inventory.AgentIdentityRecord, []inven
 	for _, child := range r.exclusions {
 		excluded = append(excluded, child)
 	}
+	subagents := make([]inventory.AgentIdentitySubagent, 0, len(r.subagents))
+	for _, sub := range r.subagents {
+		subagents = append(subagents, sub)
+	}
 	r.pending = make(map[string]*inventory.AgentIdentityRecord)
 	r.exclusions = nil
-	return batch, excluded
+	r.subagents = nil
+	return batch, excluded, subagents
 }
 
 // restore puts back a failed write, merging it with hooks and child links
 // buffered while the write was in flight.
-func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord, excluded []inventory.AgentIdentitySession) {
+func (r *agentIdentityRecorder) restore(
+	batch []inventory.AgentIdentityRecord, excluded []inventory.AgentIdentitySession, subagents []inventory.AgentIdentitySubagent,
+) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	for _, sub := range subagents {
+		r.noteSubagentLocked(sub)
+	}
 	if r.exclusions == nil {
 		r.exclusions = make(map[string]inventory.AgentIdentitySession)
 	}
@@ -225,19 +332,36 @@ func (r *agentIdentityRecorder) restore(batch []inventory.AgentIdentityRecord, e
 	}
 }
 
-// snapshot copies the buffered rows and hints for the API.
-func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRecord, map[string]string) {
+// snapshot copies buffered rows, hints and distinct sub-agent sightings for
+// the API. A buffered row counts its sub-agents until the store reconciles
+// those sightings with instances already persisted there.
+func (r *agentIdentityRecorder) snapshot() (map[string]inventory.AgentIdentityRecord, map[string]string, []inventory.AgentIdentitySubagent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	pending := make(map[string]inventory.AgentIdentityRecord, len(r.pending))
 	for id, rec := range r.pending {
 		pending[id] = *rec
 	}
+	newest := map[string]time.Time{}
+	subagents := make([]inventory.AgentIdentitySubagent, 0, len(r.subagents))
+	for _, sub := range r.subagents {
+		subagents = append(subagents, sub)
+		rec, ok := pending[sub.AgentID]
+		if !ok {
+			continue
+		}
+		rec.SubagentsSeen++
+		if sub.FirstSeen.After(newest[sub.AgentID]) {
+			newest[sub.AgentID] = sub.FirstSeen
+			rec.LastSubagentID = sub.InstanceID
+		}
+		pending[sub.AgentID] = rec
+	}
 	hints := make(map[string]string, len(r.hints))
 	for id, hint := range r.hints {
 		hints[id] = hint
 	}
-	return pending, hints
+	return pending, hints, subagents
 }
 
 // flush writes the buffered batch to store.
@@ -247,12 +371,12 @@ func (r *agentIdentityRecorder) flush(ctx context.Context, store *inventory.Inve
 	if store == nil {
 		return nil
 	}
-	batch, excluded := r.take()
-	if len(batch) == 0 && len(excluded) == 0 {
+	batch, excluded, subagents := r.take()
+	if len(batch) == 0 && len(excluded) == 0 && len(subagents) == 0 {
 		return nil
 	}
-	if err := store.UpsertAgentIdentitiesAndExclude(ctx, batch, excluded); err != nil {
-		r.restore(batch, excluded)
+	if err := store.UpsertAgentIdentityBatch(ctx, batch, excluded, subagents); err != nil {
+		r.restore(batch, excluded, subagents)
 		r.notePersist(err)
 		return err
 	}
@@ -446,7 +570,7 @@ func (r *agentIdentityRecorder) sweepOwnStore(ctx context.Context) {
 func (r *agentIdentityRecorder) pendingCount() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return len(r.pending) + len(r.exclusions)
+	return len(r.pending) + len(r.exclusions) + len(r.subagents)
 }
 
 // agentIdentityRow is one row of GET /api/v1/agents/identities.
@@ -502,12 +626,20 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 		offset = min(n, 1<<30)
 	}
 	user := strings.TrimSpace(q.Get("user"))
+	proof := q.Get("holder_proof")
 	ids := adminViewAccountIDs(user)
-	incarnation, holderChanged := adminViewAccountProvenance(ids)
+	domains := adminViewAccountDomains(ids)
+	incarnation, holderChanged := adminViewAccountProvenance(ids, proof)
+	if len(ids) == 0 {
+		if holders := adminViewBareAccountIDs(user); len(holders) > 0 {
+			ids = holders
+			incarnation, holderChanged = adminViewBareHolderProvenance(holders, proof)
+		}
+	}
 	filter := inventory.AgentIdentityFilter{
 		User:            user,
 		UserIDs:         ids,
-		UserDomains:     adminViewAccountDomains(ids),
+		UserDomains:     domains,
 		UserIncarnation: incarnation,
 		HolderChanged:   holderChanged,
 		RemovedAccount:  adminViewRemovedAccount(user),
@@ -520,12 +652,29 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 			fmt.Fprintf(os.Stderr, "[sidecar] agent identity flush failed: %v\n", err)
 		}
 	}
-	pending, hints := sharedAgentIdentities.snapshot()
+	// Keep a successful ticker flush from moving the buffered sightings into
+	// the store between this snapshot and the reconciliation below.
+	sharedAgentIdentities.flushMu.Lock()
+	pending, hints, bufferedSubagents := sharedAgentIdentities.snapshot()
 	var stored []inventory.AgentIdentityRecord
 	start, total, persisted := 0, 0, false
 	if store := sharedAgentIdentities.store(); store != nil {
 		var err error
+		var overlays map[string]inventory.AgentIdentitySubagentOverlay
+		if overlays, err = store.ReconcileAgentIdentitySubagents(r.Context(), bufferedSubagents); err != nil {
+			sharedAgentIdentities.flushMu.Unlock()
+			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent identities unavailable"})
+			return
+		}
+		for id, overlay := range overlays {
+			if rec, ok := pending[id]; ok {
+				rec.SubagentsSeen = overlay.NewCount
+				rec.LastSubagentID = overlay.LastSubagentID
+				pending[id] = rec
+			}
+		}
 		if stored, start, total, err = storedAgentIdentityWindow(r.Context(), store, filter, offset, limit, pending); err != nil {
+			sharedAgentIdentities.flushMu.Unlock()
 			a.writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "agent identities unavailable"})
 			return
 		}
@@ -539,6 +688,7 @@ func (a *APIServer) handleAgentIdentities(w http.ResponseWriter, r *http.Request
 	}
 	// rows begins at merged row start.
 	rows := mergeAgentIdentityRows(stored, pending, hints, filter)
+	sharedAgentIdentities.flushMu.Unlock()
 	from := offset - start
 	page := rows[min(from, len(rows)):min(from+limit, len(rows))]
 	next := ""
@@ -656,6 +806,14 @@ func mergeAgentIdentityRows(
 		}
 		if buffered.UserIncarnation != "" {
 			rec.UserIncarnation = buffered.UserIncarnation
+		}
+		rec.UPN = buffered.UPN
+		rec.UPNUnavailable = buffered.UPNUnavailable
+		// With a store, buffered.SubagentsSeen contains only instance IDs
+		// absent from it and LastSubagentID was ordered against its keys.
+		rec.SubagentsSeen += buffered.SubagentsSeen
+		if buffered.LastSubagentID != "" {
+			rec.LastSubagentID = buffered.LastSubagentID
 		}
 	}
 	rows := make([]agentIdentityRow, 0, len(order))
@@ -795,11 +953,74 @@ var adminViewAccountIDs = func(user string) []string {
 	return []string{id}
 }
 
+// adminViewBareAccountIDs is the uid a bare --user name of the agent
+// identity view names now, as profile-explain resolves it, or none (a
+// qualified name, an id, a name no account or more than one account holds,
+// a SID). A bare name still selects the rows recorded with that name for
+// every account of it; the uid only keeps the rows another holder of that
+// uid left from being listed as the account's own
+// (useridentity.AccountFilter.MatchesIn): a local account deleted and
+// created again under the same name, uid and home showed the agent
+// identities of the account before it (T8r, GAP-0422). Tests replace it.
+var adminViewBareAccountIDs = func(user string) []string {
+	user = strings.TrimSpace(user)
+	if user == "" || useridentity.QualifiedAccountName(user) || useridentity.KindForID(user) != "" {
+		return nil
+	}
+	id, _, err := profileExplainAccount(user)
+	if err != nil || useridentity.KindForID(id) != useridentity.KindPOSIXUID {
+		return nil
+	}
+	return []string{id}
+}
+
+// adminViewProvenHolder is the account token of the uid id as proof, the
+// view's holder_proof (<uid>:<home proof>, from the administrator's root
+// CLI), shows it, and whether the hooks recorded another one last
+// (agentIdentityAdminHolderToken). false when proof names another uid or
+// tells nothing.
+func adminViewProvenHolder(id, proof string) (string, bool) {
+	uid, token, ok := strings.Cut(strings.TrimSpace(proof), ":")
+	if !ok || uid != id || useridentity.KindForID(id) != useridentity.KindPOSIXUID {
+		return "", false
+	}
+	return agentIdentityAdminHolderToken(id, token)
+}
+
+// adminViewBareHolderProvenance is adminViewAccountProvenance for the uid a
+// bare name names now (adminViewBareAccountIDs). A bare name selects rows by
+// the name they were recorded with, so it hides only the rows of the uid
+// that are shown to be another holder's: another token, or none after
+// another account is known to have held the uid. While the token cannot be
+// told (a directory outage), the last one stands, so an outage hides none
+// of the account's own rows.
+func adminViewBareHolderProvenance(ids []string, proof string) (string, bool) {
+	if len(ids) != 1 {
+		return "", false
+	}
+	_ = agentIdentityIncarnation(ids[0])
+	if token, differs := adminViewProvenHolder(ids[0], proof); differs {
+		return token, true
+	}
+	current := agentIdentityVerifiedAccountToken(ids[0])
+	last, changed := agentIdentityHolderHistory(ids[0])
+	switch {
+	case current == "":
+		return last, changed
+	case last != "" && last != current:
+		return current, true
+	}
+	return current, changed
+}
+
 // adminViewAccountProvenance is the account token of the account ids name
 // (the uid a qualified filter resolves to) and whether another account is
 // known to have held that uid (agentIdentityHolderHistory), for
-// AgentIdentityFilter.UserIncarnation and HolderChanged.
-func adminViewAccountProvenance(ids []string) (string, bool) {
+// AgentIdentityFilter.UserIncarnation and HolderChanged. proof is the
+// view's holder_proof (adminViewProvenHolder): an account deleted and
+// created again since the hooks last saw it is told from the one before it
+// at once.
+func adminViewAccountProvenance(ids []string, proof string) (string, bool) {
 	if len(ids) != 1 {
 		return "", false
 	}
@@ -807,6 +1028,9 @@ func adminViewAccountProvenance(ids []string) (string, bool) {
 	// agent hook. Refresh the holder before reading its history; rowToken
 	// alone resolves the new token without recording the handoff.
 	_ = agentIdentityIncarnation(ids[0])
+	if token, differs := adminViewProvenHolder(ids[0], proof); differs {
+		return token, true
+	}
 	current := agentIdentityVerifiedAccountToken(ids[0])
 	last, changed := agentIdentityHolderHistory(ids[0])
 	if useridentity.KindForID(ids[0]) == useridentity.KindPOSIXUID && (current == "" || last != current) {

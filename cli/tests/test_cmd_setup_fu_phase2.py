@@ -767,6 +767,33 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(self.app.cfg.guardrail, before)
 
 
+    def test_direct_hermes_whose_tui_skips_shell_hooks_is_set_up_with_a_warning(self):
+        # GAP-0978: Hermes 0.19.0 (the newest on PyPI) through 0.21.0 run
+        # tools in their TUI and dashboard chat without the shell hooks setup
+        # registers, and in their classic interface with them. Setup accepts
+        # them in observe and action mode and warns about the TUI; it refused
+        # them before, which left the classic sessions unguarded too (1.0.4
+        # review).
+        signal = SimpleNamespace(
+            version="Hermes Agent v0.19.0 (2026.7.20)",
+            installed=True,
+            error="",
+            binary_path="/home/tester/.local/bin/hermes",
+        )
+        disc = SimpleNamespace(agents={"hermes": signal})
+        for mode in ("observe", "action"):
+            with self.subTest(mode=mode), patch("defenseclaw.commands.cmd_setup.ux.warn") as warn:
+                accepted = cmd_setup._check_connector_version_supported_for_setup(
+                    "hermes",
+                    mode=mode,
+                    data_dir=self.app.cfg.data_dir,
+                    _discovery=disc,
+                )
+                self.assertTrue(accepted)
+                warned = " ".join(str(call.args[0]) for call in warn.call_args_list)
+                self.assertIn("hermes --tui", warned)
+                self.assertIn("Hermes 0.21.1 (v2026.9.7)", warned)
+
     def test_windows_opencode_admission_scan_preserves_prior_connector_discovery(self):
         signal = SimpleNamespace(
             version="opencode 1.18.11",
@@ -2512,7 +2539,8 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                     self.app.cfg = copy.deepcopy(original_cfg)
                     gc = self.app.cfg.guardrail
                     gc.enabled = True
-                    # A guarded OpenClaw refuses --connector opencode first (GAP-2452).
+                    # An older install may have saved OpenClaw before the
+                    # operator picked an installed OpenCode connector.
                     gc.connector = {"configured": "opencode", "explicit": "codex"}.get(target_case, "openclaw")
                     if target_case == "explicit":
                         # Both connectors are registered; explicit selection
@@ -2571,6 +2599,10 @@ class TestPerConnectorWriteSurface(_BaseSetup):
                         patch(
                             "defenseclaw.commands.cmd_setup.platform_support.host_os",
                             return_value="windows",
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+                            return_value=["opencode"],
                         ),
                         patch(
                             "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
@@ -3596,14 +3628,20 @@ class TestGatewayOfflineStaging(_BaseSetup):
         openclaw_check.assert_not_called()
 
     def test_new_api_port_with_a_running_gateway_says_it_applies_on_restart(self):
+        import socket
+
         self.app.logger = MagicMock()
         self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("connection refused")
         self._seed_map("codex")
 
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(("127.0.0.1", 0))
+            free_port = probe.getsockname()[1]
+
         with patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True), patch(
             "defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True
         ):
-            result = _invoke(["gateway", "--api-port", "19095", "--non-interactive"], self.app)
+            result = _invoke(["gateway", "--api-port", str(free_port), "--non-interactive"], self.app)
 
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("nothing listens on the new API port until the gateway restarts", result.output)

@@ -29,18 +29,22 @@ func TestPKRootSetuidShellUsesExactActionFactsProof(t *testing.T) {
 		t.Run(profile, func(t *testing.T) {
 			connector := "pkroot-setuid-shell-" + profile
 			installToolCallCorpusProfileConnector(t, connector, profile)
-			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-				Input: input, Connector: connector, EnforcementCapable: true,
-			})
-			finding := findingWithID(findings, "privilege.pkroot_setuid_shell")
-			if finding == nil || !finding.contributesToEnforcement() {
-				t.Fatalf("exact bounded proof did not enforce: finding=%+v all=%+v", finding, findings)
-			}
-			evaluation := EvaluateDeterministicAction(
-				t.Context(), input, input.Command, connector, profile,
-			)
-			if evaluation.Action != "block" {
-				t.Fatalf("profile=%s action=%q evaluation=%+v", profile, evaluation.Action, evaluation)
+			for _, command := range []string{pkrootSetuidShellGatewayFixture, pkrootSetuidShellGatewayFixture + "; id"} {
+				candidate := input
+				candidate.Command = command
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: candidate, Connector: connector, EnforcementCapable: true,
+				})
+				finding := findingWithID(findings, "privilege.pkroot_setuid_shell")
+				if finding == nil || !finding.contributesToEnforcement() {
+					t.Fatalf("%q: exact bounded proof did not enforce: finding=%+v all=%+v", command, finding, findings)
+				}
+				evaluation := EvaluateDeterministicAction(
+					t.Context(), candidate, command, connector, profile,
+				)
+				if evaluation.Action != "block" {
+					t.Fatalf("profile=%s command=%q action=%q evaluation=%+v", profile, command, evaluation.Action, evaluation)
+				}
 			}
 		})
 	}
@@ -53,7 +57,6 @@ func TestPKRootSetuidShellNearMissesDoNotReachRule(t *testing.T) {
 		"ordinary wrapper": strings.Replace(pkrootSetuidShellGatewayFixture, "/pkroot/run", "/runner/run", 1),
 		"wrong target":     strings.ReplaceAll(pkrootSetuidShellGatewayFixture, "/tmp/.pksh", "/tmp/.helper"),
 		"extra payload":    strings.Replace(pkrootSetuidShellGatewayFixture, "chmod 4755 /tmp/.pksh'", "chmod 4755 /tmp/.pksh && id'", 1),
-		"outer sequence":   pkrootSetuidShellGatewayFixture + "; id",
 	} {
 		t.Run(name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "shell", Command: command, DialectHint: actionfacts.DialectPOSIX}

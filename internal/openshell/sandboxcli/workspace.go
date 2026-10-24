@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -167,22 +168,53 @@ func (a *App) Undo(ctx context.Context, o UndoOptions) error {
 	if running {
 		question = "Stop " + o.Name + " and restore " + a.tildePath(preview.Result.Project) + " to its undo point?"
 	}
+	// A session attached in another terminal ends with the stop, and the
+	// restore takes its work too: it is named in the question.
+	asked, err := a.attachedSessions(o.Name)
+	if err != nil {
+		return attachedUnknown(o.Name, err)
+	}
+	if asked > 0 {
+		what := attachedText(o.Name, asked) + "; undo stops the sandbox, which ends " + them(asked)
+		question = what + ". " + question
+		if o.Yes {
+			a.warn(what + " (--yes)")
+		}
+	}
 	yes, err := a.confirm(question, o.Yes)
 	if err != nil {
 		return err
 	}
-	if !yes {
+	kept := func() error {
 		a.note("nothing changed")
 		if stdout != nil {
 			return writeJSON(stdout, preview)
 		}
 		return nil
 	}
-	// The daemon's stop marks a detached run it ends interrupted and keeps
-	// its log for `sandbox logs`.
-	res, err := api.Undo(ctx, o.Name, sandboxapi.UndoRequest{Stop: true, Restart: o.Restart, KeepRefs: o.KeepRefs})
-	if err != nil {
-		return apiError(err)
+	if !yes {
+		return kept()
+	}
+	// The undo is made under the sandbox's exclusive gate: a session that
+	// attached since the question (a connect starts a stopped sandbox) is
+	// named and asked about again, with no lock held while the question is
+	// open, and none attaches between the last count and the daemon's stop
+	// (endAsked). The daemon's stop marks a detached run it ends
+	// interrupted and keeps its log for `sandbox logs`.
+	var res *sandboxapi.UndoResponse
+	var undoErr error
+	err = a.endAsked(ctx, o.Name, asked, func(others int) (bool, error) {
+		return a.confirmEnding(attachedText(o.Name, others)+" now; undo stops the sandbox, which ends "+them(others), "Undo anyway?", o.Yes)
+	}, func() {
+		res, undoErr = api.Undo(ctx, o.Name, sandboxapi.UndoRequest{Stop: true, Restart: o.Restart, KeepRefs: o.KeepRefs})
+	})
+	switch {
+	case errors.Is(err, errKept):
+		return kept()
+	case err != nil:
+		return err
+	case undoErr != nil:
+		return apiError(undoErr)
 	}
 	if stdout != nil {
 		return writeJSON(stdout, res)
@@ -636,34 +668,56 @@ func (a *App) Pull(ctx context.Context, o PullOptions) error {
 			return err
 		}
 	}
+	// What the pull read is recorded as the copy's state only when nothing
+	// ran in it since base was read: no session attached (not even one
+	// that has ended since) and no hook came (copyBase).
+	base := a.copyBaseOf(sb)
 	switch {
 	case res != nil:
-		defer func() { a.markStoppedCopy(sb, handedOver, res.Result) }()
+		defer func() {
+			// A connect may start the copy while this pull applies a saved
+			// read. Do not record it as stopped or omit the attached session.
+			// This check is bounded because the gateway can go away too.
+			checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+			defer cancel()
+			now, err := api.Get(checkCtx, o.Name)
+			if err != nil {
+				return
+			}
+			if now.Phase == "ready" {
+				if n, err := a.attachedSessions(o.Name); err == nil && n > 0 {
+					a.note(o.Name + " keeps running: " + attachedText(o.Name, n) + " → stop it once " + map[bool]string{true: "it ends", false: "they end"}[n == 1] + ": " + CommandName + " stop " + o.Name)
+				}
+				return
+			}
+			// The copy of the stopped sandbox, as its last stop left it: a
+			// session or `sandbox start` may have started it during this pull,
+			// so it is checked again under the sandbox's exclusive gate.
+			a.markStillStopped(context.WithoutCancel(ctx), api, sb, base, handedOver, res.Result)
+		}()
 	case sb.Phase != "ready":
 		a.note("starting " + o.Name + " to read its work…")
 		a.forgetStoppedCopy(o.Name)
-		hooked := sb.Hooks.LastHookAt
 		if sb, err = api.Start(ctx, o.Name, sandboxapi.StartRequest{}); err != nil {
 			return apiError(err)
 		}
 		// Leave it as it was found, unless a session attached meanwhile:
 		// the count and the stop are made under the sandbox's exclusive
 		// gate (stopIfAlone), and a count that cannot be made keeps it
-		// running too. A session that attached and ended meanwhile (its
-		// hooks tell) may have changed the copy since the pull.
+		// running too.
 		defer func() {
-			stopped, keep, err := a.stopIfAlone(context.WithoutCancel(ctx), api, o.Name)
+			keep, err := a.stopIfAlone(context.WithoutCancel(ctx), api, o.Name, func(stopped *sandboxapi.Sandbox) {
+				if res != nil && base.unchanged(a, o.Name, stopped) {
+					a.markStoppedCopy(sb, handedOver, res.Result)
+				}
+			})
 			switch {
 			case keep != "":
 				a.note(o.Name + " keeps running: " + keep)
-				return
 			case err != nil:
 				a.warn("could not stop " + o.Name + " again: " + apiError(err).Error())
-				return
-			}
-			a.note("stopped " + o.Name + " again")
-			if res != nil && (stopped == nil || !stopped.Hooks.LastHookAt.After(hooked)) {
-				a.markStoppedCopy(sb, handedOver, res.Result)
+			default:
+				a.note("stopped " + o.Name + " again")
 			}
 		}()
 	}
@@ -887,6 +941,24 @@ func (a *App) reviewGlobs(ctx context.Context, sb *sandboxapi.Sandbox) []string 
 		return eff.Workspace.Review
 	}
 	return nil
+}
+
+// markStillStopped records what sb's copy held (markStoppedCopy) after a
+// pull that reused its last pull without starting it, under the sandbox's
+// exclusive gate, only when it is still stopped as it was: no start since
+// (a session, `sandbox start`), no session attached, and nothing that ran
+// in it since base was read.
+func (a *App) markStillStopped(ctx context.Context, api API, sb *sandboxapi.Sandbox, base copyBase, clean bool, pulled string) {
+	others, release, err := a.lockForStop(ctx, sb.Name)
+	if err != nil {
+		return
+	}
+	defer release()
+	now, err := api.Get(ctx, sb.Name)
+	if err != nil || others > 0 || now.Phase == "ready" || now.ID != sb.ID || !now.StartedAt.Equal(sb.StartedAt) || !base.unchanged(a, sb.Name, now) {
+		return
+	}
+	a.markStoppedCopy(sb, clean, pulled)
 }
 
 // reusePull is the pull of stopped sandbox sb made from its last one, when

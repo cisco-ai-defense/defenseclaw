@@ -951,7 +951,9 @@ def test_linux_wrapper_layout_reads_the_result_the_postinstall_writes(os_dir: st
     # back to mdm_binaries_damaged (GAP-0108).
     postinstall = _text(ROOT / "packaging" / "linux" / "postinstall.sh")
     state = re.findall(r"^state=(\S+)$", postinstall, re.MULTILINE)
-    written = set(re.findall(r'>"\$state/([^"]+\.json)"', postinstall))
+    # The result is written to a temporary file and renamed into place
+    # (w4-unix-obs: a full disk never erases the last result).
+    written = set(re.findall(r'(?:>|mv -fT "\$result_tmp" )"\$state/([^"]+\.json)"', postinstall))
     assert len(state) == 1 and len(written) == 1, (state, written)
     expected = f"{state[0]}/{written.pop()}"
     assert expected == "/var/lib/defenseclaw-enterprise/last-package-result.json"
@@ -1018,6 +1020,36 @@ echo "version=$(dc_json_field "$doc" installed_version)"
             continue
         result = subprocess.run([shell, "-c", script], input=indented, capture_output=True, text=True, check=True)
         assert result.stdout.splitlines() == ["installed", "version=1.2.3"], (shell, result.stdout)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell scripts")
+@pytest.mark.parametrize("platform", ["linux", "macos"])
+def test_unix_detect_requires_complete_security_for_health(tmp_path: Path, platform: str) -> None:
+    gateway = tmp_path / "gateway"
+    state = tmp_path / "verify.json"
+    gateway.write_text(
+        '#!/bin/sh\ncase "$*" in\n'
+        f'  "enterprise {platform} status --json") echo \'{{"installed":true,"installed_version":"9.9.9"}}\' ;;\n'
+        f'  "enterprise {platform} verify --json") cat "{state}" ;;\n'
+        '  *) exit 9 ;;\nesac\n',
+        encoding="ascii",
+    )
+    gateway.chmod(0o755)
+    source = _text(MDM / platform / "detect.sh")
+    source = source.replace('[ "$(dc_platform)" = "$DC_SCRIPT_OS" ]', '[ 1 = 1 ]', 1)
+    source = source.replace('[ "$(id -u)" = 0 ]', '[ 1 = 1 ]', 1)
+    source = source.replace('dc_trusted_path "$gateway" ||', '[ -f "$gateway" ] ||', 1)
+    original = ("gateway=/opt/defenseclaw/bin/defenseclaw-gateway group=linux" if platform == "linux"
+                else "gateway=/opt/cisco/defenseclaw/bin/defenseclaw-gateway group=macos")
+    assert original in source
+    source = source.replace(original, f'gateway="{gateway}" group={platform}', 1)
+    detect = tmp_path / "detect.sh"
+    detect.write_text(source, encoding="ascii")
+    for complete, expected in ((False, "unhealthy"), (True, "9.9.9")):
+        state.write_text(json.dumps({"ok": True, "security_complete": complete}), encoding="ascii")
+        result = subprocess.run(["sh", str(detect), "--require-healthy", "--format", "value"],
+                                capture_output=True, text=True)
+        assert (result.returncode, result.stdout) == (0, expected + "\n"), (platform, complete, result)
 
 
 _NOT_READY = json.dumps(

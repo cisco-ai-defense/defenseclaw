@@ -37,11 +37,9 @@ func VMGone(said string) bool {
 	return saysReason(said, "ProcessExited")
 }
 
-// mainProcessFailed reports OpenShell's account of a sandbox in its error
-// state because its main process exited with an error (said: as for
-// VMGone): OpenShell returns its stop as it is (is_failed_main_process_result,
-// 0.1.3 and 0.1.5), and starts it again.
-func mainProcessFailed(said string) bool {
+// MainProcessFailed reports OpenShell's error reason for a workload whose
+// main process exited. OpenShell returns its stop as it is in this state.
+func MainProcessFailed(said string) bool {
 	return saysReason(said, "MainProcessFailed")
 }
 
@@ -92,36 +90,49 @@ func HoldsGateway(p SandboxPhase, said string, stopFlushes bool) bool {
 // StopWayOn is what the user runs to bring the sandbox name, which holds
 // its gateway in phase p (HoldsGateway; said: as for VMGone), to a phase in
 // which OpenShell reports it stopped, on a gateway that runs DefenseClaw
-// sandboxes (runs: SupportedMin or later) or an older one, whose stop of a
+// sandboxes (release: SupportedMin or later), an older gateway, or one whose
+// release could not be read. An older gateway's stop of a
 // sandbox in its error state OpenShell refuses and on which DefenseClaw
 // starts none. OpenShell refuses the stop of a sandbox whose provisioning
 // timed out, which never ran its workload: a start after OpenShell's
 // cleanup, then the stop of the ready sandbox, brings it to stopped. It
 // returns its stop of a completed sandbox, or of one whose main process
-// failed, as it is, and nothing in OpenShell writes such a MicroVM's disk
-// back (exec needs a ready sandbox, and 0.1.5's flushing stop covers only a
-// running workload): its start ends the VM, with whatever the workload left
-// running, with no flush first, so what the VM had not written to its disk
+// failed, as it is. A lingering failed MicroVM may still run, and nothing
+// in OpenShell writes its disk back (exec needs a ready sandbox, and
+// 0.1.5's flushing stop covers only a running workload): its start ends
+// the VM with no flush first, so what the VM has not written to its disk
 // is lost. Its way on says so, and needs the start's --end-vm
 // (sandboxapi.StartRequest.EndVM), as does its delete, which loses all of
-// its work. Neither keeps all of it.
-func StopWayOn(name string, p SandboxPhase, said string, runs bool) string {
-	stop := "`defenseclaw sandbox stop " + name + "`"
-	del := "`defenseclaw sandbox delete " + name + "`, which deletes it and its work"
+// its work. Neither keeps all of it. The gateway also lists raw OpenShell
+// sandboxes, which DefenseClaw's commands refuse, so each stop and delete
+// also names OpenShell's own.
+func StopWayOn(name string, p SandboxPhase, said, release string) string {
+	runs := RunsSandboxes(release)
+	_, parseErr := ParseVersion(release)
+	knownOld := !runs && parseErr == nil
+	dcStop := "`defenseclaw sandbox stop " + name + "`"
+	rawStopCommand := "`openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
+	rawStop := rawStopCommand
+	if !runs {
+		rawStop = "on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then " + rawStop
+	}
+	stop := "save or sync any accessible guest work first, then " + dcStop + " (DefenseClaw sandbox), or " + rawStop
+	del := "`defenseclaw sandbox delete " + name + "` (DefenseClaw sandbox) or `openshell sandbox delete " + name +
+		"` (raw OpenShell sandbox), which deletes it and its work"
 	switch {
 	case p == PhaseReady:
-		return stop + " (DefenseClaw sandbox), or `openshell sandbox stop " + name + "` (raw OpenShell sandbox)"
+		return stop
 	case p != PhaseCompleted && p != PhaseError:
-		return "wait until `defenseclaw sandbox list` shows it ready or stopped, then " + stop + " if it is ready"
-	case !runs && p == PhaseCompleted:
-		return del + " (this OpenShell neither stops nor starts a completed MicroVM)"
+		return "wait until `openshell sandbox list` shows it ready or stopped, then " + stop + " if it is ready"
+	case knownOld:
+		return "save or sync any accessible guest work outside the guest first; OpenShell " + release + " cannot stop or start a completed or error-state MicroVM: " + del
 	case !runs:
-		return del + " (this OpenShell neither stops nor starts a sandbox in its error state)"
+		return "save or sync any accessible guest work first; the gateway release is unknown and raw stop may not flush the guest, so save its work outside the guest before trying " + rawStopCommand + "; only if OpenShell refuses stop or still reports the VM running, " + del
 	case p == PhaseError && ProvisioningTimedOut(said):
-		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`, then " + stop +
-			" once it is ready (OpenShell refuses to stop a sandbox whose provisioning timed out), or " + del
-	case p == PhaseCompleted || mainProcessFailed(said):
-		return LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + stop + " once it is ready; or " + del
+		return "wait a minute for OpenShell's cleanup of the provisioning that timed out, then `defenseclaw sandbox start " + name + "`; save or sync any accessible guest work first, then " + dcStop +
+			" once it is ready (OpenShell refuses to stop a sandbox whose provisioning timed out); for a raw OpenShell sandbox, `openshell sandbox start " + name + "`, then save or sync its work before " + rawStop + " once it is ready"
+	case p == PhaseCompleted || p == PhaseError && LingeringVM(p, said, false) && MainProcessFailed(said):
+		return "save or sync any accessible guest work first; " + LingeringVMLoss + ": `defenseclaw sandbox start " + name + " --end-vm` ends the VM that way, then " + dcStop + " once it is ready; for a raw OpenShell sandbox, `openshell sandbox start " + name + "` ends its VM the same way, then " + rawStop + " once it is ready; only if OpenShell refuses that path or still reports the VM running, `openshell sandbox delete " + name + "` deletes it and its work"
 	}
 	return stop
 }
@@ -153,9 +164,9 @@ func phaseWord(p SandboxPhase) string {
 // stoppedRefusal is base for the sandboxes of list that hold their gateway
 // on a driver whose stop does not flush (HoldsGateway), each named with
 // its phase and its way on (StopWayOn, on a gateway that runs sandboxes
-// when runs says so; asked only when one holds), and then is the step to
+// when release says so; asked only when one holds), and then is the step to
 // retry after; nil when none holds.
-func stoppedRefusal(base error, list []*Sandbox, runs func() bool, then string) error {
+func stoppedRefusal(base error, list []*Sandbox, release func() string, then string) error {
 	var held []*Sandbox
 	for _, sb := range list {
 		if sb != nil && HoldsGateway(sb.Status.Phase, FailureReason(sb), false) {
@@ -165,10 +176,10 @@ func stoppedRefusal(base error, list []*Sandbox, runs func() bool, then string) 
 	if len(held) == 0 {
 		return nil
 	}
-	newer := runs()
+	currentRelease := release()
 	lines := make([]string, 0, len(held))
 	for _, sb := range held {
-		lines = append(lines, fmt.Sprintf("%s (%s): %s", sb.Name, phaseWord(sb.Status.Phase), StopWayOn(sb.Name, sb.Status.Phase, FailureReason(sb), newer)))
+		lines = append(lines, fmt.Sprintf("%s (%s): %s", sb.Name, phaseWord(sb.Status.Phase), StopWayOn(sb.Name, sb.Status.Phase, FailureReason(sb), currentRelease)))
 	}
 	slices.Sort(lines)
 	return fmt.Errorf("%w; OpenShell has not reported these stopped: %s; then %s", base, strings.Join(lines, "; "), then)
@@ -228,10 +239,12 @@ func unreachableRefusal(ctx context.Context, base, cause error, vms VMCount, the
 	return nil
 }
 
-// gatewayRunsSandboxes reports whether the gateway c talks to runs
-// DefenseClaw sandboxes (RunsSandboxes of its health's release): false
-// when it does not say.
-func gatewayRunsSandboxes(ctx context.Context, c Client) bool {
+// restartGatewayRelease reports the gateway's health release, or an empty string
+// when it cannot be read.
+func restartGatewayRelease(ctx context.Context, c Client) string {
 	h, err := c.Health(ctx)
-	return err == nil && h != nil && RunsSandboxes(h.RawVersion)
+	if err != nil || h == nil {
+		return ""
+	}
+	return h.RawVersion
 }

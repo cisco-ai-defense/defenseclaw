@@ -35,6 +35,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from defenseclaw import hook_integrity
 from defenseclaw.hook_integrity import hook_command_problems, hook_registration_problems
 
@@ -57,6 +58,23 @@ _REMOVABLE = ["claudecode", "codex", "copilot", "hermes"]
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook layouts")
 
 
+def approve_hermes_hooks(config: Path) -> None:
+    """Approve every hook of the Hermes *config* in its shell-hooks-allowlist.json, as Setup does.
+
+    Hermes skips a shell hook it has not approved (rel-1-0-4 GAP-0339).
+    """
+
+    hooks = (yaml.safe_load(config.read_text(encoding="utf-8")) or {}).get("hooks") or {}
+    approvals = [
+        {"event": event, "command": entry["command"].strip(), "defenseclaw_managed": True}
+        for event, entries in hooks.items()
+        for entry in entries or ()
+        if isinstance(entry, dict) and isinstance(entry.get("command"), str)
+    ]
+    allowlist = config.parent / hook_integrity.HERMES_ALLOWLIST_FILE
+    allowlist.write_text(json.dumps({"approvals": approvals}), encoding="utf-8")
+
+
 def _install(tmp_path: Path, connector: str, document: str, *, data_dir: Path | None = None, extra: list[Path] = ()):
     home = tmp_path / "home"
     data_dir = data_dir or home / ".defenseclaw"
@@ -64,6 +82,8 @@ def _install(tmp_path: Path, connector: str, document: str, *, data_dir: Path | 
     config = home / _LAYOUTS[connector]["file"]
     config.parent.mkdir(parents=True, exist_ok=True)
     config.write_text(document.replace("{data_dir}", str(data_dir)).replace("{home}", str(home)), encoding="utf-8")
+    if connector == "hermes":
+        approve_hermes_hooks(config)
     paths = [str(config), *map(str, extra)]
     lock = {"version": 2, "connectors": {connector: {"locations": {"hook_config_paths": paths}}}}
     (data_dir / "hook_contract_lock.json").write_text(json.dumps(lock), encoding="utf-8")
@@ -124,11 +144,12 @@ def test_copilot_bash_hook_command_with_an_unquoted_space_cannot_run(tmp_path, m
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "dc user" / ".defenseclaw"
     script = data_dir / "hooks" / "copilot-hook.sh"
-    good = json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": f"'{script}' --event 'preToolUse'"}]}})
+    entry = {"type": "command", "bash": f"'{script}' --event 'preToolUse'", "timeoutSec": 30}
+    good = json.dumps({"version": 1, "hooks": {"preToolUse": [entry]}})
     cfg, config = _install(tmp_path, "copilot", good, data_dir=data_dir)
     assert hook_registration_problems(cfg, "copilot") == []
     config.write_text(
-        json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "bash": f"{script} --event preToolUse"}]}}),
+        json.dumps({"version": 1, "hooks": {"preToolUse": [{**entry, "bash": f"{script} --event preToolUse"}]}}),
         encoding="utf-8",
     )
     problems = hook_command_problems(cfg, "copilot")
@@ -142,9 +163,12 @@ def test_hermes_yaml_hook_command_with_an_unquoted_space_cannot_run(tmp_path, mo
     monkeypatch.chdir(tmp_path)
     data_dir = tmp_path / "dc user" / ".defenseclaw"
     script = data_dir / "hooks" / "hermes-hook.sh"
-    cfg, config = _install(tmp_path, "hermes", f"hooks:\n  pre_tool_call:\n    - command: \"'{script}'\"\n", data_dir=data_dir)
+    fields = "      matcher: .*\n      timeout: 30\n"
+    cfg, config = _install(
+        tmp_path, "hermes", f"hooks:\n  pre_tool_call:\n    - command: \"'{script}'\"\n{fields}", data_dir=data_dir
+    )
     assert hook_registration_problems(cfg, "hermes") == []
-    config.write_text(f"hooks:\n  pre_tool_call:\n    - command: {script}\n", encoding="utf-8")
+    config.write_text(f"hooks:\n  pre_tool_call:\n    - command: {script}\n{fields}", encoding="utf-8")
     problems = hook_command_problems(cfg, "hermes")
     assert problems and "cannot run" in problems[0] and str(config) in problems[0]
 
@@ -153,14 +177,16 @@ def _windows_document(connector: str, command: str) -> str:
     if connector == "codex":
         return (
             "[hooks]\n[[hooks.PreToolUse]]\nmatcher = '*'\n\n[[hooks.PreToolUse.hooks]]\n"
-            f"command = '{command}'\ncommand_windows = '{command}'\ntype = 'command'\n"
+            f"command = '{command}'\ncommand_windows = '{command}'\ntimeout = 30\ntype = 'command'\n"
             "\n[otel.exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\n"
         )
     if connector == "copilot":
-        return json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "powershell": command}]}})
+        entry = {"type": "command", "powershell": command, "timeoutSec": 30}
+        return json.dumps({"version": 1, "hooks": {"preToolUse": [entry]}})
     if connector == "hermes":
-        return f"hooks:\n  pre_tool_call:\n    - command: '{command}'\n"
-    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": command}]}]}})
+        return f"hooks:\n  pre_tool_call:\n    - command: '{command}'\n      matcher: .*\n      timeout: 30\n"
+    handler = {"type": "command", "command": command, "timeout": 30}
+    return json.dumps({"hooks": {"PreToolUse": [{"matcher": "*", "hooks": [handler]}]}})
 
 
 @pytest.mark.parametrize("connector", ["claudecode", "codex", "copilot", "hermes"])
@@ -172,7 +198,13 @@ def test_windows_launcher_registrations_are_registered(tmp_path, monkeypatch, co
     command = _LAYOUTS["windows_commands"][connector]
     assert "defenseclaw" not in command.lower()
     cfg, config = _install(tmp_path, connector, _windows_document(connector, command))
-    assert hook_registration_problems(cfg, connector) == []
+    if connector == "copilot":
+        # This fixture pins presence detection, but has only one event and no
+        # native contract evidence, so it is not a healthy Copilot install.
+        assert hook_integrity._registers_defenseclaw_hooks(cfg, connector, config, strict=False)
+        assert hook_registration_problems(cfg, connector)
+    else:
+        assert hook_registration_problems(cfg, connector) == []
 
     removed = {"codex": "[otel.exporter.otlp-http.headers]\nx-defenseclaw-source = 'codex'\n"}.get(
         connector, json.dumps({"hooks": {}, "env": {"OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=x"}})
@@ -192,7 +224,7 @@ def _with_launcher(value, launcher: str):
 
 
 def _claude_windows_settings(handler: dict, launcher: str) -> str:
-    entry = _with_launcher(handler, launcher)
+    entry = {**_with_launcher(handler, launcher), "timeout": 30}
     hooks = {event: [{"matcher": "*", "hooks": [entry]}] for event in ("PreToolUse", "PostToolUse", "UserPromptSubmit")}
     env = {"OTEL_RESOURCE_ATTRIBUTES": "defenseclaw.connector=claudecode"}
     return json.dumps({"env": env, "hooks": hooks})
@@ -255,8 +287,10 @@ def test_windows_copilot_adapter_in_a_data_dir_not_named_defenseclaw_is_register
     command = f"& '{adapter}' -Event 'preToolUse'"
     if "defenseclaw" in command.lower():
         pytest.skip("the temporary folder names DefenseClaw")
-    document = json.dumps({"version": 1, "hooks": {"preToolUse": [{"type": "command", "powershell": command}]}})
+    entry = {"type": "command", "powershell": command, "timeoutSec": 30}
+    document = json.dumps({"version": 1, "hooks": {"preToolUse": [entry]}})
     cfg, config = _install(tmp_path, "copilot", document, data_dir=data_dir)
-    assert hook_registration_problems(cfg, "copilot") == []
+    assert hook_integrity._registers_defenseclaw_hooks(cfg, "copilot", config, strict=False)
+    assert hook_registration_problems(cfg, "copilot")  # one event and an incomplete native lock
     config.write_text(json.dumps({"version": 1, "hooks": {}}), encoding="utf-8")
     assert hook_registration_problems(cfg, "copilot") == [f"no DefenseClaw hooks are registered in {config}"]

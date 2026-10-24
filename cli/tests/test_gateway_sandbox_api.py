@@ -27,6 +27,7 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 import requests
+from defenseclaw import gateway
 from defenseclaw.gateway import (
     SANDBOX_ADMIN_MESSAGE,
     OrchestratorClient,
@@ -133,6 +134,14 @@ def daemon() -> Iterator[FakeDaemon]:
         yield fake
     finally:
         fake.stop()
+
+
+@pytest.fixture(autouse=True)
+def proven_fake_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests exercise the sandbox wire contract against a same-account
+    # fake daemon on a random port; listener ownership is covered separately.
+    monkeypatch.setattr(gateway, "_unproven_per_user_gateway_target", lambda _host, _port: "")
+    monkeypatch.setattr(gateway, "_verify_connected_gateway_socket", lambda _socket, _host, _port: None)
 
 
 def test_reads_carry_the_token_and_decode_the_payloads(daemon: FakeDaemon) -> None:

@@ -24,10 +24,11 @@ CRITICAL findings cannot be approved. Change the rule, not the call.
 
 ## Steps
 
-1. Find the rule id of the finding.
+1. List Claude Code's alerts and note the number of the blocked finding. Show that number to find its rule ID. The `1` below is an example; if the finding is older than 25 rows, increase `--limit` in both commands.
 
    ```bash
-   defenseclaw alerts --show 1
+   defenseclaw alerts --connector claudecode --limit 25
+   defenseclaw alerts --connector claudecode --limit 25 --show 1
    ```
 
    The `Rule:` line names it, for example `C2-WEBHOOK-SITE`.

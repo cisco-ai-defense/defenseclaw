@@ -204,6 +204,15 @@ func ReplaceDocument(ctx context.Context, path string, raw []byte, opt Options) 
 	})
 }
 
+// PublicationOccurred reports whether a failed write replaced config.yaml
+// before it returned. A gateway may have loaded those bytes even if the
+// writer restored the file itself; a prepublication error needs no undo.
+func PublicationOccurred(err error) bool { return cfgtxn.PublicationOccurred(err) }
+
+// AfterPublication preserves the phase of a failure after a caller-owned
+// config publication. ReplaceDocument marks its own postpublication errors.
+func AfterPublication(err error) error { return cfgtxn.AfterPublication(err) }
+
 // Locked runs install with config.yaml.lock held and then records the
 // bytes now at path in config.generation.json. It is for writers that
 // install the file themselves under their own transaction, such as the
@@ -315,6 +324,11 @@ func WriteFileDurablePublished(path string, data []byte, mode os.FileMode, publi
 // SyncDir flushes dir so a file created or removed in it is durable (fsync
 // on POSIX; a no-op on Windows, where NTFS journals the directory).
 func SyncDir(dir string) error { return cfgtxn.SyncDir(dir) }
+
+// MkdirDurable makes dir, whose parent exists, a folder whose entry
+// survives a power loss before it returns (a write-through move on
+// Windows). A folder already there is not an error.
+func MkdirDurable(dir string) error { return cfgtxn.MkdirDurable(dir) }
 
 // SyncFile flushes path, its owner and access included, after they were
 // changed on a file already written.

@@ -4,7 +4,7 @@ Locks the contract that:
   * the dotenv file is rewritten atomically with mode 0o600
   * unrelated entries survive rotation byte-for-byte
   * a duplicate DEFENSECLAW_GATEWAY_TOKEN line is collapsed (never two)
-  * every enabled owner and safely discovered persisted sidecar receives a distinct scoped hook credential
+  * only configured owners receive a distinct scoped hook credential
   * the gateway boot loop refreshes affected hooks/plugins and proves scoped
     authentication before generation B is committed
   * every credential sidecar is restored byte-for-byte if any phase fails
@@ -29,7 +29,6 @@ from click.testing import CliRunner
 from defenseclaw.audit_actions import ACTION_SETUP_GATEWAY
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
-from defenseclaw.config import CONFIG_PATH_ENV
 from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
@@ -1030,7 +1029,7 @@ with locked_file_update(lock_base):
             cmd_setup._rotate_token_hook_fingerprint(new_value),
         )
 
-    def test_unconfigured_orphan_sidecar_rotates_with_disjoint_readiness_state(self) -> None:
+    def test_removed_connector_sidecar_is_revoked_and_not_advertised(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
@@ -1065,25 +1064,58 @@ with locked_file_update(lock_base):
                 result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
 
             codex_value = Path(td, "hooks", ".hook-codex.token").read_text(encoding="ascii").strip()
-            orphan_value = orphan.read_text(encoding="ascii").strip()
+            orphan_exists = orphan.exists()
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertNotEqual(orphan_value, old_orphan)
-        self.assertFalse(
-            cmd_setup.secrets.compare_digest(old_orphan, orphan_value),
-            "the old orphan credential still authenticates after successful rotation",
-        )
+        self.assertFalse(orphan_exists, "the gateway still authenticates a leftover scoped token on disk")
         self.assertEqual(len(states), 1)
         self.assertEqual(
             states[0]["hook_token_fingerprints"],
             {"codex": cmd_setup._rotate_token_hook_fingerprint(codex_value)},
         )
-        self.assertEqual(
-            states[0]["orphan_hook_token_fingerprints"],
-            {"opencode": cmd_setup._rotate_token_hook_fingerprint(orphan_value)},
-        )
+        self.assertNotIn("orphan_hook_token_fingerprints", states[0])
         self.assertNotIn("opencode", states[0]["hook_token_fingerprints"])
         self.assertNotIn("opencode", result.output)
+
+    def test_removed_connector_kept_hook_token_survives_rotation(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            codex = Path(td, "hooks", ".hook-codex.token")
+            old_codex = codex.read_bytes()
+            kept = Path(td, "hooks", ".hook-openhands.token")
+            old_kept = b"3" * 64 + b"\r\n"
+            cmd_setup.atomic_write_private_bytes(kept, old_kept)
+            kept_mode = kept.stat().st_mode & 0o777
+            states: list[dict[str, object]] = []
+
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
+                del token, config_file, cleanup
+                if action == "start":
+                    states.append(json.loads(str(connector_state)))
+
+            with (
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
+                mock.patch.object(cmd_setup.secrets, "token_hex", return_value="b" * 64),
+                mock.patch.object(cmd_setup.secrets, "token_bytes", return_value=b"\x42" * 32),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(kept.read_bytes(), old_kept)
+            self.assertEqual(kept.stat().st_mode & 0o777, kept_mode)
+            self.assertNotEqual(codex.read_bytes(), old_codex)
+            self.assertEqual(len(states), 1)
+            self.assertEqual(set(states[0]["hook_token_fingerprints"]), {"codex"})
 
     def test_failed_b_restores_exact_orphan_and_recovery_state_omits_unverifiable_orphans(self) -> None:
         from tempfile import TemporaryDirectory
@@ -1139,7 +1171,7 @@ with locked_file_update(lock_base):
         self.assertEqual(events, [("stop", False), ("start", False), ("stop", True), ("start", False)])
         self.assertEqual(restored_orphan, original_orphan)
         self.assertEqual(restored_mode, original_mode)
-        self.assertIn("thirdparty", starts[0]["orphan_hook_token_fingerprints"])
+        self.assertNotIn("orphan_hook_token_fingerprints", starts[0])
         self.assertNotIn("orphan_hook_token_fingerprints", starts[1])
         self.assertNotIn("thirdparty", result.output)
 

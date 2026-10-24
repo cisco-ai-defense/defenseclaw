@@ -28,6 +28,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
@@ -554,6 +555,7 @@ func TestEnumerateTargetsExpandsHermesSkillsAndSkipsOnlyProvenBundles(t *testing
 
 func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "openclaw"
 	t.Setenv("PATH", "")
 
 	pluginDir := filepath.Join(cfg.DataDir, "plugins")
@@ -580,6 +582,9 @@ func TestEnumerateTargets_IncludesConfiguredMCPServers(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Claw.ConfigFile = ocPath
+	// An installed OpenClaw is the active connector (w13: no connector resolves
+	// to OpenClaw by default).
+	cfg.Claw.Mode = config.ClawOpenClaw
 
 	w := New(cfg, []string{skillDir}, []string{pluginDir}, store, logger, nil, nil)
 	targets := w.enumerateTargets()
@@ -819,6 +824,7 @@ args = ["mcp.js"]
 
 func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "openclaw"
 	t.Setenv("PATH", "")
 
 	ocPath := filepath.Join(cfg.DataDir, "openclaw.json")
@@ -833,6 +839,9 @@ func TestSnapshotMCPServer_UsesConfigEntryAndEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Claw.ConfigFile = ocPath
+	// An installed OpenClaw is the active connector (w13: no connector resolves
+	// to OpenClaw by default).
+	cfg.Claw.Mode = config.ClawOpenClaw
 
 	w := New(cfg, []string{skillDir}, nil, store, logger, nil, nil)
 	snap, err := w.snapshotMCPServer(InstallEvent{Type: InstallMCP, Name: "remote-mcp", Path: "remote-mcp"})

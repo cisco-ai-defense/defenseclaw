@@ -87,6 +87,11 @@ def classify(*files: str) -> dict:
     return ci_changes.classify(list(files), references=fake_references, read=FAKE_REPO.__getitem__)
 
 
+def test_postinstall_only_selects_reboot_regression() -> None:
+    selected = ci_changes.classify(["packaging/linux/postinstall.sh"])["py_select"]
+    assert "cli/tests/test_enterprise_install_lanes.py" in selected.split()
+
+
 def ran(outputs: dict) -> set[str]:
     groups = (
         "go",
@@ -352,6 +357,15 @@ def test_every_tracked_path_is_classified() -> None:
 
 def _workflow(name: str) -> dict:
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+
+
+def test_windows_native_ci_runs_standalone_transaction_recovery_smoke() -> None:
+    steps = _workflow("windows-native.yml")["jobs"]["powershell-static"]["steps"]
+    smoke = "./packaging/windows/tests/enterprise-standalone-recovery-gateway-smoke.ps1"
+    assert any(
+        smoke in str(step.get("run", "")) and step.get("if") == "${{ !cancelled() }}"
+        for step in steps
+    )
 
 
 def _check_names(job: dict) -> set[str]:

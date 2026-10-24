@@ -29,6 +29,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisebundle"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisestatus"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
@@ -570,6 +571,7 @@ func TestWindowsEnterpriseStandaloneFailureCodes(t *testing.T) {
 		{"invalid arguments: --profile must be secure_client or standalone", "invalid_arguments", 1639},
 		{"powershell7_required: the standalone enterprise lifecycle requires PowerShell 7", "powershell7_required", 1603},
 		{"profile_conflict: a Cisco Secure Client DefenseClaw deployment exists", "profile_conflict", 1603},
+		{"state_invalid: managed state contains a reparse point: C:\\ProgramData\\Cisco\\DefenseClaw\\secrets", "state_invalid", 1603},
 		{"Install requires -Config", "lifecycle_error", 1603},
 	} {
 		result := enterprisestatus.New("install", "standalone", "windows", "1.4.0")
@@ -610,6 +612,35 @@ func TestWindowsEnterpriseStandaloneUninstallOnCleanHostIsNoop(t *testing.T) {
 	}
 	if !result.OK || !result.Noop || result.NoopReason != "not_installed" {
 		t.Fatalf("result %+v", result)
+	}
+}
+
+func TestWindowsEnterpriseStandaloneCLIUninstallUsesTransactionModule(t *testing.T) {
+	originalFootprint := windowsEnterpriseStandaloneFootprint
+	originalRunner := windowsEnterpriseStandaloneRunner
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneFootprint = originalFootprint
+		windowsEnterpriseStandaloneRunner = originalRunner
+	})
+	windowsEnterpriseStandaloneFootprint = func() (bool, error) { return true, nil }
+	var script string
+	var args []string
+	windowsEnterpriseStandaloneRunner = func(_ context.Context, _ *cobra.Command, path string, supplied []string) (windowsEnterpriseStandaloneRun, error) {
+		script, args = path, append([]string(nil), supplied...)
+		return windowsEnterpriseStandaloneRun{}, errors.New("stopped at the shared module boundary")
+	}
+	command := &cobra.Command{}
+	command.SetOut(&bytes.Buffer{})
+	command.SetErr(&bytes.Buffer{})
+	opts := &windowsEnterpriseLifecycleOptions{resolvedProfile: "standalone", jsonOutput: true}
+	installer := `C:\stage\install-enterprise.ps1`
+	_ = runWindowsEnterpriseStandaloneAction(
+		context.Background(), command, "uninstall", opts, installer,
+		windowsEnterprisePowerShellArgs("uninstall", opts),
+	)
+	if script != installer || windowsEnterpriseInstallerAction(args) != "Uninstall" ||
+		!containsString(args, "Standalone") {
+		t.Fatalf("CLI uninstall bypassed the shared transaction module: script=%q args=%q", script, args)
 	}
 }
 
@@ -730,6 +761,42 @@ func TestWindowsEnterpriseConfigRefusalReportsTheInstalledHost(t *testing.T) {
 	if result.OK || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
 		!result.Installed || result.InstalledVersion != "1.4.0" || !result.Readiness.Gateway || !result.Readiness.Guardian {
 		t.Fatalf("result = %+v", result)
+	}
+}
+
+// GAP-0723: Setup /install forwards a supplied config to this preflight.
+// A connector Windows cannot enroll is a bad argument (1639), before the
+// lifecycle can create a root or change hook wiring.
+func TestWindowsEnterpriseInstallUnsupportedConnectorIsInvalidArguments(t *testing.T) {
+	stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("status")}}
+	stub.install(t)
+	previousSource, previousLayout := windowsEnterpriseStandaloneConfigSource, windowsEnterpriseStandaloneLayoutForPreflight
+	t.Cleanup(func() {
+		windowsEnterpriseStandaloneConfigSource, windowsEnterpriseStandaloneLayoutForPreflight = previousSource, previousLayout
+	})
+	windowsEnterpriseStandaloneConfigSource = func(string) error { return nil }
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{}, errors.New("no installed layout needed")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("guardrail:\n  connectors:\n    openhands: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := ensureTestOptions()
+	opts.configPath = path
+	opts.jsonOutput = true
+	command := &cobra.Command{}
+	var stdout bytes.Buffer
+	command.SetOut(&stdout)
+	refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "install", opts, `C:\stage\install-enterprise.ps1`)
+	var result enterprisestatus.Result
+	if decodeErr := json.Unmarshal(stdout.Bytes(), &result); decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	if !refused || commandExitCode(err) != 1639 || result.ExitCode != 1639 || result.OK ||
+		len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" ||
+		!strings.Contains(result.Errors[0].Message, "openhands") || len(stub.calls) != 1 || stub.calls[0][1] != "Status" {
+		t.Fatalf("refused=%t err=%v result=%+v calls=%v", refused, err, result, stub.calls)
 	}
 }
 
@@ -863,7 +930,7 @@ func TestWindowsEnterpriseMissingConfigRefusalReportsTheRunningDeployment(t *tes
 	}
 }
 
-// GAP-1433: an ensure or upgrade whose config is refused first recovers a
+// GAP-1433, GAP-0705: ensure, upgrade, and repair whose config is refused first recover a
 // pending transaction with a repair that carries no sources, so the refusal
 // reports the restored deployment instead of leaving the services stopped.
 // Without a pending transaction only the refusal's status probe runs.
@@ -880,7 +947,9 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 	}{
 		{"ensure", true, "Repair Status"},
 		{"upgrade", true, "Repair Status"},
+		{"repair", true, "Recover Status"},
 		{"ensure", false, "Status"},
+		{"repair", false, "Status"},
 	} {
 		pending := tc.pending
 		windowsEnterpriseStandaloneTransactionPending = func() bool { return pending }
@@ -910,6 +979,30 @@ func TestWindowsEnterpriseConfigRefusalRecoversAPendingTransaction(t *testing.T)
 		if len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" || !result.Installed {
 			t.Fatalf("%s pending=%v: result %+v", tc.action, pending, result)
 		}
+	}
+	// An upgrade without CONFIG keeps config.yaml, but an interrupted older
+	// transaction may have left a foreign candidate there. Its recovery owns
+	// the first read of that file and restores the previous config.
+	installed := filepath.Join(t.TempDir(), "config.yaml")
+	foreign := "data_dir: /opt/cisco/defenseclaw/runtime\n" +
+		strings.Replace(strings.Replace(standaloneGatewayCheckConfig, "config_version: 8", "config_version: 9", 1),
+			"  rule_pack_dir: \"\"\n", "", 1)
+	if err := os.WriteFile(installed, []byte(foreign), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+		return managed.StandaloneLayout{
+			GOOS: "windows", ConfigPath: installed, DataDir: filepath.Join(t.TempDir(), "runtime"),
+			SecretsDir: filepath.Join(t.TempDir(), "secrets"), ServiceUser: `NT SERVICE\DefenseClawGateway`,
+		}, nil
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return false }
+	if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err == nil || !strings.Contains(err.Error(), "data_dir") {
+		t.Fatalf("healthy upgrade did not refuse the foreign kept config: %v", err)
+	}
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return true }
+	if err := windowsEnterpriseStandaloneKeptConfigPreflight(); err != nil {
+		t.Fatalf("upgrade with kept config refused before pending transaction recovery: %v", err)
 	}
 }
 
@@ -1539,6 +1632,7 @@ func TestWindowsBundleApplyFailureExitFollowsItsCause(t *testing.T) {
 		{"bundle_install_options_changed", enterprisestatus.WindowsExitFailure},
 		{"bundle_hot_apply_unavailable", enterprisestatus.WindowsExitBusy},
 		{"bundle_policy_not_adopted", enterprisestatus.WindowsExitBusy},
+		{string(enterprisebundle.CodeNotConfirmed), enterprisestatus.WindowsExitBusy},
 		{"lifecycle_busy", enterprisestatus.WindowsExitBusy},
 	} {
 		result := &enterprisestatus.Result{}
@@ -2933,6 +3027,40 @@ func TestWindowsEnterprisePolicyReportsWhetherTheGatewayAppliedIt(t *testing.T) 
 	}
 }
 
+// Status, verify and the change actions name a policy digest they could not
+// read instead of omitting the policy block silently: the installed CLI the
+// custody check refuses to run (rel-1-0-4 GAP-0594), a run that fails, and a
+// report with no digest. A policy that cannot be built keeps its own warning.
+func TestWindowsEnterprisePolicyNamesADigestItCouldNotRead(t *testing.T) {
+	previous := windowsEnterprisePolicyDigest
+	t.Cleanup(func() { windowsEnterprisePolicyDigest = previous })
+	for name, c := range map[string]struct {
+		out      string
+		err      error
+		code     string
+		contains string
+	}{
+		"custody refused": {err: errors.New(`refuse to run the installed CLI: C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe is writable by BUILTIN\Users`),
+			code: "policy_unverified", contains: "refuse to run the installed CLI"},
+		"run failed":    {err: errors.New("exit status 1"), code: "policy_unverified", contains: "exit status 1"},
+		"no digest":     {out: `{}`, code: "policy_unverified", contains: "no effective policy digest"},
+		"not buildable": {out: `{"error":"rule pack \"p\": digest does not match","gateway_reported_digest":"sha256:aa"}`, code: "policy_not_buildable"},
+	} {
+		for _, action := range []string{"status", "verify", "ensure"} {
+			t.Run(name+" "+action, func(t *testing.T) {
+				windowsEnterprisePolicyDigest = func(context.Context) ([]byte, error) { return []byte(c.out), c.err }
+				result := newWindowsEnterpriseStandaloneResult(action, &windowsEnterpriseLifecycleOptions{})
+				result.Installed, result.Readiness.Gateway = true, true
+				applyWindowsEnterprisePolicy(context.Background(), result)
+				if result.Policy != nil || len(result.Warnings) != 1 || result.Warnings[0].Code != c.code ||
+					!strings.Contains(result.Warnings[0].Message, c.contains) {
+					t.Fatalf("policy=%+v warnings=%+v, want only %s naming %q", result.Policy, result.Warnings, c.code, c.contains)
+				}
+			})
+		}
+	}
+}
+
 // An applied change action records policy-state.json beside deployment.json;
 // status does not (GAP-0037).
 func TestWindowsEnterprisePolicyStateIsRecordedBesideTheDeployment(t *testing.T) {
@@ -2990,7 +3118,9 @@ func warningCodes(result *enterprisestatus.Result) []string {
 func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")
-	runtimeDir := t.TempDir()
+	// This test exercises migration reporting. A present TempDir is not a
+	// trusted scanner runtime on Windows, especially under Administrator.
+	runtimeDir := filepath.Join(t.TempDir(), "absent-scanner-runtime")
 	layoutSeam, runnerSeam, scannerSeam := windowsEnterpriseHotConfigLayout, windowsEnterpriseStandaloneRunner, windowsScannerRuntimeDir
 	t.Cleanup(func() {
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseStandaloneRunner, windowsScannerRuntimeDir = layoutSeam, runnerSeam, scannerSeam
@@ -3002,7 +3132,7 @@ func TestWindowsEnterpriseLifecycleReportsIgnoredLocalEnforcementEntries(t *test
 	migrate := false
 	windowsEnterpriseStandaloneRunner = func(context.Context, *cobra.Command, string, []string) (windowsEnterpriseStandaloneRun, error) {
 		if migrate {
-			record := `{"schema_version":1,"from_version":8,"to_version":9,"actions_rows_ignored":2}`
+			record := `{"schema_version":1,"from_version":8,"to_version":9,"migrated_at":"2026-10-01T00:00:00Z","actor":"lifecycle","source_sha256":"` + strings.Repeat("a", 64) + `","result_sha256":"` + strings.Repeat("b", 64) + `","actions_rows_ignored":2}`
 			if err := os.WriteFile(config.MigrationRecordPath(configPath), []byte(record), 0o600); err != nil {
 				return windowsEnterpriseStandaloneRun{}, err
 			}
@@ -3647,6 +3777,96 @@ func TestWindowsCursorRepairPlannerRefusesALinkedRecord(t *testing.T) {
 		pending, err := windowsEnterpriseCursorMigrationRepairPending()
 		if pending || err == nil || !strings.Contains(err.Error(), config.MigrationV9RecordFile) {
 			t.Fatalf("live=%v: pending = %v, %v; want an error naming %s", live, pending, err, config.MigrationV9RecordFile)
+		}
+	}
+}
+
+// Review P2 (q-win-lifecycle loop round 3): a repair whose supplied config is
+// refused recovers a pending transaction with the transaction recovery alone
+// (Recover, the one Setup runs after a timeout), never with the full
+// source-free repair, which went on past the recovery and changed services,
+// access lists and hooks for a request it then refused. The recovery takes
+// none of the repair's own switches, and the result reports what it
+// changed: on the refusal, and for the repair that goes on once its config
+// passes after the recovery.
+func TestWindowsRepairConfigRefusalRunsOnlyTheTransactionRecovery(t *testing.T) {
+	pending := true
+	configPath, _ := stubWindowsEnterpriseRulePackPreflight(t, func(string, string, string) error {
+		return errors.New("a standard user can write to the pack")
+	})
+	originalPending := windowsEnterpriseStandaloneTransactionPending
+	t.Cleanup(func() { windowsEnterpriseStandaloneTransactionPending = originalPending })
+	windowsEnterpriseStandaloneTransactionPending = func() bool { return pending }
+	const recovered = "recovered the interrupted lifecycle transaction before checking the supplied config"
+	for _, tc := range []struct {
+		name             string
+		settles, passes  bool
+		replies          []map[string]any
+		refused          bool
+		changes, actions string
+	}{
+		{name: "recovered, config still refused", settles: true, refused: true, actions: "Recover Status",
+			replies: []map[string]any{installedStatus("recover"), installedStatus("status")}, changes: recovered},
+		{name: "recovery left the transaction pending", refused: true, actions: "Recover Status",
+			replies: []map[string]any{{"schema_version": 1, "ok": false, "action": "recover", "error": "the lifecycle recovery is still pending"}, installedStatus("status")}},
+		{name: "recovered, config passes", settles: true, passes: true, actions: "Recover",
+			replies: []map[string]any{installedStatus("recover")}, changes: recovered},
+	} {
+		pending = true
+		passes := tc.passes
+		// The supplied config is refused until the recovery settles the
+		// transaction; a config that passes then needs no compile here.
+		windowsEnterpriseStandaloneConfigSource = func(string) error {
+			if passes && !pending {
+				return nil
+			}
+			return errors.New("a standard user can write to the config")
+		}
+		windowsEnterpriseStandaloneLayoutForPreflight = func() (managed.StandaloneLayout, error) {
+			return managed.StandaloneLayout{}, errors.New("the test compiles no config")
+		}
+		stub := &ensureStub{t: t, replies: tc.replies}
+		stub.install(t)
+		recorded := windowsEnterpriseStandaloneRunner
+		settles := tc.settles
+		windowsEnterpriseStandaloneRunner = func(ctx context.Context, cmd *cobra.Command, script string, args []string) (windowsEnterpriseStandaloneRun, error) {
+			run, err := recorded(ctx, cmd, script, args)
+			if settles && windowsEnterpriseInstallerAction(args) == "Recover" {
+				pending = false
+			}
+			return run, err
+		}
+		command := &cobra.Command{}
+		var stdout bytes.Buffer
+		command.SetOut(&stdout)
+		opts := ensureTestOptions()
+		opts.configPath, opts.noStart, opts.attestClaudeEffectivePolicy = configPath, true, true
+		refused, err := refuseWindowsEnterpriseStandaloneSuppliedConfig(context.Background(), command, "repair", opts, `C:\stage\install-enterprise.ps1`)
+		var actions []string
+		for _, call := range stub.calls {
+			actions = append(actions, windowsEnterpriseInstallerAction(call))
+		}
+		recovery := strings.Join(stub.calls[0], " ")
+		if refused != tc.refused || strings.Join(actions, " ") != tc.actions ||
+			strings.Contains(recovery, configPath) || strings.Contains(recovery, "-NoStart") || strings.Contains(recovery, "-AttestClaudeEffectivePolicy") {
+			t.Fatalf("%s: refused=%v (%v), installer runs %q", tc.name, refused, err, stub.calls)
+		}
+		if got := strings.Join(opts.recoveryChanges, " | "); (tc.changes == "") != (got == "") || !strings.HasPrefix(got, tc.changes) ||
+			strings.Contains(got, "without new sources") {
+			t.Fatalf("%s: recovery changes %q", tc.name, got)
+		}
+		if !tc.refused {
+			continue
+		}
+		var result enterprisestatus.Result
+		if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		if commandExitCode(err) != 1639 || len(result.Errors) != 1 || result.Errors[0].Code != "invalid_arguments" {
+			t.Fatalf("%s: exit %d, result %+v", tc.name, commandExitCode(err), result)
+		}
+		if reported := strings.Join(result.Changes, " | "); (tc.changes == "") != (reported == "") || !strings.HasPrefix(reported, tc.changes) {
+			t.Fatalf("%s: the refusal reports changes %q", tc.name, reported)
 		}
 	}
 }

@@ -6,6 +6,7 @@ package connector
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -118,6 +119,15 @@ func TestClaudeSettingsLinkedIntoHomeIsInspected(t *testing.T) {
 	}
 	if _, err := claudeCodeUserSettingsReadPath(settingsPath); err == nil || !strings.Contains(err.Error(), "outside your home folder") {
 		t.Fatalf("link outside the home folder: err = %v", err)
+	}
+	// GAP-0634: the link out of the home is an agent-settings refusal, so
+	// setup stops before it restarts the gateway and a gateway start keeps
+	// the other connectors.
+	if err := CheckAgentSettings(conn, opts); !errors.Is(err, ErrAgentConfigRefusal) || !strings.Contains(err.Error(), "outside your home folder") {
+		t.Fatalf("CheckAgentSettings(link outside the home folder) = %v; want an agent-settings refusal", err)
+	}
+	if err := conn.Setup(context.Background(), opts); !errors.Is(err, ErrAgentConfigRefusal) {
+		t.Fatalf("Setup(link outside the home folder) = %v; want an agent-settings refusal", err)
 	}
 }
 

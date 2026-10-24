@@ -25,12 +25,14 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/openshell"
@@ -84,6 +86,51 @@ func setupApp(t *testing.T, input, extra string, settled bool) *testApp {
 		ta.gateway.state.DockerNamespace = openshell.AccountDockerNamespace(1000)
 	}
 	return ta
+}
+
+// Setup must not report ready while another account holds the ingress port.
+func TestSetupWaitDaemonRefusesSquattedIngress(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	squatter, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = squatter.Close() })
+	ta.Cfg.OpenShell.IngressPort = squatter.Addr().(*net.TCPAddr).Port
+	// The fake daemon reports the same listener state as one that lost its
+	// configured ingress port to the other account.
+	ta.daemon.status.IngressAddr = ""
+	ready, _, down := ta.waitDaemon(context.Background(), openshell.DriverDocker)
+	if ready || down {
+		t.Fatalf("waitDaemon = ready %t, down %t; output:\n%s", ready, down, ta.output())
+	}
+	has(t, ta.output(), "ingress", "openshell.ingress_port", "restart")
+	lacks(t, ta.output(), "the daemon runs the sandbox subsystem")
+	ta.fresh()
+	wantExit(t, ta.Setup(bg, SetupOptions{Yes: true, SkipImages: true, NoWrappers: true}), 1)
+	has(t, ta.output(), "not ready for sandboxes yet", "openshell.ingress_port", "restart")
+}
+
+func TestSetupWaitDaemonWaitsForListenersToBind(t *testing.T) {
+	ta := setupApp(t, "", "", true)
+	ta.daemon.status.IngressAddr = ""
+	polls, sleeps := 0, 0
+	ta.daemon.onStatus = func(st *sandboxapi.Status) {
+		polls++
+		if polls == 2 {
+			st.IngressAddr = "127.0.0.1:18971"
+		}
+	}
+	ta.Sleep = func(context.Context, time.Duration) error {
+		sleeps++
+		return nil
+	}
+	ready, _, down := ta.waitDaemon(context.Background(), openshell.DriverDocker)
+	if !ready || down || polls != 2 || sleeps != 1 {
+		t.Fatalf("waitDaemon = ready %t, down %t, polls %d, sleeps %d; output:\n%s", ready, down, polls, sleeps, ta.output())
+	}
+	has(t, ta.output(), "the daemon runs the sandbox subsystem")
+	lacks(t, ta.output(), "another process may hold the port")
 }
 
 // noCloseClient keeps the shared fake gateway open when a command closes
@@ -555,8 +602,8 @@ func TestSetupOffersTheUpgrade(t *testing.T) {
 		// The restart would stop a running MicroVM without a flush.
 		{"MicroVMs running", "", true, SetupOptions{}, openshell.DriverVM, 2, nil, false,
 			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell " +
-				"reports every MicroVM sandbox on the gateway stopped, which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); " +
-				"dc-claude-theirs-b (ready): `defenseclaw sandbox stop dc-claude-theirs-b` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-b` (raw OpenShell sandbox); then try again", "→ then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
+				"reports every MicroVM sandbox on the gateway stopped, which it does not for these: dc-claude-theirs-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); " +
+				"dc-claude-theirs-b (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-b` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-claude-theirs-b` (raw OpenShell sandbox); then try again", "→ then upgrade: `defenseclaw sandbox setup --install-openshell`"}},
 		{"MicroVMs running, --install-openshell", "", false, flag, openshell.DriverVM, 2, nil, false,
 			[]string{"⚠ OpenShell 0.1.1 is kept: the upgrade to " + openshell.InstallerVersion + " restarts the gateway, and DefenseClaw makes it only once OpenShell"}},
 		{"no MicroVM running", "", false, flag, openshell.DriverVM, 0, nil, true,
@@ -1867,7 +1914,7 @@ func TestDoctorFixAsksBeforeARestartStopsSandboxes(t *testing.T) {
 	report := on(openshell.DriverVM)
 	const question = `Fix "MicroVM resources": raise them and restart the gateway?`
 	const stops = "MicroVM resources: this restarts the OpenShell gateway, and DefenseClaw makes it only once OpenShell reports every MicroVM sandbox on the gateway stopped, " +
-		"which it does not for these: dc-claude-theirs-a (ready): `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); then try again"
+		"which it does not for these: dc-claude-theirs-a (ready): save or sync any accessible guest work first, then `defenseclaw sandbox stop dc-claude-theirs-a` (DefenseClaw sandbox), or on an older or unknown gateway release, raw stop may not flush the guest: save its work outside the guest first, then `openshell sandbox stop dc-claude-theirs-a` (raw OpenShell sandbox); then try again"
 
 	ta := newTestApp(t, "\n")
 	ta.IO.TTY = true

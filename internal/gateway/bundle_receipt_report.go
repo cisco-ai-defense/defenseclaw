@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -93,11 +94,23 @@ type bundleReceiptReporter struct {
 	reportedRefusal string
 	attempts        int
 	gaugeVersion    uint64
-	seen            map[string]bool
+	// seen holds the ids whose reported marker is on disk.
+	seen map[string]bool
+	// unmarked holds the ids reported by this process whose marker write
+	// failed. They are not reported again, and every poll writes their
+	// marker again: the change commands remove a change event from the
+	// spool only once its marker is on disk.
+	unmarked map[string]bool
 	// changes holds the change events offered and not reported yet.
 	changes map[string]*changeDelivery
 	// pins keeps the record of each change the same on every offer.
 	pins *audit.ConfigChangePins
+	// spoolAtStart holds the ids of the change events and reservations in
+	// the change spool when this reporter first read it (spoolScanned).
+	// Only a change that entered the spool later, on its first offer, is one
+	// no earlier gateway process can have offered (audit.ConfigChange.FirstOffer).
+	spoolAtStart map[string]bool
+	spoolScanned bool
 }
 
 // newBundleReceiptReporter returns the reporter of a standalone enterprise
@@ -149,6 +162,7 @@ func (r *bundleReceiptReporter) poll(ctx context.Context) {
 			r.gaugeVersion = v
 		}
 	}
+	r.retryMarkers()
 	r.reportSpool()
 	r.reportChanges()
 	info, err := os.Lstat(r.receiptPath)
@@ -233,23 +247,52 @@ func (r *bundleReceiptReporter) hasSeen(id string) bool {
 	if !reportableID(id) {
 		return false
 	}
-	if r.seen[id] {
+	if r.seen[id] || r.unmarked[id] {
 		return true
 	}
 	info, err := os.Lstat(filepath.Join(r.seenDir(), id))
 	return err == nil && info.Mode().IsRegular()
 }
 
-func (r *bundleReceiptReporter) markSeen(id string) {
+// mkdirMarkers is configwrite.MkdirDurable; a test replaces it.
+var mkdirMarkers = configwrite.MkdirDurable
+
+// markSeen records that id is reported and reports whether its marker is on
+// disk. An id whose marker write failed is kept in unmarked, so it is not
+// reported again, and retryMarkers writes its marker at the next poll.
+func (r *bundleReceiptReporter) markSeen(id string) bool {
 	if !reportableID(id) {
-		return
+		return false
+	}
+	// Made durably: the record pin of a change goes once its marker is on
+	// disk (markedChange), so a marker folder a power loss took back would
+	// leave the change unreported and unpinned.
+	err := mkdirMarkers(r.seenDir())
+	if err == nil {
+		err = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600)
+	}
+	if err != nil {
+		if r.unmarked == nil {
+			r.unmarked = make(map[string]bool)
+		}
+		r.unmarked[id] = true
+		return false
 	}
 	if r.seen == nil {
 		r.seen = make(map[string]bool)
 	}
 	r.seen[id] = true
-	if err := os.MkdirAll(r.seenDir(), 0o700); err == nil {
-		_ = configwrite.WriteFileDurable(filepath.Join(r.seenDir(), id), []byte("reported\n"), 0o600)
+	delete(r.unmarked, id)
+	return true
+}
+
+// retryMarkers writes the marker of each id reported without one. A change
+// keeps its delivery state and its record pin until its marker is on disk.
+func (r *bundleReceiptReporter) retryMarkers() {
+	for id := range r.unmarked {
+		if r.markSeen(id) {
+			r.markedChange(id)
+		}
 	}
 }
 
@@ -305,6 +348,9 @@ func (r *bundleReceiptReporter) reportSpool() {
 // commands remove it, only once every sink confirmed it.
 func (r *bundleReceiptReporter) reportChanges() {
 	dir := r.changeDir()
+	if !r.spoolScanned {
+		r.spoolAtStart, r.spoolScanned = changeSpoolIDs(dir)
+	}
 	for _, ev := range enterprisestatus.ReportableChangeEvents(dir, r.hasSeen) {
 		r.reportChange(ev)
 	}
@@ -332,7 +378,9 @@ func (r *bundleReceiptReporter) reportChanges() {
 // change goes to every destination again, under the same record id.
 func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	state := r.changes[ev.EventID]
+	firstOffer := false
 	if state == nil {
+		firstOffer = r.spoolScanned && !r.spoolAtStart[ev.EventID]
 		state = &changeDelivery{delivery: observability.NewRemoteDelivery()}
 		if r.changes == nil {
 			r.changes = make(map[string]*changeDelivery)
@@ -353,6 +401,7 @@ func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 		EventID: ev.EventID, Kind: ev.Kind, Action: ev.Action, Outcome: ev.Outcome, ReasonCode: ev.ReasonCode,
 		Actor: ev.Actor, ChangedAt: ev.Time, SHA256: ev.SHA256, PreviousSHA256: ev.PreviousSHA256,
 		KeyIDsAdded: ev.KeyIDsAdded, KeyIDsRemoved: ev.KeyIDsRemoved, SecretName: ev.SecretName,
+		FirstOffer: firstOffer,
 	}, state.delivery, r.pins)
 	state.retry = err != nil
 	if err != nil {
@@ -363,15 +412,46 @@ func (r *bundleReceiptReporter) reportChange(ev enterprisestatus.ChangeEvent) {
 	}
 }
 
-// changeReported marks a change every sink confirmed, and then drops its
-// record pin, once the marker is on disk: until then a restart offers it
-// again, and its pin keeps that offer the same record.
+// changeReported marks a change every sink confirmed. Its delivery state
+// and record pin go once the marker is on disk: until then a restart offers
+// it again, and its pin keeps that offer the same record.
 func (r *bundleReceiptReporter) changeReported(id string) {
-	delete(r.changes, id)
-	r.markSeen(id)
-	if r.reportedOnDisk(id) {
-		_ = r.pins.Remove(id)
+	if r.markSeen(id) {
+		r.markedChange(id)
 	}
+}
+
+// markedChange drops the delivery state and the record pin of a change
+// whose marker is on disk.
+func (r *bundleReceiptReporter) markedChange(id string) {
+	if _, ok := r.changes[id]; !ok && !enterprisestatus.ValidChangeEventID(id) {
+		return
+	}
+	delete(r.changes, id)
+	delete(r.spoolAtStart, id)
+	_ = r.pins.Remove(id)
+}
+
+// changeSpoolIDs is the id of every change event and reservation in the
+// change spool dir, and whether the spool could be read. A spool that does
+// not exist holds none.
+func changeSpoolIDs(dir string) (map[string]bool, bool) {
+	ids := map[string]bool{}
+	for _, folder := range []string{dir, filepath.Join(dir, enterprisestatus.ChangeReservedDirName)} {
+		entries, err := os.ReadDir(folder)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, false
+		}
+		for _, entry := range entries {
+			if id, ok := strings.CutSuffix(entry.Name(), ".json"); ok {
+				ids[id] = true
+			}
+		}
+	}
+	return ids, true
 }
 
 // reportedOnDisk reports whether the reported marker of id is on disk.

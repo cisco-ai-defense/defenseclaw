@@ -450,7 +450,10 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 	e.fake.HandleExec(e.workloadChecks(func(_ string, a *workloadAnswer) { a.files[0].sha256 = strings.Repeat("0", 64) }, nil))
 	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
 	_, err = e.m.Start(t.Context(), "restart", sandboxapi.StartRequest{})
-	wantCode(t, err, sandboxapi.CodePolicyRejected)
+	apiErr := wantCode(t, err, sandboxapi.CodePolicyRejected)
+	if !strings.Contains(apiErr.Message, "last successful disk sync") || strings.Contains(apiErr.Message, "(its work is kept)") {
+		t.Fatalf("failed MicroVM verification promises unsynced work: %q", apiErr.Message)
+	}
 	if got, _ := e.client.GetSandbox(t.Context(), "restart"); got.Status.Phase != openshell.PhaseStopped ||
 		e.fake.Calls(openshelltest.MethodStopSandbox) != stops+1 {
 		t.Fatalf("after the failed check: phase %s, stops %d", got.Status.Phase, e.fake.Calls(openshelltest.MethodStopSandbox)-stops)

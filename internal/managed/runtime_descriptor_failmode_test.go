@@ -56,3 +56,54 @@ func TestRuntimeDescriptorOpenHookConnectors(t *testing.T) {
 		}
 	}
 }
+
+func TestRuntimeDescriptorPolicyViewPinsAreBoundToListedConnectors(t *testing.T) {
+	d := failModeTestDescriptor()
+	d.PolicyViewDigests = map[string]string{"codex": strings.Repeat("a", 64)}
+	data, err := MarshalRuntimeDescriptor(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseRuntimeDescriptor(data)
+	if err != nil || parsed.PolicyViewDigests["codex"] != d.PolicyViewDigests["codex"] {
+		t.Fatalf("policy-view pin did not round-trip: %v, %+v", err, parsed)
+	}
+	for _, bad := range []map[string]string{
+		{"codex": "not-a-digest"},
+		{"codex": strings.Repeat("A", 64)},
+		{"claudecode": strings.Repeat("a", 64)},
+	} {
+		d := failModeTestDescriptor()
+		d.PolicyViewDigests = bad
+		if err := d.Validate(); err == nil {
+			t.Errorf("invalid policy-view pins %v validated", bad)
+		}
+	}
+}
+
+func TestRuntimeDescriptorPerAccountPinsRejectInvalidSources(t *testing.T) {
+	good := strings.Repeat("a", 64)
+	d := failModeTestDescriptor()
+	d.PolicyViewUserSources = map[string]map[string]string{"codex": {"alice": good}}
+	data, err := MarshalRuntimeDescriptor(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseRuntimeDescriptor(data)
+	if err != nil || parsed.PolicyViewUserSources["codex"]["alice"] != good {
+		t.Fatalf("per-account pin did not round-trip: %v, %+v", err, parsed)
+	}
+	for _, bad := range []map[string]map[string]string{
+		{"codex": {"../alice": good}},
+		{"codex": {"alice": "not-a-digest"}},
+		{"codex": {"alice": strings.Repeat("A", 64)}},
+		{"claudecode": {"alice": good}},
+		{"copilot": {"alice": good}},
+	} {
+		d := failModeTestDescriptor()
+		d.PolicyViewUserSources = bad
+		if err := d.Validate(); err == nil {
+			t.Errorf("invalid per-account sources %+v validated", bad)
+		}
+	}
+}

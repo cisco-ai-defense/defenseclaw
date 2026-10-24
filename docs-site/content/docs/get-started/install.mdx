@@ -15,6 +15,12 @@ DefenseClaw installs for your own account with one command. You do not need admi
 
 ## Install
 
+Before a first install or upgrade, quit OpenCode and Amp completely. Their
+DefenseClaw plugins load only at process start, so an already running agent
+would not gain the new protection. The installer refuses to continue while
+either agent is running for your account. Start a new agent process after the
+installer reports the gateway healthy.
+
 Pick your system. The site detects it and remembers your choice.
 
 <OsTabs>

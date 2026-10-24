@@ -18,6 +18,7 @@ package hookexec
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -104,12 +105,30 @@ func isTracestateChar(c byte) bool {
 	}
 }
 
+// managedOpenCodeBackgroundEvent names callbacks that can report runtime
+// health but cannot admit a tool. Their failures are diagnostics even when
+// the native hook's unused answer happens to be allow- or block-shaped.
+func managedOpenCodeBackgroundEvent(opts Options, sp spec) bool {
+	if sp.connector != "opencode" || !managedNativeDecision(opts) || secureClientHook(opts) {
+		return false
+	}
+	if NeutralLifecycleEvent(sp.connector, opts.Event) {
+		return true
+	}
+	switch strings.TrimSpace(opts.Event) {
+	case "defenseclaw.plugin.loaded", "tool.execute.after":
+		return true
+	}
+	return false
+}
+
 // logHookFailure appends one JSON line to Home/logs/hook-failures.jsonl,
 // when Home exists, mirroring defenseclaw_log_hook_failure. Best-effort: any
 // error is ignored so a read-only home or full disk never changes the hook's
 // decision. blocked is the delivery outcome the caller applies; a connector
 // without a fail-closed contract records what the call got instead
-// (loggedFailMode), so the fail-open report finds the calls that ran.
+// (loggedFailMode), so the fail-open report finds the calls that ran. Managed
+// OpenCode callbacks that cannot admit a tool are diagnostics.
 func logHookFailure(opts Options, sp spec, reason, category, failMode string, blocked bool) {
 	if sp.failOpenOnly {
 		blocked = loggedFailMode(opts, sp, failMode) == "closed"
@@ -124,7 +143,9 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		defer close(done)
 	}
 	outcome := "fail_closed"
-	if !blocked {
+	if managedOpenCodeBackgroundEvent(opts, sp) {
+		outcome = "diagnostic"
+	} else if !blocked {
 		outcome = "fail_open"
 		// Quote diagnostics so an unexpected transport error cannot forge lines.
 		// Never include request/response bodies or authentication credentials.
@@ -139,27 +160,23 @@ func logHookFailure(opts Options, sp spec, reason, category, failMode string, bl
 		if opts.FailureLogHome != nil {
 			home = opts.FailureLogHome()
 		}
-		if home == "" {
-			return
-		}
-		// Managed hooks can run for accounts with no prior per-user install.
-		// Their diagnostic directory is independent of the protected runtime.
-		if err := os.MkdirAll(home, 0o700); err != nil {
-			return
-		}
 	}
 	if home == "" {
 		return
 	}
-	// Never create the enforcement home for a log line: a managed hook whose
-	// protected folder was missing recreated it here, and the next event's
-	// hook found a folder and no longer said it was missing (GAP-0154).
+	// Never create the DefenseClaw folder for a log line: a managed hook whose
+	// protected folder was missing recreated it here, user-owned with the
+	// profile's inherited access control, and the next event's hook found a
+	// folder and no longer said it was missing (GAP-0154, rel-1-0-4
+	// GAP-0593). A managed account with no such folder writes no row.
+	// Mkdir creates only logs, so a purge that removes the folder while the
+	// call runs is not undone either (GAP-0654).
 	if info, err := os.Stat(home); err != nil || !info.IsDir() {
 		return
 	}
 	failMode = loggedFailMode(opts, sp, failMode)
 	logDir := filepath.Join(home, "logs")
-	if err := os.MkdirAll(logDir, 0o700); err != nil {
+	if err := os.Mkdir(logDir, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
 		return
 	}
 	entry := struct {

@@ -53,14 +53,27 @@ func atomicWriteFileWithPublisher(
 	return atomicWriteFileAt(path, writePath, data, perm, publish, false)
 }
 
-// atomicReplaceFileNoFollow is atomicWriteFile for a path that must be a
-// regular file or absent: it never writes through a link. A link or other
-// non-regular file there is an error, and the rename replaces the directory
-// entry itself, so a link put there after the check is replaced, not
-// followed. It renames a new file over path even when path already holds
-// data and perm: path then names a new file, apart from every other name
-// (hard link) of the old one. until 1.1: only the removed connectors'
-// teardown (removed.go) uses it.
+// atomicWriteFileNoFollow is atomicWriteFile for a path that must be a regular
+// file or absent: it never writes through a link. A link or other non-regular
+// file there is an error, and the rename replaces the directory entry itself,
+// so a link put there after the check is replaced, not followed. The Hermes
+// home record (recordHermesHomeSetUp) uses it.
+func atomicWriteFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	info, err := os.Lstat(path)
+	switch {
+	case err == nil && !info.Mode().IsRegular():
+		return fmt.Errorf("%s is not a regular file", path)
+	case err != nil && !errors.Is(err, os.ErrNotExist):
+		return fmt.Errorf("lstat %s: %w", path, err)
+	}
+	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, false)
+}
+
+// atomicReplaceFileNoFollow is atomicWriteFileNoFollow that renames a new
+// file over path even when path already holds data and perm: path then names
+// a new file, apart from every other name (hard link) of the old one. until
+// 1.1: only the removed connectors' teardown (removed.go repairStub and
+// restoreStubForRegistration) uses it.
 func atomicReplaceFileNoFollow(path string, data []byte, perm os.FileMode) error {
 	info, err := os.Lstat(path)
 	switch {
@@ -70,6 +83,12 @@ func atomicReplaceFileNoFollow(path string, data []byte, perm os.FileMode) error
 		return fmt.Errorf("lstat %s: %w", path, err)
 	}
 	return atomicWriteFileAt(path, path, data, perm, atomicFilePublish, true)
+}
+
+// atomicCreateFileNoFollow publishes a new private file without replacing any
+// directory entry already at path. A collision remains the caller's to handle.
+func atomicCreateFileNoFollow(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileAt(path, path, data, perm, atomicFilePublishNoReplace, true)
 }
 
 // atomicWriteFileAt writes data to writePath, path or the file a link at path

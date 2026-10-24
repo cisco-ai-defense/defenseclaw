@@ -71,16 +71,29 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "c746534fa168d50f542d085a7947e2d43ba4c026f62c404e4627cb83e4148eec",  # amp-plugin.ts
-            "392bc21bb99d9978b69683dca8fd022d074037a1e9df6f885916c6525537cdd6",  # amp-plugin-secure-client.ts
+            "18a13928b5ec16b8b6fca3036e1bcec6f5215dae1be6dfd6491536866dfc8a8b",  # amp-plugin.ts
+            "13b87331e4d23a12329741186ceec144479a4fb1244f9c2a58fcb7c76245cbf6",  # amp-plugin-managed.ts
+            "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
     ),
     "opencode": frozenset(
         {
-            "b7397e3041d3c0101bd23f20961fa89801aedc126137c5d786c32f79a7e7dcb6",  # opencode-plugin.js
-            "e2e93161e1954e6bfad005924378b57247fbbb903e44a0c6df82453d7eb64b90",  # opencode-plugin-managed.js
-            "f81b5b2f208d2535ac028c49bc95941d5666bee72315053386c05cd9411e34de",  # opencode-plugin-secure-client.js
+            "05d0de48f970852e7e82fc8539c05885c7193458ea63e1107cca45a638ee06fa",  # opencode-plugin.js
+            "f877340ea9bb5eb9b7575483a9fde55d08e1f2ade5a2dbe970c3c68267a51c37",  # opencode-plugin-managed.js
+            "72ee5dcb51e28d153714e63401233ace81c17519e8970675d08a19d5730a5ab3",  # opencode-plugin-secure-client.js
         }
+    ),
+}
+_BRIDGE_VARIABLE_MODE_LINES = {
+    "amp": (
+        b'const DC_FAIL_MODE: string = "',
+        b'" // per-user and standalone hooks stay closed\n',
+        b'const DC_FAIL_MODE: string = "{{.FailMode}}" // per-user and standalone hooks stay closed\n',
+    ),
+    "opencode": (
+        b'const DC_FAIL_MODE = "',
+        b'"; // per-user and standalone hooks stay closed\n',
+        b'const DC_FAIL_MODE = "{{.FailMode}}"; // per-user and standalone hooks stay closed\n',
     ),
 }
 _BRIDGE_DYNAMIC_LINES = {
@@ -96,6 +109,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'"\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}"\n',
             "token",
+        ),
+        (
+            b'const DC_NATIVE_POST_BINARY = "',
+            b'"\n',
+            b'const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}"\n',
+            "native",
         ),
         (
             b'const DC_FAIL_MODE: string = "',
@@ -146,6 +165,12 @@ _BRIDGE_DYNAMIC_LINES = {
             b'";\n',
             b'const DC_TOKEN_FILE = "{{.TokenFileJS}}";\n',
             "token",
+        ),
+        (
+            b'const DC_NATIVE_POST_BINARY = "',
+            b'";\n',
+            b'const DC_NATIVE_POST_BINARY = "{{.NativePostBinaryJS}}";\n',
+            "native",
         ),
         (
             b'const DC_FAIL_MODE = "',
@@ -398,6 +423,8 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
     absolute paths.
     """
 
+    if kind == "native" and value == b"":
+        return False
     if value == b"":
         return True
     try:
@@ -406,7 +433,7 @@ def _valid_bridge_managed_path(kind: str, value: bytes) -> bool:
         return False
     if not isinstance(path, str) or not os.path.isabs(path) or any(ord(char) < 0x20 for char in path):
         return False
-    if kind != "guard":
+    if kind not in {"guard", "native"}:
         return True
     try:
         info = os.lstat(path)
@@ -431,14 +458,14 @@ def _valid_bridge_dynamic_value(
 ) -> bool:
     if kind == "api":
         return _valid_bridge_api_address(value)
-    if kind == "mode":
-        return value in {b"open", b"closed"}
     if kind == "uid":
         return value.isdigit() and len(value) <= 10
     if kind == "proof":
         # The Windows standalone listener proof is on ("1") or off ("").
         return value in {b"", b"1"}
-    if kind in {"socket", "guard", "marker"}:
+    if kind == "mode":
+        return value in {b"open", b"closed"}
+    if kind in {"socket", "guard", "marker", "native"}:
         return _valid_bridge_managed_path(kind, value)
     if kind != "token":
         return False
@@ -473,6 +500,10 @@ def _matches_immutable_bridge_template(
             for index, line in enumerate(lines)
             if line.startswith(prefix) and line.endswith(suffix)
         ]
+        if not matches and kind in {"native", "proof", "mode"}:
+            # Current and Secure Client templates have distinct fields, each
+            # still covered by its exact pinned digest.
+            continue
         if len(matches) != 1:
             return False
         index = matches[0]
@@ -485,6 +516,22 @@ def _matches_immutable_bridge_template(
         ):
             return False
         lines[index] = canonical
+    if hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests:
+        return True
+    # Managed and Secure Client variants retain an administrator-selected
+    # mode. Per-user host templates bake in closed; their altered mode does
+    # not normalize to a trusted managed digest.
+    prefix, suffix, canonical = _BRIDGE_VARIABLE_MODE_LINES[connector]
+    matches = [
+        index for index, line in enumerate(lines)
+        if line.startswith(prefix) and line.endswith(suffix)
+    ]
+    if len(matches) != 1:
+        return False
+    index = matches[0]
+    if lines[index][len(prefix) : -len(suffix)] not in {b"open", b"closed"}:
+        return False
+    lines[index] = canonical
     return hashlib.sha256(b"".join(lines)).hexdigest() in expected_digests
 
 

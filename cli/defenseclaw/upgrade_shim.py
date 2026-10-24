@@ -333,6 +333,7 @@ def _upgrade(version: str | None, *, yes: bool) -> int:
             installer = os.path.join(workdir, "install.ps1")
             try:
                 _copy_windows_saved_installer(saved, installer)
+                _check_saved_installer(installer, saved, _data_home(), installed)
                 _check_installer_version(installer, installed)
             except (OSError, ShimError) as exc:
                 raise ShimError(
@@ -516,12 +517,12 @@ def _copy_windows_saved_installer(source: str, destination: str) -> None:
 
 
 def _rollback(*, yes: bool) -> int:
+    from defenseclaw import __version__ as installed
+
     home = _data_home()
     name = _installer_name()
     installer = os.path.join(home, "installer", name)
     if os.name == "nt":
-        from defenseclaw import __version__ as installed
-
         try:
             _windows_regular_file_info(installer)
             use_previous = False
@@ -583,7 +584,67 @@ def _rollback(*, yes: bool) -> int:
             hint = ". Repair the current DefenseClaw install before retrying rollback" if os.name == "nt" else ""
             raise ShimError(f"could not copy the saved installer {installer}: {exc}{hint}") from None
         raise
+    try:
+        # until 1.1: an installer that 1.0.3 or older saved in previous/ has
+        # no digest record; one a later release saved is checked.
+        if use_previous:
+            _check_saved_installer(copy, installer, os.path.join(previous, "data"), None)
+        else:
+            _check_saved_installer(copy, installer, home, installed)
+    except BaseException:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
     return _run_installer(copy, ["--rollback"] + (["--yes"] if yes else []), workdir)
+
+
+INSTALLER_RECORD = os.path.join("receipts", "installer.sha256")
+
+
+def _check_saved_installer(copy: str, saved: str, data_dir: str, reinstall: str | None) -> None:
+    """Refuse a saved installer whose bytes are not the ones its install saved (GAP-1067).
+
+    The installer records the SHA-256 of the copy it saves in
+    ``<data>/receipts/installer.sha256`` (record_saved_installer,
+    Save-InstallerDigest), and every swap moves that record with the install
+    it belongs to. *copy* is the file that will run, already copied out of
+    *saved*, so a change after this check cannot reach it. *reinstall* is the
+    release whose installer saves a verified copy again; ``None`` accepts a
+    missing record (an installer saved by 1.0.3 or older).
+    """
+
+    record = os.path.join(data_dir, INSTALLER_RECORD)
+    again = (
+        f"Save a verified copy again with: defenseclaw upgrade --version {reinstall} --yes, then run this command again"
+        if reinstall
+        else f"download {_installer_name()} from the release you want and run it with --rollback"
+    )
+    try:
+        if os.name == "nt":
+            raw = _read_windows_regular_file(record, 256)
+        else:
+            with open(record, "rb") as handle:
+                raw = handle.read(257)
+    except FileNotFoundError:
+        if reinstall is None:
+            return
+        raise ShimError(
+            f"there is no record of the installer DefenseClaw saved in {saved} ({record} is missing), "
+            f"so it is not run; nothing was changed. {again}"
+        ) from None
+    except OSError as exc:
+        raise ShimError(
+            f"could not read the record of the saved installer {record}: {exc}; nothing was changed. {again}"
+        ) from None
+    fields = raw.decode("ascii", errors="replace").split()
+    expected = fields[0].lower() if len(raw) <= 256 and len(fields) == 2 and fields[1] == _installer_name() else ""
+    with open(copy, "rb") as stream:
+        actual = hashlib.sha256(stream.read()).hexdigest()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected) or actual != expected:
+        raise ShimError(
+            f"the saved installer {saved} is not the one DefenseClaw saved (its SHA-256 is {actual}; {record} "
+            f"records {expected or 'no valid digest'}): it was changed after the install, so it is not run; "
+            f"nothing was changed. {again}"
+        )
 
 
 def legacy_setup_rollback_refusal(back_to: str, previous: str, repo: str) -> str:

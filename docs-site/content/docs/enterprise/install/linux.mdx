@@ -150,7 +150,8 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
   "readiness": { "gateway": true, "guardian": true, "enumerator": true, "sensor_helper": true },
   "enrollment": { "targets": 16, "pending": 0, "failed": 0, "exempt": 0 },
   "coverage_complete": true,
-  "security_complete": true,
+  "security_complete": false,
+  "warnings": [{ "code": "hook_process_fail_open", "message": "Codex can run a tool after its PreToolUse hook is killed or times out" }],
   "errors": []
 }
 ```
@@ -160,8 +161,8 @@ and readiness check, and exits `1` when anything fails. A healthy `status`, trim
 - With no agent enabled, `status` warns `no_connectors_enabled` and `verify` fails.
 - A new user appears after the next enumerator cycle (up to five minutes). To
   reconcile at once: `sudo /opt/defenseclaw/bin/defenseclaw-gateway enterprise linux reconcile --json`.
-- On most distributions `verify` also warns `unprivileged_user_namespaces`. See
-  [User namespaces](#user-namespaces).
+- On most distributions `status` and `verify` warn `unprivileged_user_namespaces`
+  or `unprivileged_ptrace` and report incomplete security. See [User namespaces](#user-namespaces).
 
 ## Remove
 
@@ -193,8 +194,11 @@ per-user install. See [Per-user installs](/docs/enterprise/install/reference/lin
 
 ### User namespaces
 
-On most distributions `verify` reports `unprivileged_user_namespaces`: an agent
-started inside a private user namespace can hide the machine-policy files from
-the hook. The warning names the host setting that closes it, and the trade-off
-with agent command sandboxes is in
+On most distributions `status` and `verify` warn `unprivileged_user_namespaces`
+or `unprivileged_ptrace` when the observed kernel settings allow private policy
+views. DefenseClaw does not change those host settings. An administrator can
+apply optional hardening with their own tools after testing workloads. When a
+vendor policy file changes, the gateway checks it against the
+administrator-owned digest; an unproven view raises an alert while managed
+hook calls are still inspected. See
 [User namespaces](/docs/enterprise/install/reference/linux#user-namespaces).

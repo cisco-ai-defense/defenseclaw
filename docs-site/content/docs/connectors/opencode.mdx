@@ -17,12 +17,16 @@ DefenseClaw installs one plugin file in OpenCode's plugin directory. The plugin 
 
 ## Set up
 
+On a new install, run `defenseclaw init --connector opencode` first. Until DefenseClaw is initialized, `defenseclaw setup opencode` stops with `DefenseClaw is not initialized — run 'defenseclaw init' first.`
+
 ```bash
-defenseclaw setup opencode                # observe (default): record only
+defenseclaw setup opencode                # first setup defaults to observe: record only
 defenseclaw setup opencode --mode action  # block on policy hits by throwing
 ```
 
-On Windows, run the same commands in PowerShell. Restart OpenCode afterwards. Until it starts, `defenseclaw status` shows OpenCode as `IDLE`, which is normal.
+A re-run without `--mode` keeps the current mode. On Windows, run the same
+commands in PowerShell. Restart OpenCode afterwards. Until it starts,
+`defenseclaw status` shows OpenCode as `IDLE`, which is normal.
 
 ## Check it
 
@@ -34,6 +38,8 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 
 
 ## What it can block or ask
+
+What a gateway outage does to an OpenCode call, per install and fail mode, is in the [gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage).
 
 <HookEventsList connector="opencode" />
 
@@ -48,15 +54,19 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` reports n
 | --- | --- |
 | Plugin | `$OPENCODE_CONFIG_DIR/plugins/defenseclaw.js` (default `~/.config/opencode/plugins/defenseclaw.js`; Windows `%USERPROFILE%\.config\opencode\plugins\defenseclaw.js`) |
 
-It is the only file setup writes. It holds a connector-scoped token and is limited to your account. `opencode.json` is not edited.
+Setup also writes a connector-scoped token sidecar under `~/.defenseclaw/hooks`. Per-user plugins use the account-owned `defenseclaw-gateway` native helper to verify the connected listener; Secure Client plugins use the administrator-owned native helper to verify the protected gateway service. The helper sends the token and tool event only on that verified connection. `opencode.json` is not edited. Restart OpenCode after an upgrade so it loads the repaired plugin.
 
 ## Limits
 
 - Setup refuses an OpenCode older than the supported range. A newer one runs as an untested newer version.
 - On Windows only the WinGet `SST.opencode` package and the npm `opencode-ai` package are accepted, run natively. WSL is not part of the contract.
-- With `FAIL_MODE=closed` an unreachable gateway blocks the call. The same applies only to `tool.execute.before`.
+- A listener owned by another local account receives no credential or tool event; `tool.execute.before` blocks with an unverified-listener reason, including under Secure Client. Per-user host hooks fail closed on gateway failure. A managed administrator can choose outage-only open.
 - A project plugin that loads after DefenseClaw's can change the arguments. In action mode the bridge then refuses to allow the call.
 - Running OpenCode with `--pure` turns external plugins off, and DefenseClaw sees nothing.
+
+## On a managed computer
+
+The per-user `setup`, `status` and `guardrail` commands on this page refuse on a standalone enterprise Linux or macOS host. An administrator adds `guardrail.connectors.opencode: {}` to the managed `config.yaml`, applies it through the [enterprise lifecycle](/docs/enterprise/operate/lifecycle#change-the-config), and runs `enterprise policy verify`. DefenseClaw registers its plugin in OpenCode's managed config (`/etc/opencode/opencode.json` on Linux). Set `guardrail.connectors.opencode.enabled: false` in the managed config to turn it off. [Machine policy](/docs/enterprise/configure/machine-policy#managed-opencode-plugin) describes the route.
 
 ## Turn it off
 
@@ -66,7 +76,15 @@ For a per-user, single-connector install:
 defenseclaw guardrail disable --yes
 ```
 
-This keeps OpenCode's settings. Turn it back on with `defenseclaw guardrail enable`. To remove the connector, run `defenseclaw setup remove opencode --yes` (add `--force` if it is the last one). If you modified the plugin, removal refuses before saving configuration. Preserve your edits, run `defenseclaw setup opencode --yes --restart` to restore the managed plugin, then retry removal. Restart OpenCode afterwards.
+With the default gateway restart, disabling removes DefenseClaw's plugin file
+when it is unchanged since setup. An edited plugin is left in place to preserve
+your edits; `defenseclaw doctor` reports it. This preserves your other OpenCode
+settings. `defenseclaw guardrail enable` reinstalls DefenseClaw's plugin. To
+remove the connector, run `defenseclaw setup remove opencode --yes` (add
+`--force` if it is the last one). If you modified the plugin, removal refuses
+before saving configuration. Preserve your edits, run
+`defenseclaw setup opencode --yes --restart` to restore the managed plugin,
+then retry removal. Restart OpenCode afterwards.
 
 On a multi-connector install, add `--connector opencode` to `guardrail disable` and `guardrail enable` to change only this agent.
 

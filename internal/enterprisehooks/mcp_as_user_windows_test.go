@@ -86,6 +86,13 @@ func TestWindowsMCPAsUserStarterRefusesBeforeStarting(t *testing.T) {
 	if _, err := starter.Start(context.Background(), request); err == nil || !strings.Contains(err.Error(), "unknown") {
 		t.Fatalf("unreadable state: %v", err)
 	}
+	// GAP-0643: once the enumerator republished the record of a user who
+	// signed out, the repeat scan still says the user is not signed in.
+	unreadable = &ClaudeStateUnreadable{Path: home + `\.claude.json`, Reason: "no session", SignedOut: true}
+	if _, err := starter.Start(context.Background(), request); err == nil ||
+		!strings.Contains(err.Error(), `dcw-std1 is not signed in, so their MCP server "notes" cannot be started`) {
+		t.Fatalf("state of a signed-out user: %v", err)
+	}
 	unreadable = nil
 	changed := server
 	changed.Args = []string{"-y", "evil"}

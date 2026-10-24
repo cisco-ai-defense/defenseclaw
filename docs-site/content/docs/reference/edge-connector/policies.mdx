@@ -57,14 +57,14 @@ The policy compiler converts these into deterministic finite automata (DFA) tabl
 iot_extensions:
   destination_allowlist:
     - "1.1.1.1" # illustrative public IP; replace with one approved for your service
-
+    - "2606:4700:4700::1111" # illustrative public IPv6, written without brackets
 ```
 
 <Callout type="info">
 The compiler rejects `destination_denylist`, `ssrf_protection`, and hostname entries rather than treating them as working controls. The built-in SSRF guard blocks private and metadata addresses across profiles. Replace `1.1.1.1` with an approved public literal for your service.
 </Callout>
 
-The on-device SSRF check blocks hostname destinations on every build profile. Network tools need a nonempty destination, so the allowlist needs a canonical public IPv4 or bracketed globally scoped IPv6 literal. The parser does not prove the address is routable. Private, loopback and link-local addresses, numeric aliases such as octal, hex or decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked. `1.1.1.1` in the examples is only an illustration; use an address approved for your service.
+The on-device SSRF check blocks hostname destinations on every build profile. Network tools need a nonempty destination, so the allowlist needs a public IPv4 or globally scoped IPv6 literal. Write an IPv6 entry without brackets (`2606:4700:4700::1111`, not `[2606:4700:4700::1111]`): the device takes the host out of each destination, removes the brackets and compares it with the entries as text (case-insensitive), so `https://[2606:4700:4700::1111]:443/` matches the unbracketed entry, and the compiler refuses a bracketed one. Write the address in the form the tool sends. The parser does not prove the address is routable. Private, loopback and link-local addresses, numeric aliases such as octal, hex or decimal forms, and malformed ports are blocked even if listed. A destination absent from the allowlist is also blocked. `1.1.1.1` in the examples is only an illustration; use an address approved for your service.
 
 ## Built-in rate and escalation behavior
 

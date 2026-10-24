@@ -110,29 +110,39 @@ func TestKiroHookCommandRunsAndForwardsItsSurface(t *testing.T) {
 // A Kiro hook that fails before it can run (a flag it does not know, a value
 // it does not list, a stray argument) must exit 2 so Kiro blocks instead of
 // going ahead, when its policy is to fail closed: an administrator-managed
-// hook, or any hook whose --fail-mode, hook sidecar or DEFENSECLAW_FAIL_MODE
-// does not say open (unset is closed). An explicitly fail-open Kiro hook and
-// every other connector keep cobra's status 1.
+// hook, or any per-user hook regardless of an old open flag or sidecar.
+// Other connectors keep cobra's status 1, except while the account's
+// installer holds the data directory: every hook then fails closed
+// (GAP-0862).
 func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		args    []string
-		sidecar string
-		want    int
+		name       string
+		args       []string
+		sidecar    string
+		installing bool
+		want       int
 	}{
 		{name: "kiro fail closed, unknown flag", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 2},
 		{name: "kiro managed, connector spelled with =", args: []string{"--connector=kiro", "--not-a-hook-flag", "--enterprise-managed"}, want: 2},
 		{name: "kiro closed in the hook sidecar", args: []string{"--connector", "kiro", "--hook-surface", "v9"}, sidecar: `{"version":2,"fail_modes":{"kiro":"closed"}}`, want: 2},
-		{name: "kiro fail open keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "open"}, want: 1},
-		{name: "kiro open in the hook sidecar keeps 1", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, want: 1},
+		{name: "kiro old open flag still blocks", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "open"}, want: 2},
+		{name: "kiro old open sidecar still blocks", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, want: 2},
 		{name: "kiro unset fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, want: 2},
 		{name: "kiro sidecar without kiro fails closed", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"codex":"open"}}`, want: 2},
-		{name: "codex unknown flag", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "closed"}, want: 1},
+		// A per-user hook is closed whatever its flags say (sa-port-peer).
+		{name: "codex old open flag still blocks", args: []string{"--connector", "codex", "--not-a-hook-flag", "--fail-mode", "open"}, want: 2},
+		{name: "kiro fail open during an install", args: []string{"--connector", "kiro", "--not-a-hook-flag", "--fail-mode", "open"}, installing: true, want: 2},
+		{name: "kiro open in the hook sidecar during an install", args: []string{"--connector", "kiro", "--not-a-hook-flag"}, sidecar: `{"version":2,"fail_modes":{"kiro":"open"},"fail_mode_sources":{"kiro":"config"}}`, installing: true, want: 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("DEFENSECLAW_HOME", home)
 			t.Setenv("DEFENSECLAW_FAIL_MODE", "")
+			if tc.installing {
+				if err := os.Mkdir(filepath.Join(home, ".install.lock"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.sidecar != "" {
 				if err := os.MkdirAll(filepath.Join(home, "hooks"), 0o700); err != nil {
 					t.Fatal(err)
@@ -141,9 +151,10 @@ func TestHookPreRunFailureUsesTheConnectorsBlockingExit(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			previous := hookRawArgs
+			previous, previousIO := hookRawArgs, hookFailureIO
 			hookRawArgs = func() []string { return tc.args }
-			t.Cleanup(func() { hookRawArgs = previous })
+			hookFailureIO = func() (io.Reader, io.Writer, io.Writer) { return strings.NewReader("{}"), io.Discard, io.Discard }
+			t.Cleanup(func() { hookRawArgs, hookFailureIO = previous, previousIO })
 			cmd := newHookCmd()
 			cmd.SetArgs(tc.args)
 			cmd.SetOut(io.Discard)

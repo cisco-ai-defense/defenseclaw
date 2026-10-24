@@ -129,6 +129,8 @@ These bounds apply before connector action mapping. Exceeding an admission
 limit rejects the candidate; exceeding a runtime limit takes that owner to its
 fallback without stopping unrelated rules.
 
+The 512-byte CEL regex limit caps its size. The static cost limit can reject a shorter pattern; check the whole rule with `defenseclaw guardrail validate-pack`.
+
 ## Runtime results
 
 | Result | Owner behavior |
@@ -230,12 +232,13 @@ regex, CEL typing and admission, and aggregate-cost checks. It does not inject
 synthetic facts or prove that a connector projects the fields an expression
 expects.
 
-Repository contributors should add focused Go fixtures and run the command
-below. The gateway package runs for about ten minutes, longer than the default
-`go test` deadline, so set `-timeout`:
+Repository contributors should add focused Go fixtures and use Go 1.26.4, the
+CI toolchain. The gateway suite runs through the shard runner with an explicit
+timeout:
 
 ```bash
-go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway
+go test -timeout 30m ./internal/guardrail/semantic ./internal/guardrail
+python3 scripts/go_test_shards.py --package-dir internal/gateway --shard-count 16 -- go test -timeout 30m ./internal/gateway
 ```
 
 When the compiled default catalog changes, also run

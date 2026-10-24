@@ -13,6 +13,10 @@ Every scanner setting lives in `config.yaml` under `scanners.skill_scanner` and 
 
 Set a key with `defenseclaw config set` (validated, applied at once), with the `defenseclaw setup skill-scanner` or `defenseclaw setup mcp-scanner` wizard, or by editing `config.yaml`. A change that does not validate is refused and the file is left alone.
 
+The gateway starts every external scanner under a process-tree supervisor: a child-subreaper custodian on Linux, a supervisor that follows each process with kqueue on macOS, and a kill-on-close Job Object on Windows. Scanners may start the helpers they need (skill-scanner starts its CEL helper on every scan; a local stdio MCP server or a subprocess-based judge also runs). When the supervisor stays alive, it ends the scanner and its descendants when the scan ends, is canceled, or the gateway exits or is killed, including a child that started a session of its own. If it cannot establish cleanup, the scan fails closed with a scan error.
+
+On Linux, if a scanner SIGKILLs its child-subreaper custodian, a detached child can keep running even though the scan fails closed. After such a failure, inspect and stop any leftover scanner processes. macOS has one known limit: a child that forks, starts a new session and exits between two reads of the process table (about 100 ms apart) can hand its own child to launchd before the gateway sees it. If that child keeps a descriptor it inherited, the scan fails closed; if it closes every descriptor, it is not found and keeps running. Processes a scanner asks launchd or a system service to start (for example with `open` or `launchctl` on macOS) are not its descendants. Direct CLI scans run in the CLI process, not under the gateway.
+
 ## Skill scanner
 
 ### What it scans

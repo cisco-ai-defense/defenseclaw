@@ -2057,7 +2057,10 @@ def _openclaw_path_field(cfg: object | Mapping[str, Any] | None, label: str, key
     shown read-only as unused instead.
     """
 
-    mode = _active_connector(cfg) or "openclaw"
+    mode = _active_connector(cfg)
+    if not mode and not _active_connector_names_for_setup(cfg):
+        shown = "(not used: no agent configured)"
+        return ConfigField(label=label, key=key, kind="header", value=shown, original=shown)
     if mode == "openclaw" or "openclaw" in _active_connector_names_for_setup(cfg):
         return _field(cfg, label, key, hint=hint)
     shown = f"(not used: Mode is {mode})"
@@ -3328,6 +3331,12 @@ def _cfg_port(cfg: object | Mapping[str, Any] | None, path: str) -> str:
 
 
 def _active_connector(cfg: object | Mapping[str, Any] | None) -> str:
+    configured = getattr(cfg, "has_connector_configured", None)
+    if callable(configured) and not configured():
+        return ""
+    active = getattr(cfg, "active_connector", None)
+    if callable(active):
+        return str(active() or "").strip().lower()
     return _cfg_str(cfg, "claw.mode", "").lower()
 
 
@@ -3340,8 +3349,7 @@ def _active_connector_names_for_setup(cfg: object | Mapping[str, Any] | None) ->
             names = None
         if isinstance(names, (list, tuple)):
             resolved = [str(name).strip().lower() for name in names if str(name).strip()]
-            if resolved:
-                return resolved
+            return resolved
 
     connectors_map = get_config_value(cfg, "guardrail.connectors", None)
     if isinstance(connectors_map, Mapping):
@@ -3351,6 +3359,24 @@ def _active_connector_names_for_setup(cfg: object | Mapping[str, Any] | None) ->
 
     singular = _active_connector(cfg)
     return [singular] if singular else []
+
+
+def connector_turned_off(cfg: object | Mapping[str, Any] | None, name: str) -> bool:
+    """Whether the config turns this roster connector off.
+
+    The same test as ``defenseclaw status`` (``enabled: false``) and the
+    Inventory's "(off)" chip: ``guardrail.effective_enabled``, or for a plain
+    mapping an explicit ``guardrail.connectors.<name>.enabled: false``. Setup
+    listed such a connector as active (GAP-0854).
+    """
+
+    resolver = getattr(getattr(cfg, "guardrail", None), "effective_enabled", None)
+    if callable(resolver):
+        try:
+            return not resolver(name)
+        except Exception:  # noqa: BLE001 - a config quirk must not hide setup workflows.
+            return False
+    return get_config_value(cfg, f"guardrail.connectors.{name}.enabled", None) is False
 
 
 def _guardrail_connector_choices(cfg: object | Mapping[str, Any] | None) -> tuple[str, ...]:
@@ -4395,7 +4421,11 @@ def wizard_state_summary(wizard: SetupWizard | int, cfg: object | Mapping[str, A
         return f"Guardrail: {enabled}  ·  Mode: {mode}  ·  Strategy: {_effective_strategy_text(cfg, strategy)}"
     if wizard == SetupWizard.CONNECTOR_SETUP:
         connectors = _active_connector_names_for_setup(cfg)
-        return f"Active connectors: {', '.join(connectors) if connectors else 'not set'}"
+        on = [name for name in connectors if not connector_turned_off(cfg, name)]
+        off = [name for name in connectors if connector_turned_off(cfg, name)]
+        summary = f"Active connectors: {', '.join(on) if on else 'none' if off else 'not set'}"
+        # A connector turned off stays in the roster; it is not active (GAP-0854).
+        return f"{summary}  ·  Off: {', '.join(off)}" if off else summary
     if wizard == SetupWizard.AI_DISCOVERY:
         enabled = "on" if bool(get_config_value(cfg, "ai_discovery.enabled", True)) else "off"
         mode = _cfg_str(cfg, "ai_discovery.mode", "enhanced") or "enhanced"
@@ -6054,11 +6084,6 @@ def uninstall_intent(option: UninstallOption) -> SetupCommandIntent:
     )
 
 
-# The connector install.sh offers first; the Setup form starts on it when no
-# connector is configured (GAP-2159).
-_DEFAULT_SETUP_CONNECTOR = "codex"
-
-
 def connector_setup_wizard_fields(
     cfg: object | Mapping[str, Any] | None = None,
     os_name: str | None = None,
@@ -6070,17 +6095,17 @@ def connector_setup_wizard_fields(
     if "@Connector" in overrides:
         connector = str(overrides.get("@Connector", "") or "").strip()
     else:
-        connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
-        if not connector:
+        active = getattr(cfg, "active_connector", None)
+        if callable(active):
+            connector = str(active() or "").strip()
+        else:
+            connector = str(get_config_value(cfg, "guardrail.connector", "") or "").strip()
+        if not connector and not callable(active):
             connector = str(get_config_value(cfg, "claw.mode", "") or "").strip()
-    # No connector configured: start where install.sh does (codex), not on
-    # openclaw, so Ctrl+R can't set up an agent nobody picked (GAP-2159).
-    connector = connector or _DEFAULT_SETUP_CONNECTOR
-    # A stored compatibility mirror can name a proxy connector that this OS
-    # can't run (e.g. a config copied from macOS opened on Windows); fall back
-    # to the first supported connector rather than offering an unusable default.
+    # An empty or unsupported connector requires an explicit choice. A stored
+    # compatibility mirror can name a proxy that this OS cannot run.
     if connector not in choices:
-        connector = choices[0] if choices else connector
+        connector = ""
     action = str(overrides.get("@Action", "setup") or "setup").strip().lower()
     mode = (
         str(get_config_value(cfg, "guardrail.mode", "observe") or "observe")
@@ -7575,7 +7600,7 @@ def wizard_bool_value(fields: Sequence[WizardFormField], label: str, fallback: s
 
 
 def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
-    connector = wizard_field_value(fields, "Connector") or _DEFAULT_SETUP_CONNECTOR
+    connector = wizard_field_value(fields, "Connector")
     action = wizard_field_value(fields, "Action") or "setup"
     if action == "batch":
         out = ["setup", "--yes"]
@@ -7602,8 +7627,7 @@ def _build_connector_setup_args(fields: Sequence[WizardFormField]) -> tuple[str,
 
     args, _display = connector_setup_command(connector)
     if not args:
-        args, _display = connector_setup_command("openclaw")
-        connector = "openclaw"
+        return ()
     out = list(args)
     # ``--mode`` and ``--no-restart`` apply to every connector (proxy and
     # hook). Previously the hook branch dropped ``--mode`` silently, so

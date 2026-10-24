@@ -122,7 +122,9 @@ func TestStatusNamesAgentSessionsOlderThanTheActivation(t *testing.T) {
 	if err != nil || record == nil {
 		t.Fatalf("no deployment: %v", err)
 	}
-	activated, err := time.Parse(time.RFC3339, record.InstalledAt)
+	// Status compares sessions with activation, which can follow installation
+	// by several seconds on a busy host.
+	activated, err := time.Parse(time.RFC3339Nano, record.ActivatedAt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +170,7 @@ func TestStatusNamesClaudeSessionsOpenWhileTheDropInWasChanged(t *testing.T) {
 	if err != nil || record == nil {
 		t.Fatalf("no deployment: %v", err)
 	}
-	activated, err := time.Parse(time.RFC3339, record.InstalledAt)
+	activated, err := time.Parse(time.RFC3339Nano, record.ActivatedAt)
 	if err != nil {
 		t.Fatal(err)
 	}

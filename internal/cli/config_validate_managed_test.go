@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,54 @@ import (
 )
 
 const managedLiteralSentinel = "example-sensitive-value"
+
+// GAP-0645: an offline managed candidate must receive the same proxy bind
+// refusal as the gateway when it starts, on every supported OS.
+func TestConfigValidateRefusesManagedNonLoopbackGuardrailProxy(t *testing.T) {
+	t.Cleanup(func() { configValidateCmd.SetOut(nil); configValidateJSON, configValidateDataDir = false, "" })
+	dir := t.TempDir()
+	t.Setenv(managed.ConfigPathEnv, filepath.Join(dir, "installed", "config.yaml"))
+	configValidateDataDir = dir
+	path := filepath.Join(dir, "candidate.yaml")
+	for _, tc := range []struct {
+		name, mode, host string
+		enabled          bool
+		refuse           bool
+	}{
+		{"wildcard", "managed_enterprise", "0.0.0.0", true, true},
+		{"remote IPv4", "managed_enterprise", "192.0.2.10", true, true},
+		{"IPv6 wildcard", "managed_enterprise", "[::]", true, true},
+		{"loopback", "managed_enterprise", "127.0.0.1", true, false},
+		{"disabled proxy", "managed_enterprise", "0.0.0.0", false, false},
+		{"explicit unmanaged bind", "", "192.0.2.10", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := "config_version: 9\n"
+			if tc.mode != "" {
+				body += "deployment_mode: " + tc.mode + "\nenterprise:\n  profile: standalone\n"
+			}
+			body += "guardrail:\n  enabled: " + map[bool]string{true: "true", false: "false"}[tc.enabled] + "\n  host: '" + tc.host + "'\n"
+			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			configValidateJSON = true
+			out := &strings.Builder{}
+			configValidateCmd.SetOut(out)
+			err := configValidateCmd.RunE(configValidateCmd, []string{path})
+			if tc.refuse {
+				var failure configV8WireFailure
+				if err == nil || json.Unmarshal([]byte(out.String()), &failure) != nil || failure.Path != "$.guardrail.host" ||
+					!strings.Contains(failure.Reason, "loopback") {
+					t.Fatalf("non-loopback proxy accepted or unclear: error=%v output=%q", err, out)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("valid proxy config refused: %v; output=%q", err, out)
+			}
+		})
+	}
+}
 
 // GAP-0138: `config validate` applies the managed candidate rule that
 // `enterprise linux ensure --config` applies, so a file it calls valid is

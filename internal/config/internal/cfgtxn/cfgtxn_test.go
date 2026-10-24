@@ -48,8 +48,8 @@ func TestCommitRestoresGenerationAfterPostRenameFailure(t *testing.T) {
 		}
 		return failedSync
 	}
-	if _, err := txn.Commit(first, []byte("config_version: 9\n# rejected\n"), true, 0o600, Writer{Actor: "rejected", Reason: "edit"}); !errors.Is(err, failedSync) {
-		t.Fatalf("Commit error = %v, want directory fsync failure", err)
+	if _, err := txn.Commit(first, []byte("config_version: 9\n# rejected\n"), true, 0o600, Writer{Actor: "rejected", Reason: "edit"}); !errors.Is(err, failedSync) || !PublicationOccurred(err) {
+		t.Fatalf("Commit error = %v, want a postpublication directory fsync failure", err)
 	}
 	configAfter, err := os.ReadFile(path)
 	if err != nil {
@@ -94,8 +94,8 @@ func TestCommitDoesNotReplaceConfigWhenPreviousReadFails(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := txn.Commit([]byte("original"), []byte("candidate"), true, 0o600, Writer{Actor: "test", Reason: "regression"}); err == nil {
-		t.Fatal("commit succeeded despite failed previous read")
+	if _, err := txn.Commit([]byte("original"), []byte("candidate"), true, 0o600, Writer{Actor: "test", Reason: "regression"}); err == nil || PublicationOccurred(err) {
+		t.Fatalf("failed previous read was reported as publication: %v", err)
 	}
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -220,5 +220,35 @@ func TestWriteFileDurablePublishedFlushesTheTempFileAfterPublish(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(dir); len(entries) != 2 {
 		t.Fatalf("files left: %v", entries)
+	}
+}
+
+// MkdirDurable makes a folder, keeps one already there, and refuses a file
+// at its path and a missing parent; it leaves nothing else beside the
+// folder.
+func TestMkdirDurableMakesTheFolderAndLeavesNothingElse(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "pins")
+	for range 2 {
+		if err := MkdirDurable(dir); err != nil {
+			t.Fatal(err)
+		}
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("no folder at %s: %v", dir, err)
+		}
+	}
+	file := filepath.Join(parent, "file")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := MkdirDurable(file); err == nil {
+		t.Fatal("a file at the path was taken as the folder")
+	}
+	if err := MkdirDurable(filepath.Join(parent, "missing", "pins")); err == nil {
+		t.Fatal("a folder was made under a missing parent")
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil || len(entries) != 2 || entries[0].Name() != "file" || entries[1].Name() != "pins" {
+		t.Fatalf("beside the folder: %v (%v), want only file and pins", entries, err)
 	}
 }

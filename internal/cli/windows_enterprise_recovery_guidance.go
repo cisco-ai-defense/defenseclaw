@@ -494,21 +494,31 @@ func windowsEnterpriseStandaloneRosterRunning(services []enterprisestatus.Servic
 // windowsEnterpriseStandaloneNextStep names what the administrator runs
 // after a failed lifecycle left its transaction pending: the exact Setup
 // command, and when the recovery could not use this Setup's gateway, why.
-// services are the DefenseClaw services as the service manager reports them
-// now. It is empty when nothing is pending.
+// busy is a run refused lifecycle_busy. services are the DefenseClaw
+// services as the service manager reports them now. It is empty when
+// nothing is pending and the run was not busy.
 func windowsEnterpriseStandaloneNextStep(
 	action string,
 	configPath string,
 	purge bool,
+	busy bool,
 	pending bool,
 	runs []windowsEnterpriseRecoveryGatewayRun,
 	refusal *windowsEnterpriseRecoveryGatewayRefusal,
 	services []enterprisestatus.Service,
 ) string {
+	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
+	if busy {
+		// The lock is held by a live lifecycle run, and a pending
+		// transaction is that run's: it finishes or rolls back on its own.
+		// This run did not recover anything, so the FORCE=1 last resort
+		// would remove a deployment an upgrade is still changing (GAP-0622).
+		return "Another DefenseClaw lifecycle run (an install, upgrade, repair or uninstall) is in progress and holds the lock; this run changed nothing." +
+			" Next step: wait for that run to finish, then run " + command + " again (an MDM retries exit 1618 on its own)."
+	}
 	if !pending {
 		return ""
 	}
-	command := windowsEnterpriseStandaloneSetupCommand(action, configPath, purge)
 	lead := windowsEnterprisePendingLead(services)
 	const recovers = "; as LocalSystem, Setup recovers the transaction with its own verified gateway."
 	// The last resort when no recovery finishes: it removes the deployment

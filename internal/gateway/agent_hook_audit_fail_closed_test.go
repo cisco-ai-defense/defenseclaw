@@ -50,6 +50,21 @@ type auditFailureHookFixture struct {
 	emitter *failingAuditEmitter
 }
 
+// A receipt has already committed the answer to the agent. Its durable
+// pending occurrence can be retried after an audit write fault; changing the
+// in-memory verdict to a block would falsely report an enforcement.
+func TestManagedReceiptedHookAuditFaultKeepsTheCommittedVerdict(t *testing.T) {
+	fixture := newAuditFailureHookFixture(t, "closed")
+	fixture.emitter.fail = true
+	result := fixture.api.finalizeAgentHook(t.Context(), "claudecode", agentHookRequest{
+		ConnectorName: "claudecode", HookEventName: "PreToolUse", ToolName: "Bash",
+		pendingOccurrenceID: "00000000-0000-4000-8000-000000000001",
+	}, agentHookResponse{Action: "allow", RawAction: "allow", Mode: "action"}, nil, nil, 0, false, nil)
+	if result.Response.Action != "allow" || result.AuditFailedClosed || result.AuditPersisted {
+		t.Fatalf("committed answer after audit failure = %+v, want pending allow without a false block", result)
+	}
+}
+
 func newAuditFailureHookFixture(t *testing.T, failMode string) auditFailureHookFixture {
 	t.Helper()
 	installCorrelationHMACForTest()
@@ -168,11 +183,11 @@ func TestHookAuditWriteFailureDeniesTheCall(t *testing.T) {
 			t.Fatalf("busy store: action %v, want block", out["action"])
 		}
 	})
-	t.Run("explicit open keeps the verdict", func(t *testing.T) {
+	t.Run("legacy per-user open still denies", func(t *testing.T) {
 		fixture := newAuditFailureHookFixture(t, "open")
 		fixture.emitter.fail = true
-		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "allow" {
-			t.Fatalf("open fail mode: action %v, want allow", out["action"])
+		if out := fixture.preToolUse(t, "toolu-open"); out["action"] != "block" {
+			t.Fatalf("per-user open fail mode: action %v, want block", out["action"])
 		}
 	})
 }

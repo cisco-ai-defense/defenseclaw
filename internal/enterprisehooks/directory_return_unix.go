@@ -30,8 +30,9 @@ import (
 // its caches with answers that list an Active Directory account without its
 // domain groups (its primary group, Domain Users, as a bare number). It keeps
 // serving those answers for many minutes after the domain controller is back,
-// so the accounts stayed on the default profile (default_lookup_failed) until
-// an administrator flushed the caches by hand (#1197, GAP-0680, GAP-0517).
+// so, before unproven-fact refusals were added, the accounts stayed on the
+// default profile (default_lookup_failed) until an administrator flushed
+// the caches by hand (#1197, GAP-0680, GAP-0517).
 // Nothing in Open Directory's answers says the domain controller is back:
 // `odutil show nodenames` lists the node Online through the outage, and the
 // guardian's own lookups of a mobile account succeed from the local node, so

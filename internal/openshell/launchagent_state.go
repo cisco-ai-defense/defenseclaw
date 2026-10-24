@@ -91,7 +91,8 @@ func (s LaunchAgentState) Notice() string {
 // CheckIDManagedLaunchAgent is the managed Mac's current-user gateway job.
 const CheckIDManagedLaunchAgent = "managed-openshell-launchagent"
 
-const managedLaunchAgentLabel = "com.cisco.defenseclaw.openshell-gateway"
+// managedLaunchAgentsDir is where the gateway job's plist is; a var for tests.
+var managedLaunchAgentsDir = LaunchAgentsDir
 
 // ManagedLaunchAgentCheck reads the current user's loaded gateway job in both
 // launchd domains; an ssh session can leave it in user/<uid>.
@@ -102,9 +103,10 @@ func (d *Doctor) ManagedLaunchAgentCheck(ctx context.Context) *Check {
 	}
 	d.defaults()
 	uid := strconv.Itoa(d.Geteuid())
+	label, _ := FindLaunchAgent(managedLaunchAgentsDir, GatewayAgentBase)
 	var failed, warning, healthy *Check
 	for _, domain := range []string{"gui/" + uid, "user/" + uid} {
-		target := domain + "/" + managedLaunchAgentLabel
+		target := domain + "/" + label
 		raw, err := d.Runner.Output(ctx, Command{Name: "launchctl", Args: []string{"print", target}, Timeout: 10 * time.Second})
 		if err != nil && launchAgentMissing(raw, err) {
 			continue

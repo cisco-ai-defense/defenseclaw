@@ -90,6 +90,21 @@ type MicroVMHost struct {
 	// DriverBinary is the openshell-driver-vm the gateway starts; empty
 	// when none was found.
 	DriverBinary string `json:"driver_binary,omitempty"`
+	// gatewayVersion is the version the answering gateway reports. An empty
+	// value means no version was available, so no driver release can be chosen.
+	gatewayVersion string
+	// userRepairDir is the earlier user directory when DriverBinary was
+	// found beside the gateway on PATH without an explicit driver_dir.
+	userRepairDir string
+	// missingDriverDir is the configured driver_dir when no binary was
+	// found; a repair must install there so the gateway can select it.
+	missingDriverDir string
+	// DriverVersion is the version DriverBinary reports (Linux), and
+	// DriverOlderThan the gateway's version when that is newer: an in-place
+	// upgrade of NVIDIA's package leaves the driver, which it does not ship,
+	// as it was (GAP-0652).
+	DriverVersion   string `json:"driver_version,omitempty"`
+	DriverOlderThan string `json:"driver_older_than,omitempty"`
 	// DriverFromFormula reports that DriverBinary is the one in the
 	// nvidia/openshell/openshell formula's keg, the only one the
 	// formula's post-install step (ResignVMDriverCommand) signs.
@@ -341,7 +356,7 @@ func (r *doctorRun) microVMHost(ctx context.Context) *MicroVMHost {
 		}
 	}
 	m.DriverRunning = r.running.Name == DriverVM
-	m.DriverBinary = r.findVMDriver(ctx)
+	m.DriverBinary, _ = r.findVMDriver(ctx)
 	m.DriverFromFormula = r.inFormulaKeg(m.DriverBinary)
 	if m.DriverBinary != "" {
 		out, err := r.Runner.Output(ctx, Command{Name: "codesign", Args: []string{"-d", "--entitlements", "-", m.DriverBinary}, Timeout: 30 * time.Second})
@@ -437,56 +452,88 @@ func executable(p string) bool {
 }
 
 // findVMDriver is the openshell-driver-vm the gateway starts: the one in
-// [openshell.drivers.vm] driver_dir, else the formula's (libexec, else
-// bin, of the keg under the Homebrew prefix), else one in the directories
-// the gateway itself searches (~/.local/libexec/openshell,
+// [openshell.drivers.vm] driver_dir, with only the gateway binary's sibling
+// as a fallback when driver_dir is explicit. Without it, search the
+// formula's (libexec, else bin, of the keg under the Homebrew prefix), then
+// the directories the gateway itself searches (~/.local/libexec/openshell,
 // /usr/libexec/openshell, /usr/local/libexec/openshell,
-// /usr/local/libexec), else the one next to the openshell-gateway on PATH
-// (in its directory or the libexec beside it, as OpenShell's release
-// archives lay them out). A gateway that runs the driver from anywhere
-// else names it through its running process.
-func (r *doctorRun) findVMDriver(ctx context.Context) string {
+// /usr/local/libexec), then the contacted gateway's executable directory
+// and adjacent libexec. An answering gateway is tied to its registered
+// listener before doctor uses its process. An unbound PATH gateway cannot
+// prove which driver the selected gateway will use. A driver launched from
+// another directory is found through a child process of that same gateway.
+// The second result is the earlier user directory when a gateway-adjacent
+// driver was selected and no driver_dir was configured.
+func (r *doctorRun) findVMDriver(ctx context.Context) (string, string) {
 	var dirs []string
-	if r.config != nil && filepath.IsAbs(r.config.VM.DriverDir) {
+	userDir := ""
+	configuredDir := r.config != nil && filepath.IsAbs(r.config.VM.DriverDir)
+	if configuredDir {
 		dirs = append(dirs, r.config.VM.DriverDir)
-	}
-	if prefix := r.Gateway.BrewPrefix; prefix != "" {
-		keg := filepath.Join(prefix, "opt", path.Base(GatewayFormula))
-		dirs = append(dirs, filepath.Join(keg, "libexec"), filepath.Join(keg, "bin"))
-	}
-	if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
-		dirs = append(dirs, filepath.Join(home, ".local", "libexec", "openshell"))
-	}
-	dirs = append(dirs, "/usr/libexec/openshell", "/usr/local/libexec/openshell", "/usr/local/libexec")
-	if gw, err := r.LookPath(GatewayBinary); err == nil && filepath.IsAbs(gw) {
-		bins := []string{filepath.Dir(gw)}
-		if real, err := filepath.EvalSymlinks(gw); err == nil && filepath.Dir(real) != bins[0] {
-			bins = append(bins, filepath.Dir(real))
+	} else {
+		if prefix := r.Gateway.BrewPrefix; prefix != "" {
+			keg := filepath.Join(prefix, "opt", path.Base(GatewayFormula))
+			dirs = append(dirs, filepath.Join(keg, "libexec"), filepath.Join(keg, "bin"))
 		}
-		for _, bin := range bins {
-			dirs = append(dirs, bin, filepath.Join(filepath.Dir(bin), "libexec"))
+		if home, err := r.HomeDir(); err == nil && filepath.IsAbs(home) {
+			userDir = filepath.Join(home, ".local", "libexec", "openshell")
+			dirs = append(dirs, userDir)
+		}
+		dirs = append(dirs, "/usr/libexec/openshell", "/usr/local/libexec/openshell", "/usr/local/libexec")
+	}
+	gatewayDirStart := len(dirs)
+	gw := ""
+	var running *process
+	if r.gateway != nil && r.gateway.Healthy {
+		running = r.gatewayProcess(ctx)
+		if running != nil {
+			gw = running.path
 		}
 	}
-	for _, dir := range dirs {
+	if filepath.IsAbs(gw) {
+		if configuredDir {
+			// OpenShell's current_exe() follows a gateway symlink. Its only
+			// fallback with driver_dir set is beside that executable.
+			if real, err := filepath.EvalSymlinks(gw); err == nil {
+				dirs = append(dirs, filepath.Dir(real))
+			} else {
+				// A running binary can be replaced while its sibling driver
+				// remains. Keep the directory ps saw if the path vanished.
+				dirs = append(dirs, filepath.Dir(gw))
+			}
+		} else {
+			bins := []string{filepath.Dir(gw)}
+			if real, err := filepath.EvalSymlinks(gw); err == nil && filepath.Dir(real) != bins[0] {
+				bins = append(bins, filepath.Dir(real))
+			}
+			for _, bin := range bins {
+				dirs = append(dirs, bin, filepath.Join(filepath.Dir(bin), "libexec"))
+			}
+		}
+	}
+	for i, dir := range dirs {
 		if p := filepath.Join(dir, vmDriverBinary); executable(p) {
-			return p
+			if i >= gatewayDirStart && !configuredDir {
+				return p, userDir
+			}
+			return p, ""
 		}
 	}
-	if r.running.Name != DriverVM {
-		return ""
+	if r.running.Name != DriverVM || configuredDir {
+		return "", ""
 	}
 	parent := 0
-	if gw := r.gatewayProcess(ctx); gw != nil {
-		parent = gw.pid
+	if running != nil {
+		parent = running.pid
+	}
+	if parent == 0 {
+		return "", ""
 	}
 	p := findProcess(r.processes(ctx), vmDriverBinary, parent)
-	if p == nil && parent != 0 {
-		p = findProcess(r.processes(ctx), vmDriverBinary, 0)
-	}
 	if p != nil && executable(p.path) {
-		return p.path
+		return p.path, ""
 	}
-	return ""
+	return "", ""
 }
 
 // ManagedMicroVMFix is what a user of a managed computer does about a MicroVM

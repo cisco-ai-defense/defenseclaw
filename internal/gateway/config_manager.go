@@ -44,6 +44,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config/configwrite"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/runtimegraph"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -127,8 +128,8 @@ const configReloadStartupQuietPeriod = 25 * time.Millisecond
 // caused: a referenced asset (rule pack, Rego module) changed on disk.
 const configDiffAssets = "assets"
 
-// errGenerationUnchanged reports an asset reload whose rebuilt generation
-// has the live generation's digest; nothing is swapped.
+// errGenerationUnchanged reports a rebuild that matches the live generation;
+// nothing is swapped.
 var errGenerationUnchanged = errors.New("config reload: generation unchanged")
 
 type ConfigDiff struct {
@@ -146,6 +147,9 @@ type configReloadSource struct {
 	sourceName string
 	raw        []byte
 	compiledV8 *config.ObservabilityV8CompiledConfig
+	// proveUnchanged permits a managed rebuild solely to prove that config
+	// and assets still match the published generation, without publishing.
+	proveUnchanged bool
 }
 
 type configSnapshotApplyFunc func(
@@ -334,11 +338,22 @@ func (m *ConfigManager) bindInitialObservabilityV8Plan(plan *config.Observabilit
 	m.v8PlanDigest = plan.Digest()
 }
 
-func (m *ConfigManager) recordLoadError(ctx context.Context, errorType string) {
+func (m *ConfigManager) recordLoadError(ctx context.Context, errorType string, cause error) {
 	if m == nil || m.observabilityV8 == nil {
 		return
 	}
 	recordConfigLoadErrorV8(ctx, m.observabilityV8, errorType)
+	// The graph owns its own rejection reports and their retry identities.
+	// Do not duplicate those, or report an intentional shutdown as rejection.
+	var graphError *runtimegraph.Error
+	if ctx == nil || ctx.Err() != nil || errors.As(cause, &graphError) {
+		return
+	}
+	if emitter, ok := m.observabilityV8.(sidecarRuntimeEmitter); ok {
+		if err := emitConfigReloadRejectionV8(ctx, emitter, errorType); err != nil {
+			fmt.Fprintf(os.Stderr, "[config] could not persist config.reload.rejected: %v\n", err)
+		}
+	}
 }
 
 // getEnvConfigPath returns the current env_config.json overlay path, or
@@ -358,13 +373,21 @@ func (m *ConfigManager) getEnvConfigPath() string {
 // as `defenseclaw migrate` would write it: its data.json admission and
 // thresholds and, on a per-user install, its audit.db block/allow entries
 // keep applying. A file whose migration fails is refused.
-func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, error) {
-	legacyV8 := config.NeedsMigrationV9(raw)
+func normalizeRuntimeConfigSource(source string, raw []byte) ([]byte, func(), error) {
 	migrated, exportKey, err := config.MigrateV8InMemoryCandidate(source, raw, guardrail.RulePackDigest)
 	if err != nil {
 		// Refused: the previous generation keeps running. As raw v8 the file
 		// would drop its data.json admission and audit.db block/allow policy.
-		return nil, config.InMemoryMigrationError(source, err)
+		return nil, nil, config.InMemoryMigrationError(source, err)
+	}
+	return migrated, exportKey, nil
+}
+
+func loadRuntimeConfigCandidate(source string, raw []byte) (*config.Config, error) {
+	legacyV8 := config.NeedsMigrationV9(raw)
+	migrated, exportKey, err := normalizeRuntimeConfigSource(source, raw)
+	if err != nil {
+		return nil, err
 	}
 	candidate, err := config.LoadRuntimeV8CandidateFromBytes(source, migrated)
 	if err != nil {
@@ -1127,7 +1150,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.rejected = true
 		m.permissionRetry = errors.Is(err, os.ErrPermission)
 		recordGenerationBuildError(err)
-		m.recordLoadError(ctx, "candidate_invalid")
+		m.recordLoadError(ctx, "candidate_invalid", err)
 		if m.health != nil {
 			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
 				"path":       m.path,
@@ -1140,11 +1163,11 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	m.permissionRetry = false
 	if oldCfg == nil || !config.CurrentSchemaVersion(oldCfg.ConfigVersion) ||
 		!config.CurrentSchemaVersion(next.ConfigVersion) {
-		m.recordLoadError(ctx, "schema_version")
+		m.recordLoadError(ctx, "schema_version", nil)
 		return fmt.Errorf("config reload: the configuration is from an older DefenseClaw; run 'defenseclaw migrate' first")
 	}
 	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) && !managed.IsManagedEnterprise(next.DeploymentMode) {
-		m.recordLoadError(ctx, "managed_downgrade")
+		m.recordLoadError(ctx, "managed_downgrade", nil)
 		return fmt.Errorf("config reload cannot downgrade deployment_mode from managed_enterprise")
 	}
 	// Only a change between two managed profiles is a reinstall. An unmanaged
@@ -1153,7 +1176,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if oldCfg != nil && managed.IsManagedEnterprise(oldCfg.DeploymentMode) &&
 		managed.IsManagedEnterprise(next.DeploymentMode) &&
 		oldCfg.EnterpriseProfile() != next.EnterpriseProfile() {
-		m.recordLoadError(ctx, "enterprise_profile_change")
+		m.recordLoadError(ctx, "enterprise_profile_change", nil)
 		return fmt.Errorf("config reload cannot change the enterprise profile from %q to %q; reinstall through the lifecycle", oldCfg.EnterpriseProfile(), next.EnterpriseProfile())
 	}
 	// AVC env_config.json overlay. When present and well-formed the
@@ -1237,7 +1260,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			source.compiledV8,
 			sidecarObservabilityV8ManagedOptionsFromConfig(next, source.raw),
 		); err != nil {
-			m.recordLoadError(ctx, "managed_destination_rejected")
+			m.recordLoadError(ctx, "managed_destination_rejected", nil)
 			if m.health != nil {
 				m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
 					"path":       m.path,
@@ -1265,15 +1288,50 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 			if heldDiff := diffConfigs(oldCfg, held); len(heldDiff.RestartRequired) == 0 {
 				pendingRestart = diff.RestartRequired
 				next, diff = held, heldDiff
-				fmt.Fprintf(os.Stderr, "[config] restart the gateway to apply %s; the rest of the change applies now\n",
-					strings.Join(pendingRestart, ", "))
 			}
 		}
 	}
-	setPendingRestart(pendingRestart)
 	hot = len(diff.RestartRequired) == 0
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
+	}
+	// On a standalone managed host the lifecycle's signed bundle is the only
+	// source of a new config or policy generation. A watcher event or an
+	// authenticated API call cannot turn hand-edited bytes or assets active.
+	// The boot bytes are already the running snapshot and may be reconciled
+	// once before the manager has an applied generation.
+	startupBoot := !assets && !m.rejected && reason == "startup_reconcile" && m.appliedRaw == nil && m.startupKnown &&
+		sha256.Sum256(source.raw) == m.startupSource
+	pendingBundle := m.pendingBundleGeneration(source.raw)
+	// A watched asset can be checked without a new bundle only when the
+	// config bytes are the ones already running. At startup those are the
+	// exact boot bytes; later they are the last applied bytes. The same proof
+	// repairs a standing rejection after the operator restores those bytes.
+	// The sidecar rebuilds all referenced assets and refuses any difference.
+	knownBytes := m.appliedRaw != nil && bytes.Equal(m.appliedRaw, source.raw) ||
+		m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource
+	proveUnchanged := !pendingBundle && knownBytes && (assets || m.rejected) &&
+		oldCfg.StandaloneEnterprise() && next.StandaloneEnterprise()
+	if (oldCfg.StandaloneEnterprise() || next.StandaloneEnterprise()) && !startupBoot &&
+		!pendingBundle && !proveUnchanged &&
+		(assets || m.rejected || !bytes.Equal(m.appliedRaw, source.raw) || len(diff.Changed) > 0) {
+		err := fmt.Errorf("config reload refused: this managed computer takes config and policy from a signed policy bundle; apply a new signed bundle")
+		m.rejected = true
+		recordGenerationBuildError(err)
+		m.recordLoadError(ctx, "managed_unbundled_reload", err)
+		if m.health != nil {
+			m.setConfigHealth(StateError, err.Error(), map[string]interface{}{
+				"path": m.path, "generation": m.gen.Load(), "reason": reason,
+			})
+		}
+		return err
+	}
+	if !proveUnchanged {
+		setPendingRestart(pendingRestart)
+		if len(pendingRestart) > 0 {
+			fmt.Fprintf(os.Stderr, "[config] restart the gateway to apply %s; the rest of the change applies now\n",
+				strings.Join(pendingRestart, ", "))
+		}
 	}
 	// A standing rejection also forces a rebuild: the repair (an asset
 	// restored, a bad config edit reverted) changes nothing the diff sees,
@@ -1282,7 +1340,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 	if len(diff.Changed) == 0 && (assets || m.rejected) {
 		diff.Changed = []string{configDiffAssets}
 	}
-	if len(diff.Changed) == 0 && m.pendingBundleGeneration(source.raw) {
+	if len(diff.Changed) == 0 && pendingBundle {
 		// The bundle may have changed only a referenced policy file. Build
 		// its generation before recording that it was applied.
 		diff.Changed = []string{configDiffAssets}
@@ -1336,12 +1394,16 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		return nil
 	}
 	if m.applySnapshot == nil {
-		m.recordLoadError(ctx, "apply_unavailable")
+		m.recordLoadError(ctx, "apply_unavailable", nil)
 		return fmt.Errorf("config reload schema v8 requires a source-aware apply callback")
 	}
+	source.proveUnchanged = proveUnchanged
 	applyStarted := time.Now()
 	applyErr := m.applySnapshot(ctx, oldCfg, next, diff, cloneConfigReloadSource(source))
 	applyElapsed = time.Since(applyStarted)
+	if proveUnchanged && applyErr == nil {
+		applyErr = fmt.Errorf("config reload refused: managed generation was not proven unchanged; apply a new signed policy bundle")
+	}
 	if errors.Is(applyErr, errGenerationUnchanged) {
 		// The rebuild succeeded and matches the live generation: nothing to
 		// swap, but an earlier rejected edit is resolved (a pack restored
@@ -1349,17 +1411,19 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		// state; otherwise they stay until an unrelated config write.
 		m.rejected = false
 		m.rejectedAssets.Store(nil)
-		exportCandidateKey()
 		clearGenerationBuildError()
-		recordHandEdit(ctx, next, m.path, source.raw)
-		refreshConfigGeneration(source.raw)
+		if !proveUnchanged || m.appliedRaw == nil {
+			exportCandidateKey()
+			recordHandEdit(ctx, next, m.path, source.raw)
+			refreshConfigGeneration(source.raw)
+			version.SetContentHash(source.raw)
+		}
 		// The startup reconcile of the boot bytes applies nothing new: they
 		// become the applied bytes, so a later event for the same bytes
 		// does not attribute their writer again.
 		if m.appliedRaw == nil && m.startupKnown && sha256.Sum256(source.raw) == m.startupSource {
 			m.appliedRaw = source.raw
 		}
-		version.SetContentHash(source.raw)
 		if m.health != nil {
 			state, msg := StateRunning, ""
 			if envOverlayErr != nil {
@@ -1379,7 +1443,7 @@ func (m *ConfigManager) reload(ctx context.Context, reason string, assets bool) 
 		m.noteRejectedCandidateAssets(next)
 		m.permissionRetry = errors.Is(applyErr, os.ErrPermission)
 		recordGenerationBuildError(applyErr)
-		m.recordLoadError(ctx, "apply_rejected")
+		m.recordLoadError(ctx, "apply_rejected", applyErr)
 		if m.health != nil {
 			m.setConfigHealth(StateError, applyErr.Error(), map[string]interface{}{
 				"path":             m.path,

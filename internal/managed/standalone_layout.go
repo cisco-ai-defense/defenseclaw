@@ -52,6 +52,16 @@ type StandaloneLayout struct {
 	ManifestPath    string // guardian target manifest (enumerator output)
 	DescriptorPath  string // public, non-secret runtime descriptor for hooks
 	LifecycleDir    string // transaction state, snapshots, preimages, persistent lock
+	// LifecycleMarkerPath (Linux and macOS) exists while a lifecycle run
+	// holds the lifecycle lock, so from before the run can stop or restart
+	// the gateway until the gateway it started is ready. It is in the
+	// root-only /run (/var/run on macOS): no account can make or remove it,
+	// and every account can see it. A managed hook answers a gateway it
+	// cannot reach closed while it exists, whatever the administrator chose
+	// for an outage (GAP-1074). Windows has none: there the gateway
+	// service's start type is the marker (it is automatic only outside a
+	// lifecycle transaction).
+	LifecycleMarkerPath string
 
 	// Service-owned runtime state.
 	DataDir         string // gateway state (audit DB, runtime tokens)
@@ -66,14 +76,7 @@ type StandaloneLayout struct {
 	// written hook runtime state: the per-user connector enrollments and
 	// runtime selectors and the public machine policy summary. The state
 	// root is not readable by standard users, so it cannot live there.
-	HookRuntimeDir string
-	// HookSessionDir holds the gateway's protected foreign-hook session
-	// records (enterprisepolicy.PublishForeignHookSessionDecision): one
-	// folder per account that only that account can read and only the
-	// gateway service writes. The lifecycle creates it (root/SYSTEM), owned
-	// by or writable for the gateway service; a hook reads its own record
-	// during a gateway outage under fail mode open.
-	HookSessionDir  string
+	HookRuntimeDir  string
 	HookSocketPath  string
 	SensorSocketDir string
 
@@ -122,12 +125,13 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			GuardianAuthDir: "/var/lib/defenseclaw-hook-guardian",
 			LogDir:          "/var/log/defenseclaw",
 			HookSocketDir:   "/run/defenseclaw-hook",
-			HookSessionDir:  "/run/defenseclaw-hook/sessions",
 			HookSocketPath:  "/run/defenseclaw-hook/hook.sock",
 			SensorSocketDir: "/run/defenseclaw-sensor",
 			ServiceUser:     StandaloneLinuxServiceUser,
 			ServiceGroup:    StandaloneLinuxServiceUser,
 			APIAddr:         StandaloneAPIAddr,
+
+			LifecycleMarkerPath: "/run/defenseclaw-lifecycle.active",
 		}, nil
 	case "darwin":
 		const root = "/opt/cisco/defenseclaw"
@@ -150,12 +154,13 @@ func StandaloneLayoutFor(goos string) (StandaloneLayout, error) {
 			// needs cgo, so the gateway binds the hook socket itself in a
 			// lifecycle-created directory that only _defenseclaw can write.
 			HookSocketDir:   root + "/run",
-			HookSessionDir:  root + "/run/sessions",
 			HookSocketPath:  root + "/run/hook.sock",
 			SensorSocketDir: "/var/run/defenseclaw-sensor",
 			ServiceUser:     StandaloneDarwinServiceUser,
 			ServiceGroup:    StandaloneDarwinServiceUser,
 			APIAddr:         StandaloneAPIAddr,
+
+			LifecycleMarkerPath: "/var/run/defenseclaw-lifecycle.active",
 		}, nil
 	default:
 		return StandaloneLayout{}, fmt.Errorf("no unix standalone layout for %q", goos)
@@ -193,7 +198,6 @@ func StandaloneWindowsLayoutForRoots(programFiles, programData string) (Standalo
 		HookSocketDir:   install + `\ipc`,
 		HookSocketPath:  "",
 		HookRuntimeDir:  programData + `\Cisco\` + StandaloneWindowsHookRuntimeDirName,
-		HookSessionDir:  programData + `\Cisco\` + StandaloneWindowsHookSessionDirName,
 		SensorSocketDir: install + `\ipc`,
 		ServiceUser:     `NT SERVICE\` + StandaloneWindowsGatewaySvc,
 		ServiceGroup:    "",
@@ -211,50 +215,8 @@ func StandaloneWindowsScannerRuntimeDirForRoot(programData string) string {
 	return strings.TrimRight(strings.TrimSpace(programData), `\`) + `\Cisco\DefenseClaw-ScannerRuntime`
 }
 
-// StandaloneWindowsHookRuntimeDirName and StandaloneWindowsHookSessionDirName
-// are the last elements of the Windows HookRuntimeDir and HookSessionDir,
-// both in %ProgramData%\Cisco.
-const (
-	StandaloneWindowsHookRuntimeDirName = "DefenseClaw-HookRuntime"
-	StandaloneWindowsHookSessionDirName = "DefenseClaw-HookSessions"
-)
-
-// StandaloneHookSessionDirForDataDir is the protected session record folder
-// (HookSessionDir) of the standalone layout for goos whose DataDir is
-// dataDir. The hook guardian falls back to it when it cannot resolve the
-// layout itself (on Windows, a failed lookup of the protected ProgramData
-// registration): the data directory it already runs with names the same
-// folder, so it can still remove the records' key (GAP-0352, 1.0.4 guard
-// loop round 1). False when dataDir is not that layout's.
-func StandaloneHookSessionDirForDataDir(goos, dataDir string) (string, bool) {
-	dataDir = strings.TrimSpace(dataDir)
-	if dataDir == "" {
-		return "", false
-	}
-	if goos != "windows" {
-		layout, err := StandaloneLayoutFor(goos)
-		if err != nil || path.Clean(dataDir) != layout.DataDir {
-			return "", false
-		}
-		return layout.HookSessionDir, true
-	}
-	const probe = `C:\ProgramData`
-	shape, err := StandaloneWindowsLayoutForRoots(probe, probe)
-	if err != nil {
-		return "", false
-	}
-	suffix := strings.TrimPrefix(shape.DataDir, probe)
-	dataDir = strings.TrimRight(dataDir, `\`)
-	if len(dataDir) <= len(suffix) || !strings.EqualFold(dataDir[len(dataDir)-len(suffix):], suffix) {
-		return "", false
-	}
-	programData := dataDir[:len(dataDir)-len(suffix)]
-	layout, err := StandaloneWindowsLayoutForRoots(programData, programData)
-	if err != nil || !strings.EqualFold(layout.DataDir, dataDir) {
-		return "", false
-	}
-	return layout.HookSessionDir, true
-}
+// StandaloneWindowsHookRuntimeDirName is the Windows HookRuntimeDir folder name.
+const StandaloneWindowsHookRuntimeDirName = "DefenseClaw-HookRuntime"
 
 // StandaloneWindowsScannerRuntimeName is the scanner runtime executable.
 const StandaloneWindowsScannerRuntimeName = "defenseclaw-scanners.exe"
@@ -309,7 +271,7 @@ func (l StandaloneLayout) Validate() error {
 	for _, value := range []string{
 		l.InstallRoot, l.BinDir, l.ConfigDir, l.ConfigPath, l.PolicyDir, l.VendorPolicyDir, l.SecretsDir,
 		l.ManifestPath, l.DescriptorPath, l.LifecycleDir, l.DataDir, l.GuardianAuthDir,
-		l.LogDir, l.HookSocketDir, l.HookSessionDir, l.HookSocketPath, l.SensorSocketDir,
+		l.LogDir, l.HookSocketDir, l.HookSocketPath, l.SensorSocketDir,
 	} {
 		if value == "" || !path.IsAbs(value) || path.Clean(value) != value {
 			return fmt.Errorf("standalone layout path %q is not absolute and clean", value)

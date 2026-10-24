@@ -355,13 +355,15 @@ func apiAuthenticationFailureLogReason(reason string) string {
 	if canonical := apiAuthenticationFailureReason(reason); canonical != "" {
 		return canonical
 	}
+	if hookexec.IsManagedProcessContextReason(reason) {
+		return reason
+	}
 	switch reason {
 	case managedHookReasonPeerUnverified,
 		managedHookReasonUIDUnregistered,
 		managedHookReasonRootDenied,
 		managedHookReasonLedgerUnavailable,
 		managedHookReasonConnectorUnknown,
-		hookexec.ManagedUserNamespaceReason,
 		userScopedIdentityMismatchReason,
 		userScopedListenerProofRefusedReason,
 		"invalid_scoped_header_token",

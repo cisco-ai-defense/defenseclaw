@@ -274,10 +274,21 @@ func (s *nodeHarnessSession) wait() (report string, ok bool) {
 func writeRenderedPlugin(t *testing.T, asset, name string, data templateData) string {
 	t.Helper()
 	path := filepath.Join(testenv.PrivateTempDir(t), name)
-	if err := os.WriteFile(path, []byte(renderPluginAssetForTest(t, asset, data)), 0o600); err != nil {
+	body := withoutPeerCheckForTest(renderPluginAssetForTest(t, asset, data))
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func withoutPeerCheckForTest(body string) string {
+	// Verdict tests use an in-process fake gateway. Replace the per-user
+	// transport with a test-only fetch; account-guard tests render the exact
+	// installed asset and exercise the native helper or listener proof.
+	body = strings.ReplaceAll(body, `const DC_PER_USER_NATIVE_POST: string = "1"`, `const DC_PER_USER_NATIVE_POST: string = ""`)
+	body = strings.ReplaceAll(body, `const DC_PER_USER_NATIVE_POST = "1";`, `const DC_PER_USER_NATIVE_POST = "";`)
+	body = strings.ReplaceAll(body, `throw peerError("the DefenseClaw gateway listener has no account proof")`, `return fetch("http://" + DC_API_ADDR + path, init)`)
+	return strings.ReplaceAll(body, `throw defenseclawPeerError("the DefenseClaw gateway listener has no account proof");`, `return fetch("http://" + DC_API_ADDR + path, init);`)
 }
 
 // openCodePluginHarness loads a rendered OpenCode plugin with a stub TUI

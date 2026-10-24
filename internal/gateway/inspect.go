@@ -716,12 +716,20 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			Findings:   []string{"STATIC-BLOCK"},
 		}
 	}
-	// An explicit allow skips rule/pattern/AID/judge scanning. Write tools
-	// still run CodeGuard on their content (D2): the allow bypasses the
-	// scan gate, not code-content inspection.
+	// An explicit allow skips ordinary rule/pattern/AID/judge scanning. A
+	// resolved high-severity write is still inspected: allowing the tool name
+	// cannot authorize an active instruction-file mutation. Write tools also
+	// keep CodeGuard inspection of their content (D2).
 	allowed, err := pe.IsToolAllowedForConnector(req.Tool, req.Connector)
 	if err != nil {
 		return toolPolicyLookupErrorVerdict("inspect", "allow-list", req.Tool, req.Connector, err)
+	}
+	if allowed {
+		cfg := a.decisionConfig(ctx)
+		if (cfg == nil || !cfg.SecureClientIntegration()) &&
+			len(provedHighWriteFindings(ctx, action, nil)) != 0 {
+			allowed = false
+		}
 	}
 	if allowed {
 		if !isWriteToolName(strings.ToLower(req.Tool)) {
@@ -751,7 +759,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		)
 	}
 	ruleFindings := dispatchTrustedAction(ctx, action)
-	ruleFindings, provedHighWrite := provedHighWriteFindings(ctx, action, ruleFindings)
+	ruleFindings = provedHighWriteFindings(ctx, action, ruleFindings)
 
 	// CodeGuard: scan file content for any file-write tool.
 	//
@@ -792,9 +800,6 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		runtimeAction := guardrailActionForConnectorFindings(
 			a.decisionConfig(ctx), req.Connector, ruleFindings, true,
 		)
-		if provedHighWrite {
-			runtimeAction = guardrailActionBlock
-		}
 		if enforceableSeverity != "NONE" {
 			codeGuardAction := guardrailActionForConnector(
 				a.decisionConfig(ctx), req.Connector, enforceableSeverity, true,
@@ -1755,26 +1760,30 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// user PII. Callers who need raw evidence for triage set
 	// X-DefenseClaw-Reveal-PII: 1; we record that fact in the
 	// canonical compliance history so every reveal is discoverable.
-	reveal := wantsReveal(r)
-	responseVerdict := verdict.sanitizeForResponse(reveal)
-	if reveal {
-		// Audit the reveal BEFORE exposing the raw response. The reveal
-		// occurrence is deliberately content-free: the preceding canonical
-		// guardrail/finding records already contain the source evidence and
-		// receive the destination's configured redaction projection. Copying
-		// that evidence into this mandatory compliance record would add no
-		// forensic value and could expose it through the mandatory floor.
-		_ = a.logger.LogActionCtx(r.Context(), string(audit.ActionInspectReveal), req.Tool,
-			fmt.Sprintf("severity=%s remote=%s reason_present=%t finding_count=%d",
-				verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
-				len(verdict.DetailedFindings)))
-	}
 	// The worker only classifies the managed AID fail-open reason. Account for
 	// it after this handler has selected the allow result; the 504
 	// path returns above and deliberately records nothing because installed
 	// hooks fail closed on an unreachable gateway.
 	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
-	a.writeJSON(w, http.StatusOK, responseVerdict)
+	a.writeInspectVerdict(w, r, "/api/v1/inspect/tool", req.Tool, verdict)
+}
+
+// writeInspectVerdict is the only response boundary for direct inspect routes
+// that can reveal matched evidence. The content-free reveal record must be
+// saved first; a failed audit write cannot authorize a raw response.
+func (a *APIServer) writeInspectVerdict(w http.ResponseWriter, r *http.Request, route, target string, verdict *ToolInspectVerdict) {
+	reveal := wantsReveal(r)
+	if reveal {
+		details := fmt.Sprintf("severity=%s remote=%s reason_present=%t finding_count=%d",
+			verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
+			len(verdict.DetailedFindings))
+		event := a.inspectAuditEvent(r, route, string(audit.ActionInspectReveal), target, details)
+		if err := a.logger.LogEventCtx(r.Context(), event); err != nil {
+			a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "reveal audit unavailable"})
+			return
+		}
+	}
+	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
 // inspectToolAuditEvent is the inspect-tool-* audit row.

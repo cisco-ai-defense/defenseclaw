@@ -99,9 +99,13 @@ $LockDir = Join-Path $DataDir ".install.lock"
 $RunKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
 # The per-user DefenseClaw Setup of 0.8.7-0.8.10, which an upgrade replaces.
 $SetupRoot = Join-Path $env:LOCALAPPDATA "Programs\DefenseClaw"
+$Setup = $null
 $SetupUninstallKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw"
 $SetupCache = Join-Path $env:LOCALAPPDATA "DefenseClaw\InstallerCache"
 $SetupHookState = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\hook-runtime-state.json"
+# Private copies of this release's hook that Setup's launcher delegates to
+# once Setup is replaced (Publish-SetupLauncherTrampoline).
+$SetupDelegatedHooks = Join-Path $env:LOCALAPPDATA "DefenseClaw\HookRuntime\delegated"
 # Real files in BinDir. Connector hooks record these paths, so they never move.
 $ManagedBinaries = @("defenseclaw-gateway.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe")
 # .cmd shims in BinDir for console scripts in the venv; the gateway runs them by name.
@@ -143,7 +147,7 @@ if ($RunAsFile -and $PSVersionTable.PSEdition -ne "Core" -and $env:PSModulePath)
     $env:PSModulePath = $modulePath -join ";"
 }
 $RunByUpgrade = $RunAsFile -and (Split-Path -Leaf (Split-Path -Parent $PSCommandPath)) -match '^defenseclaw-(upgrade|rollback)-'
-$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false }
+$Run = @{ Lock = $false; Transcript = $false; Log = ""; Owner = [IntPtr]::Zero; QuickstartRerun = ""; QuickstartRc = 0; OldGatewayDown = $false; UsageError = $false; UndoPending = $false; RestorePending = $false; UnprovenReplacement = $null; UnprovenReplacementUnchanged = $false; UnprovenGatewayWasRunning = $false; UnprovenCloserSha256 = "" }
 
 function Write-Info([string]$Message) { Write-Host "  > $Message" -ForegroundColor Blue }
 function Write-Ok([string]$Message) { Write-Host "  + $Message" -ForegroundColor Green }
@@ -181,6 +185,13 @@ function Confirm-Step([string]$Prompt, [switch]$DefaultNo) {
 }
 
 function Get-Field($Object, [string]$Name) {
+    # A newly written lifecycle record is an OrderedDictionary until the
+    # next process reads its JSON. Its keys are not PSObject properties in
+    # Windows PowerShell 5.1; use dictionary lookup for that in-memory path.
+    if ($Object -is [Collections.IDictionary]) {
+        if ($Object.Contains($Name)) { return $Object[$Name] }
+        return $null
+    }
     if ($null -ne $Object -and $Object.PSObject.Properties[$Name]) { return $Object.PSObject.Properties[$Name].Value }
     return $null
 }
@@ -491,7 +502,7 @@ function ConvertTo-ProcessArgument([string]$Value) {
 $UvVersion = "0.12.13"
 $UvZipSha256 = "a86c9dc7bad9b03f388583b7187c05fe9951c2e0d392217e8fd43d97787f6ec2"
 
-function Install-Uv {
+function Install-Uv([string]$Destination = $BinDir) {
     $tmp = Join-Path ([IO.Path]::GetTempPath()) ("defenseclaw-uv-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $tmp | Out-Null
     try {
@@ -499,19 +510,21 @@ function Install-Uv {
         if (-not (Save-Url "https://github.com/astral-sh/uv/releases/download/$UvVersion/uv-x86_64-pc-windows-msvc.zip" $zip)) { return "" }
         if ((Get-Sha256 $zip) -ne $UvZipSha256) { Write-Err "The uv download does not match its pinned checksum"; return "" }
         Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $tmp "uv") -Force
-        New-Item -ItemType Directory -Path $BinDir -Force | Out-Null
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
         $record = @()
         foreach ($name in @("uv.exe", "uvx.exe", "uvw.exe")) {
             $file = Join-Path $tmp "uv\$name"
             if (Test-Path -LiteralPath $file) {
-                Copy-Item -LiteralPath $file -Destination (Join-Path $BinDir $name) -Force
-                $record += "$(Get-Sha256 (Join-Path $BinDir $name))  $name"
+                Copy-Item -LiteralPath $file -Destination (Join-Path $Destination $name) -Force
+                $record += "$(Get-Sha256 (Join-Path $Destination $name))  $name"
             }
         }
-        # `defenseclaw uninstall --binaries` removes the uv this installed
-        # while it still matches this record.
-        Invoke-Quietly { [IO.File]::WriteAllText((Join-Path $BinDir "defenseclaw-uv.sha256"), (($record -join "`n") + "`n")) }
-        $uv = Join-Path $BinDir "uv.exe"
+        # Only a bin-folder install is recorded for `uninstall --binaries`;
+        # a recovery copy kept outside that folder is not an installed tool.
+        if (Test-SamePath $Destination $BinDir) {
+            Invoke-Quietly { [IO.File]::WriteAllText((Join-Path $BinDir "defenseclaw-uv.sha256"), (($record -join "`n") + "`n")) }
+        }
+        $uv = Join-Path $Destination "uv.exe"
         if (Test-Path -LiteralPath $uv) { return $uv }
         return ""
     } catch {
@@ -606,6 +619,7 @@ function Invoke-ReleaseInstaller([string]$ReleaseVersion, [string[]]$Forward) {
             # rollback. Older/unrecognized installers need this outer check.
             Wait-VenvFree
             $restartCurrent = [bool](Get-GatewayProcess)
+            Assert-NoLoadedPluginAgents
             if (-not (Stop-Gateway)) { Die "The gateway did not stop; the release installer was not started" }
             Stop-Watchdog
             Assert-GatewayQuiescent "Version change to $target"
@@ -752,7 +766,10 @@ function Get-InstalledVersion {
     # The gateway on PATH is the install that runs; a source install leaves an
     # older release venv behind, so its version is only the fallback (GAP-2454).
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
-    if ((Test-Path -LiteralPath $gateway) -and (Get-NativeOutput $gateway @("--version")) -match '\d+\.\d+\.\d+') {
+    # A later installer can put binaries beside a pending first-install
+    # record. Never execute one of those unproven binaries for discovery.
+    $unproven = $Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement
+    if (-not $unproven -and (Test-Path -LiteralPath $gateway) -and (Get-NativeOutput $gateway @("--version")) -match '\d+\.\d+\.\d+') {
         return $Matches[0]
     }
     $info = Get-ChildItem -LiteralPath (Join-Path $Venv "Lib\site-packages") -Filter "defenseclaw-*.dist-info" `
@@ -804,6 +821,78 @@ function Get-GatewayProcess {
     return $process
 }
 
+# A loaded 1.0.3 OpenCode or Amp plugin cannot acquire this release's lock
+# check until its agent process exits. Recognize native binaries and the
+# Node/Bun launchers used by package installs without reading plugin files.
+function Get-LoadedPluginAgent($Process) {
+    $name = ([string]$Process.Name).ToLowerInvariant()
+    if ($name -match '^opencode(\.exe)?$') { return "opencode" }
+    if ($name -match '^amp(\.exe)?$') { return "amp" }
+    if ($name -notmatch '^(node|bun)(\.exe)?$') { return "" }
+    $command = [string]$Process.CommandLine
+    if ($command -match '(?i)(?:^|[\\/\s])opencode(?:[\\/\s]|$)') { return "opencode" }
+    if ($command -match '(?i)@sourcegraph[\\/]amp(?:[\\/\s]|$)' -or
+        $command -match '(?i)(?:^|[\\/\s])amp(?:[\\/\s]|$)') { return "amp" }
+    return ""
+}
+
+function Assert-NoLoadedPluginAgents {
+    $loaded = @()
+    $current = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    try { $currentSession = (Get-Process -Id $PID -ErrorAction Stop).SessionId } catch {
+        Die "Could not check this installer's process session; the gateway was not stopped"
+    }
+    try { $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop) } catch {
+        Die "Could not check running OpenCode and Amp processes; the gateway was not stopped"
+    }
+    foreach ($process in $processes) {
+        $agent = Get-LoadedPluginAgent $process
+        if (-not $agent) { continue }
+        $owner = $null
+        try { $owner = Invoke-CimMethod -InputObject $process -MethodName GetOwner -ErrorAction Stop } catch { }
+        if ($null -eq $owner -or [int]$owner.ReturnValue -ne 0) {
+            # A standard user may not read another account's process owner
+            # on a shared host. Ignore that uncertainty only across sessions;
+            # a readable same-account process in any session still blocks.
+            if ($null -ne $process.SessionId -and [int]$process.SessionId -ne [int]$currentSession) { continue }
+            Die "Could not check the owner of a running $agent process; the gateway was not stopped"
+        }
+        if (("$($owner.Domain)\$($owner.User)") -ieq $current) { $loaded += "$agent (PID $($process.ProcessId))" }
+    }
+    if ($loaded.Count) {
+        Die "Close OpenCode and Amp completely before installing or upgrading DefenseClaw, then run this installer again; gateway still running: $($loaded -join ', ')"
+    }
+}
+
+function Get-InstallGatewayState {
+    # "running", "down" or "unknown": whether this install's gateway, or its
+    # watchdog that can start it again, still runs. gateway.pid alone proves
+    # nothing down: a gateway removes the file before it exits, and a failed
+    # stop or recovery can leave one running with the file gone or unreadable.
+    # So every process whose image is this install's gateway counts too (a
+    # prefix: a binary renamed aside, .old-*, as well), and so does DefenseClaw
+    # Setup's. A pid file or a process list that cannot be read, or a recorded
+    # gateway whose image cannot be read, is "unknown": nothing proves it down.
+    $images = @(Join-Path $BinDir "defenseclaw-gateway")
+    $setupInstall = Get-Variable -Name Setup -ValueOnly -ErrorAction SilentlyContinue
+    if ($setupInstall -and (Get-Field $setupInstall "Root")) { $images += Join-Path $setupInstall.Root "bin\defenseclaw-gateway" }
+    try { if (Get-GatewayProcess) { return "running" } } catch { return "unknown" }
+    try { if (@(Get-ProcessesUnder $images).Count) { return "running" } } catch { return "unknown" }
+    $file = Join-Path $DataDir "gateway.pid"
+    if (-not (Test-Path -LiteralPath $file)) { return "down" }
+    try {
+        $text = [IO.File]::ReadAllText($file).Trim()
+        $record = $null
+        try { $record = $text | ConvertFrom-Json } catch { }
+        $id = Get-Field $record "pid"
+        if (-not $id -and $text -match '^\d+$') { $id = $text }
+        if (-not $id) { return "down" }
+        $process = Get-Process -Id ([int]$id) -ErrorAction SilentlyContinue
+        if ($process -and $process.ProcessName -eq "defenseclaw-gateway" -and -not $process.Path) { return "unknown" }
+    } catch { return "unknown" }
+    return "down"
+}
+
 function Stop-Gateway {
     # Stop the running gateway with its own (the old) binary; kill it as a last
     # resort. Wait for the process itself, not its pid file: a gateway removes
@@ -826,6 +915,26 @@ function Stop-Gateway {
     }
     Stop-Watchdog
     return $process.HasExited -and -not (Get-GatewayProcess)
+}
+
+function Stop-UnprovenGateway {
+    # A binary added after a first-install record has no recorded hash. Do
+    # not run its `stop` command (or its watchdog's command): terminate only
+    # processes whose image is this install's gateway, then verify they left.
+    $image = Join-Path $BinDir "defenseclaw-gateway.exe"
+    for ($attempt = 0; $attempt -lt 10; $attempt++) {
+        $running = @(Get-ProcessesUnder @($image) | Where-Object { $_.ExecutablePath -eq $image })
+        if (-not $running.Count -and -not (Get-GatewayProcess)) { return }
+        foreach ($row in $running) {
+            $process = Get-Process -Id $row.ProcessId -ErrorAction SilentlyContinue
+            if (-not $process) { continue }
+            $path = [string]$process.Path
+            if (-not [string]::Equals($path, $image, [StringComparison]::OrdinalIgnoreCase)) { continue }
+            Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw "The unproven gateway or watchdog from $image is still running; stop it, then run: $(Get-LifecycleNextStep -Accept)"
 }
 
 function Stop-Watchdog {
@@ -949,7 +1058,8 @@ function Move-DamagedAuditStore([string]$BackTo) {
 
 function Start-Gateway {
     # Its readiness wait is the health check. Exit code 3: running, but a
-    # connector refused admission (upgrading again would not change that).
+    # connector refused admission (upgrading again would not change that) or,
+    # with --require-every-connector, a configured connector is not guarded.
     Write-Info "Starting the gateway [$(Get-UtcClock)]"
     $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
     if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
@@ -959,7 +1069,12 @@ function Start-Gateway {
     }
     $version = Get-InstalledVersion
     if ((Test-Version $version) -and [version]$version -lt [version]"1.0.1") { Reset-AuditJournalMode }
-    $rc = Invoke-Native $gateway @("start")
+    # GAP-0878: a gateway that has --require-every-connector exits 3, not 0,
+    # when its boot left a configured connector unguarded. An older one (a
+    # restored or rolled-back install) refuses the flag, so ask it first.
+    $startArgs = @("start")
+    if ((Invoke-Native $gateway @("start", "--require-every-connector", "--help") -Quiet) -eq 0) { $startArgs += "--require-every-connector" }
+    $rc = Invoke-Native $gateway $startArgs
     if ($rc -in @(0, 3) -or -not (Get-GatewayProcess)) { return $rc }
     # A first start over a large audit database can outlast start's own
     # 60-second readiness wait while the gateway keeps starting (GAP-1348).
@@ -971,7 +1086,12 @@ function Start-Gateway {
         Start-Sleep -Seconds 3
         if ((Invoke-Native $gateway @("status") -Quiet) -eq 0) {
             $up++
-            if ($up -ge 2) { Write-Ok "The gateway finished starting"; return 0 }
+            if ($up -ge 2) {
+                Write-Ok "The gateway finished starting"
+                # Its start gave up before it could check the connectors.
+                if ($startArgs.Count -gt 1 -and (Invoke-Native $gateway $startArgs) -ne 0) { return 3 }
+                return 0
+            }
         } else {
             $up = 0
         }
@@ -1063,13 +1183,113 @@ function Find-SetupInstall {
 
 function Disable-SetupHooks {
     # Setup's hook launcher runs Setup's hook and restarts Setup's gateway on
-    # demand; without its state file it does nothing.
-    if (Test-Path -LiteralPath $SetupHookState) { Move-Path $SetupHookState (Join-Path $Staging "hook-runtime-state.json") }
+    # demand; without its state file it does nothing. Its state is set aside
+    # and the launcher delegates to this release's staged hook instead, which
+    # answers closed while this install holds the data directory (GAP-1000).
+    if (-not (Test-Path -LiteralPath $SetupHookState)) { return }
+    $state = Join-Path $Staging "hook-runtime-state.json"
+    Move-Path $SetupHookState $state
+    Invoke-Quietly {
+        [void](Publish-SetupLauncherTrampoline $state (Join-Path $Staging "bin\defenseclaw-hook.exe") (Join-Path $Staging "bin\defenseclaw-gateway.exe"))
+    }
+}
+
+function Enable-SetupHooks {
+    # Undo Disable-SetupHooks: Setup's hook launcher answers again.
+    $state = Join-Path $Staging "hook-runtime-state.json"
+    if (-not (Test-Path -LiteralPath $state)) { return }
+    if (Test-SetupLauncherTrampoline) { Remove-Item -LiteralPath $SetupHookState -Force }
+    if (-not (Test-Path -LiteralPath $SetupHookState)) { Move-Path $state $SetupHookState }
+}
+
+function Test-SetupLauncherTrampoline {
+    # True when Setup's launcher delegates to a copy of this release's hook
+    # (Publish-SetupLauncherTrampoline), not to Setup's own.
+    $hook = [string](Get-Field (Read-Json $SetupHookState) "hook_path")
+    if (-not $hook) { return $false }
+    try {
+        $folder = Split-Path -Parent (Split-Path -Parent $hook)
+        return [string]::Equals([IO.Path]::GetFullPath($folder).TrimEnd("\", "/"), [IO.Path]::GetFullPath($SetupDelegatedHooks).TrimEnd("\", "/"),
+            [StringComparison]::OrdinalIgnoreCase)
+    } catch {
+        # A path that does not parse is not this installer's.
+        return $false
+    }
+}
+
+function Protect-SetupLauncherFile([string]$Path) {
+    # Setup's launcher runs only a hook and a state file that this account
+    # owns and that only it and LocalSystem can open.
+    $user = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = New-Object Security.AccessControl.FileSecurity
+    $acl.SetOwner($user)
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @($user, (New-Object Security.Principal.SecurityIdentifier "S-1-5-18"))) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($sid, "FullControl", "Allow")))
+    }
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+function Publish-SetupLauncherTrampoline([string]$Template, [string]$Hook, [string]$Gateway) {
+    # GAP-1000: an agent session started before the upgrade keeps running
+    # Setup's stable launcher (%LOCALAPPDATA%\DefenseClaw\HookRuntime) until
+    # it restarts, and with its state set aside that launcher answers every
+    # call with exit 0 and no decision. Setup 0.8.10's launcher is a
+    # trampoline to the hook its state names: point it at a private copy of
+    # this release's hook (Hook), under the launcher identity Template
+    # records, so those sessions stay guarded. The state names the gateway
+    # at its final path in the bin folder, with Gateway's digest. True when
+    # the launcher now delegates; an older full launcher keeps its no-op.
+    $prior = Read-Json $Template
+    $launcher = [string](Get-Field $prior "launcher_path")
+    if (-not $prior -or [string](Get-Field $prior "schema_version") -ne "2" -or [string](Get-Field $prior "launcher_kind") -ne "trampoline" -or
+        -not $launcher -or -not (Test-Path -LiteralPath $launcher -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $Hook -PathType Leaf) -or -not (Test-Path -LiteralPath $Gateway -PathType Leaf)) {
+        return $false
+    }
+    $launcherHash = (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($launcherHash -ne ([string](Get-Field $prior "launcher_sha256")).ToLowerInvariant()) { return $false }
+    # A new folder for each copy: the launcher holds the copy it runs open
+    # without delete sharing, so a copy in use is never replaced.
+    $id = [guid]::NewGuid().ToString("N")
+    $folder = Join-Path $SetupDelegatedHooks $id
+    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+    $copy = Join-Path $folder "defenseclaw-hook.exe"
+    Copy-Item -LiteralPath $Hook -Destination $copy -Force
+    Protect-SetupLauncherFile $copy
+    $state = [ordered]@{
+        schema_version = 2
+        status = "active"
+        runtime_root = [string](Get-Field $prior "runtime_root")
+        launcher_path = $launcher
+        launcher_sha256 = $launcherHash
+        launcher_kind = "trampoline"
+        hook_path = $copy
+        hook_sha256 = (Get-FileHash -LiteralPath $copy -Algorithm SHA256).Hash.ToLowerInvariant()
+        data_root = $DataDir.TrimEnd("\")
+        gateway_path = (Join-Path $BinDir "defenseclaw-gateway.exe")
+        gateway_sha256 = (Get-FileHash -LiteralPath $Gateway -Algorithm SHA256).Hash.ToLowerInvariant()
+        transaction_id = $id
+    }
+    $next = "$SetupHookState.$id"
+    [IO.File]::WriteAllText($next, ($state | ConvertTo-Json -Compress))
+    Protect-SetupLauncherFile $next
+    # One rename, so the launcher reads the whole of one state or the other.
+    if (Test-Path -LiteralPath $SetupHookState) {
+        [IO.File]::Replace($next, $SetupHookState, "$next.old")
+        Remove-Item -LiteralPath "$next.old" -Force -ErrorAction SilentlyContinue
+    } else {
+        [IO.File]::Move($next, $SetupHookState)
+    }
+    foreach ($old in @(Get-ChildItem -LiteralPath $SetupDelegatedHooks -Directory -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $id })) {
+        # A copy a running call holds stays until the next install.
+        Remove-Item -LiteralPath $old.FullName -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $true
 }
 
 function Restore-SetupInstall([switch]$KeepStopped) {
-    $state = Join-Path $Staging "hook-runtime-state.json"
-    if (Test-Path -LiteralPath $state) { Move-Path $state $SetupHookState }
+    Enable-SetupHooks
     if ($WasRunning -and -not $KeepStopped) { Start-SetupGateway $Setup.Root }
 }
 
@@ -1092,6 +1312,10 @@ function Remove-SetupInstall {
     }
     Invoke-Quietly {
         $state = Join-Path $Staging "hook-runtime-state.json"
+        if (-not (Test-SetupLauncherTrampoline)) {
+            # Disable-SetupHooks could not point the launcher at the staged hook.
+            Invoke-Quietly { [void](Publish-SetupLauncherTrampoline $state (Join-Path $BinDir "defenseclaw-hook.exe") (Join-Path $BinDir "defenseclaw-gateway.exe")) }
+        }
         if (Test-Path -LiteralPath $state) { Move-Path $state (Join-Path $keep "hook-runtime-state.json") }
     }
     Invoke-Quietly {
@@ -1154,6 +1378,31 @@ function Get-ConfiguredConnectors {
     # The connectors the config names (active_connector.json).
     $state = Read-Json (Join-Path $DataDir "active_connector.json")
     return @(@(Get-Field $state "names") + @(Get-Field $state "name") | Where-Object { $_ -and $_ -ne "none" } | ForEach-Object { [string]$_ })
+}
+
+function Get-EffectiveConfigConnectors {
+    # Older gateways may not have status --json. In that case the installed
+    # connector roster must come from the effective config, including an
+    # external DEFENSECLAW_CONFIG, before this run records its rollback point.
+    # Every release defaults guardrail.enabled to false and a disabled
+    # guardrail tears every connector down, so such a config guards none.
+    # Get-LifecycleState still keeps any connector the running gateway reports.
+    $path = if ($env:DEFENSECLAW_CONFIG) { $env:DEFENSECLAW_CONFIG } else { Join-Path $DataDir "config.yaml" }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return @() }
+    $python = Join-Path $Staging "venv\Scripts\python.exe"
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { $python = Join-Path $Venv "Scripts\python.exe" }
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw "Cannot read the effective config's connectors without a checked Python environment: $path" }
+    # Windows PowerShell 5.1 strips embedded double quotes from native argv.
+    # Keep Python's string literals single-quoted so -c receives valid code.
+    $code = 'import json,sys,yaml; from defenseclaw.connector_paths import normalize; c=yaml.safe_load(open(sys.argv[1],encoding=''utf-8'')); c=c if isinstance(c,dict) else {}; g=c.get(''guardrail'') or {}; g=g if isinstance(g,dict) else {}; m=g.get(''connectors'') or {}; claw=c.get(''claw'') or {}; claw=claw if isinstance(claw,dict) else {}; names=[n for n,v in m.items() if isinstance(n,str) and n.strip() and not (isinstance(v,dict) and v.get(''enabled'') is False)] if isinstance(m,dict) and m else [g.get(''connector'') or claw.get(''mode'')]; names=names if str(g.get(''enabled'')).strip().lower() in (''1'',''t'',''true'') else []; print(json.dumps(sorted({normalize(n) for n in names if isinstance(n,str) and n.strip()})))'
+    $probe = Get-NativeProbe $python @("-I", "-c", $code, $path)
+    if ($probe.Exit -ne 0) { throw "Cannot read the effective config's connectors: $path" }
+    try {
+        $decoded = $probe.Output | ConvertFrom-Json -ErrorAction Stop
+        # Windows PowerShell 5.1 emits a JSON array as one object. Enumerate
+        # it explicitly or the caller sees one "System.Object[]" connector.
+        return @($decoded | ForEach-Object { [string]$_ })
+    } catch { throw "Cannot parse the effective config's connector roster: $path" }
 }
 
 function Test-ConnectorConfigured {
@@ -1277,20 +1526,66 @@ function Publish-File([string]$New, [string]$Destination) {
 }
 
 function Invoke-AtomicReplace([string]$New, [string]$Destination) {
-    # One rename of $New over $Destination (MoveFileEx with
-    # MOVEFILE_REPLACE_EXISTING and MOVEFILE_WRITE_THROUGH): at every instant
-    # the path names the old file or the new one. Windows refuses it, and
-    # changes nothing, while the installed file runs as a program or another
-    # program holds it.
+    # FileRenameInfoEx atomically replaces a name when existing open handles
+    # permit it. A mapped executable image can still refuse the replacement;
+    # Switch-InPlace retries for a short idle window (GAP-0732).
     if (-not ("DefenseClawInstall.Rename" -as [type])) {
-        Add-Type -Namespace DefenseClawInstall -Name Rename -MemberDefinition @'
-[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-public static extern bool MoveFileExW(string existingFileName, string newFileName, int flags);
+        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+
+namespace DefenseClawInstall {
+    public static class Rename {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFileW(string name, uint access, uint share,
+            IntPtr security, uint creation, uint flags, IntPtr templateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetFileInformationByHandle(SafeFileHandle file, int infoClass,
+            IntPtr info, uint length);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern bool MoveFileExW(string oldName, string newName, int flags);
+
+        public static void Replace(string source, string destination) {
+            // DELETE is the access needed to rename the staged source. Share
+            // read, write and delete so readers cannot strand this handle.
+            using (SafeFileHandle file = CreateFileW(source, 0x10000, 7, IntPtr.Zero, 3, 0x80, IntPtr.Zero)) {
+                if (file.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
+                byte[] name = Encoding.Unicode.GetBytes(Path.GetFullPath(destination));
+                int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+                int lengthOffset = IntPtr.Size == 8 ? 16 : 8;
+                int nameOffset = IntPtr.Size == 8 ? 20 : 12;
+                IntPtr info = Marshal.AllocHGlobal(nameOffset + name.Length + 2);
+                try {
+                    // FILE_RENAME_FLAG_REPLACE_IF_EXISTS |
+                    // FILE_RENAME_FLAG_POSIX_SEMANTICS, FileRenameInfoEx = 22.
+                    Marshal.WriteInt32(info, 3);
+                    Marshal.WriteIntPtr(info, rootOffset, IntPtr.Zero);
+                    Marshal.WriteInt32(info, lengthOffset, name.Length);
+                    Marshal.Copy(name, 0, IntPtr.Add(info, nameOffset), name.Length);
+                    Marshal.WriteInt16(info, nameOffset + name.Length, 0);
+                    if (SetFileInformationByHandle(file, 22, info, (uint)(nameOffset + name.Length + 2))) return;
+                    int error = Marshal.GetLastWin32Error();
+                    // Older Windows/filesystems do not support FileRenameInfoEx.
+                    // Keep the original atomic rename for those hosts.
+                    if ((error == 1 || error == 87) && MoveFileExW(source, destination, 0x9)) return;
+                    if (error == 1 || error == 87) error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(error);
+                } finally {
+                    Marshal.FreeHGlobal(info);
+                }
+            }
+        }
+    }
+    }
 '@
     }
-    if (-not [DefenseClawInstall.Rename]::MoveFileExW($New, $Destination, 0x9)) {
-        throw (New-Object ComponentModel.Win32Exception ([Runtime.InteropServices.Marshal]::GetLastWin32Error()))
-    }
+    [DefenseClawInstall.Rename]::Replace($New, $Destination)
 }
 
 function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) {
@@ -1298,20 +1593,23 @@ function Switch-InPlace([string]$New, [string]$Destination, [int]$Seconds = 10) 
     # the old launcher for replacement and can deny a concurrent hook's
     # execution with a sharing violation (GAP-0352); its partial-failure
     # recovery also cannot prove uninterrupted availability. A running hook
-    # or scanner may refuse the rename. Retry while the whole old launcher
-    # remains callable, then refuse the upgrade without changing it.
-    for ($waited = 0; ; $waited++) {
+    # or scanner may refuse the rename. Windows will also refuse replacing a
+    # mapped executable image, even with POSIX rename semantics. Registered
+    # calls arriving once a second can phase-lock a 500 ms retry to the busy
+    # part of every call. Probe each 25 ms gap while the whole old launcher
+    # remains callable, then refuse without changing it if no gap appears.
+    for ($attempt = 0; ; $attempt++) {
         try {
             Invoke-AtomicReplace $New $Destination
             return
         } catch {
             $reason = $_.Exception.Message
         }
-        if (-not (Test-Path -LiteralPath $New) -or $waited -ge 2 * $Seconds) {
+        if (-not (Test-Path -LiteralPath $New) -or $attempt -ge 40 * $Seconds) {
             Remove-Item -LiteralPath $New -Force -ErrorAction SilentlyContinue
             throw "Could not replace $Destination in place ($reason); it was left as it was. Retry the same install command after the running hook finishes"
         }
-        Start-Sleep -Milliseconds 500
+        Start-Sleep -Milliseconds 25
     }
 }
 
@@ -1594,7 +1892,21 @@ function Get-LifecycleState {
     $connectors = @()
     if ($running) {
         $report = Get-GatewayHealthReport $gateway
-        if ($report) { $connectors = @(Get-GuardedConnectors $report) }
+        # The old gateway's JSON can be absent or omit an enabled hook.
+        # A connector it explicitly reports as not running was already
+        # unhealthy, so requiring it here would make upgrade and rollback
+        # impossible. The effective config is authoritative over a stale
+        # active_connector.json, including with external DEFENSECLAW_CONFIG.
+        if ($report) { $reported = @(Get-GuardedConnectors $report) } else { $reported = @() }
+        $notRunning = @()
+        if ($report) {
+            $notRunning = @(@(Get-Field (Get-Field $report "health") "connectors") |
+                Where-Object { $_ -and [string](Get-Field $_ "state") -ne "running" } |
+                ForEach-Object { [string](Get-Field $_ "name") })
+        }
+        $enabled = @(Get-EffectiveConfigConnectors)
+        $connectors = @($reported + @($enabled | Where-Object { $notRunning -notcontains $_ }) |
+            Where-Object { $_ -and $_ -ne "none" } | Sort-Object -Unique)
     }
     $external = Get-ExternalConfig
     return [ordered]@{
@@ -1621,15 +1933,46 @@ function Write-LifecycleManifest([string]$Operation, [string]$From, [string]$To,
     # Step 1: the working state this step starts from, durable before
     # anything changes. A manifest an earlier run left is still being
     # restored: Resume-InterruptedRun finished it before this run got here.
-    $state = Get-LifecycleState
+    $unproven = $Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement
+    if ($unproven) {
+        # Reading the live gateway's health report here could execute bytes
+        # the earlier installer added. Keep the last proven baseline instead.
+        $original = $Run.UnprovenReplacement
+        $state = [ordered]@{
+            Bins = Get-Field $original "Bins"
+            GatewayWasRunning = $false
+            Connectors = @()
+            Config = [string](Get-Field $original "Config")
+            ExternalConfig = [string](Get-Field $original "ExternalConfig")
+            ExternalConfigSha256 = [string](Get-Field $original "ExternalConfigSha256")
+            HookFailModes = [string](Get-Field $original "HookFailModes")
+            BinDirProtected = [bool](Get-Field $original "BinDirProtected")
+        }
+    } else {
+        $state = Get-LifecycleState
+    }
     $state["Schema"] = 1
     $state["Operation"] = $Operation
     $state["From"] = $From
     $state["To"] = $To
     $state["Slot"] = $Slot
-    $state["SetupRoot"] = $(if ($Setup) { [string]$Setup.Root } else { "" })
+    # Rollback enters before the install path discovers a legacy Setup install.
+    $state["SetupRoot"] = $(if ($unproven) { [string](Get-Field $original "SetupRoot") } elseif ($Operation -eq "rollback") { "" } elseif ($Setup) { [string]$Setup.Root } else { "" })
     $state["Committed"] = $false
     $state["Created"] = (Get-Date).ToUniversalTime().ToString("o")
+    if ($unproven) {
+        # A prior first install recorded no binaries. A legacy installer
+        # populated them without retiring that record. The new transaction
+        # must keep the last proven baseline, not turn those unknown bytes
+        # into a restore target. Its record stays until the staged release is
+        # installed and proven, including across an interrupted snapshot.
+        if (-not $Run.UnprovenCloserSha256) {
+            throw "The checked release hook closer was not recorded before the replacement transaction"
+        }
+        $state["UnprovenReplacement"] = $true
+        $state["ReplacementGatewayWasRunning"] = [bool]$Run.UnprovenGatewayWasRunning
+        $state["ReplacementCloserSha256"] = [string]$Run.UnprovenCloserSha256
+    }
     foreach ($key in $Extra.Keys) { $state[$key] = $Extra[$key] }
     Write-DurableText $LifecycleManifest ($state | ConvertTo-Json -Depth 4)
     return $state
@@ -1703,13 +2046,16 @@ function Close-AllHooks([string[]]$Gateways) {
 }
 
 function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest, [bool]$RequireProtected = $true,
-        [string]$SetupRoot = "") {
+        [string]$SetupRoot = "", [switch]$AllowLegacyStatus) {
     # Step 3: what is wrong with the live install, empty when it is proven.
     # $Bins: the SHA-256 each managed binary must have. $GatewayRunning: the
     # gateway must run from this install. $Connectors: those it must guard.
     # -RequireDigest: a gateway that cannot report the live config's policy
     # digest fails too (this release's gateway can; an older restored one
     # may not).
+    # -AllowLegacyStatus applies only to restoring a recorded pre-1.0.4
+    # binary set. Those gateways may have no JSON status, but exact binary
+    # and config hashes plus their legacy status still permit recovery.
     $problems = @()
     $expected = ConvertTo-Map $Bins
     foreach ($name in $ManagedBinaries) {
@@ -1747,8 +2093,13 @@ function Test-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors
         foreach ($name in @($Connectors | Where-Object { $_ })) {
             if ($guarded -notcontains $name) { $problems += "connector $name is not guarded again: the gateway does not report its hooks running" }
         }
-    } elseif ((Invoke-Native $gateway @("status") -Quiet) -ne 0) {
-        $problems += "the gateway does not answer its health check"
+    } else {
+        if (-not $AllowLegacyStatus) {
+            $problems += "a usable JSON health report is unavailable, so the gateway's connectors cannot be proven"
+        }
+        if ((Invoke-Native $gateway @("status") -Quiet) -ne 0) {
+            $problems += "the gateway does not answer its health check"
+        }
     }
     $digest = Get-GatewayDigestProblem $gateway
     if ($digest -eq "unsupported") {
@@ -1765,7 +2116,7 @@ function Set-RecoveryPending([string]$Flag = "RestorePending") {
 }
 
 function Wait-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors = @(), [switch]$RequireDigest,
-        [bool]$RequireProtected = $true, [string]$SetupRoot = "") {
+        [bool]$RequireProtected = $true, [string]$SetupRoot = "", [switch]$AllowLegacyStatus) {
     # Test-LifecycleProof, asked again for a while when a running gateway is
     # part of the proof: a gateway that just passed its start readiness can
     # take a few seconds to report its connectors and its policy generation.
@@ -1774,7 +2125,7 @@ function Wait-LifecycleProof($Bins, [bool]$GatewayRunning, [string[]]$Connectors
     if ($null -eq $limit) { $limit = 30 }
     $clock = [Diagnostics.Stopwatch]::StartNew()
     while ($true) {
-        $problems = @(Test-LifecycleProof $Bins $GatewayRunning $Connectors -RequireDigest:$RequireDigest -RequireProtected $RequireProtected -SetupRoot $SetupRoot)
+        $problems = @(Test-LifecycleProof $Bins $GatewayRunning $Connectors -RequireDigest:$RequireDigest -RequireProtected $RequireProtected -SetupRoot $SetupRoot -AllowLegacyStatus:$AllowLegacyStatus)
         if (-not $problems.Count -or -not $GatewayRunning -or $clock.Elapsed.TotalSeconds -ge $limit) { return $problems }
         Start-Sleep -Seconds 2
     }
@@ -1824,7 +2175,8 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     $bins = Get-Field $Manifest "Bins"
     $protected = [bool](Get-Field $Manifest "BinDirProtected")
     $setupRoot = [string](Get-Field $Manifest "SetupRoot")
-    $problems = @(Wait-LifecycleProof $bins $running @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot)
+    $allowLegacyStatus = [string](Get-Field $Manifest "From") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+    $problems = @(Wait-LifecycleProof $bins $running @(Get-Field $Manifest "Connectors") -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus)
     $drift = @()
     $configChanged = $false
     $config = [string](Get-Field $Manifest "Config")
@@ -1840,12 +2192,13 @@ function Assert-LifecycleRestored($Manifest, [switch]$KeepStopped, [switch]$Outl
     # about its hooks.
     $unguarded = @()
     if ($Outlived -and $problems.Count -and
-        -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot).Count) {
+        -not @(Test-LifecycleProof $bins $running @() -RequireProtected $protected -SetupRoot $setupRoot -AllowLegacyStatus:$allowLegacyStatus).Count) {
         # Only connectors the record names are not guarded.
         $report = if ($setupRoot) { $null } else { Get-GatewayHealthReport (Join-Path $BinDir "defenseclaw-gateway.exe") }
         $kept = @(@(Get-Field (Get-Field $report "health") "connectors") | ForEach-Object { [string](Get-Field $_ "name") }) +
             @(Get-ConfiguredConnectors)
-        $configPath = Join-Path $DataDir "config.yaml"
+        $configPath = Get-ExternalConfig
+        if (-not $configPath) { $configPath = Join-Path $DataDir "config.yaml" }
         $configText = if (Test-Path -LiteralPath $configPath -PathType Leaf) { [IO.File]::ReadAllText($configPath) } else { "" }
         foreach ($problem in $problems) {
             $name = if ($problem -match '^connector (\S+) is not guarded again') { $Matches[1] } else { "" }
@@ -1908,6 +2261,20 @@ function Save-BinarySnapshot {
     Set-Content -LiteralPath (Join-Path $Snap "BIN_SAVED") -Value "" -Encoding Ascii
 }
 
+function Finish-EarlySnapshotRestore($Recorded) {
+    if (Test-RecoveryPending) { return }
+    if ($Run.UnprovenReplacement) {
+        # The copy in the slot was put back, but a still-open transaction
+        # from an older installer did not prove its binary baseline.
+        # Comparing the restored files with that empty map falsely reports
+        # every binary as foreign. Retain the record for the next run.
+        Set-RecoveryPending
+        Write-Warn "The hook snapshot was restored, but an earlier interrupted install never proved its binary baseline. Its lifecycle record remains; retry after the previous hook call finishes"
+        return
+    }
+    try { Assert-LifecycleRestored $Recorded } catch { Write-Err $_.Exception.Message }
+}
+
 function Save-Snapshot {
     if (-not (Test-Path -LiteralPath (Join-Path $Snap "BIN_SAVED"))) { Save-BinarySnapshot }
     New-Item -ItemType Directory -Path (Join-Path $Snap "data") | Out-Null
@@ -1966,7 +2333,7 @@ function Update-HookFailModes([string]$Gateway) {
 
 $script:FailModeHold = $null
 
-function Start-HookFailModeHold([string]$Gateway, [int]$GatewayId) {
+function Start-HookFailModeHold([string]$Gateway, [int]$GatewayId, [switch]$Closed) {
     # Update-HookFailModes for the running gateway $GatewayId, which is about
     # to stop. The staged gateway refreshes, holds the lock every release's
     # hook writer takes until that gateway has exited, and refreshes again:
@@ -1974,15 +2341,16 @@ function Start-HookFailModeHold([string]$Gateway, [int]$GatewayId) {
     # (a 1.0.x Codex registration check does), and the old hook would follow
     # that open while it is down. True once the first refresh is written and
     # the lock held; Complete-HookFailModeHold waits for the rest.
-    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return $true }
+    if (-not $Closed -and -not (Test-Path -LiteralPath (Join-Path $DataDir "hooks\.hookcfg") -PathType Leaf)) { return $true }
     switch (Test-HookFailModeRefresh $Gateway) {
         0 { }
-        1 { return $true }
+        1 { if ($Closed) { return $false }; return $true }
         default { return $false }
     }
     $info = New-Object System.Diagnostics.ProcessStartInfo
     $info.FileName = $Gateway
-    $info.Arguments = "connector refresh-fail-modes --data-dir `"$($DataDir.TrimEnd([char]92))`" --hold-until-exit $GatewayId"
+    $info.Arguments = "connector refresh-fail-modes --data-dir `"$($DataDir.TrimEnd([char]92))`" --hold-until-exit $GatewayId$(if ($Closed) { ' --closed' })"
     $info.UseShellExecute = $false
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
@@ -2036,6 +2404,34 @@ function Stop-HookFailModeHold {
         }
     } catch { }
     $hold.Process.Dispose()
+}
+
+function Start-SwapHookFailModes([string]$StagedGateway, $GatewayProcess) {
+    # Set the hooks' fail modes from the config for the swap and, for a
+    # running gateway, hold them until it exits; return the running gateway,
+    # or $null. DefenseClaw Setup's hook launcher stays at the path the agents
+    # cached, and with its state moved aside (Disable-SetupHooks) it answers
+    # every call with exit 0 and no decision. So it stays enabled while the
+    # staged gateway refreshes the modes and takes the hold (up to a minute);
+    # Invoke-Install disables it right before the stop, which an enabled
+    # launcher would undo by starting Setup's gateway again. With no gateway
+    # running it is disabled right after the refresh; a gateway it started
+    # before then is held and stopped like one that ran (GAP-0948 group).
+    # Every refusal here leaves the launcher enabled.
+    if (-not $GatewayProcess) {
+        if (-not (Update-HookFailModes $StagedGateway)) {
+            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+        }
+        if (-not $Setup) { return $null }
+        Disable-SetupHooks
+        $GatewayProcess = Get-GatewayProcess
+        if (-not $GatewayProcess) { return $null }
+        Enable-SetupHooks
+    }
+    if (-not (Start-HookFailModeHold $StagedGateway $GatewayProcess.Id)) {
+        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+    }
+    return $GatewayProcess
 }
 
 function Install-HookFirst([string]$Slot) {
@@ -2114,6 +2510,76 @@ function Save-HookCloser([string]$Slot, [string]$Gateway) {
     } catch {
         throw ("Could not keep the new gateway in $(Split-Path -Parent $closer), which closes the agent hooks if this install stops " +
             "unfinished ($($_.Exception.Message)); the installed hook was left as it was")
+    }
+}
+
+function Prepare-UnprovenReplacement([string]$Gateway, $ExpectedBins) {
+    # The empty first-install record remains the journal. Keep the checked
+    # release gateway beside it before touching the older running install.
+    # A retry can then close hooks even if the staged release is gone.
+    if (-not (Test-SameBinaries (Get-BinariesState (Split-Path -Parent $Gateway)) $ExpectedBins)) {
+        throw "The staged release changed before the older gateway could be stopped"
+    }
+    $closer = Join-Path $LifecycleCloser "defenseclaw-gateway.exe"
+    $temporary = "$closer.new"
+    New-Item -ItemType Directory -Path $LifecycleCloser -Force -ErrorAction Stop | Out-Null
+    Copy-Item -LiteralPath $Gateway -Destination $temporary -Force -ErrorAction Stop
+    $stream = New-Object IO.FileStream($temporary, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::Read)
+    try { $stream.Flush($true) } finally { $stream.Dispose() }
+    if ((Get-Sha256 $temporary) -ne (Get-Sha256 $Gateway)) { throw "The kept hook closer differs from the checked gateway" }
+    if (Test-Path -LiteralPath $closer) { [IO.File]::Replace($temporary, $closer, [NullString]::Value) }
+    else { [IO.File]::Move($temporary, $closer) }
+    if ((Get-Sha256 $closer) -ne (Get-Sha256 $Gateway)) { throw "The published hook closer differs from the checked gateway" }
+    $Run.UnprovenCloserSha256 = Get-Sha256 $closer
+    $running = Get-GatewayProcess
+    if ((Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container) -and -not (Close-AllHooks @($closer))) {
+        throw "Could not close the older install's hooks with the checked gateway"
+    }
+    # From here a failed retry keeps the record: every installed hook was
+    # closed with the hash-checked gateway before a stop is possible. It keeps
+    # the install lock only once the older gateway is down; while that
+    # gateway runs it can render its hooks again (Finish-InstallLock).
+    $Run.UnprovenReplacementUnchanged = $false
+    if ($running -and -not (Start-HookFailModeHold $closer $running.Id -Closed)) {
+        throw "Could not hold the older install's hooks closed while its gateway exits"
+    }
+    try { Stop-UnprovenGateway } catch { Stop-HookFailModeHold; throw }
+    if (-not (Complete-HookFailModeHold)) { throw "Could not keep the older install's hooks closed after its gateway exited" }
+}
+
+function Stop-UnprovenRecoveryGateway($Manifest, [string]$Slot) {
+    # A completed interrupted snapshot may contain a restarted old gateway.
+    # Use only the release closer whose digest the transaction recorded after
+    # checking the staged release; never run the older unproven binary.
+    $running = Get-GatewayProcess
+    $hooks = Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container
+    if (-not $running -and -not $hooks) { return }
+    $expected = [string](Get-Field $Manifest "ReplacementCloserSha256")
+    if (-not $expected) {
+        throw "The interrupted replacement record has no checked closer digest, so the gateway was left alone. Restore the last proven install from $Slot under administrator supervision, then rerun its installer"
+    }
+    $candidates = @((Join-Path $LifecycleCloser "defenseclaw-gateway.exe"),
+        (Join-Path $Slot "closer\defenseclaw-gateway.exe"),
+        (Join-Path $Staging "bin\defenseclaw-gateway.exe"),
+        (Join-Path $BinDir "defenseclaw-gateway.exe"))
+    $checked = $null
+    foreach ($candidate in $candidates) {
+        if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { continue }
+        try { if ((Get-Sha256 $candidate) -eq $expected) { $checked = $candidate; break } } catch { }
+    }
+    if (-not $checked) {
+        throw "The checked release hook closer is missing or changed; restore its SHA-256 $expected at $LifecycleCloser, then run: $(Get-LifecycleNextStep -Accept)"
+    }
+    if ($hooks -and -not (Close-AllHooks @($checked))) {
+        throw "Could not close the interrupted install's hooks with the checked release gateway; run: $(Get-LifecycleNextStep -Accept)"
+    }
+    if (-not $running) { return }
+    if (-not (Start-HookFailModeHold $checked $running.Id -Closed)) {
+        throw "Could not hold the interrupted install's hooks closed while its gateway exits; run: $(Get-LifecycleNextStep -Accept)"
+    }
+    try { Stop-UnprovenGateway } catch { Stop-HookFailModeHold; throw }
+    if (-not (Complete-HookFailModeHold)) {
+        throw "Could not keep the interrupted install's hooks closed after its gateway exited; run: $(Get-LifecycleNextStep -Accept)"
     }
 }
 
@@ -2302,13 +2768,58 @@ function Get-UnchangedNote {
 function Close-InstallLock {
     # An undo or a restore that did not finish keeps .install.lock, so hooks
     # wait for the install instead of starting a gateway for a mixed install.
-    # The next run takes the lock over and finishes the restore.
+    # The next run takes the lock over and finishes the restore. A failed run
+    # keeps it only with every hook closed and no gateway of this install
+    # running (Finish-InstallLock).
     Invoke-Quietly { Clear-StagedRelease }
     if (Test-RecoveryPending) {
-        Write-Warn "The install stays locked ($LockDir) until the installer runs again and finishes restoring the previous install; until then hooks do not start the gateway"
+        if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
+            Write-Warn "The install stays locked ($LockDir); retry the checked release with: $(Get-LifecycleNextStep -Accept)"
+        } else {
+            Write-Warn "The install stays locked ($LockDir) until the installer runs again and finishes restoring the previous install; until then hooks do not start the gateway"
+        }
         return
     }
     Invoke-Quietly { Remove-Tree $LockDir }
+}
+
+function Finish-InstallLock([int]$ExitCode) {
+    if (-not $Run.Lock) { return }
+    # A refusal that changed nothing (a record whose programs another
+    # installer added or replaced), or a failure before the checked closer
+    # closed its hooks, did not change the older install. Leave its record
+    # for the next retry but let its own hooks cold-start the gateway.
+    $closed = $false
+    if ($ExitCode -ne 0 -and -not $Run.UnprovenReplacementUnchanged) {
+        $result = @(Invoke-Quietly { Close-UnfinishedInstallHooks })
+        $closed = $result.Count -gt 0 -and $result[-1] -is [bool] -and $result[-1]
+        if (Test-Path -LiteralPath $LifecycleManifest -PathType Leaf) { Set-RecoveryPending }
+    }
+    if (Test-RecoveryPending) {
+        # While the lock is held, hooks do not cold-start a gateway and follow
+        # their outage mode, which the config may set open. So the lock stays
+        # only on proof: this run closed every hook (Close-UnfinishedInstallHooks)
+        # and afterwards no gateway or watchdog of this install runs, by
+        # gateway.pid and by image (Get-InstallGatewayState). A gateway still
+        # running was left alone by a refusal, survived a stop that failed, or
+        # was started by a recovery whose proof failed; it renders its own
+        # hooks, and once it exits a kept lock would leave them on their outage
+        # mode. Without that proof the lock goes, so hooks cold-start the
+        # gateway as before 1.0.4, and the record stays for the next run.
+        $state = Get-InstallGatewayState
+        if ($state -ne "down" -or -not $closed) {
+            $accept = $Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement
+            $retry = if ($accept) { Get-LifecycleNextStep -Accept } else { Get-LifecycleNextStep }
+            $why = if ($state -eq "running") { "its gateway is still running and can rewrite its hooks" }
+                elseif ($state -eq "unknown") { "this run cannot tell whether its gateway is still running" }
+                else { "this run could not prove every agent hook closed" }
+            Write-Warn ("The earlier install is not finished, but $why, so the install lock is released " +
+                "and the hooks start or keep using that gateway. Finish it with: $retry")
+            $Run.UndoPending = $false
+            $Run.RestorePending = $false
+        }
+    }
+    Close-InstallLock
 }
 
 function Get-RestoredNote {
@@ -2548,13 +3059,17 @@ function Close-UnfinishedInstallHooks {
     # place, or a saved one, that has 'refresh-fail-modes --closed' does it.
     # A lifecycle record still pending (a restore not proven yet, whose
     # snapshot may already be consumed) is an unfinished install too.
+    # True only when the hooks are closed (or there are none) with no
+    # gateway of this install running: Finish-InstallLock keeps the lock
+    # on nothing less.
     $record = Get-Variable -Name LifecycleManifest -ValueOnly -ErrorAction SilentlyContinue
     $closer = Get-Variable -Name LifecycleCloser -ValueOnly -ErrorAction SilentlyContinue
     $unfinished = @(@((Join-Path $DataDir "previous.new"), (Join-Path $DataDir ".repair"), (Join-Path $DataDir ".rollback-hold")) |
         Where-Object { Test-Path -LiteralPath $_ })
     $pending = $record -and (Test-Path -LiteralPath $record -PathType Leaf)
-    if ((-not $unfinished.Count -and -not $pending) -or (Get-GatewayProcess)) { return }
-    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return }
+    if (-not $unfinished.Count -and -not $pending) { return $false }
+    if ((Get-InstallGatewayState) -ne "down") { return $false }
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "hooks") -PathType Container)) { return $true }
     $gateways = @()
     if ($closer) { $gateways += Join-Path $closer "defenseclaw-gateway.exe" }
     $gateways += @((Join-Path $BinDir "defenseclaw-gateway.exe")) +
@@ -2562,10 +3077,10 @@ function Close-UnfinishedInstallHooks {
         @(Join-Path $Previous "bin\defenseclaw-gateway.exe")
     if (Close-AllHooks $gateways) {
         Write-Warn "The install is not finished, so every agent hook blocks tool calls until the gateway runs again. Run the installer again to finish it"
-        return
+        return $true
     }
-    Write-Err ("The install is not finished and the agent hooks could not be closed: until the gateway runs, they follow the outage fail mode " +
-        "in your config. Run the installer again to finish it")
+    Write-Err "The install is not finished and the agent hooks could not be closed. Run the installer again to finish it"
+    return $false
 }
 
 function Clear-SetupDataDir([string]$Failed) {
@@ -2681,6 +3196,11 @@ function Resume-InterruptedRun {
     # (Write-LifecycleManifest) says what that install was; it goes only once
     # the restore is proven against it (Assert-LifecycleRestored).
     $manifest = Read-LifecycleManifest
+    # A snapshot or rollback hold may be consumed during this recovery. A
+    # later empty-record refusal must not release a lock after such a change.
+    $hadRecoveryWork = (Test-Path -LiteralPath (Join-Path $DataDir "previous.new")) -or
+        (Test-Path -LiteralPath (Join-Path $DataDir ".repair")) -or
+        (Test-Path -LiteralPath (Join-Path $DataDir ".rollback-hold"))
     if ($manifest -and (Get-Field $manifest "Committed")) {
         # The new install was proven before the run stopped: finish moving
         # the previous one aside (Complete-Swap) instead of undoing it.
@@ -2728,10 +3248,22 @@ function Resume-InterruptedRun {
             } else {
                 Write-Warn "An earlier install was interrupted; restoring the install it replaced"
             }
-            [void](Stop-Gateway)
+            if ($manifest -and $manifest.PSObject.Properties["UnprovenReplacement"] -and $manifest.UnprovenReplacement) {
+                Stop-UnprovenRecoveryGateway $manifest $slot
+            } else {
+                [void](Stop-Gateway)
+            }
             $keepStopped = Test-Path -LiteralPath (Join-Path $slot "GATEWAY_RESTART_UNPROVEN")
             Save-LifecycleCloser $slot
+            # Setup's own launcher state goes back with the install it ran.
+            if (Test-Path -LiteralPath (Join-Path $Staging "hook-runtime-state.json")) { Enable-SetupHooks }
             $failed = Restore-Slot $slot
+            if ($manifest -and $manifest.PSObject.Properties["UnprovenReplacement"] -and $manifest.UnprovenReplacement) {
+                # The snapshot's old hook files and outage mode were moved
+                # back after the first closure. Tighten them again before
+                # this accepted retry spends time staging its release.
+                Stop-UnprovenRecoveryGateway $manifest $slot
+            }
             # A DefenseClaw Setup install that was replaced runs its own gateway (GAP-1839).
             $setupInstall = Find-SetupInstall
             $setupBack = $setupInstall -and -not (Test-Path -LiteralPath (Join-Path $BinDir "defenseclaw-gateway.exe"))
@@ -2748,8 +3280,10 @@ function Resume-InterruptedRun {
                 Start-RecoveredGateway "restored"
             }
             if ($setupBack -and $manifest) { $manifest.SetupRoot = [string]$setupInstall.Root }
-            Assert-LifecycleRestored $manifest -KeepStopped:$keepStopped
-            $manifest = $null
+            if (-not ($manifest -and $manifest.PSObject.Properties["UnprovenReplacement"] -and $manifest.UnprovenReplacement)) {
+                Assert-LifecycleRestored $manifest -KeepStopped:$keepStopped
+                $manifest = $null
+            }
             if ($firstInstall -and -not $setupBack) {
                 Write-Info "Nothing was left installed"
             } elseif (-not $setupBack) {
@@ -2760,8 +3294,10 @@ function Resume-InterruptedRun {
             try { Undo-Snapshot $slot } catch { Set-RecoveryPending "UndoPending"; throw }
             if ($wasRunning -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "recovered" }
             Set-RecoverySetupRoot $manifest
-            Assert-LifecycleRestored $manifest
-            $manifest = $null
+            if (-not ($manifest -and $manifest.PSObject.Properties["UnprovenReplacement"] -and $manifest.UnprovenReplacement)) {
+                Assert-LifecycleRestored $manifest
+                $manifest = $null
+            }
         }
     }
     $hold = Join-Path $DataDir ".rollback-hold"
@@ -2786,7 +3322,8 @@ function Resume-InterruptedRun {
         # The rollback's record proves its target, not the install it left.
         if ($manifest -and (Get-Field $manifest "Operation") -eq "rollback") {
             if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
-            $problems = @(Wait-LifecycleProof (Get-Field $manifest "TargetBins") $restart)
+            $legacyTarget = [string](Get-Field $manifest "To") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+            $problems = @(Wait-LifecycleProof (Get-Field $manifest "TargetBins") $restart -AllowLegacyStatus:$legacyTarget)
             if ($problems.Count) {
                 Set-RecoveryPending
                 Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
@@ -2824,7 +3361,8 @@ function Resume-InterruptedRun {
         if (Test-SameBinaries (Get-BinariesState $BinDir) $target) {
             $wanted = [bool](Get-Field $manifest "StartAfter")
             if ($wanted -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "rolled-back" }
-            $problems = @(Wait-LifecycleProof $target $wanted)
+            $legacyTarget = [string](Get-Field $manifest "To") -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+            $problems = @(Wait-LifecycleProof $target $wanted -AllowLegacyStatus:$legacyTarget)
             if ($problems.Count) {
                 Set-RecoveryPending
                 Die "The finished rollback is not proven: $($problems -join '; '). Fix the cause, then run: $(Get-LifecycleNextStep)"
@@ -2834,12 +3372,37 @@ function Resume-InterruptedRun {
         }
     }
     $recordedBins = if ($manifest) { ConvertTo-Map (Get-Field $manifest "Bins") } else { @{} }
-    if ($manifest -and $recordedBins.Count -and
-        -not @($recordedBins.Keys | Where-Object { Test-Path -LiteralPath (Join-Path $BinDir $_) }).Count -and -not (Find-SetupInstall)) {
+    $liveBinNames = @()
+    if ($manifest) { $liveBinNames = @($ManagedBinaries | Where-Object { Test-Path -LiteralPath (Join-Path $BinDir $_) -PathType Leaf }) }
+    if ($manifest -and $recordedBins.Count -and -not $liveBinNames.Count -and -not (Find-SetupInstall)) {
         # The install the record names was uninstalled since (none of its
         # programs is left, and no snapshot): nothing to restore or start.
         Write-Warn "The install an earlier run recorded is no longer there (uninstalled); its record is dropped"
         Remove-LifecycleManifest
+        return
+    }
+    if ($manifest -and -not $recordedBins.Count -and $liveBinNames.Count) {
+        # No binary was present when the interrupted first install wrote its
+        # record. A legacy installer can populate the folder without reading
+        # it. Those bytes are not a proven restore, even with the switch.
+        $added = @(Test-LifecycleProof $recordedBins $false -RequireProtected $false)
+        $Run.UnprovenReplacementUnchanged = -not $hadRecoveryWork
+        $override = [bool](Get-Variable -Name AcceptCurrentInstall -ValueOnly -ErrorAction SilentlyContinue)
+        if (-not $override -or [bool](Get-Variable -Name Rollback -ValueOnly -ErrorAction SilentlyContinue)) {
+            throw ("The previous install is not proven back: $($added -join '; '). An older installer added programs after this first install recorded none; its running gateway was left alone. " +
+                "The record stays in $LifecycleManifest. To install this release over them, run: $(Get-LifecycleNextStep -Accept)")
+        }
+        $wasRunningUnproven = [bool](Get-GatewayProcess) -or [bool](Get-Field $manifest "ReplacementGatewayWasRunning")
+        if ($wasRunningUnproven -and -not (Get-Field $manifest "ReplacementGatewayWasRunning")) {
+            # Record the observed running state before the checked release
+            # closes its hooks and stops it later. Recovery then knows whether
+            # the replacement gateway must be started after a power loss.
+            $manifest | Add-Member -NotePropertyName ReplacementGatewayWasRunning -NotePropertyValue $true -Force
+            Write-DurableText $LifecycleManifest ($manifest | ConvertTo-Json -Depth 4)
+        }
+        $Run.UnprovenReplacement = $manifest
+        $Run.UnprovenGatewayWasRunning = $wasRunningUnproven
+        Write-Warn "An older installer added programs after the interrupted first install recorded none ($($added -join '; ')); its gateway stays running while this release is staged, and the record stays until the checked release is installed and proven"
         return
     }
     if ($manifest -and $recordedBins.Count -and -not (Test-SameBinaries (Get-BinariesState $BinDir) $recordedBins)) {
@@ -2855,9 +3418,14 @@ function Resume-InterruptedRun {
             Remove-LifecycleManifest
             return
         }
-        Set-RecoveryPending
+        # Unless a snapshot or rollback hold was recovered above, this refusal
+        # stopped and changed nothing: the other installer's programs stay as
+        # they are, so the lock goes and only the record stays (as for an
+        # empty record above). Their hooks can then cold-start their gateway.
+        $Run.UnprovenReplacementUnchanged = -not $hadRecoveryWork
+        if (-not $Run.UnprovenReplacementUnchanged) { Set-RecoveryPending }
         throw ("The previous install is not proven back: $($replaced -join '; '). Another installer replaced the programs it recorded, so they are not started. " +
-            "The record of it stays in $LifecycleManifest and the install stays locked. To install this release over them, run: $(Get-LifecycleNextStep -Accept)")
+            "The record of it stays in $LifecycleManifest. To install this release over them, run: $(Get-LifecycleNextStep -Accept)")
     }
     if ($manifest) { $restart = $restart -or [bool](Get-Field $manifest "GatewayWasRunning") }
     if ($restart -and -not (Get-GatewayProcess)) { Start-RecoveredGateway "recovered" }
@@ -2915,6 +3483,110 @@ function Save-Installer {
         Copy-Item -LiteralPath $PSCommandPath -Destination (Join-Path $InstallerDir "install.ps1") -Force
     }
     Remove-Item -LiteralPath $next -Force -ErrorAction SilentlyContinue
+    Save-InstallerDigest
+}
+
+function Save-InstallerDigest {
+    # The SHA-256 of the saved installer, which 'defenseclaw rollback' checks
+    # before it runs that file (GAP-1067). It is kept with the data, in
+    # receipts\ (a DefenseClaw security-state folder the tamper rule
+    # watches), so it moves with the install it belongs to on every swap.
+    $receipts = Join-Path $DataDir "receipts"
+    $record = Join-Path $receipts "installer.sha256"
+    $saved = Join-Path $InstallerDir "install.ps1"
+    try {
+        Remove-Item -LiteralPath $record -Force -ErrorAction SilentlyContinue
+        if (-not (Test-Path -LiteralPath $saved -PathType Leaf)) { return }
+        New-Item -ItemType Directory -Path $receipts -Force | Out-Null
+        [IO.File]::WriteAllText("$record.new", "$(Get-Sha256 $saved)  install.ps1`n", [Text.Encoding]::ASCII)
+        Move-Item -LiteralPath "$record.new" -Destination $record -Force
+    } catch {
+        Write-Warn "Could not record the digest of the saved installer, so 'defenseclaw rollback' will not run it; record it again with: defenseclaw upgrade --version $Ver --yes"
+    }
+}
+
+function Get-OtherBuildInstalled([string]$StagedGateway) {
+    # The installed gateway reports another build of this version (its commit
+    # or build date) than the staged one (GAP-1063): the build each names, or
+    # $null. An installed gateway that does not answer is repaired, as before.
+    $installedGateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $installedGateway -PathType Leaf)) { return $null }
+    $installed = (Get-NativeOutput $installedGateway @("--version")).Trim()
+    $staged = (Get-NativeOutput $StagedGateway @("--version")).Trim()
+    if (-not $installed -or -not $installed.Contains($Ver) -or $installed -eq $staged) { return $null }
+    $name = { param($Text) if ($Text -match '\(commit=([^,)]*)') { "commit $($Matches[1])" } else { $Text } }
+    return @{ Installed = (& $name $installed); Staged = (& $name $staged) }
+}
+
+# until 1.1: the gateway tears the removed connectors (OpenHands, OmniGent)
+# down when it starts, but a start that brings the other connectors up only
+# logs one it could not finish, and an upgrade of a stopped gateway does not
+# start it. Check each here: one not done is torn down again, and one still
+# not done (an agent config that runs a hook DefenseClaw could not put the
+# sealed stub under) is named with its cause and step, and the install exits
+# 3, not 0. Without a config nothing was set up and the gateway cannot read
+# one, so there is nothing to check.
+function Complete-RetiredConnectorCleanup {
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return $true }
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+        Write-Err "DefenseClaw $Ver could not check that the removed OpenHands and OmniGent connectors are blocked: $gateway is missing"
+        return $false
+    }
+    $ErrorActionPreference = "Continue"
+    $clean = $true
+    foreach ($name in @("openhands", "omnigent")) {
+        $verify = @("connector", "verify", "--connector", $name, "--data-dir", $DataDir)
+        if ((Invoke-Native $gateway $verify -Quiet) -eq 0) { continue }
+        [void](Invoke-Native $gateway @("connector", "teardown", "--connector", $name, "--data-dir", $DataDir) -Quiet)
+        # "$_" keeps only the text of a stderr line; Windows PowerShell 5.1
+        # formats the record with its script position otherwise.
+        $global:LASTEXITCODE = -1
+        try { $why = @(& $gateway @verify 2>&1 | ForEach-Object { "$_".Trim() } | Where-Object { $_ }) -join " " } catch { $why = "" }
+        if ($LASTEXITCODE -eq 0) { continue }
+        $why = $why -replace ("^(" + [char]0x2717 + "|X)\s+"), ""
+        if (-not $why) { $why = "run 'defenseclaw-gateway connector verify --connector $name' for the cause" }
+        Write-Err "DefenseClaw $Ver could not finish removing the $name connector, so its agent may not be blocked: $why"
+        $clean = $false
+    }
+    return $clean
+}
+
+# A gateway that was not running before an upgrade or repair is not started,
+# so nothing rendered this release's hooks: a connector kept the hook an
+# earlier release wrote (a 1.0.3 Hermes hook cannot answer this release's
+# execution probe) and the install exited 0 with it unprotected. The new
+# gateway puts every connector the config guards on its current hook and
+# reads each back; one it cannot is named with the cause, and the install
+# exits 3. Without a config nothing was set up. An older gateway (a
+# downgrade) has no --every-connector and renders its hooks when it starts.
+function Complete-StoppedConnectorReconcile {
+    if (-not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) { return $true }
+    $gateway = Join-Path $BinDir "defenseclaw-gateway.exe"
+    if (-not (Test-Path -LiteralPath $gateway -PathType Leaf)) {
+        Write-Err "DefenseClaw $Ver could not put the connectors on their current hooks: $gateway is missing"
+        return $false
+    }
+    if ((Invoke-Native $gateway @("connector", "reconcile", "--every-connector", "--help") -Quiet) -ne 0) { return $true }
+    $ErrorActionPreference = "Continue"
+    $setConfig = -not $env:DEFENSECLAW_CONFIG
+    if ($setConfig) { $env:DEFENSECLAW_CONFIG = Join-Path $DataDir "config.yaml" }
+    # "$_" keeps only the text of a stderr line; Windows PowerShell 5.1
+    # formats the record with its script position otherwise.
+    $global:LASTEXITCODE = -1
+    try {
+        $lines = @(& $gateway @("connector", "reconcile", "--every-connector", "--data-dir", $DataDir) 2>&1 |
+            ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    } catch { $lines = @() } finally {
+        if ($setConfig) { Remove-Item Env:DEFENSECLAW_CONFIG -ErrorAction SilentlyContinue }
+    }
+    $rc = $LASTEXITCODE
+    if ($rc -eq 0) { return $true }
+    $why = @($lines | Where-Object { $_ -like "Error: *" } | Select-Object -Last 1) -join ""
+    $why = $why -replace '^Error: ', ''
+    if (-not $why) { $why = "exit $rc; run 'defenseclaw-gateway connector reconcile --every-connector' for the cause" }
+    Write-Err "DefenseClaw $Ver could not put every connector on its current hook while the gateway is stopped: $why"
+    return $false
 }
 
 function Complete-Swap {
@@ -2935,7 +3607,12 @@ function Complete-Swap {
             Remove-Tree $Snap
         }
     }
-    if ($Setup) { Remove-SetupInstall }
+    if ($Setup) {
+        Remove-SetupInstall
+    } elseif (Test-SetupLauncherTrampoline) {
+        # A later install: Setup's launcher delegates to this release's hook.
+        Invoke-Quietly { [void](Publish-SetupLauncherTrampoline $SetupHookState (Join-Path $BinDir "defenseclaw-hook.exe") (Join-Path $BinDir "defenseclaw-gateway.exe")) }
+    }
     Save-Installer
     foreach ($leftover in @($Staging, (Join-Path $DataDir ".upgrade-recovery"), (Join-Path $DataDir ".upgrade-receipts"),
             (Join-Path $env:USERPROFILE ".defenseclaw-install-custody"),
@@ -2998,10 +3675,12 @@ function Select-Connector {
     # An answer that is neither a number on the list nor a name is asked
     # again, never replaced with another agent (GAP-0333).
     for ($try = 1; $try -le 3; $try++) {
-        # No console to answer on: the default, as before.
-        try { $choice = Read-Host "  Choice (number or name) [default 1=codex]" } catch { $choice = "" }
+        # Enter, or no console to answer on: no agent. A default never picks
+        # one the machine may not have; 'defenseclaw init' finds the installed
+        # agents (GAP-0568).
+        try { $choice = Read-Host "  Choice (number or name) [default none]" } catch { $choice = "" }
         $answer = "$choice".Trim().ToLowerInvariant()
-        if (-not $answer) { $answer = "1" }
+        if (-not $answer) { $answer = "none" }
         $number = 0
         $picked = ""
         if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $ConnectorChoices.Count) {
@@ -3066,7 +3745,10 @@ Options:
   -AcceptCurrentInstall Keep the config and connectors changed since an earlier
                         run that is not proven back (its binaries and gateway
                         are still checked), or, when another installer
-                        replaced its programs, install this release over them
+                        replaced its programs, install this release over them.
+                        An empty first-install record stays until the checked
+                        replacement is installed and proven; its added
+                        programs stay stopped during recovery
   -Help                 Show this help
 
 Exit codes (run as a file):
@@ -3244,6 +3926,7 @@ function Invoke-Rollback {
     $wasRunning = [bool](Get-GatewayProcess)
     $savedWasRunning = Read-Text (Join-Path $Previous "GATEWAY_WAS_RUNNING")
     $startAfter = $wasRunning -or $savedWasRunning -eq "true"
+    Assert-NoLoadedPluginAgents
     # The rollback's lifecycle transaction: the install it leaves (proven
     # back by Undo-Rollback on any failure) and the one it goes to, which
     # stays in previous\ until this rollback is proven.
@@ -3310,7 +3993,10 @@ function Invoke-Rollback {
     # for a 0.x one (GAP-0486): never "Now running" with the gateway down.
     $problems = @()
     if ($startAfter -and (Start-Gateway) -notin @(0, 3)) { $problems += "the gateway of DefenseClaw $backTo did not start" }
-    else { $problems = @(Wait-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter) }
+    else {
+        $legacyTarget = $backTo -match '^(?:0\.8\.10|1\.0\.[0-3])$'
+        $problems = @(Wait-LifecycleProof (Get-Field $Manifest "TargetBins") $startAfter -AllowLegacyStatus:$legacyTarget)
+    }
     if ($problems.Count) {
         return Undo-Rollback "DefenseClaw $backTo is not proven running ($($problems -join '; '))" $current $backTo $savedWasRunning $quarantined $conversionAttempted
     }
@@ -3518,7 +4204,10 @@ function Invoke-Install {
     if (Test-Path -LiteralPath "$Venv.busy") {
         if (Test-Path -LiteralPath $Venv) { Remove-Tree "$Venv.busy" } else { Move-Path "$Venv.busy" $Venv }
     }
-    try { Resume-InterruptedRun } catch { $Run.RestorePending = $true; throw }
+    try { Resume-InterruptedRun } catch {
+        if (-not $Run.UnprovenReplacementUnchanged) { Set-RecoveryPending }
+        throw
+    }
 
     if ($Rollback) { return Invoke-Rollback }
 
@@ -3552,12 +4241,13 @@ function Invoke-Install {
     if (-not $env:UV_COMPILE_BYTECODE_TIMEOUT) { $env:UV_COMPILE_BYTECODE_TIMEOUT = "600" }
     if (-not $env:UV_HTTP_TIMEOUT) { $env:UV_HTTP_TIMEOUT = "300" }
     $Uv = [string](Get-Command uv.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty Source)
+    if ($Run.UnprovenReplacement -and $Uv -and (Test-SamePath (Split-Path -Parent $Uv) $BinDir)) { $Uv = "" }
     # A uv already in the bin folder belongs to the user (or an earlier run)
     # even when that folder is not on PATH yet: use it, never overwrite it.
-    if (-not $Uv -and (Test-Path -LiteralPath (Join-Path $BinDir "uv.exe") -PathType Leaf)) { $Uv = Join-Path $BinDir "uv.exe" }
+    if (-not $Uv -and -not $Run.UnprovenReplacement -and (Test-Path -LiteralPath (Join-Path $BinDir "uv.exe") -PathType Leaf)) { $Uv = Join-Path $BinDir "uv.exe" }
     if (-not $Uv) {
         Write-Info "Installing uv $UvVersion (Python package manager)"
-        $Uv = Install-Uv
+        $Uv = if ($Run.UnprovenReplacement) { Install-Uv (Join-Path $DataDir ".uv\bin") } else { Install-Uv }
         if (-not $Uv) { Die "Could not install uv; install it from https://docs.astral.sh/uv/ and retry" }
     }
 
@@ -3624,9 +4314,18 @@ function Invoke-Install {
     # What the proof of this install compares the live binaries with.
     $stagedBinaries = Get-BinariesState (Join-Path $Staging "bin")
 
-    # Swap.
-    if ($PrevVersion -and $PrevVersion -eq $Ver) {
+    # Swap. A same-version run over the installed build is a repair:
+    # previous\ stays the rollback copy. Another build of this version (a
+    # release candidate the next one replaces) is replaced as an upgrade is:
+    # the replaced build becomes the rollback copy, and this says so before
+    # the swap (GAP-1063).
+    $otherBuild = if ($PrevVersion -and $PrevVersion -eq $Ver) { Get-OtherBuildInstalled $stagedGateway } else { $null }
+    $Repair = $PrevVersion -and $PrevVersion -eq $Ver -and -not $otherBuild
+    if ($Repair) {
         if (-not (Confirm-Step "Reinstall DefenseClaw ${Ver}?")) { Die "Cancelled; nothing was changed" }
+    } elseif ($otherBuild) {
+        Write-Info "The installed DefenseClaw $Ver is another build ($($otherBuild.Installed)) than this one ($($otherBuild.Staged)); it is kept in $Previous, so 'defenseclaw rollback' returns to it"
+        if (-not (Confirm-Step "Replace the installed build of DefenseClaw ${Ver}?")) { Die "Cancelled; nothing was changed" }
     } elseif ($PrevVersion) {
         $auditDb = Join-Path $DataDir "audit.db"
         if ([version]$PrevVersion -lt [version]"1.0.0" -and (Test-Path -LiteralPath $auditDb)) {
@@ -3647,28 +4346,48 @@ function Invoke-Install {
     if (-not $PrevVersion -and -not $Yes -and -not $Connector) { $Connector = Select-Connector }
 
     Assert-InstallRoom $FinalEnvRoom "the final Python environment"
+    Assert-NoLoadedPluginAgents
     Wait-VenvFree
+    if ($Run.UnprovenReplacement) {
+        try { Prepare-UnprovenReplacement $stagedGateway $stagedBinaries } catch {
+            if (-not $Run.UnprovenReplacementUnchanged) { Set-RecoveryPending }
+            Die "$($_.Exception.Message); the lifecycle record stays. Run: $(Get-LifecycleNextStep -Accept)"
+        }
+    }
     if ($Setup) {
-        Disable-SetupHooks
         if ($Setup.CodexHome -and -not $env:CODEX_HOME) { $env:CODEX_HOME = $Setup.CodexHome }
         if ($Setup.ClaudeConfigDir -and -not $env:CLAUDE_CONFIG_DIR) { $env:CLAUDE_CONFIG_DIR = $Setup.ClaudeConfigDir }
     }
-    $gatewayProcess = Get-GatewayProcess
-    $WasRunning = [bool]$gatewayProcess
-    if ($WasRunning) {
-        if (-not (Start-HookFailModeHold $stagedGateway $gatewayProcess.Id)) {
-            if ($Setup) { Restore-SetupInstall }
-            Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
-        }
-    } elseif (-not (Update-HookFailModes $stagedGateway)) {
-        if ($Setup) { Restore-SetupInstall }
-        Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down; nothing was changed (see above)"
+    # Wait-VenvFree and setup work can outlive the first scan: check again
+    # before the lifecycle record and the gateway stop, so a newly started
+    # OpenCode or Amp process holding an older plugin is refused.
+    try { Assert-NoLoadedPluginAgents } catch {
+        if ($Setup) { Restore-SetupInstall -KeepStopped }
+        throw
     }
-    $Snap = if ($PrevVersion -and $PrevVersion -eq $Ver) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
+    if ($Run.UnprovenReplacement -and (Get-GatewayProcess)) {
+        try { Prepare-UnprovenReplacement $stagedGateway $stagedBinaries } catch {
+            if (-not $Run.UnprovenReplacementUnchanged) { Set-RecoveryPending }
+            Die "$($_.Exception.Message); the lifecycle record stays. Run: $(Get-LifecycleNextStep -Accept)"
+        }
+    }
+    $gatewayProcess = Get-GatewayProcess
+    if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement -and $gatewayProcess) {
+        Die "The unproven gateway restarted after it was stopped; the lifecycle record stays. Run: $(Get-LifecycleNextStep -Accept)"
+    }
+    if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
+        # Prepare-UnprovenReplacement held the closed mode until the older
+        # gateway exited. Do not restore a configured open while it is down.
+        if ($Setup) { Disable-SetupHooks }
+    } else {
+        $gatewayProcess = Start-SwapHookFailModes $stagedGateway $gatewayProcess
+    }
+    $WasRunning = [bool]$gatewayProcess
+    $Snap = if ($Repair) { Join-Path $DataDir ".repair" } else { Join-Path $DataDir "previous.new" }
     # The lifecycle transaction starts here: the working state is on the
     # disk before the first program changes (the hook swap). The outage
     # modes the hold or the refresh above set only ever tighten.
-    $operation = if ($PrevVersion -and $PrevVersion -eq $Ver) { "repair" } elseif ($PrevVersion) { "upgrade" } else { "install" }
+    $operation = if ($Repair) { "repair" } elseif ($PrevVersion) { "upgrade" } else { "install" }
     try { $Manifest = Write-LifecycleManifest $operation $PrevVersion $Ver $Snap } catch {
         Stop-HookFailModeHold
         if ($Setup) { Restore-SetupInstall }
@@ -3678,11 +4397,9 @@ function Invoke-Install {
         $failure = $_
         Stop-HookFailModeHold
         Undo-EarlySnapshot $Snap
-        # Nothing else changed yet: prove the install is the recorded one,
-        # which drops the record. An unfinished undo keeps it and the lock.
-        if (-not (Test-RecoveryPending)) {
-            try { Assert-LifecycleRestored $Manifest } catch { Write-Err $_.Exception.Message }
-        }
+        # A proven baseline retires its record; a prior unproven baseline
+        # stays locked without claiming the current attempt changed binaries.
+        Finish-EarlySnapshotRestore $Manifest
         throw $failure
     }
     # From here to the rollback copy the new hook is live while the old
@@ -3693,6 +4410,9 @@ function Invoke-Install {
     $stopRefused = $false
     try {
         if ($WasRunning) {
+            # Setup's hook launcher goes quiet only now: enabled, it would
+            # start Setup's gateway again (GAP-0948 group).
+            if ($Setup) { Disable-SetupHooks }
             Write-Info "Stopping the gateway [$(Get-UtcClock)]"
             if (-not (Stop-Gateway)) {
                 $stopRefused = $true
@@ -3704,7 +4424,9 @@ function Invoke-Install {
                 Die "Could not set the hooks' fail modes from your config, so they could fail open while the gateway is down"
             }
         }
-        Stop-Watchdog
+        if ($Run.ContainsKey("UnprovenReplacement") -and $Run.UnprovenReplacement) {
+            Prepare-UnprovenReplacement $stagedGateway $stagedBinaries
+        } else { Stop-Watchdog }
         if ($versionChange) {
             Assert-GatewayQuiescent "Version change to $Ver"
             Assert-NoActiveConnectorRecovery "Version change to $Ver"
@@ -3762,7 +4484,7 @@ function Invoke-Install {
     # gate for the install.
     $sealOnly = -not $WasRunning -and -not $Setup -and $PrevVersion -and [version]$PrevVersion -lt [version]"1.0.0" -and
         (Test-Path -LiteralPath (Join-Path $DataDir "agent_selection.json"))
-    $startNew = $WasRunning -or $sealOnly -or ($Setup -and (Test-ConnectorConfigured))
+    $startNew = $WasRunning -or $Run.UnprovenGatewayWasRunning -or $sealOnly -or ($Setup -and (Test-ConnectorConfigured))
     if ($startNew -and -not (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -and -not $env:DEFENSECLAW_CONFIG) {
         # 0.x gateways ran on defaults without a config; 1.x needs one.
         $startNew = $false
@@ -3795,7 +4517,7 @@ function Invoke-Install {
     $provenGateway = $startNew -and -not $sealOnly
     # Only connectors this release supports on Windows are required again: a
     # retired one (or the default openclaw entry) has no hooks to put back.
-    $guardedBefore = if ($startRc -eq 0) { @(@(Get-Field $Manifest "Connectors") | Where-Object { $ConnectorChoices -contains $_ -and $_ -ne "none" }) } else { @() }
+    $guardedBefore = @(@(Get-Field $Manifest "Connectors") | Where-Object { $ConnectorChoices -contains $_ -and $_ -ne "none" })
     $problems = @(Wait-LifecycleProof $stagedBinaries $provenGateway $guardedBefore -RequireDigest:$provenGateway)
     if ($problems.Count) {
         foreach ($problem in $problems) { Write-Err $problem }
@@ -3810,6 +4532,10 @@ function Invoke-Install {
     Remove-LifecycleManifest
     Remove-DeveloperFiles
     try { [Console]::TreatControlCAsInput = $false } catch { }
+    # until 1.1: an upgrade or repair never ends with a removed connector's
+    # hook left unsealed, whether or not its gateway was running before it.
+    if ($PrevVersion -and -not (Complete-RetiredConnectorCleanup)) { $startRc = 3 }
+    if ($PrevVersion -and -not $startNew -and -not (Complete-StoppedConnectorReconcile)) { $startRc = 3 }
 
     if ($startRc -eq 3) { Write-Warn "A connector needs attention before it is guarded again (see the gateway output above)" }
     $configured = (Test-Path -LiteralPath (Join-Path $DataDir "config.yaml")) -or $env:DEFENSECLAW_CONFIG
@@ -3830,9 +4556,11 @@ function Invoke-Install {
     Write-Host "  DefenseClaw $Ver is installed." -ForegroundColor Green
     if ($Setup) {
         Write-Host "  Replaced DefenseClaw Setup $PrevVersion; your config and data were kept."
-    } elseif ($PrevVersion -and $PrevVersion -ne $Ver) {
-        $changed = if ((Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion) { "Downgraded" } else { "Upgraded" }
-        Write-Host "  $changed from $PrevVersion. Undo with: defenseclaw rollback"
+    } elseif ($PrevVersion -and -not $Repair) {
+        $changed = "Upgraded from $PrevVersion"
+        if ((Test-Version $PrevVersion) -and [version]$Ver -lt [version]$PrevVersion) { $changed = "Downgraded from $PrevVersion" }
+        if ($PrevVersion -eq $Ver) { $changed = "Replaced the other build of $Ver" }
+        Write-Host "  $changed. Undo with: defenseclaw rollback"
     }
     if ($PrevVersion -and $configured -and -not (Get-GatewayProcess)) {
         # GAP-1496: it was not running before the upgrade, so it was not started.
@@ -3854,14 +4582,10 @@ function Invoke-Install {
     }
     if ($PrevVersion -and -not $Setup -and -not $Quickstart -and -not $configured) {
         # An earlier install that was never initialized: say how to start, as a
-        # fresh install does, with the connector picked back then.
-        $nextConnector = $Connector
-        $pickedPath = Join-Path $DataDir "picked_connector"
-        if (-not $nextConnector -and (Test-Path -LiteralPath $pickedPath)) {
-            $nextConnector = ([string](Get-Content -LiteralPath $pickedPath -TotalCount 1)) -replace '[^a-z0-9_-]', ''
-        }
-        if ($nextConnector -and $nextConnector -ne "none") {
-            Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init --connector $nextConnector" -ForegroundColor Cyan
+        # fresh install does. The connector an earlier install recorded is not
+        # named: it may be the codex picked with no console to ask on (GAP-0568).
+        if ($Connector -and $Connector -ne "none") {
+            Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init --connector $Connector" -ForegroundColor Cyan
         } else {
             Write-Host "  DefenseClaw is not set up yet. Next: defenseclaw init" -ForegroundColor Cyan
         }
@@ -3900,10 +4624,7 @@ try {
     $code = if ($Run.UsageError) { 2 } else { 1 }
 } finally {
     try { [Console]::TreatControlCAsInput = $false } catch { }
-    # While this run still holds the install lock: a failed run never leaves
-    # an unfinished install's hooks on an outage open.
-    if ($Run.Lock -and $code -ne 0) { Invoke-Quietly { Close-UnfinishedInstallHooks } }
-    if ($Run.Lock) { Close-InstallLock }
+    Finish-InstallLock $code
     if ($Run.Transcript) { try { Stop-Transcript | Out-Null } catch { } }
     if ($Run.Owner -ne [IntPtr]::Zero) { [void][DefenseClawInstall.Native]::SwapDefaultOwner($Run.Owner) }
     # A variable that was unset stays unset. PowerShell 7 passes $null to

@@ -69,8 +69,9 @@ func TestSSSDGroupsUnavailableWhileTheGuardianFindsSSSDOffline(t *testing.T) {
 // TestSSSDOfflineTimeline pins GAP-0191 on the hook path's cache: an account
 // SSSD lists in its primary group only is refreshed after the incomplete
 // lifetime, so once the guardian finds SSSD offline the facts cached from
-// that answer are dropped and the account gets default_lookup_failed with
-// the reason (directory_lookups_failing in status and verify). Once SSSD is
+// that answer are dropped and requests needing the missing groups are
+// refused with the fact named (directory_lookups_failing in status and
+// verify). Once SSSD is
 // online again (the guardian flushed SSSD's caches and removed the domain),
 // the next lookup, one retry cycle later, gets the account's groups.
 func TestSSSDOfflineTimeline(t *testing.T) {

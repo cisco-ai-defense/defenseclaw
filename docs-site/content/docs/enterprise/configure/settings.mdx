@@ -66,6 +66,13 @@ Under `enterprise.machine_policy.windows_wsl`. See [Agent sessions in WSL](/docs
 | `editor_settings` | `repair`, `report`, `allow`. Default: `repair` | **Windows.** What the guardian does with `chatgpt.runCodexInWindowsSubsystemForLinux: true` in enrolled users' VS Code, VS Code Insiders and Cursor settings: reset it to `false`, only report it, or ignore it. |
 | `claude_desktop_key` | `merge`, `create`. Default: `merge` | **Windows.** `merge` adds `disableWslSessions` only where `HKLM\SOFTWARE\Policies\Claude` already holds machine policy. `create` also writes it to an empty key, which makes Claude Desktop ignore every account's HKCU policy and local third-party configuration. |
 
+### Linux kernel settings
+
+DefenseClaw has no setting that writes host-wide kernel values. `status` and
+`verify` report the observed user namespace and ptrace settings. An
+administrator may harden the host with their own tools; see
+[User namespaces](/docs/enterprise/install/reference/linux#user-namespaces).
+
 ### `managed_hooks_only` on Windows
 
 Codex always gets its lock on Windows, whatever the key says. Claude Code's Windows drop-in follows the key as on Linux and macOS: `enforce` (the default) sets `allowManagedHooksOnly: true`, and `preserve` leaves the lock out. The key also decides whether the foreign-hook guard covers Codex and Claude Code on every OS. See [Machine policy](/docs/enterprise/configure/machine-policy#windows-differences).

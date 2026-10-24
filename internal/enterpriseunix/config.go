@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/local"
+	"github.com/defenseclaw/defenseclaw/internal/openshell/packs"
 	"github.com/defenseclaw/defenseclaw/internal/posixacl"
 	policyassets "github.com/defenseclaw/defenseclaw/policies"
 )
@@ -320,6 +321,12 @@ func (e *Env) checkConfig(raw []byte) (*validatedConfig, error) {
 	if err := config.ValidateManagedStandaloneConfig(raw, cfg, compiled.Plan, e.Layout); err != nil {
 		return nil, err
 	}
+	if err := config.ValidateManagedStandaloneRuntimeContent(cfg); err != nil {
+		return nil, err
+	}
+	if err := e.checkManagedPolicyDir(cfg); err != nil {
+		return nil, err
+	}
 	if err := e.checkRulePackDirs(cfg); err != nil {
 		return nil, err
 	}
@@ -584,6 +591,58 @@ func (e *Env) checkRulePackDirs(cfg *config.Config) error {
 	return nil
 }
 
+// checkManagedPolicyDir mirrors the gateway's policy-tree trust check before
+// the lifecycle swaps config.yaml. checkRulePackDirs handles referenced packs
+// separately and preserves its more specific refusal text. Env.P keeps this
+// check valid on rooted test hosts.
+func (e *Env) checkManagedPolicyDir(cfg *config.Config) error {
+	dir := strings.TrimSpace(cfg.PolicyDir)
+	if dir == "" {
+		return nil
+	}
+	full := e.P(filepath.Clean(dir))
+	info, err := os.Lstat(full)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("config: inspect policy_dir %s: %w", dir, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("config: managed standalone policy_dir %s is not a directory", dir)
+	}
+	if err := e.Trust(full, TrustRuntimeDir); err != nil {
+		return fmt.Errorf("config: managed standalone policy_dir is not administrator-controlled: %w", err)
+	}
+	entries := 0
+	return filepath.WalkDir(full, func(path string, _ fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("config: inspect policy_dir %s: %w", path, walkErr)
+		}
+		if path == full {
+			return nil
+		}
+		entries++
+		if entries > rulePackTreeMaxEntries {
+			return fmt.Errorf("config: managed standalone policy_dir has more than %d entries", rulePackTreeMaxEntries)
+		}
+		entry, err := os.Lstat(path)
+		if err != nil {
+			return fmt.Errorf("config: inspect policy_dir %s: %w", path, err)
+		}
+		kind := TrustRuntimeFile
+		if entry.IsDir() {
+			kind = TrustRuntimeDir
+		} else if !entry.Mode().IsRegular() {
+			return fmt.Errorf("config: managed standalone policy_dir %s is not a regular file or directory", path)
+		}
+		if err := e.Trust(path, kind); err != nil {
+			return fmt.Errorf("config: managed standalone policy_dir is not administrator-controlled: %w", err)
+		}
+		return nil
+	})
+}
+
 // checkCandidateAssets builds the rule packs the config selects, with its
 // guardrail.rules layers, the way the gateway does when it starts, and checks
 // its webhook URLs. A layer the gateway would refuse (a duplicate suppression
@@ -599,6 +658,51 @@ func (e *Env) checkCandidateAssets(v *validatedConfig) error {
 			return &plainConfigError{msg: plain, err: err}
 		}
 		return fmt.Errorf("config does not build: %w", err)
+	}
+	return nil
+}
+
+// checkRequiredSandboxPacks loads every administrator-required sandbox pack
+// that a gateway generation would load. A malformed or mismatched pack must
+// fail planning before ensure writes config.yaml or restarts the gateway
+// (GAP-0546). The rooted test host maps the same paths below Env.Root; on a
+// real host LoadGenerationPack also enforces root ownership and path trust.
+func (e *Env) checkRequiredSandboxPacks(cfg *config.Config) error {
+	names := []string{""}
+	for name := range cfg.Guardrail.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	loaded := map[string]*packs.Pack{}
+	subject := packs.Subject{UID: os.Getuid()}
+	for _, name := range names {
+		floor, _, err := cfg.SandboxManagedFloor(name)
+		if err != nil {
+			return fmt.Errorf("sandbox policy floor %q does not load: %w", name, err)
+		}
+		ref := strings.TrimSpace(floor.RequiredPack)
+		if ref == "" || packs.IsBuiltin(ref) {
+			continue
+		}
+		pack, ok := loaded[ref]
+		if !ok {
+			mapped := ref
+			if filepath.IsAbs(ref) {
+				mapped = e.P(ref)
+			}
+			if e.Root == "" {
+				pack, err = packs.LoadGenerationPack(subject, mapped, cfg.OpenShell.PackDir)
+			} else {
+				pack, err = packs.LoadRequired(subject, mapped, e.P(cfg.OpenShell.PackDir), false)
+			}
+			if err != nil {
+				return fmt.Errorf("required sandbox pack %s does not load: %w", ref, err)
+			}
+			loaded[ref] = pack
+		}
+		if pin := strings.TrimSpace(floor.RequiredPackDigest); pin != "" && pack.Digest != pin {
+			return fmt.Errorf("required sandbox pack %s has digest %s, not its pinned required_pack_digest %s", ref, pack.Digest, pin)
+		}
 	}
 	return nil
 }

@@ -51,7 +51,7 @@ func TestAdminVMDriver(t *testing.T) {
 			t.Fatalf("found %q, refused %v", found, refused)
 		}
 	})
-	if dirs := UserVMDriverDirs("/home/u", ""); strings.Join(dirs[1:], ",") != strings.Join(AdminVMDriverDirs("linux"), ",") {
+	if dirs := UserVMDriverDirs("/home/u", "", ""); strings.Join(dirs[1:], ",") != strings.Join(AdminVMDriverDirs("linux"), ",") {
 		t.Errorf("UserVMDriverDirs system tail = %v, want AdminVMDriverDirs", dirs[1:])
 	}
 }
@@ -82,6 +82,25 @@ func TestAdminVMDriverFixUsesThePinnedDigest(t *testing.T) {
 	}
 	if fix := AdminVMDriverFix("darwin", "amd64"); fix.Command != "" {
 		t.Errorf("an Intel Mac gets a command: %+v", fix)
+	}
+}
+
+// Repair a stale administrator driver in the directory the gateway selects,
+// even when it is not the first administrator directory.
+func TestOldAdminVMDriverRepairKeepsSelectedDirectory(t *testing.T) {
+	for _, tc := range []struct{ dir, commandDir, commandTarget string }{
+		{"/usr/lib/openshell", "/usr/lib/openshell", "/usr/lib/openshell/openshell-driver-vm"},
+		{"/opt/openshell/libexec", "/opt/openshell/libexec", "/opt/openshell/libexec/openshell-driver-vm"},
+		{"/opt/Open Shell/libexec", "'/opt/Open Shell/libexec'", "'/opt/Open Shell/libexec/openshell-driver-vm'"},
+	} {
+		m := &MicroVMHost{DriverBinary: tc.dir + "/openshell-driver-vm", DriverOlderThan: InstallerVersion}
+		fix := m.vmDriverFix("amd64")
+		if fix == nil || !fix.Sudo || !strings.Contains(fix.Summary, tc.dir) ||
+			!strings.Contains(fix.Command, "sudo install -d -m 0755 -o root -g root "+tc.commandDir) ||
+			!strings.Contains(fix.Command, "sudo install -m 0755 -o root -g root openshell-driver-vm "+tc.commandTarget) ||
+			strings.Contains(fix.Command, " /usr/libexec/openshell/openshell-driver-vm") {
+			t.Fatalf("selected directory %q: repair = %+v", tc.dir, fix)
+		}
 	}
 }
 
