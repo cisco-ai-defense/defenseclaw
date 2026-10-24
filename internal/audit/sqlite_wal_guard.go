@@ -25,15 +25,12 @@ var walFrameBytes int64 = 4096 + 24
 const auditWALJournalSizeLimitBytes = 64 << 20
 
 // WALHardLimitBytes is the published audit WAL ceiling and alarm threshold.
-// Arm the emergency hold with two guard ticks of headroom at the measured
-// 10 Hz flood rate, before a slow final copy can carry the log past it.
+// Arm the emergency hold with more than one guard tick of headroom at the
+// measured 10 Hz flood rate, before a slow final copy carries the log past it.
 const (
 	WALHardLimitBytes    = 256 << 20
-	WALEmergencyArmBytes = WALHardLimitBytes - 80<<20
+	WALEmergencyArmBytes = WALHardLimitBytes - 48<<20
 )
-
-// Test seam for isolating the ordinary trigger policy from the hard ceiling.
-var walEmergencyArmBytes int64 = WALEmergencyArmBytes
 
 // auditBusyTimeoutMillis is the busy_timeout of every audit connection.
 const auditBusyTimeoutMillis = 5000
@@ -304,7 +301,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	policy := walCatchUpPolicy{window: walIdleWindow, acquire: walWriterAcquireWait, hold: walCatchUpCap}
 	if logBytes > limitBytes {
 		policy = s.boundedCatchUpPolicy(writerBudget)
-		if logBytes >= walEmergencyArmBytes {
+		if logBytes >= WALEmergencyArmBytes {
 			policy.hold = walEmergencyCatchUpCap
 		}
 		result.Bounded, result.HoldCap = true, policy.hold

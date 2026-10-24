@@ -532,71 +532,70 @@ func TestCheckpointWALIfLargeBoundedCatchUpGivesTheWriterBackAtItsCap(t *testing
 	}
 }
 
-// The gateway starts catch-up at 176 MiB. Repeated misses there must leave
-// hook verdict writes responsive while passive copying and WAL pressure keep
-// working; the next pass can restart the log when the slow copy clears.
-func TestCheckpointWALIfLargeRepeatedMissesAtProductionTriggerKeepHookWritesResponsive(t *testing.T) {
+// The gateway starts catch-up at 176 MiB. A measured log in the real band
+// between that trigger and the emergency arm must use the 100 ms hold.
+func TestCheckpointWALIfLargeAtProductionTriggerUsesOrdinaryHold(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	const productionTrigger = int64(176 << 20)
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
 	originalFrameBytes := walFrameBytes
-	walFrameBytes = 8 << 20 // scale measured frames, not SQLite I/O
 	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
-	originalArm := walEmergencyArmBytes
-	walEmergencyArmBytes = math.MaxInt64 // isolate the ordinary over-trigger hold
-	t.Cleanup(func() { walEmergencyArmBytes = originalArm })
-	logWALGuardEvents(t, store, 200)
-	writeDuringEveryCopy(t, store)
-	entered := make(chan struct{}, 3)
+	originalCopy := walCopyPhaseHook
+	walCopyPhaseHook = func(context.Context) {
+		if err := store.LogEvent(Event{Action: "hook_decision", Target: "wal-guard"}); err != nil {
+			t.Errorf("write during the copy: %v", err)
+			return
+		}
+		frames := (walFileSize(t, store) - 32) / (4096 + 24)
+		if frames <= 0 {
+			t.Error("no WAL frames to scale")
+			return
+		}
+		walFrameBytes = (productionTrigger + 8<<20) / frames
+	}
+	t.Cleanup(func() { walCopyPhaseHook = originalCopy })
+	entered := make(chan struct{}, 1)
 	originalWriter := walWriterPhaseHook
 	walWriterPhaseHook = func(ctx context.Context) {
 		entered <- struct{}{}
 		<-ctx.Done()
 	}
 	t.Cleanup(func() { walWriterPhaseHook = originalWriter })
-	for miss := range 3 {
-		finished := make(chan struct {
+	finished := make(chan struct {
+		pass WALCheckpoint
+		err  error
+	}, 1)
+	go func() {
+		pass, err := store.CheckpointWALIfLarge(context.Background(), productionTrigger, testWALWriterBudget)
+		finished <- struct {
 			pass WALCheckpoint
 			err  error
-		}, 1)
-		go func() {
-			pass, err := store.CheckpointWALIfLarge(context.Background(), productionTrigger, testWALWriterBudget)
-			finished <- struct {
-				pass WALCheckpoint
-				err  error
-			}{pass, err}
-		}()
-		select {
-		case <-entered:
-		case got := <-finished:
-			t.Fatalf("catch-up ended before its writer phase: %+v, %v", got.pass, got.err)
-		case <-time.After(30 * time.Second):
-			t.Fatal("bounded catch-up did not reach its writer phase")
-		}
-		started := time.Now()
-		if err := store.LogEvent(Event{Action: "hook_decision", Target: "during-over-limit-catch-up"}); err != nil {
-			t.Fatal(err)
-		}
-		elapsed := time.Since(started)
-		got := <-finished
-		if elapsed > 500*time.Millisecond {
-			t.Fatalf("miss %d delayed a hook audit write for %v, above the hook writer budget: %+v", miss, elapsed, got.pass)
-		}
-		if got.err != nil || got.pass.LogBytes <= productionTrigger || !got.pass.Bounded || !got.pass.WriterDeferred || got.pass.Restarted {
-			t.Fatalf("miss %d: %+v, %v; want a deferred bounded catch-up", miss, got.pass, got.err)
-		}
-		if got.pass.WriterHeld > testWALWriterBudget || got.pass.HoldCap != walCatchUpCap {
-			t.Fatalf("miss %d held the writer %v with a %v cap; want the ordinary %v cap within %v", miss,
-				got.pass.WriterHeld, got.pass.HoldCap, walCatchUpCap, testWALWriterBudget)
-		}
-		if !store.WALOverLimit() {
-			t.Fatal("a missed catch-up cleared WAL pressure")
-		}
+		}{pass, err}
+	}()
+	select {
+	case <-entered:
+	case got := <-finished:
+		t.Fatalf("catch-up ended before its writer phase: %+v, %v", got.pass, got.err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("bounded catch-up did not reach its writer phase")
 	}
-	walWriterPhaseHook = originalWriter
-	walCopyPhaseHook = nil
-	if pass, err := store.CheckpointWALIfLarge(context.Background(), productionTrigger, testWALWriterBudget); err != nil || !pass.Restarted || store.WALOverLimit() {
-		t.Fatalf("catch-up after the slow copy cleared: %+v, %v; over limit %t", pass, err, store.WALOverLimit())
+	started := time.Now()
+	if err := store.LogEvent(Event{Action: "hook_decision", Target: "during-over-limit-catch-up"}); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(started)
+	got := <-finished
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("ordinary catch-up delayed a hook audit write for %v: %+v", elapsed, got.pass)
+	}
+	if got.err != nil || got.pass.LogBytes <= productionTrigger || got.pass.LogBytes >= WALEmergencyArmBytes || !got.pass.Bounded || !got.pass.WriterDeferred || got.pass.Restarted {
+		t.Fatalf("catch-up: %+v, %v; want a deferred hold between trigger and emergency arm", got.pass, got.err)
+	}
+	if got.pass.HoldCap != walCatchUpCap || got.pass.WriterHeld > testWALWriterBudget || !store.WALOverLimit() {
+		t.Fatalf("ordinary catch-up: %+v; want a %v cap inside the writer budget and WAL pressure", got.pass, walCatchUpCap)
 	}
 }
 

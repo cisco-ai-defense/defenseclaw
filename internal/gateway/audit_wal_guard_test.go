@@ -62,6 +62,9 @@ func TestAuditWALGuardKeepsFloodHeadroomBelowThePublishedCeiling(t *testing.T) {
 	if headroom := int64(auditWALLimitBytes) - fake.limit; headroom < neededHeadroom {
 		t.Fatalf("WAL guard starts bounded catch-up at %d bytes: %d bytes of headroom, want at least %d for two 10 Hz flood ticks before the %d-byte ceiling", fake.limit, headroom, neededHeadroom, int64(auditWALLimitBytes))
 	}
+	if fake.limit != 176<<20 || fake.limit >= audit.WALEmergencyArmBytes || audit.WALEmergencyArmBytes >= audit.WALHardLimitBytes {
+		t.Fatalf("WAL trigger %d, emergency arm %d, ceiling %d; want 176 MiB < arm < 256 MiB", fake.limit, audit.WALEmergencyArmBytes, audit.WALHardLimitBytes)
+	}
 	fake.result = audit.WALCheckpoint{Bounded: true, Restarted: true, LogBytes: 224 << 20, WriterHeld: 100 * time.Millisecond, HoldCap: 2 * time.Second}
 	var log bytes.Buffer
 	auditWALGuardPass(t.Context(), fake, &auditWALAlarm{}, time.Now(), &log)
