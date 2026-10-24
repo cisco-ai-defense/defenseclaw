@@ -84,7 +84,9 @@ func TestDoctorIsNotReadyWhileALegacySandboxRuns(t *testing.T) {
 	ta.daemon.add(ended)
 	c := row(ta)
 	if c == nil || c.Status != openshell.StatusFail || c.Fix == nil ||
-		!strings.Contains(c.Detail, "old-ready, old-ended: legacy sandbox running, not protected by the 1.0.4 egress policy") ||
+		// The fake daemon lists its sandboxes in map order.
+		!(strings.Contains(c.Detail, "old-ready, old-ended: legacy sandbox running, not protected by the 1.0.4 egress policy") ||
+			strings.Contains(c.Detail, "old-ended, old-ready: legacy sandbox running, not protected by the 1.0.4 egress policy")) ||
 		!strings.Contains(c.Detail, "creates and starts no sandbox until they are gone") ||
 		!strings.Contains(c.Fix.Summary, "save the work you need in old-ready, then run `defenseclaw sandbox stop old-ready`, which syncs the VM's disk first") ||
 		!strings.Contains(c.Fix.Summary, "`defenseclaw sandbox delete old-ended` deletes old-ended and its work") {
