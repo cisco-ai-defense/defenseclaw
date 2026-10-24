@@ -836,6 +836,9 @@ function Get-LoadedPluginAgent($Process) {
     }
     if ($key -match '[\\/](node|bun)\.exe$') { $runtime = $Matches[1] } else { return "" }
     $operand = (Get-ScriptOperand $runtime ([string]$Process.CommandLine)).Replace('/', '\')
+    # A relative script is relative to the process's folder, which this
+    # check cannot read: it is not known.
+    if ($operand -notmatch '^([A-Za-z]:\\|\\\\)') { return "" }
     if (Test-NpmPackage (Get-NpmPackageFolder $operand "opencode-ai") "opencode-ai") { return "opencode" }
     if (Test-NpmPackage (Get-NpmPackageFolder $operand "@sourcegraph\amp") "@sourcegraph/amp") { return "amp" }
     return ""
@@ -880,7 +883,9 @@ function Get-InstalledAgentPrograms {
 # is never the script: the options that take it in the next word are listed
 # (from node and bun --help; install.sh script_operand has the same lists).
 # Any other option is a switch, and --option=value is one word. Options are
-# case-sensitive (Node's -C takes a value, its -c does not).
+# case-sensitive (Node's -C takes a value, its -c does not). The words are
+# those Node and Bun get (Split-CommandLine), so a quoted value with spaces
+# in it, also as --option="value", is one word.
 function Get-ScriptOperand([string]$Runtime, [string]$CommandLine) {
     if ($Runtime -eq "bun") {
         $valueOptions = -split "-r --preload --require --import --cwd -c --config --env-file --conditions -d --define --drop -l --loader --tsconfig-override --main-fields --extension-order --jsx-factory --jsx-fragment --jsx-import-source --jsx-runtime --port --title --console-depth --fetch-preconnect --max-http-header-size --dns-result-order --install --unhandled-rejections --user-agent -F --filter --shell --elide-lines --cpu-prof-name --cpu-prof-dir"
@@ -889,7 +894,7 @@ function Get-ScriptOperand([string]$Runtime, [string]$CommandLine) {
         $valueOptions = -split "-C --conditions -r --require --import --loader --experimental-loader --input-type --env-file --env-file-if-exists --experimental-config-file --experimental-default-type --experimental-sea-config --experimental-test-isolation --test-isolation --test-global-setup --experimental-policy --policy-integrity --experimental-specifier-resolution --es-module-specifier-resolution --allow-fs-read --allow-fs-write --build-snapshot-config --snapshot-blob --cpu-prof-dir --cpu-prof-interval --cpu-prof-name --heap-prof-dir --heap-prof-interval --heap-prof-name --heapsnapshot-near-heap-limit --heapsnapshot-signal --diagnostic-dir --report-dir --report-directory --report-filename --report-signal --redirect-warnings --disable-proto --disable-warning --dns-result-order --icu-data-dir --openssl-config --inspect-port --debug-port --inspect-publish-uid --localstorage-file --max-http-header-size --max-old-space-size-percentage --network-family-autoselection-attempt-timeout --secure-heap --secure-heap-min --test-concurrency --test-coverage-branches --test-coverage-exclude --test-coverage-functions --test-coverage-include --test-coverage-lines --test-name-pattern --test-reporter --test-reporter-destination --test-shard --test-skip-pattern --test-timeout --title --tls-cipher-list --tls-keylog --trace-event-categories --trace-event-file-pattern --trace-require-module --unhandled-rejections --use-largepages --v8-pool-size --watch-kill-signal --watch-path"
         $noScript = -split "-e --eval -p --print --run --test"
     }
-    $words = @([regex]::Matches($CommandLine, '"[^"]*"|\S+') | ForEach-Object { $_.Value.Trim('"') })
+    $words = @(Split-CommandLine $CommandLine)
     for ($i = 1; $i -lt $words.Count; $i++) {
         $word = $words[$i]
         if (-not $word) { continue }
@@ -907,6 +912,60 @@ function Get-ScriptOperand([string]$Runtime, [string]$CommandLine) {
         return $word
     }
     return ""
+}
+
+# The arguments a Windows program gets for its command line, split as
+# CommandLineToArgvW and the C runtime split them: the program name up to
+# its closing quote or the first space; then words split at spaces and tabs
+# outside quotes, where 2n backslashes before a quote are n backslashes and
+# the quote opens or closes, 2n+1 are n and a literal quote, "" inside
+# quotes is a literal quote, and other backslashes are literal.
+function Split-CommandLine([string]$CommandLine) {
+    $words = [Collections.Generic.List[string]]::new()
+    $n = $CommandLine.Length
+    $i = 0
+    while ($i -lt $n -and ($CommandLine[$i] -eq ' ' -or $CommandLine[$i] -eq "`t")) { $i++ }
+    if ($i -ge $n) { return $words.ToArray() }
+    $word = [Text.StringBuilder]::new()
+    if ($CommandLine[$i] -eq '"') {
+        $i++
+        while ($i -lt $n -and $CommandLine[$i] -ne '"') { [void]$word.Append($CommandLine[$i]); $i++ }
+        $i++
+    } else {
+        while ($i -lt $n -and $CommandLine[$i] -ne ' ' -and $CommandLine[$i] -ne "`t") { [void]$word.Append($CommandLine[$i]); $i++ }
+    }
+    $words.Add($word.ToString())
+    while ($true) {
+        while ($i -lt $n -and ($CommandLine[$i] -eq ' ' -or $CommandLine[$i] -eq "`t")) { $i++ }
+        if ($i -ge $n) { break }
+        $word = [Text.StringBuilder]::new()
+        $quoted = $false
+        while ($i -lt $n) {
+            $c = $CommandLine[$i]
+            if (-not $quoted -and ($c -eq ' ' -or $c -eq "`t")) { break }
+            if ($c -eq '\') {
+                $slashes = 0
+                while ($i -lt $n -and $CommandLine[$i] -eq '\') { $slashes++; $i++ }
+                if ($i -lt $n -and $CommandLine[$i] -eq '"') {
+                    [void]$word.Append([char]'\', $slashes -shr 1)
+                    if ($slashes % 2) { [void]$word.Append([char]'"'); $i++ }
+                } else {
+                    [void]$word.Append([char]'\', $slashes)
+                }
+                continue
+            }
+            if ($c -eq '"') {
+                if ($quoted -and $i + 1 -lt $n -and $CommandLine[$i + 1] -eq '"') { [void]$word.Append([char]'"'); $i += 2; continue }
+                $quoted = -not $quoted
+                $i++
+                continue
+            }
+            [void]$word.Append($c)
+            $i++
+        }
+        $words.Add($word.ToString())
+    }
+    return $words.ToArray()
 }
 
 function Assert-NoLoadedPluginAgents {

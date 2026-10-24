@@ -509,17 +509,65 @@ installed_version() {
 # Bun runs a script of the agents' npm packages (opencode-ai,
 # @sourcegraph/amp). A package counts by its own manifest (npm_package_is,
 # homebrew_opencode), never by the name of its folder. A project, script or
-# other program that is only named opencode or amp is not an agent.
+# other program that is only named opencode or amp is not an agent. The
+# script is read from the process's own arguments (process_argv): ps joins
+# them with spaces, so an option value with a space in it would read as two
+# words, the second one taken for the script.
 loaded_plugin_agents() {
-    local processes installed pid args program agent
+    local processes installed pid program agent word
+    local -a argv
     processes="$(ps -u "$(id -u)" -o pid= -o args= 2>/dev/null)" || return 2
     installed="$(installed_agent_programs)"
-    while read -r pid args; do
+    while read -r pid _; do
         [[ "${pid}" =~ ^[0-9]+$ ]] || continue
         program="$(agent_program "${pid}")" || continue
-        agent="$(agent_of "${program}" "${args}" "${installed}")"
+        argv=()
+        while IFS= read -r -d '' word || [[ -n "${word}" ]]; do
+            argv+=("${word}")
+        done < <(process_argv "${pid}" 2>/dev/null || true)
+        agent="$(agent_of "${program}" "${installed}" "${pid}" ${argv[@]+"${argv[@]}"})"
         [[ -z "${agent}" ]] || printf '%s (PID %s)\n' "${agent}" "${pid}"
     done < <(printf '%s\n' "${processes}" | awk 'tolower($0) ~ /opencode|amp/')
+}
+
+# process_argv PID: the arguments of process PID as the kernel keeps them,
+# each ended by a NUL, so an argument with spaces in it stays one argument:
+# /proc/PID/cmdline on Linux, sysctl KERN_PROCARGS2 (CTL_KERN 1, 49) through
+# the system perl on macOS (ps prints them joined by spaces). Nothing for a
+# process that has exited or that this account may not read.
+process_argv() {
+    if [[ "${OSTYPE:-}" == linux* ]]; then
+        cat "/proc/$1/cmdline" 2>/dev/null
+        return
+    fi
+    [[ "${OSTYPE:-}" == darwin* ]] && command -v perl >/dev/null 2>&1 || return 1
+    # SYS___sysctl is 202 on macOS (x86_64 and arm64); the buffer holds
+    # argc, the executable path, padding NULs, then the arguments.
+    perl -e '
+        my $mib = pack("i3", 1, 49, $ARGV[0]); my $len = pack("Q", 0);
+        syscall(202, $mib, 3, 0, $len, 0, 0) == 0 or exit 1;
+        my $buf = "\0" x unpack("Q", $len);
+        syscall(202, $mib, 3, $buf, $len, 0, 0) == 0 or exit 1;
+        $buf = substr($buf, 0, unpack("Q", $len));
+        my $argc = unpack("i", $buf);
+        my @words = split(/\0/, substr($buf, 4), -1);
+        shift @words;
+        shift @words while @words && $words[0] eq "";
+        $argc = @words if $argc > @words;
+        print map { "$_\0" } @words[0 .. $argc - 1];
+    ' "$1"
+}
+
+# process_cwd PID: the folder process PID runs in (a relative script is
+# relative to it, not to this installer's folder): /proc/PID/cwd on Linux,
+# lsof's cwd entry on macOS.
+process_cwd() {
+    if [[ "${OSTYPE:-}" == linux* ]]; then
+        readlink "/proc/$1/cwd" 2>/dev/null
+        return
+    fi
+    command -v lsof >/dev/null 2>&1 || return 1
+    lsof -nP -a -p "$1" -d cwd -Fn 2>/dev/null | awk '/^n/ { print substr($0, 2); found = 1; exit } END { exit !found }'
 }
 
 # agent_program PID: the program file process PID runs, as the kernel found
@@ -551,33 +599,125 @@ installed_agent_programs() {
     done
 }
 
-# npm_package_is FOLDER NAME: FOLDER holds the npm package NAME by the name
-# its own package.json gives first (npm, pnpm and Bun install a package so).
-# A folder that is only named like the package is not it.
+# json_string FILE KEY...: the string at KEY... (one key per object level,
+# from the top-level object) of the JSON file FILE, as JSON.parse reads it:
+# escapes decoded, the last of duplicate keys wins, a "name" inside a nested
+# object, an array or a string value is no top-level "name". Fails for a
+# file that is not one JSON object, or when that value is not a string.
+json_string() {
+    local file="$1"
+    shift
+    LC_ALL=C awk -v want="$*" '
+        function skip() { while (i <= n && index(" \t\r\n", substr(text, i, 1))) i++ }
+        function hex4(h,    k, c, v) {
+            v = 0
+            for (k = 1; k <= 4; k++) {
+                c = index("0123456789abcdef", tolower(substr(h, k, 1)))
+                if (!c) return -1
+                v = v * 16 + c - 1
+            }
+            return v
+        }
+        function str(    out, c, e, v) {
+            out = ""; i++
+            while (i <= n) {
+                c = substr(text, i, 1)
+                if (c == "\"") { i++; ok = 1; return out }
+                if (c < " ") break
+                if (c == "\\") {
+                    e = substr(text, i + 1, 1)
+                    if (e == "u") {
+                        v = hex4(substr(text, i + 2, 4))
+                        if (v < 0) break
+                        # Only printable ASCII matters here; any other character
+                        # (a control character could forge the key path) is one placeholder.
+                        out = out ((v >= 32 && v < 127) ? sprintf("%c", v) : "\001"); i += 6; continue
+                    }
+                    if (e == "n") c = "\n"; else if (e == "t") c = "\t"; else if (e == "r") c = "\r"
+                    else if (e == "b") c = "\b"; else if (e == "f") c = "\f"
+                    else if (e == "\"" || e == "\\" || e == "/") c = e
+                    else break
+                    out = out c; i += 2; continue
+                }
+                out = out c; i++
+            }
+            ok = 0; return ""
+        }
+        function value(path,    c, key, s) {
+            skip(); c = substr(text, i, 1)
+            if (path == target) found = 0
+            if (c == "{" || c == "[") {
+                i++; skip()
+                if (substr(text, i, 1) == (c == "{" ? "}" : "]")) { i++; return 1 }
+                while (1) {
+                    if (c == "{") {
+                        skip()
+                        if (substr(text, i, 1) != "\"") return 0
+                        key = str(); if (!ok) return 0
+                        skip()
+                        if (substr(text, i, 1) != ":") return 0
+                        i++
+                        if (!value(path SUBSEP key)) return 0
+                    } else if (!value(path SUBSEP "\036")) return 0
+                    skip(); s = substr(text, i, 1); i++
+                    if (s == ",") continue
+                    return s == (c == "{" ? "}" : "]")
+                }
+            }
+            if (c == "\"") {
+                s = str(); if (!ok) return 0
+                if (path == target) { found = 1; result = s }
+                return 1
+            }
+            if (match(substr(text, i), /^(-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?|true|false|null)/)) { i += RLENGTH; return 1 }
+            return 0
+        }
+        { text = text $0 "\n" }
+        END {
+            n = length(text); i = 1; found = 0
+            if (substr(text, 1, 3) == "\357\273\277") i = 4
+            target = "\035"; k = split(want, keys, " ")
+            for (j = 1; j <= k; j++) target = target SUBSEP keys[j]
+            skip()
+            if (substr(text, i, 1) != "{" || !value("\035")) exit 1
+            skip()
+            if (i <= n || !found) exit 1
+            printf "%s", result
+        }
+    ' "${file}" 2>/dev/null
+}
+
+# npm_package_is FOLDER NAME: FOLDER holds the npm package NAME by the
+# top-level name of its own package.json (npm, pnpm and Bun install a
+# package so). A folder that is only named like the package is not it, nor
+# one whose manifest names it anywhere else (an author, a dependency).
 npm_package_is() {
-    local manifest pattern='"name"[[:space:]]*:[[:space:]]*"([^"]*)"'
-    manifest="$(cat "$1/package.json" 2>/dev/null)" || return 1
-    [[ "${manifest}" =~ ${pattern} ]] && [[ "${BASH_REMATCH[1]}" == "$2" ]]
+    local name
+    name="$(json_string "$1/package.json" name)" || return 1
+    [[ "${name}" == "$2" ]]
 }
 
 # homebrew_opencode KEG: KEG (.../Cellar/opencode/VERSION) is OpenCode as
 # Homebrew installed it: its install receipt names a tap that ships this
 # OpenCode (homebrew/core, sst/tap, anomalyco/tap). Another formula named
 # opencode (the archived Go opencode of opencode-ai/tap) is not this agent.
+# The tap is the receipt's source.tap, where
+# Homebrew records it; a "tap" anywhere else in the receipt is not it.
 homebrew_opencode() {
-    local receipt pattern='"tap"[[:space:]]*:[[:space:]]*"([^"]*)"'
-    receipt="$(cat "$1/INSTALL_RECEIPT.json" 2>/dev/null)" || return 1
-    [[ "${receipt}" =~ ${pattern} ]] || return 1
-    case "${BASH_REMATCH[1]}" in
+    local tap
+    tap="$(json_string "$1/INSTALL_RECEIPT.json" source tap)" || return 1
+    case "${tap}" in
         homebrew/core | sst/tap | anomalyco/tap) return 0 ;;
     esac
     return 1
 }
 
-# agent_of PROGRAM ARGS INSTALLED: OpenCode or Amp when a process running
-# PROGRAM with the command line ARGS is that agent, else nothing.
+# agent_of PROGRAM INSTALLED PID WORD...: OpenCode or Amp when process PID,
+# running PROGRAM with the arguments WORD... (its program first), is that
+# agent, else nothing.
 agent_of() {
-    local program="${1% (deleted)}" args="$2" installed="$3" agent path runtime script
+    local program="${1% (deleted)}" installed="$2" pid="$3" agent path runtime script cwd
+    shift 3
     # The OpenCode binary of opencode-ai or of one of the platform packages it
     # publishes (opencode-linux-x64-baseline-musl, opencode-darwin-arm64, ...),
     # by exact name and by that package's manifest: another package named
@@ -601,14 +741,16 @@ agent_of() {
         bun) runtime=bun ;;
         *) return 0 ;;
     esac
-    set -f
-    # shellcheck disable=SC2086 # split the command line into its words
-    set -- ${args}
-    set +f
     script="$(script_operand "${runtime}" "$@")"
+    # A relative script is relative to the folder the process runs in; when
+    # that cannot be read, the script is not known.
+    if [[ -n "${script}" && "${script}" != /* ]]; then
+        cwd="$(process_cwd "${pid}")" || cwd=""
+        if [[ "${cwd}" == /* ]]; then script="${cwd%/}/${script}"; else script=""; fi
+    fi
     # A script started by its #! line is named by the path PATH found (often
     # a link into the package): resolve it as the kernel did.
-    [[ "${script}" != */* ]] || script="$(readlink -f "${script}" 2>/dev/null || printf '%s' "${script}")"
+    [[ -z "${script}" ]] || script="$(readlink -f "${script}" 2>/dev/null || printf '%s' "${script}")"
     while read -r agent path; do
         [[ -n "${path}" && "${script}" == "${path}" ]] && { printf '%s' "${agent}"; return 0; }
     done <<< "${installed}"

@@ -1398,8 +1398,9 @@ def _install_sh_functions(*names: str) -> str:
     return helpers + "".join(bodies)
 
 
-_AGENT_SCAN = ("loaded_plugin_agents", "agent_program", "installed_agent_programs", "npm_package_is", "homebrew_opencode",
-               "agent_of", "script_operand", "assert_no_loaded_plugin_agents")
+_AGENT_SCAN = ("loaded_plugin_agents", "process_argv", "process_cwd", "agent_program", "installed_agent_programs",
+               "json_string", "npm_package_is", "homebrew_opencode", "agent_of", "script_operand",
+               "assert_no_loaded_plugin_agents")
 
 
 def _agent_scan(home: Path, path: list[Path]) -> subprocess.CompletedProcess[str]:
@@ -1654,18 +1655,35 @@ def test_upgrade_refuses_loaded_opencode_or_amp_before_stopping_gateway(tmp_path
         ("/opt/homebrew/Cellar/opencode-tools/1.0/bin/opencode", "opencode", "", ""),
         # pnpm: the package is the last node_modules/opencode-ai on the path.
         ("/usr/bin/node", "node /w/node_modules/.pnpm/opencode-ai@1.19.4/node_modules/opencode-ai/bin/opencode", "", "OpenCode"),
+        # Review loop 2 (rc.7 at 677bf76b): the arguments are the process's
+        # own (a list here), so a value with spaces is one word, never the script.
+        ("/usr/bin/node", ["node", "--conditions", "dev /tmp/w/node_modules/opencode-ai/feature", "worker.js"], "", ""),
+        ("/usr/bin/node", ["node", "--conditions=dev /w/node_modules/opencode-ai/feature", "/w/worker.js"], "", ""),
+        ("/usr/bin/node", ["node", "-r", "./x /w/node_modules/@sourcegraph/amp/dist/main.js", "/w/app.js"], "", ""),
+        ("/usr/bin/node", ["node", "--title", "a /w/node_modules/opencode-ai/bin/opencode", "/w/app.js"], "", ""),
+        ("/Users/u/.bun/bin/bun", ["bun", "--preload", "x /w/node_modules/opencode-ai/p.ts", "app.ts"], "", ""),
+        ("/usr/bin/node", ["node", "/w/app.js", "/w/node_modules/@sourcegraph/amp/dist/main.js"], "", ""),
+        # ... and a real agent under a folder with spaces is still one script.
+        ("/usr/bin/node", ["node", "/Users/John Smith/.npm/lib/node_modules/@sourcegraph/amp/dist/main.js"], "", "Amp"),
+        ("/usr/bin/node", ["node", "--title", "a b", "/w/node_modules/opencode-ai/bin/opencode"], "", "OpenCode"),
+        # A relative script is relative to the process's folder (stubbed /cwd).
+        ("/usr/bin/node", ["node", "node_modules/opencode-ai/bin/opencode"], "", "OpenCode"),
+        ("/usr/bin/node", ["node", "bin/x.js", "/w/node_modules/opencode-ai/bin/opencode"], "", ""),
     ],
 )
-def test_an_agent_is_told_by_its_program_file(tmp_path: Path, program: str, args: str, installed: str, agent: str) -> None:
+def test_an_agent_is_told_by_its_program_file(tmp_path: Path, program: str, args: str | list[str], installed: str, agent: str) -> None:
     # npm_package_is and homebrew_opencode read the package's manifest (their
     # own test reads real files); here a package under no-manifest/ has none,
     # and the stubs check the folder and name agent_of asks about.
     manifests = (
         'npm_package_is() { [[ "$1" == */node_modules/"$2" && "$1" != */no-manifest/* ]]; }\n'
         'homebrew_opencode() { [[ "$1" == */Cellar/opencode/* && "$1" != */no-manifest/* ]]; }\n'
+        "process_cwd() { printf '/cwd'; }\n"
     )
+    words = args if isinstance(args, list) else args.split()
     result = subprocess.run(
-        [BASH, "-c", _install_sh_functions("agent_of", "script_operand") + manifests + 'agent_of "$1" "$2" "$3"', "agent_of", program, args, installed],
+        [BASH, "-c", _install_sh_functions("agent_of", "script_operand") + manifests + 'agent_of "$1" "$2" 0 "${@:3}"',
+         "agent_of", program, installed, *words],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stderr
@@ -1679,6 +1697,23 @@ def test_an_agent_is_told_by_its_program_file(tmp_path: Path, program: str, args
         ("npm_package_is", "package.json", '{"name":"@sourcegraph/amp","version":"0.0.1"}', "@sourcegraph/amp", True),
         ("npm_package_is", "package.json", '{"name": "opencode-ai-fork"}', "opencode-ai", False),
         ("npm_package_is", "package.json", '{"name":"tools","author":{"name":"opencode-ai"}}', "opencode-ai", False),
+        # Review loop 2 (rc.7 at 677bf76b): only the top-level name, as
+        # JSON.parse reads it, wherever the other names stand.
+        ("npm_package_is", "package.json", '{"author":{"name":"opencode-ai"},"name":"innocent-tool"}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"contributors":[{"name":"opencode-ai"}],"name":"x"}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"description":"\\"name\\": \\"opencode-ai\\"","name":"x"}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"keywords":["name","opencode-ai"],"version":"1"}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"":{"name":"opencode-ai"}}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"x\\u001cname":"opencode-ai"}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"name":"opencode-ai","name":"other"}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"name":"opencode-ai","name":{"a":1}}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"name":1}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '[{"name":"opencode-ai"}]', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"name":"opencode-ai"', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"name":"opencode-ai"} {}', "opencode-ai", False),
+        ("npm_package_is", "package.json", '{"name":"other","name":"opencode-ai"}', "opencode-ai", True),
+        ("npm_package_is", "package.json", '{"main":"x","n\\u0061me":"\\u006fpencode-ai","bin":{"a":[1,true,null,-2.5e3]}}', "opencode-ai", True),
+        ("npm_package_is", "package.json", '\ufeff{ "name" : "opencode-ai" }', "opencode-ai", True),
         ("npm_package_is", "package.json", "not a manifest", "opencode-ai", False),
         ("npm_package_is", "", "", "opencode-ai", False),
         ("homebrew_opencode", "INSTALL_RECEIPT.json", "homebrew/core", "", True),
@@ -1686,6 +1721,11 @@ def test_an_agent_is_told_by_its_program_file(tmp_path: Path, program: str, args
         ("homebrew_opencode", "INSTALL_RECEIPT.json", "anomalyco/tap", "", True),
         ("homebrew_opencode", "INSTALL_RECEIPT.json", "opencode-ai/tap", "", False),
         ("homebrew_opencode", "INSTALL_RECEIPT.json", "{}", "", False),
+        # Review loop 2: the tap is source.tap, not a "tap" elsewhere.
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", '{"runtime_dependencies":[{"tap":"homebrew/core"}],"source":{"tap":"opencode-ai/tap"}}', "", False),
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", '{"tap":"homebrew/core","source":{"path":"x"}}', "", False),
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", '{"source\\u001ctap":"homebrew/core"}', "", False),
+        ("homebrew_opencode", "INSTALL_RECEIPT.json", '{"source":{"tap":"opencode-ai/tap","tap":"homebrew/core"}}', "", True),
         ("homebrew_opencode", "", "", "", False),
     ],
 )
@@ -1701,7 +1741,7 @@ def test_a_package_counts_by_its_own_manifest(tmp_path: Path, helper: str, file:
     elif file:
         (folder / file).write_text(text, encoding="utf-8")
     result = subprocess.run(
-        [BASH, "-c", "set -euo pipefail\n" + _install_sh_functions(helper) + f'if {helper} "$1" "$2"; then echo yes; else echo no; fi', helper, str(folder), want],
+        [BASH, "-c", "set -euo pipefail\n" + _install_sh_functions("json_string", helper) + f'if {helper} "$1" "$2"; then echo yes; else echo no; fi', helper, str(folder), want],
         capture_output=True, text=True, timeout=30, check=False,
     )
     assert (result.returncode, result.stdout.strip()) == (0, "yes" if ok else "no"), result.stderr
@@ -1723,21 +1763,89 @@ def test_the_installed_agents_are_those_of_the_native_installers(tmp_path: Path)
 
 
 @pytest.mark.skipif(shutil.which("node") is None or not Path("/proc/self/exe").exists(), reason="runs Node, reads /proc")
-def test_a_real_node_option_value_naming_opencode_ai_does_not_refuse(tmp_path: Path) -> None:
+@pytest.mark.parametrize("case", ["value", "value with a space", "--option=value with a space", "title with a space", "agent in a folder with a space"])
+def test_a_real_node_option_value_naming_opencode_ai_does_not_refuse(tmp_path: Path, case: str) -> None:
     # R1 review: a Node worker started with --conditions <a path in
-    # opencode-ai> (which need not exist) was taken for OpenCode.
+    # opencode-ai> was taken for OpenCode. Review loop 2: ps joins the
+    # arguments with spaces, so a quoted value with a space in it was split
+    # and its path read as the script. The package here is a real opencode-ai.
     node = Path(shutil.which("node")).resolve()
-    worker = tmp_path / "work" / "worker.js"
+    work = tmp_path / ("John Smith" if case.startswith("agent") else "work")
+    worker = work / "worker.js"
     worker.parent.mkdir(parents=True)
     worker.write_text("setTimeout(() => {}, 60000)\n", encoding="utf-8")
-    proc = _started([str(node), "--conditions", str(tmp_path / "work" / "node_modules" / "opencode-ai" / "feature"), str(worker)], node)
+    package = work / "node_modules" / "opencode-ai"
+    _manifest(package, "opencode-ai")
+    (package / "feature").write_text("", encoding="utf-8")
+    launcher = package / "bin" / "opencode"
+    launcher.parent.mkdir()
+    launcher.write_text("setTimeout(() => {}, 60000)\n", encoding="utf-8")
+    options = {
+        "value": ["--conditions", str(package / "feature")],
+        "value with a space": ["--conditions", f"dev {package / 'feature'}"],
+        "--option=value with a space": [f"--conditions=dev {package / 'feature'}"],
+        "title with a space": ["--title", f"worker {launcher}"],
+        "agent in a folder with a space": [],
+    }[case]
+    script = launcher if case.startswith("agent") else worker
+    proc = _started([str(node), *options, str(script)], node)
     try:
         result = _agent_scan(tmp_path / "home", [])
     finally:
         os.killpg(proc.pid, signal.SIGKILL)
         proc.wait()
-    assert result.returncode == 0, (result.stdout, result.stderr)
-    assert "scan-passed" in result.stdout
+    if case.startswith("agent"):
+        assert result.returncode == 1 and f"OpenCode (PID {proc.pid})" in result.stderr, (result.stdout, result.stderr)
+    else:
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        assert "scan-passed" in result.stdout
+
+
+@pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")
+def test_the_arguments_are_read_with_their_boundaries(tmp_path: Path) -> None:
+    # Review loop 2: process_argv gives each argument whole, as the kernel
+    # keeps it; ps would join "a b" and "c  d" into one line of words.
+    words = ["-c", "sleep 60; :", "a b", "c  d", "", "e"]
+    proc = subprocess.Popen([BASH, *words], start_new_session=True)
+    try:
+        for _ in range(500):
+            if Path(f"/proc/{proc.pid}/cmdline").read_bytes().count(b"\0") == len(words) + 1:
+                break
+            time.sleep(0.01)
+        script = _install_sh_functions("process_argv") + 'OSTYPE=linux-gnu\nprocess_argv "$1"'
+        own = subprocess.run([BASH, "-c", script, "argv", str(proc.pid)], capture_output=True, timeout=30, check=False)
+    finally:
+        os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+    assert own.returncode == 0, own.stderr
+    assert own.stdout.split(b"\0")[1:-1] == [w.encode() for w in words]
+    gone = subprocess.run([BASH, "-c", script, "argv", str(proc.pid)], capture_output=True, timeout=30, check=False)
+    assert (gone.returncode != 0, gone.stdout) == (True, b"")
+
+
+def test_a_relative_script_is_the_process_folders_not_the_installers(tmp_path: Path) -> None:
+    # Review loop 2: a relative script was resolved against the installer's
+    # own folder, so an unrelated `node node_modules/opencode-ai/x.js` read
+    # the installer folder's real OpenCode manifest.
+    installer_dir, process_dir = tmp_path / "installer", tmp_path / "process"
+    _manifest(installer_dir / "node_modules" / "opencode-ai", "opencode-ai")
+    (installer_dir / "node_modules" / "opencode-ai" / "x.js").write_text("", encoding="utf-8")
+    (process_dir / "node_modules" / "opencode-ai").mkdir(parents=True)
+    (process_dir / "node_modules" / "opencode-ai" / "x.js").write_text("", encoding="utf-8")
+    funcs = _install_sh_functions("agent_of", "script_operand", "json_string", "npm_package_is", "homebrew_opencode")
+
+    def told(cwd: str | None) -> str:
+        stub = f"process_cwd() {{ printf '%s' '{cwd}'; }}\n" if cwd else "process_cwd() { return 1; }\n"
+        result = subprocess.run(
+            [BASH, "-c", funcs + stub + 'agent_of /usr/bin/node "" 0 node node_modules/opencode-ai/x.js'],
+            cwd=installer_dir, capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    assert told(str(process_dir)) == ""
+    assert told(None) == ""
+    assert told(str(installer_dir)) == "OpenCode"
 
 
 @pytest.mark.skipif(not Path("/proc/self/exe").exists(), reason="Linux /proc")

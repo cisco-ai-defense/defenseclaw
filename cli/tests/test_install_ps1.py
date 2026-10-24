@@ -3782,6 +3782,20 @@ _WINDOWS_AGENT_ROWS = [
     (r"C:\Program Files\nodejs\node.exe",
      r"node C:\w\node_modules\.pnpm\opencode-ai@1.19.4\node_modules\opencode-ai\bin\opencode", "opencode"),
     (r"C:\W\Node_Modules\OpenCode-Windows-X64\bin\opencode.exe", "opencode.exe", "opencode"),
+    # Review loop 2 (rc.7 at 677bf76b): the words are those Node gets
+    # (Split-CommandLine), so a quoted value with spaces, also as
+    # --option="value" or with a quote mid-word, is one word, never the script.
+    (r"C:\Program Files\nodejs\node.exe", r'node --conditions="dev C:\w\node_modules\opencode-ai\feature" C:\w\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node --title "x C:\w\node_modules\@sourcegraph\amp\dist\main.js" C:\w\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node --title "a\" C:\w\node_modules\opencode-ai\bin\opencode" C:\w\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node --title=x" "C:\w\node_modules\opencode-ai\bin\opencode C:\w\worker.js', ""),
+    (r"C:\Program Files\nodejs\node.exe", r'node C:\w\app.js "C:\w\node_modules\opencode-ai\bin\opencode"', ""),
+    # A relative script is relative to a folder this check cannot read.
+    (r"C:\Program Files\nodejs\node.exe", r"node w\node_modules\opencode-ai\bin\opencode", ""),
+    # ... while a real agent, in a folder with spaces or on a share, still is.
+    (r"C:\Program Files\nodejs\node.exe",
+     r'"C:\Program Files\nodejs\node.exe" "C:\Users\John Smith\AppData\Roaming\npm\node_modules\@sourcegraph\amp\dist\main.js"', "amp"),
+    (r"C:\Program Files\nodejs\node.exe", r'node --title "a b" \\srv\share\node_modules\opencode-ai\bin\opencode', "opencode"),
 ]
 
 
@@ -3810,7 +3824,7 @@ def test_a_windows_agent_is_told_by_its_executable() -> None:
         "$Root.EndsWith('\\node_modules\\' + $Name.Replace('/', '\\'), [StringComparison]::OrdinalIgnoreCase) }\n"
     )
     script = ("Set-StrictMode -Version Latest\n" + _ps1_function("Get-LoadedPluginAgent") + _ps1_function("Get-ScriptOperand")
-              + _ps1_function("Get-NpmPackageFolder") + manifests
+              + _ps1_function("Split-CommandLine") + _ps1_function("Get-NpmPackageFolder") + manifests
               + "function Get-InstalledAgentPrograms { " + installed.split("=", 1)[1].strip() + " }\n" + rows)
     result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
@@ -3841,6 +3855,29 @@ def test_the_installed_windows_agents_are_those_of_the_native_installers(tmp_pat
     assert result.returncode == 0, result.stderr
     lines = sorted(line for line in result.stdout.splitlines() if "=" in line)
     assert lines == [f"{str(profile / '.amp' / 'bin' / 'amp.exe').lower()}=amp"]
+
+
+@pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
+@pytest.mark.allow_subprocess
+def test_a_windows_command_line_splits_as_node_reads_it() -> None:
+    # Review loop 2: Split-CommandLine follows CommandLineToArgvW and the C
+    # runtime, which Node and Bun use for their arguments.
+    rows = [
+        (r'"C:\Program Files\nodejs\node.exe" a "b c" d', [r"C:\Program Files\nodejs\node.exe", "a", "b c", "d"]),
+        (r'node --x="a b" c', ["node", "--x=a b", "c"]),
+        (r'node a\\\"b "c\\" d', ["node", 'a\\"b', "c\\", "d"]),
+        (r'node "a""b" c', ["node", 'a"b', "c"]),
+        (r"node a\b\\c	 x", ["node", r"a\b\\c", "x"]),
+        (r'node "" x', ["node", "", "x"]),
+        (r'C:\a"b c', ['C:\\a"b', "c"]),
+        ("", []),
+    ]
+    script = "Set-StrictMode -Version Latest\n" + _ps1_function("Split-CommandLine") + "\n".join(
+        "ConvertTo-Json -Compress -InputObject @(Split-CommandLine '{}')".format(line.replace("'", "''")) for line, _ in rows
+    )
+    result = subprocess.run([POWERSHELL, "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert [json.loads(line) for line in result.stdout.splitlines() if line.strip()] == [words for _, words in rows]
 
 
 @pytest.mark.skipif(POWERSHELL is None, reason="PowerShell is not installed")
