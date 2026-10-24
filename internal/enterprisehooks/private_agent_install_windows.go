@@ -147,7 +147,7 @@ func openWindowsPrivateWalkDir(dir string) (*os.File, error) {
 	// directory to enumerate, even if it is selected by a user-controlled
 	// reparse point.
 	if len(absolute) < 3 || absolute[1] != ':' || absolute[2] != '\\' ||
-		!((absolute[0] >= 'A' && absolute[0] <= 'Z') || (absolute[0] >= 'a' && absolute[0] <= 'z')) ||
+		((absolute[0] < 'A' || absolute[0] > 'Z') && (absolute[0] < 'a' || absolute[0] > 'z')) ||
 		len(filepath.VolumeName(absolute)) != 2 || strings.Contains(absolute[2:], ":") {
 		return nil, errPrivateWalkReparse
 	}
