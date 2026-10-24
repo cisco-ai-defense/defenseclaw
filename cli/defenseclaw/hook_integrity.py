@@ -446,7 +446,9 @@ def _claude_guardable_hook_executable(path: str) -> bool:
 
 
 def _claude_pretool_guard_view(handler: dict, command: str, args: list[str]) -> dict | None:
-    if len(args) != 5 or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND or args[2:] != ["hook", "--connector", "claudecode"]:
+    if len(args) != 5 or args[0] != CLAUDE_LAUNCHER_GUARD_SUBCOMMAND:
+        return None
+    if args[2:] != ["hook", "--connector", "claudecode"]:
         return None
     launcher = args[1]
     if not _claude_guardable_hook_executable(command) or not _claude_guardable_hook_executable(launcher):

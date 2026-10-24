@@ -55,12 +55,16 @@ func fakeLauncher(t *testing.T) string {
 // the PreToolUse guard handler.
 func runHookMain(t *testing.T, args []string, stdin string) (int, string, string) {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "-test.run=^TestHookMainHelperProcess$")
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(self, "-test.run=^TestHookMainHelperProcess$")
 	cmd.Env = append(os.Environ(), "GO_WANT_HOOK_MAIN_ARGS="+strings.Join(args, "\x1f"))
 	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	err := cmd.Run()
+	err = cmd.Run()
 	code := 0
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		code = exitErr.ExitCode()
