@@ -421,6 +421,58 @@ func TestLinuxManagedHookContextReadsOnlyTheStatusHead(t *testing.T) {
 	}
 }
 
+// A status reader may have to obtain the account's entire (potentially slow)
+// Groups line to satisfy a large read. A valid hook must not ask for it.
+func TestLinuxManagedHookDoesNotReadTheGroupsLine(t *testing.T) {
+	descriptor := testDescriptor()
+	withStandaloneHookRuntime(t, "linux",
+		func(string) (*managed.RuntimeDescriptor, error) { return descriptor, nil },
+		noMarkers, "/nonexistent-secure-client")
+	status := linuxStatusWithGroups("0", 65536)
+	groups := strings.Index(status, "Groups:")
+	if groups <= 0 || len(status) <= linuxHookContextMaxBytes {
+		t.Fatal("test needs a large kernel-shaped Groups line")
+	}
+	requestedGroups := false
+	standaloneLinuxHookContext = func() string {
+		reader := &statusBeforeGroupsReader{data: status, end: groups, requestedGroups: &requestedGroups}
+		return linuxManagedHookContextReason(
+			func(string) (string, error) { return "user:[1]", nil },
+			func(path string) (io.ReadCloser, error) {
+				if path == "/proc/self/uid_map" {
+					return io.NopCloser(strings.NewReader("0 0 4294967295\n")), nil
+				}
+				if path == "/proc/self/status" {
+					return io.NopCloser(reader), nil
+				}
+				return nil, os.ErrNotExist
+			})
+	}
+	prepareEnterpriseManagedHookRuntime("codex")
+	opts := buildHookOptionsForRuntime("codex", "PreToolUse", "", "", true)
+	if requestedGroups || opts.ManagedRuntimeFailure != "" || opts.ManagedUnixSocket != descriptor.HookSocket || opts.FailMode != "closed" {
+		t.Fatalf("valid hook depended on Groups: read=%v failure=%q socket=%q mode=%q",
+			requestedGroups, opts.ManagedRuntimeFailure, opts.ManagedUnixSocket, opts.FailMode)
+	}
+}
+
+type statusBeforeGroupsReader struct {
+	data            string
+	end             int
+	offset          int
+	requestedGroups *bool
+}
+
+func (r *statusBeforeGroupsReader) Read(p []byte) (int, error) {
+	if len(p) > r.end-r.offset {
+		*r.requestedGroups = true
+		return 0, errors.New("slow Groups line")
+	}
+	n := copy(p, r.data[r.offset:])
+	r.offset += n
+	return n, nil
+}
+
 // A standalone runtime that fails its checks (an untrusted descriptor, or one
 // that names no hook socket, since the standalone hook has no loopback TCP
 // fallback and never reads a token) fails closed. Its options select no

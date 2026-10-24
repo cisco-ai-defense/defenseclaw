@@ -116,7 +116,12 @@ func linuxTracerPidReason(open func(string) (io.ReadCloser, error)) string {
 		return hookexec.ManagedProcessContextUnknownReason
 	}
 	defer f.Close()
-	head := bufio.NewReader(io.LimitReader(f, linuxHookContextMaxBytes))
+	// Keep read-ahead smaller than the Uid/Gid/FDSize lines between
+	// TracerPid and Groups in the kernel's status format. A default-sized
+	// bufio reader asks proc for 4 KiB at once, making a valid hook wait
+	// for (or fail on) the account's entire Groups line before it can see
+	// TracerPid, even though the parser stops there.
+	head := bufio.NewReaderSize(io.LimitReader(f, linuxHookContextMaxBytes), 16)
 	for {
 		line, err := head.ReadString('\n')
 		if err != nil {
