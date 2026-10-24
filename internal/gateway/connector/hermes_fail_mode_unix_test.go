@@ -24,7 +24,8 @@ import (
 )
 
 // A per-user Copilot CLI, Antigravity or Hermes hook bakes closed for every
-// failure and records closed with unset or predecessor-open settings. No
+// failure and records the outage mode of its policy tier: closed when unset
+// or strict, open in the default and permissive tiers (oss-outage-open). No
 // hook reads DEFENSECLAW_FAIL_MODE (GAP-0315).
 func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 	scripts := map[string]string{"antigravity": "antigravity-hook.sh", "copilot": "copilot-hook.sh", "hermes": "hermes-hook.sh"}
@@ -34,7 +35,7 @@ func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 		}{
 			{name: "unset", mode: "", want: "closed"},
 			{name: "closed", mode: "closed", want: "closed"},
-			{name: "predecessor open", mode: "open", want: "closed"},
+			{name: "outage open tier", mode: "open", want: "open"},
 		} {
 			t.Run(conn.Name()+"/"+tc.name, func(t *testing.T) {
 				dir := t.TempDir()
@@ -79,7 +80,13 @@ func TestPerUserNativeDenyHookKeepsTheResolvedFailMode(t *testing.T) {
 // clean DEFENSECLAW_* environment.
 func runPerUserHook(t *testing.T, script, stdin string, args ...string) (stdout, stderr string, code int) {
 	t.Helper()
-	home := t.TempDir()
+	return runPerUserHookIn(t, t.TempDir(), nil, script, stdin, args...)
+}
+
+// runPerUserHookIn is runPerUserHook with HOME and DEFENSECLAW_HOME at home
+// and extraEnv added.
+func runPerUserHookIn(t *testing.T, home string, extraEnv []string, script, stdin string, args ...string) (stdout, stderr string, code int) {
+	t.Helper()
 	cmd := exec.Command("bash", append([]string{script}, args...)...)
 	cmd.Stdin = strings.NewReader(stdin)
 	var env []string
@@ -88,7 +95,7 @@ func runPerUserHook(t *testing.T, script, stdin string, args ...string) (stdout,
 			env = append(env, kv)
 		}
 	}
-	cmd.Env = append(env, "DEFENSECLAW_HOME="+home, "HOME="+home)
+	cmd.Env = append(append(env, "DEFENSECLAW_HOME="+home, "HOME="+home), extraEnv...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
@@ -127,10 +134,9 @@ func TestPerUserHermesHookBlocksAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	}
 }
 
-// With the gateway down, the per-user Copilot CLI hook rendered with an unset
-// or closed outage mode denies preToolUse and permissionRequest with
-// Copilot's native deny and a reason that names the next step. An older open
-// option also renders closed on a per-user install.
+// With the gateway down, the per-user Copilot CLI hook follows the current
+// config tier. Strict denies preToolUse and permissionRequest with Copilot's
+// native deny; default lets the call run with a warning that names the fix.
 // Copilot's other events cannot block and stay neutral.
 func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 	if _, err := exec.LookPath("curl"); err != nil {
@@ -153,6 +159,12 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 		if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, NewCopilotConnector()); err != nil {
 			t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
 		}
+		// The fixture keeps hooks under dir/hooks, so place the trusted
+		// helper binary next to that runtime's config once per mode.
+		installOutageOpenRuntimeForHookTest(t, dir, dir)
+		if mode == "closed" {
+			writeOutageTierConfig(t, dir, outageStrictTierConfig)
+		}
 		script := filepath.Join(hookDir, "copilot-hook.sh")
 		for _, tc := range []struct{ event, field, deny string }{
 			{"preToolUse", "permissionDecisionReason", `"permissionDecision":"deny"`},
@@ -160,15 +172,20 @@ func TestPerUserCopilotHookDeniesWhileTheGatewayIsDown(t *testing.T) {
 			{"sessionStart", "", ""},
 		} {
 			t.Run("mode "+map[string]string{"": "unset"}[mode]+mode+"/"+tc.event, func(t *testing.T) {
-				out, errOut, code := runPerUserHook(t, script,
+				home := t.TempDir()
+				out, errOut, code := runPerUserHookIn(t, home, []string{"DEFENSECLAW_GATEWAY_AUTOSTART=0"}, script,
 					`{"sessionId":"s","timestamp":1,"cwd":"/tmp","toolName":"bash","toolArgs":"{\"command\":\"echo ok\"}"}`,
 					"--event", tc.event)
 				if code != 0 {
 					t.Fatalf("exit %d, want 0 (stdout %q stderr %q)", code, out, errOut)
 				}
-				if tc.deny == "" {
+				if tc.deny == "" || mode != "closed" {
 					if strings.TrimSpace(out) != "" {
 						t.Fatalf("stdout %q, want no decision (stderr %q)", out, errOut)
+					}
+					if mode != "closed" && tc.deny != "" &&
+						(!strings.Contains(errOut, "defenseclaw-gateway start") || !strings.Contains(errOut, "defenseclaw doctor")) {
+						t.Fatalf("stderr %q, want the outage warning with its fix", errOut)
 					}
 					return
 				}

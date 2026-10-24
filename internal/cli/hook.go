@@ -602,12 +602,12 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		apiAddr = fmt.Sprintf("127.0.0.1:%d", config.DefaultGatewayAPIPort)
 	}
 
-	// Per-user native hooks fail closed, including while their gateway is
-	// down. An older sidecar or inherited environment cannot open them.
-	// Managed hooks take their mode from protected administrator state below.
-	outageFailMode := "closed"
-	if !enterpriseManaged {
-		outageFailMode = perUserHookOutageFailMode(filepath.Join(hookDir, ".hookcfg"), connector)
+	// Per-user native hooks decide a classified outage from their runtime
+	// config at call time. Only the installed runtime's protected hook home
+	// can open one; an agent-chosen home remains closed.
+	var outageFailModeNow func() string
+	if !enterpriseManaged && trustedNativeState {
+		outageFailModeNow = func() string { return hookOutageFailModeNow(connector, hookDir) }
 	}
 	token := os.Getenv("DEFENSECLAW_GATEWAY_TOKEN")
 	if trustedNativeState {
@@ -621,7 +621,7 @@ func buildHookOptionsForRuntime(connector, event, apiAddr, _ string, enterpriseM
 		Event:                     event,
 		APIAddr:                   apiAddr,
 		FailMode:                  "closed",
-		OutageFailMode:            outageFailMode,
+		OutageFailModeNow:         outageFailModeNow,
 		Home:                      home,
 		HookDir:                   hookDir,
 		Token:                     token,
@@ -743,11 +743,6 @@ func readHookSidecar(path string) map[string]string {
 		}
 	}
 	return out
-}
-
-// A per-user hook never inherits an open mode from a predecessor's sidecar.
-func perUserHookOutageFailMode(_, _ string) string {
-	return "closed"
 }
 
 // hookConfigMaxBytes bounds the config.yaml read of readHookConfigDocument.

@@ -71,7 +71,7 @@ The tree and the programs are listed in [Paths](/docs/reference/configuration/pa
 
 On Linux and macOS the gateway runs as a background process of your account. It starts with `defenseclaw quickstart`, `defenseclaw setup` or `defenseclaw-gateway start`. The install adds no systemd unit, LaunchAgent or login item. When the gateway is not running (after a reboot, for example), the next hook call of an agent starts it in the background and sends its request again. This applies to the shell hooks of Claude Code, Codex, Cursor, GitHub Copilot, Devin, Hermes, Kiro and Antigravity. The OpenCode and Amp plugins do not start it. On Windows a hook starts a stopped gateway too.
 
-A hook call that meets a gateway restart is retried for up to about 3 seconds. A longer outage ends the call with `gateway restarting or not running`: a per-user hook blocks it in every policy tier, as does a managed hook by default. On Windows a per-user hook for a tool call waits at most about 3.5 seconds for the decision (about 4 seconds when the gateway is checking with Cisco AI Defense or the LLM judge), then fails closed.
+A hook call that meets a gateway restart is retried for up to about 3 seconds. A longer outage ends the call with `gateway restarting or not running`: a fail-closed hook (a per-user strict policy, a managed host by default) blocks it; a per-user default or permissive policy lets it run with a warning. On Windows a per-user hook for a tool call waits at most about 3.5 seconds for the decision (about 4 seconds when the gateway is checking with Cisco AI Defense or the LLM judge), then applies its fail mode.
 
 A hook does not start the gateway:
 
@@ -80,7 +80,7 @@ A hook does not start the gateway:
 - for 60 seconds after a hook start failed (see `~/.defenseclaw/gateway.log`);
 - when `DEFENSECLAW_GATEWAY_AUTOSTART=0` is set.
 
-While the gateway is down, per-user hooks and managed hooks by default block supported events in every policy tier and guardrail mode. During an install or upgrade every hook blocks ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)). When `gateway.watchdog.enabled` is set and the gateway process stops on its own, the watchdog starts it again after `gateway.watchdog.debounce` failed health checks. A gateway that runs but does not answer is not restarted by a hook or the watchdog: check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`.
+While the gateway is down, a per-user install in the default or permissive policy lets agent calls run with one warning (start the gateway; `defenseclaw doctor` if it does not start) and a `hook-failures.jsonl` record; the strict policy and a managed host by default block them, in observe mode too. During an install or upgrade every hook blocks ([Fail modes](/docs/reference/configuration/fail-modes#per-user-installs)). When `gateway.watchdog.enabled` is set and the gateway process stops on its own, the watchdog starts it again after `gateway.watchdog.debounce` failed health checks. A gateway that runs but does not answer is not restarted by a hook or the watchdog: check `defenseclaw-gateway status`, or run `defenseclaw-gateway restart`.
 
 ## Verify a download
 

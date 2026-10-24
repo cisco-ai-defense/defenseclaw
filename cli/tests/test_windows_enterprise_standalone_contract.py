@@ -443,6 +443,7 @@ STANDALONE_SMOKES = (
     "enterprise-standalone-recovery-gateway-smoke.ps1",
     "enterprise-standalone-rollback-sensor-helper-smoke.ps1",
     "enterprise-standalone-root-squat-smoke.ps1",
+    "enterprise-standalone-runtime-env-acl-smoke.ps1",
     "enterprise-standalone-w2b-lifecycle-smoke.ps1",
     "enterprise-standalone-secrets-acl-smoke.ps1",
     "enterprise-standalone-service-logged-error-smoke.ps1",
@@ -486,6 +487,13 @@ def test_every_standalone_smoke_is_wired() -> None:
     assert present == set(STANDALONE_SMOKES)
     for name in STANDALONE_SMOKES:
         assert f"{name.removesuffix('.ps1')}: OK" in _text(tests / name)
+
+
+def test_runtime_env_acl_smoke_is_in_native_workflow() -> None:
+    name = "enterprise-standalone-runtime-env-acl-smoke.ps1"
+    assert name in STANDALONE_SMOKES
+    workflow = _text(ROOT / ".github" / "workflows" / "windows-native.yml")
+    assert f"./packaging/windows/tests/{name}" in workflow
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows PowerShell")

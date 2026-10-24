@@ -67,6 +67,30 @@ func TestLinuxLifecycleNeverChangesHostKernel(t *testing.T) {
 	assertKernelUntouched(t, h)
 }
 
+func TestLinuxLifecycleActionsReportOpenKernelPolicyViews(t *testing.T) {
+	h := newTestHost(t, "linux")
+	setKernelValue(t, h, sysctlMaxUserNamespaces, "63229\n")
+	setKernelValue(t, h, sysctlPtraceScope, "0\n")
+	for _, action := range []string{ActionInstall, ActionEnsure, ActionRepair, ActionUpgrade, ActionStatus, ActionVerify} {
+		var opts Options
+		switch action {
+		case ActionInstall:
+			opts = Options{Action: action, PayloadDir: h.payload("1.0.4")}
+		case ActionUpgrade:
+			opts = Options{Action: action, PayloadDir: h.payload("1.0.5")}
+		default:
+			opts = Options{Action: action}
+		}
+		result := h.run(opts)
+		if action != ActionVerify {
+			requireOK(t, result)
+		}
+		if result.SecurityComplete || !hasWarning(result, codeUserNamespaces) || !hasWarning(result, codeUnprivilegedPtrace) {
+			t.Fatalf("%s claims different kernel-view truth from status: security_complete=%t warnings=%+v", action, result.SecurityComplete, result.Warnings)
+		}
+	}
+}
+
 func TestLinuxStatusUsesCurrentKernelFactsWithoutBootMarkers(t *testing.T) {
 	h := newTestHost(t, "linux")
 	setKernelValue(t, h, sysctlMaxUserNamespaces, "0\n")

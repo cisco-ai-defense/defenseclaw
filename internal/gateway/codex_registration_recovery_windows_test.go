@@ -325,7 +325,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 		t.Fatalf("Codex re-addition did not publish registration: present=%v err=%v", present, err)
 	}
 	locked := connector.LoadHookContractLockEntry(dataDir, "codex")
-	if locked.Connector != "codex" || locked.HookFailMode != "closed" {
+	if locked.Connector != "codex" || locked.HookFailMode != "open" {
 		t.Fatalf("Codex re-addition did not publish its hook-contract lock: %+v", locked)
 	}
 
@@ -333,7 +333,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	// Connector.Teardown restores the operator's managed_config.toml and leaves
 	// the already-published contract lock/shared runtime state behind. A stale
 	// connector-flat runtime record models the captured partial teardown state:
-	// status still resolves windows-sidecar=closed from the shared JSON, but the
+	// status still resolves windows-sidecar=open from the shared JSON, but the
 	// real managed hook matrix is registration-missing.
 	if err := conn.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("late stale Codex teardown: %v", err)
@@ -348,11 +348,11 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	if present, err := connector.OwnedHooksPresent(conn, opts); err != nil || present {
 		t.Fatalf("late teardown did not remove managed registration: present=%v err=%v", present, err)
 	}
-	if got := connector.LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" || got.HookFailMode != "closed" {
+	if got := connector.LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" || got.HookFailMode != "open" {
 		t.Fatalf("late teardown unexpectedly removed Codex lock evidence: %+v", got)
 	}
 	sharedRuntime, err := os.ReadFile(filepath.Join(dataDir, "hooks", ".hookcfg"))
-	if err != nil || !bytes.Contains(sharedRuntime, []byte(`"codex": "closed"`)) {
+	if err != nil || !bytes.Contains(sharedRuntime, []byte(`"codex": "open"`)) {
 		t.Fatalf("late teardown unexpectedly removed shared Codex runtime mode: err=%v body=%q", err, sharedRuntime)
 	}
 
@@ -399,9 +399,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/codex/hook", bytes.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:49152"
-	// Teardown revoked the first scoped token; re-addition issued the one
-	// published to the recovered hook.
-	req.Header.Set("Authorization", "Bearer "+restartOpts.HookAPIToken)
+	req.Header.Set("Authorization", "Bearer "+hookToken)
 	setTestCodexHookBinding(req, "SessionStart", restartOpts.HookContractID)
 	recorder := httptest.NewRecorder()
 	requestDone := make(chan struct{})
@@ -415,7 +413,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	// lane finishes Setup and registers its exact hook guard. An authenticated
 	// SessionStart arriving in that bounded startup window must hand off to the
 	// subsequently registered current owner instead of returning an internal
-	// 503 that Codex could render as a successful hook.
+	// 503 that Codex's fail-open UI renders as a successful hook.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	replacementGuard := NewHookConfigGuard(nil, nil, time.Hour)
@@ -492,7 +490,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 		t.Fatalf("registration-missing persisted after authenticated SessionStart: present=%v err=%v", present, err)
 	}
 	repairedLock := connector.LoadHookContractLockEntry(dataDir, "codex")
-	if repairedLock.Connector != "codex" || repairedLock.HookFailMode != "closed" {
+	if repairedLock.Connector != "codex" || repairedLock.HookFailMode != "open" {
 		t.Fatalf("authenticated SessionStart did not republish Codex contract evidence: %+v", repairedLock)
 	}
 	if repairedLock.UpdatedAt == locked.UpdatedAt {
@@ -500,7 +498,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	}
 	runtimeBody, err := os.ReadFile(filepath.Join(dataDir, "hooks", ".hookcfg.codex"))
 	if err != nil || !bytes.Contains(runtimeBody, []byte("DEFENSECLAW_CONNECTOR=codex")) ||
-		!bytes.Contains(runtimeBody, []byte("DEFENSECLAW_FAIL_MODE=closed")) {
+		!bytes.Contains(runtimeBody, []byte("DEFENSECLAW_FAIL_MODE=open")) {
 		t.Fatalf("authenticated SessionStart did not republish Codex runtime evidence: err=%v body=%q", err, runtimeBody)
 	}
 
@@ -527,14 +525,14 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 		bytes.NewReader(body),
 	)
 	lockRepairRequest.RemoteAddr = "127.0.0.1:49153"
-	lockRepairRequest.Header.Set("Authorization", "Bearer "+restartOpts.HookAPIToken)
+	lockRepairRequest.Header.Set("Authorization", "Bearer "+hookToken)
 	setTestCodexHookBinding(lockRepairRequest, "SessionStart", restartOpts.HookContractID)
 	lockRepairRecorder := httptest.NewRecorder()
 	api.tokenAuth(api.handleAgentHook("codex")).ServeHTTP(lockRepairRecorder, lockRepairRequest)
 	if lockRepairRecorder.Code != http.StatusOK {
 		t.Fatalf("authenticated SessionStart did not repair missing ready lock: status=%d body=%s", lockRepairRecorder.Code, lockRepairRecorder.Body.String())
 	}
-	if got := connector.LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" || got.HookFailMode != "closed" {
+	if got := connector.LoadHookContractLockEntry(dataDir, "codex"); got.Connector != "codex" || got.HookFailMode != "open" {
 		t.Fatalf("authenticated SessionStart did not republish missing ready lock: %+v", got)
 	}
 
@@ -818,8 +816,8 @@ cfg.has_connector_configured = lambda: True
 cfg.connector_workspace_dir = lambda: ""
 report = connector_fail_mode_report(cfg, "codex")
 print(json.dumps(report, sort_keys=True))
-if report["effective"] != "closed" or report["runtime"] != "closed":
-    raise SystemExit("Codex runtime fail-mode report is not closed")
+if report["effective"] != "open" or report["runtime"] != "open":
+    raise SystemExit("Codex runtime fail-mode report is not open")
 if report["current"] is not True or report["drift"]:
     raise SystemExit("Codex runtime fail-mode report is not current: " + ", ".join(report["drift"]))
 `
@@ -864,10 +862,10 @@ if report["current"] is not True or report["drift"]:
 		}
 		t.Fatalf("Python Codex fail-mode report acceptance failed: %v\n%s", err, output)
 	}
-	if !bytes.Contains(output, []byte(`"effective": "closed"`)) ||
-		!bytes.Contains(output, []byte(`"runtime": "closed"`)) ||
+	if !bytes.Contains(output, []byte(`"effective": "open"`)) ||
+		!bytes.Contains(output, []byte(`"runtime": "open"`)) ||
 		!bytes.Contains(output, []byte(`"current": true`)) {
-		t.Fatalf("Python Codex fail-mode report omitted current closed runtime state:\n%s", output)
+		t.Fatalf("Python Codex fail-mode report omitted current open runtime state:\n%s", output)
 	}
 	if !bytes.Contains(output, []byte(`"drift": []`)) || bytes.Contains(output, []byte("registration-missing")) {
 		t.Fatalf("Python Codex fail-mode report retained registration drift:\n%s", output)

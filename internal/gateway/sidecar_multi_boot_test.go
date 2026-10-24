@@ -1004,15 +1004,13 @@ func TestSetupConnectorsIsolated_CleanupResidueAbortsAndRollsBackSurvivors(t *te
 func TestMultiConnectorActivePublicationFailureRestoresPreviouslyActivePosture(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = testenv.PrivateTempDir(t)
-	s.cfg.DeploymentMode = "managed_enterprise"
-	s.cfg.Enterprise.Profile = "standalone"
 	s.cfg.Guardrail.Enabled = true
 	s.cfg.Guardrail.Mode = "observe"
-	s.cfg.Guardrail.HookFailMode = "open"
-	// An administrator's current outage mode is open, changed from the prior
-	// install's closed mode; per-user hooks cannot make this transition.
+	s.cfg.Guardrail.HookFailMode = "closed"
+	// The default tier: the current outage mode is open (oss-outage-open),
+	// changed from the prior install's closed.
 	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
-		"codex": {Mode: "observe", HookFailMode: "open"},
+		"codex": {Mode: "observe", HookFailMode: "closed"},
 	}
 	s.health = NewSidecarHealth()
 	artifactPath := filepath.Join(testenv.PrivateTempDir(t), "codex-registration-posture")
@@ -2405,7 +2403,8 @@ func TestSetupConnectorsIsolatedPreflightsAllScopedTokens(t *testing.T) {
 }
 
 // TestConnectorSetupOpts_PerConnectorHookFailMode verifies the SetupOpts carry
-// the closed per-user outage mode regardless of saved values or policy tier.
+// each connector's outage mode (EffectiveHookOutageFailModeForConnector): its
+// policy tier's, whatever hook_fail_mode it saves (oss-outage-open).
 func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.Guardrail.Mode = "action"
@@ -2416,8 +2415,8 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	}
 
 	codexOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "codex"}}, "tok", "a", "b")
-	if codexOpts.HookFailMode != "closed" {
-		t.Errorf("codex HookFailMode=%q, want closed for per-user", codexOpts.HookFailMode)
+	if codexOpts.HookFailMode != "open" {
+		t.Errorf("codex HookFailMode=%q, want the default tier's open", codexOpts.HookFailMode)
 	}
 	cursorOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "cursor"}}, "tok", "a", "b")
 	if cursorOpts.HookFailMode != "closed" {
@@ -3135,13 +3134,14 @@ func assertPathMissing(t *testing.T, path string) {
 
 // TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient: the gateway
 // renders an unset hook fail mode open under Secure Client (#1163), and tells
-// the renderer so; a managed standalone or OSS install renders it closed.
+// the renderer so; a managed standalone install renders it closed, and an OSS
+// install its default tier's outage mode, open (oss-outage-open).
 func TestConnectorSetupOptsHookFailModeOpenOnlyUnderSecureClient(t *testing.T) {
 	for _, tc := range []struct {
 		name, deploymentMode, profile, want string
 		secureClient                        bool
 	}{
-		{"oss", "", "", "closed", false},
+		{"oss", "", "", "open", false},
 		{"standalone", "managed_enterprise", "standalone", "closed", false},
 		{"secure_client", "managed_enterprise", "secure_client", "open", true},
 	} {

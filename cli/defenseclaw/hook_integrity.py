@@ -847,7 +847,7 @@ def _load_agent_document(path: Path, raw: bytes | None = None) -> Any:
 
 
 def _commandless_codex_handlers(document: Any) -> int:
-    """Codex hook handlers that have no command: Codex refuses to load the file."""
+    """Codex hook handlers without a command, which may leave hooks inactive."""
 
     hooks = document.get("hooks") if isinstance(document, dict) else None
     if not isinstance(hooks, dict):
@@ -874,8 +874,8 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
     The hook entries can be intact while the agent runs none of them: Claude
     Code with ``disableAllHooks`` (GAP-1066; in the settings of the project in
     the current folder, GAP-1067) or Codex with ``[features] hooks = false``
-    (GAP-1094). Codex also refuses to start when hook entries have lost their
-    command, for example after hook lines were deleted by hand (GAP-1102).
+    (GAP-1094). Codex may run without DefenseClaw hooks when entries lose their
+    command, for example after hook lines are deleted by hand (GAP-1102).
     Copilot reads ``disableAllHooks`` from its user and repository settings
     (rel-1-0-4 GAP-0580) and from the hook registration files themselves;
     settings that cannot be read fail too, since what Copilot does with them
@@ -920,7 +920,7 @@ def agent_hook_switch_problems(cfg: Any, connector: str, *, workspace_dir: str |
                 problems.append(
                     HookProblem(
                         f"{path} has {orphans} Codex hook {noun} without a command (left when hook lines were "
-                        "deleted), so Codex refuses to start",
+                        "deleted), so Codex may run without its DefenseClaw hooks",
                         f"run `{setup_command(connector)} --yes`; it removes the entries without a command",
                     )
                 )

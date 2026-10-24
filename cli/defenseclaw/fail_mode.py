@@ -155,6 +155,9 @@ class ConnectorFailModeState:
     # its default, says), or a managed native Windows hook, which runs the
     # guardian's authenticated runtime generation.
     runtime_verified: bool = True
+    # Reporting context only; the resolver still decides the hook mode.
+    deployment: str = ""
+    policy_tier: str = ""
 
     @property
     def _managed_windows_runtime(self) -> bool:
@@ -204,23 +207,27 @@ class ConnectorFailModeState:
     def note(self) -> str:
         """Why the effective mode is not the configured guardrail.hook_fail_mode, or "".
 
-        Per-user Cursor follows its guardrail mode (observe open, action
-        closed) whatever the global value says
-        (GuardrailConfig.effective_hook_fail_mode), so ``closed`` in
-        config.yaml next to ``open`` in its observe-mode hooks is intended;
-        reporting says so instead of looking like drift (GAP-0129). Every
-        other connector follows its configured value in observe mode too.
-        A closed Copilot CLI, Antigravity or Hermes hook names the vendor
-        limit it keeps instead.
+        Deployment and policy tier explain a saved value overridden by the
+        effective policy. A closed Copilot CLI, Antigravity or Hermes hook
+        names the vendor limit it keeps instead.
         """
 
         notes = []
         if self.limit and self.effective == "closed":
             notes.append(self.limit)
         elif self.configured != self.desired and self.effective == self.desired:
+            if self.deployment == "managed":
+                reason = f"managed application protection selects hooks fail-{self.desired}"
+            elif self.deployment == "secure-client":
+                reason = f"Secure Client policy selects hooks fail-{self.desired}"
+            elif self.deployment == "per-user" and self.policy_tier:
+                reason = f"the {self.policy_tier} per-user policy tier keeps gateway outages fail-{self.desired}"
+            elif self.deployment == "per-user":
+                reason = f"this per-user deployment keeps hooks fail-{self.desired}"
+            else:
+                reason = f"the effective policy selects hooks fail-{self.desired}"
             notes.append(
-                f"observe mode keeps hooks fail-{self.desired}; "
-                f"guardrail.hook_fail_mode={self.configured} applies in action mode"
+                f"{reason}; guardrail.hook_fail_mode={self.configured} does not control hook failures here"
             )
         if not self.runtime_verified and self._managed_windows_runtime:
             notes.append(
@@ -331,6 +338,19 @@ def _windows_native_integrity_drift(cfg: Any, connector: str) -> str | None:
     return HOOK_RUNTIME_STALE if check.state == "stale" else REGISTRATION_FOREIGN
 
 
+def _fail_mode_note_context(cfg: Any, guardrail: Any, connector: str) -> tuple[str, str]:
+    """Identify the policy that selected a hook mode for status wording."""
+
+    standalone = getattr(cfg, "managed_outside_secure_client", None)
+    if callable(standalone) and standalone():
+        return "managed", ""
+    secure_client = getattr(guardrail, "secure_client_hook_fail_modes", None)
+    if callable(secure_client) and secure_client():
+        return "secure-client", ""
+    tier = getattr(guardrail, "hook_policy_tier", None)
+    return "per-user", str(tier(connector)) if callable(tier) else ""
+
+
 def resolve_connector_fail_mode(
     cfg: Any,
     connector: str,
@@ -349,6 +369,7 @@ def resolve_connector_fail_mode(
     configured = normalize_fail_mode(raw or getattr(guardrail, "hook_fail_mode", ""))
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     desired = normalize_fail_mode(resolver(name) if callable(resolver) else configured)
+    deployment, policy_tier = _fail_mode_note_context(cfg, guardrail, name)
     sources: list[tuple[str, str | None]] = [("config", configured)]
     drift: list[str] = []
 
@@ -356,7 +377,11 @@ def resolve_connector_fail_mode(
     if sidecar_drift:
         drift.append(sidecar_drift)
     if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
-        state = _resolve_native_deny_fail_mode(cfg, name, configured, desired)
+        state = replace(
+            _resolve_native_deny_fail_mode(cfg, name, configured, desired),
+            deployment=deployment,
+            policy_tier=policy_tier,
+        )
         if sidecar_drift:
             return replace(state, drift=(*state.drift, sidecar_drift))
         return state
@@ -471,6 +496,8 @@ def resolve_connector_fail_mode(
         sources=tuple(sources),
         drift=tuple(dict.fromkeys(drift)),
         runtime_verified=runtime_verified,
+        deployment=deployment,
+        policy_tier=policy_tier,
     )
 
 
@@ -713,7 +740,7 @@ def connector_fail_mode_report(
 
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
     if connector == "amp":
-        return "amp-plugin", _read_amp_plugin_mode(Path(amp_policy_plugin_path()))
+        return "amp-plugin", _read_amp_plugin_mode(Path(amp_policy_plugin_path()), cfg)
     if connector == "opencode":
         return "opencode-plugin", _read_opencode_plugin_mode(cfg)
     if _is_windows():
@@ -736,9 +763,13 @@ def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]
         and not reads_env
         and str(getattr(cfg, "deployment_mode", "") or "").strip().lower() != "managed_enterprise"
     ):
-        # A per-user script bakes closed for every failure and reads its
-        # gateway-outage mode from its runtime record (_hardening.sh
-        # defenseclaw_per_user_outage_open).
+        # A current per-user script decides its outage mode from config at
+        # call time; older scripts still read their runtime record.
+        helper = _read_small_file(hook_dir / "_hardening.sh")
+        if helper and "defenseclaw-call-time-outage-v1" in helper:
+            resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
+            if callable(resolver):
+                return "hook-script", normalize_fail_mode(resolver(connector))
         return "hook-script", _read_flat_hook_record_mode(hook_dir, connector)
     return ("hook-script-env" if reads_env else "hook-script"), mode
 
@@ -1113,16 +1144,22 @@ def _read_opencode_plugin_mode(cfg: Any) -> str | None:
         plugin = _read_small_file(Path(str(raw_path)))
         if plugin is None:
             continue
+        if "defenseclaw-call-time-outage-v1" in plugin:
+            resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
+            return normalize_fail_mode(resolver("opencode")) if callable(resolver) else None
         match = _OPENCODE_OUTAGE_PATTERN.search(plugin) or _OPENCODE_FAIL_MODE_PATTERN.search(plugin)
         if match:
             return match.group(1)
     return None
 
 
-def _read_amp_plugin_mode(path: Path) -> str | None:
+def _read_amp_plugin_mode(path: Path, cfg: Any) -> str | None:
     data = _read_small_file(path)
     if data is None:
         return None
+    if "defenseclaw-call-time-outage-v1" in data:
+        resolver = getattr(cfg.guardrail, "effective_hook_outage_fail_mode", None)
+        return normalize_fail_mode(resolver("amp")) if callable(resolver) else None
     match = _AMP_OUTAGE_PATTERN.search(data) or _AMP_FAIL_MODE_PATTERN.search(data)
     return match.group(1) if match else None
 

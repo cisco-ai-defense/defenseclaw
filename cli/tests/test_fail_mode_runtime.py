@@ -24,8 +24,59 @@ from defenseclaw.fail_mode import (
     connector_fail_mode_report,
     resolve_connector_fail_mode,
 )
+from tests.fail_mode_tier import policy_tier_follows_the_saved_fail_mode  # noqa: F401 - autouse fixture
 
 _WINDOWS_REGISTRATION_FRESHNESS = fail_mode_runtime._windows_registration_freshness
+
+
+def test_current_amp_bridge_reports_the_live_outage_tier(tmp_path: Path) -> None:
+    """A stopped gateway can leave an earlier plugin render on disk."""
+    plugin = tmp_path / "defenseclaw.ts"
+    plugin.write_text(
+        '// defenseclaw-call-time-outage-v1\nconst DC_FAIL_MODE: string = "closed"\n',
+        encoding="utf-8",
+    )
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(guardrail=guardrail)
+
+    assert fail_mode_runtime._read_amp_plugin_mode(plugin, cfg) == "closed"
+    selected["mode"] = "open"
+    assert fail_mode_runtime._read_amp_plugin_mode(plugin, cfg) == "open"
+
+
+def test_current_opencode_bridge_reports_the_live_outage_tier(tmp_path: Path) -> None:
+    plugin = tmp_path / "defenseclaw.js"
+    plugin.write_text(
+        '// defenseclaw-call-time-outage-v1\nconst DC_FAIL_MODE = "closed";\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps({"connectors": {"opencode": {"locations": {"hook_config_paths": [str(plugin)]}}}}),
+        encoding="utf-8",
+    )
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(data_dir=str(tmp_path), guardrail=guardrail)
+
+    assert fail_mode_runtime._read_opencode_plugin_mode(cfg) == "closed"
+    selected["mode"] = "open"
+    assert fail_mode_runtime._read_opencode_plugin_mode(cfg) == "open"
+
+
+def test_current_shell_helper_reports_the_live_outage_tier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    (hooks / "codex-hook.sh").write_text('FAIL_MODE="closed"\n', encoding="utf-8")
+    (hooks / "_hardening.sh").write_text("# defenseclaw-call-time-outage-v1\n", encoding="utf-8")
+    selected = {"mode": "closed"}
+    guardrail = SimpleNamespace(effective_hook_outage_fail_mode=lambda _name: selected["mode"])
+    cfg = SimpleNamespace(data_dir=str(tmp_path), deployment_mode="", guardrail=guardrail)
+    monkeypatch.setattr(fail_mode_runtime, "_is_windows", lambda: False)
+
+    assert fail_mode_runtime._platform_runtime_source(cfg, "codex") == ("hook-script", "closed")
+    selected["mode"] = "open"
+    assert fail_mode_runtime._platform_runtime_source(cfg, "codex") == ("hook-script", "open")
 
 # The fail-mode lines of real per-user Unix hook renders; the Go test
 # TestUnixHookFailModeLinesMatchTheSharedGolden checks them against Setup.
@@ -393,7 +444,7 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
     assert report["note"] == ""
     assert "caller_env" not in report
 
-    # GAP-0129: closed in config.yaml with open hooks is intended in observe mode, and the report says so.
+    # The per-user default-tier outage mode can differ from the saved value.
     observe = ConnectorFailModeState(
         connector="claudecode",
         desired="open",
@@ -401,10 +452,68 @@ def test_fail_mode_state_reports_effective_provenance() -> None:
         runtime="open",
         sources=(("config", "closed"), ("hook-script", "open"), ("claude-env", "open")),
         drift=(),
+        deployment="per-user",
+        policy_tier="default",
     ).to_report()
     assert observe["effective"] == "open" and observe["drift"] == []
     assert (
-        observe["note"] == "observe mode keeps hooks fail-open; guardrail.hook_fail_mode=closed applies in action mode"
+        observe["note"] == "the default per-user policy tier keeps gateway outages fail-open; "
+        "guardrail.hook_fail_mode=closed does not control hook failures here"
+    )
+
+
+def test_closed_per_user_hook_note_does_not_claim_observe_mode() -> None:
+    # A saved open preference on a per-user action-mode host is overridden by
+    # the closed hook rule. Status must name that rule, not observe mode.
+    state = ConnectorFailModeState(
+        connector="codex",
+        desired="closed",
+        configured="open",
+        runtime="closed",
+        sources=(("config", "open"), ("hook-script", "closed")),
+        drift=(),
+        deployment="per-user",
+    )
+    report = state.to_report()
+    assert report["effective"] == "closed"
+    assert report["note"] == (
+        "this per-user deployment keeps hooks fail-closed; "
+        "guardrail.hook_fail_mode=open does not control hook failures here"
+    )
+
+
+@pytest.mark.parametrize(
+    ("deployment", "tier", "configured", "desired", "reason"),
+    [
+        ("per-user", "default", "closed", "open", "the default per-user policy tier keeps gateway outages fail-open"),
+        ("per-user", "strict", "open", "closed", "the strict per-user policy tier keeps gateway outages fail-closed"),
+        ("managed", "default", "open", "closed", "managed application protection selects hooks fail-closed"),
+        ("secure-client", "default", "closed", "open", "Secure Client policy selects hooks fail-open"),
+    ],
+)
+def test_fail_mode_note_names_deployment_and_tier_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    deployment: str,
+    tier: str,
+    configured: str,
+    desired: str,
+    reason: str,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"cursor": ""})
+    cfg.guardrail.hook_fail_mode = configured
+    cfg.guardrail.effective_hook_fail_mode = lambda _name: desired
+    cfg.guardrail.hook_policy_tier = lambda _name: tier
+    cfg.managed_outside_secure_client = lambda: deployment == "managed"
+    cfg.guardrail.secure_client_hook_fail_modes = lambda: deployment == "secure-client"
+    monkeypatch.setattr(fail_mode_runtime, "_platform_runtime_source", lambda _cfg, _name: ("hook-script", desired))
+
+    state = resolve_connector_fail_mode(cfg, "cursor")
+
+    assert state.desired == desired
+    assert state.effective == desired
+    assert state.note == (
+        f"{reason}; guardrail.hook_fail_mode={configured} does not control hook failures here"
     )
 
 
@@ -618,16 +727,16 @@ def test_windows_codex_presence_uses_native_registration_validator(
 
 def test_windows_resolver_reports_effective_mixed_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
-    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     with (
         patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
     ):
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
-    # The predecessor's saved open value no longer opens Codex.
+    # Each connector runs its own tier's outage mode (oss-outage-open).
     assert claude.current and claude.runtime == "closed"
-    assert codex.current and codex.desired == "closed" and codex.runtime == "closed"
+    assert codex.current and codex.desired == "open" and codex.runtime == "open"
 
 
 def test_windows_resolver_accepts_sealed_claude_v2_contract(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -648,7 +757,7 @@ def test_windows_resolver_accepts_sealed_claude_v2_contract(monkeypatch: pytest.
     assert "registration-contract-stale" not in state.drift
 
 
-def test_windows_resolver_rejects_predecessor_open_records_then_accepts_closed(
+def test_windows_resolver_initial_open_open_and_reverse_mixed_mode(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "open", "codex": "open"})
@@ -657,14 +766,15 @@ def test_windows_resolver_rejects_predecessor_open_records_then_accepts_closed(
         patch("defenseclaw.fail_mode._is_windows", return_value=True),
         patch("defenseclaw.fail_mode.Path.home", return_value=home),
     ):
-        assert not resolve_connector_fail_mode(cfg, "claudecode").current
-        assert not resolve_connector_fail_mode(cfg, "codex").current
+        # The default tier's open is current (oss-outage-open).
+        assert resolve_connector_fail_mode(cfg, "claudecode").current
+        assert resolve_connector_fail_mode(cfg, "codex").current
 
         cfg.guardrail.connectors["codex"].hook_fail_mode = "closed"
-        _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
+        _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "closed"})
         claude = resolve_connector_fail_mode(cfg, "claudecode")
         codex = resolve_connector_fail_mode(cfg, "codex")
-    assert claude.current and claude.runtime == "closed" and claude.desired == "closed"
+    assert claude.current and claude.runtime == "open" and claude.desired == "open"
     assert codex.current and codex.runtime == "closed"
 
 
@@ -672,8 +782,8 @@ def test_cli_status_reports_old_open_mode_as_drift(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
-    # The predecessor's Codex hook still records open and must show drift.
-    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
+    # Codex's tier gives open, but its installed hook still records closed.
+    _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "closed"})
     app = AppContext()
     app.cfg = cfg
     app.logger = MagicMock()

@@ -20,24 +20,35 @@ const (
 )
 
 // HookOutageFailMode is the one decision of what a hook does while its
-// gateway is down. managedInstall is any managed or enterprise install
-// (rpm, pkg, Setup, any managed profile, Secure Client included), and
-// managedMode is the mode that install's protected config resolved.
+// gateway is down (owner decision 2026-10-23, which replaces decision 16 for
+// per-user installs). managedInstall is any managed or enterprise install
+// (rpm, pkg, Setup, any managed profile, Secure Client included), managedMode
+// the mode that install's protected config resolved
+// (EffectiveHookFailModeForConnector), and tier the connector's policy tier
+// (HookPolicyTierForConnector).
 //
 //   - A managed install keeps managedMode: closed unless its administrator
 //     chose open, which outside Secure Client covers a classified outage only.
-//   - A per-user (OSS) install fails closed in every policy tier.
+//     The tier never opens a managed hook.
+//   - A per-user (OSS) install in the strict tier fails closed.
+//   - A per-user install in the default (balanced) or permissive tier fails
+//     open for an outage: the gateway is not running, has stopped or does not
+//     take the call in time. The hook warns, names the fix and records the
+//     call in hook-failures.jsonl.
 //
-// Outside Secure Client, only an outage can open: an answer the gateway gave
-// (an error status, a malformed, partial or oversized answer), a refusal, a
-// missing credential, another program on the gateway port and the install
-// window stay closed in every tier. A configured per-user
-// guardrail.hook_fail_mode does not change the per-user answer.
-func HookOutageFailMode(managedInstall bool, managedMode string) string {
+// Only an outage can open: an answer the gateway gave (an error status, a
+// malformed, partial or oversized answer), a refusal, a missing credential,
+// another program on the gateway port and the install window stay closed in
+// every tier. A configured per-user guardrail.hook_fail_mode does not change
+// the per-user answer: tier selects it.
+func HookOutageFailMode(managedInstall bool, managedMode, tier string) string {
 	if managedInstall {
 		return explicitHookFailMode(managedMode)
 	}
-	return "closed"
+	if normalizeHookPolicyTier(tier) == HookPolicyTierStrict {
+		return "closed"
+	}
+	return "open"
 }
 
 // EffectiveHookOutageFailModeForConnector is HookOutageFailMode for this
@@ -51,9 +62,31 @@ func (c *Config) EffectiveHookOutageFailModeForConnector(connector string) strin
 	}
 	managedInstall := managed.IsManagedEnterprise(c.DeploymentMode)
 	if managedInstall {
-		return HookOutageFailMode(true, c.EffectiveHookFailModeForConnector(connector))
+		return HookOutageFailMode(true, c.EffectiveHookFailModeForConnector(connector), "")
 	}
-	return HookOutageFailMode(false, "")
+	return HookOutageFailMode(false, "", c.HookPolicyTierForConnector(connector))
+}
+
+// HookPolicyTierForConnector is the policy tier of connector's guardrail rule
+// pack, as the gateway reads its posture (internal/gateway packPosture): the
+// pack manifest's posture, else a built-in pack's own name, else the folder
+// name (strict and permissive keep theirs, anything else is default).
+func (c *Config) HookPolicyTierForConnector(connector string) string {
+	if c == nil {
+		return HookPolicyTierDefault
+	}
+	ref := c.EffectiveRulePackRefForConnector(connector)
+	dir := strings.TrimSpace(c.ResolveRulePackDir(ref))
+	if dir == "" {
+		dir = strings.TrimSpace(ref.Dir)
+	}
+	if posture := packManifestPosture(dir); posture != "" {
+		return posture
+	}
+	if ref.Name != "" && IsBuiltinRulePack(ref.Name) {
+		return ref.Name
+	}
+	return packFolderPosture(dir)
 }
 
 // packManifestPosture is the posture defenseclaw-pack.json in dir names, ""
@@ -88,6 +121,14 @@ func packFolderPosture(dir string) string {
 	switch base := strings.ToLower(filepath.Base(filepath.Clean(dir))); base {
 	case HookPolicyTierStrict, HookPolicyTierPermissive:
 		return base
+	}
+	return HookPolicyTierDefault
+}
+
+func normalizeHookPolicyTier(tier string) string {
+	switch t := strings.ToLower(strings.TrimSpace(tier)); t {
+	case HookPolicyTierStrict, HookPolicyTierPermissive:
+		return t
 	}
 	return HookPolicyTierDefault
 }

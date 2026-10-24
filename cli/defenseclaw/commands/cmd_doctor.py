@@ -18229,7 +18229,7 @@ def _drifted_hook_connectors(cfg) -> list[str]:
         unguarded_tool_call_hooks,
     )
 
-    # Codex hook entries left without a command keep Codex from starting, and
+    # Codex hook entries left without a command may leave Codex running unguarded, and
     # an edited hook entry fails or runs unguarded; the restart re-runs the
     # gateway's setup of the connector, which removes or replaces them
     # (GAP-1102, GAP-0906, GAP-0907, rel-1-0-4 GAP-0538).

@@ -20,21 +20,22 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
-// A published predecessor may record an open or closed per-user outage mode.
-// Upgrading must seal a closed runtime and keep rejecting an open record under
-// the new contract. A failed publication retains the predecessor lock for the
-// installer to restore its old binary.
-func TestCodexUpgradeRewritesPredecessorOutageLockClosed(t *testing.T) {
-	for _, predecessor := range []string{"0.8.10", "1.0.0", "1.0.1", "1.0.2", "1.0.3"} {
+// A published predecessor may record either outage mode. Upgrade publishes
+// the current tier's mode, rejects a different runtime record, and restores
+// the predecessor lock if publication must roll back.
+func TestCodexUpgradePreservesTierAndRestoresPredecessorLock(t *testing.T) {
+	for _, predecessor := range []string{"1.0.0", "1.0.1", "1.0.2", "1.0.3"} {
 		for _, priorMode := range []string{"open", "closed"} {
-			t.Run(predecessor+"/"+priorMode, func(t *testing.T) {
-				testCodexUpgradePredecessorLock(t, predecessor, priorMode)
-			})
+			for _, tier := range []string{"default", "strict"} {
+				t.Run(predecessor+"/"+priorMode+"/"+tier, func(t *testing.T) {
+					testCodexUpgradePredecessorLock(t, predecessor, priorMode, tier)
+				})
+			}
 		}
 	}
 }
 
-func testCodexUpgradePredecessorLock(t *testing.T, predecessor, priorMode string) {
+func testCodexUpgradePredecessorLock(t *testing.T, predecessor, priorMode, tier string) {
 	t.Helper()
 	dataDir := testenv.PrivateTempDir(t)
 	codexHome := testenv.PrivateTempDir(t)
@@ -65,16 +66,22 @@ func testCodexUpgradePredecessorLock(t *testing.T, predecessor, priorMode string
 		t.Fatal(err)
 	}
 	conn := connector.NewCodexConnector()
+	wantMode := "open"
+	if tier == "strict" {
+		wantMode = "closed"
+	}
 	opts := connector.SetupOpts{
 		DataDir: dataDir, APIAddr: "127.0.0.1:18970",
 		APIToken: token, HookAPIToken: token, HookAPITokenScoped: true,
-		HookFailMode: priorMode,
+		HookFailMode: wantMode,
 	}
 	prepareCodexSetupPolicyFixture(t, dataDir, &opts)
 	if err := os.Link(opts.AgentExecutable, filepath.Join(launcherDir, "defenseclaw-hook.exe")); err != nil {
 		t.Fatal(err)
 	}
-	prior := connector.NewHookContractLockEntry(opts, conn, predecessor)
+	priorOpts := opts
+	priorOpts.HookFailMode = priorMode
+	prior := connector.NewHookContractLockEntry(priorOpts, conn, predecessor)
 	prior.HookFailMode = priorMode
 	if err := connector.SaveHookContractLockEntry(dataDir, prior); err != nil {
 		t.Fatal(err)
@@ -93,8 +100,8 @@ func testCodexUpgradePredecessorLock(t *testing.T, predecessor, priorMode string
 		t.Fatalf("upgrade from %s: %v", predecessor, err)
 	}
 	got := connector.LoadHookContractLockEntry(dataDir, "codex")
-	if got.HookFailMode != "closed" || got.DefenseClawVersion != version.Current().BinaryVersion {
-		t.Fatalf("upgraded lock = mode %q release %q, want closed current release", got.HookFailMode, got.DefenseClawVersion)
+	if got.HookFailMode != wantMode || got.DefenseClawVersion != version.Current().BinaryVersion {
+		t.Fatalf("upgraded lock = mode %q release %q, want %s current release", got.HookFailMode, got.DefenseClawVersion, wantMode)
 	}
 	if current, err := connector.HookRuntimeRegistrationCurrent(opts, conn, version.Current().BinaryVersion); err != nil || !current {
 		t.Fatalf("upgraded registration current=%v err=%v", current, err)
@@ -104,21 +111,24 @@ func testCodexUpgradePredecessorLock(t *testing.T, predecessor, priorMode string
 	if err != nil {
 		t.Fatal(err)
 	}
-	opened := bytes.Replace(flat, []byte("DEFENSECLAW_FAIL_MODE=closed"), []byte("DEFENSECLAW_FAIL_MODE=open"), 1)
-	if bytes.Equal(opened, flat) {
-		t.Fatalf("fresh Codex runtime record did not contain closed: %q", flat)
+	otherMode := "closed"
+	if wantMode == "closed" {
+		otherMode = "open"
 	}
-	if err := os.WriteFile(flatPath, opened, 0o600); err != nil {
+	tampered := bytes.Replace(flat, []byte("DEFENSECLAW_FAIL_MODE="+wantMode), []byte("DEFENSECLAW_FAIL_MODE="+otherMode), 1)
+	if bytes.Equal(tampered, flat) {
+		t.Fatalf("fresh Codex runtime record did not contain %s: %q", wantMode, flat)
+	}
+	if err := os.WriteFile(flatPath, tampered, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if current, err := connector.HookRuntimeRegistrationCurrent(opts, conn, version.Current().BinaryVersion); err != nil || current {
-		t.Fatalf("opened runtime record current=%v err=%v, want refusal", current, err)
+		t.Fatalf("tampered runtime record current=%v err=%v, want refusal", current, err)
 	}
 
 	// A later publication error reapplies the prior registration and
-	// restores its old lock. Verify the closed runtime, then keep the
-	// old lock for the predecessor binary's installer rollback.
-	if err := conn.Setup(context.Background(), opts); err != nil {
+	// restores its old lock after checking the restored registration.
+	if err := conn.Setup(context.Background(), priorOpts); err != nil {
 		t.Fatal(err)
 	}
 	if err := priorSnapshot.Restore(); err != nil {
@@ -133,11 +143,23 @@ func testCodexUpgradePredecessorLock(t *testing.T, predecessor, priorMode string
 	if restored := connector.LoadHookContractLockEntry(dataDir, "codex"); restored.HookFailMode != priorMode || restored.DefenseClawVersion != predecessor {
 		t.Fatalf("rollback lock = mode %q release %q, want predecessor %s lock", restored.HookFailMode, restored.DefenseClawVersion, priorMode)
 	}
-	if err := os.WriteFile(flatPath, opened, 0o600); err != nil {
+	flat, err = os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherMode = "closed"
+	if priorMode == "closed" {
+		otherMode = "open"
+	}
+	tampered = bytes.Replace(flat, []byte("DEFENSECLAW_FAIL_MODE="+priorMode), []byte("DEFENSECLAW_FAIL_MODE="+otherMode), 1)
+	if bytes.Equal(tampered, flat) {
+		t.Fatalf("restored Codex runtime record did not contain %s: %q", priorMode, flat)
+	}
+	if err := os.WriteFile(flatPath, tampered, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := verifyPreviouslyActiveConnectorRollback(point); err == nil {
-		t.Fatal("rollback accepted an open runtime record under the current closed contract")
+		t.Fatal("rollback accepted a runtime record outside the predecessor contract")
 	}
 	if restored := connector.LoadHookContractLockEntry(dataDir, "codex"); restored.HookFailMode != priorMode || restored.DefenseClawVersion != predecessor {
 		t.Fatalf("failed rollback check lost predecessor lock: mode %q release %q", restored.HookFailMode, restored.DefenseClawVersion)

@@ -97,8 +97,11 @@ func runOutageToolCall(t *testing.T, home, dataDir string, call outageToolCall) 
 	return code == 2 || strings.Contains(out, `"deny"`), fmt.Sprintf("exit %d stdout=%q stderr=%q", code, out, stderr.String())
 }
 
-// Per-user hooks block tool calls while the gateway is down in every policy
-// tier, even when a predecessor saved an open outage mode.
+// The per-user hooks of agents without a fail-closed hook contract of their
+// own, and Cursor, follow the outage mode of their current policy tier
+// (oss-outage-open, owner decision 2026-10-23): with the gateway down, the
+// strict tier blocks the tool call and the default or permissive tier lets it
+// run, in observe and action mode alike. The rendered mode does not decide.
 func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	requireShellHookToolsForTest(t)
 	addr := closedLoopbackAddrForTest(t)
@@ -109,13 +112,13 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 	}{
 		{"copilot unset", "copilot", SetupOpts{}, true},
 		{"copilot closed", "copilot", SetupOpts{HookFailMode: "closed"}, true},
-		{"copilot open", "copilot", SetupOpts{HookFailMode: "open"}, true},
+		{"copilot open", "copilot", SetupOpts{HookFailMode: "open"}, false},
 		{"antigravity unset", "antigravity", SetupOpts{}, true},
-		{"antigravity open", "antigravity", SetupOpts{HookFailMode: "open"}, true},
+		{"antigravity open", "antigravity", SetupOpts{HookFailMode: "open"}, false},
 		{"cursor observe unset", "cursor", SetupOpts{GuardrailMode: "observe"}, true},
-		{"cursor observe open", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, true},
+		{"cursor observe open", "cursor", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, false},
 		{"cursor action strict", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "closed"}, true},
-		{"cursor action open", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, true},
+		{"cursor action open", "cursor", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			conn, ok := NewDefaultRegistry().Get(test.connector)
@@ -129,13 +132,17 @@ func TestPerUserHooksBlockAToolCallWhileTheGatewayIsDown(t *testing.T) {
 			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dataDir, "hooks"), opts, conn); err != nil {
 				t.Fatal(err)
 			}
+			// The config the outage-open hook reads gives the open tier.
+			installOutageOpenRuntimeForHookTest(t, home, dataDir)
+			if test.block {
+				writeOutageTierConfig(t, dataDir, outageStrictTierConfig)
+			}
 			blocked, detail := runOutageToolCall(t, home, dataDir, outageToolCalls[test.connector])
 			if blocked != test.block {
 				t.Fatalf("blocked = %v, want %v: %s", blocked, test.block, detail)
 			}
-			// What the hook does is what its sidecar entry records, with the
-			// config as its source: the native hook and the shared shell
-			// readers follow the same mode.
+			// The setup sidecar keeps the rendered metadata; the hook reads
+			// the current config at call time for the outage decision.
 			want := "open"
 			if test.block {
 				want = "closed"

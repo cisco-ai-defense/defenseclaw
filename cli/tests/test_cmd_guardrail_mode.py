@@ -120,7 +120,7 @@ def test_cursor_mode_switch_keeps_its_fail_mode(app, restarts, rerenders) -> Non
     assert payload["gateway"] == "live" and restarts == [] and rerenders == []
     _run(app, "observe")
     assert restarts == [] and rerenders == []
-    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "closed"
+    assert app.cfg.guardrail.effective_hook_fail_mode("cursor") == "open"
 
 
 def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restarts, rerenders) -> None:
@@ -130,7 +130,8 @@ def test_mode_switch_outside_secure_client_keeps_the_hook_fail_mode(app, restart
     assert payload["gateway"] == "live" and rerenders == [] and restarts == []
     _, payload = _run(app, "observe", "--json")
     assert rerenders == [] and restarts == []
-    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "closed"
+    # The default tier's outage mode (oss-outage-open).
+    assert app.cfg.guardrail.effective_hook_fail_mode("codex") == "open"
 
 
 def test_connector_override_created_on_a_single_install(app, restarts, rerenders) -> None:

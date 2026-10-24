@@ -709,6 +709,102 @@ func TestStandaloneConfigManagerAppliesOnlyRecordedNoAnchorLifecycleGenerations(
 	}
 }
 
+// A lifecycle write may change only comments. Its rebuilt policy is unchanged,
+// but that successful proof must consume the writer's generation. Otherwise a
+// later asset edit can reuse the still-pending record (GAP-1279).
+func TestStandaloneConfigManagerNoOpGenerationCannotAuthorizeLaterAssetEdit(t *testing.T) {
+	for _, method := range []string{"watcher", "api"} {
+		t.Run(method, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, config.DefaultConfigName)
+			asset := filepath.Join(dir, "policy.rego")
+			if err := os.WriteFile(asset, []byte("package original"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeConfigForManagerTest(t, path, dir, "observe")
+			initialRaw, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial, err := config.LoadRuntimeV8File(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			initial.DeploymentMode = "managed_enterprise"
+			initial.Enterprise.Profile = "standalone"
+			boot, applied := true, 0
+			mgr := newConfigManagerWithSnapshot(path, initial, nil, nil, "", func(_ context.Context, _, _ *config.Config, _ ConfigDiff, source configReloadSource) error {
+				if boot {
+					boot = false
+					return errGenerationUnchanged
+				}
+				contents, err := os.ReadFile(asset)
+				if err != nil {
+					return err
+				}
+				if source.proveUnchanged {
+					if string(contents) != "package original" {
+						return fmt.Errorf("referenced asset %s differs from the applied generation", asset)
+					}
+					return errGenerationUnchanged
+				}
+				if bytes.HasPrefix(source.raw, []byte("# lifecycle-noop\n")) && string(contents) == "package original" {
+					return errGenerationUnchanged
+				}
+				applied++
+				return nil
+			})
+			loader := mgr.loadSnapshot
+			mgr.loadSnapshot = func(source string, raw []byte) (*config.Config, error) {
+				candidate, err := loader(source, raw)
+				if err == nil {
+					candidate.DeploymentMode = "managed_enterprise"
+					candidate.Enterprise.Profile = "standalone"
+				}
+				return candidate, err
+			}
+			mgr.setStartupSource(path, initialRaw)
+			if err := mgr.Reload(t.Context(), "startup_reconcile"); err != nil {
+				t.Fatal(err)
+			}
+			writeLifecycle := func(raw []byte) uint64 {
+				t.Helper()
+				result, err := configwrite.ReplaceDocument(t.Context(), path, raw, configwrite.Options{Actor: configwrite.ActorLifecycle, Reason: "enterprise ensure"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return result.Generation
+			}
+			noopRaw := append([]byte("# lifecycle-noop\n"), initialRaw...)
+			noopGeneration := writeLifecycle(noopRaw)
+			if err := mgr.Reload(t.Context(), "watch"); err != nil {
+				t.Fatalf("authorized no-op reload: %v", err)
+			}
+			if mgr.appliedGeneration != noopGeneration || !bytes.Equal(mgr.appliedRaw, noopRaw) || applied != 0 {
+				t.Fatalf("no-op proof left generation=%d bytes=%q applies=%d; want generation %d", mgr.appliedGeneration, mgr.appliedRaw, applied, noopGeneration)
+			}
+			if err := os.WriteFile(asset, []byte("package edited"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if method == "watcher" {
+				err = mgr.ReloadAssets(t.Context(), "asset_watch")
+			} else {
+				err = mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload")
+			}
+			if err == nil || !strings.Contains(err.Error(), asset) || applied != 0 || mgr.appliedGeneration != noopGeneration {
+				t.Fatalf("unrecorded asset edit: err=%v applies=%d generation=%d", err, applied, mgr.appliedGeneration)
+			}
+			// A subsequent lifecycle write can still authorize the edited asset.
+			if generation := writeLifecycle(append([]byte("# authorized asset\n"), initialRaw...)); generation <= noopGeneration {
+				t.Fatalf("subsequent lifecycle generation=%d, want newer than %d", generation, noopGeneration)
+			}
+			if err := mgr.ReloadRecordedGeneration(t.Context(), "api:policy_reload"); err != nil || applied != 1 {
+				t.Fatalf("subsequent authorized asset: err=%v applies=%d", err, applied)
+			}
+		})
+	}
+}
+
 // The Windows lifecycle asks /policy/reload to load the generation it just
 // recorded, because the watcher can miss the atomic config replacement. The
 // managed reload loads that recorded generation (unsigned before trust
@@ -1580,9 +1676,9 @@ func TestAPIServerHookPostureUsesPublishedRuntimeConfig(t *testing.T) {
 	}
 	for _, row := range rows {
 		name, _ := row["connector"].(string)
-		// A saved open value cannot open a per-user hook outage.
-		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "closed" || row["enabled"] != true {
-			t.Fatalf("%s published posture = %#v, want action/closed/enabled", name, row)
+		// hook_fail_mode is the hooks' outage mode: the default tier's open.
+		if row["policy_mode"] != "action" || row["hook_fail_mode"] != "open" || row["enabled"] != true {
+			t.Fatalf("%s published posture = %#v, want action/open/enabled", name, row)
 		}
 	}
 	if boot.EffectiveGuardrailModeForConnector("codex") != "observe" ||

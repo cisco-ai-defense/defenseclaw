@@ -60,17 +60,26 @@ describe('Cursor observe outage mode', () => {
   it('keeps the rendered hook closed unless the config explicitly opens it', () => {
     const hooks = source('internal/gateway/connector/subprocess.go');
     const outage = hooks.split('func OutageHookFailMode(')[1]?.split('\n}')[0] ?? '';
-    // sa-port-peer: a per-user render is closed whatever the config says.
+    // oss-outage-open: a per-user render takes the policy tier's outage mode
+    // (opts.HookFailMode); a managed one resolves the administrator's.
+    assert.match(outage, /if perUserOutageRender\(opts\) \{\s*return normalizeHookFailMode\(opts\.HookFailMode\)/);
     assert.match(outage, /return resolveHookFailMode\(opts, conn\)/);
     const resolve = hooks.split('func resolveHookFailMode(')[1]?.split('\n}')[0] ?? '';
     assert.match(resolve, /return defaultHookFailMode/);
     assert.match(hooks, /func renderedHookFailMode\([\s\S]*?OutageHookFailMode\(opts, conn\)/);
     const failModes = page('reference/configuration/fail-modes.mdx').split('## Controls')[0] ?? '';
     const cursor = page('reference/connectors/cursor.mdx').split('## Fail mode')[1]?.split('## Limits')[0] ?? '';
-    assert.match(failModes, /On a per-user install hooks fail closed during a gateway outage in every policy tier/i);
-    assert.match(cursor, /A per-user Cursor hook blocks a gateway outage in every policy tier and guardrail mode/i);
+    const perUser = page('reference/configuration/fail-modes.mdx').split('### Per-user installs')[1]?.split('\n## ')[0] ?? '';
+    assert.match(perUser, /`default` \(balanced, the out-of-the-box policy\) or `permissive` \| The call runs/i);
+    assert.match(perUser, /\| `strict` \(`defenseclaw guardrail use-pack strict`\) \| Block/i);
+    assert.match(perUser, /The guardrail mode does not change the outage mode: observe and action mode fail the same way/i);
+    assert.match(cursor, /per-user Cursor hook makes the outage decision of its policy tier in observe and action mode/i);
     const coverage = page('appendix/coverage-by-layer.mdx');
-    assert.match(coverage, /Per-user hooks fail closed during a gateway outage in every policy tier/i);
+    assert.match(coverage, /On a per-user install the policy tier decides, in observe and action mode alike: default and permissive run the call with a warning/i);
+    for (const stale of ['features/guardrail.mdx', 'reference/commands/installer.mdx', 'appendix/coverage-by-layer.mdx']) {
+      assert.ok(!/Per-user Cursor (?:in )?observe (?:mode )?(?:still|also) blocks/i.test(page(stale)), stale);
+    }
+    assert.match(failModes, /On a per-user install the outage behavior follows the policy tier.{0,600}Every other failure blocks in every tier/i);
     const managedRegistration = source('internal/gateway/connector/cursor_enterprise_hooks.go');
     assert.match(managedRegistration, /"failClosed": true,/);
     assert.match(page('reference/connectors/cursor.mdx'), /sets `failClosed: true`, so a hook process that never answers blocks the call. The administrator's resolved fail mode decides/i);
@@ -78,7 +87,7 @@ describe('Cursor observe outage mode', () => {
 
     const overview = page('connectors/cursor.mdx').split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
     assert.match(overview, /Observe mode.{0,120}policy findings without blocking/i);
-    assert.match(overview, /gateway outage.{0,100}blocks supported events by default/i);
+    assert.match(overview, /gateway outage lets the call run with a warning in the default and permissive policies and blocks it in strict/i);
     const mapping = page('reference/connectors/cursor.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
     assert.match(mapping, /\| Observe \| `failClosed: true` \|[^|]*policy findings[^|]*gateway outage/i);
     assert.ok(!/observe cannot become blocking/i.test(mapping));
@@ -93,8 +102,51 @@ describe('Observe mode policy findings and gateway outages', () => {
     assert.match(antigravity, /PreToolUse\)[\s\S]*?if \[ "\$closed" = "1" \]; then[\s\S]*?"decision":"deny"/);
     const mapping = page('reference/connectors/antigravity.mdx').split('## Verdict mapping')[1]?.split('## Native ask')[0] ?? '';
     assert.match(mapping, /`observe` records policy findings without blocking on those findings/i);
-    assert.match(mapping, /default fail mode `closed`.{0,120}gateway is unreachable.{0,80}denies `PreToolUse`/i);
+    // oss-outage-open: a per-user outage follows the policy tier; strict and managed deny it.
+    assert.match(mapping, /gateway is not running, a per-user install in the default or permissive policy lets `PreToolUse` run with one warning/i);
+    assert.match(mapping, /strict policy and a managed install in the default fail mode `closed` deny it/i);
     assert.ok(!/always permits tool execution/i.test(mapping));
+  });
+
+  it('states the per-user outage tier on every hook connector reference page', () => {
+    // oss-outage-open review (loop round 2): these pages said a per-user
+    // outage blocks by default. The default and permissive policies run it
+    // with one warning; strict blocks it.
+    for (const connector of ['amp', 'antigravity', 'claudecode', 'codex', 'copilot', 'devin', 'hermes', 'kiro', 'opencode']) {
+      const text = page(`reference/connectors/${connector}.mdx`).replace(/\s+/g, ' ');
+      assert.match(text, /per-user install.{0,120}?(?:default and permissive|default or permissive) polic(?:y|ies).{0,40}?lets?.{0,80}?run with one warning/i, connector);
+      assert.match(text, /strict policy.{0,80}?(?:blocks|denies|deny) it/i, connector);
+      assert.ok(text.includes('/docs/reference/apis/capability-matrix#gateway-outage'), connector);
+      assert.ok(!/per-user host (?:bridge blocks|failures block)/i.test(text), connector);
+      assert.ok(!/even if an older sidecar still says `open`|including when an older sidecar says `open`/i.test(text), connector);
+      assert.ok(!/default fail mode `closed`, when the gateway is unreachable the running hook denies/i.test(text), connector);
+      assert.ok(!/unless `guardrail\.hook_fail_mode` is `open`\. The default is `closed`/i.test(text), connector);
+    }
+  });
+
+  it('keeps no per-user fail-mode claim the outage tier replaced on any connector page', () => {
+    // oss-outage-open review (loop round 3): the Amp, Hermes and Kiro
+    // references (and the Copilot and Antigravity connector pages) still
+    // said a per-user gateway failure fails closed by default, or that only
+    // an explicit `open` lets a call run. A per-user outage follows the
+    // policy tier; a sentence about a fail mode `open` or a `closed` default
+    // must name the managed host, the administrator, Secure Client or a
+    // sandbox it is about.
+    const stale = /explicit `open`|fail mode `open`|With `open`|hook_fail_mode` is `open`|default when no `hook_fail_mode`|fail mode `closed`, the default|per-user gateway failures\b.{0,60}?\bfail closed|per-user (?:host )?hooks? fail closed on gateway failure/i;
+    const scoped = /managed|administrator|Secure Client|sandbox|OpenShell/i;
+    const offenders = ['reference/connectors', 'connectors'].flatMap((folder) => docsPages(join(docs, folder))
+      .flatMap((path) => readFileSync(path, 'utf8').replace(/\s+/g, ' ').split(/(?<=[.|])\s+/)
+        .filter((sentence) => stale.test(sentence) && !scoped.test(sentence))
+        .map((sentence) => `${relative(docs, path)}: ${sentence.slice(0, 160)}`)));
+    assert.deepEqual(offenders, []);
+  });
+
+  it('describes the live OSS outage decision in the guide and fail-mode reference', () => {
+    const guide = page('connectors/opencode.mdx');
+    assert.match(guide, /per-user.*default and permissive.*run with one warning.*strict.*blocks/i);
+    const failModes = page('reference/configuration/fail-modes.mdx');
+    assert.match(failModes, /reads `config\.yaml` next to its own hooks on each call/i);
+    assert.doesNotMatch(failModes, /effective mode is installed with the hooks|A hook's fail mode is the one installed with it|reads only its outage mode from its record/i);
   });
 
   it('does not pair observe with blocks nothing on any content page', () => {
@@ -113,7 +165,7 @@ describe('Observe mode policy findings and gateway outages', () => {
     for (const connector of ['claudecode', 'antigravity']) {
       const section = page(`connectors/${connector}.mdx`).split('## What it can block or ask')[1]?.split('## Files it changes')[0] ?? '';
       assert.match(section, /Observe mode.{0,120}policy findings without blocking/i, connector);
-      assert.match(section, /By default the running hook (?:blocks|denies)[^.]{0,80}gateway is unreachable/i, connector);
+      assert.match(section, /When the gateway is not running, the default and permissive policies let the call run with one warning and strict (?:blocks it|denies `PreToolUse`)/i, connector);
     }
   });
 
@@ -369,13 +421,17 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     for (const name of ['reference/connectors/copilot.mdx']) {
       const text = page(name);
       assert.ok(!/no fail-closed hook transport/i.test(text), name);
-      assert.match(text, /in fail mode `closed`, the default/i, name);
+      // oss-outage-open: a per-user outage follows the policy tier; every other failure denies.
+      assert.match(text, /On a per-user install a gateway that is not running follows the policy tier/i, name);
+      assert.match(text, /the strict policy denies it/i, name);
+      assert.match(text, /Every other failure DefenseClaw sees \(an unusable answer, a missing token, oversized input\) is denied/i, name);
     }
     for (const name of ['reference/connectors/antigravity.mdx']) {
       const text = page(name);
       assert.ok(!text.includes('A gateway failure lets the call run'), name);
       assert.ok(!text.includes('normal fail-open operation'), name);
-      assert.ok(text.includes('In fail mode `closed`, the default'), name);
+      assert.ok(text.includes('On a managed host the administrator\'s fail mode decides an outage: `closed`, the default, denies it'), name);
+      assert.ok(text.includes('Every other failure, an authentication or decoding failure or an unusable answer, denies `PreToolUse`'), name);
     }
   });
 
@@ -388,9 +444,11 @@ describe('fail mode of Copilot CLI and Antigravity hooks', () => {
     }
   });
 
-  it('says an upgrade closes per-user hooks in every tier', () => {
-    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks fail closed during a gateway outage in every policy tier'));
+  it('says an upgrade gives per-user hooks the outage mode of their policy tier', () => {
+    assert.ok(page('get-started/upgrade.mdx').includes('Per-user hooks take the outage mode of their policy tier'));
+    assert.ok(page('get-started/upgrade.mdx').includes('whatever an earlier config or registration saved, and fail closed for every other failure'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('`closed` outside Secure Client; `open` under it'));
+    assert.ok(page('reference/configuration/fail-modes.mdx').includes('The hooks follow the mode Setup recorded for the connector'));
     assert.ok(page('reference/configuration/fail-modes.mdx').includes('A per-user install ignores a saved value'));
   });
 });

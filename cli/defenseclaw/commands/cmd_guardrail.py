@@ -1799,18 +1799,20 @@ def _apply_global_fail_mode_transaction(
 # What a per-user hook does while its gateway is down (Go
 # config.HookOutageFailMode), as `guardrail fail-mode` explains it.
 _PER_USER_OUTAGE_RULE = (
-    "On a per-user install hooks fail closed during a gateway outage in every policy tier. "
-    "A saved fail mode cannot open them."
+    "On a per-user install the gateway-outage mode follows the policy tier: the default (balanced) and "
+    "permissive rule packs let a call run with a warning while the gateway is not running, strict blocks it. "
+    "Every other failure (an error or unusable gateway answer, a missing token, an install or upgrade) blocks."
 )
 
 
 def _refuse_a_mode_the_policy_tier_does_not_give(app: AppContext, mode: str, connector_flag: str | None) -> None:
-    """Refuse a per-user ``fail-mode`` value the hooks cannot use.
+    """Refuse a per-user ``fail-mode`` value the connectors' policy tier does not give.
 
-    A per-user hook's gateway-outage mode is closed (Go
-    config.HookOutageFailMode). The command refreshes and verifies the
-    installed hooks for closed. A connector the config does not know is left
-    to the usual "not configured" error.
+    A per-user hook's gateway-outage mode follows its policy tier (owner
+    decision 2026-10-23, Go config.HookOutageFailMode). With the tier's value
+    the command refreshes and verifies the installed hooks; any other value
+    would not change what they do. A connector the config does not know is
+    left to the usual "not configured" error.
     """
     gc = app.cfg.guardrail
     resolver = getattr(gc, "effective_hook_fail_mode", None)
@@ -1824,6 +1826,7 @@ def _refuse_a_mode_the_policy_tier_does_not_give(app: AppContext, mode: str, con
         targets = sorted(known) or [_resolve_active_connector(app.cfg)]
     if any(resolver(name) != mode for name in targets if name):
         ux.err(_PER_USER_OUTAGE_RULE, indent="  ")
+        click.echo(f"  {ux.dim('Fail closed during an outage:')} defenseclaw guardrail use-pack strict")
         raise SystemExit(1)
 
 
@@ -1832,7 +1835,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
 
     gc = app.cfg.guardrail
     click.echo()
-    click.echo(f"  {ux.bold('gateway outage:')} closed on per-user installs")
+    click.echo(f"  {ux.bold('gateway outage:')} follows the policy tier (rule pack)")
     click.echo()
     click.echo(f"  {ux._style('per connector:', fg='bright_black', bold=True)}")
     for name in _active_connector_set(app.cfg, _resolve_active_connector(app.cfg)):
@@ -1842,9 +1845,10 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         elif _is_proxy_connector(name):
             shown = "closed (proxy-backed, no hooks: blocked while the gateway is down)"
         else:
+            tier = gc.hook_policy_tier(name) if hasattr(gc, "hook_policy_tier") else "default"
             resolver = getattr(gc, "effective_hook_fail_mode", None)
-            outage = resolver(name) if callable(resolver) else "closed"
-            notes = ["per-user"]
+            outage = resolver(name) if callable(resolver) else ("closed" if tier == "strict" else "open")
+            notes = [f"{tier} tier"]
             limit = upstream_hook_limit(name)
             if outage == "closed" and limit:
                 # What closed cannot change for a vendor hook (GAP-0150).
@@ -1857,6 +1861,7 @@ def _show_per_user_outage_modes(app: AppContext) -> None:
         click.echo(f"      - {_connector_label(name)} ({name}): {shown}")
     click.echo()
     ux.subhead(_PER_USER_OUTAGE_RULE, indent="  ")
+    click.echo(f"  {ux.dim('Fail closed during an outage:')} defenseclaw guardrail use-pack strict")
     click.echo(f"  {ux.dim('Gateway down:')} defenseclaw-gateway start; defenseclaw doctor if it does not start")
     click.echo()
 
@@ -4059,6 +4064,40 @@ def _registered_pack_names(gc: object) -> str:
     )
 
 
+def _refresh_hook_outage_modes(app: AppContext) -> None:
+    """Rewrite the installed per-user hooks' outage records from the saved config.
+
+    A per-user hook's outage mode follows its connector's rule pack. The
+    gateway rewrites the records when it reloads; a stopped gateway, or one
+    with ``hook_self_heal`` off, does not, so a pack switched to strict would
+    leave the old open record behind (the hooks also check the config before
+    they open). ``defenseclaw-gateway connector refresh-fail-modes`` writes
+    them now. Best effort: no hooks folder, no gateway binary or a failed run
+    changes nothing here, and managed installs are left alone by the command.
+    """
+    import subprocess
+
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    data_dir = str(getattr(app.cfg, "data_dir", "") or "")
+    if not data_dir or not os.path.isdir(os.path.join(data_dir, "hooks")):
+        return
+    binary = resolve_gateway_binary()
+    if not binary:
+        return
+    try:
+        subprocess.run(
+            [binary, "connector", "refresh-fail-modes", "--data-dir", data_dir],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return
+
+
 def _applied_note(app: AppContext, result: object) -> str:
     """How the change reaches the gateway, with the config generation."""
     generation = getattr(result, "generation", 0)
@@ -4238,6 +4277,7 @@ def use_pack_cmd(
             _fail,
         )
         previous_name = policy_catalog.pack_name_for_path(app.cfg, previous)[0]
+        _refresh_hook_outage_modes(app)
         _log_guardrail_change(
             app, "guardrail-use-pack", f"scope={connector_key} pack={fallback.pack} previous={previous_name}"
         )
@@ -4512,6 +4552,7 @@ def use_pack_cmd(
             f"config changed, run again: {snapshot[0] if snapshot else 'config.yaml'} changed or was removed "
             "after --repin read it. Nothing was changed.",
         )
+    _refresh_hook_outage_modes(app)
     if connector_key is None:
         message = f"All connectors now use the '{pack_name}' rule pack."
         if cleared:

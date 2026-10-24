@@ -5,15 +5,18 @@ package connector
 
 import "testing"
 
-// A per-user render bakes and records closed for every failure, including an
-// outage, even when an older config or lock supplies open.
+// oss-outage-open: a per-user render bakes closed for every failure
+// (resolveHookFailMode) and records the outage mode its caller resolved from
+// the policy tier (config.HookOutageFailMode) in its runtime records: open in
+// the default and permissive tiers, closed in strict and for an empty or
+// unknown value. The guardrail mode does not change either.
 func TestPerUserHookRenderBakesClosedAndRecordsTheOutageMode(t *testing.T) {
 	for _, conn := range []Connector{
 		NewCodexConnector(), NewClaudeCodeConnector(), NewCursorConnector(), NewCopilotConnector(),
 		NewHermesConnector(), NewAntigravityConnector(), NewOpenCodeConnector(), NewAMPConnector(),
 	} {
 		for _, mode := range []string{"observe", "action"} {
-			for outage, want := range map[string]string{"open": "closed", "closed": "closed", "": "closed", "Open ": "closed", "bogus": "closed"} {
+			for outage, want := range map[string]string{"open": "open", "closed": "closed", "": "closed", "Open ": "open", "bogus": "closed"} {
 				opts := SetupOpts{GuardrailMode: mode, HookFailMode: outage}
 				if got := resolveHookFailMode(opts, conn); got != "closed" {
 					t.Errorf("%s/%s/%q: baked fail mode = %q, want closed", conn.Name(), mode, outage, got)

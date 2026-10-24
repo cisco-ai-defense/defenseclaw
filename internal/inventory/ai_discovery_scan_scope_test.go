@@ -133,3 +133,81 @@ func TestPerUserFindingsInTheOwnHomeKeepTheirOwnerBesideAnExtraFolder(t *testing
 		t.Fatalf("extra-folder claude finding owner = %q, want none", claude.UserID)
 	}
 }
+
+// When every configured package root is in a macOS privacy-protected folder
+// (or reached through a link into one), the scan walks none of them, records
+// the skip so the scan reports itself partial, and does not fall back to the
+// whole home. A configured root that does not exist still falls back as in
+// the release, and that walk skips the protected folders.
+func TestPrivacySkippedPackageRootsDoNotWidenToTheWholeHome(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("macOS privacy rule; symbolic links need privileges on Windows")
+	}
+	restoreGOOS, restoreAccess := discoveryGOOS, macOSFullDiskAccess
+	t.Cleanup(func() { discoveryGOOS, macOSFullDiskAccess = restoreGOOS, restoreAccess })
+	discoveryGOOS = "darwin"
+	macOSFullDiskAccess = func() bool { return false }
+
+	for _, tc := range []struct {
+		name     string
+		roots    func(home string) []string
+		wantHome bool // the walk falls back to the home
+	}{
+		{"the only root is in Documents", func(home string) []string {
+			return []string{filepath.Join(home, "Documents", "project")}
+		}, false},
+		{"the only root is Documents itself, by tilde", func(string) []string {
+			return []string{"~/Documents"}
+		}, false},
+		{"the only root links into Documents", func(home string) []string {
+			return []string{filepath.Join(home, "work", "link", "project")}
+		}, false},
+		{"every root is protected or missing", func(home string) []string {
+			return []string{filepath.Join(home, "Desktop", "app"), filepath.Join(home, "missing")}
+		}, false},
+		{"the only root is missing", func(home string) []string {
+			return []string{filepath.Join(home, "missing")}
+		}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(home, "Documents", "project", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+			mustWrite(t, filepath.Join(home, "Desktop", "app", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+			mustWrite(t, filepath.Join(home, "unrelated", "package.json"), `{"dependencies": {"ai": "^3.0.0"}}`)
+			if err := os.MkdirAll(filepath.Join(home, "work"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(home, "Documents"), filepath.Join(home, "work", "link")); err != nil {
+				t.Fatal(err)
+			}
+			catalog, err := LoadAISignatures()
+			if err != nil {
+				t.Fatalf("LoadAISignatures: %v", err)
+			}
+			svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+				Enabled: true, Mode: "enhanced", DataDir: filepath.Join(home, "data"), HomeDir: home,
+				ScanRoots: tc.roots(home), MaxFilesPerScan: 100, MaxFileBytes: 1 << 20,
+			}, catalog)
+			cleanupPreparedDiscoveryService(t, svc)
+			signals, _, err := svc.detectPackageManifests(context.Background())
+			if err != nil {
+				t.Fatalf("detectPackageManifests: %v", err)
+			}
+			projects := 0
+			for _, sig := range signals {
+				if sig.Component != nil && sig.Component.Name == "ai" {
+					projects++
+				}
+			}
+			if want := map[bool]int{true: 1, false: 0}[tc.wantHome]; projects != want {
+				t.Fatalf("%d manifest projects, want %d (home fallback %v)", projects, want, tc.wantHome)
+			}
+			if !svc.tccSkipped {
+				t.Fatal("no privacy skip recorded; the scan must report itself partial")
+			}
+		})
+	}
+}

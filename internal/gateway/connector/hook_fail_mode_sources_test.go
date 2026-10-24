@@ -124,7 +124,9 @@ func (cannotFailClosedForTest) HookCapabilities(SetupOpts) HookCapability {
 // A per-user render records the config as the source of a mode only when it
 // is the outage mode the config chose (OutageHookFailMode). Copilot and
 // Antigravity render an unset mode closed (their hooks print the native
-// denial). Even a vendor without a fail-closed contract cannot lower the recorded
+// denial), and a Cursor in observe renders closed unless the config sets open
+// (its observe registration stays fail-open): both carry the source. An open
+// Even a vendor without a fail-closed contract cannot lower the recorded
 // per-user mode to open; the hook blocks supported events itself.
 func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 	for _, test := range []struct {
@@ -134,14 +136,14 @@ func TestPerUserRenderRecordsOnlyAnOutageModeTheConfigChose(t *testing.T) {
 		wantMode, wantSource, wantOut string
 	}{
 		{"copilot unset", NewCopilotConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"copilot predecessor open", NewCopilotConnector(), SetupOpts{HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"copilot outage open tier", NewCopilotConnector(), SetupOpts{HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
 		{"antigravity unset", NewAntigravityConnector(), SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
 		{"cursor observe unset", NewCursorConnector(), SetupOpts{GuardrailMode: "observe"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor observe predecessor open", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
-		{"cursor action predecessor open", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"cursor observe outage open tier", NewCursorConnector(), SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
+		{"cursor action outage open tier", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
 		{"cursor action strict tier", NewCursorConnector(), SetupOpts{GuardrailMode: "action", HookFailMode: "closed"}, "closed", HookFailModeSourceConfig, "closed"},
 		{"limited vendor unset", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{}, "closed", HookFailModeSourceConfig, "closed"},
-		{"limited vendor predecessor open", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open"}, "closed", HookFailModeSourceConfig, "closed"},
+		{"limited vendor outage open tier", cannotFailClosedForTest{NewCodexConnector()}, SetupOpts{HookFailMode: "open"}, "open", HookFailModeSourceConfig, "open"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dataDir := t.TempDir()
@@ -180,10 +182,10 @@ func TestCursorRuntimeRecordsTheOutageMode(t *testing.T) {
 		contract string
 		ok       bool
 	}{
-		{"observe, predecessor open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", true},
-		{"action, predecessor open", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, "closed", true},
+		{"observe, outage open tier", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "open", true},
+		{"action, outage open tier", SetupOpts{GuardrailMode: "action", HookFailMode: "open"}, "open", true},
 		{"observe, strict tier", SetupOpts{GuardrailMode: "observe", HookFailMode: "closed"}, "closed", true},
-		{"closed contract after predecessor open", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", true},
+		{"stale closed contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "open"}, "closed", false},
 		{"stale open contract", SetupOpts{GuardrailMode: "observe", HookFailMode: "closed"}, "open", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
