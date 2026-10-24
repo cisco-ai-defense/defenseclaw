@@ -406,7 +406,8 @@ func actionWindowsSSHDirectoryNavigation(words []string, cwd, home string) bool 
 	}
 	if len(words) == 3 {
 		option := strings.ToLower(words[1])
-		if option != "-path" && option != "-literalpath" {
+		if option != "-path" && option != "-literalpath" &&
+			(option != "--" || program != "cd" && program != "pushd") {
 			return false
 		}
 		words = words[2:]
