@@ -28,11 +28,11 @@ const (
 //     chose open, which outside Secure Client covers a classified outage only.
 //   - A per-user (OSS) install fails closed in every policy tier.
 //
-// Only an outage can open: an answer the gateway gave (an error status, a
-// malformed, partial or oversized answer), a refusal, a missing credential,
-// another program on the gateway port and the install window stay closed in
-// every tier. A configured per-user guardrail.hook_fail_mode does not change
-// the per-user answer.
+// Outside Secure Client, only an outage can open: an answer the gateway gave
+// (an error status, a malformed, partial or oversized answer), a refusal, a
+// missing credential, another program on the gateway port and the install
+// window stay closed in every tier. A configured per-user
+// guardrail.hook_fail_mode does not change the per-user answer.
 func HookOutageFailMode(managedInstall bool, managedMode string) string {
 	if managedInstall {
 		return explicitHookFailMode(managedMode)

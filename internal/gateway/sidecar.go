@@ -6613,13 +6613,13 @@ func verifyPreviouslyActiveConnectorRollback(applied multiConnectorSetupRollback
 	}
 	defenseClawVersion := applied.previousLock.DefenseClawVersion
 	if connector.RequiresHookRuntimeRegistrationEvidence(applied.conn) &&
-		!prior.ManagedEnterprise && applied.previousLock.HookFailMode == "open" &&
+		!prior.ManagedEnterprise &&
 		connector.OutageHookFailMode(prior, applied.conn) == "closed" &&
 		supportedLegacyHookLockRelease(defenseClawVersion) {
-		// A supported predecessor's lock can say open, while this binary
-		// re-renders the registration closed. Verify the restored artifacts
-		// with the current strict contract, then put the old lock back for
-		// the installer if it restores the predecessor binary.
+		// This binary re-renders a supported predecessor's registration
+		// closed, changing its artifact digests even when the old lock said
+		// closed. Verify the restored artifacts with the current strict
+		// contract, then put the old lock back for the predecessor binary.
 		previous, err := connector.CaptureHookContractLockSnapshot(prior.DataDir)
 		if err != nil {
 			return fmt.Errorf("capture prior hook contract lock for rollback verification: %w", err)
