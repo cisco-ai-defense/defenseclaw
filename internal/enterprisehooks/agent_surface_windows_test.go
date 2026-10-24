@@ -176,6 +176,61 @@ func TestWindowsExtensionDirectoryOverflowIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestWindowsOverflowKeepsOtherExtensionRoots(t *testing.T) {
+	home := t.TempDir()
+	large := filepath.Join(home, ".vscode", "extensions")
+	if err := os.MkdirAll(large, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i <= windowsSurfaceMaxEntries; i++ {
+		if err := os.Mkdir(filepath.Join(large, fmt.Sprintf("unrelated-%04d", i)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := filepath.Join(home, ".cursor", "extensions", "anthropic.claude-code-2.1.100-win32-x64")
+	if err := os.MkdirAll(old, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "S-1-5-21-1-2-3-1001"
+	previous := windowsSurfaceReadAs
+	windowsSurfaceReadAs = func(_, _ string, fn func() error) error { return fn() }
+	t.Cleanup(func() { windowsSurfaceReadAs = previous })
+	surfaces, err := DiscoverWindowsAgentSurfaces(sid, home, "claudecode")
+	if err == nil || !strings.Contains(err.Error(), large) {
+		t.Fatalf("overflow error = %v, want %s", err, large)
+	}
+	if len(surfaces) != 1 || surfaces[0].Path != old || surfaces[0].EngineVersion != "2.1.100" {
+		t.Fatalf("other root surface lost after overflow: %+v", surfaces)
+	}
+	var reported []UnprotectedAgent
+	row := &ManifestTarget{SID: sid, UserHome: home, Connector: "claudecode"}
+	ctx := windowsStandaloneRowContext{sessionActive: true, user: "alice", report: func(agent UnprotectedAgent) { reported = append(reported, agent) }}
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, "2.1.300"); got != "2.1.300" {
+		t.Fatalf("CLI row version = %q, want 2.1.300", got)
+	}
+	var incomplete, oldSurface bool
+	for _, agent := range reported {
+		incomplete = incomplete || agent.Code == UnprotectedCodeInstallScanIncomplete
+		oldSurface = oldSurface || agent.Code == UnprotectedCodeSurfaceUnverified && agent.Version == "2.1.100"
+	}
+	if !incomplete || !oldSurface {
+		t.Fatalf("want incomplete and old-surface findings, got %+v", reported)
+	}
+	// A known surface found after the overflow is evidence for a warning,
+	// but an incomplete inventory cannot select a new row version.
+	known := filepath.Join(home, ".cursor", "extensions", "anthropic.claude-code-2.1.220-win32-x64")
+	if err := os.MkdirAll(known, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	reported = nil
+	if got := windowsStandaloneSurfaceVersion(row, nil, ctx, ""); got != "" {
+		t.Fatalf("partial inventory enrolled a surface-only row at %q", got)
+	}
+	if len(reported) == 0 || reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+		t.Fatalf("partial inventory lost its incomplete warning: %+v", reported)
+	}
+}
+
 // A native claude.exe whose build Claude Code has not recorded yet (it
 // writes .local\share\claude\versions on first start) cannot be enrolled,
 // and the account is reported with what is missing instead of being left

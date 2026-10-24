@@ -189,6 +189,7 @@ func TestEnumerateWindowsReportsAgentsItCannotAdmit(t *testing.T) {
 	stubCodexMachinePolicyPublished(t, true)
 	cursorHome := cursorProfile(t, "4.1.0")
 	codexHome := codexProfile(t, "0.125.0")
+	writeRunnableWindowsCodexCopy(t, filepath.Join(codexHome, "AppData", "Roaming", "npm", "node_modules", "@openai", "codex"), "0.125.0")
 	injectWindowsProfileList(t, map[string]string{
 		testLocalUserSID: cursorHome,
 		testLocalUserTwo: codexHome,

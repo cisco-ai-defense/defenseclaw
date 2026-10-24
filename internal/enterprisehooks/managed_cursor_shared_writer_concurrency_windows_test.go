@@ -85,8 +85,8 @@ func windowsCursorSharedWriterAdmin(paths windowsCursorPaths) sharedfiletest.Adm
 	}
 }
 
-// enrollWindowsCursorOpenAliceForTest enrolls Alice in open mode on an
-// installed empty guard: the shared registration fails open.
+// enrollWindowsCursorOpenAliceForTest enrolls Alice with an open target
+// mode on an installed empty guard; the host registration stays closed.
 func enrollWindowsCursorOpenAliceForTest(t *testing.T, paths windowsCursorPaths) {
 	t.Helper()
 	data, err := os.ReadFile(paths.State)
@@ -160,6 +160,7 @@ func windowsCursorSharedWriterOps() []cursorSharedWriterOp {
 	publish := func(t *testing.T) (windowsCursorPaths, func() error) {
 		paths := installWindowsCursorEmptyGuardOverAdminHooksForTest(t)
 		enrollWindowsCursorOpenAliceForTest(t, paths)
+		protectWindowsCursorHooksForAdminsForTest(t, paths.Hooks)
 		return paths, func() error {
 			return PublishWindowsCursorManagedPolicyTargets([]WindowsCursorManagedRuntimeTarget{})
 		}
@@ -208,7 +209,7 @@ func windowsCursorSharedWriterOps() []cursorSharedWriterOp {
 		{name: "setup", prepare: setup, want: "closed"},
 		{name: "setup rollback", prepare: setup, fail: true, wantErr: true, want: "inactive"},
 		{name: "publication", prepare: publish, want: "closed", steady: true},
-		{name: "publication rollback", prepare: publish, fail: true, wantErr: true, want: "open", steady: true},
+		{name: "publication rollback", prepare: publish, fail: true, wantErr: true, want: "closed", steady: true},
 		{name: "repair", prepare: repair, want: "closed"},
 		{name: "repair rollback", prepare: repair, fail: true, anyErr: true, want: "closed", repair: true},
 		{name: "repair hooks.json and adapter lost", prepare: rebuildBoth, want: "closed", absent: true},

@@ -208,6 +208,7 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	var secretError *config.V8SecretReferenceError
 	var profileError *config.UnknownGuardrailProfileError
 	var settingError *config.SettingError
+	var pathError *config.V8ConfigPathError
 	var sourceError *configV8SourceError
 	var readError *configV8ReadError
 	if errors.As(err, &sourceError) && sourceError.version >= config.ObservabilityV8ConfigVersion {
@@ -216,6 +217,16 @@ func configV8ValidationFailure(err error) configV8WireFailure {
 	switch {
 	case errors.As(err, &readError):
 		result.Reason = readError.reason()
+	case errors.As(err, &pathError):
+		result.Path = configV8DiagnosticPath("$." + pathError.Path)
+		if errors.Is(err, fs.ErrPermission) {
+			result.Reason = configV8DiagnosticReason("config_path_inspection_denied",
+				"the account running validation cannot inspect this configured path", "",
+				"run config validate as an administrator on a managed host, or as an account with access to the path")
+		} else {
+			result.Reason = configV8DiagnosticReason("config_path_inspection_failed",
+				"cannot inspect configured path", "", "check the path and its filesystem access")
+		}
 	case errors.As(err, &settingError):
 		// A runtime-loader refusal of a profile, its sandbox section or the
 		// openshell section: name the setting and the rule, so the fix is to
