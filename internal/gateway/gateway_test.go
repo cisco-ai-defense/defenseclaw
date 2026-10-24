@@ -3890,14 +3890,26 @@ func TestAPIPolicyReloadWithoutPolicyDirRefusesManagedConfig(t *testing.T) {
 		api.handlePolicyReload(w, httptest.NewRequest(http.MethodPost, "/policy/reload", nil))
 		return w
 	}
-	if w := reload(); w.Code != http.StatusForbidden || called != 0 || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) {
-		t.Fatalf("reload = %d %s, calls = %d; want signed-bundle refusal without reload", w.Code, w.Body.String(), called)
+	if w := reload(); w.Code != http.StatusForbidden || called != 0 || !strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) ||
+		!strings.Contains(w.Body.String(), "cause: this gateway cannot load a recorded generation") {
+		t.Fatalf("reload = %d %s, calls = %d; want signed-bundle refusal with its cause, without reload", w.Code, w.Body.String(), called)
 	}
 	recorded := 0
 	api.SetRecordedGenerationReloader(func() error { recorded++; return fmt.Errorf("%w: hand edit", errNoRecordedGeneration) })
 	if w := reload(); w.Code != http.StatusForbidden || called != 0 || recorded != 1 ||
-		!strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) || !strings.Contains(w.Body.String(), "recorded by the lifecycle") {
+		!strings.Contains(w.Body.String(), managedBundlePolicyReloadRefusal) || !strings.Contains(w.Body.String(), "recorded by the lifecycle") ||
+		!strings.Contains(w.Body.String(), "cause: hand edit") {
 		t.Fatalf("unrecorded reload = %d %s, calls = %d/%d; want the named refusal", w.Code, w.Body.String(), called, recorded)
+	}
+	// A repeat whose proof finds an unrecorded asset edit is refused, not
+	// reported as reloaded or as a failed build, and names the asset.
+	api.SetRecordedGenerationReloader(func() error {
+		return fmt.Errorf("%w: %w", errNoRecordedGeneration,
+			errors.New("config reload refused: managed config or referenced assets differ from the applied generation (rego policy.rego)"))
+	})
+	if w := reload(); w.Code != http.StatusForbidden || !strings.Contains(w.Body.String(), `"refused"`) ||
+		!strings.Contains(w.Body.String(), "referenced assets differ from the applied generation (rego policy.rego)") {
+		t.Fatalf("unrecorded asset edit = %d %s; want a refusal naming the asset", w.Code, w.Body.String())
 	}
 	api.SetRecordedGenerationReloader(func() error { return errors.New("guardrail generation rejected") })
 	if w := reload(); w.Code != http.StatusInternalServerError || called != 0 || !strings.Contains(w.Body.String(), "guardrail generation rejected") {
