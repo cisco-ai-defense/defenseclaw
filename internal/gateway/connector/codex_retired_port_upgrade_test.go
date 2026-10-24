@@ -43,7 +43,11 @@ func TestCodexUpgradeRefusesPartialMarkerOnRetiredPort(t *testing.T) {
 					if retained == "client" {
 						removedMarker = "x-defenseclaw-source = 'codex'\n"
 					}
-					body := strings.ReplaceAll(string(fixture), removedMarker, "")
+					body := strings.ReplaceAll(string(fixture), "\r\n", "\n")
+					body = strings.ReplaceAll(body, removedMarker, "")
+					if goos == "windows" {
+						body = strings.ReplaceAll(body, "\n", "\r\n")
+					}
 					before := append(base, []byte(body)...)
 					if err := os.WriteFile(configPath, before, 0o600); err != nil {
 						t.Fatal(err)
