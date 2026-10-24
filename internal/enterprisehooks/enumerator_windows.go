@@ -295,7 +295,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 		// Leave time to write the manifest and coverage record. A timed-out
 		// profile must never discard rows already decided in this cycle.
 		if standalone && windowsPrivateProfileBudget(ctx, len(profiles)-profileIndex) <= 0 {
-			reportWindowsProfilesNotInspected(profiles[profileIndex:], connectors, opts, exclude, previous, running, lookupAccount, visited, judged, &targets)
+			reportWindowsProfilesNotInspected(profiles[profileIndex:], connectors, opts, exclude, previous, running, lookupAccount, groups, visited, judged, &targets)
 			break
 		}
 		if err := ctx.Err(); err != nil {
@@ -341,23 +341,7 @@ func EnumerateWindows(ctx context.Context, cfg *config.Config, opts EnumerateOpt
 			continue
 		}
 		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookupAccount)
-		// An administrator-authored target is enrolled whatever the group
-		// filters say; only exclude_users and exempt_users still apply.
-		if (decision == windowsEnrollmentEnrolled || decision == windowsEnrollmentExempt) && groups.active() && opts.ManifestSubjects == nil {
-			sid := canonicalManifestTargetSID(profile.SID)
-			groupDecision, groupReason, inDoubt := groups.evaluate(sid)
-			if inDoubt && (groupDecision != windowsEnrollmentExcluded || windowsHasPreviousRows(previous, sid)) {
-				// The decision rests on groups cached at an earlier sign-in,
-				// and the user may be signed in now with groups this cycle
-				// could not read: nothing changes for them. Their rows stay,
-				// they get no new ones, and a user without rows whom the
-				// cache excludes stays excluded.
-				groupDecision, groupReason = windowsEnrollmentUndecided, groups.inDoubtReason(sid)
-			}
-			if groupDecision != windowsEnrollmentEnrolled {
-				decision, reason = groupDecision, groupReason
-			}
-		}
+		decision, reason = windowsProfileGroupDecision(profile, decision, reason, groups, previous, opts.ManifestSubjects == nil)
 		if decision == windowsEnrollmentExcluded {
 			logfSafely(opts.Logger, profile.SID, reason)
 			judged[canonicalManifestTargetSID(profile.SID)] = true
@@ -525,16 +509,46 @@ func windowsPrivateProfileBudget(ctx context.Context, profilesLeft int) time.Dur
 	return share
 }
 
+// Apply the same group result on the regular and out-of-time profile paths.
+// An administrator-authored manifest target is enrolled regardless of group
+// filters; explicit user exclusions and exemptions still apply.
+func windowsProfileGroupDecision(profile windowsUserProfile, decision windowsEnrollmentDecision, reason string,
+	groups *windowsEnrollmentGroups, previous map[string]ManifestTarget, automatic bool) (windowsEnrollmentDecision, string) {
+	if (decision != windowsEnrollmentEnrolled && decision != windowsEnrollmentExempt) || !groups.active() || !automatic {
+		return decision, reason
+	}
+	sid := canonicalManifestTargetSID(profile.SID)
+	groupDecision, groupReason, inDoubt := groups.evaluate(sid)
+	if inDoubt && (groupDecision != windowsEnrollmentExcluded || windowsHasPreviousRows(previous, sid)) {
+		// A decision resting on groups cached at an earlier sign-in cannot
+		// revoke existing rows while the current token is unreadable.
+		groupDecision, groupReason = windowsEnrollmentUndecided, groups.inDoubtReason(sid)
+	}
+	if groupDecision != windowsEnrollmentEnrolled {
+		return groupDecision, groupReason
+	}
+	return decision, reason
+}
+
 // Preserve rows already published for profiles the cycle could not reach,
 // and name their incomplete inspection in the protected coverage record.
 func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors []string, opts EnumerateOptions,
 	exclude map[string]struct{}, previous map[string]ManifestTarget, running map[string]map[string]string,
-	lookup windowsEnrollmentAccountLookup, visited, judged map[string]bool, targets *[]ManifestTarget) {
+	lookup windowsEnrollmentAccountLookup, groups *windowsEnrollmentGroups, visited, judged map[string]bool, targets *[]ManifestTarget) {
 	for _, profile := range profiles {
 		sid := canonicalManifestTargetSID(profile.SID)
 		user := filepath.Base(filepath.Clean(profile.Home))
-		if _, skip := exclude[sid]; skip || windowsEnrollmentListMatches(opts.ExcludeUsers, []string{sid, user}) {
+		if _, skip := exclude[sid]; skip {
 			judged[sid] = true
+			continue
+		}
+		decision, reason := windowsProfileEnrollmentDecision(profile, opts.ExcludeUsers, opts.ExemptUsers, lookup)
+		if decision == windowsEnrollmentExcluded {
+			logfSafely(opts.Logger, profile.SID, reason)
+			judged[sid] = true
+			if opts.ReportExcluded != nil {
+				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+			}
 			continue
 		}
 		profileConnectors := connectors
@@ -553,6 +567,15 @@ func reportWindowsProfilesNotInspected(profiles []windowsUserProfile, connectors
 			// Keep a lookup failure uncertain, as in the normal profile path.
 			logfSafely(opts.Logger, profile.SID,
 				"the local account no longer exists; its rows are revoked although its profile folder remains")
+			continue
+		}
+		decision, reason = windowsProfileGroupDecision(profile, decision, reason, groups, previous, opts.ManifestSubjects == nil)
+		if decision == windowsEnrollmentExcluded {
+			logfSafely(opts.Logger, profile.SID, reason)
+			judged[sid] = true
+			if opts.ReportExcluded != nil {
+				opts.ReportExcluded(ManifestTarget{SID: profile.SID, UserHome: filepath.Clean(profile.Home)})
+			}
 			continue
 		}
 		for _, conn := range profileConnectors {

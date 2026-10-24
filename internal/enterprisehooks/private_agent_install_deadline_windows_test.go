@@ -62,6 +62,120 @@ func TestWindowsDeadlineDropsOnlyDefinitelyDeletedLocalAccountRows(t *testing.T)
 	}
 }
 
+func TestWindowsDeadlineAppliesExplicitExclusionsBeforeCarryingRows(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	stubActiveSessions(t, map[string][]string{})
+	home := codexProfile(t, "0.150.0")
+	injectWindowsProfileList(t, map[string]string{testLocalUserSID: home})
+	enabled := true
+	prior := writeWindowsTestManifest(t, ManifestTarget{
+		SID: testLocalUserSID, Connector: "codex", UserHome: home,
+		DataDir: filepath.Join(home, ".defenseclaw"), AgentVersion: "0.150.0", Enabled: &enabled,
+	})
+	oldLookup := windowsEnrollmentLookupAccountSID
+	t.Cleanup(func() { windowsEnrollmentLookupAccountSID = oldLookup })
+	for _, tc := range []struct {
+		name      string
+		exclude   string
+		lookupErr error
+		uncertain bool
+	}{
+		{name: "SID", exclude: testLocalUserSID},
+		{name: "profile folder", exclude: filepath.Base(home)},
+		{name: "domain account", exclude: `CONTOSO\alice`},
+		{name: "unresolved domain account", exclude: `CONTOSO\alice`, lookupErr: errors.New("directory unavailable"), uncertain: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			windowsEnrollmentLookupAccountSID = func(string) (string, string, error) {
+				return "alice", "CONTOSO", tc.lookupErr
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+			defer cancel()
+			var excluded []ManifestTarget
+			var reported []UnprotectedAgent
+			manifest, err := EnumerateWindows(ctx, standaloneEnumeratorConfig("codex"), EnumerateOptions{
+				ExistingManifestPath: prior,
+				ExcludeUsers:         []string{tc.exclude},
+				ReportExcluded:       func(target ManifestTarget) { excluded = append(excluded, target) },
+				ReportUnprotected:    func(agent UnprotectedAgent) { reported = append(reported, agent) },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.uncertain {
+				if len(manifest.Targets) != 1 || len(excluded) != 0 || len(reported) != 1 ||
+					reported[0].Code != UnprotectedCodeInstallScanIncomplete {
+					t.Fatalf("uncertain exclusion lost its prior incomplete row: rows=%+v excluded=%+v reported=%+v",
+						manifest.Targets, excluded, reported)
+				}
+				return
+			}
+			if len(manifest.Targets) != 0 || len(excluded) != 1 || excluded[0].SID != testLocalUserSID ||
+				excluded[0].UserHome != filepath.Clean(home) || len(reported) != 0 {
+				t.Fatalf("explicit exclusion was bypassed: rows=%+v excluded=%+v reported=%+v",
+					manifest.Targets, excluded, reported)
+			}
+		})
+	}
+}
+
+func TestWindowsDeadlineAppliesGroupExclusionBeforeCarryingRows(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	stubGroupDirectory(t, map[string]string{`contoso\developers`: testDomainDevelopersSID}, map[string][]string{})
+	stubActiveSessions(t, map[string][]string{})
+	home := codexProfile(t, "0.150.0")
+	injectWindowsProfileList(t, map[string]string{testDomainUserA: home})
+	enabled := true
+	prior := writeWindowsTestManifest(t, ManifestTarget{
+		SID: testDomainUserA, Connector: "codex", UserHome: home,
+		DataDir: filepath.Join(home, ".defenseclaw"), AgentVersion: "0.150.0", Enabled: &enabled,
+	})
+	cache := NewWindowsEnrollmentGroupCache()
+	cache.Users[testDomainUserA] = []string{testDomainDevelopersSID}
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+	var excluded []ManifestTarget
+	var reported []UnprotectedAgent
+	manifest, err := EnumerateWindows(ctx, standaloneEnumeratorConfig("codex"), EnumerateOptions{
+		ExistingManifestPath: prior,
+		ExcludeGroups:        []string{`contoso\developers`}, GroupCache: cache,
+		ReportExcluded:    func(target ManifestTarget) { excluded = append(excluded, target) },
+		ReportUnprotected: func(agent UnprotectedAgent) { reported = append(reported, agent) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(manifest.Targets) != 0 || len(excluded) != 1 || excluded[0].SID != testDomainUserA || len(reported) != 0 {
+		t.Fatalf("group exclusion was bypassed: rows=%+v excluded=%+v reported=%+v", manifest.Targets, excluded, reported)
+	}
+}
+
+func TestWindowsDeadlineReportsExcludedDeletedAccount(t *testing.T) {
+	stubMachineWinGet(t, nil)
+	stubActiveSessions(t, map[string][]string{})
+	oldDomain, oldLookup := windowsMachineAccountDomainSID, windowsEnrollmentLookupAccountSID
+	t.Cleanup(func() { windowsMachineAccountDomainSID, windowsEnrollmentLookupAccountSID = oldDomain, oldLookup })
+	windowsMachineAccountDomainSID = func() (string, error) { return testMachineDomainSID, nil }
+	windowsEnrollmentLookupAccountSID = func(string) (string, string, error) { return "", "", windows.ERROR_NONE_MAPPED }
+	home := codexProfile(t, "0.150.0")
+	injectWindowsProfileList(t, map[string]string{testDeletedLocalSID: home})
+	enabled := true
+	prior := writeWindowsTestManifest(t, ManifestTarget{
+		SID: testDeletedLocalSID, Connector: "codex", UserHome: home,
+		DataDir: filepath.Join(home, ".defenseclaw"), AgentVersion: "0.150.0", Enabled: &enabled,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+	var excluded []ManifestTarget
+	manifest, err := EnumerateWindows(ctx, standaloneEnumeratorConfig("codex"), EnumerateOptions{
+		ExistingManifestPath: prior, ExcludeUsers: []string{testDeletedLocalSID},
+		ReportExcluded: func(target ManifestTarget) { excluded = append(excluded, target) },
+	})
+	if err != nil || len(manifest.Targets) != 0 || len(excluded) != 1 || excluded[0].SID != testDeletedLocalSID {
+		t.Fatalf("excluded deleted account kept identity: rows=%+v excluded=%+v err=%v", manifest.Targets, excluded, err)
+	}
+}
+
 func TestWindowsPrivateInstallDeadlineKeepsOtherProfilesAndRows(t *testing.T) {
 	stubMachineWinGet(t, nil)
 	firstHome, secondHome := codexProfile(t, "0.150.0"), codexProfile(t, "0.150.0")
