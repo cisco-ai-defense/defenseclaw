@@ -2711,7 +2711,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		hookEvaluatorPanicHook()
 	}
 	startup := a.applyInstructionStartup(ctx, req.ConnectorName, req.SessionID, req.HookEventName, req.CWD)
-	ctx = withInstructionStartup(ctx, startup)
+	ctx = a.withInstructionStartup(ctx, req.ConnectorName, req.SessionID, startup)
 	// A hook authenticated through a sandbox binding is always evaluated and
 	// enforced: DefenseClaw launched that harness itself, usually with its
 	// own permission prompts off, and the host's connector selection and

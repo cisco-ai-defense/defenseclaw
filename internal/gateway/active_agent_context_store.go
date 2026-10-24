@@ -33,6 +33,7 @@ type instructionLoadRecord struct {
 	Identities           map[string]string `json:"identities,omitempty"`
 	StartupFiles         map[string]string `json:"startup_files,omitempty"`
 	StartupKnown         bool              `json:"startup_known,omitempty"`
+	StartupDirs          []string          `json:"startup_dirs,omitempty"`
 }
 
 func (a *APIServer) instructionLoadDir() string {
@@ -66,7 +67,7 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 		Scope: key.scope, Connector: key.connector, Session: key.sessionID,
 		Files: session.files, CaseInsensitiveFiles: session.caseInsensitiveFiles,
 		Identities: session.identities, StartupFiles: session.startupFiles,
-		StartupKnown: session.startupKnown,
+		StartupKnown: session.startupKnown, StartupDirs: session.startupDirs,
 	})
 	if err != nil || len(data) > maxInstructionLoadRecordBytes || os.MkdirAll(dir, 0o700) != nil {
 		return
@@ -166,8 +167,15 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 			return instructionLoadRecord{}, false
 		}
 	}
-	if len(record.StartupFiles) > 256 || len(record.StartupFiles) > 0 && !record.StartupKnown {
+	if len(record.StartupFiles) > maxStartupInstructionFiles || len(record.StartupDirs) > maxStartupDirectories ||
+		(len(record.StartupFiles) > 0 || len(record.StartupDirs) > 0) && !record.StartupKnown {
 		return instructionLoadRecord{}, false
+	}
+	for _, dir := range record.StartupDirs {
+		if dir == "" || len(dir) > maxActiveAgentContextPathSize || strings.TrimSpace(dir) != dir ||
+			!filepath.IsAbs(dir) && !path.IsAbs(dir) {
+			return instructionLoadRecord{}, false
+		}
 	}
 	for file, identity := range record.StartupFiles {
 		if !recordedInstructionFile(file) || len(identity) > 64 || identity == "" ||

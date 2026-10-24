@@ -61,8 +61,23 @@ func StartupInstructionFiles(cwd, home string) map[string]string {
 	if !filepath.IsAbs(cwd) {
 		return nil
 	}
+	return InstructionFilesIn(instructionDirectories(cwd, home))
+}
+
+// StartupDirectories are the directories StartupInstructionFiles reads.
+func StartupDirectories(cwd, home string) []string {
+	return instructionDirectories(cwd, home)
+}
+
+// InstructionFilesIn captures the identities of the existing instruction
+// files in directories. A missing file has no entry; nil means more files
+// than a snapshot holds.
+func InstructionFilesIn(directories []string) map[string]string {
 	files := make(map[string]string)
-	for _, directory := range instructionDirectories(cwd, home) {
+	for _, directory := range directories {
+		if !filepath.IsAbs(directory) {
+			continue
+		}
 		for _, name := range InstructionFileNames {
 			candidate := filepath.Join(directory, name)
 			if identity := FileIdentity(candidate); identity != "" {
@@ -341,6 +356,21 @@ var InstructionHomeVariables = [...]string{"CLAUDE_CONFIG_DIR", "CODEX_HOME"}
 // and agent folders, and the agents' configured homes (CLAUDE_CONFIG_DIR,
 // CODEX_HOME) of the calling process.
 func instructionDirectories(cwd, home string) []string {
+	directories := InstructionDirectories(cwd, home)
+	for _, variable := range InstructionHomeVariables {
+		if value := os.Getenv(variable); filepath.IsAbs(value) &&
+			!slices.Contains(directories, filepath.Clean(value)) {
+			directories = append(directories, filepath.Clean(value))
+		}
+	}
+	return directories
+}
+
+// InstructionDirectories are the places of instructionDirectories that do
+// not depend on the calling process's environment: the working directory
+// and its parents with their .claude folders, and the home and agent
+// folders. A gateway judging another process's snapshot claims only these.
+func InstructionDirectories(cwd, home string) []string {
 	var directories []string
 	add := func(directory string) {
 		if filepath.IsAbs(directory) && !slices.Contains(directories, directory) {
@@ -361,11 +391,6 @@ func instructionDirectories(cwd, home string) []string {
 	if filepath.IsAbs(home) {
 		for _, sub := range InstructionHomeFolders {
 			add(filepath.Join(home, filepath.FromSlash(sub)))
-		}
-	}
-	for _, variable := range InstructionHomeVariables {
-		if value := os.Getenv(variable); value != "" {
-			add(filepath.Clean(value))
 		}
 	}
 	return directories

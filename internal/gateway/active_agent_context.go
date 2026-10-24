@@ -38,6 +38,11 @@ const (
 	maxActiveAgentContextEvictions = maxActiveAgentContextSessions
 	maxActiveAgentContextPathSize  = 4 << 10
 	maxActiveAgentSessionIDSize    = 512
+	// maxStartupInstructionFiles and maxStartupDirectories bound a session's
+	// instruction-file snapshot (instruction_startup.go). A directory that
+	// does not fit stays unsnapshotted, so its files keep the call-time proof.
+	maxStartupInstructionFiles = 256
+	maxStartupDirectories      = 1024
 )
 
 type authenticatedHookConnectorContextKey struct{}
@@ -76,6 +81,10 @@ type activeAgentContextSession struct {
 	caseInsensitiveFiles []string
 	startupFiles         map[string]string
 	startupKnown         bool
+	// startupDirs are the directories, normalized as instructionDirectoryKey
+	// does, whose instruction files startupFiles records. A directory the
+	// session had not reached is not in it (instruction_startup.go).
+	startupDirs []string
 	// identities maps the hook client's file identity of a loaded file
 	// (hookpaths.LoadedIdentityPrefix) to that file.
 	identities               map[string]string
@@ -89,9 +98,16 @@ type activeAgentContextSnapshot struct {
 	caseInsensitiveFiles     []string
 	startupFiles             map[string]string
 	startupKnown             bool
+	startupDirs              []string
 	identities               map[string]string
 	caseInsensitiveUncertain bool
 	uncertain                bool
+}
+
+// startupCovers reports whether the snapshot recorded the instruction files
+// of directory, a key of instructionDirectoryKey.
+func (snapshot activeAgentContextSnapshot) startupCovers(directory string) bool {
+	return snapshot.startupKnown && slices.Contains(snapshot.startupDirs, directory)
 }
 
 type activeAgentContextEviction struct {
@@ -581,12 +597,13 @@ func (cache *activeAgentContextCache) resetKey(key activeAgentContextKey, preser
 	if preserveStartup {
 		next.startupFiles = maps.Clone(previous.startupFiles)
 		next.startupKnown = previous.startupKnown
+		next.startupDirs = slices.Clone(previous.startupDirs)
 	}
 	cache.sessions[key] = next
 }
 
-func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, files map[string]string) {
-	if files == nil {
+func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, files map[string]string, dirs []string) {
+	if files == nil || len(dirs) == 0 {
 		return
 	}
 	cache.mu.Lock()
@@ -596,14 +613,15 @@ func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, f
 		return
 	}
 	session.startupFiles = maps.Clone(files)
+	session.startupDirs = slices.Clone(dirs)
 	session.startupKnown = true
 	cache.sessions[key] = session
 }
 
 // ensureStartupKey pins the first inspect call's snapshot without replacing a
 // concurrent call's snapshot or treating an evicted, unknown session as new.
-func (cache *activeAgentContextCache) ensureStartupKey(key activeAgentContextKey, files map[string]string) bool {
-	if files == nil {
+func (cache *activeAgentContextCache) ensureStartupKey(key activeAgentContextKey, files map[string]string, dirs []string) bool {
+	if files == nil || len(dirs) == 0 {
 		return false
 	}
 	cache.mu.Lock()
@@ -619,9 +637,58 @@ func (cache *activeAgentContextCache) ensureStartupKey(key activeAgentContextKey
 	}
 	cache.makeRoomLocked(key)
 	cache.sessions[key] = activeAgentContextSession{
-		startupFiles: maps.Clone(files), startupKnown: true, updatedAt: cache.currentTime(),
+		startupFiles: maps.Clone(files), startupDirs: slices.Clone(dirs),
+		startupKnown: true, updatedAt: cache.currentTime(),
 	}
 	return true
+}
+
+// extendStartupKey adds the directories a running session reaches for the
+// first time to its snapshot, with the instruction files they held then. A
+// directory already in the snapshot keeps its first record, so a file the
+// session created there stays a file it created. files is keyed like
+// startupFiles; a directory that does not fit stays out.
+func (cache *activeAgentContextCache) extendStartupKey(key activeAgentContextKey, files map[string]string, dirs []string) bool {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	session, ok := cache.sessions[key]
+	if !ok || !session.startupKnown {
+		return false
+	}
+	changed := false
+	for _, dir := range dirs {
+		if slices.Contains(session.startupDirs, dir) {
+			continue
+		}
+		if len(session.startupDirs) >= maxStartupDirectories {
+			break
+		}
+		var held []string
+		for file := range files {
+			if instructionParent(file) == dir {
+				held = append(held, file)
+			}
+		}
+		if len(session.startupFiles)+len(held) > maxStartupInstructionFiles {
+			continue
+		}
+		if !changed {
+			session.startupFiles = maps.Clone(session.startupFiles)
+			if session.startupFiles == nil {
+				session.startupFiles = make(map[string]string)
+			}
+			session.startupDirs = slices.Clone(session.startupDirs)
+			changed = true
+		}
+		for _, file := range held {
+			session.startupFiles[file] = files[file]
+		}
+		session.startupDirs = append(session.startupDirs, dir)
+	}
+	if changed {
+		cache.sessions[key] = session
+	}
+	return changed
 }
 
 func (cache *activeAgentContextCache) end(connectorName, sessionID string) {
@@ -639,6 +706,18 @@ func (cache *activeAgentContextCache) endKey(key activeAgentContextKey) {
 	cache.mu.Unlock()
 }
 
+// startupDirsKey returns the directories of key's instruction-file
+// snapshot, if the session has one.
+func (cache *activeAgentContextCache) startupDirsKey(key activeAgentContextKey) ([]string, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	session, ok := cache.sessions[key]
+	if !ok || !session.startupKnown {
+		return nil, false
+	}
+	return slices.Clone(session.startupDirs), true
+}
+
 // sessionKey returns a copy of the session the cache holds for key.
 func (cache *activeAgentContextCache) sessionKey(key activeAgentContextKey) (activeAgentContextSession, bool) {
 	cache.mu.Lock()
@@ -651,6 +730,7 @@ func (cache *activeAgentContextCache) sessionKey(key activeAgentContextKey) (act
 	session.caseInsensitiveFiles = slices.Clone(session.caseInsensitiveFiles)
 	session.identities = maps.Clone(session.identities)
 	session.startupFiles = maps.Clone(session.startupFiles)
+	session.startupDirs = slices.Clone(session.startupDirs)
 	return session, true
 }
 
@@ -677,6 +757,7 @@ func (cache *activeAgentContextCache) restoreKey(key activeAgentContextKey, reco
 		identities:               maps.Clone(record.Identities),
 		startupFiles:             maps.Clone(record.StartupFiles),
 		startupKnown:             record.StartupKnown,
+		startupDirs:              slices.Clone(record.StartupDirs),
 		uncertain:                uncertain,
 		caseInsensitiveUncertain: caseInsensitiveUncertain,
 		updatedAt:                now,
@@ -715,6 +796,7 @@ func (cache *activeAgentContextCache) snapshotKey(key activeAgentContextKey) act
 		identities:   maps.Clone(session.identities),
 		startupFiles: maps.Clone(session.startupFiles),
 		startupKnown: session.startupKnown,
+		startupDirs:  slices.Clone(session.startupDirs),
 		caseInsensitiveFiles: append(
 			[]string(nil),
 			session.caseInsensitiveFiles...,
@@ -747,7 +829,8 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	switch req.HookEventName {
 	case "SessionStart":
 		a.activeAgentContext.beginKey(key)
-		a.activeAgentContext.setStartupKey(key, instructionStartupFiles(ctx, connectorName, req.CWD))
+		files, dirs := instructionStartupFiles(ctx, connectorName, req.CWD)
+		a.activeAgentContext.setStartupKey(key, files, dirs)
 		a.saveInstructionLoads(key)
 	case "CwdChanged":
 		a.restoreInstructionLoads(key)
@@ -769,6 +852,7 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 		a.saveInstructionLoads(key)
 	case "PreToolUse", "PermissionRequest":
 		a.restoreInstructionLoads(key)
+		a.extendInstructionStartup(ctx, key, req.CWD)
 		return a.activeAgentContext.snapshotKey(key)
 	}
 	return activeAgentContextSnapshot{}

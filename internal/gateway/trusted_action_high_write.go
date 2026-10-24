@@ -89,7 +89,24 @@ func provedHighWriteFindings(
 	for _, loaded := range request.ActiveAgentFileIdentities {
 		locations.loaded = append(locations.loaded, loaded)
 	}
-	startup := instructionStartupFromContext(ctx)
+	startupView := instructionStartupFromContext(ctx)
+	startup := startupView.snapshot
+	if startupView.extend != nil {
+		// The directories this call works in or writes to are snapshotted
+		// before it is judged, the first time the session reaches them.
+		reached := hookpaths.StartupDirectories(request.Input.CWD, request.Input.ActiveHome)
+		for _, target := range facts.Paths {
+			if target.Resolved != "" && target.Flavor == hostFlavor {
+				reached = append(reached, filepath.Dir(filepath.FromSlash(target.Resolved)))
+			}
+		}
+		for operand, resolved := range request.ResolvedWriteTargets {
+			if !strings.HasPrefix(operand, "\x00") && filepath.IsAbs(resolved) {
+				reached = append(reached, filepath.Dir(resolved))
+			}
+		}
+		startup = startupView.extend(reached)
+	}
 	clientInstructions := hookpaths.InstructionIdentities(request.ResolvedWriteTargets)
 	loadedAtRuntime := func(location string, flavor actionfacts.PathFlavor) bool {
 		normalized, ok := activeAgentInstructionPath(location, flavor)
@@ -122,9 +139,12 @@ func provedHighWriteFindings(
 		if loadedAtRuntime(location, flavor) {
 			return true
 		}
-		if startup.startupKnown {
-			normalized, ok := activeAgentInstructionPath(location, flavor)
-			if !ok || startup.startupFiles[normalized] == "" {
+		// A file in a directory the session's snapshot records is protected
+		// only while it is the file that was there when the session reached
+		// the directory; one the session created since is ordinary.
+		if normalized, ok := activeAgentInstructionPath(location, flavor); ok &&
+			startup.startupCovers(instructionParent(normalized)) {
+			if startup.startupFiles[normalized] == "" {
 				return false
 			}
 			identity := ""
@@ -376,6 +396,29 @@ func connectorInstructionLoads(connector string) instructionLoads {
 		every.variables[variable] = allInstructionNames
 	}
 	return every
+}
+
+// connectorInstructionLoadNames are the instruction file names connector's
+// agent loads in any of its places.
+func connectorInstructionLoadNames(connector string) []string {
+	loads := connectorInstructionLoads(connector)
+	var names []string
+	add := func(list []string) {
+		for _, name := range list {
+			if !slices.Contains(names, name) {
+				names = append(names, name)
+			}
+		}
+	}
+	add(loads.project)
+	add(loads.claudeFolder)
+	for _, list := range loads.home {
+		add(list)
+	}
+	for _, list := range loads.variables {
+		add(list)
+	}
+	return names
 }
 
 // instructionLoadLocation reports whether target, spelled with an
