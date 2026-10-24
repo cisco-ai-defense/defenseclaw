@@ -9343,6 +9343,11 @@ function Set-DefenseClawManagedAcls {
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ManifestPath -Kind AdminFile -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.RuntimeDirectory -Kind RuntimeDirectory -GatewayServiceSID $gatewaySID
+    $runtimeEnv = [IO.Path]::Combine([string]$Layout.RuntimeDirectory, '.env')
+    if ((Test-DefenseClawStandaloneProfile) -and
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $runtimeEnv -PathType Leaf)) {
+        Set-DefenseClawPathAcl -Path $runtimeEnv -Kind RuntimeFile -GatewayServiceSID $gatewaySID
+    }
     if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout) -and
         (-not $AllowTransactionRecordedBrokerAbsence -or
             (Microsoft.PowerShell.Management\Test-Path `
