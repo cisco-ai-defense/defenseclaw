@@ -746,6 +746,16 @@ describe('1.0.4 operator routes and limits', () => {
     assert.doesNotMatch(row, /DEFENSECLAW_FAIL_MODE[^|]*honored only when stricter/i);
   });
 
+  it('describes the managed Unix hook socket directory and listener checks', () => {
+    const transport = source('internal/gateway/connector/hookexec/managed_standalone_transport.go');
+    const row = source('docs-site/content/docs/troubleshooting/enterprise/index.mdx')
+      .split('\n').find((line) => line.startsWith('| `enterprise_managed_gateway_peer_unverified` |')) ?? '';
+    assert.match(transport, /hook socket directory .* is not owned by root or the gateway service account/);
+    assert.match(transport, /hook socket listener uid .* is neither root nor the gateway service uid/);
+    assert.match(row, /Linux and macOS:.*socket directory.*root or the gateway account.*listener UID.*kernel/i);
+    assert.doesNotMatch(row, /hook socket is not owned by root or the gateway account/);
+  });
+
   it('does not advertise local files as MCP scan targets', () => {
     const api = page('reference/apis/gateway-api.mdx');
     assert.match(api, /`POST`\s*\|\s*`\/v1\/mcp\/scan`[^\n]*Path or JSON-file targets[^\n]*HTTP 400[^\n]*bare identifier without path or file syntax[^\n]*configured server name/i);
