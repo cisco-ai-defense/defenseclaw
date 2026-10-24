@@ -494,6 +494,15 @@ func (l *lifecycle) run(ctx context.Context) (failure int) {
 		r.AddError(codeInterrupted, "the run got a stop signal (SIGTERM or an interrupt) before it started; nothing was changed")
 		return 0
 	}
+	// Managed hooks answer closed while this run can stop or restart the
+	// gateway (GAP-1074). Removed before the lock is released.
+	releaseMarker, err := env.holdLifecycleMarker()
+	if err != nil {
+		r.AddError(codeState, err.Error()+"; nothing was changed")
+		l.reportNoSpace(err)
+		return 0
+	}
+	defer releaseMarker()
 	if l.opts.FromPackage && l.opts.Reason != "package" {
 		// Recorded before the lock goes, so a package run that waits for it
 		// writes its own result after this one.
