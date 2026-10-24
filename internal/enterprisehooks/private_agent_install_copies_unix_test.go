@@ -385,6 +385,44 @@ func TestDiscoverUnixPrivateInstallsReportsTheFindingLimit(t *testing.T) {
 	}
 }
 
+func TestPrivateInstallScanReportsSearchableUnlistableHomeChild(t *testing.T) {
+	withPrivateInstallMachinePrefixes(t)
+	home := makeHome(t, filepath.Join(trustedTestDir(t), "homes"), "alice")
+	opaque := filepath.Join(home, "opaque")
+	copy := filepath.Join(opaque, "nested", "lib", "node_modules", "@anthropic-ai", "claude-code")
+	if err := os.MkdirAll(filepath.Join(copy, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copy, "bin", "claude.exe"), []byte("fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(opaque, 0o700) })
+	for _, tc := range []struct {
+		name       string
+		mode       os.FileMode
+		incomplete bool
+	}{
+		{"searchable_without_list", 0o311, true},
+		{"not_searchable", 0o200, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.Chmod(opaque, tc.mode); err != nil {
+				t.Fatal(err)
+			}
+			found := DiscoverUnixPrivateAgentInstalls(home, []string{"claudecode"})
+			incomplete := false
+			for _, install := range found {
+				if install.Connector == "claudecode" && install.Incomplete && install.Skipped == PrivateInstallSkippedHome {
+					incomplete = true
+				}
+			}
+			if incomplete != tc.incomplete {
+				t.Fatalf("scan incomplete = %t, want %t: %+v", incomplete, tc.incomplete, found)
+			}
+		})
+	}
+}
+
 // The worker's machine-prefix findings pass the parent's path check; a
 // path anywhere else does not.
 func TestUnixPrivateInstallPathAllowedNamesTheScanRoots(t *testing.T) {

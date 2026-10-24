@@ -290,11 +290,28 @@ func boundedPrivateHomeDirs(home string) ([]string, error) {
 		return nil, errPrivateInstallLimit
 	}
 	var out []string
+	unlistable := false
 	for _, name := range names {
-		info, err := os.Stat(filepath.Join(home, name))
+		path := filepath.Join(home, name)
+		info, err := os.Stat(path)
 		if err == nil && info.IsDir() {
 			out = append(out, name)
+			// A user can run a known path inside a searchable directory even
+			// when they cannot list it. The scan cannot prove absence there.
+			if _, err := os.Stat(path + string(os.PathSeparator) + "."); err == nil {
+				child, readErr := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+				if readErr == nil {
+					_, readErr = child.Readdirnames(1)
+					_ = child.Close()
+				}
+				if readErr != nil && !errors.Is(readErr, io.EOF) {
+					unlistable = true
+				}
+			}
 		}
+	}
+	if unlistable {
+		return out, fs.ErrPermission
 	}
 	return out, nil
 }
