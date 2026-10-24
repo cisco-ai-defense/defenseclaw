@@ -58,7 +58,7 @@ func TestPerUserPluginsRefuseARepeatedKeyInTheAnswer(t *testing.T) {
 					t.Fatal(err)
 				}
 				body := renderPluginAssetForTest(t, plugin.asset, templateData{APIAddr: strings.TrimPrefix(server.URL, "http://"),
-					TokenFileJS: javaScriptStringContent(token), FailMode: "closed"})
+					TokenFileJS: javaScriptStringContent(token), FailMode: "closed", OutageFailMode: "open"})
 				path := filepath.Join(home, plugin.name)
 				if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 					t.Fatal(err)

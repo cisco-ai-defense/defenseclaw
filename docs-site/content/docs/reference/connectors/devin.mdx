@@ -126,7 +126,7 @@ Devin has no native resumable ask. A `confirm` finding stays in audit and cannot
 
 ## Fail mode
 
-Fail closed: yes. On a per-user install a gateway that is not running follows the policy tier: the default and permissive policies let the call run with one warning, and the strict policy blocks it ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Every other failure, an error or unusable answer included, blocks the events that support a block response. In a standalone enterprise deployment each hook follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. Devin itself blocks only on exit `2`; every other hook error fails open on its side. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
+Fail closed: yes. When the gateway cannot give a usable answer, the hook blocks the events that support a block response unless `guardrail.hook_fail_mode` is `open`. The default is `closed`. In a standalone enterprise deployment each hook follows the administrator's fail mode: `closed` unless `hook_fail_mode` (global or for Devin) is `open`. Devin itself blocks only on exit `2`; every other hook error fails open on its side. Settings and edge cases are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Limits
 

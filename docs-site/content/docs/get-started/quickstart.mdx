@@ -33,7 +33,7 @@ The installer asks which agent to guard: type `claudecode`. Requirements and opt
 defenseclaw init --connector claudecode
 ```
 
-Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw records policy findings without enforcing them. In the default policy its hook lets a call run with one warning while the gateway is not running; every other hook failure blocks. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
+Press Enter through the prompts. Claude Code starts in **observe** mode: DefenseClaw records policy findings without enforcing them. With the default fail mode `closed`, its hook denies supported events when the gateway is unreachable. At **Select connector(s) for action enforcement**, leave the box unchecked. `init` starts the gateway and prints a first-run report. This sample comes from `defenseclaw quickstart --skip-gateway`, which prints the same report, so its Sidecar row says not started where yours says started:
 
 <include>../../snippets/first-run-report.mdx</include>
 
@@ -51,7 +51,7 @@ Quit and reopen Claude Code so it loads the hooks, ask it to list the files in t
 defenseclaw guardrail mode action --connector claudecode
 ```
 
-This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The mode does not change what an outage does: in the default policy a tool call runs with a warning while the gateway is not running, and `defenseclaw guardrail use-pack strict` blocks it ([fail modes](/docs/reference/configuration/fail-modes)).
+This switches only Claude Code to **action** mode, which enforces the rules. The running gateway applies it without a restart. The hook fail mode is `closed` on a new install: if the gateway is down, tool calls are blocked ([fail modes](/docs/reference/configuration/fail-modes)).
 
 </Step>
 

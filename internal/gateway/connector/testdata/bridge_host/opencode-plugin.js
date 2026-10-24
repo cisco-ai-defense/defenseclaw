@@ -69,6 +69,11 @@ const DC_LISTENER_PROOF = "{{.ListenerProofJS}}";
 // Per-user plugins ask the native gateway binary to verify the connected
 // listener's account before each request. The proof above serves managed TCP.
 const DC_PER_USER_NATIVE_POST = "1";
+// A per-user plugin's gateway-outage mode (config.HookOutageFailMode): "open"
+// in the default and permissive policy tiers lets a tool call run with a
+// warning and a hook-failures.jsonl row while this account's gateway is not
+// running; "closed" (strict) blocks it. Every other failure blocks.
+const DC_OUTAGE_FAIL_MODE = "{{.OutageFailMode}}";
 const DC_LISTENER_PROOF_DOMAIN = "defenseclaw.listener-proof.v1";
 const DC_TIMEOUT_MS = 10000;
 const DC_PLUGIN_URL = import.meta.url;
@@ -484,33 +489,21 @@ async function defenseclawProvenTCPRequest(path, init, token) {
 }
 
 function defenseclawPerUserNativePostBinary() {
-  const account = userInfo();
-  const dataDir = dirname(dirname(DC_TOKEN_FILE));
-  const dataHome = dirname(dataDir);
-  // The token path is baked into this plugin at setup. A custom data
-  // directory uses the OS account home. Neither path follows the agent's HOME.
-  const homes = dataDir === join(dataHome, ".defenseclaw") ? [dataHome, account.homedir] : [account.homedir];
-  let lastError = new Error("per-user gateway helper path is missing");
-  for (const home of new Set(homes)) {
-    const directory = join(home, ".local", "bin");
-    const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
-    const paths = [home, join(home, ".local"), directory, binary];
-    try {
-      for (let index = 0; index < paths.length; index++) {
-        const info = lstatSync(paths[index]);
-        if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
-          throw new Error("per-user gateway helper path is untrusted");
-        }
-        if (process.platform !== "win32" && (info.uid !== account.uid || (info.mode & 0o022) !== 0)) {
-          throw new Error("per-user gateway helper path is writable by another account");
-        }
-      }
-      return binary;
-    } catch (error) {
-      lastError = error;
+  const home = homedir();
+  const directory = join(home, ".local", "bin");
+  const binary = join(directory, process.platform === "win32" ? "defenseclaw-gateway.exe" : "defenseclaw-gateway");
+  const paths = [home, join(home, ".local"), directory, binary];
+  const uid = userInfo().uid;
+  for (let index = 0; index < paths.length; index++) {
+    const info = lstatSync(paths[index]);
+    if (info.isSymbolicLink() || (index === paths.length - 1 ? !info.isFile() : !info.isDirectory())) {
+      throw new Error("per-user gateway helper path is untrusted");
+    }
+    if (process.platform !== "win32" && (info.uid !== uid || (info.mode & 0o022) !== 0)) {
+      throw new Error("per-user gateway helper path is writable by another account");
     }
   }
-  throw lastError;
+  return binary;
 }
 
 // defenseclawFetch posts to the gateway over the managed hook socket when one
@@ -853,32 +846,16 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
   }
 }
 
-// defenseclaw-call-time-outage-v1: defenseclawPerUserOutageOpen reports a per-user tool check that may run
+// defenseclawPerUserOutageOpen reports a per-user tool check that may run
 // unchecked: the native helper exited 7 (hookexec.PerUserPostOutageExit:
 // this account's gateway refused or dropped the connection before any
-// status), strict availability is off, no install holds the data directory,
-// and the config on disk gives the open outage mode. An answer the gateway gave, an unverified listener and
-// every other error keep the call blocked.
+// status), the outage mode is open, strict availability is off and no
+// install holds the data directory. An answer the gateway gave, an
+// unverified listener and every other error keep the call blocked.
 async function defenseclawPerUserOutageOpen(err) {
-  if (!err || err.status !== 7) return false;
+  if (DC_OUTAGE_FAIL_MODE !== "open" || !err || err.status !== 7) return false;
   if (["1", "true", "TRUE", "yes", "YES"].includes(String(process.env.DEFENSECLAW_STRICT_AVAILABILITY || ""))) return false;
-  return !(await defenseclawInstallWindow()) && defenseclawConfigOutageOpen();
-}
-
-// defenseclawConfigOutageOpen asks the per-user helper (`hook-outage-mode`,
-// which only reads the config.yaml of this plugin's data directory, never one
-// the agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for OpenCode's
-// outage mode now. A helper that cannot run or answers anything but "open"
-// keeps it closed.
-function defenseclawConfigOutageOpen() {
-  try {
-    const output = execFileSync(defenseclawPerUserNativePostBinary(), ["hook-outage-mode", "--connector", "opencode", "--hook-dir", dirname(DC_TOKEN_FILE)], {
-      timeout: 3000, maxBuffer: 4096, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
-    });
-    return String(output).trim() === "open";
-  } catch (_) {
-    return false;
-  }
+  return !(await defenseclawInstallWindow());
 }
 
 // defenseclawPerUserOutageNotice is the one warning of a tool call that ran

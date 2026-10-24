@@ -102,14 +102,9 @@ func TestShellHookFailureRecordsNameTheOutcomeTheHookApplied(t *testing.T) {
 					if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, run.conn); err != nil {
 						t.Fatal(err)
 					}
-					// The config the outage-open hook reads gives the open tier.
-					installOutageOpenRuntimeForHookTest(t, home, home)
-					if mode == "closed" {
-						writeOutageTierConfig(t, home, outageStrictTierConfig)
-					}
 					cmd := exec.Command("bash", append([]string{filepath.Join(hookDir, run.invoke.script)}, run.invoke.args...)...)
 					cmd.Stdin = strings.NewReader(run.invoke.stdin)
-					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home, "DEFENSECLAW_GATEWAY_AUTOSTART=0")
+					cmd.Env = append(sanitizedTestEnv(), "HOME="+home, "DEFENSECLAW_HOME="+home)
 					cmd.Env = append(cmd.Env, run.invoke.env...)
 					switch scenario {
 					case "strict-outage":
@@ -143,7 +138,7 @@ func TestShellHookFailureRecordsNameTheOutcomeTheHookApplied(t *testing.T) {
 					}
 					// The per-user outage outcome and the strict availability
 					// column of the gateway outage table (HookOutage). The
-					// per-user outage mode is the current config tier.
+					// per-user outage mode is the record this render wrote.
 					outage := ConnectorHookOutage(run.conn)
 					perUser := outage.PerUserOpen
 					if mode == "closed" || strings.HasPrefix(run.invoke.script, "inspect-") {

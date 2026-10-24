@@ -46,7 +46,7 @@ The agent appears under **Agents** with its mode. `defenseclaw doctor` passes th
 - In action mode `PreToolUse` can deny a tool call or ask you first. The question appears inside Claude Code in Manual mode, its default; in any other permission mode the call is blocked with a note to switch to Manual mode and ask again.
 - The prompt, permission, task, stop, compaction, config and elicitation events can also block.
 - Events that carry a tool's result (`PostToolUse`, `PostToolUseFailure`, `PermissionDenied`) are advisory. DefenseClaw scans them and records findings, but the tool has already run.
-- Observe mode records policy findings without blocking on those findings. When the gateway is not running, the default and permissive policies let the call run with one warning and strict blocks it; every other hook failure blocks ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Settings and limits are in [Fail modes](/docs/reference/configuration/fail-modes).
+- Observe mode records policy findings without blocking on those findings. By default the running hook blocks supported events when the gateway is unreachable ([gateway outage table](/docs/reference/apis/capability-matrix#gateway-outage)). Settings and limits are in [Fail modes](/docs/reference/configuration/fail-modes).
 
 ## Files it changes
 

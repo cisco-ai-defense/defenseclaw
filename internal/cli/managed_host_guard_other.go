@@ -31,9 +31,6 @@ var secureClientHost = func() bool {
 // descriptor.
 var managedHostWindowsStandalone = func() (string, bool) { return "", false }
 
-// Unix hosts use the runtime descriptor above the per-user hook runtime.
-var managedHostWindowsMarkerUncertain = func() bool { return false }
-
 // managedHostRecordTrusted accepts every record outside Windows: the unix
 // descriptor lives in a root-owned directory no standard user can write.
 var managedHostRecordTrusted = func(string) error { return nil }

@@ -16,7 +16,7 @@ import (
 // matrix's outage table, which enterprisepolicy
 // TestDocsCapabilityMatrixOutageMatchesTheHooks checks against
 // ConnectorHookOutage. These tests check ConnectorHookOutage against the
-// hooks themselves: the call-time reader each per-user render installs (here),
+// hooks themselves: the fail mode each render bakes for an outage (here),
 // the running shell hooks (TestShellHookFailureRecordsNameTheOutcomeTheHookApplied),
 // the managed per-user-route Copilot hook and Amp and OpenCode plugins
 // (TestManagedUnixPerUserRouteCopilotOutageFollowsHookOutage,
@@ -34,10 +34,13 @@ var (
 		return regexp.MustCompile(`(?:process\.env\.|process\.env\[["']|environ(?:\.get)?\(\s*["']|environ\[["']|getenv\(\s*["'])` + name)
 	}
 	renderedPluginOutageMode = regexp.MustCompile(`const DC_FAIL_MODE(?:: string)? = "([a-z]*)"`)
+	// A per-user plugin's outage mode (pluginOutageFailMode).
+	renderedPluginPerUserOutageMode = regexp.MustCompile(`const DC_OUTAGE_FAIL_MODE(?:: string)? = "([a-z]*)"`)
 )
 
 // renderedHookOutage renders conn's hooks for opts the way Setup does and
-// checks the per-user call-time reader or the managed/Secure Client mode.
+// returns the outage outcome they bake: OutageBlocks for fail mode closed,
+// OutageRuns for open. Every rendered hook of conn must agree.
 func renderedHookOutage(t *testing.T, conn Connector, opts SetupOpts) string {
 	t.Helper()
 	var modes []string
@@ -51,14 +54,9 @@ func renderedHookOutage(t *testing.T, conn Connector, opts SetupOpts) string {
 			}
 			pattern := renderedPluginOutageMode
 			if perUserOutageRender(opts) {
-				// The installed plugin makes its outage decision at call time.
-				if !strings.Contains(string(body), "defenseclaw-call-time-outage-v1") ||
-					!strings.Contains(string(body), "hook-outage-mode") ||
-					strings.Contains(string(body), "DC_OUTAGE_FAIL_MODE") {
-					t.Fatalf("%s: per-user plugin does not use the call-time outage decision", conn.Name())
-				}
-				modes = append(modes, normalizeHookFailMode(opts.HookFailMode))
-				break
+				// A per-user plugin bakes closed for every failure but the
+				// outage, whose mode is DC_OUTAGE_FAIL_MODE.
+				pattern = renderedPluginPerUserOutageMode
 			}
 			for _, m := range pattern.FindAllSubmatch(body, -1) {
 				modes = append(modes, string(m[1]))
@@ -74,8 +72,8 @@ func renderedHookOutage(t *testing.T, conn Connector, opts SetupOpts) string {
 			t.Fatalf("%s: render: %v", conn.Name(), err)
 		}
 		if perUserOutageRender(opts) {
-			// A per-user script bakes closed for other failures; its outage
-			// mode comes from the runtime config when the hook is called.
+			// A per-user script bakes closed for every failure; its outage
+			// mode is its runtime record (defenseclaw_per_user_outage_open).
 			for _, name := range owner.HookScriptNames(opts) {
 				body, err := os.ReadFile(filepath.Join(hookDir, name))
 				if err != nil {
@@ -87,12 +85,15 @@ func renderedHookOutage(t *testing.T, conn Connector, opts SetupOpts) string {
 					}
 				}
 			}
-			helper, err := os.ReadFile(filepath.Join(hookDir, "_hardening.sh"))
-			if err != nil || !strings.Contains(string(helper), "defenseclaw-call-time-outage-v1") ||
-				!strings.Contains(string(helper), "hook-outage-mode") {
-				t.Fatalf("%s: per-user hook does not use the call-time outage decision: %v", conn.Name(), err)
+			record, err := os.ReadFile(filepath.Join(hookDir, hookConfigSidecarName+"."+conn.Name()))
+			if err != nil {
+				t.Fatalf("%s: runtime record: %v", conn.Name(), err)
 			}
-			modes = append(modes, normalizeHookFailMode(opts.HookFailMode))
+			mode := "closed"
+			if strings.Contains(string(record), "DEFENSECLAW_FAIL_MODE=open\n") && strings.Contains(string(record), "FAIL_MODE_SOURCE=config\n") {
+				mode = "open"
+			}
+			modes = append(modes, mode)
 			break
 		}
 		for _, name := range owner.HookScriptNames(opts) {

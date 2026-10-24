@@ -145,14 +145,17 @@ func TestRefreshFailModesWritesThePolicyTiersOutageMode(t *testing.T) {
 			}
 			// What the earlier render recorded for Copilot: open, no source.
 			writeHookSidecarForTest(t, home, `{"version":2,"gateway_addr":"127.0.0.1:18970","fail_modes":{"copilot":"open"}}`)
+			if got := buildHookOptions("copilot", "preToolUse", "", ""); got.FailMode != "closed" || got.OutageFailMode != "closed" {
+				t.Fatalf("before the refresh the native hook fails %q, outage %q, want closed for both", got.FailMode, got.OutageFailMode)
+			}
 			if result := runRefreshFailModesForTest(t, home); result.Config != "loaded" || !reflect.DeepEqual(result.Refreshed, []string{"copilot"}) {
 				t.Fatalf("refresh %+v", result)
 			}
 			if got := oldHookFailMode(t, home, "copilot"); got != test.want {
 				t.Fatalf("refreshed copilot mode %q, want %q", got, test.want)
 			}
-			if got := hookOutageFailModeNow("copilot", filepath.Join(home, "hooks")); got != test.want {
-				t.Fatalf("the native hook's call-time outage mode is %q, want %q", got, test.want)
+			if got := buildHookOptions("copilot", "preToolUse", "", ""); got.FailMode != "closed" || got.OutageFailMode != test.want {
+				t.Fatalf("the native hook fails %q, outage %q, want closed and %q", got.FailMode, got.OutageFailMode, test.want)
 			}
 		})
 	}
@@ -189,10 +192,8 @@ func TestRefreshFailModesGivesCursorThePolicyTiersOutageMode(t *testing.T) {
 			if got := oldHookFailMode(t, home, "cursor"); got != test.want {
 				t.Fatalf("the old cursor hook reads %q, want %q", got, test.want)
 			}
-			if test.read == "loaded" {
-				if got := hookOutageFailModeNow("cursor", filepath.Join(home, "hooks")); got != test.want {
-					t.Fatalf("the new cursor hook's call-time outage mode is %q, want %q", got, test.want)
-				}
+			if got := buildHookOptions("cursor", "beforeShellExecution", "", ""); got.FailMode != "closed" || got.OutageFailMode != test.want {
+				t.Fatalf("the new cursor hook fails %q, outage %q, want closed and %q", got.FailMode, got.OutageFailMode, test.want)
 			}
 		})
 	}
