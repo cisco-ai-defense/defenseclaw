@@ -24,13 +24,16 @@ var walFrameBytes int64 = 4096 + 24
 // back without waiting for the next WAL guard pass (rel-1-0-2:GAP-0709).
 const auditWALJournalSizeLimitBytes = 64 << 20
 
-// WALHardLimitBytes is the published audit WAL ceiling. At this size the guard
-// may briefly hold the writer longer to restart a log that cannot finish a
-// final copy inside the ordinary hook writer budget.
-const WALHardLimitBytes = 256 << 20
+// WALHardLimitBytes is the published audit WAL ceiling and alarm threshold.
+// Arm the emergency hold with two guard ticks of headroom at the measured
+// 10 Hz flood rate, before a slow final copy can carry the log past it.
+const (
+	WALHardLimitBytes    = 256 << 20
+	WALEmergencyArmBytes = WALHardLimitBytes - 80<<20
+)
 
 // Test seam for isolating the ordinary trigger policy from the hard ceiling.
-var walHardLimitBytes int64 = WALHardLimitBytes
+var walEmergencyArmBytes int64 = WALEmergencyArmBytes
 
 // auditBusyTimeoutMillis is the busy_timeout of every audit connection.
 const auditBusyTimeoutMillis = 5000
@@ -83,13 +86,13 @@ var (
 	walCatchUpCap        = 100 * time.Millisecond
 )
 
-// A fixed emergency hold permits a slow final copy to finish after the WAL
-// has reached its hard ceiling. It never escalates after a missed pass.
+// A fixed emergency hold permits a slow final copy to finish before the WAL
+// reaches its hard ceiling. It never escalates after a missed pass.
 const walEmergencyCatchUpCap = time.Second
 
 // Above the limit, a pass waits for the writer even without an idle gap. A
-// missed pass may wait longer to acquire it next time. Before the hard limit,
-// the hold stays inside walCatchUpCap; at the hard limit it can last up to
+// missed pass may wait longer to acquire it next time. Before the emergency
+// arm, the hold stays inside walCatchUpCap; above it the hold can last up to
 // walEmergencyCatchUpCap. The next over-limit pass retries the writer
 // directly. A restart, or
 // a log back under the limit, resets the acquisition wait. Variables so tests
@@ -186,7 +189,7 @@ type WALCheckpoint struct {
 //     and the next pass tries again.
 //   - A log over the trigger tries the writer without an idle gap on every
 //     pass. Its hold is normally capped at walCatchUpCap. At the published
-//     hard ceiling, it gets one fixed emergency hold long enough for a slow
+//     emergency arm, it gets one fixed hold long enough for a slow
 //     final copy. Only the wait to acquire a free writer escalates after a
 //     miss. A PASSIVE copy continues after a hold that reaches its cap, and
 //     background writes wait while the log is over the trigger.
@@ -301,7 +304,7 @@ func (s *Store) CheckpointWALIfLarge(ctx context.Context, limitBytes int64, writ
 	policy := walCatchUpPolicy{window: walIdleWindow, acquire: walWriterAcquireWait, hold: walCatchUpCap}
 	if logBytes > limitBytes {
 		policy = s.boundedCatchUpPolicy(writerBudget)
-		if logBytes >= walHardLimitBytes {
+		if logBytes >= walEmergencyArmBytes {
 			policy.hold = walEmergencyCatchUpCap
 		}
 		result.Bounded, result.HoldCap = true, policy.hold
@@ -321,7 +324,7 @@ type walCatchUpPolicy struct {
 
 // boundedCatchUpPolicy lengthens only the wait for a free writer after misses.
 // Its ordinary hold stays inside the caller's writer budget; the caller uses
-// the separate fixed emergency cap once the WAL reaches its hard ceiling.
+// the separate fixed emergency cap once the WAL reaches its emergency arm.
 func (s *Store) boundedCatchUpPolicy(writerBudget time.Duration) walCatchUpPolicy {
 	s.walGuardMu.Lock()
 	misses := s.walBoundedMisses

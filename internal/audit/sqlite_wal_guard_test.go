@@ -452,13 +452,19 @@ func floodTheStore(t *testing.T, store *Store) (stop func(), longestWrite *atomi
 }
 
 // GAP-1303: a persistent final copy three times slower than the ordinary hold
-// still has to restart the WAL under continuous hook writes at the hard limit.
+// must restart the WAL under continuous hook writes before the hard limit.
 func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 	logWALGuardEvents(t, store, 200)
+	// Scale the measured frames to the production band between the emergency
+	// arm and the 256 MiB alarm without allocating a 176 MiB fixture.
+	frames := (walFileSize(t, store) - 32) / (4096 + 24)
+	if frames <= 0 {
+		t.Fatal("no WAL frames to scale")
+	}
 	originalFrameBytes := walFrameBytes
-	walFrameBytes = 96 << 10 // measured log exceeds the production 256 MiB ceiling
+	walFrameBytes = (WALEmergencyArmBytes + 8<<20) / frames
 	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
 	writes := writeDuringEveryCopy(t, store)
 	slowCopy := 3 * walCatchUpCap
@@ -469,6 +475,9 @@ func TestCheckpointWALIfLargeBoundsALogOverTheLimitUnderAFlood(t *testing.T) {
 	defer stop()
 	pass, err := store.CheckpointWALIfLarge(context.Background(), 0, testWALWriterBudget)
 	stop()
+	if pass.LogBytes < WALEmergencyArmBytes || pass.LogBytes >= WALHardLimitBytes {
+		t.Fatalf("measured log = %d bytes; want emergency hold armed before the %d-byte ceiling at %d bytes", pass.LogBytes, WALHardLimitBytes, WALEmergencyArmBytes)
+	}
 	if err != nil || !pass.Bounded || !pass.Restarted || pass.WriterDeferred {
 		t.Fatalf("log over the limit under a flood: %+v, %v; want a bounded catch-up that restarts the log", pass, err)
 	}
@@ -533,9 +542,9 @@ func TestCheckpointWALIfLargeRepeatedMissesAtProductionTriggerKeepHookWritesResp
 	originalFrameBytes := walFrameBytes
 	walFrameBytes = 8 << 20 // scale measured frames, not SQLite I/O
 	t.Cleanup(func() { walFrameBytes = originalFrameBytes })
-	originalHardLimit := walHardLimitBytes
-	walHardLimitBytes = math.MaxInt64 // isolate the ordinary over-trigger hold
-	t.Cleanup(func() { walHardLimitBytes = originalHardLimit })
+	originalArm := walEmergencyArmBytes
+	walEmergencyArmBytes = math.MaxInt64 // isolate the ordinary over-trigger hold
+	t.Cleanup(func() { walEmergencyArmBytes = originalArm })
 	logWALGuardEvents(t, store, 200)
 	writeDuringEveryCopy(t, store)
 	entered := make(chan struct{}, 3)

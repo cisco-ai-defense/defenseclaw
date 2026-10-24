@@ -24,10 +24,9 @@ const (
 	// Start the bounded catch-up with room for two guard ticks at 10 hooks/s.
 	// A catch-up first requested at the ceiling can arrive one or more ticks
 	// late and leave the on-disk WAL above it (GAP-0952).
-	auditWALGuardHeadroomBytes = 80 << 20
-	auditWALGuardTriggerBytes  = auditWALLimitBytes - auditWALGuardHeadroomBytes
+	auditWALGuardTriggerBytes = audit.WALEmergencyArmBytes
 	// auditWALWriterBudget bounds the ordinary writer hold. Once the WAL
-	// reaches the published ceiling, the guard uses a fixed emergency hold
+	// passes the trigger, the guard uses a fixed emergency hold
 	// to restart a log whose final copy needs more time. Hook audit writes
 	// can see that occasional latency spike.
 	auditWALWriterBudget = 200 * time.Millisecond

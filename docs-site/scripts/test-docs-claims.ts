@@ -324,10 +324,24 @@ function repoText(name: string): string {
 }
 
 describe('1.0.4 audit flood and upgrade claims', () => {
+  it('describes the WAL hold and alarm actually used by the gateway', () => {
+    const wal = page('reference/observability/index.mdx');
+    const enterprise = page('troubleshooting/enterprise/index.mdx');
+    for (const body of [wal, enterprise]) {
+      assert.match(body, /audit\.db-wal[\s\S]*?176 MiB[\s\S]*?256 MiB/i);
+      assert.match(body, /100 ms[\s\S]*?1 second/i);
+      assert.match(body, /256 MiB[\s\S]*?warn/i);
+      assert.doesNotMatch(body, /up to two seconds|up to 30 seconds|over its 1024 MiB bound|stays near 256 MiB under load/i);
+    }
+    assert.match(source('internal/audit/sqlite_wal_guard.go'), /WALEmergencyArmBytes\s*=\s*WALHardLimitBytes\s*-\s*80\s*<<\s*20/);
+    assert.match(source('internal/gateway/audit_wal_guard.go'), /auditWALGuardTriggerBytes\s*=\s*audit\.WALEmergencyArmBytes/);
+    assert.match(source('internal/gateway/audit_wal_guard.go'), /auditWALAlarmBytes\s*=\s*auditWALLimitBytes/);
+  });
+
   it('describes bounded Windows WAL catch-up and the remaining hook delay', () => {
     const enterprise = page('troubleshooting/enterprise/index.mdx');
-    assert.match(enterprise, /Windows.*audit\.db-wal.*bounded catch-up/i);
-    assert.match(enterprise, /bounded catch-up.*256 MiB/i);
+    assert.match(enterprise, /Windows.*audit\.db-wal.*catch-up/i);
+    assert.match(enterprise, /176 MiB.*256 MiB/i);
     assert.match(enterprise, /0\.9.to.1\.2 GB.*10 calls a second/i);
     assert.match(enterprise, /hook answers.*(?:slow|wait|delay).*default.*closed/i);
     assert.doesNotMatch(enterprise, /audit\.db-wal.*20 GB|fix needs a change to how the audit store indexes hook records and is deferred/i);

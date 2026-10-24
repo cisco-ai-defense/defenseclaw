@@ -322,10 +322,13 @@ report `enterprise_managed_runtime_state_invalid` instead.
   DefenseClaw blocked the action under your organization's policy and may name "SSH authorized keys
   mutation." Split the command into smaller calls. Per-user mode is not affected.
 - On Windows, sustained hook traffic on a disk with slow scattered writes can delay audit writes and
-  hook answers. The gateway checks `audit.db-wal` every two seconds and uses bounded catch-up once
-  the log in use passes 256 MiB; it kept the log from growing without bound in the measured flood. In Windows
-  runner tests, the file peaked at 0.9 to 1.2 GB at 10 calls a second; that is an observation, not
-  a disk-space guarantee. Catch-up may hold the audit writer, so some hook answers can still wait
+  hook answers. The gateway checks `audit.db-wal` every two seconds. An ordinary catch-up holds the
+  audit writer for up to 100 ms; once the active log passes 176 MiB, a flooded log can use a fixed
+  hold of up to 1 second before the 256 MiB ceiling. If the file remains over 256 MiB after a check,
+  the gateway warns and repeats the warning every ten minutes while it stays over. A slow disk can
+  still push it past that threshold. In Windows runner tests, the file peaked at 0.9 to 1.2 GB at
+  10 calls a second; that is an observation, not a disk-space guarantee. A SQLite statement can run
+  past the hold, so some hook answers can still wait
   seconds or exceed their answer budget. Under the default `closed` mode those calls block; an
   administrator's outage-only `open` applies only to a classified no-answer timeout, and calls of
   guarded connectors (`foreign_hooks: remove`) still block, as in 1.0.3 (GAP-0352). If the gateway logs a persistent
