@@ -1163,3 +1163,156 @@ def test_a_live_policy_edit_over_the_legacy_default_keeps_what_it_decides(tmp_pa
         assert written == case["admission"], case["name"]
         assert verdicts(of(written)) == case["verdicts"], case["name"]
         assert verdicts(cfg) == case["verdicts"], case["name"]
+
+
+def test_every_policy_source_compiles_a_chosen_quarantine_as_written(tmp_path, monkeypatch):
+    """GAP-1488, review round e: the one choke point. The Go and Python
+    compilers build their verdict tables only from config.yaml (Go
+    CompileAdmission callers: gateway startup load and reload, the watcher,
+    the policy CLI; a managed bundle installs a config.yaml), and every
+    DefenseClaw write of config.yaml commits through
+    config_writer._keep_chosen_admission (write_with callers: apply,
+    Config.save, write_config_yaml_secure, replace_document). Each source
+    below runs through its real entry point, and the written block is
+    compiled. A block any source chooses never compiles through the pre-1.0.4
+    default MCP compatibility, so a chosen quarantine at any severity is
+    never a warning. Only an untouched upgraded preset (startup load, an
+    unrelated write, a whole-document writer that leaves admission alone, a
+    restore) keeps it. The TUI bypass row and the whole-document writer rows
+    fail before the choke point; the activation rows guard named policy
+    activation."""
+    import copy
+    import json
+    from pathlib import Path
+
+    from click.testing import CliRunner
+    from defenseclaw import config as config_module
+    from defenseclaw.commands.cmd_policy import policy
+    from defenseclaw.config import _merge_admission, default_config, write_config_yaml_secure
+    from defenseclaw.context import AppContext
+    from defenseclaw.enforce.admission import _legacy_balanced_default_mcp, action_blocks, compile_admission
+    from defenseclaw.tui.services.setup_state import apply_config_field
+
+    monkeypatch.delenv("DEFENSECLAW_DEPLOYMENT_MODE", raising=False)
+    monkeypatch.setattr(config_writer, "_use_go_validator", lambda: False)
+    # Not about managed devices: a test host with a machine-managed config
+    # must not refuse these writes.
+    monkeypatch.setattr(config_writer, "managed_refuses", lambda current, actor: False)
+    monkeypatch.setattr(config_writer, "machine_managed_standalone", lambda: False)
+    root = Path(__file__).resolve().parents[2]
+    legacy = json.loads((root / "testdata" / "admission_legacy_default_writes.json").read_text())["legacy"]
+    policy_1_0_3 = yaml.safe_load((root / "testdata" / "legacy_default_1_0_3.yaml").read_text(encoding="utf-8"))
+
+    def variant(**defaults):
+        block = copy.deepcopy(legacy)
+        block["defaults"].update(defaults)
+        return block
+
+    no_bypass = variant(allow_list_bypass_scan=False)
+    chosen_high = copy.deepcopy(legacy)
+    chosen_high["mcp"]["actions"]["high"] = "warn"
+
+    def verdicts(admission):
+        cfg = default_config()
+        cfg.admission = _merge_admission(admission)
+        actions = compile_admission(cfg, "mcp").actions
+        return "".join("R" if action_blocks(actions[sev][0]) else "w" for sev in ("CRITICAL", "HIGH", "MEDIUM", "LOW"))
+
+    def writes(*changes):
+        def run(folder, path):
+            config_writer.apply(
+                [Change(c[0], c[1]) if len(c) == 2 else Change(c[0], unset=True) for c in changes],
+                "cli:test", "test", path=path,
+            )
+        return run
+
+    def policy_cli(*args, mine=None):
+        def run(folder, path):
+            app = AppContext()
+            app.cfg = config_module.load(data_dir=str(folder))
+            if mine is not None:
+                policy_dir = folder / "policies"
+                policy_dir.mkdir()
+                data = copy.deepcopy(policy_1_0_3)
+                data["name"] = "mine"
+                mine(data)
+                (policy_dir / "mine.yaml").write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+                app.cfg.policy_dir = str(policy_dir)
+            result = CliRunner().invoke(policy, [*args, "--no-reload"], obj=app, catch_exceptions=False)
+            assert result.exit_code == 0, result.output
+        return run
+
+    def tui(*rows):
+        def run(folder, path):
+            cfg = config_module.load(data_dir=str(folder))
+            for key, value in rows:
+                apply_config_field(cfg, key, value)
+            cfg.save()
+        return run
+
+    def whole_document(edit):
+        def run(folder, path):
+            with open(path, encoding="utf-8") as stream:
+                document = yaml.safe_load(stream)
+            edit(document["admission"])
+            write_config_yaml_secure(path, document)
+        return run
+
+    def restore(admission):
+        def run(folder, path):
+            other = folder / "snapshot"
+            other.mkdir()
+            raw = Path(_config(other, yaml.safe_dump({"admission": admission}, sort_keys=False))).read_bytes()
+            config_writer.replace_document(raw, "cli:test", "setup rollback", path=path)
+        return run
+
+    def keep(data):
+        return None
+
+    def no_mcp_overrides(data):
+        data["scanner_overrides"].pop("mcp")
+
+    # (source, admission before, run, MCP CRITICAL/HIGH/MEDIUM/LOW, chosen)
+    sources = [
+        ("gateway startup load or reload of the untouched 1.0.3 preset", legacy, None, "Rwww", False),
+        ("config set of an unrelated key", legacy, writes(("watch.rescan_interval_min", 45)), "Rwww", False),
+        ("config set admission.defaults.actions.high quarantine", legacy,
+         writes(("admission.defaults.actions.high", "quarantine")), "RRww", True),
+        ("config unset admission.mcp.actions.high", chosen_high, writes(("admission.mcp.actions.high",)), "RRRR", True),
+        ("config set admission.defaults.allow_list_bypass_scan true", no_bypass,
+         writes(("admission.defaults.allow_list_bypass_scan", True)), "RRRR", True),
+        ("policy edit actions --severity high --file quarantine", legacy,
+         policy_cli("edit", "actions", "--severity", "high", "--file", "quarantine"), "RRww", True),
+        ("policy edit scanner --type mcp --severity medium --file quarantine", legacy,
+         policy_cli("edit", "scanner", "--type", "mcp", "--severity", "medium", "--file", "quarantine"), "RwRw", True),
+        ("policy activate of a named policy with the 1.0.3 default actions, over the 1.0.3 preset", legacy,
+         policy_cli("activate", "mine", mine=keep), "RRRR", True),
+        ("policy activate of a named policy with the 1.0.3 default actions, on no admission", None,
+         policy_cli("activate", "mine", mine=keep), "RRRR", True),
+        ("policy activate of a named policy whose MCP inherits the defaults, over the 1.0.3 preset", legacy,
+         policy_cli("activate", "mine", mine=no_mcp_overrides), "RRww", True),
+        ("TUI Setup admission.mcp.actions.high quarantine", legacy,
+         tui(("admission.mcp.actions.high", "quarantine")), "RRww", True),
+        ("TUI Setup admission.defaults.allow_list_bypass_scan on", no_bypass,
+         tui(("admission.defaults.allow_list_bypass_scan", "true")), "RRRR", True),
+        ("TUI Setup admission.defaults.allow_list_bypass_scan off", legacy,
+         tui(("admission.defaults.allow_list_bypass_scan", "false")), "Rwww", True),
+        ("whole-document writer that turns the bypass on", no_bypass,
+         whole_document(lambda adm: adm["defaults"].update(allow_list_bypass_scan=True)), "RRRR", True),
+        ("whole-document writer that leaves admission alone", legacy, whole_document(lambda adm: None), "Rwww", False),
+        ("restore (setup rollback) of the untouched 1.0.3 preset", chosen_high, restore(legacy), "Rwww", False),
+    ]
+    failures = []
+    for index, (name, base, run, expected, chosen) in enumerate(sources):
+        folder = tmp_path / str(index)
+        folder.mkdir()
+        path = _config(folder, "" if base is None else yaml.safe_dump({"admission": copy.deepcopy(base)}, sort_keys=False))
+        if run is not None:
+            run(folder, path)
+        with open(path, encoding="utf-8") as stream:
+            written = yaml.safe_load(stream).get("admission")
+        compat = _legacy_balanced_default_mcp(_merge_admission(written))
+        got = verdicts(written)
+        if got != expected or compat == chosen or (not chosen and written != legacy):
+            failures.append(f"{name}: MCP {got}, expected {expected}; compatibility {'on' if compat else 'off'}")
+    assert not failures, "\n".join(failures)

@@ -24,7 +24,6 @@ import functools
 import json
 import os
 import unicodedata
-from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -343,26 +342,44 @@ def _write_touches(path: tuple, key: tuple) -> bool:
     return tuple(path[:n]) == tuple(key[:n])
 
 
-def legacy_default_mcp_pins(before: Any, after: Callable[[], Any], paths: list[tuple]) -> dict[tuple, Any]:
+def _rule_inputs(document: Any) -> dict[tuple, Any]:
+    """The values :func:`_legacy_balanced_default_mcp` reads, by key: the
+    two flags and each defaults and MCP severity, as compiled."""
+    from defenseclaw.config import _merge_admission
+
+    adm = _merge_admission(document.get("admission") if isinstance(document, dict) else None)
+    out: dict[tuple, Any] = {
+        ("admission", "defaults", "scan_on_install"): adm.defaults.scan_on_install,
+        ("admission", "defaults", "allow_list_bypass_scan"): adm.defaults.allow_list_bypass_scan,
+    }
+    for name, holder in (("defaults", adm.defaults), ("mcp", adm.mcp)):
+        for sev, action in _compile_action_map(holder.actions).items():
+            out[("admission", name, "actions", sev.lower())] = action
+    return out
+
+
+def legacy_default_mcp_pins(before: Any, after: Any, paths: list[tuple]) -> dict[tuple, Any]:
     """The ``admission.mcp.actions`` a config write adds so the pre-1.0.4
     default MCP compatibility covers only an untouched preset (GAP-1488).
 
-    *before* is config.yaml, parsed, before a write of the key *paths*, and
-    *after()* returns it parsed after the write. When *before* is the old default preset and the write touches a
-    key the compatibility rule reads, each MCP HIGH, MEDIUM and LOW the write
-    did not decide keeps its translated ``warn`` as an explicit
-    ``admission.mcp.actions.<severity>``. One it decided (its own MCP key, or
-    the defaults key MCP inherits it from) compiles as written, in Go and in
-    Python, never as warn. A write that leaves the old preset's shape, from
-    that preset or from any other block, gets its inherited MCP HIGH written
-    under MCP, so what it wrote compiles as written too. Empty when the write
-    needs nothing."""
+    *before* and *after* are config.yaml, parsed, before and after a write
+    that decided the key *paths*. A key the compatibility rule reads whose
+    value the write changed is decided too, whoever wrote it. When *before*
+    is the old default preset and the write decides such a key, each MCP
+    HIGH, MEDIUM and LOW the write did not decide keeps its translated
+    ``warn`` as an explicit ``admission.mcp.actions.<severity>``. One it
+    decided (its own MCP key, or the defaults key MCP inherits it from)
+    compiles as written, in Go and in Python, never as warn. A write that
+    leaves the old preset's shape, from that preset or from any other block,
+    gets its inherited MCP HIGH written under MCP, so what it wrote compiles
+    as written too. Empty when the write needs nothing."""
     from defenseclaw.config import _merge_admission
 
     def legacy(document: Any) -> bool:
         return isinstance(document, dict) and _legacy_balanced_default_mcp(_merge_admission(document.get("admission")))
 
-    paths = [tuple(path) for path in paths]
+    old, new = _rule_inputs(before), _rule_inputs(after)
+    paths = [tuple(path) for path in paths] + [key for key in {**old, **new} if old.get(key) != new.get(key)]
     if not any(_write_touches(path, key) for path in paths for key in _LEGACY_DEFAULT_MCP_INPUTS):
         return {}
     pins: dict[tuple, Any] = {}
@@ -376,12 +393,12 @@ def legacy_default_mcp_pins(before: Any, after: Callable[[], Any], paths: list[t
             )
             if not decided:
                 pins[own] = "warn"
-    if not pins and legacy(after_document := after()):
+    if not pins and legacy(after):
         # The write decided all three with the preset's own values, or it
         # turned another block into the preset's shape. Either way that is
         # what was chosen: name the HIGH that MCP inherits under MCP, so
         # both compilers compile what was written.
-        defaults = after_document["admission"]["defaults"]["actions"]
+        defaults = after["admission"]["defaults"]["actions"]
         pins[("admission", "mcp", "actions", "high")] = _inherited_high(defaults)
     return pins
 

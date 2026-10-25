@@ -49,7 +49,7 @@ import stat
 import sys
 import tempfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -179,6 +179,9 @@ class WriteResult:
     sha256: str
     changed: list[str] = field(default_factory=list)
     restart_required: list[str] = field(default_factory=list)
+    #: The ``admission.mcp.actions`` the write added so what it chose
+    #: compiles as written (:func:`_keep_chosen_admission`).
+    pins: dict[tuple, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -276,7 +279,8 @@ def apply(
     def mutate(current: bytes, source_name: str) -> tuple[bytes, list[str]]:
         return _patch(current, changes, source_name)
 
-    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s)
+    decided = [change.path for change in changes]
+    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s, decided=decided)
 
 
 def replace_document(
@@ -295,7 +299,9 @@ def replace_document(
     def mutate(current: bytes, _source_name: str) -> tuple[bytes, list[str]]:
         return candidate, diff_documents(current, candidate)
 
-    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s)
+    # A migration or a restore writes the bytes it was given: it chooses no
+    # admission block, so an untouched 1.0.0-1.0.3 preset stays one.
+    return write_with(mutate, actor, reason, expect_sha256, path=path, timeout_s=timeout_s, as_is=True)
 
 
 Mutator = Callable[[bytes, str], "tuple[bytes, list[str]]"]
@@ -310,19 +316,23 @@ def write_with(
     path: str | os.PathLike[str] | None = None,
     timeout_s: float = DEFAULT_LOCK_TIMEOUT_S,
     verify: Callable[[str], None] | None = None,
+    decided: Iterable[str] = (),
+    as_is: bool = False,
 ) -> WriteResult:
     """Run one writer transaction: ``mutate(current_bytes, path)`` returns
     the candidate bytes and the changed paths. ``Config.save`` uses it to
     merge its modeled values inside the lock. ``verify(path)`` runs after the
     commit, still under the lock; when it raises, the previous bytes are
-    restored (as a new generation) and the error re-raised."""
+    restored (as a new generation) and the error re-raised. *decided* names
+    the config keys the caller chose, also with an unchanged value; unless
+    *as_is*, the candidate passes :func:`_keep_chosen_admission`."""
 
     if not str(actor or "").strip():
         raise ConfigWriteError("a config writer actor is required")
     target = _resolve(path)
     refuse_when_managed(target, actor)
     with hold_lock(target, timeout_s=timeout_s):
-        return _transact(target, mutate, actor, reason, expect_sha256, verify)
+        return _transact(target, mutate, actor, reason, expect_sha256, verify, None if as_is else list(decided))
 
 
 _held = threading.local()
@@ -371,6 +381,7 @@ def _transact(
     reason: str,
     expect_sha256: str | None,
     verify: Callable[[str], None] | None,
+    decided: list[str] | None,
 ) -> WriteResult:
     current, mode, exists = _read_current(target)
     digest = hashlib.sha256(current).hexdigest()
@@ -379,6 +390,10 @@ def _transact(
     if managed_refuses(current, actor):
         raise ManagedConfigWriteError(MANAGED_REFUSAL)
     candidate, changed = mutate(current, target)
+    pins: dict[tuple, Any] = {}
+    if decided is not None:
+        candidate, pins = _keep_chosen_admission(current, candidate, decided, target)
+        changed = [*changed, *(p for p in map(format_path, pins) if p not in changed)]
     if exists and candidate == current:
         if verify is not None:
             verify(target)
@@ -406,7 +421,45 @@ def _transact(
                 os.unlink(target)
             raise
     _refresh_derived_files(target, candidate)
-    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed))
+    return WriteResult(state.generation, state.config_sha256, changed, restart_required(changed), pins)
+
+
+def _keep_chosen_admission(
+    current: bytes, candidate: bytes, decided: list[str], source_name: str,
+) -> tuple[bytes, dict[tuple, Any]]:
+    """GAP-1488: the one step every policy source passes before a verdict
+    table is built. Go and Python compile admission only from config.yaml,
+    and every DefenseClaw write of it commits here: config set and unset,
+    guardrail apply, policy activate, load and the delete fallback, policy
+    edit, TUI Setup and the whole-document setup writers.
+
+    Both compilers read the pre-1.0.4 default preset's MCP shape as the
+    untouched 1.0.0-1.0.3 preset and compile MCP HIGH, MEDIUM and LOW as
+    warn. A write that chooses admission (a *decided* key, or a changed key
+    that rule reads) gets the pins of
+    :func:`~defenseclaw.enforce.admission.legacy_default_mcp_pins`, so what
+    it chose compiles as written and an explicit quarantine is never
+    compiled as a warning. A write that leaves admission as it was changes
+    nothing. Migrations and restores (``as_is``) skip this step."""
+    from defenseclaw.enforce.admission import legacy_default_mcp_pins
+    from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
+
+    try:
+        before = _parse_config_document(current) if current.strip() else None
+        after = _parse_config_document(candidate) if candidate.strip() else None
+        paths = []
+        for path in decided:
+            try:
+                paths.append(parse_path(path))
+            except ValueError:
+                continue
+        pins = legacy_default_mcp_pins(before, after, paths)
+    except (ValueError, yaml.YAMLError):
+        return candidate, {}  # the validator refuses what does not parse
+    if not pins:
+        return candidate, {}
+    mutations = _ordered_mutations([V8YAMLMutation.set(parts, value) for parts, value in pins.items()])
+    return prepare_v8_yaml_write(candidate, mutations, source_name=source_name, any_path=True).candidate, pins
 
 
 def _undo_failed_commit(target: str, candidate: bytes, previous: bytes, mode: int, existed: bool) -> None:
@@ -1015,30 +1068,14 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
             _check_destination_index(document, change.path, parts)
             mutations.append(V8YAMLMutation.set(parts, change.value))
         changed.append(change.path)
-    # GAP-1488: a write over the pre-1.0.4 default preset keeps the MCP
-    # balanced compatibility only for what it did not decide. This also
-    # applies when the written value equals the preset's.
-    from defenseclaw.enforce.admission import legacy_default_mcp_pins
-
-    def prepare(edits: list[Any]) -> bytes:
-        ordered = _ordered_mutations(edits)
-        return prepare_v8_yaml_write(current, ordered, source_name=source_name, any_path=True).candidate
-
-    if mutations and not current.strip():
+    if not mutations:
+        return current, []
+    if not current.strip():
         from defenseclaw.config import CURRENT_CONFIG_VERSION
 
         current = f"config_version: {CURRENT_CONFIG_VERSION}\n".encode()
-    candidate = prepare(mutations) if mutations else current
-    explicit = [parse_path(change.path) for change in changes]
-    pins = legacy_default_mcp_pins(document, lambda: _parse_config_document(candidate), explicit)
-    for parts, value in pins.items():
-        mutations.append(V8YAMLMutation.set(parts, value))
-        changed.append(format_path(parts))
-    if not mutations:
-        return current, []
-    if pins:
-        candidate = prepare(mutations)
-    return candidate, changed
+    prepared = prepare_v8_yaml_write(current, _ordered_mutations(mutations), source_name=source_name, any_path=True)
+    return prepared.candidate, changed
 
 
 def render_document(current: bytes, document: dict[str, Any], source_name: str) -> bytes:

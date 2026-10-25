@@ -2745,6 +2745,148 @@
      }
     }
    }
+  },
+  {
+   "name": "TUI Setup row admission.defaults.allow_list_bypass_scan on makes the old shape",
+   "base": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": false,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "disable",
+       "install": "none"
+      }
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   },
+   "verdicts": {
+    "CRITICAL": "rejected",
+    "HIGH": "rejected",
+    "MEDIUM": "rejected",
+    "LOW": "rejected"
+   },
+   "admission": {
+    "defaults": {
+     "scan_on_install": true,
+     "allow_list_bypass_scan": true,
+     "actions": {
+      "critical": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      },
+      "info": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    },
+    "mcp": {
+     "actions": {
+      "medium": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "low": {
+       "file": "none",
+       "runtime": "disable",
+       "install": "none"
+      },
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      }
+     }
+    },
+    "plugin": {
+     "actions": {
+      "high": {
+       "file": "quarantine",
+       "runtime": "disable",
+       "install": "block"
+      },
+      "medium": {
+       "file": "none",
+       "runtime": "enable",
+       "install": "none"
+      }
+     }
+    }
+   },
+   "tui": [
+    [
+     "admission.defaults.allow_list_bypass_scan",
+     "true"
+    ]
+   ]
   }
  ]
 }

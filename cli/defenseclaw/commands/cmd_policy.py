@@ -1147,6 +1147,8 @@ def _activate_policy(app: AppContext, name: str) -> tuple[str, list[str]]:
     if not secure_client:
         try:
             app.cfg.admission = _admission_from_policy(data, first_party_notes)
+            # An activation chooses the whole admission block (GAP-1488).
+            app.cfg.decide("admission")
             _apply_policy_guardrail(app.cfg, data)
         except (TypeError, ValueError) as exc:
             raise click.ClickException(f"invalid policy {name!r}: {exc}") from exc
