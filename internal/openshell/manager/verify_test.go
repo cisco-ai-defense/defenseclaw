@@ -113,12 +113,16 @@ func answerFor(want verifyRecord, hostname string) workloadAnswer {
 
 // workloadChecks answers the workload check of each sandbox as its record
 // expects, after edit (when set), and hands every other command to other
-// (exit 0 without output when nil).
+// (when nil: exit 0, and a stop's harness exit and disk flush report the
+// flush done, as a guest whose sync(1) works does).
 func (e *harnessEnv) workloadChecks(edit func(sandbox string, a *workloadAnswer), other openshelltest.ExecHandler) openshelltest.ExecHandler {
 	return func(ctx context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if !isWorkloadCheck(call) {
 			if other != nil {
 				return other(ctx, call)
+			}
+			if len(call.Command) >= 3 && strings.HasPrefix(call.Command[2], flushTrap) {
+				return openshelltest.ExecResponse{Stdout: []byte("none\nsynced\n")}
 			}
 			return openshelltest.ExecResponse{}
 		}
@@ -423,6 +427,9 @@ func TestStartChecksTheWorkloadAgainstTheRecord(t *testing.T) {
 	e.fake.HandleExec(func(_ context.Context, call openshelltest.ExecCall) openshelltest.ExecResponse {
 		if isWorkloadCheck(call) {
 			return openshelltest.ExecResponse{Stdout: created.stdout()}
+		}
+		if len(call.Command) >= 3 && strings.HasPrefix(call.Command[2], flushTrap) {
+			return openshelltest.ExecResponse{Stdout: []byte("exited\nsynced\n")}
 		}
 		return openshelltest.ExecResponse{}
 	})

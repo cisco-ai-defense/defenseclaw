@@ -1582,7 +1582,7 @@ const sandboxPolicyStopReason = "policy_stop"
 // stopRevoked stops a sandbox whose registration the managed gateway
 // revoked; it never starts again from this registration.
 func (d *SandboxDaemon) stopRevoked(ctx context.Context, r daemonRegistration) {
-	if _, err := d.rt.manager.Stop(ctx, r.Sandbox); err != nil {
+	if _, err := d.rt.manager.StopForPolicy(ctx, r.Sandbox); err != nil {
 		d.logf("stop %s after its registration was revoked: %v", r.Sandbox, err)
 		return
 	}

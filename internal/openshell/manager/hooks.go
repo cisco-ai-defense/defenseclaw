@@ -545,7 +545,9 @@ func (m *Manager) stopForAlarm(name, bindingID string, kind audit.SandboxFinding
 	if !current {
 		return
 	}
-	if err := m.stop(ctx, b); err != nil {
+	// The pack's response (hooks.on_tamper, hooks.on_silence: stop) is
+	// the organization's: a failed sync does not hold it back.
+	if err := m.stop(ctx, b, false); err != nil {
 		m.logf("%s: stop %s: %v", what, name, err)
 		m.feed.Publish(sandboxapi.ActivityEvent{Kind: sandboxapi.ActivityFinding, Sandbox: name, Severity: "HIGH",
 			Reason: string(kind), Message: "⚠ DefenseClaw could not stop the sandbox for " + what + ": stop it yourself"})

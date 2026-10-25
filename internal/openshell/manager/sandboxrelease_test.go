@@ -185,12 +185,15 @@ func TestDefenseClawStopsNoLegacyGuest(t *testing.T) {
 			if e.boxOf("fresh") != nil {
 				t.Fatal("the refused create left a sandbox behind")
 			}
-			// The user's stop ends it; then a sandbox runs again, and the next
-			// session of this one gets its create-time network back.
+			// The user's stop ends it once its guest's sync works (a stop
+			// whose sync fails is held: GAP-1163); then a sandbox runs again,
+			// and the next session of this one gets its create-time network
+			// back.
 			if tc.cause != "" {
 				e.fake.SetGlobalPolicy(nil)
 				e.fake.Intercept(nil)
 			}
+			e.fake.HandleExec(e.workloadChecks(nil, guestAnswers("exited\nsynced\n", false)))
 			e.stopBox("kept")
 			if got := e.get("kept"); got.Phase != "stopped" || got.OldSupervisor {
 				t.Fatalf("the user's stop: %+v", got)
@@ -422,8 +425,9 @@ func findingsSaying(e *harnessEnv, name, text string) []sandboxapi.ActivityEvent
 
 // A legacy MicroVM whose guest sync is broken is not stopped by
 // DefenseClaw: the feed names it once however often reconcile looks again,
-// and never says a stop lost its writes. A user's stop that OpenShell
-// refused lost nothing either; one it took says so.
+// and never says a stop lost its writes. A user's stop is held while the
+// sync fails (GAP-1163): the VM keeps running with its work, and the
+// refusal says how to save it first.
 func TestALegacyMicroVMIsNamedOnceAndOnlyItsUsersStopEndsIt(t *testing.T) {
 	e, b := legacyMicroVMWithBrokenSync(t, "kept")
 	stops := e.fake.Calls(openshelltest.MethodStopSandbox)
@@ -443,18 +447,18 @@ func TestALegacyMicroVMIsNamedOnceAndOnlyItsUsersStopEndsIt(t *testing.T) {
 		t.Fatalf("the legacy MicroVM was not named exactly once over four looks: %+v", got)
 	}
 
-	// The user accepts the loss: OpenShell refuses the first stop, which
-	// lost nothing, and takes the second, which says what it may have lost.
-	e.fake.FailNext(openshelltest.MethodStopSandbox, &types.StatusError{Code: types.ErrorInternal, Message: "stop refused"})
-	if _, err := e.m.Stop(t.Context(), "kept"); err == nil {
-		t.Fatal("the refused stop succeeded")
+	// The user's stop while the sync fails is held: OpenShell is not
+	// asked, and nothing was lost.
+	_, err := e.m.Stop(t.Context(), "kept")
+	if !sandboxapi.IsCode(err, sandboxapi.CodeConflict) || !strings.Contains(err.Error(), "keeps running") ||
+		!strings.Contains(err.Error(), "defenseclaw sandbox pull kept") {
+		t.Fatalf("the user's stop with a broken sync = %v", err)
+	}
+	if got := e.fake.Calls(openshelltest.MethodStopSandbox); got != stops {
+		t.Fatalf("a held stop called OpenShell's stop: %d calls", got-stops)
 	}
 	if got := e.events("kept", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 0 {
-		t.Fatalf("a refused stop was reported as one that lost writes: %+v", got)
-	}
-	e.stopBox("kept")
-	if got := e.events("kept", sandboxapi.ActivityLifecycle, "stop_unflushed"); len(got) != 1 {
-		t.Fatalf("the user's unflushed stop was not reported once: %+v", got)
+		t.Fatalf("a held stop was reported as one that lost writes: %+v", got)
 	}
 }
 

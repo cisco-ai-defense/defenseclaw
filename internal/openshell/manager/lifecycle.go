@@ -262,7 +262,26 @@ func (m *Manager) Stop(ctx context.Context, name string) (*sandboxapi.Sandbox, e
 	if err := m.refuseRetained(b); err != nil {
 		return nil, err
 	}
-	if err := m.stop(ctx, b); err != nil {
+	if err := m.stop(ctx, b, true); err != nil {
+		return nil, err
+	}
+	v := m.viewOf(b)
+	return &v, nil
+}
+
+// StopForPolicy is Stop for the organization's own decision (a revoked
+// managed registration): a failed MicroVM sync does not hold it back
+// (Manager.stop).
+func (m *Manager) StopForPolicy(ctx context.Context, name string) (*sandboxapi.Sandbox, error) {
+	b, unlock, err := m.lockBox(name)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	if err := m.refuseRetained(b); err != nil {
+		return nil, err
+	}
+	if err := m.stop(ctx, b, false); err != nil {
 		return nil, err
 	}
 	v := m.viewOf(b)
@@ -358,13 +377,18 @@ func (m *Manager) refuseRetained(b *box) error {
 
 // stop stops the sandbox of b once its harness has exited and, on a driver
 // whose stop does not flush (the MicroVM driver), after sync(1) in the
-// guest. A flush that fails does not hold the stop back: once OpenShell
-// takes the stop, the feed says what it may have lost (flushFailed), never
-// for a stop that was refused or not made. One whose main process
-// completed or failed OpenShell returns as it is: it keeps its phase, and
-// with it the OpenShell gateway (HoldsCompute), until OpenShell reports
-// another.
-func (m *Manager) stop(ctx context.Context, b *box) error {
+// guest. A flush that fails holds the stop back when hold is set (a stop
+// the user asked for, or one that ends a session): the sandbox keeps
+// running with what it wrote, and the refusal says why and how to save the
+// work first (unsyncedStopHeld, GAP-1163). Without hold (the
+// organization's own response to a hook alarm or a foreign rule, a revoked
+// registration, an undo that discards the changes anyway) the stop goes
+// ahead, and once OpenShell takes it the feed says what it may have lost
+// (flushFailed), never for a stop that was refused or not made. One whose
+// main process completed or failed OpenShell returns as it is: it keeps its
+// phase, and with it the OpenShell gateway (HoldsCompute), until OpenShell
+// reports another.
+func (m *Manager) stop(ctx context.Context, b *box, hold bool) error {
 	gw, err := m.gateway(ctx)
 	if err != nil {
 		return err
@@ -386,6 +410,10 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	// the stop ends is marked interrupted, and once the stop is published
 	// its log is kept for `sandbox logs` of the stopped sandbox (runlog.go).
 	run, flushErr := m.endHarness(ctx, gw, b)
+	if flushErr != nil && hold {
+		m.logf("sandbox %s: the stop is held, the sandbox keeps running: %v", name, flushErr)
+		return unsyncedStopHeld(name, flushErr)
+	}
 	if !ended {
 		m.lifecycle(ctx, b, audit.SandboxPhaseStopping, audit.SandboxTriggerStop, false, nil, nil)
 	}
@@ -464,6 +492,17 @@ func (m *Manager) stop(ctx context.Context, b *box) error {
 	m.mu.Unlock()
 	m.lifecycle(ctx, b, auditPhase(sb.Status.Phase), audit.SandboxTriggerStop, false, nil, sb.Status.ExitCode)
 	return nil
+}
+
+// unsyncedStopHeld is the refusal of a stop held because the sync of the
+// MicroVM name's disk failed (err): a MicroVM's stop loses what was not
+// synced, so DefenseClaw keeps it running with its work (GAP-1163).
+func unsyncedStopHeld(name string, err error) error {
+	return &sandboxapi.Error{Code: sandboxapi.CodeConflict,
+		Message: "sandbox " + name + " keeps running: DefenseClaw could not sync its MicroVM's disk before the stop (" + err.Error() +
+			"), and the stop of a MicroVM loses what was not synced",
+		Detail: "save the work you need first (`defenseclaw sandbox pull " + name + "` brings a copy's changes back), then run `defenseclaw sandbox stop " +
+			name + "` again, which syncs again first; `defenseclaw sandbox delete " + name + "` ends it without keeping its work"}
 }
 
 // lockStart takes the gateway's lifecycle lock for a create or a start
@@ -1644,7 +1683,9 @@ func (m *Manager) Undo(ctx context.Context, name string, req sandboxapi.UndoRequ
 		if !req.Stop {
 			return nil, sandboxapi.Errorf(sandboxapi.CodeConflict, "stop sandbox %s before undoing its changes", name)
 		}
-		if err := m.stop(ctx, b); err != nil {
+		// The undo discards what the sandbox wrote: a failed sync loses
+		// nothing it keeps.
+		if err := m.stop(ctx, b, false); err != nil {
 			return nil, err
 		}
 		resp.Stopped = true
