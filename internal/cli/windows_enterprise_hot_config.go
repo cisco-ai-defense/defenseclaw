@@ -27,6 +27,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -637,6 +638,24 @@ func windowsEnterpriseHotConfigApply(
 			return false, nil
 		}
 	}
+	// The hook guardian renders a connector's hook fail mode into every
+	// enrolled target's runtime sidecars when it reloads config.yaml, on its
+	// next pass (about a minute). A verify before that pass read the previous
+	// mode and put the previous config back, so a signed bundle could never
+	// take an explicit open back to closed (GAP-1418). Wait, bounded, until
+	// the published targets verify with the installed config.
+	if windowsHotConfigHookFailModesChanged(previous, next) {
+		targets, err := windowsEnterpriseHotConfigPublishedTargets(layout)
+		if err == nil && len(targets) > 0 {
+			err = windowsEnterpriseHotConfigTargetHooksProven(ctx, layout, targets, windowsEnterpriseHotConfigRenderTimeout)
+		}
+		if err != nil {
+			undo()
+			failBundle("bundle_post_verify_failed", "the hook guardian did not put the changed hook fail mode in place for every enrolled target: "+
+				windowsEnterpriseBoundedDiagnostic(err.Error()))
+			return false, nil
+		}
+	}
 	verifyReport, verifyRun, err := runWindowsEnterpriseStandaloneInstaller(ctx, cmd, opts, script,
 		windowsEnterprisePowerShellArgs("verify", windowsEnterpriseEnsureProbeOptions(opts)))
 	if err != nil || !windowsEnterpriseVerifyAcceptable(verifyReport) {
@@ -688,6 +707,83 @@ func windowsEnterpriseHotConfigApply(
 		result.AddWarning("ensure_config_applied", "ensure applied drift:config in the running gateway, without stopping any service: "+applied)
 	}
 	return true, nil
+}
+
+// windowsEnterpriseHotConfigRenderTimeout bounds the wait for the hook
+// guardian's next pass (its interval is one minute) to render a changed hook
+// fail mode into the enrolled targets (GAP-1418).
+var windowsEnterpriseHotConfigRenderTimeout = 3 * time.Minute
+
+// windowsEnterpriseHotConfigPublishedTargets returns the enabled targets of
+// the published targets.yaml; none when it does not exist. A seam for tests.
+var windowsEnterpriseHotConfigPublishedTargets = func(layout managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) {
+	manifest, err := enterprisehooks.LoadManifest(layout.ManifestPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var targets []enterprisehooks.ManifestTarget
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() {
+			targets = append(targets, target)
+		}
+	}
+	return targets, nil
+}
+
+// windowsHotConfigHookFailModesChanged reports whether any hook_fail_mode
+// setting (global, per connector or per application-protection override)
+// differs between two configs, including one set or removed. A config that
+// does not parse counts as changed.
+func windowsHotConfigHookFailModesChanged(previous, next []byte) bool {
+	before, beforeOK := windowsHotConfigHookFailModes(previous)
+	after, afterOK := windowsHotConfigHookFailModes(next)
+	if !beforeOK || !afterOK || len(before) != len(after) {
+		return true
+	}
+	for path, mode := range before {
+		if other, ok := after[path]; !ok || other != mode {
+			return true
+		}
+	}
+	return false
+}
+
+// windowsHotConfigHookFailModes maps the YAML path of every hook_fail_mode
+// key in raw to its value, trimmed and lowercased.
+func windowsHotConfigHookFailModes(raw []byte) (map[string]string, bool) {
+	var document yaml.Node
+	if err := yaml.Unmarshal(raw, &document); err != nil {
+		return nil, false
+	}
+	modes := map[string]string{}
+	var walk func(node *yaml.Node, path string)
+	walk = func(node *yaml.Node, path string) {
+		switch node.Kind {
+		case yaml.DocumentNode, yaml.SequenceNode:
+			for i, child := range node.Content {
+				walk(child, path+"["+strconv.Itoa(i)+"]")
+			}
+		case yaml.MappingNode:
+			for i := 0; i+1 < len(node.Content); i += 2 {
+				key := strings.ToLower(strings.TrimSpace(node.Content[i].Value))
+				value := node.Content[i+1]
+				if key == "hook_fail_mode" && value.Kind == yaml.ScalarNode {
+					modes[path+"."+key] = strings.ToLower(strings.TrimSpace(value.Value))
+					continue
+				}
+				walk(value, path+"."+key)
+			}
+		case yaml.AliasNode:
+			if node.Alias != nil {
+				walk(node.Alias, path)
+			}
+		}
+	}
+	walk(&document, "")
+	return modes, true
 }
 
 // windowsEnterpriseHotConfigRefreshTargets runs one enumerator cycle with

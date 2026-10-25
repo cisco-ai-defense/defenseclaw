@@ -122,6 +122,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 	runtimeCandidateSeam := windowsEnterpriseStandaloneRuntimeCandidateCheck
 	recordSeam := windowsEnterpriseHotConfigTargetsRecord
 	hookProofSeam := windowsEnterpriseHotConfigTargetHooksProven
+	publishedTargetsSeam, renderTimeoutSeam := windowsEnterpriseHotConfigPublishedTargets, windowsEnterpriseHotConfigRenderTimeout
 	reloadSeam, failClosedSeam := windowsEnterpriseHotBundleReload, windowsEnterpriseHotConfigFailClosed
 	closeHooksSeam, hooksHeldSeam, releaseHooksSeam := windowsEnterpriseHotConfigCloseHooks, windowsEnterpriseHotConfigHooksHeld, windowsEnterpriseHotConfigReleaseHooks
 	restartSeam, recoverSeam := windowsEnterpriseHotConfigRestart, windowsEnterpriseHotConfigRecover
@@ -132,6 +133,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		windowsEnterpriseHotConfigRefreshTargets = refreshSeam
 		windowsEnterpriseHotConfigTargetsRecord = recordSeam
 		windowsEnterpriseHotConfigTargetHooksProven = hookProofSeam
+		windowsEnterpriseHotConfigPublishedTargets, windowsEnterpriseHotConfigRenderTimeout = publishedTargetsSeam, renderTimeoutSeam
 		windowsEnterpriseIsElevated = elevatedSeam
 		windowsEnterpriseHotConfigLayout, windowsEnterpriseHotConfigLock = layoutSeam, lockSeam
 		windowsEnterpriseHotConfigValidate, windowsEnterpriseHotConfigWrite = validateSeam, writeSeam
@@ -169,6 +171,7 @@ func newHotConfigHost(t *testing.T, previous, next string) (*hotConfigHost, *win
 		host.hookProofs = append(host.hookProofs, append([]enterprisehooks.ManifestTarget(nil), targets...))
 		return host.hookProofErr
 	}
+	windowsEnterpriseHotConfigPublishedTargets = func(managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) { return nil, nil }
 	windowsEnterpriseHotBundleReload = func(context.Context, managed.StandaloneLayout) error { return nil }
 	// No test stops or starts a real gateway service: an unproven undo and
 	// a start of a stopped gateway are counted.
@@ -1414,5 +1417,98 @@ func TestWindowsEqualBaseFirstBundleStillPlansApply(t *testing.T) {
 	plan, err = planWindowsEnterpriseEnsure(status, opts, "installer.ps1")
 	if err != nil || plan.Action != "" || plan.Reason != "compliant" {
 		t.Fatalf("confirmed repeat plan=%+v, %v", plan, err)
+	}
+}
+
+// GAP-1418: the hook guardian renders a changed hook fail mode into every
+// enrolled target's runtime sidecars on its next pass. A signed bundle that
+// takes an explicit open back to the default closed (or closed to open, or
+// changes the mode anywhere it can be set) waits for that render before its
+// post-apply verify; one that leaves every hook fail mode alone does not
+// wait, and a render that never comes fails the bundle with the previous
+// config back.
+func TestWindowsHotBundleWaitsForGuardianHookFailModeRender(t *testing.T) {
+	const base = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex: {}\n    claudecode: {}\n"
+	const explicitOpen = "config_version: 9\nguardrail:\n  block_at: MEDIUM\n  connectors:\n    codex:\n      hook_fail_mode: open\n    claudecode:\n      hook_fail_mode: open\n"
+	targets := []enterprisehooks.ManifestTarget{
+		{SID: "S-1-5-21-1-2-3-1001", Connector: "codex"},
+		{SID: "S-1-5-21-1-2-3-1001", Connector: "claudecode"},
+		{SID: "S-1-5-21-1-2-3-1002", Connector: "codex"},
+		{SID: "S-1-5-21-1-2-3-1002", Connector: "claudecode"},
+	}
+	for _, tc := range []struct {
+		name, previous, next string
+		wantProof            bool
+		proofErr             error
+	}{
+		{name: "explicit open back to the default closed", previous: explicitOpen, next: base, wantProof: true},
+		{name: "default closed to explicit open", previous: base, next: explicitOpen, wantProof: true},
+		{name: "explicit open to explicit closed", previous: explicitOpen, next: strings.ReplaceAll(explicitOpen, "hook_fail_mode: open", "hook_fail_mode: Closed"), wantProof: true},
+		{name: "one connector only", previous: explicitOpen, next: strings.Replace(explicitOpen, "    claudecode:\n      hook_fail_mode: open\n", "    claudecode: {}\n", 1), wantProof: true},
+		{name: "global hook fail mode", previous: base, next: strings.Replace(base, "  block_at: MEDIUM\n", "  block_at: MEDIUM\n  hook_fail_mode: open\n", 1), wantProof: true},
+		{name: "hook fail modes unchanged", previous: explicitOpen, next: strings.Replace(explicitOpen, "MEDIUM", "LOW", 1)},
+		{name: "the render never comes", previous: explicitOpen, next: base, wantProof: true, proofErr: errors.New("no verified DefenseClaw hook for S-1-5-21-1-2-3-1001/codex")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			host, opts := newHotConfigHost(t, tc.previous, tc.next)
+			host.adopted = true
+			host.hookProofErr = tc.proofErr
+			opts.bundle = host.bundleRun()
+			windowsEnterpriseHotConfigPublishedTargets = func(managed.StandaloneLayout) ([]enterprisehooks.ManifestTarget, error) {
+				return targets, nil
+			}
+			restart := windowsEnterpriseHotConfigRestart
+			t.Cleanup(func() { windowsEnterpriseHotConfigRestart = restart })
+			windowsEnterpriseHotConfigRestart = func() (bool, error) {
+				t.Fatal("a hook fail mode change restarted the gateway")
+				return false, nil
+			}
+			stub := &ensureStub{t: t, replies: []map[string]any{installedStatus("Verify")}}
+			stub.install(t)
+			savedDigest := windowsEnterprisePolicyDigest
+			t.Cleanup(func() { windowsEnterprisePolicyDigest = savedDigest })
+			windowsEnterprisePolicyDigest = host.digest
+			result := newWindowsEnterpriseStandaloneResult("ensure", opts)
+			applied, _ := windowsEnterpriseHotConfigApply(context.Background(), &cobra.Command{}, opts, "installer.ps1",
+				&windowsEnterpriseInstallerReport{OK: true, Installed: true, GatewayReady: true}, result)
+			if !tc.wantProof {
+				if !applied || len(host.hookProofs) != 0 {
+					t.Fatalf("applied=%t hook proofs=%d errors=%v", applied, len(host.hookProofs), result.Errors)
+				}
+				return
+			}
+			if len(host.hookProofs) != 1 || len(host.hookProofs[0]) != len(targets) {
+				t.Fatalf("the post-apply verify did not wait for the guardian to render every target: proofs %v", host.hookProofs)
+			}
+			got, _ := os.ReadFile(host.configPath)
+			if tc.proofErr == nil {
+				if !applied || string(got) != tc.next || len(stub.calls) != 1 || stub.calls[0][1] != "Verify" {
+					t.Fatalf("applied=%t config=%q installer=%q errors=%v", applied, got, stub.calls, result.Errors)
+				}
+				return
+			}
+			if applied || string(got) != tc.previous || len(stub.calls) != 0 || !windowsBundleHasCode(result.Errors, "bundle_post_verify_failed") {
+				t.Fatalf("an unrendered fail mode: applied=%t config=%q installer=%q errors=%v", applied, got, stub.calls, result.Errors)
+			}
+		})
+	}
+}
+
+func TestWindowsHotConfigHookFailModesChanged(t *testing.T) {
+	for _, tc := range []struct {
+		name, previous, next string
+		want                 bool
+	}{
+		{name: "identical", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail:\n  hook_fail_mode: open\n"},
+		{name: "case and spacing", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail:\n  hook_fail_mode: ' OPEN '\n"},
+		{name: "removed", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail: {}\n", want: true},
+		{name: "added under a connector", previous: "guardrail:\n  connectors:\n    codex: {}\n", next: "guardrail:\n  connectors:\n    codex:\n      hook_fail_mode: open\n", want: true},
+		{name: "application protection override", previous: "application_protection:\n  connectors:\n    codex:\n      guardrail:\n        hook_fail_mode: open\n", next: "application_protection:\n  connectors:\n    codex:\n      guardrail:\n        hook_fail_mode: closed\n", want: true},
+		{name: "other keys only", previous: "guardrail:\n  block_at: LOW\n", next: "guardrail:\n  block_at: HIGH\n"},
+		{name: "unparseable", previous: "guardrail:\n  hook_fail_mode: open\n", next: "guardrail: [\n", want: true},
+	} {
+		if got := windowsHotConfigHookFailModesChanged([]byte(tc.previous), []byte(tc.next)); got != tc.want {
+			t.Errorf("%s: changed = %t, want %t", tc.name, got, tc.want)
+		}
 	}
 }
