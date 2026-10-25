@@ -49,7 +49,7 @@ func TestUninstallCleansAValidConfigLargerThanTheCheckLimit(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			h := newRemovedHost(t)
 			h.stage(t, c)
-			writeRemovedFile(t, h.agentConfig, removedLargeConfig(t, h, c, removedConfigReadLimit+1024), 0o600)
+			writeRemovedFile(t, h.agentConfig, removedLargeConfig(t, h, c, 17<<20), 0o600)
 			uninstallRemoved(t, c, h.opts)
 			config := readRemovedTestFile(t, h.agentConfig)
 			if strings.Contains(config, c.script) || strings.Contains(config, removedOmnigentModuleName) {
@@ -59,9 +59,19 @@ func TestUninstallCleansAValidConfigLargerThanTheCheckLimit(t *testing.T) {
 			if c.name == removedOmnigentID {
 				operator = "corp_policy.check"
 			}
-			if !strings.Contains(config, operator) || len(config) < removedConfigReadLimit {
+			if !strings.Contains(config, operator) || len(config) < 17<<20 {
 				t.Fatalf("the uninstall lost the operator's entries (%d bytes left)", len(config))
 			}
+			requireRemovedGone(t, h.script(c))
+			// What the uninstall runs next accepts it: the verification, the
+			// leftovers and a retried uninstall, which writes no stub back.
+			if err := c.VerifyClean(h.opts); err != nil {
+				t.Fatalf("VerifyClean after the uninstall: %v", err)
+			}
+			if removedListsPath(c.leftovers(h.opts), h.agentConfig) {
+				t.Fatalf("the uninstall still lists the cleaned %s", h.agentConfig)
+			}
+			uninstallRemoved(t, c, h.opts)
 			requireRemovedGone(t, h.script(c))
 		})
 	}
@@ -70,9 +80,9 @@ func TestUninstallCleansAValidConfigLargerThanTheCheckLimit(t *testing.T) {
 func TestUninstallFailsWhileAValidConfigStillNamesDefenseClaw(t *testing.T) {
 	for _, c := range removedConnectorsUnderTest() {
 		t.Run(c.name+" too large to check", func(t *testing.T) {
-			saved := removedUninstallConfigReadLimit
-			removedUninstallConfigReadLimit = 1 << 20
-			t.Cleanup(func() { removedUninstallConfigReadLimit = saved })
+			saved := removedConfigReadLimit
+			removedConfigReadLimit = 1 << 20
+			t.Cleanup(func() { removedConfigReadLimit = saved })
 			h := newRemovedHost(t)
 			h.stage(t, c)
 			large := removedLargeConfig(t, h, c, 2<<20)

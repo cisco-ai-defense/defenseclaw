@@ -112,10 +112,13 @@ const (
 	removedScriptReadLimit = 1 << 20
 	// removedMarkerLines is how many leading lines may hold the marker.
 	removedMarkerLines = 3
-	// removedConfigReadLimit bounds the read of an agent config; a larger
-	// one cannot be checked and is listed for a check by hand.
-	removedConfigReadLimit = 16 << 20
 )
+
+// removedConfigReadLimit bounds the read of an agent config, the same for
+// every check, the uninstall's cleaning and its verification; a larger one
+// cannot be checked: it is listed for a check by hand and fails an uninstall
+// (removed_uninstall.go). A var for tests.
+var removedConfigReadLimit = 256 << 20
 
 // RemovedConnectorForHookPath returns the removed connector whose gateway
 // hook route path is: the route every 0.8.10 to 1.0.3 OpenHands hook and
@@ -1108,16 +1111,11 @@ func (c removedOnlyConnector) configNames(data []byte) (bool, error) {
 
 // configNamesWith is configNames with names deciding what names the script.
 func (c removedOnlyConnector) configNamesWith(data []byte, names func(string) bool) (bool, error) {
-	return c.configNamesWithin(data, names, removedConfigReadLimit)
-}
-
-// configNamesWithin is configNamesWith for a config read up to limit.
-func (c removedOnlyConnector) configNamesWithin(data []byte, names func(string) bool, limit int) (bool, error) {
 	if names(string(data)) {
 		return true, nil
 	}
-	if len(data) > limit {
-		return false, fmt.Errorf("it is larger than %d MiB", limit>>20)
+	if len(data) > removedConfigReadLimit {
+		return false, fmt.Errorf("it is larger than %d MiB", removedConfigReadLimit>>20)
 	}
 	body := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
 	if len(bytes.TrimSpace(body)) == 0 {
@@ -1160,15 +1158,9 @@ func (c removedOnlyConnector) registrationRunsScript(opts SetupOpts) (string, bo
 // liveRegistrations are the agent configs that still run or import the
 // script, or that could not be read or checked (they may).
 func (c removedOnlyConnector) liveRegistrations(opts SetupOpts) []string {
-	return c.liveRegistrationsWithin(opts, removedConfigReadLimit)
-}
-
-// liveRegistrationsWithin is liveRegistrations with every config read up to
-// limit.
-func (c removedOnlyConnector) liveRegistrationsWithin(opts SetupOpts, limit int) []string {
 	var live []string
 	for _, path := range c.configPaths(opts) {
-		data, err := readRemovedConfigWithin(path, limit)
+		data, err := readRemovedConfig(path)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
 		}
@@ -1176,7 +1168,7 @@ func (c removedOnlyConnector) liveRegistrationsWithin(opts SetupOpts, limit int)
 			live = append(live, path)
 			continue
 		}
-		if names, checkErr := c.configNamesWithin(data, c.scriptNames, limit); names || checkErr != nil {
+		if names, checkErr := c.configNamesWith(data, c.scriptNames); names || checkErr != nil {
 			live = append(live, path)
 		}
 	}
@@ -1488,11 +1480,6 @@ func removedAbsolute(value string) string {
 // up to one byte past removedConfigReadLimit (more is a file too large to
 // check).
 func readRemovedConfig(path string) ([]byte, error) {
-	return readRemovedConfigWithin(path, removedConfigReadLimit)
-}
-
-// readRemovedConfigWithin is readRemovedConfig up to one byte past limit.
-func readRemovedConfigWithin(path string, limit int) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -1505,7 +1492,7 @@ func readRemovedConfigWithin(path string, limit int) ([]byte, error) {
 	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	return io.ReadAll(io.LimitReader(file, int64(limit)+1))
+	return io.ReadAll(io.LimitReader(file, int64(removedConfigReadLimit)+1))
 }
 
 // FormatRemovedLeftovers renders leftovers as the lines status, uninstall and

@@ -43,13 +43,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// removedUninstallConfigReadLimit bounds the read of an agent config in an
-// uninstall. A valid config larger than removedConfigReadLimit is still
-// cleaned and checked; a larger one than this fails the uninstall (no data is
-// removed) instead of leaving a registration whose stub the data removal
-// would take.
-var removedUninstallConfigReadLimit = 256 << 20 // a var for tests
-
 // RemovedConnectorUninstallEnv set to "1" in the environment of
 // `defenseclaw-gateway connector teardown` marks the teardown as part of an
 // uninstall (defenseclaw uninstall and reset, Windows Setup /uninstall). Only
@@ -72,7 +65,7 @@ func UninstallRemovedConnector(name string, opts SetupOpts) (bool, error) {
 	if err := c.removeRegistrations(opts); err != nil {
 		return true, fmt.Errorf("%s uninstall: %w; the stub that blocks every call was kept", c.name, err)
 	}
-	if len(c.liveRegistrationsWithin(opts, removedUninstallConfigReadLimit)) > 0 {
+	if len(c.liveRegistrations(opts)) > 0 {
 		// Listed with its step; the stub stays for it.
 		return true, nil
 	}
@@ -106,16 +99,16 @@ func UninstallRemovedConnector(name string, opts SetupOpts) (bool, error) {
 func (c removedOnlyConnector) removeRegistrations(opts SetupOpts) error {
 	var errs []error
 	for _, path := range c.configPaths(opts) {
-		data, err := readRemovedConfigWithin(path, removedUninstallConfigReadLimit)
+		data, err := readRemovedConfig(path)
 		if err != nil {
 			continue
 		}
-		if len(data) > removedUninstallConfigReadLimit {
+		if len(data) > removedConfigReadLimit {
 			errs = append(errs, fmt.Errorf("%s is larger than %d MiB, so DefenseClaw cannot check it for its entries; %s, then run the uninstall again",
-				path, removedUninstallConfigReadLimit>>20, c.configStep))
+				path, removedConfigReadLimit>>20, c.configStep))
 			continue
 		}
-		if names, _ := c.configNamesWithin(data, c.textNames, removedUninstallConfigReadLimit); !names {
+		if names, _ := c.configNames(data); !names {
 			continue
 		}
 		var updated []byte
