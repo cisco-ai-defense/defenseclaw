@@ -105,7 +105,9 @@ func TestHookDataDirNowDefaultsAndRefusals(t *testing.T) {
 		// The runtime takes an empty value as it is: no absolute folder, so
 		// its hooks never open an outage (hookOutageFailModeNow).
 		{name: "empty data_dir", body: "data_dir: \"\"\n" + outageNowDefaultConfig, want: ""},
-		{name: "relative data_dir", body: "data_dir: relative/data\n" + outageNowDefaultConfig, want: ""},
+		// A relative value is taken from the config's folder, as
+		// hook-outage-mode takes it (loadHookRuntimeConfig).
+		{name: "relative data_dir", body: "data_dir: relative/data\n" + outageNowDefaultConfig, want: filepath.Join(home, "relative", "data")},
 		// An older release's config this one loads only after migrate.
 		{name: "older config with a quoted key", body: "config_version: 7\n\"data_dir\": \"" + filepath.ToSlash(data) + "\"\n", want: data},
 		{name: "data_dir that is not a string", body: "config_version: 7\ndata_dir: [a, b]\n", wantErr: true},

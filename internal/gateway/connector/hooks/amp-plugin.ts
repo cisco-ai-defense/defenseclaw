@@ -747,9 +747,11 @@ async function perUserOutageOpen(error: unknown): Promise<boolean> {
 // reads the config.yaml of this plugin's data directory, never one the
 // agent's DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names) for Amp's outage mode
 // now. A helper that cannot run or answers anything but "open" keeps it closed.
-function configOutageOpen(): boolean {
+function configOutageOpen(installWindow = false): boolean {
 	try {
-		const output = execFileSync(perUserNativePostBinary(), ["hook-outage-mode", "--connector", "amp", "--hook-dir", dirname(DC_TOKEN_FILE)], {
+		const args = ["hook-outage-mode", "--connector", "amp", "--hook-dir", dirname(DC_TOKEN_FILE)]
+		if (installWindow) args.push("--install-window")
+		const output = execFileSync(perUserNativePostBinary(), args, {
 			timeout: 3000, maxBuffer: 4096, windowsHide: true, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
 		})
 		return String(output).trim() === "open"
@@ -850,22 +852,42 @@ function installLockDirs(): string[] {
 }
 
 // An interrupted install keeps its lock on purpose, next to one of these,
-// until the installer runs again and finishes or undoes it.
+// until the installer runs again and finishes or undoes it, at most until
+// the lock's deadline (hookexec.InstallLockRecoveryRecords).
 const DC_INSTALL_RECOVERY_RECORDS = ["previous.new", ".repair", ".rollback-hold", ".lifecycle-txn.json"]
 // install.sh and install.ps1 write the lock's pid right after they make it,
 // so a lock without a pid is an installer's for this long.
 const DC_INSTALL_LOCK_NO_PID_MS = 10 * 60 * 1000
-// No install runs this long. Past it, a pid that names a process again (a
-// reused pid) no longer holds a healthy gateway's answer.
+// No install runs this long: the latest deadline of any lock, whatever
+// deadline it records. Past it, a pid that names a process again (a reused
+// pid) no longer holds the lock.
 const DC_INSTALL_LOCK_MAX_MS = 6 * 60 * 60 * 1000
 
-// installLockState is the install-lock rule of this plugin, the OpenCode
-// plugin and `defenseclaw doctor` (_install_lock_state): "none" when dir has
-// no .install.lock and is a folder or absent; "stale" when the lock is a
-// folder, no interrupted-install record sits beside it, and its installer is
-// proven gone: its pid names no process, it has had no pid for ten minutes,
-// or it is older than six hours; "held" for a live or uncertain install,
-// everything else. `defenseclaw doctor --fix` removes a stale lock.
+// installLockNumber reads one number of the lock's owner record (pid,
+// deadline): "absent" (missing, empty or not a positive number), "valid",
+// or "unreadable" (not a small regular file, or a read error but its
+// absence).
+async function installLockNumber(path: string): Promise<{ state: "absent" | "valid" | "unreadable"; value: number }> {
+	try {
+		const info = await lstat(path)
+		if (!info.isFile() || info.size > 64) return { state: "unreadable", value: 0 }
+		const text = String(readFileSync(path, "utf8")).trim()
+		return /^[1-9][0-9]{0,11}$/.test(text) ? { state: "valid", value: Number(text) } : { state: "absent", value: 0 }
+	} catch (error) {
+		return { state: (error as { code?: unknown } | null)?.code === "ENOENT" ? "absent" : "unreadable", value: 0 }
+	}
+}
+
+// installLockState is the one install-lock rule of every per-user hook
+// (hookexec installLockStale, the shell hooks, the OpenCode plugin) and of
+// `defenseclaw doctor` (_install_lock_state): "none" when dir has no
+// .install.lock and is a folder or absent; "stale" when the lock is a folder
+// whose deadline has passed (the one it records, never later than six hours
+// after it was made), or, before that, when no interrupted-install record
+// sits beside it and its installer is proven gone: its pid names no process
+// or it has had no pid for ten minutes; "held" for a live or uncertain
+// install, everything else. A stale lock is no lock; `defenseclaw doctor
+// --fix` or the next installer run removes it.
 async function installLockState(dir: string): Promise<"none" | "stale" | "held"> {
 	const missing = (error: unknown) => (error as { code?: unknown } | null)?.code === "ENOENT"
 	const lock = join(dir, ".install.lock")
@@ -884,6 +906,12 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 		return "none"
 	}
 	if (!info.isDirectory()) return "held"
+	const now = Date.now()
+	let deadline = info.mtimeMs + DC_INSTALL_LOCK_MAX_MS
+	const recorded = await installLockNumber(join(lock, "deadline"))
+	if (recorded.state === "valid" && recorded.value * 1000 < deadline) deadline = recorded.value * 1000
+	if (now > deadline) return "stale"
+	if (recorded.state === "unreadable") return "held"
 	for (const name of DC_INSTALL_RECOVERY_RECORDS) {
 		try {
 			await lstat(join(dir, name))
@@ -892,46 +920,60 @@ async function installLockState(dir: string): Promise<"none" | "stale" | "held">
 			if (!missing(error)) return "held"
 		}
 	}
-	const age = Date.now() - info.mtimeMs
-	if (age > DC_INSTALL_LOCK_MAX_MS) return "stale"
-	let text = ""
+	const owner = await installLockNumber(join(lock, "pid"))
+	if (owner.state === "unreadable") return "held"
+	if (owner.state === "absent" || owner.value > 2147483647) return now - info.mtimeMs > DC_INSTALL_LOCK_NO_PID_MS ? "stale" : "held"
+	if (owner.value === process.pid) return "held"
 	try {
-		const pidFile = join(lock, "pid")
-		const pidInfo = await lstat(pidFile)
-		if (!pidInfo.isFile() || pidInfo.size > 64) return "held"
-		text = String(readFileSync(pidFile, "utf8")).trim()
-	} catch (error) {
-		if (!missing(error)) return "held"
-	}
-	const pid = /^[1-9][0-9]{0,9}$/.test(text) ? Number(text) : 0
-	if (!pid || pid > 2147483647) return age > DC_INSTALL_LOCK_NO_PID_MS ? "stale" : "held"
-	if (pid === process.pid) return "held"
-	try {
-		process.kill(pid, 0)
+		process.kill(owner.value, 0)
 		return "held"
 	} catch (error) {
 		return (error as { code?: unknown } | null)?.code === "ESRCH" ? "stale" : "held"
 	}
 }
 
-// installLockHeld reports whether any lock is there, stale or not: every
-// failure and every outage stays closed under it.
-async function installLockHeld(): Promise<boolean> {
-	for (const dir of installLockDirs()) {
-		if (await installLockState(dir) !== "none") return true
-	}
-	return false
+// installLocks reads the lock of every folder an installer of this account
+// locks: whether one is held, and whether one is stale.
+async function installLocks(): Promise<{ held: boolean; stale: boolean }> {
+	const states: string[] = []
+	for (const dir of installLockDirs()) states.push(await installLockState(dir))
+	return { held: states.includes("held"), stale: states.includes("stale") }
 }
 
-// installRunning reports whether an install may still be running: a lock
-// that is not proven stale. Only then is a reachable gateway's answer held
-// back; release plugins forwarded it, and a killed installer's lock must not
-// block every healthy call for good.
-async function installRunning(): Promise<boolean> {
-	for (const dir of installLockDirs()) {
-		if (await installLockState(dir) === "held") return true
-	}
-	return false
+// installLockHeld reports an install that may be running: a lock that is
+// not stale. Every failure and every outage stays closed under it.
+async function installLockHeld(): Promise<boolean> {
+	return (await installLocks()).held
+}
+
+const DC_INSTALL_WINDOW_NOTICE = "DefenseClaw is being installed or upgraded for this account. Its gateway checked this tool call, " +
+	"so it runs (the default and permissive policies let checked calls run during an install; any failure blocks). `defenseclaw-gateway status` shows its state."
+const DC_STALE_INSTALL_LOCK_NOTICE = "DefenseClaw found an install lock whose installer is no longer running, so it ignores it and checks tool calls as usual. " +
+	"Run `defenseclaw doctor --fix` (or the installer again) to remove it."
+let staleLockNoticeShown = false
+
+// installWindow is what an install does to a call the gateway answers:
+// "closed" holds it back while an installer holds this account's data
+// directory and the outage mode the config gives Amp for an install window
+// is not open (the strict tier, a saved closed, any doubt: hook-outage-mode
+// --install-window); "open" lets the answer through with a warning (the
+// default and permissive tiers, or a saved open); "stale" when only a
+// stale lock is there; "none" otherwise.
+async function installWindow(): Promise<"none" | "open" | "closed" | "stale"> {
+	const locks = await installLocks()
+	if (locks.held) return configOutageOpen(true) ? "open" : "closed"
+	return locks.stale ? "stale" : "none"
+}
+
+// withInstallWindowNotice adds to a verdict that lets the call run the
+// warning of an install window, or the one warning of this process about a
+// stale lock.
+function withInstallWindowNotice(data: GatewayResponse, lockWindow: string): GatewayResponse {
+	if (data.action === "block" || data.action === "confirm" || data.outage_notice) return data
+	if (lockWindow === "open") return { ...data, outage_notice: DC_INSTALL_WINDOW_NOTICE }
+	if (lockWindow !== "stale" || staleLockNoticeShown) return data
+	staleLockNoticeShown = true
+	return { ...data, outage_notice: DC_STALE_INSTALL_LOCK_NOTICE }
 }
 
 {{end}}async function perUserInstallInProgress(): Promise<boolean> {
@@ -1050,7 +1092,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	}
 
 	async function post(payload: Record<string, unknown>, actionable: boolean): Promise<GatewayResponse> {
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		if (actionable && await installRunning()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		if (actionable && await installWindow() === "closed") return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}		let body: string
 		try {
 			body = JSON.stringify(payload)
@@ -1124,8 +1166,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				body,
 				signal: controller.signal,
 			}, token), controller.signal){{end}}
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installRunning()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}			if (!response.ok) {
+			if (!response.ok) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (response.status >= 500 && (DC_FAIL_MODE === "closed" || await perUserInstallInProgress())) {
 					return { action: "block", reason: await perUserGatewayDownText(null, response.status) }
@@ -1139,9 +1180,11 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (actionable && await installLockHeld()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 {{end}}				return failureResponse("invalid gateway verdict")
 			}
-{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (actionable && await installRunning()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
-{{end}}			return data
-		} catch (error) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			const lockWindow = actionable ? await installWindow() : "none"
+			if (lockWindow === "closed") return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
+			return withInstallWindowNotice(data, lockWindow)
+{{else}}			return data
+{{end}}		} catch (error) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}			if (error && typeof error === "object" && "code" in error && error.code === "DC_PEER_UNVERIFIED") {
 				return { action: "block", reason: `DefenseClaw hook failed closed (${safeError(error)})` }
 			}

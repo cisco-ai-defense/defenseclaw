@@ -89,10 +89,12 @@ func TestHookOutageFailModeNowReadsOnlyTheRuntimesConfig(t *testing.T) {
 			env: func(_, other string) map[string]string {
 				return map[string]string{"DEFENSECLAW_HOME": other, "DEFENSECLAW_CONFIG": filepath.Join(other, "config.yaml")}
 			}, want: "closed"},
-		{name: "DEFENSECLAW_CONFIG names this config and DEFENSECLAW_HOME moves its data", runtime: outageNowDefaultConfig,
+		// The agent's environment never moves the runtime's data directory
+		// either (loadHookRuntimeConfig, the rule hook-data-dir uses too).
+		{name: "DEFENSECLAW_CONFIG names this config and DEFENSECLAW_HOME is elsewhere", runtime: outageNowDefaultConfig,
 			env: func(home, other string) map[string]string {
 				return map[string]string{"DEFENSECLAW_HOME": other, "DEFENSECLAW_CONFIG": filepath.Join(home, "config.yaml")}
-			}, want: "closed"},
+			}, want: "open"},
 		{name: "the environment names a strict config elsewhere", runtime: outageNowDefaultConfig,
 			env: func(_, other string) map[string]string {
 				return map[string]string{"DEFENSECLAW_HOME": other, "DEFENSECLAW_CONFIG": filepath.Join(other, "config.yaml")}

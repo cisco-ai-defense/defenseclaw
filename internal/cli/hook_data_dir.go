@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
@@ -31,9 +32,10 @@ import (
 // is read as plain YAML for its data_dir, which can only name one more folder
 // to hold. A config that is not YAML at all, or a data_dir that is not a
 // string, is an error: install.sh then stops before it stops the gateway.
-// The answer is "" when the data directory is not an absolute path: the
-// hooks of such a runtime never let an outage through (hookOutageFailModeNow
-// compares an absolute folder).
+// A relative data_dir is taken from the config's folder (configDataDir),
+// as hook-outage-mode takes it. The answer is "" when the data directory is
+// still not an absolute path: the hooks of such a runtime never let an
+// outage through (hookOutageFailModeNow compares an absolute folder).
 //
 // A config kept apart from the installer's home (DEFENSECLAW_CONFIG) whose
 // data_dir is that home, set or by default, is also the config of hooks in
@@ -42,7 +44,8 @@ import (
 // (loadConfigSourceChecked), so hook-outage-mode can open an outage there.
 // install.sh already holds its home (LOCK_DIR), so the answer is then the
 // config's folder, when the config is a config.yaml with a hooks folder
-// beside it.
+// beside it whose hooks take that folder as their data directory, by the
+// rule they use (loadHookRuntimeConfig).
 //
 // A relative DEFENSECLAW_CONFIG or DEFENSECLAW_HOME names a folder from
 // install.sh's working directory, the one this command runs in. Both are
@@ -61,14 +64,57 @@ func hookDataDirNow() (string, error) {
 		return dir, err
 	}
 	folder := filepath.Dir(configFile)
-	// Hooks read only <data dir>/config.yaml (hookOutageFailModeNow).
-	if filepath.Base(configFile) == config.DefaultConfigName &&
-		pathidentity.Same(dir, config.DefaultDataPath()) && !pathidentity.Same(folder, dir) {
+	// Hooks read only <data dir>/config.yaml (hookOutageFailModeNow), with
+	// the same rule (loadHookRuntimeConfig).
+	if filepath.Base(configFile) == config.DefaultConfigName && !pathidentity.Same(folder, dir) {
 		if info, statErr := os.Stat(filepath.Join(folder, "hooks")); statErr == nil && info.IsDir() {
-			return absoluteOrEmpty(folder), nil
+			if _, own, loadErr := loadHookRuntimeConfig(configFile); loadErr == nil && pathidentity.Same(own, folder) {
+				return absoluteOrEmpty(folder), nil
+			}
 		}
 	}
 	return dir, nil
+}
+
+// loadHookRuntimeConfig loads configFile as the hook runtime of its folder
+// does, and names the data directory it gives that runtime: the one rule
+// hook-outage-mode (whether a hook may open an outage) and hook-data-dir
+// (which folder install.sh locks) share. The load leaves out
+// DEFENSECLAW_CONFIG, which a hook inherits from the agent and install.sh
+// from its caller: naming this file, it would move a default data_dir to
+// DEFENSECLAW_HOME (loadConfigSourceChecked). The data directory is the
+// config's data_dir, a relative one taken from the config's folder, or that
+// folder; "" for a config path that is not absolute.
+func loadHookRuntimeConfig(configFile string) (*config.Config, string, error) {
+	if !filepath.IsAbs(configFile) {
+		return nil, "", fmt.Errorf("config path %q is not absolute", configFile)
+	}
+	value, present := os.LookupEnv(managed.ConfigPathEnv)
+	if present {
+		if err := os.Unsetenv(managed.ConfigPathEnv); err != nil {
+			return nil, "", err
+		}
+		defer func() { _ = os.Setenv(managed.ConfigPathEnv, value) }()
+	}
+	loaded, err := config.LoadFromFile(configFile)
+	if err != nil || loaded == nil {
+		return nil, "", fmt.Errorf("load %s: %w", configFile, err)
+	}
+	return loaded, configDataDir(configFile, loaded.DataDir), nil
+}
+
+// configDataDir is the absolute data directory a data_dir value of the
+// config at configFile names: an absolute value as it is, a relative one
+// from the config's folder; "" without an absolute config path or a value.
+func configDataDir(configFile, dataDir string) string {
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" || !filepath.IsAbs(configFile) {
+		return ""
+	}
+	if !filepath.IsAbs(dataDir) {
+		dataDir = filepath.Join(filepath.Dir(configFile), dataDir)
+	}
+	return filepath.Clean(dataDir)
 }
 
 func hookDataDirOfConfig(configFile string) (string, error) {
@@ -78,7 +124,7 @@ func hookDataDirOfConfig(configFile string) (string, error) {
 		return "", fmt.Errorf("read %s: %w", configFile, err)
 	}
 	if loaded, err := config.LoadFromFile(configFile); err == nil && loaded != nil {
-		return absoluteOrEmpty(loaded.DataDir), nil
+		return absoluteOrEmpty(configDataDir(configFile, loaded.DataDir)), nil
 	}
 	raw, err := os.ReadFile(configFile)
 	if err != nil {
@@ -99,7 +145,7 @@ func hookDataDirOfConfig(configFile string) (string, error) {
 	if dir == "" {
 		return absoluteOrEmpty(config.DefaultDataPath()), nil
 	}
-	return absoluteOrEmpty(dir), nil
+	return absoluteOrEmpty(configDataDir(configFile, dir)), nil
 }
 
 // absoluteInstallerEnv binds a relative DEFENSECLAW_CONFIG and

@@ -26,11 +26,13 @@ def _exited_pid() -> int:
     return proc.pid
 
 
-def _lock(folder: Path, pid: str | None, age: float = 0) -> Path:
+def _lock(folder: Path, pid: str | None, age: float = 0, deadline: str | None = None) -> Path:
     lock = folder / ".install.lock"
     lock.mkdir(parents=True)
     if pid is not None:
         (lock / "pid").write_text(pid, encoding="ascii")
+    if deadline is not None:
+        (lock / "deadline").write_text(deadline, encoding="ascii")
     if age:
         then = time.time() - age
         os.utime(lock, (then, then))
@@ -73,6 +75,39 @@ def test_install_lock_state_follows_the_plugin_rule(account, pid, age, record, w
     if record:
         (account.data / record).mkdir()
     assert cmd_doctor._install_lock_state(str(account.data))[0] == want
+
+
+PAST = str(int(time.time()) - 60)
+FUTURE = str(int(time.time()) + 3600)
+
+
+# oss-outage-open round i: the lock records a deadline (install.sh writes
+# pid, started and deadline). Past it the lock is no lock, also for a running
+# pid (reused) and an interrupted install's kept lock; the six-hour bound
+# caps a later recorded deadline; a deadline that cannot be read holds.
+@pytest.mark.parametrize(
+    ("pid", "age", "deadline", "record", "want"),
+    [
+        (str(os.getppid()), 0, FUTURE, None, "held"),
+        (str(os.getppid()), 0, PAST, None, "stale"),
+        (str(os.getppid()), 7 * 3600, str(int(time.time()) + 100 * 86400), None, "stale"),
+        (f"{DEAD}\n", 0, FUTURE, None, "stale"),
+        (f"{DEAD}\n", 0, PAST, "previous.new", "stale"),
+        (f"{DEAD}\n", 0, FUTURE, "previous.new", "recovery"),
+        (str(os.getppid()), 0, "soon", None, "held"),
+    ],
+)
+def test_install_lock_state_honours_the_recorded_deadline(account, pid, age, deadline, record, want):
+    _lock(account.data, pid, age, deadline)
+    if record:
+        (account.data / record).mkdir()
+    assert cmd_doctor._install_lock_state(str(account.data))[0] == want
+
+
+def test_a_deadline_that_cannot_be_read_holds_until_the_six_hour_bound(account):
+    lock = _lock(account.data, f"{DEAD}\n")
+    (lock / "deadline").mkdir()
+    assert cmd_doctor._install_lock_state(str(account.data))[0] == "held"
 
 
 def test_a_lock_that_is_not_a_folder_or_a_pid_that_is_not_a_file_is_held(account):

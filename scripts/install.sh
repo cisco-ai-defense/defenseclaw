@@ -57,6 +57,17 @@ esac
 readonly RELEASE_BASE
 readonly OFFICIAL_RELEASE_BASE="https://github.com/${DEFAULT_REPO}"
 readonly RELEASE_SIGNER='^https://github\.com/cisco-ai-defense/defenseclaw/\.github/workflows/release\.yaml@refs/heads/main$'
+# A relative DEFENSECLAW_HOME or DEFENSECLAW_CONFIG names a folder from the
+# caller's directory. Record the absolute path once, here, so the locks this
+# installer takes, the folder hook-data-dir names and the gateway it starts
+# from its own runtime directory all see the same one.
+for dc_path_var in DEFENSECLAW_HOME DEFENSECLAW_CONFIG; do
+    dc_path_value="${!dc_path_var:-}"
+    case "${dc_path_value}" in
+        ""|/*|"~"|"~/"*) ;;
+        *) export "${dc_path_var}=$(pwd -P)/${dc_path_value}" ;;
+    esac
+done
 readonly DEFENSECLAW_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 export DEFENSECLAW_HOME
 # until 1.1: a 0.8.x or 1.0.x OmniGent setup may have used a relative
@@ -465,15 +476,33 @@ LOCK_HINT="check the free space (df -h ${DEFENSECLAW_HOME%/*}) and that $(id -un
 mkdir -p "${DEFENSECLAW_HOME}" "${DEFENSECLAW_HOME}/logs" 2>/dev/null \
     || die "Could not create ${DEFENSECLAW_HOME}/logs: ${LOCK_HINT}"
 chmod 700 "${DEFENSECLAW_HOME}" 2>/dev/null || true
+# The owner record of every lock this installer takes: its pid, its start
+# time and a deadline, in Unix seconds. Past the deadline, or once its pid
+# names no process, every hook and `defenseclaw doctor` treat the lock as no
+# lock (hookexec installLockStale), and the next run takes it over.
+LOCK_STARTED="$(date +%s)"
+LOCK_DEADLINE=$((LOCK_STARTED + 21600))
+write_lock_owner() {
+    { echo $$ > "$1/pid" && echo "${LOCK_STARTED}" > "$1/started" && echo "${LOCK_DEADLINE}" > "$1/deadline"; } 2>/dev/null
+}
+lock_owner_live() {
+    # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK still
+    # runs and its deadline has not passed.
+    local deadline
+    [[ -n "$2" ]] && kill -0 "$2" 2>/dev/null || return 1
+    deadline="$(cat "$1/deadline" 2>/dev/null || true)"
+    [[ "${deadline}" =~ ^[1-9][0-9]{0,11}$ ]] || return 0
+    (( $(date +%s) <= deadline ))
+}
 if ! mkdir "${LOCK_DIR}" 2>/dev/null; then
     holder="$(cat "${LOCK_DIR}/pid" 2>/dev/null || true)"
-    if [[ -n "${holder}" ]] && kill -0 "${holder}" 2>/dev/null; then
+    if lock_owner_live "${LOCK_DIR}" "${holder}"; then
         die "Another DefenseClaw install is running (pid ${holder})"
     fi
     rm -rf "${LOCK_DIR}"
     mkdir "${LOCK_DIR}" 2>/dev/null || die "Could not create the install lock ${LOCK_DIR}: ${LOCK_HINT}"
 fi
-if ! { echo $$ > "${LOCK_DIR}/pid"; } 2>/dev/null; then
+if ! write_lock_owner "${LOCK_DIR}"; then
     rm -rf "${LOCK_DIR}"
     die "Could not write the install lock ${LOCK_DIR}/pid: ${LOCK_HINT}"
 fi
@@ -532,7 +561,7 @@ hold_hook_data_dir() {
     done
     if ! mkdir "${lock}" 2>/dev/null; then
         holder="$(cat "${lock}/pid" 2>/dev/null || true)"
-        if [[ -n "${holder}" ]] && kill -0 "${holder}" 2>/dev/null; then
+        if lock_owner_live "${lock}" "${holder}"; then
             die "Another DefenseClaw install is running (pid ${holder}) for the data folder ${data}"
         fi
         rm -rf "${lock:?}"
@@ -540,7 +569,7 @@ hold_hook_data_dir() {
             || die "Could not create the install lock ${lock}: check that $(id -un) can write ${data}; nothing was changed"
     fi
     DATA_LOCK_DIRS+=("${lock}")
-    { echo $$ > "${lock}/pid"; } 2>/dev/null \
+    write_lock_owner "${lock}" \
         || die "Could not write the install lock ${lock}/pid: check the free space and that $(id -un) can write ${data}; nothing was changed"
 }
 hold_hook_data_dir "${BIN_DIR}/defenseclaw-gateway"

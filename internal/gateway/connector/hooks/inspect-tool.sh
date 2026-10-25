@@ -14,15 +14,17 @@ case "$_DC_HOOK_DATA_DIR" in
 esac
 # defenseclaw_install_lock_held DATA returns 0 (true) while this account's
 # installer holds its data directory DATA: DATA/.install.lock exists as any
-# file type, or DATA exists but cannot be searched, so the lock cannot be
-# shown absent; no DATA to look in counts as held too. The native hook
-# (installLockHeld), the in-agent plugins and the Windows adapters apply the
-# same rule (GAP-0914). defenseclaw_install_held below, the one install check
-# of every shell hook, reads it.
+# file type and is not stale (defenseclaw_install_lock_stale), or DATA
+# exists but cannot be searched, so the lock cannot be shown absent; no DATA
+# to look in counts as held too. The native hook (installLockHeld), the
+# in-agent plugins and the Windows adapters apply the same rule (GAP-0914).
+# defenseclaw_install_held below, the one install check of every shell hook,
+# reads it.
 defenseclaw_install_lock_held() {
   local data="${1:-}"
   [ -n "$data" ] || return 0
   if [ -e "${data}/.install.lock" ] || [ -L "${data}/.install.lock" ]; then
+    defenseclaw_install_lock_stale "$data" && return 1
     return 0
   fi
   if [ -e "$data" ] || [ -L "$data" ]; then
@@ -32,6 +34,66 @@ defenseclaw_install_lock_held() {
     return 0
   fi
   return 1
+}
+# defenseclaw_install_lock_stale DATA returns 0 (true) when DATA/.install.lock
+# is a folder whose deadline has passed (the one its owner record names,
+# never later than six hours after it was made), or, before that, when no
+# interrupted-install record sits beside it and its installer is proven
+# gone: its pid names no process, or it has had no pid for ten minutes. A
+# live or uncertain owner keeps it (hookexec installLockStale, the one rule).
+defenseclaw_install_lock_stale() {
+  local data="${1:-}" lock now made deadline recorded rc pid name
+  lock="${data}/.install.lock"
+  [ -d "$lock" ] && [ ! -L "$lock" ] || return 1
+  now="$(date +%s 2>/dev/null)" || return 1
+  made="$(stat -c %Y "$lock" 2>/dev/null || stat -f %m "$lock" 2>/dev/null)" || return 1
+  case "$now$made" in ''|*[!0-9]*) return 1 ;; esac
+  deadline=$((made + 21600))
+  rc=0
+  recorded="$(defenseclaw_install_lock_number "${lock}/deadline")" || rc=$?
+  if [ "$rc" = 0 ] && [ "$recorded" -lt "$deadline" ]; then
+    deadline="$recorded"
+  fi
+  [ "$now" -gt "$deadline" ] && return 0
+  [ "$rc" = 2 ] && return 1
+  for name in previous.new .repair .rollback-hold .lifecycle-txn.json; do
+    if [ -e "${data}/${name}" ] || [ -L "${data}/${name}" ]; then
+      return 1
+    fi
+  done
+  rc=0
+  pid="$(defenseclaw_install_lock_number "${lock}/pid")" || rc=$?
+  [ "$rc" = 2 ] && return 1
+  if [ "$rc" != 0 ] || [ "$pid" -gt 2147483647 ]; then
+    [ $((now - made)) -gt 600 ] && return 0
+    return 1
+  fi
+  [ "$pid" = "$$" ] && return 1
+  kill -0 "$pid" 2>/dev/null && return 1
+  # A process of another account refuses the signal; only ps proves it gone.
+  command -v ps >/dev/null 2>&1 || return 1
+  ps -p "$pid" >/dev/null 2>&1 && return 1
+  return 0
+}
+# defenseclaw_install_lock_number FILE prints the decimal number of one owner
+# record file (pid, deadline). It returns 1 when FILE is absent, empty or
+# not a positive number, and 2 when it cannot be read (not a small regular
+# file).
+defenseclaw_install_lock_number() {
+  local file="${1:-}" size text
+  if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+    return 1
+  fi
+  [ -f "$file" ] && [ ! -L "$file" ] && [ -r "$file" ] || return 2
+  size="$(wc -c < "$file" 2>/dev/null | tr -d ' ')" || return 2
+  case "$size" in ''|*[!0-9]*) return 2 ;; esac
+  [ "$size" -le 64 ] || return 2
+  text="$(cat "$file" 2>/dev/null)" || return 2
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  case "$text" in ''|0*|*[!0-9]*) return 1 ;; esac
+  [ "${#text}" -le 12 ] || return 1
+  printf '%s' "$text"
 }
 # defenseclaw_install_held returns 0 (true) while an installer holds either
 # data directory of this account's hook: the one DEFENSECLAW_HOME names, else

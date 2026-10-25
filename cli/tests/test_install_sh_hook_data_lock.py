@@ -35,6 +35,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -71,9 +73,11 @@ printf '%s\\n' "${STUB_DATA_DIR:-}"
 
 def _functions() -> str:
     text = INSTALL_SH.read_text(encoding="utf-8")
+    owner = text.index('LOCK_STARTED="$(date +%s)"')
+    owner_end = text.index('if ! mkdir "${LOCK_DIR}" 2>/dev/null; then', owner)
     start = text.index("DATA_LOCK_DIRS=()")
     end = text.index('\nhold_hook_data_dir "${BIN_DIR}/defenseclaw-gateway"\n', start)
-    return text[start:end] + "\n"
+    return text[owner:owner_end] + text[start:end] + "\n"
 
 
 def _gateway(tmp_path: Path, name: str = "gw") -> Path:
@@ -251,3 +255,58 @@ def test_both_holds_come_before_anything_stops_the_gateway() -> None:
         "if ! swap_in; then",
     ):
         assert staged < text.index(later), later
+
+
+# oss-outage-open round i: every lock install.sh takes records its owner
+# (pid, start time) and a deadline, the record the hooks and doctor read
+# (hookexec installLockStale); a lock past its deadline is taken over even
+# when its pid names a running process (a reused pid).
+def test_the_data_dir_lock_records_its_owner_and_a_deadline(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    body = (
+        f'hold_hook_data_dir "{_gateway(tmp_path)}"\n'
+        'lock="${DATA_LOCK_DIRS[0]}"\n'
+        'echo "pid=$(cat "$lock/pid") self=$$ started=$(cat "$lock/started") deadline=$(cat "$lock/deadline")"\n'
+    )
+    before = int(time.time())
+    proc = _run(tmp_path, home, body, {"STUB_DATA_DIR": str(data)})
+    assert proc.returncode == 0, proc.stderr
+    line = next(item for item in proc.stdout.splitlines() if item.startswith("pid="))
+    fields = dict(part.split("=", 1) for part in line.split())
+    assert fields["pid"] == fields["self"]
+    assert before - 1 <= int(fields["started"]) <= int(time.time()) + 1
+    assert int(fields["deadline"]) == int(fields["started"]) + 6 * 3600
+
+
+def test_a_live_pid_past_the_deadline_is_taken_over(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        (data / ".install.lock").mkdir()
+        (data / ".install.lock" / "pid").write_text(f"{other.pid}\n", encoding="utf-8")
+        (data / ".install.lock" / "deadline").write_text(f"{int(time.time()) - 60}\n", encoding="utf-8")
+        proc = _run(tmp_path, home, f'hold_hook_data_dir "{_gateway(tmp_path)}"\n', {"STUB_DATA_DIR": str(data)})
+        assert proc.returncode == 0, proc.stderr
+        assert _held(proc) == [f"{data.resolve()}/.install.lock"]
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    start = text.index("for dc_path_var in DEFENSECLAW_HOME DEFENSECLAW_CONFIG; do")
+    end = text.index("done\n", start) + len("done\n")
+    script = text[start:end] + 'printf "%s|%s\\n" "$DEFENSECLAW_HOME" "${DEFENSECLAW_CONFIG:-}"\n'
+    for home, config, want in (
+        ("rel-home", "rel/config.yaml", "{cwd}/rel-home|{cwd}/rel/config.yaml"),
+        ("/abs/home", "", "/abs/home|"),
+        ("~/x", "/abs/c.yaml", "~/x|/abs/c.yaml"),
+    ):
+        cwd = Path(tempfile.mkdtemp()).resolve()
+        proc = subprocess.run(
+            [BASH, "-c", script], capture_output=True, text=True, cwd=cwd, check=False, timeout=30,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "DEFENSECLAW_HOME": home, "DEFENSECLAW_CONFIG": config},
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert proc.stdout.strip() == want.format(cwd=cwd)

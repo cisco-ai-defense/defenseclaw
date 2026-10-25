@@ -19,17 +19,14 @@ import (
 // oss-outage-open round h loop 2 (P2, stale install lock): an installer
 // killed after it made .install.lock left the lock, and Amp and OpenCode
 // then blocked every tool call a healthy gateway answered, for good. Both
-// plugins share one rule (installLockState): a reachable gateway's answer is
-// forwarded past a lock whose installer is proven gone, and held back for a
-// live or uncertain install. A failure stays closed under any lock, stale or
-// not, and never logs a fail-open.
+// plugins share one rule (installLockState, hookexec installLockStale): a
+// lock whose installer is proven gone is no lock, so a reachable gateway's
+// answer runs and a failure follows the plugin's own rule; a live or
+// uncertain install (here the strict-tier answer of a helper that cannot
+// tell the tier) holds back the answer and blocks a failure as an install.
+// Nothing under any lock logs a fail-open (round i).
 func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) {
-	node := nodeForTest(t)
-	exited := exec.Command(node, "-e", "")
-	if err := exited.Run(); err != nil {
-		t.Fatal(err)
-	}
-	dead := strconv.Itoa(exited.ProcessState.Pid())
+	dead := startedAndExitedPid(t)
 	live := strconv.Itoa(os.Getpid())
 	makeLock := func(pid string, age time.Duration) func(*testing.T, string) {
 		return func(t *testing.T, lock string) {
@@ -130,8 +127,8 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 					session.close()
 					ran, installBlock := pluginStaleLockVerdict(t, plugin.name, got)
 					if failure != "valid-allow" {
-						if ran || !installBlock {
-							t.Fatalf("%s under the lock = %q; a failure must stay blocked as an install", failure, got)
+						if ran || installBlock == tc.runs {
+							t.Fatalf("%s under the lock = %q; a failure must stay blocked, as an install only under a held lock", failure, got)
 						}
 						continue
 					}
@@ -148,6 +145,16 @@ func TestPerUserPluginsForwardAHealthyAnswerPastAStaleInstallLock(t *testing.T) 
 			})
 		}
 	}
+}
+
+// startedAndExitedPid is the pid of a process that has exited.
+func startedAndExitedPid(t *testing.T) string {
+	t.Helper()
+	exited := exec.Command(nodeForTest(t), "-e", "")
+	if err := exited.Run(); err != nil {
+		t.Fatal(err)
+	}
+	return strconv.Itoa(exited.ProcessState.Pid())
 }
 
 func pluginStaleLockVerdict(t *testing.T, plugin, got string) (ran, installBlock bool) {

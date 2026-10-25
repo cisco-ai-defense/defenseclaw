@@ -32,21 +32,32 @@ import (
 // The policy source is the runtime's own config, config.yaml in the data
 // directory above hookDir, whose data_dir is that directory: the folder the
 // gateway rendered the hooks into. The hook process's DEFENSECLAW_CONFIG and
-// DEFENSECLAW_HOME come from the agent and never choose it, so an agent that
-// points them at another default-tier config cannot reopen a strict outage.
-// A config kept outside its data directory closes the outage.
+// DEFENSECLAW_HOME come from the agent and never choose it or its data
+// directory (loadHookRuntimeConfig), so an agent that points them at another
+// default-tier config cannot reopen a strict outage. A config kept outside
+// its data directory closes the outage.
 //
 // An install or upgrade of this account's DefenseClaw is not an outage
 // either: while any folder an installer of this account may hold carries its
 // .install.lock, the answer is "closed" (hookOutageInstallHeld).
 func hookOutageFailModeNow(connectorName, hookDir string) string {
+	return hookOutageFailModeFor(connectorName, hookDir, false)
+}
+
+// hookOutageFailModeFor is hookOutageFailModeNow; installWindow leaves out
+// the install-lock check only (hookOutageInstallHeld). It is the mode an
+// install window gives a call this account's gateway answered: "open" (the
+// default and permissive tiers, or a saved open) lets that answer through
+// with a warning, "closed" (the strict tier, a saved closed, a managed or
+// Secure Client install, any doubt) blocks it.
+func hookOutageFailModeFor(connectorName, hookDir string, installWindow bool) string {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
 	hookDir = strings.TrimSpace(hookDir)
 	if name == "" || hookDir == "" || !filepath.IsAbs(hookDir) {
 		return "closed"
 	}
 	dataDir := filepath.Dir(filepath.Clean(hookDir))
-	loaded, err := config.LoadFromFile(filepath.Join(dataDir, config.DefaultConfigName))
+	loaded, ownDataDir, err := loadHookRuntimeConfig(filepath.Join(dataDir, config.DefaultConfigName))
 	if err != nil || loaded == nil || managed.IsManagedEnterprise(loaded.DeploymentMode) || loaded.SecureClientIntegration() {
 		return "closed"
 	}
@@ -70,14 +81,14 @@ func hookOutageFailModeNow(connectorName, hookDir string) string {
 			return "closed"
 		}
 	}
-	// An environment that moves the loader's data directory, or a config
-	// whose data_dir is elsewhere, is not this runtime's config. A relative
-	// data_dir names a folder only from some working directory (the agent's
-	// here, the installer's when it locks), so it is never this one.
-	if !filepath.IsAbs(loaded.DataDir) || !pathidentity.Same(loaded.DataDir, dataDir) {
+	// A config whose data_dir is elsewhere is not this runtime's config.
+	// The data directory is the one hook-data-dir names for install.sh to
+	// lock (loadHookRuntimeConfig): a relative data_dir is taken from the
+	// config's folder, never from the agent's working directory.
+	if ownDataDir == "" || !pathidentity.Same(ownDataDir, dataDir) {
 		return "closed"
 	}
-	if hookOutageInstallHeld(dataDir) {
+	if !installWindow && hookOutageInstallHeld(dataDir) {
 		return "closed"
 	}
 	if loaded.EffectiveHookOutageFailModeForConnector(name) == "open" {
@@ -90,7 +101,8 @@ func hookOutageFailModeNow(connectorName, hookDir string) string {
 // account's DefenseClaw while the hook runtime in dataDir asks to let an
 // outage through. The installer stops the gateway and starts it again when
 // it is done; that window is never an outage. It is held when the
-// .install.lock of any folder below exists, as any file type, or one of
+// .install.lock of any folder below exists, as any file type, and is not
+// stale (its deadline passed or its installer is proven gone), or one of
 // those folders exists but is not a folder that can be searched, so the lock
 // cannot be shown absent (hookexec.InstallLockHeld):
 //
@@ -154,6 +166,7 @@ func outageInstallLockHeld(root string) bool {
 
 func init() {
 	var connectorName, hookDir string
+	var installWindow bool
 	cmd := &cobra.Command{
 		Use:    "hook-outage-mode",
 		Short:  "Print the gateway-outage mode the config gives a per-user connector's hooks now",
@@ -163,12 +176,13 @@ func init() {
 		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			_, err := fmt.Fprintln(cmd.OutOrStdout(), hookOutageFailModeNow(connectorName, hookDir))
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), hookOutageFailModeFor(connectorName, hookDir, installWindow))
 			return err
 		},
 	}
 	cmd.Flags().StringVar(&connectorName, "connector", "", "connector name")
 	cmd.Flags().StringVar(&hookDir, "hook-dir", "", "absolute hooks folder of the hook runtime asking")
+	cmd.Flags().BoolVar(&installWindow, "install-window", false, "print the mode for a call the gateway answered while an installer holds the data directory")
 	_ = cmd.MarkFlagRequired("connector")
 	rootCmd.AddCommand(cmd)
 }

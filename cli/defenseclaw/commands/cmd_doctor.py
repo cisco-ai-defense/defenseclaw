@@ -2742,9 +2742,11 @@ _INSTALL_LOCK_MAX_SECONDS = 6 * 60 * 60
 def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, str]:
     """("none" | "stale" | "recovery" | "held", detail) of the lock in folder.
 
-    "stale" only on proof that its installer is gone: the lock is a folder, no
-    interrupted-install record sits beside it, and its pid names no process,
-    or it has had no pid for ten minutes, or it is older than six hours.
+    The one rule of every per-user hook (hookexec installLockStale): "stale"
+    when the lock is a folder whose deadline has passed (the one its owner
+    record names, never later than six hours after it was made), or, before
+    that, when no interrupted-install record sits beside it and its pid names
+    no process, or it has had no pid for ten minutes.
     """
     from defenseclaw.process_liveness import pid_alive
 
@@ -2757,6 +2759,26 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
         return ("held", f"{lock} cannot be inspected ({exc.strerror or exc})")
     if not stat.S_ISDIR(info.st_mode):
         return ("held", f"{lock} is not a folder")
+    deadline = info.st_mtime + _INSTALL_LOCK_MAX_SECONDS
+    deadline_file = os.path.join(lock, "deadline")
+    recorded_unreadable = False
+    try:
+        deadline_info = os.lstat(deadline_file)
+        if not stat.S_ISREG(deadline_info.st_mode) or deadline_info.st_size > 64:
+            recorded_unreadable = True
+        else:
+            with open(deadline_file, encoding="ascii", errors="replace") as handle:
+                recorded = handle.read(64).strip()
+            if re.fullmatch(r"[1-9][0-9]{0,11}", recorded) and int(recorded) < deadline:
+                deadline = int(recorded)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        recorded_unreadable = True
+    if time.time() > deadline:
+        return ("stale", f"{lock} is past its deadline")
+    if recorded_unreadable:
+        return ("held", f"{deadline_file} cannot be read")
     for record in _INSTALL_RECOVERY_RECORDS:
         path = os.path.join(folder, record)
         try:
@@ -2767,8 +2789,6 @@ def _install_lock_state(folder: str, name: str = ".install.lock") -> tuple[str, 
             return ("held", f"{path} cannot be inspected")
         return ("recovery", f"{lock} is kept by an interrupted install ({path})")
     age = time.time() - info.st_mtime
-    if age > _INSTALL_LOCK_MAX_SECONDS:
-        return ("stale", f"{lock} is older than six hours")
     pid_file = os.path.join(lock, "pid")
     text = ""
     try:
