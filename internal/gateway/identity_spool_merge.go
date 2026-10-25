@@ -79,21 +79,6 @@ func awaitingSpoolUPN(facts useridentity.DirectoryFacts) bool {
 	return false
 }
 
-// macOSOwnDirectory is the directory the gateway's own Open Directory answer
-// proves for an account: local for an account of the local node
-// (darwinLocalNodeAccount) that is not linked to Platform SSO, else unknown
-// until the guardian's record names it. A Platform SSO account is held by
-// the local node too, but it is the identity provider's account, and only
-// the guardian's record carries its UPN. Calling it local let a users entry
-// naming that UPN miss it while the record was absent or aged out, so the
-// account got the default profile where it was refused (GAP-0532).
-func macOSOwnDirectory(localNode, platformSSOLinked bool) useridentity.Directory {
-	if localNode && !platformSSOLinked {
-		return useridentity.DirectoryLocal
-	}
-	return ""
-}
-
 // spoolRecordNote is the explain note for an account the enumerator has no
 // current identity record for. On Windows a group assignment can match only
 // through that record, so the answer, usually match=default, is not final.
