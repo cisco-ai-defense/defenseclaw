@@ -136,7 +136,7 @@ type agentHookRequest struct {
 	// toolCallShapeUnparsed: ToolCallUnparsed for a reason other than the
 	// missing write evidence of an argumentless Copilot callback (a
 	// duplicate key, a decoy dialect field, both argument fields, a decoder
-	// refusal). Such a callback never reuses an earlier decision.
+	// refusal). Such a callback is never bound to an earlier call.
 	toolCallShapeUnparsed bool
 	Content               string
 	Direction             string
@@ -500,8 +500,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// Only the write evidence below is what an argumentless permission
 		// callback lacks by design (copilotPermissionJoin.match).
 		req.toolCallShapeUnparsed = req.ToolCallUnparsed
+		// writeProofCWD is the directory the write proof places targets in;
+		// a permission callback bound to an earlier call (below) is proven
+		// again the same way.
+		writeProofCWD := req.CWD
 		if structuredToolRoute && connectorName == "copilot" &&
-			copilotWriteCallUnproven(req.ToolName, req.ToolArgs, req.CWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
+			copilotWriteCallUnproven(req.ToolName, req.ToolArgs, writeProofCWD, hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context())) {
 			req.ToolCallUnparsed = true
 		}
 		a.hermesTasks.fill(&req)
@@ -616,7 +620,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				a.handleHookPanic(ctx, connectorName, req.HookEventName, recovered)
 				// A later empty permission callback must not reuse an older
 				// pre-tool allow after this call failed before its decision.
-				a.copilotPermission.record(ctx, req, agentHookResponse{Action: "block"}, "")
+				a.copilotPermission.record(ctx, req, false)
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
@@ -724,27 +728,29 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// audit envelope without a second pass here.
 		accountingCtx := ctx
 		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
+		// An argumentless Copilot permission callback is bound to the call of
+		// the one audited preToolUse allow it follows and decided again, now,
+		// like that call: its write targets are proven and resolved as they
+		// are now, under the live policy and sandbox floor. An earlier
+		// decision is never reused. Every callback consumes the candidate; one
+		// that cannot be bound, or whose bound call cannot be proven now (a
+		// private managed home the user-side hook did not prove for this
+		// callback), keeps its own unparsed decision.
+		if tool, args, bound := a.copilotPermission.match(ctx, req, rawBody); bound {
+			req.ToolName, req.ToolArgs, req.ToolArgsProjectionUncertain = tool, args, false
+			req.ToolCallUnparsed = copilotWriteCallUnproven(tool, args, writeProofCWD,
+				hookActiveHome(r.Context()), copilotManagedPatchEvidence(r.Context()))
+		}
 		// An uncertain identity refuses before any profile-specific gate can
 		// replace its missing-fact explanation.
 		resp, gated := a.refuseProfileHook(ctx, profile, connectorName, req, b, payload)
-		// A refused permission delivery still consumes any earlier candidate;
-		// it cannot be replayed as a later argumentless allow.
-		prior, matched := a.copilotPermission.match(ctx, req, profile, rawBody, a.copilotPermissionPolicy(ctx))
-		sandboxGate := requireSandboxOutcome{}
-		if !gated && matched {
-			// The earlier decision stands in for this callback's evaluation
-			// only: the live sandbox floor still refuses a host run first.
-			sandboxGate, resp, gated = a.requireSandboxHostRun(ctx, profile, connectorName, req, b, payload, requireSandboxSurface(ctx, r.Header))
-			if !gated {
-				resp, gated = prior, true
-			}
-		}
 		if !gated && req.ToolCallUnparsed &&
 			toolRoute == connector.ToolEventRouteStructuredAction {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
 			resp = a.unparsedStructuredHookResponse(ctx, profile, req)
 			gated = true
 		}
+		sandboxGate := requireSandboxOutcome{}
 		if !gated {
 			// The require-sandbox gate answers a host run of a connector
 			// the caller's proven floor requires in a sandbox.
@@ -885,11 +891,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// fail-mode verdict (finalizeAgentHook); the agent, a second Copilot
 		// delivery and the AID accounting all get that one.
 		resp = finalization.Response
-		if finalization.AuditPersisted && !panicked {
-			a.copilotPermission.record(persistCtx, req, resp, a.copilotPermissionPolicy(persistCtx))
-		} else {
-			a.copilotPermission.record(persistCtx, req, agentHookResponse{Action: "block"}, "")
-		}
+		a.copilotPermission.record(persistCtx, req, finalization.AuditPersisted && !panicked && resp.Action == "allow")
 		if delivery == nil && finalization.AuditFailedClosed {
 			wireResp = resp
 		}

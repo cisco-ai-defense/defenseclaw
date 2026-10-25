@@ -5,7 +5,7 @@ package gateway
 
 import (
 	"context"
-	"strconv"
+	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -20,37 +20,21 @@ const (
 
 // A native Copilot permissionRequest sometimes omits the call arguments and
 // call id. Only one recent, audited, allowed preToolUse in the same verified
-// caller/session/directory, decided under the same policy, can supply that
-// missing decision.
+// caller/session/directory can name the call such a callback is for. The
+// join keeps that call (tool and arguments), never its decision: the
+// callback is bound to the call and decided again, now, like any call, so
+// the write targets as they resolve now, the live policy and the live
+// sandbox floor all apply.
 type copilotPermissionJoin struct {
 	mu      sync.Mutex
 	entries map[string]copilotPermissionEntry
 }
 
 type copilotPermissionEntry struct {
-	response agentHookResponse
-	tool     string
-	// policy is copilotPermissionPolicy of the preToolUse.
-	policy    string
+	tool      string
+	args      json.RawMessage
 	at        time.Time
 	ambiguous bool
-}
-
-// copilotPermissionPolicy names the policy a request decides under: the
-// generation it pinned and the guardrail profile it resolved. A config,
-// bundle, asset or profile change between the preToolUse and its permission
-// callback makes the earlier decision stale.
-func (a *APIServer) copilotPermissionPolicy(ctx context.Context) string {
-	var parts []string
-	if g := a.decisionGeneration(ctx); g != nil {
-		parts = append(parts, strconv.FormatUint(g.N, 10), g.Digest)
-	} else {
-		parts = append(parts, "", "")
-	}
-	if resolved := resolvedGuardrailProfileFrom(ctx); resolved != nil {
-		parts = append(parts, resolved.decision.Name, resolved.decision.Digest, resolved.decision.Refused)
-	}
-	return strings.Join(parts, "\x00")
 }
 
 func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
@@ -61,7 +45,10 @@ func copilotPermissionKey(ctx context.Context, req agentHookRequest) string {
 	return scope + "\x00" + req.SessionID + "\x00" + req.CWD
 }
 
-func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest, response agentHookResponse, policy string) {
+// record keeps the call of an audited preToolUse when allowed is true. Any
+// other preToolUse in the same scope within the lifetime, allowed or not,
+// leaves the next callback ambiguous.
+func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest, allowed bool) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "preToolUse" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
 		return
@@ -92,29 +79,28 @@ func (j *copilotPermissionJoin) record(ctx context.Context, req agentHookRequest
 			return
 		}
 	}
-	if req.ToolCallUnparsed || req.ToolArgsProjectionUncertain || req.ToolName == "" || response.Action != "allow" {
+	if !allowed || req.ToolCallUnparsed || req.ToolArgsProjectionUncertain || req.ToolName == "" || len(req.ToolArgs) == 0 {
 		return
 	}
-	j.entries[key] = copilotPermissionEntry{response: response, tool: req.ToolName, policy: policy, at: now}
+	j.entries[key] = copilotPermissionEntry{tool: req.ToolName, args: append(json.RawMessage(nil), req.ToolArgs...), at: now}
 }
 
-// match reuses the prior decision only for a callback whose raw body is one
+// match returns the call of the one prior preToolUse this argumentless
+// callback stands for. It binds only a callback whose raw body is one
 // unambiguous JSON value: a decoder keeps the last of duplicate keys, so a
 // duplicate toolInput, toolName or hookName could pair a protected call with
-// an empty decoded map. Such a callback still consumes the prior decision
-// and gets its own (unparsed) gate. An argumentless callback is unparsed by
-// design (no write evidence), so req.ToolCallUnparsed alone cannot refuse
-// it; any other parser refusal (req.toolCallShapeUnparsed) does. policy is
-// copilotPermissionPolicy of the callback: a decision made under another
-// policy is stale.
-func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest, profile connector.HookProfile, raw []byte, policy string) (agentHookResponse, bool) {
+// an empty decoded map. An argumentless callback is unparsed by design (no
+// write evidence), so req.ToolCallUnparsed alone cannot refuse it; any other
+// parser refusal (req.toolCallShapeUnparsed) does. Every callback consumes
+// the prior call, bound or not, so no later callback can reuse it.
+func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest, raw []byte) (string, json.RawMessage, bool) {
 	if req.ConnectorName != "copilot" || req.HookEventName != "permissionRequest" ||
 		req.HookSurface == connector.CopilotHookSurfaceVSCodeLocal {
-		return agentHookResponse{}, false
+		return "", nil, false
 	}
 	key := copilotPermissionKey(ctx, req)
 	if key == "" {
-		return agentHookResponse{}, false
+		return "", nil, false
 	}
 	j.mu.Lock()
 	entry, exists := j.entries[key]
@@ -123,18 +109,18 @@ func (j *copilotPermissionJoin) match(ctx context.Context, req agentHookRequest,
 		exists = false
 	}
 	if exists {
-		// This callback consumes the one prior decision even if its tool or
-		// argument shape differs. Another callback cannot reuse that allow.
+		// This callback consumes the one prior call even if its tool or
+		// argument shape differs. Another callback cannot bind to it.
 		delete(j.entries, key)
 	}
 	j.mu.Unlock()
-	if !exists || entry.ambiguous || entry.policy != policy || req.toolCallShapeUnparsed ||
+	if !exists || entry.ambiguous || req.toolCallShapeUnparsed ||
 		!hookToolCallJSONUnambiguous(req.ConnectorName, raw) ||
 		!copilotEmptyPermissionArgs(req.Payload) ||
 		!copilotPermissionToolMatches(entry.tool, req.ToolName) {
-		return agentHookResponse{}, false
+		return "", nil, false
 	}
-	return copilotDedupedResponse(profile, req, entry.response), true
+	return entry.tool, append(json.RawMessage(nil), entry.args...), true
 }
 
 func copilotPermissionToolMatches(pre, permission string) bool {

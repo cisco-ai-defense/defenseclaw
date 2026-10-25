@@ -12,12 +12,9 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 )
 
@@ -148,92 +145,51 @@ func TestNativeCopilotPermissionJoinRunsTheLiveSandboxGate(t *testing.T) {
 	}
 }
 
-// A decision made under one policy generation is stale under the next:
-// a config, bundle or asset swap between the preToolUse and its permission
-// callback sends the callback to its own gate.
-func TestNativeCopilotPermissionJoinDropsAllowsOfAnotherPolicy(t *testing.T) {
-	project := t.TempDir()
-	store, logger := testStoreAndLogger(t)
-	cfg := &config.Config{}
-	cfg.Guardrail.Mode = "action"
-	cfg.Guardrail.Connector = "copilot"
-	var current atomic.Pointer[Generation]
-	current.Store(&Generation{Config: cfg, Digest: "sha256:first"})
-	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger,
-		generationSource: func() *Generation { return current.Load() }}
-
-	if action, body := copilotJoinPost(t, api, "preToolUse", copilotJoinPreToolUse(t, "same", project)); action != "allow" {
-		t.Fatalf("control preToolUse action=%s: %s", action, body)
-	}
-	if action, body := copilotJoinPost(t, api, "permissionRequest", copilotJoinPermission(t, "same", project)); action != "allow" {
-		t.Fatalf("control permission under the same policy action=%s: %s", action, body)
-	}
-
-	if action, body := copilotJoinPost(t, api, "preToolUse", copilotJoinPreToolUse(t, "swapped", project)); action != "allow" {
-		t.Fatalf("preToolUse action=%s: %s", action, body)
-	}
-	current.Store(&Generation{N: 0, Config: cfg, Digest: "sha256:second"})
-	if action, body := copilotJoinPost(t, api, "permissionRequest", copilotJoinPermission(t, "swapped", project)); action == "allow" {
-		t.Fatalf("permission callback reused an allow of the previous policy: %s", body)
-	}
-}
-
-func TestCopilotPermissionPolicyNamesGenerationAndProfile(t *testing.T) {
-	first := &Generation{N: 4, Digest: "sha256:a"}
-	api := &APIServer{generationSource: func() *Generation { return first }}
+// The join binds a callback to the call of the prior allow, never to its
+// decision, and only an unambiguous, argumentless callback of that tool.
+func TestCopilotPermissionJoinBindsTheCallNotTheDecision(t *testing.T) {
 	ctx := context.Background()
-	base := api.copilotPermissionPolicy(ctx)
-	if base != api.copilotPermissionPolicy(ctx) {
-		t.Fatal("the policy stamp of one generation is not stable")
-	}
-	for name, other := range map[string]context.Context{
-		"generation counter": withPinnedGeneration(ctx, &Generation{N: 5, Digest: "sha256:a"}),
-		"generation digest":  withPinnedGeneration(ctx, &Generation{N: 4, Digest: "sha256:b"}),
-		"profile": context.WithValue(ctx, resolvedGuardrailProfileKey{},
-			&resolvedGuardrailProfile{decision: profileDecision{Name: "contractors", Digest: "sha256:p"}}),
-		"refused profile": context.WithValue(ctx, resolvedGuardrailProfileKey{},
-			&resolvedGuardrailProfile{decision: profileDecision{Refused: "group"}}),
-	} {
-		if api.copilotPermissionPolicy(other) == base {
-			t.Errorf("%s: a different policy has the same stamp", name)
-		}
-	}
-	if (&APIServer{}).copilotPermissionPolicy(ctx) == base {
-		t.Error("no generation has the stamp of a published one")
-	}
-}
-
-func TestCopilotPermissionJoinRefusesShapeUnparsedAndStalePolicy(t *testing.T) {
-	ctx := context.Background()
+	args := json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`)
 	pre := agentHookRequest{ConnectorName: "copilot", HookEventName: "preToolUse", SessionID: "native",
-		CWD: "/tmp/native", ToolName: "apply_patch"}
+		CWD: "/tmp/native", ToolName: "apply_patch", ToolArgs: args}
 	permission := func() agentHookRequest {
 		return agentHookRequest{ConnectorName: "copilot", HookEventName: "permissionRequest",
 			SessionID: "native", CWD: "/tmp/native", ToolName: "edit", ToolCallUnparsed: true,
 			Payload: map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{}}}
 	}
 	raw := []byte(`{"hookName":"permissionRequest","toolName":"edit","toolInput":{}}`)
-	allow := agentHookResponse{Action: "allow"}
 	for _, tc := range []struct {
 		name   string
-		mutate func(*agentHookRequest) string
+		record func(*copilotPermissionJoin)
+		mutate func(*agentHookRequest)
 		want   bool
 	}{
-		{"argumentless", func(*agentHookRequest) string { return "p1" }, true},
-		{"shape unparsed", func(req *agentHookRequest) string { req.toolCallShapeUnparsed = true; return "p1" }, false},
-		{"another policy", func(*agentHookRequest) string { return "p2" }, false},
+		{"argumentless after an allow", func(j *copilotPermissionJoin) { j.record(ctx, pre, true) }, func(*agentHookRequest) {}, true},
+		{"after a block", func(j *copilotPermissionJoin) { j.record(ctx, pre, false) }, func(*agentHookRequest) {}, false},
+		{"two preToolUse calls", func(j *copilotPermissionJoin) { j.record(ctx, pre, true); j.record(ctx, pre, true) }, func(*agentHookRequest) {}, false},
+		{"an allow then a block", func(j *copilotPermissionJoin) { j.record(ctx, pre, true); j.record(ctx, pre, false) }, func(*agentHookRequest) {}, false},
+		{"shape unparsed", func(j *copilotPermissionJoin) { j.record(ctx, pre, true) }, func(req *agentHookRequest) { req.toolCallShapeUnparsed = true }, false},
+		{"another tool", func(j *copilotPermissionJoin) { j.record(ctx, pre, true) }, func(req *agentHookRequest) { req.ToolName = "powershell" }, false},
+		{"another directory", func(j *copilotPermissionJoin) { j.record(ctx, pre, true) }, func(req *agentHookRequest) { req.CWD = "/tmp/other" }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var join copilotPermissionJoin
-			join.record(ctx, pre, allow, "p1")
+			tc.record(&join)
 			req := permission()
-			policy := tc.mutate(&req)
-			if _, ok := join.match(ctx, req, connector.HookProfile{}, raw, policy); ok != tc.want {
+			tc.mutate(&req)
+			tool, bound, ok := join.match(ctx, req, raw)
+			if ok != tc.want {
 				t.Fatalf("match=%v want %v", ok, tc.want)
 			}
-			// Either way the callback consumed the one prior decision.
-			if _, ok := join.match(ctx, permission(), connector.HookProfile{}, raw, "p1"); ok {
-				t.Fatal("a second callback reused the consumed decision")
+			if ok && (tool != "apply_patch" || string(bound) != string(args)) {
+				t.Fatalf("bound call %s %s, want the preToolUse call", tool, bound)
+			}
+			// Either way a callback of the same scope consumed the one
+			// prior call.
+			if req.CWD == permission().CWD {
+				if _, _, ok := join.match(ctx, permission(), raw); ok {
+					t.Fatal("a second callback reused the consumed call")
+				}
 			}
 		})
 	}

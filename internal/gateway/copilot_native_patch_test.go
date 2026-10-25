@@ -20,7 +20,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/copilotargs"
-	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/hookpaths"
 )
 
@@ -163,16 +162,16 @@ func TestCopilotPermissionJoinCapacityStillInvalidatesPrior(t *testing.T) {
 		t.Fatal("expected verified per-user scope")
 	}
 	join := copilotPermissionJoin{entries: map[string]copilotPermissionEntry{
-		key: {tool: "apply_patch", response: agentHookResponse{Action: "allow"}, at: time.Now()},
+		key: {tool: "apply_patch", args: json.RawMessage(`"*** Begin Patch\n*** Add File: README.md\n+x\n*** End Patch\n"`), at: time.Now()},
 	}}
 	for i := 1; i < copilotPermissionJoinMax; i++ {
 		join.entries["other"+strconv.Itoa(i)] = copilotPermissionEntry{at: time.Now()}
 	}
-	join.record(ctx, pre, agentHookResponse{Action: "block"}, "")
+	join.record(ctx, pre, false)
 	permission := agentHookRequest{ConnectorName: "copilot", HookEventName: "permissionRequest",
 		SessionID: "native", CWD: "/tmp/native", ToolName: "edit",
 		Payload: map[string]any{"hookName": "permissionRequest", "toolName": "edit", "toolInput": map[string]any{}}}
-	if _, ok := join.match(ctx, permission, connector.HookProfile{}, []byte(`{"hookName":"permissionRequest","toolName":"edit","toolInput":{}}`), ""); ok {
+	if _, _, ok := join.match(ctx, permission, []byte(`{"hookName":"permissionRequest","toolName":"edit","toolInput":{}}`)); ok {
 		t.Fatal("protected call left an earlier allowed decision reusable at cache capacity")
 	}
 }
