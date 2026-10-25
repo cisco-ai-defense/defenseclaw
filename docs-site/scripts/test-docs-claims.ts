@@ -83,12 +83,19 @@ describe('Known 1.0.4 upgrade and policy limits', () => {
     assert.ok(limits, 'upgrade and policy limits section is missing');
     assert.doesNotMatch(pageText, /release lead|fixes do not ship|\btrain\b|\bT12\b|\bround\b/i);
     const microvm = limits.split('**Legacy MicroVM guests:**')[1]?.split('- **')[0] ?? '';
-    assert.match(microvm, /save[\s\S]*?recreate/i);
+    const doctor = source('internal/openshell/sandboxcli/doctor.go');
+    const lifecycle = source('internal/openshell/sandboxcli/lifecycle.go');
+    assert.match(doctor, /if sb\.Phase == "ready" \{[\s\S]{0,250}CommandName \+ " stop "/);
+    assert.match(lifecycle, /then `%s start %s` \(or `connect`\) runs it on the gateway's own supervisor/);
+    assert.match(microvm, /ready guest[\s\S]*?`defenseclaw sandbox stop NAME`[\s\S]*?`defenseclaw sandbox start NAME`/i);
+    assert.doesNotMatch(microvm.split('For a completed guest')[0], /recreat|delet/i);
+    assert.match(microvm, /completed guest[\s\S]*?`MainProcessFailed`[\s\S]*?`defenseclaw sandbox start NAME --end-vm`[\s\S]*?loses unwritten work/i);
+    assert.match(microvm, /OpenShell 0\.1\.3[\s\S]*?`defenseclaw sandbox delete NAME`[\s\S]*?deletion removes the guest and its work/i);
     const policy = limits.split('**Managed policy before launch:**')[1]?.split('- **')[0] ?? '';
     for (const word of ['root-owned', 'doctor', 'verify']) assert.ok(policy.includes(word));
     const upgrade = limits.split('**Managed upgrades from 1.0.2 and 1.0.3:**')[1] ?? '';
     assert.match(upgrade, /stop agent sessions[^.]*gateway is healthy/i);
-    assert.match(page('get-started/upgrade.mdx'), /For a legacy MicroVM guest[\s\S]{0,250}save[\s\S]{0,200}before upgrading[\s\S]{0,200}recreate[\s\S]{0,200}Known limits in 1\.0\.4/i);
+    assert.match(page('get-started/upgrade.mdx'), /For a legacy MicroVM guest[\s\S]{0,250}save[\s\S]{0,200}before upgrading[\s\S]{0,200}ready[\s\S]{0,200}`defenseclaw sandbox stop NAME`[\s\S]{0,100}`defenseclaw sandbox start NAME`[\s\S]{0,250}Known limits in 1\.0\.4/i);
   });
 });
 
