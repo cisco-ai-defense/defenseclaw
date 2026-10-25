@@ -86,12 +86,20 @@ func instructionStartupFromContext(ctx context.Context) instructionStartupView {
 	return view
 }
 
+// instructionStartupKey is the key of a session's instruction-file state:
+// scoped to its sandbox binding and to its verified caller, as the session
+// start gate's key is (sessionStartGateKey), so two enrolled users whose
+// agents use the same session ID keep separate snapshots and loads.
 func instructionStartupKey(ctx context.Context, connector, sessionID string) (activeAgentContextKey, bool) {
 	scope := ""
 	if binding, ok := sandboxauth.FromContext(ctx); ok {
 		scope = sandboxBindingScope(binding)
 	}
-	return validScopedActiveAgentContextKey(scope, connector, sessionID)
+	key, ok := validScopedActiveAgentContextKey(scope, connector, sessionID)
+	if ok {
+		key.caller = verifiedSessionCaller(ctx)
+	}
+	return key, ok
 }
 
 // instructionGatewayReadsFiles reports whether the gateway reads the

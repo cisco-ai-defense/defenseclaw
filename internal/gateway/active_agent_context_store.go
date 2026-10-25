@@ -24,8 +24,24 @@ import (
 
 const maxInstructionLoadRecordBytes = 1 << 20
 
+// maxInstructionLoadRecords and maxInstructionLoadStoreBytes bound the saved
+// records. They hold far more sessions than the in-memory cache
+// (maxActiveAgentContextSessions), so a session the cache evicts restores
+// its first sighting from its record until it ends: churn through newer
+// sessions never turns a file it created into one that was there before it.
+// Only when the saved sessions that never ended pass these bounds does the
+// oldest one lose its record; its next call then takes a new first sighting,
+// which protects every instruction file that exists then (never fewer).
+const (
+	maxInstructionLoadRecords    = 16 * maxActiveAgentContextSessions
+	maxInstructionLoadStoreBytes = 64 << 20
+)
+
 type instructionLoadRecord struct {
-	Scope                string   `json:"scope,omitempty"`
+	Scope string `json:"scope,omitempty"`
+	// Caller is the verified caller the session belongs to
+	// (activeAgentContextKey.caller); empty on a per-user gateway.
+	Caller               string   `json:"caller,omitempty"`
 	Connector            string   `json:"connector"`
 	Session              string   `json:"session"`
 	Files                []string `json:"files,omitempty"`
@@ -53,7 +69,12 @@ func (a *APIServer) instructionLoadDir() string {
 }
 
 func instructionLoadRecordPath(dir string, key activeAgentContextKey) string {
-	sum := sha256.Sum256([]byte(key.scope + "\x00" + key.connector + "\x00" + key.sessionID))
+	name := key.scope + "\x00" + key.connector + "\x00" + key.sessionID
+	if key.caller != "" {
+		// A per-user gateway's record keeps the name earlier builds gave it.
+		name += "\x00caller\x00" + key.caller
+	}
+	sum := sha256.Sum256([]byte(name))
 	return filepath.Join(dir, hex.EncodeToString(sum[:])+".json")
 }
 
@@ -73,7 +94,7 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 		return
 	}
 	data, err := json.Marshal(instructionLoadRecord{
-		Scope: key.scope, Connector: key.connector, Session: key.sessionID,
+		Scope: key.scope, Caller: key.caller, Connector: key.connector, Session: key.sessionID,
 		Files: session.files, CaseInsensitiveFiles: session.caseInsensitiveFiles,
 		LoadedIdentities: session.identities, StartupFiles: session.startupFiles,
 		StartupKnown: session.startupKnown, StartupDirs: session.startupDirs,
@@ -95,22 +116,29 @@ func (a *APIServer) saveInstructionLoads(key activeAgentContextKey) {
 	pruneInstructionLoads(dir)
 }
 
-// pruneInstructionLoads keeps the newest records of as many sessions as the
-// in-memory cache holds; a session that never sent SessionEnd ages out.
+// pruneInstructionLoads keeps the newest records within
+// maxInstructionLoadRecords and maxInstructionLoadStoreBytes; a session that
+// never sent SessionEnd ages out.
 func pruneInstructionLoads(dir string) {
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) <= maxActiveAgentContextSessions {
+	if err != nil {
 		return
 	}
 	type record struct {
 		name    string
 		modTime int64
+		size    int64
 	}
 	var records []record
+	var total int64
 	for _, entry := range entries {
 		if info, err := entry.Info(); err == nil && info.Mode().IsRegular() && strings.HasSuffix(entry.Name(), ".json") {
-			records = append(records, record{entry.Name(), info.ModTime().UnixNano()})
+			records = append(records, record{entry.Name(), info.ModTime().UnixNano(), info.Size()})
+			total += info.Size()
 		}
+	}
+	if len(records) <= maxInstructionLoadRecords && total <= maxInstructionLoadStoreBytes {
+		return
 	}
 	slices.SortFunc(records, func(left, right record) int {
 		switch {
@@ -121,8 +149,9 @@ func pruneInstructionLoads(dir string) {
 		}
 		return strings.Compare(left.name, right.name)
 	})
-	for len(records) > maxActiveAgentContextSessions {
+	for len(records) > 0 && (len(records) > maxInstructionLoadRecords || total > maxInstructionLoadStoreBytes) {
 		_ = os.Remove(filepath.Join(dir, records[0].name))
+		total -= records[0].size
 		records = records[1:]
 	}
 }
@@ -137,11 +166,15 @@ func (a *APIServer) restoreInstructionLoads(key activeAgentContextKey) {
 	if _, ok := a.activeAgentContext.sessionKey(key); ok {
 		return
 	}
-	record, ok := readInstructionLoadRecord(instructionLoadRecordPath(dir, key), key)
+	name := instructionLoadRecordPath(dir, key)
+	record, ok := readInstructionLoadRecord(name, key)
 	if !ok {
 		return
 	}
-	a.activeAgentContext.restoreKey(key, record, a.activeAgentContext.currentTime())
+	now := a.activeAgentContext.currentTime()
+	a.activeAgentContext.restoreKey(key, record, now)
+	// A session that is back in use is the newest to keep.
+	_ = os.Chtimes(name, now, now)
 }
 
 func readInstructionLoadRecord(name string, key activeAgentContextKey) (instructionLoadRecord, bool) {
@@ -154,7 +187,7 @@ func readInstructionLoadRecord(name string, key activeAgentContextKey) (instruct
 		return instructionLoadRecord{}, false
 	}
 	var record instructionLoadRecord
-	if json.Unmarshal(data, &record) != nil || record.Scope != key.scope ||
+	if json.Unmarshal(data, &record) != nil || record.Scope != key.scope || record.Caller != key.caller ||
 		record.Connector != key.connector || record.Session != key.sessionID ||
 		!record.StartupKnown && len(record.Files) == 0 ||
 		len(record.Files) > maxActiveAgentContextFiles ||

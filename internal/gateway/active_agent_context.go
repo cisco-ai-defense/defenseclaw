@@ -70,8 +70,12 @@ func authenticatedHookConnector(ctx context.Context) string {
 // scope is the sandbox binding ID for sandbox traffic and empty for the
 // host, so a sandbox that names a host session ID (or another sandbox's)
 // can neither read nor reset that session's instruction-file authority.
+// caller is the verified caller of a managed gateway (verifiedSessionCaller)
+// and empty on a per-user gateway, so one enrolled user's session can
+// neither read nor reset another user's session of the same ID.
 type activeAgentContextKey struct {
 	scope     string
+	caller    string
 	connector string
 	sessionID string
 }
@@ -377,6 +381,9 @@ func (cache *activeAgentContextCache) consumeEvictionLocked(
 func activeAgentContextKeyLess(left, right activeAgentContextKey) bool {
 	if left.scope != right.scope {
 		return left.scope < right.scope
+	}
+	if left.caller != right.caller {
+		return left.caller < right.caller
 	}
 	if left.connector != right.connector {
 		return left.connector < right.connector
@@ -957,12 +964,8 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	if a == nil || authenticatedHookConnector(ctx) != connectorName {
 		return activeAgentContextSnapshot{}
 	}
-	scope := ""
 	view, sandboxed := sandboxHookView(ctx)
-	if binding, ok := sandboxauth.FromContext(ctx); ok {
-		scope = sandboxBindingScope(binding)
-	}
-	key, ok := validScopedActiveAgentContextKey(scope, connectorName, req.SessionID)
+	key, ok := instructionStartupKey(ctx, connectorName, req.SessionID)
 	if !ok {
 		return activeAgentContextSnapshot{}
 	}

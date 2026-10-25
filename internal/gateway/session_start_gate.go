@@ -88,13 +88,21 @@ func sessionStartGateKey(ctx context.Context, connectorName, sessionID string) s
 	if session == "" {
 		return ""
 	}
-	caller := ""
+	return strings.ToLower(strings.TrimSpace(connectorName)) + "\x00" + verifiedSessionCaller(ctx) + "\x00" + session
+}
+
+// verifiedSessionCaller names the verified caller a session's state is
+// scoped to: the kernel-verified uid of a managed hook-socket caller, else
+// the verified user-scoped identity (a managed Windows caller's), else ""
+// (a per-user gateway has one user).
+func verifiedSessionCaller(ctx context.Context) string {
 	if peer, ok := managedHookPeerFromContext(ctx); ok {
-		caller = "uid:" + strconv.Itoa(peer.UID)
-	} else if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
-		caller = "user:" + identity
+		return "uid:" + strconv.Itoa(peer.UID)
 	}
-	return strings.ToLower(strings.TrimSpace(connectorName)) + "\x00" + caller + "\x00" + session
+	if identity, _ := ctx.Value(verifiedUserScopedIdentityContextKey{}).(string); identity != "" {
+		return "user:" + identity
+	}
+	return ""
 }
 
 // sessionStartGateEvent reports a call the gate holds back: a prompt or a
