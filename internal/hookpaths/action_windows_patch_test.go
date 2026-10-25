@@ -28,6 +28,19 @@ func TestActionWindowsPatchHereString(t *testing.T) {
 		{"protected target in a second envelope", envelope("*** Add File: a.txt\n+a\n*** End Patch\n*** Begin Patch\n*** Add File: C:\\Users\\dcw4-std2\\.ssh\\authorized_keys\n+b\n"), "dynamic-argument"},
 		{"protected extra argument", envelope("*** Add File: a.txt\n+a\n") + " C:\\Users\\dcw4-std2\\.ssh\\authorized_keys", "dynamic-argument"},
 		{"protected file-fed patch", "apply_patch C:\\Users\\dcw4-std2\\.ssh\\authorized_keys", "dynamic-argument"},
+		// A quote inside the here-string body does not end it (loop round 2).
+		{"apostrophe in content", envelope("*** Add File: notes.txt\n+It's fine.\n"), ""},
+		{"apostrophe in content with CRLF", "apply_patch @'\r\n*** Begin Patch\r\n*** Add File: notes.txt\r\n+It's fine.\r\n*** End Patch\r\n'@", ""},
+		{"quotes of both kinds in content", envelope("*** Update File: src\\a.ts\n@@\n-const a = 'x'\n+const a = \"it's\"\n"), ""},
+		{"piped apostrophe in content", "@'\n*** Begin Patch\n*** Add File: notes.txt\n+It's fine.\n*** End Patch\n'@ | apply_patch", ""},
+		{"piped apostrophe then a command", "@'\n*** Begin Patch\n*** Add File: notes.txt\n+don't\n*** End Patch\n'@ | apply_patch; Get-Content notes.txt", ""},
+		{"apostrophe beside a protected target", envelope("*** Add File: notes.txt\n+It's fine.\n*** Add File: C:\\Users\\dcw4-std2\\.ssh\\authorized_keys\n+k\n"), "dynamic-argument"},
+		{"piped apostrophe beside a protected target", "@'\n*** Begin Patch\n*** Add File: ~/.ssh/authorized_keys\n+it's mine\n*** End Patch\n'@ | apply_patch", "dynamic-argument"},
+		{"apostrophe then a protected write", envelope("*** Add File: a.txt\n+It's\n") + "; Set-Content C:\\Users\\dcw4-std2\\.ssh\\authorized_keys k", "dynamic-argument"},
+		{"early closer then a protected write", "apply_patch @'\n*** Begin Patch\n*** Add File: a.txt\n'@; Set-Content ~\\.ssh\\authorized_keys k\n+x\n*** End Patch\n'@", "shell-parse"},
+		{"indented closer", "apply_patch @'\n*** Begin Patch\n*** Add File: a.txt\n  '@\n+x\n*** End Patch\n'@", "shell-parse"},
+		{"unterminated here-string", "apply_patch @'\n*** Begin Patch\n*** Add File: a.txt\n+It's\n*** End Patch\n", "shell-parse"},
+		{"expanding body with an apostrophe", "apply_patch @\"\n*** Begin Patch\n*** Add File: notes.txt\n+It's $k\n*** End Patch\n\"@", "dynamic-argument"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := ActionCommandDecision(tc.command, cwd, home); got != tc.want {

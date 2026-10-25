@@ -87,7 +87,10 @@ func actionWindowsProtected(value, cwd, home string, readOnly bool) (bool, bool)
 }
 
 // actionWindowsWords treats a quoted command body as one word and emits each
-// redirection separately. An unclosed quote leaves the command unproved.
+// redirection separately. An unclosed quote leaves the command unproved. A
+// PowerShell here-string (@' or @" at the end of its line) is one word,
+// "@" + body + "@", and runs to the line that starts with its closing '@ or
+// "@: a quote inside the body (It's, "x") does not end it.
 func actionWindowsWords(command string) ([]string, bool) {
 	var words []string
 	var word strings.Builder
@@ -110,6 +113,17 @@ func actionWindowsWords(command string) ([]string, bool) {
 		}
 		switch c {
 		case '\'', '"':
+			if word.String() == "@" {
+				if end, here, ok := actionWindowsHereStringEnd(command, i); here {
+					if !ok {
+						return words, false
+					}
+					word.WriteString(command[i+1 : end])
+					word.WriteByte('@')
+					i = end + 1
+					continue
+				}
+			}
 			quote = c
 		case ' ', '\t', '\r', '\n':
 			flush()
@@ -133,6 +147,35 @@ func actionWindowsWords(command string) ([]string, bool) {
 	}
 	flush()
 	return words, quote == 0
+}
+
+// actionWindowsHereStringEnd reads the here-string whose opening quote is at
+// command[open] (after an @). here is false when only blanks do not follow
+// the quote to the end of its line: that is an ordinary quote. Otherwise end
+// is the index of the closing quote, the first line that starts with the
+// quote and @. A closing marker after blanks, which PowerShell refuses, or
+// no closing line at all leaves the text unproved (ok false).
+func actionWindowsHereStringEnd(command string, open int) (end int, here, ok bool) {
+	quote := command[open]
+	newline := strings.IndexByte(command[open+1:], '\n')
+	if newline < 0 || strings.Trim(command[open+1:open+1+newline], " \t\r") != "" {
+		return 0, false, false
+	}
+	closer := string(quote) + "@"
+	for start := open + 1 + newline + 1; start <= len(command); {
+		line := command[start:]
+		if next := strings.IndexByte(line, '\n'); next >= 0 {
+			line = line[:next]
+		}
+		if strings.HasPrefix(line, closer) {
+			return start, true, true
+		}
+		if strings.HasPrefix(strings.TrimLeft(line, " \t"), closer) {
+			return 0, true, false
+		}
+		start += len(line) + 1
+	}
+	return 0, true, false
 }
 
 func actionWindowsCommandDecision(command, cwd, home string, depth int) string {
