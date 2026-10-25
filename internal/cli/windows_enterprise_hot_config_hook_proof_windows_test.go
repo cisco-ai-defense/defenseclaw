@@ -48,16 +48,34 @@ func init() {
 		row.OK = true
 	case "absent":
 		row.Error = "owned hook command not present"
+	case "unrelated_failure", "authorization_error":
+		row.OK = true
 	default:
 		fmt.Fprintln(os.Stderr, "unexpected hot-config hook probe fixture:", fixture)
 		os.Exit(2)
 	}
+	rows := []enterpriseHookReconcileRow{row}
+	if fixture == "unrelated_failure" {
+		rows = append(rows, enterpriseHookReconcileRow{SID: "S-1-5-21-1-2-3-1003", Connector: "codex", Error: "other target failed"})
+	}
+	authorizationError := ""
+	if fixture == "authorization_error" {
+		authorizationError = "protected record invalid"
+	}
 	if err := json.NewEncoder(os.Stdout).Encode(struct {
-		Results []enterpriseHookReconcileRow `json:"results"`
-	}{Results: []enterpriseHookReconcileRow{row}}); err != nil {
+		OK                 bool                         `json:"ok"`
+		Scope              string                       `json:"scope"`
+		AuthorizationError string                       `json:"authorization_error,omitempty"`
+		Results            []enterpriseHookReconcileRow `json:"results"`
+	}{
+		OK:                 fixture == "registered",
+		Scope:              "machine_hook_registration",
+		AuthorizationError: authorizationError,
+		Results:            rows,
+	}); err != nil {
 		os.Exit(2)
 	}
-	if !row.OK {
+	if fixture != "registered" {
 		os.Exit(1)
 	}
 	os.Exit(0)
@@ -76,16 +94,19 @@ func TestWindowsHotConfigHermesRegistrationProof(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		unproven int
+		wantErr  bool
 	}{
 		{name: "registered", unproven: 0},
 		{name: "absent", unproven: 1},
+		{name: "unrelated_failure", unproven: 0},
+		{name: "authorization_error", unproven: 1, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(hermesHotConfigProbeFixtureEnv, tc.name)
 			t.Setenv(hermesHotConfigProbeManifestEnv, layout.ManifestPath)
 			got, err := windowsEnterpriseHotConfigUnprovenTargetHooks(context.Background(), os.Args[0], layout, []enterprisehooks.ManifestTarget{hermes})
-			if err != nil || len(got) != tc.unproven {
-				t.Fatalf("Hermes %s registration proof = (%+v, %v), want %d unproven", tc.name, got, err, tc.unproven)
+			if (err != nil) != tc.wantErr || len(got) != tc.unproven {
+				t.Fatalf("Hermes %s registration proof = (%+v, %v), want %d unproven, error %t", tc.name, got, err, tc.unproven, tc.wantErr)
 			}
 		})
 	}
