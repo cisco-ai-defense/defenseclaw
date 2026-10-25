@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"path"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 
@@ -2500,6 +2501,9 @@ func matchesActiveDefenseClawState(
 	candidate actionfacts.PathFact,
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
+	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		relative, ok = exactActiveDefenseClawRelative(facts, candidate)
+	}
 	if !ok || !strings.HasPrefix(relative, ".defenseclaw/") {
 		return false
 	}
@@ -2514,6 +2518,7 @@ func matchesActiveDefenseClawState(
 	}
 	for _, prefix := range []string{
 		"cache/",
+		"hooks/",
 		"policies/",
 		"quarantine/",
 		"receipts/",
@@ -2535,6 +2540,14 @@ func matchesSafeDefenseClawStateCandidate(
 	if !ok || !strings.HasPrefix(relative, ".defenseclaw/") {
 		return false
 	}
+	// POSIX Linux names are case-sensitive. A distinct .DefenseClaw tree is
+	// ordinary user work even though the catalog's regex is case-insensitive.
+	if runtime.GOOS == "linux" && candidate.Flavor == actionfacts.PathFlavorPOSIX {
+		exact, inside := exactActiveDefenseClawRelative(facts, candidate)
+		if !inside || !strings.HasPrefix(exact, ".defenseclaw/") {
+			return true
+		}
+	}
 	state := strings.TrimPrefix(relative, ".defenseclaw/")
 	for _, prefix := range []string{
 		"logs/",
@@ -2549,6 +2562,15 @@ func matchesSafeDefenseClawStateCandidate(
 	return state == "gateway.jsonl" ||
 		state == "gateway.log" ||
 		state == "gateway.pid"
+}
+
+func exactActiveDefenseClawRelative(facts actionfacts.Facts, candidate actionfacts.PathFact) (string, bool) {
+	home := strings.TrimRight(path.Clean(facts.ActiveHome), "/")
+	resolved := path.Clean(exactSemanticPathValue(candidate))
+	if home == "" || !strings.HasPrefix(resolved, home+"/") {
+		return "", false
+	}
+	return strings.TrimPrefix(resolved, home+"/"), true
 }
 
 func integritySingleChild(value, parent string) bool {

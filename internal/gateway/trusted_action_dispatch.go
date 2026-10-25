@@ -325,7 +325,7 @@ func dispatchTrustedActionWith(
 		findings = withMigratedLiteralRuleFindings(generation, request, facts, findings)
 	}()
 	defer func() {
-		findings = withActiveStateTargetMention(generation, request, findings)
+		findings = withActiveStateTargetMention(generation, request, facts, findings)
 	}()
 	if !request.simpleCommandPass {
 		defer func() {
@@ -771,16 +771,20 @@ func dispatchTrustedActionWith(
 	return withTwinProvenBlocks(finalized, twinFindings)
 }
 
-// The action target check treats a resolved active security-state mention as
-// a protected target independently of the command's operand roles. Keep its
-// finding separate from the SSH-key proof and honor the selected rule pack.
+// The action target check uses a resolved active security-state mention to
+// find candidates, then requires the executing operand's mutation role and
+// physical target before adding a finding. Keep it separate from SSH keys.
 func withActiveStateTargetMention(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
+	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
 	command, known := trustedBashCommandInput(request.Input)
 	if !known || !hookpaths.ActionStateTargetMention(command, request.Input.CWD, request.Input.ActiveHome) {
+		return findings
+	}
+	if !provenStateMutationPath(facts, request) {
 		return findings
 	}
 	const ruleID = "tamper.detector_state_write"
@@ -796,6 +800,12 @@ func withActiveStateTargetMention(
 	}
 	if index >= 0 {
 		finding = findings[index]
+		// Keep the stronger ActionFacts proof of an actual state mutation.
+		if finding.contributesToEnforcement() && finding.proof.authorizes(ruleID) &&
+			(finding.proof.kind == findingProofActionFactsSemantic ||
+				finding.proof.kind == findingProofActionFactsSubgraph) {
+			return findings
+		}
 	} else {
 		finding = adjustConfidence(request.Input.Tool, finding)
 	}
@@ -803,12 +813,58 @@ func withActiveStateTargetMention(
 	if request.EnforcementCapable {
 		finding.enforcement = findingEnforcementAllowed
 	}
-	finding = finding.withTrustedActionProof(newExactFallbackFindingProof(ruleID, true, true, true, true))
+	finding = finding.withTrustedActionProof(newFindingProof(findingProofActiveStateMutation, ruleID, true))
 	if index >= 0 {
 		findings[index] = finding
 		return findings
 	}
 	return append(findings, finding)
+}
+
+// ActionFacts' executing mutation role plus the physical active target
+// authorize the observe-mode exception. The hook's resolved target map is
+// preferred; local resolution is limited to a per-user, non-sandbox call.
+func provenStateMutationPath(facts actionfacts.Facts, request trustedActionRequest) bool {
+	projected := facts.EnforcementProjection()
+	if !projected.Authoritative() || !projected.EnforcementEligible() ||
+		projected.ActiveHome == "" {
+		return false
+	}
+	for _, candidate := range projected.Paths {
+		command, ok := integrityCommandByID(projected, candidate.CommandID)
+		if !ok || !stateCommandMutatesPath(command, candidate) {
+			continue
+		}
+		physical := ""
+		for _, spelling := range []string{candidate.Resolved, candidate.Value, candidate.Normalized} {
+			if value, found := request.ResolvedWriteTargets[spelling]; found {
+				physical = value
+				break
+			}
+		}
+		if physical == "" && !request.ProtectedHomeHook && !request.SkipLocalFilesystemResolution {
+			physical, _ = hookpaths.ResolveWriteTarget(candidate.Resolved)
+		}
+		if physical == "" {
+			continue
+		}
+		candidate.Resolved = physical
+		if matchesActiveDefenseClawState(projected, candidate) {
+			return true
+		}
+	}
+	return false
+}
+
+func stateCommandMutatesPath(command actionfacts.CommandFact, candidate actionfacts.PathFact) bool {
+	if integrityCommandMutatesPath(command, candidate) {
+		return true
+	}
+	if command.Effect != actionfacts.EffectExecute {
+		return false
+	}
+	return candidate.Access == actionfacts.PathAccessDelete && hasOperation(command, actionfacts.OperationMove) ||
+		candidate.Access == actionfacts.PathAccessMetadata && hasOperation(command, actionfacts.OperationPermissionChange)
 }
 
 // withMigratedLiteralRuleFindings blocks a tool call that a migrated 0.8.x

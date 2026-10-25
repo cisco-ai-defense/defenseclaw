@@ -260,11 +260,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
 	action := rawAction
-	wouldBlock := rawAction == "block" && mode != "action"
+	stateMutation := a.provenActiveStateMutation(ctx, verdict) && claudeCodeCanEnforce(req)
+	wouldBlock := rawAction == "block" && mode != "action" && !stateMutation
 	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
 		wouldBlock = true
-	} else if mode != "action" && rawAction == "block" {
+	} else if mode != "action" && rawAction == "block" && !stateMutation {
 		action = "allow"
 	}
 	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {

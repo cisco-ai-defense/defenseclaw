@@ -848,7 +848,7 @@ func actionProtectedStateRelative(relative string) bool {
 		"judge.db-shm", "judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
 		return true
 	}
-	for _, prefix := range []string{"cache/", "policies/", "quarantine/", "receipts/", "registries/"} {
+	for _, prefix := range []string{"cache/", "hooks/", "policies/", "quarantine/", "receipts/", "registries/"} {
 		if strings.HasPrefix(state, prefix) && len(state) > len(prefix) {
 			return true
 		}
