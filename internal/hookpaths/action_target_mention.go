@@ -680,6 +680,10 @@ func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	if !ok || resolved != root+"/.ssh" {
 		return false
 	}
+	if runtime.GOOS == "windows" && actionProtectedFileGlobReach(
+		filepath.Join(filepath.FromSlash(resolved), base), cwd, newProtectedFiles(home)) {
+		return true
+	}
 	for _, name := range AuthorizedKeysFiles {
 		if matched, _ := path.Match(strings.ToLower(base), name); matched {
 			return true

@@ -5,6 +5,7 @@ package hookpaths
 
 import (
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -200,7 +201,11 @@ func actionWordValueWithGlob(word *syntax.Word, values actionValues, cwd, home s
 	}
 	value := out.String()
 	if strings.HasPrefix(value, "~/") {
-		value = filepath.Join(home, value[2:])
+		if actionPosixWindowsHome(home) {
+			value = path.Join(home, value[2:])
+		} else {
+			value = filepath.Join(home, value[2:])
+		}
 	}
 	return value, true
 }

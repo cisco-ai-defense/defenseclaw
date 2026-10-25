@@ -287,8 +287,10 @@ func TestR104ActionArgvGlobProtectedMention(t *testing.T) {
 	if got := ActionCommandDecision(`cp payload ~/.ssh/*.pub`, cwd, home); got != "" {
 		t.Fatalf("ordinary glob decision = %q", got)
 	}
-	if got := ActionCommandDecision(`cp payload '~/.ssh/authorized_k*'`, cwd, home); got != "" {
-		t.Fatalf("literal glob decision = %q", got)
+	if runtime.GOOS != "windows" {
+		if got := ActionCommandDecision(`cp payload '~/.ssh/authorized_k*'`, cwd, home); got != "" {
+			t.Fatalf("literal glob decision = %q", got)
+		}
 	}
 }
 
@@ -386,6 +388,9 @@ func TestR104LessOutputProtectedMention(t *testing.T) {
 }
 
 func TestR104DirectoryScopedWriteSurvivesDirectoryMentionExemption(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX directory write proof uses native POSIX paths")
+	}
 	home := t.TempDir()
 	cwd := filepath.Join(home, "project")
 	ssh := filepath.Join(home, ".ssh")
