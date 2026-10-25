@@ -171,9 +171,10 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 
 // The text scan finds paths in payloads another program interprets (inline
 // interpreter code, nested shells), where a quoted "~/" may still expand.
-// When every program in the command treats its arguments as literal text or
-// literal operands, a quoted or escaped "~/" is the literal name the shell
-// passes. It is marked so the scan resolves it below the cwd, not the home.
+// When every program in the command only reads or prints its arguments and
+// nothing is redirected to a file, a quoted or escaped "~/" is the literal
+// name the shell passes. It is marked so the scan resolves it below the cwd,
+// not the home. Writers and redirects keep the conservative home spelling.
 const actionLiteralTilde = "\x1e"
 
 var actionMentionToken = regexp.MustCompile(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
@@ -184,10 +185,19 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 		if !literal {
 			return false
 		}
-		switch node.(type) {
+		switch node := node.(type) {
 		case *syntax.FuncDecl, *syntax.ProcSubst, *syntax.CoprocClause:
 			literal = false
 			return false
+		case *syntax.Redirect:
+			// Writing the text keeps the 1.0.0 mention rule: an output
+			// redirect of a key spelling is a protected-named write.
+			switch node.Op {
+			case syntax.RdrIn, syntax.DplIn, syntax.Hdoc, syntax.DashHdoc, syntax.WordHdoc:
+			default:
+				literal = false
+				return false
+			}
 		}
 		call, ok := node.(*syntax.CallExpr)
 		if !ok || len(call.Args) == 0 {
@@ -200,9 +210,8 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 		}
 		switch programBase(program) {
 		case "echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "less", "more",
-			"wc", "ls", "dir", "stat", "file", "sort", "uniq", "cut", "tr", "diff", "cmp", "touch",
-			"mkdir", "cp", "mv", "ln", "rm", "rmdir", "tee", "cd", "pushd", "popd", "pwd", "true",
-			"false", "test", "[", "basename", "dirname":
+			"wc", "ls", "dir", "stat", "file", "sort", "uniq", "cut", "tr", "diff", "cmp", "cd",
+			"pushd", "popd", "pwd", "true", "false", "test", "[", "basename", "dirname":
 		case "git":
 			// A commit or log message is text; global -c options and config
 			// can install commands that run later, so they are not literal.
@@ -211,7 +220,7 @@ func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
 				sub, fixed = StaticWord(call.Args[1], home)
 			}
 			switch sub {
-			case "commit", "log", "show", "diff", "status", "add", "grep", "tag":
+			case "commit", "log", "show", "diff", "status", "grep":
 			default:
 				fixed = false
 			}

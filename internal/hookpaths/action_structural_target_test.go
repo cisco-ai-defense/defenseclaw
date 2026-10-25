@@ -152,7 +152,6 @@ func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
 		`echo ~"/.ssh/authorized_keys"`,
 		`printf '%s\n' '~/.ssh/authorized_keys'`,
 		`x='~/.ssh/authorized_keys'; echo "$x"`,
-		`echo '~/.ssh/authorized_keys' > notes.txt`,
 		`grep -n '~/.ssh/authorized_keys' README.md`,
 		`git commit -m 'Document ~/.ssh/authorized_keys'`,
 		`echo "$prefix/authorized_keys.bak"`,
@@ -174,6 +173,9 @@ func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
 	for _, command := range []string{
 		`echo ~/.ssh/authorized_keys`,
 		`echo ~/".ssh/authorized_keys"`,
+		`echo '~/.ssh/authorized_keys' > notes.txt`,
+		`echo "check ~/.ssh/authorized_keys" > notes.txt`,
+		`cp payload '~/.ssh/authorized_keys'`,
 		`x=~/.ssh/authorized_keys; cp payload "$x"`,
 		`dd if=payload of=~/.ssh/authorized_keys`,
 		`python3 -c "import os; open(os.path.expanduser('~/.ssh/authorized_keys'),'a').write('k')"`,
