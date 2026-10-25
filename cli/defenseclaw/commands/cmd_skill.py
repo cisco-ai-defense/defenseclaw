@@ -5486,8 +5486,8 @@ def _copy_skill_tree_to_connector(
     skill_name: str,
     *,
     force: bool,
-    backups: list[tuple[str, str]],
-    installed: list[str],
+    backups: list[tuple[str, str]] | None = None,
+    installed: tuple[str, ...] | list[str] = (),
 ) -> str:
     """Copy the staged skill to ``install_root``. A replaced (--force) copy
     that this install did not write (``installed``) is moved aside and
@@ -5540,8 +5540,9 @@ def _copy_skill_tree_to_connector(
             if _is_path_alias(target_path):
                 click.echo("error: connector skill destination became a path alias", err=True)
                 raise SystemExit(1)
-            if real_target in {os.path.realpath(path) for path in installed}:
-                # This install's copy for another connector sharing the root.
+            if backups is None or real_target in {os.path.realpath(path) for path in installed}:
+                # Nothing to put back, or this install's copy for another
+                # connector sharing the root.
                 _remove_skill_tree_path(target_path)
             else:
                 backup_path = os.path.join(
