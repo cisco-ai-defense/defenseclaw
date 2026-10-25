@@ -75,7 +75,9 @@ package connector
 // Nothing else is touched: agent config files (hooks.json, config.yaml),
 // import paths (.pth), runtime records (.hookcfg), backups, every other
 // entry of the hook contract lock and every other connector's files stay as
-// they are.
+// they are. An uninstall then also removes DefenseClaw's entries from the
+// agent configs, the stub and OmniGent's import-path line
+// (removed_uninstall.go), so a removed DefenseClaw does not keep blocking.
 // RemovedConnectorLeftovers lists what is left, with the steps to remove it
 // by hand; status, doctor and every uninstall form show that list. The
 // gateway keeps the old hook routes, which block every call

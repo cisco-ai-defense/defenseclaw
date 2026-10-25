@@ -1873,6 +1873,21 @@ class MCPWriterBackupRemovalTests(unittest.TestCase):
 
 
 class GatewayTeardownOutputTests(unittest.TestCase):
+    def test_gateway_teardown_marks_the_uninstall_for_removed_connectors(self):
+        # Review fixes (uninstall lifecycle round b): the gateway removes a
+        # removed connector's agent-config entries, stub and import path only
+        # in an uninstall, so a removed DefenseClaw does not keep blocking.
+        completed = type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        with (
+            patch("shutil.which", return_value="defenseclaw-gateway"),
+            patch("subprocess.run", return_value=completed) as run_mock,
+            capture_click_output(),
+        ):
+            self.assertTrue(cmd_uninstall._run_gateway_connector_teardown("omnigent"))
+        teardown = run_mock.call_args_list[0]
+        self.assertIn("teardown", teardown.args[0])
+        self.assertEqual(teardown.kwargs["env"]["DEFENSECLAW_REMOVED_CONNECTOR_UNINSTALL"], "1")
+
     def test_gateway_teardown_uses_utf8_and_preserves_checkmark(self):
         completed = type(
             "Completed",
