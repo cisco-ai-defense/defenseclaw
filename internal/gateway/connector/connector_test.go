@@ -6266,11 +6266,17 @@ func TestRestoreCodexOtelEntriesReplacesProductExporterWithOperatorOriginal(t *t
 		t.Fatalf("product exporter was not replaced by the operator original: %#v", got)
 	}
 
+	// A backup contaminated by an earlier release holds that release's
+	// exporter: a token-shaped bearer with the product markers. The shape
+	// alone would be an operator's own bearer (review of feb972ad).
 	contaminatedOriginal, err := json.Marshal(map[string]interface{}{
 		"exporter": map[string]interface{}{
 			"otlp-http": map[string]interface{}{
 				"endpoint": "http://127.0.0.1:43189/v1/logs",
-				"headers":  map[string]interface{}{"authorization": "Bearer " + strings.Repeat("5", 64)},
+				"headers": map[string]interface{}{
+					"authorization":        "Bearer " + strings.Repeat("5", 64),
+					"x-defenseclaw-source": "codex",
+				},
 			},
 		},
 	})
@@ -6322,6 +6328,7 @@ endpoint = "https://operator.example.test/v1/logs"
 
 [otel.exporter.otlp-http.headers]
 Authorization = "bearer 5ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7e75ec7"
+X-DefenseClaw-Source = "codex"
 
 [otel.metrics_exporter.otlp-http]
 endpoint = "https://operator.example.test/v1/metrics"
