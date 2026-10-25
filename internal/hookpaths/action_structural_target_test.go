@@ -125,3 +125,105 @@ func TestR104StructuralProtectedNamedWindows(t *testing.T) {
 		})
 	}
 }
+
+// Round-k loop 2: a quoted, escaped or parameter-derived tilde is a literal
+// name, and an unresolved word names a key only through a complete path
+// component. Both forms allowed at the train baseline and blocked at
+// 6f741b9e80; the protected forms beside them must keep blocking.
+func TestR104StructuralLiteralTildeAndKeyComponent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("native POSIX fixture")
+	}
+	home := t.TempDir()
+	cwd := filepath.Join(home, "project")
+	ssh := filepath.Join(home, ".ssh")
+	for _, dir := range []string{cwd, ssh} {
+		if err := os.Mkdir(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(ssh, "authorized_keys"), []byte("marker\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range []string{
+		`echo '~/.ssh/authorized_keys'`,
+		`echo "~/.ssh/authorized_keys"`,
+		`echo \~/.ssh/authorized_keys`,
+		`echo ~"/.ssh/authorized_keys"`,
+		`printf '%s\n' '~/.ssh/authorized_keys'`,
+		`x='~/.ssh/authorized_keys'; echo "$x"`,
+		`echo '~/.ssh/authorized_keys' > notes.txt`,
+		`grep -n '~/.ssh/authorized_keys' README.md`,
+		`git commit -m 'Document ~/.ssh/authorized_keys'`,
+		`echo "$prefix/authorized_keys.bak"`,
+		`cp report "$prefix/authorized_keys.bak"`,
+		`cp report "$prefix/authorized_keys2.txt"`,
+		`cp report "$out/my_authorized_keys"`,
+		`cp report "${prefix}authorized_keys.orig"`,
+		`cp report "$dir/authorized_keys-$stamp.txt"`,
+		`cp report "$dir/$(date +%s)-authorized_keys.bak"`,
+		`cp report "$dir/${name}s"`,
+		`cp report "$dir/$name"`,
+	} {
+		t.Run("allow/"+command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "" {
+				t.Fatalf("decision = %q, want allow", got)
+			}
+		})
+	}
+	for _, command := range []string{
+		`echo ~/.ssh/authorized_keys`,
+		`echo ~/".ssh/authorized_keys"`,
+		`x=~/.ssh/authorized_keys; cp payload "$x"`,
+		`dd if=payload of=~/.ssh/authorized_keys`,
+		`python3 -c "import os; open(os.path.expanduser('~/.ssh/authorized_keys'),'a').write('k')"`,
+		`python3 add_key.py '~/.ssh/authorized_keys'`,
+		`echo 'cat payload >> ~/.ssh/authorized_keys' | s` + `h`,
+		`eval "$(echo 'cp payload ~/.ssh/authorized_keys')"`,
+		`git -c core.sshCommand='cat payload >> ~/.ssh/authorized_keys' fetch`,
+		`cp payload "$prefix/authorized_keys"`,
+		`cp payload "$prefix/authorized_keys2"`,
+		`cp payload "$prefix"/authorized_keys`,
+		`cp payload "$prefix/authorized_keys$suffix"`,
+		`cp payload "$prefix/authorized_key$s"`,
+		`cp payload "$prefix/authorized_k"*`,
+		`cp payload "$prefix/${base}_keys"`,
+		`cp payload "$prefix/$(printf %s authorized_keys)"`,
+		`cp payload "$prefix/${x:+authorized_keys}"`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+}
+
+func TestR104WindowsDynamicKeyComponent(t *testing.T) {
+	const home = `C:\Users\b00`
+	const cwd = `C:\work`
+	for _, command := range []string{
+		`Copy-Item payload $root\.ssh\authorized_keys.bak`,
+		`Copy-Item payload %ROOT%\.ssh\authorized_keys2.txt`,
+		`Copy-Item payload $env:TEMP\.ssh\my_authorized_keys`,
+	} {
+		t.Run("allow/"+command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "" {
+				t.Fatalf("decision = %q, want allow", got)
+			}
+		})
+	}
+	for _, command := range []string{
+		`Copy-Item payload $root\.ssh\authorized_keys`,
+		`Copy-Item payload %ROOT%\.ssh\AUTHORIZED_KEYS2`,
+		`Copy-Item payload $root\.ssh\authorized_keys$sfx`,
+		`Copy-Item payload "$root\.ssh\authorized_keys"`,
+		`Copy-Item payload $root\.ssh\authorized_k*`,
+	} {
+		t.Run(command, func(t *testing.T) {
+			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
+				t.Fatalf("decision = %q, want protected-target", got)
+			}
+		})
+	}
+}

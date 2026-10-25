@@ -200,14 +200,25 @@ func actionWordValueWithGlob(word *syntax.Word, values actionValues, cwd, home s
 		return "", false
 	}
 	value := out.String()
-	if strings.HasPrefix(value, "~/") {
+	if actionWordTildePrefix(word) {
 		if actionPosixWindowsHome(home) {
-			value = path.Join(home, value[2:])
+			value = path.Join(home, value[1:])
 		} else {
-			value = filepath.Join(home, value[2:])
+			value = filepath.Join(home, value[1:])
 		}
 	}
 	return value, true
+}
+
+// The shell expands a leading tilde only when it is unquoted and unescaped
+// and ends at an unquoted slash or the end of the word. A quoted, escaped or
+// parameter-derived tilde stays a literal directory name below the cwd.
+func actionWordTildePrefix(word *syntax.Word) bool {
+	if len(word.Parts) == 0 {
+		return false
+	}
+	lit, ok := word.Parts[0].(*syntax.Lit)
+	return ok && (strings.HasPrefix(lit.Value, "~/") || lit.Value == "~" && len(word.Parts) == 1)
 }
 
 // actionBoundProgramWords accepts only a simple program parameter immediately

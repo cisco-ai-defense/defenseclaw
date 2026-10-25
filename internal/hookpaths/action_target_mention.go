@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"unicode/utf16"
@@ -48,11 +49,11 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 	}
 	protected := newProtectedFiles(home)
 	ssh := filepath.Join(home, ".ssh")
-	check := func(value string) bool {
+	check := func(value string, tilde bool) bool {
 		if len(value) == 0 || len(value) > MaxWriteTargetPathBytes {
 			return false
 		}
-		if strings.HasPrefix(value, "~/") {
+		if tilde && strings.HasPrefix(value, "~/") {
 			if actionPosixWindowsHome(home) {
 				value = path.Join(home, value[2:])
 			} else {
@@ -92,11 +93,13 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 				value, known = actionWordValueWithGlob(word, values, effectiveCWD, home, true)
 			}
 			if known && (!strings.ContainsAny(value, "*?[]") || activeGlob) {
-				if check(value) {
+				// A parsed value has had its shell tilde expanded already;
+				// a remaining "~/" was quoted, escaped or parameter-derived.
+				if check(value, false) {
 					return true
 				}
 				if _, target, attached := strings.Cut(value, "="); attached {
-					return check(target)
+					return check(target, actionAttachedTildeExpands(word, command))
 				}
 				return false
 			}
@@ -149,16 +152,133 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		}
 	}
 	text := actionMaskLiteralMetacharacters(command)
+	if parsed && actionLiteralArgumentProgramsOnly(file, home) {
+		text = actionMarkLiteralTildes(text)
+	}
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "${HOME}/", home+"/"), "$HOME/", home+"/")
-	for _, token := range unprovenPathToken.FindAllString(text, -1) {
+	for _, token := range actionMentionToken.FindAllString(text, -1) {
+		literalTilde := strings.HasPrefix(token, actionLiteralTilde)
+		token = strings.ReplaceAll(token, actionLiteralTilde, "~")
 		if strings.ContainsAny(token, "*?[]") && (parsed || !strings.ContainsAny(token, "/\\")) {
 			continue // Shell case labels and patch text are not argv glob operands.
 		}
-		if check(token) {
+		if check(token, !literalTilde) {
 			return true
 		}
 	}
 	return false
+}
+
+// The text scan finds paths in payloads another program interprets (inline
+// interpreter code, nested shells), where a quoted "~/" may still expand.
+// When every program in the command treats its arguments as literal text or
+// literal operands, a quoted or escaped "~/" is the literal name the shell
+// passes. It is marked so the scan resolves it below the cwd, not the home.
+const actionLiteralTilde = "\x1e"
+
+var actionMentionToken = regexp.MustCompile(`[A-Za-z0-9_./~*?\[\]\x1e-]+`)
+
+func actionLiteralArgumentProgramsOnly(file *syntax.File, home string) bool {
+	literal := true
+	syntax.Walk(file, func(node syntax.Node) bool {
+		if !literal {
+			return false
+		}
+		switch node.(type) {
+		case *syntax.FuncDecl, *syntax.ProcSubst, *syntax.CoprocClause:
+			literal = false
+			return false
+		}
+		call, ok := node.(*syntax.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		program, known := staticProgramWord(call.Args[0], home)
+		if !known {
+			literal = false
+			return false
+		}
+		switch programBase(program) {
+		case "echo", "printf", "grep", "egrep", "fgrep", "rg", "cat", "head", "tail", "less", "more",
+			"wc", "ls", "dir", "stat", "file", "sort", "uniq", "cut", "tr", "diff", "cmp", "touch",
+			"mkdir", "cp", "mv", "ln", "rm", "rmdir", "tee", "cd", "pushd", "popd", "pwd", "true",
+			"false", "test", "[", "basename", "dirname":
+		case "git":
+			// A commit or log message is text; global -c options and config
+			// can install commands that run later, so they are not literal.
+			sub, fixed := "", false
+			if len(call.Args) > 1 {
+				sub, fixed = StaticWord(call.Args[1], home)
+			}
+			switch sub {
+			case "commit", "log", "show", "diff", "status", "add", "grep", "tag":
+			default:
+				fixed = false
+			}
+			literal = fixed
+		default:
+			literal = false
+		}
+		return literal
+	})
+	return literal
+}
+
+// actionMarkLiteralTildes marks each quoted or escaped tilde that starts a
+// path token. The input keeps the command's quotes, so their state is exact.
+func actionMarkLiteralTildes(text string) string {
+	quoted := actionShellQuotedBytes(text)
+	var out strings.Builder
+	out.Grow(len(text))
+	for i := 0; i < len(text); i++ {
+		if text[i] == '~' && quoted[i] && i+1 < len(text) && text[i+1] == '/' &&
+			(i == 0 || !actionMentionToken.MatchString(text[i-1:i])) {
+			out.WriteString(actionLiteralTilde)
+			continue
+		}
+		out.WriteByte(text[i])
+	}
+	return out.String()
+}
+
+// actionShellQuotedBytes reports, per byte, whether the outer shell quotes
+// or escapes it.
+func actionShellQuotedBytes(command string) []bool {
+	quoted := make([]bool, len(command))
+	var quote byte
+	escaped := false
+	for i := 0; i < len(command); i++ {
+		c := command[i]
+		quoted[i] = escaped || quote != 0
+		switch {
+		case escaped:
+			escaped = false
+		case c == '\\' && quote != '\'':
+			escaped = true
+		case c == '\'' && quote == 0:
+			quote = '\''
+		case c == '\'' && quote == '\'':
+			quote = 0
+		case c == '"' && quote == 0:
+			quote = '"'
+		case c == '"' && quote == '"':
+			quote = 0
+		}
+	}
+	return quoted
+}
+
+// The shell expands a tilde right after the "=" of an assignment-shaped
+// argument (of=~/x) only when that tilde is unquoted.
+func actionAttachedTildeExpands(word *syntax.Word, command string) bool {
+	start, end := int(word.Pos().Offset()), int(word.End().Offset())
+	if start < 0 || end > len(command) || start >= end {
+		return false
+	}
+	raw := command[start:end]
+	equals := strings.IndexByte(raw, '=')
+	return equals >= 0 && equals+1 < len(raw) && raw[equals+1] == '~' &&
+		!actionShellQuotedBytes(raw)[equals+1]
 }
 
 // A Windows hook may receive a POSIX-dialect command from WSL or another
@@ -585,7 +705,8 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 	check := func(candidate string) bool {
 		candidate = strings.ReplaceAll(candidate, "`", "")
 		if strings.ContainsAny(candidate, "*?[]") {
-			return !stateOnly && actionWindowsProtectedGlobReach(candidate, cwd, home)
+			return !stateOnly && (actionWindowsProtectedGlobReach(candidate, cwd, home) ||
+				actionWindowsDynamicKeyPath(candidate))
 		}
 		resolved, ok := actionWindowsPath(candidate, cwd, home)
 		if !ok {
@@ -625,18 +746,43 @@ func actionWindowsWordMentionsTarget(word, cwd, home string, stateOnly bool) boo
 	return false
 }
 
+// A dynamic Windows word names a key only when the component after a .ssh
+// directory is a key file name or a pattern that can select one; a longer
+// literal name such as authorized_keys.bak is another file.
 func actionWindowsDynamicKeyPath(value string) bool {
 	value = strings.ToLower(strings.ReplaceAll(value, `\`, "/"))
 	if !strings.ContainsAny(value, "$%`") {
 		return false
 	}
-	for _, name := range AuthorizedKeysFiles {
-		if strings.Contains(value, "/.ssh/"+name) {
+	value = actionWindowsDynamicPart.ReplaceAllString(value, "\x00")
+	for rest := value; ; {
+		index := strings.Index(rest, "/.ssh/")
+		if index < 0 {
+			return false
+		}
+		rest = rest[index+len("/.ssh/"):]
+		end := strings.IndexAny(rest, "/\"' ;|&,)")
+		if end < 0 {
+			end = len(rest)
+		}
+		var component actionKeyComponent
+		for i := 0; i < end; i++ {
+			switch rest[i] {
+			case 0, '*':
+				component.wildcard("*")
+			case '?':
+				component.wildcard("?")
+			default:
+				component.literal(rest[i])
+			}
+		}
+		if component.selects(false) {
 			return true
 		}
 	}
-	return false
 }
+
+var actionWindowsDynamicPart = regexp.MustCompile(`\$\{[^}]*\}|\$\([^)]*\)|\$[a-z_][a-z0-9_]*(:[a-z_][a-z0-9_]*)?|%[^%/]*%`)
 
 func actionWindowsProtectedGlobReach(pattern, cwd, home string) bool {
 	pattern = strings.ReplaceAll(pattern, `\`, "/")
