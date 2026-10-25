@@ -1167,7 +1167,9 @@ defenseclaw_log_hook_failure() {
   esac
   # A per-user outage the hook lets through gets its one warning, with the
   # cause and the fix, from defenseclaw_emit_unreachable_stderr.
-  if [ "$outcome" = "fail_open" ] && ! { [ "$category" = transport ] && defenseclaw_per_user_outage_open; }; then
+  if [ "$outcome" = "fail_open" ] &&
+     ! { [ "$category" = transport ] && defenseclaw_per_user_outage_open; } &&
+     ! { [[ "$reason" = "stdin body exceeded "* ]] && defenseclaw_per_user_oversize_open; }; then
     printf 'defenseclaw: WARNING hook fail-open; inspection bypassed (connector=%s hook=%s category=%s): %s\n' \
       "$(defenseclaw_json_escape "$connector")" "$(defenseclaw_json_escape "$hook_name")" \
       "$(defenseclaw_json_escape "$category")" "$(defenseclaw_json_escape "$reason")" >&2 || true
@@ -1236,6 +1238,25 @@ defenseclaw_per_user_outage_open() {
   case "$connector" in
     ""|inspect|*[!a-z0-9_-]*) return 1 ;;
   esac
+  [ -n "${HOOK_DIR:-}" ] || return 1
+  record="${HOOK_DIR}/.hookcfg.${connector}"
+  recorded="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_CONNECTOR 2>/dev/null)" || return 1
+  mode="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_FAIL_MODE 2>/dev/null)" || return 1
+  source="$(defenseclaw_flat_hookcfg_value "$record" FAIL_MODE_SOURCE 2>/dev/null)" || return 1
+  [ "$recorded" = "$connector" ] && [ "$mode" = open ] && [ "$source" = config ]
+}
+
+# A completed bounded read that found an oversized post-tool result may be
+# surfaced in the balanced per-user tier. The installed flat record carries
+# that tier; this check does not classify a gateway answer as an outage.
+defenseclaw_per_user_oversize_open() {
+  case "${DEFENSECLAW_MANAGED_HOOK:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
+  [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return 1
+  [ "${_DC_SECURE_CLIENT_HOOK:-0}" != 1 ] || return 1
+  case "${DEFENSECLAW_STRICT_AVAILABILITY:-0}" in 1|true|TRUE|yes|YES) return 1 ;; esac
+  ! defenseclaw_install_held || return 1
+  local connector="${DEFENSECLAW_HOOK_CONNECTOR:-}" record="" recorded="" mode="" source=""
+  case "$connector" in ""|inspect|*[!a-z0-9_-]*) return 1 ;; esac
   [ -n "${HOOK_DIR:-}" ] || return 1
   record="${HOOK_DIR}/.hookcfg.${connector}"
   recorded="$(defenseclaw_flat_hookcfg_value "$record" DEFENSECLAW_CONNECTOR 2>/dev/null)" || return 1
@@ -2192,8 +2213,8 @@ if len(data)>cap:
 sys.stdout.buffer.write(data+b"x")')"
     _dc_rc=$?
     case "$_dc_rc" in
-      3) _dc_stdin_refused "$cap" overflow "$overflow_outcome"; return 1 ;;
-      4) _dc_stdin_refused "$cap" nul "$overflow_outcome"; return 1 ;;
+      3) _dc_stdin_refused "$cap" overflow "$overflow_outcome"; return 3 ;;
+      4) _dc_stdin_refused "$cap" nul "$overflow_outcome"; return 4 ;;
     esac
     printf '%s' "${_dc_body%x}"
     return 0
@@ -2212,18 +2233,18 @@ sys.stdout.buffer.write(data+b"x")')"
   _dc_read_stdin_exact "$cap" "$overflow_outcome"
 }
 
-# _dc_read_stdin_exact prints stdin unchanged, or refuses it (returns 1, prints
-# nothing) when it has a NUL byte or more than $1 bytes. LC_ALL=C makes
+# _dc_read_stdin_exact prints stdin unchanged, or refuses it (returns 4 for
+# NUL, 3 for overflow, and prints nothing). LC_ALL=C makes
 # ${#body} a byte count. See defenseclaw_read_stdin_capped.
 _dc_read_stdin_exact() {
   local cap="$1" outcome="$2" body="" LC_ALL=C
   if IFS= read -r -d '' body; then
     _dc_stdin_refused "$cap" nul "$outcome"
-    return 1
+    return 4
   fi
   if [ "${#body}" -gt "$cap" ]; then
     _dc_stdin_refused "$cap" overflow "$outcome"
-    return 1
+    return 3
   fi
   printf '%s' "$body"
 }
@@ -2239,9 +2260,15 @@ _dc_stdin_refused() {
     echo "defenseclaw: hook payload has a NUL byte; refusing to alter it" >&2
     return 0
   fi
+  local outcome="$3" log_mode="${FAIL_MODE:-closed}"
+  if [ "$connector" = codex ] && [ "${_DC_CODEX_EVENT:-}" = PostToolUse ] &&
+     defenseclaw_per_user_oversize_open; then
+    outcome=fail_open
+    log_mode=open
+  fi
   defenseclaw_log_hook_failure "$connector" "$hook_name" \
-    "stdin body exceeded $1 byte cap" transport "${FAIL_MODE:-closed}" "$3"
-  echo "defenseclaw: hook payload exceeded $1 bytes; refusing to truncate" >&2
+    "stdin body exceeded $1 byte cap" transport "$log_mode" "$outcome"
+  [ "$outcome" = fail_open ] || echo "defenseclaw: hook payload exceeded $1 bytes; refusing to truncate" >&2
 }
 
 # defenseclaw_validate_traceparent returns 0 when $1 matches the W3C

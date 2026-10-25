@@ -284,7 +284,15 @@ export DEFENSECLAW_HOOK_CONNECTOR DEFENSECLAW_HOOK_NAME
 {{if and .Managed (not .SecureClient) (not .Sandbox)}}# A standalone managed hook blocks input too large to inspect in every
 # fail mode: the agent chooses the size.
 {{end}}PAYLOAD="$(defenseclaw_read_stdin_capped "$(defenseclaw_hook_delivery_outcome response "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}")")" || {
+  _DC_STDIN_RC=$?
 {{if and (not .Managed) (not .Sandbox)}}  defenseclaw_close_during_install
+  # A post-tool MCP result can exceed the bounded prefix read even though
+  # the tool already ran. The installed balanced tier keeps its result usable
+  # and records the inspection gap; actionable pre-tool calls still close.
+  if [ "$_DC_STDIN_RC" -eq 3 ] && [ "$BOUND_EVENT" = PostToolUse ] && defenseclaw_per_user_oversize_open; then
+    printf '{"systemMessage":"DefenseClaw warning: this tool result is too large for the bounded hook check. The result was allowed and the inspection gap was audited."}\n'
+    exit 0
+  fi
 {{end}}  [ "{{if and .Managed (not .SecureClient) (not .Sandbox)}}closed{{else}}$FAIL_MODE{{end}}" = "open" ] ||
     defenseclaw_allow_failed_stop_event codex codex-hook "$BOUND_EVENT" "" "stdin body exceeded cap" transport
   echo "defenseclaw: codex hook refusing oversized payload" >&2
