@@ -1489,6 +1489,45 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     )
 
 
+# The managed enumerator's unprotected-agents record and the command that runs
+# a scan now, per OS; status and verify call a record older than 16 minutes (or
+# none) a pending scan (GAP-1430).
+_MANAGED_INSTALL_SCAN = {
+    "linux": (
+        "/etc/defenseclaw/hook-guardian/unprotected-agents.json",
+        "sudo systemctl restart defenseclaw-hook-enumerator.service",
+    ),
+    "darwin": (
+        "/opt/cisco/defenseclaw/etc/hook-guardian/unprotected-agents.json",
+        "sudo launchctl kickstart -k system/com.cisco.defenseclaw.hook-enumerator",
+    ),
+}
+
+
+def _managed_install_scan_pending() -> tuple[str, str]:
+    """The managed status/verify scan-pending warning and its remedy, or
+    ("", "") when the record is current or this account cannot see it."""
+    record, remedy = _MANAGED_INSTALL_SCAN.get("linux" if sys.platform.startswith("linux") else sys.platform, ("", ""))
+    if not record:
+        return "", ""
+    try:
+        age = time.time() - os.stat(record).st_mtime
+    except FileNotFoundError:
+        state = "missing (no scan has published it yet)"
+    except OSError:
+        return "", ""
+    else:
+        if -300 <= age <= 16 * 60:
+            return "", ""
+        state = f"dated {int(-age)}s in the future" if age < 0 else f"{int(age) // 60} min old"
+    return (
+        f"NOT COVERED (scan pending): the enumerator's unprotected-agents record is {state} (limit 16 min), "
+        "so agents installed since its last scan are not proven protected; enforcement is unchanged; "
+        "the record refreshes on the next scheduled scan (every five minutes)",
+        remedy,
+    )
+
+
 def _report_uninitialized_install(
     cfg, r: _DoctorResult, *, json_out: bool, write_cache: bool, leftover: str = ""
 ) -> int:
@@ -1529,6 +1568,17 @@ def _report_uninitialized_install(
             reason_code="managed-device",
             remediation="defenseclaw uninstall --all --binaries --yes" if leftover else "",
         )
+        pending, remedy = _managed_install_scan_pending()
+        if pending:
+            _emit(
+                "warn",
+                "Agent install scan",
+                pending,
+                r=r,
+                check_id="doctor.managed.install-scan",
+                reason_code="scan-pending",
+                remediation=remedy,
+            )
     else:
         _emit(
             "fail",

@@ -394,6 +394,25 @@ func (l *lifecycle) guardianTargetFailedSince(since time.Time) bool {
 // eligible user but could not enroll; it runs without DefenseClaw hooks.
 const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 
+// reportInstallScanPending reports a missing or stale unprotected-agents
+// record as one NOT COVERED warning, verify included, and audits it in the
+// gateway (GAP-1430).
+func (l *lifecycle) reportInstallScanPending(age string) {
+	env, r := l.env, l.result
+	remedy := "sudo systemctl restart " + unitEnumerator
+	if env.GOOS == "darwin" {
+		remedy = "sudo launchctl kickstart -k system/" + labelEnumerator
+	}
+	r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age, remedy))
+	r.CoverageComplete, r.SecurityComplete = false, false
+	if (l.opts.Action == ActionStatus || l.opts.Action == ActionVerify) && env.ReportLaunchCoverage != nil {
+		if err := env.ReportLaunchCoverage(context.Background(), managed.LaunchCoverageReport{
+			Reason: managed.LaunchCoverageScanPending, ScanState: age}); err != nil {
+			r.AddWarning(codeManagedLaunchAuditUnavailable, "could not audit the pending agent install scan: "+err.Error())
+		}
+	}
+}
+
 // describeUnprotectedAgents reports the agents the enumerator found
 // uncovered (its unprotected-agents record next to the
 // manifest) and marks the deployment security-incomplete. Each is one
@@ -404,6 +423,10 @@ const codeAgentUnprotected = enterprisehooks.UnprotectedCodeAgentUnprotected
 func (l *lifecycle) describeUnprotectedAgents() {
 	env, r := l.env, l.result
 	data, err := readBounded(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)), enterprisehooks.UnprotectedAgentsMaxBytes)
+	if errors.Is(err, os.ErrNotExist) {
+		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordMissing)
+		return
+	}
 	if err != nil {
 		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
 		if l.opts.Action == ActionVerify {
@@ -426,14 +449,16 @@ func (l *lifecycle) describeUnprotectedAgents() {
 		return
 	}
 	info, err := os.Stat(env.P(enterprisehooks.UnprotectedAgentsPath(env.Layout.ManifestPath)))
-	if err != nil || enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), time.Now()) {
-		message := "the enumerator's unprotected-agents record is stale or its scan time cannot be read"
+	if err != nil {
+		message := "the enumerator's unprotected-agents record's scan time cannot be read: " + err.Error()
 		if l.opts.Action == ActionVerify {
 			r.AddError(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		} else {
 			r.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, message)
 		}
 		r.CoverageComplete, r.SecurityComplete = false, false
+	} else if now := time.Now(); enterprisehooks.UnprotectedAgentsRecordStale(info.ModTime(), now) {
+		l.reportInstallScanPending(enterprisehooks.UnprotectedAgentsRecordAge(info.ModTime(), now))
 	}
 	for _, agent := range agents {
 		if agent.Code == enterprisehooks.UnprotectedCodeHookContractUnverified ||

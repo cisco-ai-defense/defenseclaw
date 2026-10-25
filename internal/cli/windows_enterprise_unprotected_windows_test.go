@@ -30,6 +30,9 @@ func stubWindowsUnprotectedAgents(t *testing.T, agents []enterprisehooks.Unprote
 	previous := windowsEnterpriseUnprotectedAgentsReader
 	t.Cleanup(func() { windowsEnterpriseUnprotectedAgentsReader = previous })
 	windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.UnprotectedAgent, error) { return agents, err }
+	previousAudit := windowsManagedScanPendingAudit
+	t.Cleanup(func() { windowsManagedScanPendingAudit = previousAudit })
+	windowsManagedScanPendingAudit = func(string) error { return nil }
 }
 
 // Agents the enumerator found installed but could not enroll run without
@@ -120,19 +123,35 @@ func TestWindowsPrivateClaudeInstallReportsAndAuditsEachCopy(t *testing.T) {
 	}
 }
 
-func TestWindowsMissingUnprotectedRecordMakesCoverageUnknown(t *testing.T) {
-	stubWindowsUnprotectedAgents(t, nil, os.ErrNotExist)
-	for _, action := range []string{"status", "verify"} {
-		result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
-		result.CoverageComplete, result.SecurityComplete = true, true
-		applyWindowsEnterpriseUnprotectedAgents(result)
-		messages := result.Warnings
-		if action == "verify" {
-			messages = result.Errors
+// GAP-1430: a missing or stale protected record (an upgrade before the new
+// enumerator's first scan) is one NOT COVERED (scan pending) warning with the
+// record's age and one audit row; verify does not fail for it alone. An
+// unreadable record still fails verify (TestWindowsUnreadableProtectedRecordExplainsElevation).
+func TestWindowsPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{os.ErrNotExist, "record is missing (no scan has published it yet)"},
+		{fmt.Errorf("read: %w", enterprisehooks.UnprotectedAgentsStaleError{Age: "2h0m0s old"}), "record is 2h0m0s old (limit 16m0s)"},
+	} {
+		stubWindowsUnprotectedAgents(t, nil, tc.err)
+		var audited []string
+		windowsManagedScanPendingAudit = func(age string) error { audited = append(audited, age); return nil }
+		for _, action := range []string{"status", "verify"} {
+			result := enterprisestatus.New(action, managed.ProfileStandalone, "windows", "1.0.4")
+			result.CoverageComplete, result.SecurityComplete = true, true
+			applyWindowsEnterpriseUnprotectedAgents(result)
+			if result.CoverageComplete || result.SecurityComplete || len(result.Errors) != 0 || len(result.Warnings) != 1 ||
+				result.Warnings[0].Code != enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
+				!strings.Contains(result.Warnings[0].Message, "NOT COVERED (scan pending)") ||
+				!strings.Contains(result.Warnings[0].Message, tc.want) ||
+				!strings.Contains(result.Warnings[0].Message, "Restart-Service DefenseClawHookEnumerator") {
+				t.Fatalf("%v %s: %+v", tc.err, action, result)
+			}
 		}
-		if result.CoverageComplete || result.SecurityComplete ||
-			!strings.Contains(fmt.Sprint(messages), "unprotected-agents record") {
-			t.Fatalf("%s hid missing install evidence: %+v", action, result)
+		if len(audited) != 2 || !strings.Contains(tc.want, audited[0]) {
+			t.Fatalf("%v scan-pending audits = %q", tc.err, audited)
 		}
 	}
 }

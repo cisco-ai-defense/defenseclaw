@@ -34,6 +34,7 @@ var managedLaunchReasons = map[string]map[string]bool{
 	"claudecode": {"unsupported_installed_version": true, "installed_version_unverified": true,
 		"claude_npm_launch_unverified": true, "claude_version_unverified": true,
 		"launch_arguments_unverified": true},
+	"":        {managed.LaunchCoverageScanPending: true}, // host-wide
 	"codex":   {"unsupported_installed_version": true, "installed_version_unverified": true},
 	"copilot": {"unsupported_installed_version": true, "installed_version_unverified": true},
 }
@@ -61,8 +62,23 @@ func (a *APIServer) handleManagedLaunchCoverageAudit(w http.ResponseWriter, r *h
 	var extra any
 	if decoder.Decode(&report) != nil || decoder.Decode(&extra) != io.EOF ||
 		report.UID < 0 || uint64(report.UID) > uint64(^uint32(0)) ||
-		!managedLaunchReasons[report.Connector][report.Reason] {
+		!managedLaunchReasons[report.Connector][report.Reason] ||
+		(report.ScanState != "") != (report.Reason == managed.LaunchCoverageScanPending) {
 		http.Error(w, "invalid launch coverage report", http.StatusBadRequest)
+		return
+	}
+	if report.Reason == managed.LaunchCoverageScanPending {
+		if report.UID != 0 || report.PID != 0 || report.StartedAt != "" || report.InstallPath != "" || report.Version != "" ||
+			len(report.ScanState) > 128 || strings.ContainsAny(report.ScanState, "\x00\r\n") {
+			http.Error(w, "invalid install scan report", http.StatusBadRequest)
+			return
+		}
+		if err := a.logger.LogAlert("managed-install-coverage", "MEDIUM", "managed_agent_install_scan_pending", map[string]any{
+			"coverage_reason": report.Reason, "coverage_state": "pending", "scan_record": report.ScanState}); err != nil {
+			http.Error(w, "audit emission failed", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	install := report.Reason == "unsupported_installed_version" || report.Reason == "installed_version_unverified"

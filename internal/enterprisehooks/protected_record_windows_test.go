@@ -7,8 +7,10 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,8 +71,9 @@ func TestWindowsStaleUnprotectedAgentsRecordRejectedAndRefreshed(t *testing.T) {
 	if err := os.Chtimes(path, old, old); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ReadWindowsUnprotectedAgents(manifest); err == nil {
-		t.Fatal("stale record was accepted as a completed install scan")
+	var stale UnprotectedAgentsStaleError
+	if _, err := ReadWindowsUnprotectedAgents(manifest); !errors.As(err, &stale) || !strings.HasPrefix(stale.Age, "1h0m") {
+		t.Fatalf("stale record was accepted or not dated as stale: %v", err)
 	}
 	if changed, err := WriteWindowsUnprotectedAgents(manifest, nil); err != nil || changed {
 		t.Fatalf("unchanged rescan changed record: changed=%t err=%v", changed, err)

@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -274,3 +276,60 @@ def test_bootstrap_missing_authoritative_state_points_to_init(tmp_path) -> None:
     assert by_name["Device key"].next_command == (
         "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
     )
+
+
+@pytest.mark.parametrize(
+    ("age", "expected"),
+    [
+        (2 * 3600, "120 min old"),
+        (None, "missing (no scan has published it yet)"),
+        (60, ""),
+        (-3600, "in the future"),
+    ],
+)
+def test_doctor_on_a_managed_device_warns_of_a_pending_agent_install_scan(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    age,
+    expected,
+) -> None:
+    # GAP-1430: status and verify report a missing or stale enumerator record as a
+    # pending scan; Doctor says the same, with the command that runs a scan now.
+    home = tmp_path / "home"
+    data_dir = home / ".defenseclaw"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("DEFENSECLAW_HOME", str(data_dir))
+    monkeypatch.delenv("DEFENSECLAW_CONFIG", raising=False)
+    monkeypatch.setattr("defenseclaw.config_writer.machine_managed_standalone", lambda: True)
+    record = tmp_path / "unprotected-agents.json"
+    if age is not None:
+        record.write_text("[]")
+        os.utime(record, (time.time() - age, time.time() - age))
+    monkeypatch.setattr(cmd_doctor.sys, "platform", "linux")
+    monkeypatch.setitem(cmd_doctor._MANAGED_INSTALL_SCAN, "linux", (str(record), "sudo systemctl restart x"))
+
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+
+    assert result.exit_code == 3, result.output
+    rows = [c for c in json.loads(result.output)["checks"] if c.get("check_id") == "doctor.managed.install-scan"]
+    if not expected:
+        assert rows == []
+        return
+    assert len(rows) == 1, rows
+    assert rows[0]["status"] == "warn"
+    assert "NOT COVERED (scan pending)" in rows[0]["detail"] and expected in rows[0]["detail"]
+    assert rows[0]["remediation"] == "sudo systemctl restart x"
+
+
+def test_doctor_on_a_managed_device_skips_a_scan_record_it_cannot_see(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A standard account cannot list the root-only record folder: no row.
+    def denied(path, *args, **kwargs):
+        raise PermissionError(path)
+
+    monkeypatch.setattr(cmd_doctor.sys, "platform", "linux")
+    monkeypatch.setattr(cmd_doctor, "os", SimpleNamespace(stat=denied))
+    assert cmd_doctor._managed_install_scan_pending() == ("", "")

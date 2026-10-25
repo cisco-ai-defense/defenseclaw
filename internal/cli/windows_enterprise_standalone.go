@@ -1966,6 +1966,21 @@ var windowsEnterpriseUnprotectedAgentsReader = func() ([]enterprisehooks.Unprote
 // are, so verify fails on it.
 func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 	agents, err := windowsEnterpriseUnprotectedAgentsReader()
+	if stale := (enterprisehooks.UnprotectedAgentsStaleError{}); errors.As(err, &stale) || errors.Is(err, os.ErrNotExist) {
+		age := stale.Age
+		if age == "" {
+			age = enterprisehooks.UnprotectedAgentsRecordMissing
+		}
+		result.AddWarning(enterprisehooks.UnprotectedCodeInstallScanIncomplete, enterprisehooks.UnprotectedAgentsScanPending(age,
+			"Restart-Service DefenseClawHookEnumerator (from an elevated prompt)"))
+		result.CoverageComplete, result.SecurityComplete = false, false
+		if result.Action == "status" || result.Action == "verify" {
+			if err := windowsManagedScanPendingAudit(age); err != nil {
+				result.AddWarning(windowsManagedLaunchAuditUnavailable, "could not audit the pending agent install scan: "+err.Error())
+			}
+		}
+		return
+	}
 	if err != nil {
 		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()
 		if errors.Is(err, os.ErrPermission) {

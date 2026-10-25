@@ -125,8 +125,8 @@ func ReadWindowsUnprotectedAgents(manifestPath string) ([]UnprotectedAgent, erro
 	if err != nil {
 		return nil, err
 	}
-	if UnprotectedAgentsRecordStale(info.ModTime(), time.Now()) {
-		return nil, fmt.Errorf("enterprise hooks: unprotected-agents record is stale")
+	if now := time.Now(); UnprotectedAgentsRecordStale(info.ModTime(), now) {
+		return nil, UnprotectedAgentsStaleError{Age: UnprotectedAgentsRecordAge(info.ModTime(), now)}
 	}
 	return ParseUnprotectedAgents(data)
 }
