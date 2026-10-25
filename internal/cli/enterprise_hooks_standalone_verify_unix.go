@@ -52,10 +52,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	// target failed the guardian pass. The protected records must still have
 	// matching, complete dispositions for that pass; pending proof still
 	// requires an exact, authenticated record of each pending target.
-	partialRegistration := registrationOnly && !authorization.OK && !activation.OK &&
-		authorization.FailureCount > 0 &&
-		authorization.SuccessCount+authorization.PendingCount+authorization.FailureCount == authorization.TargetCount &&
-		activation.SuccessCount+activation.PendingCount+activation.FailureCount == activation.TargetCount
+	partialRegistration := registrationOnly && enterpriseHookPartialGuardianRecord(authorization, activation)
 	switch {
 	case authorizationErr != nil:
 		run.AuthorizationErr = authorizationErr
@@ -242,13 +239,7 @@ func runEnterpriseHookVerifyAttemptStandaloneUnix(ctx context.Context, registrat
 	if run.AuthorizationErr == nil && exists && activationExists {
 		proof := run
 		if partialRegistration {
-			for _, row := range run.Rows {
-				if !row.OK && !row.Pending {
-					// A prior protected row may be carried forward for the
-					// failed target. It proves nothing about current readiness.
-					proof.Excused = append(proof.Excused, row)
-				}
-			}
+			proof = enterpriseHookPartialRegistrationProof(run)
 		}
 		if issues := enterpriseHookVerifyDispositionIssues(proof, authorization, activation); len(issues) > 0 {
 			run.AuthorizationErr = errors.New(strings.Join(issues, "; "))

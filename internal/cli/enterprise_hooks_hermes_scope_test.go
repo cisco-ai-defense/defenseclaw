@@ -1,0 +1,235 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build !windows
+
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisepolicy"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+)
+
+// GAP-1433: a managed Windows account that signs out unloads its registry
+// hive, so the HERMES_HOME it selects cannot be read. The guardian's
+// verification of its previously protected Hermes target failed and, with no
+// session to repair in, became a host failure (Setup verify 1603). Its Hermes
+// is unobservable, not changed: the target now waits for the account's next
+// sign-in, reported NOT COVERED, and every other cause still fails.
+func TestEnterpriseHookVerifyOrRepairTargetLeavesSignedOutHermesToTheNextSignIn(t *testing.T) {
+	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
+	previousSession, previousRelease := enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease
+	previousSecureClient, previousChange := enterpriseHookReconcileSecureClient, enterpriseHookReconcileTargetFailModeChange
+	t.Cleanup(func() {
+		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller = previousVerifier, previousInstaller
+		enterpriseHookReconcileSessionAvailable, enterpriseHookReconcileTargetRelease = previousSession, previousRelease
+		enterpriseHookReconcileSecureClient, enterpriseHookReconcileTargetFailModeChange = previousSecureClient, previousChange
+	})
+	secureClient := false
+	enterpriseHookReconcileSecureClient = func() bool { return secureClient }
+	// This release wrote the lock, and the fail mode did not change: before
+	// GAP-1433 such a target always failed while its account was signed out.
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "", false, nil }
+	enterpriseHookReconcileTargetFailModeChange = func(enterprisehooks.InstallOptions) (string, string, error) { return "", "", nil }
+	signedIn := false
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return signedIn, nil }
+	signedOut := fmt.Errorf("enterprise hooks: connector hermes hook verification failed: hermes hooks not verified: "+
+		"resolve the Hermes home of C:\\Users\\dcw-std2: %w: %w", hermespath.ErrAccountEnvironmentUnavailable, hermespath.ErrAccountSignedOut)
+	verifyErr := signedOut
+	enterpriseHookReconcileVerifier = func(context.Context, enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return enterprisehooks.InstallResult{}, verifyErr
+	}
+	installs := 0
+	enterpriseHookReconcileInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		installs++
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName}, nil
+	}
+	hermes := enterprisehooks.ManifestTarget{SID: "S-1-5-21-1-2-3-1018", Connector: "hermes", Deferred: true}
+	run := func(target enterprisehooks.ManifestTarget) (bool, error) {
+		_, repaired, err := enterpriseHookVerifyOrRepairTarget(context.Background(), target,
+			enterprisehooks.InstallOptions{ConnectorName: target.Connector}, true)
+		return repaired, err
+	}
+	waits := func(err error) bool {
+		return err != nil && strings.HasPrefix(err.Error(), enterpriseHookAwaitingSignInPrefix+": "+enterpriseHookAwaitingSignInHermesHome) &&
+			errors.Is(err, errEnterpriseHookAwaitingSignIn) && strings.Contains(err.Error(), "NOT COVERED")
+	}
+
+	_, err := run(hermes)
+	if !waits(err) || installs != 0 {
+		t.Fatalf("signed-out Hermes: err=%v installs=%d, want the Hermes sign-in wait and no install", err, installs)
+	}
+	if cause := enterpriseHookAwaitingSignInCause(err.Error()); !strings.Contains(cause, "Hermes NOT COVERED") ||
+		strings.Contains(cause, "earlier DefenseClaw release") {
+		t.Fatalf("status cause = %q, want the Hermes signed-out reason", cause)
+	}
+	row := enterpriseHookReconcileRow{SID: hermes.SID, Connector: "hermes", Error: err.Error()}
+	if !enterpriseHookAwaitingSignInError(row) {
+		t.Fatalf("the guardian row %q is not a sign-in wait status and verify excuse", row.Error)
+	}
+
+	// The account signs in: the guardian repairs the target in its session.
+	signedIn = true
+	if repaired, err := run(hermes); err != nil || !repaired || installs != 1 {
+		t.Fatalf("signed-in Hermes: repaired=%v err=%v installs=%d, want a repair", repaired, err, installs)
+	}
+	signedIn = false
+
+	// Every other cause stays a failure.
+	for name, tc := range map[string]struct {
+		target enterprisehooks.ManifestTarget
+		err    error
+		sc     bool
+	}{
+		"owned hook removed": {hermes, errors.New("enterprise hooks: connector hermes hook verification failed: canonical hook matrix is absent"), false},
+		"unreadable profile": {hermes, fmt.Errorf("resolve the Hermes home: %w: no profile names it", hermespath.ErrAccountEnvironmentUnavailable), false},
+		"non-Hermes":         {enterprisehooks.ManifestTarget{SID: hermes.SID, Connector: "codex", Deferred: true}, signedOut, false},
+		"not deferred":       {enterprisehooks.ManifestTarget{SID: hermes.SID, Connector: "hermes"}, signedOut, false},
+		"Secure Client":      {hermes, signedOut, true},
+	} {
+		verifyErr, secureClient = tc.err, tc.sc
+		if _, err := run(tc.target); err == nil || errors.Is(err, errEnterpriseHookAwaitingSignIn) {
+			t.Fatalf("%s: err=%v, want the signed-out repair failure", name, err)
+		}
+	}
+}
+
+// One target's own guardian failure never fails another target's
+// registration readiness (the hot-config undo and Setup readiness of the
+// rest): readiness proves every other target from the consistent protected
+// records of that pass and stays not ok for the failed one. Public verify
+// keeps requiring a complete pass, and a record that does not match the
+// current targets still refuses protected authorization.
+func TestRegistrationReadinessScopesAnotherTargetsGuardianFailure(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
+	stubEnterpriseHookTokenSources(t)
+	previousManifest, previousAPI, previousProxy := enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr
+	previousVerifier, previousInstaller := enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller
+	previousPublic, previousCleanup := enterpriseHookLivePublicVerifier, enterpriseForeignHookCleanup
+	previousStateTrust, previousManifestTrust := enterpriseHookGuardianStateFileTrustCheck, enterpriseHookManifestFileTrustCheck
+	t.Cleanup(func() {
+		enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr = previousManifest, previousAPI, previousProxy
+		enterpriseHookReconcileVerifier, enterpriseHookReconcileInstaller = previousVerifier, previousInstaller
+		enterpriseHookLivePublicVerifier, enterpriseForeignHookCleanup = previousPublic, previousCleanup
+		enterpriseHookGuardianStateFileTrustCheck, enterpriseHookManifestFileTrustCheck = previousStateTrust, previousManifestTrust
+	})
+	enterpriseForeignHookCleanup = func(enterprisehooks.TargetCredentials, string, string) (enterprisepolicy.CleanupResult, error) {
+		return enterprisepolicy.CleanupResult{}, nil
+	}
+	enterpriseHookGuardianStateFileTrustCheck = func(string) error { return nil }
+	enterpriseHookManifestFileTrustCheck = func(string) error { return nil }
+
+	scope := t.TempDir()
+	dataDir := filepath.Join(scope, "runtime")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(hookGuardianAuthorizationDirEnv, filepath.Join(scope, "authorization"))
+	accounts := []struct{ name, sid string }{
+		{"Alice", "S-1-5-21-1-2-3-1017"},
+		{"Bob", "S-1-5-21-1-2-3-1018"},
+	}
+	var manifestBody strings.Builder
+	manifestBody.WriteString("version: 1\ntargets:\n")
+	for _, account := range accounts {
+		home := filepath.Join(scope, account.name)
+		if err := os.MkdirAll(home, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		for _, connectorName := range []string{"claudecode", "codex"} {
+			fmt.Fprintf(&manifestBody,
+				"  - user_home: %q\n    uid: %d\n    gid: %d\n    sid: %s\n    connector: %s\n    enabled: true\n",
+				home, os.Getuid(), os.Getgid(), account.sid, connectorName)
+		}
+	}
+	manifestPath := filepath.Join(scope, "targets.yaml")
+	if err := os.WriteFile(manifestPath, []byte(manifestBody.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg = &config.Config{DataDir: dataDir, DeploymentMode: "local"}
+	enterpriseHookManifest, enterpriseHookAPIAddr, enterpriseHookProxyAddr = manifestPath, "127.0.0.1:18970", "127.0.0.1:4000"
+	failing := map[string]bool{accounts[1].sid + "/codex": true}
+	result := func(opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		if failing[opts.OwnerSID+"/"+opts.ConnectorName] {
+			return enterprisehooks.InstallResult{}, errors.New("enterprise hooks: write managed Codex hook runtime: access is denied")
+		}
+		return enterprisehooks.InstallResult{Connector: opts.ConnectorName, UserHome: opts.UserHome}, nil
+	}
+	enterpriseHookReconcileInstaller = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return result(opts)
+	}
+	enterpriseHookReconcileVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return result(opts)
+	}
+	enterpriseHookLivePublicVerifier = func(_ context.Context, opts enterprisehooks.InstallOptions) (enterprisehooks.InstallResult, error) {
+		return result(opts)
+	}
+	reconciled, err := runEnterpriseHookReconcileOnce(context.Background())
+	if err != nil || reconciled.StateErr != nil || reconciled.Failures != 1 {
+		t.Fatalf("guardian pass: run=%+v err=%v, want exactly Bob's Codex failed", reconciled, err)
+	}
+
+	// Verification reads the scoped hook tokens the guardian published.
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		if _, err := connector.EnsureHookAPIToken(dataDir, connectorName); err != nil {
+			t.Fatal(err)
+		}
+		if scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName); ok {
+			if _, err := connector.EnsureOTLPPathToken(dataDir, scope); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	readiness, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true)
+	if err != nil || readiness.AuthorizationErr != nil {
+		t.Fatalf("readiness refused protected authorization for another target's failure: err=%v authorization=%v", err, readiness.AuthorizationErr)
+	}
+	proven, failed := 0, 0
+	for _, row := range readiness.Rows {
+		switch {
+		case row.OK:
+			proven++
+		case row.SID == accounts[1].sid && row.Connector == "codex":
+			failed++
+		default:
+			t.Fatalf("readiness row %+v, want only Bob's Codex failed", row)
+		}
+	}
+	if proven != 3 || failed != 1 || readiness.Failures != 1 || len(readiness.Excused) != 0 {
+		t.Fatalf("readiness = %d proven, %d failed, run %+v; want 3 proven and the failure kept", proven, failed, readiness)
+	}
+	public, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), false)
+	if err != nil || public.AuthorizationErr == nil {
+		t.Fatalf("public verify accepted an incomplete guardian pass: err=%v authorization=%v", err, public.AuthorizationErr)
+	}
+
+	// The failed target now verifies, but no protected record authorizes
+	// it yet: readiness does not claim it until the guardian protects it.
+	delete(failing, accounts[1].sid+"/codex")
+	stale, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range stale.Rows {
+		if row.SID == accounts[1].sid && row.Connector == "codex" && (row.OK || !strings.Contains(row.Error, "protected authorization does not cover target")) {
+			t.Fatalf("readiness claimed a target no protected record authorizes: %+v", row)
+		}
+	}
+	// A different target fails than the one the records name.
+	failing[accounts[0].sid+"/claudecode"] = true
+	if swapped, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true); err != nil || swapped.AuthorizationErr == nil {
+		t.Fatalf("readiness accepted a failure the protected records do not name: err=%v authorization=%v", err, swapped.AuthorizationErr)
+	}
+}

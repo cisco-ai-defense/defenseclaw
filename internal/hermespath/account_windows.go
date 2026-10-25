@@ -74,7 +74,7 @@ func accountHomeDir(userHome string) (string, error) {
 	}
 	hive, err := registry.OpenKey(accountUserHives.root, hivePath, registry.QUERY_VALUE)
 	if errors.Is(err, registry.ErrNotExist) {
-		return "", fmt.Errorf("%w: the registry hive of %s is not loaded while it is signed out", ErrAccountEnvironmentUnavailable, sid)
+		return "", accountSignedOutError{sid: sid}
 	}
 	if err != nil {
 		return "", fmt.Errorf("%w: open the registry hive of %s: %v", ErrAccountEnvironmentUnavailable, sid, err)

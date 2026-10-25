@@ -21,6 +21,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -144,9 +145,39 @@ func (l *lifecycle) describeConnectors(record *Deployment) {
 // lifecycle Verify. The public hooks Verify keeps refusing session-home
 // attestation; the hidden readiness check verifies the same physical hook,
 // render, credentials and protected authorization without that claim.
+//
+// One account's or one target's Hermes state never fails another target or
+// the host: an enabled Hermes the enumerator could not enroll has no hook to
+// prove (GAP-1420), and a Hermes target the guardian's attested last
+// reconcile recorded as failed is reported NOT COVERED here and classified
+// by the guardian target warnings (describeHookContracts), as every other
+// connector's target is. A Hermes hook that fails live while the guardian
+// last proved it, a report that omits or duplicates a target, and invalid
+// protected authorization still fail Verify.
 func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
 	state, ok := l.result.Connectors["hermes"]
 	if !ok || !state.Enabled || state.HooksInstalled != enterprisestatus.HooksInstalledUnknown {
+		return nil
+	}
+	manifest, err := enterprisehooks.LoadStandaloneManifest(l.env.P(l.env.Layout.ManifestPath))
+	if err != nil {
+		return fmt.Errorf("read managed Hermes targets: %w", err)
+	}
+	expected := make(map[string]bool)
+	key := func(connector, user, home string) string {
+		return strings.ToLower(strings.TrimSpace(connector)) + "\x00" + strings.TrimSpace(user) + "\x00" +
+			strings.TrimSpace(home)
+	}
+	for _, target := range manifest.Targets {
+		if target.IsEnabled() && strings.EqualFold(target.Connector, "hermes") {
+			expected[key(target.Connector, target.User, target.UserHome)] = false
+		}
+	}
+	if len(expected) == 0 {
+		// No Hermes target is enrolled, so no DefenseClaw Hermes hook is
+		// installed to prove. The install the enumerator could not enroll
+		// stays NOT COVERED with its reason (connectors.hermes and the
+		// unprotected-agent warning, which is audited).
 		return nil
 	}
 	out, err := l.env.runGatewayCLI(ctx, "enterprise", "hooks", "readiness", "--manifest", l.env.Layout.ManifestPath, "--json")
@@ -154,10 +185,6 @@ func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
 	// target makes readiness exit nonzero. A launch failure has no exit code.
 	if err != nil && out.ExitCode <= 0 {
 		return fmt.Errorf("live registration check failed: %w", err)
-	}
-	manifest, err := enterprisehooks.LoadStandaloneManifest(l.env.P(l.env.Layout.ManifestPath))
-	if err != nil {
-		return fmt.Errorf("read managed Hermes targets: %w", err)
 	}
 	var proof struct {
 		OK                    bool   `json:"ok"`
@@ -177,38 +204,47 @@ func (l *lifecycle) verifyManagedHermesRegistration(ctx context.Context) error {
 		(out.ExitCode == 0) != proof.OK {
 		return errors.New("live registration check did not prove the current managed Hermes target")
 	}
-	expected := make(map[string]bool)
-	key := func(connector, user, home string) string {
-		return strings.ToLower(strings.TrimSpace(connector)) + "\x00" + strings.TrimSpace(user) + "\x00" +
-			strings.TrimSpace(home)
-	}
-	for _, target := range manifest.Targets {
-		if target.IsEnabled() && strings.EqualFold(target.Connector, "hermes") {
-			expected[key(target.Connector, target.User, target.UserHome)] = false
+	guardianFailed := map[string]bool{}
+	if rows, known := l.attestedGuardianResults(); known {
+		for _, row := range rows {
+			if !row.OK && !row.Pending {
+				guardianFailed[key(row.Connector, row.User, row.UserHome)] = true
+			}
 		}
 	}
-	if len(expected) == 0 {
-		return errors.New("live registration check omitted the managed Hermes target")
-	}
-	unrelatedFailure := false
+	explainedFailure := false
+	var notCovered []string
 	for _, row := range proof.Results {
+		failed := !row.OK && !row.Pending
 		if !strings.EqualFold(row.Connector, "hermes") {
-			unrelatedFailure = unrelatedFailure || !row.OK && !row.Pending
+			explainedFailure = explainedFailure || failed
 			continue
 		}
 		rowKey := key(row.Connector, row.User, row.UserHome)
-		if _, enrolled := expected[rowKey]; !enrolled || expected[rowKey] || !row.OK && !row.Pending {
+		if _, enrolled := expected[rowKey]; !enrolled || expected[rowKey] {
 			return errors.New("live registration check reported an unprotected Hermes target")
 		}
 		expected[rowKey] = true
+		if failed {
+			if !guardianFailed[rowKey] {
+				return errors.New("live registration check reported an unprotected Hermes target")
+			}
+			explainedFailure = true
+			notCovered = append(notCovered, strings.TrimSpace(row.User))
+		}
 	}
 	for _, found := range expected {
 		if !found {
 			return errors.New("live registration check omitted the managed Hermes target")
 		}
 	}
-	if !proof.OK && !unrelatedFailure {
+	if !proof.OK && !explainedFailure {
 		return errors.New("live registration check did not prove the current managed Hermes target")
+	}
+	sort.Strings(notCovered)
+	for _, user := range notCovered {
+		l.result.AddWarning(enterprisestatus.CodeStatusDetailUnavailable, "connectors.hermes: NOT COVERED for user "+user+
+			": the guardian's last reconcile could not protect its Hermes hook; the guardian target warning names the cause")
 	}
 	return nil
 }
@@ -241,6 +277,29 @@ func machinePolicyCoverage(connectors []string, states map[string]enterprisestat
 // attestation is bound to the ledger of the same reconcile (as
 // describeHookContracts reads them).
 func (l *lifecycle) attestedGuardianRows() ([]enterprisestatus.ConnectorTarget, bool) {
+	results, known := l.attestedGuardianResults()
+	if !known {
+		return nil, false
+	}
+	rows := make([]enterprisestatus.ConnectorTarget, 0, len(results))
+	for _, row := range results {
+		rows = append(rows, enterprisestatus.ConnectorTarget{Connector: row.Connector, OK: row.OK, Pending: row.Pending})
+	}
+	return rows, true
+}
+
+// attestedGuardianResult is one target row of the guardian's last reconcile.
+type attestedGuardianResult struct {
+	Connector string `json:"connector"`
+	User      string `json:"user"`
+	UserHome  string `json:"user_home"`
+	OK        bool   `json:"ok"`
+	Pending   bool   `json:"pending"`
+}
+
+// attestedGuardianResults are attestedGuardianRows with each target's
+// account and home.
+func (l *lifecycle) attestedGuardianResults() ([]attestedGuardianResult, bool) {
 	env := l.env
 	ledgerPath := env.P(filepath.Join(env.Layout.GuardianAuthDir, managed.HookGuardianAuthorizationFile))
 	ledger, err := readBounded(ledgerPath, 4<<20)
@@ -256,11 +315,7 @@ func (l *lifecycle) attestedGuardianRows() ([]enterprisestatus.ConnectorTarget, 
 		return nil, false
 	}
 	var state struct {
-		Results []struct {
-			Connector string `json:"connector"`
-			OK        bool   `json:"ok"`
-			Pending   bool   `json:"pending"`
-		} `json:"results"`
+		Results []attestedGuardianResult `json:"results"`
 	}
 	if json.Unmarshal(data, &state) != nil {
 		return nil, false
@@ -268,11 +323,7 @@ func (l *lifecycle) attestedGuardianRows() ([]enterprisestatus.ConnectorTarget, 
 	if again, err := readBounded(ledgerPath, 4<<20); err != nil || !bytes.Equal(again, ledger) {
 		return nil, false
 	}
-	rows := make([]enterprisestatus.ConnectorTarget, 0, len(state.Results))
-	for _, row := range state.Results {
-		rows = append(rows, enterprisestatus.ConnectorTarget{Connector: row.Connector, OK: row.OK, Pending: row.Pending})
-	}
-	return rows, true
+	return state.Results, true
 }
 
 // noteIdentityHealth keeps the identity block of the gateway's /health body

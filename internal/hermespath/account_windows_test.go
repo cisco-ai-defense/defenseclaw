@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,11 +91,12 @@ func TestConfigPathForAccountReadsTheAccountHive(t *testing.T) {
 	if want := filepath.Join(alice, "hermes-work", "config.yaml"); err != nil || got != want {
 		t.Fatalf("ConfigPathForAccount(alice) = %q, %v; want %q", got, err, want)
 	}
-	if got, err := ConfigPathForAccount(bob); !errors.Is(err, ErrAccountEnvironmentUnavailable) {
-		t.Fatalf("a signed-out account = %q, %v; want ErrAccountEnvironmentUnavailable, never the default", got, err)
+	if got, err := ConfigPathForAccount(bob); !errors.Is(err, ErrAccountEnvironmentUnavailable) || !errors.Is(err, ErrAccountSignedOut) ||
+		!strings.Contains(err.Error(), "is not loaded while it is signed out") {
+		t.Fatalf("a signed-out account = %q, %v; want ErrAccountEnvironmentUnavailable and ErrAccountSignedOut, never the default", got, err)
 	}
-	if got, err := ConfigPathForAccount(filepath.Join(t.TempDir(), "nobody")); !errors.Is(err, ErrAccountEnvironmentUnavailable) {
-		t.Fatalf("a home no profile names = %q, %v; want ErrAccountEnvironmentUnavailable", got, err)
+	if got, err := ConfigPathForAccount(filepath.Join(t.TempDir(), "nobody")); !errors.Is(err, ErrAccountEnvironmentUnavailable) || errors.Is(err, ErrAccountSignedOut) {
+		t.Fatalf("a home no profile names = %q, %v; want ErrAccountEnvironmentUnavailable without ErrAccountSignedOut", got, err)
 	}
 
 	// Without the account's own variable the machine's applies.
