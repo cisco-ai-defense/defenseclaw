@@ -223,7 +223,11 @@ func TestManagedHermesRegistrationScopesRowsAndRequiresAuthorization(t *testing.
 			} {
 				t.Run(tc.name, func(t *testing.T) {
 					payload := strings.ReplaceAll(tc.payload, "HOME", home)
-					h.runner.replies = map[string]fakeReply{readiness: {result: CommandResult{Stdout: []byte(payload), ExitCode: 1}}}
+					// ExecRunner returns both the JSON and an error for exit 1.
+					h.runner.replies = map[string]fakeReply{readiness: {
+						result: CommandResult{Stdout: []byte(payload), ExitCode: 1},
+						err:    errors.New("readiness exited 1"),
+					}}
 					if err := l.verifyManagedHermesRegistration(context.Background()); (err != nil) != tc.wantError {
 						t.Fatalf("registration error = %v, want error %t", err, tc.wantError)
 					}
