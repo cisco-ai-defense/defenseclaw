@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -172,7 +173,8 @@ func TestInstructionPrunedIndexSaturates(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, instructionLoadPrunedName), []byte("x"), 0o000); err != nil {
 		t.Fatal(err)
 	}
-	if os.Geteuid() != 0 {
+	// Windows file modes do not deny reads, and root reads every file.
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 {
 		var unreadable activeAgentContextCache
 		unreadable.storeMu.Lock()
 		unreadable.loadPrunedLocked(dir)
