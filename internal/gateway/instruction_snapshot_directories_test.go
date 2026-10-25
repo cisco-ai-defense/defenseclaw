@@ -126,7 +126,7 @@ func TestInstructionProtectionInspectSharesHookSnapshot(t *testing.T) {
 	api.scannerCfg.Guardrail.BlockAt = "HIGH"
 	api.scannerCfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "default")
 	api.scannerCfg.DataDir = t.TempDir()
-	api.applyInstructionStartup(withAuthenticatedHookConnector(t.Context(), "opencode"), "opencode", "live", "session.created", first)
+	api.applyInstructionStartup(withAuthenticatedHookConnector(t.Context(), "opencode"), "opencode", "live", "session.created", "", first)
 	created := filepath.Join(first, "AGENTS.md")
 	if err := os.WriteFile(created, []byte("new\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -251,8 +251,8 @@ func TestInstructionStartupAgentHookReachesNewDirectory(t *testing.T) {
 	api := instructionProtectionTestAPI(t, "opencode", "action", "HIGH")
 	api.scannerCfg.DataDir = t.TempDir()
 	auth := withAuthenticatedHookConnector(t.Context(), "opencode")
-	api.applyInstructionStartup(auth, "opencode", "live", "session.created", first)
-	api.applyInstructionStartup(auth, "opencode", "live", "session.error", first)
+	api.applyInstructionStartup(auth, "opencode", "live", "session.created", "", first)
+	api.applyInstructionStartup(auth, "opencode", "live", "session.error", "", first)
 	created := filepath.Join(first, "AGENTS.md")
 	if err := os.WriteFile(created, []byte("new\n"), 0o600); err != nil {
 		t.Fatal(err)
@@ -261,13 +261,13 @@ func TestInstructionStartupAgentHookReachesNewDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		flavor = actionfacts.PathFlavorWindows
 	}
-	got := api.applyInstructionStartup(auth, "opencode", "live", "tool.execute.before", second)
+	got := api.applyInstructionStartup(auth, "opencode", "live", "tool.execute.before", "", second)
 	key, _ := activeAgentInstructionPath(existing, flavor)
 	if !got.startupKnown || got.startupFiles[key] == "" {
 		t.Fatalf("tool call in a new workdir did not record its AGENTS.md: %+v", got)
 	}
-	api.applyInstructionStartup(auth, "opencode", "live", "session.error", second)
-	got = api.applyInstructionStartup(auth, "opencode", "live", "tool.execute.before", first)
+	api.applyInstructionStartup(auth, "opencode", "live", "session.error", "", second)
+	got = api.applyInstructionStartup(auth, "opencode", "live", "tool.execute.before", "", first)
 	createdKey, _ := activeAgentInstructionPath(created, flavor)
 	if !got.startupKnown || got.startupFiles[key] == "" || got.startupFiles[createdKey] != "" {
 		t.Fatalf("session.error changed the snapshot: %+v", got)

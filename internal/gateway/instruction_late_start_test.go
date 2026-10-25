@@ -103,11 +103,25 @@ func TestInstructionBenignLateSessionStartKeepsFirstSighting(t *testing.T) {
 }
 
 // The same rule on the Claude Code route: a PreToolUse before SessionStart,
-// one gateway process and a restarted one.
+// one gateway process and a restarted one. Protected control: a start whose
+// source is a resume, clear or compact is a new generation even when it is
+// the first start this gateway sees, so it takes a new snapshot.
 func TestInstructionBenignClaudeCodeLateSessionStart(t *testing.T) {
-	for _, restart := range []bool{false, true} {
-		for _, existed := range []bool{false, true} {
+	for _, source := range []string{"startup", "", "resume", "clear", "compact"} {
+		for _, restart := range []bool{false, true} {
+			for _, existed := range []bool{false, true} {
+				claudeCodeLateStart(t, source, restart, existed)
+			}
+		}
+	}
+}
+
+func claudeCodeLateStart(t *testing.T, source string, restart, existed bool) {
+	newGeneration := source == "resume" || source == "clear" || source == "compact"
+	{
+		{
 			name := map[bool]string{false: "created after the first call", true: "existing before the first call"}[existed]
+			name += ", source " + source
 			if restart {
 				name += ", restarts between events"
 			}
@@ -145,12 +159,12 @@ func TestInstructionBenignClaudeCodeLateSessionStart(t *testing.T) {
 					writeActiveAgentTestFile(t, project, "CLAUDE.md")
 				}
 				gateway().evaluateClaudeCodeHook(authenticatedClaudeCodeTestContext(), claudeCodeHookRequest{
-					HookEventName: "SessionStart", SessionID: "late", CWD: project,
+					HookEventName: "SessionStart", SessionID: "late", CWD: project, Source: source,
 				})
 				for range 2 {
 					got := write()
-					if blocked := cogBlocked(got.Action, got.WouldBlock, got.Findings); blocked != existed {
-						t.Fatalf("existed before the first call=%v, blocked=%v: %+v", existed, blocked, got)
+					if blocked := cogBlocked(got.Action, got.WouldBlock, got.Findings); blocked != (existed || newGeneration) {
+						t.Fatalf("existed before the first call=%v, source %q, blocked=%v: %+v", existed, source, blocked, got)
 					}
 				}
 			})

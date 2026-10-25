@@ -620,17 +620,19 @@ func (cache *activeAgentContextCache) resetKey(key activeAgentContextKey, preser
 }
 
 // startKey records a start event of key with its startup snapshot. The
-// first start of a session whose calls reached the gateway before it
-// (awaitingStart) is that session's own late start: what those calls
-// recorded stands, a directory they sighted keeps its first record (so a
-// file the session created there stays its own), and the start only adds
-// the directories they had not reached. Any other start, a later start of
-// the same session ID (resume, clear, reset) included, is a new generation:
-// it resets the session and takes a new snapshot.
-func (cache *activeAgentContextCache) startKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs map[string]string) {
+// first start of a session whose calls reached the gateway before it and
+// took its first sighting (awaitingStart, startupKnown) is that session's
+// own late start: what those calls recorded stands, a directory they
+// sighted keeps its first record (so a file the session created there stays
+// its own), and the start only adds the directories they had not reached.
+// Any other start is a new generation: it resets the session and takes a
+// new snapshot. That is a start the session ID already had, one that says
+// so (newGeneration: a resume, clear, compact or reset), and a start after
+// loads alone, as before.
+func (cache *activeAgentContextCache) startKey(key activeAgentContextKey, newGeneration bool, files map[string]string, dirs []string, dirIDs map[string]string) {
 	cache.mu.Lock()
 	session, exists := cache.sessions[key]
-	late := exists && session.awaitingStart
+	late := exists && session.awaitingStart && session.startupKnown && !newGeneration
 	if late {
 		session.awaitingStart = false
 		session.updatedAt = cache.currentTime()
@@ -642,14 +644,9 @@ func (cache *activeAgentContextCache) startKey(key activeAgentContextKey, files 
 		cache.setStartupKey(key, files, dirs, dirIDs)
 		return
 	}
-	if files == nil || len(dirs) == 0 {
-		return
-	}
-	if session.startupKnown {
+	if files != nil && len(dirs) != 0 {
 		cache.extendStartupKey(key, files, dirs, dirIDs, nil, nil)
-		return
 	}
-	cache.setStartupKey(key, files, dirs, dirIDs)
 }
 
 func (cache *activeAgentContextCache) setStartupKey(key activeAgentContextKey, files map[string]string, dirs []string, dirIDs map[string]string) {
@@ -971,7 +968,7 @@ func (a *APIServer) applyClaudeCodeActiveAgentContext(ctx context.Context, req c
 	}
 	switch req.HookEventName {
 	case "SessionStart":
-		a.startInstructionSession(ctx, key, req.CWD)
+		a.startInstructionSession(ctx, key, req.HookEventName, req.Source, req.CWD)
 	case "CwdChanged":
 		a.restoreInstructionLoads(key)
 		a.activeAgentContext.beginKeyPreservingStartup(key)

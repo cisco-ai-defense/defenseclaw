@@ -22,7 +22,7 @@ func TestInstructionStartupRecordKeepsTheRootDirectory(t *testing.T) {
 		return api
 	}
 	auth := withAuthenticatedHookConnector(t.Context(), "codex")
-	newGateway().applyInstructionStartup(auth, "codex", "live", "SessionStart", project)
+	newGateway().applyInstructionStartup(auth, "codex", "live", "SessionStart", "", project)
 	root := filepath.VolumeName(project) + string(filepath.Separator)
 	rootKey, ok := instructionDirectoryKey(root)
 	if !ok {
@@ -31,7 +31,7 @@ func TestInstructionStartupRecordKeepsTheRootDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(project, "AGENTS.md"), []byte("new\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	got := newGateway().applyInstructionStartup(auth, "codex", "live", "PreToolUse", project)
+	got := newGateway().applyInstructionStartup(auth, "codex", "live", "PreToolUse", "", project)
 	if !got.startupKnown || !slices.Contains(got.startupDirs, rootKey) || len(got.startupFiles) != 0 {
 		t.Fatalf("restart did not restore the snapshot with root %q: %+v", rootKey, got)
 	}

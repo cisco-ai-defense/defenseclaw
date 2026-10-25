@@ -221,7 +221,7 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	req codexHookRequest,
 	profile connector.HookProfile,
 ) codexHookResponse {
-	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.CWD)
+	startup := a.applyInstructionStartup(ctx, "codex", req.SessionID, req.HookEventName, req.Source, req.CWD)
 	ctx = a.withInstructionStartup(ctx, "codex", req.SessionID, startup)
 	mode := sandboxHookMode(ctx, "codex", a.codexMode(ctx))
 	// Sandbox hooks are always judged, and enforced (see evaluateAgentHook).

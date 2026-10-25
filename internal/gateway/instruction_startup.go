@@ -447,7 +447,7 @@ func (a *APIServer) applyInstructionInspectStartup(ctx context.Context, connecto
 	return a.activeAgentContext.snapshotKey(key)
 }
 
-func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sessionID, event, cwd string) activeAgentContextSnapshot {
+func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sessionID, event, source, cwd string) activeAgentContextSnapshot {
 	if a == nil || authenticatedHookConnector(ctx) != connector {
 		return activeAgentContextSnapshot{}
 	}
@@ -457,7 +457,7 @@ func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sess
 	}
 	switch canonicalEvent(event) {
 	case "sessionstart", "onsessionstart", "onsessionreset", "sessioncreated":
-		a.startInstructionSession(ctx, key, cwd)
+		a.startInstructionSession(ctx, key, event, source, cwd)
 	case "sessionend", "onsessionend", "onsessionfinalize", "sessiondeleted":
 		a.activeAgentContext.endKey(key)
 		a.saveInstructionLoads(key)
@@ -477,11 +477,18 @@ func (a *APIServer) applyInstructionStartup(ctx context.Context, connector, sess
 // startInstructionSession records a session start and its startup snapshot
 // (activeAgentContextCache.startKey). A call that reached a restarted
 // gateway before the late start left its record, so the record is read
-// first.
-func (a *APIServer) startInstructionSession(ctx context.Context, key activeAgentContextKey, cwd string) {
+// first. A reset event, or a start whose source is a resume, clear or
+// compact of the session (Claude Code, Codex), always starts a new
+// generation.
+func (a *APIServer) startInstructionSession(ctx context.Context, key activeAgentContextKey, event, source, cwd string) {
 	a.restoreInstructionLoads(key)
+	newGeneration := canonicalEvent(event) == "onsessionreset"
+	switch strings.ToLower(strings.TrimSpace(source)) {
+	case "resume", "clear", "compact":
+		newGeneration = true
+	}
 	files, dirs, identities := instructionStartupFiles(ctx, key.connector, cwd)
-	a.activeAgentContext.startKey(key, files, dirs, identities)
+	a.activeAgentContext.startKey(key, newGeneration, files, dirs, identities)
 	a.saveInstructionLoads(key)
 }
 
