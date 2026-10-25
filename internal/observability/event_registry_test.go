@@ -493,6 +493,7 @@ func familySignalForTest(t *testing.T, signal Signal) familySignal {
 }
 
 func classificationDefaultEventNames() []EventName {
+	ensureGeneratedProducerClassifications()
 	unique := make(map[EventName]struct{})
 	for _, classifications := range []map[ProducerKey]Classification{
 		gatewayEventClassifications,

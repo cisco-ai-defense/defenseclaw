@@ -400,13 +400,13 @@ func TestGeneratedDefaultRuleCatalogMatchesShippedYAML(t *testing.T) {
 		}
 		yamlCategories[file.Category] = file
 	}
-	if got, want := len(defaultRuleCategories), len(yamlCategories); got != want {
+	if got, want := len(defaultRuleCategories()), len(yamlCategories); got != want {
 		t.Fatalf("generated category count = %d, default YAML count = %d", got, want)
 	}
 
-	seenCategories := make(map[string]bool, len(defaultRuleCategories))
+	seenCategories := make(map[string]bool, len(defaultRuleCategories()))
 	seenIDs := make(map[string]bool)
-	for _, generatedCategory := range defaultRuleCategories {
+	for _, generatedCategory := range defaultRuleCategories() {
 		if seenCategories[generatedCategory.Name] {
 			t.Fatalf("generated catalog contains duplicate category %q", generatedCategory.Name)
 		}
