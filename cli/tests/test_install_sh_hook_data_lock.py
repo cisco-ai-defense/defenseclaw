@@ -93,7 +93,11 @@ def _run(tmp_path: Path, home: Path, body: str, env: dict[str, str] | None = Non
     script.write_text(
         "set -euo pipefail\n"
         "die() { printf '%s\\n' \"$*\" >&2; exit 1; }\nerr() { :; }\n"
-        f'DEFENSECLAW_HOME={home}\nLOCK_DIR={lock}\nmkdir -p "$LOCK_DIR"\n' + _functions() + body + _PROBE,
+        f'DEFENSECLAW_HOME={home}\nLOCK_DIR={lock}\nmkdir -p "$LOCK_DIR"\n'
+        + _functions()
+        + 'write_lock_owner "$LOCK_DIR"\n'
+        + body
+        + _PROBE,
         encoding="utf-8",
     )
     run_env = {"HOME": str(tmp_path / "user"), "PATH": os.environ.get("PATH", "/usr/bin:/bin")}
@@ -318,3 +322,117 @@ def test_relative_home_and_config_are_recorded_as_absolute_paths() -> None:
         )
         assert proc.returncode == 0, proc.stderr
         assert proc.stdout.strip() == want.format(cwd=cwd)
+
+
+# oss-outage-open round i loop 2 (P1, a live installer lost its lock after
+# six hours): the deadline was fixed at the start, so an install waiting at
+# its prompt past it lost its locks to the next run and to the hooks. A live
+# install now renews every lock it holds; a killed one stops renewing at
+# once (its renewer is no longer its child), so its pid-gone lock is stale
+# to the next calls; and it gives back, or acts under, only a lock that is
+# still its own.
+def test_a_live_install_renews_every_lock_it_holds(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    body = (
+        "LOCK_RENEW_SECONDS=1\n"
+        f'hold_hook_data_dir "{_gateway(tmp_path)}"\n'
+        'lock="${DATA_LOCK_DIRS[0]}"\n'
+        # Both deadlines as good as passed, as after six hours at a prompt.
+        'echo 1 > "$lock/deadline"; echo 1 > "$LOCK_DIR/deadline"\n'
+        "sleep 3\n"
+        'echo "data=$(cat "$lock/deadline") home=$(cat "$LOCK_DIR/deadline") now=$(date +%s)"\n'
+    )
+    proc = _run(tmp_path, home, body, {"STUB_DATA_DIR": str(data)})
+    assert proc.returncode == 0, proc.stderr
+    line = next(item for item in proc.stdout.splitlines() if item.startswith("data="))
+    fields = {key: int(value) for key, value in (part.split("=", 1) for part in line.split())}
+    assert fields["data"] >= fields["now"] + 6 * 3600 - 5, line
+    assert fields["home"] >= fields["now"] + 6 * 3600 - 5, line
+    # The installer gave both back when it exited, and no renewer is left.
+    assert not (data / ".install.lock").exists()
+    assert not (home / ".install.lock").exists()
+
+
+def test_a_killed_install_stops_renewing_and_its_lock_goes_stale(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    script = tmp_path / "hold.sh"
+    body = f'LOCK_RENEW_SECONDS=1\nhold_hook_data_dir "{_gateway(tmp_path)}"\necho held >&2\nsleep 30\n'
+    _run(tmp_path, home, "true # KILLED-MARKER\n", {"STUB_DATA_DIR": str(data)})  # writes hold.sh once
+    text = script.read_text(encoding="utf-8").replace("true # KILLED-MARKER\n", body, 1)
+    script.write_text(text, encoding="utf-8")
+    run_env = {
+        "HOME": str(tmp_path / "user"),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "STUB_DATA_DIR": str(data),
+    }
+    installer = subprocess.Popen([BASH, str(script)], env=run_env, stderr=subprocess.PIPE, text=True)
+    try:
+        assert installer.stderr is not None
+        assert installer.stderr.readline().strip() == "held"
+        lock = data.resolve() / ".install.lock"
+        assert (lock / "pid").read_text(encoding="utf-8").strip() == str(installer.pid)
+        installer.kill()
+        installer.wait()
+        (lock / "deadline").write_text("1\n", encoding="utf-8")
+        time.sleep(3)
+        # No renewer brought the deadline back, and the lock names a dead pid.
+        assert (lock / "deadline").read_text(encoding="utf-8").strip() == "1"
+        renewers = subprocess.run(["pgrep", "-f", str(lock)], capture_output=True, text=True, check=False)
+        assert renewers.stdout.strip() == "", renewers.stdout
+    finally:
+        if installer.poll() is None:
+            installer.kill()
+            installer.wait()
+
+
+def test_a_lock_another_run_took_over_stops_the_install_and_stays(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        body = (
+            f'hold_hook_data_dir "{_gateway(tmp_path)}"\n'
+            'lock="${DATA_LOCK_DIRS[0]}"\n'
+            f'echo {other.pid} > "$lock/pid"\n'
+            "assert_locks_ours\n"
+            "echo not-reached\n"
+        )
+        proc = _run(tmp_path, home, body, {"STUB_DATA_DIR": str(data)})
+        assert proc.returncode == 1
+        assert "is no longer this installer's" in proc.stderr
+        assert "not-reached" not in proc.stdout
+        # The other run's lock stays; this run's own home lock goes.
+        assert (data / ".install.lock" / "pid").read_text(encoding="utf-8").strip() == str(other.pid)
+        assert not (home / ".install.lock").exists()
+    finally:
+        other.kill()
+        other.wait()
+
+
+def test_every_folder_hook_data_dir_names_is_held(tmp_path: Path) -> None:
+    home, data = _layout(tmp_path)
+    alias = tmp_path / "cfg"
+    alias.mkdir()
+    proc = _run(
+        tmp_path,
+        home,
+        f'hold_hook_data_dir "{_gateway(tmp_path)}"\n',
+        {"STUB_DATA_DIR": f"{alias}\n{data}"},
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert _held(proc) == [f"{alias.resolve()}/.install.lock", f"{data.resolve()}/.install.lock"]
+
+
+def test_the_install_checks_its_locks_after_the_prompt_and_before_the_swap() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    prompt = text.index('ask_yes_no "Upgrade DefenseClaw ${PREV_VERSION}')
+    check = text.index("\nassert_locks_ours\nassert_no_loaded_plugin_agents\n", prompt)
+    assert check < text.index('if ! stop_gateway "${BIN_DIR}/defenseclaw-gateway"; then', prompt)
+    assert text.index("assert_locks_ours\nif ! snapshot; then") < text.index("if ! swap_in; then")
+    rollback = text.index('ask_yes_no "${question}" || die "Rollback cancelled; nothing was changed"')
+    assert (
+        rollback
+        < text.index("    assert_locks_ours\n", rollback)
+        < text.index(
+            'stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"'
+        )
+    )

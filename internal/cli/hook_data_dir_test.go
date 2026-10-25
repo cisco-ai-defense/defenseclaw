@@ -152,3 +152,13 @@ func TestHookDataDirCommandPrintsTheFolder(t *testing.T) {
 		t.Fatalf("hook-data-dir printed %q, want %q", got, data)
 	}
 }
+
+// hookDataDirNow is the first folder hook-data-dir names (the hooks' own
+// folder when one qualifies, else the data directory), "" for none.
+func hookDataDirNow() (string, error) {
+	dirs, err := hookDataDirsNow()
+	if err != nil || len(dirs) == 0 {
+		return "", err
+	}
+	return dirs[0], nil
+}

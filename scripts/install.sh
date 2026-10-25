@@ -479,11 +479,79 @@ chmod 700 "${DEFENSECLAW_HOME}" 2>/dev/null || true
 # The owner record of every lock this installer takes: its pid, its start
 # time and a deadline, in Unix seconds. Past the deadline, or once its pid
 # names no process, every hook and `defenseclaw doctor` treat the lock as no
-# lock (hookexec installLockStale), and the next run takes it over.
+# lock (hookexec installLockStale), and the next run takes it over. A live
+# install renews the deadline of every lock it holds (start_lock_renewer),
+# however long it waits at a prompt, so only a lock whose installer is gone
+# (killed, or its pid reused by another process) ever reaches its deadline.
 LOCK_STARTED="$(date +%s)"
-LOCK_DEADLINE=$((LOCK_STARTED + 21600))
+LOCK_LIFETIME=21600
+LOCK_RENEW_SECONDS=300
+LOCK_DEADLINE=$((LOCK_STARTED + LOCK_LIFETIME))
+LOCK_RENEWER_PID=""
 write_lock_owner() {
     { echo $$ > "$1/pid" && echo "${LOCK_STARTED}" > "$1/started" && echo "${LOCK_DEADLINE}" > "$1/deadline"; } 2>/dev/null
+}
+lock_is_ours() {
+    # lock_is_ours LOCK: LOCK still records this installer as its owner (its
+    # pid and start time); a lock another run took over is not ours.
+    [[ "$(cat "$1/pid" 2>/dev/null || true)" == "$$" \
+        && "$(cat "$1/started" 2>/dev/null || true)" == "${LOCK_STARTED}" ]]
+}
+assert_locks_ours() {
+    # Every lock this install holds is still its own before it stops the
+    # gateway or swaps a file; one another run took over stops this one.
+    local lock
+    for lock in "${LOCK_DIR}" ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"}; do
+        lock_is_ours "${lock}" \
+            || die "The install lock ${lock} is no longer this installer's (another run took it over); nothing more was changed"
+    done
+}
+stop_lock_renewer() {
+    [[ -n "${LOCK_RENEWER_PID}" ]] || return 0
+    kill "${LOCK_RENEWER_PID}" 2>/dev/null || true
+    wait "${LOCK_RENEWER_PID}" 2>/dev/null || true
+    LOCK_RENEWER_PID=""
+}
+start_lock_renewer() {
+    # A child that renews the deadline of every lock this installer holds
+    # (and the lock folder's time, which the hooks also bound it by) every
+    # LOCK_RENEW_SECONDS while the installer runs. It stops as soon as the
+    # installer is gone (it is no longer its parent: killed, so its pid can
+    # be reused) and renews only a lock that still names this installer.
+    stop_lock_renewer
+    # shellcheck disable=SC2016
+    bash -c '
+        owner=$1 started=$2 every=$3 lifetime=$4; shift 4
+        nap=""
+        trap '"'"'[ -z "$nap" ] || kill "$nap" 2>/dev/null; exit 0'"'"' TERM INT HUP
+        while :; do
+            sleep "$every" & nap=$!
+            wait "$nap"; nap=""
+            parent="$(ps -o ppid= -p $$ 2>/dev/null | tr -d " ")"
+            [ -z "$parent" ] || [ "$parent" = "$owner" ] || exit 0
+            kill -0 "$owner" 2>/dev/null || exit 0
+            for lock; do
+                [ "$(cat "$lock/pid" 2>/dev/null)" = "$owner" ] || continue
+                [ "$(cat "$lock/started" 2>/dev/null)" = "$started" ] || continue
+                echo $(( $(date +%s) + lifetime )) > "$lock/deadline.new" 2>/dev/null \
+                    && mv -f "$lock/deadline.new" "$lock/deadline" 2>/dev/null \
+                    && touch "$lock" 2>/dev/null
+            done
+        done
+    ' dc-install-lock-renewer "$$" "${LOCK_STARTED}" "${LOCK_RENEW_SECONDS}" "${LOCK_LIFETIME}" \
+        "${LOCK_DIR}" ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"} </dev/null >/dev/null 2>&1 &
+    LOCK_RENEWER_PID=$!
+}
+release_locks() {
+    # The EXIT trap: stop renewing, then give back every lock that is still
+    # this installer's; a lock another run took over stays with that run.
+    local lock
+    stop_lock_renewer
+    for lock in "${LOCK_DIR}" ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"}; do
+        if lock_is_ours "${lock}"; then
+            rm -rf "${lock:?}"
+        fi
+    done
 }
 lock_owner_live() {
     # lock_owner_live LOCK HOLDER: the installer HOLDER that wrote LOCK still
@@ -521,14 +589,15 @@ exec > >(trap '' INT TERM; exec tee -a "${LOG}") 2>&1
 # installed gateway now, before anything may stop it, and of the staged one
 # before the swap (an older installed release has no hook-data-dir; its hooks
 # do not open an unset outage). DATA_LOCK_DIRS are the locks
-# hold_hook_data_dir took; the EXIT trap removes them.
+# hold_hook_data_dir took; the EXIT trap gives back those still its own.
 DATA_LOCK_DIRS=()
-trap 'rm -rf "${LOCK_DIR}" ${DATA_LOCK_DIRS[@]+"${DATA_LOCK_DIRS[@]}"} ${SELF_TMP:+"${SELF_TMP}"}' EXIT
+trap 'release_locks; rm -rf ${SELF_TMP:+"${SELF_TMP}"}' EXIT
+start_lock_renewer
 trap 'printf "\n"; err "Cancelled."; exit 130' INT TERM
 
 hook_data_dir_of() {
-    # hook_data_dir_of BINARY: the data_dir BINARY's hook-data-dir names, ""
-    # when it names no absolute folder. Returns 2 when BINARY is missing or
+    # hook_data_dir_of BINARY: the folders BINARY's hook-data-dir names, one
+    # per line, "" when it names no absolute folder. Returns 2 when BINARY is missing or
     # has no hook-data-dir (an older release), 1 when it cannot read the
     # config (it says why on stderr).
     local binary="$1" help=""
@@ -539,12 +608,13 @@ hook_data_dir_of() {
 }
 
 hold_hook_data_dir() {
-    # hold_hook_data_dir BINARY [required]: hold the data_dir BINARY reads from
-    # the config as well. A BINARY that cannot read the config stops the
-    # install before anything changes; so does one without hook-data-dir when
-    # required (the staged gateway of this release always has it).
-    local binary="$1" required="${2:-}" data="" rc=0 lock holder held
-    data="$(hook_data_dir_of "${binary}")" || rc=$?
+    # hold_hook_data_dir BINARY [required]: hold every data folder BINARY
+    # names from the config as well (one per line). A BINARY that cannot read
+    # the config stops the install before anything changes; so does one
+    # without hook-data-dir when required (the staged gateway of this
+    # release always has it).
+    local binary="$1" required="${2:-}" answer="" rc=0 data
+    answer="$(hook_data_dir_of "${binary}")" || rc=$?
     case ${rc} in
         0) ;;
         2)
@@ -552,6 +622,16 @@ hold_hook_data_dir() {
             die "${binary} cannot name the data folder of your configuration; nothing was changed" ;;
         *) die "Could not read the data folder of your configuration (${DEFENSECLAW_CONFIG:-${DEFENSECLAW_HOME}/config.yaml}) with ${binary}, so its hooks could fail open while the gateway is down; fix the file, then run this installer again; nothing was changed" ;;
     esac
+    while IFS= read -r data; do
+        hold_data_lock "${data}"
+    done <<< "${answer}"
+    start_lock_renewer
+}
+
+hold_data_lock() {
+    # hold_data_lock DATA: take DATA/.install.lock unless DATA is no folder,
+    # is this install's home or is already held.
+    local data="$1" lock holder held
     [[ -n "${data}" && -d "${data}" ]] || return 0
     data="$(cd -P -- "${data}" 2>/dev/null && pwd -P)" || return 0
     [[ "${data}" != "$(cd -P -- "${DEFENSECLAW_HOME}" 2>/dev/null && pwd -P)" ]] || return 0
@@ -568,9 +648,11 @@ hold_hook_data_dir() {
         mkdir "${lock}" 2>/dev/null \
             || die "Could not create the install lock ${lock}: check that $(id -un) can write ${data}; nothing was changed"
     fi
+    if ! write_lock_owner "${lock}"; then
+        rm -rf "${lock:?}"
+        die "Could not write the install lock ${lock}/pid: check the free space and that $(id -un) can write ${data}; nothing was changed"
+    fi
     DATA_LOCK_DIRS+=("${lock}")
-    write_lock_owner "${lock}" \
-        || die "Could not write the install lock ${lock}/pid: check the free space and that $(id -un) can write ${data}; nothing was changed"
 }
 hold_hook_data_dir "${BIN_DIR}/defenseclaw-gateway"
 
@@ -881,6 +963,7 @@ if [[ "${ROLLBACK}" == true ]]; then
     saved_was_running="$(cat "${PREVIOUS}/GATEWAY_WAS_RUNNING" 2>/dev/null || true)"
     restart="${was_running}"
     [[ "${saved_was_running}" == true ]] && restart=true
+    assert_locks_ours
     assert_no_loaded_plugin_agents
     stop_gateway "${BIN_DIR}/defenseclaw-gateway" || die "The gateway did not stop; nothing was changed"
     if [[ -n "${current}" ]] && version_lt "${back_to}" 1.0.0 && ! version_lt "${current}" 1.0.0; then
@@ -1170,6 +1253,7 @@ if [[ -z "${PREV_VERSION}" ]] && [[ "${YES}" != true ]] && [[ -z "${CONNECTOR}" 
     pick_connector
 fi
 
+assert_locks_ours
 assert_no_loaded_plugin_agents
 WAS_RUNNING=false
 RESTORED_NOTE="Your previous install is back."
@@ -1202,6 +1286,7 @@ else
 fi
 trap 'warn "Interrupted; finishing or undoing the swap before exiting"' INT TERM
 trap '' HUP PIPE
+assert_locks_ours
 if ! snapshot; then
     undo_snapshot
     restart_old

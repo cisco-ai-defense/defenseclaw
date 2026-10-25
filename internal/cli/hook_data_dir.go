@@ -19,8 +19,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
 
-// hookDataDirNow is the data directory a gateway started with this process's
-// environment renders its per-user hooks into, the folder whose
+// hookDataDirsNow are the data directories a gateway started with this
+// process's environment renders its per-user hooks into, and every folder
+// whose hooks load that config as their own and can open an outage there,
+// one per line for install.sh to hold, the first one the hooks' own folder.
+// The data directory is the folder whose
 // .install.lock those hooks look for (hookOutageInstallHeld): the data_dir of
 // the config the gateway loads (config.ConfigPath, so DEFENSECLAW_CONFIG, or
 // config.yaml in DEFENSECLAW_HOME or ~/.defenseclaw), as the runtime loader
@@ -43,7 +46,7 @@ import (
 // it, the runtime takes the config's folder as its data directory
 // (loadConfigSourceChecked), so hook-outage-mode can open an outage there.
 // install.sh already holds its home (LOCK_DIR), so the answer is then the
-// config's folder, when the config is a config.yaml with a hooks folder
+// config's folder, when that folder's config.yaml is the config, by file identity, with a hooks folder
 // beside it whose hooks take that folder as their data directory, by the
 // rule they use (loadHookRuntimeConfig).
 //
@@ -52,28 +55,83 @@ import (
 // made absolute first (absoluteInstallerEnv): a relative spelling named no
 // folder ("") and install.sh then held only its home, while hooks beside
 // the config load it by its absolute path and could open an outage.
-func hookDataDirNow() (string, error) {
+func hookDataDirsNow() ([]string, error) {
 	restore, err := absoluteInstallerEnv()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer restore()
 	configFile := filepath.Clean(config.ConfigPath())
 	dir, err := hookDataDirOfConfig(configFile)
-	if err != nil || dir == "" {
-		return dir, err
+	if err != nil {
+		return nil, err
 	}
-	folder := filepath.Dir(configFile)
-	// Hooks read only <data dir>/config.yaml (hookOutageFailModeNow), with
-	// the same rule (loadHookRuntimeConfig).
-	if filepath.Base(configFile) == config.DefaultConfigName && !pathidentity.Same(folder, dir) {
-		if info, statErr := os.Stat(filepath.Join(folder, "hooks")); statErr == nil && info.IsDir() {
-			if _, own, loadErr := loadHookRuntimeConfig(configFile); loadErr == nil && pathidentity.Same(own, folder) {
-				return absoluteOrEmpty(folder), nil
+	var dirs []string
+	add := func(candidate string) {
+		candidate = absoluteOrEmpty(candidate)
+		if candidate == "" {
+			return
+		}
+		for _, held := range dirs {
+			if pathidentity.Same(held, candidate) {
+				return
 			}
 		}
+		dirs = append(dirs, candidate)
 	}
-	return dir, nil
+	if dir == "" {
+		return nil, nil
+	}
+	// Hooks read only <data dir>/config.yaml (hookOutageFailModeNow), with
+	// the same rule (loadHookRuntimeConfig). That file is the configured
+	// one whenever it is the same file, by any name: the configured file
+	// itself, a config.yaml link to it, or the folder a linked configured
+	// file resolves to (GAP review loop 2: DEFENSECLAW_CONFIG=policy.yaml
+	// with config.yaml a link to it left that folder unlocked).
+	for _, folder := range hookConfigFolders(configFile) {
+		if pathidentity.Same(folder, dir) {
+			continue
+		}
+		if info, statErr := os.Stat(filepath.Join(folder, "hooks")); statErr != nil || !info.IsDir() {
+			continue
+		}
+		alias := filepath.Join(folder, config.DefaultConfigName)
+		if !sameExistingFile(alias, configFile) {
+			continue
+		}
+		if _, own, loadErr := loadHookRuntimeConfig(alias); loadErr == nil && pathidentity.Same(own, folder) {
+			add(folder)
+		}
+	}
+	add(dir)
+	return dirs, nil
+}
+
+// hookConfigFolders are the folders whose hooks may load configFile as
+// their config.yaml: its own folder and, for a link, the folder of the file
+// it resolves to.
+func hookConfigFolders(configFile string) []string {
+	folders := []string{filepath.Dir(configFile)}
+	if real, err := filepath.EvalSymlinks(configFile); err == nil {
+		if real, err = filepath.Abs(real); err == nil && filepath.Dir(real) != folders[0] {
+			folders = append(folders, filepath.Dir(real))
+		}
+	}
+	return folders
+}
+
+// sameExistingFile reports whether a and b both exist and are the same file
+// once links are followed.
+func sameExistingFile(a, b string) bool {
+	left, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	right, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(left, right)
 }
 
 // loadHookRuntimeConfig loads configFile as the hook runtime of its folder
@@ -194,12 +252,19 @@ func init() {
 		Annotations: map[string]string{"defenseclaw.skip-daemon-bootstrap": "true"},
 		Args:        cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			dir, err := hookDataDirNow()
+			dirs, err := hookDataDirsNow()
 			if err != nil {
 				return err
 			}
-			_, err = fmt.Fprintln(cmd.OutOrStdout(), dir)
-			return err
+			if len(dirs) == 0 {
+				dirs = []string{""}
+			}
+			for _, dir := range dirs {
+				if _, err := fmt.Fprintln(cmd.OutOrStdout(), dir); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 	}
 	rootCmd.AddCommand(cmd)
