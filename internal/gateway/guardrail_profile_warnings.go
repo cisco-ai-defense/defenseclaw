@@ -108,14 +108,20 @@ func shortNameAssignmentWarnings(assignments []config.ProfileAssignment, records
 			if entry == "" || strings.ContainsAny(entry, `@\`) || useridentity.KindForID(entry) != "" {
 				continue
 			}
-			for _, record := range records {
-				facts := record.Facts
-				if facts.Directory != useridentity.DirectoryActiveDirectory ||
-					(facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceSSSDInfoPipe) ||
-					!useridentity.EqualFold(useridentity.BareAccountName(record.User), entry) {
-					continue
+			namesakes := sssdADNamesakes(records, entry)
+			if len(namesakes) > 1 {
+				// One bare entry selects accounts of more than one trusted
+				// domain: one warning names them all (GAP-0725).
+				names := make([]string, 0, len(namesakes))
+				for _, record := range namesakes {
+					names = append(names, fmt.Sprintf("%s (uid %s)", firstNonEmpty(record.Facts.UPN, record.Facts.Principal, record.User), record.Key))
 				}
-				qualified := firstNonEmpty(facts.UPN, facts.Principal)
+				warnings = append(warnings, fmt.Sprintf("assignment %d uses the bare user %q, which selects the SSSD AD accounts %s of different trusted domains; "+
+					"write the qualified name or uid of each account it should select (the strict policy tier refuses this entry)", i+1, entry, strings.Join(names, " and ")))
+				continue
+			}
+			for _, record := range namesakes {
+				qualified := firstNonEmpty(record.Facts.UPN, record.Facts.Principal)
 				if qualified != "" {
 					warnings = append(warnings, fmt.Sprintf("assignment %d uses the bare user %q for %s; write %s (or uid %s) to select exactly this SSSD AD account",
 						i+1, entry, record.User, qualified, record.Key))
@@ -124,6 +130,22 @@ func shortNameAssignmentWarnings(assignments []config.ProfileAssignment, records
 		}
 	}
 	return warnings
+}
+
+// sssdADNamesakes are the guardian records of SSSD Active Directory accounts
+// whose bare name is entry.
+func sssdADNamesakes(records []enterprisehooks.IdentitySpoolRecord, entry string) []enterprisehooks.IdentitySpoolRecord {
+	var out []enterprisehooks.IdentitySpoolRecord
+	for _, record := range records {
+		facts := record.Facts
+		if facts.Directory != useridentity.DirectoryActiveDirectory ||
+			(facts.Source != useridentity.SourceSSSD && facts.Source != useridentity.SourceSSSDInfoPipe) ||
+			!useridentity.EqualFold(useridentity.BareAccountName(record.User), entry) {
+			continue
+		}
+		out = append(out, record)
+	}
+	return out
 }
 
 // standaloneProfileWarnings is what status and verify list on a standalone
@@ -901,7 +923,7 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 	for _, entry := range set.assignments[decision.Assignment-1].Match.Users {
 		entry = strings.TrimSpace(entry)
 		if entry == "" || strings.ContainsAny(entry, `@\`) || !userEntryMatches(subject, entry) ||
-			strings.EqualFold(entry, subject.UserID) {
+			strings.EqualFold(entry, subject.UserID) || ambiguousBareUserEntry(subject, entry) {
 			continue
 		}
 		qualified := firstNonEmpty(subject.UPN, subject.Principal, subject.UserID)
@@ -912,19 +934,41 @@ func shortNameUserNote(set *guardrailProfileSet, decision profileDecision, subje
 }
 
 func ambiguousShortNameUserNote(set *guardrailProfileSet, decision profileDecision, subject *profileSubject) string {
-	if set == nil || subject == nil || !slices.Contains(decision.Unproven, "account:ambiguous_short_name") {
+	if set == nil || subject == nil {
 		return ""
 	}
 	qualified := firstNonEmpty(subject.UPN, subject.Principal)
 	if qualified == "" {
 		qualified = subject.UserID
 	}
+	refused := slices.Contains(decision.Unproven, "account:ambiguous_short_name")
 	for i, assignment := range set.assignments {
 		for _, entry := range assignment.Match.Users {
-			if ambiguousBareUserEntry(subject, entry) {
-				return fmt.Sprintf("assignment %d uses the ambiguous short name %q for %s; write %s (or uid %s) to select only this account",
-					i+1, strings.TrimSpace(entry), subject.UserName, qualified, subject.UserID)
+			if !ambiguousBareUserEntry(subject, entry) {
+				continue
 			}
+			entry = strings.TrimSpace(entry)
+			// Name every account the entry selects that the guardian has a
+			// record for; the namesakes of a domain it has not seen yet are
+			// named by their domain only (GAP-0725).
+			var accounts []string
+			own := false
+			for _, record := range sssdADNamesakes(profileShortNameRecords(), entry) {
+				own = own || record.Key == subject.UserID
+				accounts = append(accounts, fmt.Sprintf("%s (uid %s)", firstNonEmpty(record.Facts.UPN, record.Facts.Principal, record.User), record.Key))
+			}
+			if !own {
+				accounts = append([]string{fmt.Sprintf("%s (uid %s)", firstNonEmpty(subject.UPN, subject.Principal, subject.UserName), subject.UserID)}, accounts...)
+			}
+			if len(accounts) == 1 {
+				accounts = append(accounts, fmt.Sprintf("the account named %s in each other trusted domain", entry))
+			}
+			if refused {
+				return fmt.Sprintf("assignment %d uses the ambiguous short name %q, which names %s; the strict policy tier refuses it: write %s (or uid %s) to select only this account",
+					i+1, entry, strings.Join(accounts, " and "), qualified, subject.UserID)
+			}
+			return fmt.Sprintf("assignment %d uses the ambiguous short name %q, which selects %s; write %s (or uid %s) to select only this account",
+				i+1, entry, strings.Join(accounts, " and "), qualified, subject.UserID)
 		}
 	}
 	return ""

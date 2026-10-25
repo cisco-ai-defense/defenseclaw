@@ -238,7 +238,12 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 					userState = matchYes
 				}
 			case res.Account == proofProven:
-				if ambiguousBareUserEntry(subject, entry) {
+				if ambiguousBareUserEntry(subject, entry) && set.refusesAmbiguousShortNames(connectorName) {
+					// Only the strict policy tier refuses a bare entry that
+					// may name accounts in more than one trusted domain; the
+					// default and permissive tiers match it as before, and
+					// explain, status and verify warn and name the accounts
+					// (GAP-0725).
 					userState, userNeed = max(userState, matchMaybe), "account:ambiguous_short_name"
 				} else if userEntryMatches(subject, entry) {
 					userState = matchYes
@@ -290,6 +295,15 @@ func (set *guardrailProfileSet) assignmentState(m config.ProfileMatch, subject *
 		return state, "", "", needs
 	}
 	return matchYes, reason, group, nil
+}
+
+// refusesAmbiguousShortNames reports whether connectorName's guardrail rule
+// pack in the base configuration is the strict policy tier
+// (config.HookPolicyTierForConnector), the only tier in which a bare users
+// entry that may name accounts of more than one trusted domain is refused
+// instead of matched (GAP-0725). It is asked only for such an entry.
+func (set *guardrailProfileSet) refusesAmbiguousShortNames(connectorName string) bool {
+	return set != nil && set.base != nil && set.base.HookPolicyTierForConnector(connectorName) == config.HookPolicyTierStrict
 }
 
 // factAssignmentGroupSID is the unproven fact of an assignment group name
