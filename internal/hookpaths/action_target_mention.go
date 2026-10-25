@@ -617,7 +617,7 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 	if _, err := filepath.Match(pattern, ""); err != nil {
 		return false
 	}
-	candidates, complete := actionExpandGlob(pattern, literal, actionGlobViewHidden(cwd, home))
+	candidates, complete, unseen := actionExpandGlob(pattern, literal, actionGlobViewHidden(cwd, home))
 	for _, candidate := range candidates {
 		if protectedReachPath(candidate, protected, ssh) {
 			return true
@@ -625,6 +625,12 @@ func actionProtectedFileGlobReach(pattern, cwd string, protected protectedFiles,
 	}
 	if !complete {
 		base := filepath.Base(pattern)
+		if unseen && !strings.ContainsAny(filepath.Dir(pattern), "*?[") && !actionGlobHasLiteral(base) {
+			// Only the last component is a pattern, in a directory this
+			// process cannot read, and it names nothing (git add *): no
+			// directory alias can be selected, so it stays ordinary.
+			return false
+		}
 		for _, name := range append([]string{".ssh"}, AuthorizedKeysFiles[:]...) {
 			if actionGlobNameMatch(base, name) {
 				return true
@@ -644,12 +650,12 @@ const (
 // literal component is joined without a lookup, so a final file that does
 // not exist yet is still a candidate; literal is a prefix of pattern taken
 // as written (the cwd of a relative word). complete is false when a bound
-// is exceeded.
+// is exceeded or a directory cannot be read; unseen tells the latter.
 //
 // hidden is set when the process cannot see the request's cwd or home
 // (systemd ProtectHome on a managed gateway): a directory missing from
 // that view is not proof the user's shell finds no match (GAP-1460).
-func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string, complete bool) {
+func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string, complete, unseen bool) {
 	separator := string(filepath.Separator)
 	start := filepath.VolumeName(pattern) + separator
 	rest := strings.TrimPrefix(pattern, start)
@@ -671,7 +677,7 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 		var next []string
 		for _, dir := range paths {
 			if reads++; reads > actionGlobMaxReads {
-				return nil, false
+				return nil, false, false
 			}
 			directory, err := os.Open(dir)
 			if err != nil {
@@ -680,12 +686,12 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 				}
 				// Permission denied, or a home this process cannot see:
 				// the user's shell may still expand the pattern there.
-				return nil, false
+				return nil, false, true
 			}
 			names, err := directory.Readdirnames(actionGlobMaxNames + 1)
 			_ = directory.Close()
 			if err != nil && err != io.EOF || len(names) > actionGlobMaxNames {
-				return nil, false
+				return nil, false, false
 			}
 			for _, name := range names {
 				if actionGlobNameMatch(component, name) {
@@ -693,15 +699,36 @@ func actionExpandGlob(pattern, literal string, hidden bool) (candidates []string
 				}
 			}
 			if len(next) > actionGlobMaxNames {
-				return nil, false
+				return nil, false, false
 			}
 		}
 		if len(next) == 0 {
-			return nil, true
+			return nil, true, false
 		}
 		paths = next
 	}
-	return paths, true
+	return paths, true, false
+}
+
+// actionGlobHasLiteral reports whether a pattern component keeps a literal
+// character outside *, ? and bracket expressions.
+func actionGlobHasLiteral(component string) bool {
+	for i := 0; i < len(component); i++ {
+		switch component[i] {
+		case '*', '?':
+		case '\\':
+			return true
+		case '[':
+			if end := strings.IndexByte(component[i+1:], ']'); end >= 0 {
+				i += end + 1
+				continue
+			}
+			return true
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // actionGlobViewHidden reports whether this process cannot see the cwd or

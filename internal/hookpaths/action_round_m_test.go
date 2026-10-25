@@ -138,12 +138,18 @@ func TestR104GlobAliasBehindHiddenHome(t *testing.T) {
 		`cp payload ` + cwd + `/keyd*/authorized_keys`,
 		`cd docs && cp payload ../keyd*/authorized_keys`,
 		`for f in keyd*/authorized_keys; do cp payload "$f"; done`,
+		`cp payload keyd*/a*`,
+		`cp payload keyd*/*`,
+		`cp payload */authorized_keys`,
 	}
 	allowed := []string{
 		`cp src/*.txt docs/`,
 		`cat docs/*.md > notes.txt`,
 		`rm -f src/*.log`,
 		`cp payload d*/notes.txt`,
+		`git add *`,
+		`cp payload docs/*`,
+		`chmod 644 src/[a-z]*`,
 	}
 	t.Cleanup(func() { _ = os.Chmod(homes, 0o700) })
 	for _, hidden := range []bool{false, true} {
