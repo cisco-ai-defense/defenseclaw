@@ -263,16 +263,20 @@ func instructionSnapshot(connector string, files map[string]string, dirs []strin
 // (instructionGatewayReadsFiles: managed Windows), reads the same files
 // itself when the hook sends none, as a 1.0.3 hook does during an upgrade.
 func instructionStartupFiles(ctx context.Context, connector, cwd string) (map[string]string, []string, map[string]string) {
-	if authenticatedHookConnector(ctx) != connector || !filepath.IsAbs(cwd) || isSandboxHookRequest(ctx) {
+	if authenticatedHookConnector(ctx) != connector || isSandboxHookRequest(ctx) {
 		return nil, nil, nil
 	}
 	home := instructionHome(ctx)
 	facts := resolvedWritesFromContext(ctx)
 	if files, supplied := hookpaths.StartupFiles(facts); supplied {
+		cwd = managedClientCWD(ctx, cwd, facts)
+		if !filepath.IsAbs(cwd) {
+			return nil, nil, nil
+		}
 		identities, _, _ := hookpaths.ReachedInstructions(facts)
 		return instructionSnapshot(connector, files, hookpaths.InstructionDirectories(cwd, home), identities)
 	}
-	if _, managed := managedHookPeerFromContext(ctx); managed && !instructionGatewayReadsFiles(ctx) {
+	if _, managed := managedHookPeerFromContext(ctx); managed && !instructionGatewayReadsFiles(ctx) || !filepath.IsAbs(cwd) {
 		return nil, nil, nil
 	}
 	dirs := hookpaths.StartupDirectories(cwd, home)

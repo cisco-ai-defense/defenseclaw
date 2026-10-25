@@ -612,6 +612,11 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			return ""
 		}
 		facts := map[string]string{StartupFilesKey: string(listed)}
+		// The directory the snapshot was read in, as the user: a managed
+		// gateway behind ProtectHome cannot resolve it itself (GAP-1462).
+		if filepath.IsAbs(cwd) && len(cwd) <= MaxWriteTargetPathBytes {
+			facts[CWDKey] = cwd
+		}
 		// The start directories' identities, so the gateway knows another
 		// spelling of one later (ReachedInstructionsKey).
 		if reached := reachedEvidence(InstructionDirectories(cwd, home)); reached != "" {

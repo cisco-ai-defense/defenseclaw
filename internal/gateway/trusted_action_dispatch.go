@@ -231,6 +231,7 @@ func dispatchTrustedAction(
 	}
 	if _, ok := managedHookPeerFromContext(parent); ok {
 		request.ProtectedHomeHook = true
+		request.Input.CWD = managedClientCWD(parent, request.Input.CWD, request.ResolvedWriteTargets)
 	}
 	var (
 		facts     actionfacts.Facts

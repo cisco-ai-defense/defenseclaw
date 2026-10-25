@@ -76,6 +76,7 @@ func provedHighWriteFindings(
 	if generation == nil {
 		return findings
 	}
+	request.Input.CWD = managedClientCWD(ctx, request.Input.CWD, request.ResolvedWriteTargets)
 	facts := actionfacts.Analyze(request.Input)
 	proved := append([]RuleFinding(nil), findings...)
 	hostFlavor := actionfacts.PathFlavorPOSIX
