@@ -141,13 +141,15 @@ $hook = Join-Path $bin 'defenseclaw-hook.exe'
 $new = Join-Path $Scratch 'new-hook.exe'
 Set-Content -LiteralPath $hook -Value 'hook-1.0.2' -NoNewline
 Set-Content -LiteralPath $new -Value 'hook-1.0.4' -NoNewline
+# An authenticated source descriptor carries the digest it was admitted by.
+$newSource = @{ path = $new; sha256 = (Get-FileHash -LiteralPath $new -Algorithm SHA256).Hash }
 $layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch }
 $intent = [ordered]@{ schema_version = 1; phase = 'quiescing' }
 $result = [ordered]@{ case = $Case; threw = '' }
 try {
     switch ($Case) {
         'publish' {
-            $preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive
+            $preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive
             $result.preimage = $preimage
             $result.preimage_bytes = Get-Content -LiteralPath $preimage -Raw
             $result.hook = Get-Content -LiteralPath $hook -Raw
@@ -159,12 +161,12 @@ try {
             $result.restored = Get-Content -LiteralPath $hook -Raw
         }
         'snapshot-failure' {
-            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
             Restore-DefenseClawEarlyHook -Layout $layout -Intent $intent -TransactionDirectory $transaction
             $result.restored = Get-Content -LiteralPath $hook -Raw
         }
         'recovery-guard' {
-            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
             # Simulate an interrupted older rollback that republished its
             # 1.0.2 hook before service restoration was complete.
             Copy-Item -LiteralPath $intent['early_hook_preimage'] -Destination $hook -Force
@@ -184,12 +186,12 @@ try {
             $result.restored = Get-Content -LiteralPath $hook -Raw
         }
         'guard-tamper' {
-            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
             Set-Content -LiteralPath $intent['early_hook_guard_copy'] -Value 'tampered' -NoNewline
             [void](Hold-DefenseClawEarlyHookGuard -Layout $layout -TransactionDirectory $transaction -GuardCopy $intent['early_hook_guard_copy'] -GuardSHA256 $intent['early_hook_guard_sha256'])
         }
         'first-install' {
-            $result.preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent
+            $result.preimage = Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent
             $result.hook = Get-Content -LiteralPath $hook -Raw
             Restore-DefenseClawEarlyHook -Layout $layout -Intent $intent -TransactionDirectory $transaction
         }
@@ -198,7 +200,7 @@ try {
             $result.hook = Get-Content -LiteralPath $hook -Raw
         }
         'drain' {
-            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source @{ path = $new } -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+            [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
             $script:events.Add('returned')
         }
         'drain-timeout' {
@@ -229,16 +231,132 @@ $result | ConvertTo-Json -Compress -Depth 6
 """
 
 
+# GAP-1381: the guard copy runs through the real payload admission. Under
+# HashPinned trust an unsigned payload file is admitted only by the SHA-256 the
+# administrator's payload manifest pins for its name; early-hook-closed.exe has
+# no such name, so the copy must be admitted by the pin of the hook it copies.
+_TRUST_HARNESS = r"""
+param([string]$ModulePath, [string]$Scratch, [string]$Case)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$tokens = $null
+$errors = $null
+$ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
+if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
+foreach ($name in @(
+        'Publish-DefenseClawEarlyHook',
+        'Hold-DefenseClawEarlyHookGuard',
+        'Get-DefenseClawSourceDescriptor',
+        'Assert-DefenseClawSourceDescriptorCurrent',
+        'Install-DefenseClawSourceDescriptor',
+        'Assert-DefenseClawRegularSource',
+        'Test-DefenseClawStandalonePayloadTrusted')) {
+    $definition = $ast.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
+    }, $true)
+    if ($null -eq $definition) { throw "missing $name" }
+    # Every test file is unsigned, as an rc build's payload is.
+    $text = $definition.Extent.Text.Replace(
+        'Microsoft.PowerShell.Security\Get-AuthenticodeSignature', 'Get-TestAuthenticodeSignature')
+    . ([ScriptBlock]::Create($text))
+}
+function Get-TestAuthenticodeSignature {
+    param([string]$LiteralPath)
+    [pscustomobject]@{ Status = [Management.Automation.SignatureStatus]::NotSigned; SignerCertificate = $null }
+}
+function Resolve-DefenseClawFullPath {
+    param([string]$Path, [switch]$MustExist, [switch]$Leaf)
+    $full = [IO.Path]::GetFullPath($Path)
+    if ($MustExist -and -not (Test-Path -LiteralPath $full -PathType Leaf)) { throw "missing: $full" }
+    return $full
+}
+# The NTFS owner, DACL and volume checks have their own smokes.
+function Assert-DefenseClawTrustedSource { param([string]$Path, [string]$Label) return $Path }
+function Assert-DefenseClawNoReparsePath { param([string]$Path, [switch]$AllowMissingLeaf) }
+function Test-DefenseClawStandaloneProfile { return $true }
+function Write-DefenseClawJsonAtomic {
+    param($Value, [string]$Path)
+    ($Value | ConvertTo-Json -Depth 8) | Set-Content -LiteralPath $Path -Encoding utf8
+}
+function Wait-DefenseClawPriorHookCalls { param([string]$HookPath, [datetime]$StartedBefore) @() }
+function Write-DefenseClawLifecyclePhase { param([string]$Stage) }
+# A file named here is changed right after the atomic copy wrote it (a swap
+# after the copy's own digest check).
+$script:SwapLeaf = ''
+function Install-DefenseClawFileAtomic {
+    param([string]$Source, [string]$Destination, [string]$ExpectedSHA256, [switch]$SkipIfContentMatches)
+    if ($ExpectedSHA256 -and (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash -ne $ExpectedSHA256) {
+        throw 'source digest mismatch'
+    }
+    Copy-Item -LiteralPath $Source -Destination $Destination -Force
+    if ($script:SwapLeaf -and [IO.Path]::GetFileName($Destination) -ceq $script:SwapLeaf) {
+        Set-Content -LiteralPath $Destination -Value 'swapped' -NoNewline
+    }
+}
+function Get-TestSHA256([string]$Path) {
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+$stage = Join-Path $Scratch 'setup'
+$bin = Join-Path $Scratch 'bin'
+$transaction = Join-Path $Scratch 'transaction'
+New-Item -ItemType Directory -Path $stage, $bin, $transaction -Force | Out-Null
+$staged = Join-Path $stage 'defenseclaw-hook.exe'
+$hook = Join-Path $bin 'defenseclaw-hook.exe'
+Set-Content -LiteralPath $staged -Value 'hook-1.0.4' -NoNewline
+Set-Content -LiteralPath $hook -Value 'hook-1.0.2' -NoNewline
+$swapped = Join-Path $Scratch 'swapped.bin'
+Set-Content -LiteralPath $swapped -Value 'swapped' -NoNewline
+$script:DefenseClawAllowedSignerSHA256 = @()
+$script:DefenseClawTrustMode = 'HashPinned'
+$script:DefenseClawPinnedPayloadSHA256 = @{ 'defenseclaw-hook.exe' = (Get-TestSHA256 $staged) }
+switch ($Case) {
+    'unpinned-source' { $script:DefenseClawPinnedPayloadSHA256['defenseclaw-hook.exe'] = ('0' * 64) }
+    'authenticode-mode' { $script:DefenseClawTrustMode = 'Authenticode' }
+    'guard-swapped' { $script:SwapLeaf = 'early-hook-closed.exe' }
+    'guard-swapped-guard-name-pinned' {
+        # A manifest that also pins the guard's own name to other bytes does
+        # not admit a guard copy that differs from the hook it copies.
+        $script:SwapLeaf = 'early-hook-closed.exe'
+        $script:DefenseClawPinnedPayloadSHA256['early-hook-closed.exe'] = (Get-TestSHA256 $swapped)
+    }
+    'hook-swapped' { $script:SwapLeaf = 'defenseclaw-hook.exe' }
+}
+$layout = @{ HookPath = $hook; PendingPath = (Join-Path $Scratch 'pending.json'); StateRoot = $Scratch }
+$intent = [ordered]@{ schema_version = 1; phase = 'quiescing' }
+$result = [ordered]@{ case = $Case; threw = ''; pin = (Get-TestSHA256 $staged) }
+try {
+    $source = Get-DefenseClawSourceDescriptor -Path $staged -Label 'hook executable' -Authenticode
+    [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $source -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+    $result.guard_sha256 = [string]$intent['early_hook_guard_sha256']
+    $result.guard_bytes = Get-Content -LiteralPath $intent['early_hook_guard_copy'] -Raw
+    $result.hook_after_publish = Get-Content -LiteralPath $hook -Raw
+    # An interrupted rollback put the 1.0.2 hook back while the services
+    # were down: the guard republishes this release's closed hook.
+    Copy-Item -LiteralPath $intent['early_hook_preimage'] -Destination $hook -Force
+    $read = Get-Content -LiteralPath $layout.PendingPath -Raw | ConvertFrom-Json
+    $result.held = Hold-DefenseClawEarlyHookGuard -Layout $layout -TransactionDirectory $transaction -GuardCopy $read.early_hook_guard_copy -GuardSHA256 $read.early_hook_guard_sha256
+    $result.hook_held = Get-Content -LiteralPath $hook -Raw
+}
+catch {
+    $result.threw = $_.Exception.Message
+}
+$result.hook = Get-Content -LiteralPath $hook -Raw
+$result.pending = Test-Path -LiteralPath $layout.PendingPath
+$result | ConvertTo-Json -Compress -Depth 6
+"""
+
+
 def _pwsh() -> str | None:
     return os.environ.get("DEFENSECLAW_TEST_PWSH") or shutil.which("pwsh") or shutil.which("pwsh.exe")
 
 
-def _run(tmp_path: Path, case: str) -> dict:
+def _run(tmp_path: Path, case: str, harness_text: str = _HARNESS) -> dict:
     engine = _pwsh()
     if engine is None:
         pytest.skip("PowerShell 7 (pwsh) is not installed")
     harness = tmp_path / "early-hook.ps1"
-    harness.write_text(_HARNESS, encoding="utf-8")
+    harness.write_text(harness_text, encoding="utf-8")
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     completed = subprocess.run(
@@ -345,3 +463,38 @@ def test_recovery_refuses_a_preimage_outside_its_transaction(tmp_path: Path) -> 
     result = _run(tmp_path, "foreign-preimage")
     assert "unexpected hook preimage" in result["threw"], result
     assert "restore" not in result["events"], result
+
+
+def test_a_hash_pinned_upgrade_admits_its_guard_copy_by_the_hooks_pin(tmp_path: Path) -> None:
+    """GAP-1381: the published 1.0.2 -> rc.8 managed Setup upgrade under
+    HashPinned trust ended 1603 because the guard copy was admitted by its
+    own name, which the payload manifest does not pin."""
+    result = _run(tmp_path, "hash-pinned", _TRUST_HARNESS)
+    assert result["threw"] == "", result
+    assert result["guard_bytes"] == "hook-1.0.4", result
+    assert result["guard_sha256"] == result["pin"], result
+    assert result["hook_after_publish"] == "hook-1.0.4", result
+    assert result["held"] == result["pin"], result
+    assert result["hook_held"] == "hook-1.0.4", result
+
+
+@pytest.mark.parametrize("case", ["guard-swapped", "guard-swapped-guard-name-pinned"])
+def test_a_guard_copy_without_the_hooks_pinned_bytes_is_refused(tmp_path: Path, case: str) -> None:
+    result = _run(tmp_path, case, _TRUST_HARNESS)
+    assert "hook executable is not admitted by the standalone payload trust policy" in result["threw"], result
+    assert "early-hook-closed.exe" in result["threw"], result
+    # Refused before the intent names a guard and before the hook changes.
+    assert result["pending"] is False, result
+    assert result["hook"] == "hook-1.0.2", result
+
+
+@pytest.mark.parametrize("case", ["unpinned-source", "authenticode-mode", "hook-swapped"])
+def test_the_hook_payload_trust_is_unchanged(tmp_path: Path, case: str) -> None:
+    result = _run(tmp_path, case, _TRUST_HARNESS)
+    assert "hook executable is not admitted by the standalone payload trust policy" in result["threw"], result
+    if case == "hook-swapped":
+        # The hook path's own copy is still checked against the pin.
+        assert "defenseclaw-hook.exe" in result["threw"], result
+    else:
+        assert result["pending"] is False, result
+        assert result["hook"] == "hook-1.0.2", result
