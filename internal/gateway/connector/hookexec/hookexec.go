@@ -287,6 +287,9 @@ type Options struct {
 	// oversizedReview marks a balanced per-user call whose bounded prefix was
 	// sent to the gateway. Only its answered allow gets the size warning.
 	oversizedReview bool
+	// oversizedUninspected marks an oversizedReview that could not keep a
+	// command or target value whole (OversizeUninspectedField).
+	oversizedUninspected bool
 	// answerBy is the answer deadline of a tool call (answerDeadline);
 	// doRequest sets it, and the request then asks for progress reports.
 	answerBy time.Time
@@ -1214,8 +1217,12 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		if json.Unmarshal(body, &verdict) == nil && (verdict.Action == "allow" || verdict.Action == "alert") {
 			quiet := opts
 			quiet.Stderr = io.Discard
-			logHookFailure(quiet, sp, "stdin body exceeded cap; bounded prefix reviewed by gateway", "transport", "open", false)
-			fmt.Fprintf(opts.Stderr, "defenseclaw: warning: %s hook payload exceeded the bounded inspection cap; gateway allowed this call and recorded its verdict\n", sp.connector)
+			reason, note := "stdin body exceeded cap; bounded prefix reviewed by gateway", ""
+			if opts.oversizedUninspected {
+				reason, note = "stdin body exceeded cap; oversize, command not inspected", " (oversize, command not inspected)"
+			}
+			logHookFailure(quiet, sp, reason, "transport", "open", false)
+			fmt.Fprintf(opts.Stderr, "defenseclaw: warning: %s hook payload exceeded the bounded inspection cap%s; gateway allowed this call and recorded its verdict\n", sp.connector, note)
 		}
 	}
 	if delivery != nil && resp.StatusCode == http.StatusOK && readErr == nil {
@@ -2192,16 +2199,18 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
 		normalizeFailMode(opts.OutageFailMode) == "open" && !perUserInstallWindow(opts) {
 		// A prefix the reducer cannot turn into one request (a duplicated
-		// key) keeps the closed oversize answer below.
+		// key) keeps the closed oversize answer below. A review without a
+		// whole command or target is marked uninspected: the gateway warns
+		// and audits it in observe mode and blocks it in action mode.
 		bound := opts.Event
 		if sp.connector == "copilot" || sp.connector == "antigravity" {
 			bound = "" // their bodies carry no event; the request header binds it
 		}
-		if review := oversizedReviewPayload(prefix, bound); review != nil {
+		if review, uninspected := oversizedReview(prefix, bound); review != nil {
 			if strings.TrimSpace(opts.Event) == "" {
 				opts.Event = resolveHookEvent("", review)
 			}
-			opts.oversizedReview = true
+			opts.oversizedReview, opts.oversizedUninspected = true, uninspected
 			return sendToGateway(ctx, opts, sp, failMode, review, startedAt)
 		}
 	}

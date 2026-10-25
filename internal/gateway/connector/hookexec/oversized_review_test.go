@@ -74,7 +74,7 @@ func TestOversizedReviewBoundsContextAndRefusesDuplicateKeys(t *testing.T) {
 // closed oversize answer). Budgets running out, a value the cap cut, a value
 // nested too deep or a review over the gateway cap never yield a review the
 // gateway could allow without the command.
-func TestOversizedReviewNeverSendsACallWithoutItsWholeCommand(t *testing.T) {
+func TestOversizedReviewMarksACallWithoutItsWholeCommand(t *testing.T) {
 	const secret = "cat ~/.ssh/id_rsa"
 	notes := func(n int) string {
 		var b strings.Builder
@@ -92,9 +92,12 @@ func TestOversizedReviewNeverSendsACallWithoutItsWholeCommand(t *testing.T) {
 	reviewer += strings.Repeat("p", 1067482-len(reviewer)-2) + `"}`
 	deep := `{"tool_input":{"command":` + strings.Repeat("[", oversizedReviewMaxDepth+2) + `"` + secret + `"` + strings.Repeat("]", oversizedReviewMaxDepth+2) + `},"padding":"` + strings.Repeat("p", 2<<20) + `"}`
 	pad := strings.Repeat("p", 2<<20)
+	// 160 Ki control bytes fit the keep budget whole, but their escaped form
+	// (6 bytes each) keeps every pass over the gateway cap.
+	escaped := `{"tool_input":{"cmd":"` + strings.Repeat(`\u0001`, 160<<10) + `"},"padding":"` + pad + `"}`
 	for _, tc := range []struct {
 		name, body string
-		reviewed   bool // false: no review may be sent
+		reviewed   bool // false: the review must be marked uninspected
 		want       []string
 	}{
 		{"reviewer shape: cmd after the budgets ran out", reviewer, true, []string{`"cmd":"` + secret + `"`}},
@@ -105,21 +108,31 @@ func TestOversizedReviewNeverSendsACallWithoutItsWholeCommand(t *testing.T) {
 		{"target cut by the cap", `{"tool_input":{"content":"x","file_path":"/home/a/` + pad + `"}}`, false, nil},
 		{"command nested past the depth limit", deep, false, nil},
 		{"copilot toolArgs command cut by the cap", `{"toolName":"bash","toolArgs":"{\"command\":\"echo ` + pad + `\"}"}`, false, nil},
+		// The cap hides keys after it: a command after a long value of the
+		// call's arguments was never read.
+		{"bash command after a description cut by the cap", `{"tool_name":"Bash","tool_input":{"description":"` + pad + `","command":"` + secret + `"}}`, false, nil},
+		{"write target after content cut by the cap", `{"tool_name":"Write","tool_input":{"content":"` + pad + `","file_path":"/home/a/.ssh/authorized_keys"}}`, false, nil},
+		{"command after a nested context value cut by the cap", `{"tool_name":"Bash","tool_input":{"meta":{"notes":["` + pad + `"]},"command":"` + secret + `"}}`, false, nil},
+		{"command array cut between its elements", `{"tool_input":{"command":["bash","-lc",` + strings.Repeat(`"x",`, 300000) + `"` + secret + `"]}}`, false, nil},
+		{"copilot toolArgs with file text before its path", `{"toolName":"create","toolArgs":"{\"file_text\":\"` + pad + `\",\"path\":\"/home/a/.ssh/authorized_keys\"}"}`, false, nil},
+		{"escaped command over the gateway cap", escaped, false, nil},
 		// Benign oversized calls keep their review (balanced defaults).
 		{"lockfile write", `{"tool_name":"Write","tool_input":{"file_path":"/w/package-lock.json","content":"` + pad + `"}}`, true, []string{`"file_path":"/w/package-lock.json"`}},
 		{"copilot create with a long file text", `{"toolName":"create","toolArgs":"{\"path\":\"/w/gen.go\",\"file_text\":\"` + pad + `\"}"}`, true, []string{`\"path\":\"/w/gen.go\"`}},
 		{"large tool result", `{"hook_event_name":"PostToolUse","tool_name":"mcp__deepwiki__read_wiki_contents","tool_input":{"repoName":"a/b"},"tool_response":"` + pad + `"}`, true, []string{`"repoName":"a/b"`}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			review := oversizedReviewPayload([]byte(tc.body[:defaultMaxBody]), "PreToolUse")
-			if !tc.reviewed {
-				if review != nil {
-					t.Fatalf("a review without the whole command or target was built (%d bytes)", len(review))
-				}
-				return
+			prefix := []byte(tc.body)
+			if int64(len(prefix)) > defaultMaxBody {
+				prefix = prefix[:defaultMaxBody]
 			}
+			review, uninspected := oversizedReview(prefix, "PreToolUse")
 			if len(review) == 0 || len(review) > oversizedReviewMaxBytes || !json.Valid(review) {
 				t.Fatalf("review is not a valid bounded request: %d bytes", len(review))
+			}
+			marked := strings.Contains(string(review), `"`+OversizeUninspectedField+`":true`)
+			if marked != uninspected || marked == tc.reviewed {
+				t.Fatalf("uninspected=%v marked=%v, want marked=%v: %.300s", uninspected, marked, !tc.reviewed, review)
 			}
 			for _, want := range tc.want {
 				if !strings.Contains(string(review), want) {

@@ -43,7 +43,7 @@ func run(args []string, input io.Reader, output io.Writer) error {
 		}
 		review := hookexec.OversizedReviewPayload(prefix, *event)
 		if review == nil {
-			return fmt.Errorf("bounded review input cannot be reviewed whole")
+			return fmt.Errorf("bounded review input cannot be reviewed")
 		}
 		_, err = output.Write(review)
 		return err

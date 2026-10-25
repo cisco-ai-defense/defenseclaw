@@ -874,16 +874,18 @@ const DC_REVIEW_KEYS = new Set(["cmd", "command", "commands", "commandline", "ar
 
 // defenseclawBoundedReview reduces an oversized payload to a request under
 // the gateway's 1 MiB cap that keeps every key of the call, so the gateway
-// judges its command and target as at normal size. It returns "" (the call
-// keeps its closed oversize answer) when a command or target value does not
-// fit whole or the review stays over the cap.
+// judges its command and target as at normal size. A review that cannot keep
+// a command or target value whole sends a head of it and is marked
+// oversize_command_not_inspected: the gateway warns and audits it in observe
+// mode and blocks it in action mode. It returns "" only when even the last
+// pass, which keeps no value whole, stays over the cap.
 function defenseclawBoundedReview(payload, originalBytes) {
-  let body = "";
-  for (let scale = 1; scale <= 8; scale *= 2) {
-    // Command and target values must all fit whole; only the context heads
-    // shrink when the review is too large.
-    let keep = 896 * 1024;
-    let heads = (192 * 1024) / scale;
+  for (let pass = 0; pass <= 4; pass++) {
+    // Command and target values are kept whole while they fit; only the
+    // context heads shrink when the review is too large. The last pass keeps
+    // none whole.
+    let keep = pass === 4 ? 0 : 896 * 1024;
+    let heads = (192 * 1024) >> Math.min(pass, 3);
     let incomplete = false;
     const walk = (value, inKeep, depth) => {
       if (typeof value === "string") {
@@ -891,8 +893,8 @@ function defenseclawBoundedReview(payload, originalBytes) {
         if (inKeep && depth < 128 && /^\s*[[{]/.test(value)) {
           try { return JSON.stringify(walk(JSON.parse(value), false, depth + 1)); } catch (_) { /* not JSON */ }
         }
-        // A command or target value that does not fit whole: no review.
-        if (inKeep) { incomplete = true; return undefined; }
+        // A command or target value that does not fit whole: only a head.
+        if (inKeep) incomplete = true;
         const n = Math.max(0, Math.min(value.length, 8192, heads));
         heads -= n;
         return n > 0 || value === "" ? value.slice(0, n) : undefined;
@@ -907,14 +909,14 @@ function defenseclawBoundedReview(payload, originalBytes) {
       return out;
     };
     const review = walk(payload, false, 0) || {};
-    if (incomplete) return "";
+    if (incomplete) review.oversize_command_not_inspected = true;
     review.content_truncated = true;
     review.bounded_prefix_review = true;
     review.original_body_bytes = originalBytes;
-    body = JSON.stringify(review);
-    if (Buffer.byteLength(body, "utf8") <= 960 * 1024) return body;
+    const body = JSON.stringify(review);
+    if (Buffer.byteLength(body, "utf8") <= 960 * 1024) return { body, uninspected: incomplete };
   }
-  return "";
+  return null;
 }
 {{end}}
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
@@ -959,13 +961,15 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    let body = JSON.stringify(payload);
     const originalBytes = Buffer.byteLength(body, "utf8");
     let oversizedReview = false;
+    let uninspected = false;
     if (originalBytes > (1 << 20)) {
       if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       if (DC_OUTAGE_FAIL_MODE === "open") {
         const review = defenseclawBoundedReview(payload, originalBytes);
         if (review) {
-          body = review;
+          body = review.body;
           oversizedReview = true;
+          uninspected = review.uninspected;
         }
       }
       if (!oversizedReview && actionable) {
@@ -1014,8 +1018,8 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
       return { reason: data.reason || "DefenseClaw hook failed closed (missing native deny)", mode: data.mode || "" };
     }
 {{end}}{{end}}{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}    if (oversizedReview) {
-      await defenseclawLogFailOpen("stdin body exceeded cap; bounded prefix reviewed by gateway", "transport");
-      return { reason: "", mode: data && data.mode || "", notice: "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the gateway allowed and audited this call." };
+      await defenseclawLogFailOpen(uninspected ? "stdin body exceeded cap; oversize, command not inspected" : "stdin body exceeded cap; bounded prefix reviewed by gateway", "transport");
+      return { reason: "", mode: data && data.mode || "", notice: "DefenseClaw warning: this hook payload exceeded the bounded inspection cap" + (uninspected ? " (oversize, command not inspected)" : "") + "; the gateway allowed and audited this call." };
     }
 {{end}}    return { reason: "", mode: data && data.mode || "", notice: defenseclawConfirmNotice(data) };
   } catch (err) {

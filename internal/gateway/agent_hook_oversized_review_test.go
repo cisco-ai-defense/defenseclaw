@@ -141,3 +141,63 @@ func TestOversizedReviewKeepsEveryConnectorsCommandForTheGatewayVerdict(t *testi
 		})
 	}
 }
+
+// A bounded review that lacks part of a command or target (the cap hid the
+// command after a long description) is never a silent allow: observe mode
+// allows it with a warning and a HIGH audit row that says "oversize, command
+// not inspected", action mode blocks it. The marker only tightens: a review
+// whose own verdict blocks stays blocked.
+func TestOversizeUninspectedReviewWarnsInObserveAndBlocksInAction(t *testing.T) {
+	full := `{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_input":{"description":"` +
+		strings.Repeat("d", 2<<20) + `","command":"cat ~/.ssh/id_rsa"}}`
+	review := hookexec.OversizedReviewPayload([]byte(full[:hookexec.DefaultMaxBody]), "PreToolUse")
+	if !strings.Contains(string(review), `"`+hookexec.OversizeUninspectedField+`":true`) {
+		t.Fatalf("review of a command hidden past the cap is not marked: %.300s", review)
+	}
+	blocked := `{"hook_event_name":"PreToolUse","session_id":"s","tool_name":"Bash","tool_input":{"command":"echo x >> ~/.ssh/authorized_keys"},` +
+		`"bounded_prefix_review":true,"` + hookexec.OversizeUninspectedField + `":true}`
+	for _, tc := range []struct {
+		name, mode, body, want string
+	}{
+		{"observe warns and audits", "observe", string(review), "allow"},
+		{"action blocks", "action", string(review), "block"},
+		{"action keeps its own block", "action", blocked, "block"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = tc.mode
+			cfg.Guardrail.Connector = "claudecode"
+			store, logger := testStoreAndLogger(t)
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth(), store: store, logger: logger}
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/claude-code/hook", strings.NewReader(tc.body))
+			request.Header.Set("Content-Type", "application/json")
+			reply := httptest.NewRecorder()
+			api.handleAgentHook("claudecode").ServeHTTP(reply, request)
+			var answer agentHookResponse
+			if err := json.Unmarshal(reply.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("status=%d body=%.300s", reply.Code, reply.Body.String())
+			}
+			if answer.Action != tc.want {
+				t.Fatalf("action=%q, want %q: %.400s", answer.Action, tc.want, reply.Body.String())
+			}
+			if tc.mode == "action" {
+				return // blocked, by its own verdict or as uninspected
+			}
+			if answer.Severity != "HIGH" || !strings.Contains(answer.Reason, "oversize, command not inspected") {
+				t.Fatalf("answer lacks the uninspected reason: %+v", answer)
+			}
+			events, err := store.ListEvents(20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range events {
+				if event.Action == string(audit.ActionConnectorHook) && event.Severity == "HIGH" &&
+					strings.Contains(event.Details, "oversize, command not inspected") &&
+					strings.Contains(event.Details, hookexec.OversizeUninspectedField) {
+					return
+				}
+			}
+			t.Fatalf("no HIGH audit row with the uninspected reason: %+v", events)
+		})
+	}
+}

@@ -66,7 +66,7 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 	const overBudget = `patch: "q".repeat(600000), diff: "r".repeat(400000), `
 	for _, plugin := range []struct {
 		asset, name, connector, harness, input string
-		local                                  bool // no review: the plugin blocks locally
+		uninspected                            bool // the review must be marked oversize_command_not_inspected
 	}{
 		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad, true},
 		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, command: "cat /home/user/.ssh/authorized_keys"`, false},
@@ -87,12 +87,14 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 		}
 		t.Run(plugin.connector+" "+name, func(t *testing.T) {
 			var request []byte
-			// The gateway blocks only a request that names the protected
-			// target: a review without it would be allowed.
+			// The gateway (action mode) blocks a request that names the
+			// protected target or is marked uninspected: an unmarked review
+			// without the target would be allowed.
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				request, _ = io.ReadAll(r.Body)
 				w.Header().Set("Content-Type", "application/json")
-				if !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
+				if !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") &&
+					!strings.Contains(string(request), `"oversize_command_not_inspected":true`) {
 					_, _ = io.WriteString(w, `{"action":"allow","raw_action":"allow","mode":"action","hook_output":{"decision":"allow"}}`)
 					return
 				}
@@ -130,14 +132,10 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 			if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &result); err != nil {
 				t.Fatal(err)
 			}
-			if plugin.local {
-				if !strings.HasPrefix(result.Verdict, "block:") || strings.Contains(string(request), `"bounded_prefix_review":true`) {
-					t.Fatalf("local block=%q request=%.300q", result.Verdict, request)
-				}
-				return
-			}
-			if !strings.HasPrefix(result.Verdict, "block:") || !strings.Contains(string(request), `"bounded_prefix_review":true`) || !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
-				t.Fatalf("gateway block=%q request=%.300q", result.Verdict, request)
+			marked := strings.Contains(string(request), `"oversize_command_not_inspected":true`)
+			if !strings.HasPrefix(result.Verdict, "block:") || !strings.Contains(string(request), `"bounded_prefix_review":true`) || marked != plugin.uninspected ||
+				!plugin.uninspected && !strings.Contains(string(request), "/home/user/.ssh/authorized_keys") {
+				t.Fatalf("gateway block=%q marked=%v request=%.300q", result.Verdict, marked, request)
 			}
 		})
 	}

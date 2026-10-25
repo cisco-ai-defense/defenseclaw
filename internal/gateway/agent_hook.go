@@ -755,6 +755,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			// the kernel denials its tool calls hit (kernel_block_notice.go).
 			resp = a.safeAddKernelBlockNotice(ctx, profile, connectorName, req, b, payload, resp)
 		}
+		if payload[hookexec.OversizeUninspectedField] == true && (resp.Action == "allow" || resp.Action == "alert") {
+			// The hook could not send a command or target of this oversized
+			// call whole: never a silent allow of what was not inspected (an
+			// observe-mode alert already warns and audits its own finding).
+			// The field only tightens a verdict, so any sender may set it.
+			if mode := a.agentHookMode(ctx, connectorName); resp.Action == "allow" || mode == "action" {
+				resp = oversizeUninspectedHookResponse(profile, req, mode)
+			}
+		}
 		if payload["bounded_prefix_review"] == true && (resp.Action == "allow" || resp.Action == "alert") {
 			// The gateway inspected only the bounded head. Keep the allow
 			// decision, but make its audit and telemetry severity conspicuous.
@@ -783,6 +792,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		auditExtra := mergeHookEnvelopeExtra(hookRequestAuditExtra(ctx, profile), sandboxGate.auditExtra())
 		if payload["bounded_prefix_review"] == true {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{"bounded_prefix_review": "true"})
+		}
+		if payload[hookexec.OversizeUninspectedField] == true {
+			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{hookexec.OversizeUninspectedField: "true"})
 		}
 		if len(resp.KernelBlocksTold) > 0 {
 			auditExtra = mergeHookEnvelopeExtra(auditExtra, map[string]string{kernelBlocksToldExtra: strings.Join(resp.KernelBlocksTold, ",")})
@@ -2972,6 +2984,24 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	return resp
 }
 
+// hookOversizeUninspectedRuleID is the finding of an oversized call whose
+// bounded review lacks part of a command or target value
+// (hookexec.OversizeUninspectedField).
+const hookOversizeUninspectedRuleID = "HOOK-OVERSIZE-COMMAND-NOT-INSPECTED"
+
+const oversizeUninspectedReason = "oversize, command not inspected: this hook payload is over DefenseClaw's size cap " +
+	"and its command or target did not fit the bounded review."
+
+// oversizeUninspectedHookResponse answers such a call like an unparsed one,
+// in the connector's mode: observe warns and audits, action blocks.
+func oversizeUninspectedHookResponse(profile connector.HookProfile, req agentHookRequest, mode string) agentHookResponse {
+	action, wouldBlock := mapHookActionForProfile("block", mode, req.HookEventName, profile.Capabilities, profile, req.Payload)
+	resp := agentHookResponseForProfile(profile, req, action, "block", "HIGH", oversizeUninspectedReason,
+		[]string{hookOversizeUninspectedRuleID}, mode, wouldBlock, profile.Capabilities)
+	resp.RuleIDs = []string{hookOversizeUninspectedRuleID}
+	return resp
+}
+
 // hookToolCallUnparsedRuleID is the finding of a tool call whose hook
 // payload the connector's decoder cannot read: DefenseClaw blocks it.
 const hookToolCallUnparsedRuleID = "HOOK-TOOL-CALL-UNPARSED"
@@ -2993,9 +3023,13 @@ func unparsedToolCallReason(connectorName string) string {
 }
 
 // trustedUnparsedToolCallReason reports whether reason is exactly an
-// unparsedToolCallReason: gateway text and a connector name, nothing from
-// the payload, so the agent is shown it as written.
+// unparsedToolCallReason or oversizeUninspectedReason: gateway text and a
+// connector name, nothing from the payload, so the agent is shown it as
+// written.
 func trustedUnparsedToolCallReason(reason string) bool {
+	if reason == oversizeUninspectedReason {
+		return true
+	}
 	name, ok := strings.CutPrefix(reason, unparsedToolCallReasonPrefix)
 	if !ok {
 		return false

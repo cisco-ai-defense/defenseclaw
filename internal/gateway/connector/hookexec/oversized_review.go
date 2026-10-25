@@ -15,7 +15,7 @@ const (
 	oversizedReviewHead = 8 << 10
 	// oversizedReviewKeep bounds the command and target text kept verbatim,
 	// summed over every such field. A call whose command and target values do
-	// not all fit gets no review: it keeps the closed oversize answer.
+	// not all fit is reviewed as uninspected (OversizeUninspectedField).
 	// oversizedReviewHeads bounds the context heads; only they shrink when
 	// the encoded review is too large.
 	oversizedReviewKeep  = 896 << 10
@@ -25,6 +25,14 @@ const (
 	oversizedReviewMaxBytes = 960 << 10
 	oversizedReviewMaxDepth = 128
 )
+
+// OversizeUninspectedField marks a bounded review that lacks part of a
+// command or target value of the call: one too long to keep whole, cut by
+// the cap, nested too deep, or hidden past the cap in the call's arguments.
+// The gateway never allows such a review silently: it warns and audits
+// "oversize, command not inspected" in observe mode and blocks in action
+// mode. The field can only tighten a verdict, never loosen one.
+const OversizeUninspectedField = "oversize_command_not_inspected"
 
 // oversizedReviewKeys are the fields, at any depth and in any connector's
 // payload, that carry what a call runs or touches: shell commands and their
@@ -56,14 +64,26 @@ func oversizedReviewKey(key string) bool {
 // after a long value, arrays included. Command and target values are kept
 // verbatim (oversizedReviewKeys); other strings keep an 8 KiB head; a context
 // value the cap cut keeps the part the prefix holds. Fields past the cap were
-// never read and are not in the review. It returns nil, so the caller keeps
-// its closed oversize answer, when the review could not judge the call as
-// sent: a command or target value that does not fit whole (too long, cut by
-// the cap, nested too deep), a review still over the gateway cap, or a
-// duplicated key (the gateway refuses that payload at full size).
+// never read and are not in the review. A review that could not keep every
+// command and target value of the call whole carries OversizeUninspectedField
+// (and a head of each such value). It returns nil, so the caller keeps its
+// closed oversize answer, only for a duplicated key (the gateway refuses that
+// payload at full size) or a structure too large for the gateway cap.
 func oversizedReviewPayload(prefix []byte, boundEvent string) []byte {
-	for scale := 1; scale <= 8; scale *= 2 {
-		r := &oversizedReducer{src: prefix, keep: oversizedReviewKeep, heads: oversizedReviewHeads / scale}
+	review, _ := oversizedReview(prefix, boundEvent)
+	return review
+}
+
+// oversizedReview is oversizedReviewPayload; uninspected reports that the
+// review carries OversizeUninspectedField.
+func oversizedReview(prefix []byte, boundEvent string) (body []byte, uninspected bool) {
+	// The last pass keeps no command or target value whole: the review is
+	// then uninspected but still under the cap.
+	for pass := 0; pass <= 4; pass++ {
+		r := &oversizedReducer{src: prefix, keep: oversizedReviewKeep, heads: oversizedReviewHeads >> min(pass, 3)}
+		if pass == 4 {
+			r.keep = 0
+		}
 		review := map[string]any{}
 		decoder := json.NewDecoder(bytes.NewReader(prefix))
 		decoder.UseNumber()
@@ -72,8 +92,11 @@ func oversizedReviewPayload(prefix []byte, boundEvent string) []byte {
 				review = object.(map[string]any)
 			}
 		}
-		if r.duplicate || r.incomplete {
-			return nil
+		if r.duplicate {
+			return nil, false
+		}
+		if r.incomplete {
+			review[OversizeUninspectedField] = true
 		}
 		review["content_truncated"] = true
 		review["bounded_prefix_review"] = true
@@ -87,10 +110,10 @@ func oversizedReviewPayload(prefix []byte, boundEvent string) []byte {
 			}
 		}
 		if body := encodeOversizedReview(review); len(body) <= oversizedReviewMaxBytes {
-			return body
+			return body, r.incomplete
 		}
 	}
-	return nil
+	return nil, false
 }
 
 // OversizedReviewPayload is the shell transport's bounded review encoder.
@@ -115,6 +138,11 @@ type oversizedReducer struct {
 	duplicate   bool
 	// incomplete is set when a command or target value is not kept whole.
 	incomplete bool
+	// argsDepth is the depth of the call's arguments object (tool_input, an
+	// embedded toolArgs document) while the reducer is inside it, else 0.
+	argsDepth int
+	// cutSettled is set once settleCut has judged where the prefix ends.
+	cutSettled bool
 }
 
 // value reads the next value. present reports whether the review keeps
@@ -152,29 +180,66 @@ func (r *oversizedReducer) value(decoder *json.Decoder, keep bool, depth int) (v
 
 func (r *oversizedReducer) object(decoder *json.Decoder, keep bool, depth int) (any, bool, bool) {
 	out := map[string]any{}
+	sawKey := false // a command or target key of this object was read whole
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
+			r.settleCut(keep, sawKey, depth)
 			return out, true, false
 		}
 		key, ok := token.(string)
 		if !ok {
+			r.settleCut(keep, sawKey, depth)
 			return out, true, false
 		}
 		if _, seen := out[key]; seen {
 			r.duplicate = true
 		}
 		childKeep := keep || oversizedReviewKey(key)
+		args := depth == 1 && r.argsDepth == 0 && strings.EqualFold(strings.ReplaceAll(key, "_", ""), "toolinput")
+		if args {
+			r.argsDepth = depth + 1
+		}
 		value, present, complete := r.value(decoder, childKeep, depth)
 		if present && (r.charge(childKeep, len(key)) || childKeep || value != nil) {
 			out[key] = value
 		}
 		if !complete {
+			r.settleCut(childKeep, sawKey, depth)
 			return out, true, false
 		}
+		if args {
+			r.argsDepth = 0
+		}
+		sawKey = sawKey || childKeep
 	}
 	_, err := decoder.Token()
+	if err != nil {
+		r.settleCut(keep, sawKey, depth)
+	}
 	return out, len(out) > 0 || r.charge(keep, 2), err == nil
+}
+
+// settleCut judges, from the innermost object the prefix ends in outward,
+// whether the cap may have hidden a command or target value: the prefix ends
+// inside one, or inside the call's arguments before any of their command or
+// target keys was read (an agent writes the arguments in any order, so a long
+// description can come before the command). A cut in context outside the
+// arguments, or after the arguments named their command or target, hides none.
+func (r *oversizedReducer) settleCut(keep, sawKey bool, depth int) {
+	if r.cutSettled {
+		return
+	}
+	switch {
+	case keep:
+		r.incomplete = true
+	case r.argsDepth == 0 || depth < r.argsDepth || sawKey:
+	case depth > r.argsDepth:
+		return // an enclosing object of the arguments decides
+	default:
+		r.incomplete = true
+	}
+	r.cutSettled = true
 }
 
 func (r *oversizedReducer) array(decoder *json.Decoder, keep bool, depth int) (any, bool, bool) {
@@ -214,7 +279,7 @@ func (r *oversizedReducer) charge(keep bool, n int) bool {
 // lasts, and a bounded head of anything else. An embedded JSON document
 // (Copilot toolArgs) too long to keep is reduced like the payload, so its
 // command and target keys survive whole. A command or target value that
-// fits neither way marks the review incomplete: no head of it is sent.
+// fits neither way marks the review incomplete and keeps a bounded head.
 func (r *oversizedReducer) text(value string, keep bool, depth int) (string, bool) {
 	if keep && len(value) <= r.keep {
 		r.keep -= len(value)
@@ -224,8 +289,8 @@ func (r *oversizedReducer) text(value string, keep bool, depth int) (string, boo
 		if reduced, ok := r.embedded(value, depth); ok {
 			return reduced, true
 		}
+		// Only a head of it is sent, and the review is marked uninspected.
 		r.incomplete = true
-		return "", false
 	}
 	n := min(len(value), oversizedReviewHead, r.heads)
 	if n <= 0 {
@@ -240,7 +305,8 @@ func (r *oversizedReducer) embedded(value string, depth int) (string, bool) {
 	if trimmed == "" || (trimmed[0] != '{' && trimmed[0] != '[') || depth >= oversizedReviewMaxDepth {
 		return "", false
 	}
-	sub := &oversizedReducer{src: []byte(trimmed), keep: r.keep, heads: r.heads}
+	// The document is the call's arguments: settleCut judges a cut in it.
+	sub := &oversizedReducer{src: []byte(trimmed), keep: r.keep, heads: r.heads, argsDepth: depth + 1}
 	decoder := json.NewDecoder(bytes.NewReader(sub.src))
 	decoder.UseNumber()
 	token, err := decoder.Token()
@@ -250,14 +316,15 @@ func (r *oversizedReducer) embedded(value string, depth int) (string, bool) {
 	// Its keys are classified like the payload's: a long file text in it
 	// keeps a head, its command and target keys stay whole.
 	var reduced any
+	complete := false
 	if token == json.Delim('{') {
-		reduced, _, _ = sub.object(decoder, false, depth+1)
+		reduced, _, complete = sub.object(decoder, false, depth+1)
 	} else {
-		reduced, _, _ = sub.array(decoder, false, depth+1)
+		reduced, _, complete = sub.array(decoder, false, depth+1)
 	}
 	r.keep, r.heads = sub.keep, sub.heads
 	r.duplicate = r.duplicate || sub.duplicate
-	r.incomplete = r.incomplete || sub.incomplete
+	r.incomplete = r.incomplete || sub.incomplete || (!complete && !sub.cutSettled)
 	return string(encodeOversizedReview(reduced)), true
 }
 
@@ -288,14 +355,15 @@ func (r *oversizedReducer) cutString(start int64, keep bool, depth int) (string,
 			text = strings.ToValidUTF8(text, "")
 			if keep {
 				// The cap cut this command or target value: only an embedded
-				// document's whole keys can still be judged.
+				// document's whole keys can still be judged. Else send a head
+				// of it and mark the review uninspected.
 				if reduced, ok := r.embedded(text, depth); ok {
+					r.cutSettled = true // the document judged its own cut
 					return reduced, true
 				}
 				r.incomplete = true
-				return "", false
 			}
-			return r.text(text, keep, depth)
+			return r.text(text, false, depth)
 		}
 		raw = raw[:len(raw)-1]
 	}

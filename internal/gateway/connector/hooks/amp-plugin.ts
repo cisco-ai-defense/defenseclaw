@@ -269,16 +269,18 @@ const DC_REVIEW_KEYS = new Set(["cmd", "command", "commands", "commandline", "ar
 
 // boundedReview reduces an oversized payload to a request under
 // the gateway's 1 MiB cap that keeps every key of the call, so the gateway
-// judges its command and target as at normal size. It returns "" (the call
-// keeps its closed oversize answer) when a command or target value does not
-// fit whole or the review stays over the cap.
-function boundedReview(payload: Record<string, unknown>, originalBytes: number): string {
-  let body = "";
-  for (let scale = 1; scale <= 8; scale *= 2) {
-    // Command and target values must all fit whole; only the context heads
-    // shrink when the review is too large.
-    let keep = 896 * 1024;
-    let heads = (192 * 1024) / scale;
+// judges its command and target as at normal size. A review that cannot keep
+// a command or target value whole sends a head of it and is marked
+// oversize_command_not_inspected: the gateway warns and audits it in observe
+// mode and blocks it in action mode. It returns "" only when even the last
+// pass, which keeps no value whole, stays over the cap.
+function boundedReview(payload: Record<string, unknown>, originalBytes: number): { body: string; uninspected: boolean } | null {
+  for (let pass = 0; pass <= 4; pass++) {
+    // Command and target values are kept whole while they fit; only the
+    // context heads shrink when the review is too large. The last pass keeps
+    // none whole.
+    let keep = pass === 4 ? 0 : 896 * 1024;
+    let heads = (192 * 1024) >> Math.min(pass, 3);
     let incomplete = false;
     const walk = (value: unknown, inKeep: boolean, depth: number): unknown => {
       if (typeof value === "string") {
@@ -286,8 +288,8 @@ function boundedReview(payload: Record<string, unknown>, originalBytes: number):
         if (inKeep && depth < 128 && /^\s*[[{]/.test(value)) {
           try { return JSON.stringify(walk(JSON.parse(value), false, depth + 1)); } catch (_) { /* not JSON */ }
         }
-        // A command or target value that does not fit whole: no review.
-        if (inKeep) { incomplete = true; return undefined; }
+        // A command or target value that does not fit whole: only a head.
+        if (inKeep) incomplete = true;
         const n = Math.max(0, Math.min(value.length, 8192, heads));
         heads -= n;
         return n > 0 || value === "" ? value.slice(0, n) : undefined;
@@ -302,14 +304,14 @@ function boundedReview(payload: Record<string, unknown>, originalBytes: number):
       return out;
     };
     const review = (walk(payload, false, 0) || {}) as Record<string, unknown>;
-    if (incomplete) return "";
+    if (incomplete) review.oversize_command_not_inspected = true;
     review.content_truncated = true;
     review.bounded_prefix_review = true;
     review.original_body_bytes = originalBytes;
-    body = JSON.stringify(review);
-    if (utf8Bytes(body) <= 960 * 1024) return body;
+    const body = JSON.stringify(review);
+    if (utf8Bytes(body) <= 960 * 1024) return { body, uninspected: incomplete };
   }
-  return "";
+  return null;
 }
 {{end}}
 function utf8Bytes(value: string): number {
@@ -1015,14 +1017,16 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 
 		const originalBytes = utf8Bytes(body)
 		let oversizedReview = false
-		if (originalBytes > DC_MAX_BODY_BYTES) {
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}		let uninspected = false
+{{end}}		if (originalBytes > DC_MAX_BODY_BYTES) {
 			if (actionable) {
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 				if (DC_OUTAGE_FAIL_MODE === "open") {
 					const review = boundedReview(payload, originalBytes)
 					if (review) {
-						body = review
+						body = review.body
 						oversizedReview = true
+						uninspected = review.uninspected
 					}
 				}
 {{end}}				if (!oversizedReview) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)
@@ -1106,9 +1110,11 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 				return failureResponse("invalid gateway verdict")
 			}
 			if (oversizedReview && (data.action === "allow" || data.action === "alert")) {
-				await logFailOpen("payload exceeded cap; bounded prefix reviewed by gateway")
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}				await logFailOpen(uninspected ? "payload exceeded cap; oversize, command not inspected" : "payload exceeded cap; bounded prefix reviewed by gateway")
+				const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap" + (uninspected ? " (oversize, command not inspected)" : "") + "; the gateway allowed and audited this call."
+{{else}}				await logFailOpen("payload exceeded cap; bounded prefix reviewed by gateway")
 				const notice = "DefenseClaw warning: this hook payload exceeded the bounded inspection cap; the gateway allowed and audited this call."
-				if (data.action === "allow") data.outage_notice = notice
+{{end}}				if (data.action === "allow") data.outage_notice = notice
 				else await notifyIfForeground(String(payload.thread_id || ""), notice)
 			}
 			return data
