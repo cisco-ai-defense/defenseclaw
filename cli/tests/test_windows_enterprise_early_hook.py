@@ -98,6 +98,17 @@ def test_standalone_publishes_the_hook_after_the_prior_guardian_stopped() -> Non
     gateway = transaction.index("Stop-DefenseClawService -Name $GatewayServiceName")
     assert first < guardian < sweep < standalone < gateway
     assert "if (Test-DefenseClawStandaloneProfile) {" in transaction[guardian:sweep]
+    # GAP-1451: the guardian's process is taken before its stop, and the swap
+    # waits for that process itself to exit; the publication is checked once
+    # the replaced hook's calls drained, before the gateway stops.
+    identity = transaction.index("$priorGuardianProcess = Get-DefenseClawServiceProcessIdentity -Name $GuardianServiceName")
+    exit_wait = transaction.index("Wait-DefenseClawServiceProcessExit -Name $GuardianServiceName -Identity $priorGuardianProcess")
+    assert identity < guardian < exit_wait < sweep
+    publish_body = _function_body(_text(), "Publish-DefenseClawEarlyHook")
+    drain = publish_body.index("Wait-DefenseClawPriorHookCalls -HookPath")
+    check = publish_body.index("Assert-DefenseClawEarlyHookPublished -Layout $Layout -Source $Source")
+    assert drain < check < publish_body.index("return $preimage")
+    assert "if (Test-DefenseClawStandaloneProfile) {" in publish_body[drain:check]
 
 _HARNESS = r"""
 param([string]$ModulePath, [string]$Scratch, [string]$Case)
@@ -107,7 +118,7 @@ $tokens = $null
 $errors = $null
 $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tokens, [ref]$errors)
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
-foreach ($name in @('Publish-DefenseClawEarlyHook', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds')) {
+foreach ($name in @('Publish-DefenseClawEarlyHook', 'Assert-DefenseClawEarlyHookPublished', 'Restore-DefenseClawEarlyHook', 'Get-DefenseClawEarlyHookField', 'Hold-DefenseClawEarlyHookGuard', 'Restore-DefenseClawSnapshotHookAfterActivation', 'Wait-DefenseClawPriorHookCalls', 'Get-DefenseClawPriorHookProcessIds', 'Wait-DefenseClawServiceProcessExit', 'Test-DefenseClawProcessIdentityRunning')) {
     $definition = $ast.Find({
         param($node)
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq $name
@@ -143,6 +154,31 @@ if ($Case -like 'drain*') {
         $script:looks++
         $script:events.Add('look:' + [string]$script:looks)
         if ($Case -eq 'drain-timeout' -or $script:looks -le 2) { 4242 }
+    }
+}
+if ($Case -like 'restorer*') {
+    # GAP-1451: a writer of the replaced release (its guardian's restore)
+    # puts its hook back while the replaced hook's calls drain: once
+    # (restorer-once), or after every publication (restorer-persists).
+    $script:restores = 0
+    function Get-DefenseClawPriorHookProcessIds {
+        param([string]$HookPath, [datetime]$StartedBefore)
+        if ($script:restores -eq 0) {
+            $script:restores++
+            Set-Content -LiteralPath $HookPath -Value 'hook-1.0.2' -NoNewline
+            $script:events.Add('prior-writer')
+        }
+    }
+    if ($Case -eq 'restorer-persists') {
+        function Install-DefenseClawSourceDescriptor {
+            param([hashtable]$Source, [string]$Destination)
+            $script:events.Add('publish:' + [IO.Path]::GetFileName($Destination))
+            Copy-Item -LiteralPath $Source.path -Destination $Destination -Force
+            if ([IO.Path]::GetFileName($Destination) -ceq 'defenseclaw-hook.exe' -and $script:restores -gt 0) {
+                Set-Content -LiteralPath $Destination -Value 'hook-1.0.2' -NoNewline
+                $script:events.Add('prior-writer')
+            }
+        }
     }
 }
 function Install-DefenseClawFileAtomic {
@@ -222,6 +258,38 @@ try {
             [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
             $script:events.Add('returned')
         }
+        { $_ -like 'restorer*' } {
+            try {
+                [void](Publish-DefenseClawEarlyHook -Layout $layout -Source $newSource -TransactionDirectory $transaction -Intent $intent -PriorDeploymentActive)
+                $script:events.Add('returned')
+            }
+            finally {
+                $result.hook = Get-Content -LiteralPath $hook -Raw
+            }
+        }
+        { $_ -like 'process-*' } {
+            # A real process stands for the prior guardian's: one that exits
+            # on its own (process-exits), one that keeps running after its
+            # service stopped (process-lingers), and an identity whose id a
+            # later process reuses (process-reused).
+            $engine = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+            $seconds = if ($Case -eq 'process-exits') { 1 } else { 60 }
+            $child = Start-Process -FilePath $engine -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "Start-Sleep -Seconds $seconds") -PassThru
+            $identity = [pscustomobject]@{ Id = $child.Id; StartTime = $child.StartTime }
+            if ($Case -eq 'process-reused') {
+                $identity.StartTime = $child.StartTime.AddMinutes(-5)
+            }
+            $script:DefenseClawTerminatedServiceProcesses = @()
+            $started = [DateTime]::UtcNow
+            Wait-DefenseClawServiceProcessExit -Name 'DefenseClawHookGuardian' -Identity $identity -TimeoutSeconds 3
+            $result.seconds = ([DateTime]::UtcNow - $started).TotalSeconds
+            $child.Refresh()
+            $result.exited = $child.HasExited
+            $result.terminated = @($script:DefenseClawTerminatedServiceProcesses)
+            if (-not $child.HasExited) { $child.Kill() }
+            # No identity (no prior guardian process): nothing to wait for.
+            Wait-DefenseClawServiceProcessExit -Name 'DefenseClawHookGuardian' -Identity $null
+        }
         'drain-timeout' {
             $started = [DateTime]::UtcNow
             $result.running = @(Wait-DefenseClawPriorHookCalls -HookPath $hook -StartedBefore ([DateTime]::Now) -TimeoutSeconds 1)
@@ -264,6 +332,7 @@ $ast = [Management.Automation.Language.Parser]::ParseFile($ModulePath, [ref]$tok
 if ($errors.Count -gt 0) { throw "module parse failed: $($errors[0].Message)" }
 foreach ($name in @(
         'Publish-DefenseClawEarlyHook',
+        'Assert-DefenseClawEarlyHookPublished',
         'Hold-DefenseClawEarlyHookGuard',
         'Get-DefenseClawSourceDescriptor',
         'Assert-DefenseClawSourceDescriptorCurrent',
@@ -444,6 +513,49 @@ def test_the_early_publish_waits_for_the_replaced_hooks_calls(tmp_path: Path) ->
         "publish:defenseclaw-hook.exe:hook-1.0.2",
     ], result
     assert events[3:] == ["look:1", "look:2", "look:3", "returned"], result
+
+
+def test_the_hook_is_published_again_when_a_prior_writer_restored_it(tmp_path: Path) -> None:
+    """GAP-1451: the replaced release's guardian restored its own fail-open
+    hook while the candidate waited for the replaced hook's calls, and the
+    gateway then stopped with that hook in place. The publication is checked
+    after the wait and made once more."""
+    result = _run(tmp_path, "restorer-once")
+    assert result["threw"] == "", result
+    assert result["hook"] == "hook-1.0.4", result
+    events = result["events"]
+    assert events.index("prior-writer") < events.index("returned"), result
+    again = [e for e in events if "publishing it again" in e]
+    assert len(again) == 1, result
+    assert events.index("prior-writer") < events.index(again[0]), result
+    assert events[-2:] == ["publish:defenseclaw-hook.exe:hook-1.0.2", "returned"], result
+
+
+def test_a_hook_replaced_again_fails_the_transaction(tmp_path: Path) -> None:
+    result = _run(tmp_path, "restorer-persists")
+    assert "replaced again before the prior gateway stopped" in result["threw"], result
+    assert "returned" not in result["events"], result
+
+
+@pytest.mark.parametrize("case", ["process-exits", "process-lingers", "process-reused"])
+def test_the_swap_waits_for_the_prior_guardians_process_to_exit(tmp_path: Path, case: str) -> None:
+    """GAP-1451: a 1.0.2 or 1.0.3 guardian reports its service stopped before
+    its process exits, and its hook watch can restore its hook meanwhile."""
+    result = _run(tmp_path, case)
+    assert result["threw"] == "", result
+    if case == "process-exits":
+        assert result["exited"] is True, result
+        assert result["terminated"] == [], result
+    elif case == "process-lingers":
+        # Ended after the bound, and named in the lifecycle's result.
+        assert result["exited"] is True, result
+        assert result["seconds"] >= 3, result
+        assert len(result["terminated"]) == 1 and "DefenseClawHookGuardian" in result["terminated"][0], result
+    else:
+        # Another process now has that id: it is not waited for or ended.
+        assert result["exited"] is False, result
+        assert result["seconds"] < 3, result
+        assert result["terminated"] == [], result
 
 
 def test_the_wait_for_the_replaced_hooks_calls_is_bounded(tmp_path: Path) -> None:
