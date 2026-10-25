@@ -108,7 +108,7 @@ func TestPerUserNativeHookDeniesAnUnprovenListenerInTheOutageOpenTier(t *testing
 				case <-time.After(gatewayRestartBudget + 300*time.Millisecond):
 				case <-stop:
 				}
-				return errConnectedSocketNotFound
+				return errors.New("connected gateway server socket was not found")
 			})
 			return peer
 		}},
