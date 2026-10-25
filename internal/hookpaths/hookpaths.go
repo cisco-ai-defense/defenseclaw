@@ -624,6 +624,16 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		}
 		encoded, err := json.Marshal(facts)
 		if err == nil && len(encoded) > maxEncodedTargets {
+			// A deep start directory's sighting does not fit: its own
+			// identity still does, so a file the session creates there
+			// stays its own under another spelling of it.
+			delete(facts, ReachedInstructionsKey)
+			if compact := reachedEvidence([]string{cwd}); compact != "" {
+				facts[ReachedInstructionsKey] = compact
+			}
+			encoded, err = json.Marshal(facts)
+		}
+		if err == nil && len(encoded) > maxEncodedTargets {
 			delete(facts, ReachedInstructionsKey)
 			encoded, err = json.Marshal(facts)
 		}
@@ -957,8 +967,10 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 		size += entry
 	}
 	// The first sighting of every directory the call works in or writes to
-	// (ReachedInstructionsKey). One that does not fit is omitted: the
-	// gateway keeps the call-time proof for those directories.
+	// (ReachedInstructionsKey), with the parents and home folders while they
+	// fit, else without them (a deep working directory). One that does not
+	// fit is omitted: the gateway keeps the call-time proof for those
+	// directories.
 	reached := []string{cwd}
 	for _, target := range slices.Sorted(maps.Keys(targets)) {
 		if strings.HasPrefix(target, "\x00") || !filepath.IsAbs(target) {
@@ -981,11 +993,16 @@ func ResolveConnector(connector, surface, event string, payload []byte) string {
 			reached = append(reached, filepath.Clean(candidate.Resolved))
 		}
 	}
-	if value := reachedEvidence(append(reached, InstructionDirectories(cwd, home)...)); value != "" {
+	for _, directories := range [][]string{append(slices.Clone(reached), InstructionDirectories(cwd, home)...), reached} {
+		value := reachedEvidence(directories)
+		if value == "" {
+			continue
+		}
 		entry := len(jsonString(ReachedInstructionsKey)) + 1 + len(jsonString(value)) + 1
 		if size+entry <= maxEncodedTargets && len(targets) < 2*MaxWriteTargets+5 {
 			targets[ReachedInstructionsKey] = value
 			size += entry
+			break
 		}
 	}
 	if truncated {
