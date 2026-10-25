@@ -43,6 +43,9 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		return false
 	}
 	file, parsed := parseShell(command)
+	if parsed && nativePOSIX && !stateOnly && actionWindowsLiteralHereDocumentTarget(file, home) {
+		return true
+	}
 	if depth == 0 && parsed && actionKnownReadOnlyShell(file, home) {
 		return false
 	}
@@ -211,6 +214,53 @@ func actionProtectedTargetMentionDepth(command, cwd, home string, depth int, sta
 		}
 	}
 	return false
+}
+
+// A POSIX here-document passes its literal body through unchanged, including
+// backslashes in an absolute Windows path. The ordinary POSIX text scan treats
+// those backslashes as escapes, so inspect literal bodies separately.
+func actionWindowsLiteralHereDocumentTarget(file *syntax.File, home string) bool {
+	var targets []string
+	for _, target := range ProtectedAuthorizedKeysPaths(home) {
+		targets = append(targets, strings.ToLower(strings.ReplaceAll(target, "\\", "/")))
+	}
+	found := false
+	syntax.Walk(file, func(node syntax.Node) bool {
+		redirect, ok := node.(*syntax.Redirect)
+		if !ok || redirect.Hdoc == nil || redirect.Op != syntax.Hdoc && redirect.Op != syntax.DashHdoc {
+			return true
+		}
+		for _, part := range redirect.Hdoc.Parts {
+			literal, ok := part.(*syntax.Lit)
+			if !ok {
+				continue
+			}
+			body := strings.ToLower(strings.ReplaceAll(literal.Value, "\\", "/"))
+			for _, target := range targets {
+				for start := 0; start < len(body); {
+					index := strings.Index(body[start:], target)
+					if index < 0 {
+						break
+					}
+					index += start
+					end := index + len(target)
+					if (index == 0 || !actionWindowsPathByte(body[index-1])) &&
+						(end == len(body) || !actionWindowsPathByte(body[end])) {
+						found = true
+						return false
+					}
+					start = index + 1
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+func actionWindowsPathByte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= '0' && value <= '9' ||
+		strings.ContainsRune("_./:-", rune(value))
 }
 
 // The text scan finds paths in payloads another program interprets (inline

@@ -23,6 +23,8 @@ func TestR104WindowsActionExplicitDialect(t *testing.T) {
 		{"POSIX percent literal", `echo '%USERPROFILE%/.ssh/authorized_keys'`, actionfacts.DialectPOSIX, ""},
 		{"POSIX quoted tilde", `echo '~/.ssh/authorized_keys'`, actionfacts.DialectPOSIX, ""},
 		{"POSIX expanded dollar", `echo $HOME/.ssh/authorized_keys`, actionfacts.DialectPOSIX, "protected-target"},
+		{"POSIX Windows path in literal here document", "cat > review.patch <<'EOF'\n*** Update File: C:\\Users\\alice\\.ssh\\authorized_keys\nEOF", actionfacts.DialectPOSIX, "protected-target"},
+		{"POSIX Windows path suffix in literal here document", "cat > review.patch <<'EOF'\n*** Update File: C:\\Users\\alice\\.ssh\\authorized_keys.bak\nEOF", actionfacts.DialectPOSIX, ""},
 		{"POSIX protected redirect", `echo marker > ~/.ssh/authorized_keys`, actionfacts.DialectPOSIX, "protected-target"},
 		{"PowerShell escaped dollar", "Write-Output \"`$HOME/.ssh/authorized_keys\"", actionfacts.DialectPowerShell, ""},
 		{"nested PowerShell escaped dollar", "pwsh -Command 'Write-Output \"`$HOME/.ssh/authorized_keys\"'", actionfacts.DialectPowerShell, ""},
