@@ -96,6 +96,7 @@ func TestR104StructuralProtectedNamedWindows(t *testing.T) {
 		`Get-ChildItem ` + home + `\.ssh | Select-Object -Property {Set-Content ` + key + ` marker}`,
 		`Get-Content (Resolve-Path ` + key + `)`,
 		`pwsh -Command 'Get-Content $env:USERPROFILE\.ssh\authorized_keys'`,
+		`Push-Location ` + home + `\.ssh; Pop-Location; Add-Content notes.txt ok`,
 	} {
 		t.Run(command, func(t *testing.T) {
 			if got := ActionCommandDecision(command, cwd, home); got != "protected-target" {
@@ -108,6 +109,7 @@ func TestR104StructuralProtectedNamedWindows(t *testing.T) {
 		`ls ` + home + `\.ssh`, `stat ` + home + `\.ssh`,
 		`Test-Path ` + home + `\.ssh`, `Resolve-Path ` + home + `\.ssh`,
 		`Set-Location ` + home + `\.ssh; Get-Content authorized_keys`,
+		`Push-Location C:\work\build; Pop-Location; Add-Content notes.txt ok`,
 		`Copy-Item payload C:\Users\b00\.s*\ordinary.txt`,
 	} {
 		t.Run("allow/"+command, func(t *testing.T) {
