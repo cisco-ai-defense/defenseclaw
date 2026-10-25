@@ -590,37 +590,59 @@ function defenseclawCheckWindowsHelperACL(paths) {
   // take-ownership grant to anyone else. A volume root cannot be renamed, so
   // delete is not checked there.
   const checked = new Set(paths.map((path) => path.toLowerCase()));
-  const entries = paths.map((p) => ({ p, m: 0x500D0156 }));
+  const entries = paths.map((p) => [0x500D0156, p]);
   for (const path of paths) {
     for (let dir = dirname(path), top = false; !top; dir = dirname(dir)) {
       top = dirname(dir) === dir;
       if (checked.has(dir.toLowerCase())) continue;
       checked.add(dir.toLowerCase());
-      entries.push({ p: dir, m: top ? 0x100C0040 : 0x100D0040 });
+      entries.push([top ? 0x100C0040 : 0x100D0040, dir]);
     }
   }
+  // PowerShell finds a cmdlet through PSModulePath, which the agent's
+  // environment sets: a module planted in a folder it names first could
+  // answer for ConvertFrom-Json or Get-Acl and pass every path. The script
+  // calls no cmdlet, only .NET methods and language statements, runs with
+  // PSModulePath set to the system PowerShell's own module folder (and no
+  // .NET profiler or COMPlus setting), and the check passes only when it
+  // reports every entry checked. Each path goes as base64 UTF-8, so a
+  // non-ASCII path is not mangled by the console code page.
   const script = [
     "$ErrorActionPreference='Stop'",
     "$current=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value",
     "$trusted=@($current,'S-1-5-18','S-1-5-32-544','S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')",
     "$inheritOnly=[int][System.Security.AccessControl.PropagationFlags]::InheritOnly",
-    "$entries=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())",
-    "foreach($entry in $entries) {",
-    "  $acl=Get-Acl -LiteralPath $entry.p",
-    "  $writeMask=[int64]$entry.m",
-    "  if($trusted -notcontains $acl.GetOwner([System.Security.Principal.SecurityIdentifier]).Value) { throw 'owner' }",
-    "  foreach($ace in $acl.GetAccessRules($true,$true,[System.Security.Principal.SecurityIdentifier])) {",
+    "$sid=[System.Security.Principal.SecurityIdentifier]",
+    "$count=0",
+    "foreach($line in [Console]::In.ReadToEnd().Split([char]10)) {",
+    "  $entry=$line.Split([char]32)",
+    "  if($entry.Length -ne 2) { throw 'entry' }",
+    "  $writeMask=[int64]$entry[0]",
+    "  $p=[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($entry[1]))",
+    "  if([System.IO.Directory]::Exists($p)) { $acl=[System.IO.Directory]::GetAccessControl($p) } elseif([System.IO.File]::Exists($p)) { $acl=[System.IO.File]::GetAccessControl($p) } else { throw 'missing' }",
+    "  if($trusted -notcontains $acl.GetOwner($sid).Value) { throw 'owner' }",
+    "  foreach($ace in $acl.GetAccessRules($true,$true,$sid)) {",
     "    if($ace.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Allow -and (([int]$ace.PropagationFlags -band $inheritOnly) -eq 0) -and $trusted -notcontains $ace.IdentityReference.Value -and (([int64]$ace.FileSystemRights -band $writeMask) -ne 0)) { throw 'writable' }",
     "  }",
+    "  $count++",
     "}",
+    "[Console]::Out.Write('checked ' + $count)",
   ].join("\n");
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) {
+    if (value !== undefined && !/^(psmodulepath|psmoduleanalysiscachepath|cor_|complus_)/i.test(name)) env[name] = value;
+  }
+  env.PSModulePath = join(dirname(DC_WINDOWS_POWERSHELL), "Modules");
+  let output = "";
   try {
-    execFileSync(DC_WINDOWS_POWERSHELL, ["-NoProfile", "-NonInteractive", "-Command", script], {
-      input: JSON.stringify(entries), timeout: 5000, windowsHide: true, stdio: ["pipe", "ignore", "ignore"],
+    output = execFileSync(DC_WINDOWS_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script], {
+      input: entries.map(([mask, path]) => mask + " " + Buffer.from(path, "utf8").toString("base64")).join("\n"),
+      env, timeout: 5000, windowsHide: true, encoding: "utf8", stdio: ["pipe", "pipe", "ignore"],
     });
   } catch {
-    throw new Error("per-user gateway helper path has an untrusted Windows owner or DACL");
+    output = "";
   }
+  if (output.trim() !== "checked " + entries.length) throw new Error("per-user gateway helper path has an untrusted Windows owner or DACL");
 }
 {{end}}// defenseclawFetch posts to the gateway over the managed hook socket when one
 // is configured. A per-user post goes through the native helper, which

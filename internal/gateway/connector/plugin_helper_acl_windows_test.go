@@ -28,6 +28,13 @@ import (
 // no checked parent otherwise, and swapping it after the check hands the
 // bearer to a planted helper. Create-folder rights (as C:\ grants Users)
 // are not such a right.
+//
+// Every verdict must also hold when the agent's PSModulePath names a hostile
+// module directory first: PowerShell loads a cmdlet from the first module
+// that exports it, so a planted ConvertFrom-Json or Get-Acl that answers
+// "nothing to check" would pass every path. A path with non-ASCII characters
+// (a profile such as C:\Users\José) is checked as it is, not as the console
+// code page decodes it.
 func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 	node := nodeForTest(t)
 	profile, err := os.UserHomeDir()
@@ -56,6 +63,7 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 			name    string
 			nested  bool
 			custom  bool   // a custom data root that holds the helper (home = data root)
+			rootDir string // the custom data root's folder name; "" = dcroot
 			owner   string // owner of every fixture path; "" = the current user
 			changes func(l layout) [][]string
 			trusted bool
@@ -91,6 +99,9 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 				changes: func(l layout) [][]string { return [][]string{{l.binary, "/setowner", users}} }},
 			{name: "custom data root holding the helper", custom: true, trusted: true},
 			{name: "elevated custom data root owned by Administrators", custom: true, owner: administrators, trusted: true},
+			{name: "custom data root with a non-ASCII name", custom: true, rootDir: "dcroot-Jos\u00e9-\u4e2d\u6587", trusted: true},
+			{name: "custom data root with a non-ASCII name writable by Users", custom: true, rootDir: "dcroot-Jos\u00e9-\u4e2d\u6587",
+				changes: func(l layout) [][]string { return [][]string{{l.binDir, "/grant", users + ":W"}} }},
 			{name: "custom data root parent where Users may create folders", custom: true, trusted: true,
 				changes: func(l layout) [][]string { return [][]string{{l.parent, "/grant", users + ":(AD)"}} }},
 			{name: "parent swap: custom data root parent modifiable by Users", custom: true,
@@ -118,7 +129,11 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 				if tc.custom {
 					// The layout setup records when a custom data root holds
 					// the gateway: <root>\.local\bin under the root itself.
-					l.home = filepath.Join(l.parent, "dcroot")
+					rootDir := tc.rootDir
+					if rootDir == "" {
+						rootDir = "dcroot"
+					}
+					l.home = filepath.Join(l.parent, rootDir)
 					l.nest, l.data = l.home, l.home
 				}
 				home := l.home
@@ -166,14 +181,41 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 					}
 				}
 				render(windowsSystemPowerShellExe())
-				check := func() string {
+				// A module directory the agent's PSModulePath names first,
+				// exporting the cmdlets an ACL check could call, each
+				// answering "nothing here".
+				hostile := filepath.Join(base, "psmodules")
+				hostileModule := filepath.Join(hostile, "DCHostile")
+				if err := os.MkdirAll(hostileModule, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				hostileCmdlets := []string{"ConvertFrom-Json", "Get-Acl", "Get-Item", "Get-ChildItem", "Test-Path",
+					"Write-Output", "Out-String", "Select-Object", "Where-Object", "ForEach-Object"}
+				var psm1 strings.Builder
+				for _, name := range hostileCmdlets {
+					psm1.WriteString("function " + name + " { param([Parameter(ValueFromPipeline=$true)]$InputObject, $LiteralPath, $Path) @() }\r\n")
+				}
+				psm1.WriteString("Export-ModuleMember -Function " + strings.Join(hostileCmdlets, ",") + "\r\n")
+				if err := os.WriteFile(filepath.Join(hostileModule, "DCHostile.psm1"), []byte(psm1.String()), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				manifest := "@{ RootModule = 'DCHostile.psm1'; ModuleVersion = '1.0'; GUID = '6c1c0f0e-2f5e-4a8e-9a43-0d5f4b1d7a11'; FunctionsToExport = @('" +
+					strings.Join(hostileCmdlets, "','") + "') }\r\n"
+				if err := os.WriteFile(filepath.Join(hostileModule, "DCHostile.psd1"), []byte(manifest), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				hostileEnv := append(os.Environ(), "PSModulePath="+hostile+";"+os.Getenv("PSModulePath"))
+				checkIn := func(env []string) string {
 					t.Helper()
-					out, err := exec.Command(node, plugin).CombinedOutput()
+					cmd := exec.Command(node, plugin)
+					cmd.Env = env
+					out, err := cmd.CombinedOutput()
 					if err != nil {
 						t.Fatalf("rendered plugin: %v\n%s", err, out)
 					}
 					return strings.TrimSpace(string(out))
 				}
+				check := func() string { t.Helper(); return checkIn(nil) }
 				if got := check(); got != "trusted" {
 					t.Fatalf("private fixture: %q", got)
 				}
@@ -206,12 +248,17 @@ func TestWindowsPerUserPluginRejectsWritableHelperPaths(t *testing.T) {
 						icacls(args...)
 					}
 				}
-				got := check()
-				if tc.trusted && got != "trusted" {
-					t.Fatalf("%s: %q, want trusted", tc.name, got)
-				}
-				if !tc.trusted && !strings.HasPrefix(got, "rejected:") {
-					t.Fatalf("%s: %q, want rejected", tc.name, got)
+				for _, run := range []struct {
+					name string
+					env  []string
+				}{{"", nil}, {" with a hostile PSModulePath", hostileEnv}} {
+					got := checkIn(run.env)
+					if tc.trusted && got != "trusted" {
+						t.Fatalf("%s%s: %q, want trusted", tc.name, run.name, got)
+					}
+					if !tc.trusted && !strings.HasPrefix(got, "rejected:") {
+						t.Fatalf("%s%s: %q, want rejected", tc.name, run.name, got)
+					}
 				}
 			})
 		}

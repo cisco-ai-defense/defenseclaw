@@ -55,6 +55,7 @@ declare module 'node:child_process' {
     timeout?: number
     maxBuffer?: number
     windowsHide?: boolean
+    env?: Record<string, string>
     input?: string
     encoding?: 'utf8'
     stdio?: readonly ('ignore' | 'pipe' | 'inherit')[]
