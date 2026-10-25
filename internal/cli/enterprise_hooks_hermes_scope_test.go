@@ -382,9 +382,56 @@ func TestVerifyLeavesASignedOutHermesTargetToTheNextSignIn(t *testing.T) {
 	delete(live, bob+"/hermes")
 	check("hive loaded while signed out", true, true)
 
+	// GAP-1433 as observed: an upgrade from 1.0.2 while Bob is signed out
+	// leaves his Hermes target waiting for his sign-in (an earlier release
+	// protected it), and an elevated administrator's verify cannot query
+	// his session. The LocalSystem guardian's record of the wait stands.
+	previousNotLocalSystem := enterpriseHookSessionCheckNotLocalSystem
+	t.Cleanup(func() { enterpriseHookSessionCheckNotLocalSystem = previousNotLocalSystem })
+	errNotLocalSystem := errors.New("enterprise hooks: process is not LocalSystem")
+	enterpriseHookSessionCheckNotLocalSystem = func(err error) bool { return errors.Is(err, errNotLocalSystem) }
+	signedIn[bob] = true
+	delete(live, bob+"/hermes")
+	reconcile(0)
+	signedIn[bob] = false
+	live[bob+"/hermes"] = errors.New("enterprise hooks: connector hermes hook verification failed: canonical hook matrix is absent: owned hook command not present")
+	enterpriseHookReconcileTargetRelease = func(opts enterprisehooks.InstallOptions) (string, bool, error) {
+		return "1.0.2", opts.OwnerSID == bob && opts.ConnectorName == "hermes", nil
+	}
+	reconcile(1)
+	enterpriseHookReconcileTargetRelease = func(enterprisehooks.InstallOptions) (string, bool, error) { return "", false, nil }
+	adminView := func(target enterprisehooks.ManifestTarget) (bool, error) {
+		if target.SID == bob {
+			return false, errNotLocalSystem
+		}
+		return true, nil
+	}
+	enterpriseHookReconcileSessionAvailable = adminView
+	checkNote := func(name, want string) {
+		t.Helper()
+		run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true)
+		if err != nil || run.AuthorizationErr != nil || run.Failures != len(run.Excused) {
+			t.Fatalf("%s: err=%v authorization=%v rows=%+v", name, err, run.AuthorizationErr, run.Rows)
+		}
+		for _, row := range run.Rows {
+			if row.SID == bob && row.Connector == "hermes" && !strings.Contains(enterpriseHookVerifyExcusedNote(run, row), want) {
+				t.Fatalf("%s: note %q, want %q", name, enterpriseHookVerifyExcusedNote(run, row), want)
+			}
+		}
+	}
+	checkNote("earlier release, administrator verify", "an earlier DefenseClaw release protected it")
+	// Bob signs in: until the guardian repairs his target, it fails.
+	enterpriseHookReconcileSessionAvailable = func(enterprisehooks.ManifestTarget) (bool, error) { return true, nil }
+	if run, err := runEnterpriseHookVerifyAttemptWithScope(context.Background(), true); err != nil ||
+		run.Failures == len(run.Excused) {
+		t.Fatalf("signed in before the repair: err=%v rows=%+v, want the target failing", err, run.Rows)
+	}
+	enterpriseHookReconcileSessionAvailable = func(target enterprisehooks.ManifestTarget) (bool, error) { return signedIn[target.SID], nil }
+
 	// Controls: any other failure of that target, or the same error of
 	// another connector, while the guardian last proved it.
 	signedIn[bob] = true
+	delete(live, bob+"/hermes")
 	reconcile(0)
 	signedIn[bob] = false
 	live[bob+"/hermes"] = errors.New("enterprise hooks: connector hermes hook verification failed: canonical hook matrix is absent")

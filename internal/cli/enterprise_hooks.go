@@ -2306,6 +2306,17 @@ func enterpriseHookHermesSignedOutRow(
 			"(verification: %v)", enterpriseHookAwaitingSignInPrefix, enterpriseHookAwaitingSignInHermesHome, liveErr), true
 	case liveErr == nil && lastWaits:
 		return strings.TrimSpace(last.Error), true
+	case liveErr != nil && known && !last.OK && !last.Pending && enterpriseHookAwaitingSignInError(last):
+		// The guardian left the target waiting for its sign-in for another
+		// cause (an earlier release protected it, GAP-0644). An elevated
+		// administrator's verify cannot query another account's session,
+		// so, as on Secure Client, the LocalSystem guardian's fresh
+		// protected record of the wait stands while the account has no
+		// session it can see (GAP-1433).
+		available, err := enterpriseHookReconcileSessionAvailable(target)
+		if (err == nil && !available) || (err != nil && enterpriseHookSessionCheckNotLocalSystem(err)) {
+			return strings.TrimSpace(last.Error), true
+		}
 	}
 	return "", false
 }
