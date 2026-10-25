@@ -103,6 +103,13 @@ func NewPerUserGatewayHTTPClient(timeout time.Duration, apiAddr string) (*http.C
 // sent a status line.
 var errPerUserAnswerIncomplete = errors.New("per-user gateway answer incomplete")
 
+// errPerUserPeerUnverified wraps every failure of the connected-listener
+// check. A listener this transport could not prove to be this account's is
+// never an outage, whatever the check's own error wraps: a foreign listener
+// that closes or unbinds during the check (ENOENT, EOF, a reset) or a check
+// still running at the restart deadline must keep the refusal closed.
+var errPerUserPeerUnverified = errors.New("per-user gateway connected listener is unverified")
+
 // PerUserPostOutageExit is the exit status of `hook-post` for a gateway
 // outage (PerUserPostOutage), curl's "could not connect" status, which the
 // shell hooks and in-agent plugins already read as this account's gateway
@@ -115,8 +122,8 @@ const PerUserPostOutageExit = 7
 // whose owner could not be verified, a timeout after the connection and
 // every other error are not.
 func PerUserPostOutage(err error) bool {
-	if err == nil || errors.Is(err, errPerUserAnswerIncomplete) || errors.Is(err, errInvalidHookRequest) ||
-		errors.Is(err, errGatewayTookCallNoAnswer) {
+	if err == nil || errors.Is(err, errPerUserPeerUnverified) || errors.Is(err, errPerUserAnswerIncomplete) ||
+		errors.Is(err, errInvalidHookRequest) || errors.Is(err, errGatewayTookCallNoAnswer) {
 		return false
 	}
 	return gatewayRestartShaped(err)
@@ -206,7 +213,7 @@ func verifiedPerUserHTTPClient(
 				}
 				if err := verify(conn); err != nil {
 					_ = conn.Close()
-					return nil, fmt.Errorf("per-user gateway connected listener is unverified: %w", err)
+					return nil, fmt.Errorf("%w: %w", errPerUserPeerUnverified, err)
 				}
 				return conn, nil
 			},

@@ -2857,7 +2857,7 @@ defenseclaw_keep_nul_visible() {
 # .curlrc there could trace the bearer and body to a file or turn an HTTP 401
 # into a transport failure. Bash 3.2 compatible.
 defenseclaw_gateway_post() {
-  local _dc_post_status=0 _dc_listener_status=0
+  local _dc_post_status=0 _dc_listener_status=0 _dc_post_peer_final=0
   _dc_gateway_post_once "$@" || _dc_post_status=$?
   case "$_dc_post_status" in
     1|28) ;;
@@ -2867,9 +2867,17 @@ defenseclaw_gateway_post() {
     1|true|TRUE|yes|YES) return "$_dc_post_status" ;;
   esac
   [ -z "${DEFENSECLAW_HOOK_SOCKET:-}" ] || return "$_dc_post_status"
-  # A per-user call that was not answered reads the socket tables once, so
-  # the outcome is the one the old send-time preflight gave: no listener is
-  # a cold start (7), a foreign or unknown one fails closed (1).
+  # The native helper ran and failed on its own terms, not with its outage
+  # status (7): it reached a listener and refused its owner, or the call it
+  # sent got no usable answer. That result is final. A socket table read
+  # later may no longer show a foreign listener that unbound after the
+  # refusal, and must not turn the refusal into a cold start, the one status
+  # a per-user outage rule may let through.
+  [ "$_dc_post_peer_final" = 0 ] || return 1
+  # A per-user call that never reached a peer (refused, or not sent) reads
+  # the socket tables once, so the outcome is the one the old send-time
+  # preflight gave: no listener is a cold start (7), a foreign or unknown one
+  # fails closed (1).
   defenseclaw_api_listener_unproven "${API_ADDR:-}" || _dc_listener_status=$?
   case "$_dc_listener_status" in
     2) return 7 ;;
@@ -3039,13 +3047,25 @@ _dc_gateway_post_once() {
       fi |
         (
           if [ -n "${_DC_HOOK_NATIVE_VMEM_LIMIT:-}" ]; then
-            ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 1
+            # 126, as for a helper that cannot run: nothing was sent.
+            ulimit -S -v "$_DC_HOOK_NATIVE_VMEM_LIMIT" 2>/dev/null || exit 126
           fi
           exec "$_dc_post_bin" hook-post --api-addr "$API_ADDR" --max-time "$_dc_post_remaining" --curl-output
         ) 2>/dev/null |
         defenseclaw_keep_nul_visible
       exit "${PIPESTATUS[1]}"
-    )" || return 1
+    )" || {
+      # 7 is the helper's outage status (hookexec.PerUserPostOutageExit: no
+      # gateway took the connection) and 126 or 127 a helper that did not
+      # run; neither reached a peer. Every other failure came after the
+      # helper's connected-peer check decided, and stays closed
+      # (defenseclaw_gateway_post).
+      case "$?" in
+        7|126|127) ;;
+        *) _dc_post_peer_final=1 ;;
+      esac
+      return 1
+    }
     printf '%s' "$_dc_post_output"
     return 0
   fi

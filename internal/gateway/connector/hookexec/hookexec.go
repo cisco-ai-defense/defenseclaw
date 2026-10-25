@@ -2246,12 +2246,13 @@ func withPerUserOutage(opts Options) Options {
 // outage: a connection this account's gateway refused, reset or closed
 // before any status (it exited or is restarting), or none within the
 // restart budget. A call the gateway took and did not answer in time
-// (errGatewayTookCallNoAnswer), an invalid request and every other error
-// are not, and neither is any error after an HTTP status: the gateway
-// answered.
+// (errGatewayTookCallNoAnswer), a listener whose owner was not proven
+// (errPerUserPeerUnverified), an invalid request and every other error are
+// not, and neither is any error after an HTTP status: the gateway answered.
 func perUserOutageError(opts Options, err error) bool {
 	if opts.ManagedEnterprise || opts.ManagedUnixSocket != "" || opts.SecureClient || err == nil ||
-		opts.answeredErrorStatus != 0 || errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(err, errInvalidHookRequest) {
+		opts.answeredErrorStatus != 0 || errors.Is(err, errGatewayTookCallNoAnswer) || errors.Is(err, errInvalidHookRequest) ||
+		errors.Is(err, errPerUserPeerUnverified) {
 		return false
 	}
 	return gatewayRestartShaped(err)

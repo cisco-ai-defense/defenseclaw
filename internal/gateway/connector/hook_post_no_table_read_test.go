@@ -162,10 +162,18 @@ func TestPerUserGatewayPostClassifiesOnlyAnUnsentCall(t *testing.T) {
 	}{
 		{"refused, no listener: cold start", "127.0.0.1:18960", "defenseclaw-hook-post", "7", "2", "0", "rc=7", true, true},
 		{"refused, own listener: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "7", "1", "0", "rc=1", true, true},
-		{"peer refused, foreign: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "1", "0", "0", "rc=1", true, true},
-		{"peer refused, own: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "1", "1", "0", "rc=1", true, true},
-		{"peer refused, now free: cold start", "[::1]:18960", "defenseclaw-hook-post", "1", "2", "0", "rc=7", true, true},
+		// The helper's own refusal is final: a later table read that no
+		// longer shows the foreign listener is no cold start (T12b loop 2).
+		{"peer refused, foreign: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "1", "0", "0", "rc=1", true, false},
+		{"peer refused, own: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "1", "1", "0", "rc=1", true, false},
+		{"peer refused, now free: closed", "[::1]:18960", "defenseclaw-hook-post", "1", "2", "0", "rc=1", true, false},
+		{"helper panic, now free: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "2", "2", "0", "rc=1", true, false},
+		{"helper killed, now free: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "137", "2", "0", "rc=1", true, false},
+		{"helper timeout code, now free: closed", "127.0.0.1:18960", "defenseclaw-hook-post", "28", "2", "0", "rc=1", true, false},
+		{"gateway CLI fallback peer refused, now free: closed", "localhost:18960", "defenseclaw-gateway", "1", "2", "0", "rc=1", true, false},
 		{"gateway CLI fallback refused, free", "localhost:18960", "defenseclaw-gateway", "7", "2", "0", "rc=7", true, true},
+		{"helper cannot run, free", "127.0.0.1:18960", "defenseclaw-hook-post", "126", "2", "0", "rc=7", true, true},
+		{"helper not found, free", "127.0.0.1:18960", "defenseclaw-hook-post", "127", "2", "0", "rc=7", true, true},
 		{"no helper installed, free", "127.0.0.1:18960", "", "", "2", "0", "rc=7", false, true},
 		{"no helper installed, own", "127.0.0.1:18960", "", "", "1", "0", "rc=1", false, true},
 		{"no helper installed, foreign", "127.0.0.1:18960", "", "", "0", "0", "rc=1", false, true},
@@ -215,6 +223,53 @@ defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 4 '{}' -H 
 				t.Fatalf("status = %q, want %q; helper or curl ran: %q", out, tc.want, marker)
 			}
 		})
+	}
+}
+
+// The reviewer's race end to end (T12b loop 2): a foreign listener took the
+// connection, the helper refused its owner, and the listener unbound before
+// any socket table read. The restart wait must end on the refusal (1), never
+// on the outage status (7) that a default per-user install lets through, and
+// must not cold-start or classify the listener. A genuine refusal (helper 7)
+// with no listener is still the cold start.
+func TestPerUserPeerRefusalIsNeverAnOutageAfterTheListenerLeaves(t *testing.T) {
+	for _, tc := range []struct{ helper, exit, want string }{
+		{"defenseclaw-hook-post", "1", "rc=1 transport=1"},
+		{"defenseclaw-gateway", "1", "rc=1 transport=1"},
+		{"defenseclaw-hook-post", "7", "rc=7 transport=7"},
+	} {
+		t.Run(tc.helper+"/exit "+tc.exit, func(t *testing.T) {
+			f := newPostFixture(t)
+			f.helper(t, tc.helper)
+			script := postStubPrologue + classifierStub + `API_ADDR=127.0.0.1:18960
+defenseclaw_gateway_cold_start() { echo cold-start >> "$DC_TEST_MARKER"; }
+sleep() { :; }
+_post() { defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 4 '{}' -H 'Authorization: Bearer secret' >/dev/null; }
+status=0; _post || status=$?
+defenseclaw_await_gateway "$status" _post; echo "rc=$? transport=$_DC_TRANSPORT_STATUS"`
+			out, marker := f.run(t, script, "DC_TEST_HELPER_EXIT="+tc.exit, "DC_TEST_LISTENER=2")
+			if strings.TrimSpace(out) != tc.want {
+				t.Fatalf("restart wait = %q, want %q (marker %q)", out, tc.want, marker)
+			}
+			refusal := tc.exit != "7"
+			if refusal && (strings.Contains(marker, "classify") || strings.Contains(marker, "cold-start")) {
+				t.Fatalf("a refused peer was classified or cold-started: %q", marker)
+			}
+			if !refusal && !strings.Contains(marker, "cold-start") {
+				t.Fatalf("a refused connection did not cold-start the gateway: %q", marker)
+			}
+		})
+	}
+	// A helper that could not start under the memory limit sent nothing, so
+	// the table read still decides.
+	f := newPostFixture(t)
+	f.helper(t, "defenseclaw-hook-post")
+	script := postStubPrologue + classifierStub + `API_ADDR=127.0.0.1:18960
+_DC_HOOK_NATIVE_VMEM_LIMIT=not-a-number
+defenseclaw_gateway_post "http://${API_ADDR}/api/v1/claude-code/hook" 4 '{}' -H 'Authorization: Bearer secret'; echo "rc=$?"`
+	out, marker := f.run(t, script, "DC_TEST_LISTENER=2")
+	if strings.TrimSpace(out) != "rc=7" || strings.Contains(marker, "helper ") || strings.Count(marker, "classify") != 1 {
+		t.Fatalf("helper that could not start: status %q, marker %q", out, marker)
 	}
 }
 
