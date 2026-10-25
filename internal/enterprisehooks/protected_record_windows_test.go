@@ -82,3 +82,35 @@ func TestWindowsStaleUnprotectedAgentsRecordRejectedAndRefreshed(t *testing.T) {
 		t.Fatalf("fresh rescan was rejected: %v", err)
 	}
 }
+
+// GAP-1430 review: a stale record still names the agents its last scan found
+// (a refusal=missing entry must keep failing verify), and a malformed stale
+// record is a parse error, never a pending scan.
+func TestWindowsStaleUnprotectedAgentsRecordKeepsItsAgentsAndMalformedFails(t *testing.T) {
+	dir := prepareWindowsTargetsManifestTestDirectory(t)
+	manifest := filepath.Join(dir, "targets.yaml")
+	agents := []UnprotectedAgent{{User: "alice", SID: testLocalUserSID, Connector: "cursor", Version: "4.1.0",
+		Reason: "version 4.1.0 is not verified against a known hook contract", Refusal: RefusalMissing}}
+	if _, err := WriteWindowsUnprotectedAgents(manifest, agents); err != nil {
+		t.Fatal(err)
+	}
+	path := UnprotectedAgentsPath(manifest)
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	var stale UnprotectedAgentsStaleError
+	got, err := ReadWindowsUnprotectedAgents(manifest)
+	if !errors.As(err, &stale) || len(got) != 1 || got[0].Connector != "cursor" || got[0].Refusal != RefusalMissing {
+		t.Fatalf("stale record = %+v, %v; want its agent and a stale error", got, err)
+	}
+	if _, err := WriteWindowsProtectedRecordAtomic(path, []byte("{not json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := ReadWindowsUnprotectedAgents(manifest); err == nil || errors.As(err, &stale) || len(got) != 0 {
+		t.Fatalf("malformed stale record = %+v, %v; want a parse error", got, err)
+	}
+}

@@ -1979,7 +1979,9 @@ func applyWindowsEnterpriseUnprotectedAgents(result *enterprisestatus.Result) {
 				result.AddWarning(windowsManagedLaunchAuditUnavailable, "could not audit the pending agent install scan: "+err.Error())
 			}
 		}
-		return
+		// A stale record still names the agents its last scan found; they
+		// are reported below, so verify keeps failing on a known gap.
+		err = nil
 	}
 	if err != nil {
 		message := "the enumerator's unprotected-agents record is missing or unreadable: " + err.Error()

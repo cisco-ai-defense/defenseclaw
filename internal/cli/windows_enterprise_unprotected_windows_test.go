@@ -156,6 +156,44 @@ func TestWindowsPendingUnprotectedRecordIsAWarningNotAVerifyFailure(t *testing.T
 	}
 }
 
+// GAP-1430 review: a stale record's agents are still reported, so a
+// refusal=missing entry or a Kiro IDE below its floor keeps failing verify
+// next to the pending warning; a malformed record fails verify, not pending.
+func TestWindowsStaleProtectedRecordStillFailsVerifyOnKnownGaps(t *testing.T) {
+	stale := fmt.Errorf("read: %w", enterprisehooks.UnprotectedAgentsStaleError{Age: "2h0m0s old"})
+	stubWindowsUnprotectedAgents(t, []enterprisehooks.UnprotectedAgent{
+		{User: "alice", SID: "S-1-5-21-1-2-3-1001", Connector: "cursor", Version: "4.1.0",
+			Code: enterprisehooks.UnprotectedCodeHookContractUnverified, Reason: "not verified", Refusal: enterprisehooks.RefusalMissing},
+		{User: "bob", SID: "S-1-5-21-1-2-3-1002", Connector: "kiro", Version: "0.1.0",
+			Code: enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor, Reason: "below floor"},
+		{User: "carol", SID: "S-1-5-21-1-2-3-1003", Connector: "codex", Version: "1.0.0",
+			Code: enterprisehooks.UnprotectedCodeAgentUnprotected, Reason: "could not enroll"},
+	}, stale)
+	verify := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
+	verify.CoverageComplete, verify.SecurityComplete = true, true
+	applyWindowsEnterpriseUnprotectedAgents(verify)
+	if verify.CoverageComplete || verify.SecurityComplete || len(verify.Errors) != 2 || len(verify.Warnings) != 2 ||
+		verify.Errors[0].Code != enterprisehooks.UnprotectedCodeHookContractUnverified ||
+		verify.Errors[1].Code != enterprisehooks.UnprotectedCodeKiroIDEBelowGlobalHooksFloor ||
+		!strings.Contains(verify.Warnings[0].Message, "NOT COVERED (scan pending)") ||
+		verify.Warnings[1].Code != enterprisehooks.UnprotectedCodeAgentUnprotected {
+		t.Fatalf("verify on a stale record with known gaps = %+v", verify)
+	}
+	status := enterprisestatus.New("status", managed.ProfileStandalone, "windows", "1.0.4")
+	applyWindowsEnterpriseUnprotectedAgents(status)
+	if len(status.Errors) != 0 || len(status.Warnings) != 4 {
+		t.Fatalf("status on a stale record with known gaps = %+v", status)
+	}
+
+	stubWindowsUnprotectedAgents(t, nil, errors.New("enterprise hooks: parse unprotected agents record: invalid character"))
+	malformed := enterprisestatus.New("verify", managed.ProfileStandalone, "windows", "1.0.4")
+	applyWindowsEnterpriseUnprotectedAgents(malformed)
+	if len(malformed.Errors) != 1 || malformed.Errors[0].Code != enterprisehooks.UnprotectedCodeInstallScanIncomplete ||
+		strings.Contains(fmt.Sprint(malformed.Warnings, malformed.Errors), "scan pending") {
+		t.Fatalf("verify on a malformed record = %+v", malformed)
+	}
+}
+
 func TestWindowsUnreadableProtectedRecordExplainsElevation(t *testing.T) {
 	stubWindowsUnprotectedAgents(t, nil, os.ErrPermission)
 	for _, action := range []string{"status", "verify"} {
