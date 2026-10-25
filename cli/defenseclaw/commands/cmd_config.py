@@ -55,6 +55,7 @@ from defenseclaw.config_inspect import (
     inspect_v8_config,
 )
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.file_permissions import UNSAFE_PATH_NAMESPACE_VIEW
 from defenseclaw.observability.v8_config import (
     MAX_SOURCE_BYTES,
     RETIRED_KEY_ACTION_PREFIX,
@@ -1503,6 +1504,9 @@ class ValidationResult:
         # The canonical validator did not finish (a busy host); the file was
         # not judged invalid (GAP-1621).
         self.timed_out: bool = False
+        # The canonical validator could not run here (a sandbox hides the
+        # owner of the gateway's folders); the file was not judged (GAP-1395).
+        self.not_checked: str = ""
 
     @property
     def ok(self) -> bool:
@@ -1526,6 +1530,12 @@ def validate_config() -> ValidationResult:
         try:
             inspected = inspect_v8_config("validate", config_path=cfg_path)
         except ConfigInspectError as exc:
+            cause = exc.__cause__
+            if getattr(cause, "code", "") == UNSAFE_PATH_NAMESPACE_VIEW:
+                # Not judged: a sandbox hides who owns the gateway's folders,
+                # so the canonical validator was not run (GAP-1395).
+                res.not_checked = str(cause)
+                return res
             res.timed_out = isinstance(exc, ConfigInspectTimeoutError)
             res.errors.append(_v8_failure_detail(cfg_path, exc))
             return res

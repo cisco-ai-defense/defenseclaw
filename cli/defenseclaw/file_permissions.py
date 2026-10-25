@@ -48,6 +48,9 @@ UNSAFE_PATH_CHANGED = "unsafe-path-changed"
 UNSAFE_PATH_UNTRUSTED_CUSTODY = "unsafe-path-untrusted-custody"
 UNSAFE_PATH_NOT_ABSOLUTE = "unsafe-path-not-absolute"
 UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
+# The owner is hidden by the user namespace this process runs in (an agent's
+# sandbox): it is not known to be another account, it cannot be checked here.
+UNSAFE_PATH_NAMESPACE_VIEW = "unsafe-path-namespace-view"
 
 _tracked_host_stat_lock = threading.Lock()
 
@@ -86,6 +89,39 @@ def tracked_host_owner_uid(path: str | os.PathLike[str], info: os.stat_result) -
         return -1 if reported == 0xFFFFFFFF else reported
     except OSError:
         return -1
+
+
+def namespace_hides_owner(info: os.stat_result) -> bool:
+    """True when *info*'s owner is only the overflow UID of this user namespace.
+
+    Inside an unprivileged user namespace (the workspace sandbox an agent such
+    as Codex runs its tools in) every host account outside the namespace's UID
+    map, root included, shows as the kernel's overflow UID. Such an owner is
+    unknown, not another account (GAP-1395).
+    """
+    if sys.platform != "linux":
+        return False
+    try:
+        with open("/proc/sys/kernel/overflowuid", encoding="ascii") as handle:
+            overflow = int(handle.read().strip())
+        with open("/proc/self/uid_map", encoding="ascii") as handle:
+            uid_map = handle.read().split()
+    except (OSError, ValueError):
+        return False
+    # The initial namespace maps every UID onto itself in one range.
+    return info.st_uid == overflow and uid_map != ["0", "0", "4294967295"]
+
+
+def _namespace_view_error(path: Path | str, resolved: str) -> UnsafePathError:
+    what = f"the gateway executable {resolved}"
+    if str(path) != resolved:
+        what = f"{path}, which holds {what},"
+    return UnsafePathError(
+        f"the owner of {what} cannot be checked here: "
+        "this command runs inside a sandbox (a user namespace) that hides it, so DefenseClaw did not "
+        "run the gateway's checks. Nothing needs changing; run the command outside the sandbox to check",
+        code=UNSAFE_PATH_NAMESPACE_VIEW,
+    )
 
 
 def tracked_host_stat_channel() -> socket.socket | None:
@@ -149,7 +185,7 @@ class UnsafePathError(OSError):
 
 def unsafe_gateway_remedy(exc: UnsafePathError) -> str:
     """The refusal plus a fix, without repeating one it already names."""
-    if "chmod go-w" in str(exc):
+    if "chmod go-w" in str(exc) or getattr(exc, "code", "") == UNSAFE_PATH_NAMESPACE_VIEW:
         return str(exc)
     return f"{exc}; fix its owner and mode (chmod go-w) or reinstall DefenseClaw"
 
@@ -776,7 +812,10 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         )
     geteuid = getattr(os, "geteuid", None)
     current_uid = geteuid() if callable(geteuid) else info.st_uid
-    if tracked_host_owner_uid(resolved, info) not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
+    owner = tracked_host_owner_uid(resolved, info)
+    if owner == -1 and namespace_hides_owner(info):
+        raise _namespace_view_error(resolved, resolved)
+    if owner not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
         raise UnsafePathError(
             f"gateway executable {resolved} can be changed by another account; "
             f"make this account or root its owner and run: chmod go-w {shlex.quote(str(resolved))}",
@@ -802,6 +841,8 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         # directory check allows it too). Without this, every config check
         # failed for a home under /tmp.
         parent_uid = tracked_host_owner_uid(current, parent_info)
+        if parent_uid == -1 and namespace_hides_owner(parent_info):
+            raise _namespace_view_error(f"folder {current}", resolved)
         root_sticky = parent_uid == 0 and parent_info.st_mode & stat.S_ISVTX
         if parent_uid not in {0, current_uid} or (
             stat.S_IMODE(parent_info.st_mode) & 0o022 and not root_sticky

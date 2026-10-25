@@ -357,6 +357,8 @@ def status(app: AppContext, as_json: bool) -> None:
         problems = list(getattr(app, "config_problems", None) or [])
         if problems:
             payload["config_errors"] = problems
+        if not_checked := getattr(app, "config_not_checked", ""):
+            payload["config_not_checked"] = not_checked
         click.echo(json.dumps(payload, indent=2))
         if problems:
             raise SystemExit(1)
@@ -386,6 +388,8 @@ def status(app: AppContext, as_json: bool) -> None:
             ux._style(f"{len(config_problems)} problem(s), listed above", fg="yellow")
             + ux.dim(" (details: defenseclaw config validate)"),
         )
+    elif not_checked := getattr(app, "config_not_checked", ""):
+        _status_row("Config check", ux._style(f"not run: {not_checked}", fg="yellow"))
     _status_row("Audit DB", cfg.audit_db)
     _status_row("Scope", _connector_scope_text(cfg))
     _print_removed_connector_cleanup(cfg)

@@ -79,6 +79,7 @@ from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
+    namespace_hides_owner,
     read_regular_file_no_follow,
     tracked_host_owner_uid,
 )
@@ -769,6 +770,12 @@ def _managed_config_trust_problem(path: str) -> str | None:
         owner_uid = tracked_host_owner_uid(current, info) if hasattr(info, "st_uid") else None
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
+        if owner_uid == -1 and namespace_hides_owner(info):
+            # Unknown, not another account: a sandbox hides it (GAP-1395).
+            return (
+                f"{current}: its owner cannot be checked inside this sandbox (a user namespace hides it); "
+                "run the command outside the sandbox"
+            )
         if owner_uid != 0:
             return f"{current}: owner uid {owner_uid} is not trusted; expected root/admin uid 0"
 
