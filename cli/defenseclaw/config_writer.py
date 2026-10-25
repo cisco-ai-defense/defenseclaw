@@ -1021,7 +1021,8 @@ def _patch(current: bytes, changes: list[Change], source_name: str) -> tuple[byt
     from defenseclaw.enforce.admission import legacy_default_mcp_pins
 
     def prepare(edits: list[Any]) -> bytes:
-        return prepare_v8_yaml_write(current, _ordered_mutations(edits), source_name=source_name, any_path=True).candidate
+        ordered = _ordered_mutations(edits)
+        return prepare_v8_yaml_write(current, ordered, source_name=source_name, any_path=True).candidate
 
     if mutations and not current.strip():
         from defenseclaw.config import CURRENT_CONFIG_VERSION
