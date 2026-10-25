@@ -65,7 +65,9 @@ func (l *lifecycle) describeChangedGuardianFiles() {
 						continue
 					}
 					info, err := os.Lstat(env.P(file.Path))
-					if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o100 == 0 {
+					// Hermes runs the script through its shell, which must
+					// read it: owner execute alone (0100) runs nothing (GAP-1484).
+					if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o500 != 0o500 {
 						change.nonExecutable = file.Path
 						break
 					}
@@ -94,7 +96,7 @@ func (l *lifecycle) describeChangedGuardianFiles() {
 				change.count, boundedGuardianReason(change.user), change.connector, boundedGuardianReason(change.first), env.lifecycleCommand("status")))
 		}
 		if change.nonExecutable != "" {
-			r.AddError(codeVerify, fmt.Sprintf("registered Hermes hook is not executable for user %s: %s",
+			r.AddError(codeVerify, fmt.Sprintf("registered Hermes hook is not executable for user %s (its owner must be able to read and run it): %s",
 				boundedGuardianReason(change.user), boundedGuardianReason(change.nonExecutable)))
 		}
 	}
