@@ -11,10 +11,8 @@ Claude Code does not emit `PreToolUse` for a command you type with `!` in its sh
 
 The local Splunk bridge is x86_64 only; it needs a `linux/amd64` Docker engine. On ARM64, use `--enterprise` with an existing Splunk HEC endpoint. See [Send to Splunk](/docs/how-to/observability/send-to-splunk#before-you-start).
 
-## Conditional limits
+## Upgrade and policy limits
 
-These entries apply only if their fixes do not ship in 1.0.4. The release lead removes an entry when its fix ships.
-
-- **MicroVM legacy guests:** save accessible work outside the guest, stop it through DefenseClaw, and recreate it on 1.0.4. Avoid raw OpenShell commands during the upgrade.
-- **Managed policy view before agent launch:** keep policy files root-owned through MDM or an administrator, and use doctor to check the view before starting the agent. Repair a missing view before use.
-- **Managed upgrade window with old hooks (1.0.2 and 1.0.3):** stop agent sessions before upgrading and keep them stopped until the gateway is healthy. Restart OpenCode and Amp sessions after the upgrade. See [Managed hook limits](/docs/troubleshooting/enterprise#known-limits-for-managed-hooks).
+- **Legacy MicroVM guests:** save accessible work outside the guest before upgrading. Afterward, follow `defenseclaw sandbox status NAME` to stop or delete it, then recreate it on 1.0.4. Use DefenseClaw's sandbox commands for a DefenseClaw guest.
+- **Managed policy before launch:** a private policy view can hide the hook before the agent starts. Keep Unix policy files root-owned and Windows machine policy protected by the installer. Check the agent's hook with its doctor command where available; before use, have an administrator run the [policy verification for that OS](/docs/enterprise/configure/machine-policy#inspect-export-and-verify) and repair any missing hook.
+- **Managed upgrades from 1.0.2 and 1.0.3:** with administrator-set `hook_fail_mode: open`, an old hook already in flight or a plugin still loaded by an agent may let a call run while the gateway is stopped. Stop agent sessions before upgrading and keep them stopped until the gateway is healthy. Start new OpenCode and Amp sessions afterward. See [Managed hook limits](/docs/troubleshooting/enterprise#known-limits-for-managed-hooks).

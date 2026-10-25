@@ -53,7 +53,7 @@ If the `defenseclaw` command does not start, run the install command again. It r
 A running OpenShell sandbox keeps running, but its hooks fail closed while the gateway is stopped (usually under a minute). Upgrade between sessions, or let the agent retry afterwards.
 </Callout>
 
-If the [legacy MicroVM limit](/docs/troubleshooting/known-limits#conditional-limits) remains in 1.0.4, save the guest's work outside it, stop it through DefenseClaw, and recreate it after upgrading.
+For a legacy MicroVM guest, save accessible work outside it before upgrading; afterward, recreate it on 1.0.4 as described in [Known limits in 1.0.4](/docs/troubleshooting/known-limits#upgrade-and-policy-limits).
 
 ## Rollback
 

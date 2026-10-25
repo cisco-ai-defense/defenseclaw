@@ -76,14 +76,19 @@ describe('Owner-decided 1.0.4 vendor and platform limits', () => {
   });
 });
 
-describe('Conditional 1.0.4 fallback limits', () => {
-  it('names each pending class and its mitigation without presenting it as shipped', () => {
-    const limits = page('troubleshooting/known-limits.mdx').split('## Conditional limits')[1] ?? '';
-    assert.match(limits, /only if (?:their|the) fixes do not ship in 1\.0\.4/i);
-    assert.match(limits, /MicroVM legacy guests[^.]*save[^.]*recreate/i);
-    assert.match(limits, /managed policy view[^.]*root-owned[^.]*doctor/i);
-    assert.match(limits, /managed upgrade window[^.]*1\.0\.2[^.]*1\.0\.3[^.]*stop agent sessions[^.]*gateway is healthy/i);
-    assert.match(page('get-started/upgrade.mdx'), /If the \[legacy MicroVM limit\].{0,160}save the guest's work[^.]*recreate it after upgrading/i);
+describe('Known 1.0.4 upgrade and policy limits', () => {
+  it('gives the three limits and their mitigations without release notes', () => {
+    const pageText = page('troubleshooting/known-limits.mdx');
+    const limits = pageText.split('## Upgrade and policy limits')[1] ?? '';
+    assert.ok(limits, 'upgrade and policy limits section is missing');
+    assert.doesNotMatch(pageText, /release lead|fixes do not ship|\btrain\b|\bT12\b|\bround\b/i);
+    const microvm = limits.split('**Legacy MicroVM guests:**')[1]?.split('- **')[0] ?? '';
+    assert.match(microvm, /save[\s\S]*?recreate/i);
+    const policy = limits.split('**Managed policy before launch:**')[1]?.split('- **')[0] ?? '';
+    for (const word of ['root-owned', 'doctor', 'verify']) assert.ok(policy.includes(word));
+    const upgrade = limits.split('**Managed upgrades from 1.0.2 and 1.0.3:**')[1] ?? '';
+    assert.match(upgrade, /stop agent sessions[^.]*gateway is healthy/i);
+    assert.match(page('get-started/upgrade.mdx'), /For a legacy MicroVM guest[\s\S]{0,250}save[\s\S]{0,200}before upgrading[\s\S]{0,200}recreate[\s\S]{0,200}Known limits in 1\.0\.4/i);
   });
 });
 
