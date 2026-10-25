@@ -532,15 +532,23 @@ function runForeignHookCheck(event: string, cwd: string): Promise<string> {
 }
 
 // foreignCheckFailure is the block reason when the foreign-plugin check
-// itself could not run. Amp loads plugins once, so a check that failed at
-// load keeps blocking for the life of this process; that reason says to
-// restart the agent.
+// itself could not run. A later tool call retries this startup check.
 function foreignCheckFailure(event: string, why: string): string {
 	const detail = String(why || "").split(/\r?\n/)[0].trim() || "no answer"
 	if (event === "session.load") {
-		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Restart the agent once DefenseClaw is available.`
+		return `DefenseClaw could not check for unapproved plugins when the agent started (${detail}), so this tool call is blocked. Retry when DefenseClaw is available.`
 	}
 	return `DefenseClaw could not check for unapproved plugins (${detail}), so this tool call is blocked.`
+}
+
+// A confirmed foreign plugin loaded with Amp stays loaded for this process.
+// Availability failures do not prove that one was loaded; retry the startup
+// check on the next call while keeping this call closed.
+function startupCheckRetryable(reason: string): boolean {
+	return reason.startsWith("DefenseClaw could not check for unapproved plugins") ||
+		reason.includes("could not check this agent session's hook record") ||
+		reason.includes("enterprise_gateway_not_running") ||
+		reason.includes("enterprise_managed_gateway_not_running")
 }
 
 // promptNotice sets DefenseClaw's hidden agent.start notice apart from the
@@ -781,10 +789,14 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 	// Amp loads plugins once at startup: a foreign plugin present now keeps
 	// running for this process even if its file is deleted later, so a block
 	// found at load holds for the whole process.
-	const startupGuard = runForeignHookCheck("session.load", workspaceRoot)
-	const foreignHookCheck = async (event: string): Promise<string> =>
-		(await managedLifecycleHeld()) ? DC_MANAGED_LIFECYCLE_TEXT :
-			(await startupGuard) || (await runForeignHookCheck(event, workspaceRoot))
+	let startupGuard: Promise<string> | null = runForeignHookCheck("session.load", workspaceRoot)
+	const foreignHookCheck = async (event: string): Promise<string> => {
+		if (await managedLifecycleHeld()) return DC_MANAGED_LIFECYCLE_TEXT
+		if (!startupGuard) startupGuard = runForeignHookCheck("session.load", workspaceRoot)
+		const startupBlock = await startupGuard
+		if (startupBlock && startupCheckRetryable(startupBlock)) startupGuard = null
+		return startupBlock || (await runForeignHookCheck(event, workspaceRoot))
+	}
 
 	async function agentFacts(threadID: string, ctx: { thread: { agent(): Promise<Agent> } }): Promise<AgentFacts> {
 		const cached = agents.get(threadID)

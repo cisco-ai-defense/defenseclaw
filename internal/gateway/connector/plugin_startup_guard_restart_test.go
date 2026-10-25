@@ -76,8 +76,14 @@ console.log(await call(restarted, "C3"));
 	}
 
 	ampRoot := testenv.PrivateTempDir(t)
+	ampToken := filepath.Join(ampRoot, ".hook-amp.token")
+	if err := os.WriteFile(ampToken, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	lines = runNodeHarness(t, `
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+globalThis.Bun = { file: (path) => ({ slice: () => ({ text: async () => readFileSync(path, "utf8") }) }) };
 const loaded = await import(pathToFileURL(process.argv[1]).href);
 const handlers = {};
 loaded.default({
@@ -92,8 +98,8 @@ for (const id of ["U1", "U2"]) {
   console.log(result.action + ":" + (result.message || ""));
 }
 `, writeRenderedPlugin(t, "amp-plugin.ts", "defenseclaw.mts", templateData{
-		APIAddr:            "127.0.0.1:18970",
-		TokenFileJS:        javaScriptStringContent(filepath.Join(ampRoot, ".hook-amp.token")),
+		APIAddr:            strings.TrimPrefix(openCodeStubGateway(t).URL, "http://"),
+		TokenFileJS:        javaScriptStringContent(ampToken),
 		ForeignHookGuardJS: javaScriptStringContent(writeFlakyForeignGuard(t, ampRoot)),
 		FailMode:           "closed",
 		Managed:            true,
@@ -101,10 +107,8 @@ for (const id of ["U1", "U2"]) {
 	if len(lines) != 2 {
 		t.Fatalf("Amp verdicts = %q", lines)
 	}
-	for _, line := range lines {
-		if !strings.HasPrefix(line, "reject-and-continue:") || !strings.Contains(line, "Restart the agent") {
-			t.Fatalf("Amp: a failed load-time check must keep blocking and say to restart: %q", line)
-		}
+	if !strings.HasPrefix(lines[0], "reject-and-continue:") || !strings.HasPrefix(lines[1], "allow:") {
+		t.Fatalf("Amp: transient startup failure must recover on the next call: %q", lines)
 	}
 	if _, err := os.Stat(filepath.Join(ampRoot, "defenseclaw-hook.ran")); err != nil {
 		t.Fatalf("the guard did not run at load: %v", err)
@@ -295,12 +299,9 @@ console.log(await call(restarted, "U3"));
 		FailMode:           "closed",
 		Managed:            true,
 	}))
-	if len(lines) != 3 || !strings.HasPrefix(lines[2], "allow:") {
-		t.Fatalf("Amp verdicts = %q, want two blocks, then an allow after the restart", lines)
-	}
-	for _, line := range lines[:2] {
-		if !strings.HasPrefix(line, "reject-and-continue:") || !strings.Contains(line, "enterprise_gateway_not_running") {
-			t.Fatalf("Amp: the outage denial at load must hold for the process: %q", line)
-		}
+	if len(lines) != 3 || !strings.HasPrefix(lines[0], "reject-and-continue:") ||
+		!strings.Contains(lines[0], "enterprise_gateway_not_running") ||
+		!strings.HasPrefix(lines[1], "allow:") || !strings.HasPrefix(lines[2], "allow:") {
+		t.Fatalf("Amp verdicts = %q, want outage block then recovery in the same process", lines)
 	}
 }

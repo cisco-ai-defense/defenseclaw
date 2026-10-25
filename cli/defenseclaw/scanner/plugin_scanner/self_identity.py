@@ -70,13 +70,13 @@ _BRIDGE_PUBLICATION_SCHEMA = {
 # bridge_host), and the copy the Secure Client profile renders
 # (internal/gateway/connector/hooks/*-secure-client.*), which its release pins.
 _BRIDGE_STANDALONE_TEMPLATE_DIGESTS = {
-    "amp": "ed45651617971870e7718f8f51bd1e47ed4071121f445183c9518b9f5ca0551f",
+    "amp": "bd57562f6e1c9170b032171e340c6b18349a2d12a9dee14d29feb5a28275457b",
     "opencode": "e976f0bff3399476a0c40f4a8e1689dc656cf9eeb48ef132e573a4cbaaeee2bc",
 }
 _BRIDGE_TEMPLATE_DIGESTS = {
     "amp": frozenset(
         {
-            "45659cde17983d5717ac2ec817b9a62b36dfbe68bf121dd84315848ac132ad2a",  # amp-plugin.ts
+            "b175ef5f600552d8bbb1083d2cc0c5794c5899e9653eb3fcbadd1842494e1432",  # amp-plugin.ts
             _BRIDGE_STANDALONE_TEMPLATE_DIGESTS["amp"],
             "cf00f9f404c0711357f55535dd1062667d398acbf7603dfa15fa951d212b4d4b",  # amp-plugin-secure-client.ts
         }
