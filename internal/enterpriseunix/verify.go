@@ -1300,12 +1300,15 @@ func (l *lifecycle) readGatewayPosture(body []byte) {
 			message += "; last SQLite failure class: " + class
 		}
 		l.result.AddWarning(codeAuditWriteFailed, message+"; inspect the gateway /health telemetry details")
-	} else if class := health.Telemetry.Details.LastSQLiteClass; class != "" {
+	} else if class := health.Telemetry.Details.LastSQLiteClass; class != "" && class != "busy_locked" && class != "deadline" {
 		// Any later record clears the active failure, so one that fails
 		// only some records (one agent's hook calls) showed as healthy
-		// while those calls were refused (GAP-0773).
+		// while those calls were refused (GAP-0773). The gateway keeps the
+		// last class after it recovers, so a lock or a timed-out write,
+		// which the next commit clears (GAP-1537, GAP-1790), is not kept
+		// as a failure for the rest of the gateway's life.
 		switch class {
-		case "busy_locked", "deadline", "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
+		case "full", "io", "readonly_cantopen", "constraint_corrupt", "unavailable", "other":
 		default:
 			class = "other"
 		}

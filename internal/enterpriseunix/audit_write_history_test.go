@@ -34,3 +34,34 @@ func TestStatusAndVerifyReportAnAuditWriteFailureThatOtherRecordsCleared(t *test
 		}
 	}
 }
+
+// A lock or a timed-out write that the next commit cleared leaves its class in
+// /health; it must not keep the audit warning or security_complete false until
+// the gateway restarts (r105 R1-1).
+func TestStatusAndVerifyIgnoreARecoveredTransientAuditWriteFailure(t *testing.T) {
+	for _, class := range []string{"deadline", "busy_locked"} {
+		h := newTestHost(t, "linux")
+		requireOK(t, h.run(Options{Action: ActionInstall, PayloadDir: h.payload("1.0.0")}))
+		writeFreshLedger(t, h)
+		health := func(lastClass string) {
+			h.env.HealthGet = func(context.Context) (int, []byte, error) {
+				return 200, []byte(`{"api":{"state":"running"},"telemetry":{"state":"running","details":{"event_history_last_sqlite_class":"` + lastClass + `"}}}`), nil
+			}
+		}
+		health("")
+		baseline := map[string]bool{}
+		for _, action := range []string{ActionStatus, ActionVerify} {
+			baseline[action] = h.run(Options{Action: action}).SecurityComplete
+		}
+		health(class)
+		for _, action := range []string{ActionStatus, ActionVerify} {
+			result := h.run(Options{Action: action})
+			if message := messagesOf(result.Warnings, codeAuditWriteFailed); message != "" {
+				t.Fatalf("%s %s: recovered transient failure kept the audit warning %q", class, action, message)
+			}
+			if result.SecurityComplete != baseline[action] {
+				t.Fatalf("%s %s: security_complete=%t, want %t", class, action, result.SecurityComplete, baseline[action])
+			}
+		}
+	}
+}
