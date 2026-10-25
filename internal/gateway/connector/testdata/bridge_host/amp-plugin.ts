@@ -239,6 +239,51 @@ function stringID(value: unknown): string {
 	return value === undefined || value === null ? "" : String(value)
 }
 
+
+// Command and target fields the bounded review of an oversized call keeps
+// verbatim at any depth (Bash "command" or "cmd", argv arrays, patches,
+// scripts and every path or target form); other strings keep an 8 KiB head.
+// Keys are compared lower-case without "_" and "-".
+const DC_REVIEW_KEYS = new Set(["cmd", "command", "commands", "commandline", "args", "arguments", "argv", "toolargs", "script", "code", "input", "patch", "patchtext", "diff", "filepath", "path", "paths", "file", "files", "filename", "target", "targetfile", "targetpath", "targets", "destination", "dest", "source", "sourcepath", "oldpath", "newpath", "absolutepath", "relativepath", "url", "uri", "cwd", "workdir", "workingdirectory", "directory", "dir"]);
+
+// boundedReview reduces an oversized payload to a request under
+// the gateway's 1 MiB cap that keeps every key of the call, so the gateway
+// judges its command and target as at normal size.
+function boundedReview(payload: Record<string, unknown>, originalBytes: number): string {
+  let body = "";
+  for (let scale = 1; scale <= 8; scale *= 2) {
+    let keep = (512 * 1024) / scale;
+    let heads = (192 * 1024) / scale;
+    const walk = (value: unknown, inKeep: boolean, depth: number): unknown => {
+      if (typeof value === "string") {
+        if (inKeep && value.length <= keep) { keep -= value.length; return value; }
+        if (inKeep && depth < 128 && /^\s*[[{]/.test(value)) {
+          try { return JSON.stringify(walk(JSON.parse(value), true, depth + 1)); } catch (_) { /* not JSON: keep a head */ }
+        }
+        if (inKeep && keep > 0) { const head = value.slice(0, keep); keep = 0; return head; }
+        const n = Math.max(0, Math.min(value.length, 8192, heads));
+        heads -= n;
+        return n > 0 || value === "" ? value.slice(0, n) : undefined;
+      }
+      if (value === null || typeof value !== "object") return value;
+      if (depth >= 128) return undefined;
+      if (Array.isArray(value)) return value.map((item) => walk(item, inKeep, depth + 1));
+      const out: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(value)) {
+        out[key] = walk(item, inKeep || DC_REVIEW_KEYS.has(String(key).toLowerCase().replace(/[_-]/g, "")), depth + 1);
+      }
+      return out;
+    };
+    const review = (walk(payload, false, 0) || {}) as Record<string, unknown>;
+    review.content_truncated = true;
+    review.bounded_prefix_review = true;
+    review.original_body_bytes = originalBytes;
+    body = JSON.stringify(review);
+    if (utf8Bytes(body) <= 960 * 1024) break;
+  }
+  return body;
+}
+
 function utf8Bytes(value: string): number {
 	return new TextEncoder().encode(value).byteLength
 }
@@ -908,19 +953,7 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			if (actionable) {
 				if (await installWindow()) return { action: "block", reason: DC_INSTALL_WINDOW_TEXT }
 				if (DC_OUTAGE_FAIL_MODE === "open") {
-					const input = payload.tool_input && typeof payload.tool_input === "object" ? payload.tool_input as Record<string, unknown> : {}
-					const reviewInput: Record<string, string> = {}
-					for (const key of ["file_path", "filePath", "path", "command", "CommandLine", "content", "diff"]) {
-						if (typeof input[key] === "string") reviewInput[key] = (input[key] as string).slice(0, 8192)
-					}
-					body = JSON.stringify({
-						hook_event_name: payload.hook_event_name, session_id: payload.session_id,
-						thread_id: payload.thread_id, turn_id: payload.turn_id,
-						tool_call_id: payload.tool_call_id, tool_name: payload.tool_name,
-						tool_input: reviewInput, cwd: payload.cwd,
-						content_truncated: true, bounded_prefix_review: true,
-						original_body_bytes: originalBytes,
-					})
+					body = boundedReview(payload, originalBytes)
 					oversizedReview = true
 				}
 				if (!oversizedReview) return failureResponse(`payload exceeds ${DC_MAX_BODY_BYTES} bytes`)

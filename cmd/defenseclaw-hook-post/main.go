@@ -41,7 +41,11 @@ func run(args []string, input io.Reader, output io.Writer) error {
 		if err != nil || len(prefix) > (1<<20)+1 {
 			return fmt.Errorf("bounded review input is invalid or too large")
 		}
-		_, err = output.Write(hookexec.OversizedReviewPayload(prefix, *event))
+		review := hookexec.OversizedReviewPayload(prefix, *event)
+		if review == nil {
+			return fmt.Errorf("bounded review input is ambiguous")
+		}
+		_, err = output.Write(review)
 		return err
 	}
 	if len(args) == 0 || args[0] != "hook-post" {

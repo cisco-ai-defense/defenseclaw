@@ -54,13 +54,23 @@ const verdict = call.action === "allow" ? "allow" : "block:" + (call.message || 
 console.log(JSON.stringify({ verdict, notices }));
 `
 
+// Every command and target key of an oversized plugin call reaches the
+// gateway's bounded review, before or after a long value (Amp Bash "cmd",
+// OpenCode "command", a write's file path after its content).
 func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 	nodeForTest(t)
-	for _, plugin := range []struct{ asset, name, connector, harness string }{
-		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness},
-		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness},
+	const pad = `"x".repeat(1100000)`
+	for _, plugin := range []struct {
+		asset, name, connector, harness, input string
+	}{
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `description: ` + pad + `, command: "cat /home/user/.ssh/authorized_keys"`},
+		{"opencode-plugin.js", "defenseclaw.mjs", "opencode", openCodeOutageHarness, `content: ` + pad + `, filePath: "/home/user/.ssh/authorized_keys"`},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `command: "cat /home/user/.ssh/authorized_keys " + ` + pad},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `cmd: "cat /home/user/.ssh/authorized_keys", description: ` + pad},
+		{"amp-plugin.ts", "defenseclaw.mts", "amp", ampOutageHarness, `content: ` + pad + `, path: "/home/user/.ssh/authorized_keys"`},
 	} {
-		t.Run(plugin.connector, func(t *testing.T) {
+		t.Run(plugin.connector+" "+strings.SplitN(plugin.input, ":", 2)[0], func(t *testing.T) {
 			var request []byte
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				request, _ = io.ReadAll(r.Body)
@@ -86,8 +96,7 @@ func TestPerUserPluginOversizedProtectedPrefixGetsGatewayBlock(t *testing.T) {
 			if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			command := `command: "cat /home/user/.ssh/authorized_keys " + "x".repeat(1100000)`
-			harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, command)
+			harness := strings.ReplaceAll(plugin.harness, `command: "echo marker"`, plugin.input)
 			cmd := exec.Command(nodeForTest(t), "--input-type=module", "-e", harness, path)
 			cmd.Env = append(sanitizedTestEnv(), "HOME="+home)
 			out, err := cmd.Output()

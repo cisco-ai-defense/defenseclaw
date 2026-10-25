@@ -864,7 +864,52 @@ async function defenseclawFailModeNow(mode, actionable) {
   if (mode !== "open" || !actionable) return mode;
   return await defenseclawPerUserInstallInProgress() ? "closed" : mode;
 }
+{{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}
 
+// Command and target fields the bounded review of an oversized call keeps
+// verbatim at any depth (Bash "command" or "cmd", argv arrays, patches,
+// scripts and every path or target form); other strings keep an 8 KiB head.
+// Keys are compared lower-case without "_" and "-".
+const DC_REVIEW_KEYS = new Set(["cmd", "command", "commands", "commandline", "args", "arguments", "argv", "toolargs", "script", "code", "input", "patch", "patchtext", "diff", "filepath", "path", "paths", "file", "files", "filename", "target", "targetfile", "targetpath", "targets", "destination", "dest", "source", "sourcepath", "oldpath", "newpath", "absolutepath", "relativepath", "url", "uri", "cwd", "workdir", "workingdirectory", "directory", "dir"]);
+
+// defenseclawBoundedReview reduces an oversized payload to a request under
+// the gateway's 1 MiB cap that keeps every key of the call, so the gateway
+// judges its command and target as at normal size.
+function defenseclawBoundedReview(payload, originalBytes) {
+  let body = "";
+  for (let scale = 1; scale <= 8; scale *= 2) {
+    let keep = (512 * 1024) / scale;
+    let heads = (192 * 1024) / scale;
+    const walk = (value, inKeep, depth) => {
+      if (typeof value === "string") {
+        if (inKeep && value.length <= keep) { keep -= value.length; return value; }
+        if (inKeep && depth < 128 && /^\s*[[{]/.test(value)) {
+          try { return JSON.stringify(walk(JSON.parse(value), true, depth + 1)); } catch (_) { /* not JSON: keep a head */ }
+        }
+        if (inKeep && keep > 0) { const head = value.slice(0, keep); keep = 0; return head; }
+        const n = Math.max(0, Math.min(value.length, 8192, heads));
+        heads -= n;
+        return n > 0 || value === "" ? value.slice(0, n) : undefined;
+      }
+      if (value === null || typeof value !== "object") return value;
+      if (depth >= 128) return undefined;
+      if (Array.isArray(value)) return value.map((item) => walk(item, inKeep, depth + 1));
+      const out = {};
+      for (const [key, item] of Object.entries(value)) {
+        out[key] = walk(item, inKeep || DC_REVIEW_KEYS.has(String(key).toLowerCase().replace(/[_-]/g, "")), depth + 1);
+      }
+      return out;
+    };
+    const review = walk(payload, false, 0) || {};
+    review.content_truncated = true;
+    review.bounded_prefix_review = true;
+    review.original_body_bytes = originalBytes;
+    body = JSON.stringify(review);
+    if (Buffer.byteLength(body, "utf8") <= 960 * 1024) break;
+  }
+  return body;
+}
+{{end}}
 async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult, mcpIdentity, actionable) {
   if (actionable && await defenseclawManagedLifecycleHeld()) return { reason: DC_MANAGED_LIFECYCLE_TEXT };
 {{if and (not .Sandbox) (not .Managed) (not .SecureClient)}}  if (actionable && await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
@@ -910,18 +955,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
     if (originalBytes > (1 << 20)) {
       if (await defenseclawInstallWindow()) return { reason: DC_INSTALL_WINDOW_TEXT };
       if (DC_OUTAGE_FAIL_MODE === "open") {
-        const input = payload.tool_input && typeof payload.tool_input === "object" ? payload.tool_input : {};
-        const reviewInput = {};
-        for (const key of ["file_path", "filePath", "path", "command", "CommandLine", "content", "diff"]) {
-          if (typeof input[key] === "string") reviewInput[key] = input[key].slice(0, 8192);
-        }
-        body = JSON.stringify({
-          hook_event_name: payload.hook_event_name, tool_name: payload.tool_name,
-          tool_input: reviewInput, session_id: payload.session_id,
-          turn_id: payload.turn_id, tool_call_id: payload.tool_call_id,
-          cwd: payload.cwd, content_truncated: true, bounded_prefix_review: true,
-          original_body_bytes: originalBytes,
-        });
+        body = defenseclawBoundedReview(payload, originalBytes);
         oversizedReview = true;
       } else if (actionable) {
         return { reason: "DefenseClaw hook payload too large" };

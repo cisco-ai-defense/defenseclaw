@@ -1105,6 +1105,38 @@ func TestOversizedBalancedPreActionAsksGatewayAboutProtectedTarget(t *testing.T)
 	}
 }
 
+// Every native connector's oversized call reaches the gateway with its
+// command, wherever the connector puts it, so a protected command blocks.
+func TestOversizedBalancedNativeCallSendsItsCommandToTheGateway(t *testing.T) {
+	const secret = "cat ~/.ssh/id_rsa"
+	pad := strings.Repeat("p", 4096)
+	for _, tc := range []struct {
+		name, connector, event, payload, want string
+	}{
+		{"codex exec_command cmd", "codex", "PreToolUse", `{"hook_event_name":"PreToolUse","tool_name":"exec_command","tool_input":{"justification":"` + pad + `","cmd":"` + secret + `"},"padding":"` + pad + pad + `"}`, `"cmd":"` + secret + `"`},
+		{"codex shell argv", "codex", "PreToolUse", `{"hook_event_name":"PreToolUse","tool_name":"shell","tool_input":{"command":["bash","-lc","` + secret + `"]},"padding":"` + pad + pad + `"}`, `"-lc","` + secret + `"`},
+		{"claude bash command", "claudecode", "PreToolUse", `{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"description":"` + pad + `","command":"` + secret + `"},"padding":"` + pad + pad + `"}`, `"command":"` + secret + `"`},
+		{"cursor top-level command", "cursor", "beforeShellExecution", `{"hook_event_name":"beforeShellExecution","command":"` + secret + `","cwd":"/w","padding":"` + pad + pad + `"}`, `"command":"` + secret + `"`},
+		{"copilot toolArgs", "copilot", "preToolUse", `{"toolName":"bash","toolArgs":"{\"command\":\"` + secret + `\",\"description\":\"` + pad + pad + `\"}"}`, `\"command\":\"` + secret + `\"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := ok(`{"action":"block","reason":"protected target"}`)
+			r := run(t, tc.connector, rt, func(o *Options) {
+				o.Event = tc.event
+				o.OutageFailMode = "open"
+				o.MaxBody = 6144
+				o.Stdin = strings.NewReader(tc.payload)
+			})
+			if rt.requests != 1 || !bytes.Contains(rt.gotBody, []byte(tc.want)) {
+				t.Fatalf("gateway requests=%d review lost the command %s: %.500s", rt.requests, tc.want, rt.gotBody)
+			}
+			if r.code == 0 && !strings.Contains(r.stdout, "deny") && !strings.Contains(r.stdout, "block") {
+				t.Fatalf("protected call was allowed: stdout=%q stderr=%q", r.stdout, r.stderr)
+			}
+		})
+	}
+}
+
 // --- Transport failure (unreachable + 5xx): fail-open by default ---
 
 // GAP-0159: a per-user hook the gateway refused with its own message (a

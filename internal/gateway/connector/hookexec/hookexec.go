@@ -2191,12 +2191,19 @@ func handleOversized(ctx context.Context, opts Options, sp spec, failMode string
 	// existing per-user outage rule in sendToGateway.
 	if !opts.ManagedEnterprise && !opts.SecureClient && !opts.StrictAvailability &&
 		normalizeFailMode(opts.OutageFailMode) == "open" && !perUserInstallWindow(opts) {
-		review := oversizedReviewPayload(prefix, opts.Event)
-		if strings.TrimSpace(opts.Event) == "" {
-			opts.Event = resolveHookEvent("", review)
+		// A prefix the reducer cannot turn into one request (a duplicated
+		// key) keeps the closed oversize answer below.
+		bound := opts.Event
+		if sp.connector == "copilot" || sp.connector == "antigravity" {
+			bound = "" // their bodies carry no event; the request header binds it
 		}
-		opts.oversizedReview = true
-		return sendToGateway(ctx, opts, sp, failMode, review, startedAt)
+		if review := oversizedReviewPayload(prefix, bound); review != nil {
+			if strings.TrimSpace(opts.Event) == "" {
+				opts.Event = resolveHookEvent("", review)
+			}
+			opts.oversizedReview = true
+			return sendToGateway(ctx, opts, sp, failMode, review, startedAt)
+		}
 	}
 	// All managed and strict hooks keep their closed local-failure behavior.
 	failMode = managedNonOutageMode(&opts, failMode)
