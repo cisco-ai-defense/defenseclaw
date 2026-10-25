@@ -38,5 +38,5 @@ func managedScanUnavailable(kind string) error {
 	}
 	return withExitCode(fmt.Errorf("scan %s: this computer's DefenseClaw is managed by your organization (%s), and the managed Linux and macOS "+
 		"packages include no %s scanner, so `scan %s` cannot run here.%s The full %s scan runs on a per-user installation or a managed "+
-		"Windows computer. Nothing was scanned.", kind, record, scanner, kind, here, scanner), 3)
+		"Windows computer. Nothing was scanned", kind, record, scanner, kind, here, scanner), 3)
 }
