@@ -27,7 +27,9 @@ func TestHookDataDirNowNamesTheRuntimesDataDirInEveryYAMLForm(t *testing.T) {
 		body func(data string) string
 	}{
 		{"plain key", func(d string) string { return "data_dir: " + d + "\n" + outageNowDefaultConfig }},
-		{"double-quoted key", func(d string) string { return `"data_dir": "` + d + "\"\n" + outageNowDefaultConfig }},
+		{"double-quoted key", func(d string) string {
+			return `"data_dir": "` + filepath.ToSlash(d) + "\"\n" + outageNowDefaultConfig
+		}},
 		{"single-quoted key", func(d string) string { return "'data_dir': '" + d + "'\n" + outageNowDefaultConfig }},
 		{"space before the colon", func(d string) string { return "data_dir : " + d + "\n" + outageNowDefaultConfig }},
 		{"value on the next line", func(d string) string { return "data_dir:\n  " + d + "\n" + outageNowDefaultConfig }},
